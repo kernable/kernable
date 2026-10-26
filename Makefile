@@ -1,4 +1,4 @@
-.PHONY: check py
+.PHONY: check py check-packages
 check: py
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets -- -D warnings
@@ -14,3 +14,7 @@ check: py
 py:
 	cd sdks/python && { test -d .venv || { python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt; }; } \
 		&& .venv/bin/python -m grpc_tools.protoc -I../../proto --python_out=. --grpc_python_out=. kernable/v1/kernable.proto
+
+# Builds the npm and Python packages and runs them, installed, against a kernel (needs network).
+check-packages:
+	./scripts/check-packages.sh

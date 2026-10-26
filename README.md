@@ -2,7 +2,7 @@
 
 Event sourcing / CQRS runtime with a Rust kernel and business logic in any language.
 
-Workers connect to the kernel, which runs their command handlers and commits the events they return. All messages are signed, and stored events form a verifiable hash chain. Read models and reactors are ordered, durable listeners; a submit returns once they have processed the command's events. This is the MVP in progress; it is private.
+Workers connect to the kernel, which runs their command handlers and commits the events they return. All messages are signed, and stored events form a verifiable hash chain. Read models and reactors are ordered, durable listeners; a submit returns once they have processed the command's events. This is the MVP; it is private.
 
 ## Layout
 
@@ -17,13 +17,19 @@ Workers connect to the kernel, which runs their command handlers and commits the
 | `sdks/typescript` | `@kernable/sdk` |
 | `sdks/python` | `kernable` for Python, same API |
 | `examples/order-ts` | Order domain in TypeScript |
+| `docs/` | Getting started |
 | `examples/shop` | Reference app: identity in Python, orders and the HTTP API in TypeScript |
+
+## Start here
+
+`docs/getting-started.md` walks through a kernel, a TypeScript worker, a Python read model and a request that reads its own writes, in about ten minutes.
 
 ## Develop
 
 ```sh
 make check          # Rust, TypeScript and Python tests against every storage backend
                     # (Python ≥ 3.10; the first run installs the Python SDK's venv)
+make check-packages # builds the npm package and the Python wheel, installs and runs them
 ./bench/run.sh      # benchmark matrix; STORE=file:k.log or STORE=memory: picks the backend
 ```
 

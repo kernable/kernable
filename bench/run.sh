@@ -21,7 +21,7 @@ TCP="127.0.0.1:47233"
 STORE=${STORE:-sqlite:k.db}
 
 start_kernel() { # <listen>
-  rm -f "$DIR"/k.db* "$DIR"/k.log*
+  rm -f "$DIR"/k.db* "$DIR"/k.log* "$DIR/k.sock" # a stale socket would look like a ready kernel
   cat > "$DIR/kernable.toml" <<TOML
 store = "$STORE"
 listen = "$1"
@@ -30,10 +30,19 @@ kernel_key = "kernel.key"
 "$CLIENT" = ["*"]
 [workers]
 "$WORKER" = ["bench.*"]
+[listeners]
+"$WORKER" = ["*"]
 TOML
   "$BIN/kernable-kernel" "$DIR/kernable.toml" 2>/dev/null &
   KERNEL=$!
-  sleep 0.5
+  # Wait until it accepts connections; the Rust worker does not retry.
+  for _ in $(seq 200); do
+    case "$1" in
+      unix:*) [ -S "${1#unix:}" ] && break ;;
+      *) (echo >"/dev/tcp/${1%:*}/${1##*:}") 2>/dev/null && break ;;
+    esac
+    sleep 0.05
+  done
 }
 
 stop_all() {
@@ -102,3 +111,20 @@ for events in 10 100 1000; do
   scenario "ts, history $events" ts 1 "$SOCK" history "$SOCK" "$DIR/client.key" "$events"
 done
 scenario "ts, hot aggregate" ts 1 "$SOCK" load "$SOCK" "$DIR/client.key" concurrency=8 aggregates=1 seconds=5
+
+# Cost of settling: two listeners that do no work (orders 0 and 10), each submit waits for
+# both (wait=settled) or only for the commit (wait=committed).
+for wait in committed settled; do
+  for c in 1 64; do
+    start_kernel "$SOCK"
+    start_workers rust 1 "$SOCK"
+    for order in 0 10; do
+      "$BIN/kernable-bench" listener "$SOCK" "$DIR/worker.key" "l$order" "$order" &
+      PIDS+=($!)
+    done
+    sleep 0.5
+    printf '%-28s ' "rust, 2 listeners, $wait"
+    "$BIN/kernable-bench" load "$SOCK" "$DIR/client.key" concurrency=$c seconds=5 wait=$wait
+    stop_all
+  done
+done

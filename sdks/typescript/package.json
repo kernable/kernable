@@ -1,12 +1,27 @@
 {
   "name": "@kernable/sdk",
-  "version": "0.0.0",
+  "version": "0.1.0",
+  "description": "kernable SDK for TypeScript: event-sourced business logic in TypeScript on the kernable kernel",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
-  "exports": "./src/index.ts",
-  "engines": { "node": ">=22.18" },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "proto"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
   "scripts": {
+    "build": "rm -rf dist proto && tsc -p tsconfig.build.json && mkdir -p proto/kernable/v1 && cp ../../proto/kernable/v1/kernable.proto proto/kernable/v1/",
+    "prepack": "npm run build",
+    "postpack": "rm -rf dist proto",
     "check": "tsc && node --test test/*.test.ts ../../examples/order-ts/*.test.ts ../../examples/shop/*.test.ts"
   },
   "dependencies": {

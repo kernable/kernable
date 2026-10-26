@@ -1,6 +1,6 @@
 // Wire types and gRPC clients, loaded from proto/kernable/v1/kernable.proto at runtime.
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import * as grpc from "@grpc/grpc-js";
@@ -132,7 +132,9 @@ export interface Clients {
   close(): void;
 }
 
-const PROTO = fileURLToPath(new URL("../../../proto/kernable/v1/kernable.proto", import.meta.url));
+// Packaged next to `dist/`; in the repository, the shared `proto/` at the root.
+const BUNDLED = fileURLToPath(new URL("../proto/kernable/v1/kernable.proto", import.meta.url));
+const PROTO = existsSync(BUNDLED) ? BUNDLED : fileURLToPath(new URL("../../../proto/kernable/v1/kernable.proto", import.meta.url));
 
 let v1: any; // generated client constructors, untyped
 

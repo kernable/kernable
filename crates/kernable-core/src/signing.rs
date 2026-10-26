@@ -174,7 +174,14 @@ pub fn derived_id(command_id: &str, n: u64) -> String {
     b[6] = (b[6] & 0x0f) | 0x80; // version 8
     b[8] = (b[8] & 0x3f) | 0x80; // RFC 9562 variant
     let h = hex::encode(b);
-    format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
+    format!(
+        "{}-{}-{}-{}-{}",
+        &h[..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..]
+    )
 }
 
 /// Chain hash of `event`, linked to the hash of the previous event (`GENESIS` for the first).

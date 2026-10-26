@@ -1,5 +1,5 @@
-//! Baselines, a Rust worker and an open/closed-loop load generator for the PoC benchmark
-//! (POC_PLAN.md §9). `bench/run.sh` runs the whole matrix.
+//! Baselines, a Rust worker, a no-op listener and an open/closed-loop load generator.
+//! `bench/run.sh` runs the whole matrix.
 
 use std::{
     process::ExitCode,
@@ -9,9 +9,11 @@ use std::{
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
-        ChallengeResponse, Command, NewEvent, Register, Result as WorkResult, SubmitRequest,
-        WorkerMessage, command_result::Outcome, command_service_client::CommandServiceClient,
-        kernel_message::Msg as Out, worker_gateway_client::WorkerGatewayClient,
+        Ack, ChallengeResponse, Command, Hello, ListenerMessage, NewEvent, Register,
+        Result as WorkResult, SubmitRequest, Wait, WorkerMessage, command_result::Outcome,
+        command_service_client::CommandServiceClient, kernel_message::Msg as Out,
+        listener_delivery::Msg as Delivery, listener_message::Msg as Listen,
+        listener_service_client::ListenerServiceClient, worker_gateway_client::WorkerGatewayClient,
         worker_message::Msg as In,
     },
     signing, transport,
@@ -24,7 +26,8 @@ const USAGE: &str = "usage:
   kernable-bench crypto
   kernable-bench store <store-url> [count]
   kernable-bench worker <addr> <worker.key> [concurrency]
-  kernable-bench load <addr> <client.key> (rate=<n> | concurrency=<n>) [seconds=10] [aggregates=10000] [payload=1024]
+  kernable-bench listener <addr> <listener.key> <name> <order>   acknowledges every event at once
+  kernable-bench load <addr> <client.key> (rate=<n> | concurrency=<n>) [seconds=10] [aggregates=10000] [payload=1024] [wait=settled|committed]
   kernable-bench history <addr> <client.key> <events>";
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -51,6 +54,9 @@ async fn main() -> ExitCode {
                 rest.first().and_then(|n| n.parse().ok()).unwrap_or(64),
             )
             .await
+        }
+        ["listener", addr, key, name, order] => {
+            listener(addr, key, name, order.parse().unwrap_or(0)).await
         }
         ["load", addr, key, opts @ ..] => load(addr, key, Opts::parse(opts)).await,
         ["history", addr, key, n] => history(addr, key, n.parse().unwrap_or(100)).await,
@@ -227,6 +233,35 @@ async fn worker(addr: &str, key: &str, concurrency: u32) -> Result<(), BoxError>
     Ok(())
 }
 
+/// A listener that does no work: it acknowledges each batch as soon as it arrives, so it
+/// measures what ordering and settling cost by themselves.
+async fn listener(addr: &str, key: &str, name: &str, order: i32) -> Result<(), BoxError> {
+    let key = signing::read_signing_key(key)?;
+    let (tx, rx) = mpsc::channel(1024);
+    let msg = |m: Listen| ListenerMessage { msg: Some(m) };
+    tx.send(msg(Listen::Hello(Hello {
+        name: name.into(),
+        key_id: signing::key_id(&key.verifying_key()),
+        order,
+        event_types: Vec::new(),
+        from_position: None,
+    })))
+    .await?;
+    let mut client = ListenerServiceClient::new(transport::connect(addr).await?);
+    let mut inbound = client.listen(ReceiverStream::new(rx)).await?.into_inner();
+    while let Some(m) = inbound.message().await? {
+        let reply = match m.msg {
+            Some(Delivery::Challenge(c)) => Listen::ChallengeResponse(ChallengeResponse {
+                sig: signing::sign(&key, &signing::challenge_message(&c.nonce)).sig,
+            }),
+            Some(Delivery::Batch(b)) => Listen::Ack(Ack { position: b.up_to }),
+            _ => continue,
+        };
+        tx.send(msg(reply)).await?;
+    }
+    Ok(())
+}
+
 // ---- load ----
 
 struct Opts {
@@ -235,6 +270,7 @@ struct Opts {
     seconds: f64,
     aggregates: usize,
     payload: usize,
+    wait: Wait,
 }
 
 impl Opts {
@@ -251,6 +287,10 @@ impl Opts {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(10_000),
             payload: get("payload").and_then(|v| v.parse().ok()).unwrap_or(1024),
+            wait: match get("wait") {
+                Some("committed") => Wait::Committed,
+                _ => Wait::Settled,
+            },
         }
     }
 }
@@ -263,10 +303,10 @@ async fn channels(addr: &str, n: usize) -> Result<Vec<Channel>, BoxError> {
     Ok(all)
 }
 
-async fn submit(channel: Channel, cmd: Command) -> Result<Outcome, tonic::Status> {
+async fn submit(channel: Channel, cmd: Command, wait: Wait) -> Result<Outcome, tonic::Status> {
     let request = SubmitRequest {
         command: Some(cmd),
-        ..Default::default()
+        wait: wait.into(),
     };
     let result = CommandServiceClient::new(channel).submit(request).await?;
     Ok(result
@@ -296,7 +336,7 @@ async fn load(addr: &str, key: &str, opts: Opts) -> Result<(), BoxError> {
             let cmd = signed(&key, command(&run, i, opts.aggregates, &payload));
             let (channel, tx) = (pool[i % pool.len()].clone(), tx.clone());
             tokio::spawn(async move {
-                let outcome = submit(channel, cmd).await;
+                let outcome = submit(channel, cmd, opts.wait).await;
                 let _ = tx.send((due.elapsed(), outcome));
             });
         }
@@ -316,14 +356,14 @@ async fn load(addr: &str, key: &str, opts: Opts) -> Result<(), BoxError> {
                 payload.clone(),
                 pool[c % pool.len()].clone(),
             );
-            let aggregates = opts.aggregates;
+            let (aggregates, wait) = (opts.aggregates, opts.wait);
             tasks.push(tokio::spawn(async move {
                 let mut local = Tally::default();
                 let mut i = c;
                 while started.elapsed() < duration {
                     let cmd = signed(&key, command(&run, i, aggregates, &payload));
                     let t = Instant::now();
-                    let outcome = submit(channel.clone(), cmd).await;
+                    let outcome = submit(channel.clone(), cmd, wait).await;
                     local.record(t.elapsed(), &outcome);
                     i += concurrency;
                 }
@@ -357,13 +397,13 @@ async fn history(addr: &str, key: &str, events: usize) -> Result<(), BoxError> {
         signed(&key, cmd)
     };
     for i in 0..events {
-        submit(channel.clone(), one(i)).await?;
+        submit(channel.clone(), one(i), Wait::Settled).await?;
     }
     let mut tally = Tally::default();
     let started = Instant::now();
     for i in events..events + SAMPLES {
         let t = Instant::now();
-        let outcome = submit(channel.clone(), one(i)).await;
+        let outcome = submit(channel.clone(), one(i), Wait::Settled).await;
         tally.record(t.elapsed(), &outcome);
     }
     tally.report(&format!("history events={events}"), started.elapsed());

@@ -1,0 +1,47 @@
+# M13: MVP state (domains, request context, snapshots, in-memory queue), plus the cost of settling with two listeners. Same machine and harness as before.
+
+== Apple M2 Max, 2026-10-26, store=memory:
+crypto: sign=17.6us verify=37.0us per-command(2 sign + 2 verify)=109.2us
+baseline in-process          store memory (in-process, signed): n=5000 throughput=8592/s p50=0.12ms p95=0.12ms p99=0.13ms p99.9=0.21ms max=1.00ms rejected=0 errors=0
+rust worker, UDS, sequential load concurrency=1: n=24647 throughput=4929/s p50=0.18ms p95=0.21ms p99=0.25ms p99.9=0.40ms max=3.71ms rejected=0 errors=0
+ts worker, UDS, sequential   load concurrency=1: n=22289 throughput=4458/s p50=0.20ms p95=0.24ms p99=0.31ms p99.9=0.56ms max=7.26ms rejected=0 errors=0
+ts worker, TCP, sequential   load concurrency=1: n=17471 throughput=3494/s p50=0.25ms p95=0.33ms p99=0.40ms p99.9=0.60ms max=5.03ms rejected=0 errors=0
+rust worker, UDS, 2000/s     load rate=2000/s: n=20000 throughput=1996/s p50=1.88ms p95=2.76ms p99=2.95ms p99.9=5.71ms max=10.63ms rejected=0 errors=0
+ts worker, UDS, 2000/s       load rate=2000/s: n=20000 throughput=1995/s p50=1.45ms p95=2.32ms p99=2.56ms p99.9=9.48ms max=12.77ms rejected=0 errors=0
+rust worker, UDS, max        load concurrency=64: n=166967 throughput=16690/s p50=3.78ms p95=3.97ms p99=4.30ms p99.9=9.39ms max=31.27ms rejected=0 errors=0
+ts worker, UDS, max          load concurrency=64: n=134232 throughput=13414/s p50=4.37ms p95=6.73ms p99=7.19ms p99.9=16.23ms max=31.12ms rejected=0 errors=0
+ts worker, TCP, max          load concurrency=64: n=135676 throughput=13560/s p50=4.46ms p95=6.20ms p99=6.99ms p99.9=16.84ms max=32.86ms rejected=0 errors=0
+ts x1, 1ms work, max         load concurrency=64: n=9454 throughput=945/s p50=67.36ms p95=69.23ms p99=70.21ms p99.9=138.44ms max=146.84ms rejected=0 errors=0
+ts x2, 1ms work, max         load concurrency=64: n=18202 throughput=1817/s p50=34.80ms p95=71.36ms p99=77.52ms p99.9=89.79ms max=114.98ms rejected=0 errors=0
+ts x4, 1ms work, max         load concurrency=64: n=34927 throughput=3478/s p50=12.46ms p95=53.85ms p99=67.97ms p99.9=77.50ms max=83.80ms rejected=0 errors=0
+ts, history 10               history events=10: n=200 throughput=1696/s p50=0.62ms p95=0.80ms p99=1.05ms p99.9=1.29ms max=1.29ms rejected=0 errors=0
+ts, history 100              history events=100: n=200 throughput=2130/s p50=0.47ms p95=0.64ms p99=0.72ms p99.9=0.73ms max=0.73ms rejected=0 errors=0
+ts, history 1000             history events=1000: n=200 throughput=2410/s p50=0.42ms p95=0.56ms p99=0.64ms p99.9=0.68ms max=0.68ms rejected=0 errors=0
+ts, hot aggregate            load concurrency=8: n=15455 throughput=3090/s p50=2.60ms p95=3.56ms p99=4.62ms p99.9=12.09ms max=19.50ms rejected=0 errors=0
+rust, 2 listeners, committed load concurrency=1: n=21137 throughput=4227/s p50=0.21ms p95=0.26ms p99=0.29ms p99.9=0.47ms max=3.31ms rejected=0 errors=0
+rust, 2 listeners, committed load concurrency=64: n=76247 throughput=15238/s p50=4.05ms p95=4.98ms p99=5.50ms p99.9=9.93ms max=17.16ms rejected=0 errors=0
+rust, 2 listeners, settled   load concurrency=1: n=18875 throughput=3775/s p50=0.24ms p95=0.27ms p99=0.33ms p99.9=0.55ms max=3.35ms rejected=0 errors=0
+rust, 2 listeners, settled   load concurrency=64: n=76067 throughput=15201/s p50=4.10ms p95=4.72ms p99=5.83ms p99.9=10.17ms max=16.87ms rejected=0 errors=0
+
+== Apple M2 Max, 2026-10-26, store=sqlite:k.db
+crypto: sign=17.1us verify=34.5us per-command(2 sign + 2 verify)=103.2us
+baseline in-process          store sqlite (in-process, signed): n=5000 throughput=4680/s p50=0.19ms p95=0.22ms p99=1.82ms p99.9=2.41ms max=3.12ms rejected=0 errors=0
+rust worker, UDS, sequential load concurrency=1: n=16613 throughput=3322/s p50=0.26ms p95=0.29ms p99=1.76ms p99.9=2.27ms max=3.75ms rejected=0 errors=0
+ts worker, UDS, sequential   load concurrency=1: n=15063 throughput=3012/s p50=0.28ms p95=0.39ms p99=1.81ms p99.9=2.35ms max=7.12ms rejected=0 errors=0
+ts worker, TCP, sequential   load concurrency=1: n=13340 throughput=2668/s p50=0.33ms p95=0.40ms p99=2.05ms p99.9=2.62ms max=8.05ms rejected=0 errors=0
+rust worker, UDS, 2000/s     load rate=2000/s: n=20000 throughput=1998/s p50=1.98ms p95=3.58ms p99=4.96ms p99.9=8.07ms max=9.46ms rejected=0 errors=0
+ts worker, UDS, 2000/s       load rate=2000/s: n=20000 throughput=1997/s p50=1.58ms p95=3.17ms p99=4.59ms p99.9=10.69ms max=16.84ms rejected=0 errors=0
+rust worker, UDS, max        load concurrency=64: n=58437 throughput=5839/s p50=10.14ms p95=16.16ms p99=20.08ms p99.9=26.81ms max=31.37ms rejected=0 errors=0
+ts worker, UDS, max          load concurrency=64: n=58820 throughput=5877/s p50=10.03ms p95=15.58ms p99=19.53ms p99.9=42.86ms max=44.50ms rejected=0 errors=0
+ts worker, TCP, max          load concurrency=64: n=56856 throughput=5681/s p50=11.20ms p95=13.11ms p99=15.94ms p99.9=54.07ms max=54.97ms rejected=0 errors=0
+ts x1, 1ms work, max         load concurrency=64: n=9429 throughput=941/s p50=67.75ms p95=76.69ms p99=82.67ms p99.9=139.46ms max=147.42ms rejected=0 errors=0
+ts x2, 1ms work, max         load concurrency=64: n=17763 throughput=1770/s p50=33.42ms p95=78.48ms p99=91.81ms p99.9=113.36ms max=116.19ms rejected=0 errors=0
+ts x4, 1ms work, max         load concurrency=64: n=32483 throughput=3239/s p50=15.35ms p95=51.44ms p99=66.11ms p99.9=76.94ms max=84.94ms rejected=0 errors=0
+ts, history 10               history events=10: n=200 throughput=1286/s p50=0.78ms p95=1.22ms p99=3.31ms p99.9=3.67ms max=3.67ms rejected=0 errors=0
+ts, history 100              history events=100: n=200 throughput=1647/s p50=0.58ms p95=0.76ms p99=2.39ms p99.9=4.15ms max=4.15ms rejected=0 errors=0
+ts, history 1000             history events=1000: n=200 throughput=1649/s p50=0.57ms p95=0.79ms p99=2.15ms p99.9=2.40ms max=2.40ms rejected=0 errors=0
+ts, hot aggregate            load concurrency=8: n=11431 throughput=2285/s p50=3.40ms p95=5.23ms p99=6.14ms p99.9=7.96ms max=10.08ms rejected=0 errors=0
+rust, 2 listeners, committed load concurrency=1: n=14130 throughput=2826/s p50=0.31ms p95=0.38ms p99=1.87ms p99.9=2.36ms max=10.11ms rejected=0 errors=0
+rust, 2 listeners, committed load concurrency=64: n=24045 throughput=4799/s p50=13.29ms p95=14.78ms p99=17.93ms p99.9=22.88ms max=30.38ms rejected=0 errors=0
+rust, 2 listeners, settled   load concurrency=1: n=11372 throughput=2274/s p50=0.39ms p95=0.46ms p99=2.03ms p99.9=2.69ms max=8.85ms rejected=0 errors=0
+rust, 2 listeners, settled   load concurrency=64: n=23318 throughput=4656/s p50=13.55ms p95=16.33ms p99=18.17ms p99.9=29.48ms max=30.00ms rejected=0 errors=0
