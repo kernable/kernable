@@ -19,6 +19,8 @@ const USAGE: &str = "usage:
   kernable checkpoint <store> <kernel.key>  signs the current head of the event log (kernel stopped)
   kernable verify <store> <kernel.pub>      checks hash chain, checkpoints and signatures
                                           (store: sqlite:<path>, file:<path> or a bare SQLite path)
+  kernable certs new <dir> <client>...    writes a development CA, a kernel certificate and one
+                                          client certificate per name, for mTLS
   kernable listeners <store>              lists registered listeners with order and position
   kernable listeners remove <store> <name>  removes a listener (kernel stopped)
   kernable submit <addr> <client.key> <tenant> <aggregate_type> <aggregate_id> <command_type> <payload>
@@ -34,6 +36,17 @@ async fn main() -> ExitCode {
         ["keys", "new", name] => keys_new(name),
         ["checkpoint", store, key] => checkpoint(store, key),
         ["verify", store, key] => verify(store, key),
+        ["certs", "new", dir, clients @ ..] if !clients.is_empty() => {
+            match kernable_core::certs::create(std::path::Path::new(dir), clients) {
+                Ok(()) => {
+                    println!(
+                        "wrote ca.tls.crt, kernel.tls.crt/.tls.key and client certificates to {dir}"
+                    );
+                    Ok(true)
+                }
+                Err(e) => Err(e.to_string().into()),
+            }
+        }
         ["listeners", store] => listeners(store),
         ["listeners", "remove", store, name] => remove_listener(store, name),
         [

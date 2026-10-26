@@ -37,6 +37,13 @@ struct Entry {
     dirty: bool,
 }
 
+/// A listener as reported in metrics.
+pub(crate) struct ListenerStatus {
+    pub(crate) name: String,
+    pub(crate) position: u64,
+    pub(crate) connected: bool,
+}
+
 #[derive(Default)]
 pub(crate) struct Registry {
     entries: Mutex<HashMap<String, Entry>>,
@@ -76,6 +83,20 @@ impl Registry {
             .map(|e| e.record.position)
             .min()
             .unwrap_or(u64::MAX)
+    }
+
+    pub(crate) fn snapshot(&self) -> Vec<ListenerStatus> {
+        let mut all: Vec<ListenerStatus> = self
+            .entries()
+            .values()
+            .map(|e| ListenerStatus {
+                name: e.record.name.clone(),
+                position: e.record.position,
+                connected: e.connected,
+            })
+            .collect();
+        all.sort_by(|a, b| a.name.cmp(&b.name));
+        all
     }
 
     /// Whether every registered listener has acknowledged `position`.
@@ -144,6 +165,7 @@ struct DisconnectOnDrop(Arc<Kernel>, String);
 
 impl Drop for DisconnectOnDrop {
     fn drop(&mut self) {
+        tracing::info!(listener = %self.1, "listener disconnected");
         self.0.listeners.disconnect(&self.1);
         self.0.listeners.progress.notify_waiters();
     }
@@ -242,6 +264,7 @@ pub(crate) async fn run(
         position
     };
     let _disconnect = DisconnectOnDrop(Arc::clone(&kernel), hello.name.clone());
+    tracing::info!(listener = %hello.name, order = hello.order, after = start, "listener connected");
     kernel.listeners.progress.notify_waiters();
     send(
         out,

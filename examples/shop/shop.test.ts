@@ -1,28 +1,19 @@
 // Acceptance tests of the reference application (MVP_PLAN.md §3): identity in Python, orders in
-// TypeScript, one kernel. Needs `cargo build` and the Python SDK venv (`make check-py`).
+// TypeScript, one kernel, all over TCP with mutual TLS. Needs `cargo build` and the Python SDK
+// venv (`make py`).
 
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { createServer } from "node:net";
 import { test } from "node:test";
 
 import { Kernable, type StoredEvent } from "../../sdks/typescript/src/index.ts";
-import { TestKernel } from "../../sdks/typescript/test/kernel.ts";
+import { TestKernel, freePort } from "../../sdks/typescript/test/kernel.ts";
 import { ORDER_EVENTS, project, type OrderRow } from "./orders/order.ts";
 
 const ROOT = new URL("../../", import.meta.url).pathname;
 const PYTHON = process.env.KERNABLE_PYTHON ?? `${ROOT}sdks/python/.venv/bin/python`;
 const COMMANDS = ["RegisterAccount", "ChangeEmail", "DeactivateAccount", "PlaceOrder", "AddItem", "SubmitOrder", "RecordConfirmation", "CancelOrder"];
-
-function freePort(): Promise<number> {
-  return new Promise((resolve) => {
-    const s = createServer().listen(0, "127.0.0.1", () => {
-      const { port } = s.address() as { port: number };
-      s.close(() => resolve(port));
-    });
-  });
-}
 
 /** One service process that can be killed and started again. */
 class Service {
@@ -31,16 +22,19 @@ class Service {
   private readonly command: string;
   private readonly args: string[];
 
-  constructor(port: number, command: string, args: string[]) {
+  private readonly env: Record<string, string>;
+
+  constructor(port: number, command: string, args: string[], env: Record<string, string>) {
     this.url = `http://127.0.0.1:${port}`;
     this.command = command;
     this.args = args;
+    this.env = env;
   }
 
   async start(): Promise<void> {
     this.process = spawn(this.command, this.args, {
       stdio: ["ignore", "ignore", "inherit"],
-      env: { ...process.env, PYTHONPATH: `${ROOT}sdks/python` },
+      env: { ...process.env, ...this.env, PYTHONPATH: `${ROOT}sdks/python` },
     });
     for (let i = 0; i < 250; i++) {
       const ok = await fetch(`${this.url}/health`).then((r) => r.ok, () => false);
@@ -67,13 +61,17 @@ interface Shop {
 }
 
 async function shop(): Promise<Shop> {
-  const kernel = new TestKernel(COMMANDS);
+  const kernel = new TestKernel(COMMANDS, "", { tls: true, metrics: true });
   await kernel.start();
+  const tls = kernel.tlsFiles!;
+  const env = { KERNABLE_TLS_CA: tls.ca, KERNABLE_TLS_CERT: tls.cert, KERNABLE_TLS_KEY: tls.key };
   const identityPort = await freePort();
-  const identity = new Service(identityPort, PYTHON, [`${ROOT}examples/shop/identity/identity.py`, kernel.url, kernel.appKey, String(identityPort)]);
+  const identityArgs = [`${ROOT}examples/shop/identity/identity.py`, kernel.url, kernel.appKey, String(identityPort)];
+  const identity = new Service(identityPort, PYTHON, identityArgs, env);
   await identity.start();
   const port = await freePort();
-  const orders = new Service(port, process.execPath, [`${ROOT}examples/shop/orders/service.ts`, kernel.url, kernel.appKey, String(port), identity.url]);
+  const ordersArgs = [`${ROOT}examples/shop/orders/service.ts`, kernel.url, kernel.appKey, String(port), identity.url];
+  const orders = new Service(port, process.execPath, ordersArgs, env);
   await orders.start();
   return {
     kernel,
@@ -157,7 +155,7 @@ test("kill -9 of each process loses and duplicates nothing", async () => {
     for (let i = 1; i <= n; i++) {
       await until(() => s.call("GET", `/orders/o${i}`), ([, o]) => o.status === "confirmed", `confirmation of o${i}`);
     }
-    const kernable = new Kernable({ url: s.kernel.url, key: s.kernel.appKey });
+    const kernable = new Kernable({ url: s.kernel.url, key: s.kernel.appKey, tls: s.kernel.tlsFiles });
     const events: StoredEvent[] = [];
     const replay = kernable.subscribe({ types: ORDER_EVENTS }, (e) => void events.push(e));
     await until(async () => events.filter((e) => e.type === "ConfirmationSent").length, (c) => c >= n, "replay");
@@ -171,6 +169,13 @@ test("kill -9 of each process loses and duplicates nothing", async () => {
     for (const e of events) project(rows, e);
     for (const [id, row] of rows) assert.deepEqual((await s.call("GET", `/orders/${id}`))[1], row);
     assert.match(s.kernel.verify(), /OK/);
+
+    // Every listener has caught up, and the metrics show it.
+    const metrics = await (await fetch(s.kernel.metricsUrl!)).text();
+    for (const listener of ["accounts", "orders", "confirmations"]) {
+      assert.match(metrics, new RegExp(`^kernable_listener_lag\\{listener="${listener}"\\} 0$`, "m"));
+      assert.match(metrics, new RegExp(`^kernable_listener_connected\\{listener="${listener}"\\} 1$`, "m"));
+    }
   } finally {
     await s.dispose();
   }

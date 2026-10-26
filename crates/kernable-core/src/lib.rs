@@ -6,6 +6,9 @@ pub mod proto {
     tonic::include_proto!("kernable.v1");
 }
 
+#[cfg(feature = "certs")]
+pub mod certs;
+
 pub mod signing;
 
 pub mod transport;

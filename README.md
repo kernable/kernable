@@ -12,7 +12,7 @@ Workers connect to the kernel, which runs their command handlers and commits the
 | `crates/kernable-core` | Protocol types, signing, hash chain, client transport |
 | `crates/kernable-store` | `Store` trait and backends: `sqlite:`, `file:`, `memory:` |
 | `crates/kernable-kernel` | The kernel server (`kernable-kernel <kernable.toml>`) |
-| `crates/kernable-cli` | `kernable keys new \| submit \| verify \| checkpoint \| listeners` |
+| `crates/kernable-cli` | `kernable keys new \| certs new \| submit \| verify \| checkpoint \| listeners` |
 | `crates/kernable-bench`, `bench/` | Load generator, benchmark matrix, results |
 | `sdks/typescript` | `@kernable/sdk` |
 | `sdks/python` | `kernable` for Python, same API |
@@ -26,3 +26,9 @@ make check          # Rust, TypeScript and Python tests against every storage ba
                     # (Python ≥ 3.10; the first run installs the Python SDK's venv)
 ./bench/run.sh      # benchmark matrix; STORE=file:k.log or STORE=memory: picks the backend
 ```
+
+## Operate
+
+- **Mutual TLS** (TCP only): `kernable certs new <dir> <client>...` creates a development CA and certificates. Then add `[tls]` to `kernable.toml` (see `crates/kernable-kernel/src/config.rs`) and pass `tls` to the SDKs (`{ ca, cert, key }` in TypeScript, `Tls(ca, cert, key)` in Python).
+- **Metrics**: `metrics_listen = "127.0.0.1:9233"` serves Prometheus text at `/metrics`: commands by outcome, queue depth, worker sessions, execution and settle time, and position, lag and connection state per listener.
+- **Logs**: structured, to stderr. `KERNABLE_LOG` sets the filter (default `info`), and `KERNABLE_LOG_FORMAT=json` switches to JSON.

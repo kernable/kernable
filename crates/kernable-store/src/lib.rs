@@ -127,6 +127,9 @@ pub trait Store: Send + Sync {
     /// Up to `limit` events with a global position greater than `after`, in order.
     fn read_all(&self, after: u64, limit: u32) -> Result<Vec<Event>>;
 
+    /// Global position of the newest event; 0 while there are none.
+    fn head_position(&self) -> Result<u64>;
+
     /// Persists a command as pending. Idempotent on `command_id`.
     fn enqueue(&self, cmd: &Command, now_ms: i64) -> Result<Enqueued>;
 

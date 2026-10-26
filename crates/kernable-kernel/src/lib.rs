@@ -10,13 +10,14 @@
 
 pub mod config;
 mod listeners;
+mod metrics;
 mod queue;
 
 use std::{
     collections::{HashMap, HashSet},
     os::unix::fs::FileTypeExt,
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::{Arc, Mutex, MutexGuard, PoisonError, atomic::Ordering::Relaxed},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use ed25519_dalek::SigningKey;
@@ -42,7 +43,10 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream, UnixListenerStream};
-use tonic::{Request, Response, Status, Streaming, transport::Server};
+use tonic::{
+    Request, Response, Status, Streaming,
+    transport::{Certificate, Identity, Server, ServerTlsConfig},
+};
 
 pub use config::Config;
 
@@ -71,6 +75,7 @@ pub struct Kernel {
     appended: Notify,
     listeners: listeners::Registry,
     queue: queue::Queue,
+    metrics: metrics::Metrics,
 }
 
 impl Kernel {
@@ -91,6 +96,7 @@ impl Kernel {
             appended: Notify::new(),
             listeners,
             queue,
+            metrics: metrics::Metrics::default(),
         }))
     }
 
@@ -144,7 +150,20 @@ impl Kernel {
 /// Serves the gRPC API on `config.listen` and writes checkpoints until dropped.
 pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
     let api = Api(Arc::clone(&kernel));
-    let router = Server::builder()
+    let mut builder = Server::builder();
+    if let Some(tls) = &kernel.config.tls {
+        if transport::unix_path(&kernel.config.listen).is_some() {
+            return Err("TLS applies to TCP only; remove [tls] or listen on host:port".into());
+        }
+        let identity = Identity::from_pem(std::fs::read(&tls.cert)?, std::fs::read(&tls.key)?);
+        let client_ca = Certificate::from_pem(std::fs::read(&tls.client_ca)?);
+        builder = builder.tls_config(
+            ServerTlsConfig::new()
+                .identity(identity)
+                .client_ca_root(client_ca),
+        )?;
+    }
+    let router = builder
         .add_service(CommandServiceServer::new(api.clone()))
         .add_service(EventServiceServer::new(api.clone()))
         .add_service(ListenerServiceServer::new(api.clone()))
@@ -172,6 +191,14 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
         result = server => result,
         _ = checkpoints(&kernel) => unreachable!(),
         _ = flush_listeners(&kernel) => unreachable!(),
+        result = serve_metrics(&kernel) => result,
+    }
+}
+
+async fn serve_metrics(kernel: &Kernel) -> Result<(), BoxError> {
+    match &kernel.config.metrics_listen {
+        Some(addr) => metrics::serve(kernel, addr).await,
+        None => std::future::pending().await,
     }
 }
 
@@ -180,7 +207,7 @@ async fn flush_listeners(kernel: &Kernel) {
     loop {
         tick.tick().await;
         if let Err(e) = listeners::flush(kernel) {
-            eprintln!("saving listener positions failed: {e}");
+            tracing::error!(error = %e, "saving listener positions failed");
         }
     }
 }
@@ -191,7 +218,7 @@ async fn checkpoints(kernel: &Kernel) {
     loop {
         tick.tick().await;
         if let Err(e) = kernel.store.checkpoint(&kernel.key, now_ms()) {
-            eprintln!("checkpoint failed: {e}");
+            tracing::error!(error = %e, "checkpoint failed");
         }
     }
 }
@@ -266,11 +293,14 @@ impl CommandService for Api {
                 }
             }
         };
-        if wait == Wait::Settled
-            && kernel.settle(&result).await
-            && let Some(Outcome::Committed(c)) = &mut result.outcome
-        {
-            c.settled = true;
+        if wait == Wait::Settled {
+            let started = Instant::now();
+            if kernel.settle(&result).await
+                && let Some(Outcome::Committed(c)) = &mut result.outcome
+            {
+                c.settled = true;
+                kernel.metrics.settle.record(started.elapsed());
+            }
         }
         Ok(Response::new(result))
     }
@@ -401,6 +431,7 @@ type Outbox = mpsc::Sender<Result<KernelMessage, Status>>;
 /// A command currently executed by the session's worker.
 struct InFlight {
     command: Command,
+    leased_at: Instant,
     expected_version: u64,
     /// The command was sent with a snapshot.
     with_snapshot: bool,
@@ -431,6 +462,24 @@ impl Drop for ReleaseOnDrop {
             self.0.kernel.queue.release(&lease_id);
         }
         self.0.kernel.work.notify_waiters();
+    }
+}
+
+/// Counts a connected worker session and logs it, until dropped.
+struct SessionCount(Arc<Kernel>, String);
+
+impl SessionCount {
+    fn new(kernel: &Arc<Kernel>, worker_id: &str) -> Self {
+        kernel.metrics.worker_sessions.fetch_add(1, Relaxed);
+        tracing::info!(worker = worker_id, "worker connected");
+        SessionCount(Arc::clone(kernel), worker_id.to_owned())
+    }
+}
+
+impl Drop for SessionCount {
+    fn drop(&mut self) {
+        self.0.metrics.worker_sessions.fetch_sub(1, Relaxed);
+        tracing::info!(worker = %self.1, "worker disconnected");
     }
 }
 
@@ -499,6 +548,7 @@ async fn run_session(
     )
     .await?;
 
+    let _counted = SessionCount::new(&kernel, &reg.worker_id);
     let session = Arc::new(Session {
         kernel,
         key_id: reg.key_id,
@@ -581,7 +631,7 @@ impl Session {
         let (snapshot, history) = match loaded {
             Ok(loaded) => loaded,
             Err(e) => {
-                eprintln!("read stream failed: {e}");
+                tracing::error!(error = %e, "reading the stream failed");
                 self.kernel.queue.release(&lease_id);
                 self.kernel.work.notify_waiters();
                 return true;
@@ -596,6 +646,7 @@ impl Session {
             lease_id.clone(),
             InFlight {
                 command: command.clone(),
+                leased_at: Instant::now(),
                 expected_version,
                 with_snapshot: snapshot.is_some(),
                 attempts,
@@ -651,10 +702,12 @@ impl Session {
                     };
                     // A snapshot is only a cache: losing one costs time, not data.
                     if let Err(e) = self.kernel.store.save_snapshot(&record) {
-                        eprintln!("saving snapshot failed: {e}");
+                        tracing::warn!(error = %e, "saving snapshot failed");
                     }
                 }
                 self.kernel.queue.done(&r.lease_id);
+                self.kernel.metrics.committed.fetch_add(1, Relaxed);
+                self.kernel.metrics.execution.record(f.leased_at.elapsed());
                 self.kernel.appended.notify_waiters();
                 self.kernel.complete(CommandResult {
                     command_id: f.command.command_id,
@@ -677,7 +730,7 @@ impl Session {
             }
             Err(StoreError::NotPending) => self.done(&r.lease_id),
             Err(e) => {
-                eprintln!("commit failed: {e}");
+                tracing::error!(error = %e, "commit failed");
                 self.release(&r.lease_id);
             }
         }
@@ -706,7 +759,7 @@ impl Session {
                 ..Default::default()
             };
             if let Err(e) = self.kernel.store.save_snapshot(&removed) {
-                eprintln!("removing snapshot failed: {e}");
+                tracing::error!(error = %e, "removing snapshot failed");
                 self.release(&r.lease_id);
                 return Ok(());
             }
@@ -736,6 +789,7 @@ impl Session {
         match self.kernel.store.reject(&command_id, reason.clone()) {
             Ok(()) => {
                 self.kernel.queue.done(lease_id);
+                self.kernel.metrics.rejected.fetch_add(1, Relaxed);
                 self.kernel.complete(CommandResult {
                     command_id,
                     outcome: Some(Outcome::Rejected(reason)),
@@ -743,7 +797,7 @@ impl Session {
             }
             Err(StoreError::NotPending) => self.done(lease_id),
             Err(e) => {
-                eprintln!("reject failed: {e}");
+                tracing::error!(error = %e, "reject failed");
                 self.release(lease_id);
             }
         }

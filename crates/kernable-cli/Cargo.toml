@@ -10,7 +10,7 @@ name = "kernable"
 path = "src/main.rs"
 
 [dependencies]
-kernable-core = { path = "../kernable-core" }
+kernable-core = { path = "../kernable-core", features = ["certs"] }
 kernable-store = { path = "../kernable-store" }
 getrandom.workspace = true
 tokio.workspace = true

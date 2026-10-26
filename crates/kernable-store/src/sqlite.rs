@@ -138,6 +138,14 @@ impl Store for SqliteStore {
         )
     }
 
+    fn head_position(&self) -> Result<u64> {
+        Ok(self.conn().query_row(
+            "SELECT COALESCE(MAX(global_position), 0) FROM events",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
     // ---- command queue ----
 
     /// Persists a command as pending. Idempotent on `command_id`.

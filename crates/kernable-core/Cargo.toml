@@ -16,6 +16,11 @@ tonic-prost.workspace = true
 tokio.workspace = true
 hyper-util.workspace = true
 tower.workspace = true
+rcgen = { workspace = true, optional = true }
+
+[features]
+# `certs`: create a CA and certificates for mTLS (tests and `kernable certs`).
+certs = ["dep:rcgen"]
 
 [dev-dependencies]
 hex.workspace = true

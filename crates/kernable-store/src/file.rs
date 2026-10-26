@@ -357,6 +357,10 @@ impl Store for FileStore {
         Ok(events.cloned().collect())
     }
 
+    fn head_position(&self) -> Result<u64> {
+        Ok(self.inner().state.events.len() as u64)
+    }
+
     fn enqueue(&self, cmd: &Command, now_ms: i64) -> Result<Enqueued> {
         let mut inner = self.inner();
         if let Some(existing) = inner.state.commands.get(&cmd.command_id) {

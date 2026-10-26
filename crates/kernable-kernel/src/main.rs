@@ -2,9 +2,21 @@ use std::{path::Path, process::ExitCode, sync::Arc};
 
 use kernable_kernel::{BoxError, Config, Kernel, serve};
 use tokio::signal::unix::{SignalKind, signal};
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // KERNABLE_LOG sets the level filter (default `info`); KERNABLE_LOG_FORMAT=json logs JSON.
+    let filter = EnvFilter::try_from_env("KERNABLE_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    let logs = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr);
+    if std::env::var("KERNABLE_LOG_FORMAT").as_deref() == Ok("json") {
+        logs.json().init();
+    } else {
+        logs.init();
+    }
+
     let Some(path) = std::env::args().nth(1) else {
         eprintln!("usage: kernable-kernel <kernable.toml>");
         return ExitCode::from(2);
@@ -12,7 +24,7 @@ async fn main() -> ExitCode {
     match run(Path::new(&path)).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("error: {e}");
+            tracing::error!(error = %e, "kernel stopped");
             ExitCode::FAILURE
         }
     }
@@ -20,16 +32,17 @@ async fn main() -> ExitCode {
 
 async fn run(path: &Path) -> Result<(), BoxError> {
     let config = Config::load(path)?;
-    eprintln!(
-        "kernable kernel {} listening on {}",
-        env!("CARGO_PKG_VERSION"),
-        config.listen
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        listen = %config.listen,
+        tls = config.tls.is_some(),
+        "kernel starting"
     );
     let kernel = Kernel::open(config)?;
     tokio::select! {
         result = serve(Arc::clone(&kernel)) => result?,
         signal = shutdown_signal() => {
-            eprintln!("received {}, shutting down", signal?);
+            tracing::info!(signal = signal?, "shutting down");
         }
     }
     kernel.shutdown()

@@ -36,7 +36,8 @@ from kernable.signing import (Key, challenge_message, command_message, rejection
 from kernable.v1 import kernable_pb2 as pb
 from kernable.v1 import kernable_pb2_grpc as rpc
 
-__all__ = ["Aggregate", "Event", "Kernable", "Key", "Listener", "NotSettled", "Outcome", "Rejected", "Worker", "aggregate"]
+__all__ = ["Aggregate", "Event", "Kernable", "Key", "Listener", "NotSettled", "Outcome", "Rejected", "Tls", "Worker",
+           "aggregate"]
 
 
 class Rejected(Exception):
@@ -67,6 +68,15 @@ class Outcome:
     events: list[Event] = field(default_factory=list)
     code: str = ""
     message: str = ""
+
+
+@dataclass
+class Tls:
+    """PEM files for mutual TLS: the CA of the kernel's certificate, and this process's own."""
+
+    ca: str
+    cert: str
+    key: str
 
 
 class NotSettled(Exception):
@@ -139,11 +149,20 @@ def aggregate(name: str, initial: Any, snapshot_every: int = 100, schema: str = 
 
 
 class Kernable:
-    def __init__(self, url: str, key: str, tenant: str = "default"):
-        """`url`: `unix:/path/to.sock` or `host:port`; `key`: path to this process's `.key` file."""
-        # grpcio sends the socket path as :authority for unix: URLs, which the kernel's
-        # HTTP/2 server rejects; any valid authority works.
-        self._channel = grpc.insecure_channel(url, options=[("grpc.default_authority", "localhost")])
+    def __init__(self, url: str, key: str, tenant: str = "default", tls: Tls | None = None):
+        """`url`: `unix:/path/to.sock` or `host:port`; `key`: path to this process's `.key` file;
+        `tls`: mutual TLS for `host:port`."""
+        if tls:
+            def read(path: str) -> bytes:
+                with open(path, "rb") as f:
+                    return f.read()
+
+            creds = grpc.ssl_channel_credentials(read(tls.ca), read(tls.key), read(tls.cert))
+            self._channel = grpc.secure_channel(url, creds)
+        else:
+            # grpcio sends the socket path as :authority for unix: URLs, which the kernel's
+            # HTTP/2 server rejects; any valid authority works.
+            self._channel = grpc.insecure_channel(url, options=[("grpc.default_authority", "localhost")])
         self._key = Key.from_file(key)
         self._tenant = tenant
 

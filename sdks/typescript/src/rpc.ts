@@ -1,5 +1,6 @@
 // Wire types and gRPC clients, loaded from proto/kernable/v1/kernable.proto at runtime.
 
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import * as grpc from "@grpc/grpc-js";
@@ -114,14 +115,23 @@ const PROTO = fileURLToPath(new URL("../../../proto/kernable/v1/kernable.proto",
 
 let v1: any; // generated client constructors, untyped
 
-/** Clients for a kernel at `unix:/path` or `host:port`. */
-export function connect(url: string): Clients {
+/** PEM files for mutual TLS: the CA of the kernel's certificate, and this process's own. */
+export interface TlsFiles {
+  ca: string;
+  cert: string;
+  key: string;
+}
+
+/** Clients for a kernel at `unix:/path` or `host:port` (with `tls`: over mutual TLS). */
+export function connect(url: string, tls?: TlsFiles): Clients {
   v1 ??= (
     grpc.loadPackageDefinition(
       protoLoader.loadSync(PROTO, { keepCase: true, longs: Number, defaults: true, oneofs: true }),
     ) as any
   ).kernable.v1;
-  const creds = grpc.credentials.createInsecure();
+  const creds = tls
+    ? grpc.credentials.createSsl(readFileSync(tls.ca), readFileSync(tls.key), readFileSync(tls.cert))
+    : grpc.credentials.createInsecure();
   const commands = new v1.CommandService(url, creds);
   const workers = new v1.WorkerGateway(url, creds);
   const events = new v1.EventService(url, creds);

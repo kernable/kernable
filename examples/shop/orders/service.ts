@@ -3,13 +3,16 @@
 // its own in memory, the accounts read model through the identity service.
 //
 // Usage: node service.ts <kernel-url> <key> <http-port> <identity-url>
+// Mutual TLS: set KERNABLE_TLS_CA, KERNABLE_TLS_CERT and KERNABLE_TLS_KEY.
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
 import { Kernable, NotSettled, type SubmitOptions } from "../../../sdks/typescript/src/index.ts";
 import { ORDER_EVENTS, order, project, type OrderRow } from "./order.ts";
 
 const [url, key, port, identity] = process.argv.slice(2);
-const kernable = new Kernable({ url, key, tenant: "shop" });
+const env = process.env;
+const tls = env.KERNABLE_TLS_CA ? { ca: env.KERNABLE_TLS_CA, cert: env.KERNABLE_TLS_CERT!, key: env.KERNABLE_TLS_KEY! } : undefined;
+const kernable = new Kernable({ url, key, tenant: "shop", tls });
 
 // ---- read model: in memory, rebuilt from the first event on every start ----
 

@@ -51,6 +51,7 @@ fn commit_appends_events_and_completes_command(store: &dyn Store) {
     assert_eq!(stored.iter().map(|e| e.version).collect::<Vec<_>>(), [1, 2]);
     assert_eq!(versions(store), [1, 2]);
     assert_eq!(store.read_all(0, 10).unwrap().len(), 2);
+    assert_eq!(store.head_position().unwrap(), 2);
     assert_eq!(
         store.read_all(stored[0].global_position, 10).unwrap().len(),
         1

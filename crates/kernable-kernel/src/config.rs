@@ -24,7 +24,14 @@ use serde::Deserialize;
 ///
 /// [listeners]                          # listener key ID -> event types it may read
 /// "1f0a…" = ["OrderPlaced"]
+///
+/// [tls]                                # optional, TCP only: mutual TLS
+/// cert = "kernel.tls.crt"             # see `kernable certs new`
+/// key = "kernel.tls.key"
+/// client_ca = "ca.tls.crt"             # every client must present a certificate signed by it
 /// ```
+///
+/// `metrics_listen = "127.0.0.1:9233"` serves Prometheus metrics at `/metrics`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -49,6 +56,17 @@ pub struct Config {
     pub subscribers: HashMap<String, Vec<String>>,
     #[serde(default)]
     pub listeners: HashMap<String, Vec<String>>,
+    pub tls: Option<Tls>,
+    /// Address for Prometheus metrics (`GET /metrics`); off when absent.
+    pub metrics_listen: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Tls {
+    pub cert: PathBuf,
+    pub key: PathBuf,
+    pub client_ca: PathBuf,
 }
 
 fn default_lease_ttl_ms() -> i64 {
@@ -77,6 +95,11 @@ impl Config {
             config.store = format!("{backend}:{}", dir.join(store).display());
         }
         config.kernel_key = dir.join(&config.kernel_key);
+        if let Some(tls) = &mut config.tls {
+            for path in [&mut tls.cert, &mut tls.key, &mut tls.client_ca] {
+                *path = dir.join(&*path);
+            }
+        }
         Ok(config)
     }
 }

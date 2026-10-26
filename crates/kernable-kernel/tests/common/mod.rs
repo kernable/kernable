@@ -1,7 +1,11 @@
 //! Test harness: an in-process kernel on a Unix socket and Rust test workers on raw stubs.
 #![allow(dead_code)] // each test file uses a different subset
 
-use std::{collections::HashMap, path::PathBuf, time::Duration};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use ed25519_dalek::SigningKey;
 use kernable_core::{
@@ -48,17 +52,21 @@ pub async fn start(name: &str) -> Env {
 /// subscriber key 4 for `OrderPlaced` events only, listener key 5 for all events and
 /// listener key 6 for `OrderPlaced` only.
 pub async fn start_with(name: &str, lease_ttl_ms: i64) -> Env {
+    start_custom(name, |config, _| config.lease_ttl_ms = lease_ttl_ms).await
+}
+
+/// Like [`start`], with `customize` applied to the config (it gets the test's directory).
+pub async fn start_custom(name: &str, customize: impl FnOnce(&mut Config, &Path)) -> Env {
     let dir = std::env::temp_dir().join(format!("kn-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let kernel_key = key(3);
     std::fs::write(dir.join("kernel.key"), hex(kernel_key.as_bytes())).unwrap();
-    let addr = format!("unix:{}", dir.join("k.sock").display());
     let store = store_url(&dir);
-    let config = Config {
+    let mut config = Config {
         store: store.clone(),
-        listen: addr.clone(),
+        listen: format!("unix:{}", dir.join("k.sock").display()),
         kernel_key: dir.join("kernel.key"),
-        lease_ttl_ms,
+        lease_ttl_ms: 2_000,
         checkpoint_interval_ms: 50,
         submit_timeout_ms: 5_000,
         settle_timeout_ms: 1_000,
@@ -72,7 +80,11 @@ pub async fn start_with(name: &str, lease_ttl_ms: i64) -> Env {
             (id(&key(5)), vec!["*".into()]),
             (id(&key(6)), vec!["OrderPlaced".into()]),
         ]),
+        tls: None,
+        metrics_listen: None,
     };
+    customize(&mut config, &dir);
+    let addr = config.listen.clone();
     tokio::spawn(serve(Kernel::open(config).unwrap()));
     wait_for(&addr).await;
     Env {
@@ -91,9 +103,14 @@ pub fn store_url(dir: &std::path::Path) -> String {
     }
 }
 
+/// Waits until the kernel accepts connections (at the socket level, so TLS works too).
 pub async fn wait_for(addr: &str) {
     for _ in 0..200 {
-        if transport::connect(addr).await.is_ok() {
+        let up = match transport::unix_path(addr) {
+            Some(path) => tokio::net::UnixStream::connect(path).await.is_ok(),
+            None => tokio::net::TcpStream::connect(addr).await.is_ok(),
+        };
+        if up {
             return;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -153,6 +170,8 @@ pub struct TestWorker {
     pub seen: Option<mpsc::UnboundedSender<String>>,
     /// Receives, per execution, the snapshot version (if any) and the number of history events.
     pub executions: Option<mpsc::UnboundedSender<(Option<u64>, usize)>>,
+    /// Connects over mutual TLS with these files.
+    pub tls: Option<transport::Tls>,
 }
 
 impl TestWorker {
@@ -164,6 +183,7 @@ impl TestWorker {
             behavior: Behavior::Honest,
             seen: None,
             executions: None,
+            tls: None,
         }
     }
 
@@ -189,7 +209,7 @@ pub async fn run_worker(addr: String, w: TestWorker) -> tonic::Status {
     .await
     .unwrap();
 
-    let channel = transport::connect(&addr).await.unwrap();
+    let channel = channel(&addr, w.tls.as_ref()).await.unwrap();
     let mut client = WorkerGatewayClient::new(channel);
     let mut inbound = match client.session(ReceiverStream::new(rx)).await {
         Ok(r) => r.into_inner(),
@@ -308,6 +328,25 @@ pub async fn submit_with(
     wait: Wait,
 ) -> Result<CommandResult, tonic::Status> {
     let channel = transport::connect(addr).await.unwrap();
+    submit_on(channel, cmd, wait).await
+}
+
+/// A channel to the kernel, over mutual TLS if `tls` is set.
+pub async fn channel(
+    addr: &str,
+    tls: Option<&transport::Tls>,
+) -> Result<tonic::transport::Channel, Box<dyn std::error::Error + Send + Sync>> {
+    match tls {
+        Some(tls) => transport::connect_tls(addr, tls).await,
+        None => Ok(transport::connect(addr).await?),
+    }
+}
+
+pub async fn submit_on(
+    channel: tonic::transport::Channel,
+    cmd: Command,
+    wait: Wait,
+) -> Result<CommandResult, tonic::Status> {
     let request = SubmitRequest {
         command: Some(cmd),
         wait: wait.into(),

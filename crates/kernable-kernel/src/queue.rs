@@ -77,6 +77,11 @@ impl Queue {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Number of queued commands, waiting or leased.
+    pub(crate) fn len(&self) -> usize {
+        self.inner().queued.len()
+    }
+
     /// Adds a command behind the others of its aggregate. Returns false if it is queued already.
     pub(crate) fn push(&self, command: Command) -> bool {
         let mut inner = self.inner();

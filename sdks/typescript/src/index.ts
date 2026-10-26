@@ -11,6 +11,7 @@ import {
   type ListenCall,
   type ListenerDelivery,
   type SessionCall,
+  type TlsFiles,
   type WireCommand,
   type WireEvent,
   type WireNewEvent,
@@ -127,6 +128,8 @@ export interface Options {
   key: string;
   /** Default tenant for `submit`. */
   tenant?: string;
+  /** Mutual TLS for `host:port` URLs: paths of the CA certificate and this process's certificate and key. */
+  tls?: TlsFiles;
 }
 
 export interface SubmitOptions {
@@ -151,7 +154,7 @@ export class Kernable {
   private readonly tenant: string;
 
   constructor(options: Options) {
-    this.clients = connect(options.url);
+    this.clients = connect(options.url, options.tls);
     this.key = Key.fromFile(options.key);
     this.tenant = options.tenant ?? "default";
   }
