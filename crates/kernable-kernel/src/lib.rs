@@ -88,6 +88,8 @@ impl Kernel {
     }
 
     fn complete(&self, result: CommandResult) {
+        // The aggregate is free again: its next queued command can be leased now.
+        self.work.notify_waiters();
         for waiter in self
             .waiters()
             .remove(&result.command_id)

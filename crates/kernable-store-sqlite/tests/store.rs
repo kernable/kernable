@@ -69,28 +69,56 @@ fn commit_appends_events_and_completes_command() {
 fn stale_version_conflicts_and_lease_stays_usable() {
     let store = SqliteStore::open_in_memory().unwrap();
     store.enqueue(&cmd("c1", "PlaceOrder"), 0).unwrap();
-    store.enqueue(&cmd("c2", "AddItem"), 0).unwrap();
-
-    let l1 = store.lease(&["PlaceOrder"], 0, TTL).unwrap().unwrap();
-    let l2 = store.lease(&["AddItem"], 0, TTL).unwrap().unwrap();
-    store
-        .commit(&l1.lease_id, 0, &[ev("OrderPlaced")], &sig(), 1)
-        .unwrap();
+    let lease = store.lease(&["PlaceOrder"], 0, TTL).unwrap().unwrap();
 
     let err = store
-        .commit(&l2.lease_id, 0, &[ev("ItemAdded")], &sig(), 1)
+        .commit(&lease.lease_id, 3, &[ev("OrderPlaced")], &sig(), 1)
         .unwrap_err();
     assert!(matches!(
         err,
         Error::VersionConflict {
-            expected: 0,
-            actual: 1
+            expected: 3,
+            actual: 0
         }
     ));
     store
-        .commit(&l2.lease_id, 1, &[ev("ItemAdded")], &sig(), 2)
+        .commit(&lease.lease_id, 0, &[ev("OrderPlaced")], &sig(), 1)
         .unwrap();
-    assert_eq!(versions(&store), [1, 2]);
+    assert_eq!(versions(&store), [1]);
+}
+
+#[test]
+fn one_command_per_aggregate_at_a_time_in_submission_order() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    store.enqueue(&cmd("c1", "PlaceOrder"), 0).unwrap();
+    store.enqueue(&cmd("c2", "AddItem"), 1).unwrap();
+    let mut other = cmd("c3", "AddItem");
+    other.aggregate_id = "o2".into();
+    store.enqueue(&other, 2).unwrap();
+
+    // A worker for AddItem may not overtake c1 on o1, but o2 is free.
+    let l3 = store.lease(&["AddItem"], 0, TTL).unwrap().unwrap();
+    assert_eq!(l3.command.command_id, "c3");
+    let l1 = store
+        .lease(&["PlaceOrder", "AddItem"], 0, TTL)
+        .unwrap()
+        .unwrap();
+    assert_eq!(l1.command.command_id, "c1");
+    // o1 is busy while c1 is leased: c2 waits.
+    assert!(store.lease(&["AddItem"], 0, TTL).unwrap().is_none());
+
+    // An expired lease gives the aggregate back to the same, oldest command.
+    let again = store
+        .lease(&["PlaceOrder", "AddItem"], TTL, TTL)
+        .unwrap()
+        .unwrap();
+    assert_eq!(again.command.command_id, "c1");
+    store
+        .commit(&again.lease_id, 0, &[ev("OrderPlaced")], &sig(), TTL)
+        .unwrap();
+
+    let l2 = store.lease(&["AddItem"], TTL, TTL).unwrap().unwrap();
+    assert_eq!(l2.command.command_id, "c2");
 }
 
 #[test]

@@ -101,10 +101,10 @@ async fn unauthorized_and_impostor_workers_are_refused() {
     assert_eq!(impostor.code(), Code::Unauthenticated);
 }
 
-/// Many concurrent commands on one aggregate across two workers: conflicts are retried,
-/// and whatever is committed forms a gap-free stream.
+/// Many concurrent commands on one aggregate across two workers: the kernel queues them,
+/// so every command commits, without conflicts, in a gap-free stream.
 #[tokio::test(flavor = "multi_thread")]
-async fn concurrent_commands_on_one_aggregate_lose_no_updates() {
+async fn concurrent_commands_on_one_aggregate_are_queued() {
     let env = Arc::new(start("concurrent").await);
     spawn_worker(&env);
     spawn_worker(&env);
@@ -134,16 +134,10 @@ async fn concurrent_commands_on_one_aggregate_lose_no_updates() {
     }
 
     let outcomes = outcomes.lock().unwrap();
-    let committed = outcomes
-        .iter()
-        .filter(|o| matches!(o, Outcome::Committed(_)))
-        .count();
-    assert!(outcomes.iter().all(|o| match o {
-        Outcome::Committed(_) => true,
-        Outcome::Rejected(r) => r.code == "concurrency_conflict",
-    }));
-    assert!(committed > 0);
-
+    assert!(
+        outcomes.iter().all(|o| matches!(o, Outcome::Committed(_))),
+        "{outcomes:?}"
+    );
     let store = SqliteStore::open(env.dir.join("k.db")).unwrap();
     let versions: Vec<u64> = store
         .read_stream("t1", "Order", "o1")
@@ -151,5 +145,5 @@ async fn concurrent_commands_on_one_aggregate_lose_no_updates() {
         .iter()
         .map(|e| e.version)
         .collect();
-    assert_eq!(versions, (1..=committed as u64 + 1).collect::<Vec<_>>());
+    assert_eq!(versions, (1..=21).collect::<Vec<_>>());
 }

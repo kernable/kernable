@@ -1,18 +1,26 @@
 == Apple M2 Max, 2026-10-26
-crypto: sign=17.1us verify=35.5us per-command(2 sign + 2 verify)=105.2us
-baseline in-process          store (in-process, signed): n=5000 throughput=3974/s p50=0.22ms p95=0.27ms p99=1.66ms p99.9=2.02ms max=2.14ms rejected=0 errors=0
-rust worker, UDS, sequential load concurrency=1: n=14516 throughput=2903/s p50=0.29ms p95=0.35ms p99=1.79ms p99.9=2.13ms max=2.70ms rejected=0 errors=0
-ts worker, UDS, sequential   load concurrency=1: n=12841 throughput=2568/s p50=0.32ms p95=0.46ms p99=1.82ms p99.9=2.35ms max=11.10ms rejected=0 errors=0
-ts worker, TCP, sequential   load concurrency=1: n=11941 throughput=2388/s p50=0.36ms p95=0.46ms p99=1.90ms p99.9=2.23ms max=7.20ms rejected=0 errors=0
-rust worker, UDS, 2000/s     load rate=2000/s: n=20000 throughput=1999/s p50=1.61ms p95=3.19ms p99=4.39ms p99.9=10.81ms max=16.11ms rejected=0 errors=0
-ts worker, UDS, 2000/s       load rate=2000/s: n=20000 throughput=1999/s p50=1.62ms p95=3.18ms p99=4.40ms p99.9=9.80ms max=14.37ms rejected=0 errors=0
-rust worker, UDS, max        load concurrency=64: n=46912 throughput=4687/s p50=13.40ms p95=16.08ms p99=18.34ms p99.9=21.19ms max=33.15ms rejected=0 errors=0
-ts worker, UDS, max          load concurrency=64: n=45761 throughput=4573/s p50=13.51ms p95=17.18ms p99=20.89ms p99.9=28.97ms max=32.40ms rejected=0 errors=0
-ts worker, TCP, max          load concurrency=64: n=44849 throughput=4481/s p50=13.83ms p95=16.76ms p99=19.30ms p99.9=32.36ms max=39.15ms rejected=0 errors=0
-ts x1, 1ms work, max         load concurrency=64: n=9259 throughput=925/s p50=67.91ms p95=81.25ms p99=121.87ms p99.9=148.67ms max=160.03ms rejected=0 errors=0
-ts x2, 1ms work, max         load concurrency=64: n=17825 throughput=1779/s p50=34.53ms p95=74.14ms p99=83.39ms p99.9=94.80ms max=117.58ms rejected=0 errors=0
-ts x4, 1ms work, max         load concurrency=64: n=31456 throughput=3139/s p50=16.45ms p95=51.04ms p99=67.45ms p99.9=82.08ms max=100.83ms rejected=0 errors=0
-ts, history 10               history events=10: n=200 throughput=292/s p50=1.45ms p95=8.83ms p99=25.54ms p99.9=174.74ms max=174.74ms rejected=0 errors=0
-ts, history 100              history events=100: n=200 throughput=506/s p50=1.39ms p95=2.71ms p99=24.47ms p99.9=34.46ms max=34.46ms rejected=0 errors=0
-ts, history 1000             history events=1000: n=200 throughput=181/s p50=5.08ms p95=9.11ms p99=10.26ms p99.9=11.25ms max=11.25ms rejected=0 errors=0
-ts, hot aggregate            load concurrency=8: n=1155 throughput=229/s p50=18.61ms p95=96.76ms p99=119.38ms p99.9=123.73ms max=124.01ms rejected=617 errors=0
+crypto: sign=18.1us verify=37.4us per-command(2 sign + 2 verify)=110.9us
+baseline in-process          store (in-process, signed): n=5000 throughput=3095/s p50=0.27ms p95=0.37ms p99=1.86ms p99.9=4.02ms max=24.65ms rejected=0 errors=0
+rust worker, UDS, sequential load concurrency=1: n=5854 throughput=1171/s p50=0.59ms p95=2.09ms p99=3.42ms p99.9=6.15ms max=7.80ms rejected=0 errors=0
+ts worker, UDS, sequential   load concurrency=1: n=7736 throughput=1547/s p50=0.50ms p95=1.31ms p99=2.53ms p99.9=7.69ms max=23.05ms rejected=0 errors=0
+ts worker, TCP, sequential   load concurrency=1: n=8831 throughput=1766/s p50=0.48ms p95=0.74ms p99=2.18ms p99.9=4.03ms max=9.30ms rejected=0 errors=0
+rust worker, UDS, 2000/s     load rate=2000/s: n=20000 throughput=1999/s p50=2.05ms p95=13.41ms p99=65.42ms p99.9=69.36ms max=81.43ms rejected=0 errors=0
+ts worker, UDS, 2000/s       load rate=2000/s: n=20000 throughput=1999/s p50=1.90ms p95=4.36ms p99=17.01ms p99.9=30.82ms max=35.16ms rejected=0 errors=0
+rust worker, UDS, max        load concurrency=64: n=35137 throughput=3511/s p50=17.27ms p95=22.73ms p99=34.17ms p99.9=125.68ms max=127.61ms rejected=0 errors=0
+ts worker, UDS, max          load concurrency=64: n=33725 throughput=3369/s p50=18.13ms p95=24.00ms p99=34.75ms p99.9=60.73ms max=67.44ms rejected=0 errors=0
+ts worker, TCP, max          load concurrency=64: n=34538 throughput=3451/s p50=18.04ms p95=21.92ms p99=28.97ms p99.9=46.14ms max=52.31ms rejected=0 errors=0
+ts x1, 1ms work, max         load concurrency=64: n=9293 throughput=928/s p50=68.33ms p95=82.72ms p99=109.44ms p99.9=157.94ms max=166.87ms rejected=0 errors=0
+ts x2, 1ms work, max         load concurrency=64: n=17255 throughput=1721/s p50=34.29ms p95=76.78ms p99=88.98ms p99.9=105.69ms max=113.06ms rejected=0 errors=0
+ts x4, 1ms work, max         load concurrency=64: n=27365 throughput=2734/s p50=19.42ms p95=51.57ms p99=67.95ms p99.9=76.96ms max=85.44ms rejected=0 errors=0
+ts, history 10               history events=10: n=200 throughput=944/s p50=1.04ms p95=1.26ms p99=2.67ms p99.9=2.72ms max=2.72ms rejected=0 errors=0
+ts, history 100              history events=100: n=200 throughput=805/s p50=1.20ms p95=1.49ms p99=2.86ms p99.9=3.01ms max=3.01ms rejected=0 errors=0
+ts, history 1000             history events=1000: n=200 throughput=151/s p50=6.17ms p95=9.63ms p99=10.38ms p99.9=11.79ms max=11.79ms rejected=0 errors=0
+ts, hot aggregate            load concurrency=8: n=887 throughput=175/s p50=24.78ms p95=104.19ms p99=114.47ms p99.9=119.44ms max=119.44ms rejected=0 errors=0
+
+# A/B on the same machine, kernel before vs. after per-aggregate serialization
+# (Rust worker, UDS, 3 rounds each; p50 / throughput):
+#   sequential:      before 0.29-0.30 ms / ~2.8k/s    after 0.34-0.36 ms / ~2.4k/s
+#   concurrency=64:  before ~4.5k/s (one round 3.2k)  after ~3.5-3.7k/s
+# Hot aggregate (aggregates=1, Rust worker): throughput is bound by shipping the ever-growing
+# history (1 KB payload, conc=1: 2.9 ms p50 at ~1k events; 16 B payload: 1.8 ms at ~1.6k events),
+# not by the serialization itself.

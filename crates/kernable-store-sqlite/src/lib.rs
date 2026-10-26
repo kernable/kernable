@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS commands (
 ) STRICT;
 CREATE INDEX IF NOT EXISTS commands_ready ON commands (status, created_at);
 CREATE INDEX IF NOT EXISTS commands_lease ON commands (lease_id);
+CREATE INDEX IF NOT EXISTS commands_aggregate ON commands (tenant_id, aggregate_type, aggregate_id, status);
 CREATE TABLE IF NOT EXISTS checkpoints (
     global_position INTEGER PRIMARY KEY,
     chain_hash      BLOB    NOT NULL,
@@ -229,6 +230,9 @@ impl SqliteStore {
     }
 
     /// Leases the oldest pending (or expired) command of one of `command_types` for `ttl_ms`.
+    ///
+    /// Per aggregate, at most one command is leased at a time and commands are leased in
+    /// submission order; commands of a busy aggregate wait in the queue.
     pub fn lease(&self, command_types: &[&str], now_ms: i64, ttl_ms: i64) -> Result<Option<Lease>> {
         if command_types.is_empty() {
             return Ok(None);
@@ -238,12 +242,23 @@ impl SqliteStore {
 
         let placeholders = vec!["?"; command_types.len()].join(", ");
         let sql = format!(
-            "SELECT command_id, tenant_id, aggregate_type, aggregate_id, command_type, payload,
-                    client_key_id, client_sig, attempts
-             FROM commands
-             WHERE (status = 'pending' OR (status = 'leased' AND lease_expires_at <= ?1))
-               AND command_type IN ({placeholders})
-             ORDER BY created_at, rowid
+            "SELECT c.command_id, c.tenant_id, c.aggregate_type, c.aggregate_id, c.command_type,
+                    c.payload, c.client_key_id, c.client_sig, c.attempts
+             FROM commands c
+             WHERE (c.status = 'pending' OR (c.status = 'leased' AND c.lease_expires_at <= ?1))
+               AND c.command_type IN ({placeholders})
+               -- One command per aggregate at a time, in submission order: no other command of
+               -- the aggregate may hold a live lease, and no older one may still be waiting.
+               AND NOT EXISTS (
+                   SELECT 1 FROM commands o
+                   WHERE o.tenant_id = c.tenant_id
+                     AND o.aggregate_type = c.aggregate_type
+                     AND o.aggregate_id = c.aggregate_id
+                     AND o.command_id <> c.command_id
+                     AND ((o.status = 'leased' AND o.lease_expires_at > ?1)
+                          OR (o.status IN ('pending', 'leased')
+                              AND (o.created_at, o.rowid) < (c.created_at, c.rowid))))
+             ORDER BY c.created_at, c.rowid
              LIMIT 1"
         );
         let mut args: Vec<&dyn ToSql> = vec![&now_ms];
