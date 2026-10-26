@@ -30,7 +30,7 @@ async function account(id: string): Promise<{ email: string; status: string } | 
 // ---- reactor: runs after both read models (order 10 > 0) ----
 
 const stats = { confirmations: 0, unknownAccounts: 0 };
-const confirmations = kernable.reactor("confirmations").on("OrderSubmitted", async (e, ctx) => {
+const confirmations = kernable.reactor("confirmations").on("orders.OrderSubmitted", async (e, ctx) => {
   const row = orders.get(e.aggregateId)!;
   const customer = await account(row.customerId); // throws while identity is down: retried
   if (!customer) {
@@ -40,6 +40,7 @@ const confirmations = kernable.reactor("confirmations").on("OrderSubmitted", asy
   // A reactor must not wait for settling: that would include waiting for itself. The fixed
   // command ID makes a redelivered event harmless; `follow()` keeps sender and correlation.
   await kernable.submit({
+    domain: "orders",
     aggregateType: "Order",
     aggregateId: e.aggregateId,
     type: "RecordConfirmation",
@@ -67,18 +68,18 @@ async function run(options: SubmitOptions, show: () => Promise<unknown> | unknow
 }
 
 const orderCommand = (id: string, type: string, data?: unknown) =>
-  run({ aggregateType: "Order", aggregateId: id, type, data }, () => orders.get(id));
+  run({ domain: "orders", aggregateType: "Order", aggregateId: id, type, data }, () => orders.get(id));
 
 async function route(method: string, path: string, body: any): Promise<Reply> {
   let m: RegExpMatchArray | null;
   if (method === "GET" && path === "/health") return [200, { ok: true }]; // listening means ready
   if (method === "GET" && path === "/stats") return [200, stats];
   if (method === "POST" && path === "/accounts") {
-    return run({ aggregateType: "Account", aggregateId: body.id, type: "RegisterAccount", data: body }, () => account(body.id));
+    return run({ domain: "identity", aggregateType: "Account", aggregateId: body.id, type: "RegisterAccount", data: body }, () => account(body.id));
   }
   if (method === "POST" && (m = path.match(/^\/accounts\/([^/]+)\/email$/))) {
     const id = m[1];
-    return run({ aggregateType: "Account", aggregateId: id, type: "ChangeEmail", data: body }, () => account(id));
+    return run({ domain: "identity", aggregateType: "Account", aggregateId: id, type: "ChangeEmail", data: body }, () => account(id));
   }
   if (method === "POST" && path === "/orders") {
     const customer = await account(body.customerId);

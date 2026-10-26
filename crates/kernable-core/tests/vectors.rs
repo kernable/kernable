@@ -50,6 +50,7 @@ fn vectors() -> Value {
     let cmd = Command {
         command_id: "c-1".into(),
         tenant_id: "t-1".into(),
+        domain: "orders".into(),
         aggregate_type: "Order".into(),
         aggregate_id: "o-1".into(),
         command_type: "PlaceOrder".into(),
@@ -77,6 +78,7 @@ fn vectors() -> Value {
     let event = Event {
         global_position: 1,
         tenant_id: cmd.tenant_id.clone(),
+        domain: cmd.domain.clone(),
         aggregate_type: cmd.aggregate_type.clone(),
         aggregate_id: cmd.aggregate_id.clone(),
         version: 1,
@@ -98,7 +100,7 @@ fn vectors() -> Value {
         "attributes": context.attributes.iter().map(|a| json!({"key": a.key, "value": a.value})).collect::<Vec<_>>(),
     });
     let cmd_json = json!({
-        "command_id": cmd.command_id, "tenant_id": cmd.tenant_id,
+        "command_id": cmd.command_id, "tenant_id": cmd.tenant_id, "domain": cmd.domain,
         "aggregate_type": cmd.aggregate_type, "aggregate_id": cmd.aggregate_id,
         "command_type": cmd.command_type, "payload_hex": hex::encode(&cmd.payload),
         "context": context_json,
@@ -121,7 +123,7 @@ fn vectors() -> Value {
             signing::rejection_message(&cmd.command_id, &reason),
         ),
         "snapshot": entry(
-            json!({"tenant_id": cmd.tenant_id, "aggregate_type": cmd.aggregate_type, "aggregate_id": cmd.aggregate_id,
+            json!({"tenant_id": cmd.tenant_id, "domain": cmd.domain, "aggregate_type": cmd.aggregate_type, "aggregate_id": cmd.aggregate_id,
                    "version": 100, "schema": "1", "state_hex": hex::encode(br#"{"items":3}"#)}),
             signing::snapshot_message(&cmd, 100, "1", br#"{"items":3}"#),
         ),
@@ -137,7 +139,7 @@ fn vectors() -> Value {
         "event_hash": {
             "input": {
                 "prev_hex": hex::encode(GENESIS),
-                "global_position": event.global_position, "tenant_id": event.tenant_id,
+                "global_position": event.global_position, "tenant_id": event.tenant_id, "domain": event.domain,
                 "aggregate_type": event.aggregate_type, "aggregate_id": event.aggregate_id,
                 "version": event.version, "event_type": event.event_type,
                 "payload_hex": hex::encode(&event.payload), "command_id": event.command_id,

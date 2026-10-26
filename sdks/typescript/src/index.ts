@@ -95,6 +95,8 @@ export interface ListenerContext {
 export interface StoredEvent {
   position: number;
   tenant: string;
+  /** Always the domain of the command that caused the event. */
+  domain: string;
   aggregateType: string;
   aggregateId: string;
   version: number;
@@ -123,11 +125,35 @@ export interface AggregateOptions {
 }
 
 /**
+ * A domain: a lowercase name (`orders`) that scopes its aggregates, commands and events.
+ * Types are unique within a domain; elsewhere they are named `domain.Type`.
+ */
+export class Domain {
+  readonly name: string;
+
+  constructor(name: string) {
+    if (!/^[a-z][a-z0-9_-]*$/.test(name)) throw new Error(`invalid domain name ${JSON.stringify(name)}`);
+    this.name = name;
+  }
+
+  aggregate<S>(name: string, initial: S, options?: AggregateOptions): Aggregate<S> {
+    return new Aggregate(this.name, name, initial, options);
+  }
+}
+
+export function domain(name: string): Domain {
+  return new Domain(name);
+}
+
+/**
  * An aggregate: how events change its state (`apply`) and which events a command produces
  * (`command`). Handlers must be deterministic and free of side effects; they may run again.
- * The state must survive a JSON round trip, because snapshots store it as JSON.
+ * The state must survive a JSON round trip, because snapshots store it as JSON. An aggregate
+ * belongs to a domain and produces events only of that domain; create it with
+ * `domain(...).aggregate(...)`.
  */
 export class Aggregate<S> {
+  readonly domain: string;
   readonly name: string;
   readonly initial: S;
   readonly snapshotEvery: number;
@@ -135,7 +161,8 @@ export class Aggregate<S> {
   readonly appliers = new Map<string, Apply<S>>();
   readonly handlers = new Map<string, Handle<S>>();
 
-  constructor(name: string, initial: S, options: AggregateOptions = {}) {
+  constructor(domain: string, name: string, initial: S, options: AggregateOptions = {}) {
+    this.domain = domain;
     this.name = name;
     this.initial = initial;
     this.snapshotEvery = options.snapshotEvery ?? 100;
@@ -158,9 +185,6 @@ export class Aggregate<S> {
   }
 }
 
-export function aggregate<S>(name: string, initial: S, options?: AggregateOptions): Aggregate<S> {
-  return new Aggregate(name, initial, options);
-}
 
 export interface Options {
   /** Kernel address: `unix:/path/to.sock` or `host:port`. */
@@ -176,6 +200,7 @@ export interface Options {
 }
 
 export interface SubmitOptions {
+  domain: string;
   aggregateType: string;
   aggregateId: string;
   type: string;
@@ -250,6 +275,7 @@ export class Kernable {
     const cmd = {
       command_id,
       tenant_id: options.tenant ?? this.tenant,
+      domain: options.domain,
       aggregate_type: options.aggregateType,
       aggregate_id: options.aggregateId,
       command_type: options.type,
@@ -276,7 +302,7 @@ export class Kernable {
 export interface SubscribeOptions {
   /** Global position of the last event already handled; 0 = from the beginning. */
   after?: number;
-  /** Event types to receive; empty = all the key may read. */
+  /** Qualified event types (`orders.OrderPlaced`) or domains (`orders.*`); empty = all the key may read. */
   types?: string[];
   reconnectMs?: number;
 }
@@ -364,7 +390,11 @@ export class Listener {
     this.ready = new Promise((resolve) => (this.markReady = resolve));
   }
 
+  /** `eventType` is qualified (`orders.OrderPlaced`) or a whole domain (`orders.*`). */
   on<D = any>(eventType: string, handler: (event: StoredEvent & { data: D }, ctx: ListenerContext) => void | Promise<void>): this {
+    if (!/^[a-z][a-z0-9_-]*\.([^.]+|\*)$/.test(eventType)) {
+      throw new Error(`listen to a qualified type (domain.Type) or a domain (domain.*), not ${JSON.stringify(eventType)}`);
+    }
     this.handlers.set(eventType, handler as EventHandler);
     return this;
   }
@@ -425,7 +455,8 @@ export class Listener {
       for (const e of m.batch.events) {
         const event = toStored(e);
         const ctx = { replaying: e.global_position <= this.replayUpTo, follow: () => follow(event) };
-        await this.handlers.get(e.event_type)?.(event, ctx);
+        const handler = this.handlers.get(`${e.domain}.${e.event_type}`) ?? this.handlers.get(`${e.domain}.*`);
+        await handler?.(event, ctx);
         this.position = e.global_position;
       }
       this.position = m.batch.up_to;
@@ -454,7 +485,7 @@ export class Worker {
   constructor(clients: Clients, key: Key, aggregates: Aggregate<any>[]) {
     this.clients = clients;
     this.key = key;
-    for (const agg of aggregates) for (const type of agg.handlers.keys()) this.byCommand.set(type, agg);
+    for (const agg of aggregates) for (const type of agg.handlers.keys()) this.byCommand.set(`${agg.domain}.${type}`, agg);
     this.ready = new Promise((resolve) => (this.markReady = resolve));
   }
 
@@ -508,9 +539,9 @@ export class Worker {
     let events: WireNewEvent[];
     let snapshot: WireSnapshot | undefined;
     try {
-      const agg = this.byCommand.get(cmd.command_type);
+      const agg = this.byCommand.get(`${cmd.domain}.${cmd.command_type}`);
       if (!agg || agg.name !== cmd.aggregate_type) {
-        throw new Rejected(`no handler for ${cmd.aggregate_type}.${cmd.command_type}`, "unknown_command");
+        throw new Rejected(`no handler for ${cmd.command_type} on ${cmd.domain}.${cmd.aggregate_type}`, "unknown_command");
       }
       if (x.snapshot && x.snapshot.schema !== agg.schema) {
         throw new Rejected(`snapshot schema ${x.snapshot.schema} is not ${agg.schema}`, "snapshot_stale");
@@ -600,6 +631,7 @@ function toStored(e: WireEvent): StoredEvent {
   return {
     position: e.global_position,
     tenant: e.tenant_id,
+    domain: e.domain,
     aggregateType: e.aggregate_type,
     aggregateId: e.aggregate_id,
     version: e.version,

@@ -69,7 +69,10 @@ async fn a_stale_snapshot_is_dropped_and_the_command_runs_with_all_events() {
     assert_eq!(seen, [(Some(2), 0), (None, 2)]);
     // Its own new snapshot replaced the old one.
     let store = kernable_store::open_read_only(&env.store).unwrap();
-    let latest = store.snapshot("t1", "Order", "o1").unwrap().unwrap();
+    let latest = store
+        .snapshot("t1", "orders", "Order", "o1")
+        .unwrap()
+        .unwrap();
     assert_eq!(latest.snapshot.unwrap().version, 3);
 }
 

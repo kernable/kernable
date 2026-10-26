@@ -7,7 +7,7 @@ import { Kernable, type Worker } from "../../sdks/typescript/src/index.ts";
 import { TestKernel } from "../../sdks/typescript/test/kernel.ts";
 import { order } from "./order.ts";
 
-const kernel = new TestKernel(["PlaceOrder", "AddItem", "CancelOrder", "ShipOrder"]);
+const kernel = new TestKernel(["orders.*"]);
 const kernable = new Kernable({ url: kernel.url, key: kernel.appKey, tenant: "t1" });
 let worker: Worker;
 
@@ -25,7 +25,7 @@ after(async () => {
 });
 
 const submit = (aggregateId: string, type: string, data?: unknown) =>
-  kernable.submit({ aggregateType: "Order", aggregateId, type, data });
+  kernable.submit({ domain: "orders", aggregateType: "Order", aggregateId, type, data });
 
 test("order lifecycle", async () => {
   const placed = await submit("o1", "PlaceOrder", { customerId: "k-1" });
@@ -51,8 +51,8 @@ test("business rules reject invalid commands", async () => {
 });
 
 test("resubmitting a command returns the original outcome", async () => {
-  const first = await kernable.submit({ aggregateType: "Order", aggregateId: "o3", type: "PlaceOrder", id: "fixed-id", data: { customerId: "k-3" } });
-  const again = await kernable.submit({ aggregateType: "Order", aggregateId: "o3", type: "PlaceOrder", id: "fixed-id", data: { customerId: "k-3" } });
+  const first = await kernable.submit({ domain: "orders", aggregateType: "Order", aggregateId: "o3", type: "PlaceOrder", id: "fixed-id", data: { customerId: "k-3" } });
+  const again = await kernable.submit({ domain: "orders", aggregateType: "Order", aggregateId: "o3", type: "PlaceOrder", id: "fixed-id", data: { customerId: "k-3" } });
   assert.deepEqual(again, first);
 });
 

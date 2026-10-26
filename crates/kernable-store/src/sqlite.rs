@@ -31,6 +31,7 @@ const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS events (
     global_position INTEGER PRIMARY KEY AUTOINCREMENT,
     tenant_id       TEXT    NOT NULL,
+    domain          TEXT    NOT NULL,
     aggregate_type  TEXT    NOT NULL,
     aggregate_id    TEXT    NOT NULL,
     version         INTEGER NOT NULL,
@@ -43,11 +44,12 @@ CREATE TABLE IF NOT EXISTS events (
     context         BLOB,             -- encoded RequestContext of the command
     prev_hash       BLOB    NOT NULL,
     hash            BLOB    NOT NULL,
-    UNIQUE (tenant_id, aggregate_type, aggregate_id, version)
+    UNIQUE (tenant_id, domain, aggregate_type, aggregate_id, version)
 ) STRICT;
 CREATE TABLE IF NOT EXISTS commands (
     command_id       TEXT PRIMARY KEY,
     tenant_id        TEXT    NOT NULL,
+    domain           TEXT    NOT NULL,
     aggregate_type   TEXT    NOT NULL,
     aggregate_id     TEXT    NOT NULL,
     command_type     TEXT    NOT NULL,
@@ -69,10 +71,11 @@ CREATE TABLE IF NOT EXISTS checkpoints (
 ) STRICT;
 CREATE TABLE IF NOT EXISTS snapshots (
     tenant_id      TEXT NOT NULL,
+    domain         TEXT NOT NULL,
     aggregate_type TEXT NOT NULL,
     aggregate_id   TEXT NOT NULL,
     record         BLOB NOT NULL, -- encoded SnapshotRecord
-    PRIMARY KEY (tenant_id, aggregate_type, aggregate_id)
+    PRIMARY KEY (tenant_id, domain, aggregate_type, aggregate_id)
 ) STRICT;
 CREATE TABLE IF NOT EXISTS listeners (
     name   TEXT PRIMARY KEY,
@@ -82,10 +85,10 @@ CREATE TABLE IF NOT EXISTS listeners (
 
 const EVENT_COLUMNS: &str = "global_position, tenant_id, aggregate_type, aggregate_id, version, \
                              event_type, payload, command_id, created_at, \
-                             producer_key_id, producer_sig, hash, context";
+                             producer_key_id, producer_sig, hash, context, domain";
 
 const COMMAND_COLUMNS: &str = "command_id, tenant_id, aggregate_type, aggregate_id, command_type, \
-                               payload, client_key_id, client_sig, context";
+                               payload, client_key_id, client_sig, context, domain";
 
 pub struct SqliteStore {
     conn: Mutex<Connection>,
@@ -122,15 +125,23 @@ impl Store for SqliteStore {
     fn read_stream_after(
         &self,
         tenant_id: &str,
+        domain: &str,
         aggregate_type: &str,
         aggregate_id: &str,
         after_version: u64,
     ) -> Result<Vec<Event>> {
         read_events(
             &self.conn(),
-            "WHERE tenant_id = ?1 AND aggregate_type = ?2 AND aggregate_id = ?3 AND version > ?4
+            "WHERE tenant_id = ?1 AND domain = ?2 AND aggregate_type = ?3 AND aggregate_id = ?4
+               AND version > ?5
              ORDER BY version",
-            params![tenant_id, aggregate_type, aggregate_id, after_version],
+            params![
+                tenant_id,
+                domain,
+                aggregate_type,
+                aggregate_id,
+                after_version
+            ],
         )
     }
 
@@ -159,8 +170,9 @@ impl Store for SqliteStore {
         let (key_id, sig) = split_sig(cmd.client_sig.as_ref());
         let inserted = conn.execute(
             "INSERT INTO commands (command_id, tenant_id, aggregate_type, aggregate_id, command_type,
-                                   payload, client_key_id, client_sig, context, status, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', ?10)
+                                   payload, client_key_id, client_sig, context, domain, status,
+                                   created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'pending', ?11)
              ON CONFLICT (command_id) DO NOTHING",
             params![
                 cmd.command_id,
@@ -172,6 +184,7 @@ impl Store for SqliteStore {
                 key_id,
                 sig,
                 cmd.context.as_ref().map(Message::encode_to_vec),
+                cmd.domain,
                 now_ms
             ],
         )?;
@@ -212,8 +225,13 @@ impl Store for SqliteStore {
 
         let actual: u64 = tx.query_row(
             "SELECT COALESCE(MAX(version), 0) FROM events
-             WHERE tenant_id = ?1 AND aggregate_type = ?2 AND aggregate_id = ?3",
-            params![cmd.tenant_id, cmd.aggregate_type, cmd.aggregate_id],
+             WHERE tenant_id = ?1 AND domain = ?2 AND aggregate_type = ?3 AND aggregate_id = ?4",
+            params![
+                cmd.tenant_id,
+                cmd.domain,
+                cmd.aggregate_type,
+                cmd.aggregate_id
+            ],
             |r| r.get(0),
         )?;
         if actual != expected_version {
@@ -238,6 +256,7 @@ impl Store for SqliteStore {
             let mut event = Event {
                 global_position: position,
                 tenant_id: cmd.tenant_id.clone(),
+                domain: cmd.domain.clone(),
                 aggregate_type: cmd.aggregate_type.clone(),
                 aggregate_id: cmd.aggregate_id.clone(),
                 version,
@@ -253,8 +272,8 @@ impl Store for SqliteStore {
             tx.execute(
                 "INSERT INTO events (global_position, tenant_id, aggregate_type, aggregate_id, version,
                                      event_type, payload, command_id, created_at,
-                                     producer_key_id, producer_sig, prev_hash, hash, context)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                                     producer_key_id, producer_sig, prev_hash, hash, context, domain)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     event.global_position,
                     event.tenant_id,
@@ -269,7 +288,8 @@ impl Store for SqliteStore {
                     producer_sig.sig,
                     prev,
                     event.hash,
-                    event.context.as_ref().map(Message::encode_to_vec)
+                    event.context.as_ref().map(Message::encode_to_vec),
+                    event.domain
                 ],
             )?;
             prev = event.hash.clone();
@@ -305,6 +325,7 @@ impl Store for SqliteStore {
     fn snapshot(
         &self,
         tenant_id: &str,
+        domain: &str,
         aggregate_type: &str,
         aggregate_id: &str,
     ) -> Result<Option<SnapshotRecord>> {
@@ -312,8 +333,8 @@ impl Store for SqliteStore {
             .conn()
             .query_row(
                 "SELECT record FROM snapshots
-                 WHERE tenant_id = ?1 AND aggregate_type = ?2 AND aggregate_id = ?3",
-                params![tenant_id, aggregate_type, aggregate_id],
+                 WHERE tenant_id = ?1 AND domain = ?2 AND aggregate_type = ?3 AND aggregate_id = ?4",
+                params![tenant_id, domain, aggregate_type, aggregate_id],
                 |r| r.get(0),
             )
             .optional()?;
@@ -327,17 +348,18 @@ impl Store for SqliteStore {
         if r.removed {
             self.conn().execute(
                 "DELETE FROM snapshots
-                 WHERE tenant_id = ?1 AND aggregate_type = ?2 AND aggregate_id = ?3",
-                params![r.tenant_id, r.aggregate_type, r.aggregate_id],
+                 WHERE tenant_id = ?1 AND domain = ?2 AND aggregate_type = ?3 AND aggregate_id = ?4",
+                params![r.tenant_id, r.domain, r.aggregate_type, r.aggregate_id],
             )?;
         } else {
             self.conn().execute(
-                "INSERT INTO snapshots (tenant_id, aggregate_type, aggregate_id, record)
-                 VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT (tenant_id, aggregate_type, aggregate_id)
+                "INSERT INTO snapshots (tenant_id, domain, aggregate_type, aggregate_id, record)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT (tenant_id, domain, aggregate_type, aggregate_id)
                  DO UPDATE SET record = excluded.record",
                 params![
                     r.tenant_id,
+                    r.domain,
                     r.aggregate_type,
                     r.aggregate_id,
                     r.encode_to_vec()
@@ -447,7 +469,7 @@ fn verify_tables(conn: &Connection, kernel_key_id: &str) -> Result<Report> {
     ))?;
     let mut rows = stmt.query([])?;
     while let Some(r) = rows.next()? {
-        let prev_hash: Vec<u8> = r.get(13)?;
+        let prev_hash: Vec<u8> = r.get(14)?;
         v.event(event_from_row(r)?, &prev_hash);
     }
 
@@ -459,8 +481,15 @@ fn verify_tables(conn: &Connection, kernel_key_id: &str) -> Result<Report> {
         let hash: Option<Vec<u8>> = conn
             .query_row(
                 "SELECT hash FROM events
-                 WHERE tenant_id = ?1 AND aggregate_type = ?2 AND aggregate_id = ?3 AND version = ?4",
-                params![record.tenant_id, record.aggregate_type, record.aggregate_id, version],
+                 WHERE tenant_id = ?1 AND domain = ?2 AND aggregate_type = ?3 AND aggregate_id = ?4
+                   AND version = ?5",
+                params![
+                    record.tenant_id,
+                    record.domain,
+                    record.aggregate_type,
+                    record.aggregate_id,
+                    version
+                ],
                 |r| r.get(0),
             )
             .optional()?;
@@ -491,6 +520,7 @@ fn event_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
         producer_sig: join_sig(r.get(9)?, r.get(10)?),
         hash: r.get(11)?,
         context: context_from(r.get(12)?)?,
+        domain: r.get(13)?,
     })
 }
 
@@ -504,6 +534,7 @@ fn command_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Command> {
         payload: r.get(5)?,
         client_sig: join_sig(r.get(6)?, r.get(7)?),
         context: context_from(r.get(8)?)?,
+        domain: r.get(9)?,
     })
 }
 

@@ -15,7 +15,7 @@ async function until(condition: () => boolean, what: string) {
 }
 
 test("read model shows its own writes and runs before the reactor, also across a kernel crash", async () => {
-  const kernel = new TestKernel(["PlaceOrder", "AddItem", "CancelOrder", "ShipOrder"], "settle_timeout_ms = 1000");
+  const kernel = new TestKernel(["orders.*"], "settle_timeout_ms = 1000");
   await kernel.start();
   const kernable = new Kernable({ url: kernel.url, key: kernel.appKey, tenant: "t1" });
   const worker = kernable.worker(order);
@@ -26,14 +26,14 @@ test("read model shows its own writes and runs before the reactor, also across a
 
   // The reactor queries the read model; it must always find the order there.
   const confirmed = new Set<string>();
-  const confirmations = kernable.reactor("confirmations", { reconnectMs: 100 }).on("OrderPlaced", (e) => {
+  const confirmations = kernable.reactor("confirmations", { reconnectMs: 100 }).on("orders.OrderPlaced", (e) => {
     assert.ok(view[e.aggregateId], `${e.aggregateId} is not in the read model yet`);
     confirmed.add(e.aggregateId);
   });
 
   const running = [worker.run({ reconnectMs: 100 }), overview.run(), confirmations.run()];
   const submit = async (id: string, type: string, data?: unknown) => {
-    const outcome = await kernable.submit({ aggregateType: "Order", aggregateId: id, type, data });
+    const outcome = await kernable.submit({ domain: "orders", aggregateType: "Order", aggregateId: id, type, data });
     assert.ok(outcome.committed, `${type} on ${id}`);
     return outcome.events.at(-1)!.position;
   };
@@ -67,7 +67,7 @@ test("read model shows its own writes and runs before the reactor, also across a
     // A stopped listener still counts: the next submit cannot settle and says so.
     confirmations.stop();
     await assert.rejects(submit("o3", "PlaceOrder", { customerId: "k-3" }), NotSettled);
-    const committed = await kernable.submit({ aggregateType: "Order", aggregateId: "o4", type: "PlaceOrder", data: { customerId: "k-4" }, wait: "committed" });
+    const committed = await kernable.submit({ domain: "orders", aggregateType: "Order", aggregateId: "o4", type: "PlaceOrder", data: { customerId: "k-4" }, wait: "committed" });
     assert.ok(committed.committed);
   } finally {
     worker.stop();

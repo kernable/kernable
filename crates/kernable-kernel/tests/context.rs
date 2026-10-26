@@ -40,7 +40,7 @@ async fn the_context_is_stored_with_the_events_and_covered_by_the_chain() {
     assert_eq!(c.events[0].context, Some(sender()));
 
     let store = kernable_store::open_read_only(&env.store).unwrap();
-    let stored = store.read_stream("t1", "Order", "o1").unwrap();
+    let stored = store.read_stream("t1", "orders", "Order", "o1").unwrap();
     assert_eq!(stored[0].context, Some(sender()));
     let report = store.verify(&id(&env.kernel_key)).unwrap();
     assert!(report.is_ok(), "{:?}", report.problems);

@@ -12,11 +12,13 @@ use std::{
 
 use kernable_core::proto::Command;
 
-type StreamKey = (String, String, String);
+/// Tenant, domain, aggregate type, aggregate ID.
+type StreamKey = (String, String, String, String);
 
 fn stream_key(c: &Command) -> StreamKey {
     (
         c.tenant_id.clone(),
+        c.domain.clone(),
         c.aggregate_type.clone(),
         c.aggregate_id.clone(),
     )
@@ -31,7 +33,8 @@ struct Held {
 struct Inner {
     /// Commands per aggregate in submission order; the head is next or running.
     aggregates: HashMap<StreamKey, VecDeque<Command>>,
-    /// Aggregates whose head is free to lease, per command type, in the order they became ready.
+    /// Aggregates whose head is free to lease, per qualified command type, in the order they
+    /// became ready.
     ready: HashMap<String, BTreeMap<u64, StreamKey>>,
     leases: HashMap<String, Held>,
     /// IDs of all queued commands, so a repeated push is ignored.
@@ -48,7 +51,7 @@ impl Inner {
         let seq = self.next_seq;
         self.next_seq += 1;
         self.ready
-            .entry(head.command_type.clone())
+            .entry(crate::config::qualified(&head.domain, &head.command_type))
             .or_default()
             .insert(seq, key);
     }
@@ -98,7 +101,7 @@ impl Queue {
     }
 
     /// Leases the command that has waited longest among the free aggregates whose next
-    /// command has one of `command_types`. Expired leases are given back first.
+    /// command has one of the qualified `command_types`. Expired leases are given back first.
     pub(crate) fn lease(&self, command_types: &[&str], ttl: Duration) -> Option<(String, Command)> {
         let now = Instant::now();
         let mut inner = self.inner();
@@ -164,6 +167,7 @@ mod tests {
     fn cmd(id: &str, command_type: &str, aggregate_id: &str) -> Command {
         Command {
             command_id: id.into(),
+            domain: "d".into(),
             aggregate_id: aggregate_id.into(),
             command_type: command_type.into(),
             ..Default::default()
@@ -182,17 +186,17 @@ mod tests {
         q.push(cmd("c3", "AddItem", "o2"));
 
         // A worker for AddItem may not overtake c1 on o1, but o2 is free.
-        let (l3, id) = lease(&q, &["AddItem"]).unwrap();
+        let (l3, id) = lease(&q, &["d.AddItem"]).unwrap();
         assert_eq!(id, "c3");
-        let (l1, id) = lease(&q, &["PlaceOrder", "AddItem"]).unwrap();
+        let (l1, id) = lease(&q, &["d.PlaceOrder", "d.AddItem"]).unwrap();
         assert_eq!(id, "c1");
-        assert!(lease(&q, &["PlaceOrder", "AddItem"]).is_none());
+        assert!(lease(&q, &["d.PlaceOrder", "d.AddItem"]).is_none());
 
         q.done(&l1);
-        let (_, id) = lease(&q, &["AddItem"]).unwrap();
+        let (_, id) = lease(&q, &["d.AddItem"]).unwrap();
         assert_eq!(id, "c2");
         q.done(&l3);
-        assert!(lease(&q, &["AddItem"]).is_none());
+        assert!(lease(&q, &["d.AddItem"]).is_none());
     }
 
     #[test]
@@ -200,8 +204,8 @@ mod tests {
         let q = Queue::default();
         q.push(cmd("c1", "B", "x"));
         q.push(cmd("c2", "A", "y"));
-        assert_eq!(lease(&q, &["A", "B"]).unwrap().1, "c1");
-        assert_eq!(lease(&q, &["A", "B"]).unwrap().1, "c2");
+        assert_eq!(lease(&q, &["d.A", "d.B"]).unwrap().1, "c1");
+        assert_eq!(lease(&q, &["d.A", "d.B"]).unwrap().1, "c2");
         assert!(lease(&q, &[]).is_none());
     }
 
@@ -209,13 +213,13 @@ mod tests {
     fn released_and_expired_leases_are_given_out_again() {
         let q = Queue::default();
         q.push(cmd("c1", "A", "x"));
-        let (first, _) = lease(&q, &["A"]).unwrap();
+        let (first, _) = lease(&q, &["d.A"]).unwrap();
         q.release(&first);
         assert!(!q.holds(&first));
 
-        let (_, id) = q.lease(&["A"], Duration::ZERO).unwrap();
+        let (_, id) = q.lease(&["d.A"], Duration::ZERO).unwrap();
         assert_eq!(id.command_id, "c1");
-        let (again, id) = lease(&q, &["A"]).unwrap(); // the zero-TTL lease has expired
+        let (again, id) = lease(&q, &["d.A"]).unwrap(); // the zero-TTL lease has expired
         assert_eq!(id, "c1");
         assert!(q.holds(&again));
     }
@@ -225,8 +229,8 @@ mod tests {
         let q = Queue::default();
         assert!(q.push(cmd("c1", "A", "x")));
         assert!(!q.push(cmd("c1", "A", "x")));
-        let (l, _) = lease(&q, &["A"]).unwrap();
+        let (l, _) = lease(&q, &["d.A"]).unwrap();
         q.done(&l);
-        assert!(lease(&q, &["A"]).is_none());
+        assert!(lease(&q, &["d.A"]).is_none());
     }
 }

@@ -205,7 +205,7 @@ async fn events_of_other_types_do_not_hold_back_a_filtered_listener() {
     let placed_only = Opts {
         key: key(6),
         signer: key(6),
-        types: vec!["OrderPlaced".into()],
+        types: vec!["orders.OrderPlaced".into()],
         ..opts(0)
     };
     let mut listener = listen(&env, "placed", placed_only).await.unwrap();
@@ -256,7 +256,7 @@ async fn invalid_listeners_are_refused() {
     let too_much = Opts {
         key: key(6),
         signer: key(6),
-        types: vec!["ItemAdded".into()],
+        types: vec!["orders.ItemAdded".into()],
         ..opts(0)
     };
     assert_eq!(

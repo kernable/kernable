@@ -9,7 +9,7 @@ const [url = "unix:/tmp/kernable.sock", key = "app.key"] = process.argv.slice(2)
 
 const confirmations = new Kernable({ url, key })
   .reactor("order-confirmations")
-  .on<{ customerId: string }>("OrderPlaced", (e) => {
+  .on<{ customerId: string }>("orders.OrderPlaced", (e) => {
     console.log(`sending order confirmation for ${e.aggregateId} to customer ${e.data.customerId}`);
   });
 process.on("SIGINT", () => confirmations.stop());

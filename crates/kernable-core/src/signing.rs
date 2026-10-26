@@ -91,6 +91,7 @@ pub fn command_message(cmd: &Command) -> Vec<u8> {
     Msg::new("kernable.v1.command")
         .str(&cmd.command_id)
         .str(&cmd.tenant_id)
+        .str(&cmd.domain)
         .str(&cmd.aggregate_type)
         .str(&cmd.aggregate_id)
         .str(&cmd.command_type)
@@ -104,6 +105,7 @@ pub fn result_message(cmd: &Command, expected_version: u64, events: &[NewEvent])
     let mut m = Msg::new("kernable.v1.result")
         .str(&cmd.command_id)
         .str(&cmd.tenant_id)
+        .str(&cmd.domain)
         .str(&cmd.aggregate_type)
         .str(&cmd.aggregate_id)
         .u64(expected_version)
@@ -114,10 +116,12 @@ pub fn result_message(cmd: &Command, expected_version: u64, events: &[NewEvent])
     m.0
 }
 
-/// What a worker signs for a snapshot of `stream`'s aggregate (the stream fields of a command).
+/// What a worker signs for a snapshot of `stream`'s aggregate (the stream fields of a command:
+/// tenant, domain, aggregate type and ID).
 pub fn snapshot_message(stream: &Command, version: u64, schema: &str, state: &[u8]) -> Vec<u8> {
     Msg::new("kernable.v1.snapshot")
         .str(&stream.tenant_id)
+        .str(&stream.domain)
         .str(&stream.aggregate_type)
         .str(&stream.aggregate_id)
         .u64(version)
@@ -168,6 +172,7 @@ pub fn event_hash(prev: &[u8], event: &Event) -> [u8; 32] {
         .bytes(prev)
         .u64(event.global_position)
         .str(&event.tenant_id)
+        .str(&event.domain)
         .str(&event.aggregate_type)
         .str(&event.aggregate_id)
         .u64(event.version)

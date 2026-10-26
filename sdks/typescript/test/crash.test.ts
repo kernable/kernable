@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { Kernable, aggregate } from "../src/index.ts";
+import { Kernable, domain } from "../src/index.ts";
 import { TestKernel } from "./kernel.ts";
 
 test("kernel crash mid-command: worker reconnects, command commits exactly once", async () => {
@@ -14,7 +14,7 @@ test("kernel crash mid-command: worker reconnects, command commits exactly once"
   const gate = new Promise<void>((r) => (open = r));
   let first = true;
 
-  const counter = aggregate("Counter", 0)
+  const counter = domain("counters").aggregate("Counter", 0)
     .apply("Incremented", (n) => n + 1)
     .command("Increment", async () => {
       if (first) {
@@ -25,12 +25,12 @@ test("kernel crash mid-command: worker reconnects, command commits exactly once"
       return [{ type: "Incremented" }];
     });
 
-  const kernel = new TestKernel(["Increment"], "lease_ttl_ms = 500");
+  const kernel = new TestKernel(["counters.*"], "lease_ttl_ms = 500");
   await kernel.start();
   const kernable = new Kernable({ url: kernel.url, key: kernel.appKey, tenant: "t1" });
   const worker = kernable.worker(counter);
   const running = worker.run({ reconnectMs: 100 });
-  const increment = (id: string) => kernable.submit({ aggregateType: "Counter", aggregateId: "c1", type: "Increment", id });
+  const increment = (id: string) => kernable.submit({ domain: "counters", aggregateType: "Counter", aggregateId: "c1", type: "Increment", id });
 
   try {
     await worker.ready;

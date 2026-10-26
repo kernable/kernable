@@ -4,31 +4,31 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { Kernable, aggregate, type RequestContext, type StoredEvent } from "../src/index.ts";
+import { Kernable, domain, type RequestContext, type StoredEvent } from "../src/index.ts";
 import { TestKernel } from "./kernel.ts";
 
 test("request context reaches handlers, events and follow-up commands", async () => {
-  const kernel = new TestKernel(["Open", "Note"]);
+  const kernel = new TestKernel(["support.*"]);
   await kernel.start();
   const service: RequestContext = { senderIdentity: "svc-1", attributes: { channel: "api" } };
   const kernable = new Kernable({ url: kernel.url, key: kernel.appKey, context: service });
 
   const seenByHandler: RequestContext[] = [];
-  const ticket = aggregate("Ticket", { open: false })
+  const ticket = domain("support").aggregate("Ticket", { open: false })
     .apply("Opened", () => ({ open: true }))
     .command("Open", (_s, _d, ctx) => (seenByHandler.push(ctx.request), [{ type: "Opened" }]))
     .command("Note", (_s, _d, ctx) => (seenByHandler.push(ctx.request), [{ type: "Noted" }]));
 
   const replayed: boolean[] = [];
-  const notes = kernable.reactor("notes").on("Opened", async (e, ctx) => {
+  const notes = kernable.reactor("notes").on("support.Opened", async (e, ctx) => {
     replayed.push(ctx.replaying);
-    await kernable.submit({ aggregateType: "Ticket", aggregateId: e.aggregateId, type: "Note", id: `note-${e.aggregateId}`, context: ctx.follow(), wait: "committed" });
+    await kernable.submit({ domain: "support", aggregateType: "Ticket", aggregateId: e.aggregateId, type: "Note", id: `note-${e.aggregateId}`, context: ctx.follow(), wait: "committed" });
   });
   const worker = kernable.worker(ticket);
   const running = [worker.run({ reconnectMs: 100 }), notes.run()];
   try {
     await Promise.all([worker.ready, notes.ready]);
-    const opened = await kernable.submit({ aggregateType: "Ticket", aggregateId: "t1", type: "Open", id: "open-t1", context: { senderSession: "s-9", traceId: "tr-1" } });
+    const opened = await kernable.submit({ domain: "support", aggregateType: "Ticket", aggregateId: "t1", type: "Open", id: "open-t1", context: { senderSession: "s-9", traceId: "tr-1" } });
     assert.ok(opened.committed);
 
     const request = { ...service, senderSession: "s-9", traceId: "tr-1", correlationId: "open-t1" };
@@ -45,7 +45,7 @@ test("request context reaches handlers, events and follow-up commands", async ()
     assert.deepEqual(events.map((e) => e.request), [request, followUp]);
 
     // An expected version that no longer matches rejects the command.
-    const stale = await kernable.submit({ aggregateType: "Ticket", aggregateId: "t1", type: "Note", context: { expectedVersion: 1 } });
+    const stale = await kernable.submit({ domain: "support", aggregateType: "Ticket", aggregateId: "t1", type: "Note", context: { expectedVersion: 1 } });
     assert.deepEqual(stale.committed ? "committed" : stale.code, "version_mismatch");
     assert.match(kernel.verify(), /\nOK/);
   } finally {

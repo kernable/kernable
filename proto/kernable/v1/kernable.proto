@@ -11,9 +11,14 @@ message Signature {
   bytes sig = 2; // Ed25519
 }
 
+// Names: a domain is a lowercase identifier (`orders`). Command, event, query and aggregate types
+// are unique within their domain; `domain.Type` (`orders.PlaceOrder`) is the qualified name used
+// in registrations, subscriptions and allowlists, where `orders.*` stands for a whole domain.
+
 message Command {
   string command_id = 1;
   string tenant_id = 2;
+  string domain = 9;
   string aggregate_type = 3;
   string aggregate_id = 4;
   string command_type = 5;
@@ -51,6 +56,7 @@ message Attribute {
 message Event {
   uint64 global_position = 1;
   string tenant_id = 2;
+  string domain = 13; // always the domain of the command that caused it
   string aggregate_type = 3;
   string aggregate_id = 4;
   uint64 version = 5;
@@ -128,7 +134,7 @@ service EventService {
 // then live. Signed by a key in the kernel's `subscribers` allowlist.
 message SubscribeRequest {
   uint64 after_position = 1;
-  repeated string event_types = 2; // empty = all types the key may read
+  repeated string event_types = 2; // qualified (`orders.OrderPlaced`, `orders.*`); empty = all the key may read
   int64 issued_at = 3;             // ms since epoch; must be within 60 s of the kernel's clock
   Signature client_sig = 4;
 }
@@ -163,7 +169,7 @@ message Hello {
   string name = 1;
   string key_id = 2;
   int32 order = 3;
-  repeated string event_types = 4; // empty = all types the key may read
+  repeated string event_types = 4; // qualified (`orders.OrderPlaced`, `orders.*`); empty = all the key may read
   // Start after this position instead of the stored one, e.g. 0 to rebuild an in-memory read model.
   optional uint64 from_position = 5;
 }
@@ -208,7 +214,7 @@ message KernelMessage {
 message Register {
   string worker_id = 1;
   string key_id = 2;
-  repeated string command_types = 3;
+  repeated string command_types = 3; // qualified: `orders.PlaceOrder`
   uint32 max_concurrency = 4;
 }
 

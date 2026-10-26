@@ -14,7 +14,7 @@ mod metrics;
 mod queue;
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     os::unix::fs::FileTypeExt,
     sync::{Arc, Mutex, MutexGuard, PoisonError, atomic::Ordering::Relaxed},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -244,10 +244,15 @@ impl CommandService for Api {
             .ok_or_else(|| Status::unauthenticated("command is not signed"))?;
         signing::verify(sig, &signing::command_message(&cmd))
             .map_err(|_| Status::unauthenticated("invalid command signature"))?;
-        if !config::allowed(&kernel.config.clients, &sig.key_id, &cmd.command_type) {
+        if !config::valid_domain(&cmd.domain) || !config::valid_type(&cmd.command_type) {
+            return Err(Status::invalid_argument(
+                "a command needs a lowercase domain and a command type without dots",
+            ));
+        }
+        let name = config::qualified(&cmd.domain, &cmd.command_type);
+        if !config::allowed(&kernel.config.clients, &sig.key_id, &name) {
             return Err(Status::permission_denied(format!(
-                "key may not submit {}",
-                cmd.command_type
+                "key may not submit {name}"
             )));
         }
         let bypass = cmd.context.as_ref().is_some_and(|c| c.bypass_authorization);
@@ -339,24 +344,8 @@ impl EventService for Api {
             return Err(Status::unauthenticated("request expired; check the clock"));
         }
 
-        let readable = kernel
-            .config
-            .subscribers
-            .get(&sig.key_id)
-            .ok_or_else(|| Status::permission_denied("key may not subscribe"))?;
-        let types: Option<HashSet<String>> = if req.event_types.is_empty() {
-            (!readable.iter().any(|t| t == "*")).then(|| readable.iter().cloned().collect())
-        } else if req
-            .event_types
-            .iter()
-            .all(|t| config::allowed(&kernel.config.subscribers, &sig.key_id, t))
-        {
-            Some(req.event_types.into_iter().collect())
-        } else {
-            return Err(Status::permission_denied(
-                "key may not read these event types",
-            ));
-        };
+        let types = config::readable(&kernel.config.subscribers, &sig.key_id, &req.event_types)
+            .map_err(Status::permission_denied)?;
 
         let (tx, rx) = mpsc::channel(SUBSCRIBE_BATCH as usize);
         tokio::spawn(stream_events(kernel, req.after_position, types, tx));
@@ -369,7 +358,7 @@ impl EventService for Api {
 async fn stream_events(
     kernel: Arc<Kernel>,
     mut after: u64,
-    types: Option<HashSet<String>>,
+    types: Option<Vec<String>>,
     tx: mpsc::Sender<Result<Event, Status>>,
 ) {
     loop {
@@ -390,7 +379,7 @@ async fn stream_events(
         }
         for event in batch {
             after = event.global_position;
-            let wanted = types.as_ref().is_none_or(|t| t.contains(&event.event_type));
+            let wanted = wanted(types.as_deref(), &event);
             if wanted && tx.send(Ok(event)).await.is_err() {
                 return;
             }
@@ -523,6 +512,11 @@ async fn run_session(
     let Some(In::Register(reg)) = next(inbound).await? else {
         return Err(Status::invalid_argument("expected Register"));
     };
+    if !reg.command_types.iter().all(|t| config::valid_qualified(t)) {
+        return Err(Status::invalid_argument(
+            "register qualified command types: domain.CommandType",
+        ));
+    }
     let authorized = !reg.command_types.is_empty()
         && reg
             .command_types
@@ -626,18 +620,19 @@ impl Session {
         attempts: u32,
         permit: OwnedSemaphorePermit,
     ) -> bool {
-        let (tenant, aggregate_type, id) = (
+        let (tenant, domain, aggregate_type, id) = (
             &command.tenant_id,
+            &command.domain,
             &command.aggregate_type,
             &command.aggregate_id,
         );
         let store = &self.kernel.store;
         let loaded = store
-            .snapshot(tenant, aggregate_type, id)
+            .snapshot(tenant, domain, aggregate_type, id)
             .and_then(|record| {
                 let snapshot = record.and_then(|r| r.snapshot);
                 let after = snapshot.as_ref().map_or(0, |s| s.version);
-                let history = store.read_stream_after(tenant, aggregate_type, id, after)?;
+                let history = store.read_stream_after(tenant, domain, aggregate_type, id, after)?;
                 Ok((snapshot, history))
             });
         let (snapshot, history) = match loaded {
@@ -708,6 +703,15 @@ impl Session {
         if !self.kernel.queue.holds(&r.lease_id) {
             return Ok(()); // the lease expired; the command was handed to another worker
         }
+        if !r.events.iter().all(|e| config::valid_type(&e.event_type)) {
+            // Events always belong to the command's domain: a qualified or empty type is a bug.
+            let reason = Rejected {
+                code: "invalid_event_type".into(),
+                message: "event types must be non-empty and without dots".into(),
+            };
+            self.reject(&r.lease_id, f.command.command_id, reason);
+            return Ok(());
+        }
 
         let command_id = &f.command.command_id;
         match self
@@ -719,6 +723,7 @@ impl Session {
                 if let (Some(snapshot), Some(last)) = (r.snapshot, events.last()) {
                     let record = SnapshotRecord {
                         tenant_id: last.tenant_id.clone(),
+                        domain: last.domain.clone(),
                         aggregate_type: last.aggregate_type.clone(),
                         aggregate_id: last.aggregate_id.clone(),
                         snapshot: Some(snapshot),
@@ -778,6 +783,7 @@ impl Session {
             let c = &f.command;
             let removed = SnapshotRecord {
                 tenant_id: c.tenant_id.clone(),
+                domain: c.domain.clone(),
                 aggregate_type: c.aggregate_type.clone(),
                 aggregate_id: c.aggregate_id.clone(),
                 removed: true,
@@ -839,6 +845,14 @@ impl Session {
         self.kernel.queue.release(lease_id);
         self.kernel.work.notify_waiters();
     }
+}
+
+/// Whether `event` matches the type patterns of a subscription (`None`: all events).
+fn wanted(types: Option<&[String]>, event: &Event) -> bool {
+    types.is_none_or(|patterns| {
+        let name = config::qualified(&event.domain, &event.event_type);
+        patterns.iter().any(|p| config::covers(p, &name))
+    })
 }
 
 fn internal(e: StoreError) -> Status {

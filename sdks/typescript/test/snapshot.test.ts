@@ -4,30 +4,30 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { Kernable, Rejected, aggregate } from "../src/index.ts";
+import { Kernable, Rejected, domain } from "../src/index.ts";
 import { TestKernel } from "./kernel.ts";
 
 test("snapshots shorten replays and a new schema rebuilds from the events", async () => {
-  const kernel = new TestKernel(["Increment"]);
+  const kernel = new TestKernel(["counters.*"]);
   await kernel.start();
   const kernable = new Kernable({ url: kernel.url, key: kernel.appKey });
   let applied = 0;
 
   // v1 keeps the state as an object.
-  const v1 = aggregate("Counter", { n: 0 }, { snapshotEvery: 3 })
+  const v1 = domain("counters").aggregate("Counter", { n: 0 }, { snapshotEvery: 3 })
     .apply("Incremented", (s, e: { by: number }) => (applied++, { n: s.n + e.by }))
     .command("Increment", (s, cmd: { by: number }) => {
       if (s.n + cmd.by > 20) throw new Rejected("limit");
       return [{ type: "Incremented", data: { by: cmd.by } }];
     });
   // v2 keeps it as a number: old snapshots do not fit.
-  const v2 = aggregate("Counter", 0, { snapshotEvery: 3, schema: "2" })
+  const v2 = domain("counters").aggregate("Counter", 0, { snapshotEvery: 3, schema: "2" })
     .apply("Incremented", (n, e: { by: number }) => n + e.by)
     .command("Increment", (n, cmd: { by: number }) => {
       if (n + cmd.by > 20) throw new Rejected("limit");
       return [{ type: "Incremented", data: { by: cmd.by } }];
     });
-  const increment = (by: number) => kernable.submit({ aggregateType: "Counter", aggregateId: "c1", type: "Increment", data: { by } });
+  const increment = (by: number) => kernable.submit({ domain: "counters", aggregateType: "Counter", aggregateId: "c1", type: "Increment", data: { by } });
 
   let worker = kernable.worker(v1);
   let running = worker.run({ reconnectMs: 100 });

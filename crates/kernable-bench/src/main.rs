@@ -154,7 +154,12 @@ fn store(url: &str, count: usize) -> Result<(), BoxError> {
             &signing::command_message(&cmd),
         )?;
         store.enqueue(&cmd, 0)?;
-        let history = store.read_stream(&cmd.tenant_id, &cmd.aggregate_type, &cmd.aggregate_id)?;
+        let history = store.read_stream(
+            &cmd.tenant_id,
+            &cmd.domain,
+            &cmd.aggregate_type,
+            &cmd.aggregate_id,
+        )?;
         let version = history.last().map_or(0, |e| e.version);
         let events = [NewEvent {
             event_type: "Written".into(),
@@ -187,7 +192,7 @@ async fn worker(addr: &str, key: &str, concurrency: u32) -> Result<(), BoxError>
     tx.send(msg(In::Register(Register {
         worker_id: format!("rust-bench-{}", std::process::id()),
         key_id: signing::key_id(&key.verifying_key()),
-        command_types: vec!["Write".into()],
+        command_types: vec!["bench.Write".into()],
         max_concurrency: concurrency,
     })))
     .await?;
@@ -371,6 +376,7 @@ fn command(run: &str, i: usize, aggregates: usize, payload: &[u8]) -> Command {
     Command {
         command_id: format!("{run}-{i}"),
         tenant_id: "bench".into(),
+        domain: "bench".into(),
         aggregate_type: "Bench".into(),
         aggregate_id: format!("a{}", i % aggregates.max(1)),
         command_type: "Write".into(),

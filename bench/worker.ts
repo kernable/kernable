@@ -1,11 +1,11 @@
 // TypeScript worker for the benchmark: the `Bench` aggregate echoes each command as one event.
 // Usage: [WORK_MS=1] node worker.ts <kernel-url> <worker.key>
-import { Kernable, aggregate } from "../sdks/typescript/src/index.ts";
+import { Kernable, domain } from "../sdks/typescript/src/index.ts";
 
 // WORK_MS simulates business logic that costs CPU time per command.
 const workMs = Number(process.env.WORK_MS ?? 0);
 
-const bench = aggregate("Bench", 0)
+const bench = domain("bench").aggregate("Bench", 0)
   .apply("Written", (n) => n + 1)
   .command("Write", (_n, data) => {
     for (const end = performance.now() + workMs; performance.now() < end; );

@@ -48,9 +48,9 @@ pub async fn start(name: &str) -> Env {
     start_with(name, 2_000).await
 }
 
-/// Starts a kernel that trusts client key 1 for everything, worker key 2 for Order commands,
-/// subscriber key 4 for `OrderPlaced` events only, listener key 5 for all events and
-/// listener key 6 for `OrderPlaced` only.
+/// Starts a kernel that trusts client key 1 for everything, worker key 2 for the `orders`
+/// domain, subscriber key 4 for `orders.OrderPlaced` only, listener key 5 for all events and
+/// listener key 6 for `orders.OrderPlaced` only.
 pub async fn start_with(name: &str, lease_ttl_ms: i64) -> Env {
     start_custom(name, |config, _| config.lease_ttl_ms = lease_ttl_ms).await
 }
@@ -71,14 +71,14 @@ pub async fn start_custom(name: &str, customize: impl FnOnce(&mut Config, &Path)
         submit_timeout_ms: 5_000,
         settle_timeout_ms: 1_000,
         clients: HashMap::from([(id(&key(1)), vec!["*".into()])]),
-        workers: HashMap::from([(id(&key(2)), vec!["PlaceOrder".into(), "AddItem".into()])]),
+        workers: HashMap::from([(id(&key(2)), vec!["orders.*".into()])]),
         subscribers: HashMap::from([
             (id(&key(1)), vec!["*".into()]),
-            (id(&key(4)), vec!["OrderPlaced".into()]),
+            (id(&key(4)), vec!["orders.OrderPlaced".into()]),
         ]),
         listeners: HashMap::from([
             (id(&key(5)), vec!["*".into()]),
-            (id(&key(6)), vec!["OrderPlaced".into()]),
+            (id(&key(6)), vec!["orders.OrderPlaced".into()]),
         ]),
         privileged: HashMap::from([(id(&key(1)), vec!["bypass_authorization".into()])]),
         tls: None,
@@ -180,7 +180,7 @@ impl TestWorker {
         TestWorker {
             claimed: key(2),
             signer: key(2),
-            command_types: vec!["PlaceOrder".into(), "AddItem".into()],
+            command_types: vec!["orders.PlaceOrder".into(), "orders.AddItem".into()],
             behavior: Behavior::Honest,
             seen: None,
             executions: None,
@@ -306,6 +306,7 @@ pub fn command(id: &str, command_type: &str, aggregate_id: &str) -> Command {
     Command {
         command_id: id.into(),
         tenant_id: "t1".into(),
+        domain: "orders".into(),
         aggregate_type: "Order".into(),
         aggregate_id: aggregate_id.into(),
         command_type: command_type.into(),

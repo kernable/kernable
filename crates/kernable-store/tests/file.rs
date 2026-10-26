@@ -58,6 +58,7 @@ fn run(store: &dyn Store, id: &str, agg: &str) {
     let mut cmd = Command {
         command_id: id.into(),
         tenant_id: "t1".into(),
+        domain: "orders".into(),
         aggregate_type: "Order".into(),
         aggregate_id: agg.into(),
         command_type: "Do".into(),
@@ -67,7 +68,10 @@ fn run(store: &dyn Store, id: &str, agg: &str) {
     };
     cmd.client_sig = Some(signing::sign(&client, &signing::command_message(&cmd)));
     store.enqueue(&cmd, 0).unwrap();
-    let version = store.read_stream("t1", "Order", agg).unwrap().len() as u64;
+    let version = store
+        .read_stream("t1", "orders", "Order", agg)
+        .unwrap()
+        .len() as u64;
     let events = [NewEvent {
         event_type: "Done".into(),
         payload: cmd.payload.clone(),
@@ -110,7 +114,7 @@ fn reopening_replays_events_results_queue_checkpoints_and_listeners() {
 
     let store = FileStore::open(&log.0).unwrap();
     let versions: Vec<u64> = store
-        .read_stream("t1", "Order", "o1")
+        .read_stream("t1", "orders", "Order", "o1")
         .unwrap()
         .iter()
         .map(|e| e.version)
@@ -175,7 +179,13 @@ fn torn_last_record_is_cut_off_and_kept_aside() {
     run(&store, "c2", "o1");
     drop(store);
     let reopened = FileStore::open(&log.0).unwrap();
-    assert_eq!(reopened.read_stream("t1", "Order", "o1").unwrap().len(), 2);
+    assert_eq!(
+        reopened
+            .read_stream("t1", "orders", "Order", "o1")
+            .unwrap()
+            .len(),
+        2
+    );
 }
 
 #[test]
@@ -250,7 +260,13 @@ fn one_writer_but_readers_may_open_concurrently() {
     assert!(matches!(FileStore::open(&log.0), Err(Error::Io(_))));
 
     let reader = FileStore::open_read_only(&log.0).unwrap();
-    assert_eq!(reader.read_stream("t1", "Order", "o1").unwrap().len(), 1);
+    assert_eq!(
+        reader
+            .read_stream("t1", "orders", "Order", "o1")
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(matches!(
         reader.enqueue(&Command::default(), 0),
         Err(Error::ReadOnly)

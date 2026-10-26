@@ -29,6 +29,7 @@ export interface WireRequestContext {
 export interface WireCommand {
   command_id: string;
   tenant_id: string;
+  domain: string;
   aggregate_type: string;
   aggregate_id: string;
   command_type: string;
@@ -40,6 +41,7 @@ export interface WireCommand {
 export interface WireEvent {
   global_position: number;
   tenant_id: string;
+  domain: string;
   aggregate_type: string;
   aggregate_id: string;
   version: number;

@@ -1,4 +1,4 @@
-import { Rejected, aggregate } from "../../sdks/typescript/src/index.ts";
+import { Rejected, domain } from "../../sdks/typescript/src/index.ts";
 
 type Status = "none" | "placed" | "shipped" | "cancelled";
 
@@ -8,7 +8,7 @@ interface Order {
   items: Record<string, number>;
 }
 
-export const order = aggregate<Order>("Order", { status: "none", items: {} })
+export const order = domain("orders").aggregate<Order>("Order", { status: "none", items: {} })
   .apply("OrderPlaced", (s, e: { customerId: string }) => ({ ...s, status: "placed", customerId: e.customerId }))
   .apply("ItemAdded", (s, e: { sku: string; qty: number }) => ({
     ...s,

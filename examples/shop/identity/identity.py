@@ -12,13 +12,13 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from kernable import Kernable, Rejected, Tls, aggregate
+from kernable import Kernable, Rejected, Tls, domain
 
 EMAIL = re.compile(r"^[^@\s]+@[^@\s]+$")
 
 # ---- write side ----
 
-account = aggregate("Account", {"status": "none"})
+account = domain("identity").aggregate("Account", {"status": "none"})
 
 
 @account.apply("AccountRegistered")
@@ -69,15 +69,15 @@ accounts: dict[str, dict] = {}
 def accounts_model(k: Kernable):
     model = k.read_model("accounts")
 
-    @model.on("AccountRegistered")
+    @model.on("identity.AccountRegistered")
     def _(e):
         accounts[e.aggregate_id] = {"id": e.aggregate_id, "status": "active", **e.data}
 
-    @model.on("EmailChanged")
+    @model.on("identity.EmailChanged")
     def _(e):
         accounts[e.aggregate_id]["email"] = e.data["email"]
 
-    @model.on("AccountDeactivated")
+    @model.on("identity.AccountDeactivated")
     def _(e):
         accounts[e.aggregate_id]["status"] = "deactivated"
 

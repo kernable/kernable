@@ -1,5 +1,5 @@
 // The Order aggregate and the `orders` read model's projection.
-import { Rejected, aggregate, type StoredEvent } from "../../../sdks/typescript/src/index.ts";
+import { Rejected, domain, type StoredEvent } from "../../../sdks/typescript/src/index.ts";
 
 type Status = "none" | "draft" | "submitted" | "confirmed" | "cancelled";
 
@@ -8,7 +8,7 @@ interface Order {
   items: number;
 }
 
-export const order = aggregate<Order>("Order", { status: "none", items: 0 })
+export const order = domain("orders").aggregate<Order>("Order", { status: "none", items: 0 })
   .apply("OrderPlaced", () => ({ status: "draft", items: 0 }))
   .apply("ItemAdded", (s, e: { qty: number }) => ({ ...s, items: s.items + e.qty }))
   .apply("OrderSubmitted", (s) => ({ ...s, status: "submitted" }))
@@ -46,7 +46,7 @@ export interface OrderRow {
   confirmedTo?: string;
 }
 
-export const ORDER_EVENTS = ["OrderPlaced", "ItemAdded", "OrderSubmitted", "ConfirmationSent", "OrderCancelled"];
+export const ORDER_EVENTS = ["orders.OrderPlaced", "orders.ItemAdded", "orders.OrderSubmitted", "orders.ConfirmationSent", "orders.OrderCancelled"];
 
 export function project(rows: Map<string, OrderRow>, e: StoredEvent): void {
   const data = e.data as any;

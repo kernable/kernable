@@ -14,7 +14,7 @@ use tonic::Code;
 
 fn stream_versions(env: &Env) -> Vec<u64> {
     let store = kernable_store::open_read_only(&env.store).unwrap();
-    let events = store.read_stream("t1", "Order", "o1").unwrap();
+    let events = store.read_stream("t1", "orders", "Order", "o1").unwrap();
     events.iter().map(|e| e.version).collect()
 }
 
@@ -111,7 +111,7 @@ async fn sigterm_checkpoints_and_in_flight_commands_run_right_after_a_restart() 
     let config = format!(
         "store = \"{store}\"\nlisten = \"{addr}\"\nkernel_key = \"kernel.key\"\nlease_ttl_ms = 60000\n\
          checkpoint_interval_ms = 3600000\n[clients]\n\"{}\" = [\"*\"]\n\
-         [workers]\n\"{}\" = [\"PlaceOrder\", \"AddItem\"]\n",
+         [workers]\n\"{}\" = [\"orders.*\"]\n",
         id(&key(1)),
         id(&key(2)),
     );

@@ -2,7 +2,7 @@
 
 The API mirrors the TypeScript SDK:
 
-    account = aggregate("Account", {"status": "none"})
+    account = domain("identity").aggregate("Account", {"status": "none"})
 
     @account.apply("AccountRegistered")
     def _(state, data):
@@ -23,6 +23,7 @@ Stubs: generate them first (`make py-stubs`), see sdks/python/README.md.
 import inspect
 import json
 import queue
+import re
 import sys
 import threading
 import time
@@ -37,8 +38,8 @@ from kernable.signing import (Key, challenge_message, command_message, rejection
 from kernable.v1 import kernable_pb2 as pb
 from kernable.v1 import kernable_pb2_grpc as rpc
 
-__all__ = ["Aggregate", "CommandContext", "Event", "Kernable", "Key", "Listener", "ListenerContext", "NotSettled",
-           "Outcome", "Rejected", "RequestContext", "Tls", "Worker", "aggregate"]
+__all__ = ["Aggregate", "CommandContext", "Domain", "Event", "Kernable", "Key", "Listener", "ListenerContext",
+           "NotSettled", "Outcome", "Rejected", "RequestContext", "Tls", "Worker", "domain"]
 
 
 class Rejected(Exception):
@@ -87,6 +88,8 @@ class Event:
 
     position: int
     tenant: str
+    #: Always the domain of the command that caused the event.
+    domain: str
     aggregate_type: str
     aggregate_id: str
     version: int
@@ -142,6 +145,25 @@ class NotSettled(Exception):
 
 
 _INITIAL = object()
+_DOMAIN = re.compile(r"^[a-z][a-z0-9_-]*$")
+_LISTENED = re.compile(r"^[a-z][a-z0-9_-]*\.([^.]+|\*)$")
+
+
+class Domain:
+    """A domain: a lowercase name (`orders`) that scopes its aggregates, commands and events.
+    Types are unique within a domain; elsewhere they are named `domain.Type`."""
+
+    def __init__(self, name: str):
+        if not _DOMAIN.match(name):
+            raise ValueError(f"invalid domain name {name!r}")
+        self.name = name
+
+    def aggregate(self, name: str, initial: Any, snapshot_every: int = 100, schema: str = "1") -> "Aggregate":
+        return Aggregate(self.name, name, initial, snapshot_every, schema)
+
+
+def domain(name: str) -> Domain:
+    return Domain(name)
 
 
 class Aggregate:
@@ -157,7 +179,8 @@ class Aggregate:
     ignored and the state is rebuilt from the events.
     """
 
-    def __init__(self, name: str, initial: Any, snapshot_every: int = 100, schema: str = "1"):
+    def __init__(self, domain: str, name: str, initial: Any, snapshot_every: int = 100, schema: str = "1"):
+        self.domain = domain
         self.name = name
         self.initial = initial
         self.snapshot_every = snapshot_every
@@ -195,10 +218,6 @@ def _register(owner, table: dict, name: str, fn: Callable | None):
     return decorator
 
 
-def aggregate(name: str, initial: Any, snapshot_every: int = 100, schema: str = "1") -> Aggregate:
-    return Aggregate(name, initial, snapshot_every, schema)
-
-
 class Kernable:
     def __init__(self, url: str, key: str, tenant: str = "default", tls: Tls | None = None,
                  context: RequestContext | None = None):
@@ -223,7 +242,7 @@ class Kernable:
     def worker(self, *aggregates: Aggregate) -> "Worker":
         return Worker(self._channel, self._key, aggregates)
 
-    def submit(self, aggregate_type: str, aggregate_id: str, type: str, data: Any = None, *,
+    def submit(self, domain: str, aggregate_type: str, aggregate_id: str, type: str, data: Any = None, *,
                tenant: str | None = None, id: str | None = None, wait: str = "settled",
                context: RequestContext | None = None) -> Outcome:
         """Runs a command and returns its outcome.
@@ -235,7 +254,7 @@ class Kernable:
         context; inside a listener, pass `ctx.follow()`.
         """
         mode = pb.WAIT_COMMITTED if wait == "committed" else pb.WAIT_SETTLED
-        res = self._send(aggregate_type, aggregate_id, type, data, tenant, id, mode, context)
+        res = self._send(domain, aggregate_type, aggregate_id, type, data, tenant, id, mode, context)
         if res.WhichOneof("outcome") == "rejected":
             return Outcome(committed=False, code=res.rejected.code, message=res.rejected.message)
         outcome = Outcome(committed=True, events=[_to_event(e) for e in res.committed.events])
@@ -243,11 +262,12 @@ class Kernable:
             raise NotSettled(outcome)
         return outcome
 
-    def enqueue(self, aggregate_type: str, aggregate_id: str, type: str, data: Any = None, *,
+    def enqueue(self, domain: str, aggregate_type: str, aggregate_id: str, type: str, data: Any = None, *,
                 tenant: str | None = None, id: str | None = None, context: RequestContext | None = None) -> str:
         """Stores the command in the kernel's queue and returns its ID without waiting.
         Submit it again with the same `id` to get the outcome."""
-        return self._send(aggregate_type, aggregate_id, type, data, tenant, id, pb.WAIT_ACCEPTED, context).command_id
+        return self._send(domain, aggregate_type, aggregate_id, type, data, tenant, id, pb.WAIT_ACCEPTED,
+                          context).command_id
 
     def read_model(self, name: str, *, order: int = 0, start: int | None = 0, reconnect_s: float = 1.0) -> "Listener":
         """A read model: kept in memory and rebuilt from the first event on every start (default)."""
@@ -263,10 +283,10 @@ class Kernable:
     def close(self) -> None:
         self._channel.close()
 
-    def _send(self, aggregate_type, aggregate_id, command_type, data, tenant, id, wait, context):
+    def _send(self, domain, aggregate_type, aggregate_id, command_type, data, tenant, id, wait, context):
         command_id = id or str(uuid.uuid4())
         context = context or self._context
-        cmd = pb.Command(command_id=command_id, tenant_id=tenant or self._tenant,
+        cmd = pb.Command(command_id=command_id, tenant_id=tenant or self._tenant, domain=domain,
                          aggregate_type=aggregate_type, aggregate_id=aggregate_id,
                          command_type=command_type, payload=_encode(data),
                          context=_to_wire_context(context, command_id))
@@ -331,7 +351,7 @@ class Worker(_Stream):
         super().__init__("worker", 1.0)
         self._stub = rpc.WorkerGatewayStub(channel)
         self._key = key
-        self._by_command = {t: a for a in aggregates for t in a.handlers}
+        self._by_command = {f"{a.domain}.{t}": a for a in aggregates for t in a.handlers}
 
     def _open(self, requests):
         return self._stub.Session(requests)
@@ -355,9 +375,10 @@ class Worker(_Stream):
     def _execute(self, x):
         cmd = x.command
         try:
-            agg = self._by_command.get(cmd.command_type)
+            agg = self._by_command.get(f"{cmd.domain}.{cmd.command_type}")
             if agg is None or agg.name != cmd.aggregate_type:
-                raise Rejected(f"no handler for {cmd.aggregate_type}.{cmd.command_type}", "unknown_command")
+                raise Rejected(f"no handler for {cmd.command_type} on {cmd.domain}.{cmd.aggregate_type}",
+                               "unknown_command")
             if x.HasField("snapshot") and x.snapshot.schema != agg.schema:
                 raise Rejected(f"snapshot schema {x.snapshot.schema} is not {agg.schema}", "snapshot_stale")
             history = [(e.event_type, _decode(e.payload)) for e in x.history]
@@ -405,8 +426,11 @@ class Listener(_Stream):
         # Newest event when the kernel accepted the listener; events up to it are replayed.
         self._replay_up_to = 0
 
-    def on(self, event_type: str, fn: Callable[[Event], None] | None = None):
-        """Registers a handler; works as a decorator too."""
+    def on(self, event_type: str, fn: Callable | None = None):
+        """Registers a handler for a qualified type (`orders.OrderPlaced`) or a whole domain
+        (`orders.*`); works as a decorator too."""
+        if not _LISTENED.match(event_type):
+            raise ValueError(f"listen to a qualified type (domain.Type) or a domain (domain.*), not {event_type!r}")
         return _register(self, self._handlers, event_type, fn)
 
     def _open(self, requests):
@@ -431,7 +455,7 @@ class Listener(_Stream):
             self.ready.set()
         elif kind == "batch":
             for e in msg.batch.events:
-                handler = self._handlers.get(e.event_type)
+                handler = self._handlers.get(f"{e.domain}.{e.event_type}") or self._handlers.get(f"{e.domain}.*")
                 if handler:
                     event = _to_event(e)
                     _call(handler, event, ListenerContext(e.global_position <= self._replay_up_to, event))
@@ -478,6 +502,6 @@ def _from_wire_context(c) -> RequestContext:
 
 
 def _to_event(e) -> Event:
-    return Event(position=e.global_position, tenant=e.tenant_id, aggregate_type=e.aggregate_type,
+    return Event(position=e.global_position, tenant=e.tenant_id, domain=e.domain, aggregate_type=e.aggregate_type,
                  aggregate_id=e.aggregate_id, version=e.version, type=e.event_type,
                  data=_decode(e.payload), command_id=e.command_id, request=_from_wire_context(e.context))

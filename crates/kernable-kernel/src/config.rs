@@ -13,17 +13,18 @@ use serde::Deserialize;
 /// listen = "unix:/tmp/kernable.sock"   # or "127.0.0.1:7233"
 /// kernel_key = "kernel.key"
 ///
-/// [clients]                            # client key ID -> command types it may submit
+/// # Allowlists name qualified types (`orders.PlaceOrder`), whole domains (`orders.*`) or `*`.
+/// [clients]                            # client key ID -> commands it may submit
 /// "8b84…" = ["*"]
 ///
-/// [workers]                            # worker key ID -> command types it may handle
-/// "1f0a…" = ["PlaceOrder", "AddItem"]
+/// [workers]                            # worker key ID -> commands it may handle; a worker
+/// "1f0a…" = ["orders.*"]               # can only write events of its commands' domain
 ///
-/// [subscribers]                        # subscriber key ID -> event types it may read
+/// [subscribers]                        # subscriber key ID -> events it may read
 /// "8b84…" = ["*"]
 ///
-/// [listeners]                          # listener key ID -> event types it may read
-/// "1f0a…" = ["OrderPlaced"]
+/// [listeners]                          # listener key ID -> events it may read
+/// "1f0a…" = ["orders.*", "identity.AccountRegistered"]
 ///
 /// [privileged]                         # client key ID -> privileged request context switches
 /// "8b84…" = ["bypass_authorization"]
@@ -109,9 +110,81 @@ impl Config {
     }
 }
 
-/// Whether `key_id` may use `type_name` according to an allowlist (`"*"` allows all).
-pub fn allowed(rules: &HashMap<String, Vec<String>>, key_id: &str, type_name: &str) -> bool {
+/// Whether `key_id` may use `name` according to an allowlist of patterns; see [`covers`].
+pub fn allowed(rules: &HashMap<String, Vec<String>>, key_id: &str, name: &str) -> bool {
     rules
         .get(key_id)
-        .is_some_and(|types| types.iter().any(|t| t == "*" || t == type_name))
+        .is_some_and(|patterns| patterns.iter().any(|p| covers(p, name)))
+}
+
+/// Whether `pattern` covers `name`. Patterns are `*` (everything), `domain.*` (one domain) or a
+/// qualified type `domain.Type`; `name` is a qualified type or a `domain.*` pattern itself.
+pub fn covers(pattern: &str, name: &str) -> bool {
+    pattern == "*"
+        || pattern == name
+        || pattern
+            .strip_suffix(".*")
+            .is_some_and(|domain| name.split_once('.').is_some_and(|(d, _)| d == domain))
+}
+
+/// The event type patterns a key may read, narrowed to `requested` (empty: all it may read).
+/// `Ok(None)` means every event; `Err` that it asked for more than it may read.
+pub fn readable(
+    rules: &HashMap<String, Vec<String>>,
+    key_id: &str,
+    requested: &[String],
+) -> Result<Option<Vec<String>>, &'static str> {
+    let own = rules.get(key_id).ok_or("key may not read events")?;
+    if requested.is_empty() {
+        return Ok((!own.iter().any(|p| p == "*")).then(|| own.clone()));
+    }
+    if requested.iter().all(|t| allowed(rules, key_id, t)) {
+        Ok(Some(requested.to_vec()))
+    } else {
+        Err("key may not read these event types")
+    }
+}
+
+/// `domain.Type`, the name used in registrations, subscriptions and allowlists.
+pub fn qualified(domain: &str, type_name: &str) -> String {
+    format!("{domain}.{type_name}")
+}
+
+/// A domain is a lowercase identifier: `orders`, `order-mgmt`, `billing_v2`.
+pub fn valid_domain(domain: &str) -> bool {
+    domain.starts_with(|c: char| c.is_ascii_lowercase())
+        && domain
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
+/// A type name within a domain: not empty and without dots.
+pub fn valid_type(type_name: &str) -> bool {
+    !type_name.is_empty() && !type_name.contains('.')
+}
+
+/// A qualified `domain.Type`.
+pub fn valid_qualified(name: &str) -> bool {
+    name.split_once('.')
+        .is_some_and(|(d, t)| valid_domain(d) && valid_type(t))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn patterns_cover_types_and_domains() {
+        assert!(covers("*", "orders.PlaceOrder"));
+        assert!(covers("orders.*", "orders.PlaceOrder"));
+        assert!(covers("orders.*", "orders.*"));
+        assert!(covers("orders.PlaceOrder", "orders.PlaceOrder"));
+        assert!(!covers("orders.*", "ordersx.PlaceOrder"));
+        assert!(!covers("orders.PlaceOrder", "orders.*"));
+        assert!(!covers("orders.PlaceOrder", "identity.PlaceOrder"));
+        assert!(valid_qualified("order-mgmt.PlaceOrder"));
+        assert!(!valid_qualified("PlaceOrder"));
+        assert!(!valid_qualified("Orders.PlaceOrder"));
+        assert!(!valid_qualified("orders.Place.Order"));
+    }
 }

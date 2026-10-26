@@ -7,7 +7,7 @@
 //! crash a listener may see a few events again (delivery is at least once).
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::{
         Arc, Mutex, MutexGuard, PoisonError,
         atomic::{AtomicU64, Ordering},
@@ -188,24 +188,8 @@ pub(crate) async fn run(
             "negative orders are reserved for kernable",
         ));
     }
-    let readable = kernel
-        .config
-        .listeners
-        .get(&hello.key_id)
-        .ok_or_else(|| Status::permission_denied("key may not listen"))?;
-    let types: Option<HashSet<String>> = if hello.event_types.is_empty() {
-        (!readable.iter().any(|t| t == "*")).then(|| readable.iter().cloned().collect())
-    } else if hello
-        .event_types
-        .iter()
-        .all(|t| config::allowed(&kernel.config.listeners, &hello.key_id, t))
-    {
-        Some(hello.event_types.iter().cloned().collect())
-    } else {
-        return Err(Status::permission_denied(
-            "key may not read these event types",
-        ));
-    };
+    let types = config::readable(&kernel.config.listeners, &hello.key_id, &hello.event_types)
+        .map_err(Status::permission_denied)?;
 
     let mut nonce = [0u8; 32];
     getrandom::fill(&mut nonce).map_err(|_| Status::internal("no randomness"))?;
@@ -305,7 +289,7 @@ async fn deliver(
     kernel: Arc<Kernel>,
     name: String,
     order: i32,
-    types: Option<HashSet<String>>,
+    types: Option<Vec<String>>,
     sent: Arc<AtomicU64>,
     out: Outbox,
 ) {
@@ -329,7 +313,7 @@ async fn deliver(
         let mut up_to = after;
         for event in batch.into_iter().take_while(|e| e.global_position <= gate) {
             up_to = event.global_position;
-            if types.as_ref().is_none_or(|t| t.contains(&event.event_type)) {
+            if crate::wanted(types.as_deref(), &event) {
                 events.push(event);
             }
         }

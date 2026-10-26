@@ -110,12 +110,13 @@ impl Verifier {
     pub fn snapshot(&mut self, record: &SnapshotRecord, event_hash: Option<&[u8]>) {
         self.report.snapshots += 1;
         let stream = format!(
-            "{}/{}/{}",
-            record.tenant_id, record.aggregate_type, record.aggregate_id
+            "{}/{}.{}/{}",
+            record.tenant_id, record.domain, record.aggregate_type, record.aggregate_id
         );
         let s = record.snapshot.clone().unwrap_or_default();
         let cmd = Command {
             tenant_id: record.tenant_id.clone(),
+            domain: record.domain.clone(),
             aggregate_type: record.aggregate_type.clone(),
             aggregate_id: record.aggregate_id.clone(),
             ..Default::default()
@@ -171,6 +172,7 @@ impl Verifier {
         let cmd = Command {
             command_id: first.command_id.clone(),
             tenant_id: first.tenant_id.clone(),
+            domain: first.domain.clone(),
             aggregate_type: first.aggregate_type.clone(),
             aggregate_id: first.aggregate_id.clone(),
             ..Default::default()

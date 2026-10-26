@@ -42,7 +42,7 @@ class Msg:
 
 
 def _stream(m: Msg, c) -> Msg:
-    return m.str(c.command_id).str(c.tenant_id).str(c.aggregate_type).str(c.aggregate_id)
+    return m.str(c.command_id).str(c.tenant_id).str(c.domain).str(c.aggregate_type).str(c.aggregate_id)
 
 
 def command_message(c) -> bytes:
@@ -57,7 +57,7 @@ def result_message(c, expected_version: int, events) -> bytes:
 
 
 def snapshot_message(c, version: int, schema: str, state: bytes) -> bytes:
-    return bytes(Msg("kernable.v1.snapshot").str(c.tenant_id).str(c.aggregate_type).str(c.aggregate_id)
+    return bytes(Msg("kernable.v1.snapshot").str(c.tenant_id).str(c.domain).str(c.aggregate_type).str(c.aggregate_id)
                  .u64(version).str(schema).bytes(state).buf)
 
 

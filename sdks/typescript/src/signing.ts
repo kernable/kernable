@@ -88,9 +88,10 @@ class Msg {
   }
 }
 
-type Stream = Pick<WireCommand, "command_id" | "tenant_id" | "aggregate_type" | "aggregate_id">;
+type Stream = Pick<WireCommand, "command_id" | "tenant_id" | "domain" | "aggregate_type" | "aggregate_id">;
 
-const stream = (m: Msg, c: Stream) => m.str(c.command_id).str(c.tenant_id).str(c.aggregate_type).str(c.aggregate_id);
+const stream = (m: Msg, c: Stream) =>
+  m.str(c.command_id).str(c.tenant_id).str(c.domain).str(c.aggregate_type).str(c.aggregate_id);
 
 export function commandMessage(c: WireCommand): Buffer {
   return stream(new Msg("kernable.v1.command"), c).str(c.command_type).bytes(c.payload).context(c.context).done();
@@ -105,6 +106,7 @@ export function resultMessage(c: Stream, expectedVersion: number, events: WireNe
 export function snapshotMessage(c: Omit<Stream, "command_id">, version: number, schema: string, state: Buffer): Buffer {
   return new Msg("kernable.v1.snapshot")
     .str(c.tenant_id)
+    .str(c.domain)
     .str(c.aggregate_type)
     .str(c.aggregate_id)
     .u64(version)
@@ -137,6 +139,7 @@ export function eventHash(prev: Buffer, e: WireEvent): Buffer {
     .bytes(prev)
     .u64(e.global_position)
     .str(e.tenant_id)
+    .str(e.domain)
     .str(e.aggregate_type)
     .str(e.aggregate_id)
     .u64(e.version)

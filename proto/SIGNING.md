@@ -25,10 +25,10 @@ Each message starts with a `str` **tag** for domain separation. Payloads are sig
 
 | Signed by | Tag | Fields after the tag |
 |---|---|---|
-| Client | `kernable.v1.command` | `command_id`, `tenant_id`, `aggregate_type`, `aggregate_id`, `command_type`, `payload`, `context` |
-| Worker | `kernable.v1.result` | `command_id`, `tenant_id`, `aggregate_type`, `aggregate_id`, `expected_version: u64`, `event_count: u64`, then per event `event_type`, `payload` |
+| Client | `kernable.v1.command` | `command_id`, `tenant_id`, `domain`, `aggregate_type`, `aggregate_id`, `command_type`, `payload`, `context` |
+| Worker | `kernable.v1.result` | `command_id`, `tenant_id`, `domain`, `aggregate_type`, `aggregate_id`, `expected_version: u64`, `event_count: u64`, then per event `event_type`, `payload` |
 | Worker | `kernable.v1.rejection` | `command_id`, `code`, `message` |
-| Worker | `kernable.v1.snapshot` | `tenant_id`, `aggregate_type`, `aggregate_id`, `version: u64`, `schema`, `state` |
+| Worker | `kernable.v1.snapshot` | `tenant_id`, `domain`, `aggregate_type`, `aggregate_id`, `version: u64`, `schema`, `state` |
 | Worker, listener | `kernable.v1.challenge` | `nonce` |
 | Subscriber | `kernable.v1.subscribe` | `after_position: u64`, `issued_at: i64`, `type_count: u64`, then per type `event_type` |
 | Kernel | `kernable.v1.checkpoint` | `global_position: u64`, `chain_hash`, `created_at: i64` |
@@ -46,16 +46,17 @@ Each stored event has `hash = SHA-256(message)`, where `message` has the tag `ke
 1. `prev_hash`
 2. `global_position: u64`
 3. `tenant_id`
-4. `aggregate_type`
-5. `aggregate_id`
-6. `version: u64`
-7. `event_type`
-8. `payload`
-9. `command_id`
-10. `created_at: i64`
-11. `producer_key_id`
-12. `producer_sig`
-13. `context` (of the command that caused the event)
+4. `domain`
+5. `aggregate_type`
+6. `aggregate_id`
+7. `version: u64`
+8. `event_type`
+9. `payload`
+10. `command_id`
+11. `created_at: i64`
+12. `producer_key_id`
+13. `producer_sig`
+14. `context` (of the command that caused the event)
 
 `prev_hash` is the hash of the event at the previous global position. For the first event it is 32 zero bytes. Every event of a command stores that command's worker result signature as `producer_sig`.
 

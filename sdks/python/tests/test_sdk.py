@@ -9,7 +9,7 @@ import threading
 import time
 import unittest
 
-from kernable import Kernable, NotSettled, Rejected, RequestContext, aggregate
+from kernable import Kernable, NotSettled, Rejected, RequestContext, domain
 from kernable.signing import (Key, challenge_message, command_message, rejection_message, result_message,
                               snapshot_message)
 from kernable.v1 import kernable_pb2 as pb
@@ -20,7 +20,7 @@ with open(os.path.join(ROOT, "proto", "test-vectors", "signing.json")) as f:
 
 
 def vector_command(c) -> pb.Command:
-    fields = ("command_id", "tenant_id", "aggregate_type", "aggregate_id", "command_type")
+    fields = ("command_id", "tenant_id", "domain", "aggregate_type", "aggregate_id", "command_type")
     cmd = pb.Command(**{k: c[k] for k in fields}, payload=bytes.fromhex(c["payload_hex"]))
     if "context" in c:
         context = dict(c["context"])
@@ -45,11 +45,12 @@ class SigningVectors(unittest.TestCase):
         self.check("rejection", rejection_message(j["command_id"], pb.Rejected(code=j["code"], message=j["message"])))
         self.check("challenge", challenge_message(bytes.fromhex(VECTORS["challenge"]["input"]["nonce_hex"])))
         n = VECTORS["snapshot"]["input"]
-        stream = pb.Command(tenant_id=n["tenant_id"], aggregate_type=n["aggregate_type"], aggregate_id=n["aggregate_id"])
+        stream = pb.Command(tenant_id=n["tenant_id"], domain=n["domain"], aggregate_type=n["aggregate_type"],
+                            aggregate_id=n["aggregate_id"])
         self.check("snapshot", snapshot_message(stream, n["version"], n["schema"], bytes.fromhex(n["state_hex"])))
 
 
-counter = aggregate("Counter", 0)
+counter = domain("counters").aggregate("Counter", 0)
 
 
 @counter.apply("Incremented")
@@ -74,7 +75,7 @@ def background(target) -> threading.Thread:
 
 class EndToEnd(unittest.TestCase):
     def setUp(self):
-        self.kernel = TestKernel(["Increment"], "settle_timeout_ms = 500")
+        self.kernel = TestKernel(["counters.*"], "settle_timeout_ms = 500")
         self.kernel.start()
         self.k = Kernable(self.kernel.url, self.kernel.app_key, tenant="t1")
         self.streams = []
@@ -92,7 +93,7 @@ class EndToEnd(unittest.TestCase):
         return stream
 
     def increment(self, by: int, **kw):
-        return self.k.submit("Counter", "c1", "Increment", {"by": by}, **kw)
+        return self.k.submit("counters", "Counter", "c1", "Increment", {"by": by}, **kw)
 
     def test_worker_read_model_and_reactor(self):
         self.run_stream(self.k.worker(counter))
@@ -100,10 +101,10 @@ class EndToEnd(unittest.TestCase):
         seen_by_reactor: list[tuple[int, int]] = []
 
         model = self.k.read_model("totals")
-        model.on("Incremented", lambda e: totals.__setitem__(e.aggregate_id, totals.get(e.aggregate_id, 0) + e.data["by"]))
+        model.on("counters.Incremented", lambda e: totals.__setitem__(e.aggregate_id, totals.get(e.aggregate_id, 0) + e.data["by"]))
         reactor = self.k.reactor("audit")
 
-        @reactor.on("Incremented")
+        @reactor.on("counters.Incremented")
         def _(e):
             seen_by_reactor.append((e.position, totals["c1"]))  # the read model ran first
 
@@ -133,7 +134,7 @@ class EndToEnd(unittest.TestCase):
             self.increment(1)
         self.assertTrue(ctx.exception.outcome.committed)
         self.assertTrue(self.increment(1, wait="committed").committed)
-        command_id = self.k.enqueue("Counter", "c2", "Increment", {"by": 1})
+        command_id = self.k.enqueue("counters", "Counter", "c2", "Increment", {"by": 1})
         self.assertTrue(command_id)
 
         time.sleep(0.15)  # let the kernel write a checkpoint
@@ -149,7 +150,7 @@ class EndToEnd(unittest.TestCase):
             return [{"type": "Incremented", "data": {"by": data["by"]}}]
 
         # v1 keeps the state as a dict.
-        v1 = aggregate("Counter", {"n": 0}, snapshot_every=3)
+        v1 = domain("counters").aggregate("Counter", {"n": 0}, snapshot_every=3)
 
         @v1.apply("Incremented")
         def _(state, e):
@@ -165,7 +166,7 @@ class EndToEnd(unittest.TestCase):
         time.sleep(0.1)
 
         # v2 keeps it as a number: the old snapshot does not fit.
-        v2 = aggregate("Counter", 0, snapshot_every=3, schema="2")
+        v2 = domain("counters").aggregate("Counter", 0, snapshot_every=3, schema="2")
         v2.apply("Incremented", lambda n, e: n + e["by"])
         v2.command("Increment", increment)
         self.run_stream(self.k.worker(v2))
@@ -174,7 +175,7 @@ class EndToEnd(unittest.TestCase):
 
     def test_request_context_reaches_handlers_events_and_follow_up_commands(self):
         seen = []
-        ticket = aggregate("Ticket", {"open": False})
+        ticket = domain("support").aggregate("Ticket", {"open": False})
         ticket.apply("Opened", lambda s, e: {"open": True})
 
         @ticket.command("Open")
@@ -189,20 +190,20 @@ class EndToEnd(unittest.TestCase):
 
         self.k.close()  # this test needs other command types: start a kernel of its own
         self.kernel.dispose()
-        self.kernel = TestKernel(["Open", "Note"])
+        self.kernel = TestKernel(["support.*"])
         self.kernel.start()
         service = RequestContext(sender_identity="svc-1", attributes={"channel": "api"})
         self.k = Kernable(self.kernel.url, self.kernel.app_key, context=service)
         self.run_stream(self.k.worker(ticket))
         reactor = self.k.reactor("notes")
 
-        @reactor.on("Opened")
+        @reactor.on("support.Opened")
         def _(e, ctx):
-            self.k.submit("Ticket", e.aggregate_id, "Note", id=f"note-{e.aggregate_id}", context=ctx.follow(),
+            self.k.submit("support", "Ticket", e.aggregate_id, "Note", id=f"note-{e.aggregate_id}", context=ctx.follow(),
                           wait="committed")
 
         self.run_stream(reactor)
-        opened = self.k.submit("Ticket", "t1", "Open", id="open-t1",
+        opened = self.k.submit("support", "Ticket", "t1", "Open", id="open-t1",
                                context=RequestContext(sender_identity="svc-1", sender_session="s-9"))
         request = RequestContext(sender_identity="svc-1", sender_session="s-9", correlation_id="open-t1")
         self.assertEqual(opened.events[0].request, request)
@@ -210,7 +211,7 @@ class EndToEnd(unittest.TestCase):
                                    causation_id="open-t1")
         self.assertEqual(seen, [request, follow_up])
 
-        stale = self.k.submit("Ticket", "t1", "Note", context=RequestContext(expected_version=1))
+        stale = self.k.submit("support", "Ticket", "t1", "Note", context=RequestContext(expected_version=1))
         self.assertEqual((stale.committed, stale.code), (False, "version_mismatch"))
         time.sleep(0.15)
         self.assertEqual(self.kernel.verify().returncode, 0)

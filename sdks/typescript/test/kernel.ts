@@ -46,7 +46,7 @@ export class TestKernel {
   readonly store = process.env.KERNABLE_TEST_STORE === "file" ? `file:${join(this.dir, "k.log")}` : `sqlite:${join(this.dir, "k.db")}`;
   private process?: ChildProcess;
 
-  /** `extraConfig` adds top-level TOML lines, e.g. `lease_ttl_ms = 500`. */
+  /** `commandTypes` is the worker allowlist (`orders.*`, `orders.PlaceOrder`). `extraConfig` adds top-level TOML lines, e.g. `lease_ttl_ms = 500`. */
   constructor(commandTypes: string[], extraConfig = "", options: TestKernelOptions = {}) {
     this.options = options;
     if (options.tls) {

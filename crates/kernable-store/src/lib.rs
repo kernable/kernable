@@ -109,16 +109,18 @@ pub trait Store: Send + Sync {
     fn read_stream(
         &self,
         tenant_id: &str,
+        domain: &str,
         aggregate_type: &str,
         aggregate_id: &str,
     ) -> Result<Vec<Event>> {
-        self.read_stream_after(tenant_id, aggregate_type, aggregate_id, 0)
+        self.read_stream_after(tenant_id, domain, aggregate_type, aggregate_id, 0)
     }
 
     /// The events of one aggregate with a version greater than `after_version`, in order.
     fn read_stream_after(
         &self,
         tenant_id: &str,
+        domain: &str,
         aggregate_type: &str,
         aggregate_id: &str,
         after_version: u64,
@@ -160,6 +162,7 @@ pub trait Store: Send + Sync {
     fn snapshot(
         &self,
         tenant_id: &str,
+        domain: &str,
         aggregate_type: &str,
         aggregate_id: &str,
     ) -> Result<Option<SnapshotRecord>>;

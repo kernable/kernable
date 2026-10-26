@@ -102,7 +102,7 @@ async fn event_types_are_filtered_and_restricted_per_key() {
     .await
     .unwrap();
 
-    let mut placed = subscribe(&env, request(&key(1), 0, &["OrderPlaced"], now_ms()))
+    let mut placed = subscribe(&env, request(&key(1), 0, &["orders.OrderPlaced"], now_ms()))
         .await
         .unwrap();
     assert_eq!(next(&mut placed).await.global_position, 1);
@@ -115,7 +115,7 @@ async fn event_types_are_filtered_and_restricted_per_key() {
     assert_eq!(next(&mut restricted).await.event_type, "OrderPlaced");
     assert_eq!(next(&mut restricted).await.global_position, 3);
 
-    let denied = subscribe(&env, request(&key(4), 0, &["ItemAdded"], now_ms())).await;
+    let denied = subscribe(&env, request(&key(4), 0, &["orders.ItemAdded"], now_ms())).await;
     assert_eq!(denied.unwrap_err().code(), Code::PermissionDenied);
 }
 
@@ -130,7 +130,7 @@ async fn unsigned_stale_and_unknown_subscribers_are_refused() {
         Code::Unauthenticated
     );
 
-    let mut tampered = request(&key(1), 0, &["OrderPlaced"], now_ms());
+    let mut tampered = request(&key(1), 0, &["orders.OrderPlaced"], now_ms());
     tampered.event_types.clear();
     assert_eq!(
         subscribe(&env, tampered).await.unwrap_err().code(),

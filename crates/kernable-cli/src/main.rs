@@ -23,7 +23,7 @@ const USAGE: &str = "usage:
                                           client certificate per name, for mTLS
   kernable listeners <store>              lists registered listeners with order and position
   kernable listeners remove <store> <name>  removes a listener (kernel stopped)
-  kernable submit <addr> <client.key> <tenant> <aggregate_type> <aggregate_id> <command_type> <payload>
+  kernable submit <addr> <client.key> <tenant> <domain> <aggregate_type> <aggregate_id> <command_type> <payload>
                                           signs and submits a command (addr: unix:/path or host:port)";
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -54,6 +54,7 @@ async fn main() -> ExitCode {
             addr,
             key,
             tenant,
+            domain,
             agg_type,
             agg_id,
             cmd_type,
@@ -62,6 +63,7 @@ async fn main() -> ExitCode {
             let cmd = Command {
                 command_id: random_id(),
                 tenant_id: tenant.to_string(),
+                domain: domain.to_string(),
                 aggregate_type: agg_type.to_string(),
                 aggregate_id: agg_id.to_string(),
                 command_type: cmd_type.to_string(),

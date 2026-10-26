@@ -58,6 +58,7 @@ message ListenerRecord {
 // The latest snapshot of a stream; the latest record per stream wins.
 message SnapshotRecord {
   string tenant_id = 1;
+  string domain = 7;
   string aggregate_type = 2;
   string aggregate_id = 3;
   Snapshot snapshot = 4;

@@ -9,7 +9,7 @@ export interface OrderRow {
 
 export type OrdersOverview = Record<string, OrderRow>;
 
-export const OVERVIEW_EVENTS = ["OrderPlaced", "ItemAdded", "OrderCancelled", "OrderShipped"];
+export const OVERVIEW_EVENTS = ["orders.OrderPlaced", "orders.ItemAdded", "orders.OrderCancelled", "orders.OrderShipped"];
 
 export function project(view: OrdersOverview, e: StoredEvent): OrdersOverview {
   const row = view[e.aggregateId];

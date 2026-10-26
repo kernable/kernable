@@ -13,7 +13,7 @@ import { ORDER_EVENTS, project, type OrderRow } from "./orders/order.ts";
 
 const ROOT = new URL("../../", import.meta.url).pathname;
 const PYTHON = process.env.KERNABLE_PYTHON ?? `${ROOT}sdks/python/.venv/bin/python`;
-const COMMANDS = ["RegisterAccount", "ChangeEmail", "DeactivateAccount", "PlaceOrder", "AddItem", "SubmitOrder", "RecordConfirmation", "CancelOrder"];
+const COMMANDS = ["identity.*", "orders.*"];
 
 /** One service process that can be killed and started again. */
 class Service {

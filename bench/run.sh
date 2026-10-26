@@ -29,7 +29,7 @@ kernel_key = "kernel.key"
 [clients]
 "$CLIENT" = ["*"]
 [workers]
-"$WORKER" = ["Write"]
+"$WORKER" = ["bench.*"]
 TOML
   "$BIN/kernable-kernel" "$DIR/kernable.toml" 2>/dev/null &
   KERNEL=$!

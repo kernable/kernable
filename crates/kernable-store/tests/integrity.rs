@@ -69,6 +69,7 @@ impl Fixture {
         let mut cmd = Command {
             command_id: id.into(),
             tenant_id: "t1".into(),
+            domain: "orders".into(),
             aggregate_type: "Order".into(),
             aggregate_id: aggregate_id.into(),
             command_type: "Do".into(),
@@ -82,7 +83,7 @@ impl Fixture {
 
         let version = self
             .store
-            .read_stream("t1", "Order", aggregate_id)
+            .read_stream("t1", "orders", "Order", aggregate_id)
             .unwrap()
             .len() as u64;
         let msg = signing::result_message(&cmd, version, events);
@@ -180,6 +181,7 @@ fn consistently_rewritten_chain_is_detected_by_checkpoint() {
     let c1 = Command {
         command_id: "c1".into(),
         tenant_id: "t1".into(),
+        domain: "orders".into(),
         aggregate_type: "Order".into(),
         aggregate_id: "o1".into(),
         ..Default::default()
@@ -235,6 +237,7 @@ fn unsigned_command_is_reported() {
     let cmd = Command {
         command_id: "c5".into(),
         tenant_id: "t1".into(),
+        domain: "orders".into(),
         aggregate_type: "Order".into(),
         aggregate_id: "o3".into(),
         command_type: "Do".into(),

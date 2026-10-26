@@ -13,6 +13,7 @@ fn cmd(id: &str, command_type: &str) -> Command {
     Command {
         command_id: id.into(),
         tenant_id: "t1".into(),
+        domain: "orders".into(),
         aggregate_type: "Order".into(),
         aggregate_id: "o1".into(),
         command_type: command_type.into(),
@@ -35,7 +36,7 @@ fn sig() -> Signature {
 }
 
 fn versions(store: &dyn Store) -> Vec<u64> {
-    let events = store.read_stream("t1", "Order", "o1").unwrap();
+    let events = store.read_stream("t1", "orders", "Order", "o1").unwrap();
     events.iter().map(|e| e.version).collect()
 }
 
@@ -184,7 +185,7 @@ fn snapshot_at(store: &dyn Store, version: u64, state: &[u8]) -> SnapshotRecord 
     let stream = cmd("", "");
     let msg = signing::snapshot_message(&stream, version, "1", state);
     let event_hash = store
-        .read_stream("t1", "Order", "o1")
+        .read_stream("t1", "orders", "Order", "o1")
         .unwrap()
         .iter()
         .find(|e| e.version == version)
@@ -192,6 +193,7 @@ fn snapshot_at(store: &dyn Store, version: u64, state: &[u8]) -> SnapshotRecord 
         .unwrap_or_default();
     SnapshotRecord {
         tenant_id: "t1".into(),
+        domain: "orders".into(),
         aggregate_type: "Order".into(),
         aggregate_id: "o1".into(),
         snapshot: Some(Snapshot {
@@ -213,7 +215,9 @@ fn snapshots_are_saved_replaced_removed_and_verified(store: &dyn Store) {
             .unwrap();
     }
     let after = |v| -> Vec<u64> {
-        let events = store.read_stream_after("t1", "Order", "o1", v).unwrap();
+        let events = store
+            .read_stream_after("t1", "orders", "Order", "o1", v)
+            .unwrap();
         events.iter().map(|e| e.version).collect()
     };
     assert_eq!(
@@ -221,10 +225,13 @@ fn snapshots_are_saved_replaced_removed_and_verified(store: &dyn Store) {
         (vec![1, 2, 3], vec![3], vec![], vec![])
     );
 
-    assert_eq!(store.snapshot("t1", "Order", "o1").unwrap(), None);
+    assert_eq!(store.snapshot("t1", "orders", "Order", "o1").unwrap(), None);
     store.save_snapshot(&snapshot_at(store, 1, b"one")).unwrap();
     store.save_snapshot(&snapshot_at(store, 2, b"two")).unwrap();
-    let latest = store.snapshot("t1", "Order", "o1").unwrap().unwrap();
+    let latest = store
+        .snapshot("t1", "orders", "Order", "o1")
+        .unwrap()
+        .unwrap();
     assert_eq!(latest.snapshot.unwrap().state, b"two");
 
     // `verify` checks a snapshot's signature and its link to the stored events. The events in
@@ -243,14 +250,14 @@ fn snapshots_are_saved_replaced_removed_and_verified(store: &dyn Store) {
     store.save_snapshot(&forged).unwrap();
     assert_eq!(
         problems(store),
-        ["snapshot of t1/Order/o1 at version 2: invalid worker signature"]
+        ["snapshot of t1/orders.Order/o1 at version 2: invalid worker signature"]
     );
     let mut detached = snapshot_at(store, 2, b"two");
     detached.event_hash = vec![0; 32];
     store.save_snapshot(&detached).unwrap();
     assert_eq!(
         problems(store),
-        ["snapshot of t1/Order/o1 at version 2: does not match the stored events"]
+        ["snapshot of t1/orders.Order/o1 at version 2: does not match the stored events"]
     );
 
     let removed = SnapshotRecord {
@@ -258,7 +265,7 @@ fn snapshots_are_saved_replaced_removed_and_verified(store: &dyn Store) {
         ..snapshot_at(store, 2, b"")
     };
     store.save_snapshot(&removed).unwrap();
-    assert_eq!(store.snapshot("t1", "Order", "o1").unwrap(), None);
+    assert_eq!(store.snapshot("t1", "orders", "Order", "o1").unwrap(), None);
 }
 
 struct TempDb(PathBuf);
@@ -301,7 +308,10 @@ fn sqlite_concurrent_connections_lose_no_updates() {
                 let store = SqliteStore::open(path.as_path()).unwrap();
                 for i in (t..THREADS * COMMANDS).step_by(THREADS) {
                     loop {
-                        let current = store.read_stream("t1", "Order", "o1").unwrap().len() as u64;
+                        let current = store
+                            .read_stream("t1", "orders", "Order", "o1")
+                            .unwrap()
+                            .len() as u64;
                         match store.commit(&format!("c{i}"), current, &[ev("ItemAdded")], &sig(), 0)
                         {
                             Ok(_) => break,
@@ -317,7 +327,7 @@ fn sqlite_concurrent_connections_lose_no_updates() {
         h.join().unwrap();
     }
 
-    let events = setup.read_stream("t1", "Order", "o1").unwrap();
+    let events = setup.read_stream("t1", "orders", "Order", "o1").unwrap();
     let expected: Vec<u64> = (1..=(THREADS * COMMANDS) as u64).collect();
     assert_eq!(
         events.iter().map(|e| e.version).collect::<Vec<_>>(),
@@ -342,7 +352,10 @@ fn concurrent_threads_lose_no_updates(store: &dyn Store) {
             s.spawn(move || {
                 for i in (t..THREADS * COMMANDS).step_by(THREADS) {
                     loop {
-                        let current = store.read_stream("t1", "Order", "o1").unwrap().len() as u64;
+                        let current = store
+                            .read_stream("t1", "orders", "Order", "o1")
+                            .unwrap()
+                            .len() as u64;
                         match store.commit(&format!("c{i}"), current, &[ev("ItemAdded")], &sig(), 0)
                         {
                             Ok(_) => break,

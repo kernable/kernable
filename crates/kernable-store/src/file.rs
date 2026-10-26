@@ -40,11 +40,13 @@ use crate::{
 
 const HEADER: usize = 8;
 
-type StreamKey = (String, String, String);
+/// Tenant, domain, aggregate type, aggregate ID.
+type StreamKey = (String, String, String, String);
 
 fn stream_key(c: &Command) -> StreamKey {
     (
         c.tenant_id.clone(),
+        c.domain.clone(),
         c.aggregate_type.clone(),
         c.aggregate_id.clone(),
     )
@@ -106,6 +108,7 @@ impl State {
                     }
                     let key = (
                         event.tenant_id.clone(),
+                        event.domain.clone(),
                         event.aggregate_type.clone(),
                         event.aggregate_id.clone(),
                     );
@@ -134,6 +137,7 @@ impl State {
             Record::Snapshot(s) => {
                 let key = (
                     s.tenant_id.clone(),
+                    s.domain.clone(),
                     s.aggregate_type.clone(),
                     s.aggregate_id.clone(),
                 );
@@ -309,6 +313,7 @@ impl Store for FileStore {
     fn read_stream_after(
         &self,
         tenant_id: &str,
+        domain: &str,
         aggregate_type: &str,
         aggregate_id: &str,
         after_version: u64,
@@ -316,6 +321,7 @@ impl Store for FileStore {
         let inner = self.inner();
         let key = (
             tenant_id.to_owned(),
+            domain.to_owned(),
             aggregate_type.to_owned(),
             aggregate_id.to_owned(),
         );
@@ -331,11 +337,13 @@ impl Store for FileStore {
     fn snapshot(
         &self,
         tenant_id: &str,
+        domain: &str,
         aggregate_type: &str,
         aggregate_id: &str,
     ) -> Result<Option<SnapshotRecord>> {
         let key = (
             tenant_id.to_owned(),
+            domain.to_owned(),
             aggregate_type.to_owned(),
             aggregate_id.to_owned(),
         );
@@ -417,6 +425,7 @@ impl Store for FileStore {
             let mut event = Event {
                 global_position: position,
                 tenant_id: cmd.tenant_id.clone(),
+                domain: cmd.domain.clone(),
                 aggregate_type: cmd.aggregate_type.clone(),
                 aggregate_id: cmd.aggregate_id.clone(),
                 version,
