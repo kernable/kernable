@@ -11,6 +11,7 @@ import {
   eventHash,
   rejectionMessage,
   resultMessage,
+  subscribeMessage,
 } from "../src/signing.ts";
 
 const v = JSON.parse(readFileSync(new URL("../../../proto/test-vectors/signing.json", import.meta.url), "utf8"));
@@ -35,6 +36,8 @@ test("message layouts and signatures match the test vectors", () => {
   check("result", resultMessage(command(r.command), r.expected_version, events));
   check("rejection", rejectionMessage(v.rejection.input.command_id, v.rejection.input));
   check("challenge", challengeMessage(hex(v.challenge.input.nonce_hex)));
+  const sub = v.subscribe.input;
+  check("subscribe", subscribeMessage(sub.after_position, sub.event_types, sub.issued_at));
   const cp = v.checkpoint.input;
   check("checkpoint", checkpointMessage(cp.global_position, hex(cp.chain_hash_hex), cp.created_at));
 });

@@ -7,7 +7,7 @@
 pub mod config;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     os::unix::fs::FileTypeExt,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -44,6 +44,10 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 const MAX_CONFLICT_RETRIES: u32 = 5;
 /// How often idle workers look for expired leases.
 const POLL: Duration = Duration::from_millis(100);
+/// Accepted clock difference for signed subscribe requests.
+const MAX_REQUEST_AGE_MS: i64 = 60_000;
+/// Events read from the store per subscription round trip.
+const SUBSCRIBE_BATCH: u32 = 500;
 
 pub struct Kernel {
     config: Config,
@@ -53,6 +57,8 @@ pub struct Kernel {
     waiters: Mutex<HashMap<String, Vec<oneshot::Sender<CommandResult>>>>,
     /// Wakes idle dispatch loops when new commands arrive.
     work: Notify,
+    /// Wakes subscriptions when events were committed.
+    appended: Notify,
 }
 
 impl Kernel {
@@ -65,6 +71,7 @@ impl Kernel {
             key,
             waiters: Mutex::default(),
             work: Notify::new(),
+            appended: Notify::new(),
         }))
     }
 
@@ -189,11 +196,77 @@ impl EventService for Api {
 
     async fn subscribe(
         &self,
-        _request: Request<SubscribeRequest>,
+        request: Request<SubscribeRequest>,
     ) -> Result<Response<Self::SubscribeStream>, Status> {
-        Err(Status::unimplemented(
-            "subscriptions are not implemented yet",
-        ))
+        let kernel = Arc::clone(&self.0);
+        let req = request.into_inner();
+        let sig = req
+            .client_sig
+            .as_ref()
+            .ok_or_else(|| Status::unauthenticated("request is not signed"))?;
+        let msg = signing::subscribe_message(req.after_position, &req.event_types, req.issued_at);
+        signing::verify(sig, &msg)
+            .map_err(|_| Status::unauthenticated("invalid request signature"))?;
+        if (now_ms() - req.issued_at).abs() > MAX_REQUEST_AGE_MS {
+            return Err(Status::unauthenticated("request expired; check the clock"));
+        }
+
+        let readable = kernel
+            .config
+            .subscribers
+            .get(&sig.key_id)
+            .ok_or_else(|| Status::permission_denied("key may not subscribe"))?;
+        let types: Option<HashSet<String>> = if req.event_types.is_empty() {
+            (!readable.iter().any(|t| t == "*")).then(|| readable.iter().cloned().collect())
+        } else if req
+            .event_types
+            .iter()
+            .all(|t| config::allowed(&kernel.config.subscribers, &sig.key_id, t))
+        {
+            Some(req.event_types.into_iter().collect())
+        } else {
+            return Err(Status::permission_denied(
+                "key may not read these event types",
+            ));
+        };
+
+        let (tx, rx) = mpsc::channel(SUBSCRIBE_BATCH as usize);
+        tokio::spawn(stream_events(kernel, req.after_position, types, tx));
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+}
+
+/// Sends stored events after `after` (backlog first, then live) until the subscriber leaves.
+/// Always reads from the store, so a subscriber can never miss or reorder events.
+async fn stream_events(
+    kernel: Arc<Kernel>,
+    mut after: u64,
+    types: Option<HashSet<String>>,
+    tx: mpsc::Sender<Result<Event, Status>>,
+) {
+    loop {
+        let appended = kernel.appended.notified();
+        let batch = match kernel.store.read_all(after, SUBSCRIBE_BATCH) {
+            Ok(batch) => batch,
+            Err(e) => {
+                let _ = tx.send(Err(internal(e))).await;
+                return;
+            }
+        };
+        if batch.is_empty() {
+            tokio::select! {
+                _ = appended => {}
+                _ = tx.closed() => return,
+            }
+            continue;
+        }
+        for event in batch {
+            after = event.global_position;
+            let wanted = types.as_ref().is_none_or(|t| t.contains(&event.event_type));
+            if wanted && tx.send(Ok(event)).await.is_err() {
+                return;
+            }
+        }
     }
 }
 
@@ -439,10 +512,13 @@ impl Session {
             .store
             .commit(&r.lease_id, f.expected_version, &r.events, &sig, now_ms())
         {
-            Ok(events) => self.kernel.complete(CommandResult {
-                command_id: f.command.command_id,
-                outcome: Some(Outcome::Committed(Committed { events })),
-            }),
+            Ok(events) => {
+                self.kernel.appended.notify_waiters();
+                self.kernel.complete(CommandResult {
+                    command_id: f.command.command_id,
+                    outcome: Some(Outcome::Committed(Committed { events })),
+                });
+            }
             Err(StoreError::VersionConflict { .. }) if f.attempts < MAX_CONFLICT_RETRIES => {
                 self.execute(r.lease_id, f.command, f.attempts + 1, f.permit)
                     .await;

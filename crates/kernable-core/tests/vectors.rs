@@ -85,6 +85,10 @@ fn vectors() -> Value {
             json!({"command_id": cmd.command_id, "code": reason.code, "message": reason.message}),
             signing::rejection_message(&cmd.command_id, &reason),
         ),
+        "subscribe": entry(
+            json!({"after_position": 7, "issued_at": 1_700_000_000_000i64, "event_types": ["OrderPlaced", "ItemAdded"]}),
+            signing::subscribe_message(7, &["OrderPlaced".into(), "ItemAdded".into()], 1_700_000_000_000),
+        ),
         "challenge": entry(json!({"nonce_hex": hex::encode(nonce)}), signing::challenge_message(&nonce)),
         "checkpoint": entry(
             json!({"global_position": 42, "chain_hash_hex": hex::encode(chain_hash), "created_at": 1_700_000_000_000i64}),

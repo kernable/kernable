@@ -18,6 +18,9 @@ use serde::Deserialize;
 ///
 /// [workers]                            # worker key ID -> command types it may handle
 /// "1f0a…" = ["PlaceOrder", "AddItem"]
+///
+/// [subscribers]                        # subscriber key ID -> event types it may read
+/// "8b84…" = ["*"]
 /// ```
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -35,6 +38,8 @@ pub struct Config {
     pub clients: HashMap<String, Vec<String>>,
     #[serde(default)]
     pub workers: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    pub subscribers: HashMap<String, Vec<String>>,
 }
 
 fn default_lease_ttl_ms() -> i64 {
@@ -60,9 +65,9 @@ impl Config {
     }
 }
 
-/// Whether `key_id` may use `command_type` according to an allowlist (`"*"` allows all).
-pub fn allowed(rules: &HashMap<String, Vec<String>>, key_id: &str, command_type: &str) -> bool {
+/// Whether `key_id` may use `type_name` according to an allowlist (`"*"` allows all).
+pub fn allowed(rules: &HashMap<String, Vec<String>>, key_id: &str, type_name: &str) -> bool {
     rules
         .get(key_id)
-        .is_some_and(|types| types.iter().any(|t| t == "*" || t == command_type))
+        .is_some_and(|types| types.iter().any(|t| t == "*" || t == type_name))
 }

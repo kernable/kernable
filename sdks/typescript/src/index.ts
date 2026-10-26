@@ -2,8 +2,10 @@
 
 import { randomUUID } from "node:crypto";
 
+import type { ClientReadableStream } from "@grpc/grpc-js";
+
 import { connect, type Clients, type SessionCall, type KernelMessage, type WireEvent, type WireNewEvent, type WireRejected } from "./rpc.ts";
-import { Key, challengeMessage, commandMessage, rejectionMessage, resultMessage } from "./signing.ts";
+import { Key, challengeMessage, commandMessage, rejectionMessage, resultMessage, subscribeMessage } from "./signing.ts";
 
 export { Key } from "./signing.ts";
 
@@ -26,11 +28,13 @@ export interface NewEvent {
 /** An event as stored by the kernel. */
 export interface StoredEvent {
   position: number;
+  tenant: string;
   aggregateType: string;
   aggregateId: string;
   version: number;
   type: string;
   data: unknown;
+  commandId: string;
 }
 
 export type Outcome =
@@ -125,8 +129,62 @@ export class Kernable {
     return { committed: true, events: res.committed!.events.map(toStored) };
   }
 
+  /**
+   * Streams committed events after `options.after` (backlog first, then live) to `handler`,
+   * one at a time. Reconnects and resumes after the last handled event; if the handler throws,
+   * that event is delivered again. Persist `position` yourself to resume across restarts.
+   */
+  subscribe(options: SubscribeOptions, handler: (event: StoredEvent) => void | Promise<void>): Subscription {
+    return new Subscription(this.clients, this.key, options, handler);
+  }
+
   close(): void {
     this.clients.close();
+  }
+}
+
+export interface SubscribeOptions {
+  /** Global position of the last event already handled; 0 = from the beginning. */
+  after?: number;
+  /** Event types to receive; empty = all the key may read. */
+  types?: string[];
+  reconnectMs?: number;
+}
+
+export class Subscription {
+  /** Global position of the last handled event. */
+  position: number;
+  /** Resolves after `stop()`. */
+  readonly done: Promise<void>;
+  private call?: ClientReadableStream<WireEvent>;
+  private stopped = false;
+
+  constructor(clients: Clients, key: Key, options: SubscribeOptions, handler: (event: StoredEvent) => void | Promise<void>) {
+    this.position = options.after ?? 0;
+    this.done = this.loop(clients, key, options, handler);
+  }
+
+  stop(): void {
+    this.stopped = true;
+    this.call?.cancel();
+  }
+
+  private async loop(clients: Clients, key: Key, options: SubscribeOptions, handler: (event: StoredEvent) => void | Promise<void>) {
+    const event_types = options.types ?? [];
+    while (!this.stopped) {
+      const issued_at = Date.now();
+      const client_sig = key.sign(subscribeMessage(this.position, event_types, issued_at));
+      this.call = clients.subscribe({ after_position: this.position, event_types, issued_at, client_sig });
+      try {
+        for await (const e of this.call as AsyncIterable<WireEvent>) {
+          await handler(toStored(e));
+          this.position = e.global_position;
+        }
+      } catch (err) {
+        if (!this.stopped) console.error(`kernable subscription: ${(err as Error).message}`);
+      }
+      if (!this.stopped) await new Promise((r) => setTimeout(r, options.reconnectMs ?? 1000));
+    }
   }
 }
 
@@ -233,10 +291,12 @@ function decode(payload: Buffer): unknown {
 function toStored(e: WireEvent): StoredEvent {
   return {
     position: e.global_position,
+    tenant: e.tenant_id,
     aggregateType: e.aggregate_type,
     aggregateId: e.aggregate_id,
     version: e.version,
     type: e.event_type,
     data: decode(e.payload),
+    commandId: e.command_id,
   };
 }

@@ -91,6 +91,12 @@ export function challengeMessage(nonce: Buffer): Buffer {
   return new Msg("kernable.v1.challenge").bytes(nonce).done();
 }
 
+export function subscribeMessage(afterPosition: number, eventTypes: string[], issuedAt: number): Buffer {
+  const m = new Msg("kernable.v1.subscribe").u64(afterPosition).i64(issuedAt).u64(eventTypes.length);
+  for (const t of eventTypes) m.str(t);
+  return m.done();
+}
+
 export function checkpointMessage(position: number, chainHash: Buffer, createdAt: number): Buffer {
   return new Msg("kernable.v1.checkpoint").u64(position).bytes(chainHash).i64(createdAt).done();
 }

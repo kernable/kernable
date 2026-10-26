@@ -100,6 +100,18 @@ pub fn challenge_message(nonce: &[u8]) -> Vec<u8> {
     Msg::new("kernable.v1.challenge").bytes(nonce).0
 }
 
+/// What a subscriber signs to open an event stream.
+pub fn subscribe_message(after_position: u64, event_types: &[String], issued_at: i64) -> Vec<u8> {
+    let mut m = Msg::new("kernable.v1.subscribe")
+        .u64(after_position)
+        .i64(issued_at)
+        .u64(event_types.len() as u64);
+    for t in event_types {
+        m = m.str(t);
+    }
+    m.0
+}
+
 /// What the kernel signs to anchor the chain at `global_position`.
 pub fn checkpoint_message(global_position: u64, chain_hash: &[u8], created_at: i64) -> Vec<u8> {
     Msg::new("kernable.v1.checkpoint")

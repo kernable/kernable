@@ -42,6 +42,9 @@ ${extraConfig}
 
 [workers]
 "${app}" = ${JSON.stringify(commandTypes)}
+
+[subscribers]
+"${app}" = ["*"]
 `,
     );
   }

@@ -41,7 +41,8 @@ pub async fn start(name: &str) -> Env {
     start_with(name, 2_000).await
 }
 
-/// Starts a kernel that trusts client key 1 for everything and worker key 2 for Order commands.
+/// Starts a kernel that trusts client key 1 for everything, worker key 2 for Order commands
+/// and subscriber key 4 for `OrderPlaced` events only.
 pub async fn start_with(name: &str, lease_ttl_ms: i64) -> Env {
     let dir = std::env::temp_dir().join(format!("kn-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -57,6 +58,10 @@ pub async fn start_with(name: &str, lease_ttl_ms: i64) -> Env {
         submit_timeout_ms: 5_000,
         clients: HashMap::from([(id(&key(1)), vec!["*".into()])]),
         workers: HashMap::from([(id(&key(2)), vec!["PlaceOrder".into(), "AddItem".into()])]),
+        subscribers: HashMap::from([
+            (id(&key(1)), vec!["*".into()]),
+            (id(&key(4)), vec!["OrderPlaced".into()]),
+        ]),
     };
     tokio::spawn(serve(Kernel::open(config).unwrap()));
     wait_for(&addr).await;

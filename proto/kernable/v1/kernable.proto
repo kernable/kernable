@@ -68,9 +68,13 @@ service EventService {
   rpc Subscribe(SubscribeRequest) returns (stream Event);
 }
 
+// Streams stored events with a global position after `after_position`: first the backlog,
+// then live. Signed by a key in the kernel's `subscribers` allowlist.
 message SubscribeRequest {
-  uint64 from_position = 1;
-  repeated string event_types = 2; // empty = all
+  uint64 after_position = 1;
+  repeated string event_types = 2; // empty = all types the key may read
+  int64 issued_at = 3;             // ms since epoch; must be within 60 s of the kernel's clock
+  Signature client_sig = 4;
 }
 
 // ---- workers ----

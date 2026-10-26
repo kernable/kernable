@@ -51,6 +51,13 @@ export interface WireCommandResult {
   rejected?: WireRejected | null;
 }
 
+export interface WireSubscribeRequest {
+  after_position: number;
+  event_types: string[];
+  issued_at: number;
+  client_sig: WireSignature;
+}
+
 /** One message from the kernel on a worker session; exactly one field is set. */
 export interface KernelMessage {
   challenge?: { nonce: Buffer } | null;
@@ -69,6 +76,7 @@ export type SessionCall = grpc.ClientDuplexStream<WorkerMessage, KernelMessage>;
 export interface Clients {
   submit(cmd: WireCommand): Promise<WireCommandResult>;
   session(): SessionCall;
+  subscribe(req: WireSubscribeRequest): grpc.ClientReadableStream<WireEvent>;
   close(): void;
 }
 
@@ -86,15 +94,18 @@ export function connect(url: string): Clients {
   const creds = grpc.credentials.createInsecure();
   const commands = new v1.CommandService(url, creds);
   const workers = new v1.WorkerGateway(url, creds);
+  const events = new v1.EventService(url, creds);
   return {
     submit: (cmd) =>
       new Promise((resolve, reject) =>
         commands.Submit(cmd, (err: grpc.ServiceError | null, res: WireCommandResult) => (err ? reject(err) : resolve(res))),
       ),
     session: () => workers.Session(),
+    subscribe: (req) => events.Subscribe(req),
     close: () => {
       commands.close();
       workers.close();
+      events.close();
     },
   };
 }
