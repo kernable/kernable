@@ -1,6 +1,6 @@
 use std::{collections::HashSet, path::PathBuf, sync::Arc, thread};
 
-use kernable_core::proto::{Command, NewEvent, Rejected, command_result::Outcome};
+use kernable_core::proto::{Command, NewEvent, Rejected, Signature, command_result::Outcome};
 use kernable_store_sqlite::{Enqueued, Error, SqliteStore};
 
 const TTL: i64 = 1_000;
@@ -24,6 +24,11 @@ fn ev(event_type: &str) -> NewEvent {
     }
 }
 
+/// The store does not check signatures; the kernel does.
+fn sig() -> Signature {
+    Signature::default()
+}
+
 fn versions(store: &SqliteStore) -> Vec<u64> {
     let events = store.read_stream("t1", "Order", "o1").unwrap();
     events.iter().map(|e| e.version).collect()
@@ -39,7 +44,13 @@ fn commit_appends_events_and_completes_command() {
 
     let lease = store.lease(&["PlaceOrder"], 0, TTL).unwrap().unwrap();
     let stored = store
-        .commit(&lease.lease_id, 0, &[ev("OrderPlaced"), ev("ItemAdded")], 1)
+        .commit(
+            &lease.lease_id,
+            0,
+            &[ev("OrderPlaced"), ev("ItemAdded")],
+            &sig(),
+            1,
+        )
         .unwrap();
 
     assert_eq!(stored.iter().map(|e| e.version).collect::<Vec<_>>(), [1, 2]);
@@ -63,11 +74,11 @@ fn stale_version_conflicts_and_lease_stays_usable() {
     let l1 = store.lease(&["PlaceOrder"], 0, TTL).unwrap().unwrap();
     let l2 = store.lease(&["AddItem"], 0, TTL).unwrap().unwrap();
     store
-        .commit(&l1.lease_id, 0, &[ev("OrderPlaced")], 1)
+        .commit(&l1.lease_id, 0, &[ev("OrderPlaced")], &sig(), 1)
         .unwrap();
 
     let err = store
-        .commit(&l2.lease_id, 0, &[ev("ItemAdded")], 1)
+        .commit(&l2.lease_id, 0, &[ev("ItemAdded")], &sig(), 1)
         .unwrap_err();
     assert!(matches!(
         err,
@@ -77,7 +88,7 @@ fn stale_version_conflicts_and_lease_stays_usable() {
         }
     ));
     store
-        .commit(&l2.lease_id, 1, &[ev("ItemAdded")], 2)
+        .commit(&l2.lease_id, 1, &[ev("ItemAdded")], &sig(), 2)
         .unwrap();
     assert_eq!(versions(&store), [1, 2]);
 }
@@ -93,7 +104,7 @@ fn enqueue_is_idempotent() {
 
     let lease = store.lease(&["PlaceOrder"], 0, TTL).unwrap().unwrap();
     store
-        .commit(&lease.lease_id, 0, &[ev("OrderPlaced")], 1)
+        .commit(&lease.lease_id, 0, &[ev("OrderPlaced")], &sig(), 1)
         .unwrap();
     assert!(matches!(
         store.enqueue(&cmd("c1", "PlaceOrder"), 2).unwrap(),
@@ -117,13 +128,13 @@ fn expired_lease_is_redelivered_and_old_lease_is_lost() {
     let second = store.lease(&["PlaceOrder"], TTL, TTL).unwrap().unwrap();
     assert_ne!(first.lease_id, second.lease_id);
 
-    let late = store.commit(&first.lease_id, 0, &[ev("OrderPlaced")], TTL);
+    let late = store.commit(&first.lease_id, 0, &[ev("OrderPlaced")], &sig(), TTL);
     assert!(matches!(late, Err(Error::LeaseLost)));
     store
-        .commit(&second.lease_id, 0, &[ev("OrderPlaced")], TTL)
+        .commit(&second.lease_id, 0, &[ev("OrderPlaced")], &sig(), TTL)
         .unwrap();
     assert!(matches!(
-        store.commit(&second.lease_id, 1, &[ev("OrderPlaced")], TTL),
+        store.commit(&second.lease_id, 1, &[ev("OrderPlaced")], &sig(), TTL),
         Err(Error::LeaseLost)
     ));
     assert_eq!(versions(&store), [1]);
@@ -193,7 +204,8 @@ fn concurrent_connections_lose_no_updates() {
                 while let Some(lease) = store.lease(&["AddItem"], 0, i64::MAX / 2).unwrap() {
                     loop {
                         let current = store.read_stream("t1", "Order", "o1").unwrap().len() as u64;
-                        match store.commit(&lease.lease_id, current, &[ev("ItemAdded")], 0) {
+                        match store.commit(&lease.lease_id, current, &[ev("ItemAdded")], &sig(), 0)
+                        {
                             Ok(_) => break,
                             Err(Error::VersionConflict { .. }) => continue,
                             Err(e) => panic!("{e}"),

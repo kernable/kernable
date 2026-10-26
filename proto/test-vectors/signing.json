@@ -1,0 +1,86 @@
+{
+  "challenge": {
+    "input": {
+      "nonce_hex": "01010101010101010101010101010101"
+    },
+    "message": "000000156b65726e61626c652e76312e6368616c6c656e67650000001001010101010101010101010101010101",
+    "signature": "c3bdc567931a33ab920ac311f9f39d23b4b22574134e5e76f50d5878cfbdb5eb68d816097197946a25a5650d4707e9779baa6a95099937215904452eaeef9008"
+  },
+  "checkpoint": {
+    "input": {
+      "chain_hash_hex": "0202020202020202020202020202020202020202020202020202020202020202",
+      "created_at": 1700000000000,
+      "global_position": 42
+    },
+    "message": "000000166b65726e61626c652e76312e636865636b706f696e74000000000000002a0000002002020202020202020202020202020202020202020202020202020202020202020000018bcfe56800",
+    "signature": "27edb9ce9a95919e23e1ca462a8ff7edad5542462849521b89bd28c0c36d9da7404149582c3b78686fc211351694148a196e540a9fe1edcdccd26c3c1b5f6103"
+  },
+  "command": {
+    "input": {
+      "aggregate_id": "o-1",
+      "aggregate_type": "Order",
+      "command_id": "c-1",
+      "command_type": "PlaceOrder",
+      "payload_hex": "7b22637573746f6d65724964223a226b2d31227d",
+      "tenant_id": "t-1"
+    },
+    "message": "000000136b65726e61626c652e76312e636f6d6d616e6400000003632d3100000003742d31000000054f72646572000000036f2d310000000a506c6163654f72646572000000147b22637573746f6d65724964223a226b2d31227d",
+    "signature": "3da45b35234ba353306be62b299675ef0cfa00547b20a7b3b78b405ed0c5867615672db9f0ea97186c732e11cc3633e23db1cdc831fc239e8639c570186c5d07"
+  },
+  "description": "Signing test vectors, see proto/SIGNING.md. Signatures are Ed25519 (deterministic) with `key.seed`.",
+  "event_hash": {
+    "hash": "d084f69ba70dff924c049670bbf64d603ff4fcc42f5ac67dd1dbb21721c95a89",
+    "input": {
+      "aggregate_id": "o-1",
+      "aggregate_type": "Order",
+      "command_id": "c-1",
+      "created_at": 1700000000000,
+      "event_type": "OrderPlaced",
+      "global_position": 1,
+      "payload_hex": "7b22637573746f6d65724964223a226b2d31227d",
+      "prev_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "producer_key_id": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+      "producer_sig_hex": "f1a3ac1eec25018095dc1e488e8618e60b4d49df8765e46d1aeb73c3e7b259e91cb5176da90384e3ba7213deea6d4a109089e00931e51ce25f9d7bca36208806",
+      "tenant_id": "t-1",
+      "version": 1
+    }
+  },
+  "key": {
+    "key_id": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+    "seed": "0707070707070707070707070707070707070707070707070707070707070707"
+  },
+  "rejection": {
+    "input": {
+      "code": "invalid_state",
+      "command_id": "c-1",
+      "message": "Order already exists"
+    },
+    "message": "000000156b65726e61626c652e76312e72656a656374696f6e00000003632d310000000d696e76616c69645f7374617465000000144f7264657220616c726561647920657869737473",
+    "signature": "89daed8531c203bb7927a80f45cabe0c9609e6d74b1255dac256c0d49c888b588e5c3a3a3c91a638c09e3e23cddbf6eea6063b11fc3b076b31bdd5d857ab8200"
+  },
+  "result": {
+    "input": {
+      "command": {
+        "aggregate_id": "o-1",
+        "aggregate_type": "Order",
+        "command_id": "c-1",
+        "command_type": "PlaceOrder",
+        "payload_hex": "7b22637573746f6d65724964223a226b2d31227d",
+        "tenant_id": "t-1"
+      },
+      "events": [
+        {
+          "event_type": "OrderPlaced",
+          "payload_hex": "7b22637573746f6d65724964223a226b2d31227d"
+        },
+        {
+          "event_type": "ItemAdded",
+          "payload_hex": "7b22736b75223a2278227d"
+        }
+      ],
+      "expected_version": 0
+    },
+    "message": "000000126b65726e61626c652e76312e726573756c7400000003632d3100000003742d31000000054f72646572000000036f2d31000000000000000000000000000000020000000b4f72646572506c61636564000000147b22637573746f6d65724964223a226b2d31227d000000094974656d41646465640000000b7b22736b75223a2278227d",
+    "signature": "1703fbf34116ad0312d73818f14f6553bf6f5d1e69a23c250c63887a7955512c3eea72468252431d315bcf9f4c599aa7a6019b10ff8a33003636c2f6d7818704"
+  }
+}

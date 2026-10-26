@@ -9,3 +9,5 @@ publish.workspace = true
 kernable-core = { path = "../kernable-core" }
 prost.workspace = true
 rusqlite.workspace = true
+ed25519-dalek.workspace = true
+

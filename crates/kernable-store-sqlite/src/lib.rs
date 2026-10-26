@@ -2,6 +2,10 @@
 //!
 //! All writes run in `BEGIN IMMEDIATE` transactions, so several stores on the same
 //! file (threads or processes) stay consistent; SQLite serializes them as a single writer.
+//! Tables are `STRICT`, so stored values always have the declared types.
+//! Events form a hash chain anchored by kernel-signed checkpoints (see `proto/SIGNING.md`).
+
+mod verify;
 
 use std::{
     fmt,
@@ -10,11 +14,18 @@ use std::{
     time::Duration,
 };
 
-use kernable_core::proto::{
-    Command, CommandResult, Committed, Event, NewEvent, Rejected, command_result::Outcome,
+use ed25519_dalek::SigningKey;
+use kernable_core::{
+    proto::{
+        Command, CommandResult, Committed, Event, NewEvent, Rejected, Signature,
+        command_result::Outcome,
+    },
+    signing::{self, GENESIS},
 };
 use prost::Message;
 use rusqlite::{Connection, OptionalExtension, ToSql, Transaction, TransactionBehavior, params};
+
+pub use verify::Report;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS events (
@@ -27,8 +38,12 @@ CREATE TABLE IF NOT EXISTS events (
     payload         BLOB    NOT NULL,
     command_id      TEXT    NOT NULL,
     created_at      INTEGER NOT NULL,
+    producer_key_id TEXT    NOT NULL,
+    producer_sig    BLOB    NOT NULL,
+    prev_hash       BLOB    NOT NULL,
+    hash            BLOB    NOT NULL,
     UNIQUE (tenant_id, aggregate_type, aggregate_id, version)
-);
+) STRICT;
 CREATE TABLE IF NOT EXISTS commands (
     command_id       TEXT PRIMARY KEY,
     tenant_id        TEXT    NOT NULL,
@@ -36,19 +51,29 @@ CREATE TABLE IF NOT EXISTS commands (
     aggregate_id     TEXT    NOT NULL,
     command_type     TEXT    NOT NULL,
     payload          BLOB    NOT NULL,
+    client_key_id    TEXT,
+    client_sig       BLOB,
     status           TEXT    NOT NULL, -- pending | leased | committed | rejected
     attempts         INTEGER NOT NULL DEFAULT 0,
     lease_id         TEXT,
     lease_expires_at INTEGER,
     result           BLOB,             -- encoded CommandResult once completed
     created_at       INTEGER NOT NULL
-);
+) STRICT;
 CREATE INDEX IF NOT EXISTS commands_ready ON commands (status, created_at);
 CREATE INDEX IF NOT EXISTS commands_lease ON commands (lease_id);
+CREATE TABLE IF NOT EXISTS checkpoints (
+    global_position INTEGER PRIMARY KEY,
+    chain_hash      BLOB    NOT NULL,
+    kernel_key_id   TEXT    NOT NULL,
+    kernel_sig      BLOB    NOT NULL,
+    created_at      INTEGER NOT NULL
+) STRICT;
 ";
 
 const EVENT_COLUMNS: &str = "global_position, tenant_id, aggregate_type, aggregate_id, version, \
-                             event_type, payload, command_id, created_at";
+                             event_type, payload, command_id, created_at, \
+                             producer_key_id, producer_sig, hash";
 
 #[derive(Debug)]
 pub enum Error {
@@ -111,6 +136,15 @@ pub struct Lease {
     pub command: Command,
 }
 
+/// A kernel-signed anchor of the hash chain.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Checkpoint {
+    pub global_position: u64,
+    pub chain_hash: Vec<u8>,
+    pub kernel_sig: Signature,
+    pub created_at: i64,
+}
+
 pub struct SqliteStore {
     conn: Mutex<Connection>,
 }
@@ -169,10 +203,11 @@ impl SqliteStore {
     /// Persists a command as pending. Idempotent on `command_id`.
     pub fn enqueue(&self, cmd: &Command, now_ms: i64) -> Result<Enqueued> {
         let conn = self.conn();
+        let (key_id, sig) = split_sig(cmd.client_sig.as_ref());
         let inserted = conn.execute(
             "INSERT INTO commands (command_id, tenant_id, aggregate_type, aggregate_id,
-                                   command_type, payload, status, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7)
+                                   command_type, payload, client_key_id, client_sig, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9)
              ON CONFLICT (command_id) DO NOTHING",
             params![
                 cmd.command_id,
@@ -181,6 +216,8 @@ impl SqliteStore {
                 cmd.aggregate_id,
                 cmd.command_type,
                 cmd.payload,
+                key_id,
+                sig,
                 now_ms
             ],
         )?;
@@ -201,7 +238,8 @@ impl SqliteStore {
 
         let placeholders = vec!["?"; command_types.len()].join(", ");
         let sql = format!(
-            "SELECT command_id, tenant_id, aggregate_type, aggregate_id, command_type, payload, attempts
+            "SELECT command_id, tenant_id, aggregate_type, aggregate_id, command_type, payload,
+                    client_key_id, client_sig, attempts
              FROM commands
              WHERE (status = 'pending' OR (status = 'leased' AND lease_expires_at <= ?1))
                AND command_type IN ({placeholders})
@@ -219,9 +257,9 @@ impl SqliteStore {
                     aggregate_id: r.get(3)?,
                     command_type: r.get(4)?,
                     payload: r.get(5)?,
-                    client_sig: None,
+                    client_sig: join_sig(r.get(6)?, r.get(7)?),
                 };
-                Ok((command, r.get::<_, i64>(6)?))
+                Ok((command, r.get::<_, i64>(8)?))
             })
             .optional()?;
         let Some((command, attempts)) = row else {
@@ -239,7 +277,9 @@ impl SqliteStore {
         Ok(Some(Lease { lease_id, command }))
     }
 
-    /// Appends `events` to the leased command's stream and completes the command, atomically.
+    /// Appends `events` to the leased command's stream, extends the hash chain and
+    /// completes the command, atomically. `producer_sig` is the worker's result signature;
+    /// verifying it is up to the caller.
     ///
     /// On `VersionConflict` the lease stays held, so the caller can retry with fresh history.
     pub fn commit(
@@ -247,6 +287,7 @@ impl SqliteStore {
         lease_id: &str,
         expected_version: u64,
         events: &[NewEvent],
+        producer_sig: &Signature,
         now_ms: i64,
     ) -> Result<Vec<Event>> {
         let mut conn = self.conn();
@@ -266,25 +307,20 @@ impl SqliteStore {
             });
         }
 
+        let (mut position, mut prev) = tx
+            .query_row(
+                "SELECT global_position, hash FROM events ORDER BY global_position DESC LIMIT 1",
+                [],
+                |r| Ok((r.get::<_, u64>(0)?, r.get::<_, Vec<u8>>(1)?)),
+            )
+            .optional()?
+            .unwrap_or((0, GENESIS.to_vec()));
+
         let mut stored = Vec::with_capacity(events.len());
         for (version, e) in (expected_version + 1..).zip(events) {
-            tx.execute(
-                "INSERT INTO events (tenant_id, aggregate_type, aggregate_id, version,
-                                     event_type, payload, command_id, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    cmd.tenant_id,
-                    cmd.aggregate_type,
-                    cmd.aggregate_id,
-                    version,
-                    e.event_type,
-                    e.payload,
-                    cmd.command_id,
-                    now_ms
-                ],
-            )?;
-            stored.push(Event {
-                global_position: tx.last_insert_rowid() as u64,
+            position += 1;
+            let mut event = Event {
+                global_position: position,
                 tenant_id: cmd.tenant_id.clone(),
                 aggregate_type: cmd.aggregate_type.clone(),
                 aggregate_id: cmd.aggregate_id.clone(),
@@ -293,8 +329,33 @@ impl SqliteStore {
                 payload: e.payload.clone(),
                 command_id: cmd.command_id.clone(),
                 created_at: now_ms,
-                ..Default::default()
-            });
+                hash: vec![],
+                producer_sig: Some(producer_sig.clone()),
+            };
+            event.hash = signing::event_hash(&prev, &event).to_vec();
+            tx.execute(
+                "INSERT INTO events (global_position, tenant_id, aggregate_type, aggregate_id, version,
+                                     event_type, payload, command_id, created_at,
+                                     producer_key_id, producer_sig, prev_hash, hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    event.global_position,
+                    event.tenant_id,
+                    event.aggregate_type,
+                    event.aggregate_id,
+                    event.version,
+                    event.event_type,
+                    event.payload,
+                    event.command_id,
+                    event.created_at,
+                    producer_sig.key_id,
+                    producer_sig.sig,
+                    prev,
+                    event.hash
+                ],
+            )?;
+            prev = event.hash.clone();
+            stored.push(event);
         }
 
         let outcome = Outcome::Committed(Committed {
@@ -319,6 +380,63 @@ impl SqliteStore {
     pub fn result(&self, command_id: &str) -> Result<Option<CommandResult>> {
         stored_result(&self.conn(), command_id)
     }
+
+    // ---- integrity ----
+
+    /// Signs the current head of the hash chain. Returns `None` while there are no events.
+    pub fn checkpoint(&self, kernel: &SigningKey, now_ms: i64) -> Result<Option<Checkpoint>> {
+        let conn = self.conn();
+        let head = conn
+            .query_row(
+                "SELECT global_position, hash FROM events ORDER BY global_position DESC LIMIT 1",
+                [],
+                |r| Ok((r.get::<_, u64>(0)?, r.get::<_, Vec<u8>>(1)?)),
+            )
+            .optional()?;
+        let Some((global_position, chain_hash)) = head else {
+            return Ok(None);
+        };
+        let msg = signing::checkpoint_message(global_position, &chain_hash, now_ms);
+        let kernel_sig = signing::sign(kernel, &msg);
+        conn.execute(
+            "INSERT OR IGNORE INTO checkpoints (global_position, chain_hash, kernel_key_id, kernel_sig, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                global_position,
+                chain_hash,
+                kernel_sig.key_id,
+                kernel_sig.sig,
+                now_ms
+            ],
+        )?;
+        Ok(Some(Checkpoint {
+            global_position,
+            chain_hash,
+            kernel_sig,
+            created_at: now_ms,
+        }))
+    }
+
+    /// Recomputes the hash chain and checks all signatures; see [`Report`].
+    pub fn verify(&self, kernel_key_id: &str) -> Result<Report> {
+        verify::run(&self.conn(), kernel_key_id)
+    }
+}
+
+fn event_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
+    Ok(Event {
+        global_position: r.get(0)?,
+        tenant_id: r.get(1)?,
+        aggregate_type: r.get(2)?,
+        aggregate_id: r.get(3)?,
+        version: r.get(4)?,
+        event_type: r.get(5)?,
+        payload: r.get(6)?,
+        command_id: r.get(7)?,
+        created_at: r.get(8)?,
+        producer_sig: join_sig(r.get(9)?, r.get(10)?),
+        hash: r.get(11)?,
+    })
 }
 
 fn read_events(
@@ -327,21 +445,22 @@ fn read_events(
     params: impl rusqlite::Params,
 ) -> Result<Vec<Event>> {
     let mut stmt = conn.prepare(&format!("SELECT {EVENT_COLUMNS} FROM events {filter}"))?;
-    let rows = stmt.query_map(params, |r| {
-        Ok(Event {
-            global_position: r.get(0)?,
-            tenant_id: r.get(1)?,
-            aggregate_type: r.get(2)?,
-            aggregate_id: r.get(3)?,
-            version: r.get(4)?,
-            event_type: r.get(5)?,
-            payload: r.get(6)?,
-            command_id: r.get(7)?,
-            created_at: r.get(8)?,
-            ..Default::default()
-        })
-    })?;
+    let rows = stmt.query_map(params, event_from_row)?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+fn split_sig(sig: Option<&Signature>) -> (Option<&str>, Option<&[u8]>) {
+    match sig {
+        Some(s) => (Some(&s.key_id), Some(&s.sig)),
+        None => (None, None),
+    }
+}
+
+fn join_sig(key_id: Option<String>, sig: Option<Vec<u8>>) -> Option<Signature> {
+    Some(Signature {
+        key_id: key_id?,
+        sig: sig?,
+    })
 }
 
 /// The stream identity of the command currently held under `lease_id`.
