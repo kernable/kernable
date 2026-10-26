@@ -1,0 +1,135 @@
+// kernable protocol v1 (PoC draft).
+// Payloads are opaque bytes; signatures cover the layout defined in SIGNING.md.
+syntax = "proto3";
+
+package kernable.v1;
+
+// ---- shared ----
+
+message Signature {
+  string key_id = 1;
+  bytes sig = 2; // Ed25519
+}
+
+message Command {
+  string command_id = 1;
+  string tenant_id = 2;
+  string aggregate_type = 3;
+  string aggregate_id = 4;
+  string command_type = 5;
+  bytes payload = 6;
+  Signature client_sig = 7;
+}
+
+message Event {
+  uint64 global_position = 1;
+  string tenant_id = 2;
+  string aggregate_type = 3;
+  string aggregate_id = 4;
+  uint64 version = 5;
+  string event_type = 6;
+  bytes payload = 7;
+  string command_id = 8;
+  int64 created_at = 9;
+  bytes hash = 10;
+  Signature producer_sig = 11;
+}
+
+// Event proposed by a worker; the kernel assigns position, version and hash.
+message NewEvent {
+  string event_type = 1;
+  bytes payload = 2;
+}
+
+// ---- clients ----
+
+service CommandService {
+  rpc Submit(Command) returns (CommandResult);
+}
+
+message CommandResult {
+  string command_id = 1;
+  oneof outcome {
+    Committed committed = 2;
+    Rejected rejected = 3;
+  }
+}
+
+message Committed {
+  repeated Event events = 1;
+}
+
+message Rejected {
+  string code = 1;
+  string message = 2;
+}
+
+service EventService {
+  rpc Subscribe(SubscribeRequest) returns (stream Event);
+}
+
+message SubscribeRequest {
+  uint64 from_position = 1;
+  repeated string event_types = 2; // empty = all
+}
+
+// ---- workers ----
+
+service WorkerGateway {
+  rpc Session(stream WorkerMessage) returns (stream KernelMessage);
+}
+
+message WorkerMessage {
+  oneof msg {
+    Register register = 1;
+    ChallengeResponse challenge_response = 2;
+    Result result = 3;
+    Rejection rejection = 4;
+  }
+}
+
+message KernelMessage {
+  oneof msg {
+    Challenge challenge = 1;
+    Registered registered = 2;
+    Execute execute = 3;
+  }
+}
+
+message Register {
+  string worker_id = 1;
+  string key_id = 2;
+  repeated string command_types = 3;
+  uint32 max_concurrency = 4;
+}
+
+message Challenge {
+  bytes nonce = 1;
+}
+
+message ChallengeResponse {
+  bytes sig = 1; // Ed25519 over nonce
+}
+
+message Registered {
+  string session_id = 1;
+}
+
+message Execute {
+  string lease_id = 1;
+  Command command = 2;
+  repeated Event history = 3;
+  uint64 expected_version = 4;
+}
+
+message Result {
+  string lease_id = 1;
+  repeated NewEvent events = 2;
+  Signature worker_sig = 3;
+}
+
+message Rejection {
+  string lease_id = 1;
+  Rejected reason = 2;
+  Signature worker_sig = 3;
+}
