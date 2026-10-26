@@ -2,13 +2,15 @@
 //! verifies their signed results and commits them to the event store.
 //!
 //! Workers pull work: each session runs its own dispatch loop that leases commands of the
-//! types the worker registered, up to its `max_concurrency`.
+//! types the worker registered, up to its `max_concurrency`, from the queue in kernel memory
+//! (one command per aggregate at a time, see [`queue`]).
 //!
 //! By default a submit responds once every registered listener has processed the command's
 //! events (see [`listeners`]), so a query right after it sees the new state.
 
 pub mod config;
 mod listeners;
+mod queue;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -66,6 +68,7 @@ pub struct Kernel {
     /// Wakes subscriptions and listeners when events were committed.
     appended: Notify,
     listeners: listeners::Registry,
+    queue: queue::Queue,
 }
 
 impl Kernel {
@@ -73,6 +76,10 @@ impl Kernel {
         let store = kernable_store::open(&config.store)?;
         let key = signing::read_signing_key(&config.kernel_key)?;
         let listeners = listeners::Registry::load(store.listeners()?);
+        let queue = queue::Queue::default();
+        for command in store.pending()? {
+            queue.push(command);
+        }
         Ok(Arc::new(Kernel {
             config,
             store,
@@ -81,6 +88,7 @@ impl Kernel {
             work: Notify::new(),
             appended: Notify::new(),
             listeners,
+            queue,
         }))
     }
 
@@ -88,13 +96,11 @@ impl Kernel {
         self.waiters.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Writes a final checkpoint and the listener positions, and hands all leased commands
-    /// back to the queue, so they are redelivered right after a restart instead of after
-    /// their lease expires.
+    /// Writes a final checkpoint and the listener positions. Leases are not persisted:
+    /// after a restart, every unfinished command is delivered again right away.
     pub fn shutdown(&self) -> Result<(), BoxError> {
         self.store.checkpoint(&self.key, now_ms())?;
         listeners::flush(self)?;
-        self.store.release_all()?;
         Ok(())
     }
 
@@ -232,6 +238,7 @@ impl CommandService for Api {
             }
             Enqueued::Duplicate { result: None } => None,
             Enqueued::New => {
+                kernel.queue.push(cmd.clone());
                 kernel.work.notify_waiters();
                 None
             }
@@ -417,9 +424,7 @@ impl Drop for ReleaseOnDrop {
             .map(|(lease_id, _)| lease_id)
             .collect();
         for lease_id in leases {
-            if let Err(e) = self.0.kernel.store.release(&lease_id) {
-                eprintln!("release failed: {e}");
-            }
+            self.0.kernel.queue.release(&lease_id);
         }
         self.0.kernel.work.notify_waiters();
     }
@@ -518,29 +523,22 @@ async fn run_session(
 async fn dispatch(session: Arc<Session>, command_types: Vec<String>, permits: Arc<Semaphore>) {
     let types: Vec<&str> = command_types.iter().map(String::as_str).collect();
     let kernel = &session.kernel;
+    let ttl = Duration::from_millis(kernel.config.lease_ttl_ms.max(0) as u64);
     loop {
         let Ok(permit) = Arc::clone(&permits).acquire_owned().await else {
             return;
         };
-        let lease = loop {
+        let (lease_id, command) = loop {
             let notified = kernel.work.notified();
-            match kernel
-                .store
-                .lease(&types, now_ms(), kernel.config.lease_ttl_ms)
-            {
-                Ok(Some(lease)) => break lease,
-                Ok(None) => {}
-                Err(e) => eprintln!("lease failed: {e}"),
+            if let Some(lease) = kernel.queue.lease(&types, ttl) {
+                break lease;
             }
             tokio::select! {
                 _ = notified => {}
                 _ = tokio::time::sleep(POLL) => {}
             }
         };
-        if !session
-            .execute(lease.lease_id, lease.command, 0, permit)
-            .await
-        {
+        if !session.execute(lease_id, command, 0, permit).await {
             return;
         }
     }
@@ -568,8 +566,9 @@ impl Session {
         ) {
             Ok(history) => history,
             Err(e) => {
-                // The lease expires and the command is redelivered.
                 eprintln!("read stream failed: {e}");
+                self.kernel.queue.release(&lease_id);
+                self.kernel.work.notify_waiters();
                 return true;
             }
         };
@@ -603,13 +602,18 @@ impl Session {
             self.in_flight().insert(r.lease_id, f);
             return Err(Status::unauthenticated("invalid result signature"));
         }
+        if !self.kernel.queue.holds(&r.lease_id) {
+            return Ok(()); // the lease expired; the command was handed to another worker
+        }
 
+        let command_id = &f.command.command_id;
         match self
             .kernel
             .store
-            .commit(&r.lease_id, f.expected_version, &r.events, &sig, now_ms())
+            .commit(command_id, f.expected_version, &r.events, &sig, now_ms())
         {
             Ok(events) => {
+                self.kernel.queue.done(&r.lease_id);
                 self.kernel.appended.notify_waiters();
                 self.kernel.complete(CommandResult {
                     command_id: f.command.command_id,
@@ -630,8 +634,11 @@ impl Session {
                 };
                 self.reject(&r.lease_id, f.command.command_id, reason);
             }
-            Err(StoreError::LeaseLost) => {}
-            Err(e) => eprintln!("commit failed: {e}"),
+            Err(StoreError::NotPending) => self.done(&r.lease_id),
+            Err(e) => {
+                eprintln!("commit failed: {e}");
+                self.release(&r.lease_id);
+            }
         }
         Ok(())
     }
@@ -652,14 +659,35 @@ impl Session {
     }
 
     fn reject(&self, lease_id: &str, command_id: String, reason: Rejected) {
-        match self.kernel.store.reject(lease_id, reason.clone()) {
-            Ok(()) => self.kernel.complete(CommandResult {
-                command_id,
-                outcome: Some(Outcome::Rejected(reason)),
-            }),
-            Err(StoreError::LeaseLost) => {}
-            Err(e) => eprintln!("reject failed: {e}"),
+        if !self.kernel.queue.holds(lease_id) {
+            return;
         }
+        match self.kernel.store.reject(&command_id, reason.clone()) {
+            Ok(()) => {
+                self.kernel.queue.done(lease_id);
+                self.kernel.complete(CommandResult {
+                    command_id,
+                    outcome: Some(Outcome::Rejected(reason)),
+                });
+            }
+            Err(StoreError::NotPending) => self.done(lease_id),
+            Err(e) => {
+                eprintln!("reject failed: {e}");
+                self.release(lease_id);
+            }
+        }
+    }
+
+    /// The command was completed under an earlier lease: drop it from the queue.
+    fn done(&self, lease_id: &str) {
+        self.kernel.queue.done(lease_id);
+        self.kernel.work.notify_waiters();
+    }
+
+    /// Hands the command back for another attempt.
+    fn release(&self, lease_id: &str) {
+        self.kernel.queue.release(lease_id);
+        self.kernel.work.notify_waiters();
     }
 }
 

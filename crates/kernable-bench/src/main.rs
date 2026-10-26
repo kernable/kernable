@@ -154,24 +154,15 @@ fn store(url: &str, count: usize) -> Result<(), BoxError> {
             &signing::command_message(&cmd),
         )?;
         store.enqueue(&cmd, 0)?;
-        let lease = store
-            .lease(&["Write"], 0, 10_000)?
-            .ok_or("nothing to lease")?;
         let history = store.read_stream(&cmd.tenant_id, &cmd.aggregate_type, &cmd.aggregate_id)?;
         let version = history.last().map_or(0, |e| e.version);
         let events = [NewEvent {
             event_type: "Written".into(),
-            payload: lease.command.payload.clone(),
+            payload: cmd.payload.clone(),
         }];
-        let sig = signing::sign(
-            &worker,
-            &signing::result_message(&lease.command, version, &events),
-        );
-        signing::verify(
-            &sig,
-            &signing::result_message(&lease.command, version, &events),
-        )?;
-        let stored = store.commit(&lease.lease_id, version, &events, &sig, 0)?;
+        let sig = signing::sign(&worker, &signing::result_message(&cmd, version, &events));
+        signing::verify(&sig, &signing::result_message(&cmd, version, &events))?;
+        let stored = store.commit(&cmd.command_id, version, &events, &sig, 0)?;
         let outcome = Outcome::Committed(kernable_core::proto::Committed {
             events: stored,
             settled: false,

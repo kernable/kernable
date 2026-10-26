@@ -98,10 +98,10 @@ impl Drop for KillOnDrop {
     }
 }
 
-/// SIGTERM: the kernel exits cleanly, writes a final checkpoint and hands in-flight
-/// commands back, so they are available immediately and not only after their lease expires.
+/// SIGTERM: the kernel exits cleanly and writes a final checkpoint. An in-flight command
+/// stays pending and runs right after a restart, not only after its 60 s lease expires.
 #[tokio::test(flavor = "multi_thread")]
-async fn sigterm_releases_in_flight_commands_and_checkpoints() {
+async fn sigterm_checkpoints_and_in_flight_commands_run_right_after_a_restart() {
     let dir = std::env::temp_dir().join(format!("kn-sigterm-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("kernel.key"), hex(key(3).as_bytes())).unwrap();
@@ -163,12 +163,33 @@ async fn sigterm_releases_in_flight_commands_and_checkpoints() {
     };
     assert!(exit.success());
 
-    let store = kernable_store::open(&store).unwrap();
-    let report = store.verify(&id(&key(3))).unwrap();
-    assert!(report.is_ok(), "{:?}", report.problems);
-    assert!(report.checkpoints >= 1, "no final checkpoint");
-    // Leasable right away despite the 60 s lease: the kernel handed it back.
-    let lease = store.lease(&["PlaceOrder"], 0, 1_000).unwrap();
-    assert_eq!(lease.map(|l| l.command.command_id).as_deref(), Some("c1"));
+    {
+        let store = kernable_store::open(&store).unwrap();
+        let report = store.verify(&id(&key(3))).unwrap();
+        assert!(report.is_ok(), "{:?}", report.problems);
+        assert!(report.checkpoints >= 1, "no final checkpoint");
+        let pending: Vec<String> = store
+            .pending()
+            .unwrap()
+            .into_iter()
+            .map(|c| c.command_id)
+            .collect();
+        assert_eq!(pending, ["c1"]);
+    }
+
+    // After a restart, c1 runs at once and its result reaches a resubmit.
+    kernel.0 = Process::new(env!("CARGO_BIN_EXE_kernable-kernel"))
+        .arg(dir.join("kernable.toml"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for(&addr).await;
+    tokio::spawn(run_worker(addr.clone(), TestWorker::honest()));
+    let started = Instant::now();
+    let c1 = signed(command("c1", "PlaceOrder", "o1"), &key(1));
+    assert_eq!(committed_versions(&submit(&addr, c1).await.unwrap()), [1]);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    drop(kernel);
     let _ = std::fs::remove_dir_all(&dir);
 }

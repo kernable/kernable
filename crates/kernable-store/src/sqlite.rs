@@ -20,10 +20,10 @@ use kernable_core::{
     signing::{self, GENESIS},
 };
 use prost::Message;
-use rusqlite::{Connection, OptionalExtension, ToSql, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::{
-    Checkpoint, Enqueued, Error, Lease, Result, Store,
+    Checkpoint, Enqueued, Error, Result, Store,
     verify::{Report, Verifier},
 };
 
@@ -53,16 +53,11 @@ CREATE TABLE IF NOT EXISTS commands (
     payload          BLOB    NOT NULL,
     client_key_id    TEXT,
     client_sig       BLOB,
-    status           TEXT    NOT NULL, -- pending | leased | committed | rejected
-    attempts         INTEGER NOT NULL DEFAULT 0,
-    lease_id         TEXT,
-    lease_expires_at INTEGER,
+    status           TEXT    NOT NULL, -- pending | committed | rejected
     result           BLOB,             -- encoded CommandResult once completed
     created_at       INTEGER NOT NULL
 ) STRICT;
-CREATE INDEX IF NOT EXISTS commands_ready ON commands (status, created_at);
-CREATE INDEX IF NOT EXISTS commands_lease ON commands (lease_id);
-CREATE INDEX IF NOT EXISTS commands_aggregate ON commands (tenant_id, aggregate_type, aggregate_id, status);
+CREATE INDEX IF NOT EXISTS commands_pending ON commands (status, created_at);
 CREATE TABLE IF NOT EXISTS checkpoints (
     global_position INTEGER PRIMARY KEY,
     chain_hash      BLOB    NOT NULL,
@@ -165,77 +160,36 @@ impl Store for SqliteStore {
         Ok(Enqueued::Duplicate { result })
     }
 
-    /// Leases the oldest pending (or expired) command of one of `command_types` for `ttl_ms`.
-    ///
-    /// Per aggregate, at most one command is leased at a time and commands are leased in
-    /// submission order; commands of a busy aggregate wait in the queue.
-    fn lease(&self, command_types: &[&str], now_ms: i64, ttl_ms: i64) -> Result<Option<Lease>> {
-        if command_types.is_empty() {
-            return Ok(None);
-        }
-        let mut conn = self.conn();
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-
-        let placeholders = vec!["?"; command_types.len()].join(", ");
-        let sql = format!(
-            "SELECT c.command_id, c.tenant_id, c.aggregate_type, c.aggregate_id, c.command_type,
-                    c.payload, c.client_key_id, c.client_sig, c.attempts
-             FROM commands c
-             WHERE (c.status = 'pending' OR (c.status = 'leased' AND c.lease_expires_at <= ?1))
-               AND c.command_type IN ({placeholders})
-               -- One command per aggregate at a time, in submission order: no other command of
-               -- the aggregate may hold a live lease, and no older one may still be waiting.
-               AND NOT EXISTS (
-                   SELECT 1 FROM commands o
-                   WHERE o.tenant_id = c.tenant_id
-                     AND o.aggregate_type = c.aggregate_type
-                     AND o.aggregate_id = c.aggregate_id
-                     AND o.command_id <> c.command_id
-                     AND ((o.status = 'leased' AND o.lease_expires_at > ?1)
-                          OR (o.status IN ('pending', 'leased')
-                              AND (o.created_at, o.rowid) < (c.created_at, c.rowid))))
-             ORDER BY c.created_at, c.rowid
-             LIMIT 1"
-        );
-        let mut args: Vec<&dyn ToSql> = vec![&now_ms];
-        args.extend(command_types.iter().map(|t| t as &dyn ToSql));
-        let row = tx
-            .query_row(&sql, args.as_slice(), |r| {
-                let command = Command {
-                    command_id: r.get(0)?,
-                    tenant_id: r.get(1)?,
-                    aggregate_type: r.get(2)?,
-                    aggregate_id: r.get(3)?,
-                    command_type: r.get(4)?,
-                    payload: r.get(5)?,
-                    client_sig: join_sig(r.get(6)?, r.get(7)?),
-                };
-                Ok((command, r.get::<_, i64>(8)?))
-            })
-            .optional()?;
-        let Some((command, attempts)) = row else {
-            return Ok(None);
-        };
-
-        let attempts = attempts + 1;
-        let lease_id = format!("{}#{attempts}", command.command_id);
-        tx.execute(
-            "UPDATE commands SET status = 'leased', attempts = ?2, lease_id = ?3, lease_expires_at = ?4
-             WHERE command_id = ?1",
-            params![command.command_id, attempts, lease_id, now_ms + ttl_ms],
+    /// All commands not completed yet, in submission order.
+    fn pending(&self) -> Result<Vec<Command>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT command_id, tenant_id, aggregate_type, aggregate_id, command_type, payload,
+                    client_key_id, client_sig
+             FROM commands WHERE status = 'pending' ORDER BY created_at, rowid",
         )?;
-        tx.commit()?;
-        Ok(Some(Lease { lease_id, command }))
+        let rows = stmt.query_map([], |r| {
+            Ok(Command {
+                command_id: r.get(0)?,
+                tenant_id: r.get(1)?,
+                aggregate_type: r.get(2)?,
+                aggregate_id: r.get(3)?,
+                command_type: r.get(4)?,
+                payload: r.get(5)?,
+                client_sig: join_sig(r.get(6)?, r.get(7)?),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Appends `events` to the leased command's stream, extends the hash chain and
+    /// Appends `events` to the pending command's stream, extends the hash chain and
     /// completes the command, atomically. `producer_sig` is the worker's result signature;
     /// verifying it is up to the caller.
     ///
-    /// On `VersionConflict` the lease stays held, so the caller can retry with fresh history.
+    /// On `VersionConflict` the command stays pending, so the caller can retry with fresh history.
     fn commit(
         &self,
-        lease_id: &str,
+        command_id: &str,
         expected_version: u64,
         events: &[NewEvent],
         producer_sig: &Signature,
@@ -243,7 +197,7 @@ impl Store for SqliteStore {
     ) -> Result<Vec<Event>> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let cmd = held_command(&tx, lease_id)?;
+        let cmd = pending_command(&tx, command_id)?;
 
         let actual: u64 = tx.query_row(
             "SELECT COALESCE(MAX(version), 0) FROM events
@@ -318,31 +272,11 @@ impl Store for SqliteStore {
         Ok(stored)
     }
 
-    /// Hands a leased command back to the queue before its lease expires.
-    /// Returns false if the lease was not held anymore.
-    fn release(&self, lease_id: &str) -> Result<bool> {
-        let changed = self.conn().execute(
-            "UPDATE commands SET status = 'pending', lease_id = NULL, lease_expires_at = NULL
-             WHERE lease_id = ?1 AND status = 'leased'",
-            [lease_id],
-        )?;
-        Ok(changed == 1)
-    }
-
-    /// Hands every leased command back to the queue, e.g. on shutdown.
-    fn release_all(&self) -> Result<usize> {
-        Ok(self.conn().execute(
-            "UPDATE commands SET status = 'pending', lease_id = NULL, lease_expires_at = NULL
-             WHERE status = 'leased'",
-            [],
-        )?)
-    }
-
-    /// Completes the leased command as rejected by the business logic.
-    fn reject(&self, lease_id: &str, reason: Rejected) -> Result<()> {
+    /// Completes the pending command as rejected by the business logic.
+    fn reject(&self, command_id: &str, reason: Rejected) -> Result<()> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let cmd = held_command(&tx, lease_id)?;
+        let cmd = pending_command(&tx, command_id)?;
         complete(&tx, &cmd.command_id, "rejected", Outcome::Rejected(reason))?;
         tx.commit()?;
         Ok(())
@@ -517,12 +451,12 @@ fn join_sig(key_id: Option<String>, sig: Option<Vec<u8>>) -> Option<Signature> {
     })
 }
 
-/// The stream identity of the command currently held under `lease_id`.
-fn held_command(tx: &Transaction<'_>, lease_id: &str) -> Result<Command> {
+/// The stream identity of a pending command.
+fn pending_command(tx: &Transaction<'_>, command_id: &str) -> Result<Command> {
     tx.query_row(
         "SELECT command_id, tenant_id, aggregate_type, aggregate_id FROM commands
-         WHERE lease_id = ?1 AND status = 'leased'",
-        [lease_id],
+         WHERE command_id = ?1 AND status = 'pending'",
+        [command_id],
         |r| {
             Ok(Command {
                 command_id: r.get(0)?,
@@ -534,7 +468,7 @@ fn held_command(tx: &Transaction<'_>, lease_id: &str) -> Result<Command> {
         },
     )
     .optional()?
-    .ok_or(Error::LeaseLost)
+    .ok_or(Error::NotPending)
 }
 
 fn complete(tx: &Transaction<'_>, command_id: &str, status: &str, outcome: Outcome) -> Result<()> {
@@ -543,8 +477,7 @@ fn complete(tx: &Transaction<'_>, command_id: &str, status: &str, outcome: Outco
         outcome: Some(outcome),
     };
     tx.execute(
-        "UPDATE commands SET status = ?2, result = ?3, lease_id = NULL, lease_expires_at = NULL
-         WHERE command_id = ?1",
+        "UPDATE commands SET status = ?2, result = ?3 WHERE command_id = ?1",
         params![command_id, status, result.encode_to_vec()],
     )?;
     Ok(())

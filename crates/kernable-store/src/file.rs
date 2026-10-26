@@ -6,7 +6,6 @@
 //! SHA-256(body) || body`. Opening replays the log into memory. A torn last record from a
 //! crash is moved to `<path>.torn-<offset>` and cut off; damage anywhere else refuses to open.
 //!
-//! Leases live only in memory: after a restart every open command is pending again.
 //! One process writes (exclusive file lock); others may open the log read-only.
 //! Writes reach the OS before a call returns but are not fsynced, which survives a process
 //! crash but not a power loss (like SQLite with `synchronous=NORMAL`).
@@ -15,7 +14,7 @@
 //! benchmarks.
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     fs::{self, File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -35,7 +34,7 @@ use prost::Message;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    Checkpoint, Enqueued, Error, Lease, Result, Store,
+    Checkpoint, Enqueued, Error, Result, Store,
     verify::{Report, Verifier},
 };
 
@@ -55,9 +54,6 @@ struct Cmd {
     command: Command,
     /// Submission order.
     seq: u64,
-    /// Lease ID and expiry.
-    lease: Option<(String, i64)>,
-    attempts: u32,
     result: Option<CommandResult>,
 }
 
@@ -91,8 +87,6 @@ impl State {
                 let cmd = Cmd {
                     command,
                     seq,
-                    lease: None,
-                    attempts: 0,
                     result: None,
                 };
                 self.commands.insert(id, cmd);
@@ -157,7 +151,6 @@ impl State {
                 ))
             })?;
         self.open.remove(&cmd.seq);
-        cmd.lease = None;
         cmd.result = Some(CommandResult {
             command_id: command_id.to_owned(),
             outcome: Some(outcome),
@@ -165,13 +158,11 @@ impl State {
         Ok(())
     }
 
-    /// The open command currently held under `lease_id`.
-    fn held(&self, lease_id: &str) -> Result<&Cmd> {
-        self.open
-            .values()
-            .filter_map(|id| self.commands.get(id))
-            .find(|c| c.lease.as_ref().is_some_and(|(l, _)| l == lease_id))
-            .ok_or(Error::LeaseLost)
+    fn pending(&self, command_id: &str) -> Result<&Cmd> {
+        self.commands
+            .get(command_id)
+            .filter(|c| c.result.is_none())
+            .ok_or(Error::NotPending)
     }
 }
 
@@ -191,8 +182,6 @@ struct Inner {
 
 pub struct FileStore {
     inner: Mutex<Inner>,
-    /// Makes lease IDs unique across restarts of the store.
-    lease_nonce: String,
 }
 
 impl FileStore {
@@ -232,11 +221,8 @@ impl FileStore {
     }
 
     fn new(state: State, sink: Sink, len: u64) -> Self {
-        let mut nonce = [0u8; 4];
-        getrandom::fill(&mut nonce).expect("OS randomness unavailable");
         FileStore {
             inner: Mutex::new(Inner { state, sink, len }),
-            lease_nonce: nonce.iter().map(|b| format!("{b:02x}")).collect(),
         }
     }
 
@@ -352,52 +338,26 @@ impl Store for FileStore {
         Ok(Enqueued::New)
     }
 
-    fn lease(&self, command_types: &[&str], now_ms: i64, ttl_ms: i64) -> Result<Option<Lease>> {
-        let mut inner = self.inner();
-        let state = &mut inner.state;
-        // Walk open commands in submission order. An aggregate is blocked by a live lease
-        // or by an older command still waiting, so its commands run one at a time, in order.
-        let mut blocked: HashSet<StreamKey> = HashSet::new();
-        let mut chosen = None;
-        for id in state.open.values() {
-            let cmd = &state.commands[id];
-            let key = stream_key(&cmd.command);
-            if blocked.contains(&key) {
-                continue;
-            }
-            let leased = cmd
-                .lease
-                .as_ref()
-                .is_some_and(|(_, expires)| *expires > now_ms);
-            if !leased && command_types.contains(&cmd.command.command_type.as_str()) {
-                chosen = Some(id.clone());
-                break;
-            }
-            blocked.insert(key);
-        }
-        let Some(id) = chosen else {
-            return Ok(None);
-        };
-        let cmd = state.commands.get_mut(&id).expect("open command exists");
-        cmd.attempts += 1;
-        let lease_id = format!("{id}#{}-{}", self.lease_nonce, cmd.attempts);
-        cmd.lease = Some((lease_id.clone(), now_ms + ttl_ms));
-        Ok(Some(Lease {
-            lease_id,
-            command: cmd.command.clone(),
-        }))
+    fn pending(&self) -> Result<Vec<Command>> {
+        let inner = self.inner();
+        let state = &inner.state;
+        Ok(state
+            .open
+            .values()
+            .map(|id| state.commands[id].command.clone())
+            .collect())
     }
 
     fn commit(
         &self,
-        lease_id: &str,
+        command_id: &str,
         expected_version: u64,
         events: &[NewEvent],
         producer_sig: &Signature,
         now_ms: i64,
     ) -> Result<Vec<Event>> {
         let mut inner = self.inner();
-        let cmd = inner.state.held(lease_id)?.command.clone();
+        let cmd = inner.state.pending(command_id)?.command.clone();
         let stream = inner.state.streams.get(&stream_key(&cmd));
         let actual = stream.map_or(0, |s| s.len() as u64);
         if actual != expected_version {
@@ -445,43 +405,14 @@ impl Store for FileStore {
         Ok(stored)
     }
 
-    fn reject(&self, lease_id: &str, reason: Rejected) -> Result<()> {
+    fn reject(&self, command_id: &str, reason: Rejected) -> Result<()> {
         let mut inner = self.inner();
-        let command_id = inner.state.held(lease_id)?.command.command_id.clone();
+        let command_id = inner.state.pending(command_id)?.command.command_id.clone();
         let record = RejectedRecord {
             command_id,
             reason: Some(reason),
         };
         append(&mut inner, Record::Rejected(record))
-    }
-
-    fn release(&self, lease_id: &str) -> Result<bool> {
-        let mut inner = self.inner();
-        let Ok(cmd) = inner.state.held(lease_id) else {
-            return Ok(false);
-        };
-        let id = cmd.command.command_id.clone();
-        inner
-            .state
-            .commands
-            .get_mut(&id)
-            .expect("held command exists")
-            .lease = None;
-        Ok(true)
-    }
-
-    fn release_all(&self) -> Result<usize> {
-        let mut inner = self.inner();
-        let state = &mut inner.state;
-        let mut released = 0;
-        for id in state.open.values() {
-            if let Some(cmd) = state.commands.get_mut(id)
-                && cmd.lease.take().is_some()
-            {
-                released += 1;
-            }
-        }
-        Ok(released)
     }
 
     fn result(&self, command_id: &str) -> Result<Option<CommandResult>> {

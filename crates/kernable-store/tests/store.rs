@@ -7,8 +7,6 @@ use kernable_core::proto::{
 };
 use kernable_store::{Enqueued, Error, FileStore, SqliteStore, Store};
 
-const TTL: i64 = 1_000;
-
 fn cmd(id: &str, command_type: &str) -> Command {
     Command {
         command_id: id.into(),
@@ -44,15 +42,8 @@ fn commit_appends_events_and_completes_command(store: &dyn Store) {
         Enqueued::New
     );
 
-    let lease = store.lease(&["PlaceOrder"], 0, TTL).unwrap().unwrap();
     let stored = store
-        .commit(
-            &lease.lease_id,
-            0,
-            &[ev("OrderPlaced"), ev("ItemAdded")],
-            &sig(),
-            1,
-        )
+        .commit("c1", 0, &[ev("OrderPlaced"), ev("ItemAdded")], &sig(), 1)
         .unwrap();
 
     assert_eq!(stored.iter().map(|e| e.version).collect::<Vec<_>>(), [1, 2]);
@@ -64,15 +55,14 @@ fn commit_appends_events_and_completes_command(store: &dyn Store) {
     );
     let result = store.result("c1").unwrap().unwrap();
     assert!(matches!(result.outcome, Some(Outcome::Committed(c)) if c.events.len() == 2));
-    assert!(store.lease(&["PlaceOrder"], 2, TTL).unwrap().is_none());
+    assert!(store.pending().unwrap().is_empty());
 }
 
-fn stale_version_conflicts_and_lease_stays_usable(store: &dyn Store) {
+fn stale_version_conflicts_and_command_stays_pending(store: &dyn Store) {
     store.enqueue(&cmd("c1", "PlaceOrder"), 0).unwrap();
-    let lease = store.lease(&["PlaceOrder"], 0, TTL).unwrap().unwrap();
 
     let err = store
-        .commit(&lease.lease_id, 3, &[ev("OrderPlaced")], &sig(), 1)
+        .commit("c1", 3, &[ev("OrderPlaced")], &sig(), 1)
         .unwrap_err();
     assert!(matches!(
         err,
@@ -82,41 +72,46 @@ fn stale_version_conflicts_and_lease_stays_usable(store: &dyn Store) {
         }
     ));
     store
-        .commit(&lease.lease_id, 0, &[ev("OrderPlaced")], &sig(), 1)
+        .commit("c1", 0, &[ev("OrderPlaced")], &sig(), 1)
         .unwrap();
     assert_eq!(versions(store), [1]);
 }
 
-fn one_command_per_aggregate_at_a_time_in_submission_order(store: &dyn Store) {
+fn a_command_completes_at_most_once(store: &dyn Store) {
     store.enqueue(&cmd("c1", "PlaceOrder"), 0).unwrap();
-    store.enqueue(&cmd("c2", "AddItem"), 1).unwrap();
-    let mut other = cmd("c3", "AddItem");
-    other.aggregate_id = "o2".into();
-    store.enqueue(&other, 2).unwrap();
-
-    // A worker for AddItem may not overtake c1 on o1, but o2 is free.
-    let l3 = store.lease(&["AddItem"], 0, TTL).unwrap().unwrap();
-    assert_eq!(l3.command.command_id, "c3");
-    let l1 = store
-        .lease(&["PlaceOrder", "AddItem"], 0, TTL)
-        .unwrap()
-        .unwrap();
-    assert_eq!(l1.command.command_id, "c1");
-    // o1 is busy while c1 is leased: c2 waits.
-    assert!(store.lease(&["AddItem"], 0, TTL).unwrap().is_none());
-
-    // An expired lease gives the aggregate back to the same, oldest command.
-    let again = store
-        .lease(&["PlaceOrder", "AddItem"], TTL, TTL)
-        .unwrap()
-        .unwrap();
-    assert_eq!(again.command.command_id, "c1");
     store
-        .commit(&again.lease_id, 0, &[ev("OrderPlaced")], &sig(), TTL)
+        .commit("c1", 0, &[ev("OrderPlaced")], &sig(), 1)
         .unwrap();
+    assert!(matches!(
+        store.commit("c1", 1, &[ev("OrderPlaced")], &sig(), 2),
+        Err(Error::NotPending)
+    ));
+    let reason = Rejected::default();
+    assert!(matches!(
+        store.reject("c1", reason.clone()),
+        Err(Error::NotPending)
+    ));
+    assert!(matches!(
+        store.reject("unknown", reason),
+        Err(Error::NotPending)
+    ));
+    assert_eq!(versions(store), [1]);
+}
 
-    let l2 = store.lease(&["AddItem"], TTL, TTL).unwrap().unwrap();
-    assert_eq!(l2.command.command_id, "c2");
+fn pending_lists_open_commands_in_submission_order(store: &dyn Store) {
+    for (i, id) in ["c1", "c2", "c3"].into_iter().enumerate() {
+        store.enqueue(&cmd(id, "AddItem"), i as i64).unwrap();
+    }
+    store
+        .commit("c2", 0, &[ev("ItemAdded")], &sig(), 3)
+        .unwrap();
+    let pending: Vec<String> = store
+        .pending()
+        .unwrap()
+        .into_iter()
+        .map(|c| c.command_id)
+        .collect();
+    assert_eq!(pending, ["c1", "c3"]);
 }
 
 fn enqueue_is_idempotent(store: &dyn Store) {
@@ -126,9 +121,8 @@ fn enqueue_is_idempotent(store: &dyn Store) {
         Enqueued::Duplicate { result: None }
     );
 
-    let lease = store.lease(&["PlaceOrder"], 0, TTL).unwrap().unwrap();
     store
-        .commit(&lease.lease_id, 0, &[ev("OrderPlaced")], &sig(), 1)
+        .commit("c1", 0, &[ev("OrderPlaced")], &sig(), 1)
         .unwrap();
     assert!(matches!(
         store.enqueue(&cmd("c1", "PlaceOrder"), 2).unwrap(),
@@ -137,51 +131,13 @@ fn enqueue_is_idempotent(store: &dyn Store) {
     assert_eq!(versions(store), [1]);
 }
 
-fn expired_lease_is_redelivered_and_old_lease_is_lost(store: &dyn Store) {
-    store.enqueue(&cmd("c1", "PlaceOrder"), 0).unwrap();
-
-    let first = store.lease(&["PlaceOrder"], 0, TTL).unwrap().unwrap();
-    assert!(
-        store
-            .lease(&["PlaceOrder"], TTL - 1, TTL)
-            .unwrap()
-            .is_none()
-    );
-    let second = store.lease(&["PlaceOrder"], TTL, TTL).unwrap().unwrap();
-    assert_ne!(first.lease_id, second.lease_id);
-
-    let late = store.commit(&first.lease_id, 0, &[ev("OrderPlaced")], &sig(), TTL);
-    assert!(matches!(late, Err(Error::LeaseLost)));
-    store
-        .commit(&second.lease_id, 0, &[ev("OrderPlaced")], &sig(), TTL)
-        .unwrap();
-    assert!(matches!(
-        store.commit(&second.lease_id, 1, &[ev("OrderPlaced")], &sig(), TTL),
-        Err(Error::LeaseLost)
-    ));
-    assert_eq!(versions(store), [1]);
-}
-
-fn lease_only_returns_requested_command_types(store: &dyn Store) {
-    store.enqueue(&cmd("c1", "PlaceOrder"), 0).unwrap();
-    assert!(store.lease(&["ShipOrder"], 0, TTL).unwrap().is_none());
-    assert!(store.lease(&[], 0, TTL).unwrap().is_none());
-    assert!(
-        store
-            .lease(&["ShipOrder", "PlaceOrder"], 0, TTL)
-            .unwrap()
-            .is_some()
-    );
-}
-
 fn reject_completes_command_without_events(store: &dyn Store) {
     store.enqueue(&cmd("c1", "CancelOrder"), 0).unwrap();
-    let lease = store.lease(&["CancelOrder"], 0, TTL).unwrap().unwrap();
     let reason = Rejected {
         code: "invalid_state".into(),
         message: "no order".into(),
     };
-    store.reject(&lease.lease_id, reason.clone()).unwrap();
+    store.reject("c1", reason.clone()).unwrap();
 
     let result = store.result("c1").unwrap().unwrap();
     assert_eq!(result.outcome, Some(Outcome::Rejected(reason)));
@@ -234,8 +190,8 @@ impl Drop for TempDb {
     }
 }
 
-/// Several connections on one file race for leases and commits on a single aggregate:
-/// every command must be committed exactly once, with no lost updates or version gaps.
+/// Several connections on one file race to commit commands on a single aggregate: every
+/// command must be committed exactly once, with no lost updates or version gaps.
 /// SQLite only: several connections (as from several processes) on one file.
 #[test]
 fn sqlite_concurrent_connections_lose_no_updates() {
@@ -252,14 +208,14 @@ fn sqlite_concurrent_connections_lose_no_updates() {
 
     let path = Arc::new(db.0.clone());
     let handles: Vec<_> = (0..THREADS)
-        .map(|_| {
+        .map(|t| {
             let path = Arc::clone(&path);
             thread::spawn(move || {
                 let store = SqliteStore::open(path.as_path()).unwrap();
-                while let Some(lease) = store.lease(&["AddItem"], 0, i64::MAX / 2).unwrap() {
+                for i in (t..THREADS * COMMANDS).step_by(THREADS) {
                     loop {
                         let current = store.read_stream("t1", "Order", "o1").unwrap().len() as u64;
-                        match store.commit(&lease.lease_id, current, &[ev("ItemAdded")], &sig(), 0)
+                        match store.commit(&format!("c{i}"), current, &[ev("ItemAdded")], &sig(), 0)
                         {
                             Ok(_) => break,
                             Err(Error::VersionConflict { .. }) => continue,
@@ -284,7 +240,8 @@ fn sqlite_concurrent_connections_lose_no_updates() {
     assert_eq!(committed.len(), THREADS * COMMANDS);
 }
 
-/// Several threads race for leases and commits on one store and one aggregate.
+/// Several threads race to commit commands on one store and one aggregate; the version
+/// check makes the losers retry.
 fn concurrent_threads_lose_no_updates(store: &dyn Store) {
     const THREADS: usize = 4;
     const COMMANDS: usize = 50;
@@ -293,20 +250,19 @@ fn concurrent_threads_lose_no_updates(store: &dyn Store) {
             .enqueue(&cmd(&format!("c{i}"), "AddItem"), i as i64)
             .unwrap();
     }
-    let done = std::sync::atomic::AtomicUsize::new(0);
     thread::scope(|s| {
-        for _ in 0..THREADS {
-            s.spawn(|| {
-                while done.load(std::sync::atomic::Ordering::SeqCst) < THREADS * COMMANDS {
-                    let Some(lease) = store.lease(&["AddItem"], 0, i64::MAX / 2).unwrap() else {
-                        thread::yield_now();
-                        continue;
-                    };
-                    let current = store.read_stream("t1", "Order", "o1").unwrap().len() as u64;
-                    store
-                        .commit(&lease.lease_id, current, &[ev("ItemAdded")], &sig(), 0)
-                        .unwrap();
-                    done.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        for t in 0..THREADS {
+            s.spawn(move || {
+                for i in (t..THREADS * COMMANDS).step_by(THREADS) {
+                    loop {
+                        let current = store.read_stream("t1", "Order", "o1").unwrap().len() as u64;
+                        match store.commit(&format!("c{i}"), current, &[ev("ItemAdded")], &sig(), 0)
+                        {
+                            Ok(_) => break,
+                            Err(Error::VersionConflict { .. }) => continue,
+                            Err(e) => panic!("{e}"),
+                        }
+                    }
                 }
             });
         }
@@ -347,11 +303,10 @@ macro_rules! for_each_backend {
 
 for_each_backend!(
     commit_appends_events_and_completes_command,
-    stale_version_conflicts_and_lease_stays_usable,
-    one_command_per_aggregate_at_a_time_in_submission_order,
+    stale_version_conflicts_and_command_stays_pending,
+    a_command_completes_at_most_once,
+    pending_lists_open_commands_in_submission_order,
     enqueue_is_idempotent,
-    expired_lease_is_redelivered_and_old_lease_is_lost,
-    lease_only_returns_requested_command_types,
     reject_completes_command_without_events,
     concurrent_threads_lose_no_updates,
     listeners_are_saved_replaced_and_removed,

@@ -5,9 +5,10 @@
 //! - `file:<path>`: one append-only log file, state rebuilt in memory on open; one writer.
 //! - `memory:`: the file backend's logic without a file; nothing survives the process.
 //!
-//! Every backend gives the same guarantees: commands are persisted before they run, at most
-//! one command per aggregate is leased at a time and in submission order, a commit appends all
-//! events of a command atomically, and events form a hash chain (see `proto/SIGNING.md`).
+//! Every backend gives the same guarantees: commands are persisted before they run, a command
+//! completes at most once, a commit appends all events of a command atomically and only on the
+//! expected stream version, and events form a hash chain (see `proto/SIGNING.md`). Which
+//! command runs when (one per aggregate, in submission order) is up to the kernel's queue.
 //! They also keep the registered event listeners and their acknowledged positions.
 
 mod file;
@@ -32,8 +33,8 @@ pub enum Error {
         expected: u64,
         actual: u64,
     },
-    /// The lease is not held anymore: it expired and was re-leased, or the command is done.
-    LeaseLost,
+    /// The command is not pending: it is unknown or already completed.
+    NotPending,
     /// A write on a store opened read-only.
     ReadOnly,
     /// The stored data cannot be read back (other than a torn last record).
@@ -52,7 +53,7 @@ impl fmt::Display for Error {
                     "version conflict: expected {expected}, stream is at {actual}"
                 )
             }
-            Error::LeaseLost => write!(f, "lease lost"),
+            Error::NotPending => write!(f, "command is not pending"),
             Error::ReadOnly => write!(f, "store is open read-only"),
             Error::Corrupt(what) => write!(f, "corrupt store: {what}"),
             Error::Io(e) => write!(f, "io: {e}"),
@@ -93,13 +94,6 @@ pub enum Enqueued {
     Duplicate { result: Option<CommandResult> },
 }
 
-/// A command handed to a worker for a limited time.
-#[derive(Debug, Clone)]
-pub struct Lease {
-    pub lease_id: String,
-    pub command: Command,
-}
-
 /// A kernel-signed anchor of the hash chain.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Checkpoint {
@@ -124,35 +118,25 @@ pub trait Store: Send + Sync {
     /// Persists a command as pending. Idempotent on `command_id`.
     fn enqueue(&self, cmd: &Command, now_ms: i64) -> Result<Enqueued>;
 
-    /// Leases the oldest pending (or expired) command of one of `command_types` for `ttl_ms`.
-    ///
-    /// Per aggregate, at most one command is leased at a time and commands are leased in
-    /// submission order; commands of a busy aggregate wait in the queue.
-    fn lease(&self, command_types: &[&str], now_ms: i64, ttl_ms: i64) -> Result<Option<Lease>>;
+    /// All commands not completed yet, in submission order.
+    fn pending(&self) -> Result<Vec<Command>>;
 
-    /// Appends `events` to the leased command's stream, extends the hash chain and
+    /// Appends `events` to the pending command's stream, extends the hash chain and
     /// completes the command, atomically. `producer_sig` is the worker's result signature;
     /// verifying it is up to the caller.
     ///
-    /// On `VersionConflict` the lease stays held, so the caller can retry with fresh history.
+    /// On `VersionConflict` the command stays pending, so the caller can retry with fresh history.
     fn commit(
         &self,
-        lease_id: &str,
+        command_id: &str,
         expected_version: u64,
         events: &[NewEvent],
         producer_sig: &Signature,
         now_ms: i64,
     ) -> Result<Vec<Event>>;
 
-    /// Completes the leased command as rejected by the business logic.
-    fn reject(&self, lease_id: &str, reason: Rejected) -> Result<()>;
-
-    /// Hands a leased command back to the queue before its lease expires.
-    /// Returns false if the lease was not held anymore.
-    fn release(&self, lease_id: &str) -> Result<bool>;
-
-    /// Hands every leased command back to the queue, e.g. on shutdown.
-    fn release_all(&self) -> Result<usize>;
+    /// Completes the pending command as rejected by the business logic.
+    fn reject(&self, command_id: &str, reason: Rejected) -> Result<()>;
 
     /// The final result of a command, once it is committed or rejected.
     fn result(&self, command_id: &str) -> Result<Option<CommandResult>>;

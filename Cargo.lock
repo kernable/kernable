@@ -627,7 +627,6 @@ name = "kernable-store"
 version = "0.0.0"
 dependencies = [
  "ed25519-dalek",
- "getrandom 0.3.4",
  "kernable-core",
  "prost",
  "rusqlite",

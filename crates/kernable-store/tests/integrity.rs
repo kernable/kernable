@@ -79,16 +79,15 @@ impl Fixture {
         cmd.client_sig = Some(signing::sign(&client, &signing::command_message(&cmd)));
         self.store.enqueue(&cmd, 0).unwrap();
 
-        let lease = self.store.lease(&["Do"], 0, 1_000).unwrap().unwrap();
         let version = self
             .store
             .read_stream("t1", "Order", aggregate_id)
             .unwrap()
             .len() as u64;
-        let msg = signing::result_message(&lease.command, version, events);
+        let msg = signing::result_message(&cmd, version, events);
         let sig = signing::sign(&self.worker, &msg);
         self.store
-            .commit(&lease.lease_id, version, events, &sig, 0)
+            .commit(&cmd.command_id, version, events, &sig, 0)
             .unwrap();
     }
 

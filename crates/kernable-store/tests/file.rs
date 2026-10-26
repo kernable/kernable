@@ -66,19 +66,15 @@ fn run(store: &dyn Store, id: &str, agg: &str) {
     };
     cmd.client_sig = Some(signing::sign(&client, &signing::command_message(&cmd)));
     store.enqueue(&cmd, 0).unwrap();
-    let lease = store.lease(&["Do"], 0, 1_000).unwrap().unwrap();
     let version = store.read_stream("t1", "Order", agg).unwrap().len() as u64;
     let events = [NewEvent {
         event_type: "Done".into(),
         payload: cmd.payload.clone(),
     }];
     let worker = SigningKey::from_bytes(&[2; 32]);
-    let sig = signing::sign(
-        &worker,
-        &signing::result_message(&lease.command, version, &events),
-    );
+    let sig = signing::sign(&worker, &signing::result_message(&cmd, version, &events));
     store
-        .commit(&lease.lease_id, version, &events, &sig, 0)
+        .commit(&cmd.command_id, version, &events, &sig, 0)
         .unwrap();
 }
 
@@ -101,7 +97,6 @@ fn reopening_replays_events_results_queue_checkpoints_and_listeners() {
             ..Default::default()
         };
         store.enqueue(&pending, 2).unwrap();
-        store.lease(&["Do"], 2, 60_000).unwrap().unwrap();
         let mut orders = ListenerRecord {
             name: "orders".into(),
             position: 1,
@@ -124,16 +119,13 @@ fn reopening_replays_events_results_queue_checkpoints_and_listeners() {
         store.enqueue(&Command { command_id: "c1".into(), ..Default::default() }, 3).unwrap(),
         Enqueued::Duplicate { result: Some(r) } if matches!(r.outcome, Some(Outcome::Committed(_)))
     ));
-    // Leases are not persisted: c3 is available right away despite its 60 s lease.
-    assert_eq!(
-        store
-            .lease(&["Do"], 3, 1_000)
-            .unwrap()
-            .unwrap()
-            .command
-            .command_id,
-        "c3"
-    );
+    let pending: Vec<String> = store
+        .pending()
+        .unwrap()
+        .into_iter()
+        .map(|c| c.command_id)
+        .collect();
+    assert_eq!(pending, ["c3"]);
     let listeners = store.listeners().unwrap();
     assert_eq!(
         (listeners[0].name.as_str(), listeners[0].position),
