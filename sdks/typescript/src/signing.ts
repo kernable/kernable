@@ -1,0 +1,114 @@
+// Signed messages and the event hash chain, as specified in proto/SIGNING.md.
+
+import { createHash, createPrivateKey, createPublicKey, sign, type KeyObject } from "node:crypto";
+import { readFileSync } from "node:fs";
+
+import type { WireCommand, WireEvent, WireNewEvent, WireRejected, WireSignature } from "./rpc.ts";
+
+// PKCS#8 DER prefix for a raw 32-byte Ed25519 seed.
+const PKCS8_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
+
+export class Key {
+  readonly id: string;
+  private readonly key: KeyObject;
+
+  private constructor(seed: Buffer) {
+    this.key = createPrivateKey({ key: Buffer.concat([PKCS8_PREFIX, seed]), format: "der", type: "pkcs8" });
+    this.id = createPublicKey(this.key).export({ format: "der", type: "spki" }).subarray(-32).toString("hex");
+  }
+
+  /** From a hex-encoded 32-byte seed (the content of a `.key` file). */
+  static fromHex(hex: string): Key {
+    return new Key(Buffer.from(hex.trim(), "hex"));
+  }
+
+  static fromFile(path: string): Key {
+    return Key.fromHex(readFileSync(path, "utf8"));
+  }
+
+  sign(message: Buffer): WireSignature {
+    return { key_id: this.id, sig: sign(null, message, this.key) };
+  }
+}
+
+/** Length-prefixed fields: `u32 BE length || bytes`; integers are 8 bytes BE. */
+class Msg {
+  private parts: Buffer[] = [];
+
+  constructor(tag: string) {
+    this.str(tag);
+  }
+
+  bytes(b: Buffer): this {
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(b.length);
+    this.parts.push(len, b);
+    return this;
+  }
+
+  str(s: string): this {
+    return this.bytes(Buffer.from(s, "utf8"));
+  }
+
+  u64(n: number): this {
+    const b = Buffer.alloc(8);
+    b.writeBigUInt64BE(BigInt(n));
+    this.parts.push(b);
+    return this;
+  }
+
+  i64(n: number): this {
+    const b = Buffer.alloc(8);
+    b.writeBigInt64BE(BigInt(n));
+    this.parts.push(b);
+    return this;
+  }
+
+  done(): Buffer {
+    return Buffer.concat(this.parts);
+  }
+}
+
+type Stream = Pick<WireCommand, "command_id" | "tenant_id" | "aggregate_type" | "aggregate_id">;
+
+const stream = (m: Msg, c: Stream) => m.str(c.command_id).str(c.tenant_id).str(c.aggregate_type).str(c.aggregate_id);
+
+export function commandMessage(c: WireCommand): Buffer {
+  return stream(new Msg("kernable.v1.command"), c).str(c.command_type).bytes(c.payload).done();
+}
+
+export function resultMessage(c: Stream, expectedVersion: number, events: WireNewEvent[]): Buffer {
+  const m = stream(new Msg("kernable.v1.result"), c).u64(expectedVersion).u64(events.length);
+  for (const e of events) m.str(e.event_type).bytes(e.payload);
+  return m.done();
+}
+
+export function rejectionMessage(commandId: string, reason: WireRejected): Buffer {
+  return new Msg("kernable.v1.rejection").str(commandId).str(reason.code).str(reason.message).done();
+}
+
+export function challengeMessage(nonce: Buffer): Buffer {
+  return new Msg("kernable.v1.challenge").bytes(nonce).done();
+}
+
+export function checkpointMessage(position: number, chainHash: Buffer, createdAt: number): Buffer {
+  return new Msg("kernable.v1.checkpoint").u64(position).bytes(chainHash).i64(createdAt).done();
+}
+
+export function eventHash(prev: Buffer, e: WireEvent): Buffer {
+  const sig = e.producer_sig ?? { key_id: "", sig: Buffer.alloc(0) };
+  const m = new Msg("kernable.v1.event")
+    .bytes(prev)
+    .u64(e.global_position)
+    .str(e.tenant_id)
+    .str(e.aggregate_type)
+    .str(e.aggregate_id)
+    .u64(e.version)
+    .str(e.event_type)
+    .bytes(e.payload)
+    .str(e.command_id)
+    .i64(e.created_at)
+    .str(sig.key_id)
+    .bytes(sig.sig);
+  return createHash("sha256").update(m.done()).digest();
+}
