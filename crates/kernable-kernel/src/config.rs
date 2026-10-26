@@ -1,0 +1,68 @@
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+};
+
+use serde::Deserialize;
+
+/// Kernel configuration, usually `kernable.toml`:
+///
+/// ```toml
+/// db = "kernable.db"
+/// listen = "unix:/tmp/kernable.sock"   # or "127.0.0.1:7233"
+/// kernel_key = "kernel.key"
+///
+/// [clients]                            # client key ID -> command types it may submit
+/// "8b84…" = ["*"]
+///
+/// [workers]                            # worker key ID -> command types it may handle
+/// "1f0a…" = ["PlaceOrder", "AddItem"]
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Config {
+    pub db: PathBuf,
+    pub listen: String,
+    pub kernel_key: PathBuf,
+    #[serde(default = "default_lease_ttl_ms")]
+    pub lease_ttl_ms: i64,
+    #[serde(default = "default_checkpoint_interval_ms")]
+    pub checkpoint_interval_ms: u64,
+    #[serde(default = "default_submit_timeout_ms")]
+    pub submit_timeout_ms: u64,
+    #[serde(default)]
+    pub clients: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    pub workers: HashMap<String, Vec<String>>,
+}
+
+fn default_lease_ttl_ms() -> i64 {
+    10_000
+}
+
+fn default_checkpoint_interval_ms() -> u64 {
+    5_000
+}
+
+fn default_submit_timeout_ms() -> u64 {
+    30_000
+}
+
+impl Config {
+    /// Loads a config file; relative paths in it resolve against the file's directory.
+    pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let mut config: Config = toml::from_str(&fs::read_to_string(path)?)?;
+        let dir = path.parent().unwrap_or(Path::new("."));
+        config.db = dir.join(&config.db);
+        config.kernel_key = dir.join(&config.kernel_key);
+        Ok(config)
+    }
+}
+
+/// Whether `key_id` may use `command_type` according to an allowlist (`"*"` allows all).
+pub fn allowed(rules: &HashMap<String, Vec<String>>, key_id: &str, command_type: &str) -> bool {
+    rules
+        .get(key_id)
+        .is_some_and(|types| types.iter().any(|t| t == "*" || t == command_type))
+}
