@@ -1,5 +1,6 @@
 """Signed messages, as specified in proto/SIGNING.md."""
 
+import hashlib
 import struct
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -67,6 +68,15 @@ def rejection_message(command_id: str, reason) -> bytes:
 
 def challenge_message(nonce: bytes) -> bytes:
     return bytes(Msg("kernable.v1.challenge").bytes(nonce).buf)
+
+
+def derived_id(command_id: str, n: int) -> str:
+    """The `n`-th ID derived for a command (`ctx.id()`): a version 8 UUID, see SIGNING.md."""
+    b = bytearray(hashlib.sha256(bytes(Msg("kernable.v1.id").str(command_id).u64(n).buf)).digest()[:16])
+    b[6] = (b[6] & 0x0F) | 0x80
+    b[8] = (b[8] & 0x3F) | 0x80
+    h = b.hex()
+    return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}"
 
 
 class Key:

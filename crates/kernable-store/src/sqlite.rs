@@ -23,7 +23,7 @@ use prost::Message;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::{
-    Checkpoint, Enqueued, Error, Result, Store,
+    Checkpoint, Enqueued, Error, Pending, Result, Store,
     verify::{Report, Verifier},
 };
 
@@ -196,13 +196,18 @@ impl Store for SqliteStore {
     }
 
     /// All commands not completed yet, in submission order.
-    fn pending(&self) -> Result<Vec<Command>> {
+    fn pending(&self) -> Result<Vec<Pending>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(&format!(
-            "SELECT {COMMAND_COLUMNS} FROM commands WHERE status = 'pending'
+            "SELECT {COMMAND_COLUMNS}, created_at FROM commands WHERE status = 'pending'
              ORDER BY created_at, rowid"
         ))?;
-        let rows = stmt.query_map([], command_from_row)?;
+        let rows = stmt.query_map([], |r| {
+            Ok(Pending {
+                command: command_from_row(r)?,
+                received_at: r.get(10)?,
+            })
+        })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 

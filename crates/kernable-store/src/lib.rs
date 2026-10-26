@@ -95,6 +95,14 @@ pub enum Enqueued {
     Duplicate { result: Option<CommandResult> },
 }
 
+/// A command not completed yet.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pending {
+    pub command: Command,
+    /// When the kernel accepted it (ms since epoch).
+    pub received_at: i64,
+}
+
 /// A kernel-signed anchor of the hash chain.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Checkpoint {
@@ -136,7 +144,7 @@ pub trait Store: Send + Sync {
     fn enqueue(&self, cmd: &Command, now_ms: i64) -> Result<Enqueued>;
 
     /// All commands not completed yet, in submission order.
-    fn pending(&self) -> Result<Vec<Command>>;
+    fn pending(&self) -> Result<Vec<Pending>>;
 
     /// Appends `events` to the pending command's stream, extends the hash chain and
     /// completes the command, atomically. `producer_sig` is the worker's result signature;

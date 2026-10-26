@@ -133,6 +133,15 @@ export function checkpointMessage(position: number, chainHash: Buffer, createdAt
   return new Msg("kernable.v1.checkpoint").u64(position).bytes(chainHash).i64(createdAt).done();
 }
 
+/** The `n`-th ID derived for a command (`ctx.id()`): a version 8 UUID, see SIGNING.md. */
+export function derivedId(commandId: string, n: number): string {
+  const b = createHash("sha256").update(new Msg("kernable.v1.id").str(commandId).u64(n).done()).digest().subarray(0, 16);
+  b[6] = (b[6] & 0x0f) | 0x80;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  const h = b.toString("hex");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
 export function eventHash(prev: Buffer, e: WireEvent): Buffer {
   const sig = e.producer_sig ?? { key_id: "", sig: Buffer.alloc(0) };
   const m = new Msg("kernable.v1.event")

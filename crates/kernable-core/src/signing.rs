@@ -165,6 +165,18 @@ pub fn checkpoint_message(global_position: u64, chain_hash: &[u8], created_at: i
         .0
 }
 
+/// The `n`-th ID a command handler derives while handling `command_id` (`ctx.id()` in the
+/// SDKs): a UUID (version 8) from SHA-256 over a tagged message, so it is the same in every
+/// language and every time the command runs again.
+pub fn derived_id(command_id: &str, n: u64) -> String {
+    let digest = Sha256::digest(Msg::new("kernable.v1.id").str(command_id).u64(n).0);
+    let mut b: [u8; 16] = digest[..16].try_into().expect("32-byte digest");
+    b[6] = (b[6] & 0x0f) | 0x80; // version 8
+    b[8] = (b[8] & 0x3f) | 0x80; // RFC 9562 variant
+    let h = hex::encode(b);
+    format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
+}
+
 /// Chain hash of `event`, linked to the hash of the previous event (`GENESIS` for the first).
 pub fn event_hash(prev: &[u8], event: &Event) -> [u8; 32] {
     let sig = event.producer_sig.clone().unwrap_or_default();

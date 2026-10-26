@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { Kernable, domain, type RequestContext, type StoredEvent } from "../src/index.ts";
+import { derivedId } from "../src/signing.ts";
 import { TestKernel } from "./kernel.ts";
 
 test("request context reaches handlers, events and follow-up commands", async () => {
@@ -16,7 +17,13 @@ test("request context reaches handlers, events and follow-up commands", async ()
   const seenByHandler: RequestContext[] = [];
   const ticket = domain("support").aggregate("Ticket", { open: false })
     .apply("Opened", () => ({ open: true }))
-    .command("Open", (_s, _d, ctx) => (seenByHandler.push(ctx.request), [{ type: "Opened" }]))
+    .command("Open", (_s, _d, ctx) => {
+      seenByHandler.push(ctx.request);
+      // Deterministic helpers: the same values on every run of this command.
+      const at = ctx.now().getTime();
+      assert.ok(Math.abs(at - Date.now()) < 5000 && ctx.deadline.getTime() > at);
+      return [{ type: "Opened", data: { at, ids: [ctx.id(), ctx.id()] } }];
+    })
     .command("Note", (_s, _d, ctx) => (seenByHandler.push(ctx.request), [{ type: "Noted" }]));
 
   const replayed: boolean[] = [];
@@ -30,6 +37,9 @@ test("request context reaches handlers, events and follow-up commands", async ()
     await Promise.all([worker.ready, notes.ready]);
     const opened = await kernable.submit({ domain: "support", aggregateType: "Ticket", aggregateId: "t1", type: "Open", id: "open-t1", context: { senderSession: "s-9", traceId: "tr-1" } });
     assert.ok(opened.committed);
+
+    const { ids } = opened.committed ? (opened.events[0].data as { ids: string[] }) : { ids: [] };
+    assert.deepEqual(ids, [derivedId("open-t1", 0), derivedId("open-t1", 1)]);
 
     const request = { ...service, senderSession: "s-9", traceId: "tr-1", correlationId: "open-t1" };
     assert.deepEqual(opened.events[0].request, request);

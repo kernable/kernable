@@ -34,7 +34,7 @@ use prost::Message;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    Checkpoint, Enqueued, Error, Result, Store,
+    Checkpoint, Enqueued, Error, Pending, Result, Store,
     verify::{Report, Verifier},
 };
 
@@ -54,6 +54,7 @@ fn stream_key(c: &Command) -> StreamKey {
 
 struct Cmd {
     command: Command,
+    received_at: i64,
     /// Submission order.
     seq: u64,
     result: Option<CommandResult>,
@@ -78,7 +79,10 @@ struct State {
 impl State {
     fn apply(&mut self, record: Record) -> Result<()> {
         match record {
-            Record::Enqueued(EnqueuedRecord { command, .. }) => {
+            Record::Enqueued(EnqueuedRecord {
+                command,
+                created_at,
+            }) => {
                 let command = command.ok_or_else(|| corrupt("enqueued record without command"))?;
                 let id = command.command_id.clone();
                 if self.commands.contains_key(&id) {
@@ -89,6 +93,7 @@ impl State {
                 self.open.insert(seq, id.clone());
                 let cmd = Cmd {
                     command,
+                    received_at: created_at,
                     seq,
                     result: None,
                 };
@@ -384,13 +389,16 @@ impl Store for FileStore {
         Ok(Enqueued::New)
     }
 
-    fn pending(&self) -> Result<Vec<Command>> {
+    fn pending(&self) -> Result<Vec<Pending>> {
         let inner = self.inner();
         let state = &inner.state;
         Ok(state
             .open
             .values()
-            .map(|id| state.commands[id].command.clone())
+            .map(|id| Pending {
+                command: state.commands[id].command.clone(),
+                received_at: state.commands[id].received_at,
+            })
             .collect())
     }
 

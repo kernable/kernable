@@ -97,6 +97,8 @@ export interface KernelMessage {
     history: WireEvent[];
     expected_version: number;
     snapshot?: WireSnapshot | null;
+    received_at: number;
+    deadline: number;
   } | null;
 }
 

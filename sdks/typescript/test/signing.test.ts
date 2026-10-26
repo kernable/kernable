@@ -8,6 +8,7 @@ import {
   challengeMessage,
   checkpointMessage,
   commandMessage,
+  derivedId,
   eventHash,
   rejectionMessage,
   resultMessage,
@@ -43,6 +44,11 @@ test("message layouts and signatures match the test vectors", () => {
   check("subscribe", subscribeMessage(sub.after_position, sub.event_types, sub.issued_at));
   const cp = v.checkpoint.input;
   check("checkpoint", checkpointMessage(cp.global_position, hex(cp.chain_hash_hex), cp.created_at));
+});
+
+test("derived IDs match the test vector", () => {
+  const d = v.derived_id;
+  assert.deepEqual(d.input.n.map((n: number) => derivedId(d.input.command_id, n)), d.ids);
 });
 
 test("event hash matches the test vector", () => {

@@ -10,8 +10,8 @@ import time
 import unittest
 
 from kernable import Kernable, NotSettled, Rejected, RequestContext, domain
-from kernable.signing import (Key, challenge_message, command_message, rejection_message, result_message,
-                              snapshot_message)
+from kernable.signing import (Key, challenge_message, command_message, derived_id, rejection_message,
+                              result_message, snapshot_message)
 from kernable.v1 import kernable_pb2 as pb
 from tests.kernel import ROOT, TestKernel
 
@@ -48,6 +48,8 @@ class SigningVectors(unittest.TestCase):
         stream = pb.Command(tenant_id=n["tenant_id"], domain=n["domain"], aggregate_type=n["aggregate_type"],
                             aggregate_id=n["aggregate_id"])
         self.check("snapshot", snapshot_message(stream, n["version"], n["schema"], bytes.fromhex(n["state_hex"])))
+        d = VECTORS["derived_id"]
+        self.assertEqual([derived_id(d["input"]["command_id"], n) for n in d["input"]["n"]], d["ids"])
 
 
 counter = domain("counters").aggregate("Counter", 0)
@@ -181,7 +183,8 @@ class EndToEnd(unittest.TestCase):
         @ticket.command("Open")
         def _(state, data, ctx):
             seen.append(ctx.request)
-            return [{"type": "Opened"}]
+            assert ctx.deadline > ctx.now()
+            return [{"type": "Opened", "data": {"ids": [ctx.id(), ctx.id()]}}]
 
         @ticket.command("Note")
         def _(state, data, ctx):
@@ -207,6 +210,7 @@ class EndToEnd(unittest.TestCase):
                                context=RequestContext(sender_identity="svc-1", sender_session="s-9"))
         request = RequestContext(sender_identity="svc-1", sender_session="s-9", correlation_id="open-t1")
         self.assertEqual(opened.events[0].request, request)
+        self.assertEqual(opened.events[0].data["ids"], [derived_id("open-t1", 0), derived_id("open-t1", 1)])
         follow_up = RequestContext(sender_identity="svc-1", sender_session="s-9", correlation_id="open-t1",
                                    causation_id="open-t1")
         self.assertEqual(seen, [request, follow_up])

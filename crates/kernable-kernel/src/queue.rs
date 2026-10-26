@@ -31,8 +31,9 @@ struct Held {
 
 #[derive(Default)]
 struct Inner {
-    /// Commands per aggregate in submission order; the head is next or running.
-    aggregates: HashMap<StreamKey, VecDeque<Command>>,
+    /// Commands per aggregate in submission order, with when they were received; the head is
+    /// next or running.
+    aggregates: HashMap<StreamKey, VecDeque<(Command, i64)>>,
     /// Aggregates whose head is free to lease, per qualified command type, in the order they
     /// became ready.
     ready: HashMap<String, BTreeMap<u64, StreamKey>>,
@@ -45,7 +46,7 @@ struct Inner {
 
 impl Inner {
     fn make_ready(&mut self, key: StreamKey) {
-        let Some(head) = self.aggregates.get(&key).and_then(VecDeque::front) else {
+        let Some((head, _)) = self.aggregates.get(&key).and_then(VecDeque::front) else {
             return;
         };
         let seq = self.next_seq;
@@ -86,14 +87,14 @@ impl Queue {
     }
 
     /// Adds a command behind the others of its aggregate. Returns false if it is queued already.
-    pub(crate) fn push(&self, command: Command) -> bool {
+    pub(crate) fn push(&self, command: Command, received_at: i64) -> bool {
         let mut inner = self.inner();
         if !inner.queued.insert(command.command_id.clone()) {
             return false;
         }
         let key = stream_key(&command);
         let commands = inner.aggregates.entry(key.clone()).or_default();
-        commands.push_back(command);
+        commands.push_back((command, received_at));
         if commands.len() == 1 {
             inner.make_ready(key);
         }
@@ -102,7 +103,12 @@ impl Queue {
 
     /// Leases the command that has waited longest among the free aggregates whose next
     /// command has one of the qualified `command_types`. Expired leases are given back first.
-    pub(crate) fn lease(&self, command_types: &[&str], ttl: Duration) -> Option<(String, Command)> {
+    /// Returns the lease ID, the command and when it was received.
+    pub(crate) fn lease(
+        &self,
+        command_types: &[&str],
+        ttl: Duration,
+    ) -> Option<(String, Command, i64)> {
         let now = Instant::now();
         let mut inner = self.inner();
         inner.expire(now);
@@ -115,7 +121,7 @@ impl Queue {
             .get_mut(command_type)
             .and_then(|r| r.remove(&seq))
             .expect("just found");
-        let command = inner.aggregates[&key]
+        let (command, received_at) = inner.aggregates[&key]
             .front()
             .expect("ready aggregates have a head")
             .clone();
@@ -126,7 +132,7 @@ impl Queue {
             expires_at: now + ttl,
         };
         inner.leases.insert(lease_id.clone(), held);
-        Some((lease_id, command))
+        Some((lease_id, command, received_at))
     }
 
     /// Whether `lease_id` is still the live lease of its command.
@@ -141,7 +147,7 @@ impl Queue {
             return;
         };
         let commands = inner.aggregates.get_mut(&held.key).expect("held aggregate");
-        let command = commands.pop_front().expect("held command");
+        let (command, _) = commands.pop_front().expect("held command");
         if commands.is_empty() {
             inner.aggregates.remove(&held.key);
         }
@@ -175,15 +181,15 @@ mod tests {
     }
 
     fn lease(q: &Queue, types: &[&str]) -> Option<(String, String)> {
-        q.lease(types, TTL).map(|(l, c)| (l, c.command_id))
+        q.lease(types, TTL).map(|(l, c, _)| (l, c.command_id))
     }
 
     #[test]
     fn one_command_per_aggregate_at_a_time_in_submission_order() {
         let q = Queue::default();
-        q.push(cmd("c1", "PlaceOrder", "o1"));
-        q.push(cmd("c2", "AddItem", "o1"));
-        q.push(cmd("c3", "AddItem", "o2"));
+        q.push(cmd("c1", "PlaceOrder", "o1"), 0);
+        q.push(cmd("c2", "AddItem", "o1"), 0);
+        q.push(cmd("c3", "AddItem", "o2"), 0);
 
         // A worker for AddItem may not overtake c1 on o1, but o2 is free.
         let (l3, id) = lease(&q, &["d.AddItem"]).unwrap();
@@ -202,8 +208,8 @@ mod tests {
     #[test]
     fn oldest_ready_aggregate_goes_first_across_types() {
         let q = Queue::default();
-        q.push(cmd("c1", "B", "x"));
-        q.push(cmd("c2", "A", "y"));
+        q.push(cmd("c1", "B", "x"), 0);
+        q.push(cmd("c2", "A", "y"), 0);
         assert_eq!(lease(&q, &["d.A", "d.B"]).unwrap().1, "c1");
         assert_eq!(lease(&q, &["d.A", "d.B"]).unwrap().1, "c2");
         assert!(lease(&q, &[]).is_none());
@@ -212,12 +218,12 @@ mod tests {
     #[test]
     fn released_and_expired_leases_are_given_out_again() {
         let q = Queue::default();
-        q.push(cmd("c1", "A", "x"));
+        q.push(cmd("c1", "A", "x"), 0);
         let (first, _) = lease(&q, &["d.A"]).unwrap();
         q.release(&first);
         assert!(!q.holds(&first));
 
-        let (_, id) = q.lease(&["d.A"], Duration::ZERO).unwrap();
+        let (_, id, _) = q.lease(&["d.A"], Duration::ZERO).unwrap();
         assert_eq!(id.command_id, "c1");
         let (again, id) = lease(&q, &["d.A"]).unwrap(); // the zero-TTL lease has expired
         assert_eq!(id, "c1");
@@ -227,8 +233,8 @@ mod tests {
     #[test]
     fn repeated_pushes_are_ignored() {
         let q = Queue::default();
-        assert!(q.push(cmd("c1", "A", "x")));
-        assert!(!q.push(cmd("c1", "A", "x")));
+        assert!(q.push(cmd("c1", "A", "x"), 0));
+        assert!(!q.push(cmd("c1", "A", "x"), 0));
         let (l, _) = lease(&q, &["d.A"]).unwrap();
         q.done(&l);
         assert!(lease(&q, &["d.A"]).is_none());

@@ -29,12 +29,13 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 import grpc
 
-from kernable.signing import (Key, challenge_message, command_message, rejection_message, result_message,
-                              snapshot_message)
+from kernable.signing import (Key, challenge_message, command_message, derived_id, rejection_message,
+                              result_message, snapshot_message)
 from kernable.v1 import kernable_pb2 as pb
 from kernable.v1 import kernable_pb2_grpc as rpc
 
@@ -80,6 +81,21 @@ class CommandContext:
 
     command_id: str
     request: RequestContext
+    #: When the kernel hands the command to another worker if this one has not answered.
+    deadline: datetime
+    received_at: datetime
+    _ids: int = 0
+
+    def now(self) -> datetime:
+        """When the kernel received the command: the same every time the command runs.
+        Use it instead of `datetime.now()`."""
+        return self.received_at
+
+    def id(self) -> str:
+        """A new ID that is the same every time the command runs (1st call, 2nd call, ...).
+        Use it instead of random IDs."""
+        n, self._ids = self._ids, self._ids + 1
+        return derived_id(self.command_id, n)
 
 
 @dataclass
@@ -383,7 +399,7 @@ class Worker(_Stream):
                 raise Rejected(f"snapshot schema {x.snapshot.schema} is not {agg.schema}", "snapshot_stale")
             history = [(e.event_type, _decode(e.payload)) for e in x.history]
             state = agg.fold(history, _decode(x.snapshot.state) if x.HasField("snapshot") else _INITIAL)
-            ctx = CommandContext(cmd.command_id, _from_wire_context(cmd.context))
+            ctx = CommandContext(cmd.command_id, _from_wire_context(cmd.context), _time(x.deadline), _time(x.received_at))
             produced = _call(agg.handlers[cmd.command_type], state, _decode(cmd.payload), ctx)
             events = [pb.NewEvent(event_type=e["type"], payload=_encode(e.get("data"))) for e in produced]
             snapshot = self._snapshot(agg, cmd, x.expected_version, state, events)
@@ -471,6 +487,10 @@ def _encode(data: Any) -> bytes:
 
 def _decode(payload: bytes) -> Any:
     return json.loads(payload) if payload else {}
+
+
+def _time(ms: int) -> datetime:
+    return datetime.fromtimestamp(ms / 1000, timezone.utc)
 
 
 def _call(fn: Callable, *args):

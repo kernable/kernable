@@ -172,7 +172,7 @@ async fn sigterm_checkpoints_and_in_flight_commands_run_right_after_a_restart() 
             .pending()
             .unwrap()
             .into_iter()
-            .map(|c| c.command_id)
+            .map(|p| p.command.command_id)
             .collect();
         assert_eq!(pending, ["c1"]);
     }

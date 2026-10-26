@@ -128,7 +128,7 @@ fn reopening_replays_events_results_queue_checkpoints_and_listeners() {
         .pending()
         .unwrap()
         .into_iter()
-        .map(|c| c.command_id)
+        .map(|p| p.command.command_id)
         .collect();
     assert_eq!(pending, ["c3"]);
     let listeners = store.listeners().unwrap();

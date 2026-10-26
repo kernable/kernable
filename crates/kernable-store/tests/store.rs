@@ -110,13 +110,13 @@ fn pending_lists_open_commands_in_submission_order(store: &dyn Store) {
     store
         .commit("c2", 0, &[ev("ItemAdded")], &sig(), 3)
         .unwrap();
-    let pending: Vec<String> = store
+    let pending: Vec<(String, i64)> = store
         .pending()
         .unwrap()
         .into_iter()
-        .map(|c| c.command_id)
+        .map(|p| (p.command.command_id, p.received_at))
         .collect();
-    assert_eq!(pending, ["c1", "c3"]);
+    assert_eq!(pending, [("c1".into(), 0), ("c3".into(), 2)]);
 }
 
 fn enqueue_is_idempotent(store: &dyn Store) {

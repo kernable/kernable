@@ -39,6 +39,14 @@ Listener acknowledgements are not signed. They travel on a stream whose key was 
 
 A subscribe request is valid for 60 s around `issued_at`. Within that window a captured request could be replayed, but it only grants the read access the key already has. Transport encryption (MVP) closes this gap.
 
+## Derived IDs
+
+`ctx.id()` in a command handler returns IDs that are the same every time the command runs, in every language. The `n`-th ID (counting from 0) for a command is built like this:
+
+1. Take SHA-256 over the message with tag `kernable.v1.id`, followed by `command_id` and `n: u64`.
+2. Use the first 16 bytes and set the UUID version to 8 (`b[6] = b[6] & 0x0f | 0x80`) and the RFC 9562 variant (`b[8] = b[8] & 0x3f | 0x80`).
+3. Format the result as a lowercase hyphenated UUID.
+
 ## Event hash chain
 
 Each stored event has `hash = SHA-256(message)`, where `message` has the tag `kernable.v1.event` followed by these fields:

@@ -236,6 +236,8 @@ message Execute {
   repeated Event history = 3; // events after `snapshot.version`, or all events without one
   uint64 expected_version = 4;
   Snapshot snapshot = 5;      // the latest snapshot, if any
+  int64 received_at = 6;      // ms since epoch when the kernel accepted the command; stable across retries
+  int64 deadline = 7;         // ms since epoch when the lease expires and the command goes to another worker
 }
 
 message Result {

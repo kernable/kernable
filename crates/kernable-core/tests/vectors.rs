@@ -136,6 +136,10 @@ fn vectors() -> Value {
             json!({"global_position": 42, "chain_hash_hex": hex::encode(chain_hash), "created_at": 1_700_000_000_000i64}),
             signing::checkpoint_message(42, &chain_hash, 1_700_000_000_000),
         ),
+        "derived_id": {
+            "input": { "command_id": cmd.command_id, "n": [0, 1, 2] },
+            "ids": (0..3).map(|n| signing::derived_id(&cmd.command_id, n)).collect::<Vec<_>>(),
+        },
         "event_hash": {
             "input": {
                 "prev_hex": hex::encode(GENESIS),

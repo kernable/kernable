@@ -84,8 +84,8 @@ impl Kernel {
         let key = signing::read_signing_key(&config.kernel_key)?;
         let listeners = listeners::Registry::load(store.listeners()?);
         let queue = queue::Queue::default();
-        for command in store.pending()? {
-            queue.push(command);
+        for pending in store.pending()? {
+            queue.push(pending.command, pending.received_at);
         }
         Ok(Arc::new(Kernel {
             config,
@@ -275,7 +275,8 @@ impl CommandService for Api {
             .entry(cmd.command_id.clone())
             .or_default()
             .push(tx);
-        let done = match kernel.store.enqueue(&cmd, now_ms()).map_err(internal)? {
+        let received_at = now_ms();
+        let done = match kernel.store.enqueue(&cmd, received_at).map_err(internal)? {
             Enqueued::Duplicate {
                 result: Some(result),
             } => {
@@ -284,7 +285,7 @@ impl CommandService for Api {
             }
             Enqueued::Duplicate { result: None } => None,
             Enqueued::New => {
-                kernel.queue.push(cmd.clone());
+                kernel.queue.push(cmd.clone(), received_at);
                 kernel.work.notify_waiters();
                 None
             }
@@ -432,6 +433,7 @@ type Outbox = mpsc::Sender<Result<KernelMessage, Status>>;
 /// A command currently executed by the session's worker.
 struct InFlight {
     command: Command,
+    received_at: i64,
     leased_at: Instant,
     expected_version: u64,
     /// The command was sent with a snapshot.
@@ -588,7 +590,7 @@ async fn dispatch(session: Arc<Session>, command_types: Vec<String>, permits: Ar
         let Ok(permit) = Arc::clone(&permits).acquire_owned().await else {
             return;
         };
-        let (lease_id, command) = loop {
+        let (lease_id, command, received_at) = loop {
             let notified = kernel.work.notified();
             if let Some(lease) = kernel.queue.lease(&types, ttl) {
                 break lease;
@@ -598,7 +600,10 @@ async fn dispatch(session: Arc<Session>, command_types: Vec<String>, permits: Ar
                 _ = tokio::time::sleep(POLL) => {}
             }
         };
-        if !session.execute(lease_id, command, 0, permit).await {
+        if !session
+            .execute(lease_id, command, received_at, 0, permit)
+            .await
+        {
             return;
         }
     }
@@ -617,6 +622,7 @@ impl Session {
         &self,
         lease_id: String,
         command: Command,
+        received_at: i64,
         attempts: u32,
         permit: OwnedSemaphorePermit,
     ) -> bool {
@@ -666,6 +672,7 @@ impl Session {
             lease_id.clone(),
             InFlight {
                 command: command.clone(),
+                received_at,
                 leased_at: Instant::now(),
                 expected_version,
                 with_snapshot: snapshot.is_some(),
@@ -679,6 +686,8 @@ impl Session {
             history,
             expected_version,
             snapshot,
+            received_at,
+            deadline: now_ms() + self.kernel.config.lease_ttl_ms,
         };
         send(&self.out, Out::Execute(execute)).await.is_ok()
     }
@@ -748,8 +757,14 @@ impl Session {
                 });
             }
             Err(StoreError::VersionConflict { .. }) if f.attempts < MAX_CONFLICT_RETRIES => {
-                self.execute(r.lease_id, f.command, f.attempts + 1, f.permit)
-                    .await;
+                self.execute(
+                    r.lease_id,
+                    f.command,
+                    f.received_at,
+                    f.attempts + 1,
+                    f.permit,
+                )
+                .await;
             }
             Err(StoreError::VersionConflict { .. }) => {
                 let reason = Rejected {
@@ -794,8 +809,14 @@ impl Session {
                 self.release(&r.lease_id);
                 return Ok(());
             }
-            self.execute(r.lease_id, f.command, f.attempts + 1, f.permit)
-                .await;
+            self.execute(
+                r.lease_id,
+                f.command,
+                f.received_at,
+                f.attempts + 1,
+                f.permit,
+            )
+            .await;
             return Ok(());
         }
         self.reject(&r.lease_id, f.command.command_id, reason);

@@ -20,7 +20,16 @@ import {
   type WireSnapshot,
   type WireWait,
 } from "./rpc.ts";
-import { Key, challengeMessage, commandMessage, rejectionMessage, resultMessage, snapshotMessage, subscribeMessage } from "./signing.ts";
+import {
+  Key,
+  challengeMessage,
+  commandMessage,
+  derivedId,
+  rejectionMessage,
+  resultMessage,
+  snapshotMessage,
+  subscribeMessage,
+} from "./signing.ts";
 
 export { Key } from "./signing.ts";
 
@@ -81,6 +90,12 @@ export interface RequestContext {
 export interface CommandContext {
   commandId: string;
   request: RequestContext;
+  /** When the kernel received the command: the same every time the command runs. Use it instead of `new Date()`. */
+  now(): Date;
+  /** A new ID that is the same every time the command runs (1st call, 2nd call, ...). Use it instead of random IDs. */
+  id(): string;
+  /** When the kernel hands the command to another worker if this one has not answered. */
+  deadline: Date;
 }
 
 /** What a listener handler gets besides the event. */
@@ -548,7 +563,14 @@ export class Worker {
       }
       const from = x.snapshot ? (decode(x.snapshot.state) as any) : agg.initial;
       const state = agg.fold(x.history.map((e) => ({ type: e.event_type, data: decode(e.payload) })), from);
-      const ctx = { commandId: cmd.command_id, request: fromWireContext(cmd.context) };
+      let ids = 0;
+      const ctx: CommandContext = {
+        commandId: cmd.command_id,
+        request: fromWireContext(cmd.context),
+        now: () => new Date(x.received_at),
+        id: () => derivedId(cmd.command_id, ids++),
+        deadline: new Date(x.deadline),
+      };
       const produced = await agg.handlers.get(cmd.command_type)!(state, decode(cmd.payload), ctx);
       events = produced.map((e) => ({ event_type: e.type, payload: encode(e.data) }));
       snapshot = this.snapshot(agg, cmd, x.expected_version, state, events);
