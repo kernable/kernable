@@ -1,5 +1,6 @@
-"""Identity service (Python): the Account aggregate, its worker and the `accounts` read model.
-Other services read accounts only through the query `identity.GetAccount`, via the kernel.
+"""Identity service (Python): the Account aggregate, its worker, the `accounts` read model and
+the `rbac` middleware. Other services read accounts only through the query
+`identity.GetAccount`, via the kernel.
 
 Usage: python identity.py <kernel-url> <key> <health-port>
 Mutual TLS: set KERNABLE_TLS_CA, KERNABLE_TLS_CERT and KERNABLE_TLS_KEY.
@@ -12,7 +13,7 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from kernable import Kernable, Rejected, Tls, domain
+from kernable import Check, Kernable, Rejected, Tls, domain
 
 EMAIL = re.compile(r"^[^@\s]+@[^@\s]+$")
 
@@ -89,6 +90,50 @@ def accounts_model(k: Kernable):
     return model
 
 
+# ---- authorization: a middleware for both domains, from its own read model ----
+
+#: Services that may read on behalf of others, e.g. the orders reactor looking up an email.
+SERVICES = {"svc-orders"}
+
+
+def rbac_middleware(k: Kernable):
+    """Checks every command and query of both domains before the kernel accepts it. The sender
+    is the request context's `sender_identity`; the API asserts it (signed with its key)."""
+    active: set[str] = set()
+    customer_of: dict[str, str] = {}  # order -> account
+    model = k.read_model("rbac")
+
+    @model.on("identity.AccountRegistered")
+    def _(e):
+        active.add(e.aggregate_id)
+
+    @model.on("identity.AccountDeactivated")
+    def _(e):
+        active.discard(e.aggregate_id)
+
+    @model.on("orders.OrderPlaced")
+    def _(e):
+        customer_of[e.aggregate_id] = e.data["customerId"]
+
+    @model.middleware(["identity.*", "orders.*"])
+    def _(check: Check):
+        who = check.request.sender_identity
+        if check.type == "RegisterAccount" or (who in SERVICES and check.kind == "query"):
+            return
+        if who not in active:
+            raise Rejected("sign in with an active account", "forbidden")
+        if check.domain == "identity":
+            owner = check.aggregate_id if check.kind == "command" else check.data.get("id")
+        elif check.type == "PlaceOrder":
+            owner = check.data.get("customerId")
+        else:
+            owner = customer_of.get(check.aggregate_id if check.kind == "command" else check.data.get("id"))
+        if owner != who:
+            raise Rejected(f"{check.domain}.{check.type} is not allowed for {who}", "forbidden")
+
+    return model
+
+
 def serve_health(port: int, streams) -> None:
     """Readiness only; the data is reachable through the kernel and nowhere else."""
 
@@ -117,7 +162,7 @@ if __name__ == "__main__":
     if os.environ.get("KERNABLE_TLS_CA"):
         tls = Tls(os.environ["KERNABLE_TLS_CA"], os.environ["KERNABLE_TLS_CERT"], os.environ["KERNABLE_TLS_KEY"])
     k = Kernable(url, key, tls=tls)
-    streams = [k.worker(account), accounts_model(k)]
+    streams = [k.worker(account), accounts_model(k), rbac_middleware(k)]
     for s in streams:
         threading.Thread(target=s.run, daemon=True).start()
     serve_health(port, streams)

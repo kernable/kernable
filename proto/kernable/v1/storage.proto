@@ -53,6 +53,7 @@ message ListenerRecord {
   repeated string event_types = 4;
   uint64 position = 5;
   bool removed = 6;
+  Middleware middleware = 7; // kept while disconnected, so the chain fails closed
 }
 
 // The latest snapshot of a stream; the latest record per stream wins.

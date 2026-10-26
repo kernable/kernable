@@ -9,6 +9,11 @@
 //! Listeners also answer queries (read models register query types): the kernel sends a query
 //! on the listener's stream, in order with the batches, so an answer reflects every event the
 //! listener was sent before it.
+//!
+//! A listener can also be a middleware (see `Hello.middleware`). Its registration is stored,
+//! so it keeps checking, and refusing while it is disconnected, the types it covers until it
+//! reconnects without a middleware or is removed. Checks are sent in order with the batches,
+//! and only once the listener has caught up with the events committed before it connected.
 
 use std::{
     collections::HashMap,
@@ -21,9 +26,9 @@ use std::{
 
 use kernable_core::{
     proto::{
-        Batch, Challenge, ListenerDelivery, ListenerMessage, ListenerRecord, QueryAnswer,
-        QueryCall, QueryRequest, Ready, Signature, listener_delivery::Msg as Out,
-        listener_message::Msg as In,
+        Batch, Challenge, ListenerDelivery, ListenerMessage, ListenerRecord, MiddlewareCall,
+        QueryAnswer, QueryCall, QueryRequest, Ready, Signature, Verdict,
+        listener_delivery::Msg as Out, listener_message::Msg as In, middleware_call,
     },
     signing,
 };
@@ -42,9 +47,20 @@ struct Entry {
     dirty: bool,
     /// Qualified query types the connected listener answers.
     query_types: Vec<String>,
-    /// The connected listener's stream, for queries.
+    /// The connected listener's stream, for queries and checks.
     out: Option<Outbox>,
+    /// The newest event when the listener connected: a middleware checks requests only
+    /// once it has processed it.
+    caught_up_at: u64,
 }
+
+/// What a listener sends back for a call.
+pub(crate) enum Reply {
+    Answer(QueryAnswer),
+    Verdict(Verdict),
+}
+
+type Calls = HashMap<String, (String, oneshot::Sender<Reply>)>;
 
 /// A listener as reported in metrics.
 pub(crate) struct ListenerStatus {
@@ -56,9 +72,10 @@ pub(crate) struct ListenerStatus {
 #[derive(Default)]
 pub(crate) struct Registry {
     entries: Mutex<HashMap<String, Entry>>,
-    /// Queries sent to a listener and not answered yet: call ID -> (listener, waiting caller).
-    calls: Mutex<HashMap<String, (String, oneshot::Sender<QueryAnswer>)>>,
-    /// Spreads queries over listeners that answer the same type.
+    /// Queries and checks sent to a listener and not answered yet:
+    /// call ID -> (listener, waiting caller).
+    calls: Mutex<Calls>,
+    /// Spreads queries over listeners that answer the same type; also makes call IDs unique.
     turn: AtomicU64,
     /// Wakes order gates and settling submits when a position or the set of listeners changes.
     pub(crate) progress: Notify,
@@ -75,6 +92,7 @@ impl Registry {
                     dirty: false,
                     query_types: Vec::new(),
                     out: None,
+                    caught_up_at: 0,
                 };
                 (entry.record.name.clone(), entry)
             })
@@ -147,7 +165,7 @@ impl Registry {
         self.calls().retain(|_, (listener, _)| listener != name);
     }
 
-    fn calls(&self) -> MutexGuard<'_, HashMap<String, (String, oneshot::Sender<QueryAnswer>)>> {
+    fn calls(&self) -> MutexGuard<'_, Calls> {
         self.calls.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -183,19 +201,71 @@ impl Registry {
         };
         Some(Dispatched {
             out: out.clone(),
-            call,
-            answer: rx,
+            msg: Out::Query(call),
+            reply: rx,
         })
     }
 
-    fn answer(&self, listener: &str, answer: QueryAnswer) {
+    /// The middlewares that check `name` (a qualified command or query type), in chain order:
+    /// by order, then by listener name. Includes disconnected ones.
+    pub(crate) fn chain(&self, name: &str) -> Vec<String> {
+        let mut chain: Vec<(i32, String)> = self
+            .entries()
+            .values()
+            .filter_map(|e| {
+                let m = e.record.middleware.as_ref()?;
+                m.types
+                    .iter()
+                    .any(|p| config::covers(p, name))
+                    .then(|| (m.order, e.record.name.clone()))
+            })
+            .collect();
+        chain.sort();
+        chain.into_iter().map(|(_, name)| name).collect()
+    }
+
+    /// Registers a check of `request` by the middleware `listener`. `Ok(None)` while the
+    /// middleware is still catching up; an error if it is not connected.
+    pub(crate) fn check(
+        &self,
+        listener: &str,
+        id: &str,
+        request: middleware_call::Request,
+    ) -> Result<Option<Dispatched>, Status> {
+        let entries = self.entries();
+        let Some(out) = entries.get(listener).and_then(|e| {
+            let caught_up = e.record.position >= e.caught_up_at;
+            e.out.as_ref().map(|out| caught_up.then_some(out))
+        }) else {
+            return Err(Status::unavailable(format!(
+                "middleware {listener} is not connected"
+            )));
+        };
+        let Some(out) = out else {
+            return Ok(None);
+        };
+        let turn = self.turn.fetch_add(1, Ordering::Relaxed);
+        let call_id = format!("{id}#{turn}");
+        let (tx, rx) = oneshot::channel();
+        self.calls()
+            .insert(call_id.clone(), (listener.to_owned(), tx));
+        let call = MiddlewareCall {
+            call_id,
+            request: Some(request),
+        };
+        Ok(Some(Dispatched {
+            out: out.clone(),
+            msg: Out::Check(call),
+            reply: rx,
+        }))
+    }
+
+    fn reply(&self, listener: &str, call_id: &str, reply: Reply) {
         let mut calls = self.calls();
-        if calls
-            .get(&answer.call_id)
-            .is_some_and(|(l, _)| l == listener)
-            && let Some((_, tx)) = calls.remove(&answer.call_id)
+        if calls.get(call_id).is_some_and(|(l, _)| l == listener)
+            && let Some((_, tx)) = calls.remove(call_id)
         {
-            let _ = tx.send(answer);
+            let _ = tx.send(reply);
         }
     }
 
@@ -277,6 +347,25 @@ pub(crate) async fn run(
             "key may not answer these query types",
         ));
     }
+    if let Some(m) = &hello.middleware {
+        if m.order < 0 {
+            return Err(Status::invalid_argument(
+                "negative middleware orders are reserved for kernable",
+            ));
+        }
+        if m.types.is_empty() || !m.types.iter().all(|t| config::valid_pattern(t)) {
+            return Err(Status::invalid_argument(
+                "a middleware checks `*`, `domain.*` or qualified types",
+            ));
+        }
+        if !m
+            .types
+            .iter()
+            .all(|t| config::allowed(&kernel.config.middlewares, &hello.key_id, t))
+        {
+            return Err(Status::permission_denied("key may not check these types"));
+        }
+    }
 
     let mut nonce = [0u8; 32];
     getrandom::fill(&mut nonce).map_err(|_| Status::internal("no randomness"))?;
@@ -297,6 +386,7 @@ pub(crate) async fn run(
     signing::verify(&proof, &signing::challenge_message(&nonce))
         .map_err(|_| Status::unauthenticated("challenge failed"))?;
 
+    let head = kernel.store.head_position().map_err(internal)?;
     let start = {
         let mut entries = kernel.listeners.entries();
         let previous = entries.get(&hello.name);
@@ -318,6 +408,7 @@ pub(crate) async fn run(
             event_types: hello.event_types,
             position,
             removed: false,
+            middleware: hello.middleware,
         };
         // Registration is stored right away; positions follow with the periodic flush.
         kernel
@@ -332,6 +423,7 @@ pub(crate) async fn run(
                 dirty: false,
                 query_types: hello.query_types.clone(),
                 out: Some(out.clone()),
+                caught_up_at: head,
             },
         );
         position
@@ -343,7 +435,7 @@ pub(crate) async fn run(
         out,
         Out::Ready(Ready {
             after_position: start,
-            head_position: kernel.store.head_position().map_err(internal)?,
+            head_position: head,
         }),
     )
     .await?;
@@ -368,22 +460,38 @@ pub(crate) async fn run(
             Some(In::Ack(_)) => {
                 return Err(Status::invalid_argument("ack beyond the delivered events"));
             }
-            Some(In::Answer(answer)) => kernel.listeners.answer(&hello.name, answer),
+            Some(In::Answer(a)) => {
+                let call_id = a.call_id.clone();
+                kernel
+                    .listeners
+                    .reply(&hello.name, &call_id, Reply::Answer(a));
+            }
+            Some(In::Verdict(v)) => {
+                let call_id = v.call_id.clone();
+                kernel
+                    .listeners
+                    .reply(&hello.name, &call_id, Reply::Verdict(v));
+            }
             Some(_) => return Err(Status::invalid_argument("unexpected message")),
         }
     }
 }
 
-/// A query on its way to a listener: send `call` on `out`, then wait for `answer`.
+/// A query or check on its way to a listener: send `msg` on `out`, then wait for `reply`.
 pub(crate) struct Dispatched {
     pub(crate) out: Outbox,
-    pub(crate) call: QueryCall,
-    pub(crate) answer: oneshot::Receiver<QueryAnswer>,
+    pub(crate) msg: Out,
+    pub(crate) reply: oneshot::Receiver<Reply>,
 }
 
-/// Sends a query call on a listener's stream.
-pub(crate) async fn send_call(out: &Outbox, call: QueryCall) -> Result<(), Status> {
-    send(out, Out::Query(call)).await
+impl Dispatched {
+    /// Sends the call and waits for the listener's reply; an error if it goes away first.
+    pub(crate) async fn call(self) -> Result<Reply, Status> {
+        send(&self.out, self.msg).await?;
+        self.reply
+            .await
+            .map_err(|_| Status::unavailable("the listener went away; try again"))
+    }
 }
 
 /// Sends batches of stored events after `sent`, never beyond the listener's order gate.

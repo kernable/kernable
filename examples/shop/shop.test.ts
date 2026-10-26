@@ -56,7 +56,8 @@ interface Shop {
   kernel: TestKernel;
   identity: Service;
   orders: Service;
-  call(method: string, path: string, body?: unknown): Promise<[number, any]>;
+  /** Calls the API as the account `as` (the `x-identity` header); without it, anonymously. */
+  call(method: string, path: string, body?: unknown, as?: string): Promise<[number, any]>;
   dispose(): Promise<void>;
 }
 
@@ -77,8 +78,9 @@ async function shop(): Promise<Shop> {
     kernel,
     identity,
     orders,
-    async call(method, path, body) {
-      const res = await fetch(`${orders.url}${path}`, { method, body: body === undefined ? undefined : JSON.stringify(body) });
+    async call(method, path, body, as) {
+      const headers = as ? { "x-identity": as } : undefined;
+      const res = await fetch(`${orders.url}${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
       return [res.status, await res.json()];
     },
     async dispose() {
@@ -99,30 +101,67 @@ async function until<T>(get: () => Promise<T>, ok: (v: T) => boolean, what: stri
   return v;
 }
 
+const LISTENERS = ["accounts", "rbac", "orders", "confirmations"];
+
+/** Waits until every listener is connected again: until then, the rbac middleware refuses. */
+async function reconnected(s: Shop): Promise<void> {
+  const metrics = () => fetch(s.kernel.metricsUrl!).then((r) => r.text());
+  const all = (m: string) => LISTENERS.every((l) => m.includes(`kernable_listener_connected{listener="${l}"} 1`));
+  await until(metrics, all, "listeners to reconnect");
+}
+
 test("every response shows its own write, across both languages", async () => {
   const s = await shop();
   try {
     // Written by the API, executed by the Python worker, read from the Python read model.
-    assert.deepEqual(await s.call("POST", "/accounts", { id: "a1", email: "ann@example.com", name: "Ann" }), [
+    assert.deepEqual(await s.call("POST", "/accounts", { id: "a1", email: "ann@example.com", name: "Ann" }, "a1"), [
       200,
       { id: "a1", status: "active", email: "ann@example.com", name: "Ann" },
     ]);
-    assert.equal((await s.call("POST", "/accounts", { id: "a1", email: "ann@example.com" }))[0], 409);
-    assert.equal((await s.call("POST", "/accounts", { id: "a2", email: "nope" }))[0], 422);
+    assert.equal((await s.call("POST", "/accounts", { id: "a1", email: "ann@example.com" }, "a1"))[0], 409);
+    assert.equal((await s.call("POST", "/accounts", { id: "a2", email: "nope" }, "a2"))[0], 422);
 
-    assert.deepEqual(await s.call("POST", "/orders", { id: "o1", customerId: "a1" }), [
+    assert.deepEqual(await s.call("POST", "/orders", { id: "o1", customerId: "a1" }, "a1"), [
       200,
       { id: "o1", customerId: "a1", status: "draft", items: {} },
     ]);
-    assert.equal((await s.call("POST", "/orders", { id: "o2", customerId: "nobody" }))[0], 422);
-    assert.deepEqual((await s.call("POST", "/orders/o1/items", { sku: "apple", qty: 2 }))[1].items, { apple: 2 });
-    assert.equal((await s.call("POST", "/orders/o1/submit"))[0], 200);
+    assert.equal((await s.call("POST", "/orders", { id: "o2", customerId: "nobody" }, "nobody"))[0], 403);
+    assert.deepEqual((await s.call("POST", "/orders/o1/items", { sku: "apple", qty: 2 }, "a1"))[1].items, { apple: 2 });
+    assert.equal((await s.call("POST", "/orders/o1/submit", undefined, "a1"))[0], 200);
 
     // The reactor confirms the order by email, read from the other domain's read model.
-    const confirmed = await until(() => s.call("GET", "/orders/o1"), ([, o]) => o.status === "confirmed", "confirmation");
+    const confirmed = await until(() => s.call("GET", "/orders/o1", undefined, "a1"), ([, o]) => o.status === "confirmed", "confirmation");
     assert.equal(confirmed[1].confirmedTo, "ann@example.com");
-    assert.deepEqual((await s.call("POST", "/accounts/a1/email", { email: "ann@example.org" }))[1].email, "ann@example.org");
+    assert.deepEqual((await s.call("POST", "/accounts/a1/email", { email: "ann@example.org" }, "a1"))[1].email, "ann@example.org");
     assert.deepEqual((await s.call("GET", "/stats"))[1], { confirmations: 1, unknownAccounts: 0 });
+  } finally {
+    await s.dispose();
+  }
+});
+
+test("the rbac middleware (Python) guards both domains' commands and queries", async () => {
+  const s = await shop();
+  try {
+    assert.equal((await s.call("POST", "/accounts", { id: "a1", email: "ann@example.com" }, "a1"))[0], 200);
+    assert.equal((await s.call("POST", "/accounts", { id: "b1", email: "bob@example.com" }, "b1"))[0], 200);
+    assert.equal((await s.call("POST", "/orders", { id: "o1", customerId: "a1" }, "a1"))[0], 200);
+
+    // Someone else's order and account: neither readable nor changeable.
+    assert.equal((await s.call("GET", "/orders/o1", undefined, "b1"))[0], 403);
+    assert.equal((await s.call("POST", "/orders/o1/items", { sku: "x", qty: 1 }, "b1"))[0], 403);
+    assert.equal((await s.call("POST", "/orders", { id: "o2", customerId: "a1" }, "b1"))[0], 403);
+    assert.equal((await s.call("POST", "/accounts/a1/email", { email: "evil@example.com" }, "b1"))[0], 403);
+    // Anonymous: nothing but registering.
+    assert.equal((await s.call("GET", "/orders/o1"))[0], 403);
+    // The owner still can, and the refused commands left no trace.
+    assert.deepEqual((await s.call("GET", "/orders/o1", undefined, "a1"))[1].items, {});
+    assert.equal((await s.call("GET", "/accounts/a1", undefined, "b1"))[0], 403);
+    assert.equal((await s.call("GET", "/accounts/a1", undefined, "a1"))[1].email, "ann@example.com");
+
+    const metrics = await (await fetch(s.kernel.metricsUrl!)).text();
+    const count = (outcome: string) => Number(new RegExp(`^kernable_middleware_total\\{outcome="${outcome}"\\} (\\d+)$`, "m").exec(metrics)?.[1]);
+    assert.equal(count("rejected"), 6);
+    assert.ok(count("passed") > 0);
   } finally {
     await s.dispose();
   }
@@ -134,26 +173,32 @@ test("kill -9 of each process loses and duplicates nothing", async () => {
     const victims: [string, () => Promise<void>][] = [
       ["identity", async () => (await s.identity.kill(), await s.identity.start())],
       ["orders", async () => (await s.orders.kill(), await s.orders.start())],
-      ["kernel", async () => (await s.kernel.kill("SIGKILL"), await s.kernel.start())],
+      ["kernel", async () => (await s.kernel.kill("SIGKILL"), await s.kernel.start(), await reconnected(s))],
     ];
     let n = 0;
     const order = async () => {
       n++;
-      assert.equal((await s.call("POST", "/accounts", { id: `a${n}`, email: `c${n}@example.com` }))[0], 200);
-      assert.equal((await s.call("POST", "/orders", { id: `o${n}`, customerId: `a${n}` }))[0], 200);
-      assert.equal((await s.call("POST", `/orders/o${n}/items`, { sku: "x", qty: n }))[0], 200);
-      assert.equal((await s.call("POST", `/orders/o${n}/submit`))[0], 200);
+      const as = `a${n}`;
+      assert.equal((await s.call("POST", "/accounts", { id: as, email: `c${n}@example.com` }, as))[0], 200);
+      assert.equal((await s.call("POST", "/orders", { id: `o${n}`, customerId: as }, as))[0], 200);
+      assert.equal((await s.call("POST", `/orders/o${n}/items`, { sku: "x", qty: n }, as))[0], 200);
+      assert.equal((await s.call("POST", `/orders/o${n}/submit`, undefined, as))[0], 200);
     };
-    for (const [, restart] of victims) {
+    for (const [name, restart] of victims) {
       await order();
       assert.equal((await s.call("GET", "/stats"))[1].unknownAccounts, 0);
+      if (name === "identity") {
+        // The rbac middleware is away: orders are refused too, not let through.
+        await s.identity.kill();
+        assert.equal((await s.call("POST", `/orders/o${n}/items`, { sku: "y", qty: 1 }, `a${n}`))[0], 503);
+      }
       await restart();
       await order();
     }
 
     // Every order is confirmed exactly once, and the read model matches a replay of the log.
     for (let i = 1; i <= n; i++) {
-      await until(() => s.call("GET", `/orders/o${i}`), ([, o]) => o.status === "confirmed", `confirmation of o${i}`);
+      await until(() => s.call("GET", `/orders/o${i}`, undefined, `a${i}`), ([, o]) => o.status === "confirmed", `confirmation of o${i}`);
     }
     const kernable = new Kernable({ url: s.kernel.url, key: s.kernel.appKey, tls: s.kernel.tlsFiles });
     const events: StoredEvent[] = [];
@@ -173,14 +218,14 @@ test("kill -9 of each process loses and duplicates nothing", async () => {
 
     const rows = new Map<string, OrderRow>();
     for (const e of events) project(rows, e);
-    for (const [id, row] of rows) assert.deepEqual((await s.call("GET", `/orders/${id}`))[1], row);
+    for (const [id, row] of rows) assert.deepEqual((await s.call("GET", `/orders/${id}`, undefined, row.customerId))[1], row);
     assert.match(s.kernel.verify(), /OK/);
 
     // Every listener has caught up, and the metrics show it. All reads went through the kernel.
     const metrics = await (await fetch(s.kernel.metricsUrl!)).text();
     const answered = Number(/^kernable_queries_total\{outcome="answered"\} (\d+)$/m.exec(metrics)?.[1]);
     assert.ok(answered > 0, "no queries answered through the kernel"); // counted since the kernel's restart
-    for (const listener of ["accounts", "orders", "confirmations"]) {
+    for (const listener of LISTENERS) {
       assert.match(metrics, new RegExp(`^kernable_listener_lag\\{listener="${listener}"\\} 0$`, "m"));
       assert.match(metrics, new RegExp(`^kernable_listener_connected\\{listener="${listener}"\\} 1$`, "m"));
     }

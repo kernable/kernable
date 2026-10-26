@@ -35,6 +35,7 @@ fn read_model(env: &Env, name: &str, key: SigningKey, ack: bool) -> JoinHandle<t
             event_types: vec!["orders.OrderPlaced".into()],
             from_position: Some(0),
             query_types: vec!["orders.CountOrders".into(), "orders.Fail".into()],
+            middleware: None,
         };
         tx.send(send(In::Hello(hello))).await.unwrap();
         let channel = transport::connect(&addr).await.unwrap();
@@ -78,6 +79,7 @@ fn read_model(env: &Env, name: &str, key: SigningKey, ack: bool) -> JoinHandle<t
                         outcome: Some(outcome),
                     })
                 }
+                Out::Check(_) => unreachable!("not a middleware"),
             };
             if tx.send(send(reply)).await.is_err() {
                 return tonic::Status::ok("closed");
@@ -226,6 +228,7 @@ async fn a_read_model_that_goes_away_fails_the_query_at_once() {
         event_types: Vec::new(),
         from_position: None,
         query_types: vec!["orders.CountOrders".into()],
+        middleware: None,
     };
     tx.send(ListenerMessage {
         msg: Some(In::Hello(hello)),

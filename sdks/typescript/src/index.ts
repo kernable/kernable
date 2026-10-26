@@ -118,6 +118,33 @@ export interface QueryOptions {
   minPosition?: number;
 }
 
+/** A command or query a middleware checks before the kernel accepts or routes it. */
+export interface Check {
+  kind: "command" | "query";
+  /** The command or query ID. */
+  id: string;
+  tenant: string;
+  domain: string;
+  /** The command or query type within the domain. */
+  type: string;
+  /** Commands only. */
+  aggregateType?: string;
+  aggregateId?: string;
+  data: unknown;
+  /** Who sends it: check permissions here. */
+  request: RequestContext;
+}
+
+export interface MiddlewareOptions {
+  /** Command and query types it checks: `*`, a domain (`orders.*`) or `domain.Type`. */
+  types: string[];
+  /**
+   * Position in the chain: lower runs first, equal orders by listener name (default 0).
+   * Negative orders are reserved for kernable.
+   */
+  order?: number;
+}
+
 /** What a listener handler gets besides the event. */
 export interface ListenerContext {
   /** The event was committed before the listener connected: it is being replayed. */
@@ -416,6 +443,7 @@ export interface ListenerOptions {
 
 type EventHandler = (event: StoredEvent, ctx: ListenerContext) => void | Promise<void>;
 type QueryHandler = (data: unknown, ctx: QueryContext) => unknown;
+type MiddlewareHandler = (check: Check) => void | Promise<void>;
 
 /**
  * A durable, named event listener. Events arrive in order, one at a time, after every listener
@@ -430,6 +458,7 @@ export class Listener {
   private markReady!: () => void;
   private readonly handlers = new Map<string, EventHandler>();
   private readonly queries = new Map<string, QueryHandler>();
+  private checker?: { options: MiddlewareOptions; handler: MiddlewareHandler };
   private call?: ListenCall;
   private stopped = false;
   /** Newest event when the kernel accepted the listener; events up to it are replayed. */
@@ -467,6 +496,24 @@ export class Listener {
       throw new Error(`answer a qualified query type (domain.Query), not ${JSON.stringify(queryType)}`);
     }
     this.queries.set(queryType, handler as QueryHandler);
+    return this;
+  }
+
+  /**
+   * Makes this listener a middleware: the kernel asks `handler` about every command and query
+   * of `options.types` before accepting or routing it, in chain order, and only once this
+   * listener has caught up with the events. Throw `Rejected` to refuse; any other error
+   * refuses too. The registration is stored: while this listener is away, the kernel refuses
+   * those requests (`kernable listeners remove` unregisters it). The handler must not submit
+   * or query through the kernel: the request would wait behind itself.
+   */
+  middleware(options: MiddlewareOptions, handler: MiddlewareHandler): this {
+    for (const t of options.types) {
+      if (t !== "*" && !/^[a-z][a-z0-9_-]*\.([^.]+|\*)$/.test(t)) {
+        throw new Error(`check \`*\`, a domain (domain.*) or a qualified type (domain.Type), not ${JSON.stringify(t)}`);
+      }
+    }
+    this.checker = { options, handler };
     return this;
   }
 
@@ -511,6 +558,7 @@ export class Listener {
           event_types: [...this.handlers.keys()],
           query_types: [...this.queries.keys()],
           ...(start === undefined ? {} : { from_position: start }),
+          ...(this.checker ? { middleware: { order: this.checker.options.order ?? 0, types: this.checker.options.types } } : {}),
         },
       });
     });
@@ -535,6 +583,20 @@ export class Listener {
       call.write({ ack: { position: m.batch.up_to } });
     } else if (m.query) {
       call.write({ answer: { call_id: m.query.call_id, ...(await this.answer(m.query.query)) } });
+    } else if (m.check) {
+      call.write({ verdict: { call_id: m.check.call_id, ...(await this.verdict(m.check)) } });
+    }
+  }
+
+  private async verdict(c: NonNullable<ListenerDelivery["check"]>): Promise<{ rejected?: WireRejected }> {
+    try {
+      if (!this.checker) throw new Rejected("not a middleware", "not_a_middleware");
+      await this.checker.handler(toCheck(c));
+      return {};
+    } catch (err) {
+      return {
+        rejected: err instanceof Rejected ? { code: err.code, message: err.message } : { code: "middleware_error", message: String(err) },
+      };
     }
   }
 
@@ -719,6 +781,33 @@ function fromWireContext(c: WireRequestContext | null | undefined): RequestConte
     attributes: c.attributes.length ? Object.fromEntries(c.attributes.map((a) => [a.key, a.value])) : undefined,
   };
   return Object.fromEntries(Object.entries(all).filter(([, v]) => v !== undefined && v !== "")) as RequestContext;
+}
+
+function toCheck(c: NonNullable<ListenerDelivery["check"]>): Check {
+  if (c.command) {
+    const x = c.command;
+    return {
+      kind: "command",
+      id: x.command_id,
+      tenant: x.tenant_id,
+      domain: x.domain,
+      type: x.command_type,
+      aggregateType: x.aggregate_type,
+      aggregateId: x.aggregate_id,
+      data: decode(x.payload),
+      request: fromWireContext(x.context),
+    };
+  }
+  const q = c.query!;
+  return {
+    kind: "query",
+    id: q.query_id,
+    tenant: q.tenant_id,
+    domain: q.domain,
+    type: q.query_type,
+    data: decode(q.payload),
+    request: fromWireContext(q.context),
+  };
 }
 
 function toStored(e: WireEvent): StoredEvent {

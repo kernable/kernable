@@ -71,6 +71,7 @@ pub async fn start_custom(name: &str, customize: impl FnOnce(&mut Config, &Path)
         submit_timeout_ms: 5_000,
         settle_timeout_ms: 1_000,
         query_timeout_ms: 1_000,
+        middleware_timeout_ms: 1_000,
         clients: HashMap::from([(id(&key(1)), vec!["*".into()])]),
         workers: HashMap::from([(id(&key(2)), vec!["orders.*".into()])]),
         subscribers: HashMap::from([
@@ -83,6 +84,7 @@ pub async fn start_custom(name: &str, customize: impl FnOnce(&mut Config, &Path)
         ]),
         queriers: HashMap::from([(id(&key(1)), vec!["*".into()])]),
         query_handlers: HashMap::from([(id(&key(5)), vec!["orders.*".into()])]),
+        middlewares: HashMap::from([(id(&key(5)), vec!["*".into()])]),
         privileged: HashMap::from([(id(&key(1)), vec!["bypass_authorization".into()])]),
         tls: None,
         metrics_listen: None,

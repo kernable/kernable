@@ -7,6 +7,11 @@
 //!
 //! By default a submit responds once every registered listener has processed the command's
 //! events (see [`listeners`]), so a query right after it sees the new state.
+//!
+//! Before a command is accepted or a query routed, every middleware covering its type checks
+//! it, in chain order; the first rejection refuses the request. A missing middleware refuses
+//! too: the chain fails closed. Refused commands are not stored, like any other request the
+//! kernel does not accept.
 
 pub mod config;
 mod listeners;
@@ -31,7 +36,7 @@ use kernable_core::{
         event_service_server::{EventService, EventServiceServer},
         kernel_message::Msg as Out,
         listener_service_server::{ListenerService, ListenerServiceServer},
-        query_answer, query_result,
+        middleware_call, query_answer, query_result,
         query_service_server::{QueryService, QueryServiceServer},
         worker_gateway_server::{WorkerGateway, WorkerGatewayServer},
         worker_message::Msg as In,
@@ -124,6 +129,66 @@ impl Kernel {
         {
             let _ = waiter.send(result.clone());
         }
+    }
+
+    /// Runs `request` (of the qualified type `name`) through the middleware chain.
+    /// `Ok(Some(reason))` if a middleware rejected it; an error if one is missing or too slow.
+    async fn check(
+        &self,
+        name: &str,
+        id: &str,
+        request: middleware_call::Request,
+    ) -> Result<Option<Rejected>, Status> {
+        let chain = self.listeners.chain(name);
+        if chain.is_empty() {
+            return Ok(None);
+        }
+        let started = Instant::now();
+        let outcome = self.run_chain(&chain, id, request).await;
+        let counter = match &outcome {
+            Ok(None) => &self.metrics.middleware_passed,
+            Ok(Some(_)) => &self.metrics.middleware_rejected,
+            Err(_) => &self.metrics.middleware_failed,
+        };
+        counter.fetch_add(1, Relaxed);
+        self.metrics.middleware.record(started.elapsed());
+        outcome
+    }
+
+    async fn run_chain(
+        &self,
+        chain: &[String],
+        id: &str,
+        request: middleware_call::Request,
+    ) -> Result<Option<Rejected>, Status> {
+        let timeout = Duration::from_millis(self.config.middleware_timeout_ms);
+        for middleware in chain {
+            let checked = tokio::time::timeout(timeout, async {
+                // Wait until the middleware has caught up with what it missed while away.
+                let dispatched = loop {
+                    let progressed = self.listeners.progress.notified();
+                    if let Some(d) = self.listeners.check(middleware, id, request.clone())? {
+                        break d;
+                    }
+                    progressed.await;
+                };
+                dispatched.call().await
+            })
+            .await
+            .map_err(|_| {
+                Status::deadline_exceeded(format!("middleware {middleware} did not answer in time"))
+            })??;
+            let listeners::Reply::Verdict(verdict) = checked else {
+                return Err(Status::internal(format!(
+                    "middleware {middleware} sent no verdict"
+                )));
+            };
+            if let Some(reason) = verdict.rejected {
+                tracing::info!(%middleware, code = %reason.code, "middleware rejected a request");
+                return Ok(Some(reason));
+            }
+        }
+        Ok(None)
     }
 
     /// Waits until every registered listener has acknowledged the result's events.
@@ -269,6 +334,13 @@ impl CommandService for Api {
             return Err(Status::permission_denied(
                 "key may not set bypass_authorization",
             ));
+        }
+        let request = middleware_call::Request::Command(cmd.clone());
+        if let Some(reason) = kernel.check(&name, &cmd.command_id, request).await? {
+            return Ok(Response::new(CommandResult {
+                command_id: cmd.command_id,
+                outcome: Some(Outcome::Rejected(reason)),
+            }));
         }
 
         // Register before enqueueing, so a fast completion cannot be missed.
@@ -429,6 +501,14 @@ impl QueryService for Api {
                 "key may not set bypass_authorization",
             ));
         }
+        let request = middleware_call::Request::Query(query.clone());
+        if let Some(reason) = kernel.check(&name, &query.query_id, request).await? {
+            kernel.metrics.queries_rejected.fetch_add(1, Relaxed);
+            return Ok(Response::new(QueryResult {
+                query_id: query.query_id,
+                outcome: Some(query_result::Outcome::Rejected(reason)),
+            }));
+        }
         if !kernel.listeners.answers(&name) {
             kernel.metrics.queries_failed.fetch_add(1, Relaxed);
             return Err(Status::unavailable(format!("no read model answers {name}")));
@@ -445,15 +525,16 @@ impl QueryService for Api {
                 }
                 progressed.await;
             };
-            listeners::send_call(&dispatched.out, dispatched.call).await?;
-            dispatched
-                .answer
-                .await
-                .map_err(|_| Status::unavailable("the read model went away; ask again"))
+            dispatched.call().await
         })
         .await;
         let answer = match answered {
-            Ok(Ok(answer)) => answer,
+            Ok(Ok(listeners::Reply::Answer(answer))) => answer,
+            Ok(Ok(listeners::Reply::Verdict(_))) => {
+                return Err(Status::internal(
+                    "the read model sent a verdict, not an answer",
+                ));
+            }
             Ok(Err(status)) => {
                 kernel.metrics.queries_failed.fetch_add(1, Relaxed);
                 return Err(status);

@@ -36,7 +36,7 @@ Each message starts with a `str` **tag** for domain separation. Payloads are sig
 
 The result signature does not cover the lease ID. A replayed result can only reproduce the same events for the same command at the same version, so it is harmless. The commit is idempotent.
 
-A query is valid for 60 s around `issued_at`, like a subscribe request. Answers are not signed: they travel on the read model's authenticated stream and are not stored.
+A query is valid for 60 s around `issued_at`, like a subscribe request. Answers are not signed: they travel on the read model's authenticated stream and are not stored. The same holds for middleware verdicts. A middleware gets the command or query with the client's signature, so it can check the signature itself.
 
 Listener acknowledgements are not signed. They travel on a stream whose key was proven by the challenge, and they only affect waiting and ordering, never stored data.
 

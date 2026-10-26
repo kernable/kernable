@@ -21,8 +21,8 @@ const USAGE: &str = "usage:
                                           (store: sqlite:<path>, file:<path> or a bare SQLite path)
   kernable certs new <dir> <client>...    writes a development CA, a kernel certificate and one
                                           client certificate per name, for mTLS
-  kernable listeners <store>              lists registered listeners with order and position
-  kernable listeners remove <store> <name>  removes a listener (kernel stopped)
+  kernable listeners <store>              lists registered listeners with order, position and middleware
+  kernable listeners remove <store> <name>  removes a listener, and its middleware (kernel stopped)
   kernable submit <addr> <client.key> <tenant> <domain> <aggregate_type> <aggregate_id> <command_type> <payload>
                                           signs and submits a command (addr: unix:/path or host:port)";
 
@@ -131,8 +131,11 @@ fn listeners(store: &str) -> Result<bool> {
             [] => "*".to_owned(),
             types => types.join(","),
         };
+        let middleware = l.middleware.map_or(String::new(), |m| {
+            format!(" middleware order {} checks {}", m.order, m.types.join(","))
+        });
         println!(
-            "{} order {} position {} types {types} key {}",
+            "{} order {} position {} types {types} key {}{middleware}",
             l.name, l.order, l.position, l.key_id
         );
     }

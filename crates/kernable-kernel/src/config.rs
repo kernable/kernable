@@ -32,6 +32,9 @@ use serde::Deserialize;
 /// [query_handlers]                     # listener key ID -> queries it may answer
 /// "1f0a…" = ["identity.*"]
 ///
+/// [middlewares]                        # listener key ID -> commands and queries it may check
+/// "1f0a…" = ["*"]
+///
 /// [privileged]                         # client key ID -> privileged request context switches
 /// "8b84…" = ["bypass_authorization"]
 ///
@@ -61,6 +64,9 @@ pub struct Config {
     /// How long a query waits for a read model to catch up and answer.
     #[serde(default = "default_query_timeout_ms")]
     pub query_timeout_ms: u64,
+    /// How long a request waits for one middleware to catch up and give its verdict.
+    #[serde(default = "default_middleware_timeout_ms")]
+    pub middleware_timeout_ms: u64,
     #[serde(default)]
     pub clients: HashMap<String, Vec<String>>,
     #[serde(default)]
@@ -73,6 +79,8 @@ pub struct Config {
     pub queriers: HashMap<String, Vec<String>>,
     #[serde(default)]
     pub query_handlers: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    pub middlewares: HashMap<String, Vec<String>>,
     #[serde(default)]
     pub privileged: HashMap<String, Vec<String>>,
     pub tls: Option<Tls>,
@@ -105,6 +113,10 @@ fn default_settle_timeout_ms() -> u64 {
 }
 
 fn default_query_timeout_ms() -> u64 {
+    5_000
+}
+
+fn default_middleware_timeout_ms() -> u64 {
     5_000
 }
 
@@ -186,6 +198,13 @@ pub fn valid_qualified(name: &str) -> bool {
         .is_some_and(|(d, t)| valid_domain(d) && valid_type(t))
 }
 
+/// A type pattern: `*`, a domain (`orders.*`) or a qualified type.
+pub fn valid_pattern(pattern: &str) -> bool {
+    pattern == "*"
+        || pattern.strip_suffix(".*").is_some_and(valid_domain)
+        || valid_qualified(pattern)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,5 +222,7 @@ mod tests {
         assert!(!valid_qualified("PlaceOrder"));
         assert!(!valid_qualified("Orders.PlaceOrder"));
         assert!(!valid_qualified("orders.Place.Order"));
+        assert!(valid_pattern("*") && valid_pattern("orders.*") && valid_pattern("orders.Get"));
+        assert!(!valid_pattern("orders") && !valid_pattern("Orders.*") && !valid_pattern("o.*.*"));
     }
 }

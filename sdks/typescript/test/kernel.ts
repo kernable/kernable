@@ -86,6 +86,9 @@ ${extraConfig}
 
 [query_handlers]
 "${app}" = ["*"]
+
+[middlewares]
+"${app}" = ["*"]
 `;
   }
 

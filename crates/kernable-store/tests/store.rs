@@ -3,7 +3,7 @@
 use std::{collections::HashSet, path::PathBuf, sync::Arc, thread};
 
 use kernable_core::proto::{
-    Command, ListenerRecord, NewEvent, Rejected, Signature, Snapshot, SnapshotRecord,
+    Command, ListenerRecord, Middleware, NewEvent, Rejected, Signature, Snapshot, SnapshotRecord,
     command_result::Outcome,
 };
 use kernable_core::signing;
@@ -157,18 +157,26 @@ fn listener(name: &str, order: i32, position: u64) -> ListenerRecord {
         event_types: vec!["OrderPlaced".into()],
         position,
         removed: false,
+        middleware: None,
     }
 }
 
 fn listeners_are_saved_replaced_and_removed(store: &dyn Store) {
     assert!(store.listeners().unwrap().is_empty());
+    let auth = ListenerRecord {
+        middleware: Some(Middleware {
+            order: 0,
+            types: vec!["*".into()],
+        }),
+        ..listener("auth", -30, 0)
+    };
     store
-        .save_listeners(&[listener("orders", 0, 0), listener("auth", -30, 0)])
+        .save_listeners(&[listener("orders", 0, 0), auth.clone()])
         .unwrap();
     store.save_listeners(&[listener("orders", 10, 7)]).unwrap();
     assert_eq!(
         store.listeners().unwrap(),
-        [listener("auth", -30, 0), listener("orders", 10, 7)]
+        [auth, listener("orders", 10, 7)]
     );
 
     let removed = ListenerRecord {

@@ -77,6 +77,7 @@ async fn listen(env: &Env, name: &str, o: Opts) -> Result<Listener, Status> {
         event_types: o.types,
         from_position: o.from,
         query_types: Vec::new(),
+        middleware: None,
     });
     tx.send(ListenerMessage { msg: Some(hello) }).await.unwrap();
     let channel = transport::connect(&env.addr).await.unwrap();

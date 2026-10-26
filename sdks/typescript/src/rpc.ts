@@ -135,6 +135,7 @@ export interface ListenerDelivery {
   ready?: { after_position: number; head_position: number } | null;
   batch?: { events: WireEvent[]; up_to: number } | null;
   query?: { call_id: string; query: WireQueryRequest } | null;
+  check?: { call_id: string; request: "command" | "query"; command?: WireCommand | null; query?: WireQueryRequest | null } | null;
 }
 
 export type ListenerMessage =
@@ -146,11 +147,13 @@ export type ListenerMessage =
         event_types: string[];
         from_position?: number;
         query_types: string[];
+        middleware?: { order: number; types: string[] };
       };
     }
   | { challenge_response: { sig: Buffer } }
   | { ack: { position: number } }
-  | { answer: { call_id: string; response?: Buffer; rejected?: WireRejected } };
+  | { answer: { call_id: string; response?: Buffer; rejected?: WireRejected } }
+  | { verdict: { call_id: string; rejected?: WireRejected } };
 
 export type ListenCall = grpc.ClientDuplexStream<ListenerMessage, ListenerDelivery>;
 

@@ -39,7 +39,7 @@ from kernable.signing import (Key, challenge_message, command_message, derived_i
 from kernable.v1 import kernable_pb2 as pb
 from kernable.v1 import kernable_pb2_grpc as rpc
 
-__all__ = ["Aggregate", "CommandContext", "Domain", "Event", "Kernable", "Key", "Listener", "ListenerContext",
+__all__ = ["Aggregate", "Check", "CommandContext", "Domain", "Event", "Kernable", "Key", "Listener", "ListenerContext",
            "NotSettled", "Outcome", "QueryContext", "Rejected", "RequestContext", "Tls", "Worker", "domain"]
 
 
@@ -108,6 +108,25 @@ class QueryContext:
 
 
 @dataclass
+class Check:
+    """A command or query a middleware checks before the kernel accepts or routes it."""
+
+    kind: str  # "command" or "query"
+    #: The command or query ID.
+    id: str
+    tenant: str
+    domain: str
+    #: The command or query type within the domain.
+    type: str
+    data: Any
+    #: Who sends it: check permissions here.
+    request: RequestContext
+    #: Commands only.
+    aggregate_type: str = ""
+    aggregate_id: str = ""
+
+
+@dataclass
 class Event:
     """An event as stored by the kernel."""
 
@@ -173,6 +192,7 @@ _INITIAL = object()
 _DOMAIN = re.compile(r"^[a-z][a-z0-9_-]*$")
 _LISTENED = re.compile(r"^[a-z][a-z0-9_-]*\.([^.]+|\*)$")
 _QUERY = re.compile(r"^[a-z][a-z0-9_-]*\.[^.*]+$")
+_CHECKED = re.compile(r"^(\*|[a-z][a-z0-9_-]*\.([^.]+|\*))$")
 
 
 class Domain:
@@ -463,6 +483,7 @@ class Listener(_Stream):
         self._start = start
         self._handlers: dict[str, Callable] = {}
         self._queries: dict[str, Callable] = {}
+        self._middleware: tuple[pb.Middleware, Callable] | None = None
         #: Global position of the last handled event (or skipped, for other event types).
         self.position = 0
         # Newest event when the kernel accepted the listener; events up to it are replayed.
@@ -484,12 +505,37 @@ class Listener(_Stream):
             raise ValueError(f"answer a qualified query type (domain.Query), not {query_type!r}")
         return _register(self, self._queries, query_type, fn)
 
+    def middleware(self, types: list[str], order: int = 0, fn: Callable | None = None):
+        """Makes this listener a middleware; works as a decorator too. The kernel asks `fn` about
+        every command and query of `types` (`*`, `domain.*` or `domain.Type`) before accepting
+        or routing it, in chain order (lower `order` first, then by listener name), and only
+        once this listener has caught up with the events. `fn` gets a `Check`; raise `Rejected`
+        to refuse; any other error refuses too. The registration is stored: while this listener
+        is away, the kernel refuses those requests (`kernable listeners remove` unregisters it).
+        `fn` must not submit or query through the kernel: the request would wait behind itself.
+        Negative orders are reserved for kernable."""
+        for t in types:
+            if not _CHECKED.match(t):
+                raise ValueError(f"check `*`, a domain (domain.*) or a qualified type (domain.Type), not {t!r}")
+        spec = pb.Middleware(order=order, types=types)
+        if fn is not None:
+            self._middleware = (spec, fn)
+            return self
+
+        def decorator(f: Callable) -> Callable:
+            self._middleware = (spec, f)
+            return f
+
+        return decorator
+
     def _open(self, requests):
         return self._stub.Listen(requests)
 
     def _hello(self):
         hello = pb.Hello(name=self._name, key_id=self._key.id, order=self._order, event_types=list(self._handlers),
                          query_types=list(self._queries))
+        if self._middleware:
+            hello.middleware.CopyFrom(self._middleware[0])
         # Reconnects resume after the last handled event.
         start = self.position if self.ready.is_set() else self._start
         if start is not None:
@@ -516,7 +562,20 @@ class Listener(_Stream):
             return pb.ListenerMessage(ack=pb.Ack(position=msg.batch.up_to))
         elif kind == "query":
             return pb.ListenerMessage(answer=self._answer(msg.query.call_id, msg.query.query))
+        elif kind == "check":
+            return pb.ListenerMessage(verdict=self._verdict(msg.check))
         return None
+
+    def _verdict(self, call) -> pb.Verdict:
+        try:
+            if self._middleware is None:
+                raise Rejected("not a middleware", "not_a_middleware")
+            self._middleware[1](_to_check(call))
+            return pb.Verdict(call_id=call.call_id)
+        except Exception as err:
+            reason = (pb.Rejected(code=err.code, message=str(err)) if isinstance(err, Rejected)
+                      else pb.Rejected(code="middleware_error", message=repr(err)))
+            return pb.Verdict(call_id=call.call_id, rejected=reason)
 
     def _answer(self, call_id: str, q) -> pb.QueryAnswer:
         try:
@@ -569,6 +628,16 @@ def _from_wire_context(c) -> RequestContext:
         c.sender_tenant, c.sender_identity, c.sender_account, c.sender_session, c.on_behalf_of, c.workspace,
         c.expected_version if c.HasField("expected_version") else None, c.correlation_id, c.causation_id,
         c.trace_id, c.bypass_authorization, {a.key: a.value for a in c.attributes})
+
+
+def _to_check(call) -> Check:
+    if call.WhichOneof("request") == "command":
+        c = call.command
+        return Check("command", c.command_id, c.tenant_id, c.domain, c.command_type, _decode(c.payload),
+                     _from_wire_context(c.context), c.aggregate_type, c.aggregate_id)
+    q = call.query
+    return Check("query", q.query_id, q.tenant_id, q.domain, q.query_type, _decode(q.payload),
+                 _from_wire_context(q.context))
 
 
 def _to_event(e) -> Event:

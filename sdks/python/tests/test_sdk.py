@@ -9,6 +9,8 @@ import threading
 import time
 import unittest
 
+import grpc
+
 from kernable import Kernable, NotSettled, Rejected, RequestContext, domain
 from kernable.signing import (Key, challenge_message, command_message, derived_id, query_message,
                               rejection_message, result_message, snapshot_message)
@@ -237,6 +239,41 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual((stale.committed, stale.code), (False, "version_mismatch"))
         time.sleep(0.15)
         self.assertEqual(self.kernel.verify().returncode, 0)
+
+    def test_middleware_checks_from_its_own_state_and_fails_closed(self):
+        self.run_stream(self.k.worker(counter))
+        totals: dict[str, int] = {}
+        checks = []
+        guard = self.k.read_model("guard")
+        guard.on("counters.Incremented", lambda e: totals.__setitem__(e.aggregate_id, totals.get(e.aggregate_id, 0) + e.data["by"]))
+
+        @guard.query("counters.GetTotal")
+        def _(data):
+            return totals.get(data["id"], 0)
+
+        @guard.middleware(["counters.*"])
+        def _(check):
+            checks.append((check.kind, check.type, check.request.sender_identity))
+            if check.request.sender_identity == "guest" and (check.kind == "query" or totals.get(check.aggregate_id, 0) >= 3):
+                raise Rejected("guests stop at 3", "forbidden")
+
+        self.run_stream(guard)
+        guest = RequestContext(sender_identity="guest")
+        self.assertTrue(self.increment(3, context=guest).committed)
+        refused = self.increment(1, context=guest)  # the middleware already counted the first
+        self.assertEqual((refused.committed, refused.code), (False, "forbidden"))
+        self.assertTrue(self.increment(1).committed)
+        with self.assertRaises(Rejected) as asked:
+            self.k.query("counters", "GetTotal", {"id": "c1"}, context=guest)
+        self.assertEqual(asked.exception.code, "forbidden")
+        self.assertEqual(self.k.query("counters", "GetTotal", {"id": "c1"}), 4)
+        self.assertEqual(checks[:2], [("command", "Increment", "guest"), ("command", "Increment", "guest")])
+
+        guard.stop()
+        time.sleep(0.2)
+        with self.assertRaises(grpc.RpcError) as away:
+            self.increment(1)
+        self.assertEqual(away.exception.code(), grpc.StatusCode.UNAVAILABLE)
 
 
 if __name__ == "__main__":

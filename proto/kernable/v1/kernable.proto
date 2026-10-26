@@ -174,6 +174,11 @@ message QueryResult {
 //
 // Event N reaches a listener of order k only after every registered listener with a lower
 // order has acknowledged N. Delivery is at least once.
+//
+// A listener can also be a middleware: before the kernel accepts a command or routes a query
+// whose type the middleware covers, it asks every such middleware, in chain order, and refuses
+// the request at the first rejection. A registered middleware that is not connected refuses
+// every request it covers (UNAVAILABLE): the chain fails closed.
 service ListenerService {
   rpc Listen(stream ListenerMessage) returns (stream ListenerDelivery);
 }
@@ -184,6 +189,7 @@ message ListenerMessage {
     ChallengeResponse challenge_response = 2;
     Ack ack = 3;
     QueryAnswer answer = 4;
+    Verdict verdict = 5;
   }
 }
 
@@ -194,6 +200,9 @@ message ListenerDelivery {
     Batch batch = 3;
     // Delivered in order with the batches: the answer reflects every batch sent before it.
     QueryCall query = 4;
+    // Also in order with the batches; sent only once the listener has caught up with the
+    // events committed before it connected.
+    MiddlewareCall check = 5;
   }
 }
 
@@ -210,6 +219,28 @@ message QueryAnswer {
   }
 }
 
+// A request for a middleware to check: pass it with an empty verdict or reject it.
+message MiddlewareCall {
+  string call_id = 1;
+  oneof request {
+    Command command = 2;
+    QueryRequest query = 3;
+  }
+}
+
+message Verdict {
+  string call_id = 1;
+  Rejected rejected = 2; // absent: the request passes
+}
+
+message Middleware {
+  // Position in the chain: lower runs first, equal orders by listener name. Negative orders
+  // are reserved for kernable.
+  int32 order = 1;
+  // Command and query types it checks: `*`, a domain (`orders.*`) or a qualified type.
+  repeated string types = 2;
+}
+
 message Hello {
   string name = 1;
   string key_id = 2;
@@ -218,6 +249,7 @@ message Hello {
   // Start after this position instead of the stored one, e.g. 0 to rebuild an in-memory read model.
   optional uint64 from_position = 5;
   repeated string query_types = 6; // qualified query types this listener answers
+  Middleware middleware = 7;        // absent: not a middleware
 }
 
 message Ready {

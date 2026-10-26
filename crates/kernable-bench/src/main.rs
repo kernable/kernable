@@ -246,6 +246,7 @@ async fn listener(addr: &str, key: &str, name: &str, order: i32) -> Result<(), B
         event_types: Vec::new(),
         from_position: None,
         query_types: Vec::new(),
+        middleware: None,
     })))
     .await?;
     let mut client = ListenerServiceClient::new(transport::connect(addr).await?);

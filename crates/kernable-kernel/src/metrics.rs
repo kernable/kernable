@@ -36,6 +36,11 @@ pub(crate) struct Metrics {
     pub(crate) queries_failed: AtomicU64,
     /// From a query's arrival until its answer.
     pub(crate) query: Timer,
+    pub(crate) middleware_passed: AtomicU64,
+    pub(crate) middleware_rejected: AtomicU64,
+    pub(crate) middleware_failed: AtomicU64,
+    /// From a request's arrival until the whole middleware chain passed or rejected it.
+    pub(crate) middleware: Timer,
     pub(crate) worker_sessions: AtomicU64,
     /// From lease to commit: worker round trip plus storage.
     pub(crate) execution: Timer,
@@ -84,6 +89,25 @@ pub(crate) fn render(kernel: &Kernel) -> String {
         ],
     );
     metric(
+        "kernable_middleware_total",
+        "counter",
+        "Commands and queries checked by middleware, by outcome; failed means a middleware was missing or too slow.",
+        &[
+            (
+                "{outcome=\"passed\"}".into(),
+                m.middleware_passed.load(Relaxed),
+            ),
+            (
+                "{outcome=\"rejected\"}".into(),
+                m.middleware_rejected.load(Relaxed),
+            ),
+            (
+                "{outcome=\"failed\"}".into(),
+                m.middleware_failed.load(Relaxed),
+            ),
+        ],
+    );
+    metric(
         "kernable_queued_commands",
         "gauge",
         "Commands waiting or running.",
@@ -116,6 +140,11 @@ pub(crate) fn render(kernel: &Kernel) -> String {
             "kernable_query_seconds",
             "From a query's arrival until its answer.",
             &m.query,
+        ),
+        (
+            "kernable_middleware_seconds",
+            "From a request's arrival until the middleware chain passed or rejected it.",
+            &m.middleware,
         ),
     ] {
         let micros = timer.micros.load(Relaxed);
