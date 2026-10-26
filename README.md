@@ -12,7 +12,7 @@ Workers connect to the kernel, which runs their command handlers and commits the
 | `crates/kernable-core` | Protocol types, signing, hash chain, client transport |
 | `crates/kernable-store` | `Store` trait and backends: `sqlite:`, `file:`, `memory:` |
 | `crates/kernable-kernel` | The kernel server (`kernable-kernel <kernable.toml>`) |
-| `crates/kernable-cli` | `kernable keys new \| submit \| verify \| checkpoint` |
+| `crates/kernable-cli` | `kernable keys new \| submit \| verify \| checkpoint \| listeners` |
 | `crates/kernable-bench`, `bench/` | Load generator, benchmark matrix, results |
 | `sdks/typescript` | `@kernable/sdk` |
 | `examples/` | Order domain in TypeScript (SDK) and Python (raw stubs) |

@@ -12,6 +12,7 @@ message LogRecord {
     CommittedRecord committed = 2;
     RejectedRecord rejected = 3;
     CheckpointRecord checkpoint = 4;
+    ListenerRecord listener = 5;
   }
 }
 
@@ -41,4 +42,14 @@ message CheckpointRecord {
   bytes chain_hash = 2;
   Signature kernel_sig = 3;
   int64 created_at = 4;
+}
+
+// A registered listener and its acknowledged position; the latest record per name wins.
+message ListenerRecord {
+  string name = 1;
+  string key_id = 2;
+  int32 order = 3;
+  repeated string event_types = 4;
+  uint64 position = 5;
+  bool removed = 6;
 }

@@ -3,8 +3,12 @@
 //!
 //! Workers pull work: each session runs its own dispatch loop that leases commands of the
 //! types the worker registered, up to its `max_concurrency`.
+//!
+//! By default a submit responds once every registered listener has processed the command's
+//! events (see [`listeners`]), so a query right after it sees the new state.
 
 pub mod config;
+mod listeners;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -16,12 +20,14 @@ use std::{
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
-        Challenge, Command, CommandResult, Committed, Event, Execute, KernelMessage, Registered,
-        Rejected, Signature, SubscribeRequest, WorkerMessage,
+        Accepted, Challenge, Command, CommandResult, Committed, Event, Execute, KernelMessage,
+        ListenerDelivery, ListenerMessage, Registered, Rejected, Signature, SubmitRequest,
+        SubscribeRequest, Wait, WorkerMessage,
         command_result::Outcome,
         command_service_server::{CommandService, CommandServiceServer},
         event_service_server::{EventService, EventServiceServer},
         kernel_message::Msg as Out,
+        listener_service_server::{ListenerService, ListenerServiceServer},
         worker_gateway_server::{WorkerGateway, WorkerGatewayServer},
         worker_message::Msg as In,
     },
@@ -57,14 +63,16 @@ pub struct Kernel {
     waiters: Mutex<HashMap<String, Vec<oneshot::Sender<CommandResult>>>>,
     /// Wakes idle dispatch loops when new commands arrive.
     work: Notify,
-    /// Wakes subscriptions when events were committed.
+    /// Wakes subscriptions and listeners when events were committed.
     appended: Notify,
+    listeners: listeners::Registry,
 }
 
 impl Kernel {
     pub fn open(config: Config) -> Result<Arc<Self>, BoxError> {
         let store = kernable_store::open(&config.store)?;
         let key = signing::read_signing_key(&config.kernel_key)?;
+        let listeners = listeners::Registry::load(store.listeners()?);
         Ok(Arc::new(Kernel {
             config,
             store,
@@ -72,6 +80,7 @@ impl Kernel {
             waiters: Mutex::default(),
             work: Notify::new(),
             appended: Notify::new(),
+            listeners,
         }))
     }
 
@@ -79,10 +88,12 @@ impl Kernel {
         self.waiters.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Writes a final checkpoint and hands all leased commands back to the queue,
-    /// so they are redelivered right after a restart instead of after their lease expires.
+    /// Writes a final checkpoint and the listener positions, and hands all leased commands
+    /// back to the queue, so they are redelivered right after a restart instead of after
+    /// their lease expires.
     pub fn shutdown(&self) -> Result<(), BoxError> {
         self.store.checkpoint(&self.key, now_ms())?;
+        listeners::flush(self)?;
         self.store.release_all()?;
         Ok(())
     }
@@ -98,6 +109,28 @@ impl Kernel {
             let _ = waiter.send(result.clone());
         }
     }
+
+    /// Waits until every registered listener has acknowledged the result's events.
+    /// Returns whether they did within `settle_timeout_ms`.
+    async fn settle(&self, result: &CommandResult) -> bool {
+        let Some(Outcome::Committed(c)) = &result.outcome else {
+            return true;
+        };
+        let Some(last) = c.events.last().map(|e| e.global_position) else {
+            return true;
+        };
+        let settled = async {
+            loop {
+                let progressed = self.listeners.progress.notified();
+                if self.listeners.settled(last) {
+                    return;
+                }
+                progressed.await;
+            }
+        };
+        let timeout = Duration::from_millis(self.config.settle_timeout_ms);
+        tokio::time::timeout(timeout, settled).await.is_ok()
+    }
 }
 
 /// Serves the gRPC API on `config.listen` and writes checkpoints until dropped.
@@ -106,6 +139,7 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
     let router = Server::builder()
         .add_service(CommandServiceServer::new(api.clone()))
         .add_service(EventServiceServer::new(api.clone()))
+        .add_service(ListenerServiceServer::new(api.clone()))
         .add_service(WorkerGatewayServer::new(api));
 
     let server = async {
@@ -129,6 +163,17 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
     tokio::select! {
         result = server => result,
         _ = checkpoints(&kernel) => unreachable!(),
+        _ = flush_listeners(&kernel) => unreachable!(),
+    }
+}
+
+async fn flush_listeners(kernel: &Kernel) {
+    let mut tick = tokio::time::interval(listeners::FLUSH);
+    loop {
+        tick.tick().await;
+        if let Err(e) = listeners::flush(kernel) {
+            eprintln!("saving listener positions failed: {e}");
+        }
     }
 }
 
@@ -148,9 +193,16 @@ struct Api(Arc<Kernel>);
 
 #[tonic::async_trait]
 impl CommandService for Api {
-    async fn submit(&self, request: Request<Command>) -> Result<Response<CommandResult>, Status> {
+    async fn submit(
+        &self,
+        request: Request<SubmitRequest>,
+    ) -> Result<Response<CommandResult>, Status> {
         let kernel = &self.0;
-        let cmd = request.into_inner();
+        let request = request.into_inner();
+        let wait = request.wait();
+        let cmd = request
+            .command
+            .ok_or_else(|| Status::invalid_argument("no command"))?;
         let sig = cmd
             .client_sig
             .as_ref()
@@ -171,24 +223,47 @@ impl CommandService for Api {
             .entry(cmd.command_id.clone())
             .or_default()
             .push(tx);
-        match kernel.store.enqueue(&cmd, now_ms()).map_err(internal)? {
+        let done = match kernel.store.enqueue(&cmd, now_ms()).map_err(internal)? {
             Enqueued::Duplicate {
                 result: Some(result),
             } => {
                 kernel.waiters().remove(&cmd.command_id);
-                return Ok(Response::new(result));
+                Some(result)
             }
-            Enqueued::Duplicate { result: None } => {}
-            Enqueued::New => kernel.work.notify_waiters(),
+            Enqueued::Duplicate { result: None } => None,
+            Enqueued::New => {
+                kernel.work.notify_waiters();
+                None
+            }
+        };
+        let mut result = match done {
+            Some(result) => result,
+            None if wait == Wait::Accepted => {
+                kernel.waiters().remove(&cmd.command_id);
+                return Ok(Response::new(CommandResult {
+                    command_id: cmd.command_id,
+                    outcome: Some(Outcome::Accepted(Accepted {})),
+                }));
+            }
+            None => {
+                let timeout = Duration::from_millis(kernel.config.submit_timeout_ms);
+                match tokio::time::timeout(timeout, rx).await {
+                    Ok(Ok(result)) => result,
+                    _ => {
+                        return Err(Status::deadline_exceeded(
+                            "command accepted but not completed yet; resubmit it to get the result",
+                        ));
+                    }
+                }
+            }
+        };
+        if wait == Wait::Settled
+            && kernel.settle(&result).await
+            && let Some(Outcome::Committed(c)) = &mut result.outcome
+        {
+            c.settled = true;
         }
-
-        let timeout = Duration::from_millis(kernel.config.submit_timeout_ms);
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(result)) => Ok(Response::new(result)),
-            _ => Err(Status::deadline_exceeded(
-                "command accepted but not completed yet; resubmit it to get the result",
-            )),
-        }
+        Ok(Response::new(result))
     }
 }
 
@@ -273,6 +348,26 @@ async fn stream_events(
 }
 
 #[tonic::async_trait]
+impl ListenerService for Api {
+    type ListenStream = ReceiverStream<Result<ListenerDelivery, Status>>;
+
+    async fn listen(
+        &self,
+        request: Request<Streaming<ListenerMessage>>,
+    ) -> Result<Response<Self::ListenStream>, Status> {
+        let (out, rx) = mpsc::channel(4);
+        let kernel = Arc::clone(&self.0);
+        let mut inbound = request.into_inner();
+        tokio::spawn(async move {
+            if let Err(status) = listeners::run(kernel, &mut inbound, &out).await {
+                let _ = out.send(Err(status)).await;
+            }
+        });
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+}
+
+#[tonic::async_trait]
 impl WorkerGateway for Api {
     type SessionStream = ReceiverStream<Result<KernelMessage, Status>>;
 
@@ -330,7 +425,7 @@ impl Drop for ReleaseOnDrop {
     }
 }
 
-/// Aborts the session's dispatch loop when the session ends, however it ends.
+/// Aborts a session's background task when the session ends, however it ends.
 struct AbortOnDrop(JoinHandle<()>);
 
 impl Drop for AbortOnDrop {
@@ -518,7 +613,10 @@ impl Session {
                 self.kernel.appended.notify_waiters();
                 self.kernel.complete(CommandResult {
                     command_id: f.command.command_id,
-                    outcome: Some(Outcome::Committed(Committed { events })),
+                    outcome: Some(Outcome::Committed(Committed {
+                        events,
+                        settled: false,
+                    })),
                 });
             }
             Err(StoreError::VersionConflict { .. }) if f.attempts < MAX_CONFLICT_RETRIES => {

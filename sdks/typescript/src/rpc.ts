@@ -44,10 +44,12 @@ export interface WireRejected {
   message: string;
 }
 
+export type WireWait = "WAIT_SETTLED" | "WAIT_COMMITTED" | "WAIT_ACCEPTED";
+
 export interface WireCommandResult {
   command_id: string;
-  outcome: "committed" | "rejected";
-  committed?: { events: WireEvent[] } | null;
+  outcome: "committed" | "rejected" | "accepted";
+  committed?: { events: WireEvent[]; settled: boolean } | null;
   rejected?: WireRejected | null;
 }
 
@@ -73,9 +75,24 @@ export type WorkerMessage =
 
 export type SessionCall = grpc.ClientDuplexStream<WorkerMessage, KernelMessage>;
 
+/** One message from the kernel on a listener stream; exactly one field is set. */
+export interface ListenerDelivery {
+  challenge?: { nonce: Buffer } | null;
+  ready?: { after_position: number } | null;
+  batch?: { events: WireEvent[]; up_to: number } | null;
+}
+
+export type ListenerMessage =
+  | { hello: { name: string; key_id: string; order: number; event_types: string[]; from_position?: number } }
+  | { challenge_response: { sig: Buffer } }
+  | { ack: { position: number } };
+
+export type ListenCall = grpc.ClientDuplexStream<ListenerMessage, ListenerDelivery>;
+
 export interface Clients {
-  submit(cmd: WireCommand): Promise<WireCommandResult>;
+  submit(command: WireCommand, wait: WireWait): Promise<WireCommandResult>;
   session(): SessionCall;
+  listen(): ListenCall;
   subscribe(req: WireSubscribeRequest): grpc.ClientReadableStream<WireEvent>;
   close(): void;
 }
@@ -95,17 +112,22 @@ export function connect(url: string): Clients {
   const commands = new v1.CommandService(url, creds);
   const workers = new v1.WorkerGateway(url, creds);
   const events = new v1.EventService(url, creds);
+  const listeners = new v1.ListenerService(url, creds);
   return {
-    submit: (cmd) =>
+    submit: (command, wait) =>
       new Promise((resolve, reject) =>
-        commands.Submit(cmd, (err: grpc.ServiceError | null, res: WireCommandResult) => (err ? reject(err) : resolve(res))),
+        commands.Submit({ command, wait }, (err: grpc.ServiceError | null, res: WireCommandResult) =>
+          err ? reject(err) : resolve(res),
+        ),
       ),
     session: () => workers.Session(),
+    listen: () => listeners.Listen(),
     subscribe: (req) => events.Subscribe(req),
     close: () => {
       commands.close();
       workers.close();
       events.close();
+      listeners.close();
     },
   };
 }

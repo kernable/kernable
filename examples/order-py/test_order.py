@@ -67,7 +67,7 @@ class OrderEndToEnd(unittest.TestCase):
         cmd = pb.Command(command_id=str(uuid.uuid4()), tenant_id="t1", aggregate_type="Order",
                          aggregate_id=aggregate_id, command_type=command_type, payload=json.dumps(data or {}).encode())
         cmd.client_sig.CopyFrom(self.key.sign(command_message(cmd)))
-        return rpc.CommandServiceStub(self.channel).Submit(cmd, timeout=10)
+        return rpc.CommandServiceStub(self.channel).Submit(pb.SubmitRequest(command=cmd), timeout=10)
 
     def test_order_lifecycle_and_rust_verification(self):
         placed = self.submit("o1", "PlaceOrder", {"customerId": "k-1"})

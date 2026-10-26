@@ -27,11 +27,13 @@ Each message starts with a `str` **tag** for domain separation. Payloads are sig
 | Client | `kernable.v1.command` | `command_id`, `tenant_id`, `aggregate_type`, `aggregate_id`, `command_type`, `payload` |
 | Worker | `kernable.v1.result` | `command_id`, `tenant_id`, `aggregate_type`, `aggregate_id`, `expected_version: u64`, `event_count: u64`, then per event `event_type`, `payload` |
 | Worker | `kernable.v1.rejection` | `command_id`, `code`, `message` |
-| Worker | `kernable.v1.challenge` | `nonce` |
+| Worker, listener | `kernable.v1.challenge` | `nonce` |
 | Subscriber | `kernable.v1.subscribe` | `after_position: u64`, `issued_at: i64`, `type_count: u64`, then per type `event_type` |
 | Kernel | `kernable.v1.checkpoint` | `global_position: u64`, `chain_hash`, `created_at: i64` |
 
 The result signature does not cover the lease ID. A replayed result can only reproduce the same events for the same command at the same version, so it is harmless. The commit is idempotent.
+
+Listener acknowledgements are not signed. They travel on a stream whose key was proven by the challenge, and they only affect waiting and ordering, never stored data.
 
 A subscribe request is valid for 60 s around `issued_at`. Within that window a captured request could be replayed, but it only grants the read access the key already has. Transport encryption (MVP) closes this gap.
 

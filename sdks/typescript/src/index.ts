@@ -4,7 +4,18 @@ import { randomUUID } from "node:crypto";
 
 import type { ClientReadableStream } from "@grpc/grpc-js";
 
-import { connect, type Clients, type SessionCall, type KernelMessage, type WireEvent, type WireNewEvent, type WireRejected } from "./rpc.ts";
+import {
+  connect,
+  type Clients,
+  type KernelMessage,
+  type ListenCall,
+  type ListenerDelivery,
+  type SessionCall,
+  type WireEvent,
+  type WireNewEvent,
+  type WireRejected,
+  type WireWait,
+} from "./rpc.ts";
 import { Key, challengeMessage, commandMessage, rejectionMessage, resultMessage, subscribeMessage } from "./signing.ts";
 
 export { Key } from "./signing.ts";
@@ -16,6 +27,19 @@ export class Rejected extends Error {
   constructor(message: string, code = "rejected") {
     super(message);
     this.code = code;
+  }
+}
+
+/**
+ * The command was committed, but not every listener processed its events within the kernel's
+ * `settle_timeout_ms`. Read models may not show the change yet; `outcome` has the events.
+ */
+export class NotSettled extends Error {
+  readonly outcome: { committed: true; events: StoredEvent[] };
+
+  constructor(outcome: { committed: true; events: StoredEvent[] }) {
+    super("command committed, but not all listeners have processed its events yet");
+    this.outcome = outcome;
   }
 }
 
@@ -96,6 +120,12 @@ export interface SubmitOptions {
   tenant?: string;
   /** Idempotency key; resubmitting the same ID returns the original outcome. */
   id?: string;
+  /**
+   * `"settled"` (default): respond once every listener has processed the events, so read
+   * models already show them; throws `NotSettled` on timeout. `"committed"`: respond once the
+   * events are stored.
+   */
+  wait?: "settled" | "committed";
 }
 
 export class Kernable {
@@ -113,7 +143,37 @@ export class Kernable {
     return new Worker(this.clients, this.key, aggregates);
   }
 
+  /** Runs a command and returns its outcome; see `SubmitOptions.wait`. */
   async submit(options: SubmitOptions): Promise<Outcome> {
+    const wait = options.wait === "committed" ? "WAIT_COMMITTED" : "WAIT_SETTLED";
+    const res = await this.send(options, wait);
+    if (res.outcome === "rejected") {
+      return { committed: false, code: res.rejected!.code, message: res.rejected!.message };
+    }
+    const outcome = { committed: true as const, events: res.committed!.events.map(toStored) };
+    if (wait === "WAIT_SETTLED" && !res.committed!.settled) throw new NotSettled(outcome);
+    return outcome;
+  }
+
+  /**
+   * Stores the command in the kernel's queue and returns its ID without waiting for it to run.
+   * Submit it again with the same `id` to get the outcome.
+   */
+  async enqueue(options: Omit<SubmitOptions, "wait">): Promise<string> {
+    return (await this.send(options, "WAIT_ACCEPTED")).command_id;
+  }
+
+  /** A read model: kept in memory and rebuilt from the first event on every start (default). */
+  readModel(name: string, options: ListenerOptions = {}): Listener {
+    return new Listener(this.clients, this.key, name, { order: 0, start: 0, ...options });
+  }
+
+  /** A reactor: triggers side effects; resumes after the last acknowledged event (default). */
+  reactor(name: string, options: ListenerOptions = {}): Listener {
+    return new Listener(this.clients, this.key, name, { order: 10, ...options });
+  }
+
+  private send(options: SubmitOptions, wait: WireWait) {
     const cmd = {
       command_id: options.id ?? randomUUID(),
       tenant_id: options.tenant ?? this.tenant,
@@ -122,11 +182,7 @@ export class Kernable {
       command_type: options.type,
       payload: encode(options.data),
     };
-    const res = await this.clients.submit({ ...cmd, client_sig: this.key.sign(commandMessage(cmd)) });
-    if (res.outcome === "rejected") {
-      return { committed: false, code: res.rejected!.code, message: res.rejected!.message };
-    }
-    return { committed: true, events: res.committed!.events.map(toStored) };
+    return this.clients.submit({ ...cmd, client_sig: this.key.sign(commandMessage(cmd)) }, wait);
   }
 
   /**
@@ -184,6 +240,117 @@ export class Subscription {
         if (!this.stopped) console.error(`kernable subscription: ${(err as Error).message}`);
       }
       if (!this.stopped) await new Promise((r) => setTimeout(r, options.reconnectMs ?? 1000));
+    }
+  }
+}
+
+export interface ListenerOptions {
+  /**
+   * Listeners with a lower order process each event first; equal orders run in parallel.
+   * Defaults: 0 for read models, 10 for reactors. Negative orders are reserved for kernable.
+   */
+  order?: number;
+  /**
+   * Position to start after on the first connect: 0 rebuilds from the beginning (default for
+   * read models); omitted, the kernel resumes after the last acknowledged event (default for
+   * reactors). Reconnects always resume after the last handled event.
+   */
+  start?: number;
+  reconnectMs?: number;
+}
+
+type EventHandler = (event: StoredEvent) => void | Promise<void>;
+
+/**
+ * A durable, named event listener. Events arrive in order, one at a time, after every listener
+ * with a lower order has processed them. Delivery is at least once: if a handler throws, the
+ * listener reconnects and the event is delivered again.
+ */
+export class Listener {
+  /** Global position of the last handled event (or skipped, for other event types). */
+  position = 0;
+  /** Resolves once the kernel accepted the listener. */
+  readonly ready: Promise<void>;
+  private markReady!: () => void;
+  private readonly handlers = new Map<string, EventHandler>();
+  private call?: ListenCall;
+  private stopped = false;
+  private readonly clients: Clients;
+  private readonly key: Key;
+  private readonly name: string;
+  private readonly options: ListenerOptions;
+
+  constructor(clients: Clients, key: Key, name: string, options: ListenerOptions) {
+    this.clients = clients;
+    this.key = key;
+    this.name = name;
+    this.options = options;
+    this.ready = new Promise((resolve) => (this.markReady = resolve));
+  }
+
+  on<D = any>(eventType: string, handler: (event: StoredEvent & { data: D }) => void | Promise<void>): this {
+    this.handlers.set(eventType, handler as EventHandler);
+    return this;
+  }
+
+  /** Processes events until `stop()`, reconnecting when the stream drops. */
+  async run(): Promise<void> {
+    let start = this.options.start;
+    while (!this.stopped) {
+      try {
+        await this.listen(start);
+      } catch (err) {
+        if (!this.stopped) console.error(`kernable listener ${this.name}: ${(err as Error).message}`);
+      }
+      start = this.position;
+      if (!this.stopped) await new Promise((r) => setTimeout(r, this.options.reconnectMs ?? 1000));
+    }
+  }
+
+  stop(): void {
+    this.stopped = true;
+    this.call?.cancel();
+  }
+
+  private listen(start: number | undefined): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const call = this.clients.listen();
+      this.call = call;
+      // Batches are handled strictly one after another.
+      let queue = Promise.resolve();
+      call.on("data", (m: ListenerDelivery) => {
+        queue = queue.then(() => this.onMessage(call, m)).catch((err) => {
+          call.cancel();
+          reject(err);
+        });
+      });
+      call.on("error", reject);
+      call.on("end", resolve);
+      call.write({
+        hello: {
+          name: this.name,
+          key_id: this.key.id,
+          order: this.options.order ?? 0,
+          event_types: [...this.handlers.keys()],
+          ...(start === undefined ? {} : { from_position: start }),
+        },
+      });
+    });
+  }
+
+  private async onMessage(call: ListenCall, m: ListenerDelivery): Promise<void> {
+    if (m.challenge) {
+      call.write({ challenge_response: { sig: this.key.sign(challengeMessage(m.challenge.nonce)).sig } });
+    } else if (m.ready) {
+      this.position = m.ready.after_position;
+      this.markReady();
+    } else if (m.batch) {
+      for (const e of m.batch.events) {
+        await this.handlers.get(e.event_type)?.(toStored(e));
+        this.position = e.global_position;
+      }
+      this.position = m.batch.up_to;
+      call.write({ ack: { position: m.batch.up_to } });
     }
   }
 }

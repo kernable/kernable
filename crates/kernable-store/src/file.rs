@@ -2,7 +2,7 @@
 //!
 //! The whole store is one log of records (`proto/kernable/v1/storage.proto`): enqueued
 //! commands, commits (all events of one command in a single record, hence atomic),
-//! rejections and checkpoints. Each record is framed as `u32 BE length || first 4 bytes of
+//! rejections, checkpoints and listener positions. Each record is framed as `u32 BE length || first 4 bytes of
 //! SHA-256(body) || body`. Opening replays the log into memory. A torn last record from a
 //! crash is moved to `<path>.torn-<offset>` and cut off; damage anywhere else refuses to open.
 //!
@@ -26,8 +26,8 @@ use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
         CheckpointRecord, Command, CommandResult, Committed, CommittedRecord, EnqueuedRecord,
-        Event, LogRecord, LoggedEvent, NewEvent, Rejected, RejectedRecord, Signature,
-        command_result::Outcome, log_record::Record,
+        Event, ListenerRecord, LogRecord, LoggedEvent, NewEvent, Rejected, RejectedRecord,
+        Signature, command_result::Outcome, log_record::Record,
     },
     signing::{self, GENESIS},
 };
@@ -73,6 +73,7 @@ struct State {
     open: BTreeMap<u64, String>,
     next_seq: u64,
     checkpoints: Vec<Checkpoint>,
+    listeners: BTreeMap<String, ListenerRecord>,
 }
 
 impl State {
@@ -120,7 +121,10 @@ impl State {
                 }
                 self.complete(
                     &command_id,
-                    Outcome::Committed(Committed { events: stored }),
+                    Outcome::Committed(Committed {
+                        events: stored,
+                        settled: false,
+                    }),
                 )?;
             }
             Record::Rejected(RejectedRecord { command_id, reason }) => {
@@ -132,6 +136,12 @@ impl State {
                 kernel_sig: cp.kernel_sig.unwrap_or_default(),
                 created_at: cp.created_at,
             }),
+            Record::Listener(l) if l.removed => {
+                self.listeners.remove(&l.name);
+            }
+            Record::Listener(l) => {
+                self.listeners.insert(l.name.clone(), l);
+            }
         }
         Ok(())
     }
@@ -481,6 +491,18 @@ impl Store for FileStore {
             .commands
             .get(command_id)
             .and_then(|c| c.result.clone()))
+    }
+
+    fn listeners(&self) -> Result<Vec<ListenerRecord>> {
+        Ok(self.inner().state.listeners.values().cloned().collect())
+    }
+
+    fn save_listeners(&self, listeners: &[ListenerRecord]) -> Result<()> {
+        let mut inner = self.inner();
+        for l in listeners {
+            append(&mut inner, Record::Listener(l.clone()))?;
+        }
+        Ok(())
     }
 
     fn checkpoint(&self, kernel: &SigningKey, now_ms: i64) -> Result<Option<Checkpoint>> {

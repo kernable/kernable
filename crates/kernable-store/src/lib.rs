@@ -8,6 +8,7 @@
 //! Every backend gives the same guarantees: commands are persisted before they run, at most
 //! one command per aggregate is leased at a time and in submission order, a commit appends all
 //! events of a command atomically, and events form a hash chain (see `proto/SIGNING.md`).
+//! They also keep the registered event listeners and their acknowledged positions.
 
 mod file;
 mod sqlite;
@@ -16,7 +17,9 @@ mod verify;
 use std::fmt;
 
 use ed25519_dalek::SigningKey;
-use kernable_core::proto::{Command, CommandResult, Event, NewEvent, Rejected, Signature};
+use kernable_core::proto::{
+    Command, CommandResult, Event, ListenerRecord, NewEvent, Rejected, Signature,
+};
 
 pub use file::FileStore;
 pub use sqlite::SqliteStore;
@@ -153,6 +156,13 @@ pub trait Store: Send + Sync {
 
     /// The final result of a command, once it is committed or rejected.
     fn result(&self, command_id: &str) -> Result<Option<CommandResult>>;
+
+    /// Registered listeners with their acknowledged positions, ordered by name.
+    fn listeners(&self) -> Result<Vec<ListenerRecord>>;
+
+    /// Stores listener registrations and positions by name; a record with `removed` set
+    /// deletes the listener.
+    fn save_listeners(&self, listeners: &[ListenerRecord]) -> Result<()>;
 
     /// Signs the current head of the hash chain. Returns `None` while there are no events.
     fn checkpoint(&self, kernel: &SigningKey, now_ms: i64) -> Result<Option<Checkpoint>>;

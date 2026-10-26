@@ -9,8 +9,8 @@ use std::{
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
-        ChallengeResponse, Command, NewEvent, Register, Result as WorkResult, WorkerMessage,
-        command_result::Outcome, command_service_client::CommandServiceClient,
+        ChallengeResponse, Command, NewEvent, Register, Result as WorkResult, SubmitRequest,
+        WorkerMessage, command_result::Outcome, command_service_client::CommandServiceClient,
         kernel_message::Msg as Out, worker_gateway_client::WorkerGatewayClient,
         worker_message::Msg as In,
     },
@@ -81,7 +81,7 @@ impl Tally {
     fn record(&mut self, latency: Duration, outcome: &Result<Outcome, tonic::Status>) {
         self.latencies_us.push(latency.as_micros() as u64);
         match outcome {
-            Ok(Outcome::Committed(_)) => {}
+            Ok(Outcome::Committed(_) | Outcome::Accepted(_)) => {}
             Ok(Outcome::Rejected(_)) => self.rejected += 1,
             Err(_) => self.errors += 1,
         }
@@ -172,7 +172,10 @@ fn store(url: &str, count: usize) -> Result<(), BoxError> {
             &signing::result_message(&lease.command, version, &events),
         )?;
         let stored = store.commit(&lease.lease_id, version, &events, &sig, 0)?;
-        let outcome = Outcome::Committed(kernable_core::proto::Committed { events: stored });
+        let outcome = Outcome::Committed(kernable_core::proto::Committed {
+            events: stored,
+            settled: false,
+        });
         tally.record(t.elapsed(), &Ok(outcome));
     }
     let backend = kernable_store::backend(url).0;
@@ -264,7 +267,11 @@ async fn channels(addr: &str, n: usize) -> Result<Vec<Channel>, BoxError> {
 }
 
 async fn submit(channel: Channel, cmd: Command) -> Result<Outcome, tonic::Status> {
-    let result = CommandServiceClient::new(channel).submit(cmd).await?;
+    let request = SubmitRequest {
+        command: Some(cmd),
+        ..Default::default()
+    };
+    let result = CommandServiceClient::new(channel).submit(request).await?;
     Ok(result
         .into_inner()
         .outcome

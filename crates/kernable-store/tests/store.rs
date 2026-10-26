@@ -2,7 +2,9 @@
 
 use std::{collections::HashSet, path::PathBuf, sync::Arc, thread};
 
-use kernable_core::proto::{Command, NewEvent, Rejected, Signature, command_result::Outcome};
+use kernable_core::proto::{
+    Command, ListenerRecord, NewEvent, Rejected, Signature, command_result::Outcome,
+};
 use kernable_store::{Enqueued, Error, FileStore, SqliteStore, Store};
 
 const TTL: i64 = 1_000;
@@ -186,6 +188,36 @@ fn reject_completes_command_without_events(store: &dyn Store) {
     assert!(versions(store).is_empty());
 }
 
+fn listener(name: &str, order: i32, position: u64) -> ListenerRecord {
+    ListenerRecord {
+        name: name.into(),
+        key_id: "k".into(),
+        order,
+        event_types: vec!["OrderPlaced".into()],
+        position,
+        removed: false,
+    }
+}
+
+fn listeners_are_saved_replaced_and_removed(store: &dyn Store) {
+    assert!(store.listeners().unwrap().is_empty());
+    store
+        .save_listeners(&[listener("orders", 0, 0), listener("auth", -30, 0)])
+        .unwrap();
+    store.save_listeners(&[listener("orders", 10, 7)]).unwrap();
+    assert_eq!(
+        store.listeners().unwrap(),
+        [listener("auth", -30, 0), listener("orders", 10, 7)]
+    );
+
+    let removed = ListenerRecord {
+        removed: true,
+        ..listener("auth", 0, 0)
+    };
+    store.save_listeners(&[removed]).unwrap();
+    assert_eq!(store.listeners().unwrap(), [listener("orders", 10, 7)]);
+}
+
 struct TempDb(PathBuf);
 
 impl TempDb {
@@ -322,4 +354,5 @@ for_each_backend!(
     lease_only_returns_requested_command_types,
     reject_completes_command_without_events,
     concurrent_threads_lose_no_updates,
+    listeners_are_saved_replaced_and_removed,
 );

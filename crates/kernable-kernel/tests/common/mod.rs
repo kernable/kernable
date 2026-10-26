@@ -7,7 +7,7 @@ use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
         ChallengeResponse, Command, CommandResult, Event, NewEvent, Register, Rejected, Rejection,
-        Result as WorkResult, WorkerMessage, command_result::Outcome,
+        Result as WorkResult, SubmitRequest, Wait, WorkerMessage, command_result::Outcome,
         command_service_client::CommandServiceClient, kernel_message::Msg as Out,
         worker_gateway_client::WorkerGatewayClient, worker_message::Msg as In,
     },
@@ -43,8 +43,9 @@ pub async fn start(name: &str) -> Env {
     start_with(name, 2_000).await
 }
 
-/// Starts a kernel that trusts client key 1 for everything, worker key 2 for Order commands
-/// and subscriber key 4 for `OrderPlaced` events only.
+/// Starts a kernel that trusts client key 1 for everything, worker key 2 for Order commands,
+/// subscriber key 4 for `OrderPlaced` events only, listener key 5 for all events and
+/// listener key 6 for `OrderPlaced` only.
 pub async fn start_with(name: &str, lease_ttl_ms: i64) -> Env {
     let dir = std::env::temp_dir().join(format!("kn-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -59,11 +60,16 @@ pub async fn start_with(name: &str, lease_ttl_ms: i64) -> Env {
         lease_ttl_ms,
         checkpoint_interval_ms: 50,
         submit_timeout_ms: 5_000,
+        settle_timeout_ms: 1_000,
         clients: HashMap::from([(id(&key(1)), vec!["*".into()])]),
         workers: HashMap::from([(id(&key(2)), vec!["PlaceOrder".into(), "AddItem".into()])]),
         subscribers: HashMap::from([
             (id(&key(1)), vec!["*".into()]),
             (id(&key(4)), vec!["OrderPlaced".into()]),
+        ]),
+        listeners: HashMap::from([
+            (id(&key(5)), vec!["*".into()]),
+            (id(&key(6)), vec!["OrderPlaced".into()]),
         ]),
     };
     tokio::spawn(serve(Kernel::open(config).unwrap()));
@@ -252,8 +258,20 @@ pub fn signed(mut cmd: Command, key: &SigningKey) -> Command {
 }
 
 pub async fn submit(addr: &str, cmd: Command) -> Result<CommandResult, tonic::Status> {
+    submit_with(addr, cmd, Wait::Settled).await
+}
+
+pub async fn submit_with(
+    addr: &str,
+    cmd: Command,
+    wait: Wait,
+) -> Result<CommandResult, tonic::Status> {
     let channel = transport::connect(addr).await.unwrap();
-    let result = CommandServiceClient::new(channel).submit(cmd).await?;
+    let request = SubmitRequest {
+        command: Some(cmd),
+        wait: wait.into(),
+    };
+    let result = CommandServiceClient::new(channel).submit(request).await?;
     Ok(result.into_inner())
 }
 

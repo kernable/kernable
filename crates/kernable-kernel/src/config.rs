@@ -21,6 +21,9 @@ use serde::Deserialize;
 ///
 /// [subscribers]                        # subscriber key ID -> event types it may read
 /// "8b84…" = ["*"]
+///
+/// [listeners]                          # listener key ID -> event types it may read
+/// "1f0a…" = ["OrderPlaced"]
 /// ```
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -35,12 +38,17 @@ pub struct Config {
     pub checkpoint_interval_ms: u64,
     #[serde(default = "default_submit_timeout_ms")]
     pub submit_timeout_ms: u64,
+    /// How long a settling submit waits for listeners after the commit.
+    #[serde(default = "default_settle_timeout_ms")]
+    pub settle_timeout_ms: u64,
     #[serde(default)]
     pub clients: HashMap<String, Vec<String>>,
     #[serde(default)]
     pub workers: HashMap<String, Vec<String>>,
     #[serde(default)]
     pub subscribers: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    pub listeners: HashMap<String, Vec<String>>,
 }
 
 fn default_lease_ttl_ms() -> i64 {
@@ -53,6 +61,10 @@ fn default_checkpoint_interval_ms() -> u64 {
 
 fn default_submit_timeout_ms() -> u64 {
     30_000
+}
+
+fn default_settle_timeout_ms() -> u64 {
+    5_000
 }
 
 impl Config {

@@ -4,7 +4,9 @@ use std::{fs, io::Write, path::PathBuf};
 
 use ed25519_dalek::SigningKey;
 use kernable_core::{
-    proto::{Command, LogRecord, NewEvent, command_result::Outcome, log_record::Record},
+    proto::{
+        Command, ListenerRecord, LogRecord, NewEvent, command_result::Outcome, log_record::Record,
+    },
     signing,
 };
 use kernable_store::{Enqueued, Error, FileStore, Store};
@@ -85,7 +87,7 @@ fn kernel_id() -> String {
 }
 
 #[test]
-fn reopening_replays_events_results_queue_and_checkpoints() {
+fn reopening_replays_events_results_queue_checkpoints_and_listeners() {
     let log = TempLog::new("reopen");
     {
         let store = FileStore::open(&log.0).unwrap();
@@ -100,6 +102,14 @@ fn reopening_replays_events_results_queue_and_checkpoints() {
         };
         store.enqueue(&pending, 2).unwrap();
         store.lease(&["Do"], 2, 60_000).unwrap().unwrap();
+        let mut orders = ListenerRecord {
+            name: "orders".into(),
+            position: 1,
+            ..Default::default()
+        };
+        store.save_listeners(&[orders.clone()]).unwrap();
+        orders.position = 2;
+        store.save_listeners(&[orders]).unwrap();
     }
 
     let store = FileStore::open(&log.0).unwrap();
@@ -123,6 +133,11 @@ fn reopening_replays_events_results_queue_and_checkpoints() {
             .command
             .command_id,
         "c3"
+    );
+    let listeners = store.listeners().unwrap();
+    assert_eq!(
+        (listeners[0].name.as_str(), listeners[0].position),
+        ("orders", 2)
     );
     let report = store.verify(&kernel_id()).unwrap();
     // c3 is unsigned on purpose; everything else must check out.

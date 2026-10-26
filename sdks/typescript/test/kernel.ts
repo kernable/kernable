@@ -47,6 +47,9 @@ ${extraConfig}
 
 [subscribers]
 "${app}" = ["*"]
+
+[listeners]
+"${app}" = ["*"]
 `,
     );
   }

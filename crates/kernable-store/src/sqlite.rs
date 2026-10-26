@@ -14,7 +14,7 @@ use std::{
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
-        Command, CommandResult, Committed, Event, NewEvent, Rejected, Signature,
+        Command, CommandResult, Committed, Event, ListenerRecord, NewEvent, Rejected, Signature,
         command_result::Outcome,
     },
     signing::{self, GENESIS},
@@ -69,6 +69,10 @@ CREATE TABLE IF NOT EXISTS checkpoints (
     kernel_key_id   TEXT    NOT NULL,
     kernel_sig      BLOB    NOT NULL,
     created_at      INTEGER NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS listeners (
+    name   TEXT PRIMARY KEY,
+    record BLOB NOT NULL -- encoded ListenerRecord
 ) STRICT;
 ";
 
@@ -307,6 +311,7 @@ impl Store for SqliteStore {
 
         let outcome = Outcome::Committed(Committed {
             events: stored.clone(),
+            settled: false,
         });
         complete(&tx, &cmd.command_id, "committed", outcome)?;
         tx.commit()?;
@@ -346,6 +351,34 @@ impl Store for SqliteStore {
     /// The final result of a command, once it is committed or rejected.
     fn result(&self, command_id: &str) -> Result<Option<CommandResult>> {
         stored_result(&self.conn(), command_id)
+    }
+
+    // ---- listeners ----
+
+    fn listeners(&self) -> Result<Vec<ListenerRecord>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT record FROM listeners ORDER BY name")?;
+        let rows = stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
+        rows.map(|bytes| Ok(ListenerRecord::decode(bytes?.as_slice())?))
+            .collect()
+    }
+
+    fn save_listeners(&self, listeners: &[ListenerRecord]) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for l in listeners {
+            if l.removed {
+                tx.execute("DELETE FROM listeners WHERE name = ?1", [&l.name])?;
+            } else {
+                tx.execute(
+                    "INSERT INTO listeners (name, record) VALUES (?1, ?2)
+                     ON CONFLICT (name) DO UPDATE SET record = excluded.record",
+                    params![l.name, l.encode_to_vec()],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     // ---- integrity ----

@@ -44,7 +44,22 @@ message NewEvent {
 // ---- clients ----
 
 service CommandService {
-  rpc Submit(Command) returns (CommandResult);
+  rpc Submit(SubmitRequest) returns (CommandResult);
+}
+
+message SubmitRequest {
+  Command command = 1;
+  Wait wait = 2;
+}
+
+// How long Submit waits before it responds.
+enum Wait {
+  // Until every registered listener has acknowledged the command's last event (default).
+  WAIT_SETTLED = 0;
+  // Until the command's events are stored.
+  WAIT_COMMITTED = 1;
+  // Until the command is stored in the queue; resubmit it later to get the result.
+  WAIT_ACCEPTED = 2;
 }
 
 message CommandResult {
@@ -52,12 +67,17 @@ message CommandResult {
   oneof outcome {
     Committed committed = 2;
     Rejected rejected = 3;
+    Accepted accepted = 4;
   }
 }
 
 message Committed {
   repeated Event events = 1;
+  // True once every registered listener has acknowledged the events.
+  bool settled = 2;
 }
+
+message Accepted {}
 
 message Rejected {
   string code = 1;
@@ -75,6 +95,54 @@ message SubscribeRequest {
   repeated string event_types = 2; // empty = all types the key may read
   int64 issued_at = 3;             // ms since epoch; must be within 60 s of the kernel's clock
   Signature client_sig = 4;
+}
+
+// ---- listeners ----
+
+// Durable, named, ordered event listeners (read models and reactors).
+//
+// Event N reaches a listener of order k only after every registered listener with a lower
+// order has acknowledged N. Delivery is at least once.
+service ListenerService {
+  rpc Listen(stream ListenerMessage) returns (stream ListenerDelivery);
+}
+
+message ListenerMessage {
+  oneof msg {
+    Hello hello = 1;
+    ChallengeResponse challenge_response = 2;
+    Ack ack = 3;
+  }
+}
+
+message ListenerDelivery {
+  oneof msg {
+    Challenge challenge = 1;
+    Ready ready = 2;
+    Batch batch = 3;
+  }
+}
+
+message Hello {
+  string name = 1;
+  string key_id = 2;
+  int32 order = 3;
+  repeated string event_types = 4; // empty = all types the key may read
+  // Start after this position instead of the stored one, e.g. 0 to rebuild an in-memory read model.
+  optional uint64 from_position = 5;
+}
+
+message Ready {
+  uint64 after_position = 1; // the listener receives events after this position
+}
+
+message Batch {
+  repeated Event events = 1; // only the listener's event types
+  uint64 up_to = 2;          // last position the batch covers; acknowledge it once processed
+}
+
+message Ack {
+  uint64 position = 1;
 }
 
 // ---- workers ----
