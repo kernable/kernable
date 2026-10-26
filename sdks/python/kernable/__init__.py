@@ -31,7 +31,8 @@ from typing import Any, Callable
 
 import grpc
 
-from kernable.signing import Key, challenge_message, command_message, rejection_message, result_message
+from kernable.signing import (Key, challenge_message, command_message, rejection_message, result_message,
+                              snapshot_message)
 from kernable.v1 import kernable_pb2 as pb
 from kernable.v1 import kernable_pb2_grpc as rpc
 
@@ -79,17 +80,27 @@ class NotSettled(Exception):
         self.outcome = outcome
 
 
+_INITIAL = object()
+
+
 class Aggregate:
     """How events change an aggregate's state (`apply`) and which events a command produces
     (`command`). Handlers must be deterministic and free of side effects; they may run again.
 
     Both work as decorators (`@agg.apply("Type")`) or directly (`agg.apply("Type", fn)`).
     A command handler returns a list of `{"type": ..., "data": ...}`.
+
+    Every `snapshot_every` events (0 turns it off) the worker sends a snapshot of the state, so
+    later commands fold only the events after it. The state must survive a JSON round trip.
+    Change `schema` when `apply` produces differently shaped state: older snapshots are then
+    ignored and the state is rebuilt from the events.
     """
 
-    def __init__(self, name: str, initial: Any):
+    def __init__(self, name: str, initial: Any, snapshot_every: int = 100, schema: str = "1"):
         self.name = name
         self.initial = initial
+        self.snapshot_every = snapshot_every
+        self.schema = schema
         self.appliers: dict[str, Callable] = {}
         self.handlers: dict[str, Callable] = {}
 
@@ -99,9 +110,11 @@ class Aggregate:
     def command(self, command_type: str, fn: Callable | None = None):
         return _register(self, self.handlers, command_type, fn)
 
-    def fold(self, history: list[tuple[str, Any]]) -> Any:
-        """State after `history`; events without an `apply` are skipped."""
-        state = self.initial
+    def fold(self, history: list[tuple[str, Any]], state: Any = _INITIAL) -> Any:
+        """State after `history`, starting from `state` (default: `initial`);
+        events without an `apply` are skipped."""
+        if state is _INITIAL:
+            state = self.initial
         for event_type, data in history:
             fn = self.appliers.get(event_type)
             if fn:
@@ -121,8 +134,8 @@ def _register(owner, table: dict, name: str, fn: Callable | None):
     return decorator
 
 
-def aggregate(name: str, initial: Any) -> Aggregate:
-    return Aggregate(name, initial)
+def aggregate(name: str, initial: Any, snapshot_every: int = 100, schema: str = "1") -> Aggregate:
+    return Aggregate(name, initial, snapshot_every, schema)
 
 
 class Kernable:
@@ -267,16 +280,32 @@ class Worker(_Stream):
             agg = self._by_command.get(cmd.command_type)
             if agg is None or agg.name != cmd.aggregate_type:
                 raise Rejected(f"no handler for {cmd.aggregate_type}.{cmd.command_type}", "unknown_command")
-            state = agg.fold([(e.event_type, _decode(e.payload)) for e in x.history])
+            if x.HasField("snapshot") and x.snapshot.schema != agg.schema:
+                raise Rejected(f"snapshot schema {x.snapshot.schema} is not {agg.schema}", "snapshot_stale")
+            history = [(e.event_type, _decode(e.payload)) for e in x.history]
+            state = agg.fold(history, _decode(x.snapshot.state) if x.HasField("snapshot") else _INITIAL)
             produced = agg.handlers[cmd.command_type](state, _decode(cmd.payload))
             events = [pb.NewEvent(event_type=e["type"], payload=_encode(e.get("data"))) for e in produced]
+            snapshot = self._snapshot(agg, cmd, x.expected_version, state, events)
         except Exception as err:
             reason = (pb.Rejected(code=err.code, message=str(err)) if isinstance(err, Rejected)
                       else pb.Rejected(code="handler_error", message=repr(err)))
             sig = self._key.sign(rejection_message(cmd.command_id, reason))
             return pb.WorkerMessage(rejection=pb.Rejection(lease_id=x.lease_id, reason=reason, worker_sig=sig))
         sig = self._key.sign(result_message(cmd, x.expected_version, events))
-        return pb.WorkerMessage(result=pb.Result(lease_id=x.lease_id, events=events, worker_sig=sig))
+        return pb.WorkerMessage(result=pb.Result(lease_id=x.lease_id, events=events, worker_sig=sig, snapshot=snapshot))
+
+    def _snapshot(self, agg: Aggregate, cmd, before: int, state, events):
+        """A snapshot of the state after `events`, if they cross a multiple of `snapshot_every`."""
+        version = before + len(events)
+        every = agg.snapshot_every
+        if every <= 0 or not events or version // every == before // every:
+            return None
+        # Apply the events as they will be read back, so the snapshot equals a replay.
+        after = agg.fold([(e.event_type, _decode(e.payload)) for e in events], state)
+        state_bytes = _encode(after)
+        sig = self._key.sign(snapshot_message(cmd, version, agg.schema, state_bytes))
+        return pb.Snapshot(version=version, schema=agg.schema, state=state_bytes, worker_sig=sig)
 
 
 class Listener(_Stream):

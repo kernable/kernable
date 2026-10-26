@@ -13,6 +13,7 @@ message LogRecord {
     RejectedRecord rejected = 3;
     CheckpointRecord checkpoint = 4;
     ListenerRecord listener = 5;
+    SnapshotRecord snapshot = 6;
   }
 }
 
@@ -51,5 +52,15 @@ message ListenerRecord {
   int32 order = 3;
   repeated string event_types = 4;
   uint64 position = 5;
+  bool removed = 6;
+}
+
+// The latest snapshot of a stream; the latest record per stream wins.
+message SnapshotRecord {
+  string tenant_id = 1;
+  string aggregate_type = 2;
+  string aggregate_id = 3;
+  Snapshot snapshot = 4;
+  bytes event_hash = 5; // hash of the stream's event at snapshot.version
   bool removed = 6;
 }

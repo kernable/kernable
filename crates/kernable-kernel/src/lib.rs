@@ -23,8 +23,8 @@ use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
         Accepted, Challenge, Command, CommandResult, Committed, Event, Execute, KernelMessage,
-        ListenerDelivery, ListenerMessage, Registered, Rejected, Signature, SubmitRequest,
-        SubscribeRequest, Wait, WorkerMessage,
+        ListenerDelivery, ListenerMessage, Registered, Rejected, Signature, Snapshot,
+        SnapshotRecord, SubmitRequest, SubscribeRequest, Wait, WorkerMessage,
         command_result::Outcome,
         command_service_server::{CommandService, CommandServiceServer},
         event_service_server::{EventService, EventServiceServer},
@@ -50,6 +50,8 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// Re-executions after a version conflict before the command is rejected.
 const MAX_CONFLICT_RETRIES: u32 = 5;
+/// Rejection code of a worker that cannot read the snapshot it got.
+const SNAPSHOT_STALE: &str = "snapshot_stale";
 /// How often idle workers look for expired leases.
 const POLL: Duration = Duration::from_millis(100);
 /// Accepted clock difference for signed subscribe requests.
@@ -400,6 +402,8 @@ type Outbox = mpsc::Sender<Result<KernelMessage, Status>>;
 struct InFlight {
     command: Command,
     expected_version: u64,
+    /// The command was sent with a snapshot.
+    with_snapshot: bool,
     attempts: u32,
     permit: OwnedSemaphorePermit,
 }
@@ -551,7 +555,8 @@ impl Session {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Sends the command with its current history. Returns false once the worker is gone.
+    /// Sends the command with the latest snapshot and the events after it.
+    /// Returns false once the worker is gone.
     async fn execute(
         &self,
         lease_id: String,
@@ -559,12 +564,22 @@ impl Session {
         attempts: u32,
         permit: OwnedSemaphorePermit,
     ) -> bool {
-        let history = match self.kernel.store.read_stream(
+        let (tenant, aggregate_type, id) = (
             &command.tenant_id,
             &command.aggregate_type,
             &command.aggregate_id,
-        ) {
-            Ok(history) => history,
+        );
+        let store = &self.kernel.store;
+        let loaded = store
+            .snapshot(tenant, aggregate_type, id)
+            .and_then(|record| {
+                let snapshot = record.and_then(|r| r.snapshot);
+                let after = snapshot.as_ref().map_or(0, |s| s.version);
+                let history = store.read_stream_after(tenant, aggregate_type, id, after)?;
+                Ok((snapshot, history))
+            });
+        let (snapshot, history) = match loaded {
+            Ok(loaded) => loaded,
             Err(e) => {
                 eprintln!("read stream failed: {e}");
                 self.kernel.queue.release(&lease_id);
@@ -572,12 +587,17 @@ impl Session {
                 return true;
             }
         };
-        let expected_version = history.last().map_or(0, |e| e.version);
+        let expected_version = history
+            .last()
+            .map(|e| e.version)
+            .or(snapshot.as_ref().map(|s| s.version))
+            .unwrap_or(0);
         self.in_flight().insert(
             lease_id.clone(),
             InFlight {
                 command: command.clone(),
                 expected_version,
+                with_snapshot: snapshot.is_some(),
                 attempts,
                 permit,
             },
@@ -587,6 +607,7 @@ impl Session {
             command: Some(command),
             history,
             expected_version,
+            snapshot,
         };
         send(&self.out, Out::Execute(execute)).await.is_ok()
     }
@@ -597,10 +618,16 @@ impl Session {
         };
         let sig = r.worker_sig.unwrap_or_default();
         let msg = signing::result_message(&f.command, f.expected_version, &r.events);
-        if sig.key_id != self.key_id || signing::verify(&sig, &msg).is_err() {
+        let snapshot_ok = r
+            .snapshot
+            .as_ref()
+            .is_none_or(|s| self.valid_snapshot(s, &f, r.events.len()));
+        if sig.key_id != self.key_id || signing::verify(&sig, &msg).is_err() || !snapshot_ok {
             // Put it back, so it is released when the session ends.
             self.in_flight().insert(r.lease_id, f);
-            return Err(Status::unauthenticated("invalid result signature"));
+            return Err(Status::unauthenticated(
+                "invalid result or snapshot signature",
+            ));
         }
         if !self.kernel.queue.holds(&r.lease_id) {
             return Ok(()); // the lease expired; the command was handed to another worker
@@ -613,6 +640,20 @@ impl Session {
             .commit(command_id, f.expected_version, &r.events, &sig, now_ms())
         {
             Ok(events) => {
+                if let (Some(snapshot), Some(last)) = (r.snapshot, events.last()) {
+                    let record = SnapshotRecord {
+                        tenant_id: last.tenant_id.clone(),
+                        aggregate_type: last.aggregate_type.clone(),
+                        aggregate_id: last.aggregate_id.clone(),
+                        snapshot: Some(snapshot),
+                        event_hash: last.hash.clone(),
+                        removed: false,
+                    };
+                    // A snapshot is only a cache: losing one costs time, not data.
+                    if let Err(e) = self.kernel.store.save_snapshot(&record) {
+                        eprintln!("saving snapshot failed: {e}");
+                    }
+                }
                 self.kernel.queue.done(&r.lease_id);
                 self.kernel.appended.notify_waiters();
                 self.kernel.complete(CommandResult {
@@ -654,8 +695,38 @@ impl Session {
             self.in_flight().insert(r.lease_id, f);
             return Err(Status::unauthenticated("invalid rejection signature"));
         }
+        if reason.code == SNAPSHOT_STALE && f.with_snapshot {
+            // The worker cannot read the snapshot: drop it and send all events instead.
+            let c = &f.command;
+            let removed = SnapshotRecord {
+                tenant_id: c.tenant_id.clone(),
+                aggregate_type: c.aggregate_type.clone(),
+                aggregate_id: c.aggregate_id.clone(),
+                removed: true,
+                ..Default::default()
+            };
+            if let Err(e) = self.kernel.store.save_snapshot(&removed) {
+                eprintln!("removing snapshot failed: {e}");
+                self.release(&r.lease_id);
+                return Ok(());
+            }
+            self.execute(r.lease_id, f.command, f.attempts + 1, f.permit)
+                .await;
+            return Ok(());
+        }
         self.reject(&r.lease_id, f.command.command_id, reason);
         Ok(())
+    }
+
+    /// A snapshot must describe the state right after the result's events and be signed
+    /// by this session's worker.
+    fn valid_snapshot(&self, s: &Snapshot, f: &InFlight, event_count: usize) -> bool {
+        let msg = signing::snapshot_message(&f.command, s.version, &s.schema, &s.state);
+        event_count > 0
+            && s.version == f.expected_version + event_count as u64
+            && s.worker_sig
+                .as_ref()
+                .is_some_and(|sig| sig.key_id == self.key_id && signing::verify(sig, &msg).is_ok())
     }
 
     fn reject(&self, lease_id: &str, command_id: String, reason: Rejected) {

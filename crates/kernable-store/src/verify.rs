@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use kernable_core::{
-    proto::{Command, Event, NewEvent},
+    proto::{Command, Event, NewEvent, SnapshotRecord},
     signing::{self, GENESIS},
 };
 
@@ -15,6 +15,7 @@ pub struct Report {
     pub events: u64,
     pub commands: u64,
     pub checkpoints: u64,
+    pub snapshots: u64,
     /// Events after the last valid checkpoint; truncating them cannot be detected.
     pub unanchored: u64,
     pub problems: Vec<String>,
@@ -27,7 +28,7 @@ impl Report {
 }
 
 /// Feed checkpoints first, then all events in global order (with their stored `prev_hash`),
-/// then all commands; `finish` returns the report.
+/// then snapshots and commands; `finish` returns the report.
 pub(crate) struct Verifier {
     report: Report,
     /// Checkpoints with a valid kernel signature: position -> chain hash.
@@ -102,6 +103,39 @@ impl Verifier {
         }
         self.prev = e.hash.clone();
         self.group.push(e);
+    }
+
+    /// Checks a snapshot's worker signature and that it belongs to the stored stream:
+    /// `event_hash` is the hash of the stream's event at the snapshot's version, if any.
+    pub fn snapshot(&mut self, record: &SnapshotRecord, event_hash: Option<&[u8]>) {
+        self.report.snapshots += 1;
+        let stream = format!(
+            "{}/{}/{}",
+            record.tenant_id, record.aggregate_type, record.aggregate_id
+        );
+        let s = record.snapshot.clone().unwrap_or_default();
+        let cmd = Command {
+            tenant_id: record.tenant_id.clone(),
+            aggregate_type: record.aggregate_type.clone(),
+            aggregate_id: record.aggregate_id.clone(),
+            ..Default::default()
+        };
+        let msg = signing::snapshot_message(&cmd, s.version, &s.schema, &s.state);
+        if s.worker_sig
+            .as_ref()
+            .is_none_or(|sig| signing::verify(sig, &msg).is_err())
+        {
+            self.report.problems.push(format!(
+                "snapshot of {stream} at version {}: invalid worker signature",
+                s.version
+            ));
+        }
+        if event_hash != Some(record.event_hash.as_slice()) {
+            self.report.problems.push(format!(
+                "snapshot of {stream} at version {}: does not match the stored events",
+                s.version
+            ));
+        }
     }
 
     pub fn command(&mut self, cmd: &Command) {

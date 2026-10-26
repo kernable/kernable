@@ -85,6 +85,11 @@ fn vectors() -> Value {
             json!({"command_id": cmd.command_id, "code": reason.code, "message": reason.message}),
             signing::rejection_message(&cmd.command_id, &reason),
         ),
+        "snapshot": entry(
+            json!({"tenant_id": cmd.tenant_id, "aggregate_type": cmd.aggregate_type, "aggregate_id": cmd.aggregate_id,
+                   "version": 100, "schema": "1", "state_hex": hex::encode(br#"{"items":3}"#)}),
+            signing::snapshot_message(&cmd, 100, "1", br#"{"items":3}"#),
+        ),
         "subscribe": entry(
             json!({"after_position": 7, "issued_at": 1_700_000_000_000i64, "event_types": ["OrderPlaced", "ItemAdded"]}),
             signing::subscribe_message(7, &["OrderPlaced".into(), "ItemAdded".into()], 1_700_000_000_000),

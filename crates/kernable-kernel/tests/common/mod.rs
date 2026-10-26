@@ -6,10 +6,11 @@ use std::{collections::HashMap, path::PathBuf, time::Duration};
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
-        ChallengeResponse, Command, CommandResult, Event, NewEvent, Register, Rejected, Rejection,
-        Result as WorkResult, SubmitRequest, Wait, WorkerMessage, command_result::Outcome,
-        command_service_client::CommandServiceClient, kernel_message::Msg as Out,
-        worker_gateway_client::WorkerGatewayClient, worker_message::Msg as In,
+        ChallengeResponse, Command, CommandResult, NewEvent, Register, Rejected, Rejection,
+        Result as WorkResult, Snapshot, SubmitRequest, Wait, WorkerMessage,
+        command_result::Outcome, command_service_client::CommandServiceClient,
+        kernel_message::Msg as Out, worker_gateway_client::WorkerGatewayClient,
+        worker_message::Msg as In,
     },
     signing, transport,
 };
@@ -104,15 +105,15 @@ pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Order domain as a plain function of history and command.
-pub fn order(history: &[Event], cmd: &Command) -> Result<Vec<NewEvent>, Rejected> {
+/// Order domain as a plain function of whether the order exists and the command.
+pub fn order(exists: bool, cmd: &Command) -> Result<Vec<NewEvent>, Rejected> {
     let reject = |message: &str| Rejected {
         code: "invalid_state".into(),
         message: message.into(),
     };
     let (event_type, ok) = match cmd.command_type.as_str() {
-        "PlaceOrder" => ("OrderPlaced", history.is_empty()),
-        "AddItem" => ("ItemAdded", !history.is_empty()),
+        "PlaceOrder" => ("OrderPlaced", !exists),
+        "AddItem" => ("ItemAdded", exists),
         _ => return Err(reject("unknown command")),
     };
     if !ok {
@@ -133,6 +134,12 @@ pub enum Behavior {
     Slow(Duration),
     /// Signs results with a key other than its registered one.
     ForgeResult,
+    /// Sends a snapshot with every result.
+    Snapshots,
+    /// Sends a snapshot signed with a key other than its registered one.
+    ForgeSnapshot,
+    /// Cannot read snapshots: rejects with `snapshot_stale` when it gets one.
+    StaleSnapshots,
 }
 
 pub struct TestWorker {
@@ -144,6 +151,8 @@ pub struct TestWorker {
     pub behavior: Behavior,
     /// Receives the ID of every command the worker is asked to execute.
     pub seen: Option<mpsc::UnboundedSender<String>>,
+    /// Receives, per execution, the snapshot version (if any) and the number of history events.
+    pub executions: Option<mpsc::UnboundedSender<(Option<u64>, usize)>>,
 }
 
 impl TestWorker {
@@ -154,6 +163,7 @@ impl TestWorker {
             command_types: vec!["PlaceOrder".into(), "AddItem".into()],
             behavior: Behavior::Honest,
             seen: None,
+            executions: None,
         }
     }
 
@@ -201,22 +211,53 @@ pub async fn run_worker(addr: String, w: TestWorker) -> tonic::Status {
                 if let Some(seen) = &w.seen {
                     let _ = seen.send(cmd.command_id.clone());
                 }
+                if let Some(executions) = &w.executions {
+                    let version = x.snapshot.as_ref().map(|s| s.version);
+                    let _ = executions.send((version, x.history.len()));
+                }
                 match w.behavior {
                     Behavior::Crash => return tonic::Status::ok("crashed"),
                     Behavior::Slow(delay) => tokio::time::sleep(delay).await,
-                    Behavior::Honest | Behavior::ForgeResult => {}
+                    _ => {}
                 }
                 let result_key = match w.behavior {
                     Behavior::ForgeResult => key(9),
                     _ => w.signer.clone(),
                 };
-                match order(&x.history, &cmd) {
+                let exists = x.snapshot.is_some() || !x.history.is_empty();
+                let outcome = match w.behavior {
+                    Behavior::StaleSnapshots if x.snapshot.is_some() => Err(Rejected {
+                        code: "snapshot_stale".into(),
+                        message: "unknown snapshot schema".into(),
+                    }),
+                    _ => order(exists, &cmd),
+                };
+                match outcome {
                     Ok(events) => {
                         let msg = signing::result_message(&cmd, x.expected_version, &events);
+                        let version = x.expected_version + events.len() as u64;
+                        let snapshot_key = match w.behavior {
+                            Behavior::Snapshots | Behavior::StaleSnapshots => {
+                                Some(w.signer.clone())
+                            }
+                            Behavior::ForgeSnapshot => Some(key(9)),
+                            _ => None,
+                        };
+                        let snapshot = snapshot_key.map(|k| {
+                            let state = version.to_string().into_bytes();
+                            let msg = signing::snapshot_message(&cmd, version, "1", &state);
+                            Snapshot {
+                                version,
+                                schema: "1".into(),
+                                state,
+                                worker_sig: Some(signing::sign(&k, &msg)),
+                            }
+                        });
                         In::Result(WorkResult {
                             lease_id: x.lease_id,
                             events,
                             worker_sig: Some(signing::sign(&result_key, &msg)),
+                            snapshot,
                         })
                     }
                     Err(reason) => {

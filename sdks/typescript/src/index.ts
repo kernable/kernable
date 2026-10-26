@@ -11,12 +11,14 @@ import {
   type ListenCall,
   type ListenerDelivery,
   type SessionCall,
+  type WireCommand,
   type WireEvent,
   type WireNewEvent,
   type WireRejected,
+  type WireSnapshot,
   type WireWait,
 } from "./rpc.ts";
-import { Key, challengeMessage, commandMessage, rejectionMessage, resultMessage, subscribeMessage } from "./signing.ts";
+import { Key, challengeMessage, commandMessage, rejectionMessage, resultMessage, snapshotMessage, subscribeMessage } from "./signing.ts";
 
 export { Key } from "./signing.ts";
 
@@ -68,19 +70,34 @@ export type Outcome =
 type Apply<S> = (state: S, data: any) => S;
 type Handle<S> = (state: S, data: any) => NewEvent[] | Promise<NewEvent[]>;
 
+export interface AggregateOptions {
+  /** Send a snapshot of the state every this many events (default 100; 0 turns them off). */
+  snapshotEvery?: number;
+  /**
+   * Version of the state format (default "1"). Change it when `apply` produces differently
+   * shaped state; older snapshots are then ignored and the state is rebuilt from the events.
+   */
+  schema?: string;
+}
+
 /**
  * An aggregate: how events change its state (`apply`) and which events a command produces
  * (`command`). Handlers must be deterministic and free of side effects; they may run again.
+ * The state must survive a JSON round trip, because snapshots store it as JSON.
  */
 export class Aggregate<S> {
   readonly name: string;
   readonly initial: S;
+  readonly snapshotEvery: number;
+  readonly schema: string;
   readonly appliers = new Map<string, Apply<S>>();
   readonly handlers = new Map<string, Handle<S>>();
 
-  constructor(name: string, initial: S) {
+  constructor(name: string, initial: S, options: AggregateOptions = {}) {
     this.name = name;
     this.initial = initial;
+    this.snapshotEvery = options.snapshotEvery ?? 100;
+    this.schema = options.schema ?? "1";
   }
 
   apply<D = any>(eventType: string, fn: (state: S, data: D) => S): this {
@@ -93,14 +110,14 @@ export class Aggregate<S> {
     return this;
   }
 
-  /** State after `history`; events without an `apply` are skipped. */
-  fold(history: { type: string; data: unknown }[]): S {
-    return history.reduce((s, e) => this.appliers.get(e.type)?.(s, e.data) ?? s, this.initial);
+  /** State after `history`, starting from `from`; events without an `apply` are skipped. */
+  fold(history: { type: string; data: unknown }[], from: S = this.initial): S {
+    return history.reduce((s, e) => this.appliers.get(e.type)?.(s, e.data) ?? s, from);
   }
 }
 
-export function aggregate<S>(name: string, initial: S): Aggregate<S> {
-  return new Aggregate(name, initial);
+export function aggregate<S>(name: string, initial: S, options?: AggregateOptions): Aggregate<S> {
+  return new Aggregate(name, initial, options);
 }
 
 export interface Options {
@@ -431,14 +448,20 @@ export class Worker {
   private async execute(call: SessionCall, x: NonNullable<KernelMessage["execute"]>): Promise<void> {
     const cmd = x.command;
     let events: WireNewEvent[];
+    let snapshot: WireSnapshot | undefined;
     try {
       const agg = this.byCommand.get(cmd.command_type);
       if (!agg || agg.name !== cmd.aggregate_type) {
         throw new Rejected(`no handler for ${cmd.aggregate_type}.${cmd.command_type}`, "unknown_command");
       }
-      const state = agg.fold(x.history.map((e) => ({ type: e.event_type, data: decode(e.payload) })));
+      if (x.snapshot && x.snapshot.schema !== agg.schema) {
+        throw new Rejected(`snapshot schema ${x.snapshot.schema} is not ${agg.schema}`, "snapshot_stale");
+      }
+      const from = x.snapshot ? (decode(x.snapshot.state) as any) : agg.initial;
+      const state = agg.fold(x.history.map((e) => ({ type: e.event_type, data: decode(e.payload) })), from);
       const produced = await agg.handlers.get(cmd.command_type)!(state, decode(cmd.payload));
       events = produced.map((e) => ({ event_type: e.type, payload: encode(e.data) }));
+      snapshot = this.snapshot(agg, cmd, x.expected_version, state, events);
     } catch (err) {
       const reason: WireRejected =
         err instanceof Rejected ? { code: err.code, message: err.message } : { code: "handler_error", message: String(err) };
@@ -447,7 +470,19 @@ export class Worker {
       return;
     }
     const worker_sig = this.key.sign(resultMessage(cmd, x.expected_version, events));
-    call.write({ result: { lease_id: x.lease_id, events, worker_sig } });
+    call.write({ result: { lease_id: x.lease_id, events, worker_sig, ...(snapshot && { snapshot }) } });
+  }
+
+  /** A snapshot of the state after `events`, if they cross a multiple of `snapshotEvery`. */
+  private snapshot(agg: Aggregate<any>, cmd: WireCommand, before: number, state: unknown, events: WireNewEvent[]) {
+    const version = before + events.length;
+    const every = agg.snapshotEvery;
+    if (every <= 0 || events.length === 0 || Math.floor(version / every) === Math.floor(before / every)) return undefined;
+    // Apply the events as they will be read back, so the snapshot equals a replay.
+    const after = agg.fold(events.map((e) => ({ type: e.event_type, data: decode(e.payload) })), state);
+    const snapshot = { version, schema: agg.schema, state: encode(after) };
+    const message = snapshotMessage(cmd, version, snapshot.schema, snapshot.state);
+    return { ...snapshot, worker_sig: this.key.sign(message) };
   }
 }
 

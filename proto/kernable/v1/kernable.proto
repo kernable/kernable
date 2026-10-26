@@ -35,6 +35,14 @@ message Event {
   Signature producer_sig = 11;
 }
 
+// An aggregate's state after `version`, made by a worker: a cache, the events stay the truth.
+message Snapshot {
+  uint64 version = 1;
+  string schema = 2;        // state format of the aggregate definition; workers reject unknown ones
+  bytes state = 3;          // opaque to the kernel
+  Signature worker_sig = 4; // over kernable.v1.snapshot, see SIGNING.md
+}
+
 // Event proposed by a worker; the kernel assigns position, version and hash.
 message NewEvent {
   string event_type = 1;
@@ -190,16 +198,21 @@ message Registered {
 message Execute {
   string lease_id = 1;
   Command command = 2;
-  repeated Event history = 3;
+  repeated Event history = 3; // events after `snapshot.version`, or all events without one
   uint64 expected_version = 4;
+  Snapshot snapshot = 5;      // the latest snapshot, if any
 }
 
 message Result {
   string lease_id = 1;
   repeated NewEvent events = 2;
   Signature worker_sig = 3;
+  // Optional: the state after these events, at expected_version + len(events).
+  Snapshot snapshot = 4;
 }
 
+// A rejection with code `snapshot_stale` means the worker cannot read the snapshot it got
+// (unknown schema): the kernel drops the snapshot and executes the command again with all events.
 message Rejection {
   string lease_id = 1;
   Rejected reason = 2;

@@ -212,6 +212,7 @@ async fn worker(addr: &str, key: &str, concurrency: u32) -> Result<(), BoxError>
                     lease_id: x.lease_id,
                     events,
                     worker_sig: Some(sig),
+                    snapshot: None,
                 })
             }
             _ => continue,

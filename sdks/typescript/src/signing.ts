@@ -83,6 +83,17 @@ export function resultMessage(c: Stream, expectedVersion: number, events: WireNe
   return m.done();
 }
 
+export function snapshotMessage(c: Omit<Stream, "command_id">, version: number, schema: string, state: Buffer): Buffer {
+  return new Msg("kernable.v1.snapshot")
+    .str(c.tenant_id)
+    .str(c.aggregate_type)
+    .str(c.aggregate_id)
+    .u64(version)
+    .str(schema)
+    .bytes(state)
+    .done();
+}
+
 export function rejectionMessage(commandId: string, reason: WireRejected): Buffer {
   return new Msg("kernable.v1.rejection").str(commandId).str(reason.code).str(reason.message).done();
 }

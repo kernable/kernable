@@ -99,8 +99,8 @@ fn verify(store: &str, key: &str) -> Result<bool> {
     let key_id = signing::key_id(&signing::read_verifying_key(key)?);
     let report = kernable_store::open_read_only(store)?.verify(&key_id)?;
     println!(
-        "{} events, {} commands, {} checkpoints, {} events after the last checkpoint",
-        report.events, report.commands, report.checkpoints, report.unanchored
+        "{} events, {} commands, {} checkpoints, {} snapshots, {} events after the last checkpoint",
+        report.events, report.commands, report.checkpoints, report.snapshots, report.unanchored
     );
     for p in &report.problems {
         println!("PROBLEM {p}");

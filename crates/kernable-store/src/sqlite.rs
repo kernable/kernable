@@ -15,7 +15,7 @@ use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
         Command, CommandResult, Committed, Event, ListenerRecord, NewEvent, Rejected, Signature,
-        command_result::Outcome,
+        SnapshotRecord, command_result::Outcome,
     },
     signing::{self, GENESIS},
 };
@@ -65,6 +65,13 @@ CREATE TABLE IF NOT EXISTS checkpoints (
     kernel_sig      BLOB    NOT NULL,
     created_at      INTEGER NOT NULL
 ) STRICT;
+CREATE TABLE IF NOT EXISTS snapshots (
+    tenant_id      TEXT NOT NULL,
+    aggregate_type TEXT NOT NULL,
+    aggregate_id   TEXT NOT NULL,
+    record         BLOB NOT NULL, -- encoded SnapshotRecord
+    PRIMARY KEY (tenant_id, aggregate_type, aggregate_id)
+) STRICT;
 CREATE TABLE IF NOT EXISTS listeners (
     name   TEXT PRIMARY KEY,
     record BLOB NOT NULL -- encoded ListenerRecord
@@ -107,17 +114,18 @@ impl SqliteStore {
 impl Store for SqliteStore {
     // ---- events ----
 
-    /// All events of one aggregate, ordered by version.
-    fn read_stream(
+    fn read_stream_after(
         &self,
         tenant_id: &str,
         aggregate_type: &str,
         aggregate_id: &str,
+        after_version: u64,
     ) -> Result<Vec<Event>> {
         read_events(
             &self.conn(),
-            "WHERE tenant_id = ?1 AND aggregate_type = ?2 AND aggregate_id = ?3 ORDER BY version",
-            params![tenant_id, aggregate_type, aggregate_id],
+            "WHERE tenant_id = ?1 AND aggregate_type = ?2 AND aggregate_id = ?3 AND version > ?4
+             ORDER BY version",
+            params![tenant_id, aggregate_type, aggregate_id, after_version],
         )
     }
 
@@ -287,6 +295,53 @@ impl Store for SqliteStore {
         stored_result(&self.conn(), command_id)
     }
 
+    // ---- snapshots ----
+
+    fn snapshot(
+        &self,
+        tenant_id: &str,
+        aggregate_type: &str,
+        aggregate_id: &str,
+    ) -> Result<Option<SnapshotRecord>> {
+        let bytes: Option<Vec<u8>> = self
+            .conn()
+            .query_row(
+                "SELECT record FROM snapshots
+                 WHERE tenant_id = ?1 AND aggregate_type = ?2 AND aggregate_id = ?3",
+                params![tenant_id, aggregate_type, aggregate_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(bytes
+            .map(|b| SnapshotRecord::decode(b.as_slice()))
+            .transpose()?)
+    }
+
+    fn save_snapshot(&self, record: &SnapshotRecord) -> Result<()> {
+        let r = record;
+        if r.removed {
+            self.conn().execute(
+                "DELETE FROM snapshots
+                 WHERE tenant_id = ?1 AND aggregate_type = ?2 AND aggregate_id = ?3",
+                params![r.tenant_id, r.aggregate_type, r.aggregate_id],
+            )?;
+        } else {
+            self.conn().execute(
+                "INSERT INTO snapshots (tenant_id, aggregate_type, aggregate_id, record)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (tenant_id, aggregate_type, aggregate_id)
+                 DO UPDATE SET record = excluded.record",
+                params![
+                    r.tenant_id,
+                    r.aggregate_type,
+                    r.aggregate_id,
+                    r.encode_to_vec()
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
     // ---- listeners ----
 
     fn listeners(&self) -> Result<Vec<ListenerRecord>> {
@@ -389,6 +444,22 @@ fn verify_tables(conn: &Connection, kernel_key_id: &str) -> Result<Report> {
     while let Some(r) = rows.next()? {
         let prev_hash: Vec<u8> = r.get(12)?;
         v.event(event_from_row(r)?, &prev_hash);
+    }
+
+    let mut stmt = conn.prepare("SELECT record FROM snapshots")?;
+    let mut rows = stmt.query([])?;
+    while let Some(r) = rows.next()? {
+        let record = SnapshotRecord::decode(r.get::<_, Vec<u8>>(0)?.as_slice())?;
+        let version = record.snapshot.as_ref().map_or(0, |s| s.version);
+        let hash: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT hash FROM events
+                 WHERE tenant_id = ?1 AND aggregate_type = ?2 AND aggregate_id = ?3 AND version = ?4",
+                params![record.tenant_id, record.aggregate_type, record.aggregate_id, version],
+                |r| r.get(0),
+            )
+            .optional()?;
+        v.snapshot(&record, hash.as_deref());
     }
 
     let mut stmt = conn.prepare(

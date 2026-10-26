@@ -10,7 +10,8 @@ import time
 import unittest
 
 from kernable import Kernable, NotSettled, Rejected, aggregate
-from kernable.signing import Key, challenge_message, command_message, rejection_message, result_message
+from kernable.signing import (Key, challenge_message, command_message, rejection_message, result_message,
+                              snapshot_message)
 from kernable.v1 import kernable_pb2 as pb
 from tests.kernel import ROOT, TestKernel
 
@@ -38,6 +39,9 @@ class SigningVectors(unittest.TestCase):
         j = VECTORS["rejection"]["input"]
         self.check("rejection", rejection_message(j["command_id"], pb.Rejected(code=j["code"], message=j["message"])))
         self.check("challenge", challenge_message(bytes.fromhex(VECTORS["challenge"]["input"]["nonce_hex"])))
+        n = VECTORS["snapshot"]["input"]
+        stream = pb.Command(tenant_id=n["tenant_id"], aggregate_type=n["aggregate_type"], aggregate_id=n["aggregate_id"])
+        self.check("snapshot", snapshot_message(stream, n["version"], n["schema"], bytes.fromhex(n["state_hex"])))
 
 
 counter = aggregate("Counter", 0)
@@ -131,6 +135,37 @@ class EndToEnd(unittest.TestCase):
         out = self.kernel.verify()
         self.assertEqual(out.returncode, 0, out.stdout)
 
+    def test_snapshots_shorten_replays_and_a_new_schema_rebuilds(self):
+        applied = []
+
+        def increment(total: int, data) -> list:
+            if total + data["by"] > 20:
+                raise Rejected("limit")
+            return [{"type": "Incremented", "data": {"by": data["by"]}}]
+
+        # v1 keeps the state as a dict.
+        v1 = aggregate("Counter", {"n": 0}, snapshot_every=3)
+
+        @v1.apply("Incremented")
+        def _(state, e):
+            applied.append(e)
+            return {"n": state["n"] + e["by"]}
+
+        v1.command("Increment", lambda state, data: increment(state["n"], data))
+        worker = self.run_stream(self.k.worker(v1))
+        for _ in range(10):
+            self.assertTrue(self.increment(1).committed)
+        self.assertLessEqual(len(applied), 25)  # without snapshots: 45 for the history alone
+        worker.stop()
+        time.sleep(0.1)
+
+        # v2 keeps it as a number: the old snapshot does not fit.
+        v2 = aggregate("Counter", 0, snapshot_every=3, schema="2")
+        v2.apply("Incremented", lambda n, e: n + e["by"])
+        v2.command("Increment", increment)
+        self.run_stream(self.k.worker(v2))
+        self.assertFalse(self.increment(11).committed)  # 10 + 11 > 20: rebuilt from the events
+        self.assertTrue(self.increment(10).committed)
 
 if __name__ == "__main__":
     unittest.main()

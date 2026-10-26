@@ -1,0 +1,39 @@
+# M11: snapshots (SDK default: every 100 events). Same machine and harness as before.
+
+== Apple M2 Max, 2026-10-26, store=memory:
+crypto: sign=20.7us verify=36.5us per-command(2 sign + 2 verify)=114.3us
+baseline in-process          store memory (in-process, signed): n=5000 throughput=8764/s p50=0.11ms p95=0.13ms p99=0.14ms p99.9=0.18ms max=0.63ms rejected=0 errors=0
+rust worker, UDS, sequential load concurrency=1: n=24351 throughput=4870/s p50=0.18ms p95=0.21ms p99=0.26ms p99.9=0.48ms max=2.49ms rejected=0 errors=0
+ts worker, UDS, sequential   load concurrency=1: n=21560 throughput=4312/s p50=0.20ms p95=0.27ms p99=0.32ms p99.9=0.72ms max=11.51ms rejected=0 errors=0
+ts worker, TCP, sequential   load concurrency=1: n=17434 throughput=3487/s p50=0.26ms p95=0.30ms p99=0.37ms p99.9=0.84ms max=8.77ms rejected=0 errors=0
+rust worker, UDS, 2000/s     load rate=2000/s: n=20000 throughput=1998/s p50=1.77ms p95=2.80ms p99=4.41ms p99.9=26.04ms max=36.66ms rejected=0 errors=0
+ts worker, UDS, 2000/s       load rate=2000/s: n=20000 throughput=1997/s p50=1.68ms p95=2.71ms p99=4.72ms p99.9=24.77ms max=26.44ms rejected=0 errors=0
+rust worker, UDS, max        load concurrency=64: n=168369 throughput=16830/s p50=3.71ms p95=4.20ms p99=5.01ms p99.9=9.25ms max=20.47ms rejected=0 errors=0
+ts worker, UDS, max          load concurrency=64: n=134611 throughput=13452/s p50=4.37ms p95=6.72ms p99=7.33ms p99.9=12.17ms max=23.92ms rejected=0 errors=0
+ts worker, TCP, max          load concurrency=64: n=134739 throughput=13466/s p50=4.50ms p95=6.21ms p99=6.63ms p99.9=12.36ms max=26.03ms rejected=0 errors=0
+ts x1, 1ms work, max         load concurrency=64: n=9360 throughput=935/s p50=67.96ms p95=69.68ms p99=84.09ms p99.9=136.79ms max=146.02ms rejected=0 errors=0
+ts x2, 1ms work, max         load concurrency=64: n=18207 throughput=1816/s p50=34.02ms p95=71.85ms p99=82.53ms p99.9=121.02ms max=137.58ms rejected=0 errors=0
+ts x4, 1ms work, max         load concurrency=64: n=34421 throughput=3433/s p50=12.77ms p95=55.05ms p99=70.25ms p99.9=86.22ms max=103.76ms rejected=0 errors=0
+ts, history 10               history events=10: n=200 throughput=1680/s p50=0.63ms p95=0.86ms p99=1.12ms p99.9=1.32ms max=1.32ms rejected=0 errors=0
+ts, history 100              history events=100: n=200 throughput=2142/s p50=0.47ms p95=0.63ms p99=0.76ms p99.9=0.76ms max=0.76ms rejected=0 errors=0
+ts, history 1000             history events=1000: n=200 throughput=2386/s p50=0.42ms p95=0.55ms p99=0.65ms p99.9=0.65ms max=0.65ms rejected=0 errors=0
+ts, hot aggregate            load concurrency=8: n=15104 throughput=3019/s p50=2.64ms p95=3.75ms p99=4.95ms p99.9=7.05ms max=20.95ms rejected=0 errors=0
+
+== Apple M2 Max, 2026-10-26, store=sqlite:k.db
+crypto: sign=17.2us verify=38.2us per-command(2 sign + 2 verify)=110.8us
+baseline in-process          store sqlite (in-process, signed): n=5000 throughput=4576/s p50=0.19ms p95=0.23ms p99=1.87ms p99.9=2.30ms max=2.77ms rejected=0 errors=0
+rust worker, UDS, sequential load concurrency=1: n=16109 throughput=3222/s p50=0.26ms p95=0.31ms p99=1.82ms p99.9=3.98ms max=6.65ms rejected=0 errors=0
+ts worker, UDS, sequential   load concurrency=1: n=14550 throughput=2910/s p50=0.29ms p95=0.39ms p99=1.90ms p99.9=2.40ms max=7.59ms rejected=0 errors=0
+ts worker, TCP, sequential   load concurrency=1: n=12603 throughput=2520/s p50=0.34ms p95=0.47ms p99=2.00ms p99.9=2.48ms max=11.60ms rejected=0 errors=0
+rust worker, UDS, 2000/s     load rate=2000/s: n=20000 throughput=1998/s p50=1.83ms p95=3.88ms p99=6.16ms p99.9=11.72ms max=16.99ms rejected=0 errors=0
+ts worker, UDS, 2000/s       load rate=2000/s: n=20000 throughput=1998/s p50=1.74ms p95=3.69ms p99=5.34ms p99.9=15.99ms max=18.21ms rejected=0 errors=0
+rust worker, UDS, max        load concurrency=64: n=61196 throughput=6114/s p50=10.08ms p95=15.02ms p99=19.31ms p99.9=25.72ms max=31.11ms rejected=0 errors=0
+ts worker, UDS, max          load concurrency=64: n=48364 throughput=4832/s p50=9.87ms p95=33.22ms p99=87.41ms p99.9=158.33ms max=158.92ms rejected=0 errors=0
+ts worker, TCP, max          load concurrency=64: n=56145 throughput=5610/s p50=11.01ms p95=14.32ms p99=20.57ms p99.9=45.28ms max=54.43ms rejected=0 errors=0
+ts x1, 1ms work, max         load concurrency=64: n=9316 throughput=930/s p50=68.40ms p95=78.46ms p99=85.25ms p99.9=144.34ms max=155.12ms rejected=0 errors=0
+ts x2, 1ms work, max         load concurrency=64: n=17764 throughput=1772/s p50=32.81ms p95=80.61ms p99=91.99ms p99.9=100.74ms max=114.06ms rejected=0 errors=0
+ts x4, 1ms work, max         load concurrency=64: n=32432 throughput=3233/s p50=15.71ms p95=49.73ms p99=64.53ms p99.9=75.75ms max=82.26ms rejected=0 errors=0
+ts, history 10               history events=10: n=200 throughput=1196/s p50=0.80ms p95=1.41ms p99=2.31ms p99.9=8.60ms max=8.60ms rejected=0 errors=0
+ts, history 100              history events=100: n=200 throughput=1688/s p50=0.58ms p95=0.80ms p99=2.17ms p99.9=2.98ms max=2.98ms rejected=0 errors=0
+ts, history 1000             history events=1000: n=200 throughput=1825/s p50=0.53ms p95=0.71ms p99=2.35ms p99.9=2.44ms max=2.44ms rejected=0 errors=0
+ts, hot aggregate            load concurrency=8: n=11955 throughput=2389/s p50=3.19ms p95=5.10ms p99=6.01ms p99.9=15.27ms max=22.38ms rejected=0 errors=0

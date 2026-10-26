@@ -86,6 +86,18 @@ pub fn result_message(cmd: &Command, expected_version: u64, events: &[NewEvent])
     m.0
 }
 
+/// What a worker signs for a snapshot of `stream`'s aggregate (the stream fields of a command).
+pub fn snapshot_message(stream: &Command, version: u64, schema: &str, state: &[u8]) -> Vec<u8> {
+    Msg::new("kernable.v1.snapshot")
+        .str(&stream.tenant_id)
+        .str(&stream.aggregate_type)
+        .str(&stream.aggregate_id)
+        .u64(version)
+        .str(schema)
+        .bytes(state)
+        .0
+}
+
 /// What a worker signs when rejecting a command.
 pub fn rejection_message(command_id: &str, reason: &Rejected) -> Vec<u8> {
     Msg::new("kernable.v1.rejection")

@@ -2,7 +2,7 @@
 //!
 //! The whole store is one log of records (`proto/kernable/v1/storage.proto`): enqueued
 //! commands, commits (all events of one command in a single record, hence atomic),
-//! rejections, checkpoints and listener positions. Each record is framed as `u32 BE length || first 4 bytes of
+//! rejections, checkpoints, listener positions and snapshots. Each record is framed as `u32 BE length || first 4 bytes of
 //! SHA-256(body) || body`. Opening replays the log into memory. A torn last record from a
 //! crash is moved to `<path>.torn-<offset>` and cut off; damage anywhere else refuses to open.
 //!
@@ -26,7 +26,7 @@ use kernable_core::{
     proto::{
         CheckpointRecord, Command, CommandResult, Committed, CommittedRecord, EnqueuedRecord,
         Event, ListenerRecord, LogRecord, LoggedEvent, NewEvent, Rejected, RejectedRecord,
-        Signature, command_result::Outcome, log_record::Record,
+        Signature, SnapshotRecord, command_result::Outcome, log_record::Record,
     },
     signing::{self, GENESIS},
 };
@@ -70,6 +70,7 @@ struct State {
     next_seq: u64,
     checkpoints: Vec<Checkpoint>,
     listeners: BTreeMap<String, ListenerRecord>,
+    snapshots: HashMap<StreamKey, SnapshotRecord>,
 }
 
 impl State {
@@ -130,6 +131,18 @@ impl State {
                 kernel_sig: cp.kernel_sig.unwrap_or_default(),
                 created_at: cp.created_at,
             }),
+            Record::Snapshot(s) => {
+                let key = (
+                    s.tenant_id.clone(),
+                    s.aggregate_type.clone(),
+                    s.aggregate_id.clone(),
+                );
+                if s.removed {
+                    self.snapshots.remove(&key);
+                } else {
+                    self.snapshots.insert(key, s);
+                }
+            }
             Record::Listener(l) if l.removed => {
                 self.listeners.remove(&l.name);
             }
@@ -293,11 +306,12 @@ fn corrupt(what: &str) -> Error {
 }
 
 impl Store for FileStore {
-    fn read_stream(
+    fn read_stream_after(
         &self,
         tenant_id: &str,
         aggregate_type: &str,
         aggregate_id: &str,
+        after_version: u64,
     ) -> Result<Vec<Event>> {
         let inner = self.inner();
         let key = (
@@ -306,10 +320,30 @@ impl Store for FileStore {
             aggregate_id.to_owned(),
         );
         let indices = inner.state.streams.get(&key).map_or(&[][..], Vec::as_slice);
-        Ok(indices
+        // Versions are 1, 2, 3, ...: version v is at index v - 1.
+        let after = (after_version as usize).min(indices.len());
+        Ok(indices[after..]
             .iter()
             .map(|&i| inner.state.events[i].clone())
             .collect())
+    }
+
+    fn snapshot(
+        &self,
+        tenant_id: &str,
+        aggregate_type: &str,
+        aggregate_id: &str,
+    ) -> Result<Option<SnapshotRecord>> {
+        let key = (
+            tenant_id.to_owned(),
+            aggregate_type.to_owned(),
+            aggregate_id.to_owned(),
+        );
+        Ok(self.inner().state.snapshots.get(&key).cloned())
+    }
+
+    fn save_snapshot(&self, record: &SnapshotRecord) -> Result<()> {
+        append(&mut self.inner(), Record::Snapshot(record.clone()))
     }
 
     fn read_all(&self, after: u64, limit: u32) -> Result<Vec<Event>> {
@@ -464,6 +498,14 @@ impl Store for FileStore {
         let mut v = Verifier::new(kernel_key_id, state.checkpoints.iter().cloned());
         for (event, prev_hash) in state.events.iter().zip(&state.prev_hashes) {
             v.event(event.clone(), prev_hash);
+        }
+        for (key, record) in &state.snapshots {
+            let version = record.snapshot.as_ref().map_or(0, |s| s.version) as usize;
+            let hash = version
+                .checked_sub(1)
+                .and_then(|i| state.streams.get(key)?.get(i))
+                .map(|&i| state.events[i].hash.as_slice());
+            v.snapshot(record, hash);
         }
         let mut commands: Vec<&Cmd> = state.commands.values().collect();
         commands.sort_by_key(|c| c.seq);

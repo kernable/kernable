@@ -9,7 +9,8 @@
 //! completes at most once, a commit appends all events of a command atomically and only on the
 //! expected stream version, and events form a hash chain (see `proto/SIGNING.md`). Which
 //! command runs when (one per aggregate, in submission order) is up to the kernel's queue.
-//! They also keep the registered event listeners and their acknowledged positions.
+//! They also keep the registered event listeners with their acknowledged positions, and the
+//! latest snapshot per aggregate (a cache signed by the worker; see `proto/SIGNING.md`).
 
 mod file;
 mod sqlite;
@@ -19,7 +20,7 @@ use std::fmt;
 
 use ed25519_dalek::SigningKey;
 use kernable_core::proto::{
-    Command, CommandResult, Event, ListenerRecord, NewEvent, Rejected, Signature,
+    Command, CommandResult, Event, ListenerRecord, NewEvent, Rejected, Signature, SnapshotRecord,
 };
 
 pub use file::FileStore;
@@ -110,6 +111,17 @@ pub trait Store: Send + Sync {
         tenant_id: &str,
         aggregate_type: &str,
         aggregate_id: &str,
+    ) -> Result<Vec<Event>> {
+        self.read_stream_after(tenant_id, aggregate_type, aggregate_id, 0)
+    }
+
+    /// The events of one aggregate with a version greater than `after_version`, in order.
+    fn read_stream_after(
+        &self,
+        tenant_id: &str,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        after_version: u64,
     ) -> Result<Vec<Event>>;
 
     /// Up to `limit` events with a global position greater than `after`, in order.
@@ -140,6 +152,17 @@ pub trait Store: Send + Sync {
 
     /// The final result of a command, once it is committed or rejected.
     fn result(&self, command_id: &str) -> Result<Option<CommandResult>>;
+
+    /// The latest snapshot of one aggregate.
+    fn snapshot(
+        &self,
+        tenant_id: &str,
+        aggregate_type: &str,
+        aggregate_id: &str,
+    ) -> Result<Option<SnapshotRecord>>;
+
+    /// Replaces the aggregate's snapshot; a record with `removed` set deletes it.
+    fn save_snapshot(&self, record: &SnapshotRecord) -> Result<()>;
 
     /// Registered listeners with their acknowledged positions, ordered by name.
     fn listeners(&self) -> Result<Vec<ListenerRecord>>;

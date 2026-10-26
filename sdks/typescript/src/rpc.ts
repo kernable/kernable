@@ -39,6 +39,13 @@ export interface WireNewEvent {
   payload: Buffer;
 }
 
+export interface WireSnapshot {
+  version: number;
+  schema: string;
+  state: Buffer;
+  worker_sig: WireSignature;
+}
+
 export interface WireRejected {
   code: string;
   message: string;
@@ -64,13 +71,19 @@ export interface WireSubscribeRequest {
 export interface KernelMessage {
   challenge?: { nonce: Buffer } | null;
   registered?: { session_id: string } | null;
-  execute?: { lease_id: string; command: WireCommand; history: WireEvent[]; expected_version: number } | null;
+  execute?: {
+    lease_id: string;
+    command: WireCommand;
+    history: WireEvent[];
+    expected_version: number;
+    snapshot?: WireSnapshot | null;
+  } | null;
 }
 
 export type WorkerMessage =
   | { register: { worker_id: string; key_id: string; command_types: string[]; max_concurrency: number } }
   | { challenge_response: { sig: Buffer } }
-  | { result: { lease_id: string; events: WireNewEvent[]; worker_sig: WireSignature } }
+  | { result: { lease_id: string; events: WireNewEvent[]; worker_sig: WireSignature; snapshot?: WireSnapshot } }
   | { rejection: { lease_id: string; reason: WireRejected; worker_sig: WireSignature } };
 
 export type SessionCall = grpc.ClientDuplexStream<WorkerMessage, KernelMessage>;

@@ -42,6 +42,11 @@ def result_message(c, expected_version: int, events) -> bytes:
     return bytes(m.buf)
 
 
+def snapshot_message(c, version: int, schema: str, state: bytes) -> bytes:
+    return bytes(Msg("kernable.v1.snapshot").str(c.tenant_id).str(c.aggregate_type).str(c.aggregate_id)
+                 .u64(version).str(schema).bytes(state).buf)
+
+
 def rejection_message(command_id: str, reason) -> bytes:
     return bytes(Msg("kernable.v1.rejection").str(command_id).str(reason.code).str(reason.message).buf)
 
