@@ -27,6 +27,8 @@ pub fn id(key: &SigningKey) -> String {
 
 pub struct Env {
     pub dir: PathBuf,
+    /// Store URL, for opening the store from the test.
+    pub store: String,
     pub addr: String,
     pub kernel_key: SigningKey,
 }
@@ -49,8 +51,9 @@ pub async fn start_with(name: &str, lease_ttl_ms: i64) -> Env {
     let kernel_key = key(3);
     std::fs::write(dir.join("kernel.key"), hex(kernel_key.as_bytes())).unwrap();
     let addr = format!("unix:{}", dir.join("k.sock").display());
+    let store = store_url(&dir);
     let config = Config {
-        db: dir.join("k.db"),
+        store: store.clone(),
         listen: addr.clone(),
         kernel_key: dir.join("kernel.key"),
         lease_ttl_ms,
@@ -67,8 +70,17 @@ pub async fn start_with(name: &str, lease_ttl_ms: i64) -> Env {
     wait_for(&addr).await;
     Env {
         dir,
+        store,
         addr,
         kernel_key,
+    }
+}
+
+/// The backend under test: `KERNABLE_TEST_STORE=file` selects the file store, else SQLite.
+pub fn store_url(dir: &std::path::Path) -> String {
+    match std::env::var("KERNABLE_TEST_STORE").as_deref() {
+        Ok("file") => format!("file:{}", dir.join("k.log").display()),
+        _ => format!("sqlite:{}", dir.join("k.db").display()),
     }
 }
 

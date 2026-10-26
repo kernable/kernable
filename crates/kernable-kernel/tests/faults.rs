@@ -9,12 +9,11 @@ use std::{
 };
 
 use common::*;
-use kernable_store_sqlite::SqliteStore;
 use tokio::sync::mpsc;
 use tonic::Code;
 
 fn stream_versions(env: &Env) -> Vec<u64> {
-    let store = SqliteStore::open(env.dir.join("k.db")).unwrap();
+    let store = kernable_store::open_read_only(&env.store).unwrap();
     let events = store.read_stream("t1", "Order", "o1").unwrap();
     events.iter().map(|e| e.version).collect()
 }
@@ -108,8 +107,9 @@ async fn sigterm_releases_in_flight_commands_and_checkpoints() {
     std::fs::write(dir.join("kernel.key"), hex(key(3).as_bytes())).unwrap();
     let sock = dir.join("k.sock");
     let addr = format!("unix:{}", sock.display());
+    let store = store_url(&dir);
     let config = format!(
-        "db = \"k.db\"\nlisten = \"{addr}\"\nkernel_key = \"kernel.key\"\nlease_ttl_ms = 60000\n\
+        "store = \"{store}\"\nlisten = \"{addr}\"\nkernel_key = \"kernel.key\"\nlease_ttl_ms = 60000\n\
          checkpoint_interval_ms = 3600000\n[clients]\n\"{}\" = [\"*\"]\n\
          [workers]\n\"{}\" = [\"PlaceOrder\", \"AddItem\"]\n",
         id(&key(1)),
@@ -163,7 +163,7 @@ async fn sigterm_releases_in_flight_commands_and_checkpoints() {
     };
     assert!(exit.success());
 
-    let store = SqliteStore::open(dir.join("k.db")).unwrap();
+    let store = kernable_store::open(&store).unwrap();
     let report = store.verify(&id(&key(3))).unwrap();
     assert!(report.is_ok(), "{:?}", report.problems);
     assert!(report.checkpoints >= 1, "no final checkpoint");

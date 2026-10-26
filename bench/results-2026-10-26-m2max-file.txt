@@ -1,0 +1,21 @@
+== Apple M2 Max, 2026-10-26, store=file:k.log
+crypto: sign=17.3us verify=34.9us per-command(2 sign + 2 verify)=104.5us
+baseline in-process          store file (in-process, signed): n=5000 throughput=7485/s p50=0.12ms p95=0.14ms p99=0.18ms p99.9=0.62ms max=26.59ms rejected=0 errors=0
+rust worker, UDS, sequential load concurrency=1: n=23167 throughput=4633/s p50=0.19ms p95=0.23ms p99=0.29ms p99.9=0.51ms max=11.27ms rejected=0 errors=0
+ts worker, UDS, sequential   load concurrency=1: n=20697 throughput=4139/s p50=0.21ms p95=0.27ms p99=0.36ms p99.9=0.82ms max=13.74ms rejected=0 errors=0
+ts worker, TCP, sequential   load concurrency=1: n=17038 throughput=3407/s p50=0.26ms p95=0.31ms p99=0.39ms p99.9=1.11ms max=6.62ms rejected=0 errors=0
+rust worker, UDS, 2000/s     load rate=2000/s: n=20000 throughput=1997/s p50=1.85ms p95=3.04ms p99=4.30ms p99.9=9.87ms max=12.89ms rejected=0 errors=0
+ts worker, UDS, 2000/s       load rate=2000/s: n=20000 throughput=1998/s p50=1.71ms p95=2.81ms p99=4.10ms p99.9=11.74ms max=15.15ms rejected=0 errors=0
+rust worker, UDS, max        load concurrency=64: n=96951 throughput=9691/s p50=6.38ms p95=7.08ms p99=14.80ms p99.9=23.26ms max=46.72ms rejected=0 errors=0
+ts worker, UDS, max          load concurrency=64: n=99404 throughput=9936/s p50=6.22ms p95=7.28ms p99=11.20ms p99.9=28.34ms max=49.21ms rejected=0 errors=0
+ts worker, TCP, max          load concurrency=64: n=65052 throughput=6493/s p50=6.79ms p95=24.65ms p99=43.81ms p99.9=96.17ms max=118.76ms rejected=0 errors=0
+ts x1, 1ms work, max         load concurrency=64: n=8692 throughput=868/s p50=69.33ms p95=95.12ms p99=126.31ms p99.9=148.10ms max=157.12ms rejected=0 errors=0
+ts x2, 1ms work, max         load concurrency=64: n=16323 throughput=1631/s p50=37.76ms p95=81.21ms p99=93.86ms p99.9=113.72ms max=140.46ms rejected=0 errors=0
+ts x4, 1ms work, max         load concurrency=64: n=31784 throughput=3165/s p50=13.42ms p95=58.21ms p99=75.02ms p99.9=122.70ms max=161.85ms rejected=0 errors=0
+ts, history 10               history events=10: n=200 throughput=1176/s p50=0.84ms p95=1.15ms p99=1.38ms p99.9=1.73ms max=1.73ms rejected=0 errors=0
+ts, history 100              history events=100: n=200 throughput=931/s p50=1.08ms p95=1.33ms p99=1.46ms p99.9=1.48ms max=1.48ms rejected=0 errors=0
+ts, history 1000             history events=1000: n=200 throughput=243/s p50=3.90ms p95=5.87ms p99=9.81ms p99.9=10.05ms max=10.05ms rejected=0 errors=0
+ts, hot aggregate            load concurrency=8: n=1558 throughput=309/s p50=26.71ms p95=49.50ms p99=54.52ms p99.9=60.29ms max=61.23ms rejected=0 errors=0
+
+# The file backend keeps all state in memory and does not fsync (process-crash safe, not
+# power-loss safe); SQLite in WAL with synchronous=NORMAL is comparable but not identical.

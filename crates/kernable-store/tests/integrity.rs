@@ -7,7 +7,7 @@ use kernable_core::{
     proto::{Command, NewEvent},
     signing::{self, GENESIS},
 };
-use kernable_store_sqlite::{Report, SqliteStore};
+use kernable_store::{Report, SqliteStore, Store};
 use rusqlite::{Connection, params};
 
 struct Fixture {

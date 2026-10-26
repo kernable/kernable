@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 kernable-core = { path = "../kernable-core" }
-kernable-store-sqlite = { path = "../kernable-store-sqlite" }
+kernable-store = { path = "../kernable-store" }
 getrandom.workspace = true
 tokio.workspace = true
 tonic.workspace = true

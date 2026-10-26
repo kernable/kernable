@@ -1,5 +1,5 @@
 [package]
-name = "kernable-store-sqlite"
+name = "kernable-store"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,4 +10,5 @@ kernable-core = { path = "../kernable-core" }
 prost.workspace = true
 rusqlite.workspace = true
 ed25519-dalek.workspace = true
-
+getrandom.workspace = true
+sha2.workspace = true

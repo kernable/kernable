@@ -3,8 +3,10 @@ check:
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets -- -D warnings
 	cargo test --workspace
+	KERNABLE_TEST_STORE=file cargo test -p kernable-kernel
 	cargo build --workspace
-	cd sdks/typescript && npm install --no-audit --no-fund --silent && npm run -s check
+	cd sdks/typescript && npm install --no-audit --no-fund --silent && npm run -s check \
+		&& KERNABLE_TEST_STORE=file npm run -s check
 
 # Python worker; needs Python 3.10+ and network for the first install.
 check-py:

@@ -17,6 +17,8 @@ export class TestKernel {
   readonly url = `unix:${this.socket}`;
   /** One key for both submitting commands and running the worker. */
   readonly appKey = join(this.dir, "app.key");
+  /** Backend under test: KERNABLE_TEST_STORE=file selects the file store, else SQLite. */
+  readonly store = process.env.KERNABLE_TEST_STORE === "file" ? `file:${join(this.dir, "k.log")}` : `sqlite:${join(this.dir, "k.db")}`;
   private process?: ChildProcess;
 
   /** `extraConfig` adds top-level TOML lines, e.g. `lease_ttl_ms = 500`. */
@@ -31,7 +33,7 @@ export class TestKernel {
     const app = write("app");
     writeFileSync(
       join(this.dir, "kernable.toml"),
-      `db = "k.db"
+      `store = "${this.store}"
 listen = "${this.url}"
 kernel_key = "kernel.key"
 checkpoint_interval_ms = 50
@@ -67,7 +69,7 @@ ${extraConfig}
 
   /** Output of `kernable verify` on the event log. */
   verify(): string {
-    return execFileSync(join(BIN, "kernable"), ["verify", join(this.dir, "k.db"), join(this.dir, "kernel.pub")], {
+    return execFileSync(join(BIN, "kernable"), ["verify", this.store, join(this.dir, "kernel.pub")], {
       encoding: "utf8",
     });
   }

@@ -1,0 +1,44 @@
+// Records of the append-only file store (`file:` backend); one record per state change.
+// Not part of the wire protocol.
+syntax = "proto3";
+
+package kernable.v1;
+
+import "kernable/v1/kernable.proto";
+
+message LogRecord {
+  oneof record {
+    EnqueuedRecord enqueued = 1;
+    CommittedRecord committed = 2;
+    RejectedRecord rejected = 3;
+    CheckpointRecord checkpoint = 4;
+  }
+}
+
+message EnqueuedRecord {
+  Command command = 1;
+  int64 created_at = 2;
+}
+
+// All events of one command, so a commit is a single record and therefore atomic.
+message CommittedRecord {
+  string command_id = 1;
+  repeated LoggedEvent events = 2;
+}
+
+message LoggedEvent {
+  Event event = 1;
+  bytes prev_hash = 2;
+}
+
+message RejectedRecord {
+  string command_id = 1;
+  Rejected reason = 2;
+}
+
+message CheckpointRecord {
+  uint64 global_position = 1;
+  bytes chain_hash = 2;
+  Signature kernel_sig = 3;
+  int64 created_at = 4;
+}

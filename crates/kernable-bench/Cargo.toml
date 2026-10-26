@@ -9,7 +9,7 @@ publish.workspace = true
 ed25519-dalek.workspace = true
 getrandom.workspace = true
 kernable-core = { path = "../kernable-core" }
-kernable-store-sqlite = { path = "../kernable-store-sqlite" }
+kernable-store = { path = "../kernable-store" }
 tokio.workspace = true
 tokio-stream.workspace = true
 tonic.workspace = true

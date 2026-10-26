@@ -9,7 +9,6 @@ use std::{
 
 use common::*;
 use kernable_core::proto::command_result::Outcome;
-use kernable_store_sqlite::SqliteStore;
 use tonic::Code;
 
 #[tokio::test(flavor = "multi_thread")]
@@ -47,7 +46,7 @@ async fn signed_commands_run_end_to_end() {
 
     // The log the kernel wrote verifies, including a kernel checkpoint.
     tokio::time::sleep(Duration::from_millis(120)).await;
-    let store = SqliteStore::open(env.dir.join("k.db")).unwrap();
+    let store = kernable_store::open_read_only(&env.store).unwrap();
     let report = store.verify(&id(&env.kernel_key)).unwrap();
     assert!(report.is_ok(), "{:?}", report.problems);
     assert_eq!(report.events, 2);
@@ -138,7 +137,7 @@ async fn concurrent_commands_on_one_aggregate_are_queued() {
         outcomes.iter().all(|o| matches!(o, Outcome::Committed(_))),
         "{outcomes:?}"
     );
-    let store = SqliteStore::open(env.dir.join("k.db")).unwrap();
+    let store = kernable_store::open_read_only(&env.store).unwrap();
     let versions: Vec<u64> = store
         .read_stream("t1", "Order", "o1")
         .unwrap()

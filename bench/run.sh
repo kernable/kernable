@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Runs the PoC benchmark matrix (POC_PLAN.md §9) on this machine and prints one line per run.
-# Release builds, SQLite WAL with synchronous=NORMAL, 1 KB payloads, warm connections.
+# Release builds, 1 KB payloads, warm connections. STORE=file:k.log benchmarks the file backend
+# (default: sqlite:k.db, WAL with synchronous=NORMAL).
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -17,10 +18,12 @@ WORKER=$("$BIN/kernable" keys new "$DIR/worker")
 SOCK="unix:$DIR/k.sock"
 TCP="127.0.0.1:47233"
 
+STORE=${STORE:-sqlite:k.db}
+
 start_kernel() { # <listen>
-  rm -f "$DIR"/k.db*
+  rm -f "$DIR"/k.db* "$DIR"/k.log*
   cat > "$DIR/kernable.toml" <<TOML
-db = "k.db"
+store = "$STORE"
 listen = "$1"
 kernel_key = "kernel.key"
 [clients]
@@ -62,10 +65,11 @@ scenario() { # <label> <kind> <workers> <addr> <load args...>
   stop_all
 }
 
-echo "== $(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -m), $(date -u +%F)"
+echo "== $(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -m), $(date -u +%F), store=$STORE"
 "$BIN/kernable-bench" crypto
 printf '%-28s ' "baseline in-process"
-"$BIN/kernable-bench" store "$DIR/baseline.db" 5000
+case "$STORE" in file:*) BASELINE="file:$DIR/baseline.log" ;; *) BASELINE="sqlite:$DIR/baseline.db" ;; esac
+"$BIN/kernable-bench" store "$BASELINE" 5000
 
 # Latency without load: one client, back to back (no timer artifacts).
 for kind in rust ts; do

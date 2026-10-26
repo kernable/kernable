@@ -9,7 +9,7 @@ use serde::Deserialize;
 /// Kernel configuration, usually `kernable.toml`:
 ///
 /// ```toml
-/// db = "kernable.db"
+/// store = "sqlite:kernable.db"         # or "file:kernable.log"; a bare path means SQLite
 /// listen = "unix:/tmp/kernable.sock"   # or "127.0.0.1:7233"
 /// kernel_key = "kernel.key"
 ///
@@ -25,7 +25,8 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    pub db: PathBuf,
+    /// Storage backend URL, see `kernable_store::open`.
+    pub store: String,
     pub listen: String,
     pub kernel_key: PathBuf,
     #[serde(default = "default_lease_ttl_ms")]
@@ -59,7 +60,8 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let mut config: Config = toml::from_str(&fs::read_to_string(path)?)?;
         let dir = path.parent().unwrap_or(Path::new("."));
-        config.db = dir.join(&config.db);
+        let (backend, store) = kernable_store::backend(&config.store);
+        config.store = format!("{backend}:{}", dir.join(store).display());
         config.kernel_key = dir.join(&config.kernel_key);
         Ok(config)
     }

@@ -10,12 +10,12 @@ use kernable_core::{
     proto::{Command, command_result::Outcome, command_service_client::CommandServiceClient},
     signing, transport,
 };
-use kernable_store_sqlite::SqliteStore;
 
 const USAGE: &str = "usage:
   kernable keys new <name>                writes <name>.key (secret) and <name>.pub (key ID)
-  kernable checkpoint <db> <kernel.key>   signs the current head of the event log
-  kernable verify <db> <kernel.pub>       checks hash chain, checkpoints and signatures
+  kernable checkpoint <store> <kernel.key>  signs the current head of the event log (kernel stopped)
+  kernable verify <store> <kernel.pub>      checks hash chain, checkpoints and signatures
+                                          (store: sqlite:<path>, file:<path> or a bare SQLite path)
   kernable submit <addr> <client.key> <tenant> <aggregate_type> <aggregate_id> <command_type> <payload>
                                           signs and submits a command (addr: unix:/path or host:port)";
 
@@ -27,8 +27,8 @@ async fn main() -> ExitCode {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let outcome = match args.as_slice() {
         ["keys", "new", name] => keys_new(name),
-        ["checkpoint", db, key] => checkpoint(db, key),
-        ["verify", db, key] => verify(db, key),
+        ["checkpoint", store, key] => checkpoint(store, key),
+        ["verify", store, key] => verify(store, key),
         [
             "submit",
             addr,
@@ -79,18 +79,18 @@ fn keys_new(name: &str) -> Result<bool> {
     Ok(true)
 }
 
-fn checkpoint(db: &str, key: &str) -> Result<bool> {
+fn checkpoint(store: &str, key: &str) -> Result<bool> {
     let key = signing::read_signing_key(key)?;
-    match SqliteStore::open(db)?.checkpoint(&key, now_ms())? {
+    match kernable_store::open(store)?.checkpoint(&key, now_ms())? {
         Some(cp) => println!("checkpoint at position {}", cp.global_position),
         None => println!("no events yet"),
     }
     Ok(true)
 }
 
-fn verify(db: &str, key: &str) -> Result<bool> {
+fn verify(store: &str, key: &str) -> Result<bool> {
     let key_id = signing::key_id(&signing::read_verifying_key(key)?);
-    let report = SqliteStore::open(db)?.verify(&key_id)?;
+    let report = kernable_store::open_read_only(store)?.verify(&key_id)?;
     println!(
         "{} events, {} commands, {} checkpoints, {} events after the last checkpoint",
         report.events, report.commands, report.checkpoints, report.unanchored

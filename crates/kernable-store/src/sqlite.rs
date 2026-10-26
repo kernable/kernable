@@ -1,14 +1,11 @@
-//! SQLite event store and persistent command queue.
+//! SQLite backend (`sqlite:<path>`).
 //!
 //! All writes run in `BEGIN IMMEDIATE` transactions, so several stores on the same
 //! file (threads or processes) stay consistent; SQLite serializes them as a single writer.
 //! Tables are `STRICT`, so stored values always have the declared types.
 //! Events form a hash chain anchored by kernel-signed checkpoints (see `proto/SIGNING.md`).
 
-mod verify;
-
 use std::{
-    fmt,
     path::Path,
     sync::{Mutex, MutexGuard, PoisonError},
     time::Duration,
@@ -25,7 +22,10 @@ use kernable_core::{
 use prost::Message;
 use rusqlite::{Connection, OptionalExtension, ToSql, Transaction, TransactionBehavior, params};
 
-pub use verify::Report;
+use crate::{
+    Checkpoint, Enqueued, Error, Lease, Result, Store,
+    verify::{Report, Verifier},
+};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS events (
@@ -76,76 +76,6 @@ const EVENT_COLUMNS: &str = "global_position, tenant_id, aggregate_type, aggrega
                              event_type, payload, command_id, created_at, \
                              producer_key_id, producer_sig, hash";
 
-#[derive(Debug)]
-pub enum Error {
-    /// The stream is no longer at the version the events were based on.
-    VersionConflict {
-        expected: u64,
-        actual: u64,
-    },
-    /// The lease is not held anymore: it expired and was re-leased, or the command is done.
-    LeaseLost,
-    Sqlite(rusqlite::Error),
-    Decode(prost::DecodeError),
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Error::VersionConflict { expected, actual } => {
-                write!(
-                    f,
-                    "version conflict: expected {expected}, stream is at {actual}"
-                )
-            }
-            Error::LeaseLost => write!(f, "lease lost"),
-            Error::Sqlite(e) => write!(f, "sqlite: {e}"),
-            Error::Decode(e) => write!(f, "decode: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for Error {}
-
-impl From<rusqlite::Error> for Error {
-    fn from(e: rusqlite::Error) -> Self {
-        Error::Sqlite(e)
-    }
-}
-
-impl From<prost::DecodeError> for Error {
-    fn from(e: prost::DecodeError) -> Self {
-        Error::Decode(e)
-    }
-}
-
-pub type Result<T> = std::result::Result<T, Error>;
-
-/// Outcome of submitting a command.
-#[derive(Debug, PartialEq)]
-pub enum Enqueued {
-    /// The command is new and waits for a worker.
-    New,
-    /// A command with this ID was submitted before; `result` is set once it is completed.
-    Duplicate { result: Option<CommandResult> },
-}
-
-/// A command handed to a worker for a limited time.
-#[derive(Debug, Clone)]
-pub struct Lease {
-    pub lease_id: String,
-    pub command: Command,
-}
-
-/// A kernel-signed anchor of the hash chain.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Checkpoint {
-    pub global_position: u64,
-    pub chain_hash: Vec<u8>,
-    pub kernel_sig: Signature,
-    pub created_at: i64,
-}
-
 pub struct SqliteStore {
     conn: Mutex<Connection>,
 }
@@ -173,11 +103,13 @@ impl SqliteStore {
     fn conn(&self) -> MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(PoisonError::into_inner)
     }
+}
 
+impl Store for SqliteStore {
     // ---- events ----
 
     /// All events of one aggregate, ordered by version.
-    pub fn read_stream(
+    fn read_stream(
         &self,
         tenant_id: &str,
         aggregate_type: &str,
@@ -191,7 +123,7 @@ impl SqliteStore {
     }
 
     /// Up to `limit` events with a global position greater than `after`, in order.
-    pub fn read_all(&self, after: u64, limit: u32) -> Result<Vec<Event>> {
+    fn read_all(&self, after: u64, limit: u32) -> Result<Vec<Event>> {
         read_events(
             &self.conn(),
             "WHERE global_position > ?1 ORDER BY global_position LIMIT ?2",
@@ -202,7 +134,7 @@ impl SqliteStore {
     // ---- command queue ----
 
     /// Persists a command as pending. Idempotent on `command_id`.
-    pub fn enqueue(&self, cmd: &Command, now_ms: i64) -> Result<Enqueued> {
+    fn enqueue(&self, cmd: &Command, now_ms: i64) -> Result<Enqueued> {
         let conn = self.conn();
         let (key_id, sig) = split_sig(cmd.client_sig.as_ref());
         let inserted = conn.execute(
@@ -233,7 +165,7 @@ impl SqliteStore {
     ///
     /// Per aggregate, at most one command is leased at a time and commands are leased in
     /// submission order; commands of a busy aggregate wait in the queue.
-    pub fn lease(&self, command_types: &[&str], now_ms: i64, ttl_ms: i64) -> Result<Option<Lease>> {
+    fn lease(&self, command_types: &[&str], now_ms: i64, ttl_ms: i64) -> Result<Option<Lease>> {
         if command_types.is_empty() {
             return Ok(None);
         }
@@ -297,7 +229,7 @@ impl SqliteStore {
     /// verifying it is up to the caller.
     ///
     /// On `VersionConflict` the lease stays held, so the caller can retry with fresh history.
-    pub fn commit(
+    fn commit(
         &self,
         lease_id: &str,
         expected_version: u64,
@@ -383,7 +315,7 @@ impl SqliteStore {
 
     /// Hands a leased command back to the queue before its lease expires.
     /// Returns false if the lease was not held anymore.
-    pub fn release(&self, lease_id: &str) -> Result<bool> {
+    fn release(&self, lease_id: &str) -> Result<bool> {
         let changed = self.conn().execute(
             "UPDATE commands SET status = 'pending', lease_id = NULL, lease_expires_at = NULL
              WHERE lease_id = ?1 AND status = 'leased'",
@@ -393,7 +325,7 @@ impl SqliteStore {
     }
 
     /// Hands every leased command back to the queue, e.g. on shutdown.
-    pub fn release_all(&self) -> Result<usize> {
+    fn release_all(&self) -> Result<usize> {
         Ok(self.conn().execute(
             "UPDATE commands SET status = 'pending', lease_id = NULL, lease_expires_at = NULL
              WHERE status = 'leased'",
@@ -402,7 +334,7 @@ impl SqliteStore {
     }
 
     /// Completes the leased command as rejected by the business logic.
-    pub fn reject(&self, lease_id: &str, reason: Rejected) -> Result<()> {
+    fn reject(&self, lease_id: &str, reason: Rejected) -> Result<()> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let cmd = held_command(&tx, lease_id)?;
@@ -412,14 +344,14 @@ impl SqliteStore {
     }
 
     /// The final result of a command, once it is committed or rejected.
-    pub fn result(&self, command_id: &str) -> Result<Option<CommandResult>> {
+    fn result(&self, command_id: &str) -> Result<Option<CommandResult>> {
         stored_result(&self.conn(), command_id)
     }
 
     // ---- integrity ----
 
     /// Signs the current head of the hash chain. Returns `None` while there are no events.
-    pub fn checkpoint(&self, kernel: &SigningKey, now_ms: i64) -> Result<Option<Checkpoint>> {
+    fn checkpoint(&self, kernel: &SigningKey, now_ms: i64) -> Result<Option<Checkpoint>> {
         let conn = self.conn();
         let head = conn
             .query_row(
@@ -431,6 +363,9 @@ impl SqliteStore {
         let Some((global_position, chain_hash)) = head else {
             return Ok(None);
         };
+        if let Some(existing) = read_checkpoints(&conn, Some(global_position))?.pop() {
+            return Ok(Some(existing));
+        }
         let msg = signing::checkpoint_message(global_position, &chain_hash, now_ms);
         let kernel_sig = signing::sign(kernel, &msg);
         conn.execute(
@@ -453,9 +388,60 @@ impl SqliteStore {
     }
 
     /// Recomputes the hash chain and checks all signatures; see [`Report`].
-    pub fn verify(&self, kernel_key_id: &str) -> Result<Report> {
-        verify::run(&self.conn(), kernel_key_id)
+    fn verify(&self, kernel_key_id: &str) -> Result<Report> {
+        verify_tables(&self.conn(), kernel_key_id)
     }
+}
+
+fn read_checkpoints(conn: &Connection, at: Option<u64>) -> Result<Vec<Checkpoint>> {
+    let mut stmt = conn.prepare(
+        "SELECT global_position, chain_hash, kernel_key_id, kernel_sig, created_at FROM checkpoints
+         WHERE ?1 IS NULL OR global_position = ?1 ORDER BY global_position",
+    )?;
+    let rows = stmt.query_map([at], |r| {
+        Ok(Checkpoint {
+            global_position: r.get(0)?,
+            chain_hash: r.get(1)?,
+            kernel_sig: Signature {
+                key_id: r.get(2)?,
+                sig: r.get(3)?,
+            },
+            created_at: r.get(4)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+fn verify_tables(conn: &Connection, kernel_key_id: &str) -> Result<Report> {
+    let mut v = Verifier::new(kernel_key_id, read_checkpoints(conn, None)?);
+
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {EVENT_COLUMNS}, prev_hash FROM events ORDER BY global_position"
+    ))?;
+    let mut rows = stmt.query([])?;
+    while let Some(r) = rows.next()? {
+        let prev_hash: Vec<u8> = r.get(12)?;
+        v.event(event_from_row(r)?, &prev_hash);
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT command_id, tenant_id, aggregate_type, aggregate_id, command_type, payload,
+                client_key_id, client_sig
+         FROM commands ORDER BY created_at, rowid",
+    )?;
+    let mut rows = stmt.query([])?;
+    while let Some(r) = rows.next()? {
+        v.command(&Command {
+            command_id: r.get(0)?,
+            tenant_id: r.get(1)?,
+            aggregate_type: r.get(2)?,
+            aggregate_id: r.get(3)?,
+            command_type: r.get(4)?,
+            payload: r.get(5)?,
+            client_sig: join_sig(r.get(6)?, r.get(7)?),
+        });
+    }
+    Ok(v.finish())
 }
 
 fn event_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {

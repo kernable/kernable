@@ -16,14 +16,13 @@ use kernable_core::{
     },
     signing, transport,
 };
-use kernable_store_sqlite::SqliteStore;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 
 const USAGE: &str = "usage:
   kernable-bench crypto
-  kernable-bench store <db> [count]
+  kernable-bench store <store-url> [count]
   kernable-bench worker <addr> <worker.key> [concurrency]
   kernable-bench load <addr> <client.key> (rate=<n> | concurrency=<n>) [seconds=10] [aggregates=10000] [payload=1024]
   kernable-bench history <addr> <client.key> <events>";
@@ -39,8 +38,8 @@ async fn main() -> ExitCode {
             crypto();
             Ok(())
         }
-        ["store", db, rest @ ..] => store(
-            db,
+        ["store", url, rest @ ..] => store(
+            url,
             rest.first()
                 .map_or(Ok(5_000), |n| n.parse())
                 .unwrap_or(5_000),
@@ -137,8 +136,8 @@ fn crypto() {
 }
 
 /// Lower bound: the whole command path in-process, without network or a worker process.
-fn store(db: &str, count: usize) -> Result<(), BoxError> {
-    let store = SqliteStore::open(db)?;
+fn store(url: &str, count: usize) -> Result<(), BoxError> {
+    let store = kernable_store::open(url)?;
     let (client, worker) = (
         SigningKey::from_bytes(&[1; 32]),
         SigningKey::from_bytes(&[2; 32]),
@@ -176,7 +175,11 @@ fn store(db: &str, count: usize) -> Result<(), BoxError> {
         let outcome = Outcome::Committed(kernable_core::proto::Committed { events: stored });
         tally.record(t.elapsed(), &Ok(outcome));
     }
-    tally.report("store (in-process, signed)", started.elapsed());
+    let backend = kernable_store::backend(url).0;
+    tally.report(
+        &format!("store {backend} (in-process, signed)"),
+        started.elapsed(),
+    );
     Ok(())
 }
 

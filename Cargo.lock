@@ -572,7 +572,7 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.3.4",
  "kernable-core",
- "kernable-store-sqlite",
+ "kernable-store",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -584,7 +584,7 @@ version = "0.0.0"
 dependencies = [
  "getrandom 0.3.4",
  "kernable-core",
- "kernable-store-sqlite",
+ "kernable-store",
  "tokio",
  "tonic",
 ]
@@ -614,7 +614,7 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.3.4",
  "kernable-core",
- "kernable-store-sqlite",
+ "kernable-store",
  "serde",
  "tokio",
  "tokio-stream",
@@ -623,13 +623,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "kernable-store-sqlite"
+name = "kernable-store"
 version = "0.0.0"
 dependencies = [
  "ed25519-dalek",
+ "getrandom 0.3.4",
  "kernable-core",
  "prost",
  "rusqlite",
+ "sha2",
 ]
 
 [[package]]

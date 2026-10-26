@@ -47,7 +47,7 @@ class OrderEndToEnd(unittest.TestCase):
                 f.write(Key(seed).id)
         self.key = Key(seeds["app"])
         with open(f"{self.dir}/kernable.toml", "w") as f:
-            f.write(f'db = "k.db"\nlisten = "{self.url}"\nkernel_key = "kernel.key"\ncheckpoint_interval_ms = 50\n'
+            f.write(f'store = "k.db"\nlisten = "{self.url}"\nkernel_key = "kernel.key"\ncheckpoint_interval_ms = 50\n'
                     f'[clients]\n"{self.key.id}" = ["*"]\n'
                     f'[workers]\n"{self.key.id}" = ["PlaceOrder", "AddItem", "CancelOrder", "ShipOrder"]\n')
         self.kernel = subprocess.Popen([f"{BIN}/kernable-kernel", f"{self.dir}/kernable.toml"],

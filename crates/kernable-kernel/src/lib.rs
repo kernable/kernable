@@ -27,7 +27,7 @@ use kernable_core::{
     },
     signing, transport,
 };
-use kernable_store_sqlite::{Enqueued, Error as StoreError, SqliteStore};
+use kernable_store::{Enqueued, Error as StoreError, Store};
 use tokio::{
     net::{TcpListener, UnixListener},
     sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot},
@@ -51,7 +51,7 @@ const SUBSCRIBE_BATCH: u32 = 500;
 
 pub struct Kernel {
     config: Config,
-    store: SqliteStore,
+    store: Box<dyn Store>,
     key: SigningKey,
     /// Submit calls waiting for a command's result.
     waiters: Mutex<HashMap<String, Vec<oneshot::Sender<CommandResult>>>>,
@@ -63,7 +63,7 @@ pub struct Kernel {
 
 impl Kernel {
     pub fn open(config: Config) -> Result<Arc<Self>, BoxError> {
-        let store = SqliteStore::open(&config.db)?;
+        let store = kernable_store::open(&config.store)?;
         let key = signing::read_signing_key(&config.kernel_key)?;
         Ok(Arc::new(Kernel {
             config,
