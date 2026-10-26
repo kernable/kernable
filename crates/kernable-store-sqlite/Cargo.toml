@@ -1,0 +1,11 @@
+[package]
+name = "kernable-store-sqlite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+kernable-core = { path = "../kernable-core" }
+prost.workspace = true
+rusqlite.workspace = true
