@@ -62,6 +62,13 @@ def snapshot_message(c, version: int, schema: str, state: bytes) -> bytes:
                  .u64(version).str(schema).bytes(state).buf)
 
 
+def query_message(q) -> bytes:
+    m = Msg("kernable.v1.query").str(q.query_id).str(q.tenant_id).str(q.domain).str(q.query_type).bytes(q.payload)
+    m.context(q.context).u64(q.min_position)
+    m.buf += struct.pack(">q", q.issued_at)
+    return bytes(m.buf)
+
+
 def rejection_message(command_id: str, reason) -> bytes:
     return bytes(Msg("kernable.v1.rejection").str(command_id).str(reason.code).str(reason.message).buf)
 

@@ -127,6 +127,22 @@ fn vectors() -> Value {
                    "version": 100, "schema": "1", "state_hex": hex::encode(br#"{"items":3}"#)}),
             signing::snapshot_message(&cmd, 100, "1", br#"{"items":3}"#),
         ),
+        "query": entry(
+            json!({"query_id": "q-1", "tenant_id": cmd.tenant_id, "domain": "identity", "query_type": "GetAccount",
+                   "payload_hex": hex::encode(br#"{"id":"a-1"}"#), "context": context_json, "min_position": 7,
+                   "issued_at": 1_700_000_000_000i64}),
+            signing::query_message(&kernable_core::proto::QueryRequest {
+                query_id: "q-1".into(),
+                tenant_id: cmd.tenant_id.clone(),
+                domain: "identity".into(),
+                query_type: "GetAccount".into(),
+                payload: br#"{"id":"a-1"}"#.to_vec(),
+                context: Some(context.clone()),
+                min_position: 7,
+                issued_at: 1_700_000_000_000,
+                client_sig: None,
+            }),
+        ),
         "subscribe": entry(
             json!({"after_position": 7, "issued_at": 1_700_000_000_000i64, "event_types": ["OrderPlaced", "ItemAdded"]}),
             signing::subscribe_message(7, &["OrderPlaced".into(), "ItemAdded".into()], 1_700_000_000_000),

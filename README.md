@@ -2,7 +2,7 @@
 
 Event sourcing / CQRS runtime with a Rust kernel and business logic in any language.
 
-Workers connect to the kernel, which runs their command handlers and commits the events they return. All messages are signed, and stored events form a verifiable hash chain. Read models and reactors are ordered, durable listeners; a submit returns once they have processed the command's events. This is the MVP; it is private.
+Workers connect to the kernel, which runs their command handlers and commits the events they return. All messages are signed, and stored events form a verifiable hash chain. Read models and reactors are ordered, durable listeners; a submit returns once they have processed the command's events. Every read is a query through the kernel to the read model that answers it, so the same signatures and allowlists apply to reading as to writing. This is the MVP; it is private.
 
 ## Layout
 

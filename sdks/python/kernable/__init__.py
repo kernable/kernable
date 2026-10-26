@@ -34,13 +34,13 @@ from typing import Any, Callable
 
 import grpc
 
-from kernable.signing import (Key, challenge_message, command_message, derived_id, rejection_message,
-                              result_message, snapshot_message)
+from kernable.signing import (Key, challenge_message, command_message, derived_id, query_message,
+                              rejection_message, result_message, snapshot_message)
 from kernable.v1 import kernable_pb2 as pb
 from kernable.v1 import kernable_pb2_grpc as rpc
 
 __all__ = ["Aggregate", "CommandContext", "Domain", "Event", "Kernable", "Key", "Listener", "ListenerContext",
-           "NotSettled", "Outcome", "Rejected", "RequestContext", "Tls", "Worker", "domain"]
+           "NotSettled", "Outcome", "QueryContext", "Rejected", "RequestContext", "Tls", "Worker", "domain"]
 
 
 class Rejected(Exception):
@@ -96,6 +96,15 @@ class CommandContext:
         Use it instead of random IDs."""
         n, self._ids = self._ids, self._ids + 1
         return derived_id(self.command_id, n)
+
+
+@dataclass
+class QueryContext:
+    """What a query handler gets besides the query's data (as an optional second parameter)."""
+
+    query_id: str
+    #: Who asks: check permissions here.
+    request: RequestContext
 
 
 @dataclass
@@ -163,6 +172,7 @@ class NotSettled(Exception):
 _INITIAL = object()
 _DOMAIN = re.compile(r"^[a-z][a-z0-9_-]*$")
 _LISTENED = re.compile(r"^[a-z][a-z0-9_-]*\.([^.]+|\*)$")
+_QUERY = re.compile(r"^[a-z][a-z0-9_-]*\.[^.*]+$")
 
 
 class Domain:
@@ -284,6 +294,21 @@ class Kernable:
         Submit it again with the same `id` to get the outcome."""
         return self._send(domain, aggregate_type, aggregate_id, type, data, tenant, id, pb.WAIT_ACCEPTED,
                           context).command_id
+
+    def query(self, domain: str, type: str, data: Any = None, *, tenant: str | None = None,
+              context: RequestContext | None = None, min_position: int = 0) -> Any:
+        """Asks the read model that answers `domain.type` and returns its answer. Queries always
+        go through the kernel, also within one process. Raises `Rejected` if the read model
+        rejects it. `min_position`: answer only after the read model has processed it."""
+        query_id = str(uuid.uuid4())
+        q = pb.QueryRequest(query_id=query_id, tenant_id=tenant or self._tenant, domain=domain, query_type=type,
+                            payload=_encode(data), context=_to_wire_context(context or self._context, query_id),
+                            min_position=min_position, issued_at=int(time.time() * 1000))
+        q.client_sig.CopyFrom(self._key.sign(query_message(q)))
+        res = rpc.QueryServiceStub(self._channel).Query(q)
+        if res.WhichOneof("outcome") == "rejected":
+            raise Rejected(res.rejected.message, res.rejected.code)
+        return _decode(res.response)
 
     def read_model(self, name: str, *, order: int = 0, start: int | None = 0, reconnect_s: float = 1.0) -> "Listener":
         """A read model: kept in memory and rebuilt from the first event on every start (default)."""
@@ -437,6 +462,7 @@ class Listener(_Stream):
         self._order = order
         self._start = start
         self._handlers: dict[str, Callable] = {}
+        self._queries: dict[str, Callable] = {}
         #: Global position of the last handled event (or skipped, for other event types).
         self.position = 0
         # Newest event when the kernel accepted the listener; events up to it are replayed.
@@ -449,11 +475,21 @@ class Listener(_Stream):
             raise ValueError(f"listen to a qualified type (domain.Type) or a domain (domain.*), not {event_type!r}")
         return _register(self, self._handlers, event_type, fn)
 
+    def query(self, query_type: str, fn: Callable | None = None):
+        """Answers the qualified query type (`orders.GetOrder`) from this listener's state; works as
+        a decorator too. The kernel delivers queries in order with the events, so an answer
+        reflects every event handled before it. Raise `Rejected` to refuse. A handler must not
+        query its own listener: the answer would wait behind itself."""
+        if not _QUERY.match(query_type):
+            raise ValueError(f"answer a qualified query type (domain.Query), not {query_type!r}")
+        return _register(self, self._queries, query_type, fn)
+
     def _open(self, requests):
         return self._stub.Listen(requests)
 
     def _hello(self):
-        hello = pb.Hello(name=self._name, key_id=self._key.id, order=self._order, event_types=list(self._handlers))
+        hello = pb.Hello(name=self._name, key_id=self._key.id, order=self._order, event_types=list(self._handlers),
+                         query_types=list(self._queries))
         # Reconnects resume after the last handled event.
         start = self.position if self.ready.is_set() else self._start
         if start is not None:
@@ -478,7 +514,21 @@ class Listener(_Stream):
                 self.position = e.global_position
             self.position = msg.batch.up_to
             return pb.ListenerMessage(ack=pb.Ack(position=msg.batch.up_to))
+        elif kind == "query":
+            return pb.ListenerMessage(answer=self._answer(msg.query.call_id, msg.query.query))
         return None
+
+    def _answer(self, call_id: str, q) -> pb.QueryAnswer:
+        try:
+            handler = self._queries.get(f"{q.domain}.{q.query_type}")
+            if handler is None:
+                raise Rejected(f"no handler for {q.domain}.{q.query_type}", "unknown_query")
+            result = _call(handler, _decode(q.payload), QueryContext(q.query_id, _from_wire_context(q.context)))
+            return pb.QueryAnswer(call_id=call_id, response=_encode(result))
+        except Exception as err:
+            reason = (pb.Rejected(code=err.code, message=str(err)) if isinstance(err, Rejected)
+                      else pb.Rejected(code="handler_error", message=repr(err)))
+            return pb.QueryAnswer(call_id=call_id, rejected=reason)
 
 
 def _encode(data: Any) -> bytes:

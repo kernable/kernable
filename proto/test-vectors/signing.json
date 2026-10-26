@@ -112,6 +112,42 @@
     "key_id": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
     "seed": "0707070707070707070707070707070707070707070707070707070707070707"
   },
+  "query": {
+    "input": {
+      "context": {
+        "attributes": [
+          {
+            "key": "channel",
+            "value": "web"
+          },
+          {
+            "key": "locale",
+            "value": "de-AT"
+          }
+        ],
+        "bypass_authorization": true,
+        "causation_id": "c-0",
+        "correlation_id": "r-1",
+        "expected_version": 3,
+        "on_behalf_of": "i-2",
+        "sender_account": "a-1",
+        "sender_identity": "i-1",
+        "sender_session": "s-1",
+        "sender_tenant": "t-0",
+        "trace_id": "tr-1",
+        "workspace": "w-1"
+      },
+      "domain": "identity",
+      "issued_at": 1700000000000,
+      "min_position": 7,
+      "payload_hex": "7b226964223a22612d31227d",
+      "query_id": "q-1",
+      "query_type": "GetAccount",
+      "tenant_id": "t-1"
+    },
+    "message": "000000116b65726e61626c652e76312e717565727900000003712d3100000003742d31000000086964656e746974790000000a4765744163636f756e740000000c7b226964223a22612d31227d00000003742d3000000003692d3100000003612d3100000003732d3100000003692d3200000003772d310000000000000001000000000000000300000003722d3100000003632d300000000474722d3100000000000000010000000000000002000000076368616e6e656c00000003776562000000066c6f63616c650000000564652d415400000000000000070000018bcfe56800",
+    "signature": "ab27d1ce82c282632a0c63339c564700f504dddb2e722e68bc954482daa26caad48dc7bf15b49779884451a26953c79fb591af7a1d478963f5a3ba333eef910c"
+  },
   "rejection": {
     "input": {
       "code": "invalid_state",

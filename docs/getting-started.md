@@ -36,6 +36,10 @@ kernel_key = "kernel.key"
 "$APP" = ["shop.*"]
 [listeners]                              # who may read which events
 "$APP" = ["*"]
+[queriers]                               # who may ask which queries
+"$APP" = ["*"]
+[query_handlers]                         # which read models may answer which queries
+"$APP" = ["shop.*"]
 TOML
 kernable-kernel kernable.toml
 ```
@@ -77,13 +81,14 @@ The worker connects to the kernel and waits for commands. Leave it running.
 
 A read model is a **listener** with an order. Read models default to order 0 and are rebuilt in memory on every start. Reactors default to order 10, so they run after the read models they query.
 
+A read model's state is private. Everything else reads it through **queries**, which always go through the kernel, so signatures and allowlists apply to every read.
+
 ```sh
 cd ~/kernable-demo
 python3 -m venv py && py/bin/pip install -q /tmp/kernable-0.1.0-py3-none-any.whl
 cat > carts.py <<'PY'
-import json, os, threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from kernable import Kernable
+import os
+from kernable import Kernable, Rejected
 
 carts = {}
 k = Kernable(f"unix:{os.getcwd()}/k.sock", "app.key")
@@ -97,13 +102,13 @@ def _(e):
 def _(e):
     carts[e.aggregate_id]["order"] = e.data["orderId"]
 
-class Api(BaseHTTPRequestHandler):
-    def do_GET(self):
-        body = json.dumps(carts.get(self.path.strip("/"))).encode()
-        self.send_response(200); self.end_headers(); self.wfile.write(body)
+@model.query("shop.GetCart")
+def _(data):
+    if data["id"] not in carts:
+        raise Rejected("no such cart", "not_found")
+    return carts[data["id"]]
 
-threading.Thread(target=model.run, daemon=True).start()
-ThreadingHTTPServer(("127.0.0.1", 8081), Api).serve_forever()
+model.run()
 PY
 py/bin/python carts.py
 ```
@@ -116,12 +121,13 @@ cat > submit.js <<'JS'
 import { Kernable } from "@kernable/sdk";
 const kernable = new Kernable({ url: `unix:${process.cwd()}/k.sock`, key: "app.key" });
 const cart = (type, data) => kernable.submit({ domain: "shop", aggregateType: "Cart", aggregateId: "c1", type, data });
+const getCart = () => kernable.query({ domain: "shop", type: "GetCart", data: { id: "c1" } });
 
 await cart("AddItem", { sku: "apple", qty: 2 });
 // submit returned only after every listener processed the event: no polling needed.
-console.log(await (await fetch("http://127.0.0.1:8081/c1")).json());
+console.log(await getCart());
 await cart("CheckOut");
-console.log(await (await fetch("http://127.0.0.1:8081/c1")).json());
+console.log(await getCart());
 console.log(await cart("AddItem", { sku: "pear", qty: 1 }));   // rejected: checked out
 kernable.close();
 JS

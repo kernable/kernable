@@ -26,6 +26,7 @@ Each message starts with a `str` **tag** for domain separation. Payloads are sig
 | Signed by | Tag | Fields after the tag |
 |---|---|---|
 | Client | `kernable.v1.command` | `command_id`, `tenant_id`, `domain`, `aggregate_type`, `aggregate_id`, `command_type`, `payload`, `context` |
+| Client | `kernable.v1.query` | `query_id`, `tenant_id`, `domain`, `query_type`, `payload`, `context`, `min_position: u64`, `issued_at: i64` |
 | Worker | `kernable.v1.result` | `command_id`, `tenant_id`, `domain`, `aggregate_type`, `aggregate_id`, `expected_version: u64`, `event_count: u64`, then per event `event_type`, `payload` |
 | Worker | `kernable.v1.rejection` | `command_id`, `code`, `message` |
 | Worker | `kernable.v1.snapshot` | `tenant_id`, `domain`, `aggregate_type`, `aggregate_id`, `version: u64`, `schema`, `state` |
@@ -34,6 +35,8 @@ Each message starts with a `str` **tag** for domain separation. Payloads are sig
 | Kernel | `kernable.v1.checkpoint` | `global_position: u64`, `chain_hash`, `created_at: i64` |
 
 The result signature does not cover the lease ID. A replayed result can only reproduce the same events for the same command at the same version, so it is harmless. The commit is idempotent.
+
+A query is valid for 60 s around `issued_at`, like a subscribe request. Answers are not signed: they travel on the read model's authenticated stream and are not stored.
 
 Listener acknowledgements are not signed. They travel on a stream whose key was proven by the challenge, and they only affect waiting and ordering, never stored data.
 

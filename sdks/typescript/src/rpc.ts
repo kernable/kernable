@@ -110,17 +110,47 @@ export type WorkerMessage =
 
 export type SessionCall = grpc.ClientDuplexStream<WorkerMessage, KernelMessage>;
 
+export interface WireQueryRequest {
+  query_id: string;
+  tenant_id: string;
+  domain: string;
+  query_type: string;
+  payload: Buffer;
+  context?: WireRequestContext | null;
+  min_position: number;
+  issued_at: number;
+  client_sig?: WireSignature | null;
+}
+
+export interface WireQueryResult {
+  query_id: string;
+  outcome: "response" | "rejected";
+  response?: Buffer | null;
+  rejected?: WireRejected | null;
+}
+
 /** One message from the kernel on a listener stream; exactly one field is set. */
 export interface ListenerDelivery {
   challenge?: { nonce: Buffer } | null;
   ready?: { after_position: number; head_position: number } | null;
   batch?: { events: WireEvent[]; up_to: number } | null;
+  query?: { call_id: string; query: WireQueryRequest } | null;
 }
 
 export type ListenerMessage =
-  | { hello: { name: string; key_id: string; order: number; event_types: string[]; from_position?: number } }
+  | {
+      hello: {
+        name: string;
+        key_id: string;
+        order: number;
+        event_types: string[];
+        from_position?: number;
+        query_types: string[];
+      };
+    }
   | { challenge_response: { sig: Buffer } }
-  | { ack: { position: number } };
+  | { ack: { position: number } }
+  | { answer: { call_id: string; response?: Buffer; rejected?: WireRejected } };
 
 export type ListenCall = grpc.ClientDuplexStream<ListenerMessage, ListenerDelivery>;
 
@@ -128,6 +158,7 @@ export interface Clients {
   submit(command: WireCommand, wait: WireWait): Promise<WireCommandResult>;
   session(): SessionCall;
   listen(): ListenCall;
+  query(req: WireQueryRequest): Promise<WireQueryResult>;
   subscribe(req: WireSubscribeRequest): grpc.ClientReadableStream<WireEvent>;
   close(): void;
 }
@@ -159,6 +190,7 @@ export function connect(url: string, tls?: TlsFiles): Clients {
   const workers = new v1.WorkerGateway(url, creds);
   const events = new v1.EventService(url, creds);
   const listeners = new v1.ListenerService(url, creds);
+  const queries = new v1.QueryService(url, creds);
   return {
     submit: (command, wait) =>
       new Promise((resolve, reject) =>
@@ -168,12 +200,17 @@ export function connect(url: string, tls?: TlsFiles): Clients {
       ),
     session: () => workers.Session(),
     listen: () => listeners.Listen(),
+    query: (req) =>
+      new Promise((resolve, reject) =>
+        queries.Query(req, (err: grpc.ServiceError | null, res: WireQueryResult) => (err ? reject(err) : resolve(res))),
+      ),
     subscribe: (req) => events.Subscribe(req),
     close: () => {
       commands.close();
       workers.close();
       events.close();
       listeners.close();
+      queries.close();
     },
   };
 }

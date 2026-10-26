@@ -1,37 +1,53 @@
 // Orders service (TypeScript) and the shop's public HTTP API: the Order worker, the `orders`
-// read model, the `confirmations` reactor and the endpoints. The API reads both read models:
-// its own in memory, the accounts read model through the identity service.
+// read model, the `confirmations` reactor and the endpoints. Every read goes through the
+// kernel as a query, also of the read model in this very process, so that signatures,
+// allowlists and (later) RBAC always apply.
 //
-// Usage: node service.ts <kernel-url> <key> <http-port> <identity-url>
+// Usage: node service.ts <kernel-url> <key> <http-port>
 // Mutual TLS: set KERNABLE_TLS_CA, KERNABLE_TLS_CERT and KERNABLE_TLS_KEY.
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
-import { Kernable, NotSettled, type SubmitOptions } from "../../../sdks/typescript/src/index.ts";
+import { Kernable, NotSettled, Rejected, type SubmitOptions } from "../../../sdks/typescript/src/index.ts";
 import { ORDER_EVENTS, order, project, type OrderRow } from "./order.ts";
 
-const [url, key, port, identity] = process.argv.slice(2);
+const [url, key, port] = process.argv.slice(2);
 const env = process.env;
 const tls = env.KERNABLE_TLS_CA ? { ca: env.KERNABLE_TLS_CA, cert: env.KERNABLE_TLS_CERT!, key: env.KERNABLE_TLS_KEY! } : undefined;
 const kernable = new Kernable({ url, key, tenant: "shop", tls });
 
 // ---- read model: in memory, rebuilt from the first event on every start ----
 
-const orders = new Map<string, OrderRow>();
-const ordersModel = kernable.readModel("orders");
-for (const type of ORDER_EVENTS) ordersModel.on(type, (e) => project(orders, e));
+const ordersModel = (() => {
+  const orders = new Map<string, OrderRow>();
+  const model = kernable.readModel("orders");
+  for (const type of ORDER_EVENTS) model.on(type, (e) => project(orders, e));
+  return model.query<{ id: string }>("orders.GetOrder", ({ id }) => {
+    const row = orders.get(id);
+    if (!row) throw new Rejected(`no order ${id}`, "not_found");
+    return row;
+  });
+})();
 
-async function account(id: string): Promise<{ email: string; status: string } | undefined> {
-  const res = await fetch(`${identity}/accounts/${encodeURIComponent(id)}`);
-  if (res.status === 404) return undefined;
-  if (!res.ok) throw new Error(`identity service: ${res.status}`);
-  return res.json();
+// ---- queries, through the kernel ----
+
+/** The answer of a query, or `undefined` if the read model has no such entry. */
+async function find<T>(domain: string, type: string, id: string): Promise<T | undefined> {
+  try {
+    return await kernable.query<T>({ domain, type, data: { id } });
+  } catch (err) {
+    if (err instanceof Rejected && err.code === "not_found") return undefined;
+    throw err;
+  }
 }
+
+const account = (id: string) => find<{ email: string; status: string }>("identity", "GetAccount", id);
+const getOrder = (id: string) => find<OrderRow>("orders", "GetOrder", id);
 
 // ---- reactor: runs after both read models (order 10 > 0) ----
 
 const stats = { confirmations: 0, unknownAccounts: 0 };
 const confirmations = kernable.reactor("confirmations").on("orders.OrderSubmitted", async (e, ctx) => {
-  const row = orders.get(e.aggregateId)!;
+  const row = (await getOrder(e.aggregateId))!;
   const customer = await account(row.customerId); // throws while identity is down: retried
   if (!customer) {
     stats.unknownAccounts++; // must never happen: accounts ran first
@@ -68,7 +84,7 @@ async function run(options: SubmitOptions, show: () => Promise<unknown> | unknow
 }
 
 const orderCommand = (id: string, type: string, data?: unknown) =>
-  run({ domain: "orders", aggregateType: "Order", aggregateId: id, type, data }, () => orders.get(id));
+  run({ domain: "orders", aggregateType: "Order", aggregateId: id, type, data }, () => getOrder(id));
 
 async function route(method: string, path: string, body: any): Promise<Reply> {
   let m: RegExpMatchArray | null;
@@ -87,7 +103,7 @@ async function route(method: string, path: string, body: any): Promise<Reply> {
     return orderCommand(body.id, "PlaceOrder", { customerId: body.customerId });
   }
   if (method === "GET" && (m = path.match(/^\/orders\/([^/]+)$/))) {
-    const row = orders.get(m[1]);
+    const row = await getOrder(m[1]);
     return row ? [200, row] : [404, { error: "not found" }];
   }
   if (method === "POST" && (m = path.match(/^\/orders\/([^/]+)\/items$/))) return orderCommand(m[1], "AddItem", body);

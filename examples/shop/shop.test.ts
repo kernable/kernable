@@ -70,7 +70,7 @@ async function shop(): Promise<Shop> {
   const identity = new Service(identityPort, PYTHON, identityArgs, env);
   await identity.start();
   const port = await freePort();
-  const ordersArgs = [`${ROOT}examples/shop/orders/service.ts`, kernel.url, kernel.appKey, String(port), identity.url];
+  const ordersArgs = [`${ROOT}examples/shop/orders/service.ts`, kernel.url, kernel.appKey, String(port)];
   const orders = new Service(port, process.execPath, ordersArgs, env);
   await orders.start();
   return {
@@ -176,8 +176,10 @@ test("kill -9 of each process loses and duplicates nothing", async () => {
     for (const [id, row] of rows) assert.deepEqual((await s.call("GET", `/orders/${id}`))[1], row);
     assert.match(s.kernel.verify(), /OK/);
 
-    // Every listener has caught up, and the metrics show it.
+    // Every listener has caught up, and the metrics show it. All reads went through the kernel.
     const metrics = await (await fetch(s.kernel.metricsUrl!)).text();
+    const answered = Number(/^kernable_queries_total\{outcome="answered"\} (\d+)$/m.exec(metrics)?.[1]);
+    assert.ok(answered > 0, "no queries answered through the kernel"); // counted since the kernel's restart
     for (const listener of ["accounts", "orders", "confirmations"]) {
       assert.match(metrics, new RegExp(`^kernable_listener_lag\\{listener="${listener}"\\} 0$`, "m"));
       assert.match(metrics, new RegExp(`^kernable_listener_connected\\{listener="${listener}"\\} 1$`, "m"));

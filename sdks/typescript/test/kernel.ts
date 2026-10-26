@@ -10,7 +10,8 @@ import { join } from "node:path";
 import { Key } from "../src/index.ts";
 import type { TlsFiles } from "../src/rpc.ts";
 
-const BIN = new URL("../../../target/debug/", import.meta.url).pathname;
+// KERNABLE_BIN=release uses release binaries, e.g. for measurements.
+const BIN = new URL(`../../../target/${process.env.KERNABLE_BIN ?? "debug"}/`, import.meta.url).pathname;
 
 export interface TestKernelOptions {
   /** Listen on 127.0.0.1 with mutual TLS instead of a Unix socket; see `tlsFiles`. */
@@ -78,6 +79,12 @@ ${extraConfig}
 "${app}" = ["*"]
 
 [listeners]
+"${app}" = ["*"]
+
+[queriers]
+"${app}" = ["*"]
+
+[query_handlers]
 "${app}" = ["*"]
 `;
   }

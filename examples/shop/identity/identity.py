@@ -1,7 +1,7 @@
-"""Identity service (Python): the Account aggregate, its worker, the `accounts` read model and a
-small HTTP query API that other services read it through.
+"""Identity service (Python): the Account aggregate, its worker and the `accounts` read model.
+Other services read accounts only through the query `identity.GetAccount`, via the kernel.
 
-Usage: python identity.py <kernel-url> <key> <http-port>
+Usage: python identity.py <kernel-url> <key> <health-port>
 Mutual TLS: set KERNABLE_TLS_CA, KERNABLE_TLS_CERT and KERNABLE_TLS_KEY.
 """
 
@@ -63,10 +63,9 @@ def _(state, cmd):
 
 # ---- read side: in memory, rebuilt from the first event on every start ----
 
-accounts: dict[str, dict] = {}
-
 
 def accounts_model(k: Kernable):
+    accounts: dict[str, dict] = {}
     model = k.read_model("accounts")
 
     @model.on("identity.AccountRegistered")
@@ -81,18 +80,22 @@ def accounts_model(k: Kernable):
     def _(e):
         accounts[e.aggregate_id]["status"] = "deactivated"
 
+    @model.query("identity.GetAccount")
+    def _(data, ctx):
+        if data["id"] not in accounts:
+            raise Rejected(f"no account {data['id']}", "not_found")
+        return accounts[data["id"]]
+
     return model
 
 
-def serve(port: int, streams) -> None:
+def serve_health(port: int, streams) -> None:
+    """Readiness only; the data is reachable through the kernel and nowhere else."""
+
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
-            if self.path == "/health":
-                ok = all(s.ready.is_set() for s in streams)
-                return self.reply(200 if ok else 503, {"ok": ok})
-            m = re.fullmatch(r"/accounts/([^/]+)", self.path)
-            found = m and accounts.get(m.group(1))
-            self.reply(200, found) if found else self.reply(404, {"error": "not found"})
+            ok = self.path == "/health" and all(s.ready.is_set() for s in streams)
+            self.reply(200 if ok else 503, {"ok": ok})
 
         def reply(self, status: int, body) -> None:
             data = json.dumps(body).encode()
@@ -117,4 +120,4 @@ if __name__ == "__main__":
     streams = [k.worker(account), accounts_model(k)]
     for s in streams:
         threading.Thread(target=s.run, daemon=True).start()
-    serve(port, streams)
+    serve_health(port, streams)

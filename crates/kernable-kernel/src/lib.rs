@@ -24,13 +24,15 @@ use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
         Accepted, Challenge, Command, CommandResult, Committed, Event, Execute, KernelMessage,
-        ListenerDelivery, ListenerMessage, Registered, Rejected, Signature, Snapshot,
-        SnapshotRecord, SubmitRequest, SubscribeRequest, Wait, WorkerMessage,
+        ListenerDelivery, ListenerMessage, QueryRequest, QueryResult, Registered, Rejected,
+        Signature, Snapshot, SnapshotRecord, SubmitRequest, SubscribeRequest, Wait, WorkerMessage,
         command_result::Outcome,
         command_service_server::{CommandService, CommandServiceServer},
         event_service_server::{EventService, EventServiceServer},
         kernel_message::Msg as Out,
         listener_service_server::{ListenerService, ListenerServiceServer},
+        query_answer, query_result,
+        query_service_server::{QueryService, QueryServiceServer},
         worker_gateway_server::{WorkerGateway, WorkerGatewayServer},
         worker_message::Msg as In,
     },
@@ -167,6 +169,7 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
         .add_service(CommandServiceServer::new(api.clone()))
         .add_service(EventServiceServer::new(api.clone()))
         .add_service(ListenerServiceServer::new(api.clone()))
+        .add_service(QueryServiceServer::new(api.clone()))
         .add_service(WorkerGatewayServer::new(api));
 
     let server = async {
@@ -385,6 +388,99 @@ async fn stream_events(
                 return;
             }
         }
+    }
+}
+
+#[tonic::async_trait]
+impl QueryService for Api {
+    async fn query(&self, request: Request<QueryRequest>) -> Result<Response<QueryResult>, Status> {
+        let kernel = &self.0;
+        let query = request.into_inner();
+        let sig = query
+            .client_sig
+            .as_ref()
+            .ok_or_else(|| Status::unauthenticated("query is not signed"))?;
+        signing::verify(sig, &signing::query_message(&query))
+            .map_err(|_| Status::unauthenticated("invalid query signature"))?;
+        if (now_ms() - query.issued_at).abs() > MAX_REQUEST_AGE_MS {
+            return Err(Status::unauthenticated("query expired; check the clock"));
+        }
+        if !config::valid_domain(&query.domain) || !config::valid_type(&query.query_type) {
+            return Err(Status::invalid_argument(
+                "a query needs a lowercase domain and a query type without dots",
+            ));
+        }
+        let name = config::qualified(&query.domain, &query.query_type);
+        if !config::allowed(&kernel.config.queriers, &sig.key_id, &name) {
+            return Err(Status::permission_denied(format!("key may not ask {name}")));
+        }
+        let bypass = query
+            .context
+            .as_ref()
+            .is_some_and(|c| c.bypass_authorization);
+        if bypass
+            && !config::allowed(
+                &kernel.config.privileged,
+                &sig.key_id,
+                "bypass_authorization",
+            )
+        {
+            return Err(Status::permission_denied(
+                "key may not set bypass_authorization",
+            ));
+        }
+        if !kernel.listeners.answers(&name) {
+            kernel.metrics.queries_failed.fetch_add(1, Relaxed);
+            return Err(Status::unavailable(format!("no read model answers {name}")));
+        }
+
+        let started = Instant::now();
+        let timeout = Duration::from_millis(kernel.config.query_timeout_ms);
+        let answered = tokio::time::timeout(timeout, async {
+            // Wait until a read model that answers the query has caught up.
+            let dispatched = loop {
+                let progressed = kernel.listeners.progress.notified();
+                if let Some(d) = kernel.listeners.dispatch(&name, &query) {
+                    break d;
+                }
+                progressed.await;
+            };
+            listeners::send_call(&dispatched.out, dispatched.call).await?;
+            dispatched
+                .answer
+                .await
+                .map_err(|_| Status::unavailable("the read model went away; ask again"))
+        })
+        .await;
+        let answer = match answered {
+            Ok(Ok(answer)) => answer,
+            Ok(Err(status)) => {
+                kernel.metrics.queries_failed.fetch_add(1, Relaxed);
+                return Err(status);
+            }
+            Err(_) => {
+                kernel.metrics.queries_failed.fetch_add(1, Relaxed);
+                return Err(Status::deadline_exceeded(
+                    "no read model answered in time (or none has caught up to min_position)",
+                ));
+            }
+        };
+        kernel.metrics.query.record(started.elapsed());
+        let outcome = match answer.outcome {
+            Some(query_answer::Outcome::Response(r)) => {
+                kernel.metrics.queries_answered.fetch_add(1, Relaxed);
+                query_result::Outcome::Response(r)
+            }
+            Some(query_answer::Outcome::Rejected(r)) => {
+                kernel.metrics.queries_rejected.fetch_add(1, Relaxed);
+                query_result::Outcome::Rejected(r)
+            }
+            None => return Err(Status::internal("empty answer")),
+        };
+        Ok(Response::new(QueryResult {
+            query_id: query.query_id,
+            outcome: Some(outcome),
+        }))
     }
 }
 

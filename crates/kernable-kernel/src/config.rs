@@ -26,6 +26,12 @@ use serde::Deserialize;
 /// [listeners]                          # listener key ID -> events it may read
 /// "1f0a…" = ["orders.*", "identity.AccountRegistered"]
 ///
+/// [queriers]                           # client key ID -> queries it may ask
+/// "8b84…" = ["identity.GetAccount"]
+///
+/// [query_handlers]                     # listener key ID -> queries it may answer
+/// "1f0a…" = ["identity.*"]
+///
 /// [privileged]                         # client key ID -> privileged request context switches
 /// "8b84…" = ["bypass_authorization"]
 ///
@@ -52,6 +58,9 @@ pub struct Config {
     /// How long a settling submit waits for listeners after the commit.
     #[serde(default = "default_settle_timeout_ms")]
     pub settle_timeout_ms: u64,
+    /// How long a query waits for a read model to catch up and answer.
+    #[serde(default = "default_query_timeout_ms")]
+    pub query_timeout_ms: u64,
     #[serde(default)]
     pub clients: HashMap<String, Vec<String>>,
     #[serde(default)]
@@ -60,6 +69,10 @@ pub struct Config {
     pub subscribers: HashMap<String, Vec<String>>,
     #[serde(default)]
     pub listeners: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    pub queriers: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    pub query_handlers: HashMap<String, Vec<String>>,
     #[serde(default)]
     pub privileged: HashMap<String, Vec<String>>,
     pub tls: Option<Tls>,
@@ -88,6 +101,10 @@ fn default_submit_timeout_ms() -> u64 {
 }
 
 fn default_settle_timeout_ms() -> u64 {
+    5_000
+}
+
+fn default_query_timeout_ms() -> u64 {
     5_000
 }
 

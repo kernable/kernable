@@ -8,7 +8,7 @@ use std::{fmt, fs, io, path::Path};
 use ed25519_dalek::{Signature as Ed25519Signature, Signer, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
 
-use crate::proto::{Command, Event, NewEvent, Rejected, RequestContext, Signature};
+use crate::proto::{Command, Event, NewEvent, QueryRequest, Rejected, RequestContext, Signature};
 
 /// Hash that precedes the first event of the chain.
 pub const GENESIS: [u8; 32] = [0; 32];
@@ -97,6 +97,20 @@ pub fn command_message(cmd: &Command) -> Vec<u8> {
         .str(&cmd.command_type)
         .bytes(&cmd.payload)
         .context(cmd.context.as_ref())
+        .0
+}
+
+/// What a client signs when asking a query.
+pub fn query_message(q: &QueryRequest) -> Vec<u8> {
+    Msg::new("kernable.v1.query")
+        .str(&q.query_id)
+        .str(&q.tenant_id)
+        .str(&q.domain)
+        .str(&q.query_type)
+        .bytes(&q.payload)
+        .context(q.context.as_ref())
+        .u64(q.min_position)
+        .i64(q.issued_at)
         .0
 }
 

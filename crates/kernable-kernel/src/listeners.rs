@@ -5,6 +5,10 @@
 //! while it is disconnected, so a stalled listener holds back later orders and settling
 //! submits. Positions are kept in memory and written to the store periodically: after a
 //! crash a listener may see a few events again (delivery is at least once).
+//!
+//! Listeners also answer queries (read models register query types): the kernel sends a query
+//! on the listener's stream, in order with the batches, so an answer reflects every event the
+//! listener was sent before it.
 
 use std::{
     collections::HashMap,
@@ -17,12 +21,13 @@ use std::{
 
 use kernable_core::{
     proto::{
-        Batch, Challenge, ListenerDelivery, ListenerMessage, ListenerRecord, Ready, Signature,
-        listener_delivery::Msg as Out, listener_message::Msg as In,
+        Batch, Challenge, ListenerDelivery, ListenerMessage, ListenerRecord, QueryAnswer,
+        QueryCall, QueryRequest, Ready, Signature, listener_delivery::Msg as Out,
+        listener_message::Msg as In,
     },
     signing,
 };
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Notify, mpsc, oneshot};
 use tonic::{Status, Streaming};
 
 use crate::{BoxError, Kernel, SUBSCRIBE_BATCH, config, internal};
@@ -35,6 +40,10 @@ struct Entry {
     connected: bool,
     /// Changed since the last flush.
     dirty: bool,
+    /// Qualified query types the connected listener answers.
+    query_types: Vec<String>,
+    /// The connected listener's stream, for queries.
+    out: Option<Outbox>,
 }
 
 /// A listener as reported in metrics.
@@ -47,6 +56,10 @@ pub(crate) struct ListenerStatus {
 #[derive(Default)]
 pub(crate) struct Registry {
     entries: Mutex<HashMap<String, Entry>>,
+    /// Queries sent to a listener and not answered yet: call ID -> (listener, waiting caller).
+    calls: Mutex<HashMap<String, (String, oneshot::Sender<QueryAnswer>)>>,
+    /// Spreads queries over listeners that answer the same type.
+    turn: AtomicU64,
     /// Wakes order gates and settling submits when a position or the set of listeners changes.
     pub(crate) progress: Notify,
 }
@@ -60,12 +73,16 @@ impl Registry {
                     record,
                     connected: false,
                     dirty: false,
+                    query_types: Vec::new(),
+                    out: None,
                 };
                 (entry.record.name.clone(), entry)
             })
             .collect();
         Registry {
             entries: Mutex::new(entries),
+            calls: Mutex::default(),
+            turn: AtomicU64::new(0),
             progress: Notify::new(),
         }
     }
@@ -123,6 +140,62 @@ impl Registry {
     fn disconnect(&self, name: &str) {
         if let Some(e) = self.entries().get_mut(name) {
             e.connected = false;
+            e.out = None;
+            e.query_types.clear();
+        }
+        // Dropping the senders tells the waiting callers that no answer will come.
+        self.calls().retain(|_, (listener, _)| listener != name);
+    }
+
+    fn calls(&self) -> MutexGuard<'_, HashMap<String, (String, oneshot::Sender<QueryAnswer>)>> {
+        self.calls.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether any connected listener answers `query_type` (qualified).
+    pub(crate) fn answers(&self, query_type: &str) -> bool {
+        self.entries()
+            .values()
+            .any(|e| e.out.is_some() && e.query_types.iter().any(|t| t == query_type))
+    }
+
+    /// Picks a connected listener that answers `query_type` and has processed the query's
+    /// `min_position`, and registers the call. Returns `None` if there is none (yet).
+    pub(crate) fn dispatch(&self, query_type: &str, query: &QueryRequest) -> Option<Dispatched> {
+        let entries = self.entries();
+        let mut ready: Vec<(&String, &Outbox)> = entries
+            .iter()
+            .filter(|(_, e)| e.record.position >= query.min_position)
+            .filter(|(_, e)| e.query_types.iter().any(|t| t == query_type))
+            .filter_map(|(name, e)| Some((name, e.out.as_ref()?)))
+            .collect();
+        if ready.is_empty() {
+            return None;
+        }
+        ready.sort_by(|a, b| a.0.cmp(b.0));
+        let turn = self.turn.fetch_add(1, Ordering::Relaxed) as usize;
+        let (name, out) = ready[turn % ready.len()];
+        let call_id = format!("{}#{turn}", query.query_id);
+        let (tx, rx) = oneshot::channel();
+        self.calls().insert(call_id.clone(), (name.clone(), tx));
+        let call = QueryCall {
+            call_id,
+            query: Some(query.clone()),
+        };
+        Some(Dispatched {
+            out: out.clone(),
+            call,
+            answer: rx,
+        })
+    }
+
+    fn answer(&self, listener: &str, answer: QueryAnswer) {
+        let mut calls = self.calls();
+        if calls
+            .get(&answer.call_id)
+            .is_some_and(|(l, _)| l == listener)
+            && let Some((_, tx)) = calls.remove(&answer.call_id)
+        {
+            let _ = tx.send(answer);
         }
     }
 
@@ -148,7 +221,7 @@ pub(crate) fn flush(kernel: &Kernel) -> Result<(), BoxError> {
     Ok(())
 }
 
-type Outbox = mpsc::Sender<Result<ListenerDelivery, Status>>;
+pub(crate) type Outbox = mpsc::Sender<Result<ListenerDelivery, Status>>;
 
 async fn next(inbound: &mut Streaming<ListenerMessage>) -> Result<Option<In>, Status> {
     Ok(inbound.message().await?.and_then(|m| m.msg))
@@ -190,6 +263,20 @@ pub(crate) async fn run(
     }
     let types = config::readable(&kernel.config.listeners, &hello.key_id, &hello.event_types)
         .map_err(Status::permission_denied)?;
+    if !hello.query_types.iter().all(|t| config::valid_qualified(t)) {
+        return Err(Status::invalid_argument(
+            "answer qualified query types: domain.QueryType",
+        ));
+    }
+    if !hello
+        .query_types
+        .iter()
+        .all(|t| config::allowed(&kernel.config.query_handlers, &hello.key_id, t))
+    {
+        return Err(Status::permission_denied(
+            "key may not answer these query types",
+        ));
+    }
 
     let mut nonce = [0u8; 32];
     getrandom::fill(&mut nonce).map_err(|_| Status::internal("no randomness"))?;
@@ -243,6 +330,8 @@ pub(crate) async fn run(
                 record,
                 connected: true,
                 dirty: false,
+                query_types: hello.query_types.clone(),
+                out: Some(out.clone()),
             },
         );
         position
@@ -279,9 +368,22 @@ pub(crate) async fn run(
             Some(In::Ack(_)) => {
                 return Err(Status::invalid_argument("ack beyond the delivered events"));
             }
+            Some(In::Answer(answer)) => kernel.listeners.answer(&hello.name, answer),
             Some(_) => return Err(Status::invalid_argument("unexpected message")),
         }
     }
+}
+
+/// A query on its way to a listener: send `call` on `out`, then wait for `answer`.
+pub(crate) struct Dispatched {
+    pub(crate) out: Outbox,
+    pub(crate) call: QueryCall,
+    pub(crate) answer: oneshot::Receiver<QueryAnswer>,
+}
+
+/// Sends a query call on a listener's stream.
+pub(crate) async fn send_call(out: &Outbox, call: QueryCall) -> Result<(), Status> {
+    send(out, Out::Query(call)).await
 }
 
 /// Sends batches of stored events after `sent`, never beyond the listener's order gate.

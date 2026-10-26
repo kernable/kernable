@@ -31,6 +31,11 @@ impl Timer {
 pub(crate) struct Metrics {
     pub(crate) committed: AtomicU64,
     pub(crate) rejected: AtomicU64,
+    pub(crate) queries_answered: AtomicU64,
+    pub(crate) queries_rejected: AtomicU64,
+    pub(crate) queries_failed: AtomicU64,
+    /// From a query's arrival until its answer.
+    pub(crate) query: Timer,
     pub(crate) worker_sessions: AtomicU64,
     /// From lease to commit: worker round trip plus storage.
     pub(crate) execution: Timer,
@@ -57,6 +62,25 @@ pub(crate) fn render(kernel: &Kernel) -> String {
         &[
             ("{outcome=\"committed\"}".into(), m.committed.load(Relaxed)),
             ("{outcome=\"rejected\"}".into(), m.rejected.load(Relaxed)),
+        ],
+    );
+    metric(
+        "kernable_queries_total",
+        "counter",
+        "Queries by outcome; failed means no read model answered.",
+        &[
+            (
+                "{outcome=\"answered\"}".into(),
+                m.queries_answered.load(Relaxed),
+            ),
+            (
+                "{outcome=\"rejected\"}".into(),
+                m.queries_rejected.load(Relaxed),
+            ),
+            (
+                "{outcome=\"failed\"}".into(),
+                m.queries_failed.load(Relaxed),
+            ),
         ],
     );
     metric(
@@ -87,6 +111,11 @@ pub(crate) fn render(kernel: &Kernel) -> String {
             "kernable_settle_seconds",
             "From commit until every listener acknowledged the events.",
             &m.settle,
+        ),
+        (
+            "kernable_query_seconds",
+            "From a query's arrival until its answer.",
+            &m.query,
         ),
     ] {
         let micros = timer.micros.load(Relaxed);

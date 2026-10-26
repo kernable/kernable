@@ -3,7 +3,15 @@
 import { createHash, createPrivateKey, createPublicKey, sign, type KeyObject } from "node:crypto";
 import { readFileSync } from "node:fs";
 
-import type { WireCommand, WireEvent, WireNewEvent, WireRejected, WireRequestContext, WireSignature } from "./rpc.ts";
+import type {
+  WireCommand,
+  WireEvent,
+  WireNewEvent,
+  WireQueryRequest,
+  WireRejected,
+  WireRequestContext,
+  WireSignature,
+} from "./rpc.ts";
 
 // PKCS#8 DER prefix for a raw 32-byte Ed25519 seed.
 const PKCS8_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
@@ -95,6 +103,19 @@ const stream = (m: Msg, c: Stream) =>
 
 export function commandMessage(c: WireCommand): Buffer {
   return stream(new Msg("kernable.v1.command"), c).str(c.command_type).bytes(c.payload).context(c.context).done();
+}
+
+export function queryMessage(q: WireQueryRequest): Buffer {
+  return new Msg("kernable.v1.query")
+    .str(q.query_id)
+    .str(q.tenant_id)
+    .str(q.domain)
+    .str(q.query_type)
+    .bytes(q.payload)
+    .context(q.context)
+    .u64(q.min_position)
+    .i64(q.issued_at)
+    .done();
 }
 
 export function resultMessage(c: Stream, expectedVersion: number, events: WireNewEvent[]): Buffer {

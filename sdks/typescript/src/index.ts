@@ -15,6 +15,7 @@ import {
   type WireCommand,
   type WireEvent,
   type WireNewEvent,
+  type WireQueryRequest,
   type WireRejected,
   type WireRequestContext,
   type WireSnapshot,
@@ -25,6 +26,7 @@ import {
   challengeMessage,
   commandMessage,
   derivedId,
+  queryMessage,
   rejectionMessage,
   resultMessage,
   snapshotMessage,
@@ -96,6 +98,24 @@ export interface CommandContext {
   id(): string;
   /** When the kernel hands the command to another worker if this one has not answered. */
   deadline: Date;
+}
+
+/** What a query handler gets besides the query's data. */
+export interface QueryContext {
+  queryId: string;
+  /** Who asks: check permissions here. */
+  request: RequestContext;
+}
+
+export interface QueryOptions {
+  domain: string;
+  /** The query type within the domain. */
+  type: string;
+  data?: unknown;
+  tenant?: string;
+  context?: RequestContext;
+  /** Answer only after the read model has processed this global position (e.g. of a `committed` submit). */
+  minPosition?: number;
 }
 
 /** What a listener handler gets besides the event. */
@@ -270,6 +290,26 @@ export class Kernable {
     return (await this.send(options, "WAIT_ACCEPTED")).command_id;
   }
 
+  /**
+   * Asks the read model that answers `domain.type` and returns its answer. Queries always go
+   * through the kernel, also within one process. Throws `Rejected` if the read model rejects it.
+   */
+  async query<T = unknown>(options: QueryOptions): Promise<T> {
+    const request = {
+      query_id: randomUUID(),
+      tenant_id: options.tenant ?? this.tenant,
+      domain: options.domain,
+      query_type: options.type,
+      payload: encode(options.data),
+      context: toWireContext({ ...this.context, ...options.context }),
+      min_position: options.minPosition ?? 0,
+      issued_at: Date.now(),
+    };
+    const res = await this.clients.query({ ...request, client_sig: this.key.sign(queryMessage(request)) });
+    if (res.outcome === "rejected") throw new Rejected(res.rejected!.message, res.rejected!.code);
+    return decode(res.response!) as T;
+  }
+
   /** A read model: kept in memory and rebuilt from the first event on every start (default). */
   readModel(name: string, options: ListenerOptions = {}): Listener {
     return new Listener(this.clients, this.key, name, { order: 0, start: 0, ...options });
@@ -375,6 +415,7 @@ export interface ListenerOptions {
 }
 
 type EventHandler = (event: StoredEvent, ctx: ListenerContext) => void | Promise<void>;
+type QueryHandler = (data: unknown, ctx: QueryContext) => unknown;
 
 /**
  * A durable, named event listener. Events arrive in order, one at a time, after every listener
@@ -388,6 +429,7 @@ export class Listener {
   readonly ready: Promise<void>;
   private markReady!: () => void;
   private readonly handlers = new Map<string, EventHandler>();
+  private readonly queries = new Map<string, QueryHandler>();
   private call?: ListenCall;
   private stopped = false;
   /** Newest event when the kernel accepted the listener; events up to it are replayed. */
@@ -411,6 +453,20 @@ export class Listener {
       throw new Error(`listen to a qualified type (domain.Type) or a domain (domain.*), not ${JSON.stringify(eventType)}`);
     }
     this.handlers.set(eventType, handler as EventHandler);
+    return this;
+  }
+
+  /**
+   * Answers the qualified query type `queryType` (`orders.GetOrder`) from this listener's
+   * state. The kernel delivers queries in order with the events, so an answer reflects every
+   * event handled before it. Throw `Rejected` to refuse. A handler must not query its own
+   * listener: the answer would wait behind itself.
+   */
+  query<D = any, R = unknown>(queryType: string, handler: (data: D, ctx: QueryContext) => R | Promise<R>): this {
+    if (!/^[a-z][a-z0-9_-]*\.[^.*]+$/.test(queryType)) {
+      throw new Error(`answer a qualified query type (domain.Query), not ${JSON.stringify(queryType)}`);
+    }
+    this.queries.set(queryType, handler as QueryHandler);
     return this;
   }
 
@@ -453,6 +509,7 @@ export class Listener {
           key_id: this.key.id,
           order: this.options.order ?? 0,
           event_types: [...this.handlers.keys()],
+          query_types: [...this.queries.keys()],
           ...(start === undefined ? {} : { from_position: start }),
         },
       });
@@ -476,6 +533,21 @@ export class Listener {
       }
       this.position = m.batch.up_to;
       call.write({ ack: { position: m.batch.up_to } });
+    } else if (m.query) {
+      call.write({ answer: { call_id: m.query.call_id, ...(await this.answer(m.query.query)) } });
+    }
+  }
+
+  private async answer(q: WireQueryRequest): Promise<{ response: Buffer } | { rejected: WireRejected }> {
+    try {
+      const handler = this.queries.get(`${q.domain}.${q.query_type}`);
+      if (!handler) throw new Rejected(`no handler for ${q.domain}.${q.query_type}`, "unknown_query");
+      const result = await handler(decode(q.payload), { queryId: q.query_id, request: fromWireContext(q.context) });
+      return { response: encode(result) };
+    } catch (err) {
+      return {
+        rejected: err instanceof Rejected ? { code: err.code, message: err.message } : { code: "handler_error", message: String(err) },
+      };
     }
   }
 }

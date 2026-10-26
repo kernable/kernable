@@ -29,7 +29,9 @@ class TestKernel:
                     f"checkpoint_interval_ms = 50\n{extra_config}\n"
                     f'[clients]\n"{ids["app"]}" = ["*"]\n'
                     f'[workers]\n"{ids["app"]}" = [{types}]\n'
-                    f'[listeners]\n"{ids["app"]}" = ["*"]\n')
+                    f'[listeners]\n"{ids["app"]}" = ["*"]\n'
+                    f'[queriers]\n"{ids["app"]}" = ["*"]\n'
+                    f'[query_handlers]\n"{ids["app"]}" = ["*"]\n')
         self.process: subprocess.Popen | None = None
 
     def _write_key(self, name: str) -> str:

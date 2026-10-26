@@ -139,6 +139,35 @@ message SubscribeRequest {
   Signature client_sig = 4;
 }
 
+// ---- queries ----
+
+// Every query goes through the kernel, also between parts of one process, so that signatures,
+// allowlists and the request context always apply. Read models answer them (see Hello).
+service QueryService {
+  rpc Query(QueryRequest) returns (QueryResult);
+}
+
+message QueryRequest {
+  string query_id = 1;
+  string tenant_id = 2;
+  string domain = 3;
+  string query_type = 4;
+  bytes payload = 5;
+  RequestContext context = 6;
+  // Answer only after the read model has processed this global position (0: right away).
+  uint64 min_position = 7;
+  int64 issued_at = 8; // ms since epoch; must be within 60 s of the kernel's clock
+  Signature client_sig = 9;
+}
+
+message QueryResult {
+  string query_id = 1;
+  oneof outcome {
+    bytes response = 2;
+    Rejected rejected = 3;
+  }
+}
+
 // ---- listeners ----
 
 // Durable, named, ordered event listeners (read models and reactors).
@@ -154,6 +183,7 @@ message ListenerMessage {
     Hello hello = 1;
     ChallengeResponse challenge_response = 2;
     Ack ack = 3;
+    QueryAnswer answer = 4;
   }
 }
 
@@ -162,6 +192,21 @@ message ListenerDelivery {
     Challenge challenge = 1;
     Ready ready = 2;
     Batch batch = 3;
+    // Delivered in order with the batches: the answer reflects every batch sent before it.
+    QueryCall query = 4;
+  }
+}
+
+message QueryCall {
+  string call_id = 1;
+  QueryRequest query = 2;
+}
+
+message QueryAnswer {
+  string call_id = 1;
+  oneof outcome {
+    bytes response = 2;
+    Rejected rejected = 3;
   }
 }
 
@@ -172,6 +217,7 @@ message Hello {
   repeated string event_types = 4; // qualified (`orders.OrderPlaced`, `orders.*`); empty = all the key may read
   // Start after this position instead of the stored one, e.g. 0 to rebuild an in-memory read model.
   optional uint64 from_position = 5;
+  repeated string query_types = 6; // qualified query types this listener answers
 }
 
 message Ready {

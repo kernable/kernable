@@ -10,8 +10,8 @@ import time
 import unittest
 
 from kernable import Kernable, NotSettled, Rejected, RequestContext, domain
-from kernable.signing import (Key, challenge_message, command_message, derived_id, rejection_message,
-                              result_message, snapshot_message)
+from kernable.signing import (Key, challenge_message, command_message, derived_id, query_message,
+                              rejection_message, result_message, snapshot_message)
 from kernable.v1 import kernable_pb2 as pb
 from tests.kernel import ROOT, TestKernel
 
@@ -48,6 +48,12 @@ class SigningVectors(unittest.TestCase):
         stream = pb.Command(tenant_id=n["tenant_id"], domain=n["domain"], aggregate_type=n["aggregate_type"],
                             aggregate_id=n["aggregate_id"])
         self.check("snapshot", snapshot_message(stream, n["version"], n["schema"], bytes.fromhex(n["state_hex"])))
+        q = dict(VECTORS["query"]["input"])
+        context = q.pop("context")
+        attributes = [pb.Attribute(**a) for a in context.pop("attributes")]
+        payload = bytes.fromhex(q.pop("payload_hex"))
+        query = pb.QueryRequest(**q, payload=payload, context=pb.RequestContext(**context, attributes=attributes))
+        self.check("query", query_message(query))
         d = VECTORS["derived_id"]
         self.assertEqual([derived_id(d["input"]["command_id"], n) for n in d["input"]["n"]], d["ids"])
 
@@ -104,11 +110,20 @@ class EndToEnd(unittest.TestCase):
 
         model = self.k.read_model("totals")
         model.on("counters.Incremented", lambda e: totals.__setitem__(e.aggregate_id, totals.get(e.aggregate_id, 0) + e.data["by"]))
+
+        @model.query("counters.GetTotal")
+        def _(data, ctx):
+            if data["id"] not in totals:
+                raise Rejected(f"no counter {data['id']}", "not_found")
+            return totals[data["id"]]
+
+        def total(counter: str) -> int:
+            return self.k.query("counters", "GetTotal", {"id": counter})
         reactor = self.k.reactor("audit")
 
         @reactor.on("counters.Incremented")
         def _(e):
-            seen_by_reactor.append((e.position, totals["c1"]))  # the read model ran first
+            seen_by_reactor.append((e.position, total("c1")))  # the read model ran first
 
         self.run_stream(model)
         self.run_stream(reactor)
@@ -116,9 +131,12 @@ class EndToEnd(unittest.TestCase):
         first = self.increment(3)
         self.assertTrue(first.committed)
         self.assertEqual([e.version for e in first.events], [1])
-        self.assertEqual(totals, {"c1": 3})  # read your writes, no polling
+        self.assertEqual(total("c1"), 3)  # read your writes through the kernel, no polling
         self.increment(4)
-        self.assertEqual(totals, {"c1": 7})
+        self.assertEqual(total("c1"), 7)
+        with self.assertRaises(Rejected) as missing:
+            total("c9")
+        self.assertEqual(missing.exception.code, "not_found")
         self.assertEqual(seen_by_reactor, [(1, 3), (2, 7)])
 
         limit = self.increment(5)
