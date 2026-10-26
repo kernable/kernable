@@ -168,7 +168,11 @@ export class Kernable {
     return new Listener(this.clients, this.key, name, { order: 0, start: 0, ...options });
   }
 
-  /** A reactor: triggers side effects; resumes after the last acknowledged event (default). */
+  /**
+   * A reactor: triggers side effects; resumes after the last acknowledged event (default).
+   * Inside a reactor, submit with `wait: "committed"`: a settling submit would wait for the
+   * reactor itself and time out.
+   */
   reactor(name: string, options: ListenerOptions = {}): Listener {
     return new Listener(this.clients, this.key, name, { order: 10, ...options });
   }

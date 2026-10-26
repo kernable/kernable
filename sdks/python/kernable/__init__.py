@@ -1,0 +1,343 @@
+"""kernable SDK for Python: write event-sourced business logic in Python; the kernel does the rest.
+
+The API mirrors the TypeScript SDK:
+
+    account = aggregate("Account", {"status": "none"})
+
+    @account.apply("AccountRegistered")
+    def _(state, data):
+        return {**state, "status": "active", "email": data["email"]}
+
+    @account.command("RegisterAccount")
+    def _(state, data):
+        if state["status"] != "none":
+            raise Rejected("Account already exists")
+        return [{"type": "AccountRegistered", "data": {"email": data["email"]}}]
+
+    k = Kernable(url, key_path)
+    k.worker(account).run()
+
+Stubs: generate them first (`make py-stubs`), see sdks/python/README.md.
+"""
+
+import json
+import queue
+import sys
+import threading
+import time
+import uuid
+from dataclasses import dataclass, field
+from typing import Any, Callable
+
+import grpc
+
+from kernable.signing import Key, challenge_message, command_message, rejection_message, result_message
+from kernable.v1 import kernable_pb2 as pb
+from kernable.v1 import kernable_pb2_grpc as rpc
+
+__all__ = ["Aggregate", "Event", "Kernable", "Key", "Listener", "NotSettled", "Outcome", "Rejected", "Worker", "aggregate"]
+
+
+class Rejected(Exception):
+    """Raise from a command handler to reject the command with a business reason."""
+
+    def __init__(self, message: str, code: str = "rejected"):
+        super().__init__(message)
+        self.code = code
+
+
+@dataclass
+class Event:
+    """An event as stored by the kernel."""
+
+    position: int
+    tenant: str
+    aggregate_type: str
+    aggregate_id: str
+    version: int
+    type: str
+    data: Any
+    command_id: str
+
+
+@dataclass
+class Outcome:
+    committed: bool
+    events: list[Event] = field(default_factory=list)
+    code: str = ""
+    message: str = ""
+
+
+class NotSettled(Exception):
+    """The command was committed, but not every listener processed its events in time.
+
+    Read models may not show the change yet; `outcome` has the events.
+    """
+
+    def __init__(self, outcome: Outcome):
+        super().__init__("command committed, but not all listeners have processed its events yet")
+        self.outcome = outcome
+
+
+class Aggregate:
+    """How events change an aggregate's state (`apply`) and which events a command produces
+    (`command`). Handlers must be deterministic and free of side effects; they may run again.
+
+    Both work as decorators (`@agg.apply("Type")`) or directly (`agg.apply("Type", fn)`).
+    A command handler returns a list of `{"type": ..., "data": ...}`.
+    """
+
+    def __init__(self, name: str, initial: Any):
+        self.name = name
+        self.initial = initial
+        self.appliers: dict[str, Callable] = {}
+        self.handlers: dict[str, Callable] = {}
+
+    def apply(self, event_type: str, fn: Callable | None = None):
+        return _register(self, self.appliers, event_type, fn)
+
+    def command(self, command_type: str, fn: Callable | None = None):
+        return _register(self, self.handlers, command_type, fn)
+
+    def fold(self, history: list[tuple[str, Any]]) -> Any:
+        """State after `history`; events without an `apply` are skipped."""
+        state = self.initial
+        for event_type, data in history:
+            fn = self.appliers.get(event_type)
+            if fn:
+                state = fn(state, data)
+        return state
+
+
+def _register(owner, table: dict, name: str, fn: Callable | None):
+    if fn is not None:
+        table[name] = fn
+        return owner
+
+    def decorator(f: Callable) -> Callable:
+        table[name] = f
+        return f
+
+    return decorator
+
+
+def aggregate(name: str, initial: Any) -> Aggregate:
+    return Aggregate(name, initial)
+
+
+class Kernable:
+    def __init__(self, url: str, key: str, tenant: str = "default"):
+        """`url`: `unix:/path/to.sock` or `host:port`; `key`: path to this process's `.key` file."""
+        # grpcio sends the socket path as :authority for unix: URLs, which the kernel's
+        # HTTP/2 server rejects; any valid authority works.
+        self._channel = grpc.insecure_channel(url, options=[("grpc.default_authority", "localhost")])
+        self._key = Key.from_file(key)
+        self._tenant = tenant
+
+    def worker(self, *aggregates: Aggregate) -> "Worker":
+        return Worker(self._channel, self._key, aggregates)
+
+    def submit(self, aggregate_type: str, aggregate_id: str, type: str, data: Any = None, *,
+               tenant: str | None = None, id: str | None = None, wait: str = "settled") -> Outcome:
+        """Runs a command and returns its outcome.
+
+        `wait="settled"` (default) responds once every listener has processed the events, so
+        read models already show them, and raises `NotSettled` on timeout. `wait="committed"`
+        responds once the events are stored; use it inside reactors, which would otherwise
+        wait for themselves. `id` is an idempotency key.
+        """
+        mode = pb.WAIT_COMMITTED if wait == "committed" else pb.WAIT_SETTLED
+        res = self._send(aggregate_type, aggregate_id, type, data, tenant, id, mode)
+        if res.WhichOneof("outcome") == "rejected":
+            return Outcome(committed=False, code=res.rejected.code, message=res.rejected.message)
+        outcome = Outcome(committed=True, events=[_to_event(e) for e in res.committed.events])
+        if mode == pb.WAIT_SETTLED and not res.committed.settled:
+            raise NotSettled(outcome)
+        return outcome
+
+    def enqueue(self, aggregate_type: str, aggregate_id: str, type: str, data: Any = None, *,
+                tenant: str | None = None, id: str | None = None) -> str:
+        """Stores the command in the kernel's queue and returns its ID without waiting.
+        Submit it again with the same `id` to get the outcome."""
+        return self._send(aggregate_type, aggregate_id, type, data, tenant, id, pb.WAIT_ACCEPTED).command_id
+
+    def read_model(self, name: str, *, order: int = 0, start: int | None = 0, reconnect_s: float = 1.0) -> "Listener":
+        """A read model: kept in memory and rebuilt from the first event on every start (default)."""
+        return Listener(self._channel, self._key, name, order, start, reconnect_s)
+
+    def reactor(self, name: str, *, order: int = 10, start: int | None = None, reconnect_s: float = 1.0) -> "Listener":
+        """A reactor: triggers side effects; resumes after the last acknowledged event (default).
+
+        Inside a reactor, submit with `wait="committed"`: a settling submit would wait for the
+        reactor itself and time out."""
+        return Listener(self._channel, self._key, name, order, start, reconnect_s)
+
+    def close(self) -> None:
+        self._channel.close()
+
+    def _send(self, aggregate_type, aggregate_id, command_type, data, tenant, id, wait):
+        cmd = pb.Command(command_id=id or str(uuid.uuid4()), tenant_id=tenant or self._tenant,
+                         aggregate_type=aggregate_type, aggregate_id=aggregate_id,
+                         command_type=command_type, payload=_encode(data))
+        cmd.client_sig.CopyFrom(self._key.sign(command_message(cmd)))
+        return rpc.CommandServiceStub(self._channel).Submit(pb.SubmitRequest(command=cmd, wait=wait))
+
+
+class _Stream:
+    """A bidirectional stream that reconnects until stopped."""
+
+    def __init__(self, what: str, reconnect_s: float):
+        self.ready = threading.Event()
+        self._what = what
+        self._reconnect_s = reconnect_s
+        self._stopped = False
+        self._call = None
+        self._outbox: queue.Queue | None = None
+
+    def run(self) -> None:
+        """Processes messages until `stop()`, reconnecting when the stream drops."""
+        while not self._stopped:
+            outbox: queue.Queue = queue.Queue()
+            self._outbox = outbox
+            try:
+                self._call = self._open(iter(outbox.get, None))
+                outbox.put(self._hello())
+                for msg in self._call:
+                    reply = self._on(msg)
+                    if reply is not None:
+                        outbox.put(reply)
+            except grpc.RpcError as err:
+                if not self._stopped:
+                    print(f"kernable {self._what}: {err.details()}", file=sys.stderr)
+            except Exception as err:  # a failing handler: reconnect and get the event again
+                if not self._stopped:
+                    print(f"kernable {self._what}: {err!r}", file=sys.stderr)
+                self._call.cancel()
+            finally:
+                outbox.put(None)
+            if not self._stopped:
+                time.sleep(self._reconnect_s)
+
+    def stop(self) -> None:
+        self._stopped = True
+        if self._call is not None:
+            self._call.cancel()
+
+    def _open(self, requests):
+        raise NotImplementedError
+
+    def _hello(self):
+        raise NotImplementedError
+
+    def _on(self, msg):
+        raise NotImplementedError
+
+
+class Worker(_Stream):
+    """Executes commands for its aggregates, one at a time."""
+
+    def __init__(self, channel: grpc.Channel, key: Key, aggregates):
+        super().__init__("worker", 1.0)
+        self._stub = rpc.WorkerGatewayStub(channel)
+        self._key = key
+        self._by_command = {t: a for a in aggregates for t in a.handlers}
+
+    def _open(self, requests):
+        return self._stub.Session(requests)
+
+    def _hello(self):
+        register = pb.Register(worker_id=f"py-{uuid.uuid4().hex[:8]}", key_id=self._key.id,
+                               command_types=list(self._by_command), max_concurrency=1)
+        return pb.WorkerMessage(register=register)
+
+    def _on(self, msg):
+        kind = msg.WhichOneof("msg")
+        if kind == "challenge":
+            sig = self._key.sign(challenge_message(msg.challenge.nonce)).sig
+            return pb.WorkerMessage(challenge_response=pb.ChallengeResponse(sig=sig))
+        if kind == "registered":
+            self.ready.set()
+        elif kind == "execute":
+            return self._execute(msg.execute)
+        return None
+
+    def _execute(self, x):
+        cmd = x.command
+        try:
+            agg = self._by_command.get(cmd.command_type)
+            if agg is None or agg.name != cmd.aggregate_type:
+                raise Rejected(f"no handler for {cmd.aggregate_type}.{cmd.command_type}", "unknown_command")
+            state = agg.fold([(e.event_type, _decode(e.payload)) for e in x.history])
+            produced = agg.handlers[cmd.command_type](state, _decode(cmd.payload))
+            events = [pb.NewEvent(event_type=e["type"], payload=_encode(e.get("data"))) for e in produced]
+        except Exception as err:
+            reason = (pb.Rejected(code=err.code, message=str(err)) if isinstance(err, Rejected)
+                      else pb.Rejected(code="handler_error", message=repr(err)))
+            sig = self._key.sign(rejection_message(cmd.command_id, reason))
+            return pb.WorkerMessage(rejection=pb.Rejection(lease_id=x.lease_id, reason=reason, worker_sig=sig))
+        sig = self._key.sign(result_message(cmd, x.expected_version, events))
+        return pb.WorkerMessage(result=pb.Result(lease_id=x.lease_id, events=events, worker_sig=sig))
+
+
+class Listener(_Stream):
+    """A durable, named event listener. Events arrive in order, one at a time, after every
+    listener with a lower order has processed them. Delivery is at least once: if a handler
+    raises, the listener reconnects and the event is delivered again."""
+
+    def __init__(self, channel: grpc.Channel, key: Key, name: str, order: int, start: int | None, reconnect_s: float):
+        super().__init__(f"listener {name}", reconnect_s)
+        self._stub = rpc.ListenerServiceStub(channel)
+        self._key = key
+        self._name = name
+        self._order = order
+        self._start = start
+        self._handlers: dict[str, Callable[[Event], None]] = {}
+        #: Global position of the last handled event (or skipped, for other event types).
+        self.position = 0
+
+    def on(self, event_type: str, fn: Callable[[Event], None] | None = None):
+        """Registers a handler; works as a decorator too."""
+        return _register(self, self._handlers, event_type, fn)
+
+    def _open(self, requests):
+        return self._stub.Listen(requests)
+
+    def _hello(self):
+        hello = pb.Hello(name=self._name, key_id=self._key.id, order=self._order, event_types=list(self._handlers))
+        # Reconnects resume after the last handled event.
+        start = self.position if self.ready.is_set() else self._start
+        if start is not None:
+            hello.from_position = start
+        return pb.ListenerMessage(hello=hello)
+
+    def _on(self, msg):
+        kind = msg.WhichOneof("msg")
+        if kind == "challenge":
+            sig = self._key.sign(challenge_message(msg.challenge.nonce)).sig
+            return pb.ListenerMessage(challenge_response=pb.ChallengeResponse(sig=sig))
+        if kind == "ready":
+            self.position = msg.ready.after_position
+            self.ready.set()
+        elif kind == "batch":
+            for e in msg.batch.events:
+                handler = self._handlers.get(e.event_type)
+                if handler:
+                    handler(_to_event(e))
+                self.position = e.global_position
+            self.position = msg.batch.up_to
+            return pb.ListenerMessage(ack=pb.Ack(position=msg.batch.up_to))
+        return None
+
+
+def _encode(data: Any) -> bytes:
+    return json.dumps({} if data is None else data).encode()
+
+
+def _decode(payload: bytes) -> Any:
+    return json.loads(payload) if payload else {}
+
+
+def _to_event(e) -> Event:
+    return Event(position=e.global_position, tenant=e.tenant_id, aggregate_type=e.aggregate_type,
+                 aggregate_id=e.aggregate_id, version=e.version, type=e.event_type,
+                 data=_decode(e.payload), command_id=e.command_id)

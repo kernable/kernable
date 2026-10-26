@@ -7,7 +7,7 @@
   "exports": "./src/index.ts",
   "engines": { "node": ">=22.18" },
   "scripts": {
-    "check": "tsc && node --test test/*.test.ts ../../examples/order-ts/*.test.ts"
+    "check": "tsc && node --test test/*.test.ts ../../examples/order-ts/*.test.ts ../../examples/shop/*.test.ts"
   },
   "dependencies": {
     "@grpc/grpc-js": "^1.14.6",
