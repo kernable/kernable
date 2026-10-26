@@ -376,6 +376,7 @@ fn command(run: &str, i: usize, aggregates: usize, payload: &[u8]) -> Command {
         command_type: "Write".into(),
         payload: payload.to_vec(),
         client_sig: None,
+        context: None,
     }
 }
 

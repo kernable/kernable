@@ -250,6 +250,18 @@ impl CommandService for Api {
                 cmd.command_type
             )));
         }
+        let bypass = cmd.context.as_ref().is_some_and(|c| c.bypass_authorization);
+        if bypass
+            && !config::allowed(
+                &kernel.config.privileged,
+                &sig.key_id,
+                "bypass_authorization",
+            )
+        {
+            return Err(Status::permission_denied(
+                "key may not set bypass_authorization",
+            ));
+        }
 
         // Register before enqueueing, so a fast completion cannot be missed.
         let (tx, rx) = oneshot::channel();
@@ -642,6 +654,19 @@ impl Session {
             .map(|e| e.version)
             .or(snapshot.as_ref().map(|s| s.version))
             .unwrap_or(0);
+        let required = command.context.as_ref().and_then(|c| c.expected_version);
+        if let Some(required) = required.filter(|v| *v != expected_version) {
+            // The client based the command on a state that has changed since.
+            let reason = Rejected {
+                code: "version_mismatch".into(),
+                message: format!(
+                    "expected version {required}, the aggregate is at {expected_version}"
+                ),
+            };
+            drop(permit);
+            self.reject(&lease_id, command.command_id, reason);
+            return true;
+        }
         self.in_flight().insert(
             lease_id.clone(),
             InFlight {

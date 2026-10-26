@@ -19,6 +19,33 @@ message Command {
   string command_type = 5;
   bytes payload = 6;
   Signature client_sig = 7;
+  RequestContext context = 8; // signed with the command, stored with its events
+}
+
+// Who sends a request and in which context. Signed by the client together with the request,
+// and stored with every event the request causes, so audit and listeners can see it.
+// Options for a single call (how long to wait) are not part of it; see SubmitRequest.
+message RequestContext {
+  // The sender: the real principal, also when acting on behalf of someone else.
+  string sender_tenant = 1;
+  string sender_identity = 2;
+  string sender_account = 3;
+  string sender_session = 4;
+  string on_behalf_of = 5; // authorize as this identity of the target tenant instead
+  string workspace = 6;
+  // Reject the command unless the aggregate is at this version when it runs.
+  optional uint64 expected_version = 7;
+  string correlation_id = 8; // shared by everything one original request causes
+  string causation_id = 9;   // the command that caused this one, if any
+  string trace_id = 10;
+  // Privileged switch: only keys listed in the kernel's [privileged] table may set it.
+  bool bypass_authorization = 11;
+  repeated Attribute attributes = 12; // business data only, never security decisions
+}
+
+message Attribute {
+  string key = 1;
+  string value = 2;
 }
 
 message Event {
@@ -33,6 +60,7 @@ message Event {
   int64 created_at = 9;
   bytes hash = 10;
   Signature producer_sig = 11;
+  RequestContext context = 12; // of the command that caused the event
 }
 
 // An aggregate's state after `version`, made by a worker: a cache, the events stay the truth.
@@ -142,6 +170,7 @@ message Hello {
 
 message Ready {
   uint64 after_position = 1; // the listener receives events after this position
+  uint64 head_position = 2;  // newest event when the listener connected: up to it, it replays
 }
 
 message Batch {

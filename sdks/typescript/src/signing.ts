@@ -3,7 +3,7 @@
 import { createHash, createPrivateKey, createPublicKey, sign, type KeyObject } from "node:crypto";
 import { readFileSync } from "node:fs";
 
-import type { WireCommand, WireEvent, WireNewEvent, WireRejected, WireSignature } from "./rpc.ts";
+import type { WireCommand, WireEvent, WireNewEvent, WireRejected, WireRequestContext, WireSignature } from "./rpc.ts";
 
 // PKCS#8 DER prefix for a raw 32-byte Ed25519 seed.
 const PKCS8_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
@@ -64,6 +64,25 @@ class Msg {
     return this;
   }
 
+  /** A request context; an absent one encodes like an empty one. */
+  context(c: WireRequestContext | null | undefined): this {
+    this.str(c?.sender_tenant ?? "")
+      .str(c?.sender_identity ?? "")
+      .str(c?.sender_account ?? "")
+      .str(c?.sender_session ?? "")
+      .str(c?.on_behalf_of ?? "")
+      .str(c?.workspace ?? "");
+    if (c?.expected_version != null) this.u64(1).u64(c.expected_version);
+    else this.u64(0);
+    this.str(c?.correlation_id ?? "")
+      .str(c?.causation_id ?? "")
+      .str(c?.trace_id ?? "")
+      .u64(c?.bypass_authorization ? 1 : 0)
+      .u64(c?.attributes.length ?? 0);
+    for (const a of c?.attributes ?? []) this.str(a.key).str(a.value);
+    return this;
+  }
+
   done(): Buffer {
     return Buffer.concat(this.parts);
   }
@@ -74,7 +93,7 @@ type Stream = Pick<WireCommand, "command_id" | "tenant_id" | "aggregate_type" | 
 const stream = (m: Msg, c: Stream) => m.str(c.command_id).str(c.tenant_id).str(c.aggregate_type).str(c.aggregate_id);
 
 export function commandMessage(c: WireCommand): Buffer {
-  return stream(new Msg("kernable.v1.command"), c).str(c.command_type).bytes(c.payload).done();
+  return stream(new Msg("kernable.v1.command"), c).str(c.command_type).bytes(c.payload).context(c.context).done();
 }
 
 export function resultMessage(c: Stream, expectedVersion: number, events: WireNewEvent[]): Buffer {
@@ -126,6 +145,7 @@ export function eventHash(prev: Buffer, e: WireEvent): Buffer {
     .str(e.command_id)
     .i64(e.created_at)
     .str(sig.key_id)
-    .bytes(sig.sig);
+    .bytes(sig.sig)
+    .context(e.context);
   return createHash("sha256").update(m.done()).digest();
 }

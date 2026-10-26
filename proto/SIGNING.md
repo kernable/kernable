@@ -17,6 +17,7 @@ A message is a concatenation of fields:
 |---|---|
 | `bytes` / `str` | `u32` big-endian length, then the raw bytes (strings as UTF-8) |
 | `u64` / `i64` | 8 bytes big-endian (two's complement for `i64`) |
+| `context` | a `RequestContext` (an absent one encodes like an empty one): `sender_tenant`, `sender_identity`, `sender_account`, `sender_session`, `on_behalf_of`, `workspace`, then `u64` 1 and `expected_version: u64` if set or `u64` 0 if not, then `correlation_id`, `causation_id`, `trace_id`, `bypass_authorization` as `u64` 0 or 1, `attribute_count: u64`, then per attribute `key`, `value` (in the given order) |
 
 Each message starts with a `str` **tag** for domain separation. Payloads are signed as the exact bytes sent; no JSON canonicalization.
 
@@ -24,7 +25,7 @@ Each message starts with a `str` **tag** for domain separation. Payloads are sig
 
 | Signed by | Tag | Fields after the tag |
 |---|---|---|
-| Client | `kernable.v1.command` | `command_id`, `tenant_id`, `aggregate_type`, `aggregate_id`, `command_type`, `payload` |
+| Client | `kernable.v1.command` | `command_id`, `tenant_id`, `aggregate_type`, `aggregate_id`, `command_type`, `payload`, `context` |
 | Worker | `kernable.v1.result` | `command_id`, `tenant_id`, `aggregate_type`, `aggregate_id`, `expected_version: u64`, `event_count: u64`, then per event `event_type`, `payload` |
 | Worker | `kernable.v1.rejection` | `command_id`, `code`, `message` |
 | Worker | `kernable.v1.snapshot` | `tenant_id`, `aggregate_type`, `aggregate_id`, `version: u64`, `schema`, `state` |
@@ -54,6 +55,7 @@ Each stored event has `hash = SHA-256(message)`, where `message` has the tag `ke
 10. `created_at: i64`
 11. `producer_key_id`
 12. `producer_sig`
+13. `context` (of the command that caused the event)
 
 `prev_hash` is the hash of the event at the previous global position. For the first event it is 32 zero bytes. Every event of a command stores that command's worker result signature as `producer_sig`.
 

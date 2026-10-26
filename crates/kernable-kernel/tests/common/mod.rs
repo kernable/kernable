@@ -80,6 +80,7 @@ pub async fn start_custom(name: &str, customize: impl FnOnce(&mut Config, &Path)
             (id(&key(5)), vec!["*".into()]),
             (id(&key(6)), vec!["OrderPlaced".into()]),
         ]),
+        privileged: HashMap::from([(id(&key(1)), vec!["bypass_authorization".into()])]),
         tls: None,
         metrics_listen: None,
     };
@@ -310,6 +311,7 @@ pub fn command(id: &str, command_type: &str, aggregate_id: &str) -> Command {
         command_type: command_type.into(),
         payload: format!(r#"{{"id":"{id}"}}"#).into_bytes(),
         client_sig: None,
+        context: None,
     }
 }
 

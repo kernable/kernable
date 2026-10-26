@@ -270,6 +270,7 @@ pub(crate) async fn run(
         out,
         Out::Ready(Ready {
             after_position: start,
+            head_position: kernel.store.head_position().map_err(internal)?,
         }),
     )
     .await?;

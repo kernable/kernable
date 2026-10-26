@@ -3,7 +3,7 @@
 
 use ed25519_dalek::SigningKey;
 use kernable_core::{
-    proto::{Command, Event, NewEvent, Rejected},
+    proto::{Attribute, Command, Event, NewEvent, Rejected, RequestContext},
     signing::{self, GENESIS},
 };
 use serde_json::{Value, json};
@@ -24,6 +24,29 @@ fn vectors() -> Value {
         })
     };
 
+    let context = RequestContext {
+        sender_tenant: "t-0".into(),
+        sender_identity: "i-1".into(),
+        sender_account: "a-1".into(),
+        sender_session: "s-1".into(),
+        on_behalf_of: "i-2".into(),
+        workspace: "w-1".into(),
+        expected_version: Some(3),
+        correlation_id: "r-1".into(),
+        causation_id: "c-0".into(),
+        trace_id: "tr-1".into(),
+        bypass_authorization: true,
+        attributes: vec![
+            Attribute {
+                key: "channel".into(),
+                value: "web".into(),
+            },
+            Attribute {
+                key: "locale".into(),
+                value: "de-AT".into(),
+            },
+        ],
+    };
     let cmd = Command {
         command_id: "c-1".into(),
         tenant_id: "t-1".into(),
@@ -32,6 +55,7 @@ fn vectors() -> Value {
         command_type: "PlaceOrder".into(),
         payload: br#"{"customerId":"k-1"}"#.to_vec(),
         client_sig: None,
+        context: Some(context.clone()),
     };
     let events = [
         NewEvent {
@@ -62,11 +86,22 @@ fn vectors() -> Value {
         created_at: 1_700_000_000_000,
         hash: vec![],
         producer_sig: Some(signing::sign(&key, &producer_msg)),
+        context: Some(context.clone()),
     };
+    let context_json = json!({
+        "sender_tenant": context.sender_tenant, "sender_identity": context.sender_identity,
+        "sender_account": context.sender_account, "sender_session": context.sender_session,
+        "on_behalf_of": context.on_behalf_of, "workspace": context.workspace,
+        "expected_version": context.expected_version, "correlation_id": context.correlation_id,
+        "causation_id": context.causation_id, "trace_id": context.trace_id,
+        "bypass_authorization": context.bypass_authorization,
+        "attributes": context.attributes.iter().map(|a| json!({"key": a.key, "value": a.value})).collect::<Vec<_>>(),
+    });
     let cmd_json = json!({
         "command_id": cmd.command_id, "tenant_id": cmd.tenant_id,
         "aggregate_type": cmd.aggregate_type, "aggregate_id": cmd.aggregate_id,
         "command_type": cmd.command_type, "payload_hex": hex::encode(&cmd.payload),
+        "context": context_json,
     });
     let events_json: Vec<Value> = events
         .iter()
@@ -109,6 +144,7 @@ fn vectors() -> Value {
                 "created_at": event.created_at,
                 "producer_key_id": event.producer_sig.as_ref().unwrap().key_id,
                 "producer_sig_hex": hex::encode(&event.producer_sig.as_ref().unwrap().sig),
+                "context": context_json,
             },
             "hash": hex::encode(signing::event_hash(&GENESIS, &event)),
         },

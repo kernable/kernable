@@ -14,8 +14,8 @@ use std::{
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
-        Command, CommandResult, Committed, Event, ListenerRecord, NewEvent, Rejected, Signature,
-        SnapshotRecord, command_result::Outcome,
+        Command, CommandResult, Committed, Event, ListenerRecord, NewEvent, Rejected,
+        RequestContext, Signature, SnapshotRecord, command_result::Outcome,
     },
     signing::{self, GENESIS},
 };
@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS events (
     created_at      INTEGER NOT NULL,
     producer_key_id TEXT    NOT NULL,
     producer_sig    BLOB    NOT NULL,
+    context         BLOB,             -- encoded RequestContext of the command
     prev_hash       BLOB    NOT NULL,
     hash            BLOB    NOT NULL,
     UNIQUE (tenant_id, aggregate_type, aggregate_id, version)
@@ -53,6 +54,7 @@ CREATE TABLE IF NOT EXISTS commands (
     payload          BLOB    NOT NULL,
     client_key_id    TEXT,
     client_sig       BLOB,
+    context          BLOB,             -- encoded RequestContext
     status           TEXT    NOT NULL, -- pending | committed | rejected
     result           BLOB,             -- encoded CommandResult once completed
     created_at       INTEGER NOT NULL
@@ -80,7 +82,10 @@ CREATE TABLE IF NOT EXISTS listeners (
 
 const EVENT_COLUMNS: &str = "global_position, tenant_id, aggregate_type, aggregate_id, version, \
                              event_type, payload, command_id, created_at, \
-                             producer_key_id, producer_sig, hash";
+                             producer_key_id, producer_sig, hash, context";
+
+const COMMAND_COLUMNS: &str = "command_id, tenant_id, aggregate_type, aggregate_id, command_type, \
+                               payload, client_key_id, client_sig, context";
 
 pub struct SqliteStore {
     conn: Mutex<Connection>,
@@ -153,9 +158,9 @@ impl Store for SqliteStore {
         let conn = self.conn();
         let (key_id, sig) = split_sig(cmd.client_sig.as_ref());
         let inserted = conn.execute(
-            "INSERT INTO commands (command_id, tenant_id, aggregate_type, aggregate_id,
-                                   command_type, payload, client_key_id, client_sig, status, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9)
+            "INSERT INTO commands (command_id, tenant_id, aggregate_type, aggregate_id, command_type,
+                                   payload, client_key_id, client_sig, context, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', ?10)
              ON CONFLICT (command_id) DO NOTHING",
             params![
                 cmd.command_id,
@@ -166,6 +171,7 @@ impl Store for SqliteStore {
                 cmd.payload,
                 key_id,
                 sig,
+                cmd.context.as_ref().map(Message::encode_to_vec),
                 now_ms
             ],
         )?;
@@ -179,22 +185,11 @@ impl Store for SqliteStore {
     /// All commands not completed yet, in submission order.
     fn pending(&self) -> Result<Vec<Command>> {
         let conn = self.conn();
-        let mut stmt = conn.prepare(
-            "SELECT command_id, tenant_id, aggregate_type, aggregate_id, command_type, payload,
-                    client_key_id, client_sig
-             FROM commands WHERE status = 'pending' ORDER BY created_at, rowid",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok(Command {
-                command_id: r.get(0)?,
-                tenant_id: r.get(1)?,
-                aggregate_type: r.get(2)?,
-                aggregate_id: r.get(3)?,
-                command_type: r.get(4)?,
-                payload: r.get(5)?,
-                client_sig: join_sig(r.get(6)?, r.get(7)?),
-            })
-        })?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {COMMAND_COLUMNS} FROM commands WHERE status = 'pending'
+             ORDER BY created_at, rowid"
+        ))?;
+        let rows = stmt.query_map([], command_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -252,13 +247,14 @@ impl Store for SqliteStore {
                 created_at: now_ms,
                 hash: vec![],
                 producer_sig: Some(producer_sig.clone()),
+                context: cmd.context.clone(),
             };
             event.hash = signing::event_hash(&prev, &event).to_vec();
             tx.execute(
                 "INSERT INTO events (global_position, tenant_id, aggregate_type, aggregate_id, version,
                                      event_type, payload, command_id, created_at,
-                                     producer_key_id, producer_sig, prev_hash, hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                                     producer_key_id, producer_sig, prev_hash, hash, context)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     event.global_position,
                     event.tenant_id,
@@ -272,7 +268,8 @@ impl Store for SqliteStore {
                     producer_sig.key_id,
                     producer_sig.sig,
                     prev,
-                    event.hash
+                    event.hash,
+                    event.context.as_ref().map(Message::encode_to_vec)
                 ],
             )?;
             prev = event.hash.clone();
@@ -450,7 +447,7 @@ fn verify_tables(conn: &Connection, kernel_key_id: &str) -> Result<Report> {
     ))?;
     let mut rows = stmt.query([])?;
     while let Some(r) = rows.next()? {
-        let prev_hash: Vec<u8> = r.get(12)?;
+        let prev_hash: Vec<u8> = r.get(13)?;
         v.event(event_from_row(r)?, &prev_hash);
     }
 
@@ -470,22 +467,12 @@ fn verify_tables(conn: &Connection, kernel_key_id: &str) -> Result<Report> {
         v.snapshot(&record, hash.as_deref());
     }
 
-    let mut stmt = conn.prepare(
-        "SELECT command_id, tenant_id, aggregate_type, aggregate_id, command_type, payload,
-                client_key_id, client_sig
-         FROM commands ORDER BY created_at, rowid",
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COMMAND_COLUMNS} FROM commands ORDER BY created_at, rowid"
+    ))?;
     let mut rows = stmt.query([])?;
     while let Some(r) = rows.next()? {
-        v.command(&Command {
-            command_id: r.get(0)?,
-            tenant_id: r.get(1)?,
-            aggregate_type: r.get(2)?,
-            aggregate_id: r.get(3)?,
-            command_type: r.get(4)?,
-            payload: r.get(5)?,
-            client_sig: join_sig(r.get(6)?, r.get(7)?),
-        });
+        v.command(&command_from_row(r)?);
     }
     Ok(v.finish())
 }
@@ -503,7 +490,30 @@ fn event_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
         created_at: r.get(8)?,
         producer_sig: join_sig(r.get(9)?, r.get(10)?),
         hash: r.get(11)?,
+        context: context_from(r.get(12)?)?,
     })
+}
+
+fn command_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Command> {
+    Ok(Command {
+        command_id: r.get(0)?,
+        tenant_id: r.get(1)?,
+        aggregate_type: r.get(2)?,
+        aggregate_id: r.get(3)?,
+        command_type: r.get(4)?,
+        payload: r.get(5)?,
+        client_sig: join_sig(r.get(6)?, r.get(7)?),
+        context: context_from(r.get(8)?)?,
+    })
+}
+
+fn context_from(bytes: Option<Vec<u8>>) -> rusqlite::Result<Option<RequestContext>> {
+    bytes
+        .map(|b| RequestContext::decode(b.as_slice()))
+        .transpose()
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Blob, e.into())
+        })
 }
 
 fn read_events(
@@ -530,21 +540,14 @@ fn join_sig(key_id: Option<String>, sig: Option<Vec<u8>>) -> Option<Signature> {
     })
 }
 
-/// The stream identity of a pending command.
+/// A pending command.
 fn pending_command(tx: &Transaction<'_>, command_id: &str) -> Result<Command> {
     tx.query_row(
-        "SELECT command_id, tenant_id, aggregate_type, aggregate_id FROM commands
-         WHERE command_id = ?1 AND status = 'pending'",
+        &format!(
+            "SELECT {COMMAND_COLUMNS} FROM commands WHERE command_id = ?1 AND status = 'pending'"
+        ),
         [command_id],
-        |r| {
-            Ok(Command {
-                command_id: r.get(0)?,
-                tenant_id: r.get(1)?,
-                aggregate_type: r.get(2)?,
-                aggregate_id: r.get(3)?,
-                ..Default::default()
-            })
-        },
+        command_from_row,
     )
     .optional()?
     .ok_or(Error::NotPending)

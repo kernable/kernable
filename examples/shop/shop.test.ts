@@ -164,6 +164,12 @@ test("kill -9 of each process loses and duplicates nothing", async () => {
     kernable.close();
     const confirmations = events.filter((e) => e.type === "ConfirmationSent").map((e) => e.aggregateId);
     assert.deepEqual(confirmations.sort(), Array.from({ length: n }, (_, i) => `o${i + 1}`).sort());
+    // Each confirmation names the command that submitted the order as its cause.
+    for (const c of events.filter((e) => e.type === "ConfirmationSent")) {
+      const submitted = events.find((e) => e.type === "OrderSubmitted" && e.aggregateId === c.aggregateId)!;
+      assert.equal(c.request.causationId, submitted.commandId);
+      assert.equal(c.request.correlationId, submitted.request.correlationId);
+    }
 
     const rows = new Map<string, OrderRow>();
     for (const e of events) project(rows, e);

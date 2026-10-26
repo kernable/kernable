@@ -67,6 +67,7 @@ async fn main() -> ExitCode {
                 command_type: cmd_type.to_string(),
                 payload: payload.as_bytes().to_vec(),
                 client_sig: None,
+                context: None,
             };
             submit(addr, key, cmd).await
         }

@@ -30,7 +30,7 @@ async function account(id: string): Promise<{ email: string; status: string } | 
 // ---- reactor: runs after both read models (order 10 > 0) ----
 
 const stats = { confirmations: 0, unknownAccounts: 0 };
-const confirmations = kernable.reactor("confirmations").on("OrderSubmitted", async (e) => {
+const confirmations = kernable.reactor("confirmations").on("OrderSubmitted", async (e, ctx) => {
   const row = orders.get(e.aggregateId)!;
   const customer = await account(row.customerId); // throws while identity is down: retried
   if (!customer) {
@@ -38,13 +38,14 @@ const confirmations = kernable.reactor("confirmations").on("OrderSubmitted", asy
     return;
   }
   // A reactor must not wait for settling: that would include waiting for itself. The fixed
-  // command ID makes a redelivered event harmless.
+  // command ID makes a redelivered event harmless; `follow()` keeps sender and correlation.
   await kernable.submit({
     aggregateType: "Order",
     aggregateId: e.aggregateId,
     type: "RecordConfirmation",
     data: { email: customer.email },
     id: `confirm-${e.aggregateId}`,
+    context: ctx.follow(),
     wait: "committed",
   });
   stats.confirmations++;

@@ -74,6 +74,7 @@ impl Fixture {
             command_type: "Do".into(),
             payload: b"{}".to_vec(),
             client_sig: None,
+            context: None,
         };
         let client = SigningKey::from_bytes(&[1; 32]);
         cmd.client_sig = Some(signing::sign(&client, &signing::command_message(&cmd)));
@@ -239,6 +240,7 @@ fn unsigned_command_is_reported() {
         command_type: "Do".into(),
         payload: b"{}".to_vec(),
         client_sig: None,
+        context: None,
     };
     f.store.enqueue(&cmd, 1).unwrap();
     assert_problem(

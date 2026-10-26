@@ -8,7 +8,7 @@ use std::{fmt, fs, io, path::Path};
 use ed25519_dalek::{Signature as Ed25519Signature, Signer, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
 
-use crate::proto::{Command, Event, NewEvent, Rejected, Signature};
+use crate::proto::{Command, Event, NewEvent, Rejected, RequestContext, Signature};
 
 /// Hash that precedes the first event of the chain.
 pub const GENESIS: [u8; 32] = [0; 32];
@@ -57,6 +57,33 @@ impl Msg {
         self.0.extend(v.to_be_bytes());
         self
     }
+
+    /// A request context; an absent one encodes like an empty one.
+    fn context(self, c: Option<&RequestContext>) -> Self {
+        let default = RequestContext::default();
+        let c = c.unwrap_or(&default);
+        let mut m = self
+            .str(&c.sender_tenant)
+            .str(&c.sender_identity)
+            .str(&c.sender_account)
+            .str(&c.sender_session)
+            .str(&c.on_behalf_of)
+            .str(&c.workspace);
+        m = match c.expected_version {
+            Some(v) => m.u64(1).u64(v),
+            None => m.u64(0),
+        };
+        m = m
+            .str(&c.correlation_id)
+            .str(&c.causation_id)
+            .str(&c.trace_id)
+            .u64(c.bypass_authorization as u64)
+            .u64(c.attributes.len() as u64);
+        for a in &c.attributes {
+            m = m.str(&a.key).str(&a.value);
+        }
+        m
+    }
 }
 
 /// What a client signs when submitting a command.
@@ -68,6 +95,7 @@ pub fn command_message(cmd: &Command) -> Vec<u8> {
         .str(&cmd.aggregate_id)
         .str(&cmd.command_type)
         .bytes(&cmd.payload)
+        .context(cmd.context.as_ref())
         .0
 }
 
@@ -148,7 +176,8 @@ pub fn event_hash(prev: &[u8], event: &Event) -> [u8; 32] {
         .str(&event.command_id)
         .i64(event.created_at)
         .str(&sig.key_id)
-        .bytes(&sig.sig);
+        .bytes(&sig.sig)
+        .context(event.context.as_ref());
     Sha256::digest(msg.0).into()
 }
 

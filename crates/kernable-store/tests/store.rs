@@ -18,6 +18,7 @@ fn cmd(id: &str, command_type: &str) -> Command {
         command_type: command_type.into(),
         payload: b"{}".to_vec(),
         client_sig: None,
+        context: None,
     }
 }
 

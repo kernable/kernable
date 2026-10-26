@@ -63,6 +63,7 @@ fn run(store: &dyn Store, id: &str, agg: &str) {
         command_type: "Do".into(),
         payload: format!(r#"{{"id":"{id}"}}"#).into_bytes(),
         client_sig: None,
+        context: None,
     };
     cmd.client_sig = Some(signing::sign(&client, &signing::command_message(&cmd)));
     store.enqueue(&cmd, 0).unwrap();

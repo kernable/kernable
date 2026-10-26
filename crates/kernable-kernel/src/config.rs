@@ -25,6 +25,9 @@ use serde::Deserialize;
 /// [listeners]                          # listener key ID -> event types it may read
 /// "1f0a…" = ["OrderPlaced"]
 ///
+/// [privileged]                         # client key ID -> privileged request context switches
+/// "8b84…" = ["bypass_authorization"]
+///
 /// [tls]                                # optional, TCP only: mutual TLS
 /// cert = "kernel.tls.crt"             # see `kernable certs new`
 /// key = "kernel.tls.key"
@@ -56,6 +59,8 @@ pub struct Config {
     pub subscribers: HashMap<String, Vec<String>>,
     #[serde(default)]
     pub listeners: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    pub privileged: HashMap<String, Vec<String>>,
     pub tls: Option<Tls>,
     /// Address for Prometheus metrics (`GET /metrics`); off when absent.
     pub metrics_listen: Option<String>,

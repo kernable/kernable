@@ -426,6 +426,7 @@ impl Store for FileStore {
                 created_at: now_ms,
                 hash: vec![],
                 producer_sig: Some(producer_sig.clone()),
+                context: cmd.context.clone(),
             };
             event.hash = signing::event_hash(&prev, &event).to_vec();
             let prev_hash = std::mem::replace(&mut prev, event.hash.clone());

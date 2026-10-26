@@ -16,6 +16,7 @@ import {
   type WireEvent,
   type WireNewEvent,
   type WireRejected,
+  type WireRequestContext,
   type WireSnapshot,
   type WireWait,
 } from "./rpc.ts";
@@ -52,6 +53,44 @@ export interface NewEvent {
   data?: unknown;
 }
 
+/**
+ * Who sends a request and in which context: signed with the command and stored with every
+ * event it causes. `attributes` are business data only, never security decisions.
+ */
+export interface RequestContext {
+  senderTenant?: string;
+  senderIdentity?: string;
+  senderAccount?: string;
+  senderSession?: string;
+  /** Authorize as this identity of the target tenant; the sender stays the real principal. */
+  onBehalfOf?: string;
+  workspace?: string;
+  /** Reject the command (`version_mismatch`) unless the aggregate is at this version. */
+  expectedVersion?: number;
+  /** Shared by everything one original request causes; defaults to the command ID. */
+  correlationId?: string;
+  /** The command that caused this one. */
+  causationId?: string;
+  traceId?: string;
+  /** Privileged: only keys in the kernel's `[privileged]` table may set it. */
+  bypassAuthorization?: boolean;
+  attributes?: Record<string, string>;
+}
+
+/** What a command handler gets besides state and data. */
+export interface CommandContext {
+  commandId: string;
+  request: RequestContext;
+}
+
+/** What a listener handler gets besides the event. */
+export interface ListenerContext {
+  /** The event was committed before the listener connected: it is being replayed. */
+  replaying: boolean;
+  /** A request context for commands caused by this event: same sender and correlation. */
+  follow(): RequestContext;
+}
+
 /** An event as stored by the kernel. */
 export interface StoredEvent {
   position: number;
@@ -62,6 +101,8 @@ export interface StoredEvent {
   type: string;
   data: unknown;
   commandId: string;
+  /** The request context of the command that caused the event. */
+  request: RequestContext;
 }
 
 export type Outcome =
@@ -69,7 +110,7 @@ export type Outcome =
   | { committed: false; code: string; message: string };
 
 type Apply<S> = (state: S, data: any) => S;
-type Handle<S> = (state: S, data: any) => NewEvent[] | Promise<NewEvent[]>;
+type Handle<S> = (state: S, data: any, ctx: CommandContext) => NewEvent[] | Promise<NewEvent[]>;
 
 export interface AggregateOptions {
   /** Send a snapshot of the state every this many events (default 100; 0 turns them off). */
@@ -106,7 +147,7 @@ export class Aggregate<S> {
     return this;
   }
 
-  command<D = any>(commandType: string, fn: (state: S, data: D) => NewEvent[] | Promise<NewEvent[]>): this {
+  command<D = any>(commandType: string, fn: (state: S, data: D, ctx: CommandContext) => NewEvent[] | Promise<NewEvent[]>): this {
     this.handlers.set(commandType, fn);
     return this;
   }
@@ -128,6 +169,8 @@ export interface Options {
   key: string;
   /** Default tenant for `submit`. */
   tenant?: string;
+  /** Default request context for `submit`, e.g. this service's identity. */
+  context?: RequestContext;
   /** Mutual TLS for `host:port` URLs: paths of the CA certificate and this process's certificate and key. */
   tls?: TlsFiles;
 }
@@ -140,6 +183,8 @@ export interface SubmitOptions {
   tenant?: string;
   /** Idempotency key; resubmitting the same ID returns the original outcome. */
   id?: string;
+  /** Overrides the client's default context; inside a listener, pass `ctx.follow()`. */
+  context?: RequestContext;
   /**
    * `"settled"` (default): respond once every listener has processed the events, so read
    * models already show them; throws `NotSettled` on timeout. `"committed"`: respond once the
@@ -152,11 +197,13 @@ export class Kernable {
   private readonly clients: Clients;
   private readonly key: Key;
   private readonly tenant: string;
+  private readonly context: RequestContext;
 
   constructor(options: Options) {
     this.clients = connect(options.url, options.tls);
     this.key = Key.fromFile(options.key);
     this.tenant = options.tenant ?? "default";
+    this.context = options.context ?? {};
   }
 
   worker(...aggregates: Aggregate<any>[]): Worker {
@@ -198,13 +245,16 @@ export class Kernable {
   }
 
   private send(options: SubmitOptions, wait: WireWait) {
+    const command_id = options.id ?? randomUUID();
+    const context = { ...this.context, ...options.context };
     const cmd = {
-      command_id: options.id ?? randomUUID(),
+      command_id,
       tenant_id: options.tenant ?? this.tenant,
       aggregate_type: options.aggregateType,
       aggregate_id: options.aggregateId,
       command_type: options.type,
       payload: encode(options.data),
+      context: toWireContext({ ...context, correlationId: context.correlationId || command_id }),
     };
     return this.clients.submit({ ...cmd, client_sig: this.key.sign(commandMessage(cmd)) }, wait);
   }
@@ -283,7 +333,7 @@ export interface ListenerOptions {
   reconnectMs?: number;
 }
 
-type EventHandler = (event: StoredEvent) => void | Promise<void>;
+type EventHandler = (event: StoredEvent, ctx: ListenerContext) => void | Promise<void>;
 
 /**
  * A durable, named event listener. Events arrive in order, one at a time, after every listener
@@ -299,6 +349,8 @@ export class Listener {
   private readonly handlers = new Map<string, EventHandler>();
   private call?: ListenCall;
   private stopped = false;
+  /** Newest event when the kernel accepted the listener; events up to it are replayed. */
+  private replayUpTo = 0;
   private readonly clients: Clients;
   private readonly key: Key;
   private readonly name: string;
@@ -312,7 +364,7 @@ export class Listener {
     this.ready = new Promise((resolve) => (this.markReady = resolve));
   }
 
-  on<D = any>(eventType: string, handler: (event: StoredEvent & { data: D }) => void | Promise<void>): this {
+  on<D = any>(eventType: string, handler: (event: StoredEvent & { data: D }, ctx: ListenerContext) => void | Promise<void>): this {
     this.handlers.set(eventType, handler as EventHandler);
     return this;
   }
@@ -367,10 +419,13 @@ export class Listener {
       call.write({ challenge_response: { sig: this.key.sign(challengeMessage(m.challenge.nonce)).sig } });
     } else if (m.ready) {
       this.position = m.ready.after_position;
+      this.replayUpTo = m.ready.head_position;
       this.markReady();
     } else if (m.batch) {
       for (const e of m.batch.events) {
-        await this.handlers.get(e.event_type)?.(toStored(e));
+        const event = toStored(e);
+        const ctx = { replaying: e.global_position <= this.replayUpTo, follow: () => follow(event) };
+        await this.handlers.get(e.event_type)?.(event, ctx);
         this.position = e.global_position;
       }
       this.position = m.batch.up_to;
@@ -462,7 +517,8 @@ export class Worker {
       }
       const from = x.snapshot ? (decode(x.snapshot.state) as any) : agg.initial;
       const state = agg.fold(x.history.map((e) => ({ type: e.event_type, data: decode(e.payload) })), from);
-      const produced = await agg.handlers.get(cmd.command_type)!(state, decode(cmd.payload));
+      const ctx = { commandId: cmd.command_id, request: fromWireContext(cmd.context) };
+      const produced = await agg.handlers.get(cmd.command_type)!(state, decode(cmd.payload), ctx);
       events = produced.map((e) => ({ event_type: e.type, payload: encode(e.data) }));
       snapshot = this.snapshot(agg, cmd, x.expected_version, state, events);
     } catch (err) {
@@ -497,6 +553,49 @@ function decode(payload: Buffer): unknown {
   return payload.length ? JSON.parse(payload.toString("utf8")) : {};
 }
 
+/** A request context for a command caused by `event`. */
+function follow(event: StoredEvent): RequestContext {
+  const { expectedVersion, bypassAuthorization, ...rest } = event.request;
+  return { ...rest, correlationId: rest.correlationId || event.commandId, causationId: event.commandId };
+}
+
+function toWireContext(c: RequestContext): WireRequestContext {
+  return {
+    sender_tenant: c.senderTenant ?? "",
+    sender_identity: c.senderIdentity ?? "",
+    sender_account: c.senderAccount ?? "",
+    sender_session: c.senderSession ?? "",
+    on_behalf_of: c.onBehalfOf ?? "",
+    workspace: c.workspace ?? "",
+    ...(c.expectedVersion === undefined ? {} : { expected_version: c.expectedVersion }),
+    correlation_id: c.correlationId ?? "",
+    causation_id: c.causationId ?? "",
+    trace_id: c.traceId ?? "",
+    bypass_authorization: c.bypassAuthorization ?? false,
+    attributes: Object.entries(c.attributes ?? {}).map(([key, value]) => ({ key, value })),
+  };
+}
+
+/** Empty fields are left out. */
+function fromWireContext(c: WireRequestContext | null | undefined): RequestContext {
+  if (!c) return {};
+  const all: RequestContext = {
+    senderTenant: c.sender_tenant,
+    senderIdentity: c.sender_identity,
+    senderAccount: c.sender_account,
+    senderSession: c.sender_session,
+    onBehalfOf: c.on_behalf_of,
+    workspace: c.workspace,
+    expectedVersion: c.expected_version ?? undefined,
+    correlationId: c.correlation_id,
+    causationId: c.causation_id,
+    traceId: c.trace_id,
+    bypassAuthorization: c.bypass_authorization || undefined,
+    attributes: c.attributes.length ? Object.fromEntries(c.attributes.map((a) => [a.key, a.value])) : undefined,
+  };
+  return Object.fromEntries(Object.entries(all).filter(([, v]) => v !== undefined && v !== "")) as RequestContext;
+}
+
 function toStored(e: WireEvent): StoredEvent {
   return {
     position: e.global_position,
@@ -507,5 +606,6 @@ function toStored(e: WireEvent): StoredEvent {
     type: e.event_type,
     data: decode(e.payload),
     commandId: e.command_id,
+    request: fromWireContext(e.context),
   };
 }

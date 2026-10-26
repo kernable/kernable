@@ -26,13 +26,27 @@ class Msg:
         self.buf += struct.pack(">Q", n)
         return self
 
+    def context(self, c) -> "Msg":
+        """A RequestContext message; an unset one encodes like an empty one."""
+        self.str(c.sender_tenant).str(c.sender_identity).str(c.sender_account).str(c.sender_session)
+        self.str(c.on_behalf_of).str(c.workspace)
+        if c.HasField("expected_version"):
+            self.u64(1).u64(c.expected_version)
+        else:
+            self.u64(0)
+        self.str(c.correlation_id).str(c.causation_id).str(c.trace_id)
+        self.u64(1 if c.bypass_authorization else 0).u64(len(c.attributes))
+        for a in c.attributes:
+            self.str(a.key).str(a.value)
+        return self
+
 
 def _stream(m: Msg, c) -> Msg:
     return m.str(c.command_id).str(c.tenant_id).str(c.aggregate_type).str(c.aggregate_id)
 
 
 def command_message(c) -> bytes:
-    return bytes(_stream(Msg("kernable.v1.command"), c).str(c.command_type).bytes(c.payload).buf)
+    return bytes(_stream(Msg("kernable.v1.command"), c).str(c.command_type).bytes(c.payload).context(c.context).buf)
 
 
 def result_message(c, expected_version: int, events) -> bytes:

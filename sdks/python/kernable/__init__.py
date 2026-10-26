@@ -20,6 +20,7 @@ The API mirrors the TypeScript SDK:
 Stubs: generate them first (`make py-stubs`), see sdks/python/README.md.
 """
 
+import inspect
 import json
 import queue
 import sys
@@ -36,8 +37,8 @@ from kernable.signing import (Key, challenge_message, command_message, rejection
 from kernable.v1 import kernable_pb2 as pb
 from kernable.v1 import kernable_pb2_grpc as rpc
 
-__all__ = ["Aggregate", "Event", "Kernable", "Key", "Listener", "NotSettled", "Outcome", "Rejected", "Tls", "Worker",
-           "aggregate"]
+__all__ = ["Aggregate", "CommandContext", "Event", "Kernable", "Key", "Listener", "ListenerContext", "NotSettled",
+           "Outcome", "Rejected", "RequestContext", "Tls", "Worker", "aggregate"]
 
 
 class Rejected(Exception):
@@ -46,6 +47,38 @@ class Rejected(Exception):
     def __init__(self, message: str, code: str = "rejected"):
         super().__init__(message)
         self.code = code
+
+
+@dataclass
+class RequestContext:
+    """Who sends a request and in which context: signed with the command and stored with every
+    event it causes. `attributes` are business data only, never security decisions."""
+
+    sender_tenant: str = ""
+    sender_identity: str = ""
+    sender_account: str = ""
+    sender_session: str = ""
+    #: Authorize as this identity of the target tenant; the sender stays the real principal.
+    on_behalf_of: str = ""
+    workspace: str = ""
+    #: Reject the command (`version_mismatch`) unless the aggregate is at this version.
+    expected_version: int | None = None
+    #: Shared by everything one original request causes; defaults to the command ID.
+    correlation_id: str = ""
+    #: The command that caused this one.
+    causation_id: str = ""
+    trace_id: str = ""
+    #: Privileged: only keys in the kernel's `[privileged]` table may set it.
+    bypass_authorization: bool = False
+    attributes: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class CommandContext:
+    """What a command handler gets besides state and data (as an optional third parameter)."""
+
+    command_id: str
+    request: RequestContext
 
 
 @dataclass
@@ -60,6 +93,24 @@ class Event:
     type: str
     data: Any
     command_id: str
+    #: The request context of the command that caused the event.
+    request: RequestContext = field(default_factory=RequestContext)
+
+
+@dataclass
+class ListenerContext:
+    """What a listener handler gets besides the event (as an optional second parameter)."""
+
+    #: The event was committed before the listener connected: it is being replayed.
+    replaying: bool
+    event: Event
+
+    def follow(self) -> RequestContext:
+        """A request context for commands caused by this event: same sender and correlation."""
+        r = self.event.request
+        return RequestContext(r.sender_tenant, r.sender_identity, r.sender_account, r.sender_session,
+                              r.on_behalf_of, r.workspace, None, r.correlation_id or self.event.command_id,
+                              self.event.command_id, r.trace_id, False, dict(r.attributes))
 
 
 @dataclass
@@ -149,9 +200,12 @@ def aggregate(name: str, initial: Any, snapshot_every: int = 100, schema: str = 
 
 
 class Kernable:
-    def __init__(self, url: str, key: str, tenant: str = "default", tls: Tls | None = None):
+    def __init__(self, url: str, key: str, tenant: str = "default", tls: Tls | None = None,
+                 context: RequestContext | None = None):
         """`url`: `unix:/path/to.sock` or `host:port`; `key`: path to this process's `.key` file;
-        `tls`: mutual TLS for `host:port`."""
+        `tls`: mutual TLS for `host:port`; `context`: default request context for submits,
+        e.g. this service's identity."""
+        self._context = context or RequestContext()
         if tls:
             def read(path: str) -> bytes:
                 with open(path, "rb") as f:
@@ -170,16 +224,18 @@ class Kernable:
         return Worker(self._channel, self._key, aggregates)
 
     def submit(self, aggregate_type: str, aggregate_id: str, type: str, data: Any = None, *,
-               tenant: str | None = None, id: str | None = None, wait: str = "settled") -> Outcome:
+               tenant: str | None = None, id: str | None = None, wait: str = "settled",
+               context: RequestContext | None = None) -> Outcome:
         """Runs a command and returns its outcome.
 
         `wait="settled"` (default) responds once every listener has processed the events, so
         read models already show them, and raises `NotSettled` on timeout. `wait="committed"`
         responds once the events are stored; use it inside reactors, which would otherwise
-        wait for themselves. `id` is an idempotency key.
+        wait for themselves. `id` is an idempotency key. `context` replaces the client's default
+        context; inside a listener, pass `ctx.follow()`.
         """
         mode = pb.WAIT_COMMITTED if wait == "committed" else pb.WAIT_SETTLED
-        res = self._send(aggregate_type, aggregate_id, type, data, tenant, id, mode)
+        res = self._send(aggregate_type, aggregate_id, type, data, tenant, id, mode, context)
         if res.WhichOneof("outcome") == "rejected":
             return Outcome(committed=False, code=res.rejected.code, message=res.rejected.message)
         outcome = Outcome(committed=True, events=[_to_event(e) for e in res.committed.events])
@@ -188,10 +244,10 @@ class Kernable:
         return outcome
 
     def enqueue(self, aggregate_type: str, aggregate_id: str, type: str, data: Any = None, *,
-                tenant: str | None = None, id: str | None = None) -> str:
+                tenant: str | None = None, id: str | None = None, context: RequestContext | None = None) -> str:
         """Stores the command in the kernel's queue and returns its ID without waiting.
         Submit it again with the same `id` to get the outcome."""
-        return self._send(aggregate_type, aggregate_id, type, data, tenant, id, pb.WAIT_ACCEPTED).command_id
+        return self._send(aggregate_type, aggregate_id, type, data, tenant, id, pb.WAIT_ACCEPTED, context).command_id
 
     def read_model(self, name: str, *, order: int = 0, start: int | None = 0, reconnect_s: float = 1.0) -> "Listener":
         """A read model: kept in memory and rebuilt from the first event on every start (default)."""
@@ -207,10 +263,13 @@ class Kernable:
     def close(self) -> None:
         self._channel.close()
 
-    def _send(self, aggregate_type, aggregate_id, command_type, data, tenant, id, wait):
-        cmd = pb.Command(command_id=id or str(uuid.uuid4()), tenant_id=tenant or self._tenant,
+    def _send(self, aggregate_type, aggregate_id, command_type, data, tenant, id, wait, context):
+        command_id = id or str(uuid.uuid4())
+        context = context or self._context
+        cmd = pb.Command(command_id=command_id, tenant_id=tenant or self._tenant,
                          aggregate_type=aggregate_type, aggregate_id=aggregate_id,
-                         command_type=command_type, payload=_encode(data))
+                         command_type=command_type, payload=_encode(data),
+                         context=_to_wire_context(context, command_id))
         cmd.client_sig.CopyFrom(self._key.sign(command_message(cmd)))
         return rpc.CommandServiceStub(self._channel).Submit(pb.SubmitRequest(command=cmd, wait=wait))
 
@@ -303,7 +362,8 @@ class Worker(_Stream):
                 raise Rejected(f"snapshot schema {x.snapshot.schema} is not {agg.schema}", "snapshot_stale")
             history = [(e.event_type, _decode(e.payload)) for e in x.history]
             state = agg.fold(history, _decode(x.snapshot.state) if x.HasField("snapshot") else _INITIAL)
-            produced = agg.handlers[cmd.command_type](state, _decode(cmd.payload))
+            ctx = CommandContext(cmd.command_id, _from_wire_context(cmd.context))
+            produced = _call(agg.handlers[cmd.command_type], state, _decode(cmd.payload), ctx)
             events = [pb.NewEvent(event_type=e["type"], payload=_encode(e.get("data"))) for e in produced]
             snapshot = self._snapshot(agg, cmd, x.expected_version, state, events)
         except Exception as err:
@@ -339,9 +399,11 @@ class Listener(_Stream):
         self._name = name
         self._order = order
         self._start = start
-        self._handlers: dict[str, Callable[[Event], None]] = {}
+        self._handlers: dict[str, Callable] = {}
         #: Global position of the last handled event (or skipped, for other event types).
         self.position = 0
+        # Newest event when the kernel accepted the listener; events up to it are replayed.
+        self._replay_up_to = 0
 
     def on(self, event_type: str, fn: Callable[[Event], None] | None = None):
         """Registers a handler; works as a decorator too."""
@@ -365,12 +427,14 @@ class Listener(_Stream):
             return pb.ListenerMessage(challenge_response=pb.ChallengeResponse(sig=sig))
         if kind == "ready":
             self.position = msg.ready.after_position
+            self._replay_up_to = msg.ready.head_position
             self.ready.set()
         elif kind == "batch":
             for e in msg.batch.events:
                 handler = self._handlers.get(e.event_type)
                 if handler:
-                    handler(_to_event(e))
+                    event = _to_event(e)
+                    _call(handler, event, ListenerContext(e.global_position <= self._replay_up_to, event))
                 self.position = e.global_position
             self.position = msg.batch.up_to
             return pb.ListenerMessage(ack=pb.Ack(position=msg.batch.up_to))
@@ -385,7 +449,35 @@ def _decode(payload: bytes) -> Any:
     return json.loads(payload) if payload else {}
 
 
+def _call(fn: Callable, *args):
+    """Calls `fn` with as many of `args` as it takes, so the context parameter is optional."""
+    params = inspect.signature(fn).parameters.values()
+    if any(p.kind == p.VAR_POSITIONAL for p in params):
+        return fn(*args)
+    positional = [p for p in params if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+    return fn(*args[:len(positional)])
+
+
+def _to_wire_context(c: RequestContext, command_id: str) -> pb.RequestContext:
+    wire = pb.RequestContext(
+        sender_tenant=c.sender_tenant, sender_identity=c.sender_identity, sender_account=c.sender_account,
+        sender_session=c.sender_session, on_behalf_of=c.on_behalf_of, workspace=c.workspace,
+        correlation_id=c.correlation_id or command_id, causation_id=c.causation_id, trace_id=c.trace_id,
+        bypass_authorization=c.bypass_authorization,
+        attributes=[pb.Attribute(key=k, value=v) for k, v in c.attributes.items()])
+    if c.expected_version is not None:
+        wire.expected_version = c.expected_version
+    return wire
+
+
+def _from_wire_context(c) -> RequestContext:
+    return RequestContext(
+        c.sender_tenant, c.sender_identity, c.sender_account, c.sender_session, c.on_behalf_of, c.workspace,
+        c.expected_version if c.HasField("expected_version") else None, c.correlation_id, c.causation_id,
+        c.trace_id, c.bypass_authorization, {a.key: a.value for a in c.attributes})
+
+
 def _to_event(e) -> Event:
     return Event(position=e.global_position, tenant=e.tenant_id, aggregate_type=e.aggregate_type,
                  aggregate_id=e.aggregate_id, version=e.version, type=e.event_type,
-                 data=_decode(e.payload), command_id=e.command_id)
+                 data=_decode(e.payload), command_id=e.command_id, request=_from_wire_context(e.context))

@@ -21,19 +21,65 @@
       "aggregate_type": "Order",
       "command_id": "c-1",
       "command_type": "PlaceOrder",
+      "context": {
+        "attributes": [
+          {
+            "key": "channel",
+            "value": "web"
+          },
+          {
+            "key": "locale",
+            "value": "de-AT"
+          }
+        ],
+        "bypass_authorization": true,
+        "causation_id": "c-0",
+        "correlation_id": "r-1",
+        "expected_version": 3,
+        "on_behalf_of": "i-2",
+        "sender_account": "a-1",
+        "sender_identity": "i-1",
+        "sender_session": "s-1",
+        "sender_tenant": "t-0",
+        "trace_id": "tr-1",
+        "workspace": "w-1"
+      },
       "payload_hex": "7b22637573746f6d65724964223a226b2d31227d",
       "tenant_id": "t-1"
     },
-    "message": "000000136b65726e61626c652e76312e636f6d6d616e6400000003632d3100000003742d31000000054f72646572000000036f2d310000000a506c6163654f72646572000000147b22637573746f6d65724964223a226b2d31227d",
-    "signature": "3da45b35234ba353306be62b299675ef0cfa00547b20a7b3b78b405ed0c5867615672db9f0ea97186c732e11cc3633e23db1cdc831fc239e8639c570186c5d07"
+    "message": "000000136b65726e61626c652e76312e636f6d6d616e6400000003632d3100000003742d31000000054f72646572000000036f2d310000000a506c6163654f72646572000000147b22637573746f6d65724964223a226b2d31227d00000003742d3000000003692d3100000003612d3100000003732d3100000003692d3200000003772d310000000000000001000000000000000300000003722d3100000003632d300000000474722d3100000000000000010000000000000002000000076368616e6e656c00000003776562000000066c6f63616c650000000564652d4154",
+    "signature": "fc662fbb8f30c723f5ece32cabf8b2ba0ea6ffe0cccfac5d0d1f039709ca67baa8b36ef58b59bf8b52d0b37734f2eaf32844d0bf95440e5840f72c47b1801d00"
   },
   "description": "Signing test vectors, see proto/SIGNING.md. Signatures are Ed25519 (deterministic) with `key.seed`.",
   "event_hash": {
-    "hash": "d084f69ba70dff924c049670bbf64d603ff4fcc42f5ac67dd1dbb21721c95a89",
+    "hash": "4cdfea6612d22070aa410defe1c07b5755548be35e2b47251648df5167d271d8",
     "input": {
       "aggregate_id": "o-1",
       "aggregate_type": "Order",
       "command_id": "c-1",
+      "context": {
+        "attributes": [
+          {
+            "key": "channel",
+            "value": "web"
+          },
+          {
+            "key": "locale",
+            "value": "de-AT"
+          }
+        ],
+        "bypass_authorization": true,
+        "causation_id": "c-0",
+        "correlation_id": "r-1",
+        "expected_version": 3,
+        "on_behalf_of": "i-2",
+        "sender_account": "a-1",
+        "sender_identity": "i-1",
+        "sender_session": "s-1",
+        "sender_tenant": "t-0",
+        "trace_id": "tr-1",
+        "workspace": "w-1"
+      },
       "created_at": 1700000000000,
       "event_type": "OrderPlaced",
       "global_position": 1,
@@ -65,6 +111,29 @@
         "aggregate_type": "Order",
         "command_id": "c-1",
         "command_type": "PlaceOrder",
+        "context": {
+          "attributes": [
+            {
+              "key": "channel",
+              "value": "web"
+            },
+            {
+              "key": "locale",
+              "value": "de-AT"
+            }
+          ],
+          "bypass_authorization": true,
+          "causation_id": "c-0",
+          "correlation_id": "r-1",
+          "expected_version": 3,
+          "on_behalf_of": "i-2",
+          "sender_account": "a-1",
+          "sender_identity": "i-1",
+          "sender_session": "s-1",
+          "sender_tenant": "t-0",
+          "trace_id": "tr-1",
+          "workspace": "w-1"
+        },
         "payload_hex": "7b22637573746f6d65724964223a226b2d31227d",
         "tenant_id": "t-1"
       },

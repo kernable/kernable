@@ -11,6 +11,21 @@ export interface WireSignature {
   sig: Buffer;
 }
 
+export interface WireRequestContext {
+  sender_tenant: string;
+  sender_identity: string;
+  sender_account: string;
+  sender_session: string;
+  on_behalf_of: string;
+  workspace: string;
+  expected_version?: number | null;
+  correlation_id: string;
+  causation_id: string;
+  trace_id: string;
+  bypass_authorization: boolean;
+  attributes: { key: string; value: string }[];
+}
+
 export interface WireCommand {
   command_id: string;
   tenant_id: string;
@@ -19,6 +34,7 @@ export interface WireCommand {
   command_type: string;
   payload: Buffer;
   client_sig?: WireSignature | null;
+  context?: WireRequestContext | null;
 }
 
 export interface WireEvent {
@@ -33,6 +49,7 @@ export interface WireEvent {
   created_at: number;
   hash: Buffer;
   producer_sig?: WireSignature | null;
+  context?: WireRequestContext | null;
 }
 
 export interface WireNewEvent {
@@ -92,7 +109,7 @@ export type SessionCall = grpc.ClientDuplexStream<WorkerMessage, KernelMessage>;
 /** One message from the kernel on a listener stream; exactly one field is set. */
 export interface ListenerDelivery {
   challenge?: { nonce: Buffer } | null;
-  ready?: { after_position: number } | null;
+  ready?: { after_position: number; head_position: number } | null;
   batch?: { events: WireEvent[]; up_to: number } | null;
 }
 

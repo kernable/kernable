@@ -9,7 +9,7 @@ import threading
 import time
 import unittest
 
-from kernable import Kernable, NotSettled, Rejected, aggregate
+from kernable import Kernable, NotSettled, Rejected, RequestContext, aggregate
 from kernable.signing import (Key, challenge_message, command_message, rejection_message, result_message,
                               snapshot_message)
 from kernable.v1 import kernable_pb2 as pb
@@ -21,7 +21,12 @@ with open(os.path.join(ROOT, "proto", "test-vectors", "signing.json")) as f:
 
 def vector_command(c) -> pb.Command:
     fields = ("command_id", "tenant_id", "aggregate_type", "aggregate_id", "command_type")
-    return pb.Command(**{k: c[k] for k in fields}, payload=bytes.fromhex(c["payload_hex"]))
+    cmd = pb.Command(**{k: c[k] for k in fields}, payload=bytes.fromhex(c["payload_hex"]))
+    if "context" in c:
+        context = dict(c["context"])
+        attributes = [pb.Attribute(**a) for a in context.pop("attributes")]
+        cmd.context.CopyFrom(pb.RequestContext(**context, attributes=attributes))
+    return cmd
 
 
 class SigningVectors(unittest.TestCase):
@@ -166,6 +171,50 @@ class EndToEnd(unittest.TestCase):
         self.run_stream(self.k.worker(v2))
         self.assertFalse(self.increment(11).committed)  # 10 + 11 > 20: rebuilt from the events
         self.assertTrue(self.increment(10).committed)
+
+    def test_request_context_reaches_handlers_events_and_follow_up_commands(self):
+        seen = []
+        ticket = aggregate("Ticket", {"open": False})
+        ticket.apply("Opened", lambda s, e: {"open": True})
+
+        @ticket.command("Open")
+        def _(state, data, ctx):
+            seen.append(ctx.request)
+            return [{"type": "Opened"}]
+
+        @ticket.command("Note")
+        def _(state, data, ctx):
+            seen.append(ctx.request)
+            return [{"type": "Noted"}]
+
+        self.k.close()  # this test needs other command types: start a kernel of its own
+        self.kernel.dispose()
+        self.kernel = TestKernel(["Open", "Note"])
+        self.kernel.start()
+        service = RequestContext(sender_identity="svc-1", attributes={"channel": "api"})
+        self.k = Kernable(self.kernel.url, self.kernel.app_key, context=service)
+        self.run_stream(self.k.worker(ticket))
+        reactor = self.k.reactor("notes")
+
+        @reactor.on("Opened")
+        def _(e, ctx):
+            self.k.submit("Ticket", e.aggregate_id, "Note", id=f"note-{e.aggregate_id}", context=ctx.follow(),
+                          wait="committed")
+
+        self.run_stream(reactor)
+        opened = self.k.submit("Ticket", "t1", "Open", id="open-t1",
+                               context=RequestContext(sender_identity="svc-1", sender_session="s-9"))
+        request = RequestContext(sender_identity="svc-1", sender_session="s-9", correlation_id="open-t1")
+        self.assertEqual(opened.events[0].request, request)
+        follow_up = RequestContext(sender_identity="svc-1", sender_session="s-9", correlation_id="open-t1",
+                                   causation_id="open-t1")
+        self.assertEqual(seen, [request, follow_up])
+
+        stale = self.k.submit("Ticket", "t1", "Note", context=RequestContext(expected_version=1))
+        self.assertEqual((stale.committed, stale.code), (False, "version_mismatch"))
+        time.sleep(0.15)
+        self.assertEqual(self.kernel.verify().returncode, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
