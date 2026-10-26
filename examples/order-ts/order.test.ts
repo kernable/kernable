@@ -1,60 +1,27 @@
 // End to end against the real kernel binary (`cargo build` first): TS signs, Rust verifies.
 
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { after, before, test } from "node:test";
 
-import { Kernable, Key, type Worker } from "../../sdks/typescript/src/index.ts";
+import { Kernable, type Worker } from "../../sdks/typescript/src/index.ts";
+import { TestKernel } from "../../sdks/typescript/test/kernel.ts";
 import { order } from "./order.ts";
 
-const BIN = new URL("../../target/debug/", import.meta.url).pathname;
-const dir = mkdtempSync("/tmp/kn-"); // short: Unix socket paths are limited to ~104 bytes
-const url = `unix:${join(dir, "k.sock")}`;
-
-function newKey(name: string): Key {
-  const seed = randomBytes(32).toString("hex");
-  writeFileSync(join(dir, `${name}.key`), seed);
-  const key = Key.fromHex(seed);
-  writeFileSync(join(dir, `${name}.pub`), key.id);
-  return key;
-}
-
-const kernelKey = newKey("kernel");
-const app = newKey("app"); // submits commands and runs the worker
-writeFileSync(
-  join(dir, "kernable.toml"),
-  `db = "k.db"
-listen = "${url}"
-kernel_key = "kernel.key"
-checkpoint_interval_ms = 50
-
-[clients]
-"${app.id}" = ["*"]
-
-[workers]
-"${app.id}" = ["PlaceOrder", "AddItem", "CancelOrder", "ShipOrder"]
-`,
-);
-
-const kernel = spawn(join(BIN, "kernable-kernel"), [join(dir, "kernable.toml")], { stdio: "inherit" });
-const kernable = new Kernable({ url, key: join(dir, "app.key"), tenant: "t1" });
+const kernel = new TestKernel(["PlaceOrder", "AddItem", "CancelOrder", "ShipOrder"]);
+const kernable = new Kernable({ url: kernel.url, key: kernel.appKey, tenant: "t1" });
 let worker: Worker;
 
 before(async () => {
-  for (let i = 0; i < 100 && !existsSync(join(dir, "k.sock")); i++) await new Promise((r) => setTimeout(r, 20));
+  await kernel.start();
   worker = kernable.worker(order);
   void worker.run();
   await worker.ready;
 });
 
-after(() => {
+after(async () => {
   worker.stop();
   kernable.close();
-  kernel.kill();
-  rmSync(dir, { recursive: true, force: true });
+  await kernel.dispose();
 });
 
 const submit = (aggregateId: string, type: string, data?: unknown) =>
@@ -91,7 +58,5 @@ test("resubmitting a command returns the original outcome", async () => {
 
 test("the Rust verifier accepts the log written via the TS SDK", async () => {
   await new Promise((r) => setTimeout(r, 120)); // let the kernel write a checkpoint
-  const out = execFileSync(join(BIN, "kernable"), ["verify", join(dir, "k.db"), join(dir, "kernel.pub")], { encoding: "utf8" });
-  assert.match(out, /OK$/m);
-  assert.ok(kernelKey.id);
+  assert.match(kernel.verify(), /OK$/m);
 });

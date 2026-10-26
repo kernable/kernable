@@ -1,6 +1,7 @@
-use std::{path::Path, process::ExitCode};
+use std::{path::Path, process::ExitCode, sync::Arc};
 
 use kernable_kernel::{BoxError, Config, Kernel, serve};
+use tokio::signal::unix::{SignalKind, signal};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -24,5 +25,20 @@ async fn run(path: &Path) -> Result<(), BoxError> {
         env!("CARGO_PKG_VERSION"),
         config.listen
     );
-    serve(Kernel::open(config)?).await
+    let kernel = Kernel::open(config)?;
+    tokio::select! {
+        result = serve(Arc::clone(&kernel)) => result?,
+        signal = shutdown_signal() => {
+            eprintln!("received {}, shutting down", signal?);
+        }
+    }
+    kernel.shutdown()
+}
+
+async fn shutdown_signal() -> std::io::Result<&'static str> {
+    let mut term = signal(SignalKind::terminate())?;
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => Ok("SIGINT"),
+        _ = term.recv() => Ok("SIGTERM"),
+    }
 }

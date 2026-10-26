@@ -366,6 +366,26 @@ impl SqliteStore {
         Ok(stored)
     }
 
+    /// Hands a leased command back to the queue before its lease expires.
+    /// Returns false if the lease was not held anymore.
+    pub fn release(&self, lease_id: &str) -> Result<bool> {
+        let changed = self.conn().execute(
+            "UPDATE commands SET status = 'pending', lease_id = NULL, lease_expires_at = NULL
+             WHERE lease_id = ?1 AND status = 'leased'",
+            [lease_id],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Hands every leased command back to the queue, e.g. on shutdown.
+    pub fn release_all(&self) -> Result<usize> {
+        Ok(self.conn().execute(
+            "UPDATE commands SET status = 'pending', lease_id = NULL, lease_expires_at = NULL
+             WHERE status = 'leased'",
+            [],
+        )?)
+    }
+
     /// Completes the leased command as rejected by the business logic.
     pub fn reject(&self, lease_id: &str, reason: Rejected) -> Result<()> {
         let mut conn = self.conn();

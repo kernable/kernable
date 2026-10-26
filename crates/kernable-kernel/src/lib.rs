@@ -72,6 +72,14 @@ impl Kernel {
         self.waiters.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Writes a final checkpoint and hands all leased commands back to the queue,
+    /// so they are redelivered right after a restart instead of after their lease expires.
+    pub fn shutdown(&self) -> Result<(), BoxError> {
+        self.store.checkpoint(&self.key, now_ms())?;
+        self.store.release_all()?;
+        Ok(())
+    }
+
     fn complete(&self, result: CommandResult) {
         for waiter in self
             .waiters()
@@ -226,6 +234,27 @@ struct Session {
     in_flight: Mutex<HashMap<String, InFlight>>,
 }
 
+/// Hands the session's in-flight commands back to the queue when it ends, however it ends,
+/// so another worker gets them without waiting for the leases to expire.
+struct ReleaseOnDrop(Arc<Session>);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        let leases: Vec<String> = self
+            .0
+            .in_flight()
+            .drain()
+            .map(|(lease_id, _)| lease_id)
+            .collect();
+        for lease_id in leases {
+            if let Err(e) = self.0.kernel.store.release(&lease_id) {
+                eprintln!("release failed: {e}");
+            }
+        }
+        self.0.kernel.work.notify_waiters();
+    }
+}
+
 /// Aborts the session's dispatch loop when the session ends, however it ends.
 struct AbortOnDrop(JoinHandle<()>);
 
@@ -298,13 +327,14 @@ async fn run_session(
         in_flight: Mutex::default(),
     });
     let permits = Arc::new(Semaphore::new(reg.max_concurrency.max(1) as usize));
+    // Declared first, dropped last: stop dispatching, then release what is in flight.
+    let _release = ReleaseOnDrop(Arc::clone(&session));
     let _dispatch = AbortOnDrop(tokio::spawn(dispatch(
         Arc::clone(&session),
         reg.command_types,
         permits,
     )));
 
-    // Leases still in flight when the session ends expire and are redelivered.
     loop {
         match next(inbound).await? {
             None => return Ok(()),
@@ -399,6 +429,8 @@ impl Session {
         let sig = r.worker_sig.unwrap_or_default();
         let msg = signing::result_message(&f.command, f.expected_version, &r.events);
         if sig.key_id != self.key_id || signing::verify(&sig, &msg).is_err() {
+            // Put it back, so it is released when the session ends.
+            self.in_flight().insert(r.lease_id, f);
             return Err(Status::unauthenticated("invalid result signature"));
         }
 
@@ -436,6 +468,7 @@ impl Session {
         let sig = r.worker_sig.unwrap_or_default();
         let msg = signing::rejection_message(&f.command.command_id, &reason);
         if sig.key_id != self.key_id || signing::verify(&sig, &msg).is_err() {
+            self.in_flight().insert(r.lease_id, f);
             return Err(Status::unauthenticated("invalid rejection signature"));
         }
         self.reject(&r.lease_id, f.command.command_id, reason);
