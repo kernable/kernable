@@ -61,7 +61,9 @@ impl Config {
         let mut config: Config = toml::from_str(&fs::read_to_string(path)?)?;
         let dir = path.parent().unwrap_or(Path::new("."));
         let (backend, store) = kernable_store::backend(&config.store);
-        config.store = format!("{backend}:{}", dir.join(store).display());
+        if backend != "memory" {
+            config.store = format!("{backend}:{}", dir.join(store).display());
+        }
         config.kernel_key = dir.join(&config.kernel_key);
         Ok(config)
     }

@@ -3,6 +3,7 @@
 //! Backends, selected by URL:
 //! - `sqlite:<path>` (or a bare path): SQLite in WAL mode; several processes may open it.
 //! - `file:<path>`: one append-only log file, state rebuilt in memory on open; one writer.
+//! - `memory:`: the file backend's logic without a file; nothing survives the process.
 //!
 //! Every backend gives the same guarantees: commands are persisted before they run, at most
 //! one command per aggregate is leased at a time and in submission order, a commit appends all
@@ -160,9 +161,11 @@ pub trait Store: Send + Sync {
     fn verify(&self, kernel_key_id: &str) -> Result<Report>;
 }
 
-/// Opens a store for reading and writing: `sqlite:<path>`, `file:<path>` or a bare SQLite path.
+/// Opens a store for reading and writing: `sqlite:<path>`, `file:<path>`, `memory:` or a bare
+/// SQLite path.
 pub fn open(url: &str) -> Result<Box<dyn Store>> {
     Ok(match backend(url) {
+        ("memory", _) => Box::new(FileStore::in_memory()),
         ("file", path) => Box::new(FileStore::open(path)?),
         (_, path) => Box::new(SqliteStore::open(path)?),
     })
@@ -179,7 +182,7 @@ pub fn open_read_only(url: &str) -> Result<Box<dyn Store>> {
 /// Splits a store URL into backend and path; a bare path means SQLite.
 pub fn backend(url: &str) -> (&str, &str) {
     match url.split_once(':') {
-        Some((scheme @ ("sqlite" | "file"), path)) => (scheme, path),
+        Some((scheme @ ("sqlite" | "file" | "memory"), path)) => (scheme, path),
         _ => ("sqlite", url),
     }
 }

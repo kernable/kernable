@@ -1,4 +1,4 @@
-//! Append-only file backend (`file:<path>`).
+//! Append-only file backend (`file:<path>`), and the same logic without a file (`memory:`).
 //!
 //! The whole store is one log of records (`proto/kernable/v1/storage.proto`): enqueued
 //! commands, commits (all events of one command in a single record, hence atomic),
@@ -10,6 +10,9 @@
 //! One process writes (exclusive file lock); others may open the log read-only.
 //! Writes reach the OS before a call returns but are not fsynced, which survives a process
 //! crash but not a power loss (like SQLite with `synchronous=NORMAL`).
+//!
+//! `memory:` keeps the state only in memory: nothing survives the process. For tests and
+//! benchmarks.
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -162,10 +165,16 @@ impl State {
     }
 }
 
+/// Where records go besides the in-memory state.
+enum Sink {
+    File(File),
+    Memory,
+    ReadOnly,
+}
+
 struct Inner {
     state: State,
-    /// `None` when opened read-only.
-    file: Option<File>,
+    sink: Sink,
     /// Length of the log; a failed write is cut back to it.
     len: u64,
 }
@@ -197,21 +206,26 @@ impl FileStore {
                 aside.display()
             );
         }
-        Ok(Self::new(state, Some(file), valid as u64))
+        Ok(Self::new(state, Sink::File(file), valid as u64))
     }
 
     /// Replays the log without locking or repairing it; all writes fail with `ReadOnly`.
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
         let bytes = fs::read(path)?;
         let (state, valid) = replay(&bytes)?;
-        Ok(Self::new(state, None, valid as u64))
+        Ok(Self::new(state, Sink::ReadOnly, valid as u64))
     }
 
-    fn new(state: State, file: Option<File>, len: u64) -> Self {
+    /// A store that lives only in this process.
+    pub fn in_memory() -> Self {
+        Self::new(State::default(), Sink::Memory, 0)
+    }
+
+    fn new(state: State, sink: Sink, len: u64) -> Self {
         let mut nonce = [0u8; 4];
         getrandom::fill(&mut nonce).expect("OS randomness unavailable");
         FileStore {
-            inner: Mutex::new(Inner { state, file, len }),
+            inner: Mutex::new(Inner { state, sink, len }),
             lease_nonce: nonce.iter().map(|b| format!("{b:02x}")).collect(),
         }
     }
@@ -223,7 +237,11 @@ impl FileStore {
 
 /// Writes one record, then applies it to the in-memory state.
 fn append(inner: &mut Inner, record: Record) -> Result<()> {
-    let file = inner.file.as_mut().ok_or(Error::ReadOnly)?;
+    let file = match &mut inner.sink {
+        Sink::File(file) => file,
+        Sink::Memory => return inner.state.apply(record),
+        Sink::ReadOnly => return Err(Error::ReadOnly),
+    };
     let body = LogRecord {
         record: Some(record),
     }

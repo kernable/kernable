@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs the PoC benchmark matrix (POC_PLAN.md §9) on this machine and prints one line per run.
-# Release builds, 1 KB payloads, warm connections. STORE=file:k.log benchmarks the file backend
+# Release builds, 1 KB payloads, warm connections. STORE=file:k.log or STORE=memory: picks the backend
 # (default: sqlite:k.db, WAL with synchronous=NORMAL).
 set -euo pipefail
 
@@ -68,7 +68,11 @@ scenario() { # <label> <kind> <workers> <addr> <load args...>
 echo "== $(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -m), $(date -u +%F), store=$STORE"
 "$BIN/kernable-bench" crypto
 printf '%-28s ' "baseline in-process"
-case "$STORE" in file:*) BASELINE="file:$DIR/baseline.log" ;; *) BASELINE="sqlite:$DIR/baseline.db" ;; esac
+case "$STORE" in
+  file:*) BASELINE="file:$DIR/baseline.log" ;;
+  memory:*) BASELINE="memory:" ;;
+  *) BASELINE="sqlite:$DIR/baseline.db" ;;
+esac
 "$BIN/kernable-bench" store "$BASELINE" 5000
 
 # Latency without load: one client, back to back (no timer artifacts).

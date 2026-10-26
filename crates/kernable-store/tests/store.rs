@@ -297,6 +297,12 @@ macro_rules! for_each_backend {
                 super::$name(&super::SqliteStore::open_in_memory().unwrap());
             })*
         }
+        mod memory {
+            $(#[test]
+            fn $name() {
+                super::$name(&super::FileStore::in_memory());
+            })*
+        }
         mod file {
             $(#[test]
             fn $name() {
