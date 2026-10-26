@@ -1,0 +1,15 @@
+[package]
+name = "kernable-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ed25519-dalek.workspace = true
+getrandom.workspace = true
+kernable-core = { path = "../kernable-core" }
+kernable-store-sqlite = { path = "../kernable-store-sqlite" }
+tokio.workspace = true
+tokio-stream.workspace = true
+tonic.workspace = true
