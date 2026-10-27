@@ -35,7 +35,7 @@ use kernable_core::{
         Accepted, Challenge, Command, CommandResult, Committed, Event, Execute, KernelMessage,
         ListenerDelivery, ListenerMessage, NewEvent, QueryRequest, QueryResult, Register,
         Registered, Rejected, Signature, Snapshot, SnapshotRecord, SubmitRequest, SubscribeRequest,
-        Wait, WorkerMessage,
+        VaultValue, Wait, WorkerMessage,
         command_result::Outcome,
         command_service_server::{CommandService, CommandServiceServer},
         event_service_server::{EventService, EventServiceServer},
@@ -48,7 +48,11 @@ use kernable_core::{
     },
     signing, transport,
 };
-use kernable_store::{Enqueued, Error as StoreError, Store};
+use kernable_store::{
+    Enqueued, Error as StoreError, Store, StreamId,
+    snapshots::SnapshotStore,
+    vault::{self, Owner, Vault},
+};
 use tokio::{
     net::{TcpListener, UnixListener},
     sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot},
@@ -118,6 +122,10 @@ pub struct Kernel {
     metrics: metrics::Metrics,
     /// The highest payload version stored per qualified event type; never goes down.
     schemas: Mutex<HashMap<String, u32>>,
+    /// The latest snapshot per aggregate, apart from the log.
+    snapshots: Box<dyn SnapshotStore>,
+    /// Personal and secret values; `None` without `[vault]`.
+    vault: Option<Vault>,
     /// Set on shutdown: new submits and queries are refused while running ones finish.
     draining: AtomicBool,
     /// Submits and queries being handled, and a wake-up when one ends.
@@ -131,6 +139,24 @@ impl Kernel {
         let key = signing::read_signing_key(&config.kernel_key)?;
         let listeners = listeners::Registry::load(store.listeners()?);
         let schemas = store.event_schemas()?.into_iter().collect();
+        let snapshots = kernable_store::snapshots::open(&config.snapshots)?;
+        let vault = match &config.vault {
+            Some(v) => {
+                let key: [u8; 32] = hex::decode(std::fs::read_to_string(&v.key)?.trim())
+                    .ok()
+                    .and_then(|k: Vec<u8>| k.try_into().ok())
+                    .ok_or("the vault key must be 32 bytes, hex encoded")?;
+                let vault = Vault::open(&v.store, &key)?;
+                // Secrets of commands that completed while the kernel was down.
+                for command_id in vault.secret_commands()? {
+                    if store.result(&command_id)?.is_some() {
+                        vault.drop_secrets(&command_id)?;
+                    }
+                }
+                Some(vault)
+            }
+            None => None,
+        };
         let queue = queue::Queue::default();
         for pending in store.pending()? {
             queue.push(pending.command, pending.received_at);
@@ -146,10 +172,110 @@ impl Kernel {
             queue,
             metrics: metrics::Metrics::default(),
             schemas: Mutex::new(schemas),
+            snapshots,
+            vault,
             draining: Default::default(),
             requests: Default::default(),
             idle: Notify::new(),
         }))
+    }
+
+    /// The vault, or a refusal for requests that need one.
+    fn vault(&self) -> Result<&Vault, Status> {
+        self.vault.as_ref().ok_or_else(|| {
+            Status::failed_precondition("this kernel has no vault ([vault] in kernable.toml)")
+        })
+    }
+
+    /// The values of `refs` that the vault still holds (erased ones are missing).
+    fn values_of(&self, refs: &[String]) -> Vec<VaultValue> {
+        let Some(vault) = &self.vault else {
+            return Vec::new();
+        };
+        vault.get(refs).unwrap_or_else(|e| {
+            tracing::error!(error = %e, "reading the vault failed");
+            Vec::new()
+        })
+    }
+
+    /// Whether the listener or middleware key `key_id` gets the vault values of `name`.
+    fn reads_vault(&self, key_id: &str, name: &str) -> bool {
+        self.config
+            .vault
+            .as_ref()
+            .is_some_and(|v| config::allowed(&v.readers, key_id, name))
+    }
+
+    /// Keeps a result's vault values and carries out its erasures, before the events are
+    /// committed: an erasure is repeated if the command runs again. Returns whether it erased.
+    fn vault_result(
+        &self,
+        worker_key: &str,
+        cmd: &Command,
+        events: &[NewEvent],
+        values: &[VaultValue],
+    ) -> Result<bool, Rejected> {
+        let refused = |code: &str, message: String| Rejected {
+            code: code.into(),
+            message,
+        };
+        let refs: Vec<String> = events.iter().flat_map(|e| e.vault_refs.clone()).collect();
+        let erasing: Vec<&NewEvent> = events.iter().filter(|e| !e.erases.is_empty()).collect();
+        if refs.is_empty() && erasing.is_empty() && values.is_empty() {
+            return Ok(false);
+        }
+        let Some(vault) = &self.vault else {
+            return Err(refused("no_vault", "this kernel has no vault".into()));
+        };
+        for e in &erasing {
+            let name = config::qualified(&cmd.domain, &e.event_type);
+            let allowed = self
+                .config
+                .vault
+                .as_ref()
+                .is_some_and(|v| config::allowed(&v.erasers, worker_key, &name));
+            if !allowed {
+                return Err(refused(
+                    "erase_not_allowed",
+                    format!("worker key may not erase with {name}"),
+                ));
+            }
+        }
+        let stream = StreamId {
+            tenant_id: cmd.tenant_id.clone(),
+            domain: cmd.domain.clone(),
+            aggregate_type: cmd.aggregate_type.clone(),
+            aggregate_id: cmd.aggregate_id.clone(),
+        };
+        let owner = Owner {
+            command_id: &cmd.command_id,
+            stream: Some(&stream),
+        };
+        vault
+            .put(values, &refs, &owner, now_ms())
+            .map_err(|e| refused("invalid_vault_values", e.to_string()))?;
+        for e in &erasing {
+            let streams = vault
+                .erase(&e.erases, &cmd.command_id, now_ms())
+                .map_err(|e| refused("vault_error", e.to_string()))?;
+            // Snapshots of every stream that used the subject's values may hold them too.
+            for s in streams.iter().chain([&stream]) {
+                if let Err(e) = self.snapshots.remove(s) {
+                    tracing::error!(error = %e, "dropping a snapshot failed");
+                }
+            }
+            tracing::info!(command = %cmd.command_id, "erased a subject's vault values");
+        }
+        Ok(!erasing.is_empty())
+    }
+
+    /// Deletes a completed command's secrets.
+    fn drop_secrets(&self, command_id: &str) {
+        if let Some(vault) = &self.vault
+            && let Err(e) = vault.drop_secrets(command_id)
+        {
+            tracing::error!(error = %e, "deleting secrets failed");
+        }
     }
 
     /// Whether the kernel serves everything: not shutting down, and every registered listener
@@ -227,13 +353,14 @@ impl Kernel {
         name: &str,
         id: &str,
         request: middleware_call::Request,
+        values: &[VaultValue],
     ) -> Result<Option<Rejected>, Status> {
         let chain = self.listeners.chain(name);
         if chain.is_empty() {
             return Ok(None);
         }
         let started = Instant::now();
-        let outcome = self.run_chain(&chain, id, request).await;
+        let outcome = self.run_chain(&chain, name, id, request, values).await;
         let counter = match &outcome {
             Ok(None) => &self.metrics.middleware_passed,
             Ok(Some(_)) => &self.metrics.middleware_rejected,
@@ -247,16 +374,25 @@ impl Kernel {
     async fn run_chain(
         &self,
         chain: &[String],
+        name: &str,
         id: &str,
         request: middleware_call::Request,
+        values: &[VaultValue],
     ) -> Result<Option<Rejected>, Status> {
         let timeout = Duration::from_millis(self.config.middleware_timeout_ms);
         for middleware in chain {
+            let key = self.listeners.key(middleware).unwrap_or_default();
+            let readable = if self.reads_vault(&key, name) {
+                values.to_vec()
+            } else {
+                Vec::new()
+            };
             let checked = tokio::time::timeout(timeout, async {
                 // Wait until the middleware has caught up with what it missed while away.
                 let dispatched = loop {
                     let progressed = self.listeners.progress.notified();
-                    if let Some(d) = self.listeners.check(middleware, id, request.clone())? {
+                    let call = (request.clone(), readable.clone());
+                    if let Some(d) = self.listeners.check(middleware, id, call)? {
                         break d;
                     }
                     progressed.await;
@@ -416,6 +552,7 @@ impl CommandService for Api {
         let _running = kernel.request()?;
         let wait = request.wait();
         let listener = request.listener;
+        let values = request.vault;
         let cmd = request
             .command
             .ok_or_else(|| Status::invalid_argument("no command"))?;
@@ -449,12 +586,32 @@ impl CommandService for Api {
             ));
         }
         let caller = kernel.caller(&listener, &name)?;
+        if !cmd.vault_refs.is_empty() || !values.is_empty() {
+            kernel.vault()?;
+            vault::check(&values, &cmd.vault_refs)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        }
         let request = middleware_call::Request::Command(cmd.clone());
-        if let Some(reason) = kernel.check(&name, &cmd.command_id, request).await? {
+        if let Some(reason) = kernel
+            .check(&name, &cmd.command_id, request, &values)
+            .await?
+        {
             return Ok(Response::new(CommandResult {
                 command_id: cmd.command_id,
                 outcome: Some(Outcome::Rejected(reason)),
             }));
+        }
+
+        if let Some(vault) = &kernel.vault
+            && !cmd.vault_refs.is_empty()
+        {
+            let owner = Owner {
+                command_id: &cmd.command_id,
+                stream: None,
+            };
+            vault
+                .put(&values, &cmd.vault_refs, &owner, now_ms())
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
         }
 
         // Register before enqueueing, so a fast completion cannot be missed.
@@ -470,6 +627,7 @@ impl CommandService for Api {
                 result: Some(result),
             } => {
                 kernel.waiters().remove(&cmd.command_id);
+                kernel.drop_secrets(&cmd.command_id); // a resubmission brought them again
                 Some(result)
             }
             Enqueued::Duplicate { result: None } => None,
@@ -625,7 +783,7 @@ impl QueryService for Api {
         }
         let caller = kernel.caller(&query.listener, &name)?;
         let request = middleware_call::Request::Query(query.clone());
-        if let Some(reason) = kernel.check(&name, &query.query_id, request).await? {
+        if let Some(reason) = kernel.check(&name, &query.query_id, request, &[]).await? {
             kernel.metrics.queries_rejected.fetch_add(1, Relaxed);
             return Ok(Response::new(QueryResult {
                 query_id: query.query_id,
@@ -981,14 +1139,18 @@ impl Session {
             &command.aggregate_id,
         );
         let store = &self.kernel.store;
-        let loaded = store
-            .snapshot(tenant, domain, aggregate_type, id)
-            .and_then(|record| {
-                let snapshot = record.and_then(|r| r.snapshot);
-                let after = snapshot.as_ref().map_or(0, |s| s.version);
-                let history = store.read_stream_after(tenant, domain, aggregate_type, id, after)?;
-                Ok((snapshot, history))
-            });
+        let stream = StreamId {
+            tenant_id: tenant.clone(),
+            domain: domain.clone(),
+            aggregate_type: aggregate_type.clone(),
+            aggregate_id: id.clone(),
+        };
+        let loaded = self.kernel.snapshots.get(&stream).and_then(|record| {
+            let snapshot = record.and_then(|r| r.snapshot);
+            let after = snapshot.as_ref().map_or(0, |s| s.version);
+            let history = store.read_stream_after(tenant, domain, aggregate_type, id, after)?;
+            Ok((snapshot, history))
+        });
         let (snapshot, history) = match loaded {
             Ok(loaded) => loaded,
             Err(e) => {
@@ -1028,7 +1190,15 @@ impl Session {
                 permit,
             },
         );
+        let refs: Vec<String> = command
+            .vault_refs
+            .iter()
+            .chain(history.iter().flat_map(|e| &e.vault_refs))
+            .cloned()
+            .collect();
+        let vault = self.kernel.values_of(&refs);
         let execute = Execute {
+            vault,
             lease_id,
             command: Some(command),
             history,
@@ -1090,6 +1260,17 @@ impl Session {
             return Ok(());
         }
 
+        let erased = match self
+            .kernel
+            .vault_result(&self.key_id, &f.command, &r.events, &r.vault)
+        {
+            Ok(erased) => erased,
+            Err(reason) => {
+                self.reject(&r.lease_id, f.command.command_id, reason);
+                return Ok(());
+            }
+        };
+
         let committed = {
             // Held through the commit, so an outdated worker cannot write next to a newer one.
             let mut stored = self.kernel.schemas();
@@ -1125,7 +1306,10 @@ impl Session {
         match committed {
             Ok(events) => {
                 crash::point("commit.stored");
-                if let (Some(snapshot), Some(last)) = (r.snapshot, events.last()) {
+                self.kernel.drop_secrets(&f.command.command_id);
+                // After an erasure the worker's state may still hold erased values: no snapshot.
+                let snapshot = r.snapshot.filter(|_| !erased);
+                if let (Some(snapshot), Some(last)) = (snapshot, events.last()) {
                     let record = SnapshotRecord {
                         tenant_id: last.tenant_id.clone(),
                         domain: last.domain.clone(),
@@ -1136,7 +1320,7 @@ impl Session {
                         removed: false,
                     };
                     // A snapshot is only a cache: losing one costs time, not data.
-                    match self.kernel.store.save_snapshot(&record) {
+                    match self.kernel.snapshots.save(&record) {
                         Ok(()) => crash::point("snapshot.stored"),
                         Err(e) => tracing::warn!(error = %e, "saving snapshot failed"),
                     }
@@ -1193,15 +1377,13 @@ impl Session {
         if reason.code == SNAPSHOT_STALE && f.with_snapshot {
             // The worker cannot read the snapshot: drop it and send all events instead.
             let c = &f.command;
-            let removed = SnapshotRecord {
+            let stream = StreamId {
                 tenant_id: c.tenant_id.clone(),
                 domain: c.domain.clone(),
                 aggregate_type: c.aggregate_type.clone(),
                 aggregate_id: c.aggregate_id.clone(),
-                removed: true,
-                ..Default::default()
             };
-            if let Err(e) = self.kernel.store.save_snapshot(&removed) {
+            if let Err(e) = self.kernel.snapshots.remove(&stream) {
                 tracing::error!(error = %e, "removing snapshot failed");
                 self.release(&r.lease_id);
                 return Ok(());
@@ -1238,6 +1420,7 @@ impl Session {
         match self.kernel.store.reject(&command_id, reason.clone()) {
             Ok(()) => {
                 crash::point("reject.stored");
+                self.kernel.drop_secrets(&command_id);
                 self.kernel.queue.done(lease_id);
                 self.kernel.metrics.rejected.fetch_add(1, Relaxed);
                 self.kernel.complete(CommandResult {

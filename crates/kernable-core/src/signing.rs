@@ -84,6 +84,30 @@ impl Msg {
         }
         m
     }
+
+    /// Vault references, appended only when there are any, so that signatures and hashes
+    /// from before the vault stay valid.
+    fn refs(self, refs: &[String]) -> Self {
+        if refs.is_empty() {
+            return self;
+        }
+        let mut m = self.u64(refs.len() as u64);
+        for r in refs {
+            m = m.str(r);
+        }
+        m
+    }
+}
+
+/// The reference of a value kept in the vault: it commits to the value, its subject and kind,
+/// and a random salt, so it reveals nothing about an erased value.
+pub fn vault_ref(salt: &[u8], subject: &str, secret: bool, value: &[u8]) -> String {
+    let msg = Msg::new("kernable.v1.vault")
+        .bytes(salt)
+        .str(subject)
+        .u64(secret as u64)
+        .bytes(value);
+    hex::encode(Sha256::digest(msg.0))
 }
 
 /// What a client signs when submitting a command.
@@ -97,6 +121,7 @@ pub fn command_message(cmd: &Command) -> Vec<u8> {
         .str(&cmd.command_type)
         .bytes(&cmd.payload)
         .context(cmd.context.as_ref())
+        .refs(&cmd.vault_refs)
         .0
 }
 
@@ -126,6 +151,19 @@ pub fn result_message(cmd: &Command, expected_version: u64, events: &[NewEvent])
         .u64(events.len() as u64);
     for e in events {
         m = m.str(&e.event_type).u64(e.schema.into()).bytes(&e.payload);
+    }
+    // Vault fields, appended only when an event has any (see `Msg::refs`).
+    if events
+        .iter()
+        .any(|e| !e.vault_refs.is_empty() || !e.erases.is_empty())
+    {
+        for e in events {
+            m = m.u64(e.vault_refs.len() as u64);
+            for r in &e.vault_refs {
+                m = m.str(r);
+            }
+            m = m.str(&e.erases);
+        }
     }
     m.0
 }
@@ -217,6 +255,16 @@ pub fn event_hash(prev: &[u8], event: &Event) -> [u8; 32] {
         .str(&sig.key_id)
         .bytes(&sig.sig)
         .context(event.context.as_ref());
+    // Vault fields, appended only when set (see `Msg::refs`).
+    let msg = if event.vault_refs.is_empty() && event.erases.is_empty() {
+        msg
+    } else {
+        let mut m = msg.u64(event.vault_refs.len() as u64);
+        for r in &event.vault_refs {
+            m = m.str(r);
+        }
+        m.str(&event.erases)
+    };
     Sha256::digest(msg.0).into()
 }
 

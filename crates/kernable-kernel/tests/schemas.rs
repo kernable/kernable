@@ -83,6 +83,8 @@ async fn the_kernel_remembers_stored_schemas_across_restarts() {
         let cmd = command("c0", "PlaceOrder", "o0");
         store.enqueue(&cmd, 0).unwrap();
         let events = [NewEvent {
+            erases: String::new(),
+            vault_refs: Vec::new(),
             event_type: "OrderPlaced".into(),
             payload: b"{}".to_vec(),
             schema: 3,

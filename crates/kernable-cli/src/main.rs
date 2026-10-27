@@ -25,7 +25,8 @@ const USAGE: &str = "usage:
   kernable listeners remove <store> <name>  removes a listener, and its middleware (kernel stopped)
   kernable schemas <store>                lists the highest stored payload version per event type
   kernable migrate <store>                upgrades a store to this build's data format (kernel stopped;
-                                          back the store up first)
+                                          back the store up first); 1 to 2 drops the snapshots, which
+                                          workers rebuild into the snapshot store
   kernable submit <addr> <client.key> <tenant> <domain> <aggregate_type> <aggregate_id> <command_type> <payload>
                                           signs and submits a command (addr: unix:/path or host:port)";
 
@@ -75,6 +76,7 @@ async fn main() -> ExitCode {
                 payload: payload.as_bytes().to_vec(),
                 client_sig: None,
                 context: None,
+                vault_refs: Vec::new(),
             };
             submit(addr, key, cmd).await
         }
@@ -120,8 +122,8 @@ fn verify(store: &str, key: &str) -> Result<bool> {
     let key_id = signing::key_id(&signing::read_verifying_key(key)?);
     let report = kernable_store::open_read_only(store)?.verify(&key_id)?;
     println!(
-        "{} events, {} commands, {} checkpoints, {} snapshots, {} events after the last checkpoint",
-        report.events, report.commands, report.checkpoints, report.snapshots, report.unanchored
+        "{} events, {} commands, {} checkpoints, {} events after the last checkpoint",
+        report.events, report.commands, report.checkpoints, report.unanchored
     );
     for p in &report.problems {
         println!("PROBLEM {p}");
@@ -160,21 +162,22 @@ fn migrate(store: &str) -> Result<bool> {
         return Err(format!("no store at {path}").into());
     }
     let format = kernable_store::FORMAT;
-    match kernable_store::open(store) {
-        Ok(_) => {
-            println!("store is at format {format}; nothing to migrate");
-            Ok(true)
-        }
-        // Migrations from older formats go here, one step per format.
-        Err(kernable_store::Error::Format(found)) if found < format => {
+    match kernable_store::migrate(store) {
+        Ok(from) if from == format => println!("store is at format {format}; nothing to migrate"),
+        Ok(from) if backend == "file" => println!(
+            "migrated from format {from} to {format}; the old log is kept as {path}.format-{from}"
+        ),
+        Ok(from) => println!("migrated from format {from} to {format}"),
+        Err(kernable_store::Error::Format(0)) => {
             println!(
-                "no migration from format {found}: it comes from a development build before \
-                 format 1; create a new store"
+                "no migration from format 0: it comes from a development build before format 1; \
+                 create a new store"
             );
-            Ok(false)
+            return Ok(false);
         }
-        Err(e) => Err(e.into()),
+        Err(e) => return Err(e.into()),
     }
+    Ok(true)
 }
 
 fn remove_listener(store: &str, name: &str) -> Result<bool> {

@@ -30,6 +30,8 @@ message Command {
   bytes payload = 6;
   Signature client_sig = 7;
   RequestContext context = 8; // signed with the command, stored with its events
+  // References to the values the payload keeps in the vault (see VaultValue), in payload order.
+  repeated string vault_refs = 10;
 }
 
 // Who sends a request and in which context. Signed by the client together with the request,
@@ -73,6 +75,8 @@ message Event {
   Signature producer_sig = 11;
   RequestContext context = 12; // of the command that caused the event
   uint32 schema = 14;           // version of the payload format of `event_type`, from 1
+  repeated string vault_refs = 15; // see NewEvent
+  string erases = 16;              // see NewEvent
 }
 
 // An aggregate's state after `version`, made by a worker: a cache, the events stay the truth.
@@ -88,6 +92,26 @@ message NewEvent {
   string event_type = 1;
   bytes payload = 2;
   uint32 schema = 3; // version of the payload format, from 1; see Register.event_schemas
+  // References to the values the payload keeps in the vault, in payload order.
+  repeated string vault_refs = 4;
+  // A subject (a person) whose vault values this event erases, everywhere; empty for none.
+  string erases = 5;
+}
+
+// ---- vault ----
+
+// A personal or secret value that a command or event keeps outside the signed log. The payload
+// holds `{"$vault": ref}` instead, and `vault_refs` lists the ref. The ref commits to the value:
+//   ref = hex(SHA-256(kernable.v1.vault message)), see SIGNING.md,
+// over a random salt, the subject, `secret` and the value, so it reveals nothing once erased.
+// The kernel keeps values encrypted and deletable. Personal values belong to a subject and are
+// erased by an event that `erases` it; secret values are deleted when their command completes.
+message VaultValue {
+  string ref = 1;
+  string subject = 2; // personal: whose value it is; empty for secrets
+  bool secret = 3;
+  bytes salt = 4;     // 16 random bytes, only on writes
+  bytes value = 5;    // the JSON encoding of the field
 }
 
 // ---- clients ----
@@ -100,6 +124,7 @@ message SubmitRequest {
   Command command = 1;
   Wait wait = 2;
   uint32 protocol = 3; // see "Protocol versions" at the top
+  repeated VaultValue vault = 5; // the values of `command.vault_refs`
   // Set by SDKs when a listener's handler submits (not signed). A listener handles its events
   // one after another, so it cannot wait for itself: a settling submit then waits only for
   // listeners of a lower order, and a request the listener would have to check as a
@@ -245,6 +270,7 @@ message MiddlewareCall {
     Command command = 2;
     QueryRequest query = 3;
   }
+  repeated VaultValue vault = 4; // the command's values, if the key may read them ([vault] readers)
 }
 
 message Verdict {
@@ -280,6 +306,9 @@ message Ready {
 message Batch {
   repeated Event events = 1; // only the listener's event types
   uint64 up_to = 2;          // last position the batch covers; acknowledge it once processed
+  // The values the events refer to, if the key may read them ([vault] readers) and they are not
+  // erased; a missing value reads as null.
+  repeated VaultValue vault = 3;
 }
 
 message Ack {
@@ -346,6 +375,7 @@ message Execute {
   Snapshot snapshot = 5;      // the latest snapshot, if any
   int64 received_at = 6;      // ms since epoch when the kernel accepted the command; stable across retries
   int64 deadline = 7;         // ms since epoch when the lease expires and the command goes to another worker
+  repeated VaultValue vault = 8; // the values the command and the history refer to, unless erased
 }
 
 message Result {
@@ -354,6 +384,7 @@ message Result {
   Signature worker_sig = 3;
   // Optional: the state after these events, at expected_version + len(events).
   Snapshot snapshot = 4;
+  repeated VaultValue vault = 5; // the values of the events' `vault_refs`
 }
 
 // A rejection with code `snapshot_stale` means the worker cannot read the snapshot it got

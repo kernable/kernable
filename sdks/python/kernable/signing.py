@@ -41,19 +41,40 @@ class Msg:
             self.str(a.key).str(a.value)
         return self
 
+    def refs(self, refs) -> "Msg":
+        """Vault references, appended only when there are any (see SIGNING.md)."""
+        if refs:
+            self.u64(len(refs))
+            for r in refs:
+                self.str(r)
+        return self
+
 
 def _stream(m: Msg, c) -> Msg:
     return m.str(c.command_id).str(c.tenant_id).str(c.domain).str(c.aggregate_type).str(c.aggregate_id)
 
 
 def command_message(c) -> bytes:
-    return bytes(_stream(Msg("kernable.v1.command"), c).str(c.command_type).bytes(c.payload).context(c.context).buf)
+    m = _stream(Msg("kernable.v1.command"), c).str(c.command_type).bytes(c.payload).context(c.context)
+    return bytes(m.refs(c.vault_refs).buf)
+
+
+def vault_ref(salt: bytes, subject: str, secret: bool, value: bytes) -> str:
+    """The reference of a value kept in the vault: it commits to salt, subject, kind and value."""
+    m = Msg("kernable.v1.vault").bytes(salt).str(subject).u64(1 if secret else 0).bytes(value)
+    return hashlib.sha256(bytes(m.buf)).hexdigest()
 
 
 def result_message(c, expected_version: int, events) -> bytes:
     m = _stream(Msg("kernable.v1.result"), c).u64(expected_version).u64(len(events))
     for e in events:
         m.str(e.event_type).u64(e.schema).bytes(e.payload)
+    if any(e.vault_refs or e.erases for e in events):  # vault fields, appended only when set
+        for e in events:
+            m.u64(len(e.vault_refs))
+            for r in e.vault_refs:
+                m.str(r)
+            m.str(e.erases)
     return bytes(m.buf)
 
 

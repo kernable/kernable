@@ -36,6 +36,16 @@ export interface WireCommand {
   payload: Buffer;
   client_sig?: WireSignature | null;
   context?: WireRequestContext | null;
+  vault_refs?: string[];
+}
+
+/** A value kept in the vault; see `VaultValue` in kernable.proto. */
+export interface WireVaultValue {
+  ref: string;
+  subject: string;
+  secret: boolean;
+  salt: Buffer;
+  value: Buffer;
 }
 
 export interface WireEvent {
@@ -53,12 +63,16 @@ export interface WireEvent {
   producer_sig?: WireSignature | null;
   context?: WireRequestContext | null;
   schema: number;
+  vault_refs: string[];
+  erases: string;
 }
 
 export interface WireNewEvent {
   event_type: string;
   payload: Buffer;
   schema: number;
+  vault_refs?: string[];
+  erases?: string;
 }
 
 export interface WireSnapshot {
@@ -97,6 +111,7 @@ export interface KernelMessage {
     lease_id: string;
     command: WireCommand;
     history: WireEvent[];
+    vault: WireVaultValue[];
     expected_version: number;
     snapshot?: WireSnapshot | null;
     received_at: number;
@@ -116,7 +131,15 @@ export type WorkerMessage =
       };
     }
   | { challenge_response: { sig: Buffer } }
-  | { result: { lease_id: string; events: WireNewEvent[]; worker_sig: WireSignature; snapshot?: WireSnapshot } }
+  | {
+      result: {
+        lease_id: string;
+        events: WireNewEvent[];
+        worker_sig: WireSignature;
+        snapshot?: WireSnapshot;
+        vault: WireVaultValue[];
+      };
+    }
   | { rejection: { lease_id: string; reason: WireRejected; worker_sig: WireSignature } };
 
 export type SessionCall = grpc.ClientDuplexStream<WorkerMessage, KernelMessage>;
@@ -146,9 +169,15 @@ export interface WireQueryResult {
 export interface ListenerDelivery {
   challenge?: { nonce: Buffer } | null;
   ready?: { after_position: number; head_position: number } | null;
-  batch?: { events: WireEvent[]; up_to: number } | null;
+  batch?: { events: WireEvent[]; up_to: number; vault: WireVaultValue[] } | null;
   query?: { call_id: string; query: WireQueryRequest } | null;
-  check?: { call_id: string; request: "command" | "query"; command?: WireCommand | null; query?: WireQueryRequest | null } | null;
+  check?: {
+    call_id: string;
+    request: "command" | "query";
+    command?: WireCommand | null;
+    query?: WireQueryRequest | null;
+    vault: WireVaultValue[];
+  } | null;
 }
 
 export type ListenerMessage =
@@ -173,7 +202,7 @@ export type ListenCall = grpc.ClientDuplexStream<ListenerMessage, ListenerDelive
 
 export interface Clients {
   /** `listener`: the listener whose handler submits (see `SubmitRequest.listener`). */
-  submit(command: WireCommand, wait: WireWait, listener?: string): Promise<WireCommandResult>;
+  submit(command: WireCommand, wait: WireWait, listener?: string, vault?: WireVaultValue[]): Promise<WireCommandResult>;
   session(): SessionCall;
   listen(): ListenCall;
   query(req: WireQueryRequest): Promise<WireQueryResult>;
@@ -213,9 +242,9 @@ export function connect(url: string, tls?: TlsFiles): Clients {
   const listeners = new v1.ListenerService(url, creds);
   const queries = new v1.QueryService(url, creds);
   return {
-    submit: (command, wait, listener = "") =>
+    submit: (command, wait, listener = "", vault = []) =>
       new Promise((resolve, reject) =>
-        commands.Submit({ command, wait, protocol: PROTOCOL, listener }, (err: grpc.ServiceError | null, res: WireCommandResult) =>
+        commands.Submit({ command, wait, protocol: PROTOCOL, listener, vault }, (err: grpc.ServiceError | null, res: WireCommandResult) =>
           err ? reject(err) : resolve(res),
         ),
       ),

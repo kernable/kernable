@@ -26,8 +26,8 @@ use std::{
 
 use kernable_core::{
     proto::{
-        Batch, Challenge, ListenerDelivery, ListenerMessage, ListenerRecord, MiddlewareCall,
-        QueryAnswer, QueryCall, QueryRequest, Ready, Signature, Verdict,
+        Batch, Challenge, Event, ListenerDelivery, ListenerMessage, ListenerRecord, MiddlewareCall,
+        QueryAnswer, QueryCall, QueryRequest, Ready, Signature, VaultValue, Verdict,
         listener_delivery::Msg as Out, listener_message::Msg as In, middleware_call,
     },
     signing,
@@ -281,13 +281,18 @@ impl Registry {
         chain.into_iter().map(|(_, name)| name).collect()
     }
 
+    /// The key of the registered listener `name`.
+    pub(crate) fn key(&self, name: &str) -> Option<String> {
+        self.entries().get(name).map(|e| e.record.key_id.clone())
+    }
+
     /// Registers a check of `request` by the middleware `listener`. `Ok(None)` while the
     /// middleware is still catching up; an error if it is not connected.
     pub(crate) fn check(
         &self,
         listener: &str,
         id: &str,
-        request: middleware_call::Request,
+        (request, vault): (middleware_call::Request, Vec<VaultValue>),
     ) -> Result<Option<Dispatched>, Status> {
         let entries = self.entries();
         let Some(out) = entries.get(listener).and_then(|e| {
@@ -309,6 +314,7 @@ impl Registry {
         let call = MiddlewareCall {
             call_id,
             request: Some(request),
+            vault,
         };
         Ok(Some(Dispatched {
             out: out.clone(),
@@ -462,7 +468,7 @@ pub(crate) async fn run(
             .unwrap_or_else(|| previous.map_or(0, |e| e.record.position));
         let record = ListenerRecord {
             name: hello.name.clone(),
-            key_id: hello.key_id,
+            key_id: hello.key_id.clone(),
             order: hello.order,
             event_types: hello.event_types,
             position,
@@ -503,6 +509,7 @@ pub(crate) async fn run(
     let deliver = tokio::spawn(deliver(
         Arc::clone(&kernel),
         hello.name.clone(),
+        hello.key_id.clone(),
         hello.order,
         types,
         Arc::clone(&sent),
@@ -558,6 +565,7 @@ impl Dispatched {
 async fn deliver(
     kernel: Arc<Kernel>,
     name: String,
+    key_id: String,
     order: i32,
     types: Option<Vec<String>>,
     sent: Arc<AtomicU64>,
@@ -599,11 +607,25 @@ async fn deliver(
         if events.is_empty() && kernel.listeners.position(&name) == after {
             // Nothing to process and nothing outstanding: skip ahead without a round trip.
             kernel.listeners.ack(&name, up_to);
-        } else if send(&out, Out::Batch(Batch { events, up_to }))
+        } else if send(&out, Out::Batch(batch_of(&kernel, &key_id, events, up_to)))
             .await
             .is_err()
         {
             return;
         }
+    }
+}
+
+/// A batch with the vault values of its events that the listener's key may read.
+fn batch_of(kernel: &Kernel, key_id: &str, events: Vec<Event>, up_to: u64) -> Batch {
+    let refs: Vec<String> = events
+        .iter()
+        .filter(|e| kernel.reads_vault(key_id, &config::qualified(&e.domain, &e.event_type)))
+        .flat_map(|e| e.vault_refs.clone())
+        .collect();
+    Batch {
+        vault: kernel.values_of(&refs),
+        events,
+        up_to,
     }
 }

@@ -1,9 +1,10 @@
-//! Compatibility: stores written in data format 1 keep working, and requests of a protocol
-//! version the kernel does not speak are refused with a clear message.
+//! Compatibility: stores of every data format keep working, and requests of a protocol version
+//! the kernel does not speak are refused with a clear message.
 //!
-//! The stores in `tests/fixtures/format-1` are frozen: never regenerate them. A new data format
-//! adds a new directory (written with `KERNABLE_WRITE_FIXTURES=1`, which only fills directories
-//! that do not exist yet) and keeps the old ones, which `kernable migrate` must then upgrade.
+//! `tests/fixtures/format-<n>` are frozen stores: never regenerate them. Format 1 was written
+//! by this file as of commit 149739b and is now upgraded with `kernable migrate`. A new data
+//! format adds a new directory (written with `KERNABLE_WRITE_FIXTURES=1`, which only fills
+//! directories that do not exist yet).
 
 mod common;
 
@@ -14,8 +15,8 @@ use kernable_core::{
     PROTOCOL,
     proto::{
         Attribute, Command, Hello, ListenerMessage, ListenerRecord, Middleware, NewEvent,
-        QueryRequest, Register, Rejected, RequestContext, Snapshot, SnapshotRecord, SubmitRequest,
-        SubscribeRequest, Wait, WorkerMessage, command_result::Outcome,
+        QueryRequest, Register, Rejected, RequestContext, SubmitRequest, SubscribeRequest,
+        VaultValue, Wait, WorkerMessage, command_result::Outcome,
         command_service_client::CommandServiceClient, event_service_client::EventServiceClient,
         listener_message, listener_service_client::ListenerServiceClient,
         query_service_client::QueryServiceClient, worker_gateway_client::WorkerGatewayClient,
@@ -23,20 +24,23 @@ use kernable_core::{
     },
     signing, transport,
 };
-use kernable_store::Store;
+use kernable_kernel::config::VaultConfig;
+use kernable_store::{
+    Store, StreamId,
+    vault::{Owner, Vault},
+};
+use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 
 const AT: i64 = 1_700_000_000_000;
+const VAULT_KEY: [u8; 32] = [6; 32];
 
-fn fixtures() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/format-1")
+fn fixtures(format: u32) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/format-{format}"))
 }
 
-/// What every format-1 fixture holds: two committed commands on `o1` (with a request context,
-/// event schemas 2 and 1 and a snapshot), a rejected one, a pending one on `o2`, two listeners
-/// (one a middleware) and a checkpoint.
-fn fill(store: &dyn Store) {
-    let context = RequestContext {
+fn context() -> RequestContext {
+    RequestContext {
         sender_identity: "i-1".into(),
         correlation_id: "r-1".into(),
         attributes: vec![Attribute {
@@ -44,20 +48,64 @@ fn fill(store: &dyn Store) {
             value: "web".into(),
         }],
         ..Default::default()
-    };
-    let cmd = |id: &str, command_type: &str, aggregate: &str| {
+    }
+}
+
+/// A personal (with a subject) or secret value, with a fixed salt.
+fn value(salt: u8, subject: &str, value: &str) -> VaultValue {
+    let salt = vec![salt; 16];
+    let value = format!("\"{value}\"").into_bytes();
+    let secret = subject.is_empty();
+    VaultValue {
+        r#ref: signing::vault_ref(&salt, subject, secret, &value),
+        subject: subject.into(),
+        secret,
+        salt,
+        value,
+    }
+}
+
+fn stream(order: &str) -> StreamId {
+    StreamId {
+        tenant_id: "t1".into(),
+        domain: "orders".into(),
+        aggregate_type: "Order".into(),
+        aggregate_id: order.into(),
+    }
+}
+
+/// What the format-2 fixture holds, like format 1 plus the vault: the customer's email in
+/// `c1` and its event (subject `k-1`), a secret coupon code with the pending `c4`, and an
+/// order `o3` whose customer `k-2` was erased (by `c7`). There are no snapshots in the log.
+fn fill(store: &dyn Store, vault: &Vault) {
+    let cmd = |id: &str, command_type: &str, aggregate: &str, values: &[&VaultValue]| {
         let mut cmd = command(id, command_type, aggregate);
-        cmd.context = Some(context.clone());
+        cmd.context = Some(context());
+        cmd.vault_refs = values.iter().map(|v| v.r#ref.clone()).collect();
+        let values: Vec<VaultValue> = values.iter().map(|v| (*v).clone()).collect();
+        let owner = Owner {
+            command_id: id,
+            stream: None,
+        };
+        vault.put(&values, &cmd.vault_refs, &owner, AT).unwrap();
         signed(cmd, &key(1))
     };
-    let commit = |cmd: &Command, version: u64, event: (&str, u32, &str)| {
+    let commit = |cmd: &Command, version: u64, event: NewEvent, values: &[&VaultValue]| {
         store.enqueue(cmd, AT).unwrap();
-        let events = [NewEvent {
-            event_type: event.0.into(),
-            schema: event.1,
-            payload: event.2.as_bytes().to_vec(),
-        }];
+        let events = [event];
         let msg = signing::result_message(cmd, version, &events);
+        let values: Vec<VaultValue> = values.iter().map(|v| (*v).clone()).collect();
+        let s = stream(&cmd.aggregate_id);
+        let owner = Owner {
+            command_id: &cmd.command_id,
+            stream: Some(&s),
+        };
+        vault
+            .put(&values, &events[0].vault_refs, &owner, AT)
+            .unwrap();
+        if !events[0].erases.is_empty() {
+            vault.erase(&events[0].erases, &cmd.command_id, AT).unwrap();
+        }
         store
             .commit(
                 &cmd.command_id,
@@ -68,44 +116,59 @@ fn fill(store: &dyn Store) {
             )
             .unwrap();
     };
-    let c1 = cmd("c1", "PlaceOrder", "o1");
+    let event = |event_type: &str, schema: u32, payload: String, values: &[&VaultValue]| NewEvent {
+        event_type: event_type.into(),
+        schema,
+        payload: payload.into_bytes(),
+        vault_refs: values.iter().map(|v| v.r#ref.clone()).collect(),
+        erases: String::new(),
+    };
+    let email = value(1, "k-1", "max@firma.de");
+    let placed_email = value(2, "k-1", "max@firma.de");
+    let c1 = cmd("c1", "PlaceOrder", "o1", &[&email]);
+    let payload = format!(
+        r#"{{"customer":"k-1","email":{{"$vault":"{}"}}}}"#,
+        placed_email.r#ref
+    );
     commit(
         &c1,
         0,
-        ("OrderPlaced", 2, r#"{"customer":"k-1","currency":"EUR"}"#),
+        event("OrderPlaced", 2, payload, &[&placed_email]),
+        &[&placed_email],
     );
+    let c2 = cmd("c2", "AddItem", "o1", &[]);
     commit(
-        &cmd("c2", "AddItem", "o1"),
+        &c2,
         1,
-        ("ItemAdded", 1, r#"{"sku":"apple"}"#),
+        event("ItemAdded", 1, r#"{"sku":"apple"}"#.into(), &[]),
+        &[],
     );
-    let state = b"2".to_vec();
-    let snapshot_msg = signing::snapshot_message(&c1, 2, "1", &state);
-    let o1 = store.read_stream("t1", "orders", "Order", "o1").unwrap();
-    store
-        .save_snapshot(&SnapshotRecord {
-            tenant_id: "t1".into(),
-            domain: "orders".into(),
-            aggregate_type: "Order".into(),
-            aggregate_id: "o1".into(),
-            snapshot: Some(Snapshot {
-                version: 2,
-                schema: "1".into(),
-                state,
-                worker_sig: Some(signing::sign(&key(2), &snapshot_msg)),
-            }),
-            event_hash: o1[1].hash.clone(),
-            removed: false,
-        })
-        .unwrap();
-    let c3 = cmd("c3", "AddItem", "o9");
+    let c3 = cmd("c3", "AddItem", "o9", &[]);
     store.enqueue(&c3, AT).unwrap();
     let reason = Rejected {
         code: "invalid_state".into(),
         message: "AddItem not allowed now".into(),
     };
     store.reject("c3", reason).unwrap();
-    store.enqueue(&cmd("c4", "PlaceOrder", "o2"), AT).unwrap();
+    let coupon = value(3, "", "SAVE10");
+    let c4 = cmd("c4", "PlaceOrder", "o2", &[&coupon]);
+    store.enqueue(&c4, AT).unwrap();
+    let other = value(4, "k-2", "erika@firma.de");
+    let c6 = cmd("c6", "PlaceOrder", "o3", &[]);
+    let payload = format!(
+        r#"{{"customer":"k-2","email":{{"$vault":"{}"}}}}"#,
+        other.r#ref
+    );
+    commit(
+        &c6,
+        0,
+        event("OrderPlaced", 2, payload, &[&other]),
+        &[&other],
+    );
+    let c7 = cmd("c7", "AddItem", "o3", &[]);
+    let mut erased = event("CustomerErased", 1, r#"{"customer":"k-2"}"#.into(), &[]);
+    erased.erases = "k-2".into();
+    commit(&c7, 1, erased, &[]);
     let listener = |name: &str, types: &str, middleware: Option<Middleware>| ListenerRecord {
         name: name.into(),
         key_id: id(&key(5)),
@@ -128,15 +191,19 @@ fn fill(store: &dyn Store) {
     store.checkpoint(&key(3), AT).unwrap();
 }
 
-/// Copies the fixture of `backend` into `dir` and returns the copy's store URL.
-fn copy(backend: &str, file: &str, dir: &Path) -> String {
-    let fixture = fixtures().join(file);
-    if std::env::var_os("KERNABLE_WRITE_FIXTURES").is_some() && !fixtures().exists() {
-        std::fs::create_dir_all(fixtures()).unwrap();
-    }
-    if std::env::var_os("KERNABLE_WRITE_FIXTURES").is_some() && !fixture.exists() {
+/// Copies the store file of `format` and `backend` into `dir` (and for format 2 the vault),
+/// writing the fixture first if asked to; returns the copy's store URL.
+fn copy(format: u32, backend: &str, file: &str, dir: &Path) -> String {
+    let fixtures = fixtures(format);
+    let fixture = fixtures.join(file);
+    let write = std::env::var_os("KERNABLE_WRITE_FIXTURES").is_some() && format == 2;
+    if write && !fixture.exists() {
+        std::fs::create_dir_all(&fixtures).unwrap();
         let url = format!("{backend}:{}", fixture.display());
-        fill(kernable_store::open(&url).unwrap().as_ref());
+        let vault_path = fixtures.join(format!("vault-{backend}.db"));
+        let vault = Vault::open(&format!("sqlite:{}", vault_path.display()), &VAULT_KEY).unwrap();
+        fill(kernable_store::open(&url).unwrap().as_ref(), &vault);
+        std::fs::write(fixtures.join("vault.key"), hex(&VAULT_KEY)).unwrap();
         if backend == "sqlite" {
             // One self-contained file: fold the write-ahead log into it.
             let conn = rusqlite::Connection::open(&fixture).unwrap();
@@ -145,6 +212,11 @@ fn copy(backend: &str, file: &str, dir: &Path) -> String {
     }
     let target = dir.join(file);
     std::fs::copy(&fixture, &target).unwrap();
+    if format == 2 {
+        let vault = format!("vault-{backend}.db");
+        std::fs::copy(fixtures.join(&vault), dir.join(&vault)).unwrap();
+        std::fs::copy(fixtures.join("vault.key"), dir.join("vault.key")).unwrap();
+    }
     format!("{backend}:{}", target.display())
 }
 
@@ -152,43 +224,75 @@ fn outcome(result: &kernable_core::proto::CommandResult) -> &Outcome {
     result.outcome.as_ref().unwrap()
 }
 
+fn verified(url: &str) -> kernable_store::Report {
+    let report = kernable_store::open_read_only(url)
+        .unwrap()
+        .verify(&id(&key(3)))
+        .unwrap();
+    assert!(report.is_ok(), "{url}: {:?}", report.problems);
+    report
+}
+
+/// Checks what format 1 and 2 hold alike.
+fn check_common(store: &dyn Store, backend: &str) {
+    let events = store.read_all(0, 10).unwrap();
+    assert_eq!(
+        events[0].context.as_ref().unwrap().attributes[0].value,
+        "web"
+    );
+    assert_eq!(events[0].schema, 2);
+    let rejected = store.result("c3").unwrap().unwrap();
+    assert!(matches!(outcome(&rejected), Outcome::Rejected(r) if r.code == "invalid_state"));
+    let listeners = store.listeners().unwrap();
+    assert_eq!(listeners.len(), 2);
+    assert!(
+        listeners[0].middleware.is_some(),
+        "{backend}: guard is a middleware"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn stores_of_format_1_still_open_verify_and_run() {
+async fn stores_of_format_1_migrate_verify_and_run() {
     for (backend, file) in [("sqlite", "k.db"), ("file", "k.log")] {
         let mut url = String::new();
-        let env = start_custom(&format!("compat-{backend}"), |config, dir| {
-            url = copy(backend, file, dir);
+        let env = start_custom(&format!("compat-1-{backend}"), |config, dir| {
+            url = copy(1, backend, file, dir);
+            // A kernel of today refuses format 1 until it is migrated.
+            assert!(matches!(
+                kernable_store::open(&url).err(),
+                Some(kernable_store::Error::Format(1))
+            ));
+            assert_eq!(kernable_store::migrate(&url).unwrap(), 1);
+            assert_eq!(
+                kernable_store::migrate(&url).unwrap(),
+                2,
+                "migrating twice is harmless"
+            );
             config.store = url.clone();
         })
         .await;
+        if backend == "file" {
+            let (_, path) = kernable_store::backend(&url);
+            assert!(
+                Path::new(&format!("{path}.format-1")).exists(),
+                "the old log is kept"
+            );
+        }
 
-        let store = kernable_store::open_read_only(&url).unwrap();
-        let report = store.verify(&id(&key(3))).unwrap();
-        assert!(report.is_ok(), "{backend}: {:?}", report.problems);
-        let counts = (report.events, report.commands, report.checkpoints);
-        assert_eq!((counts, report.snapshots), ((2, 4, 1), 1), "{backend}");
+        let report = verified(&url);
         assert_eq!(
-            store.event_schemas().unwrap(),
-            [
-                ("orders.ItemAdded".to_string(), 1),
-                ("orders.OrderPlaced".to_string(), 2)
-            ]
+            (report.events, report.commands, report.checkpoints),
+            (2, 4, 1),
+            "{backend}"
         );
-        let events = store.read_all(0, 10).unwrap();
-        let context = events[0].context.as_ref().unwrap();
-        assert_eq!(context.attributes[0].value, "web");
-        let rejected = store.result("c3").unwrap().unwrap();
-        assert!(matches!(outcome(&rejected), Outcome::Rejected(r) if r.code == "invalid_state"));
-        let listeners = store.listeners().unwrap();
-        assert_eq!(listeners.len(), 2);
-        assert!(
-            listeners[0].middleware.is_some(),
-            "{backend}: guard is a middleware"
+        check_common(
+            kernable_store::open_read_only(&url).unwrap().as_ref(),
+            backend,
         );
-        drop(store);
 
-        // A worker of today runs the pending command and continues the stream after the snapshot.
-        let (tx, mut executions) = tokio::sync::mpsc::unbounded_channel();
+        // A worker of today runs the pending command; the snapshot was dropped by the
+        // migration, so the stream is read in full.
+        let (tx, mut executions) = mpsc::unbounded_channel();
         tokio::spawn(run_worker(
             env.addr.clone(),
             TestWorker {
@@ -199,15 +303,7 @@ async fn stores_of_format_1_still_open_verify_and_run() {
         ));
         let pending = signed(
             Command {
-                context: Some(RequestContext {
-                    sender_identity: "i-1".into(),
-                    correlation_id: "r-1".into(),
-                    attributes: vec![Attribute {
-                        key: "channel".into(),
-                        value: "web".into(),
-                    }],
-                    ..Default::default()
-                }),
+                context: Some(context()),
                 ..command("c4", "PlaceOrder", "o2")
             },
             &key(1),
@@ -220,11 +316,81 @@ async fn stores_of_format_1_still_open_verify_and_run() {
         let c5 = submit_with(&env.addr, c5, Wait::Committed).await.unwrap();
         assert_eq!(committed_versions(&c5), [3], "{backend}");
         let seen: Vec<_> = std::iter::from_fn(|| executions.try_recv().ok()).collect();
-        assert_eq!(seen, [(None, 0), (Some(2), 0)], "{backend}");
+        assert_eq!(seen, [(None, 0), (None, 2)], "{backend}");
+        verified(&url);
+    }
+}
 
+#[tokio::test(flavor = "multi_thread")]
+async fn stores_of_format_2_open_verify_and_run_with_their_vault() {
+    for (backend, file) in [("sqlite", "k.db"), ("file", "k.log")] {
+        let mut url = String::new();
+        let mut vault_url = String::new();
+        let env = start_custom(&format!("compat-2-{backend}"), |config, dir| {
+            url = copy(2, backend, file, dir);
+            vault_url = format!(
+                "sqlite:{}",
+                dir.join(format!("vault-{backend}.db")).display()
+            );
+            config.store = url.clone();
+            config.vault = Some(VaultConfig {
+                store: vault_url.clone(),
+                key: dir.join("vault.key"),
+                readers: Default::default(),
+                erasers: Default::default(),
+            });
+        })
+        .await;
+
+        let report = verified(&url);
+        assert_eq!(
+            (report.events, report.commands, report.checkpoints),
+            (4, 6, 1),
+            "{backend}"
+        );
         let store = kernable_store::open_read_only(&url).unwrap();
-        let report = store.verify(&id(&key(3))).unwrap();
-        assert!(report.is_ok(), "{backend}: {:?}", report.problems);
+        check_common(store.as_ref(), backend);
+        let events = store.read_all(0, 10).unwrap();
+        let (placed, erased_order, erasure) = (&events[0], &events[2], &events[3]);
+        assert_eq!(placed.vault_refs.len(), 1);
+        assert_eq!(erasure.erases, "k-2");
+        drop(store);
+
+        // A worker of today gets the pending command's secret; the secret goes once it ran.
+        let (tx, mut vaults) = mpsc::unbounded_channel();
+        tokio::spawn(run_worker(
+            env.addr.clone(),
+            TestWorker {
+                schemas: vec![("orders.OrderPlaced".into(), 2)],
+                vaults: Some(tx),
+                ..TestWorker::honest()
+            },
+        ));
+        let coupon = value(3, "", "SAVE10");
+        let mut pending = command("c4", "PlaceOrder", "o2");
+        pending.context = Some(context());
+        pending.vault_refs = vec![coupon.r#ref.clone()];
+        let c4 = submit_with(&env.addr, signed(pending, &key(1)), Wait::Committed).await;
+        assert_eq!(committed_versions(&c4.unwrap()), [1], "{backend}");
+        assert_eq!(vaults.recv().await.unwrap()[0].value, coupon.value);
+
+        // The history of o1 comes with the customer's email; the erased one stays away.
+        let c5 = signed(command("c5", "AddItem", "o1"), &key(1));
+        submit_with(&env.addr, c5, Wait::Committed).await.unwrap();
+        let sent = vaults.recv().await.unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].r#ref, placed.vault_refs[0]);
+        let c8 = signed(command("c8", "AddItem", "o3"), &key(1));
+        submit_with(&env.addr, c8, Wait::Committed).await.unwrap();
+        assert!(vaults.recv().await.unwrap().is_empty(), "k-2 was erased");
+
+        let vault = Vault::open(&vault_url, &VAULT_KEY).unwrap();
+        assert!(
+            vault.get(&[coupon.r#ref]).unwrap().is_empty(),
+            "the secret is gone"
+        );
+        assert!(vault.get(&erased_order.vault_refs).unwrap().is_empty());
+        verified(&url);
     }
 }
 

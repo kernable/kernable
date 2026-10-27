@@ -9,23 +9,31 @@
 //! completes at most once, a commit appends all events of a command atomically and only on the
 //! expected stream version, and events form a hash chain (see `proto/SIGNING.md`). Which
 //! command runs when (one per aggregate, in submission order) is up to the kernel's queue.
-//! They also keep the registered event listeners with their acknowledged positions, and the
-//! latest snapshot per aggregate (a cache signed by the worker; see `proto/SIGNING.md`).
+//! They also keep the registered event listeners with their acknowledged positions.
+//!
+//! Two more stores live apart from the log, because what they hold must be deletable:
+//! [`snapshots`] (the latest snapshot per aggregate, a cache) and the [`vault`] (personal and
+//! secret values that commands and events refer to).
 
 mod file;
+pub mod snapshots;
 mod sqlite;
+pub mod vault;
 mod verify;
 
 use std::fmt;
 
 use ed25519_dalek::SigningKey;
 use kernable_core::proto::{
-    Command, CommandResult, Event, ListenerRecord, NewEvent, Rejected, Signature, SnapshotRecord,
+    Command, CommandResult, Event, ListenerRecord, NewEvent, Rejected, Signature,
 };
 
 /// The version of the stored data format this build reads and writes. A store of another
 /// format is refused; `kernable migrate` upgrades older ones.
-pub const FORMAT: u32 = 1;
+///
+/// - 1: the first release format.
+/// - 2: vault references in commands and events; snapshots moved to their own store.
+pub const FORMAT: u32 = 2;
 
 pub use file::FileStore;
 pub use sqlite::SqliteStore;
@@ -46,6 +54,8 @@ pub enum Error {
     Corrupt(String),
     /// The store has a data format other than [`FORMAT`].
     Format(u32),
+    /// Vault values that do not match their references, or a vault that cannot be used.
+    Vault(String),
     Io(std::io::Error),
     Sqlite(rusqlite::Error),
     Decode(prost::DecodeError),
@@ -71,6 +81,7 @@ impl fmt::Display for Error {
                 f,
                 "store format {found}, this kernable reads format {FORMAT}: upgrade it with `kernable migrate`"
             ),
+            Error::Vault(what) => write!(f, "vault: {what}"),
             Error::Io(e) => write!(f, "io: {e}"),
             Error::Sqlite(e) => write!(f, "sqlite: {e}"),
             Error::Decode(e) => write!(f, "decode: {e}"),
@@ -107,6 +118,15 @@ pub enum Enqueued {
     New,
     /// A command with this ID was submitted before; `result` is set once it is completed.
     Duplicate { result: Option<CommandResult> },
+}
+
+/// One aggregate's stream of events.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct StreamId {
+    pub tenant_id: String,
+    pub domain: String,
+    pub aggregate_type: String,
+    pub aggregate_id: String,
 }
 
 /// A command not completed yet.
@@ -199,18 +219,6 @@ pub trait Store: Send + Sync {
     /// The final result of a command, once it is committed or rejected.
     fn result(&self, command_id: &str) -> Result<Option<CommandResult>>;
 
-    /// The latest snapshot of one aggregate.
-    fn snapshot(
-        &self,
-        tenant_id: &str,
-        domain: &str,
-        aggregate_type: &str,
-        aggregate_id: &str,
-    ) -> Result<Option<SnapshotRecord>>;
-
-    /// Replaces the aggregate's snapshot; a record with `removed` set deletes it.
-    fn save_snapshot(&self, record: &SnapshotRecord) -> Result<()>;
-
     /// Registered listeners with their acknowledged positions, ordered by name.
     fn listeners(&self) -> Result<Vec<ListenerRecord>>;
 
@@ -241,6 +249,17 @@ pub fn open_read_only(url: &str) -> Result<Box<dyn Store>> {
         ("file", path) => Box::new(FileStore::open_read_only(path)?),
         (_, path) => Box::new(SqliteStore::open(path)?),
     })
+}
+
+/// Upgrades the store at `url` to [`FORMAT`] (kernel stopped; back it up first) and returns
+/// the format it had. From 1 to 2, snapshots leave the log: they are dropped, and workers
+/// rebuild them into the snapshot store.
+pub fn migrate(url: &str) -> Result<u32> {
+    match backend(url) {
+        ("memory", _) => Ok(FORMAT),
+        ("file", path) => file::migrate(std::path::Path::new(path)),
+        (_, path) => sqlite::migrate(std::path::Path::new(path)),
+    }
 }
 
 /// Splits a store URL into backend and path; a bare path means SQLite.

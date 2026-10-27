@@ -63,6 +63,7 @@ prop_compose! {
         sig in any::<u8>(),
     ) -> Command {
         let mut cmd = Command {
+            vault_refs: Vec::new(),
             command_id: id, tenant_id: tenant, domain, aggregate_type, aggregate_id, command_type,
             payload, client_sig: None,
             context: Some(RequestContext { expected_version, bypass_authorization: bypass, ..Default::default() }),
@@ -85,6 +86,7 @@ fn call() -> impl Strategy<Value = Call> {
         (arbitrary_command(), 0i32..5, protocol.clone(), name()).prop_map(
             |(cmd, wait, protocol, listener)| {
                 Call::Submit(SubmitRequest {
+                    vault: Vec::new(),
                     command: Some(cmd),
                     wait,
                     protocol,

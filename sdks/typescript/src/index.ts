@@ -1,7 +1,7 @@
 // @kernable/sdk: write event-sourced business logic in TypeScript; the kernel does the rest.
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 
 import type { ClientReadableStream } from "@grpc/grpc-js";
 
@@ -21,6 +21,7 @@ import {
   type WireRejected,
   type WireRequestContext,
   type WireSnapshot,
+  type WireVaultValue,
   type WireWait,
 } from "./rpc.ts";
 import {
@@ -33,6 +34,7 @@ import {
   resultMessage,
   snapshotMessage,
   subscribeMessage,
+  vaultRef,
 } from "./signing.ts";
 
 export { Key } from "./signing.ts";
@@ -171,6 +173,11 @@ export interface StoredEvent {
    */
   schema: number;
   data: unknown;
+  /**
+   * Fields kept in the vault whose value is not here (`null` in `data`): erased, or not
+   * readable with this key (`[vault] readers`).
+   */
+  redacted: string[];
   commandId: string;
   /** The request context of the command that caused the event. */
   request: RequestContext;
@@ -214,6 +221,33 @@ export class EventSchema {
     this.schema = schema;
   }
 
+  /** The fields kept in the vault; see `personal`. */
+  readonly vault = new VaultFields();
+  /** The subject (person) this event erases, if it is an erasing event; see `erases`. */
+  eraser?: Subject;
+
+  /**
+   * Keeps these top-level fields in the vault, as personal data of the subject `subject`
+   * returns from the payload and the aggregate's ID (e.g. `(d) => d.customerId`, or
+   * `(_d, id) => id` for the aggregate itself). Events then hold only references; the kernel hands
+   * the values to workers and to listeners allowed to read them, until an event erases the
+   * subject.
+   */
+  personal<D = any>(fields: string[], subject: (data: D, aggregateId: string) => string): this {
+    this.vault.personal.push({ fields, subject });
+    return this;
+  }
+
+  /**
+   * Makes this an erasing event: it deletes every vault value of the subject `subject`
+   * returns, in every stream, and the snapshots that may hold them. Read models should drop
+   * the subject's data when they see it; rebuilt, they read `null`.
+   */
+  erases<D = any>(subject: (data: D, aggregateId: string) => string): this {
+    this.eraser = subject;
+    return this;
+  }
+
   /** Turns a payload of version `from` into one of version `from + 1`. */
   upcast<D = any>(from: number, fn: (data: D) => unknown): this {
     if (!Number.isInteger(from) || from < 1 || from >= this.schema) {
@@ -222,6 +256,94 @@ export class EventSchema {
     this.steps.set(from, fn);
     return this;
   }
+}
+
+/** Whose personal data a payload holds: from the payload and the aggregate's ID. */
+type Subject = (data: any, aggregateId: string) => string;
+
+/** Payload fields kept in the vault instead of the signed log. */
+class VaultFields {
+  readonly personal: { fields: string[]; subject: Subject }[] = [];
+  readonly secret: string[] = [];
+}
+
+/** How a command's payload is kept: which fields go to the vault. */
+export class CommandSchema {
+  readonly type: string;
+  readonly vault = new VaultFields();
+
+  constructor(type: string) {
+    if (!/^[^.*]+$/.test(type)) throw new Error(`command types are unqualified within their domain, not ${JSON.stringify(type)}`);
+    this.type = type;
+  }
+
+  /** Keeps these top-level fields in the vault as personal data of `subject`; see `EventSchema.personal`. */
+  personal<D = any>(fields: string[], subject: (data: D, aggregateId: string) => string): this {
+    this.vault.personal.push({ fields, subject });
+    return this;
+  }
+
+  /**
+   * Keeps these top-level fields (passwords, one-time tokens) in the vault only until the
+   * command completed. The handler gets them in clear; the stored command keeps a reference.
+   */
+  secret(fields: string[]): this {
+    this.vault.secret.push(...fields);
+    return this;
+  }
+}
+
+/**
+ * Moves the vault fields of `data` into vault values: the payload keeps `{"$vault": ref}`.
+ * Absent and null fields stay as they are.
+ */
+function seal(
+  data: unknown,
+  vault: VaultFields | undefined,
+  aggregateId: string,
+): { payload: Buffer; refs: string[]; values: WireVaultValue[] } {
+  if (!vault || (vault.personal.length === 0 && vault.secret.length === 0) || data === null || typeof data !== "object") {
+    return { payload: encode(data), refs: [], values: [] };
+  }
+  const sealed: Record<string, unknown> = { ...(data as Record<string, unknown>) };
+  const values: WireVaultValue[] = [];
+  const keep = (field: string, subject: string, secret: boolean) => {
+    if (sealed[field] === undefined || sealed[field] === null) return;
+    const salt = randomBytes(16);
+    const value = Buffer.from(JSON.stringify(sealed[field]));
+    const ref = vaultRef(salt, subject, secret, value);
+    values.push({ ref, subject, secret, salt, value });
+    sealed[field] = { $vault: ref };
+  };
+  for (const { fields, subject } of vault.personal) {
+    const who = String(subject(data, aggregateId) ?? "");
+    if (!who) throw new Error(`no subject for the personal fields ${fields.join(", ")}`);
+    for (const f of fields) keep(f, who, false);
+  }
+  for (const f of vault.secret) keep(f, "", true);
+  return { payload: encode(sealed), refs: values.map((v) => v.ref), values };
+}
+
+/** Puts vault values back into `data`; references without a value become `null`. */
+function unseal(data: unknown, vault: WireVaultValue[] | undefined): { data: unknown; redacted: string[] } {
+  const values = new Map((vault ?? []).map((v) => [v.ref, v.value]));
+  const redacted: string[] = [];
+  const walk = (v: unknown, path: string): unknown => {
+    if (Array.isArray(v)) return v.map((x, i) => walk(x, `${path}[${i}]`));
+    if (v === null || typeof v !== "object") return v;
+    const o = v as Record<string, unknown>;
+    const keys = Object.keys(o);
+    if (keys.length === 1 && keys[0] === "$vault" && typeof o.$vault === "string") {
+      const value = values.get(o.$vault);
+      if (value === undefined) {
+        redacted.push(path);
+        return null;
+      }
+      return JSON.parse(value.toString("utf8"));
+    }
+    return Object.fromEntries(keys.map((k) => [k, walk(o[k], path ? `${path}.${k}` : k)]));
+  };
+  return { data: walk(data, ""), redacted };
 }
 
 /** An event a process cannot read: its schema is newer than known, or a step is missing. */
@@ -250,6 +372,8 @@ export class Domain {
   readonly name: string;
   /** Payload versions and upcasts per event type; types not listed are at version 1. */
   readonly events = new Map<string, EventSchema>();
+  /** Vault fields per command type; see `command`. */
+  readonly commands = new Map<string, CommandSchema>();
 
   constructor(name: string) {
     if (!/^[a-z][a-z0-9_-]*$/.test(name)) throw new Error(`invalid domain name ${JSON.stringify(name)}`);
@@ -263,6 +387,16 @@ export class Domain {
   event(type: string, schema: number): EventSchema {
     const def = new EventSchema(type, schema);
     this.events.set(type, def);
+    return def;
+  }
+
+  /**
+   * Declares which fields of `type` commands the vault keeps (`personal`, `secret`). Clients
+   * that submit them need the domain: `kernable.use(domain)`.
+   */
+  command(type: string): CommandSchema {
+    const def = new CommandSchema(type);
+    this.commands.set(type, def);
     return def;
   }
 
@@ -367,12 +501,19 @@ export class Kernable {
   private readonly key: Key;
   private readonly tenant: string;
   private readonly context: RequestContext;
+  private readonly domains = new Map<string, Domain>();
 
   constructor(options: Options) {
     this.clients = connect(options.url, options.tls);
     this.key = Key.fromFile(options.key);
     this.tenant = options.tenant ?? "default";
     this.context = options.context ?? {};
+  }
+
+  /** Seals the vault fields of these domains' commands when submitting them; see `Domain.command`. */
+  use(...domains: Domain[]): this {
+    for (const d of domains) this.domains.set(d.name, d);
+    return this;
   }
 
   worker(...aggregates: Aggregate<any>[]): Worker {
@@ -386,7 +527,8 @@ export class Kernable {
     if (res.outcome === "rejected") {
       return { committed: false, code: res.rejected!.code, message: res.rejected!.message };
     }
-    const outcome = { committed: true as const, events: res.committed!.events.map(toStored) };
+    // Events come back with references only: the submitter is no vault reader.
+    const outcome = { committed: true as const, events: res.committed!.events.map((e) => toStored(e)) };
     if (wait === "WAIT_SETTLED" && !res.committed!.settled) throw new NotSettled(outcome);
     return outcome;
   }
@@ -439,6 +581,8 @@ export class Kernable {
 
   private send(options: SubmitOptions, wait: WireWait) {
     const command_id = options.id ?? randomUUID();
+    const schema = this.domains.get(options.domain)?.commands.get(options.type);
+    const sealed = seal(options.data, schema?.vault, options.aggregateId);
     const context = { ...this.context, ...options.context };
     const cmd = {
       command_id,
@@ -447,11 +591,12 @@ export class Kernable {
       aggregate_type: options.aggregateType,
       aggregate_id: options.aggregateId,
       command_type: options.type,
-      payload: encode(options.data),
+      payload: sealed.payload,
       context: toWireContext({ ...context, correlationId: context.correlationId || command_id }),
+      vault_refs: sealed.refs,
     };
     const signed = { ...cmd, client_sig: this.key.sign(commandMessage(cmd)) };
-    return this.clients.submit(signed, wait, handling.getStore());
+    return this.clients.submit(signed, wait, handling.getStore(), sealed.values);
   }
 
   /**
@@ -688,7 +833,7 @@ export class Listener {
       for (const e of m.batch.events) {
         const entry = this.handlers.get(`${e.domain}.${e.event_type}`) ?? this.handlers.get(`${e.domain}.*`);
         if (entry) {
-          const stored = toStored(e);
+          const stored = toStored(e, m.batch.vault);
           const event = entry.raw ? stored : { ...stored, ...upcast(this.domains.get(e.domain), e.domain, e.event_type, e.schema, stored.data) };
           await entry.handler(event, { replaying: e.global_position <= this.replayUpTo, follow: () => follow(event) });
         }
@@ -817,6 +962,7 @@ export class Worker {
   private async execute(call: SessionCall, x: NonNullable<KernelMessage["execute"]>): Promise<void> {
     const cmd = x.command;
     let events: WireNewEvent[];
+    let vault: WireVaultValue[] = [];
     let snapshot: WireSnapshot | undefined;
     try {
       const agg = this.byCommand.get(`${cmd.domain}.${cmd.command_type}`);
@@ -827,7 +973,8 @@ export class Worker {
         throw new Rejected(`snapshot schema ${x.snapshot.schema} is not ${agg.schema}`, "snapshot_stale");
       }
       const from = x.snapshot ? (decode(x.snapshot.state) as any) : agg.initial;
-      const state = agg.fold(x.history.map((e) => ({ type: e.event_type, schema: e.schema, data: decode(e.payload) })), from);
+      const history = x.history.map((e) => ({ type: e.event_type, schema: e.schema, data: unseal(decode(e.payload), x.vault).data }));
+      const state = agg.fold(history, from);
       let ids = 0;
       const ctx: CommandContext = {
         commandId: cmd.command_id,
@@ -836,9 +983,15 @@ export class Worker {
         id: () => derivedId(cmd.command_id, ids++),
         deadline: new Date(x.deadline),
       };
-      const produced = await agg.handlers.get(cmd.command_type)!(state, decode(cmd.payload), ctx);
-      events = produced.map((e) => ({ event_type: e.type, schema: agg.schemaOf(e.type), payload: encode(e.data) }));
-      snapshot = this.snapshot(agg, cmd, x.expected_version, state, events);
+      const produced = await agg.handlers.get(cmd.command_type)!(state, unseal(decode(cmd.payload), x.vault).data, ctx);
+      events = produced.map((e) => {
+        const def = agg.events.get(e.type);
+        const sealed = seal(e.data, def?.vault, cmd.aggregate_id);
+        vault.push(...sealed.values);
+        const erases = def?.eraser ? String(def.eraser(e.data, cmd.aggregate_id) ?? "") : "";
+        return { event_type: e.type, schema: agg.schemaOf(e.type), payload: sealed.payload, vault_refs: sealed.refs, erases };
+      });
+      snapshot = this.snapshot(agg, cmd, x.expected_version, state, produced);
     } catch (err) {
       if (err instanceof SchemaError) {
         // Not the command's fault: this worker cannot read the aggregate. Stop until updated.
@@ -853,16 +1006,17 @@ export class Worker {
       return;
     }
     const worker_sig = this.key.sign(resultMessage(cmd, x.expected_version, events));
-    call.write({ result: { lease_id: x.lease_id, events, worker_sig, ...(snapshot && { snapshot }) } });
+    call.write({ result: { lease_id: x.lease_id, events, worker_sig, vault, ...(snapshot && { snapshot }) } });
   }
 
   /** A snapshot of the state after `events`, if they cross a multiple of `snapshotEvery`. */
-  private snapshot(agg: Aggregate<any>, cmd: WireCommand, before: number, state: unknown, events: WireNewEvent[]) {
+  private snapshot(agg: Aggregate<any>, cmd: WireCommand, before: number, state: unknown, events: NewEvent[]) {
     const version = before + events.length;
     const every = agg.snapshotEvery;
     if (every <= 0 || events.length === 0 || Math.floor(version / every) === Math.floor(before / every)) return undefined;
-    // Apply the events as they will be read back, so the snapshot equals a replay.
-    const after = agg.fold(events.map((e) => ({ type: e.event_type, schema: e.schema, data: decode(e.payload) })), state);
+    // Apply the events as they will be read back (a JSON round trip), so the snapshot equals a replay.
+    const read = events.map((e) => ({ type: e.type, schema: agg.schemaOf(e.type), data: decode(encode(e.data)) }));
+    const after = agg.fold(read, state);
     const snapshot = { version, schema: agg.schema, state: encode(after) };
     const message = snapshotMessage(cmd, version, snapshot.schema, snapshot.state);
     return { ...snapshot, worker_sig: this.key.sign(message) };
@@ -931,7 +1085,7 @@ function toCheck(c: NonNullable<ListenerDelivery["check"]>): Check {
       type: x.command_type,
       aggregateType: x.aggregate_type,
       aggregateId: x.aggregate_id,
-      data: decode(x.payload),
+      data: unseal(decode(x.payload), c.vault).data,
       request: fromWireContext(x.context),
     };
   }
@@ -947,8 +1101,10 @@ function toCheck(c: NonNullable<ListenerDelivery["check"]>): Check {
   };
 }
 
-function toStored(e: WireEvent): StoredEvent {
+function toStored(e: WireEvent, vault?: WireVaultValue[]): StoredEvent {
+  const { data, redacted } = unseal(decode(e.payload), vault);
   return {
+    redacted,
     position: e.global_position,
     tenant: e.tenant_id,
     domain: e.domain,
@@ -957,7 +1113,7 @@ function toStored(e: WireEvent): StoredEvent {
     version: e.version,
     type: e.event_type,
     schema: e.schema,
-    data: decode(e.payload),
+    data,
     commandId: e.command_id,
     request: fromWireContext(e.context),
   };

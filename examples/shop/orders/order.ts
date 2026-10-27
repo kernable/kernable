@@ -8,7 +8,13 @@ interface Order {
   items: number;
 }
 
-export const order = domain("orders").aggregate<Order>("Order", { status: "none", items: 0 })
+export const orders = domain("orders");
+// The customer's email is personal data of the customer (an identity account): the vault keeps it,
+// and erasing the account erases it here too.
+orders.command("RecordConfirmation").personal(["email"], (d: { customerId: string }) => d.customerId);
+orders.event("ConfirmationSent", 1).personal(["email"], (d: { customerId: string }) => d.customerId);
+
+export const order = orders.aggregate<Order>("Order", { status: "none", items: 0 })
   .apply("OrderPlaced", () => ({ status: "draft", items: 0 }))
   .apply("ItemAdded", (s, e: { qty: number }) => ({ ...s, items: s.items + e.qty }))
   .apply("OrderSubmitted", (s) => ({ ...s, status: "submitted" }))
@@ -29,9 +35,9 @@ export const order = domain("orders").aggregate<Order>("Order", { status: "none"
     if (s.items === 0) throw new Rejected("Cannot submit an empty order", "invalid");
     return [{ type: "OrderSubmitted" }];
   })
-  .command("RecordConfirmation", (s, cmd: { email: string }) => {
+  .command("RecordConfirmation", (s, cmd: { email: string; customerId: string }) => {
     if (s.status !== "submitted") throw new Rejected(`Cannot confirm a ${s.status} order`, "invalid_state");
-    return [{ type: "ConfirmationSent", data: { email: cmd.email } }];
+    return [{ type: "ConfirmationSent", data: { email: cmd.email, customerId: cmd.customerId } }];
   })
   .command("CancelOrder", (s) => {
     if (s.status !== "draft" && s.status !== "submitted") throw new Rejected(`Cannot cancel a ${s.status} order`, "invalid_state");
@@ -43,10 +49,18 @@ export interface OrderRow {
   customerId: string;
   status: Exclude<Status, "none">;
   items: Record<string, number>;
-  confirmedTo?: string;
+  /** The email the confirmation went to; null once the customer's data is erased. */
+  confirmedTo?: string | null;
 }
 
-export const ORDER_EVENTS = ["orders.OrderPlaced", "orders.ItemAdded", "orders.OrderSubmitted", "orders.ConfirmationSent", "orders.OrderCancelled"];
+export const ORDER_EVENTS = [
+  "orders.OrderPlaced",
+  "orders.ItemAdded",
+  "orders.OrderSubmitted",
+  "orders.ConfirmationSent",
+  "orders.OrderCancelled",
+  "identity.AccountErased",
+];
 
 export function project(rows: Map<string, OrderRow>, e: StoredEvent): void {
   const data = e.data as any;
@@ -67,6 +81,10 @@ export function project(rows: Map<string, OrderRow>, e: StoredEvent): void {
       break;
     case "OrderCancelled":
       row.status = "cancelled";
+      break;
+    case "AccountErased":
+      // Personal data of an erased customer goes from every order (rebuilt, it reads null anyway).
+      for (const r of rows.values()) if (r.customerId === e.aggregateId && r.confirmedTo) r.confirmedTo = null;
       break;
   }
 }

@@ -13,7 +13,7 @@ message LogRecord {
     RejectedRecord rejected = 3;
     CheckpointRecord checkpoint = 4;
     ListenerRecord listener = 5;
-    SnapshotRecord snapshot = 6;
+    SnapshotRecord snapshot = 6; // format 1 only: snapshots now live in the snapshot store
     FormatRecord format = 7;
   }
 }

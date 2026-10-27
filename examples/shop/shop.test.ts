@@ -5,6 +5,8 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { Kernable, type StoredEvent } from "../../sdks/typescript/src/index.ts";
@@ -14,6 +16,7 @@ import { ORDER_EVENTS, project, type OrderRow } from "./orders/order.ts";
 const ROOT = new URL("../../", import.meta.url).pathname;
 const PYTHON = process.env.KERNABLE_PYTHON ?? `${ROOT}sdks/python/.venv/bin/python`;
 const COMMANDS = ["identity.*", "orders.*"];
+const PASSWORD = "correct horse";
 
 /** One service process that can be killed and started again. */
 class Service {
@@ -103,6 +106,27 @@ async function until<T>(get: () => Promise<T>, ok: (v: T) => boolean, what: stri
 
 const LISTENERS = ["accounts", "rbac", "orders", "confirmations"];
 
+/**
+ * The events of the orders read model, replayed from the log by a fresh listener (which, unlike a
+ * subscription, gets the vault values it may read), until `done` holds.
+ */
+async function replay(s: Shop, done: (events: StoredEvent[]) => boolean): Promise<StoredEvent[]> {
+  const kernable = new Kernable({ url: s.kernel.url, key: s.kernel.appKey, tls: s.kernel.tlsFiles });
+  const events: StoredEvent[] = [];
+  const model = kernable.readModel(`replay-${Date.now()}`);
+  for (const type of [...ORDER_EVENTS, "identity.AccountRegistered"]) model.on(type, (e) => void events.push(e));
+  const running = model.run();
+  try {
+    await until(async () => events, done, "replay");
+    await new Promise((r) => setTimeout(r, 200));
+    return events;
+  } finally {
+    model.stop();
+    await running;
+    kernable.close();
+  }
+}
+
 /** Waits until every listener is connected again: until then, the rbac middleware refuses. */
 async function reconnected(s: Shop): Promise<void> {
   const metrics = () => fetch(s.kernel.metricsUrl!).then((r) => r.text());
@@ -114,12 +138,12 @@ test("every response shows its own write, across both languages", async () => {
   const s = await shop();
   try {
     // Written by the API, executed by the Python worker, read from the Python read model.
-    assert.deepEqual(await s.call("POST", "/accounts", { id: "a1", email: "ann@example.com", name: "Ann" }, "a1"), [
+    assert.deepEqual(await s.call("POST", "/accounts", { id: "a1", email: "ann@example.com", name: "Ann", password: PASSWORD }, "a1"), [
       200,
       { id: "a1", status: "active", email: "ann@example.com", name: "Ann" },
     ]);
-    assert.equal((await s.call("POST", "/accounts", { id: "a1", email: "ann@example.com" }, "a1"))[0], 409);
-    assert.equal((await s.call("POST", "/accounts", { id: "a2", email: "nope" }, "a2"))[0], 422);
+    assert.equal((await s.call("POST", "/accounts", { id: "a1", email: "ann@example.com", password: PASSWORD }, "a1"))[0], 409);
+    assert.equal((await s.call("POST", "/accounts", { id: "a2", email: "nope", password: PASSWORD }, "a2"))[0], 422);
 
     assert.deepEqual(await s.call("POST", "/orders", { id: "o1", customerId: "a1" }, "a1"), [
       200,
@@ -142,8 +166,8 @@ test("every response shows its own write, across both languages", async () => {
 test("the rbac middleware (Python) guards both domains' commands and queries", async () => {
   const s = await shop();
   try {
-    assert.equal((await s.call("POST", "/accounts", { id: "a1", email: "ann@example.com" }, "a1"))[0], 200);
-    assert.equal((await s.call("POST", "/accounts", { id: "b1", email: "bob@example.com" }, "b1"))[0], 200);
+    assert.equal((await s.call("POST", "/accounts", { id: "a1", email: "ann@example.com", password: PASSWORD }, "a1"))[0], 200);
+    assert.equal((await s.call("POST", "/accounts", { id: "b1", email: "bob@example.com", password: PASSWORD }, "b1"))[0], 200);
     assert.equal((await s.call("POST", "/orders", { id: "o1", customerId: "a1" }, "a1"))[0], 200);
 
     // Someone else's order and account: neither readable nor changeable.
@@ -179,7 +203,7 @@ test("kill -9 of each process loses and duplicates nothing", async () => {
     const order = async () => {
       n++;
       const as = `a${n}`;
-      assert.equal((await s.call("POST", "/accounts", { id: as, email: `c${n}@example.com` }, as))[0], 200);
+      assert.equal((await s.call("POST", "/accounts", { id: as, email: `c${n}@example.com`, password: PASSWORD }, as))[0], 200);
       assert.equal((await s.call("POST", "/orders", { id: `o${n}`, customerId: as }, as))[0], 200);
       assert.equal((await s.call("POST", `/orders/o${n}/items`, { sku: "x", qty: n }, as))[0], 200);
       assert.equal((await s.call("POST", `/orders/o${n}/submit`, undefined, as))[0], 200);
@@ -200,13 +224,7 @@ test("kill -9 of each process loses and duplicates nothing", async () => {
     for (let i = 1; i <= n; i++) {
       await until(() => s.call("GET", `/orders/o${i}`, undefined, `a${i}`), ([, o]) => o.status === "confirmed", `confirmation of o${i}`);
     }
-    const kernable = new Kernable({ url: s.kernel.url, key: s.kernel.appKey, tls: s.kernel.tlsFiles });
-    const events: StoredEvent[] = [];
-    const replay = kernable.subscribe({ types: ORDER_EVENTS }, (e) => void events.push(e));
-    await until(async () => events.filter((e) => e.type === "ConfirmationSent").length, (c) => c >= n, "replay");
-    await new Promise((r) => setTimeout(r, 200));
-    replay.stop();
-    kernable.close();
+    const events = await replay(s, (events) => events.filter((e) => e.type === "ConfirmationSent").length >= n);
     const confirmations = events.filter((e) => e.type === "ConfirmationSent").map((e) => e.aggregateId);
     assert.deepEqual(confirmations.sort(), Array.from({ length: n }, (_, i) => `o${i + 1}`).sort());
     // Each confirmation names the command that submitted the order as its cause.
@@ -229,6 +247,43 @@ test("kill -9 of each process loses and duplicates nothing", async () => {
       assert.match(metrics, new RegExp(`^kernable_listener_lag\\{listener="${listener}"\\} 0$`, "m"));
       assert.match(metrics, new RegExp(`^kernable_listener_connected\\{listener="${listener}"\\} 1$`, "m"));
     }
+  } finally {
+    await s.dispose();
+  }
+});
+
+test("personal data lives in the vault, and erasing an account erases it in both domains", async () => {
+  const s = await shop();
+  try {
+    const account = { id: "a1", email: "ann@example.com", name: "Ann", password: PASSWORD };
+    assert.equal((await s.call("POST", "/accounts", account, "a1"))[0], 200);
+    // The password is a secret: the handler checks it, nothing keeps it.
+    assert.equal((await s.call("POST", "/accounts/a1/sign-in", { password: "wrong password" }, "a1"))[0], 401);
+    assert.deepEqual(await s.call("POST", "/accounts/a1/sign-in", { password: PASSWORD }, "a1"), [200, { signedIn: true }]);
+    assert.equal((await s.call("POST", "/orders", { id: "o1", customerId: "a1" }, "a1"))[0], 200);
+    assert.equal((await s.call("POST", "/orders/o1/items", { sku: "apple", qty: 1 }, "a1"))[0], 200);
+    assert.equal((await s.call("POST", "/orders/o1/submit", undefined, "a1"))[0], 200);
+    const confirmed = await until(() => s.call("GET", "/orders/o1", undefined, "a1"), ([, o]) => o.status === "confirmed", "confirmation");
+    assert.equal(confirmed[1].confirmedTo, "ann@example.com");
+
+    // Neither the email nor the password is in any of the kernel's files in clear.
+    const files = readdirSync(s.kernel.dir, { withFileTypes: true }).filter((f) => f.isFile());
+    for (const f of files) {
+      const content = readFileSync(join(s.kernel.dir, f.name));
+      assert.ok(!content.includes("ann@example.com") && !content.includes(PASSWORD), `${f.name} holds personal data`);
+    }
+
+    // Erasing the account: it can no longer act, and the log reads null where its data was, in
+    // the identity domain and in the orders domain alike.
+    assert.deepEqual(await s.call("DELETE", "/accounts/a1", undefined, "a1"), [200, { erased: true }]);
+    assert.equal((await s.call("GET", "/accounts/a1", undefined, "a1"))[0], 403);
+    const events = await replay(s, (events) => events.some((e) => e.type === "AccountErased"));
+    const registered = events.find((e) => e.type === "AccountRegistered")!;
+    assert.deepEqual([(registered.data as any).email, registered.redacted.sort()], [null, ["email", "name", "passwordHash"]]);
+    const rows = new Map<string, OrderRow>();
+    for (const e of events) project(rows, e);
+    assert.equal(rows.get("o1")!.confirmedTo, null);
+    assert.match(s.kernel.verify(), /OK/);
   } finally {
     await s.dispose();
   }

@@ -22,7 +22,7 @@ class TestKernel:
         self.app_key = f"{self.dir}/app.key"
         self.store = (f"file:{self.dir}/k.log" if os.environ.get("KERNABLE_TEST_STORE") == "file"
                       else f"sqlite:{self.dir}/k.db")
-        ids = {name: self._write_key(name) for name in ("kernel", "app")}
+        ids = {name: self._write_key(name) for name in ("kernel", "app", "vault")}
         types = ", ".join(f'"{t}"' for t in command_types)
         with open(f"{self.dir}/kernable.toml", "w") as f:
             f.write(f'store = "{self.store}"\nlisten = "{self.url}"\nkernel_key = "kernel.key"\n'
@@ -32,7 +32,10 @@ class TestKernel:
                     f'[listeners]\n"{ids["app"]}" = ["*"]\n'
                     f'[queriers]\n"{ids["app"]}" = ["*"]\n'
                     f'[query_handlers]\n"{ids["app"]}" = ["*"]\n'
-                    f'[middlewares]\n"{ids["app"]}" = ["*"]\n')
+                    f'[middlewares]\n"{ids["app"]}" = ["*"]\n'
+                    f'[vault]\nstore = "vault.db"\nkey = "vault.key"\n'
+                    f'[vault.readers]\n"{ids["app"]}" = ["*"]\n'
+                    f'[vault.erasers]\n"{ids["app"]}" = ["*"]\n')
         self.process: subprocess.Popen | None = None
 
     def _write_key(self, name: str) -> str:

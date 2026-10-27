@@ -48,6 +48,7 @@ fn vectors() -> Value {
         ],
     };
     let cmd = Command {
+        vault_refs: Vec::new(),
         command_id: "c-1".into(),
         tenant_id: "t-1".into(),
         domain: "orders".into(),
@@ -60,11 +61,15 @@ fn vectors() -> Value {
     };
     let events = [
         NewEvent {
+            erases: String::new(),
+            vault_refs: Vec::new(),
             event_type: "OrderPlaced".into(),
             payload: br#"{"customerId":"k-1"}"#.to_vec(),
             schema: 2,
         },
         NewEvent {
+            erases: String::new(),
+            vault_refs: Vec::new(),
             event_type: "ItemAdded".into(),
             payload: br#"{"sku":"x"}"#.to_vec(),
             schema: 1,
@@ -78,6 +83,8 @@ fn vectors() -> Value {
     let chain_hash = [2u8; 32];
     let producer_msg = signing::result_message(&cmd, 0, &events[..1]);
     let event = Event {
+        erases: String::new(),
+        vault_refs: Vec::new(),
         global_position: 1,
         tenant_id: cmd.tenant_id.clone(),
         domain: cmd.domain.clone(),
@@ -93,6 +100,24 @@ fn vectors() -> Value {
         producer_sig: Some(signing::sign(&key, &producer_msg)),
         context: Some(context.clone()),
     };
+    // The same command and events with vault references, and an event that erases a subject.
+    let salt = [9u8; 16];
+    let email = br#""max@firma.de""#;
+    let vault_ref = signing::vault_ref(&salt, "k-1", false, email);
+    let secret_ref = signing::vault_ref(&salt, "", true, br#""geheim""#);
+    let vault_cmd = Command {
+        vault_refs: vec![vault_ref.clone(), secret_ref.clone()],
+        ..cmd.clone()
+    };
+    let mut vault_events = events.clone();
+    vault_events[0].vault_refs = vec![vault_ref.clone()];
+    vault_events[1].erases = "k-2".into();
+    let vault_event = Event {
+        vault_refs: vec![vault_ref.clone()],
+        erases: "k-2".into(),
+        ..event.clone()
+    };
+
     let context_json = json!({
         "sender_tenant": context.sender_tenant, "sender_identity": context.sender_identity,
         "sender_account": context.sender_account, "sender_session": context.sender_session,
@@ -160,6 +185,25 @@ fn vectors() -> Value {
         "derived_id": {
             "input": { "command_id": cmd.command_id, "n": [0, 1, 2] },
             "ids": (0..3).map(|n| signing::derived_id(&cmd.command_id, n)).collect::<Vec<_>>(),
+        },
+        "vault_ref": {
+            "input": [
+                {"salt_hex": hex::encode(salt), "subject": "k-1", "secret": false, "value_hex": hex::encode(email)},
+                {"salt_hex": hex::encode(salt), "subject": "", "secret": true, "value_hex": hex::encode(br#""geheim""#)},
+            ],
+            "refs": [vault_ref, secret_ref],
+        },
+        "command_vault": entry(
+            json!({"command": cmd_json, "vault_refs": vault_cmd.vault_refs}),
+            signing::command_message(&vault_cmd),
+        ),
+        "result_vault": entry(
+            json!({"vault_refs": [[vault_ref], []], "erases": ["", "k-2"]}),
+            signing::result_message(&cmd, 0, &vault_events),
+        ),
+        "event_hash_vault": {
+            "input": {"vault_refs": [vault_ref], "erases": "k-2"},
+            "hash": hex::encode(signing::event_hash(&GENESIS, &vault_event)),
         },
         "event_hash": {
             "input": {

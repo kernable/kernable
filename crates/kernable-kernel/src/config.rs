@@ -87,9 +87,32 @@ pub struct Config {
     #[serde(default)]
     pub privileged: HashMap<String, Vec<String>>,
     pub tls: Option<Tls>,
+    /// Where snapshots live: `sqlite:<path>` or `memory:` (default; rebuilt after a restart).
+    #[serde(default = "default_snapshots")]
+    pub snapshots: String,
+    /// Personal and secret values; commands and events that refer to the vault are refused
+    /// without it.
+    pub vault: Option<VaultConfig>,
     /// Address for Prometheus metrics (`GET /metrics`), `GET /health` and `GET /ready`; off
     /// when absent.
     pub metrics_listen: Option<String>,
+}
+
+/// `[vault]`: where values live, the key that encrypts them, and who may read and erase them.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VaultConfig {
+    /// `sqlite:<path>` (or a bare path) or `memory:`.
+    pub store: String,
+    /// A file with 32 random bytes, hex encoded (`kernable keys new vault` writes one).
+    pub key: PathBuf,
+    /// Listener and middleware keys that get the values of these event and command types.
+    /// Workers always get the values of the commands they run.
+    #[serde(default)]
+    pub readers: HashMap<String, Vec<String>>,
+    /// Worker keys whose events of these types may erase a subject.
+    #[serde(default)]
+    pub erasers: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -124,6 +147,10 @@ fn default_middleware_timeout_ms() -> u64 {
     5_000
 }
 
+fn default_snapshots() -> String {
+    "memory:".into()
+}
+
 fn default_drain_timeout_ms() -> u64 {
     10_000
 }
@@ -138,6 +165,15 @@ impl Config {
             config.store = format!("{backend}:{}", dir.join(store).display());
         }
         config.kernel_key = dir.join(&config.kernel_key);
+        let in_dir = |url: &str| match kernable_store::backend(url) {
+            ("memory", _) => url.to_owned(),
+            (backend, path) => format!("{backend}:{}", dir.join(path).display()),
+        };
+        config.snapshots = in_dir(&config.snapshots);
+        if let Some(vault) = &mut config.vault {
+            vault.store = in_dir(&vault.store);
+            vault.key = dir.join(&vault.key);
+        }
         if let Some(tls) = &mut config.tls {
             for path in [&mut tls.cert, &mut tls.key, &mut tls.client_ca] {
                 *path = dir.join(&*path);

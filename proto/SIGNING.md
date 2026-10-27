@@ -25,9 +25,9 @@ Each message starts with a `str` **tag** for domain separation. Payloads are sig
 
 | Signed by | Tag | Fields after the tag |
 |---|---|---|
-| Client | `kernable.v1.command` | `command_id`, `tenant_id`, `domain`, `aggregate_type`, `aggregate_id`, `command_type`, `payload`, `context` |
+| Client | `kernable.v1.command` | `command_id`, `tenant_id`, `domain`, `aggregate_type`, `aggregate_id`, `command_type`, `payload`, `context`, then the vault fields (see below) |
 | Client | `kernable.v1.query` | `query_id`, `tenant_id`, `domain`, `query_type`, `payload`, `context`, `min_position: u64`, `issued_at: i64` |
-| Worker | `kernable.v1.result` | `command_id`, `tenant_id`, `domain`, `aggregate_type`, `aggregate_id`, `expected_version: u64`, `event_count: u64`, then per event `event_type`, `schema: u64`, `payload` |
+| Worker | `kernable.v1.result` | `command_id`, `tenant_id`, `domain`, `aggregate_type`, `aggregate_id`, `expected_version: u64`, `event_count: u64`, then per event `event_type`, `schema: u64`, `payload`, then the vault fields (see below) |
 | Worker | `kernable.v1.rejection` | `command_id`, `code`, `message` |
 | Worker | `kernable.v1.snapshot` | `tenant_id`, `domain`, `aggregate_type`, `aggregate_id`, `version: u64`, `schema`, `state` |
 | Worker, listener | `kernable.v1.challenge` | `nonce` |
@@ -50,6 +50,23 @@ A subscribe request is valid for 60 s around `issued_at`. Within that window a c
 2. Use the first 16 bytes and set the UUID version to 8 (`b[6] = b[6] & 0x0f | 0x80`) and the RFC 9562 variant (`b[8] = b[8] & 0x3f | 0x80`).
 3. Format the result as a lowercase hyphenated UUID.
 
+## Vault references
+
+A command or event keeps personal and secret values in the vault instead of its payload. The payload holds `{"$vault": ref}` in their place. The `ref` is the lowercase hex SHA-256 of the message with tag `kernable.v1.vault`, followed by these fields:
+
+1. `salt` (16 random bytes)
+2. `subject` (empty for secrets)
+3. `secret: u64` (1 or 0)
+4. `value` (the JSON encoding of the field)
+
+The salt makes a reference reveal nothing about its value, also once the value is erased.
+
+**Appended only when set.** The vault fields came with data format 2. They are appended to signed messages and to the event hash only when they are set, so signatures and hashes made before stay valid:
+
+- **Command:** if `vault_refs` is not empty, `count: u64`, then every ref.
+- **Result:** if any event has `vault_refs` or `erases`, then per event `count: u64`, every ref, and `erases`.
+- **Event hash:** if `vault_refs` or `erases` is set, `count: u64`, every ref, and `erases`, after `context`.
+
 ## Event hash chain
 
 Each stored event has `hash = SHA-256(message)`, where `message` has the tag `kernable.v1.event` followed by these fields:
@@ -69,6 +86,7 @@ Each stored event has `hash = SHA-256(message)`, where `message` has the tag `ke
 13. `producer_key_id`
 14. `producer_sig`
 15. `context` (of the command that caused the event)
+16. the vault fields, only when set (see above)
 
 `prev_hash` is the hash of the event at the previous global position. For the first event it is 32 zero bytes. Every event of a command stores that command's worker result signature as `producer_sig`.
 

@@ -15,7 +15,7 @@ use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
         Command, CommandResult, Committed, Event, ListenerRecord, NewEvent, Rejected,
-        RequestContext, Signature, SnapshotRecord, command_result::Outcome,
+        RequestContext, Signature, command_result::Outcome,
     },
     signing::{self, GENESIS},
 };
@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS events (
     producer_key_id TEXT    NOT NULL,
     producer_sig    BLOB    NOT NULL,
     context         BLOB,             -- encoded RequestContext of the command
+    vault_refs      TEXT    NOT NULL DEFAULT '', -- comma-separated
+    erases          TEXT    NOT NULL DEFAULT '',
     prev_hash       BLOB    NOT NULL,
     hash            BLOB    NOT NULL,
     UNIQUE (tenant_id, domain, aggregate_type, aggregate_id, version)
@@ -58,6 +60,7 @@ CREATE TABLE IF NOT EXISTS commands (
     client_key_id    TEXT,
     client_sig       BLOB,
     context          BLOB,             -- encoded RequestContext
+    vault_refs       TEXT    NOT NULL DEFAULT '', -- comma-separated
     status           TEXT    NOT NULL, -- pending | committed | rejected
     result           BLOB,             -- encoded CommandResult once completed
     created_at       INTEGER NOT NULL
@@ -70,14 +73,6 @@ CREATE TABLE IF NOT EXISTS checkpoints (
     kernel_sig      BLOB    NOT NULL,
     created_at      INTEGER NOT NULL
 ) STRICT;
-CREATE TABLE IF NOT EXISTS snapshots (
-    tenant_id      TEXT NOT NULL,
-    domain         TEXT NOT NULL,
-    aggregate_type TEXT NOT NULL,
-    aggregate_id   TEXT NOT NULL,
-    record         BLOB NOT NULL, -- encoded SnapshotRecord
-    PRIMARY KEY (tenant_id, domain, aggregate_type, aggregate_id)
-) STRICT;
 CREATE TABLE IF NOT EXISTS listeners (
     name   TEXT PRIMARY KEY,
     record BLOB NOT NULL -- encoded ListenerRecord
@@ -86,10 +81,11 @@ CREATE TABLE IF NOT EXISTS listeners (
 
 const EVENT_COLUMNS: &str = "global_position, tenant_id, aggregate_type, aggregate_id, version, \
                              event_type, payload, command_id, created_at, \
-                             producer_key_id, producer_sig, hash, context, domain, schema";
+                             producer_key_id, producer_sig, hash, context, domain, schema, \
+                             vault_refs, erases";
 
 const COMMAND_COLUMNS: &str = "command_id, tenant_id, aggregate_type, aggregate_id, command_type, \
-                               payload, client_key_id, client_sig, context, domain";
+                               payload, client_key_id, client_sig, context, domain, vault_refs";
 
 pub struct SqliteStore {
     conn: Mutex<Connection>,
@@ -182,8 +178,8 @@ impl Store for SqliteStore {
         let inserted = conn.execute(
             "INSERT INTO commands (command_id, tenant_id, aggregate_type, aggregate_id, command_type,
                                    payload, client_key_id, client_sig, context, domain, status,
-                                   created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'pending', ?11)
+                                   created_at, vault_refs)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'pending', ?11, ?12)
              ON CONFLICT (command_id) DO NOTHING",
             params![
                 cmd.command_id,
@@ -196,7 +192,8 @@ impl Store for SqliteStore {
                 sig,
                 cmd.context.as_ref().map(Message::encode_to_vec),
                 cmd.domain,
-                now_ms
+                now_ms,
+                cmd.vault_refs.join(",")
             ],
         )?;
         if inserted == 1 {
@@ -216,7 +213,7 @@ impl Store for SqliteStore {
         let rows = stmt.query_map([], |r| {
             Ok(Pending {
                 command: command_from_row(r)?,
-                received_at: r.get(10)?,
+                received_at: r.get(11)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -278,6 +275,8 @@ impl Store for SqliteStore {
                 version,
                 event_type: e.event_type.clone(),
                 schema: e.schema,
+                vault_refs: e.vault_refs.clone(),
+                erases: e.erases.clone(),
                 payload: e.payload.clone(),
                 command_id: cmd.command_id.clone(),
                 created_at: now_ms,
@@ -290,8 +289,9 @@ impl Store for SqliteStore {
                 "INSERT INTO events (global_position, tenant_id, aggregate_type, aggregate_id, version,
                                      event_type, payload, command_id, created_at,
                                      producer_key_id, producer_sig, prev_hash, hash, context, domain,
-                                     schema)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                                     schema, vault_refs, erases)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+                         ?18)",
                 params![
                     event.global_position,
                     event.tenant_id,
@@ -308,7 +308,9 @@ impl Store for SqliteStore {
                     event.hash,
                     event.context.as_ref().map(Message::encode_to_vec),
                     event.domain,
-                    event.schema
+                    event.schema,
+                    event.vault_refs.join(","),
+                    event.erases
                 ],
             )?;
             prev = event.hash.clone();
@@ -346,55 +348,6 @@ impl Store for SqliteStore {
     /// The final result of a command, once it is committed or rejected.
     fn result(&self, command_id: &str) -> Result<Option<CommandResult>> {
         stored_result(&self.conn(), command_id)
-    }
-
-    // ---- snapshots ----
-
-    fn snapshot(
-        &self,
-        tenant_id: &str,
-        domain: &str,
-        aggregate_type: &str,
-        aggregate_id: &str,
-    ) -> Result<Option<SnapshotRecord>> {
-        let bytes: Option<Vec<u8>> = self
-            .conn()
-            .query_row(
-                "SELECT record FROM snapshots
-                 WHERE tenant_id = ?1 AND domain = ?2 AND aggregate_type = ?3 AND aggregate_id = ?4",
-                params![tenant_id, domain, aggregate_type, aggregate_id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        Ok(bytes
-            .map(|b| SnapshotRecord::decode(b.as_slice()))
-            .transpose()?)
-    }
-
-    fn save_snapshot(&self, record: &SnapshotRecord) -> Result<()> {
-        let r = record;
-        if r.removed {
-            self.conn().execute(
-                "DELETE FROM snapshots
-                 WHERE tenant_id = ?1 AND domain = ?2 AND aggregate_type = ?3 AND aggregate_id = ?4",
-                params![r.tenant_id, r.domain, r.aggregate_type, r.aggregate_id],
-            )?;
-        } else {
-            self.conn().execute(
-                "INSERT INTO snapshots (tenant_id, domain, aggregate_type, aggregate_id, record)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT (tenant_id, domain, aggregate_type, aggregate_id)
-                 DO UPDATE SET record = excluded.record",
-                params![
-                    r.tenant_id,
-                    r.domain,
-                    r.aggregate_type,
-                    r.aggregate_id,
-                    r.encode_to_vec()
-                ],
-            )?;
-        }
-        Ok(())
     }
 
     // ---- listeners ----
@@ -497,31 +450,8 @@ fn verify_tables(conn: &Connection, kernel_key_id: &str) -> Result<Report> {
     ))?;
     let mut rows = stmt.query([])?;
     while let Some(r) = rows.next()? {
-        let prev_hash: Vec<u8> = r.get(15)?;
+        let prev_hash: Vec<u8> = r.get(17)?;
         v.event(event_from_row(r)?, &prev_hash);
-    }
-
-    let mut stmt = conn.prepare("SELECT record FROM snapshots")?;
-    let mut rows = stmt.query([])?;
-    while let Some(r) = rows.next()? {
-        let record = SnapshotRecord::decode(r.get::<_, Vec<u8>>(0)?.as_slice())?;
-        let version = record.snapshot.as_ref().map_or(0, |s| s.version);
-        let hash: Option<Vec<u8>> = conn
-            .query_row(
-                "SELECT hash FROM events
-                 WHERE tenant_id = ?1 AND domain = ?2 AND aggregate_type = ?3 AND aggregate_id = ?4
-                   AND version = ?5",
-                params![
-                    record.tenant_id,
-                    record.domain,
-                    record.aggregate_type,
-                    record.aggregate_id,
-                    version
-                ],
-                |r| r.get(0),
-            )
-            .optional()?;
-        v.snapshot(&record, hash.as_deref());
     }
 
     let mut stmt = conn.prepare(&format!(
@@ -550,6 +480,8 @@ fn event_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
         context: context_from(r.get(12)?)?,
         domain: r.get(13)?,
         schema: r.get(14)?,
+        vault_refs: split_refs(r.get(15)?),
+        erases: r.get(16)?,
     })
 }
 
@@ -564,7 +496,15 @@ fn command_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Command> {
         client_sig: join_sig(r.get(6)?, r.get(7)?),
         context: context_from(r.get(8)?)?,
         domain: r.get(9)?,
+        vault_refs: split_refs(r.get(10)?),
     })
+}
+
+fn split_refs(joined: String) -> Vec<String> {
+    if joined.is_empty() {
+        return Vec::new();
+    }
+    joined.split(',').map(str::to_owned).collect()
 }
 
 fn context_from(bytes: Option<Vec<u8>>) -> rusqlite::Result<Option<RequestContext>> {
@@ -637,4 +577,27 @@ fn stored_result(conn: &Connection, command_id: &str) -> Result<Option<CommandRe
     Ok(bytes
         .map(|b| CommandResult::decode(b.as_slice()))
         .transpose()?)
+}
+
+/// Upgrades a SQLite store to [`FORMAT`]; returns the format it had.
+pub(crate) fn migrate(path: &Path) -> Result<u32> {
+    let mut conn = Connection::open(path)?;
+    let format: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    match format {
+        FORMAT => {}
+        1 => {
+            let tx = conn.transaction()?;
+            tx.execute_batch(
+                "ALTER TABLE events ADD COLUMN vault_refs TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE events ADD COLUMN erases TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE commands ADD COLUMN vault_refs TEXT NOT NULL DEFAULT '';
+                 DROP TABLE IF EXISTS snapshots;
+                 PRAGMA user_version = 2;",
+            )?;
+            tx.commit()?;
+            conn.execute_batch("VACUUM")?; // the dropped snapshots leave no traces in the file
+        }
+        found => return Err(Error::Format(found)),
+    }
+    Ok(format)
 }

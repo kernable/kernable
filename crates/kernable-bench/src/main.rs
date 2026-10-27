@@ -168,6 +168,8 @@ fn store(url: &str, count: usize) -> Result<(), BoxError> {
         )?;
         let version = history.last().map_or(0, |e| e.version);
         let events = [NewEvent {
+            erases: String::new(),
+            vault_refs: Vec::new(),
             event_type: "Written".into(),
             payload: cmd.payload.clone(),
             schema: 1,
@@ -215,6 +217,8 @@ async fn worker(addr: &str, key: &str, concurrency: u32) -> Result<(), BoxError>
             Some(Out::Execute(x)) => {
                 let cmd = x.command.unwrap_or_default();
                 let events = vec![NewEvent {
+                    erases: String::new(),
+                    vault_refs: Vec::new(),
                     event_type: "Written".into(),
                     payload: cmd.payload.clone(),
                     schema: 1,
@@ -224,6 +228,7 @@ async fn worker(addr: &str, key: &str, concurrency: u32) -> Result<(), BoxError>
                     &signing::result_message(&cmd, x.expected_version, &events),
                 );
                 In::Result(WorkResult {
+                    vault: Vec::new(),
                     lease_id: x.lease_id,
                     events,
                     worker_sig: Some(sig),
@@ -312,6 +317,7 @@ async fn channels(addr: &str, n: usize) -> Result<Vec<Channel>, BoxError> {
 
 async fn submit(channel: Channel, cmd: Command, wait: Wait) -> Result<Outcome, tonic::Status> {
     let request = SubmitRequest {
+        vault: Vec::new(),
         listener: String::new(),
         protocol: kernable_core::PROTOCOL,
         command: Some(cmd),
@@ -423,6 +429,7 @@ async fn history(addr: &str, key: &str, events: usize) -> Result<(), BoxError> {
 
 fn command(run: &str, i: usize, aggregates: usize, payload: &[u8]) -> Command {
     Command {
+        vault_refs: Vec::new(),
         command_id: format!("{run}-{i}"),
         tenant_id: "bench".into(),
         domain: "bench".into(),

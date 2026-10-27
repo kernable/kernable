@@ -10,13 +10,20 @@
 // Mutual TLS: set KERNABLE_TLS_CA, KERNABLE_TLS_CERT and KERNABLE_TLS_KEY.
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
-import { Kernable, NotSettled, Rejected, type RequestContext, type SubmitOptions } from "../../../sdks/typescript/src/index.ts";
-import { ORDER_EVENTS, order, project, type OrderRow } from "./order.ts";
+import { Kernable, NotSettled, Rejected, domain, type RequestContext, type SubmitOptions } from "../../../sdks/typescript/src/index.ts";
+import { ORDER_EVENTS, order, orders, project, type OrderRow } from "./order.ts";
+
+// The identity commands this API submits, with the fields the vault keeps (as declared by the
+// identity service in Python): the SDK moves them out of the signed command before it is sent.
+const identity = domain("identity");
+identity.command("RegisterAccount").personal(["email", "name"], (_d, account) => account).secret(["password"]);
+identity.command("ChangeEmail").personal(["email"], (_d, account) => account);
+identity.command("SignIn").secret(["password"]);
 
 const [url, key, port] = process.argv.slice(2);
 const env = process.env;
 const tls = env.KERNABLE_TLS_CA ? { ca: env.KERNABLE_TLS_CA, cert: env.KERNABLE_TLS_CERT!, key: env.KERNABLE_TLS_KEY! } : undefined;
-const kernable = new Kernable({ url, key, tenant: "shop", tls, context: { senderIdentity: "svc-orders" } });
+const kernable = new Kernable({ url, key, tenant: "shop", tls, context: { senderIdentity: "svc-orders" } }).use(identity, orders);
 
 // ---- read model: in memory, rebuilt from the first event on every start ----
 
@@ -63,7 +70,7 @@ const confirmations = kernable.reactor("confirmations").on("orders.OrderSubmitte
     aggregateType: "Order",
     aggregateId: e.aggregateId,
     type: "RecordConfirmation",
-    data: { email: customer.email },
+    data: { email: customer.email, customerId: row.customerId },
     id: `confirm-${e.aggregateId}`,
     context: ctx.follow(),
   });
@@ -74,7 +81,7 @@ const confirmations = kernable.reactor("confirmations").on("orders.OrderSubmitte
 
 type Reply = [status: number, body: unknown];
 
-const STATUS: Record<string, number> = { exists: 409, forbidden: 403 };
+const STATUS: Record<string, number> = { exists: 409, forbidden: 403, denied: 401 };
 
 async function run(options: SubmitOptions, show: () => Promise<unknown> | unknown): Promise<Reply> {
   try {
@@ -101,6 +108,14 @@ async function route(method: string, path: string, body: any, as: RequestContext
   if (method === "GET" && (m = path.match(/^\/accounts\/([^/]+)$/))) {
     const row = await account(m[1]);
     return row ? [200, row] : [404, { error: "not found" }];
+  }
+  if (method === "POST" && (m = path.match(/^\/accounts\/([^/]+)\/sign-in$/))) {
+    const id = m[1];
+    return run({ domain: "identity", aggregateType: "Account", aggregateId: id, type: "SignIn", data: body, context: as }, () => ({ signedIn: true }));
+  }
+  if (method === "DELETE" && (m = path.match(/^\/accounts\/([^/]+)$/))) {
+    const id = m[1];
+    return run({ domain: "identity", aggregateType: "Account", aggregateId: id, type: "EraseAccount", context: as }, () => ({ erased: true }));
   }
   if (method === "POST" && (m = path.match(/^\/accounts\/([^/]+)\/email$/))) {
     const id = m[1];

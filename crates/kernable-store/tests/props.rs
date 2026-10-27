@@ -36,6 +36,8 @@ fn command(id: usize, aggregate: usize) -> Command {
 fn events(n: usize) -> Vec<NewEvent> {
     (0..n)
         .map(|i| NewEvent {
+            erases: String::new(),
+            vault_refs: Vec::new(),
             event_type: format!("Done{i}"),
             payload: format!(r#"{{"i":{i}}}"#).into_bytes(),
             schema: 1,

@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 ed25519-dalek.workspace = true
 getrandom.workspace = true
+hex.workspace = true
 kernable-core = { path = "../kernable-core" }
 kernable-store = { path = "../kernable-store" }
 serde.workspace = true
@@ -26,6 +27,8 @@ crash-points = []
 kernable-core = { path = "../kernable-core", features = ["certs"] }
 rusqlite.workspace = true
 proptest.workspace = true
+serde_json.workspace = true
+getrandom.workspace = true
 
 [[test]]
 name = "crashes"

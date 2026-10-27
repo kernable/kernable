@@ -36,6 +36,8 @@ pub struct Env {
     pub store: String,
     pub addr: String,
     pub kernel_key: SigningKey,
+    /// Snapshot store URL, for reading snapshots from the test.
+    pub snapshots: String,
     pub kernel: std::sync::Arc<Kernel>,
 }
 
@@ -89,10 +91,13 @@ pub async fn start_custom(name: &str, customize: impl FnOnce(&mut Config, &Path)
         middlewares: HashMap::from([(id(&key(5)), vec!["*".into()])]),
         privileged: HashMap::from([(id(&key(1)), vec!["bypass_authorization".into()])]),
         tls: None,
+        snapshots: format!("sqlite:{}", dir.join("snapshots.db").display()),
+        vault: None,
         metrics_listen: None,
     };
     customize(&mut config, &dir);
     let addr = config.listen.clone();
+    let snapshots = config.snapshots.clone();
     let kernel = Kernel::open(config).unwrap();
     tokio::spawn(serve(std::sync::Arc::clone(&kernel)));
     wait_for(&addr).await;
@@ -102,6 +107,7 @@ pub async fn start_custom(name: &str, customize: impl FnOnce(&mut Config, &Path)
         addr,
         kernel_key,
         kernel,
+        snapshots,
     }
 }
 
@@ -165,6 +171,8 @@ pub fn order(exists: bool, cmd: &Command) -> Result<Vec<NewEvent>, Rejected> {
         return Err(reject(&format!("{} not allowed now", cmd.command_type)));
     }
     Ok(vec![NewEvent {
+        erases: String::new(),
+        vault_refs: Vec::new(),
         event_type: event_type.into(),
         payload: cmd.payload.clone(),
         schema: 1,
@@ -188,6 +196,10 @@ pub enum Behavior {
     StaleSnapshots,
 }
 
+pub type VaultWriter = std::sync::Arc<
+    dyn Fn(&Command) -> (Vec<kernable_core::proto::VaultValue>, String) + Send + Sync,
+>;
+
 pub struct TestWorker {
     /// Key ID the worker registers with.
     pub claimed: SigningKey,
@@ -205,6 +217,10 @@ pub struct TestWorker {
     pub schemas: Vec<(String, u32)>,
     /// Writes every event at this version, whatever it declared.
     pub writes: Option<u32>,
+    /// Vault values for the command's event, and a subject it erases (empty for none).
+    pub writes_vault: Option<VaultWriter>,
+    /// Receives, per execution, the vault values the kernel sent along.
+    pub vaults: Option<mpsc::UnboundedSender<Vec<kernable_core::proto::VaultValue>>>,
 }
 
 impl TestWorker {
@@ -219,6 +235,8 @@ impl TestWorker {
             tls: None,
             schemas: vec![],
             writes: None,
+            writes_vault: None,
+            vaults: None,
         }
     }
 
@@ -275,6 +293,9 @@ pub async fn run_worker(addr: String, w: TestWorker) -> tonic::Status {
                 if let Some(seen) = &w.seen {
                     let _ = seen.send(cmd.command_id.clone());
                 }
+                if let Some(vaults) = &w.vaults {
+                    let _ = vaults.send(x.vault.clone());
+                }
                 if let Some(executions) = &w.executions {
                     let version = x.snapshot.as_ref().map(|s| s.version);
                     let _ = executions.send((version, x.history.len()));
@@ -303,6 +324,12 @@ pub async fn run_worker(addr: String, w: TestWorker) -> tonic::Status {
                             let declared = w.schemas.iter().find(|(t, _)| *t == name);
                             e.schema = w.writes.or(declared.map(|d| d.1)).unwrap_or(1);
                         }
+                        let (vault, erases) = w
+                            .writes_vault
+                            .as_ref()
+                            .map_or_else(|| (Vec::new(), String::new()), |write| write(&cmd));
+                        events[0].vault_refs = vault.iter().map(|v| v.r#ref.clone()).collect();
+                        events[0].erases = erases;
                         let msg = signing::result_message(&cmd, x.expected_version, &events);
                         let version = x.expected_version + events.len() as u64;
                         let snapshot_key = match w.behavior {
@@ -323,6 +350,7 @@ pub async fn run_worker(addr: String, w: TestWorker) -> tonic::Status {
                             }
                         });
                         In::Result(WorkResult {
+                            vault,
                             lease_id: x.lease_id,
                             events,
                             worker_sig: Some(signing::sign(&result_key, &msg)),
@@ -352,6 +380,7 @@ pub fn spawn_worker(env: &Env) {
 
 pub fn command(id: &str, command_type: &str, aggregate_id: &str) -> Command {
     Command {
+        vault_refs: Vec::new(),
         command_id: id.into(),
         tenant_id: "t1".into(),
         domain: "orders".into(),
@@ -419,6 +448,7 @@ async fn submit_as(
     listener: &str,
 ) -> Result<CommandResult, tonic::Status> {
     let request = SubmitRequest {
+        vault: Vec::new(),
         listener: listener.into(),
         protocol: kernable_core::PROTOCOL,
         command: Some(cmd),
@@ -432,5 +462,37 @@ pub fn committed_versions(result: &CommandResult) -> Vec<u64> {
     match &result.outcome {
         Some(Outcome::Committed(c)) => c.events.iter().map(|e| e.version).collect(),
         other => panic!("expected committed, got {other:?}"),
+    }
+}
+
+/// Adds a vault (a SQLite file in `dir`, `vault.db`) to a test kernel's config. Listener key 5
+/// reads every vault value, listener key 6 none; worker key 2 may erase with `orders` events
+/// if `erasers` is set.
+pub fn with_vault(config: &mut Config, dir: &Path, erasers: bool) {
+    std::fs::write(dir.join("vault.key"), hex(&[6; 32])).unwrap();
+    config.vault = Some(kernable_kernel::config::VaultConfig {
+        store: format!("sqlite:{}", dir.join("vault.db").display()),
+        key: dir.join("vault.key"),
+        readers: HashMap::from([(id(&key(5)), vec!["*".into()])]),
+        erasers: if erasers {
+            HashMap::from([(id(&key(2)), vec!["orders.*".into()])])
+        } else {
+            HashMap::new()
+        },
+    });
+}
+
+/// A personal value of `subject` (a secret if empty), JSON encoded, with a random salt.
+pub fn vault_value(subject: &str, value: &str) -> kernable_core::proto::VaultValue {
+    let mut salt = vec![0u8; 16];
+    getrandom::fill(&mut salt).unwrap();
+    let value = format!("\"{value}\"").into_bytes();
+    let secret = subject.is_empty();
+    kernable_core::proto::VaultValue {
+        r#ref: signing::vault_ref(&salt, subject, secret, &value),
+        subject: subject.into(),
+        secret,
+        salt,
+        value,
     }
 }

@@ -29,6 +29,19 @@ fn verify(env: &Env) -> kernable_store::Report {
     store.verify(&id(&env.kernel_key)).unwrap()
 }
 
+/// The version of the stored snapshot of order `o1`, if any.
+fn snapshot_version(env: &Env) -> Option<u64> {
+    let stream = kernable_store::StreamId {
+        tenant_id: "t1".into(),
+        domain: "orders".into(),
+        aggregate_type: "Order".into(),
+        aggregate_id: "o1".into(),
+    };
+    let snapshots = kernable_store::snapshots::open(&env.snapshots).unwrap();
+    let record = snapshots.get(&stream).unwrap()?;
+    record.snapshot.map(|s| s.version)
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn workers_get_the_latest_snapshot_and_only_the_events_after_it() {
     let env = start("snap-latest").await;
@@ -44,7 +57,7 @@ async fn workers_get_the_latest_snapshot_and_only_the_events_after_it() {
 
     let report = verify(&env);
     assert!(report.is_ok(), "{:?}", report.problems);
-    assert_eq!(report.snapshots, 1);
+    assert_eq!(snapshot_version(&env), Some(4));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -68,12 +81,7 @@ async fn a_stale_snapshot_is_dropped_and_the_command_runs_with_all_events() {
     let seen: Vec<_> = std::iter::from_fn(|| executions.try_recv().ok()).collect();
     assert_eq!(seen, [(Some(2), 0), (None, 2)]);
     // Its own new snapshot replaced the old one.
-    let store = kernable_store::open_read_only(&env.store).unwrap();
-    let latest = store
-        .snapshot("t1", "orders", "Order", "o1")
-        .unwrap()
-        .unwrap();
-    assert_eq!(latest.snapshot.unwrap().version, 3);
+    assert_eq!(snapshot_version(&env), Some(3));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -94,5 +102,6 @@ async fn a_forged_snapshot_ends_the_session_and_nothing_is_committed() {
     // An honest worker takes over; the forged snapshot was never stored.
     spawn_worker(&env);
     assert_eq!(committed_versions(&pending.await.unwrap().unwrap()), [1]);
-    assert_eq!(verify(&env).snapshots, 0);
+    assert_eq!(snapshot_version(&env), None);
+    assert!(verify(&env).is_ok());
 }

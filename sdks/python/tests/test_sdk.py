@@ -3,6 +3,7 @@
 Run from sdks/python: .venv/bin/python -m unittest discover tests   (after `cargo build`)
 """
 
+import hashlib
 import json
 import os
 import threading
@@ -13,7 +14,7 @@ import grpc
 
 from kernable import Kernable, NotSettled, Rejected, RequestContext, domain
 from kernable.signing import (Key, challenge_message, command_message, derived_id, query_message,
-                              rejection_message, result_message, snapshot_message)
+                              rejection_message, result_message, snapshot_message, vault_ref)
 from kernable.v1 import kernable_pb2 as pb
 from tests.kernel import ROOT, TestKernel
 
@@ -56,6 +57,17 @@ class SigningVectors(unittest.TestCase):
         payload = bytes.fromhex(q.pop("payload_hex"))
         query = pb.QueryRequest(**q, payload=payload, context=pb.RequestContext(**context, attributes=attributes))
         self.check("query", query_message(query))
+        refs = [vault_ref(bytes.fromhex(i["salt_hex"]), i["subject"], i["secret"], bytes.fromhex(i["value_hex"]))
+                for i in VECTORS["vault_ref"]["input"]]
+        self.assertEqual(refs, VECTORS["vault_ref"]["refs"])
+        c = vector_command(VECTORS["command_vault"]["input"]["command"])
+        c.vault_refs.extend(VECTORS["command_vault"]["input"]["vault_refs"])
+        self.check("command_vault", command_message(c))
+        v = VECTORS["result_vault"]["input"]
+        for e, refs_, erases in zip(events, v["vault_refs"], v["erases"]):
+            e.vault_refs.extend(refs_)
+            e.erases = erases
+        self.check("result_vault", result_message(vector_command(r["command"]), r["expected_version"], events))
         d = VECTORS["derived_id"]
         self.assertEqual([derived_id(d["input"]["command_id"], n) for n in d["input"]["n"]], d["ids"])
 
@@ -358,6 +370,54 @@ class EndToEnd(unittest.TestCase):
         with self.assertRaises(Rejected) as refused:
             self.k.query("counters", "GetTotal", {"id": "self"})
         self.assertIn("answered only by totals itself", str(refused.exception))
+
+    def test_personal_fields_and_secrets_live_in_the_vault_and_an_erasing_event_deletes_them(self):
+        sha = lambda s: hashlib.sha256(s.encode()).hexdigest()  # noqa: E731
+        identity = domain("identity")
+        identity.command("RegisterAccount").personal(["email"], lambda d: d["id"]).secret(["password"])
+        identity.event("AccountRegistered", 1).personal(["email"], lambda d: d["accountId"])
+        identity.event("AccountErased", 1).erases(lambda d: d["accountId"])
+        account = identity.aggregate("Account", {})
+        account.apply("AccountRegistered", lambda s, d: d)
+        account.command("RegisterAccount", lambda s, d: [{"type": "AccountRegistered", "data": {
+            "accountId": d["id"], "email": d["email"], "passwordHash": sha(d["password"])}}])
+        account.command("EraseAccount", lambda s, d: [{"type": "AccountErased", "data": {"accountId": d["id"]}}])
+
+        self.k.close()  # this test needs other command types: start a kernel of its own
+        self.kernel.dispose()
+        self.kernel = TestKernel(["identity.*"])
+        self.kernel.start()
+        self.k = Kernable(self.kernel.url, self.kernel.app_key).use(identity)
+        self.run_stream(self.k.worker(account))
+        emails, replayed = {}, []
+        model = self.k.read_model("accounts").use(identity)
+        model.on("identity.AccountRegistered", lambda e: emails.__setitem__(e.aggregate_id, e.data["email"]))
+        model.on("identity.AccountErased", lambda e: emails.pop(e.aggregate_id, None))
+        self.run_stream(model)
+
+        def send(type, data):
+            return self.k.submit("identity", "Account", "a1", type, data)
+
+        registered = send("RegisterAccount", {"id": "a1", "email": "max@firma.de", "password": "correct horse"})
+        self.assertEqual(registered.events[0].data,
+                         {"accountId": "a1", "email": None, "passwordHash": sha("correct horse")})
+        self.assertEqual(registered.events[0].redacted, ["email"])
+        self.assertEqual(emails, {"a1": "max@firma.de"})
+        for name in os.listdir(self.kernel.dir):
+            path = os.path.join(self.kernel.dir, name)
+            if os.path.isfile(path):
+                with open(path, "rb") as f:
+                    content = f.read()
+                self.assertNotIn(b"max@firma.de", content, name)
+                self.assertNotIn(b"correct horse", content, name)
+
+        self.assertTrue(send("EraseAccount", {"id": "a1"}).committed)
+        self.assertEqual(emails, {})
+        rebuilt = self.k.read_model("rebuilt").use(identity)
+        rebuilt.on("identity.AccountRegistered", replayed.append)
+        self.run_stream(rebuilt)
+        time.sleep(0.2)
+        self.assertEqual([(e.data["email"], e.redacted) for e in replayed], [(None, ["email"])])
 
     def test_event_schemas_are_checked_when_defined(self):
         counters = domain("counters")

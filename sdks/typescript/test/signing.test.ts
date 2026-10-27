@@ -15,6 +15,7 @@ import {
   resultMessage,
   snapshotMessage,
   subscribeMessage,
+  vaultRef,
 } from "../src/signing.ts";
 
 const v = JSON.parse(readFileSync(new URL("../../../proto/test-vectors/signing.json", import.meta.url), "utf8"));
@@ -47,6 +48,31 @@ test("message layouts and signatures match the test vectors", () => {
   check("subscribe", subscribeMessage(sub.after_position, sub.event_types, sub.issued_at));
   const cp = v.checkpoint.input;
   check("checkpoint", checkpointMessage(cp.global_position, hex(cp.chain_hash_hex), cp.created_at));
+});
+
+test("vault references and vault fields in signed messages match the test vectors", () => {
+  const refs = v.vault_ref.input.map((i: any) => vaultRef(hex(i.salt_hex), i.subject, i.secret, hex(i.value_hex)));
+  assert.deepEqual(refs, v.vault_ref.refs);
+  const c = v.command_vault.input;
+  check("command_vault", commandMessage({ ...command(c.command), vault_refs: c.vault_refs }));
+  const r = v.result.input;
+  const events = r.events.map((e: any, i: number) => ({
+    event_type: e.event_type,
+    schema: e.schema,
+    payload: hex(e.payload_hex),
+    vault_refs: v.result_vault.input.vault_refs[i],
+    erases: v.result_vault.input.erases[i],
+  }));
+  check("result_vault", resultMessage(command(r.command), r.expected_version, events));
+  const e = v.event_hash.input;
+  const event = {
+    ...e,
+    payload: hex(e.payload_hex),
+    hash: Buffer.alloc(0),
+    producer_sig: { key_id: e.producer_key_id, sig: hex(e.producer_sig_hex) },
+    ...v.event_hash_vault.input,
+  };
+  assert.equal(eventHash(hex(e.prev_hex), event).toString("hex"), v.event_hash_vault.hash);
 });
 
 test("derived IDs match the test vector", () => {

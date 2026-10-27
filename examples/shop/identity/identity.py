@@ -2,10 +2,15 @@
 the `rbac` middleware. Other services read accounts only through the query
 `identity.GetAccount`, via the kernel.
 
+Personal data (email, name, the password hash) lives in the kernel's vault, never in the signed
+log; the password itself is a secret that is gone once its command ran. `EraseAccount` erases an
+account's personal data everywhere, also in the orders domain.
+
 Usage: python identity.py <kernel-url> <key> <health-port>
 Mutual TLS: set KERNABLE_TLS_CA, KERNABLE_TLS_CERT and KERNABLE_TLS_KEY.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -19,12 +24,26 @@ EMAIL = re.compile(r"^[^@\s]+@[^@\s]+$")
 
 # ---- write side ----
 
-account = domain("identity").aggregate("Account", {"status": "none"})
+identity = domain("identity")
+# The vault keeps these fields; the subject is the account (the aggregate's ID).
+identity.command("RegisterAccount").personal(["email", "name"], lambda d, account: account).secret(["password"])
+identity.command("ChangeEmail").personal(["email"], lambda d, account: account)
+identity.command("SignIn").secret(["password"])
+identity.event("AccountRegistered", 1).personal(["email", "name", "passwordHash"], lambda d, account: account)
+identity.event("EmailChanged", 1).personal(["email"], lambda d, account: account)
+identity.event("AccountErased", 1).erases(lambda d, account: account)
+
+account = identity.aggregate("Account", {"status": "none"})
+
+
+def password_hash(password: str, salt: str) -> str:
+    return hashlib.scrypt(password.encode(), salt=salt.encode(), n=2**14, r=8, p=1).hex()
 
 
 @account.apply("AccountRegistered")
 def _(state, e):
-    return {"status": "active", "email": e["email"], "name": e["name"]}
+    return {"status": "active", "email": e["email"], "name": e["name"], "passwordHash": e["passwordHash"],
+            "salt": e["salt"]}
 
 
 @account.apply("EmailChanged")
@@ -37,13 +56,37 @@ def _(state, e):
     return {**state, "status": "deactivated"}
 
 
+@account.apply("AccountErased")
+def _(state, e):
+    return {"status": "erased"}
+
+
 @account.command("RegisterAccount")
-def _(state, cmd):
+def _(state, cmd, ctx):
     if state["status"] != "none":
         raise Rejected("Account already exists", "exists")
     if not EMAIL.match(cmd.get("email", "")):
         raise Rejected("Invalid email", "invalid")
-    return [{"type": "AccountRegistered", "data": {"email": cmd["email"], "name": cmd.get("name", "")}}]
+    if len(cmd.get("password") or "") < 8:
+        raise Rejected("The password needs at least 8 characters", "invalid")
+    salt = ctx.id()  # deterministic, so the command may run again
+    return [{"type": "AccountRegistered", "data": {"email": cmd["email"], "name": cmd.get("name", ""),
+                                                   "passwordHash": password_hash(cmd["password"], salt),
+                                                   "salt": salt}}]
+
+
+@account.command("SignIn")
+def _(state, cmd):
+    if state["status"] != "active" or password_hash(cmd.get("password") or "", state["salt"]) != state["passwordHash"]:
+        raise Rejected("Wrong account or password", "denied")
+    return [{"type": "SignedIn"}]
+
+
+@account.command("EraseAccount")
+def _(state, cmd):
+    if state["status"] in ("none", "erased"):
+        raise Rejected(f"Cannot erase a {state['status']} account", "invalid_state")
+    return [{"type": "AccountErased"}]
 
 
 @account.command("ChangeEmail")
@@ -71,7 +114,8 @@ def accounts_model(k: Kernable):
 
     @model.on("identity.AccountRegistered")
     def _(e):
-        accounts[e.aggregate_id] = {"id": e.aggregate_id, "status": "active", **e.data}
+        accounts[e.aggregate_id] = {"id": e.aggregate_id, "status": "active", "email": e.data["email"],
+                                    "name": e.data["name"]}
 
     @model.on("identity.EmailChanged")
     def _(e):
@@ -80,6 +124,10 @@ def accounts_model(k: Kernable):
     @model.on("identity.AccountDeactivated")
     def _(e):
         accounts[e.aggregate_id]["status"] = "deactivated"
+
+    @model.on("identity.AccountErased")
+    def _(e):
+        accounts.pop(e.aggregate_id, None)
 
     @model.query("identity.GetAccount")
     def _(data, ctx):
@@ -108,6 +156,10 @@ def rbac_middleware(k: Kernable):
         active.add(e.aggregate_id)
 
     @model.on("identity.AccountDeactivated")
+    def _(e):
+        active.discard(e.aggregate_id)
+
+    @model.on("identity.AccountErased")
     def _(e):
         active.discard(e.aggregate_id)
 

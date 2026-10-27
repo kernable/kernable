@@ -18,6 +18,8 @@ export interface TestKernelOptions {
   tls?: boolean;
   /** Serve Prometheus metrics; see `metricsUrl`. */
   metrics?: boolean;
+  /** Event and command types whose vault values the app key may read (default all). */
+  vaultReaders?: string[];
 }
 
 /** A free TCP port on 127.0.0.1. */
@@ -63,6 +65,7 @@ export class TestKernel {
     };
     write("kernel");
     const app = write("app");
+    writeFileSync(join(this.dir, "vault.key"), randomBytes(32).toString("hex"));
     this.topLevel = `store = "${this.store}"
 kernel_key = "kernel.key"
 checkpoint_interval_ms = 50
@@ -88,6 +91,16 @@ ${extraConfig}
 "${app}" = ["*"]
 
 [middlewares]
+"${app}" = ["*"]
+
+[vault]
+store = "vault.db"
+key = "vault.key"
+
+[vault.readers]
+"${app}" = ${JSON.stringify(options.vaultReaders ?? ["*"])}
+
+[vault.erasers]
 "${app}" = ["*"]
 `;
   }

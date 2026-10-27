@@ -56,6 +56,7 @@ fn kernel() -> SigningKey {
 fn run(store: &dyn Store, id: &str, agg: &str) {
     let client = SigningKey::from_bytes(&[1; 32]);
     let mut cmd = Command {
+        vault_refs: Vec::new(),
         command_id: id.into(),
         tenant_id: "t1".into(),
         domain: "orders".into(),
@@ -73,6 +74,8 @@ fn run(store: &dyn Store, id: &str, agg: &str) {
         .unwrap()
         .len() as u64;
     let events = [NewEvent {
+        erases: String::new(),
+        vault_refs: Vec::new(),
         event_type: "Done".into(),
         payload: cmd.payload.clone(),
         schema: 1,

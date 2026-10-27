@@ -91,6 +91,14 @@ class Msg {
     return this;
   }
 
+  /** Vault references, appended only when there are any (see SIGNING.md). */
+  refs(refs: string[] | undefined): this {
+    if (!refs?.length) return this;
+    this.u64(refs.length);
+    for (const r of refs) this.str(r);
+    return this;
+  }
+
   done(): Buffer {
     return Buffer.concat(this.parts);
   }
@@ -102,7 +110,18 @@ const stream = (m: Msg, c: Stream) =>
   m.str(c.command_id).str(c.tenant_id).str(c.domain).str(c.aggregate_type).str(c.aggregate_id);
 
 export function commandMessage(c: WireCommand): Buffer {
-  return stream(new Msg("kernable.v1.command"), c).str(c.command_type).bytes(c.payload).context(c.context).done();
+  return stream(new Msg("kernable.v1.command"), c)
+    .str(c.command_type)
+    .bytes(c.payload)
+    .context(c.context)
+    .refs(c.vault_refs)
+    .done();
+}
+
+/** The reference of a value kept in the vault: it commits to salt, subject, kind and value. */
+export function vaultRef(salt: Buffer, subject: string, secret: boolean, value: Buffer): string {
+  const m = new Msg("kernable.v1.vault").bytes(salt).str(subject).u64(secret ? 1 : 0).bytes(value);
+  return createHash("sha256").update(m.done()).digest("hex");
 }
 
 export function queryMessage(q: WireQueryRequest): Buffer {
@@ -121,6 +140,14 @@ export function queryMessage(q: WireQueryRequest): Buffer {
 export function resultMessage(c: Stream, expectedVersion: number, events: WireNewEvent[]): Buffer {
   const m = stream(new Msg("kernable.v1.result"), c).u64(expectedVersion).u64(events.length);
   for (const e of events) m.str(e.event_type).u64(e.schema).bytes(e.payload);
+  // Vault fields, appended only when an event has any.
+  if (events.some((e) => e.vault_refs?.length || e.erases)) {
+    for (const e of events) {
+      m.u64(e.vault_refs?.length ?? 0);
+      for (const r of e.vault_refs ?? []) m.str(r);
+      m.str(e.erases ?? "");
+    }
+  }
   return m.done();
 }
 
@@ -181,5 +208,11 @@ export function eventHash(prev: Buffer, e: WireEvent): Buffer {
     .str(sig.key_id)
     .bytes(sig.sig)
     .context(e.context);
+  // Vault fields, appended only when set.
+  if (e.vault_refs?.length || e.erases) {
+    m.u64(e.vault_refs.length);
+    for (const r of e.vault_refs) m.str(r);
+    m.str(e.erases);
+  }
   return createHash("sha256").update(m.done()).digest();
 }

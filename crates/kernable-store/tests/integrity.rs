@@ -27,6 +27,8 @@ impl Drop for Fixture {
 
 fn ev(event_type: &str, payload: &str) -> NewEvent {
     NewEvent {
+        erases: String::new(),
+        vault_refs: Vec::new(),
         event_type: event_type.into(),
         payload: payload.as_bytes().to_vec(),
         schema: 1,
@@ -68,6 +70,7 @@ impl Fixture {
 
     fn run(&self, id: &str, aggregate_id: &str, events: &[NewEvent]) {
         let mut cmd = Command {
+            vault_refs: Vec::new(),
             command_id: id.into(),
             tenant_id: "t1".into(),
             domain: "orders".into(),
@@ -190,6 +193,8 @@ fn consistently_rewritten_chain_is_detected_by_checkpoint() {
     let c1_events: Vec<NewEvent> = events[..2]
         .iter()
         .map(|e| NewEvent {
+            erases: String::new(),
+            vault_refs: Vec::new(),
             event_type: e.event_type.clone(),
             payload: e.payload.clone(),
             schema: e.schema,
@@ -237,6 +242,7 @@ fn forged_checkpoint_is_detected() {
 fn unsigned_command_is_reported() {
     let f = Fixture::new("unsigned");
     let cmd = Command {
+        vault_refs: Vec::new(),
         command_id: "c5".into(),
         tenant_id: "t1".into(),
         domain: "orders".into(),

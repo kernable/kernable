@@ -164,4 +164,5 @@ make check            # all tests, including examples/shop/shop.test.ts
   - **Command handlers must be deterministic.** Use `ctx.now()` and `ctx.id()`.
   - **Reactors submit with a fixed command ID**, so a redelivered event is harmless. Their submits settle on the listeners before them (the read models), not on themselves: a listener handles one event at a time and never waits for itself. The kernel refuses at once what would wait for the sending listener, such as a query to its own read model.
   - **A domain only writes its own events.** It reacts to other domains through listeners.
+  - **Personal data and secrets go to the vault**, never into the signed log: mark the fields on the domain (`personal`, `secret`) and erase a person with an erasing event (`erases`); see `README.md` → *Operate*.
   - **Events are never changed.** To change an event's payload, raise its version and add an upcast from the old one: `shop.event("ItemAdded", 2).upcast(1, (d) => ({ ...d, count: d.qty }))`. Listeners in other processes and languages need the same definition (`use(shop)`); a listener that meets an unknown version stops until it is updated.

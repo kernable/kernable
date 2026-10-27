@@ -9,6 +9,7 @@ license = "Apache-2.0"
 publish = false
 
 [workspace.dependencies]
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 proptest = "1"
 prost = "0.14"
 tonic = { version = "0.14", features = ["tls-ring"] }

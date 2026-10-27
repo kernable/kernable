@@ -23,6 +23,7 @@ Stubs: generate them first (`make py-stubs`), see sdks/python/README.md.
 import contextvars
 import inspect
 import json
+import os
 import queue
 import re
 import sys
@@ -35,14 +36,14 @@ from typing import Any, Callable
 
 import grpc
 
-from kernable.signing import (Key, challenge_message, command_message, derived_id, query_message,
+from kernable.signing import (Key, challenge_message, command_message, derived_id, query_message, vault_ref,
                               rejection_message, result_message, snapshot_message)
 from kernable.v1 import kernable_pb2 as pb
 from kernable.v1 import kernable_pb2_grpc as rpc
 
-__all__ = ["PROTOCOL", "Aggregate", "Check", "CommandContext", "Domain", "Event", "EventSchema", "Kernable", "Key",
-           "Listener", "ListenerContext", "NotSettled", "Outcome", "QueryContext", "Rejected", "RequestContext", "Tls",
-           "Worker", "domain"]
+__all__ = ["PROTOCOL", "Aggregate", "Check", "CommandContext", "CommandSchema", "Domain", "Event", "EventSchema",
+           "Kernable", "Key", "Listener", "ListenerContext", "NotSettled", "Outcome", "QueryContext", "Rejected",
+           "RequestContext", "Tls", "Worker", "domain"]
 
 
 class Rejected(Exception):
@@ -147,6 +148,9 @@ class Event:
     #: Version of the payload format. Listeners get `data` upcast to the version they know (see
     #: `Domain.event`), unless the handler is `raw`.
     schema: int = 1
+    #: Fields kept in the vault whose value is not here (None in `data`): erased, or not readable
+    #: with this key (`[vault] readers`).
+    redacted: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -218,6 +222,26 @@ class EventSchema:
         self.type = type
         self.schema = schema
         self.steps: dict[int, Callable] = {}
+        #: The fields kept in the vault; see `personal`.
+        self.vault = _VaultFields()
+        #: The subject this event erases, if it is an erasing event; see `erases`.
+        self.eraser: Callable | None = None
+
+    def personal(self, fields: list[str], subject: Callable) -> "EventSchema":
+        """Keeps these top-level fields in the vault, as personal data of the subject `subject`
+        returns from the payload and, optionally, the aggregate's ID (e.g.
+        `lambda d: d["customerId"]`, or `lambda d, id: id` for the aggregate itself). Events
+        then hold only references; the kernel hands the values to workers and to listeners
+        allowed to read them, until an event erases the subject."""
+        self.vault.personal.append((fields, subject))
+        return self
+
+    def erases(self, subject: Callable) -> "EventSchema":
+        """Makes this an erasing event: it deletes every vault value of the subject `subject`
+        returns, in every stream, and the snapshots that may hold them. Read models should drop
+        the subject's data when they see it; rebuilt, they read None."""
+        self.eraser = subject
+        return self
 
     def upcast(self, from_version: int, fn: Callable | None = None):
         """Turns a payload of version `from_version` into one of the next version; works as a
@@ -225,6 +249,84 @@ class EventSchema:
         if not isinstance(from_version, int) or not 1 <= from_version < self.schema:
             raise ValueError(f"upcast {self.type} from a version between 1 and {self.schema - 1}, not {from_version!r}")
         return _register(self, self.steps, from_version, fn)
+
+
+class _VaultFields:
+    """Payload fields kept in the vault instead of the signed log."""
+
+    def __init__(self):
+        self.personal: list[tuple[list[str], Callable]] = []
+        self.secret: list[str] = []
+
+
+class CommandSchema:
+    """How a command's payload is kept: which fields go to the vault."""
+
+    def __init__(self, type: str):
+        if not re.match(r"^[^.*]+$", type):
+            raise ValueError(f"command types are unqualified within their domain, not {type!r}")
+        self.type = type
+        self.vault = _VaultFields()
+
+    def personal(self, fields: list[str], subject: Callable) -> "CommandSchema":
+        """Keeps these top-level fields in the vault as personal data of `subject`; see
+        `EventSchema.personal`."""
+        self.vault.personal.append((fields, subject))
+        return self
+
+    def secret(self, fields: list[str]) -> "CommandSchema":
+        """Keeps these top-level fields (passwords, one-time tokens) in the vault only until the
+        command completed. The handler gets them in clear; the stored command keeps a reference."""
+        self.vault.secret.extend(fields)
+        return self
+
+
+def _seal(data: Any, vault: _VaultFields | None, aggregate_id: str) -> tuple[bytes, list[str], list]:
+    """Moves the vault fields of `data` into vault values; the payload keeps `{"$vault": ref}`.
+    Absent and None fields stay as they are."""
+    if vault is None or not (vault.personal or vault.secret) or not isinstance(data, dict):
+        return _encode(data), [], []
+    sealed = dict(data)
+    values = []
+
+    def keep(f: str, subject: str, secret: bool):
+        if sealed.get(f) is None:
+            return
+        salt = os.urandom(16)
+        value = json.dumps(sealed[f], separators=(",", ":")).encode()
+        ref = vault_ref(salt, subject, secret, value)
+        values.append(pb.VaultValue(ref=ref, subject=subject, secret=secret, salt=salt, value=value))
+        sealed[f] = {"$vault": ref}
+
+    for fields, subject in vault.personal:
+        who = str(_call(subject, data, aggregate_id) or "")
+        if not who:
+            raise ValueError(f"no subject for the personal fields {', '.join(fields)}")
+        for f in fields:
+            keep(f, who, False)
+    for f in vault.secret:
+        keep(f, "", True)
+    return _encode(sealed), [v.ref for v in values], values
+
+
+def _unseal(data: Any, vault) -> tuple[Any, list[str]]:
+    """Puts vault values back into `data`; references without a value become None."""
+    values = {v.ref: v.value for v in vault or []}
+    redacted: list[str] = []
+
+    def walk(v, path: str):
+        if isinstance(v, list):
+            return [walk(x, f"{path}[{i}]") for i, x in enumerate(v)]
+        if not isinstance(v, dict):
+            return v
+        if len(v) == 1 and isinstance(v.get("$vault"), str):
+            if v["$vault"] not in values:
+                redacted.append(path)
+                return None
+            return json.loads(values[v["$vault"]])
+        return {k: walk(x, f"{path}.{k}" if path else k) for k, x in v.items()}
+
+    return walk(data, ""), redacted
 
 
 class SchemaError(Exception):
@@ -255,6 +357,15 @@ class Domain:
         self.name = name
         #: Payload versions and upcasts per event type; types not listed are at version 1.
         self.events: dict[str, EventSchema] = {}
+        #: Vault fields per command type; see `command`.
+        self.commands: dict[str, CommandSchema] = {}
+
+    def command(self, type: str) -> CommandSchema:
+        """Declares which fields of `type` commands the vault keeps (`personal`, `secret`). Clients
+        that submit them need the domain: `kernable.use(domain)`."""
+        spec = CommandSchema(type)
+        self.commands[type] = spec
+        return spec
 
     def event(self, type: str, schema: int) -> EventSchema:
         """Declares that this domain writes `type` events at version `schema`, with an `upcast`
@@ -351,6 +462,14 @@ class Kernable:
             self._channel = grpc.insecure_channel(url, options=[("grpc.default_authority", "localhost")])
         self._key = Key.from_file(key)
         self._tenant = tenant
+        self._domains: dict[str, Domain] = {}
+
+    def use(self, *domains: Domain) -> "Kernable":
+        """Seals the vault fields of these domains' commands when submitting them; see
+        `Domain.command`."""
+        for d in domains:
+            self._domains[d.name] = d
+        return self
 
     def worker(self, *aggregates: Aggregate) -> "Worker":
         return Worker(self._channel, self._key, aggregates)
@@ -415,12 +534,15 @@ class Kernable:
     def _send(self, domain, aggregate_type, aggregate_id, command_type, data, tenant, id, wait, context):
         command_id = id or str(uuid.uuid4())
         context = context or self._context
+        spec = self._domains[domain].commands.get(command_type) if domain in self._domains else None
+        payload, refs, values = _seal(data, spec.vault if spec else None, aggregate_id)
         cmd = pb.Command(command_id=command_id, tenant_id=tenant or self._tenant, domain=domain,
                          aggregate_type=aggregate_type, aggregate_id=aggregate_id,
-                         command_type=command_type, payload=_encode(data),
-                         context=_to_wire_context(context, command_id))
+                         command_type=command_type, payload=payload,
+                         context=_to_wire_context(context, command_id), vault_refs=refs)
         cmd.client_sig.CopyFrom(self._key.sign(command_message(cmd)))
-        request = pb.SubmitRequest(command=cmd, wait=wait, protocol=PROTOCOL, listener=_HANDLING.get())
+        request = pb.SubmitRequest(command=cmd, wait=wait, protocol=PROTOCOL, listener=_HANDLING.get(),
+                                   vault=values)
         return rpc.CommandServiceStub(self._channel).Submit(request)
 
 
@@ -515,13 +637,19 @@ class Worker(_Stream):
                                "unknown_command")
             if x.HasField("snapshot") and x.snapshot.schema != agg.schema:
                 raise Rejected(f"snapshot schema {x.snapshot.schema} is not {agg.schema}", "snapshot_stale")
-            history = [(e.event_type, e.schema, _decode(e.payload)) for e in x.history]
+            history = [(e.event_type, e.schema, _unseal(_decode(e.payload), x.vault)[0]) for e in x.history]
             state = agg.fold(history, _decode(x.snapshot.state) if x.HasField("snapshot") else _INITIAL)
             ctx = CommandContext(cmd.command_id, _from_wire_context(cmd.context), _time(x.deadline), _time(x.received_at))
-            produced = _call(agg.handlers[cmd.command_type], state, _decode(cmd.payload), ctx)
-            events = [pb.NewEvent(event_type=e["type"], schema=agg.schema_of(e["type"]), payload=_encode(e.get("data")))
-                      for e in produced]
-            snapshot = self._snapshot(agg, cmd, x.expected_version, state, events)
+            produced = _call(agg.handlers[cmd.command_type], state, _unseal(_decode(cmd.payload), x.vault)[0], ctx)
+            events, vault = [], []
+            for e in produced:
+                spec = agg.events.get(e["type"])
+                payload, refs, values = _seal(e.get("data"), spec.vault if spec else None, cmd.aggregate_id)
+                vault.extend(values)
+                erases = str(_call(spec.eraser, e.get("data"), cmd.aggregate_id) or "") if spec and spec.eraser else ""
+                events.append(pb.NewEvent(event_type=e["type"], schema=agg.schema_of(e["type"]), payload=payload,
+                                          vault_refs=refs, erases=erases))
+            snapshot = self._snapshot(agg, cmd, x.expected_version, state, produced)
         except SchemaError:
             raise  # not the command's fault: this worker cannot read the aggregate; stop until updated
         except Exception as err:
@@ -530,16 +658,19 @@ class Worker(_Stream):
             sig = self._key.sign(rejection_message(cmd.command_id, reason))
             return pb.WorkerMessage(rejection=pb.Rejection(lease_id=x.lease_id, reason=reason, worker_sig=sig))
         sig = self._key.sign(result_message(cmd, x.expected_version, events))
-        return pb.WorkerMessage(result=pb.Result(lease_id=x.lease_id, events=events, worker_sig=sig, snapshot=snapshot))
+        result = pb.Result(lease_id=x.lease_id, events=events, worker_sig=sig, snapshot=snapshot, vault=vault)
+        return pb.WorkerMessage(result=result)
 
     def _snapshot(self, agg: Aggregate, cmd, before: int, state, events):
-        """A snapshot of the state after `events`, if they cross a multiple of `snapshot_every`."""
+        """A snapshot of the state after the produced `events`, if they cross a multiple of
+        `snapshot_every`."""
         version = before + len(events)
         every = agg.snapshot_every
         if every <= 0 or not events or version // every == before // every:
             return None
-        # Apply the events as they will be read back, so the snapshot equals a replay.
-        after = agg.fold([(e.event_type, e.schema, _decode(e.payload)) for e in events], state)
+        # Apply the events as they will be read back (a JSON round trip), so the snapshot equals a replay.
+        read = [(e["type"], agg.schema_of(e["type"]), _decode(_encode(e.get("data")))) for e in events]
+        after = agg.fold(read, state)
         state_bytes = _encode(after)
         sig = self._key.sign(snapshot_message(cmd, version, agg.schema, state_bytes))
         return pb.Snapshot(version=version, schema=agg.schema, state=state_bytes, worker_sig=sig)
@@ -659,7 +790,7 @@ class Listener(_Stream):
                     name = f"{e.domain}.*"
                 handler = self._handlers.get(name)
                 if handler:
-                    event = _to_event(e)
+                    event = _to_event(e, msg.batch.vault)
                     if name not in self._raw:
                         event.schema, event.data = _upcast(self._domains.get(e.domain), e.domain, e.event_type,
                                                            e.schema, event.data)
@@ -740,15 +871,17 @@ def _from_wire_context(c) -> RequestContext:
 def _to_check(call) -> Check:
     if call.WhichOneof("request") == "command":
         c = call.command
-        return Check("command", c.command_id, c.tenant_id, c.domain, c.command_type, _decode(c.payload),
+        return Check("command", c.command_id, c.tenant_id, c.domain, c.command_type,
+                     _unseal(_decode(c.payload), call.vault)[0],
                      _from_wire_context(c.context), c.aggregate_type, c.aggregate_id)
     q = call.query
     return Check("query", q.query_id, q.tenant_id, q.domain, q.query_type, _decode(q.payload),
                  _from_wire_context(q.context))
 
 
-def _to_event(e) -> Event:
+def _to_event(e, vault=None) -> Event:
+    data, redacted = _unseal(_decode(e.payload), vault)
     return Event(position=e.global_position, tenant=e.tenant_id, domain=e.domain, aggregate_type=e.aggregate_type,
                  aggregate_id=e.aggregate_id, version=e.version, type=e.event_type,
-                 data=_decode(e.payload), command_id=e.command_id, request=_from_wire_context(e.context),
-                 schema=e.schema)
+                 data=data, command_id=e.command_id, request=_from_wire_context(e.context),
+                 schema=e.schema, redacted=redacted)

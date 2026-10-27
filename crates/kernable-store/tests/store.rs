@@ -3,14 +3,13 @@
 use std::{collections::HashSet, path::PathBuf, sync::Arc, thread};
 
 use kernable_core::proto::{
-    Command, ListenerRecord, Middleware, NewEvent, Rejected, Signature, Snapshot, SnapshotRecord,
-    command_result::Outcome,
+    Command, ListenerRecord, Middleware, NewEvent, Rejected, Signature, command_result::Outcome,
 };
-use kernable_core::signing;
 use kernable_store::{Enqueued, Error, FileStore, SqliteStore, Store};
 
 fn cmd(id: &str, command_type: &str) -> Command {
     Command {
+        vault_refs: Vec::new(),
         command_id: id.into(),
         tenant_id: "t1".into(),
         domain: "orders".into(),
@@ -25,6 +24,8 @@ fn cmd(id: &str, command_type: &str) -> Command {
 
 fn ev(event_type: &str) -> NewEvent {
     NewEvent {
+        erases: String::new(),
+        vault_refs: Vec::new(),
         event_type: event_type.into(),
         payload: b"{}".to_vec(),
         schema: 1,
@@ -188,35 +189,7 @@ fn listeners_are_saved_replaced_and_removed(store: &dyn Store) {
     assert_eq!(store.listeners().unwrap(), [listener("orders", 10, 7)]);
 }
 
-/// A signed snapshot of o1 at `version`, pointing at the stored event with that version.
-fn snapshot_at(store: &dyn Store, version: u64, state: &[u8]) -> SnapshotRecord {
-    let worker = ed25519_dalek::SigningKey::from_bytes(&[2; 32]);
-    let stream = cmd("", "");
-    let msg = signing::snapshot_message(&stream, version, "1", state);
-    let event_hash = store
-        .read_stream("t1", "orders", "Order", "o1")
-        .unwrap()
-        .iter()
-        .find(|e| e.version == version)
-        .map(|e| e.hash.clone())
-        .unwrap_or_default();
-    SnapshotRecord {
-        tenant_id: "t1".into(),
-        domain: "orders".into(),
-        aggregate_type: "Order".into(),
-        aggregate_id: "o1".into(),
-        snapshot: Some(Snapshot {
-            version,
-            schema: "1".into(),
-            state: state.to_vec(),
-            worker_sig: Some(signing::sign(&worker, &msg)),
-        }),
-        event_hash,
-        removed: false,
-    }
-}
-
-fn snapshots_are_saved_replaced_removed_and_verified(store: &dyn Store) {
+fn reading_after_a_version_returns_only_later_events(store: &dyn Store) {
     for (i, id) in ["c1", "c2", "c3"].into_iter().enumerate() {
         store.enqueue(&cmd(id, "AddItem"), i as i64).unwrap();
         store
@@ -233,48 +206,6 @@ fn snapshots_are_saved_replaced_removed_and_verified(store: &dyn Store) {
         (after(0), after(2), after(3), after(9)),
         (vec![1, 2, 3], vec![3], vec![], vec![])
     );
-
-    assert_eq!(store.snapshot("t1", "orders", "Order", "o1").unwrap(), None);
-    store.save_snapshot(&snapshot_at(store, 1, b"one")).unwrap();
-    store.save_snapshot(&snapshot_at(store, 2, b"two")).unwrap();
-    let latest = store
-        .snapshot("t1", "orders", "Order", "o1")
-        .unwrap()
-        .unwrap();
-    assert_eq!(latest.snapshot.unwrap().state, b"two");
-
-    // `verify` checks a snapshot's signature and its link to the stored events. The events in
-    // these tests carry fake signatures, so only the snapshot problems are of interest.
-    let problems = |store: &dyn Store| -> Vec<String> {
-        let report = store.verify("kernel").unwrap();
-        report
-            .problems
-            .into_iter()
-            .filter(|p| p.starts_with("snapshot"))
-            .collect()
-    };
-    assert!(problems(store).is_empty());
-    let mut forged = snapshot_at(store, 2, b"two");
-    forged.snapshot.as_mut().unwrap().state = b"three".to_vec();
-    store.save_snapshot(&forged).unwrap();
-    assert_eq!(
-        problems(store),
-        ["snapshot of t1/orders.Order/o1 at version 2: invalid worker signature"]
-    );
-    let mut detached = snapshot_at(store, 2, b"two");
-    detached.event_hash = vec![0; 32];
-    store.save_snapshot(&detached).unwrap();
-    assert_eq!(
-        problems(store),
-        ["snapshot of t1/orders.Order/o1 at version 2: does not match the stored events"]
-    );
-
-    let removed = SnapshotRecord {
-        removed: true,
-        ..snapshot_at(store, 2, b"")
-    };
-    store.save_snapshot(&removed).unwrap();
-    assert_eq!(store.snapshot("t1", "orders", "Order", "o1").unwrap(), None);
 }
 
 struct TempDb(PathBuf);
@@ -419,5 +350,5 @@ for_each_backend!(
     reject_completes_command_without_events,
     concurrent_threads_lose_no_updates,
     listeners_are_saved_replaced_and_removed,
-    snapshots_are_saved_replaced_removed_and_verified,
+    reading_after_a_version_returns_only_later_events,
 );
