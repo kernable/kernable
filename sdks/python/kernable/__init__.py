@@ -20,6 +20,7 @@ The API mirrors the TypeScript SDK:
 Stubs: generate them first (`make py-stubs`), see sdks/python/README.md.
 """
 
+import contextvars
 import inspect
 import json
 import queue
@@ -195,6 +196,9 @@ class NotSettled(Exception):
 #: The protocol version this SDK speaks; see "Protocol versions" in `kernable.proto`.
 PROTOCOL = 1
 
+#: The name of the listener whose handler is running, for requests sent from it.
+_HANDLING: contextvars.ContextVar[str] = contextvars.ContextVar("kernable_listener", default="")
+
 _INITIAL = object()
 _DOMAIN = re.compile(r"^[a-z][a-z0-9_-]*$")
 _LISTENED = re.compile(r"^[a-z][a-z0-9_-]*\.([^.]+|\*)$")
@@ -357,9 +361,9 @@ class Kernable:
         """Runs a command and returns its outcome.
 
         `wait="settled"` (default) responds once every listener has processed the events, so
-        read models already show them, and raises `NotSettled` on timeout. `wait="committed"`
-        responds once the events are stored; use it inside reactors, which would otherwise
-        wait for themselves. `id` is an idempotency key. `context` replaces the client's default
+        read models already show them, and raises `NotSettled` on timeout; from a listener's
+        handler, only the listeners with a lower order count. `wait="committed"` responds once
+        the events are stored. `id` is an idempotency key. `context` replaces the client's default
         context; inside a listener, pass `ctx.follow()`.
         """
         mode = pb.WAIT_COMMITTED if wait == "committed" else pb.WAIT_SETTLED
@@ -386,7 +390,8 @@ class Kernable:
         query_id = str(uuid.uuid4())
         q = pb.QueryRequest(query_id=query_id, tenant_id=tenant or self._tenant, domain=domain, query_type=type,
                             payload=_encode(data), context=_to_wire_context(context or self._context, query_id),
-                            min_position=min_position, issued_at=int(time.time() * 1000), protocol=PROTOCOL)
+                            min_position=min_position, issued_at=int(time.time() * 1000), protocol=PROTOCOL,
+                            listener=_HANDLING.get())
         q.client_sig.CopyFrom(self._key.sign(query_message(q)))
         res = rpc.QueryServiceStub(self._channel).Query(q)
         if res.WhichOneof("outcome") == "rejected":
@@ -400,8 +405,8 @@ class Kernable:
     def reactor(self, name: str, *, order: int = 10, start: int | None = None, reconnect_s: float = 1.0) -> "Listener":
         """A reactor: triggers side effects; resumes after the last acknowledged event (default).
 
-        Inside a reactor, submit with `wait="committed"`: a settling submit would wait for the
-        reactor itself and time out."""
+        A settling submit from its handler waits for the listeners before it (the read models),
+        not for the reactor itself, which handles one event at a time."""
         return Listener(self._channel, self._key, name, order, start, reconnect_s)
 
     def close(self) -> None:
@@ -415,7 +420,7 @@ class Kernable:
                          command_type=command_type, payload=_encode(data),
                          context=_to_wire_context(context, command_id))
         cmd.client_sig.CopyFrom(self._key.sign(command_message(cmd)))
-        request = pb.SubmitRequest(command=cmd, wait=wait, protocol=PROTOCOL)
+        request = pb.SubmitRequest(command=cmd, wait=wait, protocol=PROTOCOL, listener=_HANDLING.get())
         return rpc.CommandServiceStub(self._channel).Submit(request)
 
 
@@ -584,8 +589,8 @@ class Listener(_Stream):
     def query(self, query_type: str, fn: Callable | None = None):
         """Answers the qualified query type (`orders.GetOrder`) from this listener's state; works as
         a decorator too. The kernel delivers queries in order with the events, so an answer
-        reflects every event handled before it. Raise `Rejected` to refuse. A handler must not
-        query its own listener: the answer would wait behind itself."""
+        reflects every event handled before it. Raise `Rejected` to refuse. A handler cannot
+        query its own listener (the answer would wait behind itself): the kernel refuses it."""
         if not _QUERY.match(query_type):
             raise ValueError(f"answer a qualified query type (domain.Query), not {query_type!r}")
         return _register(self, self._queries, query_type, fn)
@@ -597,7 +602,8 @@ class Listener(_Stream):
         once this listener has caught up with the events. `fn` gets a `Check`; raise `Rejected`
         to refuse; any other error refuses too. The registration is stored: while this listener
         is away, the kernel refuses those requests (`kernable listeners remove` unregisters it).
-        `fn` must not submit or query through the kernel: the request would wait behind itself.
+        `fn` cannot submit or query what it checks itself (it would wait behind itself): the
+        kernel refuses it.
         Negative orders are reserved for kernable."""
         for t in types:
             if not _CHECKED.match(t):
@@ -629,6 +635,15 @@ class Listener(_Stream):
         return pb.ListenerMessage(hello=hello)
 
     def _on(self, msg):
+        # Requests sent from the handlers name this listener, so the kernel never makes them
+        # wait for it (it handles one message at a time).
+        token = _HANDLING.set(self._name)
+        try:
+            return self._handle(msg)
+        finally:
+            _HANDLING.reset(token)
+
+    def _handle(self, msg):
         kind = msg.WhichOneof("msg")
         if kind == "challenge":
             sig = self._key.sign(challenge_message(msg.challenge.nonce)).sig

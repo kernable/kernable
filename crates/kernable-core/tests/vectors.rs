@@ -135,6 +135,7 @@ fn vectors() -> Value {
                    "payload_hex": hex::encode(br#"{"id":"a-1"}"#), "context": context_json, "min_position": 7,
                    "issued_at": 1_700_000_000_000i64}),
             signing::query_message(&kernable_core::proto::QueryRequest {
+                listener: String::new(),
                 protocol: kernable_core::PROTOCOL,
                 query_id: "q-1".into(),
                 tenant_id: cmd.tenant_id.clone(),

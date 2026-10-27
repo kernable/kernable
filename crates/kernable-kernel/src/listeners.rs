@@ -62,6 +62,24 @@ pub(crate) enum Reply {
 
 type Calls = HashMap<String, (String, oneshot::Sender<Reply>)>;
 
+/// The listener whose handler sent a request (`listener` in submits and queries). It handles
+/// one event at a time, so the request must not wait for it.
+#[derive(Clone)]
+pub(crate) struct Caller {
+    pub(crate) name: String,
+    order: i32,
+    position: u64,
+}
+
+impl Caller {
+    /// Whether the answer of the listener `e` to a query for `min_position` can come while
+    /// the caller is busy: not the caller itself, and not one that needs the caller's progress.
+    fn independent(&self, e: &Entry, min_position: u64) -> bool {
+        e.record.name != self.name
+            && (e.record.order <= self.order || min_position <= self.position)
+    }
+}
+
 /// A listener as reported in metrics.
 pub(crate) struct ListenerStatus {
     pub(crate) name: String,
@@ -134,10 +152,23 @@ impl Registry {
         all
     }
 
-    /// Whether every registered listener has acknowledged `position`.
-    pub(crate) fn settled(&self, position: u64) -> bool {
+    /// The registered listener `name`, as the sender of a request.
+    pub(crate) fn caller(&self, name: &str) -> Option<Caller> {
+        let entries = self.entries();
+        let e = entries.get(name)?;
+        Some(Caller {
+            name: name.to_owned(),
+            order: e.record.order,
+            position: e.record.position,
+        })
+    }
+
+    /// Whether every registered listener has acknowledged `position`; for a request of a
+    /// `caller`, every listener with a lower order than the caller.
+    pub(crate) fn settled(&self, position: u64, caller: Option<&Caller>) -> bool {
         self.entries()
             .values()
+            .filter(|e| caller.is_none_or(|c| e.record.order < c.order))
             .all(|e| e.record.position >= position)
     }
 
@@ -169,21 +200,34 @@ impl Registry {
         self.calls.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Whether any connected listener answers `query_type` (qualified).
-    pub(crate) fn answers(&self, query_type: &str) -> bool {
-        self.entries()
-            .values()
-            .any(|e| e.out.is_some() && e.query_types.iter().any(|t| t == query_type))
+    /// Whether any connected listener answers `query_type` (qualified) for `caller`.
+    pub(crate) fn answers(
+        &self,
+        query_type: &str,
+        query: &QueryRequest,
+        caller: Option<&Caller>,
+    ) -> bool {
+        self.entries().values().any(|e| {
+            e.out.is_some()
+                && e.query_types.iter().any(|t| t == query_type)
+                && caller.is_none_or(|c| c.independent(e, query.min_position))
+        })
     }
 
     /// Picks a connected listener that answers `query_type` and has processed the query's
     /// `min_position`, and registers the call. Returns `None` if there is none (yet).
-    pub(crate) fn dispatch(&self, query_type: &str, query: &QueryRequest) -> Option<Dispatched> {
+    pub(crate) fn dispatch(
+        &self,
+        query_type: &str,
+        query: &QueryRequest,
+        caller: Option<&Caller>,
+    ) -> Option<Dispatched> {
         let entries = self.entries();
         let mut ready: Vec<(&String, &Outbox)> = entries
             .iter()
             .filter(|(_, e)| e.record.position >= query.min_position)
             .filter(|(_, e)| e.query_types.iter().any(|t| t == query_type))
+            .filter(|(_, e)| caller.is_none_or(|c| c.independent(e, query.min_position)))
             .filter_map(|(name, e)| Some((name, e.out.as_ref()?)))
             .collect();
         if ready.is_empty() {

@@ -1,5 +1,6 @@
 // @kernable/sdk: write event-sourced business logic in TypeScript; the kernel does the rest.
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 
 import type { ClientReadableStream } from "@grpc/grpc-js";
@@ -192,6 +193,9 @@ export interface AggregateOptions {
   schema?: string;
 }
 
+/** The name of the listener whose handler is running, for requests sent from it. */
+const handling = new AsyncLocalStorage<string>();
+
 type Upcast = (data: any) => unknown;
 
 /**
@@ -352,8 +356,8 @@ export interface SubmitOptions {
   context?: RequestContext;
   /**
    * `"settled"` (default): respond once every listener has processed the events, so read
-   * models already show them; throws `NotSettled` on timeout. `"committed"`: respond once the
-   * events are stored.
+   * models already show them; throws `NotSettled` on timeout. From a listener's handler, only
+   * the listeners with a lower order count. `"committed"`: respond once the events are stored.
    */
   wait?: "settled" | "committed";
 }
@@ -410,7 +414,11 @@ export class Kernable {
       min_position: options.minPosition ?? 0,
       issued_at: Date.now(),
     };
-    const res = await this.clients.query({ ...request, client_sig: this.key.sign(queryMessage(request)) });
+    const res = await this.clients.query({
+      ...request,
+      client_sig: this.key.sign(queryMessage(request)),
+      listener: handling.getStore() ?? "",
+    });
     if (res.outcome === "rejected") throw new Rejected(res.rejected!.message, res.rejected!.code);
     return decode(res.response!) as T;
   }
@@ -422,8 +430,8 @@ export class Kernable {
 
   /**
    * A reactor: triggers side effects; resumes after the last acknowledged event (default).
-   * Inside a reactor, submit with `wait: "committed"`: a settling submit would wait for the
-   * reactor itself and time out.
+   * A settling submit from its handler waits for the listeners before it (the read models),
+   * not for the reactor itself, which handles one event at a time.
    */
   reactor(name: string, options: ListenerOptions = {}): Listener {
     return new Listener(this.clients, this.key, name, { order: 10, ...options });
@@ -442,7 +450,8 @@ export class Kernable {
       payload: encode(options.data),
       context: toWireContext({ ...context, correlationId: context.correlationId || command_id }),
     };
-    return this.clients.submit({ ...cmd, client_sig: this.key.sign(commandMessage(cmd)) }, wait);
+    const signed = { ...cmd, client_sig: this.key.sign(commandMessage(cmd)) };
+    return this.clients.submit(signed, wait, handling.getStore());
   }
 
   /**
@@ -589,8 +598,8 @@ export class Listener {
   /**
    * Answers the qualified query type `queryType` (`orders.GetOrder`) from this listener's
    * state. The kernel delivers queries in order with the events, so an answer reflects every
-   * event handled before it. Throw `Rejected` to refuse. A handler must not query its own
-   * listener: the answer would wait behind itself.
+   * event handled before it. Throw `Rejected` to refuse. A handler cannot query its own
+   * listener (the answer would wait behind itself): the kernel refuses it.
    */
   query<D = any, R = unknown>(queryType: string, handler: (data: D, ctx: QueryContext) => R | Promise<R>): this {
     if (!/^[a-z][a-z0-9_-]*\.[^.*]+$/.test(queryType)) {
@@ -605,8 +614,8 @@ export class Listener {
    * of `options.types` before accepting or routing it, in chain order, and only once this
    * listener has caught up with the events. Throw `Rejected` to refuse; any other error
    * refuses too. The registration is stored: while this listener is away, the kernel refuses
-   * those requests (`kernable listeners remove` unregisters it). The handler must not submit
-   * or query through the kernel: the request would wait behind itself.
+   * those requests (`kernable listeners remove` unregisters it). The handler cannot submit or
+   * query what it checks itself (it would wait behind itself): the kernel refuses it.
    */
   middleware(options: MiddlewareOptions, handler: MiddlewareHandler): this {
     for (const t of options.types) {
@@ -644,7 +653,9 @@ export class Listener {
       // Batches are handled strictly one after another.
       let queue = Promise.resolve();
       call.on("data", (m: ListenerDelivery) => {
-        queue = queue.then(() => this.onMessage(call, m)).catch((err) => {
+        // Requests sent from the handlers name this listener, so the kernel never makes them
+        // wait for it (it handles one message at a time).
+        queue = queue.then(() => handling.run(this.name, () => this.onMessage(call, m))).catch((err) => {
           call.cancel();
           reject(err);
         });

@@ -326,6 +326,39 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(archived, [(1, {"by": 3}), (2, {"amount": 2})])
         self.assertEqual(stale.position, 1)  # stopped before the version 2 event
 
+    def test_a_reactor_settles_on_the_read_models_before_it_and_never_waits_for_itself(self):
+        self.run_stream(self.k.worker(counter))
+        totals: dict[str, int] = {}
+        model = self.k.read_model("totals")
+        model.on("counters.Incremented", lambda e: totals.__setitem__(e.aggregate_id, totals.get(e.aggregate_id, 0) + e.data["by"]))
+
+        @model.query("counters.GetTotal")
+        def _(data):
+            if data["id"] == "self":
+                return self.k.query("counters", "GetTotal", {"id": "c1"})  # its own read model
+            return totals.get(data["id"], 0)
+
+        seen = []
+        reactor = self.k.reactor("mirror")
+
+        @reactor.on("counters.Incremented")
+        def _(e, ctx):
+            if e.aggregate_id != "c1":
+                return
+            started = time.monotonic()
+            # Settles on the read model (order 0), not on this reactor (order 10).
+            self.k.submit("counters", "Counter", "c2", "Increment", {"by": e.data["by"]}, id=f"mirror-{e.position}",
+                          context=ctx.follow())
+            seen.append((self.k.query("counters", "GetTotal", {"id": "c2"}), time.monotonic() - started < 0.4))
+
+        self.run_stream(model)
+        self.run_stream(reactor)
+        self.increment(2)
+        self.assertEqual(seen, [(2, True)])
+        with self.assertRaises(Rejected) as refused:
+            self.k.query("counters", "GetTotal", {"id": "self"})
+        self.assertIn("answered only by totals itself", str(refused.exception))
+
     def test_event_schemas_are_checked_when_defined(self):
         counters = domain("counters")
         with self.assertRaises(ValueError):

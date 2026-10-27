@@ -376,7 +376,28 @@ pub async fn submit_on(
     cmd: Command,
     wait: Wait,
 ) -> Result<CommandResult, tonic::Status> {
+    submit_as(channel, cmd, wait, "").await
+}
+
+/// Submits from the handler of `listener`, as the SDKs do.
+pub async fn submit_from(
+    addr: &str,
+    cmd: Command,
+    wait: Wait,
+    listener: &str,
+) -> Result<CommandResult, tonic::Status> {
+    let channel = transport::connect(addr).await.unwrap();
+    submit_as(channel, cmd, wait, listener).await
+}
+
+async fn submit_as(
+    channel: tonic::transport::Channel,
+    cmd: Command,
+    wait: Wait,
+    listener: &str,
+) -> Result<CommandResult, tonic::Status> {
     let request = SubmitRequest {
+        listener: listener.into(),
         protocol: kernable_core::PROTOCOL,
         command: Some(cmd),
         wait: wait.into(),

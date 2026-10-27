@@ -131,6 +131,8 @@ export interface WireQueryRequest {
   min_position: number;
   issued_at: number;
   client_sig?: WireSignature | null;
+  /** Not signed; see `QueryRequest.listener`. */
+  listener?: string;
 }
 
 export interface WireQueryResult {
@@ -170,7 +172,8 @@ export type ListenerMessage =
 export type ListenCall = grpc.ClientDuplexStream<ListenerMessage, ListenerDelivery>;
 
 export interface Clients {
-  submit(command: WireCommand, wait: WireWait): Promise<WireCommandResult>;
+  /** `listener`: the listener whose handler submits (see `SubmitRequest.listener`). */
+  submit(command: WireCommand, wait: WireWait, listener?: string): Promise<WireCommandResult>;
   session(): SessionCall;
   listen(): ListenCall;
   query(req: WireQueryRequest): Promise<WireQueryResult>;
@@ -210,9 +213,9 @@ export function connect(url: string, tls?: TlsFiles): Clients {
   const listeners = new v1.ListenerService(url, creds);
   const queries = new v1.QueryService(url, creds);
   return {
-    submit: (command, wait) =>
+    submit: (command, wait, listener = "") =>
       new Promise((resolve, reject) =>
-        commands.Submit({ command, wait, protocol: PROTOCOL }, (err: grpc.ServiceError | null, res: WireCommandResult) =>
+        commands.Submit({ command, wait, protocol: PROTOCOL, listener }, (err: grpc.ServiceError | null, res: WireCommandResult) =>
           err ? reject(err) : resolve(res),
         ),
       ),

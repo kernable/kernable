@@ -12,7 +12,7 @@ PYTHONPATH=sdks/python sdks/python/.venv/bin/python my_service.py
 
 `kernable/v1/` holds the generated gRPC stubs; it is not checked in.
 
-Inside a reactor, submit with `wait="committed"`: a settling submit would wait for the reactor
-itself.
+A settling submit from a listener's handler waits only for the listeners with a lower order:
+a listener handles one event at a time and never waits for itself.
 
 See `examples/shop/identity/identity.py` for a complete service.

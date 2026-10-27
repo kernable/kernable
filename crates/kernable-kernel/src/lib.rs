@@ -218,9 +218,28 @@ impl Kernel {
         Ok(None)
     }
 
-    /// Waits until every registered listener has acknowledged the result's events.
-    /// Returns whether they did within `settle_timeout_ms`.
-    async fn settle(&self, result: &CommandResult) -> bool {
+    /// The listener `name` that sent a request from its handler (none if empty), and a refusal
+    /// if the request (of the qualified type `request_type`) would have to wait for it.
+    fn caller(&self, name: &str, request_type: &str) -> Result<Option<listeners::Caller>, Status> {
+        if name.is_empty() {
+            return Ok(None);
+        }
+        let caller = self
+            .listeners
+            .caller(name)
+            .ok_or_else(|| Status::invalid_argument(format!("no listener {name}")))?;
+        if self.listeners.chain(request_type).contains(&caller.name) {
+            return Err(Status::failed_precondition(format!(
+                "middleware {name} checks {request_type} itself: a request from its own handler \
+                 would wait behind itself"
+            )));
+        }
+        Ok(Some(caller))
+    }
+
+    /// Waits until every registered listener (for a `caller`, every listener before it) has
+    /// acknowledged the result's events. Returns whether they did within `settle_timeout_ms`.
+    async fn settle(&self, result: &CommandResult, caller: Option<&listeners::Caller>) -> bool {
         let Some(Outcome::Committed(c)) = &result.outcome else {
             return true;
         };
@@ -230,7 +249,7 @@ impl Kernel {
         let settled = async {
             loop {
                 let progressed = self.listeners.progress.notified();
-                if self.listeners.settled(last) {
+                if self.listeners.settled(last, caller) {
                     return;
                 }
                 progressed.await;
@@ -331,6 +350,7 @@ impl CommandService for Api {
         let request = request.into_inner();
         protocol(request.protocol)?;
         let wait = request.wait();
+        let listener = request.listener;
         let cmd = request
             .command
             .ok_or_else(|| Status::invalid_argument("no command"))?;
@@ -363,6 +383,7 @@ impl CommandService for Api {
                 "key may not set bypass_authorization",
             ));
         }
+        let caller = kernel.caller(&listener, &name)?;
         let request = middleware_call::Request::Command(cmd.clone());
         if let Some(reason) = kernel.check(&name, &cmd.command_id, request).await? {
             return Ok(Response::new(CommandResult {
@@ -416,7 +437,7 @@ impl CommandService for Api {
         };
         if wait == Wait::Settled {
             let started = Instant::now();
-            if kernel.settle(&result).await
+            if kernel.settle(&result, caller.as_ref()).await
                 && let Some(Outcome::Committed(c)) = &mut result.outcome
             {
                 c.settled = true;
@@ -531,6 +552,7 @@ impl QueryService for Api {
                 "key may not set bypass_authorization",
             ));
         }
+        let caller = kernel.caller(&query.listener, &name)?;
         let request = middleware_call::Request::Query(query.clone());
         if let Some(reason) = kernel.check(&name, &query.query_id, request).await? {
             kernel.metrics.queries_rejected.fetch_add(1, Relaxed);
@@ -539,8 +561,17 @@ impl QueryService for Api {
                 outcome: Some(query_result::Outcome::Rejected(reason)),
             }));
         }
-        if !kernel.listeners.answers(&name) {
+        if !kernel.listeners.answers(&name, &query, caller.as_ref()) {
             kernel.metrics.queries_failed.fetch_add(1, Relaxed);
+            if let Some(c) = &caller
+                && kernel.listeners.answers(&name, &query, None)
+            {
+                return Err(Status::failed_precondition(format!(
+                    "{name} is answered only by {} itself or by listeners after it: a query \
+                     from its handler would wait behind itself",
+                    c.name
+                )));
+            }
             return Err(Status::unavailable(format!("no read model answers {name}")));
         }
 
@@ -550,7 +581,7 @@ impl QueryService for Api {
             // Wait until a read model that answers the query has caught up.
             let dispatched = loop {
                 let progressed = kernel.listeners.progress.notified();
-                if let Some(d) = kernel.listeners.dispatch(&name, &query) {
+                if let Some(d) = kernel.listeners.dispatch(&name, &query, caller.as_ref()) {
                     break d;
                 }
                 progressed.await;

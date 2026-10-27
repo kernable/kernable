@@ -143,6 +143,41 @@ async fn lower_orders_go_first_and_submit_waits_for_every_listener() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_listener_settles_only_on_the_listeners_before_it() {
+    let env = start("listener-caller").await;
+    spawn_worker(&env);
+    let mut model = listen(&env, "model", opts(0)).await.unwrap();
+    let mut reactor = listen(&env, "reactor", opts(10)).await.unwrap();
+    let _later = listen(&env, "later", opts(20)).await.unwrap();
+
+    let place = signed(command("c1", "PlaceOrder", "o1"), &key(1));
+    submit_with(&env.addr, place, Wait::Committed)
+        .await
+        .unwrap();
+    assert_eq!(positions(&model.next().await), [1]);
+    model.ack(1).await;
+    // The reactor handles event 1 and, from its handler, submits a command that settles.
+    assert_eq!(positions(&reactor.next().await), [1]);
+    let addr = env.addr.clone();
+    let add = signed(command("c2", "AddItem", "o1"), &key(1));
+    let follow_up =
+        tokio::spawn(async move { submit_from(&addr, add, Wait::Settled, "reactor").await });
+    assert_eq!(positions(&model.next().await), [2]);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!follow_up.is_finished(), "it waits for the read model");
+    model.ack(2).await;
+    // ... but neither for the reactor itself nor for later listeners, which are still at 0.
+    let result = follow_up.await.unwrap().unwrap();
+    assert!(settled(&result));
+
+    let unknown = signed(command("c3", "AddItem", "o1"), &key(1));
+    let status = submit_from(&env.addr, unknown, Wait::Settled, "nobody")
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), Code::InvalidArgument);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn committed_and_accepted_submits_do_not_wait_and_a_stalled_listener_times_out() {
     let env = start("listener-modes").await;
     spawn_worker(&env);

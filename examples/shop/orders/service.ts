@@ -56,8 +56,8 @@ const confirmations = kernable.reactor("confirmations").on("orders.OrderSubmitte
     stats.unknownAccounts++; // must never happen: accounts ran first
     return;
   }
-  // A reactor must not wait for settling: that would include waiting for itself. The fixed
-  // command ID makes a redelivered event harmless; `follow()` keeps sender and correlation.
+  // The submit settles on the read models before this reactor, not on the reactor itself. The
+  // fixed command ID makes a redelivered event harmless; `follow()` keeps sender and correlation.
   await kernable.submit({
     domain: "orders",
     aggregateType: "Order",
@@ -66,7 +66,6 @@ const confirmations = kernable.reactor("confirmations").on("orders.OrderSubmitte
     data: { email: customer.email },
     id: `confirm-${e.aggregateId}`,
     context: ctx.follow(),
-    wait: "committed",
   });
   stats.confirmations++;
 });

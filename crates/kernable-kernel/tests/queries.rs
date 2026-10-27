@@ -98,6 +98,7 @@ fn now_ms() -> i64 {
 
 fn signed_query(query_type: &str, min_position: u64, key: &SigningKey) -> QueryRequest {
     let mut q = QueryRequest {
+        listener: String::new(),
         protocol: kernable_core::PROTOCOL,
         query_id: "q1".into(),
         tenant_id: "t1".into(),
@@ -217,6 +218,30 @@ async fn min_position_waits_for_the_read_model_to_catch_up() {
     );
     let behind = ask(&env, signed_query("CountOrders", 1, &key(1))).await;
     assert_eq!(behind.unwrap_err().code(), Code::DeadlineExceeded);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_model_is_never_asked_from_its_own_handler() {
+    let env = start("query-self").await;
+    spawn_worker(&env);
+    let _counts = read_model(&env, "counts", key(5), true);
+    place(&env, "c1", "o1").await;
+
+    let mut q = signed_query("CountOrders", 0, &key(1));
+    q.listener = "counts".into(); // not signed
+    let status = ask(&env, q.clone()).await.unwrap_err();
+    assert_eq!(status.code(), Code::FailedPrecondition);
+    assert!(
+        status.message().contains("wait behind itself"),
+        "{status:?}"
+    );
+
+    // Another read model answers instead.
+    let _other = read_model(&env, "other", key(5), true);
+    place(&env, "c2", "o2").await;
+    for _ in 0..4 {
+        assert_eq!(response(&ask(&env, q.clone()).await.unwrap()), "2");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

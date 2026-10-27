@@ -312,6 +312,7 @@ async fn channels(addr: &str, n: usize) -> Result<Vec<Channel>, BoxError> {
 
 async fn submit(channel: Channel, cmd: Command, wait: Wait) -> Result<Outcome, tonic::Status> {
     let request = SubmitRequest {
+        listener: String::new(),
         protocol: kernable_core::PROTOCOL,
         command: Some(cmd),
         wait: wait.into(),

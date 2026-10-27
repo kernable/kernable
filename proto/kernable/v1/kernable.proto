@@ -100,6 +100,11 @@ message SubmitRequest {
   Command command = 1;
   Wait wait = 2;
   uint32 protocol = 3; // see "Protocol versions" at the top
+  // Set by SDKs when a listener's handler submits (not signed). A listener handles its events
+  // one after another, so it cannot wait for itself: a settling submit then waits only for
+  // listeners of a lower order, and a request the listener would have to check as a
+  // middleware is refused.
+  string listener = 4;
 }
 
 // How long Submit waits before it responds.
@@ -168,6 +173,10 @@ message QueryRequest {
   int64 issued_at = 8; // ms since epoch; must be within 60 s of the kernel's clock
   Signature client_sig = 9;
   uint32 protocol = 10; // not signed
+  // Set by SDKs when a listener's handler asks (not signed); see SubmitRequest.listener. The
+  // query is never routed to that listener, nor to one that could reach `min_position` only
+  // after that listener, and refused if no other read model answers it.
+  string listener = 11;
 }
 
 message QueryResult {

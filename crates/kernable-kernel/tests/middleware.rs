@@ -154,6 +154,7 @@ fn query(query_type: &str, key: &SigningKey) -> QueryRequest {
         .unwrap()
         .as_millis() as i64;
     let mut q = QueryRequest {
+        listener: String::new(),
         protocol: kernable_core::PROTOCOL,
         query_id: "q1".into(),
         tenant_id: "t1".into(),
@@ -219,6 +220,35 @@ async fn the_chain_runs_in_order_and_the_first_rejection_refuses() {
     assert!(
         matches!(answered.outcome, Some(query_result::Outcome::Rejected(r)) if r.code == "no_queries")
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_middleware_cannot_send_what_it_checks_itself() {
+    let env = start("mw-self").await;
+    spawn_worker(&env);
+    let log = Log::default();
+    let mut orders_only = spec("guard", 0, pass);
+    orders_only.types = vec!["orders.PlaceOrder".into()];
+    let _guard = middleware(&env, orders_only, &log);
+    settle_in().await;
+
+    let place = signed(command("c1", "PlaceOrder", "o1"), &key(1));
+    let status = submit_from(&env.addr, place.clone(), Wait::Committed, "guard")
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), Code::FailedPrecondition);
+    assert!(
+        status.message().contains("checks orders.PlaceOrder itself"),
+        "{status:?}"
+    );
+    assert!(log.lock().unwrap().is_empty(), "it was never asked");
+
+    // What it does not check, it may send; others may send what it checks.
+    let placed = submit(&env.addr, place).await.unwrap();
+    assert_eq!(committed_versions(&placed), [1]);
+    let add = signed(command("c2", "AddItem", "o1"), &key(1));
+    let added = submit_from(&env.addr, add, Wait::Committed, "guard").await;
+    assert_eq!(committed_versions(&added.unwrap()), [2]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
