@@ -178,6 +178,51 @@ async fn a_listener_settles_only_on_the_listeners_before_it() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_kernel_is_ready_once_every_listener_is_connected_and_caught_up() {
+    let metrics = free_addr();
+    let env = start_custom("listener-ready", |config, _| {
+        config.metrics_listen = Some(metrics.clone());
+    })
+    .await;
+    spawn_worker(&env);
+    let place = signed(command("c1", "PlaceOrder", "o1"), &key(1));
+    submit_with(&env.addr, place, Wait::Committed)
+        .await
+        .unwrap();
+    let ready = |body: String| body.starts_with("HTTP/1.1 200");
+    assert!(ready(get(&metrics, "/ready").await), "no listeners yet");
+
+    let mut model = listen(&env, "model", opts(0)).await.unwrap();
+    let waiting = get(&metrics, "/ready").await;
+    assert!(waiting.starts_with("HTTP/1.1 503"), "{waiting}");
+    assert!(
+        waiting.ends_with("waiting for listeners: model\n"),
+        "{waiting}"
+    );
+    assert!(
+        get(&metrics, "/metrics")
+            .await
+            .contains("\nkernable_ready 0\n")
+    );
+
+    assert_eq!(positions(&model.next().await), [1]);
+    model.ack(1).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(ready(get(&metrics, "/ready").await));
+    assert!(
+        get(&metrics, "/metrics")
+            .await
+            .contains("\nkernable_ready 1\n")
+    );
+
+    // A registered listener that went away makes the kernel not ready; health is unaffected.
+    drop(model);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!ready(get(&metrics, "/ready").await));
+    assert!(get(&metrics, "/health").await.starts_with("HTTP/1.1 200"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn committed_and_accepted_submits_do_not_wait_and_a_stalled_listener_times_out() {
     let env = start("listener-modes").await;
     spawn_worker(&env);

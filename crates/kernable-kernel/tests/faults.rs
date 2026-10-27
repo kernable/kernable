@@ -98,8 +98,9 @@ impl Drop for KillOnDrop {
     }
 }
 
-/// SIGTERM: the kernel exits cleanly and writes a final checkpoint. An in-flight command
-/// stays pending and runs right after a restart, not only after its 60 s lease expires.
+/// SIGTERM: the kernel lets running commands finish for `drain_timeout_ms`, then exits cleanly
+/// and writes a final checkpoint. A command still in flight stays pending and runs right after
+/// a restart, not only after its 60 s lease expires.
 #[tokio::test(flavor = "multi_thread")]
 async fn sigterm_checkpoints_and_in_flight_commands_run_right_after_a_restart() {
     let dir = std::env::temp_dir().join(format!("kn-sigterm-{}", std::process::id()));
@@ -110,7 +111,7 @@ async fn sigterm_checkpoints_and_in_flight_commands_run_right_after_a_restart() 
     let store = store_url(&dir);
     let config = format!(
         "store = \"{store}\"\nlisten = \"{addr}\"\nkernel_key = \"kernel.key\"\nlease_ttl_ms = 60000\n\
-         checkpoint_interval_ms = 3600000\n[clients]\n\"{}\" = [\"*\"]\n\
+         checkpoint_interval_ms = 3600000\ndrain_timeout_ms = 500\n[clients]\n\"{}\" = [\"*\"]\n\
          [workers]\n\"{}\" = [\"orders.*\"]\n",
         id(&key(1)),
         id(&key(2)),

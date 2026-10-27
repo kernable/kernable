@@ -152,6 +152,19 @@ impl Registry {
         all
     }
 
+    /// Registered listeners that are not connected or have not caught up with the events
+    /// committed before they connected, by name.
+    pub(crate) fn behind(&self) -> Vec<String> {
+        let mut behind: Vec<String> = self
+            .entries()
+            .values()
+            .filter(|e| !e.connected || e.record.position < e.caught_up_at)
+            .map(|e| e.record.name.clone())
+            .collect();
+        behind.sort();
+        behind
+    }
+
     /// The registered listener `name`, as the sender of a request.
     pub(crate) fn caller(&self, name: &str) -> Option<Caller> {
         let entries = self.entries();

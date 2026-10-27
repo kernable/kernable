@@ -7,12 +7,6 @@ use std::path::Path;
 use common::*;
 use kernable_core::{certs, proto::Wait, transport::Tls};
 use kernable_kernel::config;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-fn free_addr() -> String {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap().to_string()
-}
 
 fn client_tls(dir: &Path, name: &str) -> Tls {
     Tls {
@@ -68,16 +62,6 @@ async fn tcp_with_mutual_tls_admits_only_clients_of_the_ca() {
     assert!(plain, "a client without TLS was accepted");
 }
 
-async fn get(addr: &str, path: &str) -> String {
-    let mut conn = tokio::net::TcpStream::connect(addr).await.unwrap();
-    conn.write_all(format!("GET {path} HTTP/1.1\r\nhost: x\r\n\r\n").as_bytes())
-        .await
-        .unwrap();
-    let mut response = String::new();
-    conn.read_to_string(&mut response).await.unwrap();
-    response
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn metrics_report_commands_queue_and_sessions() {
     let metrics = free_addr();
@@ -107,4 +91,47 @@ async fn metrics_report_commands_queue_and_sessions() {
         );
     }
     assert!(get(&metrics, "/").await.starts_with("HTTP/1.1 404"));
+}
+
+fn slow_worker(env: &Env, delay_ms: u64) {
+    let worker = TestWorker {
+        behavior: Behavior::Slow(std::time::Duration::from_millis(delay_ms)),
+        ..TestWorker::honest()
+    };
+    tokio::spawn(run_worker(env.addr.clone(), worker));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn draining_lets_running_requests_finish_and_refuses_new_ones() {
+    let env = start("drain").await;
+    slow_worker(&env, 300);
+    let addr = env.addr.clone();
+    let place = signed(command("c1", "PlaceOrder", "o1"), &key(1));
+    let running = tokio::spawn(async move { submit(&addr, place).await });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let kernel = std::sync::Arc::clone(&env.kernel);
+    let drained = tokio::spawn(async move { kernel.drain().await });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let late = signed(command("c2", "PlaceOrder", "o2"), &key(1));
+    let refused = submit(&env.addr, late).await.unwrap_err();
+    assert_eq!(refused.code(), tonic::Code::Unavailable);
+    assert!(refused.message().contains("shutting down"), "{refused:?}");
+    assert!(env.kernel.readiness().is_err());
+
+    assert_eq!(committed_versions(&running.await.unwrap().unwrap()), [1]);
+    assert!(drained.await.unwrap(), "everything running finished");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn draining_gives_up_after_its_timeout() {
+    let env = start_custom("drain-timeout", |config, _| config.drain_timeout_ms = 200).await;
+    slow_worker(&env, 1_000);
+    let addr = env.addr.clone();
+    let place = signed(command("c1", "PlaceOrder", "o1"), &key(1));
+    tokio::spawn(async move { submit(&addr, place).await });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let started = std::time::Instant::now();
+    assert!(!env.kernel.drain().await);
+    assert!(started.elapsed() < std::time::Duration::from_millis(500));
 }

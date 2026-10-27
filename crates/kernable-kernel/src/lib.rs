@@ -21,7 +21,10 @@ mod queue;
 use std::{
     collections::HashMap,
     os::unix::fs::FileTypeExt,
-    sync::{Arc, Mutex, MutexGuard, PoisonError, atomic::Ordering::Relaxed},
+    sync::{
+        Arc, Mutex, MutexGuard, PoisonError,
+        atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed, Ordering::SeqCst},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -70,6 +73,16 @@ const POLL: Duration = Duration::from_millis(100);
 const MAX_REQUEST_AGE_MS: i64 = 60_000;
 /// Events read from the store per subscription round trip.
 const SUBSCRIBE_BATCH: u32 = 500;
+/// A submit or query in progress, see [`Kernel::request`].
+struct Running<'a>(&'a Kernel);
+
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        self.0.requests.fetch_sub(1, SeqCst);
+        self.0.idle.notify_waiters();
+    }
+}
+
 /// The protocol versions this kernel accepts; see "Protocol versions" in `kernable.proto`.
 pub const PROTOCOLS: std::ops::RangeInclusive<u32> = 1..=kernable_core::PROTOCOL;
 
@@ -104,6 +117,11 @@ pub struct Kernel {
     metrics: metrics::Metrics,
     /// The highest payload version stored per qualified event type; never goes down.
     schemas: Mutex<HashMap<String, u32>>,
+    /// Set on shutdown: new submits and queries are refused while running ones finish.
+    draining: AtomicBool,
+    /// Submits and queries being handled, and a wake-up when one ends.
+    requests: AtomicUsize,
+    idle: Notify,
 }
 
 impl Kernel {
@@ -127,7 +145,50 @@ impl Kernel {
             queue,
             metrics: metrics::Metrics::default(),
             schemas: Mutex::new(schemas),
+            draining: Default::default(),
+            requests: Default::default(),
+            idle: Notify::new(),
         }))
+    }
+
+    /// Whether the kernel serves everything: not shutting down, and every registered listener
+    /// connected and caught up. Otherwise why not.
+    pub fn readiness(&self) -> Result<(), String> {
+        if self.draining.load(SeqCst) {
+            return Err("shutting down".into());
+        }
+        match self.listeners.behind().as_slice() {
+            [] => Ok(()),
+            behind => Err(format!("waiting for listeners: {}", behind.join(", "))),
+        }
+    }
+
+    /// Refuses new submits and queries, and waits up to `drain_timeout_ms` for running ones
+    /// to finish. Returns whether they all did. Workers and listeners stay connected meanwhile,
+    /// so running commands can complete and settle.
+    pub async fn drain(&self) -> bool {
+        self.draining.store(true, SeqCst);
+        let timeout = Duration::from_millis(self.config.drain_timeout_ms);
+        let idle = async {
+            loop {
+                let ended = self.idle.notified();
+                if self.requests.load(SeqCst) == 0 {
+                    return;
+                }
+                ended.await;
+            }
+        };
+        tokio::time::timeout(timeout, idle).await.is_ok()
+    }
+
+    /// Counts a submit or query until the returned guard drops; refused while draining.
+    fn request(&self) -> Result<Running<'_>, Status> {
+        self.requests.fetch_add(1, SeqCst);
+        let running = Running(self);
+        if self.draining.load(SeqCst) {
+            return Err(Status::unavailable("the kernel is shutting down; retry"));
+        }
+        Ok(running)
     }
 
     fn schemas(&self) -> MutexGuard<'_, HashMap<String, u32>> {
@@ -349,6 +410,7 @@ impl CommandService for Api {
         let kernel = &self.0;
         let request = request.into_inner();
         protocol(request.protocol)?;
+        let _running = kernel.request()?;
         let wait = request.wait();
         let listener = request.listener;
         let cmd = request
@@ -459,6 +521,9 @@ impl EventService for Api {
         let kernel = Arc::clone(&self.0);
         let req = request.into_inner();
         protocol(req.protocol)?;
+        if kernel.draining.load(SeqCst) {
+            return Err(Status::unavailable("the kernel is shutting down; retry"));
+        }
         let sig = req
             .client_sig
             .as_ref()
@@ -519,6 +584,7 @@ impl QueryService for Api {
         let kernel = &self.0;
         let query = request.into_inner();
         protocol(query.protocol)?;
+        let _running = kernel.request()?;
         let sig = query
             .client_sig
             .as_ref()

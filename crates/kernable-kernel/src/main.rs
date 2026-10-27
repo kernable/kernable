@@ -39,10 +39,16 @@ async fn run(path: &Path) -> Result<(), BoxError> {
         "kernel starting"
     );
     let kernel = Kernel::open(config)?;
+    let mut server = tokio::spawn(serve(Arc::clone(&kernel)));
     tokio::select! {
-        result = serve(Arc::clone(&kernel)) => result?,
+        result = &mut server => result??,
         signal = shutdown_signal() => {
-            tracing::info!(signal = signal?, "shutting down");
+            // Workers and listeners stay connected, so running commands can finish and settle.
+            tracing::info!(signal = signal?, "shutting down: finishing running requests");
+            if !kernel.drain().await {
+                tracing::warn!("drain timed out: unfinished commands run again after a restart");
+            }
+            server.abort();
         }
     }
     kernel.shutdown()

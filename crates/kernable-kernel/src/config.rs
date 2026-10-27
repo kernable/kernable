@@ -67,6 +67,9 @@ pub struct Config {
     /// How long a request waits for one middleware to catch up and give its verdict.
     #[serde(default = "default_middleware_timeout_ms")]
     pub middleware_timeout_ms: u64,
+    /// On SIGTERM or SIGINT: how long running submits and queries may still finish.
+    #[serde(default = "default_drain_timeout_ms")]
+    pub drain_timeout_ms: u64,
     #[serde(default)]
     pub clients: HashMap<String, Vec<String>>,
     #[serde(default)]
@@ -84,7 +87,8 @@ pub struct Config {
     #[serde(default)]
     pub privileged: HashMap<String, Vec<String>>,
     pub tls: Option<Tls>,
-    /// Address for Prometheus metrics (`GET /metrics`); off when absent.
+    /// Address for Prometheus metrics (`GET /metrics`), `GET /health` and `GET /ready`; off
+    /// when absent.
     pub metrics_listen: Option<String>,
 }
 
@@ -118,6 +122,10 @@ fn default_query_timeout_ms() -> u64 {
 
 fn default_middleware_timeout_ms() -> u64 {
     5_000
+}
+
+fn default_drain_timeout_ms() -> u64 {
+    10_000
 }
 
 impl Config {

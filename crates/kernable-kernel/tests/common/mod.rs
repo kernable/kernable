@@ -36,6 +36,7 @@ pub struct Env {
     pub store: String,
     pub addr: String,
     pub kernel_key: SigningKey,
+    pub kernel: std::sync::Arc<Kernel>,
 }
 
 impl Drop for Env {
@@ -72,6 +73,7 @@ pub async fn start_custom(name: &str, customize: impl FnOnce(&mut Config, &Path)
         settle_timeout_ms: 1_000,
         query_timeout_ms: 1_000,
         middleware_timeout_ms: 1_000,
+        drain_timeout_ms: 1_000,
         clients: HashMap::from([(id(&key(1)), vec!["*".into()])]),
         workers: HashMap::from([(id(&key(2)), vec!["orders.*".into()])]),
         subscribers: HashMap::from([
@@ -91,14 +93,34 @@ pub async fn start_custom(name: &str, customize: impl FnOnce(&mut Config, &Path)
     };
     customize(&mut config, &dir);
     let addr = config.listen.clone();
-    tokio::spawn(serve(Kernel::open(config).unwrap()));
+    let kernel = Kernel::open(config).unwrap();
+    tokio::spawn(serve(std::sync::Arc::clone(&kernel)));
     wait_for(&addr).await;
     Env {
         dir,
         store,
         addr,
         kernel_key,
+        kernel,
     }
+}
+
+/// A free local TCP address.
+pub fn free_addr() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap().to_string()
+}
+
+/// The raw HTTP response to `GET path` at `addr` (the metrics port).
+pub async fn get(addr: &str, path: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut conn = tokio::net::TcpStream::connect(addr).await.unwrap();
+    conn.write_all(format!("GET {path} HTTP/1.1\r\nhost: x\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut response = String::new();
+    conn.read_to_string(&mut response).await.unwrap();
+    response
 }
 
 /// The backend under test: `KERNABLE_TEST_STORE=file` selects the file store, else SQLite.

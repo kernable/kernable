@@ -178,10 +178,23 @@ pub(crate) fn render(kernel: &Kernel) -> String {
         "1 while the listener is connected.",
         per(&|l| l.connected as u64),
     );
+    metric(
+        "kernable_ready",
+        "1 while the kernel is ready: every listener connected and caught up, not shutting down.",
+        vec![(String::new(), kernel.readiness().is_ok() as u64)],
+    );
     out
 }
 
-/// Serves `GET /metrics` until the listener fails. Deliberately minimal HTTP/1.
+fn reply(status: &str, content_type: &str, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+/// Serves `GET /metrics`, `GET /health` (the process runs) and `GET /ready` (see
+/// `Kernel::readiness`) until the listener fails. Deliberately minimal HTTP/1.
 pub(crate) async fn serve(kernel: &Kernel, addr: &str) -> Result<(), BoxError> {
     let listener = TcpListener::bind(addr).await?;
     tracing::info!(%addr, "serving metrics");
@@ -192,14 +205,18 @@ pub(crate) async fn serve(kernel: &Kernel, addr: &str) -> Result<(), BoxError> {
             Ok(Ok(n)) => n,
             _ => continue,
         };
-        let response = if request[..n].starts_with(b"GET /metrics ") {
-            let body = render(kernel);
-            format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: text/plain; version=0.0.4\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                body.len()
-            )
+        let request = &request[..n];
+        let response = if request.starts_with(b"GET /metrics ") {
+            reply("200 OK", "text/plain; version=0.0.4", &render(kernel))
+        } else if request.starts_with(b"GET /health ") {
+            reply("200 OK", "text/plain", "ok\n")
+        } else if request.starts_with(b"GET /ready ") {
+            match kernel.readiness() {
+                Ok(()) => reply("200 OK", "text/plain", "ready\n"),
+                Err(why) => reply("503 Service Unavailable", "text/plain", &format!("{why}\n")),
+            }
         } else {
-            "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_owned()
+            reply("404 Not Found", "text/plain", "")
         };
         let _ = conn.write_all(response.as_bytes()).await;
     }
