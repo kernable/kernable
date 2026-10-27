@@ -24,6 +24,8 @@ const USAGE: &str = "usage:
   kernable listeners <store>              lists registered listeners with order, position and middleware
   kernable listeners remove <store> <name>  removes a listener, and its middleware (kernel stopped)
   kernable schemas <store>                lists the highest stored payload version per event type
+  kernable migrate <store>                upgrades a store to this build's data format (kernel stopped;
+                                          back the store up first)
   kernable submit <addr> <client.key> <tenant> <domain> <aggregate_type> <aggregate_id> <command_type> <payload>
                                           signs and submits a command (addr: unix:/path or host:port)";
 
@@ -50,6 +52,7 @@ async fn main() -> ExitCode {
         }
         ["listeners", store] => listeners(store),
         ["schemas", store] => schemas(store),
+        ["migrate", store] => migrate(store),
         ["listeners", "remove", store, name] => remove_listener(store, name),
         [
             "submit",
@@ -151,6 +154,29 @@ fn schemas(store: &str) -> Result<bool> {
     Ok(true)
 }
 
+fn migrate(store: &str) -> Result<bool> {
+    let (backend, path) = kernable_store::backend(store);
+    if backend != "memory" && !std::path::Path::new(path).exists() {
+        return Err(format!("no store at {path}").into());
+    }
+    let format = kernable_store::FORMAT;
+    match kernable_store::open(store) {
+        Ok(_) => {
+            println!("store is at format {format}; nothing to migrate");
+            Ok(true)
+        }
+        // Migrations from older formats go here, one step per format.
+        Err(kernable_store::Error::Format(found)) if found < format => {
+            println!(
+                "no migration from format {found}: it comes from a development build before \
+                 format 1; create a new store"
+            );
+            Ok(false)
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
 fn remove_listener(store: &str, name: &str) -> Result<bool> {
     let store = kernable_store::open(store)?;
     if !store.listeners()?.iter().any(|l| l.name == name) {
@@ -173,6 +199,7 @@ async fn submit(addr: &str, key: &str, mut cmd: Command) -> Result<bool> {
     let mut client = CommandServiceClient::new(transport::connect(addr).await?);
     let request = SubmitRequest {
         command: Some(cmd),
+        protocol: kernable_core::PROTOCOL,
         ..Default::default()
     };
     match client.submit(request).await?.into_inner().outcome {

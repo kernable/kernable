@@ -71,6 +71,7 @@ fn opts(order: i32) -> Opts {
 async fn listen(env: &Env, name: &str, o: Opts) -> Result<Listener, Status> {
     let (tx, rx) = mpsc::channel(16);
     let hello = In::Hello(Hello {
+        protocol: kernable_core::PROTOCOL,
         name: name.into(),
         key_id: id(&o.key),
         order: o.order,

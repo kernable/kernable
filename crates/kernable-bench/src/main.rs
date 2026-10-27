@@ -197,6 +197,7 @@ async fn worker(addr: &str, key: &str, concurrency: u32) -> Result<(), BoxError>
     let (tx, rx) = mpsc::channel(1024);
     let msg = |m: In| WorkerMessage { msg: Some(m) };
     tx.send(msg(In::Register(Register {
+        protocol: kernable_core::PROTOCOL,
         worker_id: format!("rust-bench-{}", std::process::id()),
         key_id: signing::key_id(&key.verifying_key()),
         command_types: vec!["bench.Write".into()],
@@ -243,6 +244,7 @@ async fn listener(addr: &str, key: &str, name: &str, order: i32) -> Result<(), B
     let (tx, rx) = mpsc::channel(1024);
     let msg = |m: Listen| ListenerMessage { msg: Some(m) };
     tx.send(msg(Listen::Hello(Hello {
+        protocol: kernable_core::PROTOCOL,
         name: name.into(),
         key_id: signing::key_id(&key.verifying_key()),
         order,
@@ -310,6 +312,7 @@ async fn channels(addr: &str, n: usize) -> Result<Vec<Channel>, BoxError> {
 
 async fn submit(channel: Channel, cmd: Command, wait: Wait) -> Result<Outcome, tonic::Status> {
     let request = SubmitRequest {
+        protocol: kernable_core::PROTOCOL,
         command: Some(cmd),
         wait: wait.into(),
     };

@@ -76,6 +76,7 @@ fn middleware(env: &Env, spec: Spec, log: &Log) -> (JoinHandle<tonic::Status>, m
         let (tx, rx) = mpsc::channel(16);
         let send = |m: In| ListenerMessage { msg: Some(m) };
         let hello = Hello {
+            protocol: kernable_core::PROTOCOL,
             name: spec.name.into(),
             key_id: id(&spec.key),
             order: spec.listener_order,
@@ -153,6 +154,7 @@ fn query(query_type: &str, key: &SigningKey) -> QueryRequest {
         .unwrap()
         .as_millis() as i64;
     let mut q = QueryRequest {
+        protocol: kernable_core::PROTOCOL,
         query_id: "q1".into(),
         tenant_id: "t1".into(),
         domain: "orders".into(),

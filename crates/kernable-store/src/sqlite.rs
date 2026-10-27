@@ -23,7 +23,7 @@ use prost::Message;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::{
-    Checkpoint, Enqueued, Error, Pending, Result, Store,
+    Checkpoint, Enqueued, Error, FORMAT, Pending, Result, Store,
     verify::{Report, Verifier},
 };
 
@@ -108,8 +108,18 @@ impl SqliteStore {
         Self::init(Connection::open_in_memory()?)
     }
 
+    /// Creates the tables of a new database; refuses one of another data format.
     fn init(conn: Connection) -> Result<Self> {
-        conn.execute_batch(SCHEMA)?;
+        let format: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        let tables: u32 = conn.query_row("SELECT COUNT(*) FROM sqlite_master", [], |r| r.get(0))?;
+        match (format, tables) {
+            (0, 0) => {
+                conn.execute_batch(SCHEMA)?;
+                conn.pragma_update(None, "user_version", FORMAT)?;
+            }
+            (FORMAT, _) => {}
+            (found, _) => return Err(Error::Format(found)),
+        }
         Ok(Self {
             conn: Mutex::new(conn),
         })

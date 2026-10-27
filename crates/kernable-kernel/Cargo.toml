@@ -20,3 +20,4 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 kernable-core = { path = "../kernable-core", features = ["certs"] }
+rusqlite.workspace = true

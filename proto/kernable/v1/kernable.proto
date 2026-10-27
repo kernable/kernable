@@ -1,5 +1,10 @@
-// kernable protocol v1 (PoC draft).
+// kernable protocol v1.
 // Payloads are opaque bytes; signatures cover the layout defined in SIGNING.md.
+//
+// Protocol versions: every request and stream opening (SubmitRequest, QueryRequest,
+// SubscribeRequest, Register, Hello) carries `protocol`, the version its sender speaks. The
+// kernel accepts a range of versions and refuses others with FAILED_PRECONDITION, naming the
+// range. 0 (unset) is never accepted. Version 1 is this file.
 syntax = "proto3";
 
 package kernable.v1;
@@ -94,6 +99,7 @@ service CommandService {
 message SubmitRequest {
   Command command = 1;
   Wait wait = 2;
+  uint32 protocol = 3; // see "Protocol versions" at the top
 }
 
 // How long Submit waits before it responds.
@@ -139,6 +145,7 @@ message SubscribeRequest {
   repeated string event_types = 2; // qualified (`orders.OrderPlaced`, `orders.*`); empty = all the key may read
   int64 issued_at = 3;             // ms since epoch; must be within 60 s of the kernel's clock
   Signature client_sig = 4;
+  uint32 protocol = 5;             // not signed
 }
 
 // ---- queries ----
@@ -160,6 +167,7 @@ message QueryRequest {
   uint64 min_position = 7;
   int64 issued_at = 8; // ms since epoch; must be within 60 s of the kernel's clock
   Signature client_sig = 9;
+  uint32 protocol = 10; // not signed
 }
 
 message QueryResult {
@@ -252,6 +260,7 @@ message Hello {
   optional uint64 from_position = 5;
   repeated string query_types = 6; // qualified query types this listener answers
   Middleware middleware = 7;        // absent: not a middleware
+  uint32 protocol = 8;
 }
 
 message Ready {
@@ -300,6 +309,7 @@ message Register {
   // The kernel refuses a worker, or a result, that would write an older version of a type
   // than the store already holds, and a result whose events differ from what was declared.
   repeated EventSchema event_schemas = 5;
+  uint32 protocol = 6;
 }
 
 message EventSchema {

@@ -1,6 +1,7 @@
 //! Append-only file backend (`file:<path>`), and the same logic without a file (`memory:`).
 //!
-//! The whole store is one log of records (`proto/kernable/v1/storage.proto`): enqueued
+//! The whole store is one log of records (`proto/kernable/v1/storage.proto`). The first holds
+//! the data format (see [`crate::FORMAT`]); then come enqueued
 //! commands, commits (all events of one command in a single record, hence atomic),
 //! rejections, checkpoints, listener positions and snapshots. Each record is framed as `u32 BE length || first 4 bytes of
 //! SHA-256(body) || body`. Opening replays the log into memory. A torn last record from a
@@ -25,8 +26,8 @@ use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
         CheckpointRecord, Command, CommandResult, Committed, CommittedRecord, EnqueuedRecord,
-        Event, ListenerRecord, LogRecord, LoggedEvent, NewEvent, Rejected, RejectedRecord,
-        Signature, SnapshotRecord, command_result::Outcome, log_record::Record,
+        Event, FormatRecord, ListenerRecord, LogRecord, LoggedEvent, NewEvent, Rejected,
+        RejectedRecord, Signature, SnapshotRecord, command_result::Outcome, log_record::Record,
     },
     signing::{self, GENESIS},
 };
@@ -34,7 +35,7 @@ use prost::Message;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    Checkpoint, Enqueued, Error, Pending, Result, Store,
+    Checkpoint, Enqueued, Error, FORMAT, Pending, Result, Store,
     verify::{Report, Verifier},
 };
 
@@ -79,6 +80,8 @@ struct State {
 impl State {
     fn apply(&mut self, record: Record) -> Result<()> {
         match record {
+            // Checked by `replay`, which only accepts it first.
+            Record::Format(_) => {}
             Record::Enqueued(EnqueuedRecord {
                 command,
                 created_at,
@@ -218,6 +221,16 @@ impl FileStore {
             .map_err(|_| Error::Io(std::io::Error::other("store is in use by another process")))?;
         let bytes = fs::read(path)?;
         let (state, valid) = replay(&bytes)?;
+        if valid == 0 {
+            // A new log (or one torn before its first record ended) starts with its format.
+            file.set_len(0)?;
+            let store = Self::new(state, Sink::File(file), 0);
+            append(
+                &mut store.inner(),
+                Record::Format(FormatRecord { version: FORMAT }),
+            )?;
+            return Ok(store);
+        }
         if valid < bytes.len() {
             let aside = PathBuf::from(format!("{}.torn-{valid}", path.display()));
             fs::write(&aside, &bytes[valid..])?;
@@ -300,6 +313,13 @@ fn replay(bytes: &[u8]) -> Result<(State, usize)> {
             .map_err(|e| corrupt(&format!("record at byte {at}: {e}")))?
             .record
             .ok_or_else(|| corrupt(&format!("record at byte {at} is empty")))?;
+        match (&record, at) {
+            (Record::Format(f), 0) if f.version == FORMAT => {}
+            (Record::Format(f), 0) => return Err(Error::Format(f.version)),
+            (_, 0) => return Err(Error::Format(0)), // written before formats were recorded
+            (Record::Format(_), _) => return Err(corrupt(&format!("format record at byte {at}"))),
+            _ => {}
+        }
         state.apply(record)?;
         at += HEADER + len;
     }

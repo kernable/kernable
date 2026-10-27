@@ -70,6 +70,24 @@ const POLL: Duration = Duration::from_millis(100);
 const MAX_REQUEST_AGE_MS: i64 = 60_000;
 /// Events read from the store per subscription round trip.
 const SUBSCRIBE_BATCH: u32 = 500;
+/// The protocol versions this kernel accepts; see "Protocol versions" in `kernable.proto`.
+pub const PROTOCOLS: std::ops::RangeInclusive<u32> = 1..=kernable_core::PROTOCOL;
+
+/// Refuses a request or stream of a protocol version this kernel does not speak.
+pub(crate) fn protocol(version: u32) -> Result<(), Status> {
+    if PROTOCOLS.contains(&version) {
+        return Ok(());
+    }
+    let (min, max) = (PROTOCOLS.start(), PROTOCOLS.end());
+    let advice = if version < *min {
+        "update the SDK"
+    } else {
+        "update the kernel"
+    };
+    Err(Status::failed_precondition(format!(
+        "protocol {version} is not supported; this kernel speaks {min} to {max}: {advice}"
+    )))
+}
 
 pub struct Kernel {
     config: Config,
@@ -311,6 +329,7 @@ impl CommandService for Api {
     ) -> Result<Response<CommandResult>, Status> {
         let kernel = &self.0;
         let request = request.into_inner();
+        protocol(request.protocol)?;
         let wait = request.wait();
         let cmd = request
             .command
@@ -418,6 +437,7 @@ impl EventService for Api {
     ) -> Result<Response<Self::SubscribeStream>, Status> {
         let kernel = Arc::clone(&self.0);
         let req = request.into_inner();
+        protocol(req.protocol)?;
         let sig = req
             .client_sig
             .as_ref()
@@ -477,6 +497,7 @@ impl QueryService for Api {
     async fn query(&self, request: Request<QueryRequest>) -> Result<Response<QueryResult>, Status> {
         let kernel = &self.0;
         let query = request.into_inner();
+        protocol(query.protocol)?;
         let sig = query
             .client_sig
             .as_ref()
@@ -702,6 +723,7 @@ async fn run_session(
     let Some(In::Register(reg)) = next(inbound).await? else {
         return Err(Status::invalid_argument("expected Register"));
     };
+    protocol(reg.protocol)?;
     if !reg.command_types.iter().all(|t| config::valid_qualified(t)) {
         return Err(Status::invalid_argument(
             "register qualified command types: domain.CommandType",

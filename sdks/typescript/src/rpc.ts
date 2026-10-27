@@ -109,6 +109,7 @@ export type WorkerMessage =
       register: {
         worker_id: string;
         key_id: string;
+        protocol: number;
         command_types: string[];
         max_concurrency: number;
         event_schemas: { event_type: string; schema: number }[];
@@ -153,6 +154,7 @@ export type ListenerMessage =
       hello: {
         name: string;
         key_id: string;
+        protocol: number;
         order: number;
         event_types: string[];
         from_position?: number;
@@ -179,6 +181,9 @@ export interface Clients {
 // Packaged next to `dist/`; in the repository, the shared `proto/` at the root.
 const BUNDLED = fileURLToPath(new URL("../proto/kernable/v1/kernable.proto", import.meta.url));
 const PROTO = existsSync(BUNDLED) ? BUNDLED : fileURLToPath(new URL("../../../proto/kernable/v1/kernable.proto", import.meta.url));
+
+/** The protocol version this SDK speaks; see "Protocol versions" in `kernable.proto`. */
+export const PROTOCOL = 1;
 
 let v1: any; // generated client constructors, untyped
 
@@ -207,7 +212,7 @@ export function connect(url: string, tls?: TlsFiles): Clients {
   return {
     submit: (command, wait) =>
       new Promise((resolve, reject) =>
-        commands.Submit({ command, wait }, (err: grpc.ServiceError | null, res: WireCommandResult) =>
+        commands.Submit({ command, wait, protocol: PROTOCOL }, (err: grpc.ServiceError | null, res: WireCommandResult) =>
           err ? reject(err) : resolve(res),
         ),
       ),
@@ -215,9 +220,9 @@ export function connect(url: string, tls?: TlsFiles): Clients {
     listen: () => listeners.Listen(),
     query: (req) =>
       new Promise((resolve, reject) =>
-        queries.Query(req, (err: grpc.ServiceError | null, res: WireQueryResult) => (err ? reject(err) : resolve(res))),
+        queries.Query({ ...req, protocol: PROTOCOL }, (err: grpc.ServiceError | null, res: WireQueryResult) => (err ? reject(err) : resolve(res))),
       ),
-    subscribe: (req) => events.Subscribe(req),
+    subscribe: (req) => events.Subscribe({ ...req, protocol: PROTOCOL }),
     close: () => {
       commands.close();
       workers.close();

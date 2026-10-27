@@ -323,6 +323,7 @@ pub(crate) async fn run(
     let Some(In::Hello(hello)) = next(inbound).await? else {
         return Err(Status::invalid_argument("expected Hello"));
     };
+    crate::protocol(hello.protocol)?;
     if hello.name.is_empty() {
         return Err(Status::invalid_argument("listener name is empty"));
     }

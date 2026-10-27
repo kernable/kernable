@@ -23,6 +23,10 @@ use kernable_core::proto::{
     Command, CommandResult, Event, ListenerRecord, NewEvent, Rejected, Signature, SnapshotRecord,
 };
 
+/// The version of the stored data format this build reads and writes. A store of another
+/// format is refused; `kernable migrate` upgrades older ones.
+pub const FORMAT: u32 = 1;
+
 pub use file::FileStore;
 pub use sqlite::SqliteStore;
 pub use verify::Report;
@@ -40,6 +44,8 @@ pub enum Error {
     ReadOnly,
     /// The stored data cannot be read back (other than a torn last record).
     Corrupt(String),
+    /// The store has a data format other than [`FORMAT`].
+    Format(u32),
     Io(std::io::Error),
     Sqlite(rusqlite::Error),
     Decode(prost::DecodeError),
@@ -57,6 +63,14 @@ impl fmt::Display for Error {
             Error::NotPending => write!(f, "command is not pending"),
             Error::ReadOnly => write!(f, "store is open read-only"),
             Error::Corrupt(what) => write!(f, "corrupt store: {what}"),
+            Error::Format(found) if *found > FORMAT => write!(
+                f,
+                "store format {found} was written by a newer kernable; this one reads format {FORMAT}"
+            ),
+            Error::Format(found) => write!(
+                f,
+                "store format {found}, this kernable reads format {FORMAT}: upgrade it with `kernable migrate`"
+            ),
             Error::Io(e) => write!(f, "io: {e}"),
             Error::Sqlite(e) => write!(f, "sqlite: {e}"),
             Error::Decode(e) => write!(f, "decode: {e}"),

@@ -713,6 +713,7 @@ dependencies = [
  "getrandom 0.3.4",
  "kernable-core",
  "kernable-store",
+ "rusqlite",
  "serde",
  "tokio",
  "tokio-stream",

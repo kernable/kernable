@@ -33,10 +33,13 @@ make check-packages # builds the npm package and the Python wheel, installs and 
 ./bench/run.sh      # benchmark matrix; STORE=file:k.log or STORE=memory: picks the backend
 ```
 
+`crates/kernable-kernel/tests/fixtures/format-<n>` holds frozen stores of every data format; `make check` opens, verifies and runs them. Never regenerate them: a new format adds a directory (`KERNABLE_WRITE_FIXTURES=1` fills only missing ones) and a `kernable migrate` step.
+
 ## Operate
 
 - **Mutual TLS** (TCP only): `kernable certs new <dir> <client>...` creates a development CA and certificates. Then add `[tls]` to `kernable.toml` (see `crates/kernable-kernel/src/config.rs`) and pass `tls` to the SDKs (`{ ca, cert, key }` in TypeScript, `Tls(ca, cert, key)` in Python).
 - **Metrics**: `metrics_listen = "127.0.0.1:9233"` serves Prometheus text at `/metrics`: commands by outcome, queue depth, worker sessions, execution, settle, query and middleware time, queries and middleware checks by outcome, and position, lag and connection state per listener.
 - **Middleware** is registered in code (`listener.middleware({ types, order }, check)`) and allowed per key in `[middlewares]`. The kernel keeps the registration: while a middleware is away, everything it covers is refused with `UNAVAILABLE`. `kernable listeners <store>` shows the chain; `kernable listeners remove` (kernel stopped) unregisters a middleware for good.
+- **Versions**: SDKs send the protocol version they speak; the kernel accepts a range (today 1 to 1) and refuses others with `FAILED_PRECONDITION`, saying whether the SDK or the kernel needs an update. Stores record their data format (SQLite `user_version`, a first record in the file log); a kernel refuses a store of another format at startup. Upgrades never happen on their own: stop the kernel, back up the store and run `kernable migrate <store>`.
 - **Event schemas**: a domain declares the payload version it writes and how older ones are upcast (`orders.event("OrderPlaced", 2).upcast(1, fn)`); listeners get them with `use(orders)`. The kernel refuses a worker that would write an older version than the store holds (`kernable schemas <store>` lists the stored ones). A listener that meets a version it does not know stops and logs until it is updated; because listeners run in order, so do the listeners after it. Deploy readers before writers.
 - **Logs**: structured, to stderr. `KERNABLE_LOG` sets the filter (default `info`), and `KERNABLE_LOG_FORMAT=json` switches to JSON.

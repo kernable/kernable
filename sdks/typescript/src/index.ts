@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import type { ClientReadableStream } from "@grpc/grpc-js";
 
 import {
+  PROTOCOL,
   connect,
   type Clients,
   type KernelMessage,
@@ -654,6 +655,7 @@ export class Listener {
         hello: {
           name: this.name,
           key_id: this.key.id,
+          protocol: PROTOCOL,
           order: this.options.order ?? 0,
           event_types: [...this.handlers.keys()],
           query_types: [...this.queries.keys()],
@@ -768,6 +770,7 @@ export class Worker {
         register: {
           worker_id: `ts-${process.pid}`,
           key_id: this.key.id,
+          protocol: PROTOCOL,
           command_types: [...this.byCommand.keys()],
           max_concurrency: concurrency,
           event_schemas: this.eventSchemas(),

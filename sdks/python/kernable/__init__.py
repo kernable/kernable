@@ -39,8 +39,9 @@ from kernable.signing import (Key, challenge_message, command_message, derived_i
 from kernable.v1 import kernable_pb2 as pb
 from kernable.v1 import kernable_pb2_grpc as rpc
 
-__all__ = ["Aggregate", "Check", "CommandContext", "Domain", "Event", "EventSchema", "Kernable", "Key", "Listener", "ListenerContext",
-           "NotSettled", "Outcome", "QueryContext", "Rejected", "RequestContext", "Tls", "Worker", "domain"]
+__all__ = ["PROTOCOL", "Aggregate", "Check", "CommandContext", "Domain", "Event", "EventSchema", "Kernable", "Key",
+           "Listener", "ListenerContext", "NotSettled", "Outcome", "QueryContext", "Rejected", "RequestContext", "Tls",
+           "Worker", "domain"]
 
 
 class Rejected(Exception):
@@ -190,6 +191,9 @@ class NotSettled(Exception):
         super().__init__("command committed, but not all listeners have processed its events yet")
         self.outcome = outcome
 
+
+#: The protocol version this SDK speaks; see "Protocol versions" in `kernable.proto`.
+PROTOCOL = 1
 
 _INITIAL = object()
 _DOMAIN = re.compile(r"^[a-z][a-z0-9_-]*$")
@@ -382,7 +386,7 @@ class Kernable:
         query_id = str(uuid.uuid4())
         q = pb.QueryRequest(query_id=query_id, tenant_id=tenant or self._tenant, domain=domain, query_type=type,
                             payload=_encode(data), context=_to_wire_context(context or self._context, query_id),
-                            min_position=min_position, issued_at=int(time.time() * 1000))
+                            min_position=min_position, issued_at=int(time.time() * 1000), protocol=PROTOCOL)
         q.client_sig.CopyFrom(self._key.sign(query_message(q)))
         res = rpc.QueryServiceStub(self._channel).Query(q)
         if res.WhichOneof("outcome") == "rejected":
@@ -411,7 +415,8 @@ class Kernable:
                          command_type=command_type, payload=_encode(data),
                          context=_to_wire_context(context, command_id))
         cmd.client_sig.CopyFrom(self._key.sign(command_message(cmd)))
-        return rpc.CommandServiceStub(self._channel).Submit(pb.SubmitRequest(command=cmd, wait=wait))
+        request = pb.SubmitRequest(command=cmd, wait=wait, protocol=PROTOCOL)
+        return rpc.CommandServiceStub(self._channel).Submit(request)
 
 
 class _Stream:
@@ -480,7 +485,7 @@ class Worker(_Stream):
         # Every event type the aggregates know: the kernel refuses an outdated worker.
         schemas = {f"{a.domain}.{t}": a.schema_of(t) for a in self._by_command.values()
                    for t in [*a.appliers, *a.events]}
-        register = pb.Register(worker_id=f"py-{uuid.uuid4().hex[:8]}", key_id=self._key.id,
+        register = pb.Register(worker_id=f"py-{uuid.uuid4().hex[:8]}", key_id=self._key.id, protocol=PROTOCOL,
                                command_types=list(self._by_command), max_concurrency=1,
                                event_schemas=[pb.EventSchema(event_type=t, schema=s) for t, s in schemas.items()])
         return pb.WorkerMessage(register=register)
@@ -612,7 +617,8 @@ class Listener(_Stream):
         return self._stub.Listen(requests)
 
     def _hello(self):
-        hello = pb.Hello(name=self._name, key_id=self._key.id, order=self._order, event_types=list(self._handlers),
+        hello = pb.Hello(name=self._name, key_id=self._key.id, protocol=PROTOCOL, order=self._order,
+                         event_types=list(self._handlers),
                          query_types=list(self._queries))
         if self._middleware:
             hello.middleware.CopyFrom(self._middleware[0])

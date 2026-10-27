@@ -14,7 +14,14 @@ message LogRecord {
     CheckpointRecord checkpoint = 4;
     ListenerRecord listener = 5;
     SnapshotRecord snapshot = 6;
+    FormatRecord format = 7;
   }
+}
+
+// The first record of every log: the version of this record format. A kernel opens only logs
+// of the format it reads; `kernable migrate` upgrades older ones.
+message FormatRecord {
+  uint32 version = 1;
 }
 
 message EnqueuedRecord {

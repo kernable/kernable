@@ -29,6 +29,7 @@ fn read_model(env: &Env, name: &str, key: SigningKey, ack: bool) -> JoinHandle<t
         let (tx, rx) = mpsc::channel(16);
         let send = |m: In| ListenerMessage { msg: Some(m) };
         let hello = Hello {
+            protocol: kernable_core::PROTOCOL,
             name,
             key_id: id(&key),
             order: 0,
@@ -97,6 +98,7 @@ fn now_ms() -> i64 {
 
 fn signed_query(query_type: &str, min_position: u64, key: &SigningKey) -> QueryRequest {
     let mut q = QueryRequest {
+        protocol: kernable_core::PROTOCOL,
         query_id: "q1".into(),
         tenant_id: "t1".into(),
         domain: "orders".into(),
@@ -222,6 +224,7 @@ async fn a_read_model_that_goes_away_fails_the_query_at_once() {
     let env = start("query-gone").await;
     let (tx, rx) = mpsc::channel(16);
     let hello = Hello {
+        protocol: kernable_core::PROTOCOL,
         name: "silent".into(),
         key_id: id(&key(5)),
         order: 0,

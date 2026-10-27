@@ -214,6 +214,7 @@ pub async fn run_worker(addr: String, w: TestWorker) -> tonic::Status {
     let (tx, rx) = mpsc::channel(16);
     let send = |msg: In| WorkerMessage { msg: Some(msg) };
     tx.send(send(In::Register(Register {
+        protocol: kernable_core::PROTOCOL,
         worker_id: "test-worker".into(),
         key_id: id(&w.claimed),
         command_types: w.command_types.clone(),
@@ -376,6 +377,7 @@ pub async fn submit_on(
     wait: Wait,
 ) -> Result<CommandResult, tonic::Status> {
     let request = SubmitRequest {
+        protocol: kernable_core::PROTOCOL,
         command: Some(cmd),
         wait: wait.into(),
     };

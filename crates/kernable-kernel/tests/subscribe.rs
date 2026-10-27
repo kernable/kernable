@@ -23,6 +23,7 @@ fn request(key: &SigningKey, after: u64, types: &[&str], issued_at: i64) -> Subs
     let event_types: Vec<String> = types.iter().map(|t| t.to_string()).collect();
     let msg = signing::subscribe_message(after, &event_types, issued_at);
     SubscribeRequest {
+        protocol: kernable_core::PROTOCOL,
         after_position: after,
         event_types,
         issued_at,
