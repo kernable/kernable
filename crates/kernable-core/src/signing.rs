@@ -125,7 +125,7 @@ pub fn result_message(cmd: &Command, expected_version: u64, events: &[NewEvent])
         .u64(expected_version)
         .u64(events.len() as u64);
     for e in events {
-        m = m.str(&e.event_type).bytes(&e.payload);
+        m = m.str(&e.event_type).u64(e.schema.into()).bytes(&e.payload);
     }
     m.0
 }
@@ -210,6 +210,7 @@ pub fn event_hash(prev: &[u8], event: &Event) -> [u8; 32] {
         .str(&event.aggregate_id)
         .u64(event.version)
         .str(&event.event_type)
+        .u64(event.schema.into())
         .bytes(&event.payload)
         .str(&event.command_id)
         .i64(event.created_at)

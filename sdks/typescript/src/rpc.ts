@@ -52,11 +52,13 @@ export interface WireEvent {
   hash: Buffer;
   producer_sig?: WireSignature | null;
   context?: WireRequestContext | null;
+  schema: number;
 }
 
 export interface WireNewEvent {
   event_type: string;
   payload: Buffer;
+  schema: number;
 }
 
 export interface WireSnapshot {
@@ -103,7 +105,15 @@ export interface KernelMessage {
 }
 
 export type WorkerMessage =
-  | { register: { worker_id: string; key_id: string; command_types: string[]; max_concurrency: number } }
+  | {
+      register: {
+        worker_id: string;
+        key_id: string;
+        command_types: string[];
+        max_concurrency: number;
+        event_schemas: { event_type: string; schema: number }[];
+      };
+    }
   | { challenge_response: { sig: Buffer } }
   | { result: { lease_id: string; events: WireNewEvent[]; worker_sig: WireSignature; snapshot?: WireSnapshot } }
   | { rejection: { lease_id: string; reason: WireRejected; worker_sig: WireSignature } };

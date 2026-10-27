@@ -10,8 +10,8 @@ use std::{
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
-        ChallengeResponse, Command, CommandResult, NewEvent, Register, Rejected, Rejection,
-        Result as WorkResult, Snapshot, SubmitRequest, Wait, WorkerMessage,
+        ChallengeResponse, Command, CommandResult, EventSchema, NewEvent, Register, Rejected,
+        Rejection, Result as WorkResult, Snapshot, SubmitRequest, Wait, WorkerMessage,
         command_result::Outcome, command_service_client::CommandServiceClient,
         kernel_message::Msg as Out, worker_gateway_client::WorkerGatewayClient,
         worker_message::Msg as In,
@@ -145,6 +145,7 @@ pub fn order(exists: bool, cmd: &Command) -> Result<Vec<NewEvent>, Rejected> {
     Ok(vec![NewEvent {
         event_type: event_type.into(),
         payload: cmd.payload.clone(),
+        schema: 1,
     }])
 }
 
@@ -178,6 +179,10 @@ pub struct TestWorker {
     pub executions: Option<mpsc::UnboundedSender<(Option<u64>, usize)>>,
     /// Connects over mutual TLS with these files.
     pub tls: Option<transport::Tls>,
+    /// Payload versions it declares per qualified event type, and writes.
+    pub schemas: Vec<(String, u32)>,
+    /// Writes every event at this version, whatever it declared.
+    pub writes: Option<u32>,
 }
 
 impl TestWorker {
@@ -190,6 +195,8 @@ impl TestWorker {
             seen: None,
             executions: None,
             tls: None,
+            schemas: vec![],
+            writes: None,
         }
     }
 
@@ -209,8 +216,16 @@ pub async fn run_worker(addr: String, w: TestWorker) -> tonic::Status {
     tx.send(send(In::Register(Register {
         worker_id: "test-worker".into(),
         key_id: id(&w.claimed),
-        command_types: w.command_types,
+        command_types: w.command_types.clone(),
         max_concurrency: 4,
+        event_schemas: w
+            .schemas
+            .iter()
+            .map(|(event_type, schema)| EventSchema {
+                event_type: event_type.clone(),
+                schema: *schema,
+            })
+            .collect(),
     })))
     .await
     .unwrap();
@@ -259,7 +274,12 @@ pub async fn run_worker(addr: String, w: TestWorker) -> tonic::Status {
                     _ => order(exists, &cmd),
                 };
                 match outcome {
-                    Ok(events) => {
+                    Ok(mut events) => {
+                        for e in &mut events {
+                            let name = format!("{}.{}", cmd.domain, e.event_type);
+                            let declared = w.schemas.iter().find(|(t, _)| *t == name);
+                            e.schema = w.writes.or(declared.map(|d| d.1)).unwrap_or(1);
+                        }
                         let msg = signing::result_message(&cmd, x.expected_version, &events);
                         let version = x.expected_version + events.len() as u64;
                         let snapshot_key = match w.behavior {

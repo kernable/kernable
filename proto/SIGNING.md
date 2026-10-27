@@ -27,7 +27,7 @@ Each message starts with a `str` **tag** for domain separation. Payloads are sig
 |---|---|---|
 | Client | `kernable.v1.command` | `command_id`, `tenant_id`, `domain`, `aggregate_type`, `aggregate_id`, `command_type`, `payload`, `context` |
 | Client | `kernable.v1.query` | `query_id`, `tenant_id`, `domain`, `query_type`, `payload`, `context`, `min_position: u64`, `issued_at: i64` |
-| Worker | `kernable.v1.result` | `command_id`, `tenant_id`, `domain`, `aggregate_type`, `aggregate_id`, `expected_version: u64`, `event_count: u64`, then per event `event_type`, `payload` |
+| Worker | `kernable.v1.result` | `command_id`, `tenant_id`, `domain`, `aggregate_type`, `aggregate_id`, `expected_version: u64`, `event_count: u64`, then per event `event_type`, `schema: u64`, `payload` |
 | Worker | `kernable.v1.rejection` | `command_id`, `code`, `message` |
 | Worker | `kernable.v1.snapshot` | `tenant_id`, `domain`, `aggregate_type`, `aggregate_id`, `version: u64`, `schema`, `state` |
 | Worker, listener | `kernable.v1.challenge` | `nonce` |
@@ -62,12 +62,13 @@ Each stored event has `hash = SHA-256(message)`, where `message` has the tag `ke
 6. `aggregate_id`
 7. `version: u64`
 8. `event_type`
-9. `payload`
-10. `command_id`
-11. `created_at: i64`
-12. `producer_key_id`
-13. `producer_sig`
-14. `context` (of the command that caused the event)
+9. `schema: u64` (the version of the payload format)
+10. `payload`
+11. `command_id`
+12. `created_at: i64`
+13. `producer_key_id`
+14. `producer_sig`
+15. `context` (of the command that caused the event)
 
 `prev_hash` is the hash of the event at the previous global position. For the first event it is 32 zero bytes. Every event of a command stores that command's worker result signature as `producer_sig`.
 

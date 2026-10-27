@@ -120,7 +120,7 @@ export function queryMessage(q: WireQueryRequest): Buffer {
 
 export function resultMessage(c: Stream, expectedVersion: number, events: WireNewEvent[]): Buffer {
   const m = stream(new Msg("kernable.v1.result"), c).u64(expectedVersion).u64(events.length);
-  for (const e of events) m.str(e.event_type).bytes(e.payload);
+  for (const e of events) m.str(e.event_type).u64(e.schema).bytes(e.payload);
   return m.done();
 }
 
@@ -174,6 +174,7 @@ export function eventHash(prev: Buffer, e: WireEvent): Buffer {
     .str(e.aggregate_id)
     .u64(e.version)
     .str(e.event_type)
+    .u64(e.schema)
     .bytes(e.payload)
     .str(e.command_id)
     .i64(e.created_at)

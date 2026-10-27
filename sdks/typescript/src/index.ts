@@ -163,6 +163,11 @@ export interface StoredEvent {
   aggregateId: string;
   version: number;
   type: string;
+  /**
+   * Version of the payload format. Listeners get `data` upcast to the version they know (see
+   * `Domain.event`), unless the handler is `raw`.
+   */
+  schema: number;
   data: unknown;
   commandId: string;
   /** The request context of the command that caused the event. */
@@ -186,20 +191,78 @@ export interface AggregateOptions {
   schema?: string;
 }
 
+type Upcast = (data: any) => unknown;
+
+/**
+ * The payload format of one event type: its current version and the steps that bring older
+ * payloads up to it. Events are stored as written and never changed; readers upcast them.
+ */
+export class EventSchema {
+  readonly type: string;
+  readonly schema: number;
+  readonly steps = new Map<number, Upcast>();
+
+  constructor(type: string, schema: number) {
+    if (!/^[^.*]+$/.test(type)) throw new Error(`event types are unqualified within their domain, not ${JSON.stringify(type)}`);
+    if (!Number.isInteger(schema) || schema < 1) throw new Error(`a schema is a version from 1, not ${schema}`);
+    this.type = type;
+    this.schema = schema;
+  }
+
+  /** Turns a payload of version `from` into one of version `from + 1`. */
+  upcast<D = any>(from: number, fn: (data: D) => unknown): this {
+    if (!Number.isInteger(from) || from < 1 || from >= this.schema) {
+      throw new Error(`upcast ${this.type} from a version between 1 and ${this.schema - 1}, not ${from}`);
+    }
+    this.steps.set(from, fn);
+    return this;
+  }
+}
+
+/** An event a process cannot read: its schema is newer than known, or a step is missing. */
+class SchemaError extends Error {}
+
+/** `data` of a `type` event stored at `schema`, upcast to the current version in `events`. */
+function upcast(events: Map<string, EventSchema> | undefined, domain: string, type: string, schema: number, data: unknown) {
+  const def = events?.get(type);
+  const current = def?.schema ?? 1;
+  if (schema > current) {
+    throw new SchemaError(`${domain}.${type} has schema ${schema}, but this process knows it only up to ${current}: update it`);
+  }
+  for (let v = schema; v < current; v++) {
+    const step = def!.steps.get(v);
+    if (!step) throw new SchemaError(`no upcast for ${domain}.${type} from schema ${v}`);
+    data = step(data);
+  }
+  return { schema: current, data };
+}
+
 /**
  * A domain: a lowercase name (`orders`) that scopes its aggregates, commands and events.
  * Types are unique within a domain; elsewhere they are named `domain.Type`.
  */
 export class Domain {
   readonly name: string;
+  /** Payload versions and upcasts per event type; types not listed are at version 1. */
+  readonly events = new Map<string, EventSchema>();
 
   constructor(name: string) {
     if (!/^[a-z][a-z0-9_-]*$/.test(name)) throw new Error(`invalid domain name ${JSON.stringify(name)}`);
     this.name = name;
   }
 
+  /**
+   * Declares that this domain writes `type` events at version `schema`, with an `upcast` per
+   * older version. The domain's aggregates use it; listeners get it with `use(domain)`.
+   */
+  event(type: string, schema: number): EventSchema {
+    const def = new EventSchema(type, schema);
+    this.events.set(type, def);
+    return def;
+  }
+
   aggregate<S>(name: string, initial: S, options?: AggregateOptions): Aggregate<S> {
-    return new Aggregate(this.name, name, initial, options);
+    return new Aggregate(this.name, name, initial, options, this.events);
   }
 }
 
@@ -222,10 +285,13 @@ export class Aggregate<S> {
   readonly schema: string;
   readonly appliers = new Map<string, Apply<S>>();
   readonly handlers = new Map<string, Handle<S>>();
+  /** The domain's event schemas. */
+  readonly events: Map<string, EventSchema>;
 
-  constructor(domain: string, name: string, initial: S, options: AggregateOptions = {}) {
+  constructor(domain: string, name: string, initial: S, options: AggregateOptions = {}, events = new Map<string, EventSchema>()) {
     this.domain = domain;
     this.name = name;
+    this.events = events;
     this.initial = initial;
     this.snapshotEvery = options.snapshotEvery ?? 100;
     this.schema = options.schema ?? "1";
@@ -241,9 +307,20 @@ export class Aggregate<S> {
     return this;
   }
 
-  /** State after `history`, starting from `from`; events without an `apply` are skipped. */
-  fold(history: { type: string; data: unknown }[], from: S = this.initial): S {
-    return history.reduce((s, e) => this.appliers.get(e.type)?.(s, e.data) ?? s, from);
+  /** The payload version this aggregate writes `type` events at. */
+  schemaOf(type: string): number {
+    return this.events.get(type)?.schema ?? 1;
+  }
+
+  /**
+   * State after `history`, starting from `from`. Events are upcast first; events without an
+   * `apply` are skipped.
+   */
+  fold(history: { type: string; schema: number; data: unknown }[], from: S = this.initial): S {
+    return history.reduce((s, e) => {
+      const apply = this.appliers.get(e.type);
+      return apply ? apply(s, upcast(this.events, this.domain, e.type, e.schema, e.data).data) : s;
+    }, from);
   }
 }
 
@@ -442,6 +519,14 @@ export interface ListenerOptions {
 }
 
 type EventHandler = (event: StoredEvent, ctx: ListenerContext) => void | Promise<void>;
+
+export interface HandlerOptions {
+  /**
+   * Get events as stored, without upcasting, whatever their schema (for archives and exports).
+   * By default a listener stops at an event whose schema it does not know.
+   */
+  raw?: boolean;
+}
 type QueryHandler = (data: unknown, ctx: QueryContext) => unknown;
 type MiddlewareHandler = (check: Check) => void | Promise<void>;
 
@@ -449,6 +534,10 @@ type MiddlewareHandler = (check: Check) => void | Promise<void>;
  * A durable, named event listener. Events arrive in order, one at a time, after every listener
  * with a lower order has processed them. Delivery is at least once: if a handler throws, the
  * listener reconnects and the event is delivered again.
+ *
+ * Handlers get event payloads upcast to the versions of the domains the listener `use`s. An
+ * event with a newer schema than known stops the listener (it retries and logs) until it is
+ * updated, so it never misreads data.
  */
 export class Listener {
   /** Global position of the last handled event (or skipped, for other event types). */
@@ -456,7 +545,8 @@ export class Listener {
   /** Resolves once the kernel accepted the listener. */
   readonly ready: Promise<void>;
   private markReady!: () => void;
-  private readonly handlers = new Map<string, EventHandler>();
+  private readonly handlers = new Map<string, { handler: EventHandler; raw: boolean }>();
+  private readonly domains = new Map<string, Map<string, EventSchema>>();
   private readonly queries = new Map<string, QueryHandler>();
   private checker?: { options: MiddlewareOptions; handler: MiddlewareHandler };
   private call?: ListenCall;
@@ -476,12 +566,22 @@ export class Listener {
     this.ready = new Promise((resolve) => (this.markReady = resolve));
   }
 
+  /** Upcasts the events of these domains with their event schemas (see `Domain.event`). */
+  use(...domains: Domain[]): this {
+    for (const d of domains) this.domains.set(d.name, d.events);
+    return this;
+  }
+
   /** `eventType` is qualified (`orders.OrderPlaced`) or a whole domain (`orders.*`). */
-  on<D = any>(eventType: string, handler: (event: StoredEvent & { data: D }, ctx: ListenerContext) => void | Promise<void>): this {
+  on<D = any>(
+    eventType: string,
+    handler: (event: StoredEvent & { data: D }, ctx: ListenerContext) => void | Promise<void>,
+    options: HandlerOptions = {},
+  ): this {
     if (!/^[a-z][a-z0-9_-]*\.([^.]+|\*)$/.test(eventType)) {
       throw new Error(`listen to a qualified type (domain.Type) or a domain (domain.*), not ${JSON.stringify(eventType)}`);
     }
-    this.handlers.set(eventType, handler as EventHandler);
+    this.handlers.set(eventType, { handler: handler as EventHandler, raw: options.raw ?? false });
     return this;
   }
 
@@ -573,10 +673,12 @@ export class Listener {
       this.markReady();
     } else if (m.batch) {
       for (const e of m.batch.events) {
-        const event = toStored(e);
-        const ctx = { replaying: e.global_position <= this.replayUpTo, follow: () => follow(event) };
-        const handler = this.handlers.get(`${e.domain}.${e.event_type}`) ?? this.handlers.get(`${e.domain}.*`);
-        await handler?.(event, ctx);
+        const entry = this.handlers.get(`${e.domain}.${e.event_type}`) ?? this.handlers.get(`${e.domain}.*`);
+        if (entry) {
+          const stored = toStored(e);
+          const event = entry.raw ? stored : { ...stored, ...upcast(this.domains.get(e.domain), e.domain, e.event_type, e.schema, stored.data) };
+          await entry.handler(event, { replaying: e.global_position <= this.replayUpTo, follow: () => follow(event) });
+        }
         this.position = e.global_position;
       }
       this.position = m.batch.up_to;
@@ -668,9 +770,24 @@ export class Worker {
           key_id: this.key.id,
           command_types: [...this.byCommand.keys()],
           max_concurrency: concurrency,
+          event_schemas: this.eventSchemas(),
         },
       });
     });
+  }
+
+  /**
+   * The payload versions the worker writes, for every event type its aggregates know: the
+   * kernel refuses the worker if the store already holds a newer one.
+   */
+  private eventSchemas(): { event_type: string; schema: number }[] {
+    const schemas = new Map<string, number>();
+    for (const agg of new Set(this.byCommand.values())) {
+      for (const type of new Set([...agg.appliers.keys(), ...agg.events.keys()])) {
+        schemas.set(`${agg.domain}.${type}`, agg.schemaOf(type));
+      }
+    }
+    return [...schemas].map(([event_type, schema]) => ({ event_type, schema }));
   }
 
   private onMessage(call: SessionCall, m: KernelMessage): void {
@@ -696,7 +813,7 @@ export class Worker {
         throw new Rejected(`snapshot schema ${x.snapshot.schema} is not ${agg.schema}`, "snapshot_stale");
       }
       const from = x.snapshot ? (decode(x.snapshot.state) as any) : agg.initial;
-      const state = agg.fold(x.history.map((e) => ({ type: e.event_type, data: decode(e.payload) })), from);
+      const state = agg.fold(x.history.map((e) => ({ type: e.event_type, schema: e.schema, data: decode(e.payload) })), from);
       let ids = 0;
       const ctx: CommandContext = {
         commandId: cmd.command_id,
@@ -706,9 +823,15 @@ export class Worker {
         deadline: new Date(x.deadline),
       };
       const produced = await agg.handlers.get(cmd.command_type)!(state, decode(cmd.payload), ctx);
-      events = produced.map((e) => ({ event_type: e.type, payload: encode(e.data) }));
+      events = produced.map((e) => ({ event_type: e.type, schema: agg.schemaOf(e.type), payload: encode(e.data) }));
       snapshot = this.snapshot(agg, cmd, x.expected_version, state, events);
     } catch (err) {
+      if (err instanceof SchemaError) {
+        // Not the command's fault: this worker cannot read the aggregate. Stop until updated.
+        console.error(`kernable worker: ${err.message}`);
+        call.cancel();
+        return;
+      }
       const reason: WireRejected =
         err instanceof Rejected ? { code: err.code, message: err.message } : { code: "handler_error", message: String(err) };
       const worker_sig = this.key.sign(rejectionMessage(cmd.command_id, reason));
@@ -725,7 +848,7 @@ export class Worker {
     const every = agg.snapshotEvery;
     if (every <= 0 || events.length === 0 || Math.floor(version / every) === Math.floor(before / every)) return undefined;
     // Apply the events as they will be read back, so the snapshot equals a replay.
-    const after = agg.fold(events.map((e) => ({ type: e.event_type, data: decode(e.payload) })), state);
+    const after = agg.fold(events.map((e) => ({ type: e.event_type, schema: e.schema, data: decode(e.payload) })), state);
     const snapshot = { version, schema: agg.schema, state: encode(after) };
     const message = snapshotMessage(cmd, version, snapshot.schema, snapshot.state);
     return { ...snapshot, worker_sig: this.key.sign(message) };
@@ -819,6 +942,7 @@ function toStored(e: WireEvent): StoredEvent {
     aggregateId: e.aggregate_id,
     version: e.version,
     type: e.event_type,
+    schema: e.schema,
     data: decode(e.payload),
     commandId: e.command_id,
     request: fromWireContext(e.context),

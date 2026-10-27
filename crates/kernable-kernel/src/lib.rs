@@ -29,8 +29,9 @@ use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
         Accepted, Challenge, Command, CommandResult, Committed, Event, Execute, KernelMessage,
-        ListenerDelivery, ListenerMessage, QueryRequest, QueryResult, Registered, Rejected,
-        Signature, Snapshot, SnapshotRecord, SubmitRequest, SubscribeRequest, Wait, WorkerMessage,
+        ListenerDelivery, ListenerMessage, NewEvent, QueryRequest, QueryResult, Register,
+        Registered, Rejected, Signature, Snapshot, SnapshotRecord, SubmitRequest, SubscribeRequest,
+        Wait, WorkerMessage,
         command_result::Outcome,
         command_service_server::{CommandService, CommandServiceServer},
         event_service_server::{EventService, EventServiceServer},
@@ -83,6 +84,8 @@ pub struct Kernel {
     listeners: listeners::Registry,
     queue: queue::Queue,
     metrics: metrics::Metrics,
+    /// The highest payload version stored per qualified event type; never goes down.
+    schemas: Mutex<HashMap<String, u32>>,
 }
 
 impl Kernel {
@@ -90,6 +93,7 @@ impl Kernel {
         let store = kernable_store::open(&config.store)?;
         let key = signing::read_signing_key(&config.kernel_key)?;
         let listeners = listeners::Registry::load(store.listeners()?);
+        let schemas = store.event_schemas()?.into_iter().collect();
         let queue = queue::Queue::default();
         for pending in store.pending()? {
             queue.push(pending.command, pending.received_at);
@@ -104,7 +108,12 @@ impl Kernel {
             listeners,
             queue,
             metrics: metrics::Metrics::default(),
+            schemas: Mutex::new(schemas),
         }))
+    }
+
+    fn schemas(&self) -> MutexGuard<'_, HashMap<String, u32>> {
+        self.schemas.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn waiters(&self) -> MutexGuard<'_, HashMap<String, Vec<oneshot::Sender<CommandResult>>>> {
@@ -622,6 +631,8 @@ struct InFlight {
 struct Session {
     kernel: Arc<Kernel>,
     key_id: String,
+    /// The payload version the worker writes per qualified event type; others at 1.
+    schemas: HashMap<String, u32>,
     out: Outbox,
     in_flight: Mutex<HashMap<String, InFlight>>,
 }
@@ -706,6 +717,7 @@ async fn run_session(
             "worker key may not handle these command types",
         ));
     }
+    let schemas = declared_schemas(&kernel, &reg)?;
 
     let mut nonce = [0u8; 32];
     getrandom::fill(&mut nonce).map_err(|_| Status::internal("no randomness"))?;
@@ -737,6 +749,7 @@ async fn run_session(
     let session = Arc::new(Session {
         kernel,
         key_id: reg.key_id,
+        schemas,
         out: out.clone(),
         in_flight: Mutex::default(),
     });
@@ -757,6 +770,40 @@ async fn run_session(
             Some(_) => return Err(Status::invalid_argument("unexpected message")),
         }
     }
+}
+
+/// Checks the payload versions a registering worker declares: a worker that would write an
+/// older version of an event type than the store holds is outdated and refused.
+fn declared_schemas(kernel: &Kernel, reg: &Register) -> Result<HashMap<String, u32>, Status> {
+    let domains: Vec<&str> = reg
+        .command_types
+        .iter()
+        .filter_map(|t| t.split_once('.').map(|(domain, _)| domain))
+        .collect();
+    let stored = kernel.schemas();
+    let mut declared = HashMap::new();
+    for s in &reg.event_schemas {
+        let domain = s.event_type.split_once('.').map(|(domain, _)| domain);
+        if !config::valid_qualified(&s.event_type) || s.schema == 0 {
+            return Err(Status::invalid_argument(
+                "declare event schemas as a qualified type (domain.EventType) and a version from 1",
+            ));
+        }
+        if !domain.is_some_and(|d| domains.contains(&d)) {
+            return Err(Status::invalid_argument(format!(
+                "{} is not of a domain whose commands this worker handles",
+                s.event_type
+            )));
+        }
+        if let Some(newer) = stored.get(&s.event_type).filter(|v| **v > s.schema) {
+            return Err(Status::failed_precondition(format!(
+                "outdated worker: the store holds {} at schema {newer}, this worker writes {}",
+                s.event_type, s.schema
+            )));
+        }
+        declared.insert(s.event_type.clone(), s.schema);
+    }
+    Ok(declared)
 }
 
 async fn dispatch(session: Arc<Session>, command_types: Vec<String>, permits: Arc<Semaphore>) {
@@ -899,12 +946,57 @@ impl Session {
             return Ok(());
         }
 
-        let command_id = &f.command.command_id;
-        match self
-            .kernel
-            .store
-            .commit(command_id, f.expected_version, &r.events, &sig, now_ms())
+        let name = |e: &NewEvent| config::qualified(&f.command.domain, &e.event_type);
+        if let Some(e) = r
+            .events
+            .iter()
+            .find(|e| e.schema != self.schemas.get(&name(e)).copied().unwrap_or(1))
         {
+            let reason = Rejected {
+                code: "invalid_event_schema".into(),
+                message: format!(
+                    "{} written at schema {}, not at the declared one",
+                    name(e),
+                    e.schema
+                ),
+            };
+            self.reject(&r.lease_id, f.command.command_id, reason);
+            return Ok(());
+        }
+
+        let committed = {
+            // Held through the commit, so an outdated worker cannot write next to a newer one.
+            let mut stored = self.kernel.schemas();
+            let outdated = r.events.iter().find_map(|e| {
+                let newer = stored.get(&name(e)).filter(|v| **v > e.schema)?;
+                Some(format!(
+                    "outdated worker: the store holds {} at schema {newer}, this worker writes {}",
+                    name(e),
+                    e.schema
+                ))
+            });
+            if let Some(message) = outdated {
+                // Ends the session; the command goes back to the queue for a current worker.
+                tracing::warn!(%message, "worker refused");
+                self.in_flight().insert(r.lease_id, f);
+                return Err(Status::failed_precondition(message));
+            }
+            let committed = self.kernel.store.commit(
+                &f.command.command_id,
+                f.expected_version,
+                &r.events,
+                &sig,
+                now_ms(),
+            );
+            if committed.is_ok() {
+                for e in &r.events {
+                    let max = stored.entry(name(e)).or_default();
+                    *max = (*max).max(e.schema);
+                }
+            }
+            committed
+        };
+        match committed {
             Ok(events) => {
                 if let (Some(snapshot), Some(last)) = (r.snapshot, events.last()) {
                     let record = SnapshotRecord {

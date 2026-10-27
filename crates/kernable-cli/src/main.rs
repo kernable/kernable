@@ -23,6 +23,7 @@ const USAGE: &str = "usage:
                                           client certificate per name, for mTLS
   kernable listeners <store>              lists registered listeners with order, position and middleware
   kernable listeners remove <store> <name>  removes a listener, and its middleware (kernel stopped)
+  kernable schemas <store>                lists the highest stored payload version per event type
   kernable submit <addr> <client.key> <tenant> <domain> <aggregate_type> <aggregate_id> <command_type> <payload>
                                           signs and submits a command (addr: unix:/path or host:port)";
 
@@ -48,6 +49,7 @@ async fn main() -> ExitCode {
             }
         }
         ["listeners", store] => listeners(store),
+        ["schemas", store] => schemas(store),
         ["listeners", "remove", store, name] => remove_listener(store, name),
         [
             "submit",
@@ -138,6 +140,13 @@ fn listeners(store: &str) -> Result<bool> {
             "{} order {} position {} types {types} key {}{middleware}",
             l.name, l.order, l.position, l.key_id
         );
+    }
+    Ok(true)
+}
+
+fn schemas(store: &str) -> Result<bool> {
+    for (event_type, schema) in kernable_store::open_read_only(store)?.event_schemas()? {
+        println!("{event_type} schema {schema}");
     }
     Ok(true)
 }

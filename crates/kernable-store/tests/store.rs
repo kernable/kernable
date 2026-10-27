@@ -27,6 +27,7 @@ fn ev(event_type: &str) -> NewEvent {
     NewEvent {
         event_type: event_type.into(),
         payload: b"{}".to_vec(),
+        schema: 1,
     }
 }
 

@@ -35,7 +35,7 @@ test("key ID matches", () => assert.equal(key.id, v.key.key_id));
 test("message layouts and signatures match the test vectors", () => {
   check("command", commandMessage(command(v.command.input)));
   const r = v.result.input;
-  const events = r.events.map((e: any) => ({ event_type: e.event_type, payload: hex(e.payload_hex) }));
+  const events = r.events.map((e: any) => ({ event_type: e.event_type, schema: e.schema, payload: hex(e.payload_hex) }));
   check("result", resultMessage(command(r.command), r.expected_version, events));
   check("rejection", rejectionMessage(v.rejection.input.command_id, v.rejection.input));
   check("challenge", challengeMessage(hex(v.challenge.input.nonce_hex)));

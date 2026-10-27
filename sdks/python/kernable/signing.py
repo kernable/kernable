@@ -53,7 +53,7 @@ def command_message(c) -> bytes:
 def result_message(c, expected_version: int, events) -> bytes:
     m = _stream(Msg("kernable.v1.result"), c).u64(expected_version).u64(len(events))
     for e in events:
-        m.str(e.event_type).bytes(e.payload)
+        m.str(e.event_type).u64(e.schema).bytes(e.payload)
     return bytes(m.buf)
 
 

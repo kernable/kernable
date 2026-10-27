@@ -182,6 +182,7 @@ impl Verifier {
             .map(|e| NewEvent {
                 event_type: e.event_type.clone(),
                 payload: e.payload.clone(),
+                schema: e.schema,
             })
             .collect();
         let msg = signing::result_message(&cmd, first.version.saturating_sub(1), &events);

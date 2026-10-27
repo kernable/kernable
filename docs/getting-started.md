@@ -164,3 +164,4 @@ make check            # all tests, including examples/shop/shop.test.ts
   - **Command handlers must be deterministic.** Use `ctx.now()` and `ctx.id()`.
   - **Reactors submit with `wait: "committed"`** and a fixed command ID. A settling submit inside a reactor would wait for the reactor itself.
   - **A domain only writes its own events.** It reacts to other domains through listeners.
+  - **Events are never changed.** To change an event's payload, raise its version and add an upcast from the old one: `shop.event("ItemAdded", 2).upcast(1, (d) => ({ ...d, count: d.qty }))`. Listeners in other processes and languages need the same definition (`use(shop)`); a listener that meets an unknown version stops until it is updated.

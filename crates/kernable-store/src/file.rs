@@ -438,6 +438,7 @@ impl Store for FileStore {
                 aggregate_id: cmd.aggregate_id.clone(),
                 version,
                 event_type: e.event_type.clone(),
+                schema: e.schema,
                 payload: e.payload.clone(),
                 command_id: cmd.command_id.clone(),
                 created_at: now_ms,

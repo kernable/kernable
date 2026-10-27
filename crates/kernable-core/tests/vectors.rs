@@ -62,10 +62,12 @@ fn vectors() -> Value {
         NewEvent {
             event_type: "OrderPlaced".into(),
             payload: br#"{"customerId":"k-1"}"#.to_vec(),
+            schema: 2,
         },
         NewEvent {
             event_type: "ItemAdded".into(),
             payload: br#"{"sku":"x"}"#.to_vec(),
+            schema: 1,
         },
     ];
     let reason = Rejected {
@@ -83,6 +85,7 @@ fn vectors() -> Value {
         aggregate_id: cmd.aggregate_id.clone(),
         version: 1,
         event_type: events[0].event_type.clone(),
+        schema: events[0].schema,
         payload: events[0].payload.clone(),
         command_id: cmd.command_id.clone(),
         created_at: 1_700_000_000_000,
@@ -107,7 +110,7 @@ fn vectors() -> Value {
     });
     let events_json: Vec<Value> = events
         .iter()
-        .map(|e| json!({"event_type": e.event_type, "payload_hex": hex::encode(&e.payload)}))
+        .map(|e| json!({"event_type": e.event_type, "schema": e.schema, "payload_hex": hex::encode(&e.payload)}))
         .collect();
 
     json!({
@@ -161,7 +164,7 @@ fn vectors() -> Value {
                 "prev_hex": hex::encode(GENESIS),
                 "global_position": event.global_position, "tenant_id": event.tenant_id, "domain": event.domain,
                 "aggregate_type": event.aggregate_type, "aggregate_id": event.aggregate_id,
-                "version": event.version, "event_type": event.event_type,
+                "version": event.version, "event_type": event.event_type, "schema": event.schema,
                 "payload_hex": hex::encode(&event.payload), "command_id": event.command_id,
                 "created_at": event.created_at,
                 "producer_key_id": event.producer_sig.as_ref().unwrap().key_id,

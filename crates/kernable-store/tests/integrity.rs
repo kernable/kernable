@@ -29,6 +29,7 @@ fn ev(event_type: &str, payload: &str) -> NewEvent {
     NewEvent {
         event_type: event_type.into(),
         payload: payload.as_bytes().to_vec(),
+        schema: 1,
     }
 }
 
@@ -191,6 +192,7 @@ fn consistently_rewritten_chain_is_detected_by_checkpoint() {
         .map(|e| NewEvent {
             event_type: e.event_type.clone(),
             payload: e.payload.clone(),
+            schema: e.schema,
         })
         .collect();
     let forged = signing::sign(&attacker, &signing::result_message(&c1, 0, &c1_events));

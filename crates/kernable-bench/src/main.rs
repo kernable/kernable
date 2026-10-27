@@ -170,6 +170,7 @@ fn store(url: &str, count: usize) -> Result<(), BoxError> {
         let events = [NewEvent {
             event_type: "Written".into(),
             payload: cmd.payload.clone(),
+            schema: 1,
         }];
         let sig = signing::sign(&worker, &signing::result_message(&cmd, version, &events));
         signing::verify(&sig, &signing::result_message(&cmd, version, &events))?;
@@ -200,6 +201,7 @@ async fn worker(addr: &str, key: &str, concurrency: u32) -> Result<(), BoxError>
         key_id: signing::key_id(&key.verifying_key()),
         command_types: vec!["bench.Write".into()],
         max_concurrency: concurrency,
+        event_schemas: vec![],
     })))
     .await?;
     let mut client = WorkerGatewayClient::new(transport::connect(addr).await?);
@@ -214,6 +216,7 @@ async fn worker(addr: &str, key: &str, concurrency: u32) -> Result<(), BoxError>
                 let events = vec![NewEvent {
                     event_type: "Written".into(),
                     payload: cmd.payload.clone(),
+                    schema: 1,
                 }];
                 let sig = signing::sign(
                     &key,

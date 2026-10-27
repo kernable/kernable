@@ -67,6 +67,7 @@ message Event {
   bytes hash = 10;
   Signature producer_sig = 11;
   RequestContext context = 12; // of the command that caused the event
+  uint32 schema = 14;           // version of the payload format of `event_type`, from 1
 }
 
 // An aggregate's state after `version`, made by a worker: a cache, the events stay the truth.
@@ -81,6 +82,7 @@ message Snapshot {
 message NewEvent {
   string event_type = 1;
   bytes payload = 2;
+  uint32 schema = 3; // version of the payload format, from 1; see Register.event_schemas
 }
 
 // ---- clients ----
@@ -294,6 +296,15 @@ message Register {
   string key_id = 2;
   repeated string command_types = 3; // qualified: `orders.PlaceOrder`
   uint32 max_concurrency = 4;
+  // The payload version the worker writes per event type; types not listed are written at 1.
+  // The kernel refuses a worker, or a result, that would write an older version of a type
+  // than the store already holds, and a result whose events differ from what was declared.
+  repeated EventSchema event_schemas = 5;
+}
+
+message EventSchema {
+  string event_type = 1; // qualified: `orders.OrderPlaced`
+  uint32 schema = 2;
 }
 
 message Challenge {

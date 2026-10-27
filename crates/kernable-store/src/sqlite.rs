@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS events (
     aggregate_id    TEXT    NOT NULL,
     version         INTEGER NOT NULL,
     event_type      TEXT    NOT NULL,
+    schema          INTEGER NOT NULL,
     payload         BLOB    NOT NULL,
     command_id      TEXT    NOT NULL,
     created_at      INTEGER NOT NULL,
@@ -85,7 +86,7 @@ CREATE TABLE IF NOT EXISTS listeners (
 
 const EVENT_COLUMNS: &str = "global_position, tenant_id, aggregate_type, aggregate_id, version, \
                              event_type, payload, command_id, created_at, \
-                             producer_key_id, producer_sig, hash, context, domain";
+                             producer_key_id, producer_sig, hash, context, domain, schema";
 
 const COMMAND_COLUMNS: &str = "command_id, tenant_id, aggregate_type, aggregate_id, command_type, \
                                payload, client_key_id, client_sig, context, domain";
@@ -266,6 +267,7 @@ impl Store for SqliteStore {
                 aggregate_id: cmd.aggregate_id.clone(),
                 version,
                 event_type: e.event_type.clone(),
+                schema: e.schema,
                 payload: e.payload.clone(),
                 command_id: cmd.command_id.clone(),
                 created_at: now_ms,
@@ -277,8 +279,9 @@ impl Store for SqliteStore {
             tx.execute(
                 "INSERT INTO events (global_position, tenant_id, aggregate_type, aggregate_id, version,
                                      event_type, payload, command_id, created_at,
-                                     producer_key_id, producer_sig, prev_hash, hash, context, domain)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                                     producer_key_id, producer_sig, prev_hash, hash, context, domain,
+                                     schema)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     event.global_position,
                     event.tenant_id,
@@ -294,7 +297,8 @@ impl Store for SqliteStore {
                     prev,
                     event.hash,
                     event.context.as_ref().map(Message::encode_to_vec),
-                    event.domain
+                    event.domain,
+                    event.schema
                 ],
             )?;
             prev = event.hash.clone();
@@ -311,6 +315,15 @@ impl Store for SqliteStore {
     }
 
     /// Completes the pending command as rejected by the business logic.
+    fn event_schemas(&self) -> Result<Vec<(String, u32)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT domain || '.' || event_type, MAX(schema) FROM events GROUP BY domain, event_type",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     fn reject(&self, command_id: &str, reason: Rejected) -> Result<()> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -474,7 +487,7 @@ fn verify_tables(conn: &Connection, kernel_key_id: &str) -> Result<Report> {
     ))?;
     let mut rows = stmt.query([])?;
     while let Some(r) = rows.next()? {
-        let prev_hash: Vec<u8> = r.get(14)?;
+        let prev_hash: Vec<u8> = r.get(15)?;
         v.event(event_from_row(r)?, &prev_hash);
     }
 
@@ -526,6 +539,7 @@ fn event_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
         hash: r.get(11)?,
         context: context_from(r.get(12)?)?,
         domain: r.get(13)?,
+        schema: r.get(14)?,
     })
 }
 

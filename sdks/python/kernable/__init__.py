@@ -39,7 +39,7 @@ from kernable.signing import (Key, challenge_message, command_message, derived_i
 from kernable.v1 import kernable_pb2 as pb
 from kernable.v1 import kernable_pb2_grpc as rpc
 
-__all__ = ["Aggregate", "Check", "CommandContext", "Domain", "Event", "Kernable", "Key", "Listener", "ListenerContext",
+__all__ = ["Aggregate", "Check", "CommandContext", "Domain", "Event", "EventSchema", "Kernable", "Key", "Listener", "ListenerContext",
            "NotSettled", "Outcome", "QueryContext", "Rejected", "RequestContext", "Tls", "Worker", "domain"]
 
 
@@ -142,6 +142,9 @@ class Event:
     command_id: str
     #: The request context of the command that caused the event.
     request: RequestContext = field(default_factory=RequestContext)
+    #: Version of the payload format. Listeners get `data` upcast to the version they know (see
+    #: `Domain.event`), unless the handler is `raw`.
+    schema: int = 1
 
 
 @dataclass
@@ -195,6 +198,45 @@ _QUERY = re.compile(r"^[a-z][a-z0-9_-]*\.[^.*]+$")
 _CHECKED = re.compile(r"^(\*|[a-z][a-z0-9_-]*\.([^.]+|\*))$")
 
 
+class EventSchema:
+    """The payload format of one event type: its current version and the steps that bring older
+    payloads up to it. Events are stored as written and never changed; readers upcast them."""
+
+    def __init__(self, type: str, schema: int):
+        if not re.match(r"^[^.*]+$", type):
+            raise ValueError(f"event types are unqualified within their domain, not {type!r}")
+        if not isinstance(schema, int) or schema < 1:
+            raise ValueError(f"a schema is a version from 1, not {schema!r}")
+        self.type = type
+        self.schema = schema
+        self.steps: dict[int, Callable] = {}
+
+    def upcast(self, from_version: int, fn: Callable | None = None):
+        """Turns a payload of version `from_version` into one of the next version; works as a
+        decorator too."""
+        if not isinstance(from_version, int) or not 1 <= from_version < self.schema:
+            raise ValueError(f"upcast {self.type} from a version between 1 and {self.schema - 1}, not {from_version!r}")
+        return _register(self, self.steps, from_version, fn)
+
+
+class SchemaError(Exception):
+    """An event a process cannot read: its schema is newer than known, or a step is missing."""
+
+
+def _upcast(events: dict | None, domain: str, type: str, schema: int, data: Any) -> tuple[int, Any]:
+    """`data` of a `type` event stored at `schema`, upcast to the current version in `events`."""
+    spec = (events or {}).get(type)
+    current = spec.schema if spec else 1
+    if schema > current:
+        raise SchemaError(f"{domain}.{type} has schema {schema}, but this process knows it only up to {current}: "
+                          "update it")
+    for v in range(schema, current):
+        if v not in spec.steps:
+            raise SchemaError(f"no upcast for {domain}.{type} from schema {v}")
+        data = spec.steps[v](data)
+    return current, data
+
+
 class Domain:
     """A domain: a lowercase name (`orders`) that scopes its aggregates, commands and events.
     Types are unique within a domain; elsewhere they are named `domain.Type`."""
@@ -203,9 +245,18 @@ class Domain:
         if not _DOMAIN.match(name):
             raise ValueError(f"invalid domain name {name!r}")
         self.name = name
+        #: Payload versions and upcasts per event type; types not listed are at version 1.
+        self.events: dict[str, EventSchema] = {}
+
+    def event(self, type: str, schema: int) -> EventSchema:
+        """Declares that this domain writes `type` events at version `schema`, with an `upcast`
+        per older version. The domain's aggregates use it; listeners get it with `use(domain)`."""
+        spec = EventSchema(type, schema)
+        self.events[type] = spec
+        return spec
 
     def aggregate(self, name: str, initial: Any, snapshot_every: int = 100, schema: str = "1") -> "Aggregate":
-        return Aggregate(self.name, name, initial, snapshot_every, schema)
+        return Aggregate(self.name, name, initial, snapshot_every, schema, self.events)
 
 
 def domain(name: str) -> Domain:
@@ -225,8 +276,11 @@ class Aggregate:
     ignored and the state is rebuilt from the events.
     """
 
-    def __init__(self, domain: str, name: str, initial: Any, snapshot_every: int = 100, schema: str = "1"):
+    def __init__(self, domain: str, name: str, initial: Any, snapshot_every: int = 100, schema: str = "1",
+                 events: dict[str, EventSchema] | None = None):
         self.domain = domain
+        #: The domain's event schemas.
+        self.events = {} if events is None else events
         self.name = name
         self.initial = initial
         self.snapshot_every = snapshot_every
@@ -240,15 +294,20 @@ class Aggregate:
     def command(self, command_type: str, fn: Callable | None = None):
         return _register(self, self.handlers, command_type, fn)
 
-    def fold(self, history: list[tuple[str, Any]], state: Any = _INITIAL) -> Any:
-        """State after `history`, starting from `state` (default: `initial`);
-        events without an `apply` are skipped."""
+    def schema_of(self, event_type: str) -> int:
+        """The payload version this aggregate writes `event_type` events at."""
+        spec = self.events.get(event_type)
+        return spec.schema if spec else 1
+
+    def fold(self, history: list[tuple[str, int, Any]], state: Any = _INITIAL) -> Any:
+        """State after `history` (type, schema, data), starting from `state` (default: `initial`).
+        Events are upcast first; events without an `apply` are skipped."""
         if state is _INITIAL:
             state = self.initial
-        for event_type, data in history:
+        for event_type, schema, data in history:
             fn = self.appliers.get(event_type)
             if fn:
-                state = fn(state, data)
+                state = fn(state, _upcast(self.events, self.domain, event_type, schema, data)[1])
         return state
 
 
@@ -418,8 +477,12 @@ class Worker(_Stream):
         return self._stub.Session(requests)
 
     def _hello(self):
+        # Every event type the aggregates know: the kernel refuses an outdated worker.
+        schemas = {f"{a.domain}.{t}": a.schema_of(t) for a in self._by_command.values()
+                   for t in [*a.appliers, *a.events]}
         register = pb.Register(worker_id=f"py-{uuid.uuid4().hex[:8]}", key_id=self._key.id,
-                               command_types=list(self._by_command), max_concurrency=1)
+                               command_types=list(self._by_command), max_concurrency=1,
+                               event_schemas=[pb.EventSchema(event_type=t, schema=s) for t, s in schemas.items()])
         return pb.WorkerMessage(register=register)
 
     def _on(self, msg):
@@ -442,12 +505,15 @@ class Worker(_Stream):
                                "unknown_command")
             if x.HasField("snapshot") and x.snapshot.schema != agg.schema:
                 raise Rejected(f"snapshot schema {x.snapshot.schema} is not {agg.schema}", "snapshot_stale")
-            history = [(e.event_type, _decode(e.payload)) for e in x.history]
+            history = [(e.event_type, e.schema, _decode(e.payload)) for e in x.history]
             state = agg.fold(history, _decode(x.snapshot.state) if x.HasField("snapshot") else _INITIAL)
             ctx = CommandContext(cmd.command_id, _from_wire_context(cmd.context), _time(x.deadline), _time(x.received_at))
             produced = _call(agg.handlers[cmd.command_type], state, _decode(cmd.payload), ctx)
-            events = [pb.NewEvent(event_type=e["type"], payload=_encode(e.get("data"))) for e in produced]
+            events = [pb.NewEvent(event_type=e["type"], schema=agg.schema_of(e["type"]), payload=_encode(e.get("data")))
+                      for e in produced]
             snapshot = self._snapshot(agg, cmd, x.expected_version, state, events)
+        except SchemaError:
+            raise  # not the command's fault: this worker cannot read the aggregate; stop until updated
         except Exception as err:
             reason = (pb.Rejected(code=err.code, message=str(err)) if isinstance(err, Rejected)
                       else pb.Rejected(code="handler_error", message=repr(err)))
@@ -463,7 +529,7 @@ class Worker(_Stream):
         if every <= 0 or not events or version // every == before // every:
             return None
         # Apply the events as they will be read back, so the snapshot equals a replay.
-        after = agg.fold([(e.event_type, _decode(e.payload)) for e in events], state)
+        after = agg.fold([(e.event_type, e.schema, _decode(e.payload)) for e in events], state)
         state_bytes = _encode(after)
         sig = self._key.sign(snapshot_message(cmd, version, agg.schema, state_bytes))
         return pb.Snapshot(version=version, schema=agg.schema, state=state_bytes, worker_sig=sig)
@@ -472,7 +538,11 @@ class Worker(_Stream):
 class Listener(_Stream):
     """A durable, named event listener. Events arrive in order, one at a time, after every
     listener with a lower order has processed them. Delivery is at least once: if a handler
-    raises, the listener reconnects and the event is delivered again."""
+    raises, the listener reconnects and the event is delivered again.
+
+    Handlers get event payloads upcast to the versions of the domains the listener `use`s. An
+    event with a newer schema than known stops the listener (it retries and logs) until it is
+    updated, so it never misreads data."""
 
     def __init__(self, channel: grpc.Channel, key: Key, name: str, order: int, start: int | None, reconnect_s: float):
         super().__init__(f"listener {name}", reconnect_s)
@@ -482,6 +552,8 @@ class Listener(_Stream):
         self._order = order
         self._start = start
         self._handlers: dict[str, Callable] = {}
+        self._raw: set[str] = set()
+        self._domains: dict[str, dict[str, EventSchema]] = {}
         self._queries: dict[str, Callable] = {}
         self._middleware: tuple[pb.Middleware, Callable] | None = None
         #: Global position of the last handled event (or skipped, for other event types).
@@ -489,11 +561,19 @@ class Listener(_Stream):
         # Newest event when the kernel accepted the listener; events up to it are replayed.
         self._replay_up_to = 0
 
-    def on(self, event_type: str, fn: Callable | None = None):
+    def use(self, *domains: Domain) -> "Listener":
+        """Upcasts the events of these domains with their event schemas (see `Domain.event`)."""
+        for d in domains:
+            self._domains[d.name] = d.events
+        return self
+
+    def on(self, event_type: str, fn: Callable | None = None, *, raw: bool = False):
         """Registers a handler for a qualified type (`orders.OrderPlaced`) or a whole domain
-        (`orders.*`); works as a decorator too."""
+        (`orders.*`); works as a decorator too. A `raw` handler gets events as stored, without
+        upcasting, whatever their schema (for archives and exports)."""
         if not _LISTENED.match(event_type):
             raise ValueError(f"listen to a qualified type (domain.Type) or a domain (domain.*), not {event_type!r}")
+        (self._raw.add if raw else self._raw.discard)(event_type)
         return _register(self, self._handlers, event_type, fn)
 
     def query(self, query_type: str, fn: Callable | None = None):
@@ -553,9 +633,15 @@ class Listener(_Stream):
             self.ready.set()
         elif kind == "batch":
             for e in msg.batch.events:
-                handler = self._handlers.get(f"{e.domain}.{e.event_type}") or self._handlers.get(f"{e.domain}.*")
+                name = f"{e.domain}.{e.event_type}"
+                if name not in self._handlers:
+                    name = f"{e.domain}.*"
+                handler = self._handlers.get(name)
                 if handler:
                     event = _to_event(e)
+                    if name not in self._raw:
+                        event.schema, event.data = _upcast(self._domains.get(e.domain), e.domain, e.event_type,
+                                                           e.schema, event.data)
                     _call(handler, event, ListenerContext(e.global_position <= self._replay_up_to, event))
                 self.position = e.global_position
             self.position = msg.batch.up_to
@@ -643,4 +729,5 @@ def _to_check(call) -> Check:
 def _to_event(e) -> Event:
     return Event(position=e.global_position, tenant=e.tenant_id, domain=e.domain, aggregate_type=e.aggregate_type,
                  aggregate_id=e.aggregate_id, version=e.version, type=e.event_type,
-                 data=_decode(e.payload), command_id=e.command_id, request=_from_wire_context(e.context))
+                 data=_decode(e.payload), command_id=e.command_id, request=_from_wire_context(e.context),
+                 schema=e.schema)

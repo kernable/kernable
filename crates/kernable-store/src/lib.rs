@@ -160,6 +160,25 @@ pub trait Store: Send + Sync {
         now_ms: i64,
     ) -> Result<Vec<Event>>;
 
+    /// The highest payload version (`schema`) stored per qualified event type (`domain.Type`).
+    fn event_schemas(&self) -> Result<Vec<(String, u32)>> {
+        let mut max = std::collections::BTreeMap::<String, u32>::new();
+        let mut after = 0;
+        loop {
+            let events = self.read_all(after, 1000)?;
+            let Some(last) = events.last() else {
+                return Ok(max.into_iter().collect());
+            };
+            after = last.global_position;
+            for e in &events {
+                let v = max
+                    .entry(format!("{}.{}", e.domain, e.event_type))
+                    .or_default();
+                *v = (*v).max(e.schema);
+            }
+        }
+    }
+
     /// Completes the pending command as rejected by the business logic.
     fn reject(&self, command_id: &str, reason: Rejected) -> Result<()>;
 

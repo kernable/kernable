@@ -41,7 +41,7 @@ class SigningVectors(unittest.TestCase):
     def test_messages_and_signatures_match(self):
         self.check("command", command_message(vector_command(VECTORS["command"]["input"])))
         r = VECTORS["result"]["input"]
-        events = [pb.NewEvent(event_type=e["event_type"], payload=bytes.fromhex(e["payload_hex"])) for e in r["events"]]
+        events = [pb.NewEvent(event_type=e["event_type"], schema=e["schema"], payload=bytes.fromhex(e["payload_hex"])) for e in r["events"]]
         self.check("result", result_message(vector_command(r["command"]), r["expected_version"], events))
         j = VECTORS["rejection"]["input"]
         self.check("rejection", rejection_message(j["command_id"], pb.Rejected(code=j["code"], message=j["message"])))
@@ -274,6 +274,66 @@ class EndToEnd(unittest.TestCase):
         with self.assertRaises(grpc.RpcError) as away:
             self.increment(1)
         self.assertEqual(away.exception.code(), grpc.StatusCode.UNAVAILABLE)
+
+    def test_a_new_event_schema_is_upcast_and_outdated_processes_stop(self):
+        # Version 1 stores the increment as `by`.
+        v1 = domain("counters").aggregate("Counter", 0)
+        v1.apply("Incremented", lambda n, d: n + d["by"])
+        v1.command("Increment", lambda n, d: [{"type": "Incremented", "data": {"by": d["by"]}}])
+
+        # Version 2 renames it to `amount` and caps a counter at 5.
+        counters = domain("counters")
+        incremented = counters.event("Incremented", 2)
+
+        @incremented.upcast(1)
+        def _(d):
+            return {"amount": d["by"]}
+
+        v2 = counters.aggregate("Counter", 0)
+        v2.apply("Incremented", lambda n, d: n + d["amount"])
+
+        @v2.command("Increment")
+        def _(n, d):
+            if n + d["by"] > 5:
+                raise Rejected("at most 5", "limit")
+            return [{"type": "Incremented", "data": {"amount": d["by"]}}]
+
+        seen, archived = [], []
+        current = self.k.read_model("current").use(counters)
+        current.on("counters.Incremented", lambda e: seen.append((e.schema, e.data)))
+        archive = self.k.read_model("archive")
+        archive.on("counters.*", lambda e: archived.append((e.schema, e.data)), raw=True)
+        stale = self.k.read_model("stale")
+        stale.on("counters.Incremented", lambda e: None)
+        for listener in (current, archive, stale):
+            self.run_stream(listener)
+
+        old = self.run_stream(self.k.worker(v1))
+        self.assertTrue(self.increment(3, wait="committed").committed)
+        old.stop()
+        time.sleep(0.1)
+        self.run_stream(self.k.worker(v2))
+        self.assertEqual(self.increment(3, wait="committed").code, "limit")  # the v1 event was upcast
+        self.assertEqual(self.increment(2, wait="committed").events[0].schema, 2)
+
+        # An outdated worker is refused: it would write version 1 next to version 2.
+        outdated = self.k.worker(v1)
+        self.streams.append(outdated)
+        background(outdated.run)
+        self.assertFalse(outdated.ready.wait(0.5))
+
+        self.assertEqual(seen, [(2, {"amount": 3}), (2, {"amount": 2})])
+        self.assertEqual(archived, [(1, {"by": 3}), (2, {"amount": 2})])
+        self.assertEqual(stale.position, 1)  # stopped before the version 2 event
+
+    def test_event_schemas_are_checked_when_defined(self):
+        counters = domain("counters")
+        with self.assertRaises(ValueError):
+            counters.event("Incremented", 0)
+        with self.assertRaises(ValueError):
+            counters.event("counters.Incremented", 2)
+        with self.assertRaises(ValueError):
+            counters.event("Incremented", 2).upcast(2, lambda d: d)
 
 
 if __name__ == "__main__":
