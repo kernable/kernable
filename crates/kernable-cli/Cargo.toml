@@ -14,4 +14,3 @@ kernable-core = { path = "../kernable-core", features = ["certs"] }
 kernable-store = { path = "../kernable-store" }
 getrandom.workspace = true
 tokio.workspace = true
-tonic.workspace = true

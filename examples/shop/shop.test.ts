@@ -1,4 +1,4 @@
-// Acceptance tests of the reference application (MVP_PLAN.md §3): identity in Python, orders in
+// Acceptance tests of the reference application: identity in Python, orders in
 // TypeScript, one kernel, all over TCP with mutual TLS. Needs `cargo build` and the Python SDK
 // venv (`make py`).
 

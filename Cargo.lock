@@ -832,7 +832,6 @@ dependencies = [
  "kernable-core",
  "kernable-store",
  "tokio",
- "tonic",
 ]
 
 [[package]]

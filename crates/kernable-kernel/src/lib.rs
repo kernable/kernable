@@ -1461,7 +1461,6 @@ impl Session {
                         aggregate_id: last.aggregate_id.clone(),
                         snapshot: Some(snapshot),
                         event_hash: last.hash.clone(),
-                        removed: false,
                     };
                     // A snapshot is only a cache: losing one costs time, not data.
                     match self.kernel.snapshots.save(&record) {

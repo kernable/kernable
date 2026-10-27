@@ -11,5 +11,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["src", "test", "../../examples/order-ts", "../../examples/shop", "../../bench"]
+  "include": ["src", "test", "../../examples/shop", "../../bench"]
 }

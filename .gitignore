@@ -7,3 +7,4 @@ fuzz/coverage/
 docs/node_modules/
 docs/.vitepress/dist/
 docs/.vitepress/cache/
+__pycache__/

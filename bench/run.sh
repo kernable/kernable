@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs the PoC benchmark matrix (POC_PLAN.md §9) on this machine and prints one line per run.
+# Runs the benchmark matrix on this machine and prints one line per run.
 # Release builds, 1 KB payloads, warm connections. STORE=file:k.log or STORE=memory: picks the backend
 # (default: sqlite:k.db, WAL with synchronous=NORMAL).
 set -euo pipefail

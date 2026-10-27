@@ -15,4 +15,4 @@ PYTHONPATH=sdks/python sdks/python/.venv/bin/python my_service.py
 A settling submit from a listener's handler waits only for the listeners with a lower order:
 a listener handles one event at a time and never waits for itself.
 
-See `examples/shop/identity/identity.py` for a complete service.
+The documentation (`docs/`) has the tutorials and the generated API reference; `examples/shop/identity/identity.py` is a complete service.

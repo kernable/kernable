@@ -81,5 +81,5 @@ message SnapshotRecord {
   string aggregate_id = 3;
   Snapshot snapshot = 4;
   bytes event_hash = 5; // hash of the stream's event at snapshot.version
-  bool removed = 6;
+  reserved 6; // `removed`: snapshots left the log in format 2
 }
