@@ -178,6 +178,10 @@ fn vectors() -> Value {
             signing::subscribe_message(7, &["OrderPlaced".into(), "ItemAdded".into()], 1_700_000_000_000),
         ),
         "challenge": entry(json!({"nonce_hex": hex::encode(nonce)}), signing::challenge_message(&nonce)),
+        "revocation": entry(
+            json!({"key_id": signing::key_id(&key.verifying_key()), "since": 1_700_000_000_000i64, "created_at": 1_700_000_100_000i64}),
+            signing::revocation_message(&signing::key_id(&key.verifying_key()), 1_700_000_000_000, 1_700_000_100_000),
+        ),
         "checkpoint": entry(
             json!({"global_position": 42, "chain_hash_hex": hex::encode(chain_hash), "created_at": 1_700_000_000_000i64}),
             signing::checkpoint_message(42, &chain_hash, 1_700_000_000_000),

@@ -15,7 +15,7 @@ use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
         Command, CommandResult, Committed, Event, ListenerRecord, NewEvent, Rejected,
-        RequestContext, Signature, command_result::Outcome,
+        RequestContext, RevocationRecord, Signature, command_result::Outcome,
     },
     signing::{self, GENESIS},
 };
@@ -72,6 +72,10 @@ CREATE TABLE IF NOT EXISTS checkpoints (
     kernel_key_id   TEXT    NOT NULL,
     kernel_sig      BLOB    NOT NULL,
     created_at      INTEGER NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS revocations (
+    key_id TEXT PRIMARY KEY,
+    record BLOB NOT NULL -- encoded RevocationRecord
 ) STRICT;
 CREATE TABLE IF NOT EXISTS listeners (
     name   TEXT PRIMARY KEY,
@@ -417,9 +421,21 @@ impl Store for SqliteStore {
         }))
     }
 
+    fn revoke(&self, revocation: &RevocationRecord) -> Result<()> {
+        self.conn().execute(
+            "INSERT OR IGNORE INTO revocations (key_id, record) VALUES (?1, ?2)",
+            params![revocation.key_id, revocation.encode_to_vec()],
+        )?;
+        Ok(())
+    }
+
+    fn revocations(&self) -> Result<Vec<RevocationRecord>> {
+        read_revocations(&self.conn())
+    }
+
     /// Recomputes the hash chain and checks all signatures; see [`Report`].
-    fn verify(&self, kernel_key_id: &str) -> Result<Report> {
-        verify_tables(&self.conn(), kernel_key_id)
+    fn verify(&self, kernel_key_ids: &[String]) -> Result<Report> {
+        verify_tables(&self.conn(), kernel_key_ids)
     }
 }
 
@@ -442,8 +458,22 @@ fn read_checkpoints(conn: &Connection, at: Option<u64>) -> Result<Vec<Checkpoint
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-fn verify_tables(conn: &Connection, kernel_key_id: &str) -> Result<Report> {
-    let mut v = Verifier::new(kernel_key_id, read_checkpoints(conn, None)?);
+fn read_revocations(conn: &Connection) -> Result<Vec<RevocationRecord>> {
+    let mut stmt = conn.prepare("SELECT record FROM revocations ORDER BY rowid")?;
+    let rows = stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
+    let mut out = Vec::new();
+    for bytes in rows {
+        out.push(RevocationRecord::decode(bytes?.as_slice())?);
+    }
+    Ok(out)
+}
+
+fn verify_tables(conn: &Connection, kernel_key_ids: &[String]) -> Result<Report> {
+    let mut v = Verifier::new(
+        kernel_key_ids,
+        read_checkpoints(conn, None)?,
+        read_revocations(conn)?,
+    );
 
     let mut stmt = conn.prepare(&format!(
         "SELECT {EVENT_COLUMNS}, prev_hash FROM events ORDER BY global_position"
@@ -455,11 +485,11 @@ fn verify_tables(conn: &Connection, kernel_key_id: &str) -> Result<Report> {
     }
 
     let mut stmt = conn.prepare(&format!(
-        "SELECT {COMMAND_COLUMNS} FROM commands ORDER BY created_at, rowid"
+        "SELECT {COMMAND_COLUMNS}, created_at FROM commands ORDER BY created_at, rowid"
     ))?;
     let mut rows = stmt.query([])?;
     while let Some(r) = rows.next()? {
-        v.command(&command_from_row(r)?);
+        v.command(&command_from_row(r)?, r.get(11)?);
     }
     Ok(v.finish())
 }
@@ -596,6 +626,16 @@ pub(crate) fn migrate(path: &Path) -> Result<u32> {
             )?;
             tx.commit()?;
             conn.execute_batch("VACUUM")?; // the dropped snapshots leave no traces in the file
+            migrate(path)?;
+        }
+        2 => {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS revocations (
+                     key_id TEXT PRIMARY KEY,
+                     record BLOB NOT NULL
+                 ) STRICT;
+                 PRAGMA user_version = 3;",
+            )?;
         }
         found => return Err(Error::Format(found)),
     }

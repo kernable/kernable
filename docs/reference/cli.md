@@ -8,12 +8,16 @@ The `kernable` command creates keys and certificates, checks and migrates stores
 usage:
   kernable keys new <name>                writes <name>.key (secret) and <name>.pub (key ID)
   kernable checkpoint <store> <kernel.key>  signs the current head of the event log (kernel stopped)
-  kernable verify <store> <kernel.pub>      checks hash chain, checkpoints and signatures
-                                          (store: sqlite:<path>, file:<path> or a bare SQLite path)
+  kernable verify <store> <kernel.pub>...   checks hash chain, checkpoints and signatures, with every
+                                          key the kernel ever had (store: sqlite:<path>, file:<path>
+                                          or a bare SQLite path); exit 2: intact, but something was
+                                          signed by a revoked key (SUSPECT lines)
   kernable certs new <dir> <client>...    writes a development CA, a kernel certificate and one
                                           client certificate per name, for mTLS
   kernable listeners <store>              lists registered listeners with order, position and middleware
   kernable listeners remove <store> <name>  removes a listener, and its middleware (kernel stopped)
+  kernable vault rekey <vault> <old.key> <new.key>
+                                          re-encrypts the vault with a new key (kernel stopped)
   kernable schemas <store>                lists the highest stored payload version per event type
   kernable migrate <store>                upgrades a store to this build's data format (kernel stopped;
                                           back the store up first); 1 to 2 drops the snapshots, which

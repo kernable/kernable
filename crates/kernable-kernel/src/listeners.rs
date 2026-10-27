@@ -26,9 +26,9 @@ use std::{
 
 use kernable_core::{
     proto::{
-        Batch, Challenge, Event, ListenerDelivery, ListenerMessage, ListenerRecord, MiddlewareCall,
-        QueryAnswer, QueryCall, QueryRequest, Ready, Signature, VaultValue, Verdict,
-        listener_delivery::Msg as Out, listener_message::Msg as In, middleware_call,
+        Batch, Challenge, Event, Hello, ListenerDelivery, ListenerMessage, ListenerRecord,
+        MiddlewareCall, QueryAnswer, QueryCall, QueryRequest, Ready, Signature, VaultValue,
+        Verdict, listener_delivery::Msg as Out, listener_message::Msg as In, middleware_call,
     },
     signing,
 };
@@ -396,8 +396,12 @@ pub(crate) async fn run(
             "negative orders are reserved for kernable",
         ));
     }
-    let types = config::readable(&kernel.config.listeners, &hello.key_id, &hello.event_types)
-        .map_err(Status::permission_denied)?;
+    let types = config::readable(
+        &kernel.config().listeners,
+        &hello.key_id,
+        &hello.event_types,
+    )
+    .map_err(Status::permission_denied)?;
     if !hello.query_types.iter().all(|t| config::valid_qualified(t)) {
         return Err(Status::invalid_argument(
             "answer qualified query types: domain.QueryType",
@@ -406,7 +410,7 @@ pub(crate) async fn run(
     if !hello
         .query_types
         .iter()
-        .all(|t| config::allowed(&kernel.config.query_handlers, &hello.key_id, t))
+        .all(|t| config::allowed(&kernel.config().query_handlers, &hello.key_id, t))
     {
         return Err(Status::permission_denied(
             "key may not answer these query types",
@@ -426,7 +430,7 @@ pub(crate) async fn run(
         if !m
             .types
             .iter()
-            .all(|t| config::allowed(&kernel.config.middlewares, &hello.key_id, t))
+            .all(|t| config::allowed(&kernel.config().middlewares, &hello.key_id, t))
         {
             return Err(Status::permission_denied("key may not check these types"));
         }
@@ -458,10 +462,15 @@ pub(crate) async fn run(
         if previous.is_some_and(|e| e.connected) {
             return Err(Status::already_exists("listener is already connected"));
         }
-        if previous.is_some_and(|e| e.record.key_id != hello.key_id) {
-            return Err(Status::permission_denied(
-                "listener is registered with another key",
-            ));
+        // Another key only as the registered key's successor (`[successors]`).
+        if let Some(e) = previous.filter(|e| e.record.key_id != hello.key_id) {
+            let config = kernel.config();
+            if config.successors.get(&e.record.key_id) != Some(&hello.key_id) {
+                return Err(Status::permission_denied(
+                    "listener is registered with another key",
+                ));
+            }
+            tracing::info!(listener = %hello.name, key = %hello.key_id, "listener moves to its successor key");
         }
         let position = hello
             .from_position
@@ -470,10 +479,10 @@ pub(crate) async fn run(
             name: hello.name.clone(),
             key_id: hello.key_id.clone(),
             order: hello.order,
-            event_types: hello.event_types,
+            event_types: hello.event_types.clone(),
             position,
             removed: false,
-            middleware: hello.middleware,
+            middleware: hello.middleware.clone(),
         };
         // Registration is stored right away; positions follow with the periodic flush.
         kernel
@@ -517,8 +526,19 @@ pub(crate) async fn run(
     ));
     let _abort = crate::AbortOnDrop(deliver);
 
+    let mut changes = kernel.changes();
     loop {
-        match next(inbound).await? {
+        let message = tokio::select! {
+            message = next(inbound) => message?,
+            Ok(()) = changes.changed() => {
+                // Reloaded: end the stream if the key may no longer do what it registered for.
+                if !still_allowed(&kernel.config(), &hello) {
+                    return Err(Status::permission_denied("listener key is no longer allowed or was revoked"));
+                }
+                continue;
+            }
+        };
+        match message {
             None => return Ok(()),
             Some(In::Ack(ack)) if ack.position <= sent.load(Ordering::SeqCst) => {
                 kernel.listeners.ack(&hello.name, ack.position);
@@ -628,4 +648,19 @@ fn batch_of(kernel: &Kernel, key_id: &str, events: Vec<Event>, up_to: u64) -> Ba
         events,
         up_to,
     }
+}
+
+/// Whether the listener's key may still read, answer and check what it registered for.
+fn still_allowed(config: &crate::config::Config, hello: &Hello) -> bool {
+    let key = &hello.key_id;
+    config::readable(&config.listeners, key, &hello.event_types).is_ok()
+        && hello
+            .query_types
+            .iter()
+            .all(|t| config::allowed(&config.query_handlers, key, t))
+        && hello.middleware.as_ref().is_none_or(|m| {
+            m.types
+                .iter()
+                .all(|t| config::allowed(&config.middlewares, key, t))
+        })
 }

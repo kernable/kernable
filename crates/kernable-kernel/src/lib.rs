@@ -23,7 +23,7 @@ use std::{
     collections::HashMap,
     os::unix::fs::FileTypeExt,
     sync::{
-        Arc, Mutex, MutexGuard, PoisonError,
+        Arc, Mutex, MutexGuard, PoisonError, RwLock,
         atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed, Ordering::SeqCst},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -34,8 +34,8 @@ use kernable_core::{
     proto::{
         Accepted, Challenge, Command, CommandResult, Committed, Event, Execute, KernelMessage,
         ListenerDelivery, ListenerMessage, NewEvent, QueryRequest, QueryResult, Register,
-        Registered, Rejected, Signature, Snapshot, SnapshotRecord, SubmitRequest, SubscribeRequest,
-        VaultValue, Wait, WorkerMessage,
+        Registered, Rejected, RevocationRecord, Signature, Snapshot, SnapshotRecord, SubmitRequest,
+        SubscribeRequest, VaultValue, Wait, WorkerMessage,
         command_result::Outcome,
         command_service_server::{CommandService, CommandServiceServer},
         event_service_server::{EventService, EventServiceServer},
@@ -55,7 +55,7 @@ use kernable_store::{
 };
 use tokio::{
     net::{TcpListener, UnixListener},
-    sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot},
+    sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch},
     task::JoinHandle,
 };
 use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream, UnixListenerStream};
@@ -78,6 +78,37 @@ const POLL: Duration = Duration::from_millis(100);
 const MAX_REQUEST_AGE_MS: i64 = 60_000;
 /// Events read from the store per subscription round trip.
 const SUBSCRIBE_BATCH: u32 = 500;
+/// Stores a revocation, signed by the kernel, for every key `config` revokes that the store
+/// does not know yet, and returns every revocation the store holds: revocations are never
+/// undone, also when they leave the configuration.
+fn record_revocations(
+    store: &dyn Store,
+    key: &SigningKey,
+    config: &Config,
+) -> Result<HashMap<String, i64>, BoxError> {
+    let mut known: HashMap<String, i64> = store
+        .revocations()?
+        .into_iter()
+        .map(|r| (r.key_id, r.since))
+        .collect();
+    for (key_id, since) in config.revocations()? {
+        if known.contains_key(&key_id) {
+            continue;
+        }
+        let created_at = now_ms();
+        let msg = signing::revocation_message(&key_id, since, created_at);
+        store.revoke(&RevocationRecord {
+            key_id: key_id.clone(),
+            since,
+            created_at,
+            kernel_sig: Some(signing::sign(key, &msg)),
+        })?;
+        tracing::warn!(key = %key_id, since, "key revoked");
+        known.insert(key_id, since);
+    }
+    Ok(known)
+}
+
 /// A submit or query in progress, see [`Kernel::request`].
 struct Running<'a>(&'a Kernel);
 
@@ -108,9 +139,15 @@ pub(crate) fn protocol(version: u32) -> Result<(), Status> {
 }
 
 pub struct Kernel {
-    config: Config,
+    /// Replaced as a whole on reload (SIGHUP); revoked keys are removed from its allowlists.
+    config: RwLock<Arc<Config>>,
     store: Box<dyn Store>,
-    key: SigningKey,
+    /// Signs checkpoints and revocations; replaced when `kernel_key` changes on reload.
+    key: Mutex<SigningKey>,
+    /// Revoked key ID -> since when (ms since epoch), from the store.
+    revoked: Mutex<HashMap<String, i64>>,
+    /// Bumped on every reload, so connected sessions check their key again.
+    changes: watch::Sender<u64>,
     /// Submit calls waiting for a command's result.
     waiters: Mutex<HashMap<String, Vec<oneshot::Sender<CommandResult>>>>,
     /// Wakes idle dispatch loops when new commands arrive.
@@ -134,9 +171,11 @@ pub struct Kernel {
 }
 
 impl Kernel {
-    pub fn open(config: Config) -> Result<Arc<Self>, BoxError> {
+    pub fn open(mut config: Config) -> Result<Arc<Self>, BoxError> {
         let store = kernable_store::open(&config.store)?;
         let key = signing::read_signing_key(&config.kernel_key)?;
+        let revoked = record_revocations(store.as_ref(), &key, &config)?;
+        config.without(&revoked);
         let listeners = listeners::Registry::load(store.listeners()?);
         let schemas = store.event_schemas()?.into_iter().collect();
         let snapshots = kernable_store::snapshots::open(&config.snapshots)?;
@@ -162,9 +201,11 @@ impl Kernel {
             queue.push(pending.command, pending.received_at);
         }
         Ok(Arc::new(Kernel {
-            config,
+            config: RwLock::new(Arc::new(config)),
             store,
-            key,
+            key: Mutex::new(key),
+            revoked: Mutex::new(revoked),
+            changes: watch::channel(0).0,
             waiters: Mutex::default(),
             work: Notify::new(),
             appended: Notify::new(),
@@ -178,6 +219,61 @@ impl Kernel {
             requests: Default::default(),
             idle: Notify::new(),
         }))
+    }
+
+    /// The configuration in effect.
+    pub fn config(&self) -> Arc<Config> {
+        Arc::clone(&self.config.read().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    fn key(&self) -> SigningKey {
+        self.key
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Since when `key_id` is revoked (ms since epoch), if it is.
+    fn revoked_since(&self, key_id: &str) -> Option<i64> {
+        let revoked = self.revoked.lock().unwrap_or_else(PoisonError::into_inner);
+        revoked.get(key_id).copied()
+    }
+
+    /// Notified on every reload: sessions then check their key again.
+    pub(crate) fn changes(&self) -> watch::Receiver<u64> {
+        self.changes.subscribe()
+    }
+
+    /// Applies a changed configuration (on SIGHUP): new allowlists, successors and revocations
+    /// take effect at once, and sessions of keys that may no longer do what they do are ended.
+    /// A new `kernel_key` signs from now on. Settings that need a restart (store, listen
+    /// address, TLS, snapshots, vault, metrics address) keep their old values; they are returned.
+    pub fn reload(&self, mut config: Config) -> Result<Vec<&'static str>, BoxError> {
+        let old = self.config();
+        let mut kept = Vec::new();
+        macro_rules! keep {
+            ($field:ident) => {
+                if format!("{:?}", config.$field) != format!("{:?}", old.$field) {
+                    kept.push(stringify!($field));
+                    config.$field = old.$field.clone();
+                }
+            };
+        }
+        keep!(store);
+        keep!(listen);
+        keep!(tls);
+        keep!(snapshots);
+        keep!(vault);
+        keep!(metrics_listen);
+        let key = signing::read_signing_key(&config.kernel_key)?;
+        let revoked = record_revocations(self.store.as_ref(), &key, &config)?;
+        config.without(&revoked);
+        *self.key.lock().unwrap_or_else(PoisonError::into_inner) = key;
+        *self.revoked.lock().unwrap_or_else(PoisonError::into_inner) = revoked;
+        *self.config.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(config);
+        self.changes.send_modify(|n| *n += 1);
+        self.work.notify_waiters();
+        Ok(kept)
     }
 
     /// The vault, or a refusal for requests that need one.
@@ -200,7 +296,7 @@ impl Kernel {
 
     /// Whether the listener or middleware key `key_id` gets the vault values of `name`.
     fn reads_vault(&self, key_id: &str, name: &str) -> bool {
-        self.config
+        self.config()
             .vault
             .as_ref()
             .is_some_and(|v| config::allowed(&v.readers, key_id, name))
@@ -230,7 +326,7 @@ impl Kernel {
         for e in &erasing {
             let name = config::qualified(&cmd.domain, &e.event_type);
             let allowed = self
-                .config
+                .config()
                 .vault
                 .as_ref()
                 .is_some_and(|v| config::allowed(&v.erasers, worker_key, &name));
@@ -295,7 +391,7 @@ impl Kernel {
     /// so running commands can complete and settle.
     pub async fn drain(&self) -> bool {
         self.draining.store(true, SeqCst);
-        let timeout = Duration::from_millis(self.config.drain_timeout_ms);
+        let timeout = Duration::from_millis(self.config().drain_timeout_ms);
         let idle = async {
             loop {
                 let ended = self.idle.notified();
@@ -329,7 +425,7 @@ impl Kernel {
     /// Writes a final checkpoint and the listener positions. Leases are not persisted:
     /// after a restart, every unfinished command is delivered again right away.
     pub fn shutdown(&self) -> Result<(), BoxError> {
-        self.store.checkpoint(&self.key, now_ms())?;
+        self.store.checkpoint(&self.key(), now_ms())?;
         listeners::flush(self)?;
         Ok(())
     }
@@ -379,7 +475,7 @@ impl Kernel {
         request: middleware_call::Request,
         values: &[VaultValue],
     ) -> Result<Option<Rejected>, Status> {
-        let timeout = Duration::from_millis(self.config.middleware_timeout_ms);
+        let timeout = Duration::from_millis(self.config().middleware_timeout_ms);
         for middleware in chain {
             let key = self.listeners.key(middleware).unwrap_or_default();
             let readable = if self.reads_vault(&key, name) {
@@ -453,7 +549,7 @@ impl Kernel {
                 progressed.await;
             }
         };
-        let timeout = Duration::from_millis(self.config.settle_timeout_ms);
+        let timeout = Duration::from_millis(self.config().settle_timeout_ms);
         tokio::time::timeout(timeout, settled).await.is_ok()
     }
 }
@@ -462,8 +558,8 @@ impl Kernel {
 pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
     let api = Api(Arc::clone(&kernel));
     let mut builder = Server::builder();
-    if let Some(tls) = &kernel.config.tls {
-        if transport::unix_path(&kernel.config.listen).is_some() {
+    if let Some(tls) = &kernel.config().tls {
+        if transport::unix_path(&kernel.config().listen).is_some() {
             return Err("TLS applies to TCP only; remove [tls] or listen on host:port".into());
         }
         let identity = Identity::from_pem(std::fs::read(&tls.cert)?, std::fs::read(&tls.key)?);
@@ -482,7 +578,7 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
         .add_service(WorkerGatewayServer::new(api));
 
     let server = async {
-        match transport::unix_path(&kernel.config.listen) {
+        match transport::unix_path(&kernel.config().listen) {
             Some(path) => {
                 // Replace a stale socket from a previous run, but never any other file.
                 if std::fs::metadata(path).is_ok_and(|m| m.file_type().is_socket()) {
@@ -493,7 +589,7 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
             }
             None => {
                 let incoming =
-                    TcpListenerStream::new(TcpListener::bind(&kernel.config.listen).await?);
+                    TcpListenerStream::new(TcpListener::bind(&kernel.config().listen).await?);
                 router.serve_with_incoming(incoming).await?;
             }
         }
@@ -508,7 +604,7 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
 }
 
 async fn serve_metrics(kernel: &Kernel) -> Result<(), BoxError> {
-    match &kernel.config.metrics_listen {
+    match &kernel.config().metrics_listen {
         Some(addr) => metrics::serve(kernel, addr).await,
         None => std::future::pending().await,
     }
@@ -525,11 +621,12 @@ async fn flush_listeners(kernel: &Kernel) {
 }
 
 async fn checkpoints(kernel: &Kernel) {
-    let mut tick =
-        tokio::time::interval(Duration::from_millis(kernel.config.checkpoint_interval_ms));
+    let mut tick = tokio::time::interval(Duration::from_millis(
+        kernel.config().checkpoint_interval_ms,
+    ));
     loop {
         tick.tick().await;
-        match kernel.store.checkpoint(&kernel.key, now_ms()) {
+        match kernel.store.checkpoint(&kernel.key(), now_ms()) {
             Ok(Some(_)) => crash::point("checkpoint.stored"),
             Ok(None) => {}
             Err(e) => tracing::error!(error = %e, "checkpoint failed"),
@@ -568,7 +665,7 @@ impl CommandService for Api {
             ));
         }
         let name = config::qualified(&cmd.domain, &cmd.command_type);
-        if !config::allowed(&kernel.config.clients, &sig.key_id, &name) {
+        if !config::allowed(&kernel.config().clients, &sig.key_id, &name) {
             return Err(Status::permission_denied(format!(
                 "key may not submit {name}"
             )));
@@ -576,7 +673,7 @@ impl CommandService for Api {
         let bypass = cmd.context.as_ref().is_some_and(|c| c.bypass_authorization);
         if bypass
             && !config::allowed(
-                &kernel.config.privileged,
+                &kernel.config().privileged,
                 &sig.key_id,
                 "bypass_authorization",
             )
@@ -661,7 +758,7 @@ impl CommandService for Api {
                 }));
             }
             None => {
-                let timeout = Duration::from_millis(kernel.config.submit_timeout_ms);
+                let timeout = Duration::from_millis(kernel.config().submit_timeout_ms);
                 match tokio::time::timeout(timeout, rx).await {
                     Ok(Ok(result)) => result,
                     _ => {
@@ -711,11 +808,12 @@ impl EventService for Api {
             return Err(Status::unauthenticated("request expired; check the clock"));
         }
 
-        let types = config::readable(&kernel.config.subscribers, &sig.key_id, &req.event_types)
+        let types = config::readable(&kernel.config().subscribers, &sig.key_id, &req.event_types)
             .map_err(Status::permission_denied)?;
 
         let (tx, rx) = mpsc::channel(SUBSCRIBE_BATCH as usize);
-        tokio::spawn(stream_events(kernel, req.after_position, types, tx));
+        let reader = (sig.key_id.clone(), req.event_types.clone());
+        tokio::spawn(stream_events(kernel, req.after_position, types, reader, tx));
         Ok(Response::new(ReceiverStream::new(rx)))
     }
 }
@@ -726,9 +824,16 @@ async fn stream_events(
     kernel: Arc<Kernel>,
     mut after: u64,
     types: Option<Vec<String>>,
+    (key_id, requested): (String, Vec<String>),
     tx: mpsc::Sender<Result<Event, Status>>,
 ) {
     loop {
+        // The subscriber's key may have been revoked or lost its rights on a reload.
+        if config::readable(&kernel.config().subscribers, &key_id, &requested).is_err() {
+            let status = Status::permission_denied("subscriber key is no longer allowed");
+            let _ = tx.send(Err(status)).await;
+            return;
+        }
         let appended = kernel.appended.notified();
         let batch = match kernel.store.read_all(after, SUBSCRIBE_BATCH) {
             Ok(batch) => batch,
@@ -776,7 +881,7 @@ impl QueryService for Api {
             ));
         }
         let name = config::qualified(&query.domain, &query.query_type);
-        if !config::allowed(&kernel.config.queriers, &sig.key_id, &name) {
+        if !config::allowed(&kernel.config().queriers, &sig.key_id, &name) {
             return Err(Status::permission_denied(format!("key may not ask {name}")));
         }
         let bypass = query
@@ -785,7 +890,7 @@ impl QueryService for Api {
             .is_some_and(|c| c.bypass_authorization);
         if bypass
             && !config::allowed(
-                &kernel.config.privileged,
+                &kernel.config().privileged,
                 &sig.key_id,
                 "bypass_authorization",
             )
@@ -818,7 +923,7 @@ impl QueryService for Api {
         }
 
         let started = Instant::now();
-        let timeout = Duration::from_millis(kernel.config.query_timeout_ms);
+        let timeout = Duration::from_millis(kernel.config().query_timeout_ms);
         let answered = tokio::time::timeout(timeout, async {
             // Wait until a read model that answers the query has caught up.
             let dispatched = loop {
@@ -1006,7 +1111,7 @@ async fn run_session(
         && reg
             .command_types
             .iter()
-            .all(|t| config::allowed(&kernel.config.workers, &reg.key_id, t));
+            .all(|t| config::allowed(&kernel.config().workers, &reg.key_id, t));
     if !authorized {
         return Err(Status::permission_denied(
             "worker key may not handle these command types",
@@ -1049,6 +1154,8 @@ async fn run_session(
         in_flight: Mutex::default(),
     });
     let permits = Arc::new(Semaphore::new(reg.max_concurrency.max(1) as usize));
+    let command_types = reg.command_types.clone();
+    let mut changes = session.kernel.changes();
     // Declared first, dropped last: stop dispatching, then release what is in flight.
     let _release = ReleaseOnDrop(Arc::clone(&session));
     let _dispatch = AbortOnDrop(tokio::spawn(dispatch(
@@ -1058,7 +1165,18 @@ async fn run_session(
     )));
 
     loop {
-        match next(inbound).await? {
+        let message = tokio::select! {
+            message = next(inbound) => message?,
+            Ok(()) = changes.changed() => {
+                // Reloaded: end the session if the key may no longer run its commands.
+                let config = session.kernel.config();
+                if !command_types.iter().all(|t| config::allowed(&config.workers, &session.key_id, t)) {
+                    return Err(Status::permission_denied("worker key is no longer allowed or was revoked"));
+                }
+                continue;
+            }
+        };
+        match message {
             None => return Ok(()),
             Some(In::Result(r)) => session.on_result(r).await?,
             Some(In::Rejection(r)) => session.on_rejection(r).await?,
@@ -1104,7 +1222,7 @@ fn declared_schemas(kernel: &Kernel, reg: &Register) -> Result<HashMap<String, u
 async fn dispatch(session: Arc<Session>, command_types: Vec<String>, permits: Arc<Semaphore>) {
     let types: Vec<&str> = command_types.iter().map(String::as_str).collect();
     let kernel = &session.kernel;
-    let ttl = Duration::from_millis(kernel.config.lease_ttl_ms.max(0) as u64);
+    let ttl = Duration::from_millis(kernel.config().lease_ttl_ms.max(0) as u64);
     loop {
         let Ok(permit) = Arc::clone(&permits).acquire_owned().await else {
             return;
@@ -1178,6 +1296,19 @@ impl Session {
             .map(|e| e.version)
             .or(snapshot.as_ref().map(|s| s.version))
             .unwrap_or(0);
+        let client = command.client_sig.as_ref().map(|sig| sig.key_id.as_str());
+        if let Some(since) = client.and_then(|key| self.kernel.revoked_since(key))
+            && received_at >= since
+        {
+            // Accepted after its client's key was stolen, or before the kernel knew.
+            let reason = Rejected {
+                code: "key_revoked".into(),
+                message: "the command was signed with a key revoked since then".into(),
+            };
+            drop(permit);
+            self.reject(&lease_id, command.command_id, reason);
+            return true;
+        }
         let required = command.context.as_ref().and_then(|c| c.expected_version);
         if let Some(required) = required.filter(|v| *v != expected_version) {
             // The client based the command on a state that has changed since.
@@ -1218,7 +1349,7 @@ impl Session {
             expected_version,
             snapshot,
             received_at,
-            deadline: now_ms() + self.kernel.config.lease_ttl_ms,
+            deadline: now_ms() + self.kernel.config().lease_ttl_ms,
         };
         let sent = send(&self.out, Out::Execute(execute)).await.is_ok();
         crash::point("execute.sent");

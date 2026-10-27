@@ -250,7 +250,7 @@ async fn crash_and_recover(point: &str, round: u32) {
     tokio::time::sleep(Duration::from_millis(50)).await; // a checkpoint at the head
     let report = kernable_store::open_read_only(&store)
         .unwrap()
-        .verify(&id(&key(3)))
+        .verify(&[id(&key(3)).to_string()])
         .unwrap();
     assert!(report.is_ok(), "{point}: {:?}", report.problems);
     drop(kernel);

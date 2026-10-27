@@ -71,7 +71,7 @@ async fn events_keep_their_schema_and_an_outdated_worker_cannot_write() {
         store.event_schemas().unwrap(),
         [("orders.OrderPlaced".to_string(), 2)]
     );
-    let report = store.verify(&id(&env.kernel_key)).unwrap();
+    let report = store.verify(&[id(&env.kernel_key).to_string()]).unwrap();
     assert!(report.is_ok(), "{:?}", report.problems);
 }
 

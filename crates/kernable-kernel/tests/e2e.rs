@@ -48,7 +48,7 @@ async fn signed_commands_run_end_to_end() {
     // The log the kernel wrote verifies, including a kernel checkpoint.
     tokio::time::sleep(Duration::from_millis(120)).await;
     let store = kernable_store::open_read_only(&env.store).unwrap();
-    let report = store.verify(&id(&env.kernel_key)).unwrap();
+    let report = store.verify(&[id(&env.kernel_key).to_string()]).unwrap();
     assert!(report.is_ok(), "{:?}", report.problems);
     assert_eq!(report.events, 2);
     assert!(report.checkpoints >= 1);

@@ -17,12 +17,16 @@ use kernable_core::{
 const USAGE: &str = "usage:
   kernable keys new <name>                writes <name>.key (secret) and <name>.pub (key ID)
   kernable checkpoint <store> <kernel.key>  signs the current head of the event log (kernel stopped)
-  kernable verify <store> <kernel.pub>      checks hash chain, checkpoints and signatures
-                                          (store: sqlite:<path>, file:<path> or a bare SQLite path)
+  kernable verify <store> <kernel.pub>...   checks hash chain, checkpoints and signatures, with every
+                                          key the kernel ever had (store: sqlite:<path>, file:<path>
+                                          or a bare SQLite path); exit 2: intact, but something was
+                                          signed by a revoked key (SUSPECT lines)
   kernable certs new <dir> <client>...    writes a development CA, a kernel certificate and one
                                           client certificate per name, for mTLS
   kernable listeners <store>              lists registered listeners with order, position and middleware
   kernable listeners remove <store> <name>  removes a listener, and its middleware (kernel stopped)
+  kernable vault rekey <vault> <old.key> <new.key>
+                                          re-encrypts the vault with a new key (kernel stopped)
   kernable schemas <store>                lists the highest stored payload version per event type
   kernable migrate <store>                upgrades a store to this build's data format (kernel stopped;
                                           back the store up first); 1 to 2 drops the snapshots, which
@@ -39,7 +43,13 @@ async fn main() -> ExitCode {
     let outcome = match args.as_slice() {
         ["keys", "new", name] => keys_new(name),
         ["checkpoint", store, key] => checkpoint(store, key),
-        ["verify", store, key] => verify(store, key),
+        ["verify", store, keys @ ..] if !keys.is_empty() => {
+            return verify(store, keys).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            });
+        }
+        ["vault", "rekey", vault, old, new] => vault_rekey(vault, old, new),
         ["certs", "new", dir, clients @ ..] if !clients.is_empty() => {
             match kernable_core::certs::create(std::path::Path::new(dir), clients) {
                 Ok(()) => {
@@ -118,9 +128,13 @@ fn checkpoint(store: &str, key: &str) -> Result<bool> {
     Ok(true)
 }
 
-fn verify(store: &str, key: &str) -> Result<bool> {
-    let key_id = signing::key_id(&signing::read_verifying_key(key)?);
-    let report = kernable_store::open_read_only(store)?.verify(&key_id)?;
+/// 0: intact; 1: tampered; 2: intact, but something was signed by a revoked key.
+fn verify(store: &str, keys: &[&str]) -> Result<ExitCode> {
+    let key_ids = keys
+        .iter()
+        .map(|k| Ok(signing::key_id(&signing::read_verifying_key(k)?)))
+        .collect::<Result<Vec<_>>>()?;
+    let report = kernable_store::open_read_only(store)?.verify(&key_ids)?;
     println!(
         "{} events, {} commands, {} checkpoints, {} events after the last checkpoint",
         report.events, report.commands, report.checkpoints, report.unanchored
@@ -128,8 +142,39 @@ fn verify(store: &str, key: &str) -> Result<bool> {
     for p in &report.problems {
         println!("PROBLEM {p}");
     }
-    println!("{}", if report.is_ok() { "OK" } else { "TAMPERED" });
-    Ok(report.is_ok())
+    for s in &report.suspects {
+        println!("SUSPECT {s}");
+    }
+    Ok(if !report.is_ok() {
+        println!("TAMPERED");
+        ExitCode::FAILURE
+    } else if !report.suspects.is_empty() {
+        println!("OK, {} suspect", report.suspects.len());
+        ExitCode::from(2)
+    } else {
+        println!("OK");
+        ExitCode::SUCCESS
+    })
+}
+
+fn vault_rekey(vault: &str, old: &str, new: &str) -> Result<bool> {
+    let read = |path: &str| -> Result<[u8; 32]> {
+        let text = fs::read_to_string(path)?;
+        let text = text.trim();
+        let bytes: Option<Vec<u8>> = (0..text.len())
+            .step_by(2)
+            .map(|i| {
+                text.get(i..i + 2)
+                    .and_then(|b| u8::from_str_radix(b, 16).ok())
+            })
+            .collect();
+        bytes
+            .and_then(|b| b.try_into().ok())
+            .ok_or_else(|| format!("{path}: not a 32-byte key in hex").into())
+    };
+    let count = kernable_store::vault::Vault::open(vault, &read(old)?)?.rekey(&read(new)?)?;
+    println!("re-encrypted {count} values; put the new key into [vault] key");
+    Ok(true)
 }
 
 fn listeners(store: &str) -> Result<bool> {

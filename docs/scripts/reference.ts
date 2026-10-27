@@ -47,7 +47,8 @@ function rustStruct(src: string, name: string) {
 }
 
 function tomlType(rust: string): string {
-  if (/HashMap/.test(rust)) return "table: key ID → patterns";
+  if (/HashMap<String, Vec<String>>/.test(rust)) return "table: key ID → patterns";
+  if (/HashMap<String, String>/.test(rust)) return "table: key ID → string";
   const inner = rust.replace(/^Option<(.+)>$/, "$1");
   const t = ({ String: "string", PathBuf: "path", u64: "integer (ms)", i64: "integer (ms)", Tls: "table", VaultConfig: "table" } as Record<string, string>)[inner] ?? inner;
   return t === "integer (ms)" ? t : t;

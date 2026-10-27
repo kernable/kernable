@@ -198,7 +198,7 @@ fn arbitrary_requests_never_crash_or_hang_the_kernel() {
     });
     let report = kernable_store::open_read_only(&env.store)
         .unwrap()
-        .verify(&id(&key(3)))
+        .verify(&[id(&key(3)).to_string()])
         .unwrap();
     assert!(report.is_ok(), "{:?}", report.problems);
 }

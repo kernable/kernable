@@ -140,7 +140,7 @@ fn reopening_replays_events_results_queue_checkpoints_and_listeners() {
         (listeners[0].name.as_str(), listeners[0].position),
         ("orders", 2)
     );
-    let report = store.verify(&kernel_id()).unwrap();
+    let report = store.verify(&[kernel_id().to_string()]).unwrap();
     // c3 is unsigned on purpose; everything else must check out.
     assert_eq!(
         report.problems,
@@ -238,7 +238,7 @@ fn consistently_reframed_tampering_is_caught_by_verify() {
 
     let report = FileStore::open_read_only(&log.0)
         .unwrap()
-        .verify(&kernel_id())
+        .verify(&[kernel_id().to_string()])
         .unwrap();
     assert!(
         report

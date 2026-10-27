@@ -40,18 +40,26 @@ async fn run(path: &Path) -> Result<(), BoxError> {
     );
     let kernel = Kernel::open(config)?;
     let mut server = tokio::spawn(serve(Arc::clone(&kernel)));
-    tokio::select! {
-        result = &mut server => result??,
-        signal = shutdown_signal() => {
-            // Workers and listeners stay connected, so running commands can finish and settle.
-            tracing::info!(signal = signal?, "shutting down: finishing running requests");
-            if !kernel.drain().await {
-                tracing::warn!("drain timed out: unfinished commands run again after a restart");
+    let mut hangup = signal(SignalKind::hangup())?;
+    loop {
+        tokio::select! {
+            result = &mut server => return result?.and_then(|()| kernel.shutdown()),
+            _ = hangup.recv() => match Config::load(path).and_then(|config| kernel.reload(config)) {
+                Ok(kept) if kept.is_empty() => tracing::info!("configuration reloaded"),
+                Ok(kept) => tracing::warn!(?kept, "configuration reloaded; these settings need a restart"),
+                Err(e) => tracing::error!(error = %e, "reload failed; the previous configuration stays"),
+            },
+            signal = shutdown_signal() => {
+                // Workers and listeners stay connected, so running commands can finish and settle.
+                tracing::info!(signal = signal?, "shutting down: finishing running requests");
+                if !kernel.drain().await {
+                    tracing::warn!("drain timed out: unfinished commands run again after a restart");
+                }
+                server.abort();
+                return kernel.shutdown();
             }
-            server.abort();
         }
     }
-    kernel.shutdown()
 }
 
 async fn shutdown_signal() -> std::io::Result<&'static str> {

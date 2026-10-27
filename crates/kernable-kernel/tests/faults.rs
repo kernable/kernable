@@ -166,7 +166,7 @@ async fn sigterm_checkpoints_and_in_flight_commands_run_right_after_a_restart() 
 
     {
         let store = kernable_store::open(&store).unwrap();
-        let report = store.verify(&id(&key(3))).unwrap();
+        let report = store.verify(&[id(&key(3)).to_string()]).unwrap();
         assert!(report.is_ok(), "{:?}", report.problems);
         assert!(report.checkpoints >= 1, "no final checkpoint");
         let pending: Vec<String> = store

@@ -25,7 +25,7 @@ use std::fmt;
 
 use ed25519_dalek::SigningKey;
 use kernable_core::proto::{
-    Command, CommandResult, Event, ListenerRecord, NewEvent, Rejected, Signature,
+    Command, CommandResult, Event, ListenerRecord, NewEvent, Rejected, RevocationRecord, Signature,
 };
 
 /// The version of the stored data format this build reads and writes. A store of another
@@ -33,7 +33,8 @@ use kernable_core::proto::{
 ///
 /// - 1: the first release format.
 /// - 2: vault references in commands and events; snapshots moved to their own store.
-pub const FORMAT: u32 = 2;
+/// - 3: key revocations.
+pub const FORMAT: u32 = 3;
 
 pub use file::FileStore;
 pub use sqlite::SqliteStore;
@@ -229,8 +230,15 @@ pub trait Store: Send + Sync {
     /// Signs the current head of the hash chain. Returns `None` while there are no events.
     fn checkpoint(&self, kernel: &SigningKey, now_ms: i64) -> Result<Option<Checkpoint>>;
 
-    /// Recomputes the hash chain and checks all signatures; see [`Report`].
-    fn verify(&self, kernel_key_id: &str) -> Result<Report>;
+    /// Keeps a kernel-signed revocation; a key revoked before stays revoked as it was.
+    fn revoke(&self, revocation: &RevocationRecord) -> Result<()>;
+
+    /// Every revocation, in the order they were stored.
+    fn revocations(&self) -> Result<Vec<RevocationRecord>>;
+
+    /// Recomputes the hash chain and checks all signatures against the kernel's keys (the
+    /// current one and any it had before); see [`Report`].
+    fn verify(&self, kernel_key_ids: &[String]) -> Result<Report>;
 }
 
 /// Opens a store for reading and writing: `sqlite:<path>`, `file:<path>`, `memory:` or a bare
@@ -253,7 +261,7 @@ pub fn open_read_only(url: &str) -> Result<Box<dyn Store>> {
 
 /// Upgrades the store at `url` to [`FORMAT`] (kernel stopped; back it up first) and returns
 /// the format it had. From 1 to 2, snapshots leave the log: they are dropped, and workers
-/// rebuild them into the snapshot store.
+/// rebuild them into the snapshot store. From 2 to 3 nothing changes but the format.
 pub fn migrate(url: &str) -> Result<u32> {
     match backend(url) {
         ("memory", _) => Ok(FORMAT),

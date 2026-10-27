@@ -65,6 +65,8 @@ client_ca = "ca.tls.crt"             # every client must present a certificate s
 | `middlewares` | table: key ID → patterns | empty | Listener key ID -> the commands and queries it may check as a middleware. |
 | `privileged` | table: key ID → patterns | empty | Client key ID -> the privileged request context switches it may set (`bypass_authorization`). |
 | `tls` | table | — | Mutual TLS for TCP; every client needs a certificate of `client_ca`. |
+| `successors` | table: key ID → string | empty | Old key ID -> new key ID: a listener registered with the old key may connect with the new one and keeps its position, order and middleware registration. |
+| `revoked` | table: key ID → string | empty | Key ID -> since when it must not be trusted, in UTC (`2026-10-27T09:00:00Z`). The kernel stores the revocation, refuses the key from then on, also where an allowlist still names it, and `kernable verify` flags what it signed from that time on. Never undone. |
 | `snapshots` | string | `"memory:"` | Where snapshots live: `sqlite:<path>` or `memory:` (default; rebuilt after a restart). |
 | `vault` | table | — | Personal and secret values; commands and events that refer to the vault are refused without it. |
 | `metrics_listen` | string | — | Address for Prometheus metrics (`GET /metrics`), `GET /health` and `GET /ready`; off when absent. |

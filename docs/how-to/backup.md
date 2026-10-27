@@ -7,7 +7,7 @@
 | the event store (`store`) | all commands and events | everything is lost |
 | the vault (`[vault] store`) | personal and secret values | personal data reads as `null` everywhere |
 | the vault key (`[vault] key`) | decrypts the vault | the vault cannot be read: same as losing it |
-| the kernel key (`kernel_key`) | signs checkpoints | new checkpoints get another key; old ones still verify with the old public key |
+| the kernel key (`kernel_key`) | signs checkpoints and revocations | change it ([Keys](./keys)); keep every old public key for `kernable verify` |
 | process keys | sign requests | create new ones and change the allowlists |
 | the snapshot store | a cache | nothing: workers rebuild snapshots |
 | read model stores | caches of your views | nothing: read models rebuild from the events |
@@ -20,7 +20,7 @@ Keep keys apart from the data, as you would keep any secret.
 
 1. Stop the kernel.
 2. Put the store, the vault and the keys back.
-3. Check the store: `kernable verify <store> <kernel.pub>` must say `OK`.
+3. Check the store: `kernable verify <store> <kernel.pub>...`, with every key the kernel ever had, must say `OK`.
 4. Start the kernel. Listeners with stores that are ahead of the restored log should be rebuilt ([Rebuild a read model](./rebuild-read-model)).
 
 ## Backups and erasure

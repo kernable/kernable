@@ -94,7 +94,7 @@ proptest! {
     fn random_bytes_never_crash_the_file_log(bytes in proptest::collection::vec(any::<u8>(), 0..2048)) {
         if let Ok(store) = FileStore::open_bytes(&bytes) {
             let _ = store.read_all(0, 1000);
-            let _ = store.verify("00");
+            let _ = store.verify(&["00".to_string()]);
         }
     }
 
@@ -193,7 +193,7 @@ fn apply(store: &dyn Store, ops: &[Op]) -> Vec<String> {
     log.push(format!(
         "{:?}",
         store
-            .verify(&signing::key_id(&kernel.verifying_key()))
+            .verify(&[signing::key_id(&kernel.verifying_key()).to_string()])
             .unwrap()
             .problems
     ));

@@ -26,7 +26,7 @@ async fn run(env: &Env, ids: std::ops::Range<u32>) {
 
 fn verify(env: &Env) -> kernable_store::Report {
     let store = kernable_store::open_read_only(&env.store).unwrap();
-    store.verify(&id(&env.kernel_key)).unwrap()
+    store.verify(&[id(&env.kernel_key).to_string()]).unwrap()
 }
 
 /// The version of the stored snapshot of order `o1`, if any.

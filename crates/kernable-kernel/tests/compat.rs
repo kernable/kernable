@@ -15,8 +15,8 @@ use kernable_core::{
     PROTOCOL,
     proto::{
         Attribute, Command, Hello, ListenerMessage, ListenerRecord, Middleware, NewEvent,
-        QueryRequest, Register, Rejected, RequestContext, SubmitRequest, SubscribeRequest,
-        VaultValue, Wait, WorkerMessage, command_result::Outcome,
+        QueryRequest, Register, Rejected, RequestContext, RevocationRecord, SubmitRequest,
+        SubscribeRequest, VaultValue, Wait, WorkerMessage, command_result::Outcome,
         command_service_client::CommandServiceClient, event_service_client::EventServiceClient,
         listener_message, listener_service_client::ListenerServiceClient,
         query_service_client::QueryServiceClient, worker_gateway_client::WorkerGatewayClient,
@@ -74,7 +74,8 @@ fn stream(order: &str) -> StreamId {
     }
 }
 
-/// What the format-2 fixture holds, like format 1 plus the vault: the customer's email in
+/// What the format-3 fixture holds (format 2 holds the same but the last command and the
+/// revocation), like format 1 plus the vault: the customer's email in
 /// `c1` and its event (subject `k-1`), a secret coupon code with the pending `c4`, and an
 /// order `o3` whose customer `k-2` was erased (by `c7`). There are no snapshots in the log.
 fn fill(store: &dyn Store, vault: &Vault) {
@@ -188,6 +189,20 @@ fn fill(store: &dyn Store, vault: &Vault) {
             listener("guard", "identity.*", Some(guard)),
         ])
         .unwrap();
+    // Since format 3: a client key stolen at AT. What it signed from then on is suspect.
+    let mut stolen = command("c11", "PlaceOrder", "o4");
+    stolen.context = Some(context());
+    let stolen = signed(stolen, &key(7));
+    let placed = event("OrderPlaced", 2, r#"{"customer":"k-3"}"#.into(), &[]);
+    commit(&stolen, 0, placed, &[]);
+    let msg = signing::revocation_message(&id(&key(7)), AT, AT);
+    let revocation = RevocationRecord {
+        key_id: id(&key(7)),
+        since: AT,
+        created_at: AT,
+        kernel_sig: Some(signing::sign(&key(3), &msg)),
+    };
+    store.revoke(&revocation).unwrap();
     store.checkpoint(&key(3), AT).unwrap();
 }
 
@@ -196,7 +211,8 @@ fn fill(store: &dyn Store, vault: &Vault) {
 fn copy(format: u32, backend: &str, file: &str, dir: &Path) -> String {
     let fixtures = fixtures(format);
     let fixture = fixtures.join(file);
-    let write = std::env::var_os("KERNABLE_WRITE_FIXTURES").is_some() && format == 2;
+    let write =
+        std::env::var_os("KERNABLE_WRITE_FIXTURES").is_some() && format == kernable_store::FORMAT;
     if write && !fixture.exists() {
         std::fs::create_dir_all(&fixtures).unwrap();
         let url = format!("{backend}:{}", fixture.display());
@@ -212,7 +228,7 @@ fn copy(format: u32, backend: &str, file: &str, dir: &Path) -> String {
     }
     let target = dir.join(file);
     std::fs::copy(&fixture, &target).unwrap();
-    if format == 2 {
+    if format >= 2 {
         let vault = format!("vault-{backend}.db");
         std::fs::copy(fixtures.join(&vault), dir.join(&vault)).unwrap();
         std::fs::copy(fixtures.join("vault.key"), dir.join("vault.key")).unwrap();
@@ -227,7 +243,7 @@ fn outcome(result: &kernable_core::proto::CommandResult) -> &Outcome {
 fn verified(url: &str) -> kernable_store::Report {
     let report = kernable_store::open_read_only(url)
         .unwrap()
-        .verify(&id(&key(3)))
+        .verify(&[id(&key(3)).to_string()])
         .unwrap();
     assert!(report.is_ok(), "{url}: {:?}", report.problems);
     report
@@ -265,7 +281,7 @@ async fn stores_of_format_1_migrate_verify_and_run() {
             assert_eq!(kernable_store::migrate(&url).unwrap(), 1);
             assert_eq!(
                 kernable_store::migrate(&url).unwrap(),
-                2,
+                kernable_store::FORMAT,
                 "migrating twice is harmless"
             );
             config.store = url.clone();
@@ -322,12 +338,13 @@ async fn stores_of_format_1_migrate_verify_and_run() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn stores_of_format_2_open_verify_and_run_with_their_vault() {
+async fn stores_of_format_2_migrate_verify_and_run_with_their_vault() {
     for (backend, file) in [("sqlite", "k.db"), ("file", "k.log")] {
         let mut url = String::new();
         let mut vault_url = String::new();
         let env = start_custom(&format!("compat-2-{backend}"), |config, dir| {
             url = copy(2, backend, file, dir);
+            assert_eq!(kernable_store::migrate(&url).unwrap(), 2);
             vault_url = format!(
                 "sqlite:{}",
                 dir.join(format!("vault-{backend}.db")).display()
@@ -391,6 +408,40 @@ async fn stores_of_format_2_open_verify_and_run_with_their_vault() {
         );
         assert!(vault.get(&erased_order.vault_refs).unwrap().is_empty());
         verified(&url);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stores_of_format_3_report_what_revoked_keys_signed() {
+    for (backend, file) in [("sqlite", "k.db"), ("file", "k.log")] {
+        let mut url = String::new();
+        let env = start_custom(&format!("compat-3-{backend}"), |config, dir| {
+            url = copy(3, backend, file, dir);
+            config.store = url.clone();
+            config.vault = Some(VaultConfig {
+                store: format!(
+                    "sqlite:{}",
+                    dir.join(format!("vault-{backend}.db")).display()
+                ),
+                key: dir.join("vault.key"),
+                readers: Default::default(),
+                erasers: Default::default(),
+            });
+            // Still listed, but revoked in the store: the kernel refuses it anyway.
+            config.clients.insert(id(&key(7)), vec!["*".into()]);
+        })
+        .await;
+        let report = verified(&url);
+        assert_eq!(
+            report.suspects,
+            [format!(
+                "command c11: signed by revoked key {}",
+                id(&key(7))
+            )],
+            "{backend}"
+        );
+        let refused = submit(&env.addr, signed(command("c12", "AddItem", "o4"), &key(7))).await;
+        assert_eq!(refused.unwrap_err().code(), tonic::Code::PermissionDenied);
     }
 }
 

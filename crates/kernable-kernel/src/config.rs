@@ -103,6 +103,15 @@ pub struct Config {
     pub privileged: HashMap<String, Vec<String>>,
     /// Mutual TLS for TCP; every client needs a certificate of `client_ca`.
     pub tls: Option<Tls>,
+    /// Old key ID -> new key ID: a listener registered with the old key may connect with the
+    /// new one and keeps its position, order and middleware registration.
+    #[serde(default)]
+    pub successors: HashMap<String, String>,
+    /// Key ID -> since when it must not be trusted, in UTC (`2026-10-27T09:00:00Z`). The kernel
+    /// stores the revocation, refuses the key from then on, also where an allowlist still names
+    /// it, and `kernable verify` flags what it signed from that time on. Never undone.
+    #[serde(default)]
+    pub revoked: HashMap<String, String>,
     /// Where snapshots live: `sqlite:<path>` or `memory:` (default; rebuilt after a restart).
     #[serde(default = "default_snapshots")]
     pub snapshots: String,
@@ -202,6 +211,74 @@ impl Config {
     }
 }
 
+impl Config {
+    /// The revocations as key ID -> ms since epoch.
+    pub fn revocations(&self) -> Result<HashMap<String, i64>, String> {
+        self.revoked
+            .iter()
+            .map(|(key, since)| {
+                let ms = utc_ms(since).ok_or_else(|| {
+                    format!(
+                        "revoked {key}: \"{since}\" is not a UTC time like 2026-10-27T09:00:00Z"
+                    )
+                })?;
+                Ok((key.clone(), ms))
+            })
+            .collect()
+    }
+
+    /// Removes `keys` from every allowlist, so nothing grants them anything.
+    pub fn without(&mut self, keys: &HashMap<String, i64>) {
+        let tables = [
+            &mut self.clients,
+            &mut self.workers,
+            &mut self.subscribers,
+            &mut self.listeners,
+            &mut self.queriers,
+            &mut self.query_handlers,
+            &mut self.middlewares,
+            &mut self.privileged,
+        ];
+        for table in tables {
+            table.retain(|key, _| !keys.contains_key(key));
+        }
+        if let Some(vault) = &mut self.vault {
+            vault.readers.retain(|key, _| !keys.contains_key(key));
+            vault.erasers.retain(|key, _| !keys.contains_key(key));
+        }
+    }
+}
+
+/// Milliseconds since the epoch of a UTC time `YYYY-MM-DDTHH:MM:SSZ` (seconds optional).
+pub fn utc_ms(s: &str) -> Option<i64> {
+    let s = s.strip_suffix('Z')?;
+    let (date, time) = s.split_once('T')?;
+    let num = |p: &str| p.parse::<i64>().ok();
+    let d: Vec<i64> = date.split('-').map(num).collect::<Option<_>>()?;
+    let t: Vec<i64> = time.split(':').map(num).collect::<Option<_>>()?;
+    let ([y, m, day], [h, min, sec @ ..]) = (d.as_slice(), t.as_slice()) else {
+        return None;
+    };
+    let sec = sec.first().copied().unwrap_or(0);
+    let valid = (1..=12).contains(m)
+        && (1..=31).contains(day)
+        && (0..24).contains(h)
+        && (0..60).contains(min)
+        && (0..60).contains(&sec);
+    if !valid {
+        return None;
+    }
+    // Days from 1970-01-01 to the civil date (Howard Hinnant's algorithm).
+    let y = if *m <= 2 { y - 1 } else { *y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(((days * 24 + h) * 60 + min) * 60_000 + sec * 1000)
+}
+
 /// Whether `key_id` may use `name` according to an allowlist of patterns; see [`covers`].
 pub fn allowed(rules: &HashMap<String, Vec<String>>, key_id: &str, name: &str) -> bool {
     rules
@@ -287,5 +364,21 @@ mod tests {
         assert!(!valid_qualified("orders.Place.Order"));
         assert!(valid_pattern("*") && valid_pattern("orders.*") && valid_pattern("orders.Get"));
         assert!(!valid_pattern("orders") && !valid_pattern("Orders.*") && !valid_pattern("o.*.*"));
+    }
+
+    #[test]
+    fn utc_times_parse_to_milliseconds() {
+        assert_eq!(utc_ms("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(utc_ms("2026-10-27T09:00:00Z"), Some(1_793_091_600_000));
+        assert_eq!(utc_ms("2026-10-27T09:00Z"), Some(1_793_091_600_000));
+        assert_eq!(utc_ms("2000-02-29T12:30:15Z"), Some(951_827_415_000));
+        for bad in [
+            "2026-10-27 09:00:00",
+            "2026-13-01T00:00:00Z",
+            "2026-10-27T09:00:00+01:00",
+            "x",
+        ] {
+            assert_eq!(utc_ms(bad), None, "{bad}");
+        }
     }
 }

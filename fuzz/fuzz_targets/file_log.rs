@@ -10,6 +10,6 @@ fuzz_target!(|data: &[u8]| {
         let _ = store.pending();
         let _ = store.listeners();
         let _ = store.event_schemas();
-        let _ = store.verify("00");
+        let _ = store.verify(&["00".to_string()]);
     }
 });

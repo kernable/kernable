@@ -33,6 +33,7 @@ Each message starts with a `str` **tag** for domain separation. Payloads are sig
 | Worker, listener | `kernable.v1.challenge` | `nonce` |
 | Subscriber | `kernable.v1.subscribe` | `after_position: u64`, `issued_at: i64`, `type_count: u64`, then per type `event_type` |
 | Kernel | `kernable.v1.checkpoint` | `global_position: u64`, `chain_hash`, `created_at: i64` |
+| Kernel | `kernable.v1.revocation` | `key_id`, `since: i64`, `created_at: i64` |
 
 The result signature does not cover the lease ID. A replayed result can only reproduce the same events for the same command at the same version, so it is harmless. The commit is idempotent.
 

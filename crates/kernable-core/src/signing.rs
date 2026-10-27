@@ -208,6 +208,15 @@ pub fn subscribe_message(after_position: u64, event_types: &[String], issued_at:
     m.0
 }
 
+/// What the kernel signs to revoke `key_id` from `since` on (both ms since epoch).
+pub fn revocation_message(key_id: &str, since: i64, created_at: i64) -> Vec<u8> {
+    Msg::new("kernable.v1.revocation")
+        .str(key_id)
+        .i64(since)
+        .i64(created_at)
+        .0
+}
+
 /// What the kernel signs to anchor the chain at `global_position`.
 pub fn checkpoint_message(global_position: u64, chain_hash: &[u8], created_at: i64) -> Vec<u8> {
     Msg::new("kernable.v1.checkpoint")

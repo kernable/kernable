@@ -27,7 +27,7 @@ use kernable_core::{
     proto::{
         CheckpointRecord, Command, CommandResult, Committed, CommittedRecord, EnqueuedRecord,
         Event, FormatRecord, ListenerRecord, LogRecord, LoggedEvent, NewEvent, Rejected,
-        RejectedRecord, Signature, command_result::Outcome, log_record::Record,
+        RejectedRecord, RevocationRecord, Signature, command_result::Outcome, log_record::Record,
     },
     signing::{self, GENESIS},
 };
@@ -74,6 +74,7 @@ struct State {
     next_seq: u64,
     checkpoints: Vec<Checkpoint>,
     listeners: BTreeMap<String, ListenerRecord>,
+    revocations: Vec<RevocationRecord>,
 }
 
 impl State {
@@ -145,6 +146,11 @@ impl State {
                 return Err(corrupt(
                     "a snapshot record: snapshots left the log in format 2",
                 ));
+            }
+            Record::Revocation(r) => {
+                if !self.revocations.iter().any(|k| k.key_id == r.key_id) {
+                    self.revocations.push(r);
+                }
             }
             Record::Listener(l) if l.removed => {
                 self.listeners.remove(&l.name);
@@ -514,17 +520,38 @@ impl Store for FileStore {
         Ok(inner.state.checkpoints.last().cloned())
     }
 
-    fn verify(&self, kernel_key_id: &str) -> Result<Report> {
+    fn revoke(&self, revocation: &RevocationRecord) -> Result<()> {
+        let mut inner = self.inner();
+        if inner
+            .state
+            .revocations
+            .iter()
+            .any(|r| r.key_id == revocation.key_id)
+        {
+            return Ok(());
+        }
+        append(&mut inner, Record::Revocation(revocation.clone()))
+    }
+
+    fn revocations(&self) -> Result<Vec<RevocationRecord>> {
+        Ok(self.inner().state.revocations.clone())
+    }
+
+    fn verify(&self, kernel_key_ids: &[String]) -> Result<Report> {
         let inner = self.inner();
         let state = &inner.state;
-        let mut v = Verifier::new(kernel_key_id, state.checkpoints.iter().cloned());
+        let mut v = Verifier::new(
+            kernel_key_ids,
+            state.checkpoints.iter().cloned(),
+            state.revocations.iter().cloned(),
+        );
         for (event, prev_hash) in state.events.iter().zip(&state.prev_hashes) {
             v.event(event.clone(), prev_hash);
         }
         let mut commands: Vec<&Cmd> = state.commands.values().collect();
         commands.sort_by_key(|c| c.seq);
         for c in commands {
-            v.command(&c.command);
+            v.command(&c.command, c.received_at);
         }
         Ok(v.finish())
     }
@@ -559,7 +586,7 @@ pub(crate) fn migrate(path: &Path) -> Result<u32> {
     };
     match format {
         FORMAT => return Ok(FORMAT),
-        1 => {}
+        1 | 2 => {}
         found => return Err(Error::Format(found)),
     }
     let mut log = Vec::with_capacity(bytes.len());

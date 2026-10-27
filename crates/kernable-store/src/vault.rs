@@ -259,6 +259,38 @@ impl Vault {
         Ok(streams)
     }
 
+    /// Encrypts every value again with `new_key`, in one transaction; returns how many.
+    pub fn rekey(&self, new_key: &[u8; 32]) -> Result<usize> {
+        let next = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(new_key));
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let rows: Vec<(String, Vec<u8>, Vec<u8>)> = {
+            let mut stmt = tx.prepare("SELECT ref, nonce, value FROM vault")?;
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        for (r, nonce, sealed) in &rows {
+            let aad = r.as_bytes();
+            let value = self
+                .cipher
+                .decrypt(Nonce::from_slice(nonce), Payload { msg: sealed, aad })
+                .map_err(|_| {
+                    Error::Vault(format!("value {r} cannot be decrypted with the old key"))
+                })?;
+            let mut fresh = [0u8; 12];
+            getrandom::fill(&mut fresh).map_err(|_| Error::Vault("no randomness".into()))?;
+            let resealed = next
+                .encrypt(Nonce::from_slice(&fresh), Payload { msg: &value, aad })
+                .map_err(|_| Error::Vault("encryption failed".into()))?;
+            tx.execute(
+                "UPDATE vault SET nonce = ?1, value = ?2 WHERE ref = ?3",
+                params![fresh.to_vec(), resealed, r],
+            )?;
+        }
+        tx.commit()?;
+        Ok(rows.len())
+    }
+
     /// Deletes the secrets of a completed command.
     pub fn drop_secrets(&self, command_id: &str) -> Result<()> {
         self.conn().execute(

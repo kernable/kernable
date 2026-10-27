@@ -15,7 +15,17 @@ message LogRecord {
     ListenerRecord listener = 5;
     SnapshotRecord snapshot = 6; // format 1 only: snapshots now live in the snapshot store
     FormatRecord format = 7;
+    RevocationRecord revocation = 8; // format 3
   }
+}
+
+// A key that must no longer be trusted: the kernel refuses it from now on, and `kernable
+// verify` flags what it signed from `since` on. Signed by the kernel; never undone.
+message RevocationRecord {
+  string key_id = 1;
+  int64 since = 2;      // ms since epoch: from when its signatures are suspect
+  int64 created_at = 3; // ms since epoch
+  Signature kernel_sig = 4;
 }
 
 // The first record of every log: the version of this record format. A kernel opens only logs

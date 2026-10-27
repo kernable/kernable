@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use kernable_core::{
-    proto::{Command, Event, NewEvent},
+    proto::{Command, Event, NewEvent, RevocationRecord},
     signing::{self, GENESIS},
 };
 
@@ -18,6 +18,9 @@ pub struct Report {
     /// Events after the last valid checkpoint; truncating them cannot be detected.
     pub unanchored: u64,
     pub problems: Vec<String>,
+    /// Commands and events signed by a revoked key at or after its revocation's `since`:
+    /// intact, but not to be trusted.
+    pub suspects: Vec<String>,
 }
 
 impl Report {
@@ -36,17 +39,37 @@ pub(crate) struct Verifier {
     prev: Vec<u8>,
     /// Consecutive events of one command, checked together against its worker signature.
     group: Vec<Event>,
+    /// Revoked key ID -> since when (ms since epoch), from kernel-signed revocations.
+    revoked: BTreeMap<String, i64>,
 }
 
 impl Verifier {
-    pub fn new(kernel_key_id: &str, checkpoints: impl IntoIterator<Item = Checkpoint>) -> Self {
+    /// `kernel_key_ids`: every key the kernel signed with, also before a key change.
+    pub fn new(
+        kernel_key_ids: &[String],
+        checkpoints: impl IntoIterator<Item = Checkpoint>,
+        revocations: impl IntoIterator<Item = RevocationRecord>,
+    ) -> Self {
         let mut report = Report::default();
         let mut anchors = BTreeMap::new();
+        let mut revoked = BTreeMap::new();
+        for r in revocations {
+            let sig = r.kernel_sig.clone().unwrap_or_default();
+            let msg = signing::revocation_message(&r.key_id, r.since, r.created_at);
+            if !kernel_key_ids.contains(&sig.key_id) || signing::verify(&sig, &msg).is_err() {
+                report.problems.push(format!(
+                    "revocation of key {}: not signed by a kernel key",
+                    r.key_id
+                ));
+            } else {
+                revoked.insert(r.key_id, r.since);
+            }
+        }
         for cp in checkpoints {
             report.checkpoints += 1;
             let pos = cp.global_position;
             let msg = signing::checkpoint_message(pos, &cp.chain_hash, cp.created_at);
-            if cp.kernel_sig.key_id != kernel_key_id {
+            if !kernel_key_ids.contains(&cp.kernel_sig.key_id) {
                 let key = &cp.kernel_sig.key_id;
                 report
                     .problems
@@ -66,7 +89,13 @@ impl Verifier {
             last_anchor,
             prev: GENESIS.to_vec(),
             group: Vec::new(),
+            revoked,
         }
+    }
+
+    /// Whether `sig` is of a key revoked at or before `at`.
+    fn suspect(&self, key_id: &str, at: i64) -> bool {
+        self.revoked.get(key_id).is_some_and(|since| at >= *since)
     }
 
     pub fn event(&mut self, e: Event, prev_hash: &[u8]) {
@@ -104,8 +133,17 @@ impl Verifier {
         self.group.push(e);
     }
 
-    pub fn command(&mut self, cmd: &Command) {
+    /// A stored command and when the kernel accepted it.
+    pub fn command(&mut self, cmd: &Command, created_at: i64) {
         self.report.commands += 1;
+        if let Some(sig) = &cmd.client_sig
+            && self.suspect(&sig.key_id, created_at)
+        {
+            self.report.suspects.push(format!(
+                "command {}: signed by revoked key {}",
+                cmd.command_id, sig.key_id
+            ));
+        }
         let valid = cmd
             .client_sig
             .as_ref()
@@ -157,6 +195,17 @@ impl Verifier {
             group.iter().all(|e| e.producer_sig.as_ref() == Some(sig))
                 && signing::verify(sig, &msg).is_ok()
         });
+        if let Some(sig) = &first.producer_sig
+            && self.suspect(&sig.key_id, first.created_at)
+        {
+            self.report.suspects.push(format!(
+                "command {}: events {}..={} written by revoked key {}",
+                first.command_id,
+                first.global_position,
+                group.last().map_or(0, |e| e.global_position),
+                sig.key_id
+            ));
+        }
         if !valid {
             self.report.problems.push(format!(
                 "command {}: invalid worker signature on events {}..={}",

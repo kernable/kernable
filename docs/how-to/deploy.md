@@ -8,6 +8,8 @@
 4. **Migrate the store if needed.** `kernable migrate <store>` says "nothing to migrate" when the format is current; otherwise it upgrades the store. A kernel refuses to start on a store of another format, so you cannot forget this step. A file log is rewritten and the old one kept as `<path>.format-<n>`.
 5. **Start the kernel** and wait until `GET /ready` on its metrics address answers 200: every registered listener is connected and has caught up.
 
+Changes to allowlists, successors, revocations and the kernel's key need no restart: send SIGHUP ([Keys](./keys)).
+
 Processes reconnect on their own while the kernel is away; clients get connection errors and should resubmit with the same command ID.
 
 ## Your processes

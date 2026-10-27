@@ -91,6 +91,8 @@ pub async fn start_custom(name: &str, customize: impl FnOnce(&mut Config, &Path)
         middlewares: HashMap::from([(id(&key(5)), vec!["*".into()])]),
         privileged: HashMap::from([(id(&key(1)), vec!["bypass_authorization".into()])]),
         tls: None,
+        successors: HashMap::new(),
+        revoked: HashMap::new(),
         snapshots: format!("sqlite:{}", dir.join("snapshots.db").display()),
         vault: None,
         metrics_listen: None,

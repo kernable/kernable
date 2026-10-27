@@ -27,6 +27,10 @@ flowchart LR
 
 Every stored event's hash covers its content, its worker's signature, its request context and the previous event's hash. The kernel signs a **checkpoint** of the chain regularly. `kernable verify` recomputes the chain and checks every signature: a changed, removed or reordered event shows, and so does a command without its client's signature. Events after the last checkpoint are protected by the chain only.
 
+## Revoking and changing keys
+
+A key that leaked is **revoked** from the time it may have been used: the kernel stores the revocation signed with its own key, refuses the key from then on, and `kernable verify` lists everything the key signed since that time as suspect. A revocation is never undone. Keys change without a restart: the kernel reloads its configuration on SIGHUP, and a listener moves to a new key that is declared its old key's successor. See [Keys per service, and changing a key](../how-to/keys).
+
 ## Transport
 
 Over TCP, the kernel requires **mutual TLS**: every process presents a certificate from your CA. Signatures make a message trustworthy; TLS keeps it private and keeps strangers out.

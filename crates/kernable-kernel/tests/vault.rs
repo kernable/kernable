@@ -280,7 +280,7 @@ async fn an_erasing_event_deletes_a_subject_and_its_snapshots_everywhere() {
         1,
         "only k-2's value is left"
     );
-    let report = store.verify(&id(&key(3))).unwrap();
+    let report = store.verify(&[id(&key(3)).to_string()]).unwrap();
     assert!(report.is_ok(), "{:?}", report.problems);
 }
 
