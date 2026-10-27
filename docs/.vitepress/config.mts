@@ -13,6 +13,7 @@ export default withMermaid(
       nav: [
         { text: "Tutorials", link: "/tutorial/" },
         { text: "Concepts", link: "/concepts/" },
+        { text: "How-to", link: "/how-to/" },
         { text: "Reference", link: "/reference/" },
       ],
       sidebar: [
@@ -48,6 +49,24 @@ export default withMermaid(
             { text: "Data over time", link: "/concepts/data" },
             { text: "Failures and recovery", link: "/concepts/failures" },
             { text: "Compared with other systems", link: "/concepts/comparison" },
+          ],
+        },
+        {
+          text: "How-to guides",
+          items: [
+            { text: "Overview", link: "/how-to/" },
+            { text: "Deploy and upgrade", link: "/how-to/deploy" },
+            { text: "Back up and restore", link: "/how-to/backup" },
+            { text: "Monitor kernable", link: "/how-to/monitor" },
+            { text: "Mutual TLS with your own PKI", link: "/how-to/tls" },
+            { text: "Keys per service", link: "/how-to/keys" },
+            { text: "Change an event's format", link: "/how-to/event-versions" },
+            { text: "Rebuild a read model", link: "/how-to/rebuild-read-model" },
+            { text: "Remove a listener", link: "/how-to/remove-listener" },
+            { text: "Test your domain", link: "/how-to/test-domain" },
+            { text: "Handle an erasure request", link: "/how-to/erasure" },
+            { text: "Passwords and other secrets", link: "/how-to/secrets" },
+            { text: "Write an SDK", link: "/how-to/new-sdk" },
           ],
         },
         {

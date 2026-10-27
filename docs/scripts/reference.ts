@@ -301,8 +301,21 @@ for (const [path, make] of Object.entries(generated)) {
     writeFileSync(file, content);
   }
 }
+// Every metric named anywhere in the docs must exist.
+const metrics = new Set([...metricsReference().matchAll(/`(kernable_[a-z_]+)`/g)].map((m) => m[1]));
+const unknownMetrics: string[] = [];
+for (const file of execFileSync("git", ["ls-files", "docs/*.md", "docs/**/*.md"], { cwd: ROOT, encoding: "utf8" }).split("\n").filter(Boolean)) {
+  for (const m of readFileSync(join(ROOT, file), "utf8").matchAll(/\b(kernable_[a-z_]+)/g)) {
+    const name = m[1].replace(/_(sum|count)$/, "");
+    if (!metrics.has(name)) unknownMetrics.push(`${m[1]} (${file})`);
+  }
+}
 const errors = readFileSync(join(ROOT, "docs/reference/errors.md"), "utf8");
 const undocumented = errorCodes().filter((c) => !errors.includes(`\`${c}\``));
+if (unknownMetrics.length) {
+  console.error(`unknown metrics in the docs: ${unknownMetrics.join(", ")}`);
+  process.exit(1);
+}
 if (stale.length || undocumented.length) {
   if (stale.length) console.error(`out of date (run npm run reference in docs/): ${stale.join(", ")}`);
   if (undocumented.length) console.error(`rejection codes missing from reference/errors.md: ${undocumented.join(", ")}`);
