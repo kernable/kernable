@@ -12,6 +12,7 @@ export default withMermaid(
       search: { provider: "local" },
       nav: [
         { text: "Tutorials", link: "/tutorial/" },
+        { text: "Concepts", link: "/concepts/" },
         { text: "Reference", link: "/reference/" },
       ],
       sidebar: [
@@ -33,6 +34,20 @@ export default withMermaid(
                 { text: "8. Operate", link: "/tutorial/shop/8-operate" },
               ],
             },
+          ],
+        },
+        {
+          text: "Concepts",
+          items: [
+            { text: "Overview", link: "/concepts/" },
+            { text: "Architecture", link: "/concepts/architecture" },
+            { text: "Event sourcing in kernable", link: "/concepts/event-sourcing" },
+            { text: "Order and consistency", link: "/concepts/ordering" },
+            { text: "Trust", link: "/concepts/trust" },
+            { text: "Queries and middleware", link: "/concepts/queries-and-middleware" },
+            { text: "Data over time", link: "/concepts/data" },
+            { text: "Failures and recovery", link: "/concepts/failures" },
+            { text: "Compared with other systems", link: "/concepts/comparison" },
           ],
         },
         {
