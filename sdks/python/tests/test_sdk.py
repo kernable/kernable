@@ -419,6 +419,65 @@ class EndToEnd(unittest.TestCase):
         time.sleep(0.2)
         self.assertEqual([(e.data["email"], e.redacted) for e in replayed], [(None, ["email"])])
 
+    def test_a_read_model_with_a_store_continues_and_rebuilds_on_a_new_schema(self):
+        self.run_stream(self.k.worker(counter))
+        url = f"sqlite:{self.kernel.dir}/totals.db"
+        handled = []
+
+        def totals(schema="1"):
+            model = self.k.read_model("totals", store=url, schema=schema, reconnect_s=0.05)
+
+            @model.on("counters.Incremented")
+            def _(e, ctx):
+                handled.append(e.position)
+                ctx.store.set("totals", e.aggregate_id, ctx.store.get("totals", e.aggregate_id, 0) + e.data["by"])
+                if fail and ctx.store.get("totals", e.aggregate_id) == 9:
+                    raise RuntimeError("boom")  # after writing: the write must not stick
+
+            @model.query("counters.GetTotal")
+            def _(data, ctx):
+                return ctx.store.get("totals", data["id"])
+
+            return model
+
+        def total(position):
+            return self.k.query("counters", "GetTotal", {"id": "c1"}, min_position=position)
+
+        fail = False
+        model = self.run_stream(totals())
+        for by in (1, 2, 3):
+            self.increment(by, wait="committed")
+        self.assertEqual(total(3), 6)
+        model.stop()
+        time.sleep(0.1)
+
+        # A new process with the same store: nothing is replayed, the data is there.
+        self.increment(1, wait="committed")
+        handled.clear()
+        model = self.run_stream(totals())
+        self.assertEqual(total(4), 7)
+        self.assertEqual(handled, [4])
+        self.assertEqual(model.store.all("totals"), [("c1", 7)])
+
+        # A failing handler rolls its batch back; delivered again, it counts once.
+        fail = True
+        self.increment(2, wait="committed")
+        time.sleep(0.2)
+        fail = False
+        for _ in range(100):
+            if model.position >= 5:
+                break
+            time.sleep(0.02)
+        self.assertEqual(total(5), 9)
+        model.stop()
+        time.sleep(0.1)
+
+        # A new schema clears the store and rebuilds from the first event.
+        handled.clear()
+        self.run_stream(totals("2"))
+        self.assertEqual(total(5), 9)
+        self.assertEqual(handled, [1, 2, 3, 4, 5])
+
     def test_event_schemas_are_checked_when_defined(self):
         counters = domain("counters")
         with self.assertRaises(ValueError):

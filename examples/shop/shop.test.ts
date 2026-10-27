@@ -70,7 +70,7 @@ async function shop(): Promise<Shop> {
   const tls = kernel.tlsFiles!;
   const env = { KERNABLE_TLS_CA: tls.ca, KERNABLE_TLS_CERT: tls.cert, KERNABLE_TLS_KEY: tls.key };
   const identityPort = await freePort();
-  const identityArgs = [`${ROOT}examples/shop/identity/identity.py`, kernel.url, kernel.appKey, String(identityPort)];
+  const identityArgs = [`${ROOT}examples/shop/identity/identity.py`, kernel.url, kernel.appKey, String(identityPort), `${kernel.dir}/identity`];
   const identity = new Service(identityPort, PYTHON, identityArgs, env);
   await identity.start();
   const port = await freePort();

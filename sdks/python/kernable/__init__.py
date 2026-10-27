@@ -38,12 +38,13 @@ import grpc
 
 from kernable.signing import (Key, challenge_message, command_message, derived_id, query_message, vault_ref,
                               rejection_message, result_message, snapshot_message)
+from kernable.store import Store
 from kernable.v1 import kernable_pb2 as pb
 from kernable.v1 import kernable_pb2_grpc as rpc
 
 __all__ = ["PROTOCOL", "Aggregate", "Check", "CommandContext", "CommandSchema", "Domain", "Event", "EventSchema",
            "Kernable", "Key", "Listener", "ListenerContext", "NotSettled", "Outcome", "QueryContext", "Rejected",
-           "RequestContext", "Tls", "Worker", "domain"]
+           "RequestContext", "Store", "Tls", "Worker", "domain"]
 
 
 class Rejected(Exception):
@@ -108,6 +109,8 @@ class QueryContext:
     query_id: str
     #: Who asks: check permissions here.
     request: RequestContext
+    #: The listener's store, if it has one (`store=` of `read_model` and `reactor`).
+    store: "Store | None" = None
 
 
 @dataclass
@@ -160,6 +163,8 @@ class ListenerContext:
     #: The event was committed before the listener connected: it is being replayed.
     replaying: bool
     event: Event
+    #: The listener's store, if it has one (`store=` of `read_model` and `reactor`).
+    store: "Store | None" = None
 
     def follow(self) -> RequestContext:
         """A request context for commands caused by this event: same sender and correlation."""
@@ -517,16 +522,24 @@ class Kernable:
             raise Rejected(res.rejected.message, res.rejected.code)
         return _decode(res.response)
 
-    def read_model(self, name: str, *, order: int = 0, start: int | None = 0, reconnect_s: float = 1.0) -> "Listener":
-        """A read model: kept in memory and rebuilt from the first event on every start (default)."""
-        return Listener(self._channel, self._key, name, order, start, reconnect_s)
+    def read_model(self, name: str, *, order: int = 0, start: int | None = 0, reconnect_s: float = 1.0,
+                   store: str | None = None, schema: str = "1") -> "Listener":
+        """A read model: kept in memory and rebuilt from the first event on every start (default).
 
-    def reactor(self, name: str, *, order: int = 10, start: int | None = None, reconnect_s: float = 1.0) -> "Listener":
+        With `store` (`sqlite:<path>` or `memory:`), its state lives in `listener.store`: data and
+        position are written together per batch, and a restart continues after the stored position.
+        Change `schema` when the handlers store data differently: the store is cleared and the read
+        model rebuilds from the first event."""
+        return Listener(self._channel, self._key, name, order, start, reconnect_s, store, schema)
+
+    def reactor(self, name: str, *, order: int = 10, start: int | None = None, reconnect_s: float = 1.0,
+                store: str | None = None, schema: str = "1") -> "Listener":
         """A reactor: triggers side effects; resumes after the last acknowledged event (default).
 
         A settling submit from its handler waits for the listeners before it (the read models),
-        not for the reactor itself, which handles one event at a time."""
-        return Listener(self._channel, self._key, name, order, start, reconnect_s)
+        not for the reactor itself, which handles one event at a time. `store` and `schema`: see
+        `read_model`."""
+        return Listener(self._channel, self._key, name, order, start, reconnect_s, store, schema)
 
     def close(self) -> None:
         self._channel.close()
@@ -685,8 +698,12 @@ class Listener(_Stream):
     event with a newer schema than known stops the listener (it retries and logs) until it is
     updated, so it never misreads data."""
 
-    def __init__(self, channel: grpc.Channel, key: Key, name: str, order: int, start: int | None, reconnect_s: float):
+    def __init__(self, channel: grpc.Channel, key: Key, name: str, order: int, start: int | None, reconnect_s: float,
+                 store: str | None = None, schema: str = "1"):
         super().__init__(f"listener {name}", reconnect_s)
+        self._store_url, self._schema = store, schema
+        #: The listener's store, once `run()` opened it (with `store=`).
+        self.store: Store | None = None
         self._stub = rpc.ListenerServiceStub(channel)
         self._key = key
         self._name = name
@@ -750,6 +767,12 @@ class Listener(_Stream):
 
         return decorator
 
+    def run(self) -> None:
+        if self._store_url and self.store is None:
+            self.store = Store(self._store_url, self._schema)
+            self.position = self._start = self.store.committed
+        super().run()
+
     def _open(self, requests):
         return self._stub.Listen(requests)
 
@@ -784,18 +807,18 @@ class Listener(_Stream):
             self._replay_up_to = msg.ready.head_position
             self.ready.set()
         elif kind == "batch":
-            for e in msg.batch.events:
-                name = f"{e.domain}.{e.event_type}"
-                if name not in self._handlers:
-                    name = f"{e.domain}.*"
-                handler = self._handlers.get(name)
-                if handler:
-                    event = _to_event(e, msg.batch.vault)
-                    if name not in self._raw:
-                        event.schema, event.data = _upcast(self._domains.get(e.domain), e.domain, e.event_type,
-                                                           e.schema, event.data)
-                    _call(handler, event, ListenerContext(e.global_position <= self._replay_up_to, event))
-                self.position = e.global_position
+            # With a store, the batch's data and position are committed together, before the ack.
+            if self.store:
+                self.store._begin()
+            try:
+                self._handle_batch(msg.batch)
+                if self.store:
+                    self.store._commit(msg.batch.up_to)
+            except BaseException:
+                if self.store:
+                    self.store._rollback()
+                    self.position = self.store.committed
+                raise
             self.position = msg.batch.up_to
             return pb.ListenerMessage(ack=pb.Ack(position=msg.batch.up_to))
         elif kind == "query":
@@ -803,6 +826,20 @@ class Listener(_Stream):
         elif kind == "check":
             return pb.ListenerMessage(verdict=self._verdict(msg.check))
         return None
+
+    def _handle_batch(self, batch) -> None:
+        for e in batch.events:
+            name = f"{e.domain}.{e.event_type}"
+            if name not in self._handlers:
+                name = f"{e.domain}.*"
+            handler = self._handlers.get(name)
+            if handler:
+                event = _to_event(e, batch.vault)
+                if name not in self._raw:
+                    event.schema, event.data = _upcast(self._domains.get(e.domain), e.domain, e.event_type,
+                                                       e.schema, event.data)
+                _call(handler, event, ListenerContext(e.global_position <= self._replay_up_to, event, self.store))
+            self.position = e.global_position
 
     def _verdict(self, call) -> pb.Verdict:
         try:
@@ -820,7 +857,7 @@ class Listener(_Stream):
             handler = self._queries.get(f"{q.domain}.{q.query_type}")
             if handler is None:
                 raise Rejected(f"no handler for {q.domain}.{q.query_type}", "unknown_query")
-            result = _call(handler, _decode(q.payload), QueryContext(q.query_id, _from_wire_context(q.context)))
+            result = _call(handler, _decode(q.payload), QueryContext(q.query_id, _from_wire_context(q.context), self.store))
             return pb.QueryAnswer(call_id=call_id, response=_encode(result))
         except Exception as err:
             reason = (pb.Rejected(code=err.code, message=str(err)) if isinstance(err, Rejected)

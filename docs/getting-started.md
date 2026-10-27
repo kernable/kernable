@@ -81,6 +81,8 @@ The worker connects to the kernel and waits for commands. Leave it running.
 
 A read model is a **listener** with an order. Read models default to order 0 and are rebuilt in memory on every start. Reactors default to order 10, so they run after the read models they query.
 
+This one keeps its state in memory. With `store="sqlite:carts.db"` it would keep it in a file and continue after a restart instead of reading every event again; see `README.md` → *Operate*.
+
 A read model's state is private. Everything else reads it through **queries**, which always go through the kernel, so signatures and allowlists apply to every read.
 
 ```sh

@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: kernable
+Version: 0.1.0
+Summary: kernable SDK for Python: event-sourced business logic in Python on the kernable kernel
+License-Expression: Apache-2.0
+Requires-Python: >=3.10
+Requires-Dist: grpcio>=1.85
+Requires-Dist: protobuf<8,>=7.35.1
+Requires-Dist: cryptography>=43

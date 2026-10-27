@@ -6,7 +6,7 @@ Personal data (email, name, the password hash) lives in the kernel's vault, neve
 log; the password itself is a secret that is gone once its command ran. `EraseAccount` erases an
 account's personal data everywhere, also in the orders domain.
 
-Usage: python identity.py <kernel-url> <key> <health-port>
+Usage: python identity.py <kernel-url> <key> <health-port> [<data-dir>]
 Mutual TLS: set KERNABLE_TLS_CA, KERNABLE_TLS_CERT and KERNABLE_TLS_KEY.
 """
 
@@ -105,35 +105,38 @@ def _(state, cmd):
     return [{"type": "AccountDeactivated"}]
 
 
-# ---- read side: in memory, rebuilt from the first event on every start ----
+# ---- read side: kept in a store, so a restart continues where it left off ----
 
 
-def accounts_model(k: Kernable):
-    accounts: dict[str, dict] = {}
-    model = k.read_model("accounts")
+def accounts_model(k: Kernable, store: str):
+    model = k.read_model("accounts", store=store, schema="1")
 
     @model.on("identity.AccountRegistered")
-    def _(e):
-        accounts[e.aggregate_id] = {"id": e.aggregate_id, "status": "active", "email": e.data["email"],
-                                    "name": e.data["name"]}
+    def _(e, ctx):
+        ctx.store.set("accounts", e.aggregate_id, {"id": e.aggregate_id, "status": "active", "email": e.data["email"],
+                                                   "name": e.data["name"]})
+
+    def update(ctx, account: str, **fields):
+        ctx.store.set("accounts", account, {**ctx.store.get("accounts", account), **fields})
 
     @model.on("identity.EmailChanged")
-    def _(e):
-        accounts[e.aggregate_id]["email"] = e.data["email"]
+    def _(e, ctx):
+        update(ctx, e.aggregate_id, email=e.data["email"])
 
     @model.on("identity.AccountDeactivated")
-    def _(e):
-        accounts[e.aggregate_id]["status"] = "deactivated"
+    def _(e, ctx):
+        update(ctx, e.aggregate_id, status="deactivated")
 
     @model.on("identity.AccountErased")
-    def _(e):
-        accounts.pop(e.aggregate_id, None)
+    def _(e, ctx):
+        ctx.store.remove("accounts", e.aggregate_id)  # personal data must not outlive the erasure
 
     @model.query("identity.GetAccount")
     def _(data, ctx):
-        if data["id"] not in accounts:
+        found = ctx.store.get("accounts", data["id"])
+        if found is None:
             raise Rejected(f"no account {data['id']}", "not_found")
-        return accounts[data["id"]]
+        return found
 
     return model
 
@@ -210,11 +213,13 @@ def serve_health(port: int, streams) -> None:
 
 if __name__ == "__main__":
     url, key, port = sys.argv[1], sys.argv[2], int(sys.argv[3])
+    data = sys.argv[4] if len(sys.argv) > 4 else "."
+    os.makedirs(data, exist_ok=True)
     tls = None
     if os.environ.get("KERNABLE_TLS_CA"):
         tls = Tls(os.environ["KERNABLE_TLS_CA"], os.environ["KERNABLE_TLS_CERT"], os.environ["KERNABLE_TLS_KEY"])
     k = Kernable(url, key, tls=tls)
-    streams = [k.worker(account), accounts_model(k), rbac_middleware(k)]
+    streams = [k.worker(account), accounts_model(k, f"sqlite:{data}/accounts.db"), rbac_middleware(k)]
     for s in streams:
         threading.Thread(target=s.run, daemon=True).start()
     serve_health(port, streams)

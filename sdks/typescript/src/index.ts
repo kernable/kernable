@@ -36,8 +36,10 @@ import {
   subscribeMessage,
   vaultRef,
 } from "./signing.ts";
+import { Store } from "./store.ts";
 
 export { Key } from "./signing.ts";
+export { Store } from "./store.ts";
 
 /** Throw from a command handler to reject the command with a business reason. */
 export class Rejected extends Error {
@@ -109,6 +111,8 @@ export interface QueryContext {
   queryId: string;
   /** Who asks: check permissions here. */
   request: RequestContext;
+  /** The listener's store, if it has one (`ListenerOptions.store`). */
+  store?: Store;
 }
 
 export interface QueryOptions {
@@ -155,6 +159,8 @@ export interface ListenerContext {
   replaying: boolean;
   /** A request context for commands caused by this event: same sender and correlation. */
   follow(): RequestContext;
+  /** The listener's store, if it has one (`ListenerOptions.store`). */
+  store?: Store;
 }
 
 /** An event as stored by the kernel. */
@@ -671,6 +677,17 @@ export interface ListenerOptions {
    */
   start?: number;
   reconnectMs?: number;
+  /**
+   * Keeps the listener's state in a store (`sqlite:<path>` or `memory:`) instead of memory:
+   * its data and position are written together per batch, and a restart continues after the
+   * stored position (`start` is then ignored). See `Listener.store`.
+   */
+  store?: string;
+  /**
+   * Version of the stored data's format (default "1"). Change it when the handlers store data
+   * differently: the store is cleared and the listener rebuilds from the first event.
+   */
+  schema?: string;
 }
 
 type EventHandler = (event: StoredEvent, ctx: ListenerContext) => void | Promise<void>;
@@ -697,6 +714,7 @@ type MiddlewareHandler = (check: Check) => void | Promise<void>;
 export class Listener {
   /** Global position of the last handled event (or skipped, for other event types). */
   position = 0;
+  private stored?: Store;
   /** Resolves once the kernel accepted the listener. */
   readonly ready: Promise<void>;
   private markReady!: () => void;
@@ -772,9 +790,20 @@ export class Listener {
     return this;
   }
 
+  /** The listener's store (`ListenerOptions.store`), once `run()` opened it. */
+  get store(): Store {
+    if (!this.stored) throw new Error(`listener ${this.name} has no store, or run() has not opened it yet`);
+    return this.stored;
+  }
+
   /** Processes events until `stop()`, reconnecting when the stream drops. */
   async run(): Promise<void> {
     let start = this.options.start;
+    if (this.options.store && !this.stored) {
+      this.stored = await Store.open(this.options.store, this.options.schema ?? "1");
+      this.position = this.stored.committed;
+      start = this.position;
+    }
     while (!this.stopped) {
       try {
         await this.listen(start);
@@ -830,14 +859,15 @@ export class Listener {
       this.replayUpTo = m.ready.head_position;
       this.markReady();
     } else if (m.batch) {
-      for (const e of m.batch.events) {
-        const entry = this.handlers.get(`${e.domain}.${e.event_type}`) ?? this.handlers.get(`${e.domain}.*`);
-        if (entry) {
-          const stored = toStored(e, m.batch.vault);
-          const event = entry.raw ? stored : { ...stored, ...upcast(this.domains.get(e.domain), e.domain, e.event_type, e.schema, stored.data) };
-          await entry.handler(event, { replaying: e.global_position <= this.replayUpTo, follow: () => follow(event) });
-        }
-        this.position = e.global_position;
+      // With a store, the batch's data and position are committed together, before the ack.
+      this.stored?.begin();
+      try {
+        await this.handleBatch(m.batch);
+        this.stored?.commit(m.batch.up_to);
+      } catch (err) {
+        this.stored?.rollback();
+        if (this.stored) this.position = this.stored.committed;
+        throw err;
       }
       this.position = m.batch.up_to;
       call.write({ ack: { position: m.batch.up_to } });
@@ -845,6 +875,19 @@ export class Listener {
       call.write({ answer: { call_id: m.query.call_id, ...(await this.answer(m.query.query)) } });
     } else if (m.check) {
       call.write({ verdict: { call_id: m.check.call_id, ...(await this.verdict(m.check)) } });
+    }
+  }
+
+  private async handleBatch(batch: NonNullable<ListenerDelivery["batch"]>): Promise<void> {
+    for (const e of batch.events) {
+      const entry = this.handlers.get(`${e.domain}.${e.event_type}`) ?? this.handlers.get(`${e.domain}.*`);
+      if (entry) {
+        const stored = toStored(e, batch.vault);
+        const event = entry.raw ? stored : { ...stored, ...upcast(this.domains.get(e.domain), e.domain, e.event_type, e.schema, stored.data) };
+        const ctx = { replaying: e.global_position <= this.replayUpTo, follow: () => follow(event), store: this.stored };
+        await entry.handler(event, ctx);
+      }
+      this.position = e.global_position;
     }
   }
 
@@ -864,7 +907,7 @@ export class Listener {
     try {
       const handler = this.queries.get(`${q.domain}.${q.query_type}`);
       if (!handler) throw new Rejected(`no handler for ${q.domain}.${q.query_type}`, "unknown_query");
-      const result = await handler(decode(q.payload), { queryId: q.query_id, request: fromWireContext(q.context) });
+      const result = await handler(decode(q.payload), { queryId: q.query_id, request: fromWireContext(q.context), store: this.stored });
       return { response: encode(result) };
     } catch (err) {
       return {
