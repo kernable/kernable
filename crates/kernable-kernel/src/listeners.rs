@@ -344,6 +344,7 @@ pub(crate) fn flush(kernel: &Kernel) -> Result<(), BoxError> {
     let dirty = kernel.listeners.take_dirty();
     if !dirty.is_empty() {
         kernel.store.save_listeners(&dirty)?;
+        crate::crash::point("listeners.flushed");
     }
     Ok(())
 }
@@ -514,6 +515,7 @@ pub(crate) async fn run(
             None => return Ok(()),
             Some(In::Ack(ack)) if ack.position <= sent.load(Ordering::SeqCst) => {
                 kernel.listeners.ack(&hello.name, ack.position);
+                crate::crash::point("listeners.acked");
             }
             Some(In::Ack(_)) => {
                 return Err(Status::invalid_argument("ack beyond the delivered events"));

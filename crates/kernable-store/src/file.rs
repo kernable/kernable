@@ -250,6 +250,12 @@ impl FileStore {
         Ok(Self::new(state, Sink::ReadOnly, valid as u64))
     }
 
+    /// Replays a log held in memory, read-only: for tools, property tests and fuzzing.
+    pub fn open_bytes(bytes: &[u8]) -> Result<Self> {
+        let (state, valid) = replay(bytes)?;
+        Ok(Self::new(state, Sink::ReadOnly, valid as u64))
+    }
+
     /// A store that lives only in this process.
     pub fn in_memory() -> Self {
         Self::new(State::default(), Sink::Memory, 0)

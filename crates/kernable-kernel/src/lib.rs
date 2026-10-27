@@ -14,6 +14,7 @@
 //! kernel does not accept.
 
 pub mod config;
+pub mod crash;
 mod listeners;
 mod metrics;
 mod queue;
@@ -392,8 +393,10 @@ async fn checkpoints(kernel: &Kernel) {
         tokio::time::interval(Duration::from_millis(kernel.config.checkpoint_interval_ms));
     loop {
         tick.tick().await;
-        if let Err(e) = kernel.store.checkpoint(&kernel.key, now_ms()) {
-            tracing::error!(error = %e, "checkpoint failed");
+        match kernel.store.checkpoint(&kernel.key, now_ms()) {
+            Ok(Some(_)) => crash::point("checkpoint.stored"),
+            Ok(None) => {}
+            Err(e) => tracing::error!(error = %e, "checkpoint failed"),
         }
     }
 }
@@ -471,6 +474,7 @@ impl CommandService for Api {
             }
             Enqueued::Duplicate { result: None } => None,
             Enqueued::New => {
+                crash::point("submit.enqueued");
                 kernel.queue.push(cmd.clone(), received_at);
                 kernel.work.notify_waiters();
                 None
@@ -504,6 +508,7 @@ impl CommandService for Api {
             {
                 c.settled = true;
                 kernel.metrics.settle.record(started.elapsed());
+                crash::point("settle.done");
             }
         }
         Ok(Response::new(result))
@@ -1032,7 +1037,9 @@ impl Session {
             received_at,
             deadline: now_ms() + self.kernel.config.lease_ttl_ms,
         };
-        send(&self.out, Out::Execute(execute)).await.is_ok()
+        let sent = send(&self.out, Out::Execute(execute)).await.is_ok();
+        crash::point("execute.sent");
+        sent
     }
 
     async fn on_result(&self, r: kernable_core::proto::Result) -> Result<(), Status> {
@@ -1117,6 +1124,7 @@ impl Session {
         };
         match committed {
             Ok(events) => {
+                crash::point("commit.stored");
                 if let (Some(snapshot), Some(last)) = (r.snapshot, events.last()) {
                     let record = SnapshotRecord {
                         tenant_id: last.tenant_id.clone(),
@@ -1128,8 +1136,9 @@ impl Session {
                         removed: false,
                     };
                     // A snapshot is only a cache: losing one costs time, not data.
-                    if let Err(e) = self.kernel.store.save_snapshot(&record) {
-                        tracing::warn!(error = %e, "saving snapshot failed");
+                    match self.kernel.store.save_snapshot(&record) {
+                        Ok(()) => crash::point("snapshot.stored"),
+                        Err(e) => tracing::warn!(error = %e, "saving snapshot failed"),
                     }
                 }
                 self.kernel.queue.done(&r.lease_id);
@@ -1228,6 +1237,7 @@ impl Session {
         }
         match self.kernel.store.reject(&command_id, reason.clone()) {
             Ok(()) => {
+                crash::point("reject.stored");
                 self.kernel.queue.done(lease_id);
                 self.kernel.metrics.rejected.fetch_add(1, Relaxed);
                 self.kernel.complete(CommandResult {

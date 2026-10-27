@@ -33,6 +33,8 @@ make check-packages # builds the npm package and the Python wheel, installs and 
 ./bench/run.sh      # benchmark matrix; STORE=file:k.log or STORE=memory: picks the backend
 ```
 
+Robustness: `make check` also aborts the real kernel once at each crash point (`crates/kernable-kernel/src/crash.rs`, built only with `--features crash-points`) and runs property tests on damaged logs, all storage backends and arbitrary requests. `make torture ROUNDS=20 CASES=10000` runs them for longer; `make fuzz FUZZ_SECONDS=300` fuzzes the file log and the wire messages (needs nightly Rust and `cargo install cargo-fuzz`).
+
 `crates/kernable-kernel/tests/fixtures/format-<n>` holds frozen stores of every data format; `make check` opens, verifies and runs them. Never regenerate them: a new format adds a directory (`KERNABLE_WRITE_FIXTURES=1` fills only missing ones) and a `kernable migrate` step.
 
 ## Operate

@@ -1,0 +1,41 @@
+# Coverage-guided fuzzing with cargo-fuzz (needs nightly): `make fuzz` or
+# `cargo +nightly fuzz run <target>` in this directory. Not part of the main workspace.
+[package]
+name = "kernable-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+kernable-core = { path = "../crates/kernable-core" }
+kernable-store = { path = "../crates/kernable-store" }
+prost = "0.14"
+sha2 = "0.10"
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "file_log"
+path = "fuzz_targets/file_log.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "messages"
+path = "fuzz_targets/messages.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "log_records"
+path = "fuzz_targets/log_records.rs"
+test = false
+doc = false
+bench = false
