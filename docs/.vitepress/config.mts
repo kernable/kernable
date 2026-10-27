@@ -6,8 +6,12 @@ export default withMermaid(
     title: "kernable",
     description: "Event sourcing and CQRS with a Rust kernel and business logic in any language",
     cleanUrls: true,
+    head: [["link", { rel: "icon", type: "image/svg+xml", href: "/favicon.svg" }]],
     lastUpdated: false,
-    srcExclude: ["examples/**", "scripts/**", "getting-started.old.md"],
+    srcExclude: ["examples/**", "scripts/**"],
+    // The mermaid plugin pulls in CommonJS modules that the dev server must pre-bundle, or the
+    // page stays blank in `make docs` (the production build is not affected).
+    vite: { optimizeDeps: { include: ["mermaid", "fastdom"] } },
     themeConfig: {
       search: { provider: "local" },
       nav: [
