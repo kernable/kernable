@@ -1,4 +1,4 @@
-.PHONY: check py check-packages torture fuzz
+.PHONY: check py check-packages torture fuzz docs
 check: py
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets -- -D warnings
@@ -12,6 +12,12 @@ check: py
 		&& KERNABLE_TEST_STORE=file npm run -s check
 	cd sdks/python && .venv/bin/python -m unittest discover tests \
 		&& KERNABLE_TEST_STORE=file .venv/bin/python -m unittest discover tests
+	cd docs && npm install --no-audit --no-fund --silent && npm run -s check
+
+# The documentation site at http://localhost:5173; `npm run reference` in docs/ regenerates the
+# reference after a change to the code it is generated from.
+docs:
+	cd docs && npm install --no-audit --no-fund --silent && npm run -s reference && npx vitepress dev .
 
 # Python SDK: venv (needs network the first time) and generated stubs.
 py:

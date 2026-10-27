@@ -1,0 +1,1 @@
+<!--@include: ../../proto/SIGNING.md-->

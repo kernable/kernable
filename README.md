@@ -17,12 +17,12 @@ Workers connect to the kernel, which runs their command handlers and commits the
 | `sdks/typescript` | `@kernable/sdk` |
 | `sdks/python` | `kernable` for Python, same API |
 | `examples/order-ts` | Order domain in TypeScript |
-| `docs/` | Getting started |
+| `docs/` | The documentation site: tutorial, reference (generated), runnable examples |
 | `examples/shop` | Reference app: identity in Python, orders and the HTTP API in TypeScript |
 
 ## Start here
 
-`docs/getting-started.md` walks through a kernel, a TypeScript worker, a Python read model and a request that reads its own writes, in about ten minutes.
+The documentation lives in `docs/` (VitePress): `make docs` serves it at http://localhost:5173. Start with the tutorial `docs/tutorial/getting-started.md`, which walks through a kernel, a TypeScript worker, a Python read model and a request that reads its own writes, in about ten minutes. The reference in `docs/reference/` is generated from the code; every example in the docs runs in `make check`.
 
 ## Develop
 

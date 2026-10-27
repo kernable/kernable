@@ -48,14 +48,20 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// Storage backend URL, see `kernable_store::open`.
+    /// The event store: `sqlite:<path>` (or a bare path), `file:<path>` or `memory:`.
     pub store: String,
+    /// Where the kernel listens: `unix:<path>` or `host:port` (TCP, with `[tls]` for mutual TLS).
     pub listen: String,
+    /// The kernel's own signing key (`kernable keys new kernel`): it signs checkpoints.
     pub kernel_key: PathBuf,
+    /// How long a worker may run a command before it goes to another worker.
     #[serde(default = "default_lease_ttl_ms")]
     pub lease_ttl_ms: i64,
+    /// How often the kernel signs a checkpoint of the hash chain.
     #[serde(default = "default_checkpoint_interval_ms")]
     pub checkpoint_interval_ms: u64,
+    /// How long a submit waits for its command to complete before it answers with an error
+    /// (the command still runs; resubmit it to get the result).
     #[serde(default = "default_submit_timeout_ms")]
     pub submit_timeout_ms: u64,
     /// How long a settling submit waits for listeners after the commit.
@@ -70,22 +76,32 @@ pub struct Config {
     /// On SIGTERM or SIGINT: how long running submits and queries may still finish.
     #[serde(default = "default_drain_timeout_ms")]
     pub drain_timeout_ms: u64,
+    /// Client key ID -> the commands it may submit.
     #[serde(default)]
     pub clients: HashMap<String, Vec<String>>,
+    /// Worker key ID -> the commands it may run; it writes events of their domains only.
     #[serde(default)]
     pub workers: HashMap<String, Vec<String>>,
+    /// Subscriber key ID -> the events it may read with a subscription.
     #[serde(default)]
     pub subscribers: HashMap<String, Vec<String>>,
+    /// Listener key ID -> the events it may read as a listener (read model, reactor).
     #[serde(default)]
     pub listeners: HashMap<String, Vec<String>>,
+    /// Client key ID -> the queries it may ask.
     #[serde(default)]
     pub queriers: HashMap<String, Vec<String>>,
+    /// Listener key ID -> the queries it may answer.
     #[serde(default)]
     pub query_handlers: HashMap<String, Vec<String>>,
+    /// Listener key ID -> the commands and queries it may check as a middleware.
     #[serde(default)]
     pub middlewares: HashMap<String, Vec<String>>,
+    /// Client key ID -> the privileged request context switches it may set
+    /// (`bypass_authorization`).
     #[serde(default)]
     pub privileged: HashMap<String, Vec<String>>,
+    /// Mutual TLS for TCP; every client needs a certificate of `client_ca`.
     pub tls: Option<Tls>,
     /// Where snapshots live: `sqlite:<path>` or `memory:` (default; rebuilt after a restart).
     #[serde(default = "default_snapshots")]
@@ -118,8 +134,11 @@ pub struct VaultConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Tls {
+    /// The kernel's certificate (PEM; `kernable certs new` writes development ones).
     pub cert: PathBuf,
+    /// The kernel certificate's private key (PEM).
     pub key: PathBuf,
+    /// The CA that signs every client's certificate (PEM).
     pub client_ca: PathBuf,
 }
 

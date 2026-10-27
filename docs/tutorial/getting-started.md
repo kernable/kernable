@@ -53,102 +53,52 @@ An aggregate belongs to a **domain**. `apply` folds events into state; `command`
 ```sh
 cd ~/kernable-demo
 npm init -y >/dev/null && npm pkg set type=module && npm install /tmp/kernable-sdk-0.1.0.tgz
-cat > cart.js <<'JS'
-import { Kernable, Rejected, domain } from "@kernable/sdk";
+```
 
-export const cart = domain("shop").aggregate("Cart", { items: 0, checkedOut: false })
-  .apply("ItemAdded", (s, e) => ({ ...s, items: s.items + e.qty }))
-  .apply("CheckedOut", (s) => ({ ...s, checkedOut: true }))
-  .command("AddItem", (s, cmd) => {
-    if (s.checkedOut) throw new Rejected("Cart is checked out");
-    return [{ type: "ItemAdded", data: { sku: cmd.sku, qty: cmd.qty } }];
-  })
-  .command("CheckOut", (s, _cmd, ctx) => {
-    if (s.items === 0) throw new Rejected("Cart is empty");
-    // ctx.now() and ctx.id() stay the same if the command runs again.
-    return [{ type: "CheckedOut", data: { at: ctx.now().toISOString(), orderId: ctx.id() } }];
-  });
+Save this as `cart.ts` (Node ≥ 22.18 runs TypeScript directly):
 
-const kernable = new Kernable({ url: `unix:${process.cwd()}/k.sock`, key: "app.key" });
-await kernable.worker(cart).run();
-JS
-node cart.js
+<<< @/examples/getting-started/cart.ts
+
+```sh
+node cart.ts
 ```
 
 The worker connects to the kernel and waits for commands. Leave it running.
 
 ## 4. A read model in Python
 
-A read model is a **listener** with an order. Read models default to order 0 and are rebuilt in memory on every start. Reactors default to order 10, so they run after the read models they query.
+A read model is a **listener** with an order. Read models default to order 0. Reactors default to order 10, so they run after the read models they query.
 
-This one keeps its state in memory. With `store="sqlite:carts.db"` it would keep it in a file and continue after a restart instead of reading every event again; see `README.md` → *Operate*.
+This one keeps its state in memory and reads every event again when it starts. With `store="sqlite:carts.db"` it would keep its state in a file and continue where it left off.
 
 A read model's state is private. Everything else reads it through **queries**, which always go through the kernel, so signatures and allowlists apply to every read.
 
 ```sh
 cd ~/kernable-demo
 python3 -m venv py && py/bin/pip install -q /tmp/kernable-0.1.0-py3-none-any.whl
-cat > carts.py <<'PY'
-import os
-from kernable import Kernable, Rejected
+```
 
-carts = {}
-k = Kernable(f"unix:{os.getcwd()}/k.sock", "app.key")
-model = k.read_model("carts")
+Save this as `carts.py`:
 
-@model.on("shop.ItemAdded")
-def _(e):
-    carts.setdefault(e.aggregate_id, {"items": 0})["items"] += e.data["qty"]
+<<< @/examples/getting-started/carts.py
 
-@model.on("shop.CheckedOut")
-def _(e):
-    carts[e.aggregate_id]["order"] = e.data["orderId"]
-
-@model.query("shop.GetCart")
-def _(data):
-    if data["id"] not in carts:
-        raise Rejected("no such cart", "not_found")
-    return carts[data["id"]]
-
-model.run()
-PY
+```sh
 py/bin/python carts.py
 ```
 
 ## 5. Submit and read your own writes
 
-```sh
-cd ~/kernable-demo
-cat > submit.js <<'JS'
-import { Kernable } from "@kernable/sdk";
-const kernable = new Kernable({ url: `unix:${process.cwd()}/k.sock`, key: "app.key" });
-const cart = (type, data) => kernable.submit({ domain: "shop", aggregateType: "Cart", aggregateId: "c1", type, data });
-const getCart = () => kernable.query({ domain: "shop", type: "GetCart", data: { id: "c1" } });
+Save this as `submit.ts`:
 
-await cart("AddItem", { sku: "apple", qty: 2 });
-// submit returned only after every listener processed the event: no polling needed.
-console.log(await getCart());
-await cart("CheckOut");
-console.log(await getCart());
-console.log(await cart("AddItem", { sku: "pear", qty: 1 }));   // rejected: checked out
-kernable.close();
-JS
-node submit.js
+<<< @/examples/getting-started/submit.ts
+
+```sh
+node submit.ts
 ```
 
 The output looks like this (the order ID will differ):
 
-```
-{ items: 2 }
-{ items: 2, order: '0b9c…' }
-{ committed: false, code: 'rejected', message: 'Cart is checked out' }
-```
-
-Check the integrity of everything stored so far:
-
-```sh
-kernable verify sqlite:demo.db kernel.pub
-```
+<<< @/examples/getting-started/submit.out{text}
 
 ## 6. The reference application
 
@@ -160,11 +110,10 @@ make check            # all tests, including examples/shop/shop.test.ts
 
 ## Where to go next
 
-- `proto/kernable/v1/kernable.proto` describes the protocol, and `proto/SIGNING.md` the exact signed byte layouts (with test vectors, so you can write an SDK for another language).
-- `README.md` → *Operate* covers mutual TLS (`kernable certs new`), Prometheus metrics and logs.
+- The [reference](../reference/) covers every [configuration key](../reference/configuration), the [CLI](../reference/cli) (also `kernable certs new` for mutual TLS), the SDKs, [metrics](../reference/metrics), the [protocol](../reference/protocol) and the exact [signed byte layouts](../reference/signing), with test vectors to write an SDK for another language.
 - Rules worth knowing:
   - **Command handlers must be deterministic.** Use `ctx.now()` and `ctx.id()`.
   - **Reactors submit with a fixed command ID**, so a redelivered event is harmless. Their submits settle on the listeners before them (the read models), not on themselves: a listener handles one event at a time and never waits for itself. The kernel refuses at once what would wait for the sending listener, such as a query to its own read model.
   - **A domain only writes its own events.** It reacts to other domains through listeners.
-  - **Personal data and secrets go to the vault**, never into the signed log: mark the fields on the domain (`personal`, `secret`) and erase a person with an erasing event (`erases`); see `README.md` → *Operate*.
+  - **Personal data and secrets go to the vault**, never into the signed log: mark the fields on the domain (`personal`, `secret`) and erase a person with an erasing event (`erases`); see `EventSchema` and `CommandSchema` in the [TypeScript SDK](../reference/sdk-typescript).
   - **Events are never changed.** To change an event's payload, raise its version and add an upcast from the old one: `shop.event("ItemAdded", 2).upcast(1, (d) => ({ ...d, count: d.qty }))`. Listeners in other processes and languages need the same definition (`use(shop)`); a listener that meets an unknown version stops until it is updated.
