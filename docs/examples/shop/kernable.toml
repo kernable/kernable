@@ -1,0 +1,42 @@
+# The shop's kernel in production: TCP with mutual TLS, data next to this file.
+# Replace <app> with the key ID that `kernable keys new keys/app` printed.
+store = "sqlite:data/shop.db"
+snapshots = "sqlite:data/snapshots.db"
+listen = "0.0.0.0:7233"
+kernel_key = "keys/kernel.key"
+metrics_listen = "127.0.0.1:9233"   # /metrics, /health, /ready: keep it private
+
+[tls]
+cert = "certs/kernel.tls.crt"
+key = "certs/kernel.tls.key"
+client_ca = "certs/ca.tls.crt"
+
+[vault]
+store = "sqlite:data/vault.db"
+key = "keys/vault.key"
+
+[vault.readers]                      # who gets personal values in clear
+"<app>" = ["shop.*"]
+
+[vault.erasers]                      # who may erase a customer
+"<app>" = ["shop.CustomerErased"]
+
+# One key for every service of the shop, for brevity; in production give each service its own
+# key and allow it only what it needs.
+[clients]
+"<app>" = ["shop.*"]
+
+[workers]
+"<app>" = ["shop.*"]
+
+[listeners]
+"<app>" = ["shop.*"]
+
+[queriers]
+"<app>" = ["shop.*"]
+
+[query_handlers]
+"<app>" = ["shop.*"]
+
+[middlewares]
+"<app>" = ["shop.*"]

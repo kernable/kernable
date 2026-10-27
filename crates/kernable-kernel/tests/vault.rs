@@ -108,6 +108,11 @@ async fn commands_keep_personal_and_secret_values_in_the_vault() {
     assert!(!on_disk(&env, "max@firma.de"), "no plain value in any file");
     assert!(!on_disk(&env, "correct horse"));
 
+    // Resubmitting the completed command, without values, returns its stored outcome.
+    let again = with_values("c1", "PlaceOrder", "o1", &[&email, &password]);
+    let again = submit_values(&env.addr, again, &[]).await.unwrap();
+    assert_eq!(committed_versions(&again), [1]);
+
     // Values must match their signed references, and every reference needs a value.
     let forged = VaultValue {
         value: b"\"eve@evil.example\"".to_vec(),

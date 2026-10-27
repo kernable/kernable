@@ -1,0 +1,7 @@
+c1 registers: committed
+c2 registers: committed
+c1 places o1: committed
+c2 adds to o1: forbidden (AddItem is not allowed for c2)
+c2 places for c1: forbidden (Place is not allowed for c2)
+c1 reads o1: {'id': 'o1', 'customerId': 'c1', 'status': 'draft', 'items': {}}
+c2 reads o1: forbidden (GetOrder is not allowed for c2)

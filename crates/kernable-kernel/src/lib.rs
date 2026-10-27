@@ -605,13 +605,26 @@ impl CommandService for Api {
         if let Some(vault) = &kernel.vault
             && !cmd.vault_refs.is_empty()
         {
+            // A resubmitted command that already completed needs no values: its secrets are
+            // gone, and it only gets its stored result. Checked again on a failure, in case it
+            // completed in between.
+            let completed = || {
+                kernel
+                    .store
+                    .result(&cmd.command_id)
+                    .map(|r| r.is_some())
+                    .map_err(internal)
+            };
             let owner = Owner {
                 command_id: &cmd.command_id,
                 stream: None,
             };
-            vault
-                .put(&values, &cmd.vault_refs, &owner, now_ms())
-                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            if !completed()?
+                && let Err(e) = vault.put(&values, &cmd.vault_refs, &owner, now_ms())
+                && !completed()?
+            {
+                return Err(Status::invalid_argument(e.to_string()));
+            }
         }
 
         // Register before enqueueing, so a fast completion cannot be missed.

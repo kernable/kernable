@@ -11,13 +11,29 @@ export default withMermaid(
     themeConfig: {
       search: { provider: "local" },
       nav: [
-        { text: "Tutorial", link: "/tutorial/getting-started" },
+        { text: "Tutorials", link: "/tutorial/" },
         { text: "Reference", link: "/reference/" },
       ],
       sidebar: [
         {
-          text: "Tutorial",
-          items: [{ text: "Getting started", link: "/tutorial/getting-started" }],
+          text: "Tutorials",
+          items: [
+            { text: "Getting started", link: "/tutorial/getting-started" },
+            {
+              text: "Build a shop",
+              link: "/tutorial/shop/",
+              items: [
+                { text: "1. Run a kernel", link: "/tutorial/shop/1-kernel" },
+                { text: "2. Aggregates and commands", link: "/tutorial/shop/2-commands" },
+                { text: "3. Read models and queries", link: "/tutorial/shop/3-queries" },
+                { text: "4. A reactor", link: "/tutorial/shop/4-reactor" },
+                { text: "5. A second language", link: "/tutorial/shop/5-languages" },
+                { text: "6. Authorization", link: "/tutorial/shop/6-authorization" },
+                { text: "7. Personal data", link: "/tutorial/shop/7-personal-data" },
+                { text: "8. Operate", link: "/tutorial/shop/8-operate" },
+              ],
+            },
+          ],
         },
         {
           text: "Reference",

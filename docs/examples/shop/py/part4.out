@@ -1,0 +1,1 @@
+{'id': 'o1', 'customerId': 'c1', 'status': 'confirmed', 'items': {'apple': 2}, 'confirmedTo': 'ann@example.com'}

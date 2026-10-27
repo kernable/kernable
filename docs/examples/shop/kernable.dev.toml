@@ -1,0 +1,35 @@
+# The shop's kernel on your machine: a Unix socket, data next to this file.
+# Replace <app> with the key ID that `kernable keys new app` printed.
+store = "sqlite:shop.db"
+listen = "unix:k.sock"
+kernel_key = "kernel.key"
+metrics_listen = "127.0.0.1:9233"
+
+[vault]                              # part 7: personal data and secrets
+store = "sqlite:vault.db"
+key = "vault.key"
+
+[vault.readers]
+"<app>" = ["shop.*"]
+
+[vault.erasers]
+"<app>" = ["shop.CustomerErased"]
+
+# Allowlists: which key may do what, by type (`shop.Register`), domain (`shop.*`) or `*`.
+[clients]                            # submit commands
+"<app>" = ["shop.*"]
+
+[workers]                            # run commands
+"<app>" = ["shop.*"]
+
+[listeners]                          # read events (read models, reactors)
+"<app>" = ["shop.*"]
+
+[queriers]                           # ask queries
+"<app>" = ["shop.*"]
+
+[query_handlers]                     # answer queries
+"<app>" = ["shop.*"]
+
+[middlewares]                        # check commands and queries (part 6)
+"<app>" = ["shop.*"]

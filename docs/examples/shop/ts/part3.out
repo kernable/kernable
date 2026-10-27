@@ -1,0 +1,3 @@
+{ id: 'o1', customerId: 'c1', status: 'draft', items: { apple: 2 } }
+{ id: 'c1', email: 'ann@example.com', name: 'Ann' }
+not_found: No order o9
