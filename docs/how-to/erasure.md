@@ -6,7 +6,7 @@ A person asks you to erase their personal data. With the vault, that is one comm
 
 1. Mark every personal field, in commands and events, with the person it belongs to ([tutorial, part 7](../tutorial/shop/7-personal-data)). Fields of other domains count too: the shop marks the email in an order's confirmation as personal data of the customer.
 2. Declare an erasing event, e.g. `CustomerErased`, with `erases(...)`.
-3. Allow the worker that writes it in `[vault.erasers]`.
+3. Grant the worker that writes it `vault_erase` for that event type (`kernable grant root.key worker.pub vault_erase=shop.CustomerErased …`).
 4. Make every read model that holds personal data forget the person when it sees the erasing event.
 
 ## The request

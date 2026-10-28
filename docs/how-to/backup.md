@@ -4,17 +4,17 @@
 
 | What | Why | If lost |
 |---|---|---|
-| the event store (`store`) | all commands and events | everything is lost |
-| the vault (`[vault] store`) | personal and secret values | personal data reads as `null` everywhere |
-| the vault key (`[vault] key`) | decrypts the vault | the vault cannot be read: same as losing it |
-| the kernel key (`kernel_key`) | signs checkpoints and revocations | change it ([Keys](./keys)); keep every old public key for `kernable verify` |
-| process keys | sign requests | create new ones and change the allowlists |
+| the event store (`--store`) | all commands and events | everything is lost |
+| the vault (`--vault-store`) | personal and secret values | personal data reads as `null` everywhere |
+| the vault key (`--vault-key`) | decrypts the vault | the vault cannot be read: same as losing it |
+| the kernel key (`--kernel-key`) | signs checkpoints and revocations | change it ([Keys](./keys)); keep every old public key for `kernable verify` |
+| process keys and grants | sign requests; say what each key may do | create new keys and grant them with the root key |
 | the snapshot store | a cache | nothing: workers rebuild snapshots |
 | read model stores | caches of your views | nothing: read models rebuild from the events |
 
 Back up the store and the vault **together**, from the same moment: stop the kernel, or copy both SQLite files with SQLite's online backup (`sqlite3 shop.db ".backup shop.bak"`) right after each other. A file log can be copied while the kernel runs; the copy may end in a torn record, which is cut off when it opens.
 
-Keep keys apart from the data, as you would keep any secret.
+Keep keys apart from the data, as you would keep any secret. Keep the root key offline; it is needed only to issue grants and revocations.
 
 ## Restore
 

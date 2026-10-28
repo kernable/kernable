@@ -1,10 +1,10 @@
-"""Identity service (Python): the Account aggregate, its worker, the `accounts` read model and
+"""Identity service (Python): the `account` aggregate, its worker, the `accounts` read model and
 the `rbac` middleware. Other services read accounts only through the query
 `identity.GetAccount`, via the kernel.
 
 Personal data (email, name, the password hash) lives in the kernel's vault, never in the signed
 log; the password itself is a secret that is gone once its command ran. `EraseAccount` erases an
-account's personal data everywhere, also in the orders domain.
+account's personal data everywhere, also in the `orders` domain.
 
 Usage: python identity.py <kernel-url> <key> <health-port> [<data-dir>]
 Mutual TLS: set KERNABLE_TLS_CA, KERNABLE_TLS_CERT and KERNABLE_TLS_KEY.
@@ -18,88 +18,88 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from kernable import Check, Kernable, Rejected, Tls, domain
+from kernable import Check, Kernable, Listener, Rejected, Tls, domain
 
 EMAIL = re.compile(r"^[^@\s]+@[^@\s]+$")
 
 # ---- write side ----
 
-identity = domain("identity")
+identity_domain = domain("identity")
 # The vault keeps these fields; the subject is the account (the aggregate's ID).
-identity.command("RegisterAccount").personal(["email", "name"], lambda d, account: account).secret(["password"])
-identity.command("ChangeEmail").personal(["email"], lambda d, account: account)
-identity.command("SignIn").secret(["password"])
-identity.event("AccountRegistered", 1).personal(["email", "name", "passwordHash"], lambda d, account: account)
-identity.event("EmailChanged", 1).personal(["email"], lambda d, account: account)
-identity.event("AccountErased", 1).erases(lambda d, account: account)
+identity_domain.command("RegisterAccount").personal(["email", "name"], lambda d, account: account).secret(["password"])
+identity_domain.command("ChangeEmail").personal(["email"], lambda d, account: account)
+identity_domain.command("SignIn").secret(["password"])
+identity_domain.event("AccountRegistered", 1).personal(["email", "name", "passwordHash"], lambda d, account: account)
+identity_domain.event("EmailChanged", 1).personal(["email"], lambda d, account: account)
+identity_domain.event("AccountErased", 1).erases(lambda d, account: account)
 
-account = identity.aggregate("Account", {"status": "none"})
+account_aggregate = identity_domain.aggregate("account", {"status": "none"})
 
 
 def password_hash(password: str, salt: str) -> str:
     return hashlib.scrypt(password.encode(), salt=salt.encode(), n=2**14, r=8, p=1).hex()
 
 
-@account.apply("AccountRegistered")
-def _(state, e):
-    return {"status": "active", "email": e["email"], "name": e["name"], "passwordHash": e["passwordHash"],
-            "salt": e["salt"]}
+@account_aggregate.apply("AccountRegistered")
+def _(state, data):
+    return {"status": "active", "email": data["email"], "name": data["name"], "passwordHash": data["passwordHash"],
+            "salt": data["salt"]}
 
 
-@account.apply("EmailChanged")
-def _(state, e):
-    return {**state, "email": e["email"]}
+@account_aggregate.apply("EmailChanged")
+def _(state, data):
+    state["email"] = data["email"]
 
 
-@account.apply("AccountDeactivated")
-def _(state, e):
-    return {**state, "status": "deactivated"}
+@account_aggregate.apply("AccountDeactivated")
+def _(state, data):
+    state["status"] = "deactivated"
 
 
-@account.apply("AccountErased")
-def _(state, e):
+@account_aggregate.apply("AccountErased")
+def _(state, data):
     return {"status": "erased"}
 
 
-@account.command("RegisterAccount")
-def _(state, cmd, ctx):
+@account_aggregate.command("RegisterAccount")
+def _(state, data, cmd, ctx):
     if state["status"] != "none":
         raise Rejected("Account already exists", "exists")
-    if not EMAIL.match(cmd.get("email", "")):
+    if not EMAIL.match(data.get("email", "")):
         raise Rejected("Invalid email", "invalid")
-    if len(cmd.get("password") or "") < 8:
+    if len(data.get("password") or "") < 8:
         raise Rejected("The password needs at least 8 characters", "invalid")
     salt = ctx.id()  # deterministic, so the command may run again
-    return [{"type": "AccountRegistered", "data": {"email": cmd["email"], "name": cmd.get("name", ""),
-                                                   "passwordHash": password_hash(cmd["password"], salt),
+    return [{"type": "AccountRegistered", "data": {"email": data["email"], "name": data.get("name", ""),
+                                                   "passwordHash": password_hash(data["password"], salt),
                                                    "salt": salt}}]
 
 
-@account.command("SignIn")
-def _(state, cmd):
-    if state["status"] != "active" or password_hash(cmd.get("password") or "", state["salt"]) != state["passwordHash"]:
+@account_aggregate.command("SignIn")
+def _(state, data):
+    if state["status"] != "active" or password_hash(data.get("password") or "", state["salt"]) != state["passwordHash"]:
         raise Rejected("Wrong account or password", "denied")
     return [{"type": "SignedIn"}]
 
 
-@account.command("EraseAccount")
-def _(state, cmd):
+@account_aggregate.command("EraseAccount")
+def _(state, data):
     if state["status"] in ("none", "erased"):
         raise Rejected(f"Cannot erase a {state['status']} account", "invalid_state")
     return [{"type": "AccountErased"}]
 
 
-@account.command("ChangeEmail")
-def _(state, cmd):
+@account_aggregate.command("ChangeEmail")
+def _(state, data):
     if state["status"] != "active":
         raise Rejected(f"Cannot change the email of a {state['status']} account", "invalid_state")
-    if not EMAIL.match(cmd.get("email", "")):
+    if not EMAIL.match(data.get("email", "")):
         raise Rejected("Invalid email", "invalid")
-    return [{"type": "EmailChanged", "data": {"email": cmd["email"]}}]
+    return [{"type": "EmailChanged", "data": {"email": data["email"]}}]
 
 
-@account.command("DeactivateAccount")
-def _(state, cmd):
+@account_aggregate.command("DeactivateAccount")
+def _(state, data):
     if state["status"] != "active":
         raise Rejected(f"Cannot deactivate a {state['status']} account", "invalid_state")
     return [{"type": "AccountDeactivated"}]
@@ -108,37 +108,38 @@ def _(state, cmd):
 # ---- read side: kept in a store, so a restart continues where it left off ----
 
 
-def accounts_model(k: Kernable, store: str):
-    model = k.read_model("accounts", store=store, schema="1")
+def accounts_read_model(store: str) -> Listener:
+    """The `accounts` read model, keeping its rows in `store`."""
+    accounts_readmodel = identity_domain.read_model("accounts", store=store, schema="1")
 
-    @model.on("identity.AccountRegistered")
-    def _(e, ctx):
-        ctx.store.set("accounts", e.aggregate_id, {"id": e.aggregate_id, "status": "active", "email": e.data["email"],
-                                                   "name": e.data["name"]})
+    @accounts_readmodel.on("AccountRegistered")
+    def _(data, evt, ctx):
+        ctx.store.set("accounts", evt.aggregate_id, {"id": evt.aggregate_id, "status": "active", "email": data["email"],
+                                                     "name": data["name"]})
 
     def update(ctx, account: str, **fields):
         ctx.store.set("accounts", account, {**ctx.store.get("accounts", account), **fields})
 
-    @model.on("identity.EmailChanged")
-    def _(e, ctx):
-        update(ctx, e.aggregate_id, email=e.data["email"])
+    @accounts_readmodel.on("EmailChanged")
+    def _(data, evt, ctx):
+        update(ctx, evt.aggregate_id, email=data["email"])
 
-    @model.on("identity.AccountDeactivated")
-    def _(e, ctx):
-        update(ctx, e.aggregate_id, status="deactivated")
+    @accounts_readmodel.on("AccountDeactivated")
+    def _(data, evt, ctx):
+        update(ctx, evt.aggregate_id, status="deactivated")
 
-    @model.on("identity.AccountErased")
-    def _(e, ctx):
-        ctx.store.remove("accounts", e.aggregate_id)  # personal data must not outlive the erasure
+    @accounts_readmodel.on("AccountErased")
+    def _(data, evt, ctx):
+        ctx.store.remove("accounts", evt.aggregate_id)  # personal data must not outlive the erasure
 
-    @model.query("identity.GetAccount")
-    def _(data, ctx):
+    @accounts_readmodel.query("GetAccount")
+    def _(data, qry, ctx):
         found = ctx.store.get("accounts", data["id"])
         if found is None:
             raise Rejected(f"no account {data['id']}", "not_found")
         return found
 
-    return model
+    return accounts_readmodel
 
 
 # ---- authorization: a middleware for both domains, from its own read model ----
@@ -147,46 +148,48 @@ def accounts_model(k: Kernable, store: str):
 SERVICES = {"svc-orders"}
 
 
-def rbac_middleware(k: Kernable):
-    """Checks every command and query of both domains before the kernel accepts it. The sender
-    is the request context's `sender_identity`; the API asserts it (signed with its key)."""
-    active: set[str] = set()
-    customer_of: dict[str, str] = {}  # order -> account
-    model = k.read_model("rbac")
+# Checks every command and query of both domains before the kernel accepts it. The sender is the
+# request context's `sender_identity`; the API asserts it (signed with its key).
+rbac_readmodel = identity_domain.read_model("rbac")
+active: set[str] = set()
+customer_of: dict[str, str] = {}  # order -> account
 
-    @model.on("identity.AccountRegistered")
-    def _(e):
-        active.add(e.aggregate_id)
 
-    @model.on("identity.AccountDeactivated")
-    def _(e):
-        active.discard(e.aggregate_id)
+@rbac_readmodel.on("AccountRegistered")
+def _(data, evt):
+    active.add(evt.aggregate_id)
 
-    @model.on("identity.AccountErased")
-    def _(e):
-        active.discard(e.aggregate_id)
 
-    @model.on("orders.OrderPlaced")
-    def _(e):
-        customer_of[e.aggregate_id] = e.data["customerId"]
+@rbac_readmodel.on("AccountDeactivated")
+def _(data, evt):
+    active.discard(evt.aggregate_id)
 
-    @model.middleware(["identity.*", "orders.*"])
-    def _(check: Check):
-        who = check.request.sender_identity
-        if check.type == "RegisterAccount" or (who in SERVICES and check.kind == "query"):
-            return
-        if who not in active:
-            raise Rejected("sign in with an active account", "forbidden")
-        if check.domain == "identity":
-            owner = check.aggregate_id if check.kind == "command" else check.data.get("id")
-        elif check.type == "PlaceOrder":
-            owner = check.data.get("customerId")
-        else:
-            owner = customer_of.get(check.aggregate_id if check.kind == "command" else check.data.get("id"))
-        if owner != who:
-            raise Rejected(f"{check.domain}.{check.type} is not allowed for {who}", "forbidden")
 
-    return model
+@rbac_readmodel.on("AccountErased")
+def _(data, evt):
+    active.discard(evt.aggregate_id)
+
+
+@rbac_readmodel.on("orders.OrderPlaced")
+def _(data, evt):
+    customer_of[evt.aggregate_id] = data["customerId"]
+
+
+@rbac_readmodel.middleware(["identity.*", "orders.*"])
+def _(check: Check):
+    who = check.request.sender_identity
+    if check.type == "RegisterAccount" or (who in SERVICES and check.kind == "query"):
+        return
+    if who not in active:
+        raise Rejected("sign in with an active account", "forbidden")
+    if check.domain == "identity":
+        owner = check.aggregate_id if check.kind == "command" else check.data.get("id")
+    elif check.type == "PlaceOrder":
+        owner = check.data.get("customerId")
+    else:
+        owner = customer_of.get(check.aggregate_id if check.kind == "command" else check.data.get("id"))
+    if owner != who:
+        raise Rejected(f"{check.domain}.{check.type} is not allowed for {who}", "forbidden")
 
 
 def serve_health(port: int, streams) -> None:
@@ -219,7 +222,8 @@ if __name__ == "__main__":
     if os.environ.get("KERNABLE_TLS_CA"):
         tls = Tls(os.environ["KERNABLE_TLS_CA"], os.environ["KERNABLE_TLS_CERT"], os.environ["KERNABLE_TLS_KEY"])
     k = Kernable(url, key, tls=tls)
-    streams = [k.worker(account), accounts_model(k, f"sqlite:{data}/accounts.db"), rbac_middleware(k)]
+    accounts_readmodel = accounts_read_model(f"sqlite:{data}/accounts.db")
+    streams = [k.worker(account_aggregate), k.listener(accounts_readmodel), k.listener(rbac_readmodel)]
     for s in streams:
         threading.Thread(target=s.run, daemon=True).start()
     serve_health(port, streams)

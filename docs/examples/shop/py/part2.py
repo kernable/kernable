@@ -1,8 +1,8 @@
 """Part 2: commands, rejections and idempotency."""
 
-from connect import connect
+from kernable import Kernable
 
-k = connect()
+k = Kernable()
 
 
 def show(what, o):
@@ -14,12 +14,12 @@ def send(aggregate_type, aggregate_id, type, data=None, id=None):
     return k.submit("shop", aggregate_type, aggregate_id, type, data, id=id)
 
 
-show("register", send("Customer", "c1", "Register", {"email": "ann@example.com", "name": "Ann"}))
-show("register again", send("Customer", "c1", "Register", {"email": "ann@example.com", "name": "Ann"}))
-show("place", send("Order", "o1", "Place", {"customerId": "c1"}))
-show("add apples", send("Order", "o1", "AddItem", {"sku": "apple", "qty": 2}, "add-1"))
-show("same command again", send("Order", "o1", "AddItem", {"sku": "apple", "qty": 2}, "add-1"))
-show("submit", send("Order", "o1", "Submit"))
-show("add after submit", send("Order", "o1", "AddItem", {"sku": "pear", "qty": 1}))
+show("register", send("customer", "c1", "Register", {"email": "ann@example.com", "name": "Ann"}))
+show("register again", send("customer", "c1", "Register", {"email": "ann@example.com", "name": "Ann"}))
+show("place", send("order", "o1", "Place", {"customerId": "c1"}))
+show("add apples", send("order", "o1", "AddItem", {"sku": "apple", "qty": 2}, "add-1"))
+show("same command again", send("order", "o1", "AddItem", {"sku": "apple", "qty": 2}, "add-1"))
+show("submit", send("order", "o1", "Submit"))
+show("add after submit", send("order", "o1", "AddItem", {"sku": "pear", "qty": 1}))
 # endregion try
 k.close()

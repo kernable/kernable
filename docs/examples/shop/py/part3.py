@@ -1,10 +1,8 @@
 """Part 3: read your own writes through queries."""
 
-from kernable import Rejected
+from kernable import Kernable, Rejected
 
-from connect import connect
-
-k = connect()
+k = Kernable()
 
 
 def send(aggregate_type, aggregate_id, type, data=None):
@@ -16,9 +14,9 @@ def get_order(id):
     return k.query("shop", "GetOrder", {"id": id})
 
 
-send("Customer", "c1", "Register", {"email": "ann@example.com", "name": "Ann"})
-send("Order", "o1", "Place", {"customerId": "c1"})
-send("Order", "o1", "AddItem", {"sku": "apple", "qty": 2})
+send("customer", "c1", "Register", {"email": "ann@example.com", "name": "Ann"})
+send("order", "o1", "Place", {"customerId": "c1"})
+send("order", "o1", "AddItem", {"sku": "apple", "qty": 2})
 # The submit returned after the read model processed the event: the query sees it.
 print(get_order("o1"))
 print(k.query("shop", "GetCustomer", {"id": "c1"}))

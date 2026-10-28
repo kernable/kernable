@@ -1,6 +1,6 @@
 # Monitor kernable
 
-With `metrics_listen` set, the kernel serves Prometheus metrics at `/metrics`, and health checks at `/health` and `/ready` ([reference](../reference/metrics)). Bind it to a private address.
+With `--metrics-listen` set, the kernel serves Prometheus metrics at `/metrics`, and health checks at `/health` and `/ready` ([reference](../reference/metrics)). Bind it to a private address.
 
 ## Health checks
 

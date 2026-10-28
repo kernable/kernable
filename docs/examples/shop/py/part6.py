@@ -1,10 +1,8 @@
 """Part 6: the guard decides who may do what."""
 
-from kernable import Rejected, RequestContext
+from kernable import Kernable, Rejected, RequestContext
 
-from connect import connect
-
-k = connect()
+k = Kernable()
 
 
 def show(what, o):
@@ -17,11 +15,11 @@ def send(who, aggregate_type, aggregate_id, type, data=None):
     return k.submit("shop", aggregate_type, aggregate_id, type, data, context=RequestContext(sender_identity=who))
 
 
-show("c1 registers", send("c1", "Customer", "c1", "Register", {"email": "ann@example.com", "name": "Ann"}))
-show("c2 registers", send("c2", "Customer", "c2", "Register", {"email": "bob@example.com", "name": "Bob"}))
-show("c1 places o1", send("c1", "Order", "o1", "Place", {"customerId": "c1"}))
-show("c2 adds to o1", send("c2", "Order", "o1", "AddItem", {"sku": "apple", "qty": 1}))
-show("c2 places for c1", send("c2", "Order", "o2", "Place", {"customerId": "c1"}))
+show("c1 registers", send("c1", "customer", "c1", "Register", {"email": "ann@example.com", "name": "Ann"}))
+show("c2 registers", send("c2", "customer", "c2", "Register", {"email": "bob@example.com", "name": "Bob"}))
+show("c1 places o1", send("c1", "order", "o1", "Place", {"customerId": "c1"}))
+show("c2 adds to o1", send("c2", "order", "o1", "AddItem", {"sku": "apple", "qty": 1}))
+show("c2 places for c1", send("c2", "order", "o2", "Place", {"customerId": "c1"}))
 
 
 def get_order(who):

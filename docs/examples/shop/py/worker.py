@@ -1,9 +1,10 @@
 """The worker: runs the shop's commands."""
 
-from connect import connect
-from domain import customer, order
+from kernable import Kernable
+
+from domain import customer_aggregate, order_aggregate
 
 # region worker
-k = connect()
-k.worker(customer, order).run()
+k = Kernable()
+k.worker(customer_aggregate, order_aggregate).run()
 # endregion worker

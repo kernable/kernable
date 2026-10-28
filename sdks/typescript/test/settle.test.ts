@@ -8,12 +8,13 @@ import { Kernable, NotSettled, domain } from "../src/index.ts";
 import { TestKernel } from "./kernel.ts";
 
 test("a stopped listener still counts: a settling submit reports NotSettled", async () => {
-  const kernel = new TestKernel(["shop.*"], "settle_timeout_ms = 300");
+  const kernel = new TestKernel(["shop.*"], ["--settle-timeout-ms", "300"]);
   await kernel.start();
   const kernable = new Kernable({ url: kernel.url, key: kernel.appKey });
-  const cart = domain("shop").aggregate("Cart", 0).command("Add", () => [{ type: "Added" }]);
+  const shop = domain("shop");
+  const cart = shop.aggregate("Cart", 0).command("Add", () => [{ type: "Added" }]);
   const seen: string[] = [];
-  const audit = kernable.reactor("audit").on("shop.Added", (e) => void seen.push(e.aggregateId));
+  const audit = kernable.listener(shop.reactor("audit").on("Added", (_data, evt) => void seen.push(evt.aggregateId)));
   const worker = kernable.worker(cart);
   const running = [worker.run(), audit.run()];
   const add = (id: string, wait?: "committed") =>

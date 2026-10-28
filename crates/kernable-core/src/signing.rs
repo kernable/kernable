@@ -8,7 +8,9 @@ use std::{fmt, fs, io, path::Path};
 use ed25519_dalek::{Signature as Ed25519Signature, Signer, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
 
-use crate::proto::{Command, Event, NewEvent, QueryRequest, Rejected, RequestContext, Signature};
+use crate::proto::{
+    Command, Event, Grant, NewEvent, Permission, QueryRequest, Rejected, RequestContext, Signature,
+};
 
 /// Hash that precedes the first event of the chain.
 pub const GENESIS: [u8; 32] = [0; 32];
@@ -214,6 +216,50 @@ pub fn revocation_message(key_id: &str, since: i64, created_at: i64) -> Vec<u8> 
         .str(key_id)
         .i64(since)
         .i64(created_at)
+        .0
+}
+
+/// What a root key signs to grant `grant.key_id` its permissions.
+pub fn grant_message(grant: &Grant) -> Vec<u8> {
+    let mut m = Msg::new("kernable.v1.grant")
+        .str(&grant.key_id)
+        .str(&grant.succeeds)
+        .i64(grant.issued_at)
+        .u64(grant.permissions.len() as u64);
+    for p in &grant.permissions {
+        m = m.str(&p.action).u64(p.types.len() as u64);
+        for t in &p.types {
+            m = m.str(t);
+        }
+    }
+    m.0
+}
+
+/// A grant for `key_id`, signed by `root`.
+pub fn grant(
+    root: &SigningKey,
+    key_id: &str,
+    permissions: Vec<Permission>,
+    succeeds: &str,
+    issued_at: i64,
+) -> Grant {
+    let mut grant = Grant {
+        key_id: key_id.to_owned(),
+        permissions,
+        succeeds: succeeds.to_owned(),
+        issued_at,
+        root_sig: None,
+    };
+    grant.root_sig = Some(sign(root, &grant_message(&grant)));
+    grant
+}
+
+/// What a root key signs to revoke `key_id` from `since` on (both ms since epoch).
+pub fn revoke_message(key_id: &str, since: i64, issued_at: i64) -> Vec<u8> {
+    Msg::new("kernable.v1.revoke")
+        .str(key_id)
+        .i64(since)
+        .i64(issued_at)
         .0
 }
 

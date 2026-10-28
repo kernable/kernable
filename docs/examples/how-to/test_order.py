@@ -9,19 +9,20 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "shop" / "py"))
 
-from kernable import CommandContext, Rejected, RequestContext  # noqa: E402
+from kernable import CommandContext, CommandMeta, Rejected, RequestContext  # noqa: E402
 
-from domain import order  # noqa: E402
+from domain import order_aggregate  # noqa: E402
 
 
 # region test
 def decide(history, type, data=None):
     """Runs `type` on the state after `history`, as a worker would."""
-    state = order.fold([(e["type"], 1, e.get("data", {})) for e in history])
+    state = order_aggregate.fold([(e["type"], 1, e.get("data", {})) for e in history])
     at = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    ctx = CommandContext("test", RequestContext(), deadline=at, received_at=at)
-    handler = order.handlers[type]
-    return handler(*(state, data or {}, ctx)[: len(inspect.signature(handler).parameters)])
+    cmd = CommandMeta("test", type, "shop", "order", "o1")
+    ctx = CommandContext(RequestContext(), deadline=at, received_at=at)
+    handler = order_aggregate.handlers[type]
+    return handler(*(state, data or {}, cmd, ctx)[: len(inspect.signature(handler).parameters)])
 
 
 class OrderTest(unittest.TestCase):

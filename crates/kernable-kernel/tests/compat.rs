@@ -353,8 +353,6 @@ async fn stores_of_format_2_migrate_verify_and_run_with_their_vault() {
             config.vault = Some(VaultConfig {
                 store: vault_url.clone(),
                 key: dir.join("vault.key"),
-                readers: Default::default(),
-                erasers: Default::default(),
             });
         })
         .await;
@@ -424,13 +422,12 @@ async fn stores_of_format_3_report_what_revoked_keys_signed() {
                     dir.join(format!("vault-{backend}.db")).display()
                 ),
                 key: dir.join("vault.key"),
-                readers: Default::default(),
-                erasers: Default::default(),
             });
-            // Still listed, but revoked in the store: the kernel refuses it anyway.
-            config.clients.insert(id(&key(7)), vec!["*".into()]);
         })
         .await;
+        // Revoked in the store: the kernel refuses a grant for it.
+        let refused = env.kernel.grant(grant(&key(7), &[("submit", &["*"])]));
+        assert_eq!(refused.unwrap_err().code(), tonic::Code::PermissionDenied);
         let report = verified(&url);
         assert_eq!(
             report.suspects,

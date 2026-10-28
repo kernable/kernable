@@ -13,7 +13,7 @@ hero:
       link: /reference/
 features:
   - title: Any language
-    details: Aggregates, read models and reactors run in your own processes and talk to the kernel over gRPC. TypeScript and Python SDKs share one API.
+    details: Aggregates, read models and reactors run in your own processes and talk to the kernel over gRPC. TypeScript, Python and Rust SDKs share one API.
   - title: Read your own writes
     details: A submit returns once every listener has processed the command's events, in a fixed order, so the next query already sees them.
   - title: Signed and verifiable

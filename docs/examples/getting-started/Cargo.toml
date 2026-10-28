@@ -1,0 +1,29 @@
+# The getting-started guide in Rust: the cart worker (`cart.rs`), the carts read model
+# (`carts.rs`) and the client (`submit.rs`); its test runs them like the TypeScript and Python ones.
+[package]
+name = "getting-started"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "cart"
+path = "cart.rs"
+test = false
+
+[[bin]]
+name = "carts"
+path = "carts.rs"
+test = false
+
+[dependencies]
+kernable = { path = "../../../sdks/rust" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[[bin]]
+name = "submit"
+path = "submit.rs"
+test = false

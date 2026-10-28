@@ -226,8 +226,12 @@ export interface TlsFiles {
   key: string;
 }
 
-/** Clients for a kernel at `unix:/path` or `host:port` (with `tls`: over mutual TLS). */
-export function connect(url: string, tls?: TlsFiles): Clients {
+/**
+ * Clients for a kernel at `unix:/path` or `host:port` (with `tls`: over mutual TLS). `grant`,
+ * the hex-encoded grant of this process's key, goes with every call (see `Grant` in kernable.proto).
+ */
+export function connect(url: string, tls?: TlsFiles, grant?: string): Clients {
+  url = url.replace(/^https?:\/\//, "").replace(/\/$/, "");
   v1 ??= (
     grpc.loadPackageDefinition(
       protoLoader.loadSync(PROTO, { keepCase: true, longs: Number, defaults: true, oneofs: true }),
@@ -241,20 +245,22 @@ export function connect(url: string, tls?: TlsFiles): Clients {
   const events = new v1.EventService(url, creds);
   const listeners = new v1.ListenerService(url, creds);
   const queries = new v1.QueryService(url, creds);
+  const metadata = new grpc.Metadata();
+  if (grant) metadata.set("kernable-grant", grant);
   return {
     submit: (command, wait, listener = "", vault = []) =>
       new Promise((resolve, reject) =>
-        commands.Submit({ command, wait, protocol: PROTOCOL, listener, vault }, (err: grpc.ServiceError | null, res: WireCommandResult) =>
+        commands.Submit({ command, wait, protocol: PROTOCOL, listener, vault }, metadata, (err: grpc.ServiceError | null, res: WireCommandResult) =>
           err ? reject(err) : resolve(res),
         ),
       ),
-    session: () => workers.Session(),
-    listen: () => listeners.Listen(),
+    session: () => workers.Session(metadata),
+    listen: () => listeners.Listen(metadata),
     query: (req) =>
       new Promise((resolve, reject) =>
-        queries.Query({ ...req, protocol: PROTOCOL }, (err: grpc.ServiceError | null, res: WireQueryResult) => (err ? reject(err) : resolve(res))),
+        queries.Query({ ...req, protocol: PROTOCOL }, metadata, (err: grpc.ServiceError | null, res: WireQueryResult) => (err ? reject(err) : resolve(res))),
       ),
-    subscribe: (req) => events.Subscribe({ ...req, protocol: PROTOCOL }),
+    subscribe: (req) => events.Subscribe({ ...req, protocol: PROTOCOL }, metadata),
     close: () => {
       commands.close();
       workers.close();

@@ -13,19 +13,21 @@ test("snapshots shorten replays and a new schema rebuilds from the events", asyn
   const kernable = new Kernable({ url: kernel.url, key: kernel.appKey });
   let applied = 0;
 
-  // v1 keeps the state as an object.
-  const v1 = domain("counters").aggregate("Counter", { n: 0 }, { snapshotEvery: 3 })
-    .apply("Incremented", (s, e: { by: number }) => (applied++, { n: s.n + e.by }))
-    .command("Increment", (s, cmd: { by: number }) => {
-      if (s.n + cmd.by > 20) throw new Rejected("limit");
-      return [{ type: "Incremented", data: { by: cmd.by } }];
+  // v1 keeps the state as an object, with what `apply` learns about the last event: every
+  // increment is by 1, so the version equals n, whether folded from history or from a snapshot.
+  const v1 = domain("counters").aggregate("Counter", { n: 0, version: 0, id: "c1" }, { snapshotEvery: 3 })
+    .apply("Incremented", (s, data: { by: number }, evt) => (applied++, { n: s.n + data.by, version: evt.version, id: evt.aggregateId }))
+    .command("Increment", (s, data: { by: number }) => {
+      if (s.version !== s.n || s.id !== "c1") throw new Rejected(`event meta ${JSON.stringify(s)}`);
+      if (s.n + data.by > 20) throw new Rejected("limit");
+      return [{ type: "Incremented", data: { by: data.by } }];
     });
   // v2 keeps it as a number: old snapshots do not fit.
   const v2 = domain("counters").aggregate("Counter", 0, { snapshotEvery: 3, schema: "2" })
-    .apply("Incremented", (n, e: { by: number }) => n + e.by)
-    .command("Increment", (n, cmd: { by: number }) => {
-      if (n + cmd.by > 20) throw new Rejected("limit");
-      return [{ type: "Incremented", data: { by: cmd.by } }];
+    .apply("Incremented", (n, data: { by: number }) => n + data.by)
+    .command("Increment", (n, data: { by: number }) => {
+      if (n + data.by > 20) throw new Rejected("limit");
+      return [{ type: "Incremented", data: { by: data.by } }];
     });
   const increment = (by: number) => kernable.submit({ domain: "counters", aggregateType: "Counter", aggregateId: "c1", type: "Increment", data: { by } });
 

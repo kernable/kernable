@@ -24,7 +24,7 @@ flowchart LR
 
 **The kernel** (Rust, one process per store) owns everything that must be right for every application:
 
-- it checks every signature and every allowlist;
+- it checks every signature and every key's grant;
 - it queues commands, one at a time per aggregate, and hands them to workers;
 - it commits events atomically, on the version they were based on, into a hash chain;
 - it delivers events to listeners in a fixed order and waits for them when a submit settles;
@@ -37,7 +37,7 @@ flowchart LR
 - **Listeners** receive events in order: **read models** keep views and answer queries, **reactors** cause side effects and follow-up commands, a **middleware** checks requests.
 - **Clients** submit commands and ask queries.
 
-Processes talk to the kernel over gRPC: workers and listeners keep one stream open each, clients make single calls. Any language with gRPC can take part; TypeScript and Python have SDKs.
+Processes talk to the kernel over gRPC: workers and listeners keep one stream open each, clients make single calls. Any language with gRPC can take part; TypeScript, Python and Rust have SDKs.
 
 ## A command's way
 
@@ -49,7 +49,7 @@ sequenceDiagram
   participant W as worker
   participant R as read model
   C->>K: Submit (signed)
-  K->>K: check signature, allowlist
+  K->>K: check signature, grant
   K->>M: check
   M-->>K: pass
   K->>K: store command, queue it

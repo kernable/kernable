@@ -1,34 +1,33 @@
 """The guard: a middleware that lets customers act only on themselves and their own orders."""
 
-from kernable import Check, Rejected
+from kernable import Check, Kernable, Rejected
 
-from connect import connect
+from domain import shop_domain
 
 # region guard
 SERVICES = {"svc-confirmations"}
 registered: set[str] = set()
 owner_of: dict[str, str] = {}  # order -> customer
 
-k = connect()
-guard = k.read_model("guard")
+guard_readmodel = shop_domain.read_model("guard")
 
 
-@guard.on("shop.CustomerRegistered")
-def _(e):
-    registered.add(e.aggregate_id)
+@guard_readmodel.on("CustomerRegistered")
+def _(data, evt):
+    registered.add(evt.aggregate_id)
 
 
-@guard.on("shop.CustomerErased")
-def _(e):
-    registered.discard(e.aggregate_id)
+@guard_readmodel.on("CustomerErased")
+def _(data, evt):
+    registered.discard(evt.aggregate_id)
 
 
-@guard.on("shop.OrderPlaced")
-def _(e):
-    owner_of[e.aggregate_id] = e.data["customerId"]
+@guard_readmodel.on("OrderPlaced")
+def _(data, evt):
+    owner_of[evt.aggregate_id] = data["customerId"]
 
 
-@guard.middleware(["shop.*"])
+@guard_readmodel.middleware(["shop.*"])
 def _(check: Check):
     who = check.request.sender_identity
     if check.type == "Register":
@@ -38,7 +37,7 @@ def _(check: Check):
     target = check.aggregate_id if check.kind == "command" else check.data.get("id")
     if check.type == "Place":
         owner = check.data.get("customerId")
-    elif check.type == "GetCustomer" or check.aggregate_type == "Customer":
+    elif check.type == "GetCustomer" or check.aggregate_type == "customer":
         owner = target
     else:
         owner = owner_of.get(target)
@@ -46,5 +45,5 @@ def _(check: Check):
         raise Rejected(f"{check.type} is not allowed for {who or 'anonymous'}", "forbidden")
 
 
-guard.run()
+Kernable().listener(guard_readmodel).run()
 # endregion guard

@@ -1,51 +1,26 @@
-//! Keys: a reload changes allowlists without a restart and ends sessions that lost their
-//! rights; a revoked key is refused and what it signed from its revocation on is flagged; a
-//! listener moves to its successor key; the kernel's own key can change.
+//! Keys: a newer grant changes rights without a restart and ends sessions that lost them; a
+//! revoked key is refused and what it signed from its revocation on is flagged; a listener
+//! moves to its successor key; the kernel's own key can change.
 
 mod common;
 
 use std::time::Duration;
 
 use common::*;
+use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
-        ChallengeResponse, Hello, ListenerMessage, Wait, command_result::Outcome,
+        ChallengeResponse, Hello, ListenerMessage, Register, RevokeRequest, SubmitRequest, Wait,
+        WorkerMessage, command_result::Outcome, command_service_client::CommandServiceClient,
         listener_delivery::Msg as Out, listener_message::Msg as In,
-        listener_service_client::ListenerServiceClient,
+        listener_service_client::ListenerServiceClient, trust_service_client::TrustServiceClient,
+        worker_gateway_client::WorkerGatewayClient, worker_message,
     },
     signing, transport,
 };
-use kernable_kernel::Config;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Code;
-
-fn config(env: &Env) -> Config {
-    (*env.kernel.config()).clone()
-}
-
-/// `ms` since the epoch as a UTC time, to the second, for `[revoked]`.
-fn utc(ms: i64) -> String {
-    let secs = ms / 1000;
-    let days = secs.div_euclid(86_400);
-    let rem = secs.rem_euclid(86_400);
-    // Civil from days (Howard Hinnant).
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    format!(
-        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
-        rem / 3600,
-        rem % 3600 / 60,
-        rem % 60
-    )
-}
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -54,14 +29,43 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
+/// Revokes `key_id` from `since` on through the kernel's API, signed by `signer`.
+async fn revoke_with(
+    env: &Env,
+    signer: &SigningKey,
+    key_id: &str,
+    since: i64,
+) -> Result<(), tonic::Status> {
+    let issued_at = now_ms();
+    let request = RevokeRequest {
+        key_id: key_id.into(),
+        since,
+        issued_at,
+        root_sig: Some(signing::sign(
+            signer,
+            &signing::revoke_message(key_id, since, issued_at),
+        )),
+        protocol: kernable_core::PROTOCOL,
+    };
+    let channel = transport::connect(&env.addr).await.unwrap();
+    TrustServiceClient::new(channel)
+        .revoke(request)
+        .await
+        .map(|_| ())
+}
+
+async fn revoke(env: &Env, key_id: &str, since: i64) {
+    revoke_with(env, &root(), key_id, since).await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_revoked_key_is_refused_at_once_and_what_it_signed_is_flagged() {
     let env = start("keys-revoke").await;
     let worker = tokio::spawn(run_worker(env.addr.clone(), TestWorker::honest()));
     // Key 8 submits a command before it is stolen, and one after.
-    let mut allowed = config(&env);
-    allowed.clients.insert(id(&key(8)), vec!["*".into()]);
-    env.kernel.reload(allowed.clone()).unwrap();
+    env.kernel
+        .grant(grant(&key(8), &[("submit", &["*"])]))
+        .unwrap();
     let before = signed(command("c1", "PlaceOrder", "o1"), &key(8));
     assert_eq!(
         committed_versions(&submit(&env.addr, before).await.unwrap()),
@@ -75,13 +79,13 @@ async fn a_revoked_key_is_refused_at_once_and_what_it_signed_is_flagged() {
         [2]
     );
 
+    // Only a root key may revoke.
+    let refused = revoke_with(&env, &key(1), &id(&key(8)), stolen_at).await;
+    assert_eq!(refused.unwrap_err().code(), Code::PermissionDenied);
+
     // Revoking the worker key (2) and key 8: the worker's session ends at once.
-    let mut revoked = allowed;
-    revoked.revoked.insert(id(&key(8)), utc(stolen_at));
-    revoked
-        .revoked
-        .insert(id(&key(2)), utc(now_ms() + 3_600_000));
-    env.kernel.reload(revoked.clone()).unwrap();
+    revoke(&env, &id(&key(8)), stolen_at).await;
+    revoke(&env, &id(&key(2)), now_ms() + 3_600_000).await;
     let ended = tokio::time::timeout(Duration::from_secs(2), worker)
         .await
         .unwrap()
@@ -95,15 +99,9 @@ async fn a_revoked_key_is_refused_at_once_and_what_it_signed_is_flagged() {
     let worker = run_worker(env.addr.clone(), TestWorker::honest()).await;
     assert_eq!(worker.code(), Code::PermissionDenied);
 
-    // Revocations are kept: taking them out of the configuration does not undo them.
-    let mut forgiven = revoked;
-    forgiven.revoked.clear();
-    env.kernel.reload(forgiven).unwrap();
-    let again = signed(command("c4", "AddItem", "o1"), &key(8));
-    assert_eq!(
-        submit(&env.addr, again).await.unwrap_err().code(),
-        Code::PermissionDenied
-    );
+    // A revocation is never undone: a new grant for the key is refused.
+    let regranted = env.kernel.grant(grant(&key(8), &[("submit", &["*"])]));
+    assert_eq!(regranted.unwrap_err().code(), Code::PermissionDenied);
 
     // verify flags c2 (after the theft), not c1 (before).
     let store = kernable_store::open_read_only(&env.store).unwrap();
@@ -118,9 +116,9 @@ async fn a_revoked_key_is_refused_at_once_and_what_it_signed_is_flagged() {
 #[tokio::test(flavor = "multi_thread")]
 async fn commands_of_a_revoked_client_that_wait_in_the_queue_are_rejected() {
     let env = start("keys-pending").await;
-    let mut allowed = config(&env);
-    allowed.clients.insert(id(&key(8)), vec!["*".into()]);
-    env.kernel.reload(allowed.clone()).unwrap();
+    env.kernel
+        .grant(grant(&key(8), &[("submit", &["*"])]))
+        .unwrap();
     // No worker yet: the command waits in the queue.
     let queued = signed(command("c1", "PlaceOrder", "o1"), &key(8));
     let accepted = submit_with(&env.addr, queued.clone(), Wait::Accepted).await;
@@ -128,9 +126,7 @@ async fn commands_of_a_revoked_client_that_wait_in_the_queue_are_rejected() {
         accepted.unwrap().outcome,
         Some(Outcome::Accepted(_))
     ));
-    let mut revoked = allowed;
-    revoked.revoked.insert(id(&key(8)), utc(now_ms() - 60_000));
-    env.kernel.reload(revoked).unwrap();
+    revoke(&env, &id(&key(8)), now_ms() - 60_000).await;
 
     spawn_worker(&env);
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -143,31 +139,68 @@ async fn commands_of_a_revoked_client_that_wait_in_the_queue_are_rejected() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_reload_takes_rights_away_without_a_restart() {
-    let env = start("keys-reload").await;
+async fn a_newer_grant_takes_rights_away_without_a_restart() {
+    let env = start("keys-narrower").await;
     spawn_worker(&env);
     let place = signed(command("c1", "PlaceOrder", "o1"), &key(1));
     assert_eq!(
         committed_versions(&submit(&env.addr, place).await.unwrap()),
         [1]
     );
-    let mut narrower = config(&env);
-    narrower
-        .clients
-        .insert(id(&key(1)), vec!["orders.PlaceOrder".into()]);
-    let kept = env.kernel.reload(narrower).unwrap();
-    assert!(kept.is_empty(), "{kept:?}");
+    let narrower = grant(&key(1), &[("submit", &["orders.PlaceOrder"])]);
+    env.kernel.grant(narrower).unwrap();
+    // The submit carries key 1's older, wider grant: it is ignored.
     let add = signed(command("c2", "AddItem", "o1"), &key(1));
     assert_eq!(
         submit(&env.addr, add).await.unwrap_err().code(),
         Code::PermissionDenied
     );
+}
 
-    // Settings that need a restart are kept, and reported.
-    let mut moved = config(&env);
-    moved.listen = "unix:/elsewhere.sock".into();
-    assert_eq!(env.kernel.reload(moved).unwrap(), ["listen"]);
-    assert_eq!(env.kernel.config().listen, env.addr);
+#[tokio::test(flavor = "multi_thread")]
+async fn grants_must_be_signed_by_a_root_key_for_the_presenting_key() {
+    let env = start("keys-grants").await;
+    let mut forged = grant(&key(8), &[("submit", &["*"])]);
+    forged.root_sig = Some(signing::sign(&key(1), &signing::grant_message(&forged)));
+    assert_eq!(
+        env.kernel.grant(forged).unwrap_err().code(),
+        Code::PermissionDenied
+    );
+    let mut tampered = grant(&key(8), &[("submit", &["orders.PlaceOrder"])]);
+    tampered.permissions[0].types = vec!["*".into()];
+    assert_eq!(
+        env.kernel.grant(tampered).unwrap_err().code(),
+        Code::Unauthenticated
+    );
+    let unknown = grant(&key(8), &[("write", &["*"])]);
+    assert_eq!(
+        env.kernel.grant(unknown).unwrap_err().code(),
+        Code::InvalidArgument
+    );
+
+    // A request may carry only its signer's grant: key 2 registers with key 1's grant.
+    let (tx, rx) = mpsc::channel(1);
+    let register = Register {
+        protocol: kernable_core::PROTOCOL,
+        worker_id: "w".into(),
+        key_id: id(&key(2)),
+        command_types: vec!["orders.PlaceOrder".into()],
+        ..Default::default()
+    };
+    tx.send(WorkerMessage {
+        msg: Some(worker_message::Msg::Register(register)),
+    })
+    .await
+    .unwrap();
+    let mut session = tonic::Request::new(ReceiverStream::new(rx));
+    *session.metadata_mut() = with_grant((), &key(1)).metadata().clone();
+    let mut workers = WorkerGatewayClient::new(transport::connect(&env.addr).await.unwrap());
+    let refused = match workers.session(session).await {
+        Ok(stream) => stream.into_inner().message().await.unwrap_err(),
+        Err(status) => status,
+    };
+    assert_eq!(refused.code(), Code::PermissionDenied, "{refused:?}");
+    assert_eq!(refused.message(), "the grant is for another key");
 }
 
 /// Connects a listener named `name` with `key`; its start position, or why it was refused.
@@ -203,18 +236,17 @@ async fn listen(env: &Env, name: &str, listener_key: u8) -> Result<u64, tonic::S
 async fn a_listener_moves_to_its_successor_key_and_keeps_its_place() {
     let env = start("keys-successor").await;
     // Registered with key 5 at position 0, then saved at a later position by the kernel.
-    let mut registered = env.kernel.config().as_ref().clone();
-    registered.listeners.insert(id(&key(6)), vec!["*".into()]);
-    env.kernel.reload(registered.clone()).unwrap();
+    env.kernel
+        .grant(grant(&key(6), &[("listen", &["*"])]))
+        .unwrap();
     assert_eq!(listen(&env, "audit", 5).await.unwrap(), 0);
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Another key is refused, unless it is the registered key's successor.
     let refused = listen(&env, "audit", 6).await.unwrap_err();
     assert_eq!(refused.code(), Code::PermissionDenied);
-    let mut successor = registered;
-    successor.successors.insert(id(&key(5)), id(&key(6)));
-    env.kernel.reload(successor).unwrap();
+    let successor = successor_grant(&key(6), &[("listen", &["*"])], &id(&key(5)));
+    env.kernel.grant(successor).unwrap();
     assert_eq!(listen(&env, "audit", 6).await.unwrap(), 0);
     tokio::time::sleep(Duration::from_millis(200)).await;
     let store = kernable_store::open_read_only(&env.store).unwrap();
@@ -235,10 +267,8 @@ async fn the_kernel_key_can_change() {
     submit(&env.addr, place).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await; // a checkpoint with key 3
 
-    std::fs::write(env.dir.join("kernel-2.key"), hex(key(4).as_bytes())).unwrap();
-    let mut rotated = config(&env);
-    rotated.kernel_key = env.dir.join("kernel-2.key");
-    env.kernel.reload(rotated).unwrap();
+    std::fs::write(env.dir.join("kernel.key"), hex(key(4).as_bytes())).unwrap();
+    env.kernel.reload().unwrap();
     let add = signed(command("c2", "AddItem", "o1"), &key(1));
     submit(&env.addr, add).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await; // a checkpoint with key 4
@@ -259,57 +289,100 @@ async fn the_kernel_key_can_change() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sighup_reloads_the_configuration_of_the_running_kernel() {
+async fn sighup_reads_the_kernel_key_of_the_running_kernel_again() {
     use std::process::{Command as Process, Stdio};
     let dir = std::env::temp_dir().join(format!("kn-sighup-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("kernel.key"), hex(key(3).as_bytes())).unwrap();
     let addr = format!("unix:{}", dir.join("k.sock").display());
-    let toml = |clients: &str| {
-        format!(
-            "store = \"{}\"\nlisten = \"{addr}\"\nkernel_key = \"kernel.key\"\n\
-             [clients]\n{clients}\n[workers]\n\"{}\" = [\"orders.*\"]\n",
-            store_url(&dir),
-            id(&key(2)),
-        )
-    };
-    std::fs::write(
-        dir.join("kernable.toml"),
-        toml(&format!("\"{}\" = [\"*\"]", id(&key(1)))),
-    )
-    .unwrap();
-    let mut kernel = Process::new(env!("CARGO_BIN_EXE_kernable-kernel"))
-        .arg(dir.join("kernable.toml"))
+    let store = store_url(&dir);
+    let mut kernel = Process::new(env!("CARGO_BIN_EXE_kernable"))
+        .current_dir(&dir)
+        .args([
+            "start",
+            "--root",
+            &id(&root()),
+            "--store",
+            &store,
+            "--listen",
+            &addr,
+        ])
+        .args(["--checkpoint-interval-ms", "50"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
     wait_for(&addr).await;
+    // The worker and the client present their grants, as the SDKs do.
     tokio::spawn(run_worker(addr.clone(), TestWorker::honest()));
     let place = signed(command("c1", "PlaceOrder", "o1"), &key(1));
     assert_eq!(
         committed_versions(&submit(&addr, place).await.unwrap()),
         [1]
     );
+    tokio::time::sleep(Duration::from_millis(200)).await; // a checkpoint with key 3
 
-    std::fs::write(dir.join("kernable.toml"), toml("")).unwrap();
+    std::fs::write(dir.join("kernel.key"), hex(key(4).as_bytes())).unwrap();
     let hup = Process::new("kill")
         .args(["-HUP", &kernel.id().to_string()])
         .status();
     assert!(hup.unwrap().success());
-    let refused = async {
-        loop {
-            let add = signed(command("c2", "AddItem", "o1"), &key(1));
-            match submit(&addr, add).await {
-                Err(status) if status.code() == Code::PermissionDenied => return,
-                _ => tokio::time::sleep(Duration::from_millis(20)).await,
-            }
-        }
-    };
-    tokio::time::timeout(Duration::from_secs(5), refused)
-        .await
-        .expect("reloaded");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let add = signed(command("c2", "AddItem", "o1"), &key(1));
+    submit(&addr, add).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await; // a checkpoint with key 4
     assert!(kernel.try_wait().unwrap().is_none(), "still running");
+    let _ = kernel.kill();
+    let _ = kernel.wait();
+
+    let store = kernable_store::open_read_only(&store).unwrap();
+    let both = store.verify(&[id(&key(3)), id(&key(4))]).unwrap();
+    assert!(both.is_ok(), "{:?}", both.problems);
+    let old_only = store.verify(&[id(&key(3))]).unwrap();
+    assert!(!old_only.is_ok(), "checkpoints signed by the new key");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn start_dev_creates_keys_and_a_grant_that_allows_everything_and_turns_the_vault_on() {
+    use std::process::{Command as Process, Stdio};
+    let dir = std::env::temp_dir().join(format!("kn-dev-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let addr = free_addr(); // the default, 127.0.0.1:7233, may be taken
+    let mut kernel = Process::new(env!("CARGO_BIN_EXE_kernable"))
+        .current_dir(&dir)
+        .args(["start", "--dev", "--listen", &addr])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for(&addr).await;
+    assert!(dir.join("vault.key").exists());
+    assert!(dir.join("vault.db").exists(), "the vault is on");
+
+    // app.key, with the app.grant next to it, may submit anything.
+    let app = signing::read_signing_key(dir.join("app.key")).unwrap();
+    let grant = std::fs::read_to_string(dir.join("app.grant")).unwrap();
+    let mut request = tonic::Request::new(SubmitRequest {
+        command: Some(signed(command("c1", "PlaceOrder", "o1"), &app)),
+        protocol: kernable_core::PROTOCOL,
+        wait: Wait::Accepted.into(),
+        ..Default::default()
+    });
+    request
+        .metadata_mut()
+        .insert("kernable-grant", grant.trim().parse().unwrap());
+    let channel = transport::connect(&addr).await.unwrap();
+    let result = CommandServiceClient::new(channel)
+        .submit(request)
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        matches!(result.outcome, Some(Outcome::Accepted(_))),
+        "{result:?}"
+    );
     let _ = kernel.kill();
     let _ = kernel.wait();
     let _ = std::fs::remove_dir_all(&dir);

@@ -25,7 +25,7 @@ test("kernel crash mid-command: worker reconnects, command commits exactly once"
       return [{ type: "Incremented" }];
     });
 
-  const kernel = new TestKernel(["counters.*"], "lease_ttl_ms = 500");
+  const kernel = new TestKernel(["counters.*"], ["--lease-ttl-ms", "500"]);
   await kernel.start();
   const kernable = new Kernable({ url: kernel.url, key: kernel.appKey, tenant: "t1" });
   const worker = kernable.worker(counter);

@@ -380,6 +380,7 @@ impl Drop for DisconnectOnDrop {
 
 pub(crate) async fn run(
     kernel: Arc<Kernel>,
+    metadata: &tonic::metadata::MetadataMap,
     inbound: &mut Streaming<ListenerMessage>,
     out: &Outbox,
 ) -> Result<(), Status> {
@@ -396,12 +397,10 @@ pub(crate) async fn run(
             "negative orders are reserved for kernable",
         ));
     }
-    let types = config::readable(
-        &kernel.config().listeners,
-        &hello.key_id,
-        &hello.event_types,
-    )
-    .map_err(Status::permission_denied)?;
+    kernel.present(metadata, &hello.key_id)?;
+    let permissions = kernel.permissions();
+    let types = config::readable(&permissions.listen, &hello.key_id, &hello.event_types)
+        .map_err(Status::permission_denied)?;
     if !hello.query_types.iter().all(|t| config::valid_qualified(t)) {
         return Err(Status::invalid_argument(
             "answer qualified query types: domain.QueryType",
@@ -410,7 +409,7 @@ pub(crate) async fn run(
     if !hello
         .query_types
         .iter()
-        .all(|t| config::allowed(&kernel.config().query_handlers, &hello.key_id, t))
+        .all(|t| config::allowed(&permissions.answer, &hello.key_id, t))
     {
         return Err(Status::permission_denied(
             "key may not answer these query types",
@@ -430,7 +429,7 @@ pub(crate) async fn run(
         if !m
             .types
             .iter()
-            .all(|t| config::allowed(&kernel.config().middlewares, &hello.key_id, t))
+            .all(|t| config::allowed(&permissions.check, &hello.key_id, t))
         {
             return Err(Status::permission_denied("key may not check these types"));
         }
@@ -462,10 +461,9 @@ pub(crate) async fn run(
         if previous.is_some_and(|e| e.connected) {
             return Err(Status::already_exists("listener is already connected"));
         }
-        // Another key only as the registered key's successor (`[successors]`).
+        // Another key only as the registered key's successor (`succeeds` in its grant).
         if let Some(e) = previous.filter(|e| e.record.key_id != hello.key_id) {
-            let config = kernel.config();
-            if config.successors.get(&e.record.key_id) != Some(&hello.key_id) {
+            if permissions.successors.get(&e.record.key_id) != Some(&hello.key_id) {
                 return Err(Status::permission_denied(
                     "listener is registered with another key",
                 ));
@@ -531,8 +529,9 @@ pub(crate) async fn run(
         let message = tokio::select! {
             message = next(inbound) => message?,
             Ok(()) = changes.changed() => {
-                // Reloaded: end the stream if the key may no longer do what it registered for.
-                if !still_allowed(&kernel.config(), &hello) {
+                // Permissions changed: end the stream if the key may no longer do what it
+                // registered for.
+                if !still_allowed(&kernel.permissions(), &hello) {
                     return Err(Status::permission_denied("listener key is no longer allowed or was revoked"));
                 }
                 continue;
@@ -651,16 +650,16 @@ fn batch_of(kernel: &Kernel, key_id: &str, events: Vec<Event>, up_to: u64) -> Ba
 }
 
 /// Whether the listener's key may still read, answer and check what it registered for.
-fn still_allowed(config: &crate::config::Config, hello: &Hello) -> bool {
+fn still_allowed(permissions: &crate::Permissions, hello: &Hello) -> bool {
     let key = &hello.key_id;
-    config::readable(&config.listeners, key, &hello.event_types).is_ok()
+    config::readable(&permissions.listen, key, &hello.event_types).is_ok()
         && hello
             .query_types
             .iter()
-            .all(|t| config::allowed(&config.query_handlers, key, t))
+            .all(|t| config::allowed(&permissions.answer, key, t))
         && hello.middleware.as_ref().is_none_or(|m| {
             m.types
                 .iter()
-                .all(|t| config::allowed(&config.middlewares, key, t))
+                .all(|t| config::allowed(&permissions.check, key, t))
         })
 }

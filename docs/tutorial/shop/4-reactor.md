@@ -9,6 +9,7 @@ The order gets a command and an event for the confirmation, in `domain.ts`:
 ::: code-group
 <<< @/examples/shop/ts/domain.ts#confirm [domain.ts]
 <<< @/examples/shop/py/domain.py#confirm [domain.py]
+<<< @/examples/shop/rs/src/domain.rs#confirm [domain.rs]
 :::
 
 and the orders read model learns about it, in `read-models.ts`:
@@ -16,6 +17,7 @@ and the orders read model learns about it, in `read-models.ts`:
 ::: code-group
 <<< @/examples/shop/ts/read-models.ts#confirmed [read-models.ts]
 <<< @/examples/shop/py/read_models.py#confirmed [read_models.py]
+<<< @/examples/shop/rs/src/bin/read_models.rs#confirmed [read_models.rs]
 :::
 
 ## The reactor
@@ -23,6 +25,7 @@ and the orders read model learns about it, in `read-models.ts`:
 ::: code-group
 <<< @/examples/shop/ts/confirmations.ts#reactor [confirmations.ts]
 <<< @/examples/shop/py/confirmations.py#reactor [confirmations.py]
+<<< @/examples/shop/rs/src/bin/confirmations.rs#reactor [confirmations.rs]
 :::
 
 Three things make it safe:
@@ -38,11 +41,13 @@ Start it (`node confirmations.ts` or `.venv/bin/python confirmations.py`) and su
 ::: code-group
 <<< @/examples/shop/ts/part4.ts#try [part4.ts]
 <<< @/examples/shop/py/part4.py#try [part4.py]
+<<< @/examples/shop/rs/src/bin/part4.rs#try [part4.rs]
 :::
 
 ::: code-group
 <<< @/examples/shop/ts/part4.out{text} [TypeScript]
 <<< @/examples/shop/py/part4.out{text} [Python]
+<<< @/examples/shop/rs/part4.out{text} [Rust]
 :::
 
 The `Submit` settled after the reactor, which had confirmed the order by then: the query shows it confirmed.

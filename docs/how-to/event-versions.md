@@ -6,7 +6,7 @@ Stored events are never rewritten. To change what an event carries, raise its ve
 
    <<< @/examples/concepts/upcast.ts#upcast
 
-   One upcast per old version: 1 → 2, then 2 → 3. Aggregates of the domain use them before `apply`; listeners get them with `use(shop)`.
+   One upcast per old version: 1 → 2, then 2 → 3. Aggregates of the domain use them before `apply`; listeners get them with `use(shopDomain)`.
 
 2. **Write the new format** in the command handlers.
 

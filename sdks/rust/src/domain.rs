@@ -1,0 +1,850 @@
+//! Domains, their event and command schemas, and aggregates.
+
+use std::{
+    collections::HashMap,
+    panic::{AssertUnwindSafe, catch_unwind},
+    sync::{Arc, Mutex, RwLock},
+};
+
+use kernable_core::{proto, signing};
+use serde::{Serialize, de::DeserializeOwned};
+use serde_json::{Map, Value};
+
+use crate::{
+    BoxError, Error, Listener, Rejected, RequestContext,
+    context::Timestamp,
+    vault::{self, VaultFields},
+};
+
+type Upcast = Arc<dyn Fn(Value) -> Value + Send + Sync>;
+/// Whose personal data a payload holds: from the payload and the aggregate's ID.
+pub(crate) type Subject = Arc<dyn Fn(&Value, &str) -> String + Send + Sync>;
+
+#[derive(Clone, Default)]
+pub(crate) struct EventDef {
+    pub schema: u32,
+    pub steps: HashMap<u32, Upcast>,
+    pub vault: VaultFields,
+    pub eraser: Option<Subject>,
+}
+
+struct DomainInner {
+    name: String,
+    events: RwLock<HashMap<String, EventDef>>,
+    commands: RwLock<HashMap<String, VaultFields>>,
+}
+
+/// A domain: a name that scopes its aggregates, commands and events, lowercase by convention
+/// (`orders`) like aggregates, while message types are capitalized (`orders.PlaceOrder`). Both
+/// cases are valid; names are case-sensitive. Types are unique within a domain; elsewhere they
+/// are named `domain.Type`. Cloning gives another handle to the same domain.
+#[derive(Clone)]
+pub struct Domain {
+    inner: Arc<DomainInner>,
+}
+
+/// A domain named `name`.
+///
+/// # Panics
+///
+/// If `name` does not start with a letter or holds characters other than letters, digits,
+/// `-` and `_`.
+pub fn domain(name: &str) -> Domain {
+    let valid = name.starts_with(|c: char| c.is_ascii_alphabetic())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    assert!(valid, "invalid domain name {name:?}");
+    Domain {
+        inner: Arc::new(DomainInner {
+            name: name.to_owned(),
+            events: RwLock::default(),
+            commands: RwLock::default(),
+        }),
+    }
+}
+
+impl Domain {
+    pub fn name(&self) -> &str {
+        &self.inner.name
+    }
+
+    /// Declares that this domain writes `event_type` events at version `schema`, with an
+    /// `upcast` per older version. The domain's aggregates and listeners use it; other domains'
+    /// listeners get it with `with_domain`.
+    ///
+    /// # Panics
+    ///
+    /// If `event_type` is qualified or `schema` is 0.
+    pub fn event(&self, event_type: &str, schema: u32) -> EventSchema {
+        assert!(
+            unqualified(event_type),
+            "event types are unqualified within their domain, not {event_type:?}"
+        );
+        assert!(schema >= 1, "a schema is a version from 1, not {schema}");
+        self.inner.events.write().unwrap().insert(
+            event_type.to_owned(),
+            EventDef {
+                schema,
+                ..EventDef::default()
+            },
+        );
+        EventSchema {
+            domain: self.clone(),
+            event_type: event_type.to_owned(),
+        }
+    }
+
+    /// Declares which fields of `command_type` commands the vault keeps (`personal`,
+    /// `secret`). Clients that submit them need the domain: `kernable.with_domain(&domain)`.
+    ///
+    /// # Panics
+    ///
+    /// If `command_type` is qualified.
+    pub fn command(&self, command_type: &str) -> CommandSchema {
+        assert!(
+            unqualified(command_type),
+            "command types are unqualified within their domain, not {command_type:?}"
+        );
+        self.inner
+            .commands
+            .write()
+            .unwrap()
+            .insert(command_type.to_owned(), VaultFields::default());
+        CommandSchema {
+            domain: self.clone(),
+            command_type: command_type.to_owned(),
+        }
+    }
+
+    /// An aggregate of this domain named `name` (lowercase by convention, like `cart`), whose
+    /// state starts as `initial`.
+    pub fn aggregate<S: State>(&self, name: &str, initial: S) -> Aggregate<S> {
+        Aggregate {
+            inner: Arc::new(AggregateInner {
+                domain: self.clone(),
+                name: name.to_owned(),
+                initial,
+                settings: Mutex::new((100, "1".to_owned())),
+                appliers: RwLock::default(),
+                handlers: RwLock::default(),
+            }),
+        }
+    }
+
+    /// A read model of this domain named `name`: kept in memory and rebuilt from the first
+    /// event on every start (order 0). Run it with [`crate::Kernable::listen`].
+    pub fn read_model(&self, name: &str) -> Listener {
+        Listener::new(self, name, 0, Some(0))
+    }
+
+    /// A reactor of this domain named `name`: triggers side effects; resumes after the last
+    /// acknowledged event (order 10). A settling submit from its handler waits for the
+    /// listeners before it (the read models), not for the reactor itself, which handles one
+    /// event at a time. Run it with [`crate::Kernable::listen`].
+    pub fn reactor(&self, name: &str) -> Listener {
+        Listener::new(self, name, 10, None)
+    }
+
+    pub(crate) fn event_def(&self, event_type: &str) -> Option<EventDef> {
+        self.inner.events.read().unwrap().get(event_type).cloned()
+    }
+
+    pub(crate) fn event_types(&self) -> Vec<String> {
+        self.inner.events.read().unwrap().keys().cloned().collect()
+    }
+
+    pub(crate) fn command_vault(&self, command_type: &str) -> Option<VaultFields> {
+        self.inner
+            .commands
+            .read()
+            .unwrap()
+            .get(command_type)
+            .cloned()
+    }
+
+    /// The payload version this domain writes `event_type` events at.
+    pub fn schema_of(&self, event_type: &str) -> u32 {
+        self.event_def(event_type).map_or(1, |d| d.schema)
+    }
+
+    /// `data` of an `event_type` event stored at `schema`, upcast to the version this domain
+    /// knows.
+    pub(crate) fn upcast(
+        &self,
+        event_type: &str,
+        schema: u32,
+        data: Value,
+    ) -> Result<Value, SchemaError> {
+        upcast(Some(self), &self.inner.name, event_type, schema, data)
+    }
+}
+
+fn unqualified(t: &str) -> bool {
+    !t.is_empty() && !t.contains(['.', '*'])
+}
+
+/// The payload format of one event type: its current version and the steps that bring older
+/// payloads up to it. Events are stored as written and never changed; readers upcast them.
+pub struct EventSchema {
+    domain: Domain,
+    event_type: String,
+}
+
+impl EventSchema {
+    fn update(&self, f: impl FnOnce(&mut EventDef)) {
+        let mut events = self.domain.inner.events.write().unwrap();
+        f(events
+            .get_mut(&self.event_type)
+            .expect("declared by Domain::event"));
+    }
+
+    /// Keeps these top-level fields in the vault, as personal data of the subject `subject`
+    /// returns from the payload and the aggregate's ID (e.g. `|d, _| d["customerId"]…`, or
+    /// `|_, id| id.to_owned()` for the aggregate itself). Events then hold only references; the
+    /// kernel hands the values to workers and to listeners allowed to read them, until an
+    /// event erases the subject.
+    pub fn personal(
+        self,
+        fields: &[&str],
+        subject: impl Fn(&Value, &str) -> String + Send + Sync + 'static,
+    ) -> Self {
+        let fields = fields.iter().map(|f| (*f).to_owned()).collect();
+        self.update(|d| d.vault.personal.push((fields, Arc::new(subject))));
+        self
+    }
+
+    /// Makes this an erasing event: it deletes every vault value of the subject `subject`
+    /// returns, in every stream, and the snapshots that may hold them. Read models should drop
+    /// the subject's data when they see it; rebuilt, they read `null`.
+    pub fn erases(self, subject: impl Fn(&Value, &str) -> String + Send + Sync + 'static) -> Self {
+        self.update(|d| d.eraser = Some(Arc::new(subject)));
+        self
+    }
+
+    /// Turns a payload of version `from` into one of version `from + 1`.
+    ///
+    /// # Panics
+    ///
+    /// If `from` is not a version below the current one.
+    pub fn upcast(self, from: u32, step: impl Fn(Value) -> Value + Send + Sync + 'static) -> Self {
+        self.update(|d| {
+            assert!(
+                from >= 1 && from < d.schema,
+                "upcast {} from a version between 1 and {}, not {from}",
+                self.event_type,
+                d.schema - 1
+            );
+            d.steps.insert(from, Arc::new(step));
+        });
+        self
+    }
+}
+
+/// How a command's payload is kept: which fields go to the vault.
+pub struct CommandSchema {
+    domain: Domain,
+    command_type: String,
+}
+
+impl CommandSchema {
+    fn update(&self, f: impl FnOnce(&mut VaultFields)) {
+        let mut commands = self.domain.inner.commands.write().unwrap();
+        f(commands
+            .get_mut(&self.command_type)
+            .expect("declared by Domain::command"));
+    }
+
+    /// Keeps these top-level fields in the vault as personal data of `subject`; see
+    /// [`EventSchema::personal`].
+    pub fn personal(
+        self,
+        fields: &[&str],
+        subject: impl Fn(&Value, &str) -> String + Send + Sync + 'static,
+    ) -> Self {
+        let fields = fields.iter().map(|f| (*f).to_owned()).collect();
+        self.update(|v| v.personal.push((fields, Arc::new(subject))));
+        self
+    }
+
+    /// Keeps these top-level fields (passwords, one-time tokens) in the vault only until the
+    /// command completed. The handler gets them in clear; the stored command keeps a reference.
+    pub fn secret(self, fields: &[&str]) -> Self {
+        self.update(|v| v.secret.extend(fields.iter().map(|f| (*f).to_owned())));
+        self
+    }
+}
+
+/// An event a process cannot read: its schema is newer than known, or a step is missing.
+#[derive(Debug)]
+pub(crate) struct SchemaError(pub String);
+
+impl std::fmt::Display for SchemaError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SchemaError {}
+
+/// `data` of a `domain.event_type` event stored at `schema`, upcast to the version `known`
+/// declares (1 if it declares none).
+pub(crate) fn upcast(
+    known: Option<&Domain>,
+    domain: &str,
+    event_type: &str,
+    schema: u32,
+    mut data: Value,
+) -> Result<Value, SchemaError> {
+    let def = known.and_then(|d| d.event_def(event_type));
+    let current = def.as_ref().map_or(1, |d| d.schema);
+    if schema > current {
+        return Err(SchemaError(format!(
+            "{domain}.{event_type} has schema {schema}, but this process knows it only up to {current}: update it"
+        )));
+    }
+    for v in schema..current {
+        let step = def.as_ref().and_then(|d| d.steps.get(&v)).ok_or_else(|| {
+            SchemaError(format!(
+                "no upcast for {domain}.{event_type} from schema {v}"
+            ))
+        })?;
+        data = step(data);
+    }
+    Ok(data)
+}
+
+/// An event returned by a command handler; `data` is stored as JSON.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NewEvent {
+    pub event_type: String,
+    pub data: Value,
+}
+
+impl NewEvent {
+    /// An `event_type` event with `data`; `()` stands for no data.
+    ///
+    /// # Panics
+    ///
+    /// If `data` cannot be represented as JSON (a map with non-string keys).
+    pub fn new(event_type: &str, data: impl Serialize) -> NewEvent {
+        NewEvent {
+            event_type: event_type.to_owned(),
+            data: serde_json::to_value(data).expect("event data is JSON"),
+        }
+    }
+}
+
+/// What `apply` gets about an event besides its payload. Only fields known before the kernel
+/// stores the event, so a snapshot and a replay compute the same state; put a time into the
+/// data (`ctx.now()` in the command handler) if the state needs one.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EventMeta {
+    pub event_type: String,
+    /// The aggregate's version after this event: 1 for its first event.
+    pub version: u64,
+    pub tenant: String,
+    pub domain: String,
+    pub aggregate_type: String,
+    pub aggregate_id: String,
+    /// The command that caused the event.
+    pub command_id: String,
+}
+
+/// What `apply` gets besides state, data and the event's meta. No clock and no IDs: `apply`
+/// must compute the same state every time.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ApplyContext {
+    /// The request context of the command that caused the event.
+    pub request: RequestContext,
+}
+
+/// What a command handler gets about the command besides its payload.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CommandMeta {
+    pub command_id: String,
+    pub command_type: String,
+    pub domain: String,
+    pub aggregate_type: String,
+    pub aggregate_id: String,
+    pub tenant: String,
+}
+
+/// What a command handler gets besides state, data and the command's meta: the request
+/// context, and the command's time and IDs.
+#[derive(Clone, Debug)]
+pub struct CommandContext {
+    pub request: RequestContext,
+    command_id: String,
+    received_at: Timestamp,
+    deadline: Timestamp,
+    ids: u64,
+}
+
+impl CommandContext {
+    /// A context for calling a command handler directly, e.g. in a unit test.
+    pub fn new(
+        command_id: &str,
+        request: RequestContext,
+        received_at: Timestamp,
+    ) -> CommandContext {
+        CommandContext {
+            command_id: command_id.to_owned(),
+            request,
+            received_at,
+            deadline: Timestamp(received_at.0 + 30_000),
+            ids: 0,
+        }
+    }
+
+    /// When the kernel received the command: the same every time the command runs. Use it
+    /// instead of the clock.
+    pub fn now(&self) -> Timestamp {
+        self.received_at
+    }
+
+    /// A new ID that is the same every time the command runs (1st call, 2nd call, ...). Use it
+    /// instead of random IDs.
+    pub fn id(&mut self) -> String {
+        self.ids += 1;
+        signing::derived_id(&self.command_id, self.ids - 1)
+    }
+
+    /// When the kernel hands the command to another worker if this one has not answered.
+    pub fn deadline(&self) -> Timestamp {
+        self.deadline
+    }
+}
+
+/// An event to fold: type, payload version and data, and what `apply` learns about it (empty
+/// fields if unknown).
+#[derive(Clone, Debug, Default)]
+pub struct FoldEvent {
+    pub event_type: String,
+    pub schema: u32,
+    pub data: Value,
+    pub meta: EventMeta,
+    /// The request context of the command that caused the event: `apply` gets it in its
+    /// [`ApplyContext`].
+    pub request: RequestContext,
+}
+
+impl FoldEvent {
+    /// An `event_type` event at version 1 of its payload.
+    pub fn new(event_type: &str, data: impl Serialize) -> FoldEvent {
+        FoldEvent {
+            event_type: event_type.to_owned(),
+            schema: 1,
+            data: serde_json::to_value(data).expect("event data is JSON"),
+            meta: EventMeta::default(),
+            request: RequestContext::default(),
+        }
+    }
+}
+
+/// What an aggregate's state must be: copied, and stored as JSON in snapshots.
+pub trait State: Clone + Serialize + DeserializeOwned + Send + Sync + 'static {}
+
+impl<S: Clone + Serialize + DeserializeOwned + Send + Sync + 'static> State for S {}
+
+type Apply<S> =
+    Arc<dyn Fn(&mut S, Value, &EventMeta, &ApplyContext) -> Result<(), BoxError> + Send + Sync>;
+type Handle<S> = Arc<
+    dyn Fn(&S, Value, &CommandMeta, &mut CommandContext) -> Result<Vec<NewEvent>, Failure>
+        + Send
+        + Sync,
+>;
+
+struct AggregateInner<S> {
+    domain: Domain,
+    name: String,
+    initial: S,
+    /// Snapshot every this many events, and the state format.
+    settings: Mutex<(u64, String)>,
+    appliers: RwLock<HashMap<String, Apply<S>>>,
+    handlers: RwLock<HashMap<String, Handle<S>>>,
+}
+
+/// An aggregate: how events change its state (`apply`) and which events a command produces
+/// (`command`). Handlers must be deterministic and free of side effects; they may run again.
+/// Create it with `domain(...).aggregate(...)`; cloning gives another handle to the same
+/// aggregate.
+pub struct Aggregate<S> {
+    inner: Arc<AggregateInner<S>>,
+}
+
+impl<S> Clone for Aggregate<S> {
+    fn clone(&self) -> Self {
+        Aggregate {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+/// Why a handler failed: a business rejection, or anything else (`handler_error`).
+#[derive(Debug)]
+pub(crate) enum Failure {
+    Rejected(Rejected),
+    Error(String),
+    /// This process cannot read the aggregate's events: not the command's fault.
+    Schema(String),
+}
+
+impl From<SchemaError> for Failure {
+    fn from(e: SchemaError) -> Failure {
+        Failure::Schema(e.0)
+    }
+}
+
+impl<S: State> Aggregate<S> {
+    pub fn domain(&self) -> &Domain {
+        &self.inner.domain
+    }
+
+    pub fn name(&self) -> &str {
+        &self.inner.name
+    }
+
+    pub fn initial(&self) -> &S {
+        &self.inner.initial
+    }
+
+    /// Sends a snapshot of the state every `events` events (default 100; 0 turns them off).
+    pub fn snapshot_every(&self, events: u64) -> Self {
+        self.inner.settings.lock().unwrap().0 = events;
+        self.clone()
+    }
+
+    /// Version of the state format (default "1"). Change it when `apply` produces differently
+    /// shaped state; older snapshots are then ignored and the state is rebuilt from the events.
+    pub fn schema(&self, schema: &str) -> Self {
+        self.inner.settings.lock().unwrap().1 = schema.to_owned();
+        self.clone()
+    }
+
+    /// How an event of `event_type` changes the state: `f(state, data, evt, ctx)` changes
+    /// `state` in place, or replaces it with `*state = …`. `data` is the event's payload as `D`.
+    pub fn apply<D: DeserializeOwned>(
+        &self,
+        event_type: &str,
+        f: impl Fn(&mut S, D, &EventMeta, &ApplyContext) + Send + Sync + 'static,
+    ) -> Self {
+        let apply: Apply<S> = Arc::new(move |state, data, meta, ctx| {
+            let data = serde_json::from_value(data)
+                .map_err(|e| format!("{} data: {e}", meta.event_type))?;
+            f(state, data, meta, ctx);
+            Ok(())
+        });
+        self.inner
+            .appliers
+            .write()
+            .unwrap()
+            .insert(event_type.to_owned(), apply);
+        self.clone()
+    }
+
+    /// Which events a `command_type` command produces: `f(state, data, cmd, ctx)` returns
+    /// them, or a [`Rejected`]. `data` is the command's payload as `D`.
+    pub fn command<D: DeserializeOwned>(
+        &self,
+        command_type: &str,
+        f: impl Fn(&S, D, &CommandMeta, &mut CommandContext) -> Result<Vec<NewEvent>, Rejected>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        let name = command_type.to_owned();
+        let handle: Handle<S> = Arc::new(move |state, data, cmd, ctx| {
+            let data = serde_json::from_value(data)
+                .map_err(|e| Failure::Error(format!("{name} data: {e}")))?;
+            f(state, data, cmd, ctx).map_err(Failure::Rejected)
+        });
+        self.inner
+            .handlers
+            .write()
+            .unwrap()
+            .insert(command_type.to_owned(), handle);
+        self.clone()
+    }
+
+    /// State after `history`, starting from `from` (default: the initial state). Events are
+    /// upcast first; events without an `apply` are skipped.
+    pub fn fold(
+        &self,
+        history: impl IntoIterator<Item = FoldEvent>,
+        from: Option<S>,
+    ) -> Result<S, Error> {
+        self.fold_inner(history, from).map_err(|f| match f {
+            Failure::Rejected(r) => Error::Rejected(r),
+            Failure::Error(m) | Failure::Schema(m) => Error::Config(m),
+        })
+    }
+
+    fn fold_inner(
+        &self,
+        history: impl IntoIterator<Item = FoldEvent>,
+        from: Option<S>,
+    ) -> Result<S, Failure> {
+        let mut state = from.unwrap_or_else(|| self.inner.initial.clone());
+        let appliers = self.inner.appliers.read().unwrap();
+        for e in history {
+            let Some(apply) = appliers.get(&e.event_type) else {
+                continue;
+            };
+            let data = self.inner.domain.upcast(&e.event_type, e.schema, e.data)?;
+            let meta = EventMeta {
+                event_type: e.event_type,
+                domain: if e.meta.domain.is_empty() {
+                    self.inner.domain.name().to_owned()
+                } else {
+                    e.meta.domain
+                },
+                aggregate_type: if e.meta.aggregate_type.is_empty() {
+                    self.inner.name.clone()
+                } else {
+                    e.meta.aggregate_type
+                },
+                ..e.meta
+            };
+            let ctx = ApplyContext { request: e.request };
+            caught(|| apply(&mut state, data, &meta, &ctx))?
+                .map_err(|e| Failure::Error(e.to_string()))?;
+        }
+        Ok(state)
+    }
+
+    /// Runs the `command_type` handler on `state`, e.g. in a unit test. The handler's
+    /// [`CommandMeta`] has the command ID of `ctx`, this aggregate's domain and name, and an empty
+    /// aggregate ID and tenant.
+    pub fn handle(
+        &self,
+        state: &S,
+        command_type: &str,
+        data: impl Serialize,
+        ctx: &mut CommandContext,
+    ) -> Result<Vec<NewEvent>, Error> {
+        let handler = self.handler(command_type).ok_or_else(|| {
+            Error::Config(format!(
+                "no handler for {command_type} on {}",
+                self.inner.name
+            ))
+        })?;
+        let data = serde_json::to_value(data)?;
+        let cmd = CommandMeta {
+            command_id: ctx.command_id.clone(),
+            command_type: command_type.to_owned(),
+            domain: self.inner.domain.name().to_owned(),
+            aggregate_type: self.inner.name.clone(),
+            ..CommandMeta::default()
+        };
+        match caught(|| handler(state, data, &cmd, ctx)).and_then(|r| r) {
+            Ok(events) => Ok(events),
+            Err(Failure::Rejected(r)) => Err(Error::Rejected(r)),
+            Err(Failure::Error(m) | Failure::Schema(m)) => Err(Error::Config(m)),
+        }
+    }
+
+    fn handler(&self, command_type: &str) -> Option<Handle<S>> {
+        self.inner
+            .handlers
+            .read()
+            .unwrap()
+            .get(command_type)
+            .cloned()
+    }
+}
+
+/// `f()`, with a panic turned into an error.
+fn caught<T>(f: impl FnOnce() -> T) -> Result<T, Failure> {
+    catch_unwind(AssertUnwindSafe(f)).map_err(|panic| {
+        let text = panic
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_owned())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "handler panicked".into());
+        Failure::Error(text)
+    })
+}
+
+/// What a worker sends back for a command it executed.
+pub(crate) struct Executed {
+    pub events: Vec<proto::NewEvent>,
+    pub vault: Vec<proto::VaultValue>,
+    /// Version, state format and state, if the events cross a multiple of `snapshot_every`.
+    pub snapshot: Option<(u64, String, Vec<u8>)>,
+}
+
+/// An aggregate as a worker runs it, whatever its state type.
+pub(crate) trait Runnable: Send + Sync {
+    fn domain(&self) -> &Domain;
+    fn name(&self) -> &str;
+    fn command_types(&self) -> Vec<String>;
+    /// The event types it knows: applied ones and the domain's declared ones.
+    fn event_types(&self) -> Vec<String>;
+    fn execute(&self, x: &proto::Execute) -> Result<Executed, Failure>;
+}
+
+impl<S: State> Runnable for Aggregate<S> {
+    fn domain(&self) -> &Domain {
+        &self.inner.domain
+    }
+
+    fn name(&self) -> &str {
+        &self.inner.name
+    }
+
+    fn command_types(&self) -> Vec<String> {
+        self.inner
+            .handlers
+            .read()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    fn event_types(&self) -> Vec<String> {
+        let mut types: Vec<String> = self
+            .inner
+            .appliers
+            .read()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        types.extend(self.inner.domain.event_types());
+        types.sort();
+        types.dedup();
+        types
+    }
+
+    fn execute(&self, x: &proto::Execute) -> Result<Executed, Failure> {
+        let cmd = x.command.clone().unwrap_or_default();
+        let (snapshot_every, schema) = self.inner.settings.lock().unwrap().clone();
+        let from = match &x.snapshot {
+            Some(s) if s.schema != schema => {
+                return Err(Failure::Rejected(
+                    Rejected::new(format!("snapshot schema {} is not {schema}", s.schema))
+                        .code("snapshot_stale"),
+                ));
+            }
+            Some(s) => Some(
+                serde_json::from_slice(&s.state)
+                    .map_err(|e| Failure::Error(format!("snapshot of {}: {e}", self.inner.name)))?,
+            ),
+            None => None,
+        };
+        let history = x.history.iter().map(|e| FoldEvent {
+            event_type: e.event_type.clone(),
+            schema: e.schema,
+            data: vault::unseal(decode(&e.payload), &x.vault).0,
+            meta: meta_of(&e.event_type, e.version, &cmd, &e.command_id),
+            request: RequestContext::from_wire(e.context.as_ref()),
+        });
+        let state = self.fold_inner(history.collect::<Vec<_>>(), from)?;
+        let request = RequestContext::from_wire(cmd.context.as_ref());
+        let meta = CommandMeta {
+            command_id: cmd.command_id.clone(),
+            command_type: cmd.command_type.clone(),
+            domain: cmd.domain.clone(),
+            aggregate_type: cmd.aggregate_type.clone(),
+            aggregate_id: cmd.aggregate_id.clone(),
+            tenant: cmd.tenant_id.clone(),
+        };
+        let mut ctx = CommandContext {
+            command_id: cmd.command_id.clone(),
+            request: request.clone(),
+            received_at: Timestamp(x.received_at),
+            deadline: Timestamp(x.deadline),
+            ids: 0,
+        };
+        let handler = self.handler(&cmd.command_type).ok_or_else(|| {
+            Failure::Rejected(
+                Rejected::new(format!(
+                    "no handler for {} on {}.{}",
+                    cmd.command_type, cmd.domain, cmd.aggregate_type
+                ))
+                .code("unknown_command"),
+            )
+        })?;
+        let data = vault::unseal(decode(&cmd.payload), &x.vault).0;
+        let produced = caught(|| handler(&state, data, &meta, &mut ctx))??;
+
+        let mut events = Vec::with_capacity(produced.len());
+        let mut values = Vec::new();
+        for e in &produced {
+            let def = self.inner.domain.event_def(&e.event_type);
+            let sealed = vault::seal(&e.data, def.as_ref().map(|d| &d.vault), &cmd.aggregate_id)
+                .map_err(Failure::Error)?;
+            values.extend(sealed.values);
+            let erases = def
+                .as_ref()
+                .and_then(|d| d.eraser.as_ref())
+                .map(|subject| subject(&e.data, &cmd.aggregate_id))
+                .unwrap_or_default();
+            events.push(proto::NewEvent {
+                event_type: e.event_type.clone(),
+                schema: def.as_ref().map_or(1, |d| d.schema),
+                payload: sealed.payload,
+                vault_refs: sealed.refs,
+                erases,
+            });
+        }
+
+        let before = x.expected_version;
+        let version = before + produced.len() as u64;
+        let snapshot = if snapshot_every == 0
+            || produced.is_empty()
+            || version / snapshot_every == before / snapshot_every
+        {
+            None
+        } else {
+            // Apply the events as they will be read back (a JSON round trip), so the snapshot
+            // equals a replay.
+            let read = produced.iter().enumerate().map(|(i, e)| FoldEvent {
+                event_type: e.event_type.clone(),
+                schema: self.inner.domain.schema_of(&e.event_type),
+                data: decode(&encode(&e.data)),
+                meta: meta_of(&e.event_type, before + i as u64 + 1, &cmd, &cmd.command_id),
+                request: request.clone(),
+            });
+            let after = self.fold_inner(read.collect::<Vec<_>>(), Some(state))?;
+            let state = serde_json::to_vec(&after).map_err(|e| Failure::Error(e.to_string()))?;
+            Some((version, schema, state))
+        };
+        Ok(Executed {
+            events,
+            vault: values,
+            snapshot,
+        })
+    }
+}
+
+/// What `apply` gets about an event of `cmd`'s aggregate, caused by command `command_id`.
+fn meta_of(event_type: &str, version: u64, cmd: &proto::Command, command_id: &str) -> EventMeta {
+    EventMeta {
+        event_type: event_type.to_owned(),
+        version,
+        tenant: cmd.tenant_id.clone(),
+        domain: cmd.domain.clone(),
+        aggregate_type: cmd.aggregate_type.clone(),
+        aggregate_id: cmd.aggregate_id.clone(),
+        command_id: command_id.to_owned(),
+    }
+}
+
+/// JSON bytes of `data`; no data is `{}`.
+pub(crate) fn encode(data: &Value) -> Vec<u8> {
+    if data.is_null() {
+        return b"{}".to_vec();
+    }
+    serde_json::to_vec(data).expect("a JSON value encodes")
+}
+
+/// The JSON value of `payload`; an empty payload is `{}`.
+pub(crate) fn decode(payload: &[u8]) -> Value {
+    if payload.is_empty() {
+        return Value::Object(Map::new());
+    }
+    serde_json::from_slice(payload).unwrap_or(Value::Null)
+}

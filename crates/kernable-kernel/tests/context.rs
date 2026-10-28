@@ -96,7 +96,9 @@ async fn only_privileged_keys_may_bypass_authorization() {
     let ok = submit(&privileged.addr, with_context("c1", "PlaceOrder", bypass())).await;
     assert_eq!(committed_versions(&ok.unwrap()), [1]);
 
-    let plain = start_custom("ctx-plain", |config, _| config.privileged.clear()).await;
+    let plain = start("ctx-plain").await;
+    let unprivileged = grant(&key(1), &[("submit", &["*"]), ("query", &["*"])]);
+    plain.kernel.grant(unprivileged).unwrap();
     let refused = submit(&plain.addr, with_context("c1", "PlaceOrder", bypass())).await;
     assert_eq!(refused.unwrap_err().code(), tonic::Code::PermissionDenied);
 }

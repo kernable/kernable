@@ -8,7 +8,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { Kernable, Rejected, domain, type StoredEvent } from "../src/index.ts";
+import { Kernable, Rejected, domain } from "../src/index.ts";
 import { TestKernel } from "./kernel.ts";
 
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
@@ -19,17 +19,17 @@ function identityDomain() {
   identity.event("AccountRegistered", 1).personal(["email"], (d: { accountId: string }) => d.accountId);
   identity.event("AccountErased", 1).erases((d: { accountId: string }) => d.accountId);
   const account = identity.aggregate("Account", { email: null as string | null, passwordHash: "" })
-    .apply("AccountRegistered", (_s, d: { email: string; passwordHash: string }) => ({ email: d.email, passwordHash: d.passwordHash }))
+    .apply("AccountRegistered", (_s, data: { email: string; passwordHash: string }) => ({ email: data.email, passwordHash: data.passwordHash }))
     .apply("AccountErased", () => ({ email: null, passwordHash: "" }))
-    .command("RegisterAccount", (_s, d: { id: string; email: string; password: string }) => [
+    .command("RegisterAccount", (_s, data: { id: string; email: string; password: string }) => [
       // The handler gets the secret in clear and keeps only a hash.
-      { type: "AccountRegistered", data: { accountId: d.id, email: d.email, passwordHash: sha256(d.password) } },
+      { type: "AccountRegistered", data: { accountId: data.id, email: data.email, passwordHash: sha256(data.password) } },
     ])
-    .command("Login", (s, d: { password: string }) => {
-      if (sha256(d.password) !== s.passwordHash) throw new Rejected("wrong password", "denied");
+    .command("Login", (s, data: { password: string }) => {
+      if (sha256(data.password) !== s.passwordHash) throw new Rejected("wrong password", "denied");
       return [{ type: "LoggedIn" }];
     })
-    .command("EraseAccount", (_s, d: { id: string }) => [{ type: "AccountErased", data: { accountId: d.id } }]);
+    .command("EraseAccount", (_s, data: { id: string }) => [{ type: "AccountErased", data: { accountId: data.id } }]);
   identity.command("Login").secret(["password"]);
   return { identity, account };
 }
@@ -40,13 +40,13 @@ test("personal fields and secrets live in the vault and an erasing event deletes
   const { identity, account } = identityDomain();
   const kernable = new Kernable({ url: kernel.url, key: kernel.appKey }).use(identity);
   const emails = new Map<string, string>();
-  const accounts = kernable.readModel("accounts").use(identity)
-    .on("identity.AccountRegistered", (e) => void emails.set(e.aggregateId, (e.data as { email: string }).email))
-    .on("identity.AccountErased", (e) => void emails.delete(e.aggregateId))
-    .query("identity.GetEmail", (d: { id: string }) => {
-      if (!emails.has(d.id)) throw new Rejected("no such account", "not_found");
-      return emails.get(d.id);
-    });
+  const accounts = kernable.listener(identity.readModel("accounts")
+    .on("AccountRegistered", (data: { email: string }, evt) => void emails.set(evt.aggregateId, data.email))
+    .on("AccountErased", (_data, evt) => void emails.delete(evt.aggregateId))
+    .query("GetEmail", (data: { id: string }) => {
+      if (!emails.has(data.id)) throw new Rejected("no such account", "not_found");
+      return emails.get(data.id);
+    }));
   const worker = kernable.worker(account);
   const running = [worker.run(), accounts.run()];
   const send = (type: string, data: object) =>
@@ -73,13 +73,14 @@ test("personal fields and secrets live in the vault and an erasing event deletes
     // Erasing: the read model drops the account; a rebuilt one reads null where the email was.
     assert.ok((await send("EraseAccount", { id: "a1" })).committed);
     await assert.rejects(kernable.query({ domain: "identity", type: "GetEmail", data: { id: "a1" } }), /no such account/);
-    const replayed: StoredEvent[] = [];
-    const rebuilt = kernable.readModel("rebuilt").use(identity).on("identity.AccountRegistered", (e) => void replayed.push(e));
+    const replayed: [unknown, string[]][] = [];
+    const rebuilt = kernable.listener(identity.readModel("rebuilt")
+      .on("AccountRegistered", (data: { email: unknown }, evt) => void replayed.push([data.email, evt.redacted])));
     running.push(rebuilt.run());
     await rebuilt.ready;
     await new Promise((r) => setTimeout(r, 200));
     assert.equal(replayed.length, 1);
-    assert.deepEqual([(replayed[0].data as { email: unknown }).email, replayed[0].redacted], [null, ["email"]]);
+    assert.deepEqual(replayed[0], [null, ["email"]]);
     rebuilt.stop();
   } finally {
     worker.stop();

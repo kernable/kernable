@@ -23,14 +23,9 @@ Aggregates and listeners get every event upcast to the version they know; stored
 
 Events cannot be deleted, but personal data must be deletable. Fields declared `personal` (with the person they belong to) or `secret` go to the **vault** instead of the log; the log keeps a salted reference.
 
-```mermaid
-flowchart LR
-  P["payload<br/>email: {$vault: 3fa9…}"] --> L[(log, signed, forever)]
-  V["value<br/>max@example.com"] --> Vault[(vault, encrypted, deletable)]
-  P -. reference .-> V
-```
+<FlowDiagram name="vault" />
 
-- Workers and allowed listeners (`[vault.readers]`) get the values; everyone else gets `null`.
+- Workers and listeners granted `vault_read` get the values; everyone else gets `null`.
 - Secrets are deleted once their command completes.
 - An **erasing event** deletes a person's values in every stream and domain, and the snapshots that may contain them. Read models must forget the person when they see it; rebuilt, they read `null`.
 

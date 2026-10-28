@@ -1,0 +1,60 @@
+# The shop of the tutorial "Build a shop" in Rust: the domain in the library,
+# every process and every part's script a binary. kernable's tests run them for every part.
+[package]
+name = "shop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Neither the library nor the binaries have unit tests: `cargo test` runs only tests/.
+[lib]
+test = false
+doctest = false
+
+[[bin]]
+name = "confirmations"
+test = false
+
+[[bin]]
+name = "customers_persistent"
+test = false
+
+[[bin]]
+name = "guard"
+test = false
+
+[[bin]]
+name = "part2"
+test = false
+
+[[bin]]
+name = "part3"
+test = false
+
+[[bin]]
+name = "part4"
+test = false
+
+[[bin]]
+name = "part6"
+test = false
+
+[[bin]]
+name = "part7"
+test = false
+
+[[bin]]
+name = "read_models"
+test = false
+
+[[bin]]
+name = "worker"
+test = false
+
+[dependencies]
+kernable = { path = "../../../../sdks/rust" }
+scrypt = { version = "0.11", default-features = false }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

@@ -11,7 +11,7 @@ import { test } from "node:test";
 
 import { Kernable, type StoredEvent } from "../../sdks/typescript/src/index.ts";
 import { TestKernel, freePort } from "../../sdks/typescript/test/kernel.ts";
-import { ORDER_EVENTS, project, type OrderRow } from "./orders/order.ts";
+import { ORDER_EVENTS, ordersDomain, project, type OrderRow } from "./orders/order.ts";
 
 const ROOT = new URL("../../", import.meta.url).pathname;
 const PYTHON = process.env.KERNABLE_PYTHON ?? `${ROOT}sdks/python/.venv/bin/python`;
@@ -65,7 +65,7 @@ interface Shop {
 }
 
 async function shop(): Promise<Shop> {
-  const kernel = new TestKernel(COMMANDS, "", { tls: true, metrics: true });
+  const kernel = new TestKernel(COMMANDS, [], { tls: true, metrics: true });
   await kernel.start();
   const tls = kernel.tlsFiles!;
   const env = { KERNABLE_TLS_CA: tls.ca, KERNABLE_TLS_CERT: tls.cert, KERNABLE_TLS_KEY: tls.key };
@@ -113,8 +113,9 @@ const LISTENERS = ["accounts", "rbac", "orders", "confirmations"];
 async function replay(s: Shop, done: (events: StoredEvent[]) => boolean): Promise<StoredEvent[]> {
   const kernable = new Kernable({ url: s.kernel.url, key: s.kernel.appKey, tls: s.kernel.tlsFiles });
   const events: StoredEvent[] = [];
-  const model = kernable.readModel(`replay-${Date.now()}`);
-  for (const type of [...ORDER_EVENTS, "identity.AccountRegistered"]) model.on(type, (e) => void events.push(e));
+  const replayReadmodel = ordersDomain.readModel(`replay-${Date.now()}`);
+  for (const type of [...ORDER_EVENTS, "identity.AccountRegistered"]) replayReadmodel.on(type, (data, evt, ctx) => void events.push({ ...evt, data, request: ctx.request }));
+  const model = kernable.listener(replayReadmodel);
   const running = model.run();
   try {
     await until(async () => events, done, "replay");
@@ -235,7 +236,7 @@ test("kill -9 of each process loses and duplicates nothing", async () => {
     }
 
     const rows = new Map<string, OrderRow>();
-    for (const e of events) project(rows, e);
+    for (const e of events) project(rows, e.data, e);
     for (const [id, row] of rows) assert.deepEqual((await s.call("GET", `/orders/${id}`, undefined, row.customerId))[1], row);
     assert.match(s.kernel.verify(), /OK/);
 
@@ -274,14 +275,14 @@ test("personal data lives in the vault, and erasing an account erases it in both
     }
 
     // Erasing the account: it can no longer act, and the log reads null where its data was, in
-    // the identity domain and in the orders domain alike.
+    // the `identity` domain and in the `orders` domain alike.
     assert.deepEqual(await s.call("DELETE", "/accounts/a1", undefined, "a1"), [200, { erased: true }]);
     assert.equal((await s.call("GET", "/accounts/a1", undefined, "a1"))[0], 403);
     const events = await replay(s, (events) => events.some((e) => e.type === "AccountErased"));
     const registered = events.find((e) => e.type === "AccountRegistered")!;
     assert.deepEqual([(registered.data as any).email, registered.redacted.sort()], [null, ["email", "name", "passwordHash"]]);
     const rows = new Map<string, OrderRow>();
-    for (const e of events) project(rows, e);
+    for (const e of events) project(rows, e.data, e);
     assert.equal(rows.get("o1")!.confirmedTo, null);
     assert.match(s.kernel.verify(), /OK/);
   } finally {

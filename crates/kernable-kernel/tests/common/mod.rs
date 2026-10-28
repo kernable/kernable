@@ -2,23 +2,23 @@
 #![allow(dead_code)] // each test file uses a different subset
 
 use std::{
-    collections::HashMap,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicI64, Ordering},
     time::Duration,
 };
 
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
-        ChallengeResponse, Command, CommandResult, EventSchema, NewEvent, Register, Rejected,
-        Rejection, Result as WorkResult, Snapshot, SubmitRequest, Wait, WorkerMessage,
-        command_result::Outcome, command_service_client::CommandServiceClient,
+        ChallengeResponse, Command, CommandResult, EventSchema, Grant, NewEvent, Permission,
+        Register, Rejected, Rejection, Result as WorkResult, Snapshot, SubmitRequest, Wait,
+        WorkerMessage, command_result::Outcome, command_service_client::CommandServiceClient,
         kernel_message::Msg as Out, worker_gateway_client::WorkerGatewayClient,
         worker_message::Msg as In,
     },
     signing, transport,
 };
-use kernable_kernel::{Config, Kernel, serve};
+use kernable_kernel::{Config, GRANT_HEADER, Kernel, serve};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -28,6 +28,80 @@ pub fn key(seed: u8) -> SigningKey {
 
 pub fn id(key: &SigningKey) -> String {
     signing::key_id(&key.verifying_key())
+}
+
+/// The root key every test kernel trusts.
+pub fn root() -> SigningKey {
+    key(200)
+}
+
+/// A grant for `key` signed by [`root`], newer than every grant made before.
+pub fn grant(key: &SigningKey, permissions: &[(&str, &[&str])]) -> Grant {
+    successor_grant(key, permissions, "")
+}
+
+/// Like [`grant`], for a key that succeeds the key ID `succeeds` (empty: none).
+pub fn successor_grant(key: &SigningKey, permissions: &[(&str, &[&str])], succeeds: &str) -> Grant {
+    static ISSUED: AtomicI64 = AtomicI64::new(1_000);
+    grant_at(
+        key,
+        permissions,
+        succeeds,
+        ISSUED.fetch_add(1, Ordering::SeqCst),
+    )
+}
+
+fn grant_at(
+    key: &SigningKey,
+    permissions: &[(&str, &[&str])],
+    succeeds: &str,
+    issued_at: i64,
+) -> Grant {
+    let permissions = permissions
+        .iter()
+        .map(|(action, types)| Permission {
+            action: (*action).into(),
+            types: types.iter().map(|t| (*t).into()).collect(),
+        })
+        .collect();
+    signing::grant(&root(), &id(key), permissions, succeeds, issued_at)
+}
+
+/// What the test keys may do: client key 1 everything a client does, worker key 2 the
+/// `orders` domain, subscriber key 4 `orders.OrderPlaced` only, listener key 5 all events (and
+/// their vault values) and listener key 6 `orders.OrderPlaced` only. Issued at 1, so any
+/// [`grant`] replaces them.
+pub fn default_grant(key_: &SigningKey) -> Option<Grant> {
+    let permissions: &[(&str, &[&str])] = match key_.to_bytes()[0] {
+        1 => &[
+            ("submit", &["*"]),
+            ("subscribe", &["*"]),
+            ("query", &["*"]),
+            ("privileged", &["bypass_authorization"]),
+        ],
+        2 => &[("run", &["orders.*"])],
+        4 => &[("subscribe", &["orders.OrderPlaced"])],
+        5 => &[
+            ("listen", &["*"]),
+            ("answer", &["orders.*"]),
+            ("check", &["*"]),
+            ("vault_read", &["*"]),
+        ],
+        6 => &[("listen", &["orders.OrderPlaced"])],
+        _ => return None,
+    };
+    Some(grant_at(key_, permissions, "", 1))
+}
+
+/// `message` as a request that carries `key`'s default grant, as an SDK sends it.
+pub fn with_grant<T>(message: T, key: &SigningKey) -> tonic::Request<T> {
+    let mut request = tonic::Request::new(message);
+    if let Some(grant) = default_grant(key) {
+        use prost::Message;
+        let value = hex(&grant.encode_to_vec()).parse().unwrap();
+        request.metadata_mut().insert(GRANT_HEADER, value);
+    }
+    request
 }
 
 pub struct Env {
@@ -51,9 +125,7 @@ pub async fn start(name: &str) -> Env {
     start_with(name, 2_000).await
 }
 
-/// Starts a kernel that trusts client key 1 for everything, worker key 2 for the `orders`
-/// domain, subscriber key 4 for `orders.OrderPlaced` only, listener key 5 for all events and
-/// listener key 6 for `orders.OrderPlaced` only.
+/// Starts a kernel that trusts [`root`] and holds the [`default_grant`]s of the test keys.
 pub async fn start_with(name: &str, lease_ttl_ms: i64) -> Env {
     start_custom(name, |config, _| config.lease_ttl_ms = lease_ttl_ms).await
 }
@@ -66,6 +138,7 @@ pub async fn start_custom(name: &str, customize: impl FnOnce(&mut Config, &Path)
     std::fs::write(dir.join("kernel.key"), hex(kernel_key.as_bytes())).unwrap();
     let store = store_url(&dir);
     let mut config = Config {
+        roots: vec![id(&root())],
         store: store.clone(),
         listen: format!("unix:{}", dir.join("k.sock").display()),
         kernel_key: dir.join("kernel.key"),
@@ -76,23 +149,7 @@ pub async fn start_custom(name: &str, customize: impl FnOnce(&mut Config, &Path)
         query_timeout_ms: 1_000,
         middleware_timeout_ms: 1_000,
         drain_timeout_ms: 1_000,
-        clients: HashMap::from([(id(&key(1)), vec!["*".into()])]),
-        workers: HashMap::from([(id(&key(2)), vec!["orders.*".into()])]),
-        subscribers: HashMap::from([
-            (id(&key(1)), vec!["*".into()]),
-            (id(&key(4)), vec!["orders.OrderPlaced".into()]),
-        ]),
-        listeners: HashMap::from([
-            (id(&key(5)), vec!["*".into()]),
-            (id(&key(6)), vec!["orders.OrderPlaced".into()]),
-        ]),
-        queriers: HashMap::from([(id(&key(1)), vec!["*".into()])]),
-        query_handlers: HashMap::from([(id(&key(5)), vec!["orders.*".into()])]),
-        middlewares: HashMap::from([(id(&key(5)), vec!["*".into()])]),
-        privileged: HashMap::from([(id(&key(1)), vec!["bypass_authorization".into()])]),
         tls: None,
-        successors: HashMap::new(),
-        revoked: HashMap::new(),
         snapshots: format!("sqlite:{}", dir.join("snapshots.db").display()),
         vault: None,
         metrics_listen: None,
@@ -101,6 +158,9 @@ pub async fn start_custom(name: &str, customize: impl FnOnce(&mut Config, &Path)
     let addr = config.listen.clone();
     let snapshots = config.snapshots.clone();
     let kernel = Kernel::open(config).unwrap();
+    for seed in [1, 2, 4, 5, 6] {
+        kernel.grant(default_grant(&key(seed)).unwrap()).unwrap();
+    }
     tokio::spawn(serve(std::sync::Arc::clone(&kernel)));
     wait_for(&addr).await;
     Env {
@@ -275,7 +335,8 @@ pub async fn run_worker(addr: String, w: TestWorker) -> tonic::Status {
 
     let channel = channel(&addr, w.tls.as_ref()).await.unwrap();
     let mut client = WorkerGatewayClient::new(channel);
-    let mut inbound = match client.session(ReceiverStream::new(rx)).await {
+    let session = with_grant(ReceiverStream::new(rx), &w.claimed);
+    let mut inbound = match client.session(session).await {
         Ok(r) => r.into_inner(),
         Err(status) => return status,
     };
@@ -449,6 +510,7 @@ async fn submit_as(
     wait: Wait,
     listener: &str,
 ) -> Result<CommandResult, tonic::Status> {
+    let signer = client_key(&cmd);
     let request = SubmitRequest {
         vault: Vec::new(),
         listener: listener.into(),
@@ -456,8 +518,21 @@ async fn submit_as(
         command: Some(cmd),
         wait: wait.into(),
     };
+    let request = match signer {
+        Some(key) => with_grant(request, &key),
+        None => tonic::Request::new(request),
+    };
     let result = CommandServiceClient::new(channel).submit(request).await?;
     Ok(result.into_inner())
+}
+
+/// The test key that signed `cmd`, if it is one of the keys with a default grant.
+fn client_key(cmd: &Command) -> Option<SigningKey> {
+    let signer = &cmd.client_sig.as_ref()?.key_id;
+    [1, 2, 4, 5, 6]
+        .into_iter()
+        .map(key)
+        .find(|k| &id(k) == signer)
 }
 
 pub fn committed_versions(result: &CommandResult) -> Vec<u64> {
@@ -467,20 +542,13 @@ pub fn committed_versions(result: &CommandResult) -> Vec<u64> {
     }
 }
 
-/// Adds a vault (a SQLite file in `dir`, `vault.db`) to a test kernel's config. Listener key 5
-/// reads every vault value, listener key 6 none; worker key 2 may erase with `orders` events
-/// if `erasers` is set.
-pub fn with_vault(config: &mut Config, dir: &Path, erasers: bool) {
+/// Adds a vault (a SQLite file in `dir`, `vault.db`) to a test kernel's config. By the default
+/// grants, listener key 5 reads every vault value and listener key 6 none.
+pub fn with_vault(config: &mut Config, dir: &Path) {
     std::fs::write(dir.join("vault.key"), hex(&[6; 32])).unwrap();
     config.vault = Some(kernable_kernel::config::VaultConfig {
         store: format!("sqlite:{}", dir.join("vault.db").display()),
         key: dir.join("vault.key"),
-        readers: HashMap::from([(id(&key(5)), vec!["*".into()])]),
-        erasers: if erasers {
-            HashMap::from([(id(&key(2)), vec!["orders.*".into()])])
-        } else {
-            HashMap::new()
-        },
     });
 }
 

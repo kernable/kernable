@@ -2,11 +2,27 @@
 
 # kernable (CLI)
 
-The `kernable` command creates keys and certificates, checks and migrates stores, and submits commands for scripting.
+The `kernable` command runs the kernel, creates keys, grants and certificates, revokes keys, checks and migrates stores, and submits commands for scripting.
 
 ```text
 usage:
+  kernable start --root <root.pub> [<flag> <value>]...
+  kernable start --dev [<flag> <value>]...
+                                          runs the kernel, trusting grants of the root keys; SIGHUP
+                                          reads the kernel key again, SIGTERM or SIGINT finishes
+                                          running requests and stops (flags: kernable start --help);
+                                          --dev creates missing keys and a grant that lets app.key do
+                                          everything, and turns the vault on, for trying kernable out
   kernable keys new <name>                writes <name>.key (secret) and <name>.pub (key ID)
+  kernable grant <root.key> <name.pub> [--succeeds <old.pub>] <permission>...
+                                          writes <name>.grant, signed by the root key; a permission
+                                          is <action>=<type>,<type> or a bare type for every action
+                                          (actions: submit run subscribe listen query answer check
+                                          privileged vault_read vault_erase)
+  kernable revoke <addr> <root.key> <key.pub> <since>
+                                          revokes a key from <since> on (UTC, 2026-10-27T09:00:00Z),
+                                          for good; the kernel must be running (over TCP with
+                                          mutual TLS: KERNABLE_TLS_CA, _CERT and _KEY)
   kernable checkpoint <store> <kernel.key>  signs the current head of the event log (kernel stopped)
   kernable verify <store> <kernel.pub>...   checks hash chain, checkpoints and signatures, with every
                                           key the kernel ever had (store: sqlite:<path>, file:<path>
@@ -23,5 +39,6 @@ usage:
                                           back the store up first); 1 to 2 drops the snapshots, which
                                           workers rebuild into the snapshot store
   kernable submit <addr> <client.key> <tenant> <domain> <aggregate_type> <aggregate_id> <command_type> <payload>
-                                          signs and submits a command (addr: unix:/path or host:port)
+                                          signs and submits a command (addr: http://host:port, or
+                                          unix:/path on Unix; TLS as for revoke), with <client>.grant if it exists
 ```

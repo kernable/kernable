@@ -2,59 +2,75 @@
 
 kernable splits an application in two. The **kernel** stores commands and events, signs and checks every message, runs commands one at a time per aggregate and delivers events in order. **Your processes** hold the business logic: they decide what a command means and what to do with an event. They connect to the kernel over gRPC, in any language.
 
-## Build kernable
+## Install
 
-```sh
-git clone <kernable repository> kernable && cd kernable
-cargo build --release
-make py                                   # Python SDK: venv and generated stubs
-(cd sdks/typescript && npm install && npm pack --pack-destination /tmp)
-sdks/python/.venv/bin/pip wheel sdks/python -w /tmp --no-deps
-export PATH="$PWD/target/release:$PATH"   # kernable-kernel and kernable
+Install the kernel as in [Getting started](../getting-started#_1-install-the-kernel):
+
+::: code-group
+
+```sh [macOS, Linux]
+curl -fsSL https://kernable.com/install.sh | sh
 ```
 
-## Keys and the kernel's configuration
+```powershell [Windows]
+irm https://kernable.com/install.ps1 | iex
+```
 
-Every party signs what it sends with its own Ed25519 key, and the kernel's allowlists say which key may do what. In this tutorial one key, `app`, does everything; part 8 shows how to split it.
+:::
+
+## Start the kernel
 
 ```sh
 mkdir -p ~/shop && cd ~/shop
-kernable keys new kernel >/dev/null   # the kernel signs checkpoints of the event log
-kernable keys new vault >/dev/null    # encrypts personal data (part 7)
-APP=$(kernable keys new app)          # prints the key ID, the public half
 ```
 
-Save this as `kernable.toml`, then put your key ID in: `sed -i.bak "s/<app>/$APP/g" kernable.toml`.
+<<< @/examples/shop/dev.sh#start{sh}
 
-<<< @/examples/shop/kernable.dev.toml{toml}
+It listens on `http://127.0.0.1:7233`, for this machine only, and keeps the event log in `kernable.db` in the current directory. `--dev` creates the keys the shop uses, among them `app.key`, which may do everything here, and turns on the vault for personal data (part 7). Part 8 shows how keys and grants work in production. Leave the kernel running and continue in a second terminal.
 
-Start the kernel and leave it running:
+## Set up the project
 
-```sh
-kernable-kernel kernable.toml
-```
-
-## Connect
-
-Every process of the shop connects the same way, so put it in one place. It reads the kernel's address and keys from the environment (part 8) and otherwise uses the kernel you just started:
-
-::: code-group
-<<< @/examples/shop/ts/connect.ts [connect.ts]
-<<< @/examples/shop/py/connect.py [connect.py]
-:::
-
-Install the SDK next to it:
+Make the shop a project in the language you write it in, with the SDK:
 
 ::: code-group
 ```sh [TypeScript]
 cd ~/shop
 npm init -y >/dev/null && npm pkg set type=module
-npm install /tmp/kernable-sdk-0.1.0.tgz
+npm install @kernable/sdk
 ```
 ```sh [Python]
 cd ~/shop
-python3 -m venv .venv && .venv/bin/pip install -q /tmp/kernable-0.1.0-py3-none-any.whl
+python3 -m venv .venv && .venv/bin/pip install -q kernable
+```
+```sh [Rust]
+cd ~/shop
+cargo init -q --lib --name shop
+cargo add -q kernable serde_json scrypt
+cargo add -q serde --features derive
+cargo add -q tokio --features macros,rt-multi-thread
 ```
 :::
+
+In Rust, `domain.rs` (part 2) lives in `src/` and `src/lib.rs` shares it; every process and script is a binary in `src/bin/` (run with `cargo run -q --bin worker`):
+
+<<< @/examples/shop/rs/src/lib.rs
+
+## Connect
+
+Every process of the shop connects with a client and no options:
+
+::: code-group
+```ts [TypeScript]
+const kernable = new Kernable();
+```
+```python [Python]
+k = Kernable()
+```
+```rust [Rust]
+let kernable = Kernable::new(Options::default())?;
+```
+:::
+
+The SDK takes the kernel's address from `KERNABLE_URL`, the key from `KERNABLE_KEY` and the TLS files from `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`. Without them, it connects to the kernel you just started with `app.key` from the current directory, and the grant `--dev` put next to it. So the processes run unchanged in part 8, where each gets its own key and certificate. Options in the code take precedence over the environment.
 
 Next: [2. Aggregates and commands](./2-commands).

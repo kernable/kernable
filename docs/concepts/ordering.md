@@ -13,12 +13,7 @@ kernable gives you a strict order where it matters and parallelism where it does
 
 Events have a **global position**. Every listener receives them in that order, one at a time, and acknowledges what it has processed.
 
-```mermaid
-flowchart LR
-  E[event at position 42] --> A["order 0<br/>read models"]
-  A --> B["order 10<br/>reactors"]
-  B --> C["order 20<br/>later reactors"]
-```
+<FlowDiagram name="ordering" />
 
 - **Lower orders first.** A listener gets an event only once every listener with a lower order has acknowledged it. Read models default to 0 and reactors to 10, so a reactor's queries always see the event it reacts to. Listeners of the same order run in parallel.
 - **At least once.** After a crash a listener gets the events after its last acknowledgement again. Handlers must be idempotent: reactors submit with fixed command IDs, read models overwrite rather than add. A read model with a store writes data and position together and takes effect exactly once.

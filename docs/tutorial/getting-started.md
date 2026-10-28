@@ -1,104 +1,202 @@
 # Getting started
 
-In this guide you run a kernel, write business logic in TypeScript, read its events from Python, and see that a request reads its own writes. Then you run the reference application.
+In this guide you run a kernel, write business logic and a read model in TypeScript, Python or Rust, in the same language or two different ones, and see that a request reads its own writes. Then you run the reference application.
 
-You need Rust (stable), Node.js ≥ 22.18 and Python ≥ 3.10.
+You need Node.js ≥ 22.18 (step 5 submits from TypeScript), and Python ≥ 3.10 or Rust (stable) for the steps you write in them.
 
-## 1. Build the kernel and the SDK packages
+## 1. Install the kernel
 
-```sh
-git clone <this repository> kernable && cd kernable
-cargo build --release
-make py                                   # Python SDK: venv and generated stubs
-(cd sdks/typescript && npm install && npm pack --pack-destination /tmp)
-sdks/python/.venv/bin/pip wheel sdks/python -w /tmp --no-deps
-export PATH="$PWD/target/release:$PATH"
+::: code-group
+
+```sh [macOS, Linux]
+curl -fsSL https://kernable.com/install.sh | sh
 ```
 
-You now have the binaries `kernable-kernel` and `kernable`, plus `/tmp/kernable-sdk-0.1.0.tgz` and `/tmp/kernable-0.1.0-py3-none-any.whl`.
+```powershell [Windows]
+irm https://kernable.com/install.ps1 | iex
+```
 
-## 2. Configure and start a kernel
+:::
 
-Every party signs what it sends with an Ed25519 key. The kernel trusts a key only for what its allowlists grant.
+This puts `kernable` on your `PATH`: `kernable start` runs the kernel, the other commands create keys and grants and verify a log (`kernable` alone lists them).
+
+## 2. Start a kernel
 
 ```sh
-mkdir -p ~/kernable-demo && cd ~/kernable-demo
-kernable keys new kernel >/dev/null      # signs checkpoints
-APP=$(kernable keys new app)             # this demo uses one key for everything
-cat > kernable.toml <<TOML
-store = "sqlite:demo.db"                 # or "file:demo.log" or "memory:"
-listen = "unix:$PWD/k.sock"
-kernel_key = "kernel.key"
-
-[clients]                                # who may submit which commands
-"$APP" = ["*"]
-[workers]                                # who may run which domain's commands
-"$APP" = ["shop.*"]
-[listeners]                              # who may read which events
-"$APP" = ["*"]
-[queriers]                               # who may ask which queries
-"$APP" = ["*"]
-[query_handlers]                         # which read models may answer which queries
-"$APP" = ["shop.*"]
-TOML
-kernable-kernel kernable.toml
+mkdir kernable-demo
+cd kernable-demo
+kernable start --dev
 ```
+
+The kernel keeps its events in `kernable.db` in this directory and listens on `http://127.0.0.1:7233`, for this machine only. `--dev` also creates the keys this guide uses, among them `app.key`, which may do everything here. [Keys and grants](#keys-and-grants) below explains what that means.
 
 Leave the kernel running and continue in a second terminal.
 
-## 3. Business logic in TypeScript
+## 3. Business logic
 
-An aggregate belongs to a **domain**. `apply` folds events into state; `command` decides which events a command produces, or rejects it.
+A shopping cart: commands add items and check it out; events record what happened, and the cart's state is rebuilt from them. Pick TypeScript, Python or Rust; the tabs switch together.
 
-```sh
-cd ~/kernable-demo
-npm init -y >/dev/null && npm pkg set type=module && npm install /tmp/kernable-sdk-0.1.0.tgz
-```
+**1. Register the aggregate** with its initial state:
 
-Save this as `cart.ts` (Node ≥ 22.18 runs TypeScript directly):
+::: code-group
+<<< @/examples/getting-started/cart.ts#aggregate{ts} [TypeScript]
+<<< @/examples/getting-started/cart.py#aggregate{python} [Python]
+<<< @/examples/getting-started/cart.rs#aggregate{rust} [Rust]
+:::
 
-<<< @/examples/getting-started/cart.ts
+**2. Apply events** to the state:
 
-```sh
+::: code-group
+<<< @/examples/getting-started/cart.ts#events{ts} [TypeScript]
+<<< @/examples/getting-started/cart.py#events{python} [Python]
+<<< @/examples/getting-started/cart.rs#events{rust} [Rust]
+:::
+
+**3. Decide commands:** return events, or reject with `Rejected`:
+
+::: code-group
+<<< @/examples/getting-started/cart.ts#commands{ts} [TypeScript]
+<<< @/examples/getting-started/cart.py#commands{python} [Python]
+<<< @/examples/getting-started/cart.rs#commands{rust} [Rust]
+:::
+
+**4. Run a worker** that executes the cart's commands:
+
+::: code-group
+<<< @/examples/getting-started/cart.ts#worker{ts} [TypeScript]
+<<< @/examples/getting-started/cart.py#worker{python} [Python]
+<<< @/examples/getting-started/cart.rs#worker{rust} [Rust]
+:::
+
+In a second terminal, in `kernable-demo`, set up a project, save the whole file and run it. Leave it running.
+
+::: code-group
+
+```sh [TypeScript]
+npm init -y
+npm pkg set type=module
+npm install @kernable/sdk
+# save cart.ts, then (Node ≥ 22.18 runs TypeScript directly):
 node cart.ts
 ```
 
-The worker connects to the kernel and waits for commands. Leave it running.
-
-## 4. A read model in Python
-
-A read model is a **listener** with an order. Read models default to order 0. Reactors default to order 10, so they run after the read models they query.
-
-This one keeps its state in memory and reads every event again when it starts. With `store="sqlite:carts.db"` it would keep its state in a file and continue where it left off.
-
-A read model's state is private. Everything else reads it through **queries**, which always go through the kernel, so signatures and allowlists apply to every read.
-
-```sh
-cd ~/kernable-demo
-python3 -m venv py && py/bin/pip install -q /tmp/kernable-0.1.0-py3-none-any.whl
+```sh [Python]
+python3 -m venv py                # Windows: python -m venv py
+py/bin/pip install kernable       # Windows: py\Scripts\pip install kernable
+# save cart.py, then:
+py/bin/python cart.py             # Windows: py\Scripts\python cart.py
 ```
 
-Save this as `carts.py`:
-
-<<< @/examples/getting-started/carts.py
-
-```sh
-py/bin/python carts.py
+```sh [Rust]
+cargo init --name demo
+cargo add kernable serde_json
+cargo add serde --features derive
+cargo add tokio --features macros,rt-multi-thread
+# save src/bin/cart.rs, then:
+cargo run --bin cart
 ```
+
+:::
+
+:::: details The whole file
+::: code-group
+<<< @/examples/getting-started/cart.ts#file{ts} [cart.ts]
+<<< @/examples/getting-started/cart.py#file{python} [cart.py]
+<<< @/examples/getting-started/cart.rs#file{rust} [src/bin/cart.rs]
+:::
+::::
+
+More on aggregates and their handlers: [Event sourcing](../concepts/event-sourcing).
+
+## 4. A read model
+
+A read model is a **listener**: it builds its own view from the events and answers **queries** from it. Queries always go through the kernel, so signatures and grants apply to every read. The read model doesn't have to be in the worker's language: pick any tab, independent of step 3.
+
+**1. Register the read model** on the domain, like the aggregate: its event and query types are then the domain's (`ItemAdded`, `GetCart`); another domain's would be qualified (`billing.InvoicePaid`). It keeps its rows in memory and reads every event again when it starts; with a store (`sqlite:carts.db`) it would keep them in a file and continue where it left off:
+
+::: code-group
+<<< @/examples/getting-started/carts.ts#register{ts} [TypeScript]
+<<< @/examples/getting-started/carts.py#register{python} [Python]
+<<< @/examples/getting-started/carts.rs#register{rust} [Rust]
+:::
+
+**2. Handle events** and update the rows:
+
+::: code-group
+<<< @/examples/getting-started/carts.ts#events{ts} [TypeScript]
+<<< @/examples/getting-started/carts.py#events{python} [Python]
+<<< @/examples/getting-started/carts.rs#events{rust} [Rust]
+:::
+
+**3. Answer queries** from the rows:
+
+::: code-group
+<<< @/examples/getting-started/carts.ts#queries{ts} [TypeScript]
+<<< @/examples/getting-started/carts.py#queries{python} [Python]
+<<< @/examples/getting-started/carts.rs#queries{rust} [Rust]
+:::
+
+**4. Run it** through the connection, as the worker runs the aggregate. Read models run before reactors (order 0 and 10), so reactors can query them:
+
+::: code-group
+<<< @/examples/getting-started/carts.ts#run{ts} [TypeScript]
+<<< @/examples/getting-started/carts.py#run{python} [Python]
+<<< @/examples/getting-started/carts.rs#run{rust} [Rust]
+:::
+
+In a third terminal, in `kernable-demo`, set up the language as in step 3 if it is new to you, save the whole file and run it:
+
+::: code-group
+
+```sh [TypeScript]
+node carts.ts
+```
+
+```sh [Python]
+py/bin/python carts.py            # Windows: py\Scripts\python carts.py
+```
+
+```sh [Rust]
+cargo run --bin carts             # saved as src/bin/carts.rs
+```
+
+:::
+
+:::: details The whole file
+::: code-group
+<<< @/examples/getting-started/carts.ts#file{ts} [carts.ts]
+<<< @/examples/getting-started/carts.py#file{python} [carts.py]
+<<< @/examples/getting-started/carts.rs#file{rust} [src/bin/carts.rs]
+:::
+::::
 
 ## 5. Submit and read your own writes
 
-Save this as `submit.ts`:
+A client submits commands and asks the read model. A command names the aggregate it goes to by domain, aggregate type and ID: `shop`, `cart`, `c1`. The comments show the output; the order ID will differ.
 
-<<< @/examples/getting-started/submit.ts
+::: code-group
+<<< @/examples/getting-started/submit.ts{ts} [submit.ts]
+<<< @/examples/getting-started/submit.py{python} [submit.py]
+<<< @/examples/getting-started/submit.rs{rust} [src/bin/submit.rs]
+:::
 
-```sh
+In a fourth terminal, in `kernable-demo`, save the file and run it:
+
+::: code-group
+
+```sh [TypeScript]
 node submit.ts
 ```
 
-The output looks like this (the order ID will differ):
+```sh [Python]
+py/bin/python submit.py           # Windows: py\Scripts\python submit.py
+```
 
-<<< @/examples/getting-started/submit.out{text}
+```sh [Rust]
+cargo run --bin submit            # saved as src/bin/submit.rs
+```
+
+:::
 
 ## 6. The reference application
 
@@ -108,12 +206,26 @@ The output looks like this (the order ID will differ):
 make check            # all tests, including examples/shop/shop.test.ts
 ```
 
+## Keys and grants
+
+Every process signs what it sends with its own Ed25519 key, so the kernel and `kernable verify` know who sent every command and event. A signature proves who sent a message, but anyone can make a key. So the kernel trusts one **root key**, and the root key **grants** each key what it may do: which commands it may submit or run, which events it may read, which queries it may ask or answer.
+
+`kernable start --dev` made a root key, `app.key` and a grant that lets `app` do everything; the SDKs send `app.grant` with every request signed by `app.key`. In production, every service gets its own key and only the grant it needs, and the root key stays offline:
+
+```sh
+kernable keys new root && kernable keys new kernel && kernable keys new orders
+kernable grant root.key orders.pub 'run=shop.*' 'listen=shop.*'   # writes orders.grant
+kernable start --root root.pub
+```
+
+[Part 8 of the shop tutorial](./shop/8-operate) sets this up for a whole application; [Trust](../concepts/trust) explains the model.
+
 ## Where to go next
 
-- The [reference](../reference/) covers every [configuration key](../reference/configuration), the [CLI](../reference/cli) (also `kernable certs new` for mutual TLS), the SDKs, [metrics](../reference/metrics), the [protocol](../reference/protocol) and the exact [signed byte layouts](../reference/signing), with test vectors to write an SDK for another language.
+- The [reference](../reference/) covers every [kernel flag](../reference/configuration), the [CLI](../reference/cli) (also `kernable certs new` for mutual TLS), the SDKs, [metrics](../reference/metrics), the [protocol](../reference/protocol) and the exact [signed byte layouts](../reference/signing), with test vectors to write an SDK for another language.
 - Rules worth knowing:
   - **Command handlers must be deterministic.** Use `ctx.now()` and `ctx.id()`.
   - **Reactors submit with a fixed command ID**, so a redelivered event is harmless. Their submits settle on the listeners before them (the read models), not on themselves: a listener handles one event at a time and never waits for itself. The kernel refuses at once what would wait for the sending listener, such as a query to its own read model.
   - **A domain only writes its own events.** It reacts to other domains through listeners.
   - **Personal data and secrets go to the vault**, never into the signed log: mark the fields on the domain (`personal`, `secret`) and erase a person with an erasing event (`erases`); see `EventSchema` and `CommandSchema` in the [TypeScript SDK](../reference/sdk-typescript).
-  - **Events are never changed.** To change an event's payload, raise its version and add an upcast from the old one: `shop.event("ItemAdded", 2).upcast(1, (d) => ({ ...d, count: d.qty }))`. Listeners in other processes and languages need the same definition (`use(shop)`); a listener that meets an unknown version stops until it is updated.
+  - **Events are never changed.** To change an event's payload, raise its version and add an upcast from the old one: `shopDomain.event("ItemAdded", 2).upcast(1, (d) => ({ ...d, count: d.qty }))`. Listeners in other processes and languages need the same definition (`use(shopDomain)`); a listener that meets an unknown version stops until it is updated.

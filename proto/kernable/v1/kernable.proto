@@ -16,9 +16,12 @@ message Signature {
   bytes sig = 2; // Ed25519
 }
 
-// Names: a domain is a lowercase identifier (`orders`). Command, event, query and aggregate types
-// are unique within their domain; `domain.Type` (`orders.PlaceOrder`) is the qualified name used
-// in registrations, subscriptions and allowlists, where `orders.*` stands for a whole domain.
+// Names: a domain is an identifier of letters, digits, `-` and `_` that starts with a letter;
+// by convention it is lowercase (`orders`), like aggregate types, while command, event and query
+// types are capitalized (`PlaceOrder`); both cases are valid, and names are case-sensitive.
+// Command, event, query and aggregate types are unique within their domain; `domain.Type`
+// (`orders.PlaceOrder`) is the qualified name used in registrations, subscriptions and grants,
+// where `orders.*` stands for a whole domain.
 
 message Command {
   string command_id = 1;
@@ -50,7 +53,7 @@ message RequestContext {
   string correlation_id = 8; // shared by everything one original request causes
   string causation_id = 9;   // the command that caused this one, if any
   string trace_id = 10;
-  // Privileged switch: only keys listed in the kernel's [privileged] table may set it.
+  // Privileged switch: only keys granted `privileged` for it may set it.
   bool bypass_authorization = 11;
   repeated Attribute attributes = 12; // business data only, never security decisions
 }
@@ -114,6 +117,44 @@ message VaultValue {
   bytes value = 5;    // the JSON encoding of the field
 }
 
+// ---- trust ----
+
+// The kernel trusts root keys only (`kernable start --root`). A root key grants a key what it
+// may do; the key's process presents the grant with every request, in the gRPC metadata entry
+// `kernable-grant` (the hex-encoded Grant). Signed by a root key over kernable.v1.grant, see
+// SIGNING.md. The kernel keeps the newest grant per key (by issued_at).
+message Grant {
+  string key_id = 1;                   // the grantee
+  repeated Permission permissions = 2;
+  string succeeds = 3;                 // a listener registered with this key may move to key_id
+  int64 issued_at = 4;                 // ms since epoch
+  Signature root_sig = 5;
+}
+
+// Actions: submit, run, subscribe, listen, query, answer, check, privileged, vault_read,
+// vault_erase, or `*` for all. Types: `*`, `domain.*` or `domain.Type` (for privileged: the
+// switch, `bypass_authorization`).
+message Permission {
+  string action = 1;
+  repeated string types = 2;
+}
+
+service TrustService {
+  // Revokes a key from `since` on, for good. Signed by a root key over kernable.v1.revoke and
+  // valid 60 s around issued_at. The kernel stores it signed with its own key (RevocationRecord).
+  rpc Revoke(RevokeRequest) returns (RevokeResponse);
+}
+
+message RevokeRequest {
+  string key_id = 1;
+  int64 since = 2;     // ms since epoch
+  int64 issued_at = 3; // ms since epoch
+  Signature root_sig = 4;
+  uint32 protocol = 5;
+}
+
+message RevokeResponse {}
+
 // ---- clients ----
 
 service CommandService {
@@ -169,7 +210,7 @@ service EventService {
 }
 
 // Streams stored events with a global position after `after_position`: first the backlog,
-// then live. Signed by a key in the kernel's `subscribers` allowlist.
+// then live. Signed by a key granted `subscribe` for the requested types.
 message SubscribeRequest {
   uint64 after_position = 1;
   repeated string event_types = 2; // qualified (`orders.OrderPlaced`, `orders.*`); empty = all the key may read
@@ -181,7 +222,7 @@ message SubscribeRequest {
 // ---- queries ----
 
 // Every query goes through the kernel, also between parts of one process, so that signatures,
-// allowlists and the request context always apply. Read models answer them (see Hello).
+// grants and the request context always apply. Read models answer them (see Hello).
 service QueryService {
   rpc Query(QueryRequest) returns (QueryResult);
 }
@@ -270,7 +311,7 @@ message MiddlewareCall {
     Command command = 2;
     QueryRequest query = 3;
   }
-  repeated VaultValue vault = 4; // the command's values, if the key may read them ([vault] readers)
+  repeated VaultValue vault = 4; // the command's values, if the key may read them (granted vault_read)
 }
 
 message Verdict {
@@ -306,7 +347,7 @@ message Ready {
 message Batch {
   repeated Event events = 1; // only the listener's event types
   uint64 up_to = 2;          // last position the batch covers; acknowledge it once processed
-  // The values the events refer to, if the key may read them ([vault] readers) and they are not
+  // The values the events refer to, if the key may read them (granted vault_read) and they are not
   // erased; a missing value reads as null.
   repeated VaultValue vault = 3;
 }

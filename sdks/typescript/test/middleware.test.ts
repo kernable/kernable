@@ -13,25 +13,26 @@ test("a middleware checks commands and queries from its own state and fails clos
   const kernable = new Kernable({ url: kernel.url, key: kernel.appKey });
   const as = (senderIdentity: string) => ({ context: { senderIdentity } });
 
-  const ticket = domain("support").aggregate("Ticket", { open: false })
+  const support = domain("support");
+  const ticket = support.aggregate("Ticket", { open: false })
     .apply("Opened", () => ({ open: true }))
     .command("Open", () => [{ type: "Opened" }])
-    .command("Ban", (_s, d: { identity: string }) => [{ type: "Banned", data: d }]);
+    .command("Ban", (_s, data: { identity: string }) => [{ type: "Banned", data }]);
   const tickets = new Set<string>();
-  const model = kernable.readModel("tickets")
-    .on("support.Opened", (e) => void tickets.add(e.aggregateId))
-    .query("support.CountTickets", () => tickets.size);
+  const model = kernable.listener(support.readModel("tickets")
+    .on("Opened", (_data, evt) => void tickets.add(evt.aggregateId))
+    .query("CountTickets", () => tickets.size));
 
   // Refuses banned identities, from the events it has processed.
   const banned = new Set<string>();
   const checked: Check[] = [];
-  const guard = kernable.readModel("guard")
-    .on("support.Banned", (e) => void banned.add((e.data as { identity: string }).identity))
+  const guard = kernable.listener(support.readModel("guard")
+    .on("Banned", (data: { identity: string }) => void banned.add(data.identity))
     .middleware({ types: ["support.*"] }, (check) => {
       checked.push(check);
       if (banned.has(check.request.senderIdentity ?? "")) throw new Rejected("banned", "forbidden");
       if (check.type === "Crash") throw new Error("boom");
-    });
+    }));
 
   const worker = kernable.worker(ticket);
   let running = [worker.run({ reconnectMs: 100 }), model.run(), guard.run()];

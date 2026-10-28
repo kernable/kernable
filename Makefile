@@ -1,12 +1,12 @@
-.PHONY: check py check-packages torture fuzz docs
-check: py
+.PHONY: check prune py check-packages torture fuzz docs
+check: prune py
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets -- -D warnings
-	cargo clippy -p kernable-kernel --all-targets --features crash-points -- -D warnings
+	CARGO_TARGET_DIR=target/crash cargo clippy -p kernable-kernel --all-targets --features crash-points -- -D warnings
 	cargo test --workspace
-	KERNABLE_TEST_STORE=file cargo test -p kernable-kernel
-	cargo test -p kernable-kernel --features crash-points --test crashes
-	KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --features crash-points --test crashes
+	KERNABLE_TEST_STORE=file cargo test --workspace --lib --tests
+	CARGO_TARGET_DIR=target/crash cargo test -p kernable-kernel --features crash-points --test crashes
+	CARGO_TARGET_DIR=target/crash KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --features crash-points --test crashes
 	cargo build --workspace
 	cd sdks/typescript && npm install --no-audit --no-fund --silent && npm run -s check \
 		&& KERNABLE_TEST_STORE=file npm run -s check
@@ -32,8 +32,8 @@ check-packages:
 ROUNDS ?= 20
 CASES ?= 10000
 torture:
-	KERNABLE_CRASH_ROUNDS=$(ROUNDS) cargo test -p kernable-kernel --features crash-points --test crashes
-	KERNABLE_CRASH_ROUNDS=$(ROUNDS) KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --features crash-points --test crashes
+	CARGO_TARGET_DIR=target/crash KERNABLE_CRASH_ROUNDS=$(ROUNDS) cargo test -p kernable-kernel --features crash-points --test crashes
+	CARGO_TARGET_DIR=target/crash KERNABLE_CRASH_ROUNDS=$(ROUNDS) KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --features crash-points --test crashes
 	PROPTEST_CASES=$(CASES) cargo test -p kernable-store --test props
 	PROPTEST_CASES=$(CASES) cargo test -p kernable-kernel --test props
 	PROPTEST_CASES=$(CASES) KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --test props
@@ -46,3 +46,11 @@ fuzz:
 		mkdir -p corpus/$$t seeds/$$t && \
 		cargo +nightly fuzz run $$t corpus/$$t seeds/$$t -- -max_total_time=$(FUZZ_SECONDS) || exit 1; \
 	done
+
+# Cargo never removes outdated build artifacts. A fresh build has about 40,000 files in
+# target/debug/deps; once it has grown far past that, every test binary starts slowly (the
+# directory is on their library search path), so start over.
+PRUNE_FILES ?= 150000
+prune:
+	@n=$$(ls -f target/debug/deps 2>/dev/null | wc -l | tr -d " "); \
+	if [ "$$n" -gt $(PRUNE_FILES) ]; then echo "target/debug/deps has $$n files: cargo clean"; cargo clean; fi

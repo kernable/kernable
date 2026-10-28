@@ -6,13 +6,18 @@ export default withMermaid(
     title: "kernable",
     description: "Event sourcing and CQRS with a Rust kernel and business logic in any language",
     cleanUrls: true,
-    head: [["link", { rel: "icon", type: "image/svg+xml", href: "/favicon.svg" }]],
+    head: [
+      ["link", { rel: "icon", type: "image/png", href: "/favicon.png" }],
+      ["link", { rel: "apple-touch-icon", href: "/apple-touch-icon.png" }],
+    ],
     lastUpdated: false,
     srcExclude: ["examples/**", "scripts/**"],
     // The mermaid plugin pulls in CommonJS modules that the dev server must pre-bundle, or the
     // page stays blank in `make docs` (the production build is not affected).
     vite: { optimizeDeps: { include: ["mermaid", "fastdom"] } },
     themeConfig: {
+      logo: { src: "/logo-nav.png", alt: "kernable" },
+      siteTitle: false,
       search: { provider: "local" },
       nav: [
         { text: "Tutorials", link: "/tutorial/" },
@@ -77,10 +82,11 @@ export default withMermaid(
           text: "Reference",
           items: [
             { text: "Overview", link: "/reference/" },
-            { text: "kernable.toml", link: "/reference/configuration" },
+            { text: "kernable start", link: "/reference/configuration" },
             { text: "CLI", link: "/reference/cli" },
             { text: "TypeScript SDK", link: "/reference/sdk-typescript" },
             { text: "Python SDK", link: "/reference/sdk-python" },
+            { text: "Rust SDK", link: "/reference/sdk-rust" },
             { text: "Protocol", link: "/reference/protocol" },
             { text: "Signatures", link: "/reference/signing" },
             { text: "Errors", link: "/reference/errors" },

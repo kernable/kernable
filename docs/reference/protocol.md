@@ -52,7 +52,7 @@ Who sends a request and in which context. Signed by the client together with the
 | `correlation_id` |  `string` | 8 | shared by everything one original request causes |
 | `causation_id` |  `string` | 9 | the command that caused this one, if any |
 | `trace_id` |  `string` | 10 |  |
-| `bypass_authorization` |  `bool` | 11 | Privileged switch: only keys listed in the kernel's [privileged] table may set it. |
+| `bypass_authorization` |  `bool` | 11 | Privileged switch: only keys granted `privileged` for it may set it. |
 | `attributes` | repeated `Attribute` | 12 | business data only, never security decisions |
 
 ### Attribute
@@ -120,10 +120,49 @@ A personal or secret value that a command or event keeps outside the signed log.
 | `salt` |  `bytes` | 4 | 16 random bytes, only on writes |
 | `value` |  `bytes` | 5 | the JSON encoding of the field |
 
-### CommandService
+### Grant
+
+The kernel trusts root keys only (`kernable start --root`). A root key grants a key what it may do; the key's process presents the grant with every request, in the gRPC metadata entry `kernable-grant` (the hex-encoded Grant). Signed by a root key over kernable.v1.grant, see SIGNING.md. The kernel keeps the newest grant per key (by issued_at).
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `key_id` |  `string` | 1 | the grantee |
+| `permissions` | repeated `Permission` | 2 |  |
+| `succeeds` |  `string` | 3 | a listener registered with this key may move to key_id |
+| `issued_at` |  `int64` | 4 | ms since epoch |
+| `root_sig` |  `Signature` | 5 |  |
+
+### Permission
+
+Actions: submit, run, subscribe, listen, query, answer, check, privileged, vault_read, vault_erase, or `*` for all. Types: `*`, `domain.*` or `domain.Type` (for privileged: the switch, `bypass_authorization`).
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `action` |  `string` | 1 |  |
+| `types` | repeated `string` | 2 |  |
+
+### TrustService
 
 
 | RPC | Request | Response | Description |
+|---|---|---|---|
+| `Revoke` | `RevokeRequest` | `RevokeResponse` | Revokes a key from `since` on, for good. Signed by a root key over kernable.v1.revoke and valid 60 s around issued_at. The kernel stores it signed with its own key (RevocationRecord). |
+
+### RevokeRequest
+
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `key_id` |  `string` | 1 |  |
+| `since` |  `int64` | 2 | ms since epoch |
+| `issued_at` |  `int64` | 3 | ms since epoch |
+| `root_sig` |  `Signature` | 4 |  |
+| `protocol` |  `uint32` | 5 |  |
+
+### RevokeResponse
+
+
+| Field | Type | Number | Description |
 |---|---|---|---|
 | `Submit` | `SubmitRequest` | `CommandResult` |  |
 
@@ -177,7 +216,7 @@ How long Submit waits before it responds.
 
 ### SubscribeRequest
 
-Streams stored events with a global position after `after_position`: first the backlog, then live. Signed by a key in the kernel's `subscribers` allowlist.
+Streams stored events with a global position after `after_position`: first the backlog, then live. Signed by a key granted `subscribe` for the requested types.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
@@ -189,7 +228,7 @@ Streams stored events with a global position after `after_position`: first the b
 
 ### QueryService
 
-Every query goes through the kernel, also between parts of one process, so that signatures, allowlists and the request context always apply. Read models answer them (see Hello).
+Every query goes through the kernel, also between parts of one process, so that signatures, grants and the request context always apply. Read models answer them (see Hello).
 
 | RPC | Request | Response | Description |
 |---|---|---|---|
@@ -277,7 +316,7 @@ A request for a middleware to check: pass it with an empty verdict or reject it.
 | `call_id` |  `string` | 1 |  |
 | `command` |  `Command` | 2 |  |
 | `query` |  `QueryRequest` | 3 |  |
-| `vault` | repeated `VaultValue` | 4 | the command's values, if the key may read them ([vault] readers) |
+| `vault` | repeated `VaultValue` | 4 | the command's values, if the key may read them (granted vault_read) |
 
 ### Verdict
 
@@ -324,7 +363,7 @@ A request for a middleware to check: pass it with an empty verdict or reject it.
 |---|---|---|---|
 | `events` | repeated `Event` | 1 | only the listener's event types |
 | `up_to` |  `uint64` | 2 | last position the batch covers; acknowledge it once processed |
-| `vault` | repeated `VaultValue` | 3 | The values the events refer to, if the key may read them ([vault] readers) and they are not erased; a missing value reads as null. |
+| `vault` | repeated `VaultValue` | 3 | The values the events refer to, if the key may read them (granted vault_read) and they are not erased; a missing value reads as null. |
 
 ### Ack
 

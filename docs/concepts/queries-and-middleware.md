@@ -4,7 +4,7 @@
 
 A read model's state is private to its process. Every other process reads it with a **query**, sent to the kernel like a command:
 
-- it is signed and allowed per key (`[queriers]`, `[query_handlers]`);
+- it is signed, and the key's grant must allow it (`query` to ask, `answer` to answer);
 - it passes the middleware chain, exactly like a command;
 - the kernel routes it to a read model that answers its type, **in order with that read model's events**: the answer reflects every event the read model was sent before the query.
 
@@ -23,7 +23,7 @@ flowchart LR
   M2 -- rejected --> X
 ```
 
-- **Registered in code.** A listener declares the types it checks and its order; `[middlewares]` allows its key. Negative orders are reserved for kernable.
+- **Registered in code.** A listener declares the types it checks and its order; its key needs a grant for `check` on those types. Negative orders are reserved for kernable.
 - **A chain.** Middlewares run by order, then by name; the first rejection refuses the request. A refused command is never stored.
 - **Fails closed.** The kernel keeps the registration. While a middleware is away, also right after a kernel restart, every request it covers is refused with `UNAVAILABLE`. Only `kernable listeners remove` unregisters it.
 - **Never stale.** After a reconnect, a middleware is asked only once it has processed every event committed before; checks travel in order with its events.

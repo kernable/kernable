@@ -1,8 +1,8 @@
 """Part 4: the reactor confirms a submitted order."""
 
-from connect import connect
+from kernable import Kernable
 
-k = connect()
+k = Kernable()
 
 
 def send(aggregate_type, aggregate_id, type, data=None):
@@ -10,10 +10,10 @@ def send(aggregate_type, aggregate_id, type, data=None):
 
 
 # region try
-send("Customer", "c1", "Register", {"email": "ann@example.com", "name": "Ann"})
-send("Order", "o1", "Place", {"customerId": "c1"})
-send("Order", "o1", "AddItem", {"sku": "apple", "qty": 2})
-send("Order", "o1", "Submit")
+send("customer", "c1", "Register", {"email": "ann@example.com", "name": "Ann"})
+send("order", "o1", "Place", {"customerId": "c1"})
+send("order", "o1", "AddItem", {"sku": "apple", "qty": 2})
+send("order", "o1", "Submit")
 # The submit settled after the reactor, which confirmed the order before it returned.
 print(k.query("shop", "GetOrder", {"id": "o1"}))
 # endregion try

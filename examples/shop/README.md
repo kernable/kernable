@@ -4,8 +4,8 @@ Two domains in two languages on one kernel, over mutual TLS. The documentation's
 
 | Process | Language | Contains |
 |---|---|---|
-| `identity/identity.py` | Python | `Account` aggregate and worker; `accounts` read model in a store (`accounts.db`), answering `identity.GetAccount`; `rbac` middleware for both domains |
-| `orders/service.ts` | TypeScript | `Order` aggregate and worker; `orders` read model answering `orders.GetOrder`; `confirmations` reactor; the HTTP API |
+| `identity/identity.py` | Python | `account` aggregate and worker; `accounts` read model in a store (`accounts.db`), answering `identity.GetAccount`; `rbac` middleware for both domains |
+| `orders/service.ts` | TypeScript | `order` aggregate and worker; `orders` read model answering `orders.GetOrder`; `confirmations` reactor; the HTTP API |
 
 - **Order and settling.** The reactor reacts to `OrderSubmitted`, looks up the customer's email in the other domain's `accounts` read model, and records `ConfirmationSent`. Read models run before reactors, and every `POST` answers with the read model's state: a submit returns once every listener has processed its events.
 - **Every read is a query through the kernel**, also the API's reads of the read model in its own process, so `rbac` checks every read.

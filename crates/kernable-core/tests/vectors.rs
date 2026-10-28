@@ -3,7 +3,7 @@
 
 use ed25519_dalek::SigningKey;
 use kernable_core::{
-    proto::{Attribute, Command, Event, NewEvent, Rejected, RequestContext},
+    proto::{Attribute, Command, Event, NewEvent, Permission, Rejected, RequestContext},
     signing::{self, GENESIS},
 };
 use serde_json::{Value, json};
@@ -181,6 +181,24 @@ fn vectors() -> Value {
         "revocation": entry(
             json!({"key_id": signing::key_id(&key.verifying_key()), "since": 1_700_000_000_000i64, "created_at": 1_700_000_100_000i64}),
             signing::revocation_message(&signing::key_id(&key.verifying_key()), 1_700_000_000_000, 1_700_000_100_000),
+        ),
+        "grant": entry(
+            json!({"key_id": "8b84", "succeeds": "1f0a", "issued_at": 1_700_000_000_000i64,
+                   "permissions": [{"action": "submit", "types": ["orders.*", "identity.Register"]}, {"action": "listen", "types": ["*"]}]}),
+            signing::grant_message(&signing::grant(
+                &key,
+                "8b84",
+                vec![
+                    Permission { action: "submit".into(), types: vec!["orders.*".into(), "identity.Register".into()] },
+                    Permission { action: "listen".into(), types: vec!["*".into()] },
+                ],
+                "1f0a",
+                1_700_000_000_000,
+            )),
+        ),
+        "revoke": entry(
+            json!({"key_id": "8b84", "since": 1_700_000_000_000i64, "issued_at": 1_700_000_100_000i64}),
+            signing::revoke_message("8b84", 1_700_000_000_000, 1_700_000_100_000),
         ),
         "checkpoint": entry(
             json!({"global_position": 42, "chain_hash_hex": hex::encode(chain_hash), "created_at": 1_700_000_000_000i64}),

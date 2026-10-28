@@ -1,252 +1,259 @@
-use std::{
-    collections::HashMap,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{collections::HashMap, path::PathBuf};
 
-use serde::Deserialize;
+/// The flags of `kernable start`: flag, environment variable, default, description. A flag
+/// wins over its variable; relative paths resolve against the working directory.
+pub const FLAGS: &[(&str, &str, &str, &str)] = &[
+    (
+        "--root",
+        "KERNABLE_ROOT",
+        "",
+        "A root key: its key ID or its `.pub` file. Grants and revocations must be signed by a root key. Repeat the flag for several roots (the variable takes them comma-separated); at least one is needed.",
+    ),
+    (
+        "--store",
+        "KERNABLE_STORE",
+        "sqlite:kernable.db",
+        "The event store: `sqlite:<path>` (or a bare path), `file:<path>` or `memory:`.",
+    ),
+    (
+        "--listen",
+        "KERNABLE_LISTEN",
+        "127.0.0.1:7233",
+        "Where the kernel listens: `host:port`, or `unix:<path>` on Unix. Plain TCP only on a loopback address; any other address needs mutual TLS (`--tls-cert`, `--tls-key`, `--tls-client-ca`).",
+    ),
+    (
+        "--kernel-key",
+        "KERNABLE_KERNEL_KEY",
+        "kernel.key",
+        "The kernel's own signing key (`kernable keys new kernel`): it signs checkpoints and revocations. Read again on SIGHUP (Unix).",
+    ),
+    (
+        "--snapshots",
+        "KERNABLE_SNAPSHOTS",
+        "memory:",
+        "Where snapshots live: `sqlite:<path>` or `memory:` (rebuilt after a restart).",
+    ),
+    (
+        "--vault-key",
+        "KERNABLE_VAULT_KEY",
+        "",
+        "A file with 32 random bytes, hex encoded (`kernable keys new vault` writes one). Without it the kernel has no vault, and commands and events that refer to it are refused.",
+    ),
+    (
+        "--vault-store",
+        "KERNABLE_VAULT_STORE",
+        "sqlite:vault.db",
+        "Where the vault keeps personal and secret values: `sqlite:<path>` or `memory:`.",
+    ),
+    (
+        "--tls-cert",
+        "KERNABLE_KERNEL_TLS_CERT",
+        "",
+        "Mutual TLS, TCP only: the kernel's certificate (PEM; `kernable certs new` writes development ones). Needs `--tls-key` and `--tls-client-ca` too.",
+    ),
+    (
+        "--tls-key",
+        "KERNABLE_KERNEL_TLS_KEY",
+        "",
+        "The kernel certificate's private key (PEM).",
+    ),
+    (
+        "--tls-client-ca",
+        "KERNABLE_TLS_CLIENT_CA",
+        "",
+        "The CA that signs every client's certificate (PEM).",
+    ),
+    (
+        "--metrics-listen",
+        "KERNABLE_METRICS_LISTEN",
+        "",
+        "Address for Prometheus metrics (`GET /metrics`), `GET /health` and `GET /ready`; off when empty.",
+    ),
+    (
+        "--lease-ttl-ms",
+        "KERNABLE_LEASE_TTL_MS",
+        "10000",
+        "How long a worker may run a command before it goes to another worker.",
+    ),
+    (
+        "--checkpoint-interval-ms",
+        "KERNABLE_CHECKPOINT_INTERVAL_MS",
+        "5000",
+        "How often the kernel signs a checkpoint of the hash chain.",
+    ),
+    (
+        "--submit-timeout-ms",
+        "KERNABLE_SUBMIT_TIMEOUT_MS",
+        "30000",
+        "How long a submit waits for its command to complete before it answers with an error (the command still runs; resubmit it to get the result).",
+    ),
+    (
+        "--settle-timeout-ms",
+        "KERNABLE_SETTLE_TIMEOUT_MS",
+        "5000",
+        "How long a settling submit waits for listeners after the commit.",
+    ),
+    (
+        "--query-timeout-ms",
+        "KERNABLE_QUERY_TIMEOUT_MS",
+        "5000",
+        "How long a query waits for a read model to catch up and answer.",
+    ),
+    (
+        "--middleware-timeout-ms",
+        "KERNABLE_MIDDLEWARE_TIMEOUT_MS",
+        "5000",
+        "How long a request waits for one middleware to catch up and give its verdict.",
+    ),
+    (
+        "--drain-timeout-ms",
+        "KERNABLE_DRAIN_TIMEOUT_MS",
+        "10000",
+        "On SIGTERM or SIGINT: how long running submits and queries may still finish.",
+    ),
+];
 
-/// Kernel configuration, usually `kernable.toml`:
-///
-/// ```toml
-/// store = "sqlite:kernable.db"         # or "file:kernable.log"; a bare path means SQLite
-/// listen = "unix:/tmp/kernable.sock"   # or "127.0.0.1:7233"
-/// kernel_key = "kernel.key"
-///
-/// # Allowlists name qualified types (`orders.PlaceOrder`), whole domains (`orders.*`) or `*`.
-/// [clients]                            # client key ID -> commands it may submit
-/// "8b84…" = ["*"]
-///
-/// [workers]                            # worker key ID -> commands it may handle; a worker
-/// "1f0a…" = ["orders.*"]               # can only write events of its commands' domain
-///
-/// [subscribers]                        # subscriber key ID -> events it may read
-/// "8b84…" = ["*"]
-///
-/// [listeners]                          # listener key ID -> events it may read
-/// "1f0a…" = ["orders.*", "identity.AccountRegistered"]
-///
-/// [queriers]                           # client key ID -> queries it may ask
-/// "8b84…" = ["identity.GetAccount"]
-///
-/// [query_handlers]                     # listener key ID -> queries it may answer
-/// "1f0a…" = ["identity.*"]
-///
-/// [middlewares]                        # listener key ID -> commands and queries it may check
-/// "1f0a…" = ["*"]
-///
-/// [privileged]                         # client key ID -> privileged request context switches
-/// "8b84…" = ["bypass_authorization"]
-///
-/// [tls]                                # optional, TCP only: mutual TLS
-/// cert = "kernel.tls.crt"             # see `kernable certs new`
-/// key = "kernel.tls.key"
-/// client_ca = "ca.tls.crt"             # every client must present a certificate signed by it
-/// ```
-///
-/// `metrics_listen = "127.0.0.1:9233"` serves Prometheus metrics at `/metrics`.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// Kernel configuration, from the flags of `kernable start` (see [`FLAGS`]).
+#[derive(Debug, Clone)]
 pub struct Config {
-    /// The event store: `sqlite:<path>` (or a bare path), `file:<path>` or `memory:`.
+    /// Root key IDs: they sign grants and revocations.
+    pub roots: Vec<String>,
     pub store: String,
-    /// Where the kernel listens: `unix:<path>` or `host:port` (TCP, with `[tls]` for mutual TLS).
     pub listen: String,
-    /// The kernel's own signing key (`kernable keys new kernel`): it signs checkpoints.
     pub kernel_key: PathBuf,
-    /// How long a worker may run a command before it goes to another worker.
-    #[serde(default = "default_lease_ttl_ms")]
     pub lease_ttl_ms: i64,
-    /// How often the kernel signs a checkpoint of the hash chain.
-    #[serde(default = "default_checkpoint_interval_ms")]
     pub checkpoint_interval_ms: u64,
-    /// How long a submit waits for its command to complete before it answers with an error
-    /// (the command still runs; resubmit it to get the result).
-    #[serde(default = "default_submit_timeout_ms")]
     pub submit_timeout_ms: u64,
-    /// How long a settling submit waits for listeners after the commit.
-    #[serde(default = "default_settle_timeout_ms")]
     pub settle_timeout_ms: u64,
-    /// How long a query waits for a read model to catch up and answer.
-    #[serde(default = "default_query_timeout_ms")]
     pub query_timeout_ms: u64,
-    /// How long a request waits for one middleware to catch up and give its verdict.
-    #[serde(default = "default_middleware_timeout_ms")]
     pub middleware_timeout_ms: u64,
-    /// On SIGTERM or SIGINT: how long running submits and queries may still finish.
-    #[serde(default = "default_drain_timeout_ms")]
     pub drain_timeout_ms: u64,
-    /// Client key ID -> the commands it may submit.
-    #[serde(default)]
-    pub clients: HashMap<String, Vec<String>>,
-    /// Worker key ID -> the commands it may run; it writes events of their domains only.
-    #[serde(default)]
-    pub workers: HashMap<String, Vec<String>>,
-    /// Subscriber key ID -> the events it may read with a subscription.
-    #[serde(default)]
-    pub subscribers: HashMap<String, Vec<String>>,
-    /// Listener key ID -> the events it may read as a listener (read model, reactor).
-    #[serde(default)]
-    pub listeners: HashMap<String, Vec<String>>,
-    /// Client key ID -> the queries it may ask.
-    #[serde(default)]
-    pub queriers: HashMap<String, Vec<String>>,
-    /// Listener key ID -> the queries it may answer.
-    #[serde(default)]
-    pub query_handlers: HashMap<String, Vec<String>>,
-    /// Listener key ID -> the commands and queries it may check as a middleware.
-    #[serde(default)]
-    pub middlewares: HashMap<String, Vec<String>>,
-    /// Client key ID -> the privileged request context switches it may set
-    /// (`bypass_authorization`).
-    #[serde(default)]
-    pub privileged: HashMap<String, Vec<String>>,
-    /// Mutual TLS for TCP; every client needs a certificate of `client_ca`.
     pub tls: Option<Tls>,
-    /// Old key ID -> new key ID: a listener registered with the old key may connect with the
-    /// new one and keeps its position, order and middleware registration.
-    #[serde(default)]
-    pub successors: HashMap<String, String>,
-    /// Key ID -> since when it must not be trusted, in UTC (`2026-10-27T09:00:00Z`). The kernel
-    /// stores the revocation, refuses the key from then on, also where an allowlist still names
-    /// it, and `kernable verify` flags what it signed from that time on. Never undone.
-    #[serde(default)]
-    pub revoked: HashMap<String, String>,
-    /// Where snapshots live: `sqlite:<path>` or `memory:` (default; rebuilt after a restart).
-    #[serde(default = "default_snapshots")]
     pub snapshots: String,
-    /// Personal and secret values; commands and events that refer to the vault are refused
-    /// without it.
     pub vault: Option<VaultConfig>,
-    /// Address for Prometheus metrics (`GET /metrics`), `GET /health` and `GET /ready`; off
-    /// when absent.
     pub metrics_listen: Option<String>,
 }
 
-/// `[vault]`: where values live, the key that encrypts them, and who may read and erase them.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// The vault: where values live and the key that encrypts them.
+#[derive(Debug, Clone)]
 pub struct VaultConfig {
-    /// `sqlite:<path>` (or a bare path) or `memory:`.
     pub store: String,
-    /// A file with 32 random bytes, hex encoded (`kernable keys new vault` writes one).
     pub key: PathBuf,
-    /// Listener and middleware keys that get the values of these event and command types.
-    /// Workers always get the values of the commands they run.
-    #[serde(default)]
-    pub readers: HashMap<String, Vec<String>>,
-    /// Worker keys whose events of these types may erase a subject.
-    #[serde(default)]
-    pub erasers: HashMap<String, Vec<String>>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// Mutual TLS for TCP; every client needs a certificate of `client_ca`.
+#[derive(Debug, Clone)]
 pub struct Tls {
-    /// The kernel's certificate (PEM; `kernable certs new` writes development ones).
     pub cert: PathBuf,
-    /// The kernel certificate's private key (PEM).
     pub key: PathBuf,
-    /// The CA that signs every client's certificate (PEM).
     pub client_ca: PathBuf,
 }
 
-fn default_lease_ttl_ms() -> i64 {
-    10_000
-}
-
-fn default_checkpoint_interval_ms() -> u64 {
-    5_000
-}
-
-fn default_submit_timeout_ms() -> u64 {
-    30_000
-}
-
-fn default_settle_timeout_ms() -> u64 {
-    5_000
-}
-
-fn default_query_timeout_ms() -> u64 {
-    5_000
-}
-
-fn default_middleware_timeout_ms() -> u64 {
-    5_000
-}
-
-fn default_snapshots() -> String {
-    "memory:".into()
-}
-
-fn default_drain_timeout_ms() -> u64 {
-    10_000
-}
+type Error = Box<dyn std::error::Error + Send + Sync>;
 
 impl Config {
-    /// Loads a config file; relative paths in it resolve against the file's directory.
-    pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let mut config: Config = toml::from_str(&fs::read_to_string(path)?)?;
-        let dir = path.parent().unwrap_or(Path::new("."));
-        let (backend, store) = kernable_store::backend(&config.store);
-        if backend != "memory" {
-            config.store = format!("{backend}:{}", dir.join(store).display());
+    /// Reads the flags of `kernable start` from `args`, falling back to the environment
+    /// variables in `env` and then to the defaults.
+    pub fn from_args(args: &[&str], env: impl Fn(&str) -> Option<String>) -> Result<Self, Error> {
+        let mut given: HashMap<&str, Vec<String>> = HashMap::new();
+        let mut rest = args.iter();
+        while let Some(&arg) = rest.next() {
+            let (flag, value) = match arg.split_once('=') {
+                Some((flag, value)) => (flag, Some(value.to_owned())),
+                None => (arg, None),
+            };
+            let Some((flag, ..)) = FLAGS.iter().find(|(f, ..)| *f == flag) else {
+                return Err(format!("unknown flag {arg}").into());
+            };
+            let value = match value {
+                Some(v) => v,
+                None => rest
+                    .next()
+                    .ok_or(format!("{flag} needs a value"))?
+                    .to_string(),
+            };
+            given.entry(flag).or_default().push(value);
         }
-        config.kernel_key = dir.join(&config.kernel_key);
-        let in_dir = |url: &str| match kernable_store::backend(url) {
-            ("memory", _) => url.to_owned(),
-            (backend, path) => format!("{backend}:{}", dir.join(path).display()),
+        let get = |flag: &str| -> Option<String> {
+            let (_, var, default, _) = FLAGS.iter().find(|(f, ..)| *f == flag).expect("known flag");
+            given
+                .get(flag)
+                .and_then(|v| v.last().cloned())
+                .or_else(|| env(var))
+                .or_else(|| (!default.is_empty()).then(|| default.to_string()))
+                .filter(|v| !v.is_empty())
         };
-        config.snapshots = in_dir(&config.snapshots);
-        if let Some(vault) = &mut config.vault {
-            vault.store = in_dir(&vault.store);
-            vault.key = dir.join(&vault.key);
+        let number = |flag: &str| -> Result<u64, Error> {
+            let value = get(flag).expect("has a default");
+            value
+                .parse()
+                .map_err(|_| format!("{flag}: {value} is not a number").into())
+        };
+        let roots = match given.get("--root") {
+            Some(roots) => roots.clone(),
+            None => env("KERNABLE_ROOT")
+                .map(|r| {
+                    r.split(',')
+                        .map(|s| s.trim().to_owned())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
+        };
+        if roots.is_empty() {
+            return Err(
+                "no root key: pass --root <key ID or .pub file> (or set KERNABLE_ROOT)".into(),
+            );
         }
-        if let Some(tls) = &mut config.tls {
-            for path in [&mut tls.cert, &mut tls.key, &mut tls.client_ca] {
-                *path = dir.join(&*path);
-            }
-        }
-        Ok(config)
+        let roots = roots
+            .iter()
+            .map(|r| root_key_id(r))
+            .collect::<Result<_, _>>()?;
+        let tls = match (get("--tls-cert"), get("--tls-key"), get("--tls-client-ca")) {
+            (Some(cert), Some(key), Some(client_ca)) => Some(Tls {
+                cert: cert.into(),
+                key: key.into(),
+                client_ca: client_ca.into(),
+            }),
+            (None, None, None) => None,
+            _ => return Err("TLS needs --tls-cert, --tls-key and --tls-client-ca".into()),
+        };
+        Ok(Config {
+            roots,
+            store: get("--store").expect("has a default"),
+            listen: get("--listen").expect("has a default"),
+            kernel_key: get("--kernel-key").expect("has a default").into(),
+            lease_ttl_ms: number("--lease-ttl-ms")? as i64,
+            checkpoint_interval_ms: number("--checkpoint-interval-ms")?,
+            submit_timeout_ms: number("--submit-timeout-ms")?,
+            settle_timeout_ms: number("--settle-timeout-ms")?,
+            query_timeout_ms: number("--query-timeout-ms")?,
+            middleware_timeout_ms: number("--middleware-timeout-ms")?,
+            drain_timeout_ms: number("--drain-timeout-ms")?,
+            tls,
+            snapshots: get("--snapshots").expect("has a default"),
+            vault: get("--vault-key").map(|key| VaultConfig {
+                store: get("--vault-store").expect("has a default"),
+                key: key.into(),
+            }),
+            metrics_listen: get("--metrics-listen"),
+        })
     }
 }
 
-impl Config {
-    /// The revocations as key ID -> ms since epoch.
-    pub fn revocations(&self) -> Result<HashMap<String, i64>, String> {
-        self.revoked
-            .iter()
-            .map(|(key, since)| {
-                let ms = utc_ms(since).ok_or_else(|| {
-                    format!(
-                        "revoked {key}: \"{since}\" is not a UTC time like 2026-10-27T09:00:00Z"
-                    )
-                })?;
-                Ok((key.clone(), ms))
-            })
-            .collect()
-    }
-
-    /// Removes `keys` from every allowlist, so nothing grants them anything.
-    pub fn without(&mut self, keys: &HashMap<String, i64>) {
-        let tables = [
-            &mut self.clients,
-            &mut self.workers,
-            &mut self.subscribers,
-            &mut self.listeners,
-            &mut self.queriers,
-            &mut self.query_handlers,
-            &mut self.middlewares,
-            &mut self.privileged,
-        ];
-        for table in tables {
-            table.retain(|key, _| !keys.contains_key(key));
-        }
-        if let Some(vault) = &mut self.vault {
-            vault.readers.retain(|key, _| !keys.contains_key(key));
-            vault.erasers.retain(|key, _| !keys.contains_key(key));
-        }
-    }
+/// A root key given as a key ID or as the path of a `.pub` file.
+fn root_key_id(root: &str) -> Result<String, Error> {
+    let id = if kernable_core::signing::verifying_key_from_hex(root).is_ok() {
+        root.to_owned()
+    } else {
+        std::fs::read_to_string(root)
+            .map_err(|e| format!("--root {root}: neither a key ID nor a readable .pub file ({e})"))?
+            .trim()
+            .to_owned()
+    };
+    kernable_core::signing::verifying_key_from_hex(&id)
+        .map_err(|_| format!("--root {root}: not an Ed25519 key ID"))?;
+    Ok(id)
 }
 
 /// Milliseconds since the epoch of a UTC time `YYYY-MM-DDTHH:MM:SSZ` (seconds optional).
@@ -279,7 +286,7 @@ pub fn utc_ms(s: &str) -> Option<i64> {
     Some(((days * 24 + h) * 60 + min) * 60_000 + sec * 1000)
 }
 
-/// Whether `key_id` may use `name` according to an allowlist of patterns; see [`covers`].
+/// Whether `key_id` may use `name` according to its granted patterns; see [`covers`].
 pub fn allowed(rules: &HashMap<String, Vec<String>>, key_id: &str, name: &str) -> bool {
     rules
         .get(key_id)
@@ -314,17 +321,18 @@ pub fn readable(
     }
 }
 
-/// `domain.Type`, the name used in registrations, subscriptions and allowlists.
+/// `domain.Type`, the name used in registrations, subscriptions and grants.
 pub fn qualified(domain: &str, type_name: &str) -> String {
     format!("{domain}.{type_name}")
 }
 
-/// A domain is a lowercase identifier: `orders`, `order-mgmt`, `billing_v2`.
+/// A domain is an identifier that starts with a letter: `orders` by convention, also `Orders`,
+/// `order-mgmt`, `billing_v2`. Names are case-sensitive.
 pub fn valid_domain(domain: &str) -> bool {
-    domain.starts_with(|c: char| c.is_ascii_lowercase())
+    domain.starts_with(|c: char| c.is_ascii_alphabetic())
         && domain
             .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// A type name within a domain: not empty and without dots.
@@ -360,10 +368,11 @@ mod tests {
         assert!(!covers("orders.PlaceOrder", "identity.PlaceOrder"));
         assert!(valid_qualified("order-mgmt.PlaceOrder"));
         assert!(!valid_qualified("PlaceOrder"));
-        assert!(!valid_qualified("Orders.PlaceOrder"));
+        assert!(valid_qualified("Orders.PlaceOrder"));
+        assert!(!valid_qualified("1orders.PlaceOrder") && !valid_qualified("ord ers.PlaceOrder"));
         assert!(!valid_qualified("orders.Place.Order"));
         assert!(valid_pattern("*") && valid_pattern("orders.*") && valid_pattern("orders.Get"));
-        assert!(!valid_pattern("orders") && !valid_pattern("Orders.*") && !valid_pattern("o.*.*"));
+        assert!(!valid_pattern("orders") && valid_pattern("Orders.*") && !valid_pattern("o.*.*"));
     }
 
     #[test]

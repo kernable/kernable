@@ -1,0 +1,7 @@
+register: committed
+set password: committed
+sign in, wrong password: denied (Wrong customer or password)
+sign in: committed
+{"id":"c1","email":"ann@example.com","name":"Ann"}
+erase: committed
+read: forbidden

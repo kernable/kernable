@@ -3,6 +3,7 @@
 
 use std::{
     process::ExitCode,
+    sync::OnceLock,
     time::{Duration, Instant},
 };
 
@@ -22,6 +23,19 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 
+/// The grant next to the key file (`<name>.grant`), sent with every call.
+static GRANT: OnceLock<Option<String>> = OnceLock::new();
+
+/// `message` as a request that carries the key's grant, if there is one.
+fn granted<T>(message: T) -> tonic::Request<T> {
+    let mut request = tonic::Request::new(message);
+    if let Some(grant) = GRANT.get().and_then(Option::as_ref) {
+        let value = grant.parse().expect("a grant is hex");
+        request.metadata_mut().insert("kernable-grant", value);
+    }
+    request
+}
+
 const USAGE: &str = "usage:
   kernable-bench crypto
   kernable-bench store <store-url> [count]
@@ -36,6 +50,14 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 async fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    if let [_, _, key, ..] = args.as_slice() {
+        let grant = format!("{}.grant", key.strip_suffix(".key").unwrap_or(key));
+        let _ = GRANT.set(
+            std::fs::read_to_string(grant)
+                .ok()
+                .map(|g| g.trim().to_owned()),
+        );
+    }
     let result = match args.as_slice() {
         ["crypto"] => {
             crypto();
@@ -208,7 +230,10 @@ async fn worker(addr: &str, key: &str, concurrency: u32) -> Result<(), BoxError>
     })))
     .await?;
     let mut client = WorkerGatewayClient::new(transport::connect(addr).await?);
-    let mut inbound = client.session(ReceiverStream::new(rx)).await?.into_inner();
+    let mut inbound = client
+        .session(granted(ReceiverStream::new(rx)))
+        .await?
+        .into_inner();
     while let Some(m) = inbound.message().await? {
         let reply = match m.msg {
             Some(Out::Challenge(c)) => In::ChallengeResponse(ChallengeResponse {
@@ -260,7 +285,10 @@ async fn listener(addr: &str, key: &str, name: &str, order: i32) -> Result<(), B
     })))
     .await?;
     let mut client = ListenerServiceClient::new(transport::connect(addr).await?);
-    let mut inbound = client.listen(ReceiverStream::new(rx)).await?.into_inner();
+    let mut inbound = client
+        .listen(granted(ReceiverStream::new(rx)))
+        .await?
+        .into_inner();
     while let Some(m) = inbound.message().await? {
         let reply = match m.msg {
             Some(Delivery::Challenge(c)) => Listen::ChallengeResponse(ChallengeResponse {
@@ -323,7 +351,9 @@ async fn submit(channel: Channel, cmd: Command, wait: Wait) -> Result<Outcome, t
         command: Some(cmd),
         wait: wait.into(),
     };
-    let result = CommandServiceClient::new(channel).submit(request).await?;
+    let result = CommandServiceClient::new(channel)
+        .submit(granted(request))
+        .await?;
     Ok(result
         .into_inner()
         .outcome

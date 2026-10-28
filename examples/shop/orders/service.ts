@@ -1,7 +1,7 @@
-// Orders service (TypeScript) and the shop's public HTTP API: the Order worker, the `orders`
+// Orders service (TypeScript) and the shop's public HTTP API: the `order` worker, the `orders`
 // read model, the `confirmations` reactor and the endpoints. Every read goes through the
 // kernel as a query, also of the read model in this very process, so that signatures,
-// allowlists and the `rbac` middleware (identity service) always apply.
+// grants and the `rbac` middleware (identity service) always apply.
 //
 // Who calls is the `x-identity` header (a stand-in for real authentication); it becomes the
 // request context's `senderIdentity`. The service itself acts as `svc-orders`.
@@ -11,32 +11,30 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
 import { Kernable, NotSettled, Rejected, domain, type RequestContext, type SubmitOptions } from "../../../sdks/typescript/src/index.ts";
-import { ORDER_EVENTS, order, orders, project, type OrderRow } from "./order.ts";
+import { ORDER_EVENTS, orderAggregate, ordersDomain, project, type OrderRow } from "./order.ts";
 
 // The identity commands this API submits, with the fields the vault keeps (as declared by the
 // identity service in Python): the SDK moves them out of the signed command before it is sent.
-const identity = domain("identity");
-identity.command("RegisterAccount").personal(["email", "name"], (_d, account) => account).secret(["password"]);
-identity.command("ChangeEmail").personal(["email"], (_d, account) => account);
-identity.command("SignIn").secret(["password"]);
+const identityDomain = domain("identity");
+identityDomain.command("RegisterAccount").personal(["email", "name"], (_d, account) => account).secret(["password"]);
+identityDomain.command("ChangeEmail").personal(["email"], (_d, account) => account);
+identityDomain.command("SignIn").secret(["password"]);
 
 const [url, key, port] = process.argv.slice(2);
 const env = process.env;
 const tls = env.KERNABLE_TLS_CA ? { ca: env.KERNABLE_TLS_CA, cert: env.KERNABLE_TLS_CERT!, key: env.KERNABLE_TLS_KEY! } : undefined;
-const kernable = new Kernable({ url, key, tenant: "shop", tls, context: { senderIdentity: "svc-orders" } }).use(identity, orders);
+const kernable = new Kernable({ url, key, tenant: "shop", tls, context: { senderIdentity: "svc-orders" } }).use(identityDomain, ordersDomain);
 
 // ---- read model: in memory, rebuilt from the first event on every start ----
 
-const ordersModel = (() => {
-  const orders = new Map<string, OrderRow>();
-  const model = kernable.readModel("orders");
-  for (const type of ORDER_EVENTS) model.on(type, (e) => project(orders, e));
-  return model.query<{ id: string }>("orders.GetOrder", ({ id }) => {
-    const row = orders.get(id);
-    if (!row) throw new Rejected(`no order ${id}`, "not_found");
-    return row;
-  });
-})();
+const orders = new Map<string, OrderRow>();
+const ordersReadmodel = ordersDomain.readModel("orders");
+for (const type of ORDER_EVENTS) ordersReadmodel.on(type, (data, evt) => project(orders, data, evt));
+ordersReadmodel.query<{ id: string }>("GetOrder", ({ id }) => {
+  const row = orders.get(id);
+  if (!row) throw new Rejected(`no order ${id}`, "not_found");
+  return row;
+});
 
 // ---- queries, through the kernel ----
 
@@ -56,8 +54,8 @@ const orderOf = (id: string, as?: RequestContext) => find<OrderRow>("orders", "G
 // ---- reactor: runs after both read models (order 10 > 0) ----
 
 const stats = { confirmations: 0, unknownAccounts: 0 };
-const confirmations = kernable.reactor("confirmations").on("orders.OrderSubmitted", async (e, ctx) => {
-  const row = (await orderOf(e.aggregateId))!;
+const confirmationsReactor = ordersDomain.reactor("confirmations").on("OrderSubmitted", async (_data, evt, ctx) => {
+  const row = (await orderOf(evt.aggregateId))!;
   const customer = await accountOf(row.customerId); // throws while identity is down: retried
   if (!customer) {
     stats.unknownAccounts++; // must never happen: accounts ran first
@@ -67,11 +65,11 @@ const confirmations = kernable.reactor("confirmations").on("orders.OrderSubmitte
   // fixed command ID makes a redelivered event harmless; `follow()` keeps sender and correlation.
   await kernable.submit({
     domain: "orders",
-    aggregateType: "Order",
-    aggregateId: e.aggregateId,
+    aggregateType: "order",
+    aggregateId: evt.aggregateId,
     type: "RecordConfirmation",
     data: { email: customer.email, customerId: row.customerId },
-    id: `confirm-${e.aggregateId}`,
+    id: `confirm-${evt.aggregateId}`,
     context: ctx.follow(),
   });
   stats.confirmations++;
@@ -98,12 +96,12 @@ async function route(method: string, path: string, body: any, as: RequestContext
   const account = (id: string) => accountOf(id, as);
   const getOrder = (id: string) => orderOf(id, as);
   const orderCommand = (id: string, type: string, data?: unknown) =>
-    run({ domain: "orders", aggregateType: "Order", aggregateId: id, type, data, context: as }, () => getOrder(id));
+    run({ domain: "orders", aggregateType: "order", aggregateId: id, type, data, context: as }, () => getOrder(id));
   let m: RegExpMatchArray | null;
   if (method === "GET" && path === "/health") return [200, { ok: true }]; // listening means ready
   if (method === "GET" && path === "/stats") return [200, stats];
   if (method === "POST" && path === "/accounts") {
-    return run({ domain: "identity", aggregateType: "Account", aggregateId: body.id, type: "RegisterAccount", data: body, context: as }, () => account(body.id));
+    return run({ domain: "identity", aggregateType: "account", aggregateId: body.id, type: "RegisterAccount", data: body, context: as }, () => account(body.id));
   }
   if (method === "GET" && (m = path.match(/^\/accounts\/([^/]+)$/))) {
     const row = await account(m[1]);
@@ -111,15 +109,15 @@ async function route(method: string, path: string, body: any, as: RequestContext
   }
   if (method === "POST" && (m = path.match(/^\/accounts\/([^/]+)\/sign-in$/))) {
     const id = m[1];
-    return run({ domain: "identity", aggregateType: "Account", aggregateId: id, type: "SignIn", data: body, context: as }, () => ({ signedIn: true }));
+    return run({ domain: "identity", aggregateType: "account", aggregateId: id, type: "SignIn", data: body, context: as }, () => ({ signedIn: true }));
   }
   if (method === "DELETE" && (m = path.match(/^\/accounts\/([^/]+)$/))) {
     const id = m[1];
-    return run({ domain: "identity", aggregateType: "Account", aggregateId: id, type: "EraseAccount", context: as }, () => ({ erased: true }));
+    return run({ domain: "identity", aggregateType: "account", aggregateId: id, type: "EraseAccount", context: as }, () => ({ erased: true }));
   }
   if (method === "POST" && (m = path.match(/^\/accounts\/([^/]+)\/email$/))) {
     const id = m[1];
-    return run({ domain: "identity", aggregateType: "Account", aggregateId: id, type: "ChangeEmail", data: body, context: as }, () => account(id));
+    return run({ domain: "identity", aggregateType: "account", aggregateId: id, type: "ChangeEmail", data: body, context: as }, () => account(id));
   }
   if (method === "POST" && path === "/orders") {
     const customer = await account(body.customerId);
@@ -150,7 +148,9 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
   res.writeHead(reply[0], { "content-type": "application/json" }).end(JSON.stringify(reply[1]));
 }
 
-const worker = kernable.worker(order);
+const worker = kernable.worker(orderAggregate);
+const ordersModel = kernable.listener(ordersReadmodel);
+const confirmations = kernable.listener(confirmationsReactor);
 void worker.run();
 void ordersModel.run();
 void confirmations.run();

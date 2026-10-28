@@ -13,10 +13,16 @@
 How events change an aggregate's state (`apply`) and which events a command produces (`command`). Handlers must be deterministic and free of side effects; they may run again. Both work as decorators (`@agg.apply("Type")`) or directly (`agg.apply("Type", fn)`). A command handler returns a list of `{"type": ..., "data": ...}`. Every `snapshot_every` events (0 turns it off) the worker sends a snapshot of the state, so later commands fold only the events after it. The state must survive a JSON round trip. Change `schema` when `apply` produces differently shaped state: older snapshots are then ignored and the state is rebuilt from the events.
 
 - `Aggregate(domain: str, name: str, initial: Any, snapshot_every: int=100, schema: str='1', events: dict[str, EventSchema] | None=None)`
-- `apply(event_type: str, fn: Callable | None=None)`
-- `command(command_type: str, fn: Callable | None=None)`
+- `apply(event_type: str, fn: Callable | None=None)`: How an event of `event_type` changes the state: `fn(state, data, evt, ctx)` changes `state` in place and returns nothing, or returns a new state that replaces it. `state` is a copy, so changing it never touches the state it came from; `evt` (an `EventMeta`) and `ctx` (an `ApplyContext`) are optional.
+- `command(command_type: str, fn: Callable | None=None)`: Which events a `command_type` command produces: `fn(state, data, cmd, ctx)` returns them; `cmd` (a `CommandMeta`) and `ctx` (a `CommandContext`) are optional.
 - `schema_of(event_type: str) -> int`: The payload version this aggregate writes `event_type` events at.
-- `fold(history: list[tuple[str, int, Any]], state: Any=_INITIAL) -> Any`: State after `history` (type, schema, data), starting from `state` (default: `initial`). Events are upcast first; events without an `apply` are skipped.
+- `fold(history: list[tuple], state: Any=_INITIAL) -> Any`: State after `history` (type, schema, data, and optionally an `EventMeta` and an `ApplyContext`), starting from `state` (default: `initial`). Events are upcast first; events without an `apply` are skipped.
+
+### ApplyContext
+
+What `apply` gets besides state, data and the event (as an optional fourth parameter). No clock and no IDs: `apply` must compute the same state on every replay.
+
+- `request: RequestContext`: The request context of the command that caused the event.
 
 ### Check
 
@@ -34,14 +40,24 @@ A command or query a middleware checks before the kernel accepts or routes it.
 
 ### CommandContext
 
-What a command handler gets besides state and data (as an optional third parameter).
+What a command handler gets besides state, data and the command (as an optional fourth parameter).
 
-- `command_id: str`
-- `request: RequestContext`
+- `request: RequestContext`: Who sends the command: check permissions here.
 - `deadline: datetime`: When the kernel hands the command to another worker if this one has not answered.
 - `received_at: datetime`
 - `now() -> datetime`: When the kernel received the command: the same every time the command runs. Use it instead of `datetime.now()`.
 - `id() -> str`: A new ID that is the same every time the command runs (1st call, 2nd call, ...). Use it instead of random IDs.
+
+### CommandMeta
+
+What a command handler gets about the command besides state and data (as an optional third parameter).
+
+- `command_id: str`
+- `type: str`: The command type within the domain.
+- `domain: str`
+- `aggregate_type: str`
+- `aggregate_id: str`
+- `tenant: str`
 
 ### CommandSchema
 
@@ -53,12 +69,14 @@ How a command's payload is kept: which fields go to the vault.
 
 ### Domain
 
-A domain: a lowercase name (`orders`) that scopes its aggregates, commands and events. Types are unique within a domain; elsewhere they are named `domain.Type`.
+A domain: a name that scopes its aggregates, commands and events, lowercase by convention (`orders`) like aggregates, while message types are capitalized (`orders.PlaceOrder`). Both cases are valid; names are case-sensitive. Types are unique within a domain; elsewhere they are named `domain.Type`.
 
 - `Domain(name: str)`
 - `command(type: str) -> CommandSchema`: Declares which fields of `type` commands the vault keeps (`personal`, `secret`). Clients that submit them need the domain: `kernable.use(domain)`.
-- `event(type: str, schema: int) -> EventSchema`: Declares that this domain writes `type` events at version `schema`, with an `upcast` per older version. The domain's aggregates use it; listeners get it with `use(domain)`.
-- `aggregate(name: str, initial: Any, snapshot_every: int=100, schema: str='1') -> 'Aggregate'`
+- `event(type: str, schema: int) -> EventSchema`: Declares that this domain writes `type` events at version `schema`, with an `upcast` per older version. The domain's aggregates and listeners use it; listeners of other domains get it with `use(domain)`.
+- `aggregate(name: str, initial: Any, snapshot_every: int=100, schema: str='1') -> 'Aggregate'`: An aggregate of this domain; see `Aggregate`. Run it with `kernable.worker(aggregate)`.
+- `read_model(name: str, *, order: int=0, start: int | None=0, reconnect_s: float=1.0, store: str | None=None, schema: str='1') -> 'Listener'`: A read model of this domain: kept in memory and rebuilt from the first event on every start (default). Run it with `kernable.listener(read_model)`. With `store` (`sqlite:<path>` or `memory:`), its state lives in the running listener's `store`: data and position are written together per batch, and a restart continues after the stored position. Change `schema` when the handlers store data differently: the store is cleared and the read model rebuilds from the first event.
+- `reactor(name: str, *, order: int=10, start: int | None=None, reconnect_s: float=1.0, store: str | None=None, schema: str='1') -> 'Listener'`: A reactor of this domain: triggers side effects; resumes after the last acknowledged event (default). Run it with `kernable.listener(reactor)`. A settling submit from its handler waits for the listeners before it (the read models), not for the reactor itself, which handles one event at a time. `store` and `schema`: see `read_model`.
 
 ### Event
 
@@ -74,8 +92,20 @@ An event as stored by the kernel.
 - `data: Any`
 - `command_id: str`
 - `request: RequestContext`: The request context of the command that caused the event.
-- `schema: int`: Version of the payload format. Listeners get `data` upcast to the version they know (see `Domain.event`), unless the handler is `raw`.
-- `redacted: list[str]`: Fields kept in the vault whose value is not here (None in `data`): erased, or not readable with this key (`[vault] readers`).
+- `schema: int`: Version of the payload format, as stored (see `Domain.event`).
+- `redacted: list[str]`: Fields kept in the vault whose value is not here (None in `data`): erased, or not readable with this key (granted `vault_read`).
+
+### EventMeta
+
+What `apply` gets besides state and data (as an optional third parameter): the event without its payload. Only fields known before the kernel stores the event, so a snapshot and a replay compute the same state; put a time into the data (`ctx.now()`) if the state needs one.
+
+- `type: str`
+- `version: int`: The aggregate's version after this event: 1 for its first event.
+- `tenant: str`
+- `domain: str`
+- `aggregate_type: str`
+- `aggregate_id: str`
+- `command_id: str`
 
 ### EventSchema
 
@@ -90,15 +120,14 @@ The payload format of one event type: its current version and the steps that bri
 
 
 
-- `Kernable(url: str, key: str, tenant: str='default', tls: Tls | None=None, context: RequestContext | None=None)`: `url`: `unix:/path/to.sock` or `host:port`; `key`: path to this process's `.key` file; `tls`: mutual TLS for `host:port`; `context`: default request context for submits, e.g. this service's identity.
+- `Kernable(url: str | None=None, key: str | None=None, tenant: str='default', tls: Tls | None=None, context: RequestContext | None=None, grant: str | None=None)`: `url`: `http://host:port` (`host:port` works too) or, on Unix, `unix:/path/to.sock`; default `KERNABLE_URL`, else `http://127.0.0.1:7233`, where `kernable start` listens; `key`: path to this process's `.key` file; default `KERNABLE_KEY`, else `app.key` in the current directory; `tls`: mutual TLS for `host:port`; default `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`, if set; `context`: default request context for submits and queries, e.g. this service's identity, replaced by a request's own; `grant`: path to the key's grant (`kernable grant`), sent with every call; default `KERNABLE_GRANT`, else the `.grant` file next to the key file, if there is one.
 - `use(*domains: Domain) -> 'Kernable'`: Seals the vault fields of these domains' commands when submitting them; see `Domain.command`.
 - `worker(*aggregates: Aggregate) -> 'Worker'`
 - `submit(domain: str, aggregate_type: str, aggregate_id: str, type: str, data: Any=None, *, tenant: str | None=None, id: str | None=None, wait: str='settled', context: RequestContext | None=None) -> Outcome`: Runs a command and returns its outcome. `wait="settled"` (default) responds once every listener has processed the events, so read models already show them, and raises `NotSettled` on timeout; from a listener's handler, only the listeners with a lower order count. `wait="committed"` responds once the events are stored. `id` is an idempotency key. `context` replaces the client's default context; inside a listener, pass `ctx.follow()`.
 - `enqueue(domain: str, aggregate_type: str, aggregate_id: str, type: str, data: Any=None, *, tenant: str | None=None, id: str | None=None, context: RequestContext | None=None) -> str`: Stores the command in the kernel's queue and returns its ID without waiting. Submit it again with the same `id` to get the outcome.
 - `query(domain: str, type: str, data: Any=None, *, tenant: str | None=None, context: RequestContext | None=None, min_position: int=0) -> Any`: Asks the read model that answers `domain.type` and returns its answer. Queries always go through the kernel, also within one process. Raises `Rejected` if the read model rejects it. `min_position`: answer only after the read model has processed it.
-- `read_model(name: str, *, order: int=0, start: int | None=0, reconnect_s: float=1.0, store: str | None=None, schema: str='1') -> 'Listener'`: A read model: kept in memory and rebuilt from the first event on every start (default). With `store` (`sqlite:<path>` or `memory:`), its state lives in `listener.store`: data and position are written together per batch, and a restart continues after the stored position. Change `schema` when the handlers store data differently: the store is cleared and the read model rebuilds from the first event.
-- `reactor(name: str, *, order: int=10, start: int | None=None, reconnect_s: float=1.0, store: str | None=None, schema: str='1') -> 'Listener'`: A reactor: triggers side effects; resumes after the last acknowledged event (default). A settling submit from its handler waits for the listeners before it (the read models), not for the reactor itself, which handles one event at a time. `store` and `schema`: see `read_model`.
-- `close() -> None`
+- `listener(listener: 'Listener') -> 'ListenerHandle'`: Connects a listener defined with `Domain.read_model` or `Domain.reactor`; call `run()` on the result.
+- `close() -> None`: Closes the connection now; only needed in a long-running process that discards the client.
 
 ### Key
 
@@ -110,23 +139,29 @@ An Ed25519 key; its ID is the hex-encoded public key.
 
 ### Listener
 
-A durable, named event listener. Events arrive in order, one at a time, after every listener with a lower order has processed them. Delivery is at least once: if a handler raises, the listener reconnects and the event is delivered again. Handlers get event payloads upcast to the versions of the domains the listener `use`s. An event with a newer schema than known stops the listener (it retries and logs) until it is updated, so it never misreads data.
+A listener definition: a durable, named event listener of a domain, made with `Domain.read_model` or `Domain.reactor` and run with `kernable.listener(listener)`, which returns a `ListenerHandle`. Events arrive in order, one at a time, after every listener with a lower order has processed them. Delivery is at least once: if a handler raises, the listener reconnects and the event is delivered again. Type names without a domain (`ItemAdded`, `GetCart`) are the listener's own domain's; types of other domains are qualified (`identity.AccountRegistered`, `identity.*`). Handlers get event payloads upcast to the versions of the listener's domain and of the domains it `use`s. An event with a newer schema than known stops the listener (it retries and logs) until it is updated, so it never misreads data.
 
-- `Listener(channel: grpc.Channel, key: Key, name: str, order: int, start: int | None, reconnect_s: float, store: str | None=None, schema: str='1')`
-- `use(*domains: Domain) -> 'Listener'`: Upcasts the events of these domains with their event schemas (see `Domain.event`).
-- `on(event_type: str, fn: Callable | None=None, *, raw: bool=False)`: Registers a handler for a qualified type (`orders.OrderPlaced`) or a whole domain (`orders.*`); works as a decorator too. A `raw` handler gets events as stored, without upcasting, whatever their schema (for archives and exports).
-- `query(query_type: str, fn: Callable | None=None)`: Answers the qualified query type (`orders.GetOrder`) from this listener's state; works as a decorator too. The kernel delivers queries in order with the events, so an answer reflects every event handled before it. Raise `Rejected` to refuse. A handler cannot query its own listener (the answer would wait behind itself): the kernel refuses it.
-- `middleware(types: list[str], order: int=0, fn: Callable | None=None)`: Makes this listener a middleware; works as a decorator too. The kernel asks `fn` about every command and query of `types` (`*`, `domain.*` or `domain.Type`) before accepting or routing it, in chain order (lower `order` first, then by listener name), and only once this listener has caught up with the events. `fn` gets a `Check`; raise `Rejected` to refuse; any other error refuses too. The registration is stored: while this listener is away, the kernel refuses those requests (`kernable listeners remove` unregisters it). `fn` cannot submit or query what it checks itself (it would wait behind itself): the kernel refuses it. Negative orders are reserved for kernable.
-- `run() -> None`
+- `Listener(domain: Domain, name: str, order: int, start: int | None, reconnect_s: float, store: str | None=None, schema: str='1')`
+- `use(*domains: Domain) -> 'Listener'`: Upcasts the events of these other domains with their event schemas (see `Domain.event`); the listener's own domain's apply already.
+- `on(event_type: str, fn: Callable | None=None, *, raw: bool=False)`: Registers a handler for an event type (`ItemAdded`, or `orders.OrderPlaced` of another domain) or a whole domain (`orders.*`); works as a decorator too: `fn(data, evt, ctx)` gets the event's payload, a `StoredEventMeta` and a `ListenerContext` (both optional). A `raw` handler gets payloads as stored, without upcasting, whatever their schema (for archives and exports).
+- `query(query_type: str, fn: Callable | None=None)`: Answers a query type (`GetCart`, or `orders.GetOrder` of another domain) from this listener's state; works as a decorator too: `fn(data, qry, ctx)` gets the query's data, a `QueryMeta` and a `QueryContext` (both optional). The kernel delivers queries in order with the events, so an answer reflects every event handled before it. Raise `Rejected` to refuse. A handler cannot query its own listener (the answer would wait behind itself): the kernel refuses it.
+- `middleware(types: list[str], order: int=0, fn: Callable | None=None)`: Makes this listener a middleware; works as a decorator too. The kernel asks `fn` about every command and query of `types` (`*` for all, `Type` of the own domain, `domain.*` or `domain.Type`) before accepting or routing it, in chain order (lower `order` first, then by listener name), and only once this listener has caught up with the events. `fn` gets a `Check`; raise `Rejected` to refuse; any other error refuses too. The registration is stored: while this listener is away, the kernel refuses those requests (`kernable listeners remove` unregisters it). `fn` cannot submit or query what it checks itself (it would wait behind itself): the kernel refuses it. Negative orders are reserved for kernable.
 
 ### ListenerContext
 
-What a listener handler gets besides the event (as an optional second parameter).
+What a listener handler gets besides the event's data and meta (as an optional third parameter).
 
 - `replaying: bool`: The event was committed before the listener connected: it is being replayed.
-- `event: Event`
-- `store: 'Store | None'`: The listener's store, if it has one (`store=` of `read_model` and `reactor`).
+- `request: RequestContext`: The request context of the command that caused the event.
+- `store: 'Store | None'`: The listener's store, if it has one (`store=` of `Domain.read_model` and `Domain.reactor`).
 - `follow() -> RequestContext`: A request context for commands caused by this event: same sender and correlation.
+
+### ListenerHandle
+
+A running `Listener`, returned by `kernable.listener(listener)`: `run()` processes events, queries and checks until `stop()`; `ready` is set once the kernel accepted it.
+
+- `ListenerHandle(channel: grpc.Channel, key: Key, listener: Listener)`
+- `run() -> None`: Processes events, queries and checks until `stop()`, reconnecting when the stream drops; with a store, opens it first and continues after its position.
 
 ### NotSettled
 
@@ -145,11 +180,19 @@ The command was committed, but not every listener processed its events in time. 
 
 ### QueryContext
 
-What a query handler gets besides the query's data (as an optional second parameter).
+What a query handler gets besides the query's data and meta (as an optional third parameter).
+
+- `request: RequestContext`: Who asks: check permissions here.
+- `store: 'Store | None'`: The listener's store, if it has one (`store=` of `Domain.read_model` and `Domain.reactor`).
+
+### QueryMeta
+
+What a query handler gets about the query besides its data (as an optional second parameter).
 
 - `query_id: str`
-- `request: RequestContext`: Who asks: check permissions here.
-- `store: 'Store | None'`: The listener's store, if it has one (`store=` of `read_model` and `reactor`).
+- `type: str`: The query type within the domain.
+- `domain: str`
+- `tenant: str`
 
 ### Rejected
 
@@ -171,7 +214,7 @@ Who sends a request and in which context: signed with the command and stored wit
 - `correlation_id: str`: Shared by everything one original request causes; defaults to the command ID.
 - `causation_id: str`: The command that caused this one.
 - `trace_id: str`
-- `bypass_authorization: bool`: Privileged: only keys in the kernel's `[privileged]` table may set it.
+- `bypass_authorization: bool`: Privileged: only keys granted `privileged` for it may set it.
 - `attributes: dict[str, str]`
 
 ### Store
@@ -185,6 +228,14 @@ Who sends a request and in which context: signed with the command and stored wit
 - `all(ns: str) -> list[tuple[str, Any]]`: Every key and value of a namespace, ordered by key.
 - `reset(ns: str | None=None) -> None`: Clears a namespace, or all data.
 - `close() -> None`
+
+### StoredEventMeta
+
+What a listener handler gets about the event besides its data (as an optional second parameter): the stored event without its payload and request context.
+
+- `position: int`
+- `schema: int`: Version of the payload format: the version the listener knows (see `Domain.event`), or the stored one for a `raw` handler.
+- `redacted: list[str]`: Fields kept in the vault whose value is not in the data (None there): erased, or not readable with this key (granted `vault_read`).
 
 ### Tls
 

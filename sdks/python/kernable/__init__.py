@@ -2,25 +2,31 @@
 
 The API mirrors the TypeScript SDK:
 
-    account = domain("identity").aggregate("Account", {"status": "none"})
+    account_aggregate = domain("identity").aggregate("account", {"status": "none"})
 
-    @account.apply("AccountRegistered")
+    @account_aggregate.apply("AccountRegistered")
     def _(state, data):
         return {**state, "status": "active", "email": data["email"]}
 
-    @account.command("RegisterAccount")
+    @account_aggregate.command("RegisterAccount")
     def _(state, data):
         if state["status"] != "none":
             raise Rejected("Account already exists")
         return [{"type": "AccountRegistered", "data": {"email": data["email"]}}]
 
     k = Kernable(url, key_path)
-    k.worker(account).run()
+    k.worker(account_aggregate).run()
+
+Listeners are defined on a domain too and run through the connection:
+
+    accounts_readmodel = domain("identity").read_model("accounts")
+    k.listener(accounts_readmodel).run()
 
 Stubs: generate them first (`make py-stubs`), see sdks/python/README.md.
 """
 
 import contextvars
+import copy
 import inspect
 import json
 import os
@@ -42,9 +48,10 @@ from kernable.store import Store
 from kernable.v1 import kernable_pb2 as pb
 from kernable.v1 import kernable_pb2_grpc as rpc
 
-__all__ = ["PROTOCOL", "Aggregate", "Check", "CommandContext", "CommandSchema", "Domain", "Event", "EventSchema",
-           "Kernable", "Key", "Listener", "ListenerContext", "NotSettled", "Outcome", "QueryContext", "Rejected",
-           "RequestContext", "Store", "Tls", "Worker", "domain"]
+__all__ = ["PROTOCOL", "Aggregate", "ApplyContext", "Check", "CommandContext", "CommandMeta", "CommandSchema", "Domain",
+           "Event", "EventMeta", "EventSchema", "Kernable", "Key", "Listener", "ListenerContext", "ListenerHandle", "NotSettled", "Outcome",
+           "QueryContext", "QueryMeta", "Rejected", "RequestContext", "Store", "StoredEventMeta", "Tls", "Worker",
+           "domain"]
 
 
 class Rejected(Exception):
@@ -74,21 +81,38 @@ class RequestContext:
     #: The command that caused this one.
     causation_id: str = ""
     trace_id: str = ""
-    #: Privileged: only keys in the kernel's `[privileged]` table may set it.
+    #: Privileged: only keys granted `privileged` for it may set it.
     bypass_authorization: bool = False
     attributes: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
-class CommandContext:
-    """What a command handler gets besides state and data (as an optional third parameter)."""
+class CommandMeta:
+    """What a command handler gets about the command besides state and data (as an optional third
+    parameter)."""
 
     command_id: str
+    #: The command type within the domain.
+    type: str
+    domain: str = ""
+    aggregate_type: str = ""
+    aggregate_id: str = ""
+    tenant: str = ""
+
+
+@dataclass
+class CommandContext:
+    """What a command handler gets besides state, data and the command (as an optional fourth
+    parameter)."""
+
+    #: Who sends the command: check permissions here.
     request: RequestContext
     #: When the kernel hands the command to another worker if this one has not answered.
     deadline: datetime
     received_at: datetime
-    _ids: int = 0
+    #: The command whose IDs `id()` derives.
+    _command_id: str = field(default="", repr=False)
+    _ids: int = field(default=0, repr=False)
 
     def now(self) -> datetime:
         """When the kernel received the command: the same every time the command runs.
@@ -99,17 +123,54 @@ class CommandContext:
         """A new ID that is the same every time the command runs (1st call, 2nd call, ...).
         Use it instead of random IDs."""
         n, self._ids = self._ids, self._ids + 1
-        return derived_id(self.command_id, n)
+        return derived_id(self._command_id, n)
+
+
+@dataclass
+class EventMeta:
+    """What `apply` gets besides state and data (as an optional third parameter): the event
+    without its payload. Only fields known before the kernel stores the event, so a snapshot and
+    a replay compute the same state; put a time into the data (`ctx.now()`) if the state needs one."""
+
+    type: str
+    #: The aggregate's version after this event: 1 for its first event.
+    version: int = 0
+    tenant: str = ""
+    domain: str = ""
+    aggregate_type: str = ""
+    aggregate_id: str = ""
+    command_id: str = ""
+
+
+@dataclass
+class ApplyContext:
+    """What `apply` gets besides state, data and the event (as an optional fourth parameter).
+    No clock and no IDs: `apply` must compute the same state on every replay."""
+
+    #: The request context of the command that caused the event.
+    request: RequestContext = field(default_factory=RequestContext)
+
+
+@dataclass
+class QueryMeta:
+    """What a query handler gets about the query besides its data (as an optional second
+    parameter)."""
+
+    query_id: str
+    #: The query type within the domain.
+    type: str
+    domain: str = ""
+    tenant: str = ""
 
 
 @dataclass
 class QueryContext:
-    """What a query handler gets besides the query's data (as an optional second parameter)."""
+    """What a query handler gets besides the query's data and meta (as an optional third
+    parameter)."""
 
-    query_id: str
     #: Who asks: check permissions here.
     request: RequestContext
-    #: The listener's store, if it has one (`store=` of `read_model` and `reactor`).
+    #: The listener's store, if it has one (`store=` of `Domain.read_model` and `Domain.reactor`).
     store: "Store | None" = None
 
 
@@ -148,30 +209,47 @@ class Event:
     command_id: str
     #: The request context of the command that caused the event.
     request: RequestContext = field(default_factory=RequestContext)
-    #: Version of the payload format. Listeners get `data` upcast to the version they know (see
-    #: `Domain.event`), unless the handler is `raw`.
+    #: Version of the payload format, as stored (see `Domain.event`).
     schema: int = 1
     #: Fields kept in the vault whose value is not here (None in `data`): erased, or not readable
-    #: with this key (`[vault] readers`).
+    #: with this key (granted `vault_read`).
+    redacted: list[str] = field(default_factory=list)
+
+
+@dataclass
+class StoredEventMeta(EventMeta):
+    """What a listener handler gets about the event besides its data (as an optional second
+    parameter): the stored event without its payload and request context."""
+
+    position: int = 0
+    #: Version of the payload format: the version the listener knows (see `Domain.event`), or the
+    #: stored one for a `raw` handler.
+    schema: int = 1
+    #: Fields kept in the vault whose value is not in the data (None there): erased, or not
+    #: readable with this key (granted `vault_read`).
     redacted: list[str] = field(default_factory=list)
 
 
 @dataclass
 class ListenerContext:
-    """What a listener handler gets besides the event (as an optional second parameter)."""
+    """What a listener handler gets besides the event's data and meta (as an optional third
+    parameter)."""
 
     #: The event was committed before the listener connected: it is being replayed.
     replaying: bool
-    event: Event
-    #: The listener's store, if it has one (`store=` of `read_model` and `reactor`).
+    #: The request context of the command that caused the event.
+    request: RequestContext = field(default_factory=RequestContext)
+    #: The listener's store, if it has one (`store=` of `Domain.read_model` and `Domain.reactor`).
     store: "Store | None" = None
+    #: The command that caused the event, for `follow()`.
+    _command_id: str = field(default="", repr=False)
 
     def follow(self) -> RequestContext:
         """A request context for commands caused by this event: same sender and correlation."""
-        r = self.event.request
+        r = self.request
         return RequestContext(r.sender_tenant, r.sender_identity, r.sender_account, r.sender_session,
-                              r.on_behalf_of, r.workspace, None, r.correlation_id or self.event.command_id,
-                              self.event.command_id, r.trace_id, False, dict(r.attributes))
+                              r.on_behalf_of, r.workspace, None, r.correlation_id or self._command_id,
+                              self._command_id, r.trace_id, False, dict(r.attributes))
 
 
 @dataclass
@@ -209,10 +287,11 @@ PROTOCOL = 1
 _HANDLING: contextvars.ContextVar[str] = contextvars.ContextVar("kernable_listener", default="")
 
 _INITIAL = object()
-_DOMAIN = re.compile(r"^[a-z][a-z0-9_-]*$")
-_LISTENED = re.compile(r"^[a-z][a-z0-9_-]*\.([^.]+|\*)$")
-_QUERY = re.compile(r"^[a-z][a-z0-9_-]*\.[^.*]+$")
-_CHECKED = re.compile(r"^(\*|[a-z][a-z0-9_-]*\.([^.]+|\*))$")
+_DOMAIN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+_UNQUALIFIED = re.compile(r"^[^.*]+$")
+_LISTENED = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*\.([^.]+|\*)$")
+_QUERY = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*\.[^.*]+$")
+_CHECKED = re.compile(r"^(\*|[A-Za-z][A-Za-z0-9_-]*\.([^.]+|\*))$")
 
 
 class EventSchema:
@@ -353,8 +432,10 @@ def _upcast(events: dict | None, domain: str, type: str, schema: int, data: Any)
 
 
 class Domain:
-    """A domain: a lowercase name (`orders`) that scopes its aggregates, commands and events.
-    Types are unique within a domain; elsewhere they are named `domain.Type`."""
+    """A domain: a name that scopes its aggregates, commands and events, lowercase by convention
+    (`orders`) like aggregates, while message types are capitalized (`orders.PlaceOrder`). Both
+    cases are valid; names are case-sensitive. Types are unique within a domain; elsewhere they
+    are named `domain.Type`."""
 
     def __init__(self, name: str):
         if not _DOMAIN.match(name):
@@ -374,13 +455,36 @@ class Domain:
 
     def event(self, type: str, schema: int) -> EventSchema:
         """Declares that this domain writes `type` events at version `schema`, with an `upcast`
-        per older version. The domain's aggregates use it; listeners get it with `use(domain)`."""
+        per older version. The domain's aggregates and listeners use it; listeners of other
+        domains get it with `use(domain)`."""
         spec = EventSchema(type, schema)
         self.events[type] = spec
         return spec
 
     def aggregate(self, name: str, initial: Any, snapshot_every: int = 100, schema: str = "1") -> "Aggregate":
+        """An aggregate of this domain; see `Aggregate`. Run it with `kernable.worker(aggregate)`."""
         return Aggregate(self.name, name, initial, snapshot_every, schema, self.events)
+
+    def read_model(self, name: str, *, order: int = 0, start: int | None = 0, reconnect_s: float = 1.0,
+                   store: str | None = None, schema: str = "1") -> "Listener":
+        """A read model of this domain: kept in memory and rebuilt from the first event on every
+        start (default). Run it with `kernable.listener(read_model)`.
+
+        With `store` (`sqlite:<path>` or `memory:`), its state lives in the running listener's
+        `store`: data and position are written together per batch, and a restart continues after
+        the stored position. Change `schema` when the handlers store data differently: the store is
+        cleared and the read model rebuilds from the first event."""
+        return Listener(self, name, order, start, reconnect_s, store, schema)
+
+    def reactor(self, name: str, *, order: int = 10, start: int | None = None, reconnect_s: float = 1.0,
+                store: str | None = None, schema: str = "1") -> "Listener":
+        """A reactor of this domain: triggers side effects; resumes after the last acknowledged
+        event (default). Run it with `kernable.listener(reactor)`.
+
+        A settling submit from its handler waits for the listeners before it (the read models),
+        not for the reactor itself, which handles one event at a time. `store` and `schema`: see
+        `read_model`."""
+        return Listener(self, name, order, start, reconnect_s, store, schema)
 
 
 def domain(name: str) -> Domain:
@@ -413,9 +517,15 @@ class Aggregate:
         self.handlers: dict[str, Callable] = {}
 
     def apply(self, event_type: str, fn: Callable | None = None):
+        """How an event of `event_type` changes the state: `fn(state, data, evt, ctx)` changes
+        `state` in place and returns nothing, or returns a new state that replaces it. `state` is a
+        copy, so changing it never touches the state it came from; `evt` (an `EventMeta`) and
+        `ctx` (an `ApplyContext`) are optional."""
         return _register(self, self.appliers, event_type, fn)
 
     def command(self, command_type: str, fn: Callable | None = None):
+        """Which events a `command_type` command produces: `fn(state, data, cmd, ctx)` returns
+        them; `cmd` (a `CommandMeta`) and `ctx` (a `CommandContext`) are optional."""
         return _register(self, self.handlers, command_type, fn)
 
     def schema_of(self, event_type: str) -> int:
@@ -423,15 +533,20 @@ class Aggregate:
         spec = self.events.get(event_type)
         return spec.schema if spec else 1
 
-    def fold(self, history: list[tuple[str, int, Any]], state: Any = _INITIAL) -> Any:
-        """State after `history` (type, schema, data), starting from `state` (default: `initial`).
-        Events are upcast first; events without an `apply` are skipped."""
+    def fold(self, history: list[tuple], state: Any = _INITIAL) -> Any:
+        """State after `history` (type, schema, data, and optionally an `EventMeta` and an
+        `ApplyContext`), starting from `state` (default: `initial`). Events are upcast first;
+        events without an `apply` are skipped."""
         if state is _INITIAL:
             state = self.initial
-        for event_type, schema, data in history:
+        for event_type, schema, data, *rest in history:
             fn = self.appliers.get(event_type)
             if fn:
-                state = fn(state, _upcast(self.events, self.domain, event_type, schema, data)[1])
+                meta = rest[0] if rest else EventMeta(event_type, domain=self.domain, aggregate_type=self.name)
+                ctx = rest[1] if len(rest) > 1 else ApplyContext()
+                draft = copy.deepcopy(state)
+                result = _call(fn, draft, _upcast(self.events, self.domain, event_type, schema, data)[1], meta, ctx)
+                state = draft if result is None else result
         return state
 
 
@@ -447,13 +562,47 @@ def _register(owner, table: dict, name: str, fn: Callable | None):
     return decorator
 
 
+class _WithGrant(grpc.UnaryUnaryClientInterceptor, grpc.UnaryStreamClientInterceptor,
+                 grpc.StreamUnaryClientInterceptor, grpc.StreamStreamClientInterceptor):
+    """Sends the key's grant with every call, in the `kernable-grant` metadata entry."""
+
+    def __init__(self, grant: str):
+        self._grant = grant
+
+    def _details(self, details):
+        metadata = [*(details.metadata or []), ("kernable-grant", self._grant)]
+        return details._replace(metadata=metadata)
+
+    def intercept_unary_unary(self, continuation, details, request):
+        return continuation(self._details(details), request)
+
+    def intercept_unary_stream(self, continuation, details, request):
+        return continuation(self._details(details), request)
+
+    def intercept_stream_unary(self, continuation, details, requests):
+        return continuation(self._details(details), requests)
+
+    def intercept_stream_stream(self, continuation, details, requests):
+        return continuation(self._details(details), requests)
+
+
 class Kernable:
-    def __init__(self, url: str, key: str, tenant: str = "default", tls: Tls | None = None,
-                 context: RequestContext | None = None):
-        """`url`: `unix:/path/to.sock` or `host:port`; `key`: path to this process's `.key` file;
-        `tls`: mutual TLS for `host:port`; `context`: default request context for submits,
-        e.g. this service's identity."""
+    def __init__(self, url: str | None = None, key: str | None = None, tenant: str = "default",
+                 tls: Tls | None = None, context: RequestContext | None = None,
+                 grant: str | None = None):
+        """`url`: `http://host:port` (`host:port` works too) or, on Unix, `unix:/path/to.sock`;
+        default `KERNABLE_URL`, else `http://127.0.0.1:7233`, where `kernable start` listens;
+        `key`: path to this process's `.key` file; default `KERNABLE_KEY`, else `app.key` in the
+        current directory; `tls`: mutual TLS for `host:port`; default `KERNABLE_TLS_CA`,
+        `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`, if set; `context`: default request context for submits
+        and queries, e.g. this service's identity, replaced by a request's own; `grant`: path to the key's grant (`kernable grant`), sent
+        with every call; default `KERNABLE_GRANT`, else the `.grant` file next to the key file,
+        if there is one."""
+        key = key or os.environ.get("KERNABLE_KEY") or "app.key"
+        tls = tls or _tls_from_env()
         self._context = context or RequestContext()
+        url = url or os.environ.get("KERNABLE_URL") or "http://127.0.0.1:7233"
+        url = re.sub(r"^https?://", "", url).rstrip("/")
         if tls:
             def read(path: str) -> bytes:
                 with open(path, "rb") as f:
@@ -465,6 +614,12 @@ class Kernable:
             # grpcio sends the socket path as :authority for unix: URLs, which the kernel's
             # HTTP/2 server rejects; any valid authority works.
             self._channel = grpc.insecure_channel(url, options=[("grpc.default_authority", "localhost")])
+        grant = grant or os.environ.get("KERNABLE_GRANT")
+        if grant is None and os.path.exists(default := key.removesuffix(".key") + ".grant"):
+            grant = default
+        if grant is not None:
+            with open(grant) as f:
+                self._channel = grpc.intercept_channel(self._channel, _WithGrant(f.read().strip()))
         self._key = Key.from_file(key)
         self._tenant = tenant
         self._domains: dict[str, Domain] = {}
@@ -522,26 +677,13 @@ class Kernable:
             raise Rejected(res.rejected.message, res.rejected.code)
         return _decode(res.response)
 
-    def read_model(self, name: str, *, order: int = 0, start: int | None = 0, reconnect_s: float = 1.0,
-                   store: str | None = None, schema: str = "1") -> "Listener":
-        """A read model: kept in memory and rebuilt from the first event on every start (default).
-
-        With `store` (`sqlite:<path>` or `memory:`), its state lives in `listener.store`: data and
-        position are written together per batch, and a restart continues after the stored position.
-        Change `schema` when the handlers store data differently: the store is cleared and the read
-        model rebuilds from the first event."""
-        return Listener(self._channel, self._key, name, order, start, reconnect_s, store, schema)
-
-    def reactor(self, name: str, *, order: int = 10, start: int | None = None, reconnect_s: float = 1.0,
-                store: str | None = None, schema: str = "1") -> "Listener":
-        """A reactor: triggers side effects; resumes after the last acknowledged event (default).
-
-        A settling submit from its handler waits for the listeners before it (the read models),
-        not for the reactor itself, which handles one event at a time. `store` and `schema`: see
-        `read_model`."""
-        return Listener(self._channel, self._key, name, order, start, reconnect_s, store, schema)
+    def listener(self, listener: "Listener") -> "ListenerHandle":
+        """Connects a listener defined with `Domain.read_model` or `Domain.reactor`; call `run()`
+        on the result."""
+        return ListenerHandle(self._channel, self._key, listener)
 
     def close(self) -> None:
+        """Closes the connection now; only needed in a long-running process that discards the client."""
         self._channel.close()
 
     def _send(self, domain, aggregate_type, aggregate_id, command_type, data, tenant, id, wait, context):
@@ -650,10 +792,14 @@ class Worker(_Stream):
                                "unknown_command")
             if x.HasField("snapshot") and x.snapshot.schema != agg.schema:
                 raise Rejected(f"snapshot schema {x.snapshot.schema} is not {agg.schema}", "snapshot_stale")
-            history = [(e.event_type, e.schema, _unseal(_decode(e.payload), x.vault)[0]) for e in x.history]
+            history = [(e.event_type, e.schema, _unseal(_decode(e.payload), x.vault)[0],
+                        _meta(e.event_type, e.version, cmd, e.command_id), ApplyContext(_from_wire_context(e.context)))
+                       for e in x.history]
             state = agg.fold(history, _decode(x.snapshot.state) if x.HasField("snapshot") else _INITIAL)
-            ctx = CommandContext(cmd.command_id, _from_wire_context(cmd.context), _time(x.deadline), _time(x.received_at))
-            produced = _call(agg.handlers[cmd.command_type], state, _unseal(_decode(cmd.payload), x.vault)[0], ctx)
+            meta = CommandMeta(cmd.command_id, cmd.command_type, cmd.domain, cmd.aggregate_type, cmd.aggregate_id,
+                               cmd.tenant_id)
+            ctx = CommandContext(_from_wire_context(cmd.context), _time(x.deadline), _time(x.received_at), cmd.command_id)
+            produced = _call(agg.handlers[cmd.command_type], state, _unseal(_decode(cmd.payload), x.vault)[0], meta, ctx)
             events, vault = [], []
             for e in produced:
                 spec = agg.events.get(e["type"])
@@ -682,81 +828,96 @@ class Worker(_Stream):
         if every <= 0 or not events or version // every == before // every:
             return None
         # Apply the events as they will be read back (a JSON round trip), so the snapshot equals a replay.
-        read = [(e["type"], agg.schema_of(e["type"]), _decode(_encode(e.get("data")))) for e in events]
+        apply_ctx = ApplyContext(_from_wire_context(cmd.context))
+        read = [(e["type"], agg.schema_of(e["type"]), _decode(_encode(e.get("data"))),
+                 _meta(e["type"], before + i + 1, cmd, cmd.command_id), apply_ctx) for i, e in enumerate(events)]
         after = agg.fold(read, state)
         state_bytes = _encode(after)
         sig = self._key.sign(snapshot_message(cmd, version, agg.schema, state_bytes))
         return pb.Snapshot(version=version, schema=agg.schema, state=state_bytes, worker_sig=sig)
 
 
-class Listener(_Stream):
-    """A durable, named event listener. Events arrive in order, one at a time, after every
-    listener with a lower order has processed them. Delivery is at least once: if a handler
-    raises, the listener reconnects and the event is delivered again.
+class Listener:
+    """A listener definition: a durable, named event listener of a domain, made with
+    `Domain.read_model` or `Domain.reactor` and run with `kernable.listener(listener)`, which
+    returns a `ListenerHandle`. Events arrive in order, one at a time, after every listener with a
+    lower order has processed them. Delivery is at least once: if a handler raises, the listener
+    reconnects and the event is delivered again.
 
-    Handlers get event payloads upcast to the versions of the domains the listener `use`s. An
-    event with a newer schema than known stops the listener (it retries and logs) until it is
-    updated, so it never misreads data."""
+    Type names without a domain (`ItemAdded`, `GetCart`) are the listener's own domain's; types of
+    other domains are qualified (`identity.AccountRegistered`, `identity.*`).
 
-    def __init__(self, channel: grpc.Channel, key: Key, name: str, order: int, start: int | None, reconnect_s: float,
+    Handlers get event payloads upcast to the versions of the listener's domain and of the domains
+    it `use`s. An event with a newer schema than known stops the listener (it retries and logs)
+    until it is updated, so it never misreads data."""
+
+    def __init__(self, domain: Domain, name: str, order: int, start: int | None, reconnect_s: float,
                  store: str | None = None, schema: str = "1"):
-        super().__init__(f"listener {name}", reconnect_s)
-        self._store_url, self._schema = store, schema
-        #: The listener's store, once `run()` opened it (with `store=`).
-        self.store: Store | None = None
-        self._stub = rpc.ListenerServiceStub(channel)
-        self._key = key
-        self._name = name
-        self._order = order
-        self._start = start
+        #: The domain the listener belongs to: unqualified type names are its types.
+        self.domain = domain
+        self.name = name
+        self.order = order
+        self.start = start
+        self.reconnect_s = reconnect_s
+        #: Where the running listener keeps its state (`sqlite:<path>` or `memory:`), if anywhere.
+        self.store_url = store
+        self.schema = schema
         self._handlers: dict[str, Callable] = {}
         self._raw: set[str] = set()
-        self._domains: dict[str, dict[str, EventSchema]] = {}
+        self._domains: dict[str, dict[str, EventSchema]] = {domain.name: domain.events}
         self._queries: dict[str, Callable] = {}
         self._middleware: tuple[pb.Middleware, Callable] | None = None
-        #: Global position of the last handled event (or skipped, for other event types).
-        self.position = 0
-        # Newest event when the kernel accepted the listener; events up to it are replayed.
-        self._replay_up_to = 0
+
+    def _qualify(self, type: str) -> str:
+        return type if "." in type else f"{self.domain.name}.{type}"
 
     def use(self, *domains: Domain) -> "Listener":
-        """Upcasts the events of these domains with their event schemas (see `Domain.event`)."""
+        """Upcasts the events of these other domains with their event schemas (see
+        `Domain.event`); the listener's own domain's apply already."""
         for d in domains:
             self._domains[d.name] = d.events
         return self
 
     def on(self, event_type: str, fn: Callable | None = None, *, raw: bool = False):
-        """Registers a handler for a qualified type (`orders.OrderPlaced`) or a whole domain
-        (`orders.*`); works as a decorator too. A `raw` handler gets events as stored, without
-        upcasting, whatever their schema (for archives and exports)."""
-        if not _LISTENED.match(event_type):
-            raise ValueError(f"listen to a qualified type (domain.Type) or a domain (domain.*), not {event_type!r}")
-        (self._raw.add if raw else self._raw.discard)(event_type)
-        return _register(self, self._handlers, event_type, fn)
+        """Registers a handler for an event type (`ItemAdded`, or `orders.OrderPlaced` of another
+        domain) or a whole domain (`orders.*`); works as a decorator too: `fn(data, evt, ctx)` gets
+        the event's payload, a `StoredEventMeta` and a `ListenerContext` (both optional). A `raw`
+        handler gets payloads as stored, without upcasting, whatever their schema (for archives
+        and exports)."""
+        # A bare `*` is not the own domain (that is `<domain>.*`): in middleware it means everything.
+        if not _UNQUALIFIED.match(event_type) and not _LISTENED.match(event_type):
+            raise ValueError(f"listen to a type (Type), a qualified type (domain.Type) or a domain (domain.*), not {event_type!r}")
+        qualified = self._qualify(event_type)
+        (self._raw.add if raw else self._raw.discard)(qualified)
+        return _register(self, self._handlers, qualified, fn)
 
     def query(self, query_type: str, fn: Callable | None = None):
-        """Answers the qualified query type (`orders.GetOrder`) from this listener's state; works as
-        a decorator too. The kernel delivers queries in order with the events, so an answer
-        reflects every event handled before it. Raise `Rejected` to refuse. A handler cannot
-        query its own listener (the answer would wait behind itself): the kernel refuses it."""
-        if not _QUERY.match(query_type):
-            raise ValueError(f"answer a qualified query type (domain.Query), not {query_type!r}")
-        return _register(self, self._queries, query_type, fn)
+        """Answers a query type (`GetCart`, or `orders.GetOrder` of another domain) from this
+        listener's state; works as a decorator too: `fn(data, qry, ctx)` gets the query's data, a
+        `QueryMeta` and a `QueryContext` (both optional). The kernel delivers queries in order with
+        the events, so an answer reflects every event handled before it. Raise `Rejected` to
+        refuse. A handler cannot query its own listener (the answer would wait behind itself): the
+        kernel refuses it."""
+        qualified = self._qualify(query_type)
+        if not _QUERY.match(qualified):
+            raise ValueError(f"answer a query type (Query or domain.Query), not {query_type!r}")
+        return _register(self, self._queries, qualified, fn)
 
     def middleware(self, types: list[str], order: int = 0, fn: Callable | None = None):
         """Makes this listener a middleware; works as a decorator too. The kernel asks `fn` about
-        every command and query of `types` (`*`, `domain.*` or `domain.Type`) before accepting
-        or routing it, in chain order (lower `order` first, then by listener name), and only
-        once this listener has caught up with the events. `fn` gets a `Check`; raise `Rejected`
-        to refuse; any other error refuses too. The registration is stored: while this listener
-        is away, the kernel refuses those requests (`kernable listeners remove` unregisters it).
-        `fn` cannot submit or query what it checks itself (it would wait behind itself): the
-        kernel refuses it.
+        every command and query of `types` (`*` for all, `Type` of the own domain, `domain.*` or
+        `domain.Type`) before accepting or routing it, in chain order (lower `order` first, then by
+        listener name), and only once this listener has caught up with the events. `fn` gets a
+        `Check`; raise `Rejected` to refuse; any other error refuses too. The registration is
+        stored: while this listener is away, the kernel refuses those requests (`kernable listeners
+        remove` unregisters it). `fn` cannot submit or query what it checks itself (it would wait
+        behind itself): the kernel refuses it.
         Negative orders are reserved for kernable."""
-        for t in types:
-            if not _CHECKED.match(t):
-                raise ValueError(f"check `*`, a domain (domain.*) or a qualified type (domain.Type), not {t!r}")
-        spec = pb.Middleware(order=order, types=types)
+        qualified = [t if t == "*" else self._qualify(t) for t in types]
+        for t, q in zip(types, qualified):
+            if not _CHECKED.match(q):
+                raise ValueError(f"check `*`, a type (Type or domain.Type) or a domain (domain.*), not {t!r}")
+        spec = pb.Middleware(order=order, types=qualified)
         if fn is not None:
             self._middleware = (spec, fn)
             return self
@@ -767,9 +928,30 @@ class Listener(_Stream):
 
         return decorator
 
+
+class ListenerHandle(_Stream):
+    """A running `Listener`, returned by `kernable.listener(listener)`: `run()` processes events,
+    queries and checks until `stop()`; `ready` is set once the kernel accepted it."""
+
+    def __init__(self, channel: grpc.Channel, key: Key, listener: Listener):
+        super().__init__(f"listener {listener.name}", listener.reconnect_s)
+        #: The listener definition this runs.
+        self.listener = listener
+        #: The listener's store, once `run()` opened it (with `store=`).
+        self.store: Store | None = None
+        self._stub = rpc.ListenerServiceStub(channel)
+        self._key = key
+        self._start = listener.start
+        #: Global position of the last handled event (or skipped, for other event types).
+        self.position = 0
+        # Newest event when the kernel accepted the listener; events up to it are replayed.
+        self._replay_up_to = 0
+
     def run(self) -> None:
-        if self._store_url and self.store is None:
-            self.store = Store(self._store_url, self._schema)
+        """Processes events, queries and checks until `stop()`, reconnecting when the stream
+        drops; with a store, opens it first and continues after its position."""
+        if self.listener.store_url and self.store is None:
+            self.store = Store(self.listener.store_url, self.listener.schema)
             self.position = self._start = self.store.committed
         super().run()
 
@@ -777,11 +959,12 @@ class Listener(_Stream):
         return self._stub.Listen(requests)
 
     def _hello(self):
-        hello = pb.Hello(name=self._name, key_id=self._key.id, protocol=PROTOCOL, order=self._order,
-                         event_types=list(self._handlers),
-                         query_types=list(self._queries))
-        if self._middleware:
-            hello.middleware.CopyFrom(self._middleware[0])
+        d = self.listener
+        hello = pb.Hello(name=d.name, key_id=self._key.id, protocol=PROTOCOL, order=d.order,
+                         event_types=list(d._handlers),
+                         query_types=list(d._queries))
+        if d._middleware:
+            hello.middleware.CopyFrom(d._middleware[0])
         # Reconnects resume after the last handled event.
         start = self.position if self.ready.is_set() else self._start
         if start is not None:
@@ -791,7 +974,7 @@ class Listener(_Stream):
     def _on(self, msg):
         # Requests sent from the handlers name this listener, so the kernel never makes them
         # wait for it (it handles one message at a time).
-        token = _HANDLING.set(self._name)
+        token = _HANDLING.set(self.listener.name)
         try:
             return self._handle(msg)
         finally:
@@ -828,24 +1011,30 @@ class Listener(_Stream):
         return None
 
     def _handle_batch(self, batch) -> None:
+        d = self.listener
         for e in batch.events:
             name = f"{e.domain}.{e.event_type}"
-            if name not in self._handlers:
+            if name not in d._handlers:
                 name = f"{e.domain}.*"
-            handler = self._handlers.get(name)
+            handler = d._handlers.get(name)
             if handler:
-                event = _to_event(e, batch.vault)
-                if name not in self._raw:
-                    event.schema, event.data = _upcast(self._domains.get(e.domain), e.domain, e.event_type,
-                                                       e.schema, event.data)
-                _call(handler, event, ListenerContext(e.global_position <= self._replay_up_to, event, self.store))
+                data, redacted = _unseal(_decode(e.payload), batch.vault)
+                schema = e.schema
+                if name not in d._raw:
+                    schema, data = _upcast(d._domains.get(e.domain), e.domain, e.event_type, schema, data)
+                evt = StoredEventMeta(e.event_type, e.version, e.tenant_id, e.domain, e.aggregate_type, e.aggregate_id,
+                                      e.command_id, e.global_position, schema, redacted)
+                ctx = ListenerContext(e.global_position <= self._replay_up_to, _from_wire_context(e.context),
+                                      self.store, e.command_id)
+                _call(handler, data, evt, ctx)
             self.position = e.global_position
 
     def _verdict(self, call) -> pb.Verdict:
         try:
-            if self._middleware is None:
+            middleware = self.listener._middleware
+            if middleware is None:
                 raise Rejected("not a middleware", "not_a_middleware")
-            self._middleware[1](_to_check(call))
+            middleware[1](_to_check(call))
             return pb.Verdict(call_id=call.call_id)
         except Exception as err:
             reason = (pb.Rejected(code=err.code, message=str(err)) if isinstance(err, Rejected)
@@ -854,10 +1043,11 @@ class Listener(_Stream):
 
     def _answer(self, call_id: str, q) -> pb.QueryAnswer:
         try:
-            handler = self._queries.get(f"{q.domain}.{q.query_type}")
+            handler = self.listener._queries.get(f"{q.domain}.{q.query_type}")
             if handler is None:
                 raise Rejected(f"no handler for {q.domain}.{q.query_type}", "unknown_query")
-            result = _call(handler, _decode(q.payload), QueryContext(q.query_id, _from_wire_context(q.context), self.store))
+            meta = QueryMeta(q.query_id, q.query_type, q.domain, q.tenant_id)
+            result = _call(handler, _decode(q.payload), meta, QueryContext(_from_wire_context(q.context), self.store))
             return pb.QueryAnswer(call_id=call_id, response=_encode(result))
         except Exception as err:
             reason = (pb.Rejected(code=err.code, message=str(err)) if isinstance(err, Rejected)
@@ -877,13 +1067,29 @@ def _time(ms: int) -> datetime:
     return datetime.fromtimestamp(ms / 1000, timezone.utc)
 
 
+def _meta(event_type: str, version: int, cmd, command_id: str) -> EventMeta:
+    """What `apply` gets about an event of `cmd`'s aggregate, caused by command `command_id`."""
+    return EventMeta(event_type, version, cmd.tenant_id, cmd.domain, cmd.aggregate_type, cmd.aggregate_id,
+                     command_id)
+
+
 def _call(fn: Callable, *args):
-    """Calls `fn` with as many of `args` as it takes, so the context parameter is optional."""
+    """Calls `fn` with as many of `args` as it takes, so the trailing parameters are optional."""
     params = inspect.signature(fn).parameters.values()
     if any(p.kind == p.VAR_POSITIONAL for p in params):
         return fn(*args)
     positional = [p for p in params if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
     return fn(*args[:len(positional)])
+
+
+def _tls_from_env() -> Tls | None:
+    """Mutual TLS from `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`: all or none."""
+    files = [os.environ.get(f"KERNABLE_TLS_{n}") for n in ("CA", "CERT", "KEY")]
+    if not any(files):
+        return None
+    if not all(files):
+        raise ValueError("set all of KERNABLE_TLS_CA, KERNABLE_TLS_CERT and KERNABLE_TLS_KEY, or none")
+    return Tls(*files)
 
 
 def _to_wire_context(c: RequestContext, command_id: str) -> pb.RequestContext:

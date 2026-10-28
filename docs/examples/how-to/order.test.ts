@@ -3,23 +3,23 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { Rejected, type CommandContext } from "@kernable/sdk";
+import { Rejected, type CommandContext, type CommandMeta } from "@kernable/sdk";
 
-import { order } from "../shop/ts/domain.ts";
+import { orderAggregate } from "../shop/ts/domain.ts";
 
 // #region test
 /** Runs `type` on the state after `history`, as a worker would. */
 function decide(history: { type: string; data?: unknown }[], type: string, data: unknown = {}) {
-  const state = order.fold(history.map((e) => ({ schema: 1, data: {}, ...e })));
+  const state = orderAggregate.fold(history.map((e) => ({ schema: 1, data: {}, ...e })));
+  const cmd: CommandMeta = { commandId: "test", type, domain: "shop", aggregateType: "order", aggregateId: "o1", tenant: "" };
   let ids = 0;
   const ctx: CommandContext = {
-    commandId: "test",
     request: {},
     now: () => new Date("2026-01-01T00:00:00Z"),
     id: () => `id-${ids++}`,
     deadline: new Date("2026-01-01T00:00:10Z"),
   };
-  return order.handlers.get(type)!(state, data, ctx);
+  return orderAggregate.handlers.get(type)!(state, data, cmd, ctx);
 }
 
 test("a draft order with items can be submitted", async () => {

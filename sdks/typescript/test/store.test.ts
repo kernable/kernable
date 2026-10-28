@@ -5,12 +5,13 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { Kernable, Rejected, domain, type Listener } from "../src/index.ts";
+import { Kernable, Rejected, domain, type ListenerHandle } from "../src/index.ts";
 import { TestKernel } from "./kernel.ts";
 
-const counter = domain("counters").aggregate("Counter", 0)
-  .apply("Incremented", (n, e: { by: number }) => n + e.by)
-  .command("Increment", (_n, d: { by: number }) => [{ type: "Incremented", data: { by: d.by } }]);
+const counters = domain("counters");
+const counter = counters.aggregate("Counter", 0)
+  .apply("Incremented", (n, data: { by: number }) => n + data.by)
+  .command("Increment", (_n, data: { by: number }) => [{ type: "Incremented", data: { by: data.by } }]);
 
 test("a read model with a store continues where it left off and rebuilds on a new schema", async () => {
   const kernel = new TestKernel(["counters.*"]);
@@ -20,18 +21,19 @@ test("a read model with a store continues where it left off and rebuilds on a ne
   let handled = 0;
   let failOn = -1;
   const totals = (schema?: string) => {
-    const model: Listener = kernable.readModel("totals", { store: url, schema, reconnectMs: 50 })
-      .on("counters.Incremented", (e, ctx) => {
+    const Totals = counters.readModel("totals", { store: url, schema, reconnectMs: 50 })
+      .on("Incremented", (data: { by: number }, evt, ctx) => {
         handled++;
-        const total = (ctx.store!.get<number>("totals", e.aggregateId) ?? 0) + (e.data as { by: number }).by;
-        ctx.store!.set("totals", e.aggregateId, total);
+        const total = (ctx.store!.get<number>("totals", evt.aggregateId) ?? 0) + data.by;
+        ctx.store!.set("totals", evt.aggregateId, total);
         if (total === failOn) throw new Error("boom"); // after writing: the write must not stick
       })
-      .query("counters.GetTotal", (d: { id: string }, ctx) => {
-        const total = ctx.store!.get<number>("totals", d.id);
+      .query("GetTotal", (data: { id: string }, _qry, ctx) => {
+        const total = ctx.store!.get<number>("totals", data.id);
         if (total === undefined) throw new Rejected("no counter", "not_found");
         return total;
       });
+    const model = kernable.listener(Totals);
     models.push(model);
     return model;
   };
@@ -41,7 +43,7 @@ test("a read model with a store continues where it left off and rebuilds on a ne
 
   const worker = kernable.worker(counter);
   const running = [worker.run()];
-  const models: Listener[] = [];
+  const models: ListenerHandle[] = [];
   try {
     await worker.ready;
     let model = totals();

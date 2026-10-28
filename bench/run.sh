@@ -12,9 +12,9 @@ PIDS=()
 cleanup() { for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done; rm -rf "$DIR"; }
 trap cleanup EXIT
 
-"$BIN/kernable" keys new "$DIR/kernel" >/dev/null
-CLIENT=$("$BIN/kernable" keys new "$DIR/client")
-WORKER=$("$BIN/kernable" keys new "$DIR/worker")
+for name in root kernel client worker; do "$BIN/kernable" keys new "$DIR/$name" >/dev/null; done
+"$BIN/kernable" grant "$DIR/root.key" "$DIR/client.pub" 'submit=bench.*' >/dev/null
+"$BIN/kernable" grant "$DIR/root.key" "$DIR/worker.pub" 'run=bench.*' 'listen=*' >/dev/null
 SOCK="unix:$DIR/k.sock"
 TCP="127.0.0.1:47233"
 
@@ -22,18 +22,8 @@ STORE=${STORE:-sqlite:k.db}
 
 start_kernel() { # <listen>
   rm -f "$DIR"/k.db* "$DIR"/k.log* "$DIR/k.sock" # a stale socket would look like a ready kernel
-  cat > "$DIR/kernable.toml" <<TOML
-store = "$STORE"
-listen = "$1"
-kernel_key = "kernel.key"
-[clients]
-"$CLIENT" = ["*"]
-[workers]
-"$WORKER" = ["bench.*"]
-[listeners]
-"$WORKER" = ["*"]
-TOML
-  "$BIN/kernable-kernel" "$DIR/kernable.toml" 2>/dev/null &
+  # Relative store paths resolve against the working directory: run the kernel in $DIR.
+  (cd "$DIR" && exec "$BIN/kernable" start --root root.pub --store "$STORE" --listen "$1" --kernel-key kernel.key 2>/dev/null) &
   KERNEL=$!
   # Wait until it accepts connections; the Rust worker does not retry.
   for _ in $(seq 200); do

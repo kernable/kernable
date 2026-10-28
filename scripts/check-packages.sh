@@ -17,26 +17,12 @@ make -s -C "$ROOT" py
 "$ROOT/sdks/python/.venv/bin/pip" wheel -q "$ROOT/sdks/python" -w "$DIR" --no-deps
 rm -rf "$ROOT/sdks/python/build" "$ROOT/sdks/python/"*.egg-info
 
-# A kernel with one key for everything.
+# A kernel trusting one root key, and one app key for everything, granted by the root.
 cd "$DIR"
-"$ROOT/target/debug/kernable" keys new kernel >/dev/null
-APP=$("$ROOT/target/debug/kernable" keys new app)
-cat > kernable.toml <<TOML
-store = "sqlite:k.db"
-listen = "unix:$DIR/k.sock"
-kernel_key = "kernel.key"
-[clients]
-"$APP" = ["*"]
-[workers]
-"$APP" = ["demo.*"]
-[listeners]
-"$APP" = ["*"]
-[queriers]
-"$APP" = ["*"]
-[query_handlers]
-"$APP" = ["demo.*"]
-TOML
-"$ROOT/target/debug/kernable-kernel" kernable.toml 2>kernel.log &
+K="$ROOT/target/debug/kernable"
+for name in root kernel app; do "$K" keys new "$name" >/dev/null; done
+"$K" grant root.key app.pub 'submit=*' 'run=demo.*' 'listen=*' 'query=*' 'answer=demo.*' >/dev/null
+"$K" start --root root.pub --store sqlite:k.db --listen "unix:$DIR/k.sock" --kernel-key kernel.key 2>kernel.log &
 KERNEL_PID=$!
 for _ in $(seq 50); do [ -S k.sock ] && break; sleep 0.1; done
 

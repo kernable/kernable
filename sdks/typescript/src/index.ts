@@ -2,6 +2,7 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomBytes, randomUUID } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 
 import type { ClientReadableStream } from "@grpc/grpc-js";
 
@@ -53,7 +54,7 @@ export class Rejected extends Error {
 
 /**
  * The command was committed, but not every listener processed its events within the kernel's
- * `settle_timeout_ms`. Read models may not show the change yet; `outcome` has the events.
+ * `--settle-timeout-ms`. Read models may not show the change yet; `outcome` has the events.
  */
 export class NotSettled extends Error {
   readonly outcome: { committed: true; events: StoredEvent[] };
@@ -89,14 +90,25 @@ export interface RequestContext {
   /** The command that caused this one. */
   causationId?: string;
   traceId?: string;
-  /** Privileged: only keys in the kernel's `[privileged]` table may set it. */
+  /** Privileged: only keys granted `privileged` for it may set it. */
   bypassAuthorization?: boolean;
   attributes?: Record<string, string>;
 }
 
-/** What a command handler gets besides state and data. */
-export interface CommandContext {
+/** What a command handler gets about the command besides its data. */
+export interface CommandMeta {
   commandId: string;
+  /** The command type within the domain. */
+  type: string;
+  domain: string;
+  aggregateType: string;
+  aggregateId: string;
+  tenant: string;
+}
+
+/** What a command handler gets besides state, data and `CommandMeta`. */
+export interface CommandContext {
+  /** Who sends the command: check permissions here. */
   request: RequestContext;
   /** When the kernel received the command: the same every time the command runs. Use it instead of `new Date()`. */
   now(): Date;
@@ -106,9 +118,17 @@ export interface CommandContext {
   deadline: Date;
 }
 
-/** What a query handler gets besides the query's data. */
-export interface QueryContext {
+/** What a query handler gets about the query besides its data. */
+export interface QueryMeta {
   queryId: string;
+  /** The query type within the domain. */
+  type: string;
+  domain: string;
+  tenant: string;
+}
+
+/** What a query handler gets besides the query's data and `QueryMeta`. */
+export interface QueryContext {
   /** Who asks: check permissions here. */
   request: RequestContext;
   /** The listener's store, if it has one (`ListenerOptions.store`). */
@@ -121,6 +141,7 @@ export interface QueryOptions {
   type: string;
   data?: unknown;
   tenant?: string;
+  /** Replaces the client's default context. */
   context?: RequestContext;
   /** Answer only after the read model has processed this global position (e.g. of a `committed` submit). */
   minPosition?: number;
@@ -144,7 +165,10 @@ export interface Check {
 }
 
 export interface MiddlewareOptions {
-  /** Command and query types it checks: `*`, a domain (`orders.*`) or `domain.Type`. */
+  /**
+   * Command and query types it checks: `*` (all), a type of the listener's own domain (`Type`),
+   * another domain's type (`domain.Type`) or a whole domain (`domain.*`).
+   */
   types: string[];
   /**
    * Position in the chain: lower runs first, equal orders by listener name (default 0).
@@ -153,38 +177,62 @@ export interface MiddlewareOptions {
   order?: number;
 }
 
-/** What a listener handler gets besides the event. */
+/** What a listener handler gets besides the event's data and `StoredEventMeta`. */
 export interface ListenerContext {
   /** The event was committed before the listener connected: it is being replayed. */
   replaying: boolean;
   /** A request context for commands caused by this event: same sender and correlation. */
   follow(): RequestContext;
+  /** The request context of the command that caused the event. */
+  request: RequestContext;
   /** The listener's store, if it has one (`ListenerOptions.store`). */
   store?: Store;
 }
 
-/** An event as stored by the kernel. */
-export interface StoredEvent {
-  position: number;
+/**
+ * What `apply` gets about an event besides its data. Only fields known before the kernel stores
+ * the event, so a snapshot and a replay compute the same state; put a time into the data
+ * (`ctx.now()`) if the state needs one.
+ */
+export interface EventMeta {
+  type: string;
+  /** The aggregate's version after this event: 1 for its first event. */
+  version: number;
   tenant: string;
   /** Always the domain of the command that caused the event. */
   domain: string;
   aggregateType: string;
   aggregateId: string;
-  version: number;
-  type: string;
+  commandId: string;
+}
+
+/**
+ * What `apply` gets besides state, data and `EventMeta`. Nothing that differs between runs
+ * (no clock, no IDs), so a replay computes the same state.
+ */
+export interface ApplyContext {
+  /** The request context of the command that caused the event. */
+  request: RequestContext;
+}
+
+/** What a listener handler gets about an event besides its data and request context. */
+export interface StoredEventMeta extends EventMeta {
+  position: number;
   /**
    * Version of the payload format. Listeners get `data` upcast to the version they know (see
    * `Domain.event`), unless the handler is `raw`.
    */
   schema: number;
-  data: unknown;
   /**
    * Fields kept in the vault whose value is not here (`null` in `data`): erased, or not
-   * readable with this key (`[vault] readers`).
+   * readable with this key (granted `vault_read`).
    */
   redacted: string[];
-  commandId: string;
+}
+
+/** An event as stored by the kernel. */
+export interface StoredEvent extends StoredEventMeta {
+  data: unknown;
   /** The request context of the command that caused the event. */
   request: RequestContext;
 }
@@ -193,8 +241,11 @@ export type Outcome =
   | { committed: true; events: StoredEvent[] }
   | { committed: false; code: string; message: string };
 
-type Apply<S> = (state: S, data: any) => S;
-type Handle<S> = (state: S, data: any, ctx: CommandContext) => NewEvent[] | Promise<NewEvent[]>;
+/** An event to fold: type, payload version and data, plus as much of `EventMeta` and its request context as known. */
+export type FoldEvent = Partial<EventMeta> & { type: string; schema: number; data: unknown; request?: RequestContext };
+
+type Apply<S> = (state: S, data: any, evt: EventMeta, ctx: ApplyContext) => S | void;
+type Handle<S> = (state: S, data: any, cmd: CommandMeta, ctx: CommandContext) => NewEvent[] | Promise<NewEvent[]>;
 
 export interface AggregateOptions {
   /** Send a snapshot of the state every this many events (default 100; 0 turns them off). */
@@ -371,8 +422,10 @@ function upcast(events: Map<string, EventSchema> | undefined, domain: string, ty
 }
 
 /**
- * A domain: a lowercase name (`orders`) that scopes its aggregates, commands and events.
- * Types are unique within a domain; elsewhere they are named `domain.Type`.
+ * A domain: a name that scopes its aggregates, commands and events, lowercase by convention
+ * (`orders`) like aggregates, while message types are capitalized (`orders.PlaceOrder`). Both
+ * cases are valid; names are case-sensitive. Types are unique within a domain; elsewhere they
+ * are named `domain.Type`.
  */
 export class Domain {
   readonly name: string;
@@ -382,13 +435,14 @@ export class Domain {
   readonly commands = new Map<string, CommandSchema>();
 
   constructor(name: string) {
-    if (!/^[a-z][a-z0-9_-]*$/.test(name)) throw new Error(`invalid domain name ${JSON.stringify(name)}`);
+    if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(name)) throw new Error(`invalid domain name ${JSON.stringify(name)}`);
     this.name = name;
   }
 
   /**
    * Declares that this domain writes `type` events at version `schema`, with an `upcast` per
-   * older version. The domain's aggregates use it; listeners get it with `use(domain)`.
+   * older version. The domain's aggregates and listeners use it; listeners of other domains
+   * get it with `use(domain)`.
    */
   event(type: string, schema: number): EventSchema {
     const def = new EventSchema(type, schema);
@@ -408,6 +462,24 @@ export class Domain {
 
   aggregate<S>(name: string, initial: S, options?: AggregateOptions): Aggregate<S> {
     return new Aggregate(this.name, name, initial, options, this.events);
+  }
+
+  /**
+   * Defines a read model: kept in memory and rebuilt from the first event on every start
+   * (defaults: order 0, start 0). Run it with `kernable.listener(definition)`.
+   */
+  readModel(name: string, options: ListenerOptions = {}): Listener {
+    return new Listener(this, name, { order: 0, start: 0, ...options });
+  }
+
+  /**
+   * Defines a reactor: triggers side effects; resumes after the last acknowledged event
+   * (defaults: order 10, no start). A settling submit from its handler waits for the listeners
+   * before it (the read models), not for the reactor itself, which handles one event at a time.
+   * Run it with `kernable.listener(definition)`.
+   */
+  reactor(name: string, options: ListenerOptions = {}): Listener {
+    return new Listener(this, name, { order: 10, ...options });
   }
 }
 
@@ -442,12 +514,21 @@ export class Aggregate<S> {
     this.schema = options.schema ?? "1";
   }
 
-  apply<D = any>(eventType: string, fn: (state: S, data: D) => S): this {
+  /**
+   * How an event of `eventType` changes the state: `fn(state, data, evt, ctx)` changes `state` in
+   * place and returns nothing, or returns a new state that replaces it. `state` is a copy, so
+   * changing it never touches the state it came from.
+   */
+  apply<D = any>(eventType: string, fn: (state: S, data: D, evt: EventMeta, ctx: ApplyContext) => S | void): this {
     this.appliers.set(eventType, fn);
     return this;
   }
 
-  command<D = any>(commandType: string, fn: (state: S, data: D, ctx: CommandContext) => NewEvent[] | Promise<NewEvent[]>): this {
+  /** Which events a `commandType` command produces: `fn(state, data, cmd, ctx)` returns them. */
+  command<D = any>(
+    commandType: string,
+    fn: (state: S, data: D, cmd: CommandMeta, ctx: CommandContext) => NewEvent[] | Promise<NewEvent[]>,
+  ): this {
     this.handlers.set(commandType, fn);
     return this;
   }
@@ -459,27 +540,47 @@ export class Aggregate<S> {
 
   /**
    * State after `history`, starting from `from`. Events are upcast first; events without an
-   * `apply` are skipped.
+   * `apply` are skipped. Fields of `EventMeta` an event lacks are empty (0 for `version`), as is
+   * its request context.
    */
-  fold(history: { type: string; schema: number; data: unknown }[], from: S = this.initial): S {
+  fold(history: FoldEvent[], from: S = this.initial): S {
     return history.reduce((s, e) => {
       const apply = this.appliers.get(e.type);
-      return apply ? apply(s, upcast(this.events, this.domain, e.type, e.schema, e.data).data) : s;
+      if (!apply) return s;
+      const { schema, data, request, ...meta } = e;
+      const evt: EventMeta = { version: 0, tenant: "", domain: this.domain, aggregateType: this.name, aggregateId: "", commandId: "", ...meta };
+      const draft = structuredClone(s);
+      const next = apply(draft, upcast(this.events, this.domain, e.type, schema, data).data, evt, { request: request ?? {} });
+      return next === undefined ? draft : next;
     }, from);
   }
 }
 
 
 export interface Options {
-  /** Kernel address: `unix:/path/to.sock` or `host:port`. */
-  url: string;
-  /** Path to this process's `.key` file; used to sign commands and worker results. */
-  key: string;
+  /**
+   * Kernel address: `http://host:port` (`host:port` works too) or, on Unix, `unix:/path/to.sock`.
+   * Default: `KERNABLE_URL`, else `http://127.0.0.1:7233`, where `kernable start` listens.
+   */
+  url?: string;
+  /**
+   * Path to this process's `.key` file; used to sign commands and worker results. Default:
+   * `KERNABLE_KEY`, else `app.key` in the current directory.
+   */
+  key?: string;
+  /**
+   * Path to the key's grant (`kernable grant`), sent with every call. Default: `KERNABLE_GRANT`,
+   * else the `.grant` file next to the key file, if there is one.
+   */
+  grant?: string;
   /** Default tenant for `submit`. */
   tenant?: string;
-  /** Default request context for `submit`, e.g. this service's identity. */
+  /** Default request context for `submit` and `query`, e.g. this service's identity; a request's own context replaces it. */
   context?: RequestContext;
-  /** Mutual TLS for `host:port` URLs: paths of the CA certificate and this process's certificate and key. */
+  /**
+   * Mutual TLS for `host:port` URLs: paths of the CA certificate and this process's certificate
+   * and key. Default: `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`, if set.
+   */
   tls?: TlsFiles;
 }
 
@@ -492,7 +593,7 @@ export interface SubmitOptions {
   tenant?: string;
   /** Idempotency key; resubmitting the same ID returns the original outcome. */
   id?: string;
-  /** Overrides the client's default context; inside a listener, pass `ctx.follow()`. */
+  /** Replaces the client's default context; inside a listener, pass `ctx.follow()`. */
   context?: RequestContext;
   /**
    * `"settled"` (default): respond once every listener has processed the events, so read
@@ -509,9 +610,14 @@ export class Kernable {
   private readonly context: RequestContext;
   private readonly domains = new Map<string, Domain>();
 
-  constructor(options: Options) {
-    this.clients = connect(options.url, options.tls);
-    this.key = Key.fromFile(options.key);
+  constructor(options: Options = {}) {
+    const env = process.env;
+    const key = options.key ?? env.KERNABLE_KEY ?? "app.key";
+    const grant = options.grant ?? env.KERNABLE_GRANT ?? key.replace(/\.key$/, "") + ".grant";
+    const explicit = options.grant !== undefined || env.KERNABLE_GRANT !== undefined;
+    const url = options.url ?? env.KERNABLE_URL ?? "http://127.0.0.1:7233";
+    this.clients = connect(url, options.tls ?? tlsFromEnv(), explicit || existsSync(grant) ? readFileSync(grant, "utf8").trim() : undefined);
+    this.key = Key.fromFile(key);
     this.tenant = options.tenant ?? "default";
     this.context = options.context ?? {};
   }
@@ -558,7 +664,7 @@ export class Kernable {
       domain: options.domain,
       query_type: options.type,
       payload: encode(options.data),
-      context: toWireContext({ ...this.context, ...options.context }),
+      context: toWireContext(options.context ?? this.context),
       min_position: options.minPosition ?? 0,
       issued_at: Date.now(),
     };
@@ -571,25 +677,20 @@ export class Kernable {
     return decode(res.response!) as T;
   }
 
-  /** A read model: kept in memory and rebuilt from the first event on every start (default). */
-  readModel(name: string, options: ListenerOptions = {}): Listener {
-    return new Listener(this.clients, this.key, name, { order: 0, start: 0, ...options });
-  }
-
   /**
-   * A reactor: triggers side effects; resumes after the last acknowledged event (default).
-   * A settling submit from its handler waits for the listeners before it (the read models),
-   * not for the reactor itself, which handles one event at a time.
+   * Runs a listener defined with `Domain.readModel` or `Domain.reactor` over this connection:
+   * `await kernable.listener(Carts).run()`. Handlers added to the definition later still count
+   * until `run()` connects.
    */
-  reactor(name: string, options: ListenerOptions = {}): Listener {
-    return new Listener(this.clients, this.key, name, { order: 10, ...options });
+  listener(listener: Listener): ListenerHandle {
+    return new ListenerHandle(this.clients, this.key, listener);
   }
 
   private send(options: SubmitOptions, wait: WireWait) {
     const command_id = options.id ?? randomUUID();
     const schema = this.domains.get(options.domain)?.commands.get(options.type);
     const sealed = seal(options.data, schema?.vault, options.aggregateId);
-    const context = { ...this.context, ...options.context };
+    const context = options.context ?? this.context;
     const cmd = {
       command_id,
       tenant_id: options.tenant ?? this.tenant,
@@ -614,6 +715,7 @@ export class Kernable {
     return new Subscription(this.clients, this.key, options, handler);
   }
 
+  /** Closes the connection now; only needed in a long-running process that discards the client. */
   close(): void {
     this.clients.close();
   }
@@ -680,7 +782,7 @@ export interface ListenerOptions {
   /**
    * Keeps the listener's state in a store (`sqlite:<path>` or `memory:`) instead of memory:
    * its data and position are written together per batch, and a restart continues after the
-   * stored position (`start` is then ignored). See `Listener.store`.
+   * stored position (`start` is then ignored). See `ListenerHandle.store`.
    */
   store?: string;
   /**
@@ -690,7 +792,7 @@ export interface ListenerOptions {
   schema?: string;
 }
 
-type EventHandler = (event: StoredEvent, ctx: ListenerContext) => void | Promise<void>;
+type EventHandler = (data: unknown, evt: StoredEventMeta, ctx: ListenerContext) => void | Promise<void>;
 
 export interface HandlerOptions {
   /**
@@ -699,76 +801,83 @@ export interface HandlerOptions {
    */
   raw?: boolean;
 }
-type QueryHandler = (data: unknown, ctx: QueryContext) => unknown;
+type QueryHandler = (data: unknown, qry: QueryMeta, ctx: QueryContext) => unknown;
 type MiddlewareHandler = (check: Check) => void | Promise<void>;
 
+/** A type within its domain (`ItemAdded`), not qualified and no wildcard. */
+const UNQUALIFIED = /^[^.*]+$/;
+/** `domain.Type` or a whole domain, `domain.*`. */
+const QUALIFIED_OR_DOMAIN = /^[A-Za-z][A-Za-z0-9_-]*\.([^.]+|\*)$/;
+
 /**
- * A durable, named event listener. Events arrive in order, one at a time, after every listener
- * with a lower order has processed them. Delivery is at least once: if a handler throws, the
- * listener reconnects and the event is delivered again.
+ * The definition of a durable, named event listener: which events it handles, which queries it
+ * answers and what it checks as a middleware. Define it on a domain with `Domain.readModel` or
+ * `Domain.reactor`, like an aggregate, and run it with `kernable.listener(definition)`.
  *
- * Handlers get event payloads upcast to the versions of the domains the listener `use`s. An
- * event with a newer schema than known stops the listener (it retries and logs) until it is
- * updated, so it never misreads data.
+ * Type names without a domain (`ItemAdded`, `GetCart`) are of the listener's own domain; types
+ * of other domains are qualified (`identity.AccountRegistered`) or name a whole domain
+ * (`identity.*`).
+ *
+ * Handlers get event payloads upcast to the versions of the listener's own domain and of the
+ * domains it `use`s. An event with a newer schema than known stops the listener (it retries and
+ * logs) until it is updated, so it never misreads data.
  */
 export class Listener {
-  /** Global position of the last handled event (or skipped, for other event types). */
-  position = 0;
-  private stored?: Store;
-  /** Resolves once the kernel accepted the listener. */
-  readonly ready: Promise<void>;
-  private markReady!: () => void;
-  private readonly handlers = new Map<string, { handler: EventHandler; raw: boolean }>();
-  private readonly domains = new Map<string, Map<string, EventSchema>>();
-  private readonly queries = new Map<string, QueryHandler>();
-  private checker?: { options: MiddlewareOptions; handler: MiddlewareHandler };
-  private call?: ListenCall;
-  private stopped = false;
-  /** Newest event when the kernel accepted the listener; events up to it are replayed. */
-  private replayUpTo = 0;
-  private readonly clients: Clients;
-  private readonly key: Key;
-  private readonly name: string;
-  private readonly options: ListenerOptions;
+  /** The domain the listener is defined on: its unqualified types are of this domain. */
+  readonly domain: Domain;
+  /** The listener's name, unique per tenant; the kernel tracks its position under it. */
+  readonly name: string;
+  readonly options: ListenerOptions;
+  /** Event handlers per qualified event type or domain (`domain.*`). */
+  readonly handlers = new Map<string, { handler: EventHandler; raw: boolean }>();
+  /** Query handlers per qualified query type. */
+  readonly queries = new Map<string, QueryHandler>();
+  /** The middleware handler and its qualified types, if this listener is one. */
+  checker?: { options: MiddlewareOptions; handler: MiddlewareHandler };
+  /** The domains whose event schemas upcast events, by name: the own domain and those it `use`s. */
+  readonly domains = new Map<string, Domain>();
 
-  constructor(clients: Clients, key: Key, name: string, options: ListenerOptions) {
-    this.clients = clients;
-    this.key = key;
+  constructor(domain: Domain, name: string, options: ListenerOptions = {}) {
+    this.domain = domain;
     this.name = name;
     this.options = options;
-    this.ready = new Promise((resolve) => (this.markReady = resolve));
+    this.domains.set(domain.name, domain);
   }
 
-  /** Upcasts the events of these domains with their event schemas (see `Domain.event`). */
+  /** Upcasts the events of these other domains with their event schemas (see `Domain.event`). */
   use(...domains: Domain[]): this {
-    for (const d of domains) this.domains.set(d.name, d.events);
-    return this;
-  }
-
-  /** `eventType` is qualified (`orders.OrderPlaced`) or a whole domain (`orders.*`). */
-  on<D = any>(
-    eventType: string,
-    handler: (event: StoredEvent & { data: D }, ctx: ListenerContext) => void | Promise<void>,
-    options: HandlerOptions = {},
-  ): this {
-    if (!/^[a-z][a-z0-9_-]*\.([^.]+|\*)$/.test(eventType)) {
-      throw new Error(`listen to a qualified type (domain.Type) or a domain (domain.*), not ${JSON.stringify(eventType)}`);
-    }
-    this.handlers.set(eventType, { handler: handler as EventHandler, raw: options.raw ?? false });
+    for (const d of domains) this.domains.set(d.name, d);
     return this;
   }
 
   /**
-   * Answers the qualified query type `queryType` (`orders.GetOrder`) from this listener's
-   * state. The kernel delivers queries in order with the events, so an answer reflects every
-   * event handled before it. Throw `Rejected` to refuse. A handler cannot query its own
-   * listener (the answer would wait behind itself): the kernel refuses it.
+   * Handles events of `eventType`: a type of the own domain (`ItemAdded`), of another domain
+   * (`identity.AccountRegistered`) or a whole domain (`identity.*`): `handler(data, evt, ctx)`.
    */
-  query<D = any, R = unknown>(queryType: string, handler: (data: D, ctx: QueryContext) => R | Promise<R>): this {
-    if (!/^[a-z][a-z0-9_-]*\.[^.*]+$/.test(queryType)) {
-      throw new Error(`answer a qualified query type (domain.Query), not ${JSON.stringify(queryType)}`);
+  on<D = any>(
+    eventType: string,
+    handler: (data: D, evt: StoredEventMeta, ctx: ListenerContext) => void | Promise<void>,
+    options: HandlerOptions = {},
+  ): this {
+    if (!UNQUALIFIED.test(eventType) && !QUALIFIED_OR_DOMAIN.test(eventType)) {
+      throw new Error(`listen to a type (Type), a qualified type (domain.Type) or a domain (domain.*), not ${JSON.stringify(eventType)}`);
     }
-    this.queries.set(queryType, handler as QueryHandler);
+    this.handlers.set(this.qualify(eventType), { handler: handler as EventHandler, raw: options.raw ?? false });
+    return this;
+  }
+
+  /**
+   * Answers the query type `queryType`, of the own domain (`GetCart`) or another one
+   * (`orders.GetOrder`), from this listener's state. The kernel delivers queries in order with
+   * the events, so an answer reflects every event handled before it. Throw `Rejected` to refuse.
+   * A handler cannot query its own listener (the answer would wait behind itself): the kernel
+   * refuses it.
+   */
+  query<D = any, R = unknown>(queryType: string, handler: (data: D, qry: QueryMeta, ctx: QueryContext) => R | Promise<R>): this {
+    if (!UNQUALIFIED.test(queryType) && !/^[A-Za-z][A-Za-z0-9_-]*\.[^.*]+$/.test(queryType)) {
+      throw new Error(`answer a query type (Query) or a qualified one (domain.Query), not ${JSON.stringify(queryType)}`);
+    }
+    this.queries.set(this.qualify(queryType), handler as QueryHandler);
     return this;
   }
 
@@ -782,25 +891,61 @@ export class Listener {
    */
   middleware(options: MiddlewareOptions, handler: MiddlewareHandler): this {
     for (const t of options.types) {
-      if (t !== "*" && !/^[a-z][a-z0-9_-]*\.([^.]+|\*)$/.test(t)) {
-        throw new Error(`check \`*\`, a domain (domain.*) or a qualified type (domain.Type), not ${JSON.stringify(t)}`);
+      if (t !== "*" && !UNQUALIFIED.test(t) && !QUALIFIED_OR_DOMAIN.test(t)) {
+        throw new Error(`check \`*\`, a type (Type), a qualified type (domain.Type) or a domain (domain.*), not ${JSON.stringify(t)}`);
       }
     }
-    this.checker = { options, handler };
+    const types = options.types.map((t) => (t === "*" ? t : this.qualify(t)));
+    this.checker = { options: { ...options, types }, handler };
     return this;
+  }
+
+  /** `type` with the own domain if it has none. */
+  private qualify(type: string): string {
+    return UNQUALIFIED.test(type) ? `${this.domain.name}.${type}` : type;
+  }
+}
+
+/**
+ * A listener running over a connection: `kernable.listener(definition)`. Events arrive in order,
+ * one at a time, after every listener with a lower order has processed them. Delivery is at
+ * least once: if a handler throws, the listener reconnects and the event is delivered again.
+ */
+export class ListenerHandle {
+  /** Global position of the last handled event (or skipped, for other event types). */
+  position = 0;
+  private stored?: Store;
+  /** Resolves once the kernel accepted the listener. */
+  readonly ready: Promise<void>;
+  private markReady!: () => void;
+  private call?: ListenCall;
+  private stopped = false;
+  /** Newest event when the kernel accepted the listener; events up to it are replayed. */
+  private replayUpTo = 0;
+  private readonly clients: Clients;
+  private readonly key: Key;
+  /** The definition it runs. */
+  readonly listener: Listener;
+
+  constructor(clients: Clients, key: Key, listener: Listener) {
+    this.clients = clients;
+    this.key = key;
+    this.listener = listener;
+    this.ready = new Promise((resolve) => (this.markReady = resolve));
   }
 
   /** The listener's store (`ListenerOptions.store`), once `run()` opened it. */
   get store(): Store {
-    if (!this.stored) throw new Error(`listener ${this.name} has no store, or run() has not opened it yet`);
+    if (!this.stored) throw new Error(`listener ${this.listener.name} has no store, or run() has not opened it yet`);
     return this.stored;
   }
 
   /** Processes events until `stop()`, reconnecting when the stream drops. */
   async run(): Promise<void> {
-    let start = this.options.start;
-    if (this.options.store && !this.stored) {
-      this.stored = await Store.open(this.options.store, this.options.schema ?? "1");
+    const options = this.listener.options;
+    let start = options.start;
+    if (options.store && !this.stored) {
+      this.stored = await Store.open(options.store, options.schema ?? "1");
       this.position = this.stored.committed;
       start = this.position;
     }
@@ -808,10 +953,10 @@ export class Listener {
       try {
         await this.listen(start);
       } catch (err) {
-        if (!this.stopped) console.error(`kernable listener ${this.name}: ${(err as Error).message}`);
+        if (!this.stopped) console.error(`kernable listener ${this.listener.name}: ${(err as Error).message}`);
       }
       start = this.position;
-      if (!this.stopped) await new Promise((r) => setTimeout(r, this.options.reconnectMs ?? 1000));
+      if (!this.stopped) await new Promise((r) => setTimeout(r, options.reconnectMs ?? 1000));
     }
   }
 
@@ -821,6 +966,7 @@ export class Listener {
   }
 
   private listen(start: number | undefined): Promise<void> {
+    const { name, options, handlers, queries, checker } = this.listener;
     return new Promise((resolve, reject) => {
       const call = this.clients.listen();
       this.call = call;
@@ -829,7 +975,7 @@ export class Listener {
       call.on("data", (m: ListenerDelivery) => {
         // Requests sent from the handlers name this listener, so the kernel never makes them
         // wait for it (it handles one message at a time).
-        queue = queue.then(() => handling.run(this.name, () => this.onMessage(call, m))).catch((err) => {
+        queue = queue.then(() => handling.run(name, () => this.onMessage(call, m))).catch((err) => {
           call.cancel();
           reject(err);
         });
@@ -838,14 +984,14 @@ export class Listener {
       call.on("end", resolve);
       call.write({
         hello: {
-          name: this.name,
+          name,
           key_id: this.key.id,
           protocol: PROTOCOL,
-          order: this.options.order ?? 0,
-          event_types: [...this.handlers.keys()],
-          query_types: [...this.queries.keys()],
+          order: options.order ?? 0,
+          event_types: [...handlers.keys()],
+          query_types: [...queries.keys()],
           ...(start === undefined ? {} : { from_position: start }),
-          ...(this.checker ? { middleware: { order: this.checker.options.order ?? 0, types: this.checker.options.types } } : {}),
+          ...(checker ? { middleware: { order: checker.options.order ?? 0, types: checker.options.types } } : {}),
         },
       });
     });
@@ -879,13 +1025,16 @@ export class Listener {
   }
 
   private async handleBatch(batch: NonNullable<ListenerDelivery["batch"]>): Promise<void> {
+    const { handlers, domains } = this.listener;
     for (const e of batch.events) {
-      const entry = this.handlers.get(`${e.domain}.${e.event_type}`) ?? this.handlers.get(`${e.domain}.*`);
+      const entry = handlers.get(`${e.domain}.${e.event_type}`) ?? handlers.get(`${e.domain}.*`);
       if (entry) {
         const stored = toStored(e, batch.vault);
-        const event = entry.raw ? stored : { ...stored, ...upcast(this.domains.get(e.domain), e.domain, e.event_type, e.schema, stored.data) };
-        const ctx = { replaying: e.global_position <= this.replayUpTo, follow: () => follow(event), store: this.stored };
-        await entry.handler(event, ctx);
+        const { data, request, ...evt } = entry.raw
+          ? stored
+          : { ...stored, ...upcast(domains.get(e.domain)?.events, e.domain, e.event_type, e.schema, stored.data) };
+        const ctx = { replaying: e.global_position <= this.replayUpTo, follow: () => follow(stored), request, store: this.stored };
+        await entry.handler(data, evt, ctx);
       }
       this.position = e.global_position;
     }
@@ -893,8 +1042,9 @@ export class Listener {
 
   private async verdict(c: NonNullable<ListenerDelivery["check"]>): Promise<{ rejected?: WireRejected }> {
     try {
-      if (!this.checker) throw new Rejected("not a middleware", "not_a_middleware");
-      await this.checker.handler(toCheck(c));
+      const checker = this.listener.checker;
+      if (!checker) throw new Rejected("not a middleware", "not_a_middleware");
+      await checker.handler(toCheck(c));
       return {};
     } catch (err) {
       return {
@@ -905,9 +1055,10 @@ export class Listener {
 
   private async answer(q: WireQueryRequest): Promise<{ response: Buffer } | { rejected: WireRejected }> {
     try {
-      const handler = this.queries.get(`${q.domain}.${q.query_type}`);
+      const handler = this.listener.queries.get(`${q.domain}.${q.query_type}`);
       if (!handler) throw new Rejected(`no handler for ${q.domain}.${q.query_type}`, "unknown_query");
-      const result = await handler(decode(q.payload), { queryId: q.query_id, request: fromWireContext(q.context), store: this.stored });
+      const qry: QueryMeta = { queryId: q.query_id, type: q.query_type, domain: q.domain, tenant: q.tenant_id };
+      const result = await handler(decode(q.payload), qry, { request: fromWireContext(q.context), store: this.stored });
       return { response: encode(result) };
     } catch (err) {
       return {
@@ -1016,17 +1167,28 @@ export class Worker {
         throw new Rejected(`snapshot schema ${x.snapshot.schema} is not ${agg.schema}`, "snapshot_stale");
       }
       const from = x.snapshot ? (decode(x.snapshot.state) as any) : agg.initial;
-      const history = x.history.map((e) => ({ type: e.event_type, schema: e.schema, data: unseal(decode(e.payload), x.vault).data }));
+      const history = x.history.map((e) => ({
+        ...metaOf(e.event_type, e.version, cmd, e.command_id, e.context),
+        schema: e.schema,
+        data: unseal(decode(e.payload), x.vault).data,
+      }));
       const state = agg.fold(history, from);
       let ids = 0;
-      const ctx: CommandContext = {
+      const meta: CommandMeta = {
         commandId: cmd.command_id,
+        type: cmd.command_type,
+        domain: cmd.domain,
+        aggregateType: cmd.aggregate_type,
+        aggregateId: cmd.aggregate_id,
+        tenant: cmd.tenant_id,
+      };
+      const ctx: CommandContext = {
         request: fromWireContext(cmd.context),
         now: () => new Date(x.received_at),
         id: () => derivedId(cmd.command_id, ids++),
         deadline: new Date(x.deadline),
       };
-      const produced = await agg.handlers.get(cmd.command_type)!(state, unseal(decode(cmd.payload), x.vault).data, ctx);
+      const produced = await agg.handlers.get(cmd.command_type)!(state, unseal(decode(cmd.payload), x.vault).data, meta, ctx);
       events = produced.map((e) => {
         const def = agg.events.get(e.type);
         const sealed = seal(e.data, def?.vault, cmd.aggregate_id);
@@ -1058,7 +1220,11 @@ export class Worker {
     const every = agg.snapshotEvery;
     if (every <= 0 || events.length === 0 || Math.floor(version / every) === Math.floor(before / every)) return undefined;
     // Apply the events as they will be read back (a JSON round trip), so the snapshot equals a replay.
-    const read = events.map((e) => ({ type: e.type, schema: agg.schemaOf(e.type), data: decode(encode(e.data)) }));
+    const read = events.map((e, i) => ({
+      ...metaOf(e.type, before + i + 1, cmd, cmd.command_id, cmd.context),
+      schema: agg.schemaOf(e.type),
+      data: decode(encode(e.data)),
+    }));
     const after = agg.fold(read, state);
     const snapshot = { version, schema: agg.schema, state: encode(after) };
     const message = snapshotMessage(cmd, version, snapshot.schema, snapshot.state);
@@ -1074,10 +1240,38 @@ function decode(payload: Buffer): unknown {
   return payload.length ? JSON.parse(payload.toString("utf8")) : {};
 }
 
+/** An event of `cmd`'s aggregate to fold, caused by command `commandId`, without its data. */
+function metaOf(
+  type: string,
+  version: number,
+  cmd: WireCommand,
+  commandId: string,
+  context: WireRequestContext | null | undefined,
+): EventMeta & { request: RequestContext } {
+  return {
+    type,
+    version,
+    tenant: cmd.tenant_id,
+    domain: cmd.domain,
+    aggregateType: cmd.aggregate_type,
+    aggregateId: cmd.aggregate_id,
+    commandId,
+    request: fromWireContext(context),
+  };
+}
+
 /** A request context for a command caused by `event`. */
 function follow(event: StoredEvent): RequestContext {
   const { expectedVersion, bypassAuthorization, ...rest } = event.request;
   return { ...rest, correlationId: rest.correlationId || event.commandId, causationId: event.commandId };
+}
+
+/** Mutual TLS from `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`: all or none. */
+function tlsFromEnv(): TlsFiles | undefined {
+  const { KERNABLE_TLS_CA: ca, KERNABLE_TLS_CERT: cert, KERNABLE_TLS_KEY: key } = process.env;
+  if (!ca && !cert && !key) return undefined;
+  if (!ca || !cert || !key) throw new Error("set all of KERNABLE_TLS_CA, KERNABLE_TLS_CERT and KERNABLE_TLS_KEY, or none");
+  return { ca, cert, key };
 }
 
 function toWireContext(c: RequestContext): WireRequestContext {

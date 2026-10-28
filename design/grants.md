@@ -1,0 +1,100 @@
+# Grants instead of allowlists
+
+Status: draft, being implemented.
+
+## Problem
+
+A signature proves who sent a message, not that the sender may do it: anyone can create a key. So the kernel needs a trust anchor. Today that anchor is a set of allowlists in `kernable.toml` (`[clients]`, `[workers]`, `[listeners]`, … plus `[vault.readers]`, `[vault.erasers]`, `[successors]`, `[revoked]`). Every new service means editing the kernel's configuration, and the getting-started guide begins with 15 lines of TOML.
+
+## Decision
+
+The kernel trusts **one or more root keys** and nothing else. A root key signs **grants**: "key K may do these actions on these types". A process presents its grant with its requests. The kernel checks the chain root → grant → request signature. The kernel's configuration holds no keys of services and no permissions, so it fits in command line flags; `kernable.toml` goes away.
+
+```sh
+kernable keys new root                      # keep root.key offline in production
+kernable keys new kernel
+kernable keys new app
+kernable grant root.key app.pub 'shop.*'    # writes app.grant
+kernable start --root root.pub
+```
+
+## Grants
+
+A grant names the grantee's key ID, a list of permissions, optionally the key it succeeds, and when it was issued:
+
+```proto
+message Grant {
+  string key_id = 1;                     // the grantee
+  repeated Permission permissions = 2;
+  string succeeds = 3;                   // a listener registered with this key may move to key_id
+  int64 issued_at = 4;                   // ms since epoch
+  Signature root_sig = 5;                // by a root key
+}
+message Permission {
+  string action = 1;                     // see below, or "*" for every action
+  repeated string types = 2;             // "*", "Domain.*" or "Domain.Type"
+}
+```
+
+| Action | Replaces | Covers |
+|---|---|---|
+| `submit` | `[clients]` | commands it may submit |
+| `run` | `[workers]` | commands it may run as a worker (it writes events of their domains only) |
+| `subscribe` | `[subscribers]` | events it may read with a subscription |
+| `listen` | `[listeners]` | events it may read as a listener |
+| `query` | `[queriers]` | queries it may ask |
+| `answer` | `[query_handlers]` | queries it may answer |
+| `check` | `[middlewares]` | commands and queries it may check as a middleware |
+| `privileged` | `[privileged]` | request context switches (`bypass_authorization`) |
+| `vault_read` | `[vault.readers]` | events and commands whose vault values it gets as a listener or middleware |
+| `vault_erase` | `[vault.erasers]` | erasing events it may write as a worker |
+| `*` | | every action above |
+
+Signed layout (`proto/SIGNING.md`), tag `kernable.v1.grant`: `key_id`, `succeeds`, `issued_at: i64`, `permission_count: u64`, then per permission `action`, `type_count: u64`, every type.
+
+**File.** `kernable grant <root.key> <name>.pub <permission>...` writes `<name>.grant`: the encoded `Grant`, hex. A permission is `action=type,type` or a bare type, which means every action on it.
+
+**Presenting.** Every request carries the grant in the gRPC metadata entry `kernable-grant` (the file's content): submit, query, subscribe, and the opening of worker and listener streams. The SDKs read `<key>.grant` next to the key file (or the file in `grant` / `KERNABLE_GRANT`) and attach it to every call. Signed messages do not change.
+
+**Checking.** The kernel verifies the root signature, that the grant names the key that signed the request, and that neither the grantee nor the root key is revoked. It keeps the newest verified grant per key (by `issued_at`) in memory and decides every request by it. A request without a grant is decided by the grant the kernel already holds for its key, so a grant presented once is enough until the kernel restarts. A newer grant replaces an older one; connected sessions are then checked again and ended if they lost their rights, as on a reload today.
+
+## Revocation
+
+`[revoked]` goes away. A root key signs a revocation and sends it to the running kernel:
+
+```sh
+kernable revoke <addr> root.key <key-id> 2026-10-27T09:00:00Z
+```
+
+New RPC `TrustService.Revoke(RevokeRequest)`, signed with tag `kernable.v1.revoke`: `key_id`, `since: i64`, `issued_at: i64`, valid 60 s around `issued_at`. The kernel stores the revocation signed with its own key, exactly as today (`kernable.v1.revocation`), refuses the key from then on, ends its sessions, and `kernable verify` flags what it signed since. Never undone.
+
+## Successors
+
+`[successors]` goes away. A listener moves to a new key when the new key's grant says `succeeds = <old key ID>` (`kernable grant root.key new.pub --succeeds old.pub …`).
+
+## Kernel settings
+
+All remaining settings become flags of `kernable start`, each with an environment variable:
+
+| Flag | Variable | Default |
+|---|---|---|
+| `--root <key-id or .pub>` (repeatable) | `KERNABLE_ROOT` (comma-separated) | required |
+| `--store` | `KERNABLE_STORE` | `sqlite:kernable.db` |
+| `--listen` | `KERNABLE_LISTEN` | `unix:kernable.sock` |
+| `--kernel-key` | `KERNABLE_KERNEL_KEY` | `kernel.key` |
+| `--snapshots` | `KERNABLE_SNAPSHOTS` | `memory:` |
+| `--vault-key`, `--vault-store` | `KERNABLE_VAULT_KEY`, `KERNABLE_VAULT_STORE` | no vault; store `sqlite:vault.db` once a key is given |
+| `--tls-cert`, `--tls-key`, `--tls-client-ca` | `KERNABLE_KERNEL_TLS_CERT`, `KERNABLE_KERNEL_TLS_KEY`, `KERNABLE_TLS_CLIENT_CA` | no TLS |
+| `--metrics-listen` | `KERNABLE_METRICS_LISTEN` | off |
+| `--lease-ttl-ms`, `--checkpoint-interval-ms`, `--submit-timeout-ms`, `--settle-timeout-ms`, `--query-timeout-ms`, `--middleware-timeout-ms`, `--drain-timeout-ms` | `KERNABLE_LEASE_TTL_MS`, … | as today |
+
+Relative paths resolve against the working directory. SIGHUP reads the kernel key again (key rotation); everything else needs a restart.
+
+## Consequences
+
+- No kernel configuration change, reload or restart when a service is added: issue a grant.
+- The root key is the most valuable secret. It is used only to issue grants and revocations, and can stay offline. Several roots allow rotating it.
+- A grant cannot be withdrawn, only superseded by a newer one or ended with a revocation of the key. Narrowing a service's rights means issuing a newer grant; the old one is refused once the newer one was seen. After a kernel restart, an older grant is accepted again until the newer one is presented; to be sure, rotate the key and revoke the old one.
+- `kernable verify` is unchanged: it checks signatures and the chain, not permissions.
+- `kernable start --dev` is for trying kernable out: it creates whatever is missing of `root.key`, `kernel.key`, `app.key` and an `app.grant` that allows everything, and trusts `root.pub`. Without `--dev`, `--root` is required, so a production kernel never starts open by accident.
+- Not in this step: grant expiry, storing grants in the log for audit.

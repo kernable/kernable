@@ -13,7 +13,7 @@ Throw from a command handler to reject the command with a business reason.
 ### NotSettled
 
 The command was committed, but not every listener processed its events within the kernel's
-`settle_timeout_ms`. Read models may not show the change yet; `outcome` has the events.
+`--settle-timeout-ms`. Read models may not show the change yet; `outcome` has the events.
 
 - `readonly outcome: { committed: true; events: StoredEvent[] }`
 
@@ -39,24 +39,42 @@ event it causes. `attributes` are business data only, never security decisions.
 - `correlationId?: string`: Shared by everything one original request causes; defaults to the command ID.
 - `causationId?: string`: The command that caused this one.
 - `traceId?: string`
-- `bypassAuthorization?: boolean`: Privileged: only keys in the kernel's `[privileged]` table may set it.
+- `bypassAuthorization?: boolean`: Privileged: only keys granted `privileged` for it may set it.
 - `attributes?: Record<string, string>`
+
+### CommandMeta
+
+What a command handler gets about the command besides its data.
+
+- `commandId: string`
+- `type: string`: The command type within the domain.
+- `domain: string`
+- `aggregateType: string`
+- `aggregateId: string`
+- `tenant: string`
 
 ### CommandContext
 
-What a command handler gets besides state and data.
+What a command handler gets besides state, data and `CommandMeta`.
 
-- `commandId: string`
-- `request: RequestContext`
+- `request: RequestContext`: Who sends the command: check permissions here.
 - `now(): Date`: When the kernel received the command: the same every time the command runs. Use it instead of `new Date()`.
 - `id(): string`: A new ID that is the same every time the command runs (1st call, 2nd call, ...). Use it instead of random IDs.
 - `deadline: Date`: When the kernel hands the command to another worker if this one has not answered.
 
-### QueryContext
+### QueryMeta
 
-What a query handler gets besides the query's data.
+What a query handler gets about the query besides its data.
 
 - `queryId: string`
+- `type: string`: The query type within the domain.
+- `domain: string`
+- `tenant: string`
+
+### QueryContext
+
+What a query handler gets besides the query's data and `QueryMeta`.
+
 - `request: RequestContext`: Who asks: check permissions here.
 - `store?: Store`: The listener's store, if it has one (`ListenerOptions.store`).
 
@@ -68,7 +86,7 @@ What a query handler gets besides the query's data.
 - `type: string`: The query type within the domain.
 - `data?: unknown`
 - `tenant?: string`
-- `context?: RequestContext`
+- `context?: RequestContext`: Replaces the client's default context.
 - `minPosition?: number`: Answer only after the read model has processed this global position (e.g. of a `committed` submit).
 
 ### Check
@@ -89,32 +107,52 @@ A command or query a middleware checks before the kernel accepts or routes it.
 
 
 
-- `types: string[]`: Command and query types it checks: `*`, a domain (`orders.*`) or `domain.Type`.
+- `types: string[]`: Command and query types it checks: `*` (all), a type of the listener's own domain (`Type`), another domain's type (`domain.Type`) or a whole domain (`domain.*`).
 - `order?: number`: Position in the chain: lower runs first, equal orders by listener name (default 0). Negative orders are reserved for kernable.
 
 ### ListenerContext
 
-What a listener handler gets besides the event.
+What a listener handler gets besides the event's data and `StoredEventMeta`.
 
 - `replaying: boolean`: The event was committed before the listener connected: it is being replayed.
 - `follow(): RequestContext`: A request context for commands caused by this event: same sender and correlation.
+- `request: RequestContext`: The request context of the command that caused the event.
 - `store?: Store`: The listener's store, if it has one (`ListenerOptions.store`).
+
+### EventMeta
+
+What `apply` gets about an event besides its data. Only fields known before the kernel stores
+the event, so a snapshot and a replay compute the same state; put a time into the data
+(`ctx.now()`) if the state needs one.
+
+- `type: string`
+- `version: number`: The aggregate's version after this event: 1 for its first event.
+- `tenant: string`
+- `domain: string`: Always the domain of the command that caused the event.
+- `aggregateType: string`
+- `aggregateId: string`
+- `commandId: string`
+
+### ApplyContext
+
+What `apply` gets besides state, data and `EventMeta`. Nothing that differs between runs
+(no clock, no IDs), so a replay computes the same state.
+
+- `request: RequestContext`: The request context of the command that caused the event.
+
+### StoredEventMeta
+
+What a listener handler gets about an event besides its data and request context.
+
+- `position: number`
+- `schema: number`: Version of the payload format. Listeners get `data` upcast to the version they know (see `Domain.event`), unless the handler is `raw`.
+- `redacted: string[]`: Fields kept in the vault whose value is not here (`null` in `data`): erased, or not readable with this key (granted `vault_read`).
 
 ### StoredEvent
 
 An event as stored by the kernel.
 
-- `position: number`
-- `tenant: string`
-- `domain: string`: Always the domain of the command that caused the event.
-- `aggregateType: string`
-- `aggregateId: string`
-- `version: number`
-- `type: string`
-- `schema: number`: Version of the payload format. Listeners get `data` upcast to the version they know (see `Domain.event`), unless the handler is `raw`.
 - `data: unknown`
-- `redacted: string[]`: Fields kept in the vault whose value is not here (`null` in `data`): erased, or not readable with this key (`[vault] readers`).
-- `commandId: string`
 - `request: RequestContext`: The request context of the command that caused the event.
 
 ### Outcome
@@ -126,6 +164,14 @@ export type Outcome =
 ```
 
 
+
+### FoldEvent
+
+```ts
+export type FoldEvent = Partial<EventMeta> & { type: string; schema: number; data: unknown; request?: RequestContext };
+```
+
+An event to fold: type, payload version and data, plus as much of `EventMeta` and its request context as known.
 
 ### AggregateOptions
 
@@ -159,15 +205,19 @@ How a command's payload is kept: which fields go to the vault.
 
 ### Domain
 
-A domain: a lowercase name (`orders`) that scopes its aggregates, commands and events.
-Types are unique within a domain; elsewhere they are named `domain.Type`.
+A domain: a name that scopes its aggregates, commands and events, lowercase by convention
+(`orders`) like aggregates, while message types are capitalized (`orders.PlaceOrder`). Both
+cases are valid; names are case-sensitive. Types are unique within a domain; elsewhere they
+are named `domain.Type`.
 
 - `readonly name: string`
 - `readonly events = new Map<string, EventSchema>()`: Payload versions and upcasts per event type; types not listed are at version 1.
 - `readonly commands = new Map<string, CommandSchema>()`: Vault fields per command type; see `command`.
-- `event(type: string, schema: number): EventSchema`: Declares that this domain writes `type` events at version `schema`, with an `upcast` per older version. The domain's aggregates use it; listeners get it with `use(domain)`.
+- `event(type: string, schema: number): EventSchema`: Declares that this domain writes `type` events at version `schema`, with an `upcast` per older version. The domain's aggregates and listeners use it; listeners of other domains get it with `use(domain)`.
 - `command(type: string): CommandSchema`: Declares which fields of `type` commands the vault keeps (`personal`, `secret`). Clients that submit them need the domain: `kernable.use(domain)`.
 - `aggregate<S>(name: string, initial: S, options?: AggregateOptions): Aggregate<S>`
+- `readModel(name: string, options: ListenerOptions = {}): Listener`: Defines a read model: kept in memory and rebuilt from the first event on every start (defaults: order 0, start 0). Run it with `kernable.listener(definition)`.
+- `reactor(name: string, options: ListenerOptions = {}): Listener`: Defines a reactor: triggers side effects; resumes after the last acknowledged event (defaults: order 10, no start). A settling submit from its handler waits for the listeners before it (the read models), not for the reactor itself, which handles one event at a time. Run it with `kernable.listener(definition)`.
 
 ### domain()
 
@@ -191,20 +241,21 @@ belongs to a domain and produces events only of that domain; create it with
 - `readonly appliers = new Map<string, Apply<S>>()`
 - `readonly handlers = new Map<string, Handle<S>>()`
 - `readonly events: Map<string, EventSchema>`: The domain's event schemas.
-- `apply<D = any>(eventType: string, fn: (state: S, data: D) => S): this`
-- `command<D = any>(commandType: string, fn: (state: S, data: D, ctx: CommandContext) => NewEvent[] | Promise<NewEvent[]>): this`
+- `apply<D = any>(eventType: string, fn: (state: S, data: D, evt: EventMeta, ctx: ApplyContext) => S | void): this`: How an event of `eventType` changes the state: `fn(state, data, evt, ctx)` changes `state` in place and returns nothing, or returns a new state that replaces it. `state` is a copy, so changing it never touches the state it came from.
+- `command<D = any>(commandType: string, fn: (state: S, data: D, cmd: CommandMeta, ctx: CommandContext) => NewEvent[] | Promise<NewEvent[]>): this`: Which events a `commandType` command produces: `fn(state, data, cmd, ctx)` returns them.
 - `schemaOf(type: string): number`: The payload version this aggregate writes `type` events at.
-- `fold(history: { type: string; schema: number; data: unknown }[], from: S = this.initial): S`: State after `history`, starting from `from`. Events are upcast first; events without an `apply` are skipped.
+- `fold(history: FoldEvent[], from: S = this.initial): S`: State after `history`, starting from `from`. Events are upcast first; events without an `apply` are skipped. Fields of `EventMeta` an event lacks are empty (0 for `version`), as is its request context.
 
 ### Options
 
 
 
-- `url: string`: Kernel address: `unix:/path/to.sock` or `host:port`.
-- `key: string`: Path to this process's `.key` file; used to sign commands and worker results.
+- `url?: string`: Kernel address: `http://host:port` (`host:port` works too) or, on Unix, `unix:/path/to.sock`. Default: `KERNABLE_URL`, else `http://127.0.0.1:7233`, where `kernable start` listens.
+- `key?: string`: Path to this process's `.key` file; used to sign commands and worker results. Default: `KERNABLE_KEY`, else `app.key` in the current directory.
+- `grant?: string`: Path to the key's grant (`kernable grant`), sent with every call. Default: `KERNABLE_GRANT`, else the `.grant` file next to the key file, if there is one.
 - `tenant?: string`: Default tenant for `submit`.
-- `context?: RequestContext`: Default request context for `submit`, e.g. this service's identity.
-- `tls?: TlsFiles`: Mutual TLS for `host:port` URLs: paths of the CA certificate and this process's certificate and key.
+- `context?: RequestContext`: Default request context for `submit` and `query`, e.g. this service's identity; a request's own context replaces it.
+- `tls?: TlsFiles`: Mutual TLS for `host:port` URLs: paths of the CA certificate and this process's certificate and key. Default: `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`, if set.
 
 ### SubmitOptions
 
@@ -217,7 +268,7 @@ belongs to a domain and produces events only of that domain; create it with
 - `data?: unknown`
 - `tenant?: string`
 - `id?: string`: Idempotency key; resubmitting the same ID returns the original outcome.
-- `context?: RequestContext`: Overrides the client's default context; inside a listener, pass `ctx.follow()`.
+- `context?: RequestContext`: Replaces the client's default context; inside a listener, pass `ctx.follow()`.
 - `wait?: "settled" | "committed"`: `"settled"` (default): respond once every listener has processed the events, so read models already show them; throws `NotSettled` on timeout. From a listener's handler, only the listeners with a lower order count. `"committed"`: respond once the events are stored.
 
 ### Kernable
@@ -229,10 +280,9 @@ belongs to a domain and produces events only of that domain; create it with
 - `async submit(options: SubmitOptions): Promise<Outcome>`: Runs a command and returns its outcome; see `SubmitOptions.wait`.
 - `async enqueue(options: Omit<SubmitOptions, "wait">): Promise<string>`: Stores the command in the kernel's queue and returns its ID without waiting for it to run. Submit it again with the same `id` to get the outcome.
 - `async query<T = unknown>(options: QueryOptions): Promise<T>`: Asks the read model that answers `domain.type` and returns its answer. Queries always go through the kernel, also within one process. Throws `Rejected` if the read model rejects it.
-- `readModel(name: string, options: ListenerOptions = {}): Listener`: A read model: kept in memory and rebuilt from the first event on every start (default).
-- `reactor(name: string, options: ListenerOptions = {}): Listener`: A reactor: triggers side effects; resumes after the last acknowledged event (default). A settling submit from its handler waits for the listeners before it (the read models), not for the reactor itself, which handles one event at a time.
+- `listener(listener: Listener): ListenerHandle`: Runs a listener defined with `Domain.readModel` or `Domain.reactor` over this connection: `await kernable.listener(Carts).run()`. Handlers added to the definition later still count until `run()` connects.
 - `subscribe(options: SubscribeOptions, handler: (event: StoredEvent) => void | Promise<void>): Subscription`: Streams committed events after `options.after` (backlog first, then live) to `handler`, one at a time. Reconnects and resumes after the last handled event; if the handler throws, that event is delivered again. Persist `position` yourself to resume across restarts.
-- `close(): void`
+- `close(): void`: Closes the connection now; only needed in a long-running process that discards the client.
 
 ### SubscribeOptions
 
@@ -257,7 +307,7 @@ belongs to a domain and produces events only of that domain; create it with
 - `order?: number`: Listeners with a lower order process each event first; equal orders run in parallel. Defaults: 0 for read models, 10 for reactors. Negative orders are reserved for kernable.
 - `start?: number`: Position to start after on the first connect: 0 rebuilds from the beginning (default for read models); omitted, the kernel resumes after the last acknowledged event (default for reactors). Reconnects always resume after the last handled event.
 - `reconnectMs?: number`
-- `store?: string`: Keeps the listener's state in a store (`sqlite:<path>` or `memory:`) instead of memory: its data and position are written together per batch, and a restart continues after the stored position (`start` is then ignored). See `Listener.store`.
+- `store?: string`: Keeps the listener's state in a store (`sqlite:<path>` or `memory:`) instead of memory: its data and position are written together per batch, and a restart continues after the stored position (`start` is then ignored). See `ListenerHandle.store`.
 - `schema?: string`: Version of the stored data's format (default "1"). Change it when the handlers store data differently: the store is cleared and the listener rebuilds from the first event.
 
 ### HandlerOptions
@@ -268,20 +318,39 @@ belongs to a domain and produces events only of that domain; create it with
 
 ### Listener
 
-A durable, named event listener. Events arrive in order, one at a time, after every listener
-with a lower order has processed them. Delivery is at least once: if a handler throws, the
-listener reconnects and the event is delivered again.
+The definition of a durable, named event listener: which events it handles, which queries it
+answers and what it checks as a middleware. Define it on a domain with `Domain.readModel` or
+`Domain.reactor`, like an aggregate, and run it with `kernable.listener(definition)`.
 
-Handlers get event payloads upcast to the versions of the domains the listener `use`s. An
-event with a newer schema than known stops the listener (it retries and logs) until it is
-updated, so it never misreads data.
+Type names without a domain (`ItemAdded`, `GetCart`) are of the listener's own domain; types
+of other domains are qualified (`identity.AccountRegistered`) or name a whole domain
+(`identity.*`).
+
+Handlers get event payloads upcast to the versions of the listener's own domain and of the
+domains it `use`s. An event with a newer schema than known stops the listener (it retries and
+logs) until it is updated, so it never misreads data.
+
+- `readonly domain: Domain`: The domain the listener is defined on: its unqualified types are of this domain.
+- `readonly name: string`: The listener's name, unique per tenant; the kernel tracks its position under it.
+- `readonly options: ListenerOptions`
+- `readonly handlers = new Map<string, { handler: EventHandler; raw: boolean }>()`: Event handlers per qualified event type or domain (`domain.*`).
+- `readonly queries = new Map<string, QueryHandler>()`: Query handlers per qualified query type.
+- `checker?: { options: MiddlewareOptions; handler: MiddlewareHandler }`: The middleware handler and its qualified types, if this listener is one.
+- `readonly domains = new Map<string, Domain>()`: The domains whose event schemas upcast events, by name: the own domain and those it `use`s.
+- `use(...domains: Domain[]): this`: Upcasts the events of these other domains with their event schemas (see `Domain.event`).
+- `on<D = any>(eventType: string, handler: (data: D, evt: StoredEventMeta, ctx: ListenerContext) => void | Promise<void>, options: HandlerOptions = {}): this`: Handles events of `eventType`: a type of the own domain (`ItemAdded`), of another domain (`identity.AccountRegistered`) or a whole domain (`identity.*`): `handler(data, evt, ctx)`.
+- `query<D = any, R = unknown>(queryType: string, handler: (data: D, qry: QueryMeta, ctx: QueryContext) => R | Promise<R>): this`: Answers the query type `queryType`, of the own domain (`GetCart`) or another one (`orders.GetOrder`), from this listener's state. The kernel delivers queries in order with the events, so an answer reflects every event handled before it. Throw `Rejected` to refuse. A handler cannot query its own listener (the answer would wait behind itself): the kernel refuses it.
+- `middleware(options: MiddlewareOptions, handler: MiddlewareHandler): this`: Makes this listener a middleware: the kernel asks `handler` about every command and query of `options.types` before accepting or routing it, in chain order, and only once this listener has caught up with the events. Throw `Rejected` to refuse; any other error refuses too. The registration is stored: while this listener is away, the kernel refuses those requests (`kernable listeners remove` unregisters it). The handler cannot submit or query what it checks itself (it would wait behind itself): the kernel refuses it.
+
+### ListenerHandle
+
+A listener running over a connection: `kernable.listener(definition)`. Events arrive in order,
+one at a time, after every listener with a lower order has processed them. Delivery is at
+least once: if a handler throws, the listener reconnects and the event is delivered again.
 
 - `position = 0`: Global position of the last handled event (or skipped, for other event types).
 - `readonly ready: Promise<void>`: Resolves once the kernel accepted the listener.
-- `use(...domains: Domain[]): this`: Upcasts the events of these domains with their event schemas (see `Domain.event`).
-- `on<D = any>(eventType: string, handler: (event: StoredEvent & { data: D }, ctx: ListenerContext) => void | Promise<void>, options: HandlerOptions = {}): this`: `eventType` is qualified (`orders.OrderPlaced`) or a whole domain (`orders.*`).
-- `query<D = any, R = unknown>(queryType: string, handler: (data: D, ctx: QueryContext) => R | Promise<R>): this`: Answers the qualified query type `queryType` (`orders.GetOrder`) from this listener's state. The kernel delivers queries in order with the events, so an answer reflects every event handled before it. Throw `Rejected` to refuse. A handler cannot query its own listener (the answer would wait behind itself): the kernel refuses it.
-- `middleware(options: MiddlewareOptions, handler: MiddlewareHandler): this`: Makes this listener a middleware: the kernel asks `handler` about every command and query of `options.types` before accepting or routing it, in chain order, and only once this listener has caught up with the events. Throw `Rejected` to refuse; any other error refuses too. The registration is stored: while this listener is away, the kernel refuses those requests (`kernable listeners remove` unregisters it). The handler cannot submit or query what it checks itself (it would wait behind itself): the kernel refuses it.
+- `readonly listener: Listener`: The definition it runs.
 - `get store(): Store`: The listener's store (`ListenerOptions.store`), once `run()` opened it.
 - `async run(): Promise<void>`: Processes events until `stop()`, reconnecting when the stream drops.
 - `stop(): void`

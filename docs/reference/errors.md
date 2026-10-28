@@ -18,11 +18,11 @@ Handlers choose their own codes with `Rejected(message, code)`; the default code
 | `concurrency_conflict` | kernel | The aggregate kept changing while the command ran, also after retries. Retry the command. |
 | `invalid_event_type` | kernel | A worker returned an event type that is empty or contains a dot. |
 | `invalid_event_schema` | kernel | A worker wrote an event at another payload version than it declared. |
-| `no_vault` | kernel | A worker's events refer to the vault, but the kernel has no `[vault]`. |
+| `no_vault` | kernel | A worker's events refer to the vault, but the kernel has no vault (`--vault-key`). |
 | `invalid_vault_values` | kernel | A worker's vault values do not match the references in its signed events. |
 | `vault_error` | kernel | The vault could not erase a subject. |
 | `key_revoked` | kernel | The command waited in the queue and was signed by a key revoked since a time before it was accepted. |
-| `erase_not_allowed` | kernel | A worker key not listed in `[vault.erasers]` for that event type returned an erasing event. |
+| `erase_not_allowed` | kernel | A worker whose grant has no `vault_erase` for that event type returned an erasing event. |
 | `middleware_error` | SDK, middleware | A middleware threw something other than `Rejected`. The request is refused, as by any rejection. |
 | `not_a_middleware` | SDK, listener | A check reached a listener that registered no middleware handler. |
 | `unknown_query` | SDK, read model | The read model has no handler for the query type. |
@@ -31,10 +31,10 @@ Handlers choose their own codes with `Rejected(message, code)`; the default code
 
 | Status | When |
 |---|---|
-| `UNAUTHENTICATED` | A missing or invalid signature, a failed key challenge, an expired request (queries and subscriptions are valid 60 s around `issued_at`), or a client certificate the CA did not sign. |
-| `PERMISSION_DENIED` | The key is not allowed for this type in the allowlist (`[clients]`, `[workers]`, `[listeners]`, `[queriers]`, `[query_handlers]`, `[middlewares]`, `[privileged]`), or it is revoked. Also ends a worker's, listener's or subscriber's stream when a reload takes its rights away, and refuses a listener registered with another key unless the new key is that key's successor. |
-| `INVALID_ARGUMENT` | A malformed request: names that are not qualified, a missing command, vault values that do not match their references, an unknown listener name, a negative middleware order. |
-| `FAILED_PRECONDITION` | A protocol version the kernel does not speak (the message names which side to update); an outdated worker (it would write an older event version than the store holds); a request from a listener's handler that would wait for that listener; vault values without a `[vault]`. |
+| `UNAUTHENTICATED` | A missing or invalid signature (also on a grant or a revoke request), a failed key challenge, an expired request (queries, subscriptions and revoke requests are valid 60 s around `issued_at`), or a client certificate the CA did not sign. |
+| `PERMISSION_DENIED` | The key has no grant, or its grant does not permit this action on this type (`submit`, `run`, `subscribe`, `listen`, `query`, `answer`, `check`, `privileged`), or the key is revoked. Also: a grant not signed by a root key (or by a revoked one), a grant in `kernable-grant` for another key than the one that signed the request, and a revoke request not signed by a root key. Ends a worker's, listener's or subscriber's stream when a newer grant or a revocation takes its rights away, and refuses a listener registered with another key unless the new key's grant `succeeds` that key. |
+| `INVALID_ARGUMENT` | A malformed request: names that are not qualified, a missing command, vault values that do not match their references, an unknown listener name, a negative middleware order, a `kernable-grant` entry that is not a hex-encoded `Grant`, a malformed grant (an unknown action or type pattern). |
+| `FAILED_PRECONDITION` | A protocol version the kernel does not speak (the message names which side to update); an outdated worker (it would write an older event version than the store holds); a request from a listener's handler that would wait for that listener; vault values without a vault (`--vault-key`). |
 | `UNAVAILABLE` | A middleware that checks the request is not connected; no read model answers the query; the kernel is shutting down. Retry later. |
-| `DEADLINE_EXCEEDED` | A submit did not complete within `submit_timeout_ms` (the command is stored and still runs: resubmit it with the same ID to get the result); a query was not answered within `query_timeout_ms`; a middleware did not answer within `middleware_timeout_ms`. |
-| `NotSettled` (SDK) | Not a status: the command was committed, but not every listener processed its events within `settle_timeout_ms`. The outcome is attached. |
+| `DEADLINE_EXCEEDED` | A submit did not complete within `--submit-timeout-ms` (the command is stored and still runs: resubmit it with the same ID to get the result); a query was not answered within `--query-timeout-ms`; a middleware did not answer within `--middleware-timeout-ms`. |
+| `NotSettled` (SDK) | Not a status: the command was committed, but not every listener processed its events within `--settle-timeout-ms`. The outcome is attached. |

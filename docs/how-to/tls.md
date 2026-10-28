@@ -5,25 +5,23 @@ Over TCP, the kernel requires mutual TLS: it presents a certificate, and every p
 ## Certificates
 
 - **The kernel's certificate** must name the host your processes connect to, as a DNS name or an IP address in its subject alternative names, and be valid for server authentication.
-- **Client certificates** must be signed by the CA in `client_ca` and be valid for client authentication. Any certificate of that CA is let in: TLS decides who may connect, the [keys and allowlists](../concepts/trust) decide what they may do.
+- **Client certificates** must be signed by the CA in `--tls-client-ca` and be valid for client authentication. Any certificate of that CA is let in: TLS decides who may connect, their [keys and grants](../concepts/trust) decide what they may do.
 - Files are PEM.
 
 ## The kernel
 
-```toml
-listen = "0.0.0.0:7233"
-
-[tls]
-cert = "certs/kernel.crt"        # the kernel's certificate (with its chain, if any)
-key = "certs/kernel.key"
-client_ca = "certs/clients-ca.crt"
+```sh
+kernable start --root keys/root.pub --listen 0.0.0.0:7233 \
+  --tls-cert certs/kernel.crt \
+  --tls-key certs/kernel.key \
+  --tls-client-ca certs/clients-ca.crt
 ```
 
-`[tls]` applies to TCP only; a kernel on a Unix socket refuses it.
+`--tls-cert` is the kernel's certificate (with its chain, if any). The three flags go together, and apply to TCP only; a kernel on a Unix socket refuses them. Each has an environment variable (`KERNABLE_KERNEL_TLS_CERT`, `KERNABLE_KERNEL_TLS_KEY`, `KERNABLE_TLS_CLIENT_CA`), see [kernable start](../reference/configuration).
 
 ## Your processes
 
-Give every process the CA that signed the kernel's certificate and its own certificate and key: `tls: { ca, cert, key }` in TypeScript, `Tls(ca, cert, key)` in Python. The [tutorial](../tutorial/shop/8-operate) reads them from `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`.
+Give every process the CA that signed the kernel's certificate and its own certificate and key: set `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`, which the SDKs, `kernable revoke` and `kernable submit` read, or pass them in the code: `tls: { ca, cert, key }` in TypeScript, `Tls(ca, cert, key)` in Python, `Options::tls` in Rust.
 
 ## Renewing certificates
 

@@ -162,12 +162,10 @@ async fn a_query_reaches_the_read_model_and_sees_its_own_writes() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn queries_are_signed_allowed_per_key_and_need_a_read_model() {
-    let env = start_custom("query-refused", |config, _| {
-        config
-            .queriers
-            .insert(id(&key(8)), vec!["orders.Fail".into()]);
-    })
-    .await;
+    let env = start("query-refused").await;
+    env.kernel
+        .grant(grant(&key(8), &[("query", &["orders.Fail"])]))
+        .unwrap();
     let code = |r: Result<QueryResult, tonic::Status>| r.unwrap_err().code();
 
     // Nobody answers yet.

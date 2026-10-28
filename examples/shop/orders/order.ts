@@ -1,5 +1,5 @@
-// The Order aggregate and the `orders` read model's projection.
-import { Rejected, domain, type StoredEvent } from "../../../sdks/typescript/src/index.ts";
+// The `order` aggregate and the `orders` read model's projection.
+import { Rejected, domain, type StoredEventMeta } from "../../../sdks/typescript/src/index.ts";
 
 type Status = "none" | "draft" | "submitted" | "confirmed" | "cancelled";
 
@@ -8,36 +8,36 @@ interface Order {
   items: number;
 }
 
-export const orders = domain("orders");
+export const ordersDomain = domain("orders");
 // The customer's email is personal data of the customer (an identity account): the vault keeps it,
 // and erasing the account erases it here too.
-orders.command("RecordConfirmation").personal(["email"], (d: { customerId: string }) => d.customerId);
-orders.event("ConfirmationSent", 1).personal(["email"], (d: { customerId: string }) => d.customerId);
+ordersDomain.command("RecordConfirmation").personal(["email"], (d: { customerId: string }) => d.customerId);
+ordersDomain.event("ConfirmationSent", 1).personal(["email"], (d: { customerId: string }) => d.customerId);
 
-export const order = orders.aggregate<Order>("Order", { status: "none", items: 0 })
+export const orderAggregate = ordersDomain.aggregate<Order>("order", { status: "none", items: 0 })
   .apply("OrderPlaced", () => ({ status: "draft", items: 0 }))
-  .apply("ItemAdded", (s, e: { qty: number }) => ({ ...s, items: s.items + e.qty }))
-  .apply("OrderSubmitted", (s) => ({ ...s, status: "submitted" }))
-  .apply("ConfirmationSent", (s) => ({ ...s, status: "confirmed" }))
-  .apply("OrderCancelled", (s) => ({ ...s, status: "cancelled" }))
+  .apply("ItemAdded", (s, data: { qty: number }) => { s.items += data.qty; })
+  .apply("OrderSubmitted", (s) => { s.status = "submitted"; })
+  .apply("ConfirmationSent", (s) => { s.status = "confirmed"; })
+  .apply("OrderCancelled", (s) => { s.status = "cancelled"; })
 
-  .command("PlaceOrder", (s, cmd: { customerId: string }) => {
+  .command("PlaceOrder", (s, data: { customerId: string }) => {
     if (s.status !== "none") throw new Rejected("Order already exists", "exists");
-    return [{ type: "OrderPlaced", data: { customerId: cmd.customerId } }];
+    return [{ type: "OrderPlaced", data: { customerId: data.customerId } }];
   })
-  .command("AddItem", (s, cmd: { sku: string; qty: number }) => {
+  .command("AddItem", (s, data: { sku: string; qty: number }) => {
     if (s.status !== "draft") throw new Rejected(`Cannot add items to a ${s.status} order`, "invalid_state");
-    if (!(cmd.qty > 0)) throw new Rejected("Quantity must be positive", "invalid");
-    return [{ type: "ItemAdded", data: { sku: cmd.sku, qty: cmd.qty } }];
+    if (!(data.qty > 0)) throw new Rejected("Quantity must be positive", "invalid");
+    return [{ type: "ItemAdded", data: { sku: data.sku, qty: data.qty } }];
   })
   .command("SubmitOrder", (s) => {
     if (s.status !== "draft") throw new Rejected(`Cannot submit a ${s.status} order`, "invalid_state");
     if (s.items === 0) throw new Rejected("Cannot submit an empty order", "invalid");
     return [{ type: "OrderSubmitted" }];
   })
-  .command("RecordConfirmation", (s, cmd: { email: string; customerId: string }) => {
+  .command("RecordConfirmation", (s, data: { email: string; customerId: string }) => {
     if (s.status !== "submitted") throw new Rejected(`Cannot confirm a ${s.status} order`, "invalid_state");
-    return [{ type: "ConfirmationSent", data: { email: cmd.email, customerId: cmd.customerId } }];
+    return [{ type: "ConfirmationSent", data: { email: data.email, customerId: data.customerId } }];
   })
   .command("CancelOrder", (s) => {
     if (s.status !== "draft" && s.status !== "submitted") throw new Rejected(`Cannot cancel a ${s.status} order`, "invalid_state");
@@ -53,21 +53,14 @@ export interface OrderRow {
   confirmedTo?: string | null;
 }
 
-export const ORDER_EVENTS = [
-  "orders.OrderPlaced",
-  "orders.ItemAdded",
-  "orders.OrderSubmitted",
-  "orders.ConfirmationSent",
-  "orders.OrderCancelled",
-  "identity.AccountErased",
-];
+/** The events of the `orders` read model, a listener of the `orders` domain. */
+export const ORDER_EVENTS = ["OrderPlaced", "ItemAdded", "OrderSubmitted", "ConfirmationSent", "OrderCancelled", "identity.AccountErased"];
 
-export function project(rows: Map<string, OrderRow>, e: StoredEvent): void {
-  const data = e.data as any;
-  const row = rows.get(e.aggregateId)!;
-  switch (e.type) {
+export function project(rows: Map<string, OrderRow>, data: any, evt: StoredEventMeta): void {
+  const row = rows.get(evt.aggregateId)!;
+  switch (evt.type) {
     case "OrderPlaced":
-      rows.set(e.aggregateId, { id: e.aggregateId, customerId: data.customerId, status: "draft", items: {} });
+      rows.set(evt.aggregateId, { id: evt.aggregateId, customerId: data.customerId, status: "draft", items: {} });
       break;
     case "ItemAdded":
       row.items[data.sku] = (row.items[data.sku] ?? 0) + data.qty;
@@ -84,7 +77,7 @@ export function project(rows: Map<string, OrderRow>, e: StoredEvent): void {
       break;
     case "AccountErased":
       // Personal data of an erased customer goes from every order (rebuilt, it reads null anyway).
-      for (const r of rows.values()) if (r.customerId === e.aggregateId && r.confirmedTo) r.confirmedTo = null;
+      for (const r of rows.values()) if (r.customerId === evt.aggregateId && r.confirmedTo) r.confirmedTo = null;
       break;
   }
 }

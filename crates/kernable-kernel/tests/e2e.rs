@@ -156,10 +156,10 @@ async fn concurrent_commands_on_one_aggregate_are_queued() {
 /// to its own domain's worker and into its own stream.
 #[tokio::test(flavor = "multi_thread")]
 async fn equal_names_in_two_domains_do_not_collide() {
-    let env = start_custom("domains", |config, _| {
-        config.workers.insert(id(&key(7)), vec!["billing.*".into()]);
-    })
-    .await;
+    let env = start("domains").await;
+    env.kernel
+        .grant(grant(&key(7), &[("run", &["billing.*"])]))
+        .unwrap();
     let (orders_seen, mut orders_rx) = mpsc::unbounded_channel();
     let (billing_seen, mut billing_rx) = mpsc::unbounded_channel();
     tokio::spawn(run_worker(

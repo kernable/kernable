@@ -1,9 +1,8 @@
 """Part 7: personal data in the vault, passwords as secrets, erasure."""
 
-from kernable import Rejected, RequestContext
+from kernable import Kernable, Rejected, RequestContext
 
-from connect import connect
-from domain import shop
+from domain import shop_domain
 
 
 def show(what, o):
@@ -11,12 +10,12 @@ def show(what, o):
 
 
 # region try
-# use(shop): the client moves the fields the domain declares personal or secret to the vault.
-k = connect(context=RequestContext(sender_identity="c1")).use(shop)
+# use(shop_domain): the client moves the fields the domain declares personal or secret to the vault.
+k = Kernable(context=RequestContext(sender_identity="c1")).use(shop_domain)
 
 
 def customer(type, data=None):
-    return k.submit("shop", "Customer", "c1", type, data)
+    return k.submit("shop", "customer", "c1", type, data)
 
 
 show("register", customer("Register", {"email": "ann@example.com", "name": "Ann"}))

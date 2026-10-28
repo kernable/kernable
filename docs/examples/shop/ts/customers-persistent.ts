@@ -1,23 +1,22 @@
 // The customers read model with a store: it keeps its rows in a file and continues after a
 // restart where it left off, instead of reading every event again.
-import { Rejected } from "@kernable/sdk";
+import { Kernable, Rejected } from "@kernable/sdk";
 
-import { connect } from "./connect.ts";
+import { shopDomain } from "./domain.ts";
 
 // #region persistent
 type CustomerRow = { id: string; email: string; name: string };
 
-await connect()
-  .readModel("customers", { store: "sqlite:customers.db", schema: "1" })
-  .on("shop.CustomerRegistered", (e, ctx) => {
-    const { email, name } = e.data as { email: string; name: string };
-    ctx.store!.set("customers", e.aggregateId, { id: e.aggregateId, email, name });
+const customersReadmodel = shopDomain.readModel("customers", { store: "sqlite:customers.db", schema: "1" })
+  .on("CustomerRegistered", (data: { email: string; name: string }, evt, ctx) => {
+    ctx.store!.set("customers", evt.aggregateId, { id: evt.aggregateId, email: data.email, name: data.name });
   })
-  .on("shop.CustomerErased", (e, ctx) => ctx.store!.remove("customers", e.aggregateId))
-  .query("shop.GetCustomer", (d: { id: string }, ctx) => {
-    const row = ctx.store!.get<CustomerRow>("customers", d.id);
-    if (!row) throw new Rejected(`No customer ${d.id}`, "not_found");
+  .on("CustomerErased", (_data, evt, ctx) => ctx.store!.remove("customers", evt.aggregateId))
+  .query("GetCustomer", (data: { id: string }, _qry, ctx) => {
+    const row = ctx.store!.get<CustomerRow>("customers", data.id);
+    if (!row) throw new Rejected(`No customer ${data.id}`, "not_found");
     return row;
-  })
-  .run();
+  });
+
+await new Kernable().listener(customersReadmodel).run();
 // #endregion persistent

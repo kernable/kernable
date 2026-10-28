@@ -2,7 +2,7 @@
 
 # Metrics and health
 
-With `metrics_listen = "127.0.0.1:9233"` the kernel serves, on that address:
+With `--metrics-listen 127.0.0.1:9233` the kernel serves, on that address:
 
 - `GET /metrics`: Prometheus text format, below.
 - `GET /health`: 200 while the process runs.

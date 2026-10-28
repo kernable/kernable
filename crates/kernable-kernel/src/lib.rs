@@ -15,13 +15,13 @@
 
 pub mod config;
 pub mod crash;
+pub mod grants;
 mod listeners;
 mod metrics;
 mod queue;
 
 use std::{
     collections::HashMap,
-    os::unix::fs::FileTypeExt,
     sync::{
         Arc, Mutex, MutexGuard, PoisonError, RwLock,
         atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed, Ordering::SeqCst},
@@ -32,10 +32,10 @@ use std::{
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
-        Accepted, Challenge, Command, CommandResult, Committed, Event, Execute, KernelMessage,
-        ListenerDelivery, ListenerMessage, NewEvent, QueryRequest, QueryResult, Register,
-        Registered, Rejected, RevocationRecord, Signature, Snapshot, SnapshotRecord, SubmitRequest,
-        SubscribeRequest, VaultValue, Wait, WorkerMessage,
+        Accepted, Challenge, Command, CommandResult, Committed, Event, Execute, Grant,
+        KernelMessage, ListenerDelivery, ListenerMessage, NewEvent, QueryRequest, QueryResult,
+        Register, Registered, Rejected, RevocationRecord, RevokeRequest, RevokeResponse, Signature,
+        Snapshot, SnapshotRecord, SubmitRequest, SubscribeRequest, VaultValue, Wait, WorkerMessage,
         command_result::Outcome,
         command_service_server::{CommandService, CommandServiceServer},
         event_service_server::{EventService, EventServiceServer},
@@ -43,6 +43,7 @@ use kernable_core::{
         listener_service_server::{ListenerService, ListenerServiceServer},
         middleware_call, query_answer, query_result,
         query_service_server::{QueryService, QueryServiceServer},
+        trust_service_server::{TrustService, TrustServiceServer},
         worker_gateway_server::{WorkerGateway, WorkerGatewayServer},
         worker_message::Msg as In,
     },
@@ -53,18 +54,21 @@ use kernable_store::{
     snapshots::SnapshotStore,
     vault::{self, Owner, Vault},
 };
+use prost::Message;
 use tokio::{
-    net::{TcpListener, UnixListener},
+    net::TcpListener,
     sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch},
     task::JoinHandle,
 };
-use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream, UnixListenerStream};
+use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
 use tonic::{
     Request, Response, Status, Streaming,
+    metadata::MetadataMap,
     transport::{Certificate, Identity, Server, ServerTlsConfig},
 };
 
 pub use config::Config;
+pub use grants::Permissions;
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -78,36 +82,8 @@ const POLL: Duration = Duration::from_millis(100);
 const MAX_REQUEST_AGE_MS: i64 = 60_000;
 /// Events read from the store per subscription round trip.
 const SUBSCRIBE_BATCH: u32 = 500;
-/// Stores a revocation, signed by the kernel, for every key `config` revokes that the store
-/// does not know yet, and returns every revocation the store holds: revocations are never
-/// undone, also when they leave the configuration.
-fn record_revocations(
-    store: &dyn Store,
-    key: &SigningKey,
-    config: &Config,
-) -> Result<HashMap<String, i64>, BoxError> {
-    let mut known: HashMap<String, i64> = store
-        .revocations()?
-        .into_iter()
-        .map(|r| (r.key_id, r.since))
-        .collect();
-    for (key_id, since) in config.revocations()? {
-        if known.contains_key(&key_id) {
-            continue;
-        }
-        let created_at = now_ms();
-        let msg = signing::revocation_message(&key_id, since, created_at);
-        store.revoke(&RevocationRecord {
-            key_id: key_id.clone(),
-            since,
-            created_at,
-            kernel_sig: Some(signing::sign(key, &msg)),
-        })?;
-        tracing::warn!(key = %key_id, since, "key revoked");
-        known.insert(key_id, since);
-    }
-    Ok(known)
-}
+/// The metadata entry that carries a request's grant: the hex-encoded `Grant`.
+pub const GRANT_HEADER: &str = "kernable-grant";
 
 /// A submit or query in progress, see [`Kernel::request`].
 struct Running<'a>(&'a Kernel);
@@ -139,14 +115,17 @@ pub(crate) fn protocol(version: u32) -> Result<(), Status> {
 }
 
 pub struct Kernel {
-    /// Replaced as a whole on reload (SIGHUP); revoked keys are removed from its allowlists.
-    config: RwLock<Arc<Config>>,
+    config: Arc<Config>,
+    /// The newest verified grant per key ID.
+    grants: Mutex<HashMap<String, Grant>>,
+    /// Derived from `grants` and `revoked`; replaced whenever either changes.
+    permissions: RwLock<Arc<Permissions>>,
     store: Box<dyn Store>,
-    /// Signs checkpoints and revocations; replaced when `kernel_key` changes on reload.
+    /// Signs checkpoints and revocations; read again on reload (SIGHUP).
     key: Mutex<SigningKey>,
     /// Revoked key ID -> since when (ms since epoch), from the store.
     revoked: Mutex<HashMap<String, i64>>,
-    /// Bumped on every reload, so connected sessions check their key again.
+    /// Bumped whenever permissions change, so connected sessions check their key again.
     changes: watch::Sender<u64>,
     /// Submit calls waiting for a command's result.
     waiters: Mutex<HashMap<String, Vec<oneshot::Sender<CommandResult>>>>,
@@ -171,11 +150,14 @@ pub struct Kernel {
 }
 
 impl Kernel {
-    pub fn open(mut config: Config) -> Result<Arc<Self>, BoxError> {
+    pub fn open(config: Config) -> Result<Arc<Self>, BoxError> {
         let store = kernable_store::open(&config.store)?;
         let key = signing::read_signing_key(&config.kernel_key)?;
-        let revoked = record_revocations(store.as_ref(), &key, &config)?;
-        config.without(&revoked);
+        let revoked: HashMap<String, i64> = store
+            .revocations()?
+            .into_iter()
+            .map(|r| (r.key_id, r.since))
+            .collect();
         let listeners = listeners::Registry::load(store.listeners()?);
         let schemas = store.event_schemas()?.into_iter().collect();
         let snapshots = kernable_store::snapshots::open(&config.snapshots)?;
@@ -201,7 +183,9 @@ impl Kernel {
             queue.push(pending.command, pending.received_at);
         }
         Ok(Arc::new(Kernel {
-            config: RwLock::new(Arc::new(config)),
+            config: Arc::new(config),
+            grants: Mutex::default(),
+            permissions: RwLock::default(),
             store,
             key: Mutex::new(key),
             revoked: Mutex::new(revoked),
@@ -223,7 +207,17 @@ impl Kernel {
 
     /// The configuration in effect.
     pub fn config(&self) -> Arc<Config> {
-        Arc::clone(&self.config.read().unwrap_or_else(PoisonError::into_inner))
+        Arc::clone(&self.config)
+    }
+
+    /// What every key may do, by the grants presented so far.
+    pub fn permissions(&self) -> Arc<Permissions> {
+        Arc::clone(
+            &self
+                .permissions
+                .read()
+                .unwrap_or_else(PoisonError::into_inner),
+        )
     }
 
     fn key(&self) -> SigningKey {
@@ -239,47 +233,120 @@ impl Kernel {
         revoked.get(key_id).copied()
     }
 
-    /// Notified on every reload: sessions then check their key again.
+    /// Notified whenever permissions change: sessions then check their key again.
     pub(crate) fn changes(&self) -> watch::Receiver<u64> {
         self.changes.subscribe()
     }
 
-    /// Applies a changed configuration (on SIGHUP): new allowlists, successors and revocations
-    /// take effect at once, and sessions of keys that may no longer do what they do are ended.
-    /// A new `kernel_key` signs from now on. Settings that need a restart (store, listen
-    /// address, TLS, snapshots, vault, metrics address) keep their old values; they are returned.
-    pub fn reload(&self, mut config: Config) -> Result<Vec<&'static str>, BoxError> {
-        let old = self.config();
-        let mut kept = Vec::new();
-        macro_rules! keep {
-            ($field:ident) => {
-                if format!("{:?}", config.$field) != format!("{:?}", old.$field) {
-                    kept.push(stringify!($field));
-                    config.$field = old.$field.clone();
-                }
-            };
-        }
-        keep!(store);
-        keep!(listen);
-        keep!(tls);
-        keep!(snapshots);
-        keep!(vault);
-        keep!(metrics_listen);
-        let key = signing::read_signing_key(&config.kernel_key)?;
-        let revoked = record_revocations(self.store.as_ref(), &key, &config)?;
-        config.without(&revoked);
+    /// Reads the kernel key again (on SIGHUP), so a new key signs from now on.
+    pub fn reload(&self) -> Result<(), BoxError> {
+        let key = signing::read_signing_key(&self.config.kernel_key)?;
         *self.key.lock().unwrap_or_else(PoisonError::into_inner) = key;
-        *self.revoked.lock().unwrap_or_else(PoisonError::into_inner) = revoked;
-        *self.config.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(config);
+        Ok(())
+    }
+
+    /// Whether `sig` was made by a root key that is not revoked.
+    fn by_root(&self, sig: &Signature, msg: &[u8]) -> Result<(), Status> {
+        if !self.config.roots.contains(&sig.key_id) {
+            return Err(Status::permission_denied("not signed by a root key"));
+        }
+        if self.revoked_since(&sig.key_id).is_some() {
+            return Err(Status::permission_denied("the root key was revoked"));
+        }
+        signing::verify(sig, msg).map_err(|_| Status::unauthenticated("invalid root signature"))
+    }
+
+    /// Takes a grant into effect: checks its root signature and keeps it if it is the newest
+    /// for its key. Sessions are checked again when it replaces another grant.
+    pub fn grant(&self, grant: Grant) -> Result<(), Status> {
+        let sig = grant
+            .root_sig
+            .as_ref()
+            .ok_or_else(|| Status::unauthenticated("grant is not signed"))?;
+        self.by_root(sig, &signing::grant_message(&grant))?;
+        if let Some(reason) = grants::malformed(&grant) {
+            return Err(Status::invalid_argument(format!("grant: {reason}")));
+        }
+        if self.revoked_since(&grant.key_id).is_some() {
+            return Err(Status::permission_denied("key was revoked"));
+        }
+        let replaced = {
+            let mut grants = self.grants.lock().unwrap_or_else(PoisonError::into_inner);
+            match grants.get(&grant.key_id) {
+                Some(held) if held.issued_at >= grant.issued_at => return Ok(()),
+                held => {
+                    let replaced = held.is_some();
+                    grants.insert(grant.key_id.clone(), grant);
+                    replaced
+                }
+            }
+        };
+        self.update_permissions();
+        if replaced {
+            self.changes.send_modify(|n| *n += 1);
+        }
+        Ok(())
+    }
+
+    /// Takes the grant a request carries into effect, if it carries one; it must be for the key
+    /// that signed the request.
+    pub(crate) fn present(&self, metadata: &MetadataMap, key_id: &str) -> Result<(), Status> {
+        let Some(value) = metadata.get(GRANT_HEADER) else {
+            return Ok(());
+        };
+        let grant = value
+            .to_str()
+            .ok()
+            .and_then(|v| hex::decode(v.trim()).ok())
+            .and_then(|bytes| Grant::decode(bytes.as_slice()).ok())
+            .ok_or_else(|| Status::invalid_argument("kernable-grant is not a hex-encoded Grant"))?;
+        if grant.key_id != key_id {
+            return Err(Status::permission_denied("the grant is for another key"));
+        }
+        self.grant(grant)
+    }
+
+    /// Revokes `key_id` from `since` on: stores the revocation signed by the kernel, refuses the
+    /// key from now on and ends its sessions. Never undone; a second revocation is ignored.
+    pub fn revoke(&self, key_id: &str, since: i64) -> Result<(), StoreError> {
+        if self.revoked_since(key_id).is_some() {
+            return Ok(());
+        }
+        let created_at = now_ms();
+        let msg = signing::revocation_message(key_id, since, created_at);
+        self.store.revoke(&RevocationRecord {
+            key_id: key_id.to_owned(),
+            since,
+            created_at,
+            kernel_sig: Some(signing::sign(&self.key(), &msg)),
+        })?;
+        tracing::warn!(key = %key_id, since, "key revoked");
+        self.revoked
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(key_id.to_owned(), since);
+        self.update_permissions();
         self.changes.send_modify(|n| *n += 1);
         self.work.notify_waiters();
-        Ok(kept)
+        Ok(())
+    }
+
+    fn update_permissions(&self) {
+        let permissions = {
+            let grants = self.grants.lock().unwrap_or_else(PoisonError::into_inner);
+            let revoked = self.revoked.lock().unwrap_or_else(PoisonError::into_inner);
+            Permissions::new(&grants, &revoked)
+        };
+        *self
+            .permissions
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Arc::new(permissions);
     }
 
     /// The vault, or a refusal for requests that need one.
     fn vault(&self) -> Result<&Vault, Status> {
         self.vault.as_ref().ok_or_else(|| {
-            Status::failed_precondition("this kernel has no vault ([vault] in kernable.toml)")
+            Status::failed_precondition("this kernel has no vault (kernable start --vault-key)")
         })
     }
 
@@ -296,10 +363,7 @@ impl Kernel {
 
     /// Whether the listener or middleware key `key_id` gets the vault values of `name`.
     fn reads_vault(&self, key_id: &str, name: &str) -> bool {
-        self.config()
-            .vault
-            .as_ref()
-            .is_some_and(|v| config::allowed(&v.readers, key_id, name))
+        self.vault.is_some() && config::allowed(&self.permissions().vault_read, key_id, name)
     }
 
     /// Keeps a result's vault values and carries out its erasures, before the events are
@@ -325,11 +389,7 @@ impl Kernel {
         };
         for e in &erasing {
             let name = config::qualified(&cmd.domain, &e.event_type);
-            let allowed = self
-                .config()
-                .vault
-                .as_ref()
-                .is_some_and(|v| config::allowed(&v.erasers, worker_key, &name));
+            let allowed = config::allowed(&self.permissions().vault_erase, worker_key, &name);
             if !allowed {
                 return Err(refused(
                     "erase_not_allowed",
@@ -554,13 +614,36 @@ impl Kernel {
     }
 }
 
+/// Whether the TCP address `host:port` only accepts connections from this machine.
+fn loopback(addr: &str) -> bool {
+    let host = addr.rsplit_once(':').map_or(addr, |(host, _)| host);
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
 /// Serves the gRPC API on `config.listen` and writes checkpoints until dropped.
 pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
     let api = Api(Arc::clone(&kernel));
     let mut builder = Server::builder();
+    let listen = kernel.config().listen.clone();
+    if kernel.config().tls.is_none()
+        && transport::unix_path(&listen).is_none()
+        && !loopback(&listen)
+    {
+        return Err(format!(
+            "{listen} is reachable from other machines: plain TCP only on a loopback address \
+             (127.0.0.1:7233); elsewhere, use mutual TLS (--tls-cert, --tls-key, --tls-client-ca)"
+        )
+        .into());
+    }
     if let Some(tls) = &kernel.config().tls {
         if transport::unix_path(&kernel.config().listen).is_some() {
-            return Err("TLS applies to TCP only; remove [tls] or listen on host:port".into());
+            return Err(
+                "TLS applies to TCP only; drop the --tls flags or listen on host:port".into(),
+            );
         }
         let identity = Identity::from_pem(std::fs::read(&tls.cert)?, std::fs::read(&tls.key)?);
         let client_ca = Certificate::from_pem(std::fs::read(&tls.client_ca)?);
@@ -575,21 +658,26 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
         .add_service(EventServiceServer::new(api.clone()))
         .add_service(ListenerServiceServer::new(api.clone()))
         .add_service(QueryServiceServer::new(api.clone()))
+        .add_service(TrustServiceServer::new(api.clone()))
         .add_service(WorkerGatewayServer::new(api));
 
     let server = async {
-        match transport::unix_path(&kernel.config().listen) {
+        match transport::unix_path(&listen) {
+            #[cfg(unix)]
             Some(path) => {
+                use std::os::unix::fs::FileTypeExt;
                 // Replace a stale socket from a previous run, but never any other file.
                 if std::fs::metadata(path).is_ok_and(|m| m.file_type().is_socket()) {
                     std::fs::remove_file(path)?;
                 }
-                let incoming = UnixListenerStream::new(UnixListener::bind(path)?);
+                let listener = tokio::net::UnixListener::bind(path)?;
+                let incoming = tokio_stream::wrappers::UnixListenerStream::new(listener);
                 router.serve_with_incoming(incoming).await?;
             }
+            #[cfg(not(unix))]
+            Some(_) => return Err("unix: sockets need Unix; listen on host:port".into()),
             None => {
-                let incoming =
-                    TcpListenerStream::new(TcpListener::bind(&kernel.config().listen).await?);
+                let incoming = TcpListenerStream::new(TcpListener::bind(&listen).await?);
                 router.serve_with_incoming(incoming).await?;
             }
         }
@@ -638,12 +726,43 @@ async fn checkpoints(kernel: &Kernel) {
 struct Api(Arc<Kernel>);
 
 #[tonic::async_trait]
+impl TrustService for Api {
+    async fn revoke(
+        &self,
+        request: Request<RevokeRequest>,
+    ) -> Result<Response<RevokeResponse>, Status> {
+        let kernel = &self.0;
+        let req = request.into_inner();
+        protocol(req.protocol)?;
+        let sig = req
+            .root_sig
+            .as_ref()
+            .ok_or_else(|| Status::unauthenticated("revocation is not signed"))?;
+        kernel.by_root(
+            sig,
+            &signing::revoke_message(&req.key_id, req.since, req.issued_at),
+        )?;
+        if (now_ms() - req.issued_at).abs() > MAX_REQUEST_AGE_MS {
+            return Err(Status::unauthenticated(
+                "revocation expired; check the clock",
+            ));
+        }
+        if signing::verifying_key_from_hex(&req.key_id).is_err() {
+            return Err(Status::invalid_argument("not a key ID"));
+        }
+        kernel.revoke(&req.key_id, req.since).map_err(internal)?;
+        Ok(Response::new(RevokeResponse {}))
+    }
+}
+
+#[tonic::async_trait]
 impl CommandService for Api {
     async fn submit(
         &self,
         request: Request<SubmitRequest>,
     ) -> Result<Response<CommandResult>, Status> {
         let kernel = &self.0;
+        let metadata = request.metadata().clone();
         let request = request.into_inner();
         protocol(request.protocol)?;
         let _running = kernel.request()?;
@@ -659,24 +778,21 @@ impl CommandService for Api {
             .ok_or_else(|| Status::unauthenticated("command is not signed"))?;
         signing::verify(sig, &signing::command_message(&cmd))
             .map_err(|_| Status::unauthenticated("invalid command signature"))?;
+        kernel.present(&metadata, &sig.key_id)?;
+        let permissions = kernel.permissions();
         if !config::valid_domain(&cmd.domain) || !config::valid_type(&cmd.command_type) {
             return Err(Status::invalid_argument(
-                "a command needs a lowercase domain and a command type without dots",
+                "a command needs a domain name and a command type without dots",
             ));
         }
         let name = config::qualified(&cmd.domain, &cmd.command_type);
-        if !config::allowed(&kernel.config().clients, &sig.key_id, &name) {
+        if !config::allowed(&permissions.submit, &sig.key_id, &name) {
             return Err(Status::permission_denied(format!(
                 "key may not submit {name}"
             )));
         }
         let bypass = cmd.context.as_ref().is_some_and(|c| c.bypass_authorization);
-        if bypass
-            && !config::allowed(
-                &kernel.config().privileged,
-                &sig.key_id,
-                "bypass_authorization",
-            )
+        if bypass && !config::allowed(&permissions.privileged, &sig.key_id, "bypass_authorization")
         {
             return Err(Status::permission_denied(
                 "key may not set bypass_authorization",
@@ -792,6 +908,7 @@ impl EventService for Api {
         request: Request<SubscribeRequest>,
     ) -> Result<Response<Self::SubscribeStream>, Status> {
         let kernel = Arc::clone(&self.0);
+        let metadata = request.metadata().clone();
         let req = request.into_inner();
         protocol(req.protocol)?;
         if kernel.draining.load(SeqCst) {
@@ -808,8 +925,13 @@ impl EventService for Api {
             return Err(Status::unauthenticated("request expired; check the clock"));
         }
 
-        let types = config::readable(&kernel.config().subscribers, &sig.key_id, &req.event_types)
-            .map_err(Status::permission_denied)?;
+        kernel.present(&metadata, &sig.key_id)?;
+        let types = config::readable(
+            &kernel.permissions().subscribe,
+            &sig.key_id,
+            &req.event_types,
+        )
+        .map_err(Status::permission_denied)?;
 
         let (tx, rx) = mpsc::channel(SUBSCRIBE_BATCH as usize);
         let reader = (sig.key_id.clone(), req.event_types.clone());
@@ -828,8 +950,8 @@ async fn stream_events(
     tx: mpsc::Sender<Result<Event, Status>>,
 ) {
     loop {
-        // The subscriber's key may have been revoked or lost its rights on a reload.
-        if config::readable(&kernel.config().subscribers, &key_id, &requested).is_err() {
+        // The subscriber's key may have been revoked or lost its rights to a newer grant.
+        if config::readable(&kernel.permissions().subscribe, &key_id, &requested).is_err() {
             let status = Status::permission_denied("subscriber key is no longer allowed");
             let _ = tx.send(Err(status)).await;
             return;
@@ -863,6 +985,7 @@ async fn stream_events(
 impl QueryService for Api {
     async fn query(&self, request: Request<QueryRequest>) -> Result<Response<QueryResult>, Status> {
         let kernel = &self.0;
+        let metadata = request.metadata().clone();
         let query = request.into_inner();
         protocol(query.protocol)?;
         let _running = kernel.request()?;
@@ -872,28 +995,25 @@ impl QueryService for Api {
             .ok_or_else(|| Status::unauthenticated("query is not signed"))?;
         signing::verify(sig, &signing::query_message(&query))
             .map_err(|_| Status::unauthenticated("invalid query signature"))?;
+        kernel.present(&metadata, &sig.key_id)?;
+        let permissions = kernel.permissions();
         if (now_ms() - query.issued_at).abs() > MAX_REQUEST_AGE_MS {
             return Err(Status::unauthenticated("query expired; check the clock"));
         }
         if !config::valid_domain(&query.domain) || !config::valid_type(&query.query_type) {
             return Err(Status::invalid_argument(
-                "a query needs a lowercase domain and a query type without dots",
+                "a query needs a domain name and a query type without dots",
             ));
         }
         let name = config::qualified(&query.domain, &query.query_type);
-        if !config::allowed(&kernel.config().queriers, &sig.key_id, &name) {
+        if !config::allowed(&permissions.query, &sig.key_id, &name) {
             return Err(Status::permission_denied(format!("key may not ask {name}")));
         }
         let bypass = query
             .context
             .as_ref()
             .is_some_and(|c| c.bypass_authorization);
-        if bypass
-            && !config::allowed(
-                &kernel.config().privileged,
-                &sig.key_id,
-                "bypass_authorization",
-            )
+        if bypass && !config::allowed(&permissions.privileged, &sig.key_id, "bypass_authorization")
         {
             return Err(Status::permission_denied(
                 "key may not set bypass_authorization",
@@ -983,9 +1103,10 @@ impl ListenerService for Api {
     ) -> Result<Response<Self::ListenStream>, Status> {
         let (out, rx) = mpsc::channel(4);
         let kernel = Arc::clone(&self.0);
+        let metadata = request.metadata().clone();
         let mut inbound = request.into_inner();
         tokio::spawn(async move {
-            if let Err(status) = listeners::run(kernel, &mut inbound, &out).await {
+            if let Err(status) = listeners::run(kernel, &metadata, &mut inbound, &out).await {
                 let _ = out.send(Err(status)).await;
             }
         });
@@ -1003,9 +1124,10 @@ impl WorkerGateway for Api {
     ) -> Result<Response<Self::SessionStream>, Status> {
         let (out, rx) = mpsc::channel(64);
         let kernel = Arc::clone(&self.0);
+        let metadata = request.metadata().clone();
         let mut inbound = request.into_inner();
         tokio::spawn(async move {
-            if let Err(status) = run_session(kernel, &mut inbound, &out).await {
+            if let Err(status) = run_session(kernel, &metadata, &mut inbound, &out).await {
                 let _ = out.send(Err(status)).await;
             }
         });
@@ -1094,6 +1216,7 @@ async fn send(out: &Outbox, msg: Out) -> Result<(), Status> {
 
 async fn run_session(
     kernel: Arc<Kernel>,
+    metadata: &MetadataMap,
     inbound: &mut Streaming<WorkerMessage>,
     out: &Outbox,
 ) -> Result<(), Status> {
@@ -1107,11 +1230,13 @@ async fn run_session(
             "register qualified command types: domain.CommandType",
         ));
     }
+    kernel.present(metadata, &reg.key_id)?;
+    let permissions = kernel.permissions();
     let authorized = !reg.command_types.is_empty()
         && reg
             .command_types
             .iter()
-            .all(|t| config::allowed(&kernel.config().workers, &reg.key_id, t));
+            .all(|t| config::allowed(&permissions.run, &reg.key_id, t));
     if !authorized {
         return Err(Status::permission_denied(
             "worker key may not handle these command types",
@@ -1168,9 +1293,9 @@ async fn run_session(
         let message = tokio::select! {
             message = next(inbound) => message?,
             Ok(()) = changes.changed() => {
-                // Reloaded: end the session if the key may no longer run its commands.
-                let config = session.kernel.config();
-                if !command_types.iter().all(|t| config::allowed(&config.workers, &session.key_id, t)) {
+                // Permissions changed: end the session if the key may no longer run its commands.
+                let permissions = session.kernel.permissions();
+                if !command_types.iter().all(|t| config::allowed(&permissions.run, &session.key_id, t)) {
                     return Err(Status::permission_denied("worker key is no longer allowed or was revoked"));
                 }
                 continue;
@@ -1608,4 +1733,27 @@ fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn plain_tcp_is_for_loopback_addresses_only() {
+        for local in [
+            "127.0.0.1:7233",
+            "localhost:7233",
+            "[::1]:7233",
+            "127.0.0.2:1",
+        ] {
+            assert!(super::loopback(local), "{local}");
+        }
+        for open in [
+            "0.0.0.0:7233",
+            "[::]:7233",
+            "10.0.0.5:7233",
+            "kernel.example.internal:7233",
+        ] {
+            assert!(!super::loopback(open), "{open}");
+        }
+    }
 }

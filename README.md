@@ -2,7 +2,7 @@
 
 Event sourcing and CQRS with a Rust kernel and business logic in any language.
 
-The kernel stores commands and events, signs and checks every message, runs commands one at a time per aggregate, and delivers events to listeners in a fixed order. Your processes hold the business logic: workers decide, read models answer queries, reactors act, middleware checks. They connect over gRPC; TypeScript and Python have SDKs with the same API.
+The kernel stores commands and events, signs and checks every message, runs commands one at a time per aggregate, and delivers events to listeners in a fixed order. Your processes hold the business logic: workers decide, read models answer queries, reactors act, middleware checks. They connect over gRPC; TypeScript, Python and Rust have SDKs with the same API.
 
 ## Documentation
 
@@ -11,7 +11,7 @@ The kernel stores commands and events, signs and checks every message, runs comm
 - **Tutorials:** getting started in ten minutes, and "Build a shop" in eight parts.
 - **Concepts:** architecture, order and consistency, trust, data over time, failures.
 - **How-to guides:** deploying, backups, monitoring, TLS, keys, event versions, erasure requests, new SDKs.
-- **Reference:** `kernable.toml`, the CLI, both SDKs, the protocol, signatures, errors and metrics. Generated from the code.
+- **Reference:** the `kernable start` flags, the CLI, the SDKs, the protocol, signatures, errors and metrics. Generated from the code.
 
 Every code example in the documentation is a file that runs in `make check` against a real kernel.
 
@@ -22,10 +22,9 @@ Every code example in the documentation is a file that runs in `make check` agai
 | `proto/` | The protocol (`kernable.proto`), the store's log format (`storage.proto`), `SIGNING.md` and test vectors |
 | `crates/kernable-core` | Protocol types, signing, hash chain, client transport |
 | `crates/kernable-store` | The event store (`sqlite:`, `file:`, `memory:`), the snapshot store and the vault |
-| `crates/kernable-kernel` | The kernel (`kernable-kernel <kernable.toml>`) |
-| `crates/kernable-cli` | The `kernable` command: keys, certificates, verify, migrate, listeners, vault |
+| `crates/kernable-kernel` | The kernel and the `kernable` command: `kernable start --root <root.pub>`, keys, grants, revocation, certificates, verify, migrate, listeners, vault |
 | `crates/kernable-bench`, `bench/` | Load generator, benchmark matrix, results |
-| `sdks/typescript`, `sdks/python` | The SDKs |
+| `sdks/typescript`, `sdks/python`, `sdks/rust` | The SDKs |
 | `examples/shop` | Reference application: identity in Python, orders and an HTTP API in TypeScript, with kill tests |
 | `docs/` | The documentation site and its runnable examples |
 | `fuzz/` | Fuzz targets (cargo-fuzz) |
@@ -33,7 +32,7 @@ Every code example in the documentation is a file that runs in `make check` agai
 ## Develop
 
 ```sh
-make check          # Rust, TypeScript, Python and the documentation, against every storage backend
+make check          # Rust, TypeScript, Python, the SDKs and the documentation, against every storage backend
                     # (Python ≥ 3.10; the first run installs the Python SDK's venv)
 make check-packages # builds the npm package and the Python wheel, installs and runs them
 make docs           # the documentation site; `npm run reference` in docs/ regenerates the reference

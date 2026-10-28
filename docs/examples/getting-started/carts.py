@@ -1,27 +1,36 @@
-import os
+# region file
+from kernable import Kernable, Rejected, domain
 
-from kernable import Kernable, Rejected
-
-carts = {}
-k = Kernable(f"unix:{os.getcwd()}/k.sock", "app.key")
-model = k.read_model("carts")
-
-
-@model.on("shop.ItemAdded")
-def _(e):
-    carts.setdefault(e.aggregate_id, {"items": 0})["items"] += e.data["qty"]
+# region register
+rows = {}
+shop_domain = domain("shop")
+carts_readmodel = shop_domain.read_model("carts")
+# endregion register
 
 
-@model.on("shop.CheckedOut")
-def _(e):
-    carts[e.aggregate_id]["order"] = e.data["orderId"]
+# region events
+@carts_readmodel.on("ItemAdded")
+def _(data, evt):
+    rows.setdefault(evt.aggregate_id, {"items": 0})["items"] += data["qty"]
 
 
-@model.query("shop.GetCart")
+@carts_readmodel.on("CheckedOut")
+def _(data, evt):
+    rows[evt.aggregate_id]["order"] = data["orderId"]
+# endregion events
+
+
+# region queries
+@carts_readmodel.query("GetCart")
 def _(data):
-    if data["id"] not in carts:
+    if data["id"] not in rows:
         raise Rejected("no such cart", "not_found")
-    return carts[data["id"]]
+    return rows[data["id"]]
+# endregion queries
 
 
-model.run()
+# region run
+k = Kernable(key="app.key")
+k.listener(carts_readmodel).run()
+# endregion run
+# endregion file

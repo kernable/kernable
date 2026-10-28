@@ -3,12 +3,12 @@
 ## The kernel
 
 1. **Back up** the store and the vault ([Back up and restore](./backup)).
-2. **Stop the kernel with SIGTERM.** It refuses new requests, lets running ones finish for `drain_timeout_ms` (default 10 s), saves listener positions and a checkpoint, and exits. Commands that did not finish stay queued.
-3. **Install the new binaries** (`kernable-kernel`, `kernable`).
+2. **Stop the kernel with SIGTERM.** It refuses new requests, lets running ones finish for `--drain-timeout-ms` (default 10 s), saves listener positions and a checkpoint, and exits. Commands that did not finish stay queued.
+3. **Install the new `kernable` binary.**
 4. **Migrate the store if needed.** `kernable migrate <store>` says "nothing to migrate" when the format is current; otherwise it upgrades the store. A kernel refuses to start on a store of another format, so you cannot forget this step. A file log is rewritten and the old one kept as `<path>.format-<n>`.
 5. **Start the kernel** and wait until `GET /ready` on its metrics address answers 200: every registered listener is connected and has caught up.
 
-Changes to allowlists, successors, revocations and the kernel's key need no restart: send SIGHUP ([Keys](./keys)).
+New services, new grants and revocations need no change to the kernel: issue a grant, or send a revocation with `kernable revoke`. A new kernel key needs SIGHUP only. Every other setting is a flag of `kernable start` and needs a restart ([Keys](./keys)).
 
 Processes reconnect on their own while the kernel is away; clients get connection errors and should resubmit with the same command ID.
 

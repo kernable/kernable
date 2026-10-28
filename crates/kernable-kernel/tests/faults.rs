@@ -109,17 +109,27 @@ async fn sigterm_checkpoints_and_in_flight_commands_run_right_after_a_restart() 
     let sock = dir.join("k.sock");
     let addr = format!("unix:{}", sock.display());
     let store = store_url(&dir);
-    let config = format!(
-        "store = \"{store}\"\nlisten = \"{addr}\"\nkernel_key = \"kernel.key\"\nlease_ttl_ms = 60000\n\
-         checkpoint_interval_ms = 3600000\ndrain_timeout_ms = 500\n[clients]\n\"{}\" = [\"*\"]\n\
-         [workers]\n\"{}\" = [\"orders.*\"]\n",
-        id(&key(1)),
-        id(&key(2)),
-    );
-    std::fs::write(dir.join("kernable.toml"), config).unwrap();
+    // The client and the worker present their grants, as the SDKs do.
+    let flags = [
+        "--root",
+        &id(&root()),
+        "--store",
+        &store,
+        "--listen",
+        &addr,
+        "--lease-ttl-ms",
+        "60000",
+        "--checkpoint-interval-ms",
+        "3600000",
+        "--drain-timeout-ms",
+        "500",
+    ]
+    .map(String::from);
     let mut kernel = KillOnDrop(
-        Process::new(env!("CARGO_BIN_EXE_kernable-kernel"))
-            .arg(dir.join("kernable.toml"))
+        Process::new(env!("CARGO_BIN_EXE_kernable"))
+            .current_dir(&dir)
+            .arg("start")
+            .args(&flags)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -179,8 +189,10 @@ async fn sigterm_checkpoints_and_in_flight_commands_run_right_after_a_restart() 
     }
 
     // After a restart, c1 runs at once and its result reaches a resubmit.
-    kernel.0 = Process::new(env!("CARGO_BIN_EXE_kernable-kernel"))
-        .arg(dir.join("kernable.toml"))
+    kernel.0 = Process::new(env!("CARGO_BIN_EXE_kernable"))
+        .current_dir(&dir)
+        .arg("start")
+        .args(&flags)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()

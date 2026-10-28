@@ -37,10 +37,12 @@ impl Drop for Kernel {
     }
 }
 
-fn start_kernel(dir: &Path, crash_at: Option<&str>) -> Kernel {
-    let mut process = Process::new(env!("CARGO_BIN_EXE_kernable-kernel"));
+fn start_kernel(dir: &Path, flags: &[String], crash_at: Option<&str>) -> Kernel {
+    let mut process = Process::new(env!("CARGO_BIN_EXE_kernable"));
     process
-        .arg(dir.join("kernable.toml"))
+        .current_dir(dir)
+        .arg("start")
+        .args(flags)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     if let Some(point) = crash_at {
@@ -103,7 +105,7 @@ async fn listen_once(addr: &str, seen: &Mutex<Vec<u64>>) -> Result<(), tonic::St
         .await
         .map_err(|e| tonic::Status::unavailable(e.to_string()))?;
     let mut inbound = ListenerServiceClient::new(channel)
-        .listen(ReceiverStream::new(rx))
+        .listen(with_grant(ReceiverStream::new(rx), &key(5)))
         .await?
         .into_inner();
     while let Some(msg) = inbound.message().await?.and_then(|m| m.msg) {
@@ -150,18 +152,22 @@ async fn crash_and_recover(point: &str, round: u32) {
     std::fs::write(dir.join("kernel.key"), hex(key(3).as_bytes())).unwrap();
     let addr = format!("unix:{}", dir.join("k.sock").display());
     let store = store_url(&dir);
-    let config = format!(
-        "store = \"{store}\"\nlisten = \"{addr}\"\nkernel_key = \"kernel.key\"\n\
-         checkpoint_interval_ms = 20\nsettle_timeout_ms = 2000\n\
-         [clients]\n\"{client}\" = [\"*\"]\n[workers]\n\"{worker}\" = [\"orders.*\"]\n\
-         [listeners]\n\"{audit}\" = [\"*\"]\n",
-        client = id(&key(1)),
-        worker = id(&key(2)),
-        audit = id(&key(5)),
-    );
-    std::fs::write(dir.join("kernable.toml"), config).unwrap();
+    // The client, worker and listener present their grants, as the SDKs do.
+    let flags = [
+        "--root",
+        &id(&root()),
+        "--store",
+        &store,
+        "--listen",
+        &addr,
+        "--checkpoint-interval-ms",
+        "20",
+        "--settle-timeout-ms",
+        "2000",
+    ]
+    .map(String::from);
 
-    let mut kernel = start_kernel(&dir, Some(point));
+    let mut kernel = start_kernel(&dir, &flags, Some(point));
     wait_for(&addr).await;
     worker(&addr);
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -197,7 +203,7 @@ async fn crash_and_recover(point: &str, round: u32) {
 
     // Restart and finish the workload: resubmitting returns stored outcomes.
     let _ = std::fs::remove_file(dir.join("k.sock"));
-    kernel = start_kernel(&dir, None);
+    kernel = start_kernel(&dir, &flags, None);
     wait_for(&addr).await;
     let mut outcomes = Vec::new();
     for cmd in &commands {

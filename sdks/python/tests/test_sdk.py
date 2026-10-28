@@ -12,7 +12,7 @@ import unittest
 
 import grpc
 
-from kernable import Kernable, NotSettled, Rejected, RequestContext, domain
+from kernable import Kernable, NotSettled, Rejected, RequestContext, _upcast, domain
 from kernable.signing import (Key, challenge_message, command_message, derived_id, query_message,
                               rejection_message, result_message, snapshot_message, vault_ref)
 from kernable.v1 import kernable_pb2 as pb
@@ -30,6 +30,74 @@ def vector_command(c) -> pb.Command:
         attributes = [pb.Attribute(**a) for a in context.pop("attributes")]
         cmd.context.CopyFrom(pb.RequestContext(**context, attributes=attributes))
     return cmd
+
+
+
+class ApplyTest(unittest.TestCase):
+    """apply: a handler changes a copy of the state in place, or returns a state that replaces it."""
+
+    def test_apply_changes_a_copy_in_place_deletes_or_replaces(self):
+        account = domain("crm").aggregate("Account", {"tags": [], "status": "new"})
+
+        @account.apply("Opened")
+        def _(state, data):
+            state["email"] = data["email"]
+            state["tags"].append("open")
+
+        account.apply("Reset", lambda state, data: {"tags": [], "status": "reset"})
+
+        @account.apply("Closed")
+        def _(state, data):
+            del state["email"]
+
+        opened = account.fold([("Opened", 1, {"email": "a@example.com"})])
+        self.assertEqual(opened, {"email": "a@example.com", "tags": ["open"], "status": "new"})
+        self.assertEqual(account.initial, {"tags": [], "status": "new"})  # untouched
+        closed = account.fold([("Closed", 1, {})], opened)
+        self.assertEqual(closed, {"tags": ["open"], "status": "new"})
+        self.assertIn("email", opened)  # the state before is untouched
+        self.assertEqual(account.fold([("Opened", 1, {"email": "b@example.com"}), ("Reset", 1, {})]),
+                         {"tags": [], "status": "reset"})
+
+class ListenerDefinitionTest(unittest.TestCase):
+    """Listeners are defined on a domain: unqualified types are the domain's own."""
+
+    def test_unqualified_types_are_the_own_domains_and_qualified_ones_stay(self):
+        shop, identity = domain("Shop"), domain("Identity")
+        carts = shop.read_model("carts").use(identity)
+        self.assertEqual((carts.name, carts.order, carts.start), ("carts", 0, 0))
+        self.assertEqual((shop.reactor("mailer").order, shop.reactor("mailer").start), (10, None))
+        carts.on("ItemAdded", lambda data: None)
+        carts.on("Identity.AccountRegistered", lambda data: None)
+        carts.on("Identity.*", lambda data: None)
+        carts.query("GetCart", lambda data: None)
+        carts.query("Identity.GetAccount", lambda data: None)
+        carts.middleware(["*", "Checkout", "Identity.*"], fn=lambda check: None)
+        self.assertEqual(list(carts._handlers), ["Shop.ItemAdded", "Identity.AccountRegistered", "Identity.*"])
+        self.assertEqual(list(carts._queries), ["Shop.GetCart", "Identity.GetAccount"])
+        self.assertEqual(list(carts._middleware[0].types), ["*", "Shop.Checkout", "Identity.*"])
+        with self.assertRaises(ValueError):
+            carts.query("Identity.*")
+        with self.assertRaises(ValueError):
+            carts.on("Identity.Account.Registered")
+
+    def test_listener_types_are_checked_when_defined(self):
+        # A bare `*` is not the own domain (that is `counters.*`), as in TypeScript and Rust.
+        model = domain("counters").read_model("model")
+        for event_type in ("Added", "crm.Created", "crm.*", "counters.*"):
+            model.on(event_type, lambda data: None)
+        self.assertEqual(list(model._handlers), ["counters.Added", "crm.Created", "crm.*", "counters.*"])
+        for event_type in ("*", "", "crm.a.b", "Add*"):
+            with self.assertRaises(ValueError, msg=event_type):
+                model.on(event_type, lambda data: None)
+
+    def test_the_own_domains_event_schemas_apply_without_use(self):
+        shop = domain("Shop")
+        carts = shop.read_model("carts")
+        shop.event("ItemAdded", 2).upcast(1, lambda d: {"sku": d["id"]})  # declared after the listener
+        self.assertEqual(_upcast(carts._domains.get("Shop"), "Shop", "ItemAdded", 1, {"id": "x"}),
+                         (2, {"sku": "x"}))
+        self.assertIsNone(carts._domains.get("Identity"))
 
 
 class SigningVectors(unittest.TestCase):
@@ -72,7 +140,8 @@ class SigningVectors(unittest.TestCase):
         self.assertEqual([derived_id(d["input"]["command_id"], n) for n in d["input"]["n"]], d["ids"])
 
 
-counter = domain("counters").aggregate("Counter", 0)
+counters_domain = domain("counters")
+counter = counters_domain.aggregate("Counter", 0)
 
 
 @counter.apply("Incremented")
@@ -97,7 +166,7 @@ def background(target) -> threading.Thread:
 
 class EndToEnd(unittest.TestCase):
     def setUp(self):
-        self.kernel = TestKernel(["counters.*"], "settle_timeout_ms = 500")
+        self.kernel = TestKernel(["counters.*"], ["--settle-timeout-ms", "500"])
         self.kernel.start()
         self.k = Kernable(self.kernel.url, self.kernel.app_key, tenant="t1")
         self.streams = []
@@ -122,25 +191,26 @@ class EndToEnd(unittest.TestCase):
         totals: dict[str, int] = {}
         seen_by_reactor: list[tuple[int, int]] = []
 
-        model = self.k.read_model("totals")
-        model.on("counters.Incremented", lambda e: totals.__setitem__(e.aggregate_id, totals.get(e.aggregate_id, 0) + e.data["by"]))
+        model = counters_domain.read_model("totals")
+        model.on("counters.Incremented", lambda data, evt: totals.__setitem__(evt.aggregate_id, totals.get(evt.aggregate_id, 0) + data["by"]))
 
         @model.query("counters.GetTotal")
-        def _(data, ctx):
+        def _(data, qry, ctx):
+            assert (qry.type, qry.domain, ctx.store) == ("GetTotal", "counters", None)
             if data["id"] not in totals:
                 raise Rejected(f"no counter {data['id']}", "not_found")
             return totals[data["id"]]
 
         def total(counter: str) -> int:
             return self.k.query("counters", "GetTotal", {"id": counter})
-        reactor = self.k.reactor("audit")
+        reactor = counters_domain.reactor("audit")
 
         @reactor.on("counters.Incremented")
-        def _(e):
-            seen_by_reactor.append((e.position, total("c1")))  # the read model ran first
+        def _(data, evt):
+            seen_by_reactor.append((evt.position, total("c1")))  # the read model ran first
 
-        self.run_stream(model)
-        self.run_stream(reactor)
+        self.run_stream(self.k.listener(model))
+        reactor = self.run_stream(self.k.listener(reactor))
 
         first = self.increment(3)
         self.assertTrue(first.committed)
@@ -183,15 +253,20 @@ class EndToEnd(unittest.TestCase):
                 raise Rejected("limit")
             return [{"type": "Incremented", "data": {"by": data["by"]}}]
 
-        # v1 keeps the state as a dict.
-        v1 = domain("counters").aggregate("Counter", {"n": 0}, snapshot_every=3)
+        # v1 keeps the state as a dict, with what `apply` learns about the last event: every
+        # increment is by 1, so the version equals n, whether folded from history or a snapshot.
+        v1 = domain("counters").aggregate("Counter", {"n": 0, "version": 0, "id": "c1"}, snapshot_every=3)
 
         @v1.apply("Incremented")
-        def _(state, e):
-            applied.append(e)
-            return {"n": state["n"] + e["by"]}
+        def _(state, data, evt):
+            applied.append(data)
+            return {"n": state["n"] + data["by"], "version": evt.version, "id": evt.aggregate_id}
 
-        v1.command("Increment", lambda state, data: increment(state["n"], data))
+        @v1.command("Increment")
+        def _(state, data):
+            if state["version"] != state["n"] or state["id"] != "c1":
+                raise Rejected(f"event meta {state}")
+            return increment(state["n"], data)
         worker = self.run_stream(self.k.worker(v1))
         for _ in range(10):
             self.assertTrue(self.increment(1).committed)
@@ -201,25 +276,30 @@ class EndToEnd(unittest.TestCase):
 
         # v2 keeps it as a number: the old snapshot does not fit.
         v2 = domain("counters").aggregate("Counter", 0, snapshot_every=3, schema="2")
-        v2.apply("Incremented", lambda n, e: n + e["by"])
+        v2.apply("Incremented", lambda n, data: n + data["by"])
         v2.command("Increment", increment)
         self.run_stream(self.k.worker(v2))
         self.assertFalse(self.increment(11).committed)  # 10 + 11 > 20: rebuilt from the events
         self.assertTrue(self.increment(10).committed)
 
     def test_request_context_reaches_handlers_events_and_follow_up_commands(self):
-        seen = []
+        seen, applied = [], []
         ticket = domain("support").aggregate("Ticket", {"open": False})
-        ticket.apply("Opened", lambda s, e: {"open": True})
+
+        @ticket.apply("Opened")
+        def _(state, data, evt, ctx):
+            applied.append(ctx.request)
+            return {"open": True}
 
         @ticket.command("Open")
-        def _(state, data, ctx):
+        def _(state, data, cmd, ctx):
             seen.append(ctx.request)
+            assert (cmd.command_id, cmd.type, cmd.aggregate_id) == ("open-t1", "Open", "t1")
             assert ctx.deadline > ctx.now()
             return [{"type": "Opened", "data": {"ids": [ctx.id(), ctx.id()]}}]
 
         @ticket.command("Note")
-        def _(state, data, ctx):
+        def _(state, data, cmd, ctx):
             seen.append(ctx.request)
             return [{"type": "Noted"}]
 
@@ -230,14 +310,14 @@ class EndToEnd(unittest.TestCase):
         service = RequestContext(sender_identity="svc-1", attributes={"channel": "api"})
         self.k = Kernable(self.kernel.url, self.kernel.app_key, context=service)
         self.run_stream(self.k.worker(ticket))
-        reactor = self.k.reactor("notes")
+        reactor = domain("support").reactor("notes")
 
-        @reactor.on("support.Opened")
-        def _(e, ctx):
-            self.k.submit("support", "Ticket", e.aggregate_id, "Note", id=f"note-{e.aggregate_id}", context=ctx.follow(),
+        @reactor.on("Opened")
+        def _(data, evt, ctx):
+            self.k.submit("support", "Ticket", evt.aggregate_id, "Note", id=f"note-{evt.aggregate_id}", context=ctx.follow(),
                           wait="committed")
 
-        self.run_stream(reactor)
+        self.run_stream(self.k.listener(reactor))
         opened = self.k.submit("support", "Ticket", "t1", "Open", id="open-t1",
                                context=RequestContext(sender_identity="svc-1", sender_session="s-9"))
         request = RequestContext(sender_identity="svc-1", sender_session="s-9", correlation_id="open-t1")
@@ -246,9 +326,14 @@ class EndToEnd(unittest.TestCase):
         follow_up = RequestContext(sender_identity="svc-1", sender_session="s-9", correlation_id="open-t1",
                                    causation_id="open-t1")
         self.assertEqual(seen, [request, follow_up])
+        self.assertEqual(applied, [request])  # folded for the follow-up command
 
         stale = self.k.submit("support", "Ticket", "t1", "Note", context=RequestContext(expected_version=1))
         self.assertEqual((stale.committed, stale.code), (False, "version_mismatch"))
+
+        # A request's own context replaces the client's: an anonymous one does not act as the service.
+        anonymous = self.k.submit("support", "Ticket", "t1", "Note", context=RequestContext())
+        self.assertEqual(anonymous.events[0].request, RequestContext(correlation_id=anonymous.events[0].command_id))
         time.sleep(0.15)
         self.assertEqual(self.kernel.verify().returncode, 0)
 
@@ -256,8 +341,8 @@ class EndToEnd(unittest.TestCase):
         self.run_stream(self.k.worker(counter))
         totals: dict[str, int] = {}
         checks = []
-        guard = self.k.read_model("guard")
-        guard.on("counters.Incremented", lambda e: totals.__setitem__(e.aggregate_id, totals.get(e.aggregate_id, 0) + e.data["by"]))
+        guard = counters_domain.read_model("guard")
+        guard.on("counters.Incremented", lambda data, evt: totals.__setitem__(evt.aggregate_id, totals.get(evt.aggregate_id, 0) + data["by"]))
 
         @guard.query("counters.GetTotal")
         def _(data):
@@ -269,7 +354,7 @@ class EndToEnd(unittest.TestCase):
             if check.request.sender_identity == "guest" and (check.kind == "query" or totals.get(check.aggregate_id, 0) >= 3):
                 raise Rejected("guests stop at 3", "forbidden")
 
-        self.run_stream(guard)
+        guard = self.run_stream(self.k.listener(guard))
         guest = RequestContext(sender_identity="guest")
         self.assertTrue(self.increment(3, context=guest).committed)
         refused = self.increment(1, context=guest)  # the middleware already counted the first
@@ -290,8 +375,8 @@ class EndToEnd(unittest.TestCase):
     def test_a_new_event_schema_is_upcast_and_outdated_processes_stop(self):
         # Version 1 stores the increment as `by`.
         v1 = domain("counters").aggregate("Counter", 0)
-        v1.apply("Incremented", lambda n, d: n + d["by"])
-        v1.command("Increment", lambda n, d: [{"type": "Incremented", "data": {"by": d["by"]}}])
+        v1.apply("Incremented", lambda n, data: n + data["by"])
+        v1.command("Increment", lambda n, data: [{"type": "Incremented", "data": {"by": data["by"]}}])
 
         # Version 2 renames it to `amount` and caps a counter at 5.
         counters = domain("counters")
@@ -302,23 +387,22 @@ class EndToEnd(unittest.TestCase):
             return {"amount": d["by"]}
 
         v2 = counters.aggregate("Counter", 0)
-        v2.apply("Incremented", lambda n, d: n + d["amount"])
+        v2.apply("Incremented", lambda n, data: n + data["amount"])
 
         @v2.command("Increment")
-        def _(n, d):
-            if n + d["by"] > 5:
+        def _(n, data):
+            if n + data["by"] > 5:
                 raise Rejected("at most 5", "limit")
-            return [{"type": "Incremented", "data": {"amount": d["by"]}}]
+            return [{"type": "Incremented", "data": {"amount": data["by"]}}]
 
         seen, archived = [], []
-        current = self.k.read_model("current").use(counters)
-        current.on("counters.Incremented", lambda e: seen.append((e.schema, e.data)))
-        archive = self.k.read_model("archive")
-        archive.on("counters.*", lambda e: archived.append((e.schema, e.data)), raw=True)
-        stale = self.k.read_model("stale")
-        stale.on("counters.Incremented", lambda e: None)
-        for listener in (current, archive, stale):
-            self.run_stream(listener)
+        current = counters.read_model("current")  # upcasts its own domain's events, no `use`
+        current.on("Incremented", lambda data, evt: seen.append((evt.schema, data)))
+        archive = counters.read_model("archive")
+        archive.on("counters.*", lambda data, evt: archived.append((evt.schema, data)), raw=True)
+        stale = domain("counters").read_model("stale")
+        stale.on("Incremented", lambda data: None)
+        current, archive, stale = (self.run_stream(self.k.listener(listener)) for listener in (current, archive, stale))
 
         old = self.run_stream(self.k.worker(v1))
         self.assertTrue(self.increment(3, wait="committed").committed)
@@ -341,8 +425,8 @@ class EndToEnd(unittest.TestCase):
     def test_a_reactor_settles_on_the_read_models_before_it_and_never_waits_for_itself(self):
         self.run_stream(self.k.worker(counter))
         totals: dict[str, int] = {}
-        model = self.k.read_model("totals")
-        model.on("counters.Incremented", lambda e: totals.__setitem__(e.aggregate_id, totals.get(e.aggregate_id, 0) + e.data["by"]))
+        model = counters_domain.read_model("totals")
+        model.on("counters.Incremented", lambda data, evt: totals.__setitem__(evt.aggregate_id, totals.get(evt.aggregate_id, 0) + data["by"]))
 
         @model.query("counters.GetTotal")
         def _(data):
@@ -351,20 +435,20 @@ class EndToEnd(unittest.TestCase):
             return totals.get(data["id"], 0)
 
         seen = []
-        reactor = self.k.reactor("mirror")
+        reactor = counters_domain.reactor("mirror")
 
         @reactor.on("counters.Incremented")
-        def _(e, ctx):
-            if e.aggregate_id != "c1":
+        def _(data, evt, ctx):
+            if evt.aggregate_id != "c1":
                 return
             started = time.monotonic()
             # Settles on the read model (order 0), not on this reactor (order 10).
-            self.k.submit("counters", "Counter", "c2", "Increment", {"by": e.data["by"]}, id=f"mirror-{e.position}",
+            self.k.submit("counters", "Counter", "c2", "Increment", {"by": data["by"]}, id=f"mirror-{evt.position}",
                           context=ctx.follow())
             seen.append((self.k.query("counters", "GetTotal", {"id": "c2"}), time.monotonic() - started < 0.4))
 
-        self.run_stream(model)
-        self.run_stream(reactor)
+        self.run_stream(self.k.listener(model))
+        self.run_stream(self.k.listener(reactor))
         self.increment(2)
         self.assertEqual(seen, [(2, True)])
         with self.assertRaises(Rejected) as refused:
@@ -378,10 +462,10 @@ class EndToEnd(unittest.TestCase):
         identity.event("AccountRegistered", 1).personal(["email"], lambda d: d["accountId"])
         identity.event("AccountErased", 1).erases(lambda d: d["accountId"])
         account = identity.aggregate("Account", {})
-        account.apply("AccountRegistered", lambda s, d: d)
-        account.command("RegisterAccount", lambda s, d: [{"type": "AccountRegistered", "data": {
-            "accountId": d["id"], "email": d["email"], "passwordHash": sha(d["password"])}}])
-        account.command("EraseAccount", lambda s, d: [{"type": "AccountErased", "data": {"accountId": d["id"]}}])
+        account.apply("AccountRegistered", lambda s, data: data)
+        account.command("RegisterAccount", lambda s, data: [{"type": "AccountRegistered", "data": {
+            "accountId": data["id"], "email": data["email"], "passwordHash": sha(data["password"])}}])
+        account.command("EraseAccount", lambda s, data: [{"type": "AccountErased", "data": {"accountId": data["id"]}}])
 
         self.k.close()  # this test needs other command types: start a kernel of its own
         self.kernel.dispose()
@@ -390,10 +474,10 @@ class EndToEnd(unittest.TestCase):
         self.k = Kernable(self.kernel.url, self.kernel.app_key).use(identity)
         self.run_stream(self.k.worker(account))
         emails, replayed = {}, []
-        model = self.k.read_model("accounts").use(identity)
-        model.on("identity.AccountRegistered", lambda e: emails.__setitem__(e.aggregate_id, e.data["email"]))
-        model.on("identity.AccountErased", lambda e: emails.pop(e.aggregate_id, None))
-        self.run_stream(model)
+        model = identity.read_model("accounts")
+        model.on("identity.AccountRegistered", lambda data, evt: emails.__setitem__(evt.aggregate_id, data["email"]))
+        model.on("identity.AccountErased", lambda data, evt: emails.pop(evt.aggregate_id, None))
+        self.run_stream(self.k.listener(model))
 
         def send(type, data):
             return self.k.submit("identity", "Account", "a1", type, data)
@@ -413,11 +497,11 @@ class EndToEnd(unittest.TestCase):
 
         self.assertTrue(send("EraseAccount", {"id": "a1"}).committed)
         self.assertEqual(emails, {})
-        rebuilt = self.k.read_model("rebuilt").use(identity)
-        rebuilt.on("identity.AccountRegistered", replayed.append)
-        self.run_stream(rebuilt)
+        rebuilt = domain("Reports").read_model("rebuilt").use(identity)
+        rebuilt.on("identity.AccountRegistered", lambda data, evt: replayed.append((data["email"], evt.redacted)))
+        self.run_stream(self.k.listener(rebuilt))
         time.sleep(0.2)
-        self.assertEqual([(e.data["email"], e.redacted) for e in replayed], [(None, ["email"])])
+        self.assertEqual(replayed, [(None, ["email"])])
 
     def test_a_read_model_with_a_store_continues_and_rebuilds_on_a_new_schema(self):
         self.run_stream(self.k.worker(counter))
@@ -425,20 +509,20 @@ class EndToEnd(unittest.TestCase):
         handled = []
 
         def totals(schema="1"):
-            model = self.k.read_model("totals", store=url, schema=schema, reconnect_s=0.05)
+            model = counters_domain.read_model("totals", store=url, schema=schema, reconnect_s=0.05)
 
             @model.on("counters.Incremented")
-            def _(e, ctx):
-                handled.append(e.position)
-                ctx.store.set("totals", e.aggregate_id, ctx.store.get("totals", e.aggregate_id, 0) + e.data["by"])
-                if fail and ctx.store.get("totals", e.aggregate_id) == 9:
+            def _(data, evt, ctx):
+                handled.append(evt.position)
+                ctx.store.set("totals", evt.aggregate_id, ctx.store.get("totals", evt.aggregate_id, 0) + data["by"])
+                if fail and ctx.store.get("totals", evt.aggregate_id) == 9:
                     raise RuntimeError("boom")  # after writing: the write must not stick
 
             @model.query("counters.GetTotal")
-            def _(data, ctx):
+            def _(data, qry, ctx):
                 return ctx.store.get("totals", data["id"])
 
-            return model
+            return self.k.listener(model)
 
         def total(position):
             return self.k.query("counters", "GetTotal", {"id": "c1"}, min_position=position)

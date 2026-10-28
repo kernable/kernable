@@ -1,22 +1,19 @@
 // The read models: customers and orders, in memory, answering queries.
-import { Rejected } from "@kernable/sdk";
+import { Kernable, Rejected } from "@kernable/sdk";
 
-import { connect } from "./connect.ts";
-
-const kernable = connect();
+import { shopDomain } from "./domain.ts";
 
 // #region customers
 type CustomerRow = { id: string; email: string; name: string };
 const customers = new Map<string, CustomerRow>();
 
-const customersModel = kernable.readModel("customers")
-  .on("shop.CustomerRegistered", (e) => {
-    const { email, name } = e.data as { email: string; name: string };
-    customers.set(e.aggregateId, { id: e.aggregateId, email, name });
+const customersReadmodel = shopDomain.readModel("customers")
+  .on("CustomerRegistered", (data: { email: string; name: string }, evt) => {
+    customers.set(evt.aggregateId, { id: evt.aggregateId, email: data.email, name: data.name });
   })
-  .query("shop.GetCustomer", (d: { id: string }) => {
-    const row = customers.get(d.id);
-    if (!row) throw new Rejected(`No customer ${d.id}`, "not_found");
+  .query("GetCustomer", (data: { id: string }) => {
+    const row = customers.get(data.id);
+    if (!row) throw new Rejected(`No customer ${data.id}`, "not_found");
     return row;
   });
 // #endregion customers
@@ -25,40 +22,39 @@ const customersModel = kernable.readModel("customers")
 type OrderRow = { id: string; customerId: string; status: string; items: Record<string, number>; confirmedTo?: string | null };
 const orders = new Map<string, OrderRow>();
 
-const ordersModel = kernable.readModel("orders")
-  .on("shop.OrderPlaced", (e) => {
-    const { customerId } = e.data as { customerId: string };
-    orders.set(e.aggregateId, { id: e.aggregateId, customerId, status: "draft", items: {} });
+const ordersReadmodel = shopDomain.readModel("orders")
+  .on("OrderPlaced", (data: { customerId: string }, evt) => {
+    orders.set(evt.aggregateId, { id: evt.aggregateId, customerId: data.customerId, status: "draft", items: {} });
   })
-  .on("shop.ItemAdded", (e) => {
-    const { sku, qty } = e.data as { sku: string; qty: number };
-    const items = orders.get(e.aggregateId)!.items;
-    items[sku] = (items[sku] ?? 0) + qty;
+  .on("ItemAdded", (data: { sku: string; qty: number }, evt) => {
+    const items = orders.get(evt.aggregateId)!.items;
+    items[data.sku] = (items[data.sku] ?? 0) + data.qty;
   })
-  .on("shop.OrderSubmitted", (e) => void (orders.get(e.aggregateId)!.status = "submitted"))
-  .query("shop.GetOrder", (d: { id: string }) => {
-    const row = orders.get(d.id);
-    if (!row) throw new Rejected(`No order ${d.id}`, "not_found");
+  .on("OrderSubmitted", (_data, evt) => void (orders.get(evt.aggregateId)!.status = "submitted"))
+  .query("GetOrder", (data: { id: string }) => {
+    const row = orders.get(data.id);
+    if (!row) throw new Rejected(`No order ${data.id}`, "not_found");
     return row;
   });
 // #endregion orders
 
 // #region confirmed
-ordersModel.on("shop.OrderConfirmed", (e) => {
-  const row = orders.get(e.aggregateId)!;
+ordersReadmodel.on("OrderConfirmed", (data: { email: string }, evt) => {
+  const row = orders.get(evt.aggregateId)!;
   row.status = "confirmed";
-  row.confirmedTo = (e.data as { email: string }).email;
+  row.confirmedTo = data.email;
 });
 // #endregion confirmed
 
 // #region erased
 // An erased customer's personal data must not outlive the erasure in a read model either.
-customersModel.on("shop.CustomerErased", (e) => void customers.delete(e.aggregateId));
-ordersModel.on("shop.CustomerErased", (e) => {
-  for (const row of orders.values()) if (row.customerId === e.aggregateId && row.confirmedTo) row.confirmedTo = null;
+customersReadmodel.on("CustomerErased", (_data, evt) => void customers.delete(evt.aggregateId));
+ordersReadmodel.on("CustomerErased", (_data, evt) => {
+  for (const row of orders.values()) if (row.customerId === evt.aggregateId && row.confirmedTo) row.confirmedTo = null;
 });
 // #endregion erased
 
 // #region run
-await Promise.all([customersModel.run(), ordersModel.run()]);
+const kernable = new Kernable();
+await Promise.all([kernable.listener(customersReadmodel).run(), kernable.listener(ordersReadmodel).run()]);
 // #endregion run

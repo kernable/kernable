@@ -14,11 +14,24 @@ In a CRUD application, a table holds the current state and an update overwrites 
 
 An **aggregate** is the unit of decision: a customer, an order. It has
 
-- a **state**, folded from its events by `apply`;
+- a **state**, folded from its events by `apply`: it changes the state (a copy) or returns a new one;
 - **commands**: a handler looks at the state and returns events, or rejects the command with a reason;
 - a **version**: the number of its events. Every event gets the next version.
 
-Aggregates belong to a **domain** (`shop`); types are named `shop.Register` outside their domain. A domain writes only its own events; it learns about other domains through listeners.
+Aggregates belong to a **domain** (`shop`); types are named `shop.Register` outside their domain. By convention, domain and aggregate names are lowercase and message types (events, commands, queries) capitalized; both cases are valid, and names are case-sensitive. A domain writes only its own events; it learns about other domains through listeners.
+
+## Handlers
+
+Every handler gets the same kinds of arguments, in the same order: the **data** (the payload of the event, command or query), the **envelope** (what arrived: type, IDs, version), and a **context** (in which request, and what the handler may use).
+
+| Handler | Arguments | Envelope | Context |
+|---|---|---|---|
+| `apply(type, …)` | `state, data, evt, ctx` | `evt`: type, version, domain, aggregate type and ID, tenant, command ID | `ctx`: the request context of the command that caused the event |
+| `command(type, …)` | `state, data, cmd, ctx` | `cmd`: command ID, type, domain, aggregate type and ID, tenant | `ctx`: the request context, `now()`, `id()`, the deadline |
+| `query(type, …)` | `data, qry, ctx` | `qry`: query ID, type, domain, tenant | `ctx`: the request context of who asks, the listener's store |
+| `on(type, …)` | `data, evt, ctx` | `evt`: as for `apply`, plus position, payload version and redacted fields | `ctx`: the request context, `replaying`, `follow()`, the store |
+
+`apply` gets no `now()` and no `id()`: replaying the events must give the same state every time, so a time or an ID the state needs goes into the event's data.
 
 ## Rules for handlers
 

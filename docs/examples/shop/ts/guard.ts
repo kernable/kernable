@@ -1,18 +1,17 @@
 // The guard: a middleware that lets customers act only on themselves and their own orders.
-import { Rejected } from "@kernable/sdk";
+import { Kernable, Rejected } from "@kernable/sdk";
 
-import { connect } from "./connect.ts";
+import { shopDomain } from "./domain.ts";
 
 // #region guard
 const SERVICES = new Set(["svc-confirmations"]);
 const registered = new Set<string>();
 const ownerOf = new Map<string, string>(); // order -> customer
 
-const kernable = connect();
-await kernable.readModel("guard")
-  .on("shop.CustomerRegistered", (e) => void registered.add(e.aggregateId))
-  .on("shop.CustomerErased", (e) => void registered.delete(e.aggregateId))
-  .on("shop.OrderPlaced", (e) => void ownerOf.set(e.aggregateId, (e.data as { customerId: string }).customerId))
+const guardReadmodel = shopDomain.readModel("guard")
+  .on("CustomerRegistered", (_data, evt) => void registered.add(evt.aggregateId))
+  .on("CustomerErased", (_data, evt) => void registered.delete(evt.aggregateId))
+  .on("OrderPlaced", (data: { customerId: string }, evt) => void ownerOf.set(evt.aggregateId, data.customerId))
   .middleware({ types: ["shop.*"] }, (check) => {
     const who = check.request.senderIdentity ?? "";
     if (check.type === "Register") return; // anyone may sign up
@@ -21,9 +20,10 @@ await kernable.readModel("guard")
     const target = check.kind === "command" ? check.aggregateId! : data.id!;
     const owner =
       check.type === "Place" ? data.customerId
-      : check.type === "GetCustomer" || check.aggregateType === "Customer" ? target
+      : check.type === "GetCustomer" || check.aggregateType === "customer" ? target
       : ownerOf.get(target);
     if (!registered.has(who) || owner !== who) throw new Rejected(`${check.type} is not allowed for ${who || "anonymous"}`, "forbidden");
-  })
-  .run();
+  });
+
+await new Kernable().listener(guardReadmodel).run();
 // #endregion guard

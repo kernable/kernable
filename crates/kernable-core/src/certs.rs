@@ -42,12 +42,11 @@ pub fn create(dir: &Path, clients: &[&str]) -> Result<(), Error> {
 }
 
 fn write_secret(path: &Path, content: &str) -> io::Result<()> {
-    use std::{io::Write, os::unix::fs::OpenOptionsExt};
-    fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?
-        .write_all(content.as_bytes())
+    use std::io::Write;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    // Readable by the owner only; on other systems the directory's permissions apply.
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)?.write_all(content.as_bytes())
 }

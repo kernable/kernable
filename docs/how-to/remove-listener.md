@@ -2,7 +2,7 @@
 
 The kernel remembers every listener that ever connected, with its position. A listener you stopped using still counts:
 
-- submits that settle wait for it, until `settle_timeout_ms`;
+- submits that settle wait for it, until `--settle-timeout-ms`;
 - `/ready` answers 503;
 - if it was a middleware, everything it checked is refused.
 

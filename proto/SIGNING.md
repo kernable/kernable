@@ -34,6 +34,8 @@ Each message starts with a `str` **tag** for domain separation. Payloads are sig
 | Subscriber | `kernable.v1.subscribe` | `after_position: u64`, `issued_at: i64`, `type_count: u64`, then per type `event_type` |
 | Kernel | `kernable.v1.checkpoint` | `global_position: u64`, `chain_hash`, `created_at: i64` |
 | Kernel | `kernable.v1.revocation` | `key_id`, `since: i64`, `created_at: i64` |
+| Root key | `kernable.v1.grant` | `key_id`, `succeeds`, `issued_at: i64`, `permission_count: u64`, then per permission `action`, `type_count: u64`, every type |
+| Root key | `kernable.v1.revoke` | `key_id`, `since: i64`, `issued_at: i64` |
 
 The result signature does not cover the lease ID. A replayed result can only reproduce the same events for the same command at the same version, so it is harmless. The commit is idempotent.
 
@@ -41,7 +43,9 @@ A query is valid for 60 s around `issued_at`, like a subscribe request. Answers 
 
 Listener acknowledgements are not signed. They travel on a stream whose key was proven by the challenge, and they only affect waiting and ordering, never stored data.
 
-A subscribe request is valid for 60 s around `issued_at`. Within that window a captured request could be replayed, but it only grants the read access the key already has. Transport encryption (MVP) closes this gap.
+A subscribe request is valid for 60 s around `issued_at`. Within that window a captured request could be replayed, but it only grants the read access the key already has. Transport encryption (mutual TLS over TCP) closes this gap.
+
+A grant says what a key may do. A root key signs it; the process of the grantee sends it, hex-encoded, in the gRPC metadata entry `kernable-grant` with every call. The grant is not part of any other signed message: the kernel checks that the grant names the key that signed the request. A grant has no time window; a newer one (by `issued_at`) replaces an older one for the same key. A revoke request is valid for 60 s around `issued_at`; the kernel then stores the revocation signed with its own key (`kernable.v1.revocation`). Only root-key tooling produces grants and revoke requests, so an SDK does not need to reproduce the `grant` and `revoke` test vectors.
 
 ## Derived IDs
 

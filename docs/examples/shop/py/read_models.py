@@ -2,23 +2,23 @@
 
 import threading
 
-from kernable import Rejected
+from kernable import Kernable, Rejected
 
-from connect import connect
+from domain import shop_domain
 
-k = connect()
+k = Kernable()
 
 # region customers
 customers: dict[str, dict] = {}
-customers_model = k.read_model("customers")
+customers_readmodel = shop_domain.read_model("customers")
 
 
-@customers_model.on("shop.CustomerRegistered")
-def _(e):
-    customers[e.aggregate_id] = {"id": e.aggregate_id, "email": e.data["email"], "name": e.data["name"]}
+@customers_readmodel.on("CustomerRegistered")
+def _(data, evt):
+    customers[evt.aggregate_id] = {"id": evt.aggregate_id, "email": data["email"], "name": data["name"]}
 
 
-@customers_model.query("shop.GetCustomer")
+@customers_readmodel.query("GetCustomer")
 def _(data):
     if data["id"] not in customers:
         raise Rejected(f"No customer {data['id']}", "not_found")
@@ -28,27 +28,27 @@ def _(data):
 
 # region orders
 orders: dict[str, dict] = {}
-orders_model = k.read_model("orders")
+orders_readmodel = shop_domain.read_model("orders")
 
 
-@orders_model.on("shop.OrderPlaced")
-def _(e):
-    orders[e.aggregate_id] = {"id": e.aggregate_id, "customerId": e.data["customerId"], "status": "draft",
+@orders_readmodel.on("OrderPlaced")
+def _(data, evt):
+    orders[evt.aggregate_id] = {"id": evt.aggregate_id, "customerId": data["customerId"], "status": "draft",
                               "items": {}}
 
 
-@orders_model.on("shop.ItemAdded")
-def _(e):
-    items = orders[e.aggregate_id]["items"]
-    items[e.data["sku"]] = items.get(e.data["sku"], 0) + e.data["qty"]
+@orders_readmodel.on("ItemAdded")
+def _(data, evt):
+    items = orders[evt.aggregate_id]["items"]
+    items[data["sku"]] = items.get(data["sku"], 0) + data["qty"]
 
 
-@orders_model.on("shop.OrderSubmitted")
-def _(e):
-    orders[e.aggregate_id]["status"] = "submitted"
+@orders_readmodel.on("OrderSubmitted")
+def _(data, evt):
+    orders[evt.aggregate_id]["status"] = "submitted"
 
 
-@orders_model.query("shop.GetOrder")
+@orders_readmodel.query("GetOrder")
 def _(data):
     if data["id"] not in orders:
         raise Rejected(f"No order {data['id']}", "not_found")
@@ -57,28 +57,28 @@ def _(data):
 
 
 # region confirmed
-@orders_model.on("shop.OrderConfirmed")
-def _(e):
-    orders[e.aggregate_id].update(status="confirmed", confirmedTo=e.data["email"])
+@orders_readmodel.on("OrderConfirmed")
+def _(data, evt):
+    orders[evt.aggregate_id].update(status="confirmed", confirmedTo=data["email"])
 # endregion confirmed
 
 
 # region erased
 # An erased customer's personal data must not outlive the erasure in a read model either.
-@customers_model.on("shop.CustomerErased")
-def _(e):
-    customers.pop(e.aggregate_id, None)
+@customers_readmodel.on("CustomerErased")
+def _(data, evt):
+    customers.pop(evt.aggregate_id, None)
 
 
-@orders_model.on("shop.CustomerErased")
-def _(e):
+@orders_readmodel.on("CustomerErased")
+def _(data, evt):
     for row in orders.values():
-        if row["customerId"] == e.aggregate_id and row.get("confirmedTo"):
+        if row["customerId"] == evt.aggregate_id and row.get("confirmedTo"):
             row["confirmedTo"] = None
 # endregion erased
 
 
 # region run
-threading.Thread(target=customers_model.run, daemon=True).start()
-orders_model.run()
+threading.Thread(target=k.listener(customers_readmodel).run, daemon=True).start()
+k.listener(orders_readmodel).run()
 # endregion run
