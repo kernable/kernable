@@ -62,7 +62,9 @@ CREATE TABLE IF NOT EXISTS commands (
     context          TEXT,             -- RequestContext, as JSON
     vault_refs       TEXT    NOT NULL DEFAULT '', -- comma-separated
     status           TEXT    NOT NULL, -- pending | committed | rejected
-    result           BLOB,             -- encoded CommandResult once completed
+    positions        TEXT    NOT NULL DEFAULT '', -- committed: its events' global positions, comma-separated
+    rejected_code    TEXT,             -- rejected: why
+    rejected_message TEXT,
     created_at       INTEGER NOT NULL
 ) STRICT;
 CREATE INDEX IF NOT EXISTS commands_pending ON commands (status, created_at);
@@ -321,11 +323,17 @@ impl Store for SqliteStore {
             stored.push(event);
         }
 
-        let outcome = Outcome::Committed(Committed {
-            events: stored.clone(),
-            settled: false,
-        });
-        complete(&tx, &cmd.command_id, "committed", outcome)?;
+        tx.execute(
+            "UPDATE commands SET status = 'committed', positions = ?2 WHERE command_id = ?1",
+            params![
+                cmd.command_id,
+                stored
+                    .iter()
+                    .map(|e| e.global_position.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ],
+        )?;
         tx.commit()?;
         Ok(stored)
     }
@@ -344,7 +352,11 @@ impl Store for SqliteStore {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let cmd = pending_command(&tx, command_id)?;
-        complete(&tx, &cmd.command_id, "rejected", Outcome::Rejected(reason))?;
+        tx.execute(
+            "UPDATE commands SET status = 'rejected', rejected_code = ?2, rejected_message = ?3
+             WHERE command_id = ?1",
+            params![cmd.command_id, reason.code, reason.message],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -510,7 +522,7 @@ fn event_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
         context: context_from(r.get(12)?)?,
         domain: r.get(13)?,
         schema: r.get(14)?,
-        vault_refs: split_refs(r.get(15)?),
+        vault_refs: split_list(r.get(15)?),
         erases: r.get(16)?,
     })
 }
@@ -526,11 +538,11 @@ fn command_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Command> {
         client_sig: join_sig(r.get(6)?, r.get(7)?),
         context: context_from(r.get(8)?)?,
         domain: r.get(9)?,
-        vault_refs: split_refs(r.get(10)?),
+        vault_refs: split_list(r.get(10)?),
     })
 }
 
-fn split_refs(joined: String) -> Vec<String> {
+fn split_list(joined: String) -> Vec<String> {
     if joined.is_empty() {
         return Vec::new();
     }
@@ -665,30 +677,57 @@ fn pending_command(tx: &Transaction<'_>, command_id: &str) -> Result<Command> {
     .ok_or(Error::NotPending)
 }
 
-fn complete(tx: &Transaction<'_>, command_id: &str, status: &str, outcome: Outcome) -> Result<()> {
-    let result = CommandResult {
-        command_id: command_id.to_owned(),
-        outcome: Some(outcome),
-    };
-    tx.execute(
-        "UPDATE commands SET status = ?2, result = ?3 WHERE command_id = ?1",
-        params![command_id, status, result.encode_to_vec()],
-    )?;
-    Ok(())
+/// The events at `positions` (comma-separated), which `command_id` produced.
+fn events_at(conn: &Connection, command_id: &str, positions: &str) -> Result<Vec<Event>> {
+    let positions = split_list(positions.to_owned())
+        .iter()
+        .map(|p| p.parse::<u64>())
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|_| Error::Corrupt(format!("command {command_id}: positions {positions}")))?;
+    let mut events = Vec::with_capacity(positions.len());
+    for position in positions {
+        let mut found = read_events(conn, "WHERE global_position = ?1", [position])?;
+        match found.pop() {
+            Some(event) if event.command_id == command_id => events.push(event),
+            _ => {
+                return Err(Error::Corrupt(format!(
+                    "command {command_id}: no event of it at position {position}"
+                )));
+            }
+        }
+    }
+    Ok(events)
 }
 
+/// The result of a completed command: its events are read back from the log.
 fn stored_result(conn: &Connection, command_id: &str) -> Result<Option<CommandResult>> {
-    let bytes: Option<Vec<u8>> = conn
+    type Row = (String, String, Option<String>, Option<String>);
+    let row: Option<Row> = conn
         .query_row(
-            "SELECT result FROM commands WHERE command_id = ?1",
+            "SELECT status, positions, rejected_code, rejected_message
+             FROM commands WHERE command_id = ?1",
             [command_id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
-        .optional()?
-        .flatten();
-    Ok(bytes
-        .map(|b| CommandResult::decode(b.as_slice()))
-        .transpose()?)
+        .optional()?;
+    let outcome = match row {
+        None => return Ok(None),
+        Some((status, positions, code, message)) => match status.as_str() {
+            "committed" => Outcome::Committed(Committed {
+                events: events_at(conn, command_id, &positions)?,
+                settled: false,
+            }),
+            "rejected" => Outcome::Rejected(Rejected {
+                code: code.unwrap_or_default(),
+                message: message.unwrap_or_default(),
+            }),
+            _ => return Ok(None),
+        },
+    };
+    Ok(Some(CommandResult {
+        command_id: command_id.to_owned(),
+        outcome: Some(outcome),
+    }))
 }
 
 /// Upgrades a SQLite store to [`FORMAT`]; returns the format it had.
