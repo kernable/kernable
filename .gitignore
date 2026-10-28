@@ -8,3 +8,11 @@ docs/node_modules/
 docs/.vitepress/dist/
 docs/.vitepress/cache/
 __pycache__/
+*.grant
+*key
+*.pub
+*.db
+*.db-shm
+*.db-wal
+# Frozen test stores (see crates/kernable-kernel/tests/compat.rs)
+!crates/kernable-kernel/tests/fixtures/**

@@ -3,6 +3,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
+import { basename } from "node:path";
 
 import type { ClientReadableStream } from "@grpc/grpc-js";
 
@@ -15,7 +16,9 @@ import {
   type ListenerDelivery,
   type SessionCall,
   type TlsFiles,
+  type WireCacheRequest,
   type WireCommand,
+  type WireDataRequest,
   type WireEvent,
   type WireNewEvent,
   type WireQueryRequest,
@@ -27,8 +30,10 @@ import {
 } from "./rpc.ts";
 import {
   Key,
+  cacheMessage,
   challengeMessage,
   commandMessage,
+  dataMessage,
   derivedId,
   queryMessage,
   rejectionMessage,
@@ -82,7 +87,6 @@ export interface RequestContext {
   senderSession?: string;
   /** Authorize as this identity of the target tenant; the sender stays the real principal. */
   onBehalfOf?: string;
-  workspace?: string;
   /** Reject the command (`version_mismatch`) unless the aggregate is at this version. */
   expectedVersion?: number;
   /** Shared by everything one original request causes; defaults to the command ID. */
@@ -603,9 +607,46 @@ export interface SubmitOptions {
   wait?: "settled" | "committed";
 }
 
+const LEVELS = { off: 0, error: 1, warn: 2, info: 3, debug: 4 };
+type Level = Exclude<keyof typeof LEVELS, "off">;
+
+/**
+ * Connection and activity lines of workers, listeners and subscriptions on stderr, up to the
+ * level of `KERNABLE_LOG` (`off`, `error`, `warn`, `info` (default) or `debug`).
+ */
+class Log {
+  private readonly level: number;
+  /** `<url> as <key name> (<key id>…)`, for the connected lines. */
+  readonly peer: string;
+
+  constructor(url: string, keyPath: string, key: Key) {
+    const level = process.env.KERNABLE_LOG?.toLowerCase() ?? "";
+    this.level = level in LEVELS ? LEVELS[level as keyof typeof LEVELS] : LEVELS.info;
+    this.peer = `${url} as ${basename(keyPath).replace(/\.key$/, "")} (${key.id.slice(0, 12)}…)`;
+  }
+
+  print(level: Level, what: string, line: string): void {
+    if (LEVELS[level] <= this.level) console.error(`kernable ${what}: ${line}`);
+  }
+
+  /** Logs the end of a session that was not stopped and waits `ms` before reconnecting. */
+  async reconnect(what: string, err: unknown, ms: number): Promise<void> {
+    // A gRPC error by its details only (`Connection dropped`, not `14 UNAVAILABLE: …`).
+    const e = err as Error & { details?: string };
+    const reason = e.details || e.message;
+    this.print("warn", what, `connection lost (${reason}), reconnecting in ${ms / 1000} s`);
+    await new Promise((r) => setTimeout(r, ms));
+  }
+}
+
 export class Kernable {
+  /** Files of a domain kept by the kernel, e.g. invoices; see `Data`. */
+  readonly data: Data;
+  /** The shared cache of a domain; see `Cache`. */
+  readonly cache: Cache;
   private readonly clients: Clients;
   private readonly key: Key;
+  private readonly log: Log;
   private readonly tenant: string;
   private readonly context: RequestContext;
   private readonly domains = new Map<string, Domain>();
@@ -618,8 +659,11 @@ export class Kernable {
     const url = options.url ?? env.KERNABLE_URL ?? "http://127.0.0.1:7233";
     this.clients = connect(url, options.tls ?? tlsFromEnv(), explicit || existsSync(grant) ? readFileSync(grant, "utf8").trim() : undefined);
     this.key = Key.fromFile(key);
+    this.log = new Log(url, key, this.key);
     this.tenant = options.tenant ?? "default";
     this.context = options.context ?? {};
+    this.data = new Data(this.clients, this.key, this.tenant);
+    this.cache = new Cache(this.clients, this.key, this.tenant);
   }
 
   /** Seals the vault fields of these domains' commands when submitting them; see `Domain.command`. */
@@ -629,7 +673,7 @@ export class Kernable {
   }
 
   worker(...aggregates: Aggregate<any>[]): Worker {
-    return new Worker(this.clients, this.key, aggregates);
+    return new Worker(this.clients, this.key, aggregates, this.log);
   }
 
   /** Runs a command and returns its outcome; see `SubmitOptions.wait`. */
@@ -683,7 +727,7 @@ export class Kernable {
    * until `run()` connects.
    */
   listener(listener: Listener): ListenerHandle {
-    return new ListenerHandle(this.clients, this.key, listener);
+    return new ListenerHandle(this.clients, this.key, listener, this.log);
   }
 
   private send(options: SubmitOptions, wait: WireWait) {
@@ -712,13 +756,127 @@ export class Kernable {
    * that event is delivered again. Persist `position` yourself to resume across restarts.
    */
   subscribe(options: SubscribeOptions, handler: (event: StoredEvent) => void | Promise<void>): Subscription {
-    return new Subscription(this.clients, this.key, options, handler);
+    return new Subscription(this.clients, this.key, options, handler, this.log);
   }
 
   /** Closes the connection now; only needed in a long-running process that discards the client. */
   close(): void {
     this.clients.close();
   }
+}
+
+export interface DataOptions {
+  /** Default: the client's tenant. */
+  tenant?: string;
+}
+
+export interface PutDataOptions extends DataOptions {
+  /** Default: `text/plain; charset=utf-8` for a string, else `application/octet-stream`. */
+  contentType?: string;
+}
+
+/**
+ * Files of a domain kept by the kernel under `(tenant, domain, key)`, at most 16 MiB each: PDFs,
+ * images, exports. Reading needs a grant of `data_read` for the domain (`shop.*`), putting and
+ * deleting one of `data_write`. Files are not part of the signed event log and are not erased
+ * with the vault: delete a person's files yourself when erasing them.
+ */
+export class Data {
+  private readonly clients: Clients;
+  private readonly key: Key;
+  private readonly tenant: string;
+
+  constructor(clients: Clients, key: Key, tenant: string) {
+    this.clients = clients;
+    this.key = key;
+    this.tenant = tenant;
+  }
+
+  /** Stores `data` under `key`, replacing a file there; a string is stored as UTF-8. */
+  async put(domain: string, key: string, data: Uint8Array | string, options: PutDataOptions = {}): Promise<void> {
+    const contentType = options.contentType ?? (typeof data === "string" ? "text/plain; charset=utf-8" : "application/octet-stream");
+    await this.call("put", domain, key, options, toBuffer(data), contentType);
+  }
+
+  /** The file under `key`, or `undefined` if there is none. */
+  async get(domain: string, key: string, options: DataOptions = {}): Promise<{ data: Uint8Array; contentType: string } | undefined> {
+    const res = await this.call("get", domain, key, options);
+    return res.found ? { data: res.data, contentType: res.content_type } : undefined;
+  }
+
+  /** Deletes the file under `key`; returns whether there was one. */
+  async delete(domain: string, key: string, options: DataOptions = {}): Promise<boolean> {
+    return (await this.call("delete", domain, key, options)).found;
+  }
+
+  private call(op: "put" | "get" | "delete", domain: string, key: string, options: DataOptions, data: Buffer = Buffer.alloc(0), contentType = "") {
+    const request: WireDataRequest = {
+      tenant_id: options.tenant ?? this.tenant,
+      domain,
+      key,
+      data,
+      content_type: contentType,
+      issued_at: Date.now(),
+    };
+    const rpc = op === "put" ? "PutData" : op === "get" ? "GetData" : "DeleteData";
+    return this.clients.data(rpc, { ...request, client_sig: this.key.sign(dataMessage(op, request)) });
+  }
+}
+
+export interface SetCacheOptions extends DataOptions {
+  /** Milliseconds until the value expires; default: until deleted or the kernel restarts. */
+  ttlMs?: number;
+}
+
+/**
+ * The shared cache of a domain: values of at most 1 MiB under `(tenant, domain, key)` that may
+ * expire, e.g. rates or tokens shared by several processes. Needs a grant of `cache` for the
+ * domain (`shop.*`). The cache lives in the kernel's memory: a restart empties it. Values are not
+ * part of the signed event log and are not erased with the vault.
+ */
+export class Cache {
+  private readonly clients: Clients;
+  private readonly key: Key;
+  private readonly tenant: string;
+
+  constructor(clients: Clients, key: Key, tenant: string) {
+    this.clients = clients;
+    this.key = key;
+    this.tenant = tenant;
+  }
+
+  /** Stores `value` under `key`, replacing a value there; a string is stored as UTF-8. */
+  async set(domain: string, key: string, value: Uint8Array | string, options: SetCacheOptions = {}): Promise<void> {
+    await this.call("set", domain, key, options, toBuffer(value), options.ttlMs ?? 0);
+  }
+
+  /** The live value under `key`, or `undefined` if there is none or it expired. */
+  async get(domain: string, key: string, options: DataOptions = {}): Promise<Uint8Array | undefined> {
+    const res = await this.call("get", domain, key, options);
+    return res.found ? res.value : undefined;
+  }
+
+  /** Deletes the value under `key`; returns whether there was a live one. */
+  async delete(domain: string, key: string, options: DataOptions = {}): Promise<boolean> {
+    return (await this.call("delete", domain, key, options)).found;
+  }
+
+  private call(op: "set" | "get" | "delete", domain: string, key: string, options: DataOptions, value: Buffer = Buffer.alloc(0), ttlMs = 0) {
+    const request: WireCacheRequest = {
+      tenant_id: options.tenant ?? this.tenant,
+      domain,
+      key,
+      value,
+      ttl_ms: ttlMs,
+      issued_at: Date.now(),
+    };
+    const rpc = op === "set" ? "SetCache" : op === "get" ? "GetCache" : "DeleteCache";
+    return this.clients.cache(rpc, { ...request, client_sig: this.key.sign(cacheMessage(op, request)) });
+  }
+}
+
+function toBuffer(value: Uint8Array | string): Buffer {
+  return typeof value === "string" ? Buffer.from(value, "utf8") : Buffer.from(value.buffer, value.byteOffset, value.byteLength);
 }
 
 export interface SubscribeOptions {
@@ -737,9 +895,9 @@ export class Subscription {
   private call?: ClientReadableStream<WireEvent>;
   private stopped = false;
 
-  constructor(clients: Clients, key: Key, options: SubscribeOptions, handler: (event: StoredEvent) => void | Promise<void>) {
+  constructor(clients: Clients, key: Key, options: SubscribeOptions, handler: (event: StoredEvent) => void | Promise<void>, log: Log) {
     this.position = options.after ?? 0;
-    this.done = this.loop(clients, key, options, handler);
+    this.done = this.loop(clients, key, options, handler, log);
   }
 
   stop(): void {
@@ -747,21 +905,22 @@ export class Subscription {
     this.call?.cancel();
   }
 
-  private async loop(clients: Clients, key: Key, options: SubscribeOptions, handler: (event: StoredEvent) => void | Promise<void>) {
+  private async loop(clients: Clients, key: Key, options: SubscribeOptions, handler: (event: StoredEvent) => void | Promise<void>, log: Log) {
     const event_types = options.types ?? [];
     while (!this.stopped) {
       const issued_at = Date.now();
       const client_sig = key.sign(subscribeMessage(this.position, event_types, issued_at));
       this.call = clients.subscribe({ after_position: this.position, event_types, issued_at, client_sig });
+      let error: unknown = new Error("stream ended");
       try {
         for await (const e of this.call as AsyncIterable<WireEvent>) {
           await handler(toStored(e));
           this.position = e.global_position;
         }
       } catch (err) {
-        if (!this.stopped) console.error(`kernable subscription: ${(err as Error).message}`);
+        error = err;
       }
-      if (!this.stopped) await new Promise((r) => setTimeout(r, options.reconnectMs ?? 1000));
+      if (!this.stopped) await log.reconnect("subscription", error, options.reconnectMs ?? 1000);
     }
   }
 }
@@ -924,12 +1083,14 @@ export class ListenerHandle {
   private replayUpTo = 0;
   private readonly clients: Clients;
   private readonly key: Key;
+  private readonly log: Log;
   /** The definition it runs. */
   readonly listener: Listener;
 
-  constructor(clients: Clients, key: Key, listener: Listener) {
+  constructor(clients: Clients, key: Key, listener: Listener, log: Log) {
     this.clients = clients;
     this.key = key;
+    this.log = log;
     this.listener = listener;
     this.ready = new Promise((resolve) => (this.markReady = resolve));
   }
@@ -950,19 +1111,25 @@ export class ListenerHandle {
       start = this.position;
     }
     while (!this.stopped) {
+      let error: unknown = new Error("stream ended");
       try {
         await this.listen(start);
       } catch (err) {
-        if (!this.stopped) console.error(`kernable listener ${this.listener.name}: ${(err as Error).message}`);
+        error = err;
       }
       start = this.position;
-      if (!this.stopped) await new Promise((r) => setTimeout(r, options.reconnectMs ?? 1000));
+      if (!this.stopped) await this.log.reconnect(this.what, error, options.reconnectMs ?? 1000);
     }
   }
 
   stop(): void {
     this.stopped = true;
     this.call?.cancel();
+  }
+
+  /** `listener <name>`, for log lines. */
+  private get what(): string {
+    return `listener ${this.listener.name}`;
   }
 
   private listen(start: number | undefined): Promise<void> {
@@ -1003,6 +1170,7 @@ export class ListenerHandle {
     } else if (m.ready) {
       this.position = m.ready.after_position;
       this.replayUpTo = m.ready.head_position;
+      this.logConnected();
       this.markReady();
     } else if (m.batch) {
       // With a store, the batch's data and position are committed together, before the ack.
@@ -1024,6 +1192,15 @@ export class ListenerHandle {
     }
   }
 
+  private logConnected(): void {
+    const { handlers, queries, checker } = this.listener;
+    const list = (types: Iterable<string>) => [...types].sort().join(", ");
+    let line = `connected to ${this.log.peer}, at position ${this.position}, reads ${list(handlers.keys())}`;
+    if (queries.size) line += `, answers ${list(queries.keys())}`;
+    if (checker) line += `, checks ${list(checker.options.types)}`;
+    this.log.print("info", this.what, line);
+  }
+
   private async handleBatch(batch: NonNullable<ListenerDelivery["batch"]>): Promise<void> {
     const { handlers, domains } = this.listener;
     for (const e of batch.events) {
@@ -1035,6 +1212,7 @@ export class ListenerHandle {
           : { ...stored, ...upcast(domains.get(e.domain)?.events, e.domain, e.event_type, e.schema, stored.data) };
         const ctx = { replaying: e.global_position <= this.replayUpTo, follow: () => follow(stored), request, store: this.stored };
         await entry.handler(data, evt, ctx);
+        this.log.print("debug", this.what, `${e.domain}.${e.event_type} at ${e.global_position}`);
       }
       this.position = e.global_position;
     }
@@ -1054,6 +1232,13 @@ export class ListenerHandle {
   }
 
   private async answer(q: WireQueryRequest): Promise<{ response: Buffer } | { rejected: WireRejected }> {
+    const answer = await this.tryAnswer(q);
+    const type = `${q.domain}.${q.query_type}`;
+    this.log.print("debug", this.what, "rejected" in answer ? `rejected ${type} ${answer.rejected.code}` : `answered ${type}`);
+    return answer;
+  }
+
+  private async tryAnswer(q: WireQueryRequest): Promise<{ response: Buffer } | { rejected: WireRejected }> {
     try {
       const handler = this.listener.queries.get(`${q.domain}.${q.query_type}`);
       if (!handler) throw new Rejected(`no handler for ${q.domain}.${q.query_type}`, "unknown_query");
@@ -1081,13 +1266,15 @@ export class Worker {
   private markReady!: () => void;
   private readonly clients: Clients;
   private readonly key: Key;
+  private readonly log: Log;
   private readonly byCommand = new Map<string, Aggregate<any>>();
   private call?: SessionCall;
   private stopped = false;
 
-  constructor(clients: Clients, key: Key, aggregates: Aggregate<any>[]) {
+  constructor(clients: Clients, key: Key, aggregates: Aggregate<any>[], log: Log) {
     this.clients = clients;
     this.key = key;
+    this.log = log;
     for (const agg of aggregates) for (const type of agg.handlers.keys()) this.byCommand.set(`${agg.domain}.${type}`, agg);
     this.ready = new Promise((resolve) => (this.markReady = resolve));
   }
@@ -1095,12 +1282,13 @@ export class Worker {
   /** Processes commands until `stop()`, reconnecting when the session drops. */
   async run(options: WorkerOptions = {}): Promise<void> {
     while (!this.stopped) {
+      let error: unknown = new Error("stream ended");
       try {
         await this.session(options.concurrency ?? 16);
       } catch (err) {
-        if (!this.stopped) console.error(`kernable worker: ${(err as Error).message}`);
+        error = err;
       }
-      if (!this.stopped) await new Promise((r) => setTimeout(r, options.reconnectMs ?? 1000));
+      if (!this.stopped) await this.log.reconnect("worker", error, options.reconnectMs ?? 1000);
     }
   }
 
@@ -1147,6 +1335,8 @@ export class Worker {
     if (m.challenge) {
       call.write({ challenge_response: { sig: this.key.sign(challengeMessage(m.challenge.nonce)).sig } });
     } else if (m.registered) {
+      const types = [...this.byCommand.keys()].sort().join(", ");
+      this.log.print("info", "worker", `connected to ${this.log.peer}, runs ${types}`);
       this.markReady();
     } else if (m.execute) {
       void this.execute(call, m.execute);
@@ -1155,6 +1345,7 @@ export class Worker {
 
   private async execute(call: SessionCall, x: NonNullable<KernelMessage["execute"]>): Promise<void> {
     const cmd = x.command;
+    const stream = `${cmd.domain}.${cmd.command_type} ${cmd.aggregate_type}/${cmd.aggregate_id}`;
     let events: WireNewEvent[];
     let vault: WireVaultValue[] = [];
     let snapshot: WireSnapshot | undefined;
@@ -1200,7 +1391,7 @@ export class Worker {
     } catch (err) {
       if (err instanceof SchemaError) {
         // Not the command's fault: this worker cannot read the aggregate. Stop until updated.
-        console.error(`kernable worker: ${err.message}`);
+        this.log.print("error", "worker", err.message);
         call.cancel();
         return;
       }
@@ -1208,10 +1399,12 @@ export class Worker {
         err instanceof Rejected ? { code: err.code, message: err.message } : { code: "handler_error", message: String(err) };
       const worker_sig = this.key.sign(rejectionMessage(cmd.command_id, reason));
       call.write({ rejection: { lease_id: x.lease_id, reason, worker_sig } });
+      this.log.print("debug", "worker", `${stream} rejected ${reason.code}`);
       return;
     }
     const worker_sig = this.key.sign(resultMessage(cmd, x.expected_version, events));
     call.write({ result: { lease_id: x.lease_id, events, worker_sig, vault, ...(snapshot && { snapshot }) } });
+    this.log.print("debug", "worker", `${stream} committed ${events.length} events`);
   }
 
   /** A snapshot of the state after `events`, if they cross a multiple of `snapshotEvery`. */
@@ -1281,7 +1474,6 @@ function toWireContext(c: RequestContext): WireRequestContext {
     sender_account: c.senderAccount ?? "",
     sender_session: c.senderSession ?? "",
     on_behalf_of: c.onBehalfOf ?? "",
-    workspace: c.workspace ?? "",
     ...(c.expectedVersion === undefined ? {} : { expected_version: c.expectedVersion }),
     correlation_id: c.correlationId ?? "",
     causation_id: c.causationId ?? "",
@@ -1300,7 +1492,6 @@ function fromWireContext(c: WireRequestContext | null | undefined): RequestConte
     senderAccount: c.sender_account,
     senderSession: c.sender_session,
     onBehalfOf: c.on_behalf_of,
-    workspace: c.workspace,
     expectedVersion: c.expected_version ?? undefined,
     correlationId: c.correlation_id,
     causationId: c.causation_id,

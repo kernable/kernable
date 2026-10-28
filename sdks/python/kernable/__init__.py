@@ -42,13 +42,14 @@ from typing import Any, Callable
 
 import grpc
 
-from kernable.signing import (Key, challenge_message, command_message, derived_id, query_message, vault_ref,
-                              rejection_message, result_message, snapshot_message)
+from kernable.signing import (Key, cache_message, challenge_message, command_message, data_message, derived_id,
+                              query_message, vault_ref, rejection_message, result_message, snapshot_message)
 from kernable.store import Store
 from kernable.v1 import kernable_pb2 as pb
 from kernable.v1 import kernable_pb2_grpc as rpc
 
-__all__ = ["PROTOCOL", "Aggregate", "ApplyContext", "Check", "CommandContext", "CommandMeta", "CommandSchema", "Domain",
+__all__ = ["PROTOCOL", "Aggregate", "ApplyContext", "CacheClient", "Check", "CommandContext", "CommandMeta", "CommandSchema",
+           "Data", "DataClient", "Domain",
            "Event", "EventMeta", "EventSchema", "Kernable", "Key", "Listener", "ListenerContext", "ListenerHandle", "NotSettled", "Outcome",
            "QueryContext", "QueryMeta", "Rejected", "RequestContext", "Store", "StoredEventMeta", "Tls", "Worker",
            "domain"]
@@ -73,7 +74,6 @@ class RequestContext:
     sender_session: str = ""
     #: Authorize as this identity of the target tenant; the sender stays the real principal.
     on_behalf_of: str = ""
-    workspace: str = ""
     #: Reject the command (`version_mismatch`) unless the aggregate is at this version.
     expected_version: int | None = None
     #: Shared by everything one original request causes; defaults to the command ID.
@@ -248,7 +248,7 @@ class ListenerContext:
         """A request context for commands caused by this event: same sender and correlation."""
         r = self.request
         return RequestContext(r.sender_tenant, r.sender_identity, r.sender_account, r.sender_session,
-                              r.on_behalf_of, r.workspace, None, r.correlation_id or self._command_id,
+                              r.on_behalf_of, None, r.correlation_id or self._command_id,
                               self._command_id, r.trace_id, False, dict(r.attributes))
 
 
@@ -269,6 +269,14 @@ class Tls:
     key: str
 
 
+@dataclass
+class Data:
+    """A file read with `k.data.get`."""
+
+    data: bytes
+    content_type: str
+
+
 class NotSettled(Exception):
     """The command was committed, but not every listener processed its events in time.
 
@@ -287,6 +295,10 @@ PROTOCOL = 1
 _HANDLING: contextvars.ContextVar[str] = contextvars.ContextVar("kernable_listener", default="")
 
 _INITIAL = object()
+#: Room for the largest file (16 MiB) and the rest of its message; grpcio receives 4 MiB by default.
+_MAX_MESSAGE = 17 * 1024 * 1024
+_CHANNEL_OPTIONS = [("grpc.max_send_message_length", _MAX_MESSAGE),
+                    ("grpc.max_receive_message_length", _MAX_MESSAGE)]
 _DOMAIN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 _UNQUALIFIED = re.compile(r"^[^.*]+$")
 _LISTENED = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*\.([^.]+|\*)$")
@@ -602,6 +614,7 @@ class Kernable:
         tls = tls or _tls_from_env()
         self._context = context or RequestContext()
         url = url or os.environ.get("KERNABLE_URL") or "http://127.0.0.1:7233"
+        given_url = url
         url = re.sub(r"^https?://", "", url).rstrip("/")
         if tls:
             def read(path: str) -> bytes:
@@ -609,11 +622,12 @@ class Kernable:
                     return f.read()
 
             creds = grpc.ssl_channel_credentials(read(tls.ca), read(tls.key), read(tls.cert))
-            self._channel = grpc.secure_channel(url, creds)
+            self._channel = grpc.secure_channel(url, creds, options=_CHANNEL_OPTIONS)
         else:
             # grpcio sends the socket path as :authority for unix: URLs, which the kernel's
             # HTTP/2 server rejects; any valid authority works.
-            self._channel = grpc.insecure_channel(url, options=[("grpc.default_authority", "localhost")])
+            self._channel = grpc.insecure_channel(url, options=[("grpc.default_authority", "localhost"),
+                                                                *_CHANNEL_OPTIONS])
         grant = grant or os.environ.get("KERNABLE_GRANT")
         if grant is None and os.path.exists(default := key.removesuffix(".key") + ".grant"):
             grant = default
@@ -621,8 +635,13 @@ class Kernable:
             with open(grant) as f:
                 self._channel = grpc.intercept_channel(self._channel, _WithGrant(f.read().strip()))
         self._key = Key.from_file(key)
+        self._log = _Log(given_url, key, self._key.id)
         self._tenant = tenant
         self._domains: dict[str, Domain] = {}
+        #: Files of a domain: `k.data.put(domain, key, data)`, `get`, `delete`.
+        self.data = DataClient(self)
+        #: A domain's shared cache: `k.cache.set(domain, key, value, ttl_ms)`, `get`, `delete`.
+        self.cache = CacheClient(self)
 
     def use(self, *domains: Domain) -> "Kernable":
         """Seals the vault fields of these domains' commands when submitting them; see
@@ -632,7 +651,7 @@ class Kernable:
         return self
 
     def worker(self, *aggregates: Aggregate) -> "Worker":
-        return Worker(self._channel, self._key, aggregates)
+        return Worker(self._channel, self._key, aggregates, self._log)
 
     def submit(self, domain: str, aggregate_type: str, aggregate_id: str, type: str, data: Any = None, *,
                tenant: str | None = None, id: str | None = None, wait: str = "settled",
@@ -680,7 +699,7 @@ class Kernable:
     def listener(self, listener: "Listener") -> "ListenerHandle":
         """Connects a listener defined with `Domain.read_model` or `Domain.reactor`; call `run()`
         on the result."""
-        return ListenerHandle(self._channel, self._key, listener)
+        return ListenerHandle(self._channel, self._key, listener, self._log)
 
     def close(self) -> None:
         """Closes the connection now; only needed in a long-running process that discards the client."""
@@ -701,11 +720,107 @@ class Kernable:
         return rpc.CommandServiceStub(self._channel).Submit(request)
 
 
+class DataClient:
+    """Files of a domain, kept by the kernel under (tenant, domain, key): invoices, uploads,
+    exports. They are not part of the signed event log and not erased with the vault; keep
+    personal data in vault fields instead. Needs a grant of `data_read` (get) or `data_write`
+    (put, delete) for the domain; a refused or invalid request raises `grpc.RpcError`. Keys are
+    1 to 512 bytes, files at most 16 MiB."""
+
+    def __init__(self, k: Kernable):
+        """Use `k.data` of a `Kernable`."""
+        self._k = k
+        self._stub = rpc.DataServiceStub(k._channel)
+
+    def put(self, domain: str, key: str, data: bytes | str, content_type: str | None = None, *,
+            tenant: str | None = None) -> None:
+        """Stores `data` under `key`, replacing a file stored there. A `str` is stored as UTF-8;
+        `content_type` defaults to `text/plain; charset=utf-8` for a `str` and
+        `application/octet-stream` for `bytes`."""
+        if isinstance(data, str):
+            data, content_type = data.encode(), content_type or "text/plain; charset=utf-8"
+        self._call("put", self._stub.PutData, tenant, domain, key, data=data,
+                   content_type=content_type or "application/octet-stream")
+
+    def get(self, domain: str, key: str, *, tenant: str | None = None) -> Data | None:
+        """The file stored under `key`, or `None` if there is none."""
+        res = self._call("get", self._stub.GetData, tenant, domain, key)
+        return Data(res.data, res.content_type) if res.found else None
+
+    def delete(self, domain: str, key: str, *, tenant: str | None = None) -> bool:
+        """Deletes the file stored under `key`; returns whether there was one."""
+        return self._call("delete", self._stub.DeleteData, tenant, domain, key).found
+
+    def _call(self, op, method, tenant, domain, key, **fields):
+        r = pb.DataRequest(tenant_id=tenant or self._k._tenant, domain=domain, key=key,
+                           issued_at=int(time.time() * 1000), protocol=PROTOCOL, **fields)
+        r.client_sig.CopyFrom(self._k._key.sign(data_message(op, r)))
+        return method(r)
+
+
+class CacheClient:
+    """A domain's shared cache, kept in the kernel's memory under (tenant, domain, key): rate
+    limits, short-lived tokens, computed values. Not durable: a kernel restart empties it. Values
+    are not part of the signed event log and not erased with the vault. Needs a grant of `cache`
+    for the domain; a refused or invalid request raises `grpc.RpcError`. Keys are 1 to 512 bytes,
+    values at most 1 MiB."""
+
+    def __init__(self, k: Kernable):
+        """Use `k.cache` of a `Kernable`."""
+        self._k = k
+        self._stub = rpc.CacheServiceStub(k._channel)
+
+    def set(self, domain: str, key: str, value: bytes | str, ttl_ms: int = 0, *,
+            tenant: str | None = None) -> None:
+        """Stores `value` under `key` for `ttl_ms` milliseconds; `0` keeps it until it is deleted
+        or the kernel restarts. A `str` is stored as UTF-8."""
+        value = value.encode() if isinstance(value, str) else value
+        self._call("set", self._stub.SetCache, tenant, domain, key, value=value, ttl_ms=ttl_ms)
+
+    def get(self, domain: str, key: str, *, tenant: str | None = None) -> bytes | None:
+        """The live value under `key`, or `None` if there is none or it expired."""
+        res = self._call("get", self._stub.GetCache, tenant, domain, key)
+        return res.value if res.found else None
+
+    def delete(self, domain: str, key: str, *, tenant: str | None = None) -> bool:
+        """Deletes the value under `key`; returns whether it had a live one."""
+        return self._call("delete", self._stub.DeleteCache, tenant, domain, key).found
+
+    def _call(self, op, method, tenant, domain, key, **fields):
+        r = pb.CacheRequest(tenant_id=tenant or self._k._tenant, domain=domain, key=key,
+                            issued_at=int(time.time() * 1000), protocol=PROTOCOL, **fields)
+        r.client_sig.CopyFrom(self._k._key.sign(cache_message(op, r)))
+        return method(r)
+
+
+#: Levels of `KERNABLE_LOG`; a line is printed if its level is at most the configured one.
+_LOG_LEVELS = {"off": 0, "error": 1, "warn": 2, "info": 3, "debug": 4}
+
+
+class _Log:
+    """Prints a worker's or listener's connection and activity lines to stderr, up to the level
+    of `KERNABLE_LOG` (`off`, `error`, `warn`, `info` (default), `debug`) when the client was
+    made."""
+
+    def __init__(self, url: str, key_path: str, key_id: str):
+        self.level = _LOG_LEVELS.get(os.environ.get("KERNABLE_LOG", ""), _LOG_LEVELS["info"])
+        # Who connected where, as `<url> as <keyname> (<id12>…)`.
+        self.who = f"{url} as {os.path.basename(key_path).removesuffix('.key')} ({key_id[:12]}…)"
+
+    def enabled(self, level: str) -> bool:
+        return _LOG_LEVELS[level] <= self.level
+
+    def __call__(self, level: str, what: str, line: str) -> None:
+        if self.enabled(level):
+            print(f"kernable {what}: {line}", file=sys.stderr)
+
+
 class _Stream:
     """A bidirectional stream that reconnects until stopped."""
 
-    def __init__(self, what: str, reconnect_s: float):
+    def __init__(self, what: str, reconnect_s: float, log: _Log):
         self.ready = threading.Event()
+        self._log = log
         self._what = what
         self._reconnect_s = reconnect_s
         self._stopped = False
@@ -724,16 +839,17 @@ class _Stream:
                     reply = self._on(msg)
                     if reply is not None:
                         outbox.put(reply)
+                reason = "stream ended"
             except grpc.RpcError as err:
-                if not self._stopped:
-                    print(f"kernable {self._what}: {err.details()}", file=sys.stderr)
+                reason = err.details()
             except Exception as err:  # a failing handler: reconnect and get the event again
-                if not self._stopped:
-                    print(f"kernable {self._what}: {err!r}", file=sys.stderr)
+                reason = str(err) or type(err).__name__
                 self._call.cancel()
             finally:
                 outbox.put(None)
             if not self._stopped:
+                self._log("warn", self._what,
+                          f"connection lost ({reason}), reconnecting in {self._reconnect_s:g} s")
                 time.sleep(self._reconnect_s)
 
     def stop(self) -> None:
@@ -754,8 +870,8 @@ class _Stream:
 class Worker(_Stream):
     """Executes commands for its aggregates, one at a time."""
 
-    def __init__(self, channel: grpc.Channel, key: Key, aggregates):
-        super().__init__("worker", 1.0)
+    def __init__(self, channel: grpc.Channel, key: Key, aggregates, log: _Log):
+        super().__init__("worker", 1.0, log)
         self._stub = rpc.WorkerGatewayStub(channel)
         self._key = key
         self._by_command = {f"{a.domain}.{t}": a for a in aggregates for t in a.handlers}
@@ -778,9 +894,17 @@ class Worker(_Stream):
             sig = self._key.sign(challenge_message(msg.challenge.nonce)).sig
             return pb.WorkerMessage(challenge_response=pb.ChallengeResponse(sig=sig))
         if kind == "registered":
+            self._log("info", self._what, f"connected to {self._log.who}, runs {', '.join(sorted(self._by_command))}")
             self.ready.set()
         elif kind == "execute":
-            return self._execute(msg.execute)
+            reply = self._execute(msg.execute)
+            if self._log.enabled("debug"):
+                cmd = msg.execute.command
+                done = (f"rejected {reply.rejection.reason.code}" if reply.HasField("rejection")
+                        else f"committed {len(reply.result.events)} events")
+                self._log("debug", self._what,
+                          f"{cmd.domain}.{cmd.command_type} {cmd.aggregate_type}/{cmd.aggregate_id} {done}")
+            return reply
         return None
 
     def _execute(self, x):
@@ -933,8 +1057,8 @@ class ListenerHandle(_Stream):
     """A running `Listener`, returned by `kernable.listener(listener)`: `run()` processes events,
     queries and checks until `stop()`; `ready` is set once the kernel accepted it."""
 
-    def __init__(self, channel: grpc.Channel, key: Key, listener: Listener):
-        super().__init__(f"listener {listener.name}", listener.reconnect_s)
+    def __init__(self, channel: grpc.Channel, key: Key, listener: Listener, log: _Log):
+        super().__init__(f"listener {listener.name}", listener.reconnect_s, log)
         #: The listener definition this runs.
         self.listener = listener
         #: The listener's store, once `run()` opened it (with `store=`).
@@ -946,6 +1070,8 @@ class ListenerHandle(_Stream):
         self.position = 0
         # Newest event when the kernel accepted the listener; events up to it are replayed.
         self._replay_up_to = 0
+        # The position sent in the last hello, if any.
+        self._sent_start: int | None = None
 
     def run(self) -> None:
         """Processes events, queries and checks until `stop()`, reconnecting when the stream
@@ -967,6 +1093,7 @@ class ListenerHandle(_Stream):
             hello.middleware.CopyFrom(d._middleware[0])
         # Reconnects resume after the last handled event.
         start = self.position if self.ready.is_set() else self._start
+        self._sent_start = start
         if start is not None:
             hello.from_position = start
         return pb.ListenerMessage(hello=hello)
@@ -988,6 +1115,7 @@ class ListenerHandle(_Stream):
         if kind == "ready":
             self.position = msg.ready.after_position
             self._replay_up_to = msg.ready.head_position
+            self._log("info", self._what, self._connected(msg.ready.after_position))
             self.ready.set()
         elif kind == "batch":
             # With a store, the batch's data and position are committed together, before the ack.
@@ -1005,10 +1133,28 @@ class ListenerHandle(_Stream):
             self.position = msg.batch.up_to
             return pb.ListenerMessage(ack=pb.Ack(position=msg.batch.up_to))
         elif kind == "query":
-            return pb.ListenerMessage(answer=self._answer(msg.query.call_id, msg.query.query))
+            answer = self._answer(msg.query.call_id, msg.query.query)
+            if self._log.enabled("debug"):
+                q = msg.query.query
+                done = (f"rejected {q.domain}.{q.query_type} {answer.rejected.code}" if answer.HasField("rejected")
+                        else f"answered {q.domain}.{q.query_type}")
+                self._log("debug", self._what, done)
+            return pb.ListenerMessage(answer=answer)
         elif kind == "check":
             return pb.ListenerMessage(verdict=self._verdict(msg.check))
         return None
+
+    def _connected(self, after_position: int) -> str:
+        """The info line once the kernel accepted the listener; the position is the start sent
+        (the kernel's, if none was)."""
+        d = self.listener
+        position = after_position if self._sent_start is None else self._sent_start
+        line = f"connected to {self._log.who}, at position {position}, reads {', '.join(sorted(d._handlers))}"
+        if d._queries:
+            line += f", answers {', '.join(sorted(d._queries))}"
+        if d._middleware:
+            line += f", checks {', '.join(sorted(d._middleware[0].types))}"
+        return line
 
     def _handle_batch(self, batch) -> None:
         d = self.listener
@@ -1027,6 +1173,7 @@ class ListenerHandle(_Stream):
                 ctx = ListenerContext(e.global_position <= self._replay_up_to, _from_wire_context(e.context),
                                       self.store, e.command_id)
                 _call(handler, data, evt, ctx)
+                self._log("debug", self._what, f"{e.domain}.{e.event_type} at {e.global_position}")
             self.position = e.global_position
 
     def _verdict(self, call) -> pb.Verdict:
@@ -1095,7 +1242,7 @@ def _tls_from_env() -> Tls | None:
 def _to_wire_context(c: RequestContext, command_id: str) -> pb.RequestContext:
     wire = pb.RequestContext(
         sender_tenant=c.sender_tenant, sender_identity=c.sender_identity, sender_account=c.sender_account,
-        sender_session=c.sender_session, on_behalf_of=c.on_behalf_of, workspace=c.workspace,
+        sender_session=c.sender_session, on_behalf_of=c.on_behalf_of,
         correlation_id=c.correlation_id or command_id, causation_id=c.causation_id, trace_id=c.trace_id,
         bypass_authorization=c.bypass_authorization,
         attributes=[pb.Attribute(key=k, value=v) for k, v in c.attributes.items()])
@@ -1106,7 +1253,7 @@ def _to_wire_context(c: RequestContext, command_id: str) -> pb.RequestContext:
 
 def _from_wire_context(c) -> RequestContext:
     return RequestContext(
-        c.sender_tenant, c.sender_identity, c.sender_account, c.sender_session, c.on_behalf_of, c.workspace,
+        c.sender_tenant, c.sender_identity, c.sender_account, c.sender_session, c.on_behalf_of,
         c.expected_version if c.HasField("expected_version") else None, c.correlation_id, c.causation_id,
         c.trace_id, c.bypass_authorization, {a.key: a.value for a in c.attributes})
 

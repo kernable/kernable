@@ -9,7 +9,8 @@ use ed25519_dalek::{Signature as Ed25519Signature, Signer, SigningKey, Verifying
 use sha2::{Digest, Sha256};
 
 use crate::proto::{
-    Command, Event, Grant, NewEvent, Permission, QueryRequest, Rejected, RequestContext, Signature,
+    CacheRequest, Command, DataRequest, Event, Grant, NewEvent, Permission, QueryRequest, Rejected,
+    RequestContext, Signature,
 };
 
 /// Hash that precedes the first event of the chain.
@@ -69,8 +70,7 @@ impl Msg {
             .str(&c.sender_identity)
             .str(&c.sender_account)
             .str(&c.sender_session)
-            .str(&c.on_behalf_of)
-            .str(&c.workspace);
+            .str(&c.on_behalf_of);
         m = match c.expected_version {
             Some(v) => m.u64(1).u64(v),
             None => m.u64(0),
@@ -208,6 +208,32 @@ pub fn subscribe_message(after_position: u64, event_types: &[String], issued_at:
         m = m.str(t);
     }
     m.0
+}
+
+/// What a client signs to put, get or delete a file (`op`: `put`, `get`, `delete`). The data is
+/// signed by its SHA-256 hash; get and delete sign the hash of nothing.
+pub fn data_message(op: &str, r: &DataRequest) -> Vec<u8> {
+    Msg::new(&format!("kernable.v1.data.{op}"))
+        .str(&r.tenant_id)
+        .str(&r.domain)
+        .str(&r.key)
+        .str(&r.content_type)
+        .bytes(&Sha256::digest(&r.data))
+        .i64(r.issued_at)
+        .0
+}
+
+/// What a client signs to set, get or delete a cache value (`op`: `set`, `get`, `delete`), with
+/// the value's SHA-256 hash as for data.
+pub fn cache_message(op: &str, r: &CacheRequest) -> Vec<u8> {
+    Msg::new(&format!("kernable.v1.cache.{op}"))
+        .str(&r.tenant_id)
+        .str(&r.domain)
+        .str(&r.key)
+        .bytes(&Sha256::digest(&r.value))
+        .u64(r.ttl_ms)
+        .i64(r.issued_at)
+        .0
 }
 
 /// What the kernel signs to revoke `key_id` from `since` on (both ms since epoch).

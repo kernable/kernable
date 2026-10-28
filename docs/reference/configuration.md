@@ -17,6 +17,8 @@ The kernel holds no keys of services and no permissions: it trusts the root keys
 | `--listen` | `KERNABLE_LISTEN` | `127.0.0.1:7233` | Where the kernel listens: `host:port`, or `unix:<path>` on Unix. Plain TCP only on a loopback address; any other address needs mutual TLS (`--tls-cert`, `--tls-key`, `--tls-client-ca`). |
 | `--kernel-key` | `KERNABLE_KERNEL_KEY` | `kernel.key` | The kernel's own signing key (`kernable keys new kernel`): it signs checkpoints and revocations. Read again on SIGHUP (Unix). |
 | `--snapshots` | `KERNABLE_SNAPSHOTS` | `memory:` | Where snapshots live: `sqlite:<path>` or `memory:` (rebuilt after a restart). |
+| `--data-store` | `KERNABLE_DATA_STORE` | `file:data` | Where files of the data service live: `file:<directory>` or `memory:` (gone after a restart). Created on the first file. |
+| `--cache-store` | `KERNABLE_CACHE_STORE` | `memory:` | Where the cache service keeps values: `memory:`, emptied by a restart. |
 | `--vault-key` | `KERNABLE_VAULT_KEY` | — | A file with 32 random bytes, hex encoded (`kernable keys new vault` writes one). Without it the kernel has no vault, and commands and events that refer to it are refused. |
 | `--vault-store` | `KERNABLE_VAULT_STORE` | `sqlite:vault.db` | Where the vault keeps personal and secret values: `sqlite:<path>` or `memory:`. |
 | `--tls-cert` | `KERNABLE_KERNEL_TLS_CERT` | — | Mutual TLS, TCP only: the kernel's certificate (PEM; `kernable certs new` writes development ones). Needs `--tls-key` and `--tls-client-ca` too. |

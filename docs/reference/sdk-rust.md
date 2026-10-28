@@ -11,7 +11,7 @@ How to reach the kernel and as whom.
 - `fn new(key: impl AsRef<Path>) -> Options`: Signs with the key in the `.key` file at `key`.
 - `fn url(self, url: impl Into<String>) -> Options`: Kernel address: `http://host:port` (`host:port` works too) or, on Unix, `unix:/path/to.sock`. Default: `KERNABLE_URL`, else `http://127.0.0.1:7233`, where `kernable start` listens.
 - `fn grant(self, path: impl AsRef<Path>) -> Options`: The key's grant (`kernable grant`), sent with every call. Default: `KERNABLE_GRANT`, else the `.grant` file next to the key file, if there is one.
-- `fn tenant(self, tenant: impl Into<String>) -> Options`: Default tenant for `submit` and `query` (default `default`).
+- `fn tenant(self, tenant: impl Into<String>) -> Options`: Default tenant for `submit`, `query`, files and the cache (default `default`).
 - `fn context(self, context: RequestContext) -> Options`: Default request context, e.g. this service's identity; a request's own context replaces it.
 - `fn tls(self, tls: Tls) -> Options`: Mutual TLS for `host:port` URLs: the CA certificate and this process's certificate and key. Default: `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`, if set.
 
@@ -24,6 +24,8 @@ Cloning gives another handle to the same connection.
 - `fn with_domain(&self, domain: &Domain) -> Kernable`: Seals the vault fields of this domain's commands when submitting them; see `Domain::command`.
 - `fn worker<S: State>(&self, aggregate: &Aggregate<S>) -> Worker`: A worker that runs the commands of `aggregate`; add more with `Worker::aggregate`.
 - `fn listener(&self, listener: &Listener) -> ListenerHandle`: Runs `listener` (a read model or reactor of a domain) on this connection: the handle processes its events with `run()`. Each call gives a new handle.
+- `fn data(&self) -> Files`: Files of the default tenant: bytes up to 16 MiB per key, kept by the kernel outside the signed event log; see `Files`.
+- `fn cache(&self) -> Cache`: The kernel's cache for the default tenant: values up to 1 MiB per key, optionally with a TTL, lost when the kernel restarts; see `Cache`.
 - `async fn submit(&self, submit: Submit) -> Result<Outcome, Error>`: Runs a command and returns its outcome; see `Submit::wait`.
 - `async fn enqueue(&self, submit: Submit) -> Result<String, Error>`: Stores the command in the kernel's queue and returns its ID without waiting for it to run. Submit it again with the same `id` to get the outcome.
 - `async fn query<T: DeserializeOwned>(&self, query: Query) -> Result<T, Error>`: Asks the read model that answers `domain.type` and returns its answer. Queries always go through the kernel, also within one process. A refusal is `Error::Rejected`.
@@ -353,6 +355,34 @@ A listener's store; see `crate::Listener::store`. Cloning gives another handle t
 - `fn all<T: DeserializeOwned>(&self, ns: &str) -> Result<Vec<(String, T)>, Error>`: Every key and value of a namespace, ordered by key.
 - `fn reset(&self, ns: Option<&str>) -> Result<(), Error>`: Clears a namespace, or all data.
 
+### Data
+
+A file as stored by the kernel.
+
+- `data: Vec<u8>`
+- `content_type: String`: The media type given when the file was put, e.g. `image/png`.
+
+### Files
+
+Files of up to 16 MiB under keys of 1 to 512 bytes, per tenant and domain; see
+`crate::Kernable::data`. Files are not part of the signed event log, and erasing a vault
+subject does not delete them.
+
+- `async fn put(&self, domain: &str, key: &str, data: impl Into<Vec<u8>>, content_type: &str) -> Result<(), Error>`: Stores `data` as `key` of `domain` (granted `data_write`), replacing any file there.
+- `async fn get(&self, domain: &str, key: &str) -> Result<Option<Data>, Error>`: The file `key` of `domain` (granted `data_read`); `None` if there is none.
+- `async fn delete(&self, domain: &str, key: &str) -> Result<bool, Error>`: Deletes the file `key` of `domain` (granted `data_write`); whether there was one.
+
+### Cache
+
+Values of up to 1 MiB under keys of 1 to 512 bytes, per tenant and domain, held in the
+kernel's memory (granted `cache`); see `crate::Kernable::cache`. A restart of the kernel
+empties the cache; values are not part of the signed event log, and erasing a vault subject
+does not delete them.
+
+- `async fn set(&self, domain: &str, key: &str, value: impl Into<Vec<u8>>, ttl: Option<Duration>) -> Result<(), Error>`: Stores `value` as `key` of `domain`, replacing any value there. With a `ttl`, the value expires after it; without, it stays until deleted or the kernel restarts.
+- `async fn get(&self, domain: &str, key: &str) -> Result<Option<Vec<u8>>, Error>`: The value `key` of `domain`; `None` if there is none or it expired.
+- `async fn delete(&self, domain: &str, key: &str) -> Result<bool, Error>`: Deletes the value `key` of `domain`; whether there was one.
+
 ### RequestContext
 
 Who sends a request and in which context: signed with the command and stored with every
@@ -363,7 +393,6 @@ event it causes. `attributes` are business data only, never security decisions.
 - `sender_account: String`
 - `sender_session: String`
 - `on_behalf_of: String`: Authorize as this identity of the target tenant; the sender stays the real principal.
-- `workspace: String`
 - `expected_version: Option<u64>`: Reject the command (`version_mismatch`) unless the aggregate is at this version.
 - `correlation_id: String`: Shared by everything one original request causes; defaults to the command ID.
 - `causation_id: String`: The command that caused this one.

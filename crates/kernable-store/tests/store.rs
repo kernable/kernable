@@ -3,7 +3,8 @@
 use std::{collections::HashSet, path::PathBuf, sync::Arc, thread};
 
 use kernable_core::proto::{
-    Command, ListenerRecord, Middleware, NewEvent, Rejected, Signature, command_result::Outcome,
+    Attribute, Command, ListenerRecord, Middleware, NewEvent, Rejected, RequestContext, Signature,
+    command_result::Outcome,
 };
 use kernable_store::{Enqueued, Error, FileStore, SqliteStore, Store};
 
@@ -311,6 +312,52 @@ fn concurrent_threads_lose_no_updates(store: &dyn Store) {
     assert_eq!(versions(store), expected);
 }
 
+fn contexts_come_back_as_stored(store: &dyn Store) {
+    let full = RequestContext {
+        sender_tenant: "t1".into(),
+        sender_identity: "i-1".into(),
+        sender_account: "a-1".into(),
+        sender_session: "s-1".into(),
+        on_behalf_of: "i-2".into(),
+        expected_version: Some(0),
+        correlation_id: "r-1".into(),
+        causation_id: "c-0".into(),
+        trace_id: "tr-1".into(),
+        bypass_authorization: true,
+        attributes: vec![
+            Attribute {
+                key: "channel".into(),
+                value: "web \"quoted\" ü".into(),
+            },
+            Attribute {
+                key: "channel".into(),
+                value: "app".into(),
+            },
+        ],
+    };
+    for (id, context) in [
+        ("c1", Some(full)),
+        ("c2", Some(RequestContext::default())),
+        ("c3", None),
+    ] {
+        let command = Command {
+            context: context.clone(),
+            aggregate_id: id.into(),
+            ..cmd(id, "PlaceOrder")
+        };
+        store.enqueue(&command, 0).unwrap();
+        let pending = store.pending().unwrap();
+        let stored = pending.iter().find(|p| p.command.command_id == id).unwrap();
+        assert_eq!(stored.command.context, context, "{id}");
+        let events = store
+            .commit(id, 0, &[ev("OrderPlaced")], &sig(), 1)
+            .unwrap();
+        assert_eq!(events[0].context, context, "{id}");
+        let read = store.read_stream("t1", "orders", "Order", id).unwrap();
+        assert_eq!(read[0].context, context, "{id}");
+    }
+}
+
 fn file_store(name: &str) -> (TempDb, Box<dyn Store>) {
     let db = TempDb::new(&format!("{name}.log"));
     let store = FileStore::open(&db.0).unwrap();
@@ -351,4 +398,5 @@ for_each_backend!(
     concurrent_threads_lose_no_updates,
     listeners_are_saved_replaced_and_removed,
     reading_after_a_version_returns_only_later_events,
+    contexts_come_back_as_stored,
 );

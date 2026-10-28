@@ -10,7 +10,7 @@ use kernable_core::proto::Grant;
 use crate::config;
 
 /// The actions a grant names; `*` stands for all of them.
-pub const ACTIONS: [&str; 10] = [
+pub const ACTIONS: [&str; 13] = [
     "submit",
     "run",
     "subscribe",
@@ -21,6 +21,9 @@ pub const ACTIONS: [&str; 10] = [
     "privileged",
     "vault_read",
     "vault_erase",
+    "data_read",
+    "data_write",
+    "cache",
 ];
 
 /// Key ID -> the type patterns it may use for one action.
@@ -49,6 +52,12 @@ pub struct Permissions {
     pub vault_read: Rules,
     /// Erasing event types a worker key may write.
     pub vault_erase: Rules,
+    /// Domains whose files a key may read (`domain.*`).
+    pub data_read: Rules,
+    /// Domains whose files a key may put and delete (`domain.*`).
+    pub data_write: Rules,
+    /// Domains whose cache a key may use (`domain.*`).
+    pub cache: Rules,
     /// Old key ID -> new key ID: a listener registered with the old key may connect with the
     /// new one and keeps its position, order and middleware registration.
     pub successors: HashMap<String, String>,
@@ -102,6 +111,9 @@ impl Permissions {
             "privileged" => &mut self.privileged,
             "vault_read" => &mut self.vault_read,
             "vault_erase" => &mut self.vault_erase,
+            "data_read" => &mut self.data_read,
+            "data_write" => &mut self.data_write,
+            "cache" => &mut self.cache,
             _ => unreachable!("not an action: {action}"),
         }
     }

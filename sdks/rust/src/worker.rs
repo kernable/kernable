@@ -21,6 +21,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::{
     Aggregate, BoxError, Client, Rejected, State,
     domain::{Failure, Runnable},
+    log,
 };
 
 struct WorkerInner {
@@ -94,13 +95,16 @@ impl Worker {
         let mut stopped = self.inner.stopped.subscribe();
         while !*stopped.borrow() {
             let session = self.session();
-            tokio::select! {
-                result = session => if let Err(e) = result {
-                    eprintln!("kernable worker: {e}");
-                },
+            let result = tokio::select! {
+                result = session => result,
                 _ = stopped.wait_for(|s| *s) => return,
-            }
+            };
             let delay = self.inner.settings.lock().unwrap().1;
+            let error = log::reason(result.err().as_ref());
+            self.inner
+                .client
+                .log
+                .warn("worker", || log::connection_lost(&error, delay));
             tokio::select! {
                 () = tokio::time::sleep(delay) => {}
                 _ = stopped.wait_for(|s| *s) => return,
@@ -146,6 +150,10 @@ impl Worker {
                         .await?;
                 }
                 Some(Out::Registered(_)) => {
+                    let command_types: Vec<String> = by_command.keys().cloned().collect();
+                    client.log.info("worker", || {
+                        log::worker_connected(&client.log.connected(&client.key_id), &command_types)
+                    });
                     self.inner.ready.send_replace(true);
                 }
                 Some(Out::Execute(x)) => {
@@ -175,11 +183,26 @@ impl Worker {
                         let reply = match reply(&client, outcome) {
                             Ok(reply) => reply,
                             Err(reason) => {
-                                eprintln!("kernable worker: {reason}");
+                                client.log.error("worker", || reason.clone());
                                 let _ = fail.send(reason).await;
                                 return;
                             }
                         };
+                        client.log.debug("worker", || {
+                            let outcome = match &reply {
+                                In::Result(r) => Ok(r.events.len()),
+                                In::Rejection(r) => {
+                                    Err(r.reason.as_ref().map_or("", |r| r.code.as_str()))
+                                }
+                                _ => Err(""),
+                            };
+                            log::command_done(
+                                &format!("{}.{}", command.domain, command.command_type),
+                                &command.aggregate_type,
+                                &command.aggregate_id,
+                                outcome,
+                            )
+                        });
                         let _ = tx.send(msg(reply)).await;
                     });
                 }

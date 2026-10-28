@@ -29,7 +29,7 @@ use crate::{
     BoxError, Client, Domain, HANDLING, Rejected, RequestContext, Store, StoredEvent,
     context::now_ms,
     domain::{decode, encode, upcast},
-    vault,
+    log, vault,
 };
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
@@ -489,7 +489,8 @@ impl ListenerHandle {
     /// Processes events until `stop()`, reconnecting when the stream drops.
     pub async fn run(&self) {
         let mut stopped = self.inner.stopped.subscribe();
-        let name = &self.def().name;
+        let log = &self.inner.client.log;
+        let what = format!("listener {}", self.def().name);
         let (mut start, store) = {
             let s = self.def().settings.lock().unwrap();
             (s.start, s.store.clone().map(|url| (url, s.schema.clone())))
@@ -506,20 +507,20 @@ impl ListenerHandle {
                     *self.inner.store.lock().unwrap() = Some(store);
                 }
                 Err(e) => {
-                    eprintln!("kernable listener {name}: {e}");
+                    log.error(&what, || e.to_string());
                     return;
                 }
             }
         }
         while !*stopped.borrow() {
-            tokio::select! {
-                result = self.listen(start) => if let Err(e) = result {
-                    eprintln!("kernable listener {name}: {e}");
-                },
+            let result = tokio::select! {
+                result = self.listen(start) => result,
                 _ = stopped.wait_for(|s| *s) => return,
-            }
+            };
             start = Some(self.position());
             let delay = self.def().settings.lock().unwrap().reconnect;
+            let error = log::reason(result.err().as_ref());
+            log.warn(&what, || log::connection_lost(&error, delay));
             tokio::select! {
                 () = tokio::time::sleep(delay) => {}
                 _ = stopped.wait_for(|s| *s) => return,
@@ -543,15 +544,17 @@ impl ListenerHandle {
                 order: o.order,
                 types: o.types.clone(),
             });
-        let event_types = def.handlers.read().unwrap().keys().cloned().collect();
-        let query_types = def.queries.read().unwrap().keys().cloned().collect();
+        let event_types: Vec<String> = def.handlers.read().unwrap().keys().cloned().collect();
+        let query_types: Vec<String> = def.queries.read().unwrap().keys().cloned().collect();
+        let what = format!("listener {}", def.name);
+        let checks = middleware.as_ref().map(|m| m.types.clone());
         let hello = Hello {
             name: def.name.clone(),
             key_id: client.key_id.clone(),
             order,
-            event_types,
+            event_types: event_types.clone(),
             from_position: start,
-            query_types,
+            query_types: query_types.clone(),
             middleware,
             protocol: PROTOCOL,
         };
@@ -572,6 +575,15 @@ impl ListenerHandle {
                 Some(Delivery::Ready(r)) => {
                     inner.position.store(r.after_position, Ordering::SeqCst);
                     replay_up_to = r.head_position;
+                    client.log.info(&what, || {
+                        log::listener_connected(
+                            &client.log.connected(&client.key_id),
+                            r.after_position,
+                            &event_types,
+                            &query_types,
+                            checks.as_deref(),
+                        )
+                    });
                     inner.ready.send_replace(true);
                     continue;
                 }
@@ -603,9 +615,16 @@ impl ListenerHandle {
                     Reply::Ack(Ack { position: up_to })
                 }
                 Some(Delivery::Query(q)) => {
-                    let answer = HANDLING
-                        .scope(def.name.clone(), self.answer(q.query.unwrap_or_default()))
-                        .await;
+                    let query = q.query.unwrap_or_default();
+                    let query_type = format!("{}.{}", query.domain, query.query_type);
+                    let answer = HANDLING.scope(def.name.clone(), self.answer(query)).await;
+                    client.log.debug(&what, || {
+                        let rejected = match &answer {
+                            query_answer::Outcome::Rejected(r) => Some(r.code.as_str()),
+                            _ => None,
+                        };
+                        log::query_done(&query_type, rejected)
+                    });
                     Reply::Answer(QueryAnswer {
                         call_id: q.call_id,
                         outcome: Some(answer),
@@ -661,7 +680,14 @@ impl ListenerHandle {
                     request: event.request.clone(),
                     command_id: event.command_id.clone(),
                 };
+                let event_type = format!("{}.{}", event.domain, event.event_type);
                 handler(event, ctx).await?;
+                self.inner
+                    .client
+                    .log
+                    .debug(&format!("listener {}", def.name), || {
+                        log::event_processed(&event_type, position)
+                    });
             }
             self.inner.position.store(position, Ordering::SeqCst);
         }
@@ -858,12 +884,14 @@ async fn subscription<F, Fut>(
         Ok(())
     };
     while !*stopped.borrow() {
-        tokio::select! {
-            result = read(&position) => if let Err(e) = result {
-                eprintln!("kernable subscription: {e}");
-            },
+        let result = tokio::select! {
+            result = read(&position) => result,
             _ = stopped.wait_for(|s| *s) => return,
-        }
+        };
+        let error = log::reason(result.err().as_ref());
+        client.log.warn("subscription", || {
+            log::connection_lost(&error, options.reconnect)
+        });
         tokio::select! {
             () = tokio::time::sleep(options.reconnect) => {}
             _ = stopped.wait_for(|s| *s) => return,

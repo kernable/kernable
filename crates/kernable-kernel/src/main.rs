@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::Write,
+    io::{IsTerminal, Write},
     path::Path,
     process::ExitCode,
     sync::Arc,
@@ -31,7 +31,8 @@ const USAGE: &str = "usage:
                                           writes <name>.grant, signed by the root key; a permission
                                           is <action>=<type>,<type> or a bare type for every action
                                           (actions: submit run subscribe listen query answer check
-                                          privileged vault_read vault_erase)
+                                          privileged vault_read vault_erase data_read data_write
+                                          cache)
   kernable revoke <addr> <root.key> <key.pub> <since>
                                           revokes a key from <since> on (UTC, 2026-10-27T09:00:00Z),
                                           for good; the kernel must be running (over TCP with
@@ -49,8 +50,7 @@ const USAGE: &str = "usage:
                                           re-encrypts the vault with a new key (kernel stopped)
   kernable schemas <store>                lists the highest stored payload version per event type
   kernable migrate <store>                upgrades a store to this build's data format (kernel stopped;
-                                          back the store up first); 1 to 2 drops the snapshots, which
-                                          workers rebuild into the snapshot store
+                                          back the store up first)
   kernable submit <addr> <client.key> <tenant> <domain> <aggregate_type> <aggregate_id> <command_type> <payload>
                                           signs and submits a command (addr: http://host:port, or
                                           unix:/path on Unix; TLS as for revoke), with <client>.grant if it exists";
@@ -69,10 +69,14 @@ async fn main() -> ExitCode {
         ["start", flags @ ..] => {
             let dev = flags.contains(&"--dev");
             let mut flags: Vec<&str> = flags.iter().copied().filter(|f| *f != "--dev").collect();
+            let mut notes = None;
             if dev {
-                if let Err(e) = development_setup() {
-                    eprintln!("error: {e}");
-                    return ExitCode::FAILURE;
+                match development_setup() {
+                    Ok(n) => notes = Some(n),
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        return ExitCode::FAILURE;
+                    }
                 }
                 let given = |flag: &str, var: &str| {
                     flags.iter().any(|f| f.starts_with(flag)) || std::env::var_os(var).is_some()
@@ -87,7 +91,7 @@ async fn main() -> ExitCode {
                 }
             }
             return match Config::from_args(&flags, |var| std::env::var(var).ok()) {
-                Ok(config) => start(config).await,
+                Ok(config) => start(config, notes).await,
                 Err(e) => {
                     eprintln!("error: {e}\n\n{}", start_help());
                     ExitCode::from(2)
@@ -164,11 +168,13 @@ async fn main() -> ExitCode {
 
 /// `kernable start --dev`: creates what is missing of `root.key`, `kernel.key`, `vault.key`,
 /// `app.key` and `app.grant` in the working directory, with a grant that lets `app` do everything.
-fn development_setup() -> Result<()> {
+/// Returns what it did, to show after the banner.
+fn development_setup() -> Result<Vec<String>> {
+    let mut notes = Vec::new();
     for name in ["root", "kernel", "vault", "app"] {
         if !Path::new(&format!("{name}.key")).exists() {
             write_key(name)?;
-            eprintln!("created {name}.key");
+            notes.push(format!("created {name}.key"));
         }
     }
     if !Path::new("app.grant").exists() {
@@ -180,13 +186,14 @@ fn development_setup() -> Result<()> {
         }];
         let grant = signing::grant(&root, &key_id, all, "", now_ms());
         fs::write("app.grant", format!("{}\n", hex(&grant.encode_to_vec())))?;
-        eprintln!("created app.grant");
+        notes.push("created app.grant".into());
     }
-    eprintln!(
+    notes.push(
         "development mode: app.key may do everything. In production, start with --root only and \
          grant each service what it needs (kernable grant)."
+            .into(),
     );
-    Ok(())
+    Ok(notes)
 }
 
 fn start_help() -> String {
@@ -207,7 +214,8 @@ fn start_help() -> String {
     help
 }
 
-async fn start(config: Config) -> ExitCode {
+/// Runs the kernel; `dev_notes` is what `--dev` set up, if it was given.
+async fn start(config: Config, dev_notes: Option<Vec<String>>) -> ExitCode {
     // KERNABLE_LOG sets the level filter (default `info`); KERNABLE_LOG_FORMAT=json logs JSON.
     let filter = EnvFilter::try_from_env("KERNABLE_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
     let logs = tracing_subscriber::fmt()
@@ -216,7 +224,17 @@ async fn start(config: Config) -> ExitCode {
     if std::env::var("KERNABLE_LOG_FORMAT").as_deref() == Ok("json") {
         logs.json().init();
     } else {
+        // For a person at a terminal only; services and pipes get the log lines alone.
+        if std::io::stderr().is_terminal() {
+            let dir = std::env::current_dir()
+                .map(|d| d.display().to_string())
+                .unwrap_or_default();
+            eprintln!("{}", banner(&config, dev_notes.is_some(), &dir));
+        }
         logs.init();
+    }
+    for note in dev_notes.iter().flatten() {
+        eprintln!("{note}");
     }
     match run_kernel(config).await {
         Ok(()) => ExitCode::SUCCESS,
@@ -225,6 +243,81 @@ async fn start(config: Config) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The start banner: the name, the version and platform, and where the kernel keeps what.
+fn banner(config: &Config, dev: bool, dir: &str) -> String {
+    const LOGO: [&str; 3] = [
+        r" _     _ _______ ______  __   _ _______ ______  _       _______",
+        r" |____/  |______ |_____/ | \  | |_____| |_____] |       |______",
+        r" |    \_ |______ |    \_ |  \_| |     | |_____] |_____  |______",
+    ];
+    // `sqlite:kernable.db` → `sqlite - kernable.db`, `memory:` → `memory`.
+    let store = |s: &str| match s.split_once(':') {
+        Some((kind, "")) => kind.to_owned(),
+        Some((kind, place)) => format!("{kind} - {place}"),
+        None => s.to_owned(),
+    };
+    let listen = if config.listen.starts_with("unix:") {
+        format!("{} (Unix socket)", config.listen)
+    } else if config.tls.is_some() {
+        format!("{} (mutual TLS)", config.listen)
+    } else {
+        format!("{} (plain TCP, this machine only)", config.listen)
+    };
+    let roots = match config.roots.as_slice() {
+        [one] => format!("root {}…", &one[..one.len().min(12)]),
+        many => format!("{} roots", many.len()),
+    };
+    let rows = [
+        ("Working Directory", dir.to_owned()),
+        ("Listen", listen),
+        ("Event Store", store(&config.store)),
+        ("Command Store", store(&config.store)),
+        ("Snapshot Store", store(&config.snapshots)),
+        ("Data Store", store(&config.data)),
+        ("Cache Store", store(&config.cache)),
+        (
+            "Vault",
+            config
+                .vault
+                .as_ref()
+                .map_or("disabled".into(), |v| store(&v.store)),
+        ),
+        (
+            "Keys",
+            format!("{roots} · kernel {}", config.kernel_key.display()),
+        ),
+        (
+            "Metrics",
+            config
+                .metrics_listen
+                .clone()
+                .unwrap_or_else(|| "disabled".into()),
+        ),
+        (
+            "Mode",
+            if dev {
+                "development (--dev)"
+            } else {
+                "production"
+            }
+            .into(),
+        ),
+    ];
+    let mut out = format!(
+        "\n{}\n{}   » {}\n{}   » {} » {}\n\n",
+        LOGO[0],
+        LOGO[1],
+        env!("CARGO_PKG_VERSION"),
+        LOGO[2],
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
+    for (name, value) in rows {
+        out.push_str(&format!(" » {name:.<22} {value}\n"));
+    }
+    out
 }
 
 async fn run_kernel(config: Config) -> std::result::Result<(), BoxError> {
@@ -505,9 +598,9 @@ fn migrate(store: &str) -> Result<bool> {
             "migrated from format {from} to {format}; the old log is kept as {path}.format-{from}"
         ),
         Ok(from) => println!("migrated from format {from} to {format}"),
-        Err(kernable_store::Error::Format(0)) => {
+        Err(kernable_store::Error::Format(found)) if found < format => {
             println!(
-                "no migration from format 0: it comes from a development build before format 1; \
+                "no migration from format {found}: it comes from a development build; \
                  create a new store"
             );
             return Ok(false);
@@ -588,4 +681,40 @@ fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_banner_names_where_the_kernel_keeps_what() {
+        let root = signing::key_id(&signing::generate_key().verifying_key());
+        let args = [
+            "--root",
+            &root,
+            "--vault-key",
+            "vault.key",
+            "--metrics-listen",
+            "127.0.0.1:9233",
+        ];
+        let config = Config::from_args(&args, |_| None).unwrap();
+        let banner = banner(&config, true, "/tmp/demo");
+        assert!(banner.contains("|____/"), "{banner}");
+        assert!(banner.contains(&format!("» {}", env!("CARGO_PKG_VERSION"))));
+        for line in [
+            " » Working Directory..... /tmp/demo",
+            " » Listen................ 127.0.0.1:7233 (plain TCP, this machine only)",
+            " » Event Store........... sqlite - kernable.db",
+            " » Snapshot Store........ memory",
+            " » Data Store............ file - data",
+            " » Cache Store........... memory",
+            " » Keys.................. root ",
+            " » Vault................. sqlite - vault.db",
+            " » Metrics............... 127.0.0.1:9233",
+            " » Mode.................. development (--dev)",
+        ] {
+            assert!(banner.contains(line), "{line:?} missing in\n{banner}");
+        }
+    }
 }

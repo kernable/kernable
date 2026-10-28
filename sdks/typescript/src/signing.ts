@@ -4,7 +4,9 @@ import { createHash, createPrivateKey, createPublicKey, sign, type KeyObject } f
 import { readFileSync } from "node:fs";
 
 import type {
+  WireCacheRequest,
   WireCommand,
+  WireDataRequest,
   WireEvent,
   WireNewEvent,
   WireQueryRequest,
@@ -78,8 +80,7 @@ class Msg {
       .str(c?.sender_identity ?? "")
       .str(c?.sender_account ?? "")
       .str(c?.sender_session ?? "")
-      .str(c?.on_behalf_of ?? "")
-      .str(c?.workspace ?? "");
+      .str(c?.on_behalf_of ?? "");
     if (c?.expected_version != null) this.u64(1).u64(c.expected_version);
     else this.u64(0);
     this.str(c?.correlation_id ?? "")
@@ -160,6 +161,30 @@ export function snapshotMessage(c: Omit<Stream, "command_id">, version: number, 
     .u64(version)
     .str(schema)
     .bytes(state)
+    .done();
+}
+
+/** What a client signs to put, get or delete a file (`op`: `put`, `get`, `delete`): the data's SHA-256 hash, not the data. */
+export function dataMessage(op: "put" | "get" | "delete", r: WireDataRequest): Buffer {
+  return new Msg(`kernable.v1.data.${op}`)
+    .str(r.tenant_id)
+    .str(r.domain)
+    .str(r.key)
+    .str(r.content_type)
+    .bytes(createHash("sha256").update(r.data).digest())
+    .i64(r.issued_at)
+    .done();
+}
+
+/** What a client signs to set, get or delete a cache value (`op`: `set`, `get`, `delete`), with the value's SHA-256 hash. */
+export function cacheMessage(op: "set" | "get" | "delete", r: WireCacheRequest): Buffer {
+  return new Msg(`kernable.v1.cache.${op}`)
+    .str(r.tenant_id)
+    .str(r.domain)
+    .str(r.key)
+    .bytes(createHash("sha256").update(r.value).digest())
+    .u64(r.ttl_ms)
+    .i64(r.issued_at)
     .done();
 }
 

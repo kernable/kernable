@@ -15,6 +15,7 @@
 //! [`snapshots`] (the latest snapshot per aggregate, a cache) and the [`vault`] (personal and
 //! secret values that commands and events refer to).
 
+pub mod data;
 mod file;
 pub mod snapshots;
 mod sqlite;
@@ -32,9 +33,7 @@ use kernable_core::proto::{
 /// format is refused; `kernable migrate` upgrades older ones.
 ///
 /// - 1: the first release format.
-/// - 2: vault references in commands and events; snapshots moved to their own store.
-/// - 3: key revocations.
-pub const FORMAT: u32 = 3;
+pub const FORMAT: u32 = 1;
 
 pub use file::FileStore;
 pub use sqlite::SqliteStore;
@@ -260,8 +259,7 @@ pub fn open_read_only(url: &str) -> Result<Box<dyn Store>> {
 }
 
 /// Upgrades the store at `url` to [`FORMAT`] (kernel stopped; back it up first) and returns
-/// the format it had. From 1 to 2, snapshots leave the log: they are dropped, and workers
-/// rebuild them into the snapshot store. From 2 to 3 nothing changes but the format.
+/// the format it had. There is no older format yet.
 pub fn migrate(url: &str) -> Result<u32> {
     match backend(url) {
         ("memory", _) => Ok(FORMAT),

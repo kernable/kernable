@@ -23,7 +23,7 @@
     "build": "rm -rf dist proto && tsc -p tsconfig.build.json && mkdir -p proto/kernable/v1 && cp ../../proto/kernable/v1/kernable.proto proto/kernable/v1/",
     "prepack": "npm run build",
     "postpack": "rm -rf dist proto",
-    "check": "tsc && node --test test/*.test.ts ../../examples/shop/*.test.ts"
+    "check": "tsc && KERNABLE_LOG=${KERNABLE_LOG:-warn} node --test test/*.test.ts ../../examples/shop/*.test.ts"
   },
   "dependencies": {
     "@grpc/grpc-js": "^1.14.6",

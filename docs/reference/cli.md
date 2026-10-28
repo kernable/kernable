@@ -18,7 +18,8 @@ usage:
                                           writes <name>.grant, signed by the root key; a permission
                                           is <action>=<type>,<type> or a bare type for every action
                                           (actions: submit run subscribe listen query answer check
-                                          privileged vault_read vault_erase)
+                                          privileged vault_read vault_erase data_read data_write
+                                          cache)
   kernable revoke <addr> <root.key> <key.pub> <since>
                                           revokes a key from <since> on (UTC, 2026-10-27T09:00:00Z),
                                           for good; the kernel must be running (over TCP with
@@ -36,8 +37,7 @@ usage:
                                           re-encrypts the vault with a new key (kernel stopped)
   kernable schemas <store>                lists the highest stored payload version per event type
   kernable migrate <store>                upgrades a store to this build's data format (kernel stopped;
-                                          back the store up first); 1 to 2 drops the snapshots, which
-                                          workers rebuild into the snapshot store
+                                          back the store up first)
   kernable submit <addr> <client.key> <tenant> <domain> <aggregate_type> <aggregate_id> <command_type> <payload>
                                           signs and submits a command (addr: http://host:port, or
                                           unix:/path on Unix; TLS as for revoke), with <client>.grant if it exists

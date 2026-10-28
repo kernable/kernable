@@ -75,6 +75,7 @@ export default withMermaid(
             { text: "Test your domain", link: "/how-to/test-domain" },
             { text: "Handle an erasure request", link: "/how-to/erasure" },
             { text: "Passwords and other secrets", link: "/how-to/secrets" },
+            { text: "Store files and cache values", link: "/how-to/data-and-cache" },
             { text: "Write an SDK", link: "/how-to/new-sdk" },
           ],
         },

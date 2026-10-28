@@ -17,7 +17,6 @@ export interface WireRequestContext {
   sender_account: string;
   sender_session: string;
   on_behalf_of: string;
-  workspace: string;
   expected_version?: number | null;
   correlation_id: string;
   causation_id: string;
@@ -200,6 +199,46 @@ export type ListenerMessage =
 
 export type ListenCall = grpc.ClientDuplexStream<ListenerMessage, ListenerDelivery>;
 
+/** A file of a domain; see `DataService` in kernable.proto. */
+export interface WireDataRequest {
+  tenant_id: string;
+  domain: string;
+  key: string;
+  /** Put only; empty otherwise. */
+  data: Buffer;
+  /** Put only; empty otherwise. */
+  content_type: string;
+  issued_at: number;
+  client_sig?: WireSignature | null;
+}
+
+export interface WireDataResult {
+  found: boolean;
+  data: Buffer;
+  content_type: string;
+}
+
+/** A value of a domain's cache; see `CacheService` in kernable.proto. */
+export interface WireCacheRequest {
+  tenant_id: string;
+  domain: string;
+  key: string;
+  /** Set only; empty otherwise. */
+  value: Buffer;
+  /** Set only; 0 = until deleted or the kernel restarts. */
+  ttl_ms: number;
+  issued_at: number;
+  client_sig?: WireSignature | null;
+}
+
+export interface WireCacheResult {
+  found: boolean;
+  value: Buffer;
+}
+
+export type DataOp = "PutData" | "GetData" | "DeleteData";
+export type CacheOp = "SetCache" | "GetCache" | "DeleteCache";
+
 export interface Clients {
   /** `listener`: the listener whose handler submits (see `SubmitRequest.listener`). */
   submit(command: WireCommand, wait: WireWait, listener?: string, vault?: WireVaultValue[]): Promise<WireCommandResult>;
@@ -207,6 +246,8 @@ export interface Clients {
   listen(): ListenCall;
   query(req: WireQueryRequest): Promise<WireQueryResult>;
   subscribe(req: WireSubscribeRequest): grpc.ClientReadableStream<WireEvent>;
+  data(op: DataOp, req: WireDataRequest): Promise<WireDataResult>;
+  cache(op: CacheOp, req: WireCacheRequest): Promise<WireCacheResult>;
   close(): void;
 }
 
@@ -216,6 +257,9 @@ const PROTO = existsSync(BUNDLED) ? BUNDLED : fileURLToPath(new URL("../../../pr
 
 /** The protocol version this SDK speaks; see "Protocol versions" in `kernable.proto`. */
 export const PROTOCOL = 1;
+
+/** Room for a file of 16 MiB, the kernel's limit, plus the rest of the message (grpc-js receives 4 MiB by default). */
+const MAX_DATA_MESSAGE = 17 << 20;
 
 let v1: any; // generated client constructors, untyped
 
@@ -245,8 +289,18 @@ export function connect(url: string, tls?: TlsFiles, grant?: string): Clients {
   const events = new v1.EventService(url, creds);
   const listeners = new v1.ListenerService(url, creds);
   const queries = new v1.QueryService(url, creds);
+  const data = new v1.DataService(url, creds, {
+    "grpc.max_send_message_length": MAX_DATA_MESSAGE,
+    "grpc.max_receive_message_length": MAX_DATA_MESSAGE,
+  });
+  const cache = new v1.CacheService(url, creds);
   const metadata = new grpc.Metadata();
   if (grant) metadata.set("kernable-grant", grant);
+  // A unary call with the grant and the protocol version.
+  const unary = <R>(client: any, rpc: string, req: object) =>
+    new Promise<R>((resolve, reject) =>
+      client[rpc]({ ...req, protocol: PROTOCOL }, metadata, (err: grpc.ServiceError | null, res: R) => (err ? reject(err) : resolve(res))),
+    );
   return {
     submit: (command, wait, listener = "", vault = []) =>
       new Promise((resolve, reject) =>
@@ -261,12 +315,16 @@ export function connect(url: string, tls?: TlsFiles, grant?: string): Clients {
         queries.Query({ ...req, protocol: PROTOCOL }, metadata, (err: grpc.ServiceError | null, res: WireQueryResult) => (err ? reject(err) : resolve(res))),
       ),
     subscribe: (req) => events.Subscribe({ ...req, protocol: PROTOCOL }, metadata),
+    data: (op, req) => unary(data, op, req),
+    cache: (op, req) => unary(cache, op, req),
     close: () => {
       commands.close();
       workers.close();
       events.close();
       listeners.close();
       queries.close();
+      data.close();
+      cache.close();
     },
   };
 }

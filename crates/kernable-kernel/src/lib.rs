@@ -13,6 +13,7 @@
 //! too: the chain fails closed. Refused commands are not stored, like any other request the
 //! kernel does not accept.
 
+mod cache;
 pub mod config;
 pub mod crash;
 pub mod grants;
@@ -32,12 +33,15 @@ use std::{
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
-        Accepted, Challenge, Command, CommandResult, Committed, Event, Execute, Grant,
-        KernelMessage, ListenerDelivery, ListenerMessage, NewEvent, QueryRequest, QueryResult,
-        Register, Registered, Rejected, RevocationRecord, RevokeRequest, RevokeResponse, Signature,
-        Snapshot, SnapshotRecord, SubmitRequest, SubscribeRequest, VaultValue, Wait, WorkerMessage,
+        Accepted, CacheRequest, CacheResult, Challenge, Command, CommandResult, Committed,
+        DataRequest, DataResult, Event, Execute, Grant, KernelMessage, ListenerDelivery,
+        ListenerMessage, NewEvent, QueryRequest, QueryResult, Register, Registered, Rejected,
+        RevocationRecord, RevokeRequest, RevokeResponse, Signature, Snapshot, SnapshotRecord,
+        SubmitRequest, SubscribeRequest, VaultValue, Wait, WorkerMessage,
+        cache_service_server::{CacheService, CacheServiceServer},
         command_result::Outcome,
         command_service_server::{CommandService, CommandServiceServer},
+        data_service_server::{DataService, DataServiceServer},
         event_service_server::{EventService, EventServiceServer},
         kernel_message::Msg as Out,
         listener_service_server::{ListenerService, ListenerServiceServer},
@@ -51,6 +55,7 @@ use kernable_core::{
 };
 use kernable_store::{
     Enqueued, Error as StoreError, Store, StreamId,
+    data::{Data, DataKey, DataStore},
     snapshots::SnapshotStore,
     vault::{self, Owner, Vault},
 };
@@ -80,6 +85,11 @@ const SNAPSHOT_STALE: &str = "snapshot_stale";
 const POLL: Duration = Duration::from_millis(100);
 /// Accepted clock difference for signed subscribe requests.
 const MAX_REQUEST_AGE_MS: i64 = 60_000;
+
+/// The largest file of the data service, cache value and key.
+const MAX_DATA_BYTES: usize = 16 << 20;
+const MAX_CACHE_BYTES: usize = 1 << 20;
+const MAX_KEY_BYTES: usize = 512;
 /// Events read from the store per subscription round trip.
 const SUBSCRIBE_BATCH: u32 = 500;
 /// The metadata entry that carries a request's grant: the hex-encoded `Grant`.
@@ -142,6 +152,10 @@ pub struct Kernel {
     snapshots: Box<dyn SnapshotStore>,
     /// Personal and secret values; `None` without `[vault]`.
     vault: Option<Vault>,
+    /// Files of the data service.
+    data: Box<dyn DataStore>,
+    /// Values of the cache service.
+    cache: cache::Cache,
     /// Set on shutdown: new submits and queries are refused while running ones finish.
     draining: AtomicBool,
     /// Submits and queries being handled, and a wake-up when one ends.
@@ -178,6 +192,8 @@ impl Kernel {
             }
             None => None,
         };
+        let data = kernable_store::data::open(&config.data)?;
+        let cache = cache::Cache::open(&config.cache)?;
         let queue = queue::Queue::default();
         for pending in store.pending()? {
             queue.push(pending.command, pending.received_at);
@@ -199,6 +215,8 @@ impl Kernel {
             schemas: Mutex::new(schemas),
             snapshots,
             vault,
+            data,
+            cache,
             draining: Default::default(),
             requests: Default::default(),
             idle: Notify::new(),
@@ -465,6 +483,44 @@ impl Kernel {
     }
 
     /// Counts a submit or query until the returned guard drops; refused while draining.
+    /// Checks a data or cache request: the signature over `msg`, its age, a valid domain and
+    /// key, and that the key may do `action` (`rules`) in the domain.
+    #[allow(clippy::too_many_arguments)]
+    fn authorize_store(
+        &self,
+        metadata: &MetadataMap,
+        sig: Option<&Signature>,
+        msg: &[u8],
+        issued_at: i64,
+        domain: &str,
+        key: &str,
+        action: &str,
+        rules: fn(&Permissions) -> &grants::Rules,
+    ) -> Result<(), Status> {
+        let sig = sig.ok_or_else(|| Status::unauthenticated("request is not signed"))?;
+        signing::verify(sig, msg)
+            .map_err(|_| Status::unauthenticated("invalid request signature"))?;
+        self.present(metadata, &sig.key_id)?;
+        if (now_ms() - issued_at).abs() > MAX_REQUEST_AGE_MS {
+            return Err(Status::unauthenticated("request expired; check the clock"));
+        }
+        if !config::valid_domain(domain) {
+            return Err(Status::invalid_argument("a domain name is needed"));
+        }
+        if key.is_empty() || key.len() > MAX_KEY_BYTES {
+            return Err(Status::invalid_argument(format!(
+                "a key has 1 to {MAX_KEY_BYTES} bytes"
+            )));
+        }
+        let permissions = self.permissions();
+        if !config::allowed(rules(&permissions), &sig.key_id, &format!("{domain}.*")) {
+            return Err(Status::permission_denied(format!(
+                "key may not {action} in {domain}"
+            )));
+        }
+        Ok(())
+    }
+
     fn request(&self) -> Result<Running<'_>, Status> {
         self.requests.fetch_add(1, SeqCst);
         let running = Running(self);
@@ -659,6 +715,15 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
         .add_service(ListenerServiceServer::new(api.clone()))
         .add_service(QueryServiceServer::new(api.clone()))
         .add_service(TrustServiceServer::new(api.clone()))
+        .add_service(
+            DataServiceServer::new(api.clone())
+                .max_decoding_message_size(MAX_DATA_BYTES + (64 << 10))
+                .max_encoding_message_size(MAX_DATA_BYTES + (64 << 10)),
+        )
+        .add_service(
+            CacheServiceServer::new(api.clone())
+                .max_decoding_message_size(MAX_CACHE_BYTES + (64 << 10)),
+        )
         .add_service(WorkerGatewayServer::new(api));
 
     let server = async {
@@ -978,6 +1043,166 @@ async fn stream_events(
                 return;
             }
         }
+    }
+}
+
+fn data_key(r: &DataRequest) -> DataKey {
+    DataKey {
+        tenant_id: r.tenant_id.clone(),
+        domain: r.domain.clone(),
+        key: r.key.clone(),
+    }
+}
+
+fn store_error(e: StoreError) -> Status {
+    Status::internal(e.to_string())
+}
+
+impl Api {
+    /// Checks a data request for `op` (`put`, `get`, `delete`).
+    fn data_request(&self, request: Request<DataRequest>, op: &str) -> Result<DataRequest, Status> {
+        let metadata = request.metadata().clone();
+        let r = request.into_inner();
+        protocol(r.protocol)?;
+        let (action, rules): (_, fn(&Permissions) -> &grants::Rules) = match op {
+            "get" => ("read files", |p| &p.data_read),
+            _ => ("write files", |p| &p.data_write),
+        };
+        let msg = signing::data_message(op, &r);
+        self.0.authorize_store(
+            &metadata,
+            r.client_sig.as_ref(),
+            &msg,
+            r.issued_at,
+            &r.domain,
+            &r.key,
+            action,
+            rules,
+        )?;
+        Ok(r)
+    }
+
+    /// Checks a cache request for `op` (`set`, `get`, `delete`).
+    fn cache_request(
+        &self,
+        request: Request<CacheRequest>,
+        op: &str,
+    ) -> Result<CacheRequest, Status> {
+        let metadata = request.metadata().clone();
+        let r = request.into_inner();
+        protocol(r.protocol)?;
+        let msg = signing::cache_message(op, &r);
+        self.0.authorize_store(
+            &metadata,
+            r.client_sig.as_ref(),
+            &msg,
+            r.issued_at,
+            &r.domain,
+            &r.key,
+            "use the cache",
+            |p| &p.cache,
+        )?;
+        Ok(r)
+    }
+}
+
+#[tonic::async_trait]
+impl DataService for Api {
+    async fn put_data(
+        &self,
+        request: Request<DataRequest>,
+    ) -> Result<Response<DataResult>, Status> {
+        let r = self.data_request(request, "put")?;
+        if r.data.len() > MAX_DATA_BYTES {
+            return Err(Status::invalid_argument(format!(
+                "a file has at most {} MiB",
+                MAX_DATA_BYTES >> 20
+            )));
+        }
+        let data = Data {
+            content_type: r.content_type.clone(),
+            data: r.data.clone(),
+        };
+        self.0.data.put(&data_key(&r), &data).map_err(store_error)?;
+        Ok(Response::new(DataResult {
+            found: true,
+            ..Default::default()
+        }))
+    }
+
+    async fn get_data(
+        &self,
+        request: Request<DataRequest>,
+    ) -> Result<Response<DataResult>, Status> {
+        let r = self.data_request(request, "get")?;
+        let result = match self.0.data.get(&data_key(&r)).map_err(store_error)? {
+            Some(d) => DataResult {
+                found: true,
+                data: d.data,
+                content_type: d.content_type,
+            },
+            None => DataResult::default(),
+        };
+        Ok(Response::new(result))
+    }
+
+    async fn delete_data(
+        &self,
+        request: Request<DataRequest>,
+    ) -> Result<Response<DataResult>, Status> {
+        let r = self.data_request(request, "delete")?;
+        let found = self.0.data.delete(&data_key(&r)).map_err(store_error)?;
+        Ok(Response::new(DataResult {
+            found,
+            ..Default::default()
+        }))
+    }
+}
+
+#[tonic::async_trait]
+impl CacheService for Api {
+    async fn set_cache(
+        &self,
+        request: Request<CacheRequest>,
+    ) -> Result<Response<CacheResult>, Status> {
+        let r = self.cache_request(request, "set")?;
+        if r.value.len() > MAX_CACHE_BYTES {
+            return Err(Status::invalid_argument(format!(
+                "a cache value has at most {} MiB",
+                MAX_CACHE_BYTES >> 20
+            )));
+        }
+        self.0
+            .cache
+            .set((r.tenant_id, r.domain, r.key), r.value, r.ttl_ms);
+        Ok(Response::new(CacheResult {
+            found: true,
+            value: Vec::new(),
+        }))
+    }
+
+    async fn get_cache(
+        &self,
+        request: Request<CacheRequest>,
+    ) -> Result<Response<CacheResult>, Status> {
+        let r = self.cache_request(request, "get")?;
+        let value = self.0.cache.get((r.tenant_id, r.domain, r.key));
+        Ok(Response::new(CacheResult {
+            found: value.is_some(),
+            value: value.unwrap_or_default(),
+        }))
+    }
+
+    async fn delete_cache(
+        &self,
+        request: Request<CacheRequest>,
+    ) -> Result<Response<CacheResult>, Status> {
+        let r = self.cache_request(request, "delete")?;
+        let found = self.0.cache.delete((r.tenant_id, r.domain, r.key));
+        Ok(Response::new(CacheResult {
+            found,
+            value: Vec::new(),
+        }))
     }
 }
 

@@ -47,13 +47,12 @@ Who sends a request and in which context. Signed by the client together with the
 | `sender_account` |  `string` | 3 |  |
 | `sender_session` |  `string` | 4 |  |
 | `on_behalf_of` |  `string` | 5 | authorize as this identity of the target tenant instead |
-| `workspace` |  `string` | 6 |  |
-| `expected_version` | optional `uint64` | 7 | Reject the command unless the aggregate is at this version when it runs. |
-| `correlation_id` |  `string` | 8 | shared by everything one original request causes |
-| `causation_id` |  `string` | 9 | the command that caused this one, if any |
-| `trace_id` |  `string` | 10 |  |
-| `bypass_authorization` |  `bool` | 11 | Privileged switch: only keys granted `privileged` for it may set it. |
-| `attributes` | repeated `Attribute` | 12 | business data only, never security decisions |
+| `expected_version` | optional `uint64` | 6 | Reject the command unless the aggregate is at this version when it runs. |
+| `correlation_id` |  `string` | 7 | shared by everything one original request causes |
+| `causation_id` |  `string` | 8 | the command that caused this one, if any |
+| `trace_id` |  `string` | 9 |  |
+| `bypass_authorization` |  `bool` | 10 | Privileged switch: only keys granted `privileged` for it may set it. |
+| `attributes` | repeated `Attribute` | 11 | business data only, never security decisions |
 
 ### Attribute
 
@@ -134,7 +133,7 @@ The kernel trusts root keys only (`kernable start --root`). A root key grants a 
 
 ### Permission
 
-Actions: submit, run, subscribe, listen, query, answer, check, privileged, vault_read, vault_erase, or `*` for all. Types: `*`, `domain.*` or `domain.Type` (for privileged: the switch, `bypass_authorization`).
+Actions: submit, run, subscribe, listen, query, answer, check, privileged, vault_read, vault_erase, data_read, data_write, cache, or `*` for all. Types: `*`, `domain.*` or `domain.Type` (for privileged: the switch, `bypass_authorization`; for data_read, data_write and cache: a domain, `domain.*`).
 
 | Field | Type | Number | Description |
 |---|---|---|---|
@@ -259,6 +258,71 @@ Every query goes through the kernel, also between parts of one process, so that 
 | `query_id` |  `string` | 1 |  |
 | `response` |  `bytes` | 2 |  |
 | `rejected` |  `Rejected` | 3 |  |
+
+### DataService
+
+Files of a domain, kept by the kernel under (tenant, domain, key), apart from the event log: they are neither signed into it nor erased with the vault. Every request is signed by a key granted data_read (get) or data_write (put, delete) for the domain, over `kernable.v1.data.<op>`, and valid 60 s around issued_at.
+
+| RPC | Request | Response | Description |
+|---|---|---|---|
+| `PutData` | `DataRequest` | `DataResult` |  |
+| `GetData` | `DataRequest` | `DataResult` |  |
+| `DeleteData` | `DataRequest` | `DataResult` |  |
+
+### DataRequest
+
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `tenant_id` |  `string` | 1 |  |
+| `domain` |  `string` | 2 |  |
+| `key` |  `string` | 3 | any string of 1 to 512 bytes |
+| `data` |  `bytes` | 4 | put only; at most 16 MiB |
+| `content_type` |  `string` | 5 | put only, e.g. `application/pdf` |
+| `issued_at` |  `int64` | 6 | ms since epoch |
+| `client_sig` |  `Signature` | 7 |  |
+| `protocol` |  `uint32` | 8 | not signed |
+
+### DataResult
+
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `found` |  `bool` | 1 | get and delete: whether the file existed; put: true |
+| `data` |  `bytes` | 2 | get only |
+| `content_type` |  `string` | 3 | get only |
+
+### CacheService
+
+A shared cache of a domain: values under (tenant, domain, key) that may expire. Not durable; a kernel restart may empty it. Signed like DataService requests over `kernable.v1.cache.<op>`, by a key granted cache for the domain.
+
+| RPC | Request | Response | Description |
+|---|---|---|---|
+| `SetCache` | `CacheRequest` | `CacheResult` |  |
+| `GetCache` | `CacheRequest` | `CacheResult` |  |
+| `DeleteCache` | `CacheRequest` | `CacheResult` |  |
+
+### CacheRequest
+
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `tenant_id` |  `string` | 1 |  |
+| `domain` |  `string` | 2 |  |
+| `key` |  `string` | 3 | any string of 1 to 512 bytes |
+| `value` |  `bytes` | 4 | set only; at most 1 MiB |
+| `ttl_ms` |  `uint64` | 5 | set only; 0 = until deleted or the kernel restarts |
+| `issued_at` |  `int64` | 6 | ms since epoch |
+| `client_sig` |  `Signature` | 7 |  |
+| `protocol` |  `uint32` | 8 | not signed |
+
+### CacheResult
+
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `found` |  `bool` | 1 | get and delete: whether the key had a live value; set: true |
+| `value` |  `bytes` | 2 | get only |
 
 ### ListenerService
 

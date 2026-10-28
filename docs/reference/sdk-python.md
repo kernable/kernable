@@ -24,6 +24,15 @@ What `apply` gets besides state, data and the event (as an optional fourth param
 
 - `request: RequestContext`: The request context of the command that caused the event.
 
+### CacheClient
+
+A domain's shared cache, kept in the kernel's memory under (tenant, domain, key): rate limits, short-lived tokens, computed values. Not durable: a kernel restart empties it. Values are not part of the signed event log and not erased with the vault. Needs a grant of `cache` for the domain; a refused or invalid request raises `grpc.RpcError`. Keys are 1 to 512 bytes, values at most 1 MiB.
+
+- `CacheClient(k: Kernable)`: Use `k.cache` of a `Kernable`.
+- `set(domain: str, key: str, value: bytes | str, ttl_ms: int=0, *, tenant: str | None=None) -> None`: Stores `value` under `key` for `ttl_ms` milliseconds; `0` keeps it until it is deleted or the kernel restarts. A `str` is stored as UTF-8.
+- `get(domain: str, key: str, *, tenant: str | None=None) -> bytes | None`: The live value under `key`, or `None` if there is none or it expired.
+- `delete(domain: str, key: str, *, tenant: str | None=None) -> bool`: Deletes the value under `key`; returns whether it had a live one.
+
 ### Check
 
 A command or query a middleware checks before the kernel accepts or routes it.
@@ -66,6 +75,22 @@ How a command's payload is kept: which fields go to the vault.
 - `CommandSchema(type: str)`
 - `personal(fields: list[str], subject: Callable) -> 'CommandSchema'`: Keeps these top-level fields in the vault as personal data of `subject`; see `EventSchema.personal`.
 - `secret(fields: list[str]) -> 'CommandSchema'`: Keeps these top-level fields (passwords, one-time tokens) in the vault only until the command completed. The handler gets them in clear; the stored command keeps a reference.
+
+### Data
+
+A file read with `k.data.get`.
+
+- `data: bytes`
+- `content_type: str`
+
+### DataClient
+
+Files of a domain, kept by the kernel under (tenant, domain, key): invoices, uploads, exports. They are not part of the signed event log and not erased with the vault; keep personal data in vault fields instead. Needs a grant of `data_read` (get) or `data_write` (put, delete) for the domain; a refused or invalid request raises `grpc.RpcError`. Keys are 1 to 512 bytes, files at most 16 MiB.
+
+- `DataClient(k: Kernable)`: Use `k.data` of a `Kernable`.
+- `put(domain: str, key: str, data: bytes | str, content_type: str | None=None, *, tenant: str | None=None) -> None`: Stores `data` under `key`, replacing a file stored there. A `str` is stored as UTF-8; `content_type` defaults to `text/plain; charset=utf-8` for a `str` and `application/octet-stream` for `bytes`.
+- `get(domain: str, key: str, *, tenant: str | None=None) -> Data | None`: The file stored under `key`, or `None` if there is none.
+- `delete(domain: str, key: str, *, tenant: str | None=None) -> bool`: Deletes the file stored under `key`; returns whether there was one.
 
 ### Domain
 
@@ -160,7 +185,7 @@ What a listener handler gets besides the event's data and meta (as an optional t
 
 A running `Listener`, returned by `kernable.listener(listener)`: `run()` processes events, queries and checks until `stop()`; `ready` is set once the kernel accepted it.
 
-- `ListenerHandle(channel: grpc.Channel, key: Key, listener: Listener)`
+- `ListenerHandle(channel: grpc.Channel, key: Key, listener: Listener, log: _Log)`
 - `run() -> None`: Processes events, queries and checks until `stop()`, reconnecting when the stream drops; with a store, opens it first and continues after its position.
 
 ### NotSettled
@@ -209,7 +234,6 @@ Who sends a request and in which context: signed with the command and stored wit
 - `sender_account: str`
 - `sender_session: str`
 - `on_behalf_of: str`: Authorize as this identity of the target tenant; the sender stays the real principal.
-- `workspace: str`
 - `expected_version: int | None`: Reject the command (`version_mismatch`) unless the aggregate is at this version.
 - `correlation_id: str`: Shared by everything one original request causes; defaults to the command ID.
 - `causation_id: str`: The command that caused this one.
@@ -249,7 +273,7 @@ PEM files for mutual TLS: the CA of the kernel's certificate, and this process's
 
 Executes commands for its aggregates, one at a time.
 
-- `Worker(channel: grpc.Channel, key: Key, aggregates)`
+- `Worker(channel: grpc.Channel, key: Key, aggregates, log: _Log)`
 
 ### domain()
 

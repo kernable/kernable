@@ -151,6 +151,8 @@ pub async fn start_custom(name: &str, customize: impl FnOnce(&mut Config, &Path)
         drain_timeout_ms: 1_000,
         tls: None,
         snapshots: format!("sqlite:{}", dir.join("snapshots.db").display()),
+        data: format!("file:{}", dir.join("data").display()),
+        cache: "memory:".into(),
         vault: None,
         metrics_listen: None,
     };

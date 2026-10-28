@@ -142,11 +142,6 @@ impl State {
                 kernel_sig: cp.kernel_sig.unwrap_or_default(),
                 created_at: cp.created_at,
             }),
-            Record::Snapshot(_) => {
-                return Err(corrupt(
-                    "a snapshot record: snapshots left the log in format 2",
-                ));
-            }
             Record::Revocation(r) => {
                 if !self.revocations.iter().any(|k| k.key_id == r.key_id) {
                     self.revocations.push(r);
@@ -557,59 +552,20 @@ impl Store for FileStore {
     }
 }
 
-/// Upgrades a file log to [`FORMAT`] by writing a new log next to it and swapping them; the
-/// old log is kept as `<path>.format-<n>`. Returns the format it had.
+/// Upgrades a file log to [`FORMAT`]; returns the format it had.
 pub(crate) fn migrate(path: &Path) -> Result<u32> {
     let bytes = fs::read(path)?;
-    let mut records = Vec::new();
-    let mut at = 0;
-    while at < bytes.len() {
-        let Some(header) = bytes.get(at..at + HEADER) else {
-            return Err(corrupt("torn record: open the store once to repair it"));
-        };
-        let len = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
-        let body = bytes
-            .get(at + HEADER..at + HEADER + len)
-            .filter(|body| checksum(body) == header[4..])
-            .ok_or_else(|| {
-                corrupt(&format!(
-                    "record at byte {at}: open the store once to repair it"
-                ))
-            })?;
-        records.push(LogRecord::decode(body)?.record);
-        at += HEADER + len;
-    }
-    let format = match records.first() {
-        Some(Some(Record::Format(f))) => f.version,
-        Some(_) => 0,
-        None => return Ok(FORMAT),
+    let Some(header) = bytes.get(..HEADER) else {
+        return Ok(FORMAT); // empty: a new log
     };
-    match format {
-        FORMAT => return Ok(FORMAT),
-        1 | 2 => {}
-        found => return Err(Error::Format(found)),
+    let len = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
+    let body = bytes
+        .get(HEADER..HEADER + len)
+        .filter(|body| checksum(body) == header[4..])
+        .ok_or_else(|| corrupt("first record: open the store once to repair it"))?;
+    match LogRecord::decode(body)?.record {
+        Some(Record::Format(f)) if f.version == FORMAT => Ok(FORMAT),
+        Some(Record::Format(f)) => Err(Error::Format(f.version)),
+        _ => Err(Error::Format(0)),
     }
-    let mut log = Vec::with_capacity(bytes.len());
-    for record in records.into_iter().flatten() {
-        let record = match record {
-            Record::Format(_) => Record::Format(FormatRecord { version: FORMAT }),
-            Record::Snapshot(_) => continue, // rebuilt into the snapshot store by workers
-            other => other,
-        };
-        let body = LogRecord {
-            record: Some(record),
-        }
-        .encode_to_vec();
-        log.extend((body.len() as u32).to_be_bytes());
-        log.extend(checksum(&body));
-        log.extend(body);
-    }
-    replay(&log)?; // the new log must open
-    let next = PathBuf::from(format!("{}.migrating", path.display()));
-    let mut file = File::create(&next)?;
-    file.write_all(&log)?;
-    file.sync_all()?;
-    fs::rename(path, format!("{}.format-{format}", path.display()))?;
-    fs::rename(&next, path)?;
-    Ok(format)
 }

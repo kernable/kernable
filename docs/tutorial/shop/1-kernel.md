@@ -73,4 +73,6 @@ let kernable = Kernable::new(Options::default())?;
 
 The SDK takes the kernel's address from `KERNABLE_URL`, the key from `KERNABLE_KEY` and the TLS files from `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`. Without them, it connects to the kernel you just started with `app.key` from the current directory, and the grant `--dev` put next to it. So the processes run unchanged in part 8, where each gets its own key and certificate. Options in the code take precedence over the environment.
 
+Workers and listeners print a line to stderr when they connect, with the kernel's address, the key and what they run. `KERNABLE_LOG=debug` adds every command, event and query they handle, `KERNABLE_LOG=warn` keeps only problems, `off` silences them.
+
 Next: [2. Aggregates and commands](./2-commands).

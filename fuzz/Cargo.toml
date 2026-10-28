@@ -2,7 +2,7 @@
 # `cargo +nightly fuzz run <target>` in this directory. Not part of the main workspace.
 [package]
 name = "kernable-fuzz"
-version = "0.0.0"
+version = "0.1.0"
 publish = false
 edition = "2024"
 

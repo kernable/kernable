@@ -3,18 +3,21 @@
 Run from sdks/python: .venv/bin/python -m unittest discover tests   (after `cargo build`)
 """
 
+import contextlib
 import hashlib
+import io
 import json
 import os
 import threading
 import time
 import unittest
+from unittest import mock
 
 import grpc
 
-from kernable import Kernable, NotSettled, Rejected, RequestContext, _upcast, domain
-from kernable.signing import (Key, challenge_message, command_message, derived_id, query_message,
-                              rejection_message, result_message, snapshot_message, vault_ref)
+from kernable import Data, Kernable, NotSettled, Rejected, RequestContext, _upcast, domain
+from kernable.signing import (Key, cache_message, challenge_message, command_message, data_message, derived_id,
+                              query_message, rejection_message, result_message, snapshot_message, vault_ref)
 from kernable.v1 import kernable_pb2 as pb
 from tests.kernel import ROOT, TestKernel
 
@@ -138,6 +141,12 @@ class SigningVectors(unittest.TestCase):
         self.check("result_vault", result_message(vector_command(r["command"]), r["expected_version"], events))
         d = VECTORS["derived_id"]
         self.assertEqual([derived_id(d["input"]["command_id"], n) for n in d["input"]["n"]], d["ids"])
+        p = dict(VECTORS["data_put"]["input"])
+        op, data = p.pop("op"), bytes.fromhex(p.pop("data_hex"))
+        self.check("data_put", data_message(op, pb.DataRequest(**p, data=data)))
+        s = dict(VECTORS["cache_set"]["input"])
+        op, value = s.pop("op"), bytes.fromhex(s.pop("value_hex"))
+        self.check("cache_set", cache_message(op, pb.CacheRequest(**s, value=value)))
 
 
 counters_domain = domain("counters")
@@ -164,10 +173,58 @@ def background(target) -> threading.Thread:
     return t
 
 
+class DataAndCache(unittest.TestCase):
+    def setUp(self):
+        self.kernel = TestKernel(["counters.*"], grants=["shop.*"])
+        self.kernel.start()
+        self.k = Kernable(self.kernel.url, self.kernel.app_key, tenant="t1")
+
+    def tearDown(self):
+        self.k.close()
+        self.kernel.dispose()
+
+    def test_files_are_put_read_and_deleted(self):
+        self.k.data.put("shop", "notes/n-1.txt", "Grüße")
+        self.assertEqual(self.k.data.get("shop", "notes/n-1.txt"), Data("Grüße".encode(), "text/plain; charset=utf-8"))
+        self.k.data.put("shop", "invoices/o-1.pdf", b"%PDF-1.7", "application/pdf")
+        self.assertEqual(self.k.data.get("shop", "invoices/o-1.pdf"), Data(b"%PDF-1.7", "application/pdf"))
+        self.assertIsNone(self.k.data.get("shop", "invoices/o-1.pdf", tenant="t2"))
+        large = os.urandom(5 * 1024 * 1024)
+        self.k.data.put("shop", "exports/large.bin", large)
+        self.assertEqual(self.k.data.get("shop", "exports/large.bin"), Data(large, "application/octet-stream"))
+
+        self.assertTrue(self.k.data.delete("shop", "invoices/o-1.pdf"))
+        self.assertIsNone(self.k.data.get("shop", "invoices/o-1.pdf"))
+        self.assertFalse(self.k.data.delete("shop", "invoices/o-1.pdf"))
+        self.assertIsNone(self.k.data.get("shop", "missing"))
+
+    def test_cache_values_expire_and_are_deleted(self):
+        self.k.cache.set("shop", "rate/c-1", "3", ttl_ms=200)
+        self.k.cache.set("shop", "token/c-1", b"\x00\x01")
+        self.assertEqual(self.k.cache.get("shop", "rate/c-1"), b"3")
+        self.assertEqual(self.k.cache.get("shop", "token/c-1"), b"\x00\x01")
+        time.sleep(0.3)
+        self.assertIsNone(self.k.cache.get("shop", "rate/c-1"))
+        self.assertFalse(self.k.cache.delete("shop", "rate/c-1"))
+        self.assertTrue(self.k.cache.delete("shop", "token/c-1"))
+        self.assertIsNone(self.k.cache.get("shop", "token/c-1"))
+
+    def test_a_domain_without_grant_is_refused(self):
+        for call in (lambda: self.k.data.put("billing", "x", b"1"), lambda: self.k.data.get("billing", "x"),
+                     lambda: self.k.cache.set("billing", "x", b"1"), lambda: self.k.cache.get("billing", "x")):
+            with self.assertRaises(grpc.RpcError) as refused:
+                call()
+            self.assertEqual(refused.exception.code(), grpc.StatusCode.PERMISSION_DENIED)
+
+
 class EndToEnd(unittest.TestCase):
     def setUp(self):
         self.kernel = TestKernel(["counters.*"], ["--settle-timeout-ms", "500"])
         self.kernel.start()
+        # Quiet: no connection lines in the test output (see test_connections_are_logged_to_stderr).
+        env = mock.patch.dict(os.environ, {"KERNABLE_LOG": "warn"})
+        env.start()
+        self.addCleanup(env.stop)
         self.k = Kernable(self.kernel.url, self.kernel.app_key, tenant="t1")
         self.streams = []
 
@@ -244,6 +301,40 @@ class EndToEnd(unittest.TestCase):
         time.sleep(0.15)  # let the kernel write a checkpoint
         out = self.kernel.verify()
         self.assertEqual(out.returncode, 0, out.stdout)
+
+    def test_connections_are_logged_to_stderr(self):
+        model = counters_domain.read_model("totals")
+        model.on("counters.Incremented", lambda data: None)
+        model.on("Reset", lambda data: None)
+        model.query("GetTotal", lambda data: 0)
+
+        def connect(level: str) -> str:
+            with mock.patch.dict(os.environ, {"KERNABLE_LOG": level}):
+                k = Kernable(self.kernel.url, self.kernel.app_key, tenant="t1")
+            out = io.StringIO()
+            with contextlib.redirect_stderr(out):
+                worker = self.run_stream(k.worker(counter))
+                listener = self.run_stream(k.listener(model))
+                self.assertTrue(self.increment(1).committed)
+                self.assertEqual(k.query("counters", "GetTotal"), 0)
+                worker.stop()
+                listener.stop()
+                time.sleep(0.1)
+            k.close()
+            return out.getvalue()
+
+        id12 = Key.from_file(self.kernel.app_key).id[:12]
+        info = connect("info").splitlines()
+        self.assertEqual(sorted(info), [
+            f"kernable listener totals: connected to {self.kernel.url} as app ({id12}…), at position 0, "
+            "reads counters.Incremented, counters.Reset, answers counters.GetTotal",
+            f"kernable worker: connected to {self.kernel.url} as app ({id12}…), runs counters.Increment",
+        ])
+        debug = connect("debug")
+        self.assertIn("kernable worker: counters.Increment Counter/c1 committed 1 events\n", debug)
+        self.assertRegex(debug, r"kernable listener totals: counters\.Incremented at \d+\n")
+        self.assertIn("kernable listener totals: answered counters.GetTotal\n", debug)
+        self.assertEqual(connect("warn"), "")
 
     def test_snapshots_shorten_replays_and_a_new_schema_rebuilds(self):
         applied = []

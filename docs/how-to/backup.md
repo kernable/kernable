@@ -25,4 +25,6 @@ Keep keys apart from the data, as you would keep any secret. Keep the root key o
 
 ## Backups and erasure
 
+Files of the [data store](./data-and-cache) live apart from both, in the `--data-store` directory (`data/` by default): copy it as well. The cache needs no backup.
+
 A backup keeps personal data that was erased after it was taken. Keep vault backups only as long as your retention rules allow. If you restore a vault older than an erasure, erase the person again: send the erasing command once more.

@@ -1,10 +1,9 @@
 //! Compatibility: stores of every data format keep working, and requests of a protocol version
 //! the kernel does not speak are refused with a clear message.
 //!
-//! `tests/fixtures/format-<n>` are frozen stores: never regenerate them. Format 1 was written
-//! by this file as of commit 149739b and is now upgraded with `kernable migrate`. A new data
-//! format adds a new directory (written with `KERNABLE_WRITE_FIXTURES=1`, which only fills
-//! directories that do not exist yet).
+//! `tests/fixtures/format-<n>` are frozen stores: never regenerate them. A new data format adds
+//! a new directory (written with `KERNABLE_WRITE_FIXTURES=1` and `--test-threads=1`, which only
+//! fills directories that do not exist yet) and a migration from the ones before.
 
 mod common;
 
@@ -74,10 +73,10 @@ fn stream(order: &str) -> StreamId {
     }
 }
 
-/// What the format-3 fixture holds (format 2 holds the same but the last command and the
-/// revocation), like format 1 plus the vault: the customer's email in
-/// `c1` and its event (subject `k-1`), a secret coupon code with the pending `c4`, and an
-/// order `o3` whose customer `k-2` was erased (by `c7`). There are no snapshots in the log.
+/// What the format-1 fixture holds: the customer's email in `c1` and its event (subject `k-1`),
+/// an item added by `c2`, a rejected `c3`, a secret coupon code with the pending `c4`, an order
+/// `o3` whose customer `k-2` was erased (by `c7`), two listeners, and `c11` signed by a key
+/// revoked since.
 fn fill(store: &dyn Store, vault: &Vault) {
     let cmd = |id: &str, command_type: &str, aggregate: &str, values: &[&VaultValue]| {
         let mut cmd = command(id, command_type, aggregate);
@@ -189,7 +188,7 @@ fn fill(store: &dyn Store, vault: &Vault) {
             listener("guard", "identity.*", Some(guard)),
         ])
         .unwrap();
-    // Since format 3: a client key stolen at AT. What it signed from then on is suspect.
+    // A client key stolen at AT. What it signed from then on is suspect.
     let mut stolen = command("c11", "PlaceOrder", "o4");
     stolen.context = Some(context());
     let stolen = signed(stolen, &key(7));
@@ -206,7 +205,7 @@ fn fill(store: &dyn Store, vault: &Vault) {
     store.checkpoint(&key(3), AT).unwrap();
 }
 
-/// Copies the store file of `format` and `backend` into `dir` (and for format 2 the vault),
+/// Copies the store file of `format` and `backend` into `dir` with its vault,
 /// writing the fixture first if asked to; returns the copy's store URL.
 fn copy(format: u32, backend: &str, file: &str, dir: &Path) -> String {
     let fixtures = fixtures(format);
@@ -228,11 +227,9 @@ fn copy(format: u32, backend: &str, file: &str, dir: &Path) -> String {
     }
     let target = dir.join(file);
     std::fs::copy(&fixture, &target).unwrap();
-    if format >= 2 {
-        let vault = format!("vault-{backend}.db");
-        std::fs::copy(fixtures.join(&vault), dir.join(&vault)).unwrap();
-        std::fs::copy(fixtures.join("vault.key"), dir.join("vault.key")).unwrap();
-    }
+    let vault = format!("vault-{backend}.db");
+    std::fs::copy(fixtures.join(&vault), dir.join(&vault)).unwrap();
+    std::fs::copy(fixtures.join("vault.key"), dir.join("vault.key")).unwrap();
     format!("{backend}:{}", target.display())
 }
 
@@ -249,7 +246,7 @@ fn verified(url: &str) -> kernable_store::Report {
     report
 }
 
-/// Checks what format 1 and 2 hold alike.
+/// Checks the context, schema, rejection and listeners a store holds.
 fn check_common(store: &dyn Store, backend: &str) {
     let events = store.read_all(0, 10).unwrap();
     assert_eq!(
@@ -268,83 +265,17 @@ fn check_common(store: &dyn Store, backend: &str) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn stores_of_format_1_migrate_verify_and_run() {
-    for (backend, file) in [("sqlite", "k.db"), ("file", "k.log")] {
-        let mut url = String::new();
-        let env = start_custom(&format!("compat-1-{backend}"), |config, dir| {
-            url = copy(1, backend, file, dir);
-            // A kernel of today refuses format 1 until it is migrated.
-            assert!(matches!(
-                kernable_store::open(&url).err(),
-                Some(kernable_store::Error::Format(1))
-            ));
-            assert_eq!(kernable_store::migrate(&url).unwrap(), 1);
-            assert_eq!(
-                kernable_store::migrate(&url).unwrap(),
-                kernable_store::FORMAT,
-                "migrating twice is harmless"
-            );
-            config.store = url.clone();
-        })
-        .await;
-        if backend == "file" {
-            let (_, path) = kernable_store::backend(&url);
-            assert!(
-                Path::new(&format!("{path}.format-1")).exists(),
-                "the old log is kept"
-            );
-        }
-
-        let report = verified(&url);
-        assert_eq!(
-            (report.events, report.commands, report.checkpoints),
-            (2, 4, 1),
-            "{backend}"
-        );
-        check_common(
-            kernable_store::open_read_only(&url).unwrap().as_ref(),
-            backend,
-        );
-
-        // A worker of today runs the pending command; the snapshot was dropped by the
-        // migration, so the stream is read in full.
-        let (tx, mut executions) = mpsc::unbounded_channel();
-        tokio::spawn(run_worker(
-            env.addr.clone(),
-            TestWorker {
-                schemas: vec![("orders.OrderPlaced".into(), 2)],
-                executions: Some(tx),
-                ..TestWorker::honest()
-            },
-        ));
-        let pending = signed(
-            Command {
-                context: Some(context()),
-                ..command("c4", "PlaceOrder", "o2")
-            },
-            &key(1),
-        );
-        let c4 = submit_with(&env.addr, pending, Wait::Committed)
-            .await
-            .unwrap();
-        assert_eq!(committed_versions(&c4), [1], "{backend}");
-        let c5 = signed(command("c5", "AddItem", "o1"), &key(1));
-        let c5 = submit_with(&env.addr, c5, Wait::Committed).await.unwrap();
-        assert_eq!(committed_versions(&c5), [3], "{backend}");
-        let seen: Vec<_> = std::iter::from_fn(|| executions.try_recv().ok()).collect();
-        assert_eq!(seen, [(None, 0), (None, 2)], "{backend}");
-        verified(&url);
-    }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn stores_of_format_2_migrate_verify_and_run_with_their_vault() {
+async fn stores_of_format_1_verify_and_run_with_their_vault() {
     for (backend, file) in [("sqlite", "k.db"), ("file", "k.log")] {
         let mut url = String::new();
         let mut vault_url = String::new();
-        let env = start_custom(&format!("compat-2-{backend}"), |config, dir| {
-            url = copy(2, backend, file, dir);
-            assert_eq!(kernable_store::migrate(&url).unwrap(), 2);
+        let env = start_custom(&format!("compat-vault-{backend}"), |config, dir| {
+            url = copy(1, backend, file, dir);
+            assert_eq!(
+                kernable_store::migrate(&url).unwrap(),
+                kernable_store::FORMAT,
+                "nothing to migrate"
+            );
             vault_url = format!(
                 "sqlite:{}",
                 dir.join(format!("vault-{backend}.db")).display()
@@ -360,7 +291,7 @@ async fn stores_of_format_2_migrate_verify_and_run_with_their_vault() {
         let report = verified(&url);
         assert_eq!(
             (report.events, report.commands, report.checkpoints),
-            (4, 6, 1),
+            (5, 7, 1),
             "{backend}"
         );
         let store = kernable_store::open_read_only(&url).unwrap();
@@ -410,11 +341,11 @@ async fn stores_of_format_2_migrate_verify_and_run_with_their_vault() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn stores_of_format_3_report_what_revoked_keys_signed() {
+async fn stores_of_format_1_report_what_revoked_keys_signed() {
     for (backend, file) in [("sqlite", "k.db"), ("file", "k.log")] {
         let mut url = String::new();
-        let env = start_custom(&format!("compat-3-{backend}"), |config, dir| {
-            url = copy(3, backend, file, dir);
+        let env = start_custom(&format!("compat-revoked-{backend}"), |config, dir| {
+            url = copy(1, backend, file, dir);
             config.store = url.clone();
             config.vault = Some(VaultConfig {
                 store: format!(

@@ -30,7 +30,6 @@ fn vectors() -> Value {
         sender_account: "a-1".into(),
         sender_session: "s-1".into(),
         on_behalf_of: "i-2".into(),
-        workspace: "w-1".into(),
         expected_version: Some(3),
         correlation_id: "r-1".into(),
         causation_id: "c-0".into(),
@@ -121,7 +120,7 @@ fn vectors() -> Value {
     let context_json = json!({
         "sender_tenant": context.sender_tenant, "sender_identity": context.sender_identity,
         "sender_account": context.sender_account, "sender_session": context.sender_session,
-        "on_behalf_of": context.on_behalf_of, "workspace": context.workspace,
+        "on_behalf_of": context.on_behalf_of,
         "expected_version": context.expected_version, "correlation_id": context.correlation_id,
         "causation_id": context.causation_id, "trace_id": context.trace_id,
         "bypass_authorization": context.bypass_authorization,
@@ -176,6 +175,34 @@ fn vectors() -> Value {
         "subscribe": entry(
             json!({"after_position": 7, "issued_at": 1_700_000_000_000i64, "event_types": ["OrderPlaced", "ItemAdded"]}),
             signing::subscribe_message(7, &["OrderPlaced".into(), "ItemAdded".into()], 1_700_000_000_000),
+        ),
+        "data_put": entry(
+            json!({"op": "put", "tenant_id": "t-1", "domain": "shop", "key": "invoices/o-1.pdf", "content_type": "application/pdf",
+                   "data_hex": hex::encode(b"%PDF-1.7"), "issued_at": 1_700_000_000_000i64}),
+            signing::data_message("put", &kernable_core::proto::DataRequest {
+                tenant_id: "t-1".into(),
+                domain: "shop".into(),
+                key: "invoices/o-1.pdf".into(),
+                data: b"%PDF-1.7".to_vec(),
+                content_type: "application/pdf".into(),
+                issued_at: 1_700_000_000_000,
+                client_sig: None,
+                protocol: kernable_core::PROTOCOL,
+            }),
+        ),
+        "cache_set": entry(
+            json!({"op": "set", "tenant_id": "t-1", "domain": "shop", "key": "rate/c-1", "value_hex": hex::encode(b"3"),
+                   "ttl_ms": 60_000, "issued_at": 1_700_000_000_000i64}),
+            signing::cache_message("set", &kernable_core::proto::CacheRequest {
+                tenant_id: "t-1".into(),
+                domain: "shop".into(),
+                key: "rate/c-1".into(),
+                value: b"3".to_vec(),
+                ttl_ms: 60_000,
+                issued_at: 1_700_000_000_000,
+                client_sig: None,
+                protocol: kernable_core::PROTOCOL,
+            }),
         ),
         "challenge": entry(json!({"nonce_hex": hex::encode(nonce)}), signing::challenge_message(&nonce)),
         "revocation": entry(

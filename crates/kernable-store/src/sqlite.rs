@@ -14,7 +14,7 @@ use std::{
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
-        Command, CommandResult, Committed, Event, ListenerRecord, NewEvent, Rejected,
+        Attribute, Command, CommandResult, Committed, Event, ListenerRecord, NewEvent, Rejected,
         RequestContext, RevocationRecord, Signature, command_result::Outcome,
     },
     signing::{self, GENESIS},
@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS events (
     created_at      INTEGER NOT NULL,
     producer_key_id TEXT    NOT NULL,
     producer_sig    BLOB    NOT NULL,
-    context         BLOB,             -- encoded RequestContext of the command
+    context         TEXT,             -- RequestContext of the command, as JSON
     vault_refs      TEXT    NOT NULL DEFAULT '', -- comma-separated
     erases          TEXT    NOT NULL DEFAULT '',
     prev_hash       BLOB    NOT NULL,
@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS commands (
     payload          BLOB    NOT NULL,
     client_key_id    TEXT,
     client_sig       BLOB,
-    context          BLOB,             -- encoded RequestContext
+    context          TEXT,             -- RequestContext, as JSON
     vault_refs       TEXT    NOT NULL DEFAULT '', -- comma-separated
     status           TEXT    NOT NULL, -- pending | committed | rejected
     result           BLOB,             -- encoded CommandResult once completed
@@ -194,7 +194,7 @@ impl Store for SqliteStore {
                 cmd.payload,
                 key_id,
                 sig,
-                cmd.context.as_ref().map(Message::encode_to_vec),
+                cmd.context.as_ref().map(context_json),
                 cmd.domain,
                 now_ms,
                 cmd.vault_refs.join(",")
@@ -310,7 +310,7 @@ impl Store for SqliteStore {
                     producer_sig.sig,
                     prev,
                     event.hash,
-                    event.context.as_ref().map(Message::encode_to_vec),
+                    event.context.as_ref().map(context_json),
                     event.domain,
                     event.schema,
                     event.vault_refs.join(","),
@@ -537,13 +537,95 @@ fn split_refs(joined: String) -> Vec<String> {
     joined.split(',').map(str::to_owned).collect()
 }
 
-fn context_from(bytes: Option<Vec<u8>>) -> rusqlite::Result<Option<RequestContext>> {
-    bytes
-        .map(|b| RequestContext::decode(b.as_slice()))
-        .transpose()
-        .map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Blob, e.into())
-        })
+/// A request context as JSON with the field names of `kernable.proto`, so the database can be
+/// read without it (`json_extract(context, '$.sender_identity')`). Fields left at their
+/// defaults are omitted. Hashes and signatures cover the fields, not this text.
+fn context_json(c: &RequestContext) -> String {
+    use serde_json::Value;
+    let text = |v: &str| (!v.is_empty()).then(|| Value::from(v));
+    let attributes = c
+        .attributes
+        .iter()
+        .map(|a| serde_json::json!({ "key": a.key, "value": a.value }))
+        .collect::<Vec<_>>();
+    let fields = [
+        ("sender_tenant", text(&c.sender_tenant)),
+        ("sender_identity", text(&c.sender_identity)),
+        ("sender_account", text(&c.sender_account)),
+        ("sender_session", text(&c.sender_session)),
+        ("on_behalf_of", text(&c.on_behalf_of)),
+        ("expected_version", c.expected_version.map(Value::from)),
+        ("correlation_id", text(&c.correlation_id)),
+        ("causation_id", text(&c.causation_id)),
+        ("trace_id", text(&c.trace_id)),
+        (
+            "bypass_authorization",
+            c.bypass_authorization.then_some(Value::Bool(true)),
+        ),
+        (
+            "attributes",
+            (!attributes.is_empty()).then_some(Value::Array(attributes)),
+        ),
+    ];
+    let m: serde_json::Map<String, Value> = fields
+        .into_iter()
+        .filter_map(|(name, v)| Some((name.to_owned(), v?)))
+        .collect();
+    serde_json::Value::Object(m).to_string()
+}
+
+fn context_from(json: Option<String>) -> rusqlite::Result<Option<RequestContext>> {
+    json.map(|j| parse_context(&j)).transpose().map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, e.into())
+    })
+}
+
+fn parse_context(json: &str) -> std::result::Result<RequestContext, String> {
+    let v: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    let field = |name: &str| v.get(name).filter(|f| !f.is_null());
+    let str = |name: &str| match field(name) {
+        None => Ok(String::new()),
+        Some(f) => f
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| format!("context {name}: not a string")),
+    };
+    let attributes = match field("attributes") {
+        None => Vec::new(),
+        Some(a) => a
+            .as_array()
+            .ok_or("context attributes: not an array")?
+            .iter()
+            .map(|a| match (a["key"].as_str(), a["value"].as_str()) {
+                (Some(key), Some(value)) => Ok(Attribute {
+                    key: key.into(),
+                    value: value.into(),
+                }),
+                _ => Err("context attribute: needs a key and a value".to_owned()),
+            })
+            .collect::<std::result::Result<_, _>>()?,
+    };
+    Ok(RequestContext {
+        sender_tenant: str("sender_tenant")?,
+        sender_identity: str("sender_identity")?,
+        sender_account: str("sender_account")?,
+        sender_session: str("sender_session")?,
+        on_behalf_of: str("on_behalf_of")?,
+        expected_version: field("expected_version")
+            .map(|f| f.as_u64().ok_or("context expected_version: not a number"))
+            .transpose()?,
+        correlation_id: str("correlation_id")?,
+        causation_id: str("causation_id")?,
+        trace_id: str("trace_id")?,
+        bypass_authorization: field("bypass_authorization")
+            .map(|f| {
+                f.as_bool()
+                    .ok_or("context bypass_authorization: not a boolean")
+            })
+            .transpose()?
+            .unwrap_or(false),
+        attributes,
+    })
 }
 
 fn read_events(
@@ -611,33 +693,9 @@ fn stored_result(conn: &Connection, command_id: &str) -> Result<Option<CommandRe
 
 /// Upgrades a SQLite store to [`FORMAT`]; returns the format it had.
 pub(crate) fn migrate(path: &Path) -> Result<u32> {
-    let mut conn = Connection::open(path)?;
-    let format: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    match format {
-        FORMAT => {}
-        1 => {
-            let tx = conn.transaction()?;
-            tx.execute_batch(
-                "ALTER TABLE events ADD COLUMN vault_refs TEXT NOT NULL DEFAULT '';
-                 ALTER TABLE events ADD COLUMN erases TEXT NOT NULL DEFAULT '';
-                 ALTER TABLE commands ADD COLUMN vault_refs TEXT NOT NULL DEFAULT '';
-                 DROP TABLE IF EXISTS snapshots;
-                 PRAGMA user_version = 2;",
-            )?;
-            tx.commit()?;
-            conn.execute_batch("VACUUM")?; // the dropped snapshots leave no traces in the file
-            migrate(path)?;
-        }
-        2 => {
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS revocations (
-                     key_id TEXT PRIMARY KEY,
-                     record BLOB NOT NULL
-                 ) STRICT;
-                 PRAGMA user_version = 3;",
-            )?;
-        }
-        found => return Err(Error::Format(found)),
+    let conn = Connection::open(path)?;
+    match conn.pragma_query_value(None, "user_version", |r| r.get(0))? {
+        FORMAT => Ok(FORMAT),
+        found => Err(Error::Format(found)),
     }
-    Ok(format)
 }

@@ -21,6 +21,7 @@ Step-by-step guides for tasks you will meet once your application runs. They ass
 
 - [Handle an erasure request](./erasure)
 - [Passwords and other secrets](./secrets)
+- [Store files and cache values](./data-and-cache)
 
 **Extending kernable**
 

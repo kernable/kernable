@@ -14,6 +14,7 @@ sha2.workspace = true
 aes-gcm.workspace = true
 getrandom.workspace = true
 hex.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

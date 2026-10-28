@@ -13,9 +13,11 @@ BIN = os.path.join(ROOT, "target", "debug")
 
 
 class TestKernel:
-    def __init__(self, command_types: list[str], extra_flags: list[str] | None = None):
+    def __init__(self, command_types: list[str], extra_flags: list[str] | None = None,
+                 grants: list[str] | None = None):
         """The app key may run `command_types` and do everything else; `extra_flags` go to
-        `kernable start`, e.g. `["--lease-ttl-ms", "500"]`."""
+        `kernable start`, e.g. `["--lease-ttl-ms", "500"]`; `grants` are more permissions for it,
+        e.g. `["shop.*"]` for every action in the domain shop (files and cache too)."""
         self.dir = tempfile.mkdtemp(prefix="kn-", dir="/tmp")  # short: Unix socket path limit
         self.socket = f"{self.dir}/k.sock"
         self.url = f"unix:{self.socket}"
@@ -27,7 +29,7 @@ class TestKernel:
             self._kernable("keys", "new", name)
         actions = ("submit", "subscribe", "listen", "query", "answer", "check", "vault_read", "vault_erase")
         self._kernable("grant", "root.key", "app.pub", f"run={','.join(command_types)}",
-                       *(f"{a}=*" for a in actions))
+                       *(f"{a}=*" for a in actions), *(grants or []))
         with open(f"{self.dir}/vault.key", "w") as f:
             f.write(os.urandom(32).hex())
         self.flags = ["--root", "root.pub", "--store", self.store, "--listen", self.url,

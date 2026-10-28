@@ -26,9 +26,11 @@
 //! ```
 
 mod context;
+mod data;
 mod domain;
 mod error;
 mod listener;
+mod log;
 mod store;
 mod vault;
 mod worker;
@@ -54,6 +56,7 @@ use serde_json::Value;
 use tonic::{metadata::MetadataValue, transport::Channel};
 
 pub use context::{RequestContext, Timestamp};
+pub use data::{Cache, Data, Files};
 pub use domain::{
     Aggregate, ApplyContext, CommandContext, CommandMeta, CommandSchema, Domain, EventMeta,
     EventSchema, FoldEvent, NewEvent, State, domain,
@@ -130,7 +133,7 @@ impl Options {
         self
     }
 
-    /// Default tenant for `submit` and `query` (default `default`).
+    /// Default tenant for `submit`, `query`, files and the cache (default `default`).
     pub fn tenant(mut self, tenant: impl Into<String>) -> Options {
         self.tenant = tenant.into();
         self
@@ -182,6 +185,7 @@ pub(crate) struct Client {
     key: Arc<SigningKey>,
     key_id: String,
     grant: Option<MetadataValue<tonic::metadata::Ascii>>,
+    log: log::Log,
 }
 
 impl Client {
@@ -250,12 +254,14 @@ impl Kernable {
         };
         let channel = transport::connect_lazy(&url, tls.as_ref())
             .map_err(|e| Error::Config(format!("kernel {url}: {e}")))?;
+        let log = log::Log::new(&url, &key_file);
         Ok(Kernable {
             client: Client {
                 channel,
                 key_id: signing::key_id(&key.verifying_key()),
                 key: Arc::new(key),
                 grant,
+                log,
             },
             tenant: options.tenant,
             context: options.context,
@@ -282,6 +288,18 @@ impl Kernable {
     /// processes its events with `run()`. Each call gives a new handle.
     pub fn listener(&self, listener: &Listener) -> ListenerHandle {
         ListenerHandle::new(self.client.clone(), listener)
+    }
+
+    /// Files of the default tenant: bytes up to 16 MiB per key, kept by the kernel outside the
+    /// signed event log; see [`Files`].
+    pub fn data(&self) -> Files {
+        Files::new(self.client.clone(), self.tenant.clone())
+    }
+
+    /// The kernel's cache for the default tenant: values up to 1 MiB per key, optionally with a
+    /// TTL, lost when the kernel restarts; see [`Cache`].
+    pub fn cache(&self) -> Cache {
+        Cache::new(self.client.clone(), self.tenant.clone())
     }
 
     /// Runs a command and returns its outcome; see [`Submit::wait`].

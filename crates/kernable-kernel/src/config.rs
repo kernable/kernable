@@ -34,6 +34,18 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "Where snapshots live: `sqlite:<path>` or `memory:` (rebuilt after a restart).",
     ),
     (
+        "--data-store",
+        "KERNABLE_DATA_STORE",
+        "file:data",
+        "Where files of the data service live: `file:<directory>` or `memory:` (gone after a restart). Created on the first file.",
+    ),
+    (
+        "--cache-store",
+        "KERNABLE_CACHE_STORE",
+        "memory:",
+        "Where the cache service keeps values: `memory:`, emptied by a restart.",
+    ),
+    (
         "--vault-key",
         "KERNABLE_VAULT_KEY",
         "",
@@ -130,6 +142,10 @@ pub struct Config {
     pub drain_timeout_ms: u64,
     pub tls: Option<Tls>,
     pub snapshots: String,
+    /// Files of the data service: `file:<directory>` or `memory:`.
+    pub data: String,
+    /// Values of the cache service: `memory:`.
+    pub cache: String,
     pub vault: Option<VaultConfig>,
     pub metrics_listen: Option<String>,
 }
@@ -232,6 +248,8 @@ impl Config {
             drain_timeout_ms: number("--drain-timeout-ms")?,
             tls,
             snapshots: get("--snapshots").expect("has a default"),
+            data: get("--data-store").expect("has a default"),
+            cache: get("--cache-store").expect("has a default"),
             vault: get("--vault-key").map(|key| VaultConfig {
                 store: get("--vault-store").expect("has a default"),
                 key: key.into(),

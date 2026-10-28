@@ -27,10 +27,14 @@ class Msg:
         self.buf += struct.pack(">Q", n)
         return self
 
+    def i64(self, n: int) -> "Msg":
+        self.buf += struct.pack(">q", n)
+        return self
+
     def context(self, c) -> "Msg":
         """A RequestContext message; an unset one encodes like an empty one."""
         self.str(c.sender_tenant).str(c.sender_identity).str(c.sender_account).str(c.sender_session)
-        self.str(c.on_behalf_of).str(c.workspace)
+        self.str(c.on_behalf_of)
         if c.HasField("expected_version"):
             self.u64(1).u64(c.expected_version)
         else:
@@ -85,9 +89,21 @@ def snapshot_message(c, version: int, schema: str, state: bytes) -> bytes:
 
 def query_message(q) -> bytes:
     m = Msg("kernable.v1.query").str(q.query_id).str(q.tenant_id).str(q.domain).str(q.query_type).bytes(q.payload)
-    m.context(q.context).u64(q.min_position)
-    m.buf += struct.pack(">q", q.issued_at)
-    return bytes(m.buf)
+    return bytes(m.context(q.context).u64(q.min_position).i64(q.issued_at).buf)
+
+
+def data_message(op: str, r) -> bytes:
+    """What a client signs to put, get or delete a file (`op`: `put`, `get`, `delete`); the data
+    is signed as its SHA-256 hash."""
+    return bytes(Msg(f"kernable.v1.data.{op}").str(r.tenant_id).str(r.domain).str(r.key).str(r.content_type)
+                 .bytes(hashlib.sha256(r.data).digest()).i64(r.issued_at).buf)
+
+
+def cache_message(op: str, r) -> bytes:
+    """What a client signs to set, get or delete a cache value (`op`: `set`, `get`, `delete`), with
+    the value's SHA-256 hash as for data."""
+    return bytes(Msg(f"kernable.v1.cache.{op}").str(r.tenant_id).str(r.domain).str(r.key)
+                 .bytes(hashlib.sha256(r.value).digest()).u64(r.ttl_ms).i64(r.issued_at).buf)
 
 
 def rejection_message(command_id: str, reason) -> bytes:

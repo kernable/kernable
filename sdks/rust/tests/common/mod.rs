@@ -39,8 +39,9 @@ pub struct TestKernel {
 }
 
 impl TestKernel {
-    /// The app key may run `command_types` (`Orders.*`, `Orders.PlaceOrder`) and do everything
-    /// else. `extra` goes to `kernable start`, e.g. `["--lease-ttl-ms", "500"]`.
+    /// The app key may run `command_types` (`Orders.*`, `Orders.PlaceOrder`), use files and the
+    /// cache of `shop`, and do everything else. `extra` goes to `kernable start`, e.g.
+    /// `["--lease-ttl-ms", "500"]`.
     pub fn new(command_types: &[&str], extra: &[&str]) -> TestKernel {
         // Short: Unix socket paths are limited to ~104 bytes.
         let dir = PathBuf::from(format!("/tmp/kn-rs-{}-{}", std::process::id(), unique()));
@@ -76,6 +77,8 @@ impl TestKernel {
         .map(|a| format!("{a}=*"))
         .collect();
         grant.extend(everything.iter().map(String::as_str));
+        // Files and the cache in the `shop` domain only, so other domains are refused.
+        grant.extend(["data_read=shop.*", "data_write=shop.*", "cache=shop.*"]);
         kernable(&grant);
         let mut vault_key = [0u8; 32];
         getrandom_fill(&mut vault_key);

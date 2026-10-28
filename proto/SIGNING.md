@@ -17,7 +17,7 @@ A message is a concatenation of fields:
 |---|---|
 | `bytes` / `str` | `u32` big-endian length, then the raw bytes (strings as UTF-8) |
 | `u64` / `i64` | 8 bytes big-endian (two's complement for `i64`) |
-| `context` | a `RequestContext` (an absent one encodes like an empty one): `sender_tenant`, `sender_identity`, `sender_account`, `sender_session`, `on_behalf_of`, `workspace`, then `u64` 1 and `expected_version: u64` if set or `u64` 0 if not, then `correlation_id`, `causation_id`, `trace_id`, `bypass_authorization` as `u64` 0 or 1, `attribute_count: u64`, then per attribute `key`, `value` (in the given order) |
+| `context` | a `RequestContext` (an absent one encodes like an empty one): `sender_tenant`, `sender_identity`, `sender_account`, `sender_session`, `on_behalf_of`, then `u64` 1 and `expected_version: u64` if set or `u64` 0 if not, then `correlation_id`, `causation_id`, `trace_id`, `bypass_authorization` as `u64` 0 or 1, `attribute_count: u64`, then per attribute `key`, `value` (in the given order) |
 
 Each message starts with a `str` **tag** for domain separation. Payloads are signed as the exact bytes sent; no JSON canonicalization.
 
@@ -32,6 +32,8 @@ Each message starts with a `str` **tag** for domain separation. Payloads are sig
 | Worker | `kernable.v1.snapshot` | `tenant_id`, `domain`, `aggregate_type`, `aggregate_id`, `version: u64`, `schema`, `state` |
 | Worker, listener | `kernable.v1.challenge` | `nonce` |
 | Subscriber | `kernable.v1.subscribe` | `after_position: u64`, `issued_at: i64`, `type_count: u64`, then per type `event_type` |
+| Data client | `kernable.v1.data.<op>` (`put`, `get`, `delete`) | `tenant_id`, `domain`, `key`, `content_type`, `sha256(data)` (32 bytes, as a length-prefixed field), `issued_at: i64`; get and delete sign empty `content_type` and the hash of empty data |
+| Cache client | `kernable.v1.cache.<op>` (`set`, `get`, `delete`) | `tenant_id`, `domain`, `key`, `sha256(value)`, `ttl_ms: u64`, `issued_at: i64`; get and delete sign the hash of an empty value and `ttl_ms` 0 |
 | Kernel | `kernable.v1.checkpoint` | `global_position: u64`, `chain_hash`, `created_at: i64` |
 | Kernel | `kernable.v1.revocation` | `key_id`, `since: i64`, `created_at: i64` |
 | Root key | `kernable.v1.grant` | `key_id`, `succeeds`, `issued_at: i64`, `permission_count: u64`, then per permission `action`, `type_count: u64`, every type |
@@ -44,6 +46,8 @@ A query is valid for 60 s around `issued_at`, like a subscribe request. Answers 
 Listener acknowledgements are not signed. They travel on a stream whose key was proven by the challenge, and they only affect waiting and ordering, never stored data.
 
 A subscribe request is valid for 60 s around `issued_at`. Within that window a captured request could be replayed, but it only grants the read access the key already has. Transport encryption (mutual TLS over TCP) closes this gap.
+
+Data and cache requests are valid for 60 s around `issued_at`, like a subscribe request. The operation is part of the tag, so a signed get cannot be replayed as a delete.
 
 A grant says what a key may do. A root key signs it; the process of the grantee sends it, hex-encoded, in the gRPC metadata entry `kernable-grant` with every call. The grant is not part of any other signed message: the kernel checks that the grant names the key that signed the request. A grant has no time window; a newer one (by `issued_at`) replaces an older one for the same key. A revoke request is valid for 60 s around `issued_at`; the kernel then stores the revocation signed with its own key (`kernable.v1.revocation`). Only root-key tooling produces grants and revoke requests, so an SDK does not need to reproduce the `grant` and `revoke` test vectors.
 
@@ -66,7 +70,7 @@ A command or event keeps personal and secret values in the vault instead of its 
 
 The salt makes a reference reveal nothing about its value, also once the value is erased.
 
-**Appended only when set.** The vault fields came with data format 2. They are appended to signed messages and to the event hash only when they are set, so signatures and hashes made before stay valid:
+**Appended only when set.** The vault fields are appended to signed messages and to the event hash only when they are set, so a message without vault data does not depend on them:
 
 - **Command:** if `vault_refs` is not empty, `count: u64`, then every ref.
 - **Result:** if any event has `vault_refs` or `erases`, then per event `count: u64`, every ref, and `erases`.

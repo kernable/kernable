@@ -14,7 +14,6 @@ pub struct RequestContext {
     pub sender_session: String,
     /// Authorize as this identity of the target tenant; the sender stays the real principal.
     pub on_behalf_of: String,
-    pub workspace: String,
     /// Reject the command (`version_mismatch`) unless the aggregate is at this version.
     pub expected_version: Option<u64>,
     /// Shared by everything one original request causes; defaults to the command ID.
@@ -51,7 +50,6 @@ impl RequestContext {
             sender_account: self.sender_account.clone(),
             sender_session: self.sender_session.clone(),
             on_behalf_of: self.on_behalf_of.clone(),
-            workspace: self.workspace.clone(),
             expected_version: self.expected_version,
             correlation_id: self.correlation_id.clone(),
             causation_id: self.causation_id.clone(),
@@ -78,7 +76,6 @@ impl RequestContext {
             sender_account: c.sender_account.clone(),
             sender_session: c.sender_session.clone(),
             on_behalf_of: c.on_behalf_of.clone(),
-            workspace: c.workspace.clone(),
             expected_version: c.expected_version,
             correlation_id: c.correlation_id.clone(),
             causation_id: c.causation_id.clone(),

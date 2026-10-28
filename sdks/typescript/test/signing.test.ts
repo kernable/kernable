@@ -5,9 +5,11 @@ import { test } from "node:test";
 import type { WireCommand } from "../src/rpc.ts";
 import {
   Key,
+  cacheMessage,
   challengeMessage,
   checkpointMessage,
   commandMessage,
+  dataMessage,
   derivedId,
   queryMessage,
   eventHash,
@@ -48,6 +50,13 @@ test("message layouts and signatures match the test vectors", () => {
   check("subscribe", subscribeMessage(sub.after_position, sub.event_types, sub.issued_at));
   const cp = v.checkpoint.input;
   check("checkpoint", checkpointMessage(cp.global_position, hex(cp.chain_hash_hex), cp.created_at));
+});
+
+test("data and cache messages match the test vectors", () => {
+  const d = v.data_put.input;
+  check("data_put", dataMessage(d.op, { ...d, data: hex(d.data_hex) }));
+  const c = v.cache_set.input;
+  check("cache_set", cacheMessage(c.op, { ...c, value: hex(c.value_hex) }));
 });
 
 test("vault references and vault fields in signed messages match the test vectors", () => {

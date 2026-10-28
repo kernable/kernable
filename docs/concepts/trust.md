@@ -24,6 +24,9 @@ kernable grant root.key app.pub 'submit=shop.*' 'listen=shop.*'   # writes app.g
 | `privileged` | privileged request context switches it may set (`bypass_authorization`) |
 | `vault_read` | events and commands whose vault values it gets as a listener or middleware |
 | `vault_erase` | events that erase a subject it may write as a worker |
+| `data_read` | domains whose files it may read (`shop.*`) |
+| `data_write` | domains whose files it may put and delete |
+| `cache` | domains whose cache it may use |
 
 A type is a qualified type (`shop.PlaceOrder`), a whole domain (`shop.*`) or everything (`*`). A bare type (`'shop.*'`) means every action on it.
 

@@ -47,15 +47,14 @@ message RequestContext {
   string sender_account = 3;
   string sender_session = 4;
   string on_behalf_of = 5; // authorize as this identity of the target tenant instead
-  string workspace = 6;
   // Reject the command unless the aggregate is at this version when it runs.
-  optional uint64 expected_version = 7;
-  string correlation_id = 8; // shared by everything one original request causes
-  string causation_id = 9;   // the command that caused this one, if any
-  string trace_id = 10;
+  optional uint64 expected_version = 6;
+  string correlation_id = 7; // shared by everything one original request causes
+  string causation_id = 8;   // the command that caused this one, if any
+  string trace_id = 9;
   // Privileged switch: only keys granted `privileged` for it may set it.
-  bool bypass_authorization = 11;
-  repeated Attribute attributes = 12; // business data only, never security decisions
+  bool bypass_authorization = 10;
+  repeated Attribute attributes = 11; // business data only, never security decisions
 }
 
 message Attribute {
@@ -132,8 +131,9 @@ message Grant {
 }
 
 // Actions: submit, run, subscribe, listen, query, answer, check, privileged, vault_read,
-// vault_erase, or `*` for all. Types: `*`, `domain.*` or `domain.Type` (for privileged: the
-// switch, `bypass_authorization`).
+// vault_erase, data_read, data_write, cache, or `*` for all. Types: `*`, `domain.*` or
+// `domain.Type` (for privileged: the switch, `bypass_authorization`; for data_read, data_write
+// and cache: a domain, `domain.*`).
 message Permission {
   string action = 1;
   repeated string types = 2;
@@ -251,6 +251,60 @@ message QueryResult {
     bytes response = 2;
     Rejected rejected = 3;
   }
+}
+
+// ---- data and cache ----
+
+// Files of a domain, kept by the kernel under (tenant, domain, key), apart from the event log:
+// they are neither signed into it nor erased with the vault. Every request is signed by a key
+// granted data_read (get) or data_write (put, delete) for the domain, over
+// `kernable.v1.data.<op>`, and valid 60 s around issued_at.
+service DataService {
+  rpc PutData(DataRequest) returns (DataResult);
+  rpc GetData(DataRequest) returns (DataResult);
+  rpc DeleteData(DataRequest) returns (DataResult);
+}
+
+message DataRequest {
+  string tenant_id = 1;
+  string domain = 2;
+  string key = 3;          // any string of 1 to 512 bytes
+  bytes data = 4;          // put only; at most 16 MiB
+  string content_type = 5; // put only, e.g. `application/pdf`
+  int64 issued_at = 6;     // ms since epoch
+  Signature client_sig = 7;
+  uint32 protocol = 8;     // not signed
+}
+
+message DataResult {
+  bool found = 1;          // get and delete: whether the file existed; put: true
+  bytes data = 2;          // get only
+  string content_type = 3; // get only
+}
+
+// A shared cache of a domain: values under (tenant, domain, key) that may expire. Not durable;
+// a kernel restart may empty it. Signed like DataService requests over `kernable.v1.cache.<op>`,
+// by a key granted cache for the domain.
+service CacheService {
+  rpc SetCache(CacheRequest) returns (CacheResult);
+  rpc GetCache(CacheRequest) returns (CacheResult);
+  rpc DeleteCache(CacheRequest) returns (CacheResult);
+}
+
+message CacheRequest {
+  string tenant_id = 1;
+  string domain = 2;
+  string key = 3;        // any string of 1 to 512 bytes
+  bytes value = 4;       // set only; at most 1 MiB
+  uint64 ttl_ms = 5;     // set only; 0 = until deleted or the kernel restarts
+  int64 issued_at = 6;   // ms since epoch
+  Signature client_sig = 7;
+  uint32 protocol = 8;   // not signed
+}
+
+message CacheResult {
+  bool found = 1;  // get and delete: whether the key had a live value; set: true
+  bytes value = 2; // get only
 }
 
 // ---- listeners ----

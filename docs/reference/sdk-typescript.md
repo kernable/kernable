@@ -34,7 +34,6 @@ event it causes. `attributes` are business data only, never security decisions.
 - `senderAccount?: string`
 - `senderSession?: string`
 - `onBehalfOf?: string`: Authorize as this identity of the target tenant; the sender stays the real principal.
-- `workspace?: string`
 - `expectedVersion?: number`: Reject the command (`version_mismatch`) unless the aggregate is at this version.
 - `correlationId?: string`: Shared by everything one original request causes; defaults to the command ID.
 - `causationId?: string`: The command that caused this one.
@@ -275,6 +274,8 @@ belongs to a domain and produces events only of that domain; create it with
 
 
 
+- `readonly data: Data`: Files of a domain kept by the kernel, e.g. invoices; see `Data`.
+- `readonly cache: Cache`: The shared cache of a domain; see `Cache`.
 - `use(...domains: Domain[]): this`: Seals the vault fields of these domains' commands when submitting them; see `Domain.command`.
 - `worker(...aggregates: Aggregate<any>[]): Worker`
 - `async submit(options: SubmitOptions): Promise<Outcome>`: Runs a command and returns its outcome; see `SubmitOptions.wait`.
@@ -283,6 +284,46 @@ belongs to a domain and produces events only of that domain; create it with
 - `listener(listener: Listener): ListenerHandle`: Runs a listener defined with `Domain.readModel` or `Domain.reactor` over this connection: `await kernable.listener(Carts).run()`. Handlers added to the definition later still count until `run()` connects.
 - `subscribe(options: SubscribeOptions, handler: (event: StoredEvent) => void | Promise<void>): Subscription`: Streams committed events after `options.after` (backlog first, then live) to `handler`, one at a time. Reconnects and resumes after the last handled event; if the handler throws, that event is delivered again. Persist `position` yourself to resume across restarts.
 - `close(): void`: Closes the connection now; only needed in a long-running process that discards the client.
+
+### DataOptions
+
+
+
+- `tenant?: string`: Default: the client's tenant.
+
+### PutDataOptions
+
+
+
+- `contentType?: string`: Default: `text/plain; charset=utf-8` for a string, else `application/octet-stream`.
+
+### Data
+
+Files of a domain kept by the kernel under `(tenant, domain, key)`, at most 16 MiB each: PDFs,
+images, exports. Reading needs a grant of `data_read` for the domain (`shop.*`), putting and
+deleting one of `data_write`. Files are not part of the signed event log and are not erased
+with the vault: delete a person's files yourself when erasing them.
+
+- `async put(domain: string, key: string, data: Uint8Array | string, options: PutDataOptions = {}): Promise<void>`: Stores `data` under `key`, replacing a file there; a string is stored as UTF-8.
+- `async get(domain: string, key: string, options: DataOptions = {}): Promise<{ data: Uint8Array; contentType: string } | undefined>`: The file under `key`, or `undefined` if there is none.
+- `async delete(domain: string, key: string, options: DataOptions = {}): Promise<boolean>`: Deletes the file under `key`; returns whether there was one.
+
+### SetCacheOptions
+
+
+
+- `ttlMs?: number`: Milliseconds until the value expires; default: until deleted or the kernel restarts.
+
+### Cache
+
+The shared cache of a domain: values of at most 1 MiB under `(tenant, domain, key)` that may
+expire, e.g. rates or tokens shared by several processes. Needs a grant of `cache` for the
+domain (`shop.*`). The cache lives in the kernel's memory: a restart empties it. Values are not
+part of the signed event log and are not erased with the vault.
+
+- `async set(domain: string, key: string, value: Uint8Array | string, options: SetCacheOptions = {}): Promise<void>`: Stores `value` under `key`, replacing a value there; a string is stored as UTF-8.
+- `async get(domain: string, key: string, options: DataOptions = {}): Promise<Uint8Array | undefined>`: The live value under `key`, or `undefined` if there is none or it expired.
+- `async delete(domain: string, key: string, options: DataOptions = {}): Promise<boolean>`: Deletes the value under `key`; returns whether there was a live one.
 
 ### SubscribeOptions
 

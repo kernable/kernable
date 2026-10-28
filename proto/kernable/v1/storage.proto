@@ -13,9 +13,8 @@ message LogRecord {
     RejectedRecord rejected = 3;
     CheckpointRecord checkpoint = 4;
     ListenerRecord listener = 5;
-    SnapshotRecord snapshot = 6; // format 1 only: snapshots now live in the snapshot store
-    FormatRecord format = 7;
-    RevocationRecord revocation = 8; // format 3
+    FormatRecord format = 6;
+    RevocationRecord revocation = 7;
   }
 }
 
@@ -73,7 +72,7 @@ message ListenerRecord {
   Middleware middleware = 7; // kept while disconnected, so the chain fails closed
 }
 
-// The latest snapshot of a stream; the latest record per stream wins.
+// The latest snapshot of a stream, in the snapshot store; the latest record per stream wins.
 message SnapshotRecord {
   string tenant_id = 1;
   string domain = 7;
@@ -81,5 +80,4 @@ message SnapshotRecord {
   string aggregate_id = 3;
   Snapshot snapshot = 4;
   bytes event_hash = 5; // hash of the stream's event at snapshot.version
-  reserved 6; // `removed`: snapshots left the log in format 2
 }
