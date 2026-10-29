@@ -23,7 +23,7 @@ use kernable_core::{
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::{
-    Checkpoint, Enqueued, Error, FORMAT, Pending, Result, Store,
+    Checkpoint, Enqueued, Error, FORMAT, Pending, Result, Store, StreamId, StreamSummary,
     verify::{Report, Verifier},
 };
 
@@ -373,6 +373,55 @@ impl Store for SqliteStore {
     }
 
     /// Completes the pending command as rejected by the business logic.
+    fn streams(&self, limit: usize) -> Result<Vec<StreamSummary>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT tenant_id, domain, aggregate_type, aggregate_id, MAX(version), MAX(created_at)
+             FROM events GROUP BY tenant_id, domain, aggregate_type, aggregate_id
+             ORDER BY MAX(global_position) DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit as i64], |r| {
+            Ok(StreamSummary {
+                stream: StreamId {
+                    tenant_id: r.get(0)?,
+                    domain: r.get(1)?,
+                    aggregate_type: r.get(2)?,
+                    aggregate_id: r.get(3)?,
+                },
+                version: r.get(4)?,
+                last_at: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    fn event_sources(&self) -> Result<Vec<(String, String, String)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT domain, aggregate_type, event_type FROM events ORDER BY 1, 2, 3",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    fn command(&self, command_id: &str) -> Result<Option<Pending>> {
+        Ok(self
+            .conn()
+            .query_row(
+                &format!(
+                    "SELECT {COMMAND_COLUMNS}, created_at FROM commands WHERE command_id = ?1"
+                ),
+                [command_id],
+                |r| {
+                    Ok(Pending {
+                        command: command_from_row(r)?,
+                        received_at: r.get(11)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
     fn event_schemas(&self) -> Result<Vec<(String, u32)>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(

@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kernable</title>
+<style>
+  :root {
+    --bg: #f7f7f5; --panel: #ffffff; --line: #e3e3de; --text: #1d1d1b; --muted: #6d6d68;
+    --accent: #3b5bdb; --ok: #2f9e44; --warn: #e8890c; --bad: #e03131; --dyn: #8f8f88; --live: #1c9bb8;
+    --edge: #b9b9b2; --check: #c2255c; --code: #f1f1ed;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151515; --panel: #1d1d1d; --line: #2f2f2f; --text: #e9e9e6; --muted: #9a9a95;
+      --accent: #7b93ff; --ok: #51cf66; --warn: #fcc419; --bad: #ff6b6b; --dyn: #77776f; --live: #3bc9db;
+      --edge: #4a4a46; --check: #f06595; --code: #262626;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; padding: 10px 20px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0; letter-spacing: .02em; }
+  header .meta { color: var(--muted); font-size: 13px; }
+  nav { display: flex; gap: 4px; margin-left: auto; }
+  nav button { background: none; border: 1px solid transparent; color: var(--muted); padding: 5px 12px; border-radius: 6px; cursor: pointer; font: inherit; }
+  nav button.on { color: var(--text); border-color: var(--line); background: var(--bg); }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--line); font-size: 13px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
+  main { padding: 16px 20px; }
+  .view { display: none; } .view.on { display: block; }
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .mapwrap { display: flex; gap: 16px; align-items: flex-start; }
+  .map { flex: 1; overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+  svg text { fill: var(--text); font: 12px system-ui, sans-serif; }
+  svg .head { fill: var(--muted); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; }
+  svg .node rect { fill: var(--panel); stroke: var(--line); }
+  svg .node.sel rect { stroke: var(--accent); stroke-width: 2; }
+  svg .node { cursor: pointer; }
+  svg .sub { fill: var(--muted); font-size: 11px; }
+  svg path.edge { fill: none; stroke: var(--edge); stroke-width: 1.3; }
+  svg path.edge.own { stroke-dasharray: 3 4; }
+  svg path.edge.check { stroke: var(--check); stroke-dasharray: 5 4; }
+  svg path.edge.hi { stroke: var(--accent); stroke-width: 2; }
+  svg path.edge.check.hi { stroke: var(--check); stroke-width: 2; }
+  svg .dim { opacity: .25; }
+  aside { width: 320px; flex: none; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; position: sticky; top: 70px; max-height: calc(100vh - 90px); overflow: auto; }
+  aside h3 { margin: 0 0 4px; font-size: 15px; word-break: break-all; }
+  aside .kind { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 12px 0 0; font-size: 13px; }
+  dt { color: var(--muted); } dd { margin: 0; word-break: break-word; }
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; margin-bottom: 20px; }
+  th, td { text-align: left; padding: 7px 12px; border-bottom: 1px solid var(--line); vertical-align: top; font-size: 13px; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
+  tr:last-child td { border-bottom: none; }
+  h2 { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin: 4px 0 8px; font-weight: 600; }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .history { display: flex; gap: 16px; align-items: flex-start; }
+  .streams { width: 300px; flex: none; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; max-height: calc(100vh - 110px); display: flex; flex-direction: column; position: sticky; top: 70px; }
+  .streams input { margin: 10px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }
+  .streams ul { list-style: none; margin: 0; padding: 0 0 6px; overflow: auto; }
+  .streams li { padding: 6px 12px; cursor: pointer; border-left: 3px solid transparent; }
+  .streams li:hover { background: var(--bg); }
+  .streams li.on { border-left-color: var(--accent); background: var(--bg); }
+  .streams .id { font-weight: 500; } .streams .of { color: var(--muted); font-size: 12px; }
+  .timeline { flex: 1; min-width: 0; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-bottom: 10px; }
+  .card .top { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+  .card .v { font-weight: 600; color: var(--accent); } .card .t { font-weight: 600; }
+  .card .when { color: var(--muted); font-size: 12px; margin-left: auto; }
+  pre { background: var(--code); border-radius: 6px; padding: 8px 10px; margin: 8px 0 0; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+  .tag { display: inline-block; padding: 0 6px; border-radius: 4px; font-size: 11px; border: 1px solid currentColor; }
+  .tag.personal { color: var(--live); } .tag.secret { color: var(--warn); } .tag.erased { color: var(--bad); }
+  .cmd { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line); font-size: 13px; color: var(--muted); }
+  .cmd b { color: var(--text); font-weight: 500; }
+  .snap { border-left: 3px solid var(--accent); background: var(--panel); padding: 8px 12px; border-radius: 6px; margin-bottom: 10px; font-size: 13px; }
+  .empty { color: var(--muted); padding: 40px; text-align: center; }
+  .err { color: var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <h1>kernable</h1>
+  <span class="meta" id="meta"></span>
+  <span class="pill" id="ready"><span class="dot"></span><span></span></span>
+  <nav>
+    <button data-view="map" class="on">Map</button>
+    <button data-view="connections">Connections</button>
+    <button data-view="history">History</button>
+  </nav>
+</header>
+<main>
+  <section class="view on" id="map">
+    <div class="legend">
+      <span><i class="dot" style="background:var(--ok)"></i>connected</span>
+      <span><i class="dot" style="background:var(--warn)"></i>behind</span>
+      <span><i class="dot" style="background:var(--bad)"></i>missing (the kernel waits for it)</span>
+      <span><i class="dot" style="background:var(--dyn)"></i>dynamic or away, counts for nobody</span>
+      <span><i class="dot" style="background:var(--live)"></i>live</span>
+      <span>— produces · reacts</span>
+      <span style="color:var(--check)">- - checks commands</span>
+    </div>
+    <div class="mapwrap">
+      <div class="map" id="graph"></div>
+      <aside id="details"><div class="kind">Details</div><p class="meta">Click a node.</p></aside>
+    </div>
+  </section>
+  <section class="view" id="connections"></section>
+  <section class="view" id="history">
+    <div class="history">
+      <div class="streams"><input id="filter" placeholder="Filter aggregates…"><ul id="streams"></ul></div>
+      <div class="timeline" id="timeline"><div class="empty">Pick an aggregate.</div></div>
+    </div>
+  </section>
+</main>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const NS = "http://www.w3.org/2000/svg";
+let state = null, selected = null, stream = null, streams = [];
+
+// ---- helpers ----
+function el(tag, attrs = {}, ...children) {
+  const e = tag.startsWith("svg:") ? document.createElementNS(NS, tag.slice(4)) : document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") e.setAttribute("class", v);
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else if (v !== undefined && v !== null) e.setAttribute(k, v);
+  }
+  for (const c of children.flat()) if (c !== null && c !== undefined) e.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  return e;
+}
+const covers = (pattern, name) => pattern === "*" || pattern === name || (pattern.endsWith(".*") && name.split(".")[0] === pattern.slice(0, -2));
+const ago = (ms) => {
+  if (!ms) return "never";
+  const s = Math.max(0, Math.round((state.kernel.now - ms) / 1000));
+  return s < 60 ? `${s} s ago` : s < 3600 ? `${Math.round(s / 60)} min ago` : s < 86400 ? `${Math.round(s / 3600)} h ago` : new Date(ms).toLocaleString();
+};
+const time = (ms) => new Date(ms).toLocaleString();
+const short = (key) => (key ? key.slice(0, 12) + "…" : "");
+const color = (status) => `var(--${{ connected: "ok", behind: "warn", missing: "bad", dynamic: "dyn", away: "dyn", live: "live" }[status]})`;
+
+async function get(path) {
+  const res = await fetch(path, { cache: "no-store" });
+  if (!res.ok) throw new Error(`${path}: ${res.status}`);
+  return res.json();
+}
+
+// ---- the model behind the map ----
+function model(s) {
+  const head = s.kernel.head;
+  const nodes = new Map(), edges = [];
+  const add = (id, col, label, sub, status, info) => { if (!nodes.has(id)) nodes.set(id, { id, col, label, sub, status, info }); return nodes.get(id); };
+  const services = new Map(s.services.map((m) => [m.service, m]));
+  for (const m of s.services) {
+    const meta = Object.entries(m.metadata).map(([k, v]) => `${k} ${v}`).join(" · ");
+    add(`s:${m.service}`, 0, m.service, meta || "membership applied", "connected", { kind: "service", ...m });
+  }
+  const serviceNode = (name) => name ? add(`s:${name}`, 0, name, "no membership", "dynamic", { kind: "service", service: name, note: "No membership applied: everything it registers counts." }) : null;
+
+  for (const a of s.aggregates) {
+    const m = services.get(a.service);
+    const status = a.workers > 0 ? "connected" : a.dynamic ? "dynamic" : "missing";
+    add(`a:${a.aggregate}`, 1, a.aggregate, `${a.workers} worker${a.workers === 1 ? "" : "s"} · ${a.commands.length} commands`, status, { kind: "aggregate", ...a, listed: m ? m.workers.includes(a.aggregate) : null });
+    const owner = serviceNode(a.service);
+    if (owner) edges.push({ from: owner.id, to: `a:${a.aggregate}`, kind: "own" });
+  }
+  for (const m of s.services) for (const a of m.workers) {
+    if (!nodes.has(`a:${a}`)) add(`a:${a}`, 1, a, "listed, never registered", "missing", { kind: "aggregate", aggregate: a, service: m.service, note: "Listed in the membership; no worker ever registered it. Its commands wait in the queue." });
+    edges.push({ from: `s:${m.service}`, to: `a:${a}`, kind: "own" });
+  }
+
+  for (const e of s.events) {
+    add(`e:${e.type}`, 2, e.type, `schema ${e.schema}`, "connected", { kind: "event type", ...e });
+    for (const w of e.writers) if (nodes.has(`a:${w}`)) edges.push({ from: `a:${w}`, to: `e:${e.type}` });
+  }
+
+  for (const l of s.listeners) {
+    const behind = l.connected && l.position < head;
+    const status = l.live ? "live" : !l.counts ? (l.connected ? "dynamic" : "away") : !l.connected ? "missing" : behind ? "behind" : "connected";
+    const what = l.live ? "live" : l.middlewares.length ? "middleware" : "listener";
+    const sub = `${what} · order ${l.order} · ${l.connected ? (behind ? `${head - l.position} behind` : "up to date") : "away"}`;
+    const node = add(`l:${l.name}`, 3, l.name, sub, status, { kind: what, ...l });
+    const owner = serviceNode(l.service);
+    if (owner) edges.push({ from: owner.id, to: node.id, kind: "own" });
+    const types = l.events.length ? l.events : ["*"];
+    for (const e of s.events) if (types.some((p) => covers(p, e.type))) edges.push({ from: `e:${e.type}`, to: node.id });
+    for (const q of l.queries) {
+      add(`q:${q}`, 4, q, "query", "connected", { kind: "query", type: q });
+      edges.push({ from: node.id, to: `q:${q}` });
+    }
+    for (const mw of l.middlewares) for (const a of s.aggregates) {
+      if (a.commands.some((c) => mw.types.some((p) => covers(p, c)))) edges.push({ from: node.id, to: `a:${a.aggregate}`, kind: "check" });
+    }
+  }
+  for (const m of s.services) for (const name of [...m.listeners, ...m.middlewares]) {
+    if (!nodes.has(`l:${name}`)) add(`l:${name}`, 3, name, "listed, never registered", "missing", { kind: "listener", name, service: m.service, note: "Listed in the membership; it never connected. The kernel is not ready until it does." });
+    edges.push({ from: `s:${m.service}`, to: `l:${name}`, kind: "own" });
+  }
+  return { nodes: [...nodes.values()], edges };
+}
+
+// ---- map ----
+const COLS = ["Services", "Aggregates", "Event types", "Listeners", "Queries"];
+const NODE_H = 40, GAP = 10, TOP = 40, W = 200;
+
+function drawMap() {
+  const { nodes, edges } = model(state);
+  const box = $("graph");
+  const width = Math.max(box.clientWidth, 5 * (W + 40) + 40);
+  const step = (width - 40 - W) / 4;
+  const counts = [0, 0, 0, 0, 0];
+  for (const n of nodes.sort((a, b) => a.label.localeCompare(b.label))) {
+    n.x = 20 + n.col * step;
+    n.y = TOP + counts[n.col]++ * (NODE_H + GAP);
+  }
+  const height = TOP + Math.max(1, ...counts) * (NODE_H + GAP) + 10;
+  const svg = el("svg:svg", { width, height, viewBox: `0 0 ${width} ${height}` });
+  COLS.forEach((c, i) => svg.append(el("svg:text", { class: "head", x: 20 + i * step, y: 22 }, c)));
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const lines = el("svg:g");
+  svg.append(lines);
+  for (const e of edges) {
+    const a = byId.get(e.from), b = byId.get(e.to);
+    if (!a || !b) continue;
+    let d;
+    if (e.kind === "check") {
+      // From a middleware back to the aggregate whose commands it checks.
+      const x1 = a.x, y1 = a.y + NODE_H / 2, x2 = b.x + W, y2 = b.y + NODE_H / 2;
+      d = `M${x1},${y1} C${x1 - 60},${y1 + 30} ${x2 + 60},${y2 + 30} ${x2},${y2}`;
+    } else {
+      const x1 = a.x + W, y1 = a.y + NODE_H / 2, x2 = b.x, y2 = b.y + NODE_H / 2, mid = (x1 + x2) / 2;
+      d = `M${x1},${y1} C${mid},${y1} ${mid},${y2} ${x2},${y2}`;
+    }
+    const path = el("svg:path", { class: `edge ${e.kind ?? ""}`, d });
+    path.dataset.from = e.from;
+    path.dataset.to = e.to;
+    lines.append(path);
+  }
+  for (const n of nodes) {
+    const g = el("svg:g", { class: `node${selected === n.id ? " sel" : ""}`, transform: `translate(${n.x},${n.y})`, onclick: () => select(n.id) });
+    g.dataset.id = n.id;
+    g.append(
+      el("svg:rect", { width: W, height: NODE_H, rx: 7 }),
+      el("svg:circle", { cx: 12, cy: 14, r: 4.5, fill: color(n.status) }),
+      el("svg:text", { x: 23, y: 18 }, fit(n.label, 26)),
+      el("svg:text", { class: "sub", x: 12, y: 33 }, fit(n.sub, 32)),
+    );
+    g.addEventListener("mouseenter", () => highlight(n.id, true));
+    g.addEventListener("mouseleave", () => highlight(n.id, false));
+    svg.append(g);
+  }
+  box.replaceChildren(svg);
+  if (selected) details(byId.get(selected));
+}
+const fit = (s, n) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
+
+function highlight(id, on) {
+  const svg = $("graph").firstChild;
+  if (!svg) return;
+  const near = new Set([id]);
+  svg.querySelectorAll("path.edge").forEach((p) => {
+    const hit = on && (p.dataset.from === id || p.dataset.to === id);
+    p.classList.toggle("hi", hit);
+    if (hit) { near.add(p.dataset.from); near.add(p.dataset.to); }
+  });
+  svg.querySelectorAll("g.node").forEach((g) => g.classList.toggle("dim", on && !near.has(g.dataset.id)));
+  svg.querySelectorAll("path.edge").forEach((p) => p.classList.toggle("dim", on && !p.classList.contains("hi")));
+}
+
+function select(id) {
+  selected = id;
+  drawMap();
+}
+
+function details(n) {
+  const box = $("details");
+  if (!n) { box.replaceChildren(el("div", { class: "kind" }, "Details"), el("p", { class: "meta" }, "Click a node.")); return; }
+  const i = n.info, rows = [];
+  const row = (k, v) => v !== undefined && v !== null && v !== "" && rows.push(el("dt", {}, k), el("dd", {}, v));
+  row("status", el("span", {}, el("i", { class: "dot", style: `background:${color(n.status)};margin-right:6px` }), n.status));
+  if (i.note) row("note", i.note);
+  if (i.kind === "service") {
+    for (const [k, v] of Object.entries(i.metadata ?? {})) row(k, v);
+    row("workers", (i.workers ?? []).join(", "));
+    row("listeners", (i.listeners ?? []).join(", "));
+    row("middlewares", (i.middlewares ?? []).join(", "));
+    if (i.appliedAt) row("applied", `${time(i.appliedAt)} by ${short(i.key)}`);
+  } else if (i.kind === "aggregate") {
+    row("service", i.service || "none");
+    row("commands", (i.commands ?? []).join(", "));
+    row("workers", i.workers);
+    row("in membership", i.listed === null || i.listed === undefined ? "no membership" : i.listed ? "listed" : "not listed (dynamic)");
+    row("key", short(i.key));
+    row("last seen", i.lastSeen ? ago(i.lastSeen) : undefined);
+    const inst = state.instances.filter((w) => w.aggregates.includes(i.aggregate));
+    if (inst.length) row("instances", inst.map((w) => `${w.worker} since ${ago(w.since)}`).join("\n"));
+  } else if (i.kind === "event type") {
+    row("schema", i.schema);
+    row("written by", i.writers.join(", "));
+  } else if (i.kind === "query") {
+    row("type", i.type);
+  } else {
+    row("service", i.service || "none");
+    row("order", i.order);
+    row("reads", i.events?.length ? i.events.join(", ") : "everything its key may read");
+    row("answers", i.queries?.join(", "));
+    for (const m of i.middlewares ?? []) row(`checks ${m.when}`, `${m.types.join(", ")} (order ${m.order})`);
+    if (i.position !== undefined) row("position", `${i.position} of ${state.kernel.head}`);
+    row("connected", i.connected ? `since ${ago(i.since)}` : i.lastSeen ? `no, last seen ${ago(i.lastSeen)}` : "no");
+    row("counts", i.counts === undefined ? undefined : i.counts ? "yes: others wait for it" : "no");
+    row("key", short(i.key));
+  }
+  box.replaceChildren(el("div", { class: "kind" }, i.kind), el("h3", {}, n.label), el("dl", {}, rows));
+}
+
+// ---- connections ----
+function drawConnections() {
+  const s = state, head = s.kernel.head;
+  const workers = el("table", {}, el("tr", {}, ["Worker", "Service", "Aggregates", "Key", "Connected"].map((h) => el("th", {}, h))),
+    s.instances.length ? s.instances.map((w) => el("tr", {}, el("td", { class: "mono" }, w.worker), el("td", {}, w.service || "–"), el("td", {}, w.aggregates.join(", ")), el("td", { class: "mono" }, short(w.key)), el("td", {}, ago(w.since))))
+      : el("tr", {}, el("td", { colspan: 5, class: "meta" }, "No worker connected.")));
+  const listeners = el("table", {}, el("tr", {}, ["Listener", "Service", "Kind", "Position", "Key", "Connected"].map((h) => el("th", {}, h))),
+    s.listeners.map((l) => el("tr", {},
+      el("td", {}, el("i", { class: "dot", style: `background:${color(l.live ? "live" : !l.counts ? "dynamic" : !l.connected ? "missing" : l.position < head ? "behind" : "connected")};margin-right:8px` }), l.name),
+      el("td", {}, l.service || "–"),
+      el("td", {}, l.live ? "live" : l.middlewares.length ? `middleware (${l.middlewares.map((m) => m.when).join(", ")})` : "listener"),
+      el("td", {}, `${l.position} / ${head}${l.connected && l.position < head ? ` · ${head - l.position} behind` : ""}`),
+      el("td", { class: "mono" }, short(l.key)),
+      el("td", {}, l.connected ? ago(l.since) : `no · last seen ${ago(l.lastSeen)}`))));
+  $("connections").replaceChildren(el("h2", {}, `Workers · ${s.instances.length}`), workers, el("h2", {}, `Listeners · ${s.listeners.length}`), listeners);
+}
+
+// ---- history ----
+async function loadStreams() {
+  try {
+    streams = (await get("/api/streams")).streams;
+  } catch { return; }
+  drawStreams();
+}
+
+function drawStreams() {
+  const f = $("filter").value.toLowerCase();
+  const key = (s) => `${s.tenant}/${s.domain}/${s.type}/${s.id}`;
+  $("streams").replaceChildren(...streams.filter((s) => key(s).toLowerCase().includes(f)).map((s) =>
+    el("li", { class: stream && key(stream) === key(s) ? "on" : "", onclick: () => { stream = s; drawStreams(); loadHistory(); } },
+      el("div", { class: "id" }, s.id), el("div", { class: "of" }, `${s.domain}.${s.type} · v${s.version} · ${s.tenant}`))));
+}
+
+/** A payload with its vault references as tags: personal (subject), secret, or erased. */
+function payloadView(text, vault) {
+  let data;
+  try { data = JSON.parse(text); } catch { return el("pre", {}, text); }
+  const pre = el("pre");
+  const walk = (v, indent) => {
+    const pad = "  ".repeat(indent);
+    if (v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).length === 1 && typeof v.$vault === "string") {
+      const held = vault[v.$vault];
+      pre.append(held ? el("span", { class: `tag ${held.secret ? "secret" : "personal"}`, title: v.$vault }, held.secret ? "secret" : `personal · ${held.subject}`)
+        : el("span", { class: "tag erased", title: v.$vault }, "erased"));
+    } else if (Array.isArray(v)) {
+      pre.append("[");
+      v.forEach((x, i) => { pre.append(`\n${pad}  `); walk(x, indent + 1); if (i < v.length - 1) pre.append(","); });
+      pre.append(v.length ? `\n${pad}]` : "]");
+    } else if (v && typeof v === "object") {
+      const keys = Object.keys(v);
+      pre.append("{");
+      keys.forEach((k, i) => { pre.append(`\n${pad}  ${JSON.stringify(k)}: `); walk(v[k], indent + 1); if (i < keys.length - 1) pre.append(","); });
+      pre.append(keys.length ? `\n${pad}}` : "}");
+    } else pre.append(JSON.stringify(v));
+  };
+  walk(data, 0);
+  return pre;
+}
+
+async function loadHistory() {
+  if (!stream) return;
+  const q = new URLSearchParams({ tenant: stream.tenant, domain: stream.domain, type: stream.type, id: stream.id });
+  let h;
+  try { h = await get(`/api/history?${q}`); } catch (e) { $("timeline").replaceChildren(el("div", { class: "err" }, String(e))); return; }
+  const cards = [el("h2", {}, `${stream.domain}.${stream.type} ${stream.id} · ${h.events.length} events`)];
+  if (h.snapshot) cards.push(el("div", { class: "snap" }, `Snapshot at version ${h.snapshot.version} · state schema ${h.snapshot.schema} · ${h.snapshot.bytes} bytes (not shown: it may hold personal values)`));
+  for (const e of h.events) {
+    const c = h.commands[e.commandId];
+    const ctx = e.context;
+    cards.push(el("div", { class: "card" },
+      el("div", { class: "top" }, el("span", { class: "v" }, `v${e.version}`), el("span", { class: "t" }, e.type), el("span", { class: "meta" }, `schema ${e.schema} · position ${e.position}`),
+        e.erases ? el("span", { class: "tag erased" }, `erases ${e.erases}`) : null, el("span", { class: "when" }, time(e.createdAt))),
+      payloadView(e.payload, h.vault),
+      el("div", { class: "cmd" },
+        el("div", {}, "command ", el("b", {}, c ? c.type : e.commandId), c ? ` · received ${time(c.receivedAt)} · signed by ${short(c.key)}` : ""),
+        el("div", {}, "sender ", el("b", {}, ctx.senderIdentity ?? "–"), " · correlation ", el("b", { class: "mono" }, ctx.correlationId ?? e.commandId), ctx.causationId ? [" · caused by ", el("b", { class: "mono" }, ctx.causationId)] : null),
+        c ? el("details", {}, el("summary", {}, "command payload and context"), payloadView(c.payload, h.vault), el("pre", {}, JSON.stringify(c.context, null, 2))) : null,
+        el("div", { class: "mono", title: "hash of this event in the chain" }, `worker ${short(e.key)} · hash ${e.hash.slice(0, 16)}…`))));
+    if (h.snapshot && h.snapshot.version === e.version) cards.push(el("div", { class: "snap" }, `▲ snapshot taken here (version ${e.version})`));
+  }
+  if (!h.events.length) cards.push(el("div", { class: "empty" }, "No events."));
+  $("timeline").replaceChildren(...cards);
+}
+
+// ---- refresh ----
+async function refresh() {
+  try {
+    state = await get("/api/state");
+  } catch {
+    $("ready").lastChild.textContent = "kernel unreachable";
+    $("ready").firstChild.style.background = "var(--bad)";
+    return;
+  }
+  const k = state.kernel;
+  $("meta").textContent = `${k.version} · ${k.head} events · ${k.queued} queued`;
+  $("ready").lastChild.textContent = k.ready;
+  $("ready").firstChild.style.background = k.ready === "ready" ? "var(--ok)" : "var(--warn)";
+  const view = document.querySelector("nav button.on").dataset.view;
+  if (view === "map") drawMap();
+  if (view === "connections") drawConnections();
+}
+
+document.querySelectorAll("nav button").forEach((b) => b.addEventListener("click", () => {
+  document.querySelectorAll("nav button").forEach((x) => x.classList.toggle("on", x === b));
+  document.querySelectorAll(".view").forEach((v) => v.classList.toggle("on", v.id === b.dataset.view));
+  if (b.dataset.view === "history") { loadStreams(); loadHistory(); }
+  refresh();
+}));
+$("filter").addEventListener("input", drawStreams);
+window.addEventListener("resize", () => state && drawMap());
+refresh();
+setInterval(refresh, 1000);
+setInterval(() => document.querySelector("nav button.on").dataset.view === "history" && loadStreams(), 5000);
+</script>
+</body>
+</html>

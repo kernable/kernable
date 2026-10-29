@@ -93,6 +93,40 @@ async fn metrics_report_commands_queue_and_sessions() {
     assert!(get(&metrics, "/").await.starts_with("HTTP/1.1 404"));
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn the_ui_shows_the_map_the_connections_and_an_aggregate_history() {
+    let ui = free_addr();
+    let env = start_custom("ui", |config, _| {
+        config.ui_listen = Some(ui.clone());
+    })
+    .await;
+    spawn_worker(&env).await;
+    let place = signed(command("c1", "PlaceOrder", "o1"), &key(1));
+    submit(&env.addr, place).await.unwrap();
+
+    let page = get(&ui, "/").await;
+    assert!(page.starts_with("HTTP/1.1 200 OK") && page.contains("<title>kernable</title>"));
+    let json = |response: String| -> serde_json::Value {
+        let (head, body) = response.split_once("\r\n\r\n").unwrap();
+        assert!(head.starts_with("HTTP/1.1 200 OK"), "{head}");
+        serde_json::from_str(body).unwrap()
+    };
+    let state = json(get(&ui, "/api/state").await);
+    assert_eq!(state["kernel"]["head"], 1);
+    assert_eq!(state["aggregates"][0]["aggregate"], "orders.Order");
+    assert_eq!(state["aggregates"][0]["workers"], 1);
+    assert_eq!(state["instances"][0]["aggregates"][0], "orders.Order");
+    assert_eq!(state["events"][0]["type"], "orders.OrderPlaced");
+    assert_eq!(state["events"][0]["writers"][0], "orders.Order");
+
+    let streams = json(get(&ui, "/api/streams").await);
+    assert_eq!(streams["streams"][0]["id"], "o1");
+    let history = json(get(&ui, "/api/history?tenant=t1&domain=orders&type=Order&id=o1").await);
+    assert_eq!(history["events"][0]["type"], "OrderPlaced");
+    assert_eq!(history["commands"]["c1"]["type"], "PlaceOrder");
+    assert!(get(&ui, "/nope").await.starts_with("HTTP/1.1 404"));
+}
+
 async fn slow_worker(env: &Env, delay_ms: u64) {
     let worker = TestWorker {
         behavior: Behavior::Slow(std::time::Duration::from_millis(delay_ms)),

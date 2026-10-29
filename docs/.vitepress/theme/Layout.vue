@@ -14,12 +14,13 @@ const { frontmatter } = useData()
     <template #home-hero-image>
       <AnimatedLogo v-if="frontmatter.layout === 'home'" />
     </template>
-    <!-- a command's way through kernable, below the features -->
+    <!-- kernable in one loop, below the features -->
     <template #home-features-after>
       <section v-if="frontmatter.layout === 'home'" class="kn-home-flow">
         <div class="container">
-          <h2>A command's way</h2>
-          <FlowDiagram name="command" />
+          <h2>How it works</h2>
+          <FlowDiagram name="hero" loop bare />
+          <p class="kn-credit">TypeScript, Python and Rust logos via Simple Icons; the Rust logo under CC BY-SA 4.0.</p>
         </div>
       </section>
     </template>
@@ -27,6 +28,11 @@ const { frontmatter } = useData()
 </template>
 
 <style>
+.kn-credit {
+  margin: -16px 0 0;
+  font-size: 11px;
+  color: var(--vp-c-text-3);
+}
 /* same box as the feature cards above, so both share one left edge */
 .kn-home-flow {
   margin-top: 48px;

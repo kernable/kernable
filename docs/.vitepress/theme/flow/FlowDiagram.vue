@@ -9,7 +9,11 @@ const props = defineProps({
   /* widen beyond the content column (for pages without aside) */
   wide: { type: Boolean, default: false },
   /* start automatically the first time the figure scrolls into view */
-  autoplay: { type: Boolean, default: true }
+  autoplay: { type: Boolean, default: true },
+  /* start over after the last step, forever (an eye-catcher) */
+  loop: { type: Boolean, default: false },
+  /* no legend and no buttons: only the caption and the figure */
+  bare: { type: Boolean, default: false }
 })
 
 const LEGEND = {
@@ -36,6 +40,7 @@ c.caption.value = def ? def.intro : `Unknown diagram: ${props.name}`
 let graph = null
 let runner = null
 let observer = null
+let alive = true
 
 function build () {
   if (!svg.value || !def) return
@@ -55,7 +60,7 @@ onMounted(() => {
         if (e.isIntersecting) {
           observer.disconnect()
           observer = null
-          c.playPause()
+          props.loop ? cycle() : c.playPause()
         }
       })
     }, { threshold: 0.5 })
@@ -63,7 +68,16 @@ onMounted(() => {
   }
 })
 
+/* plays to the end, rests, and starts over until the page goes away */
+async function cycle () {
+  while (alive) {
+    await c.playPause()
+    await new Promise((resolve) => setTimeout(resolve, 1800))
+  }
+}
+
 onBeforeUnmount(() => {
+  alive = false
   if (observer) observer.disconnect()
   if (runner) runner.stop()
   if (graph) graph.destroy()
@@ -73,7 +87,7 @@ onBeforeUnmount(() => {
 <template>
   <figure ref="root" class="kflow" :class="{ 'kflow-wide': wide }">
     <figcaption class="kflow-caption" aria-live="polite">{{ caption }}</figcaption>
-    <div class="kflow-bar">
+    <div v-if="!bare" class="kflow-bar">
       <span class="kflow-legend">
         <span v-for="k in legend" :key="k" class="kflow-key">
           <i :style="{ background: KIND[k] }"></i>{{ LEGEND[k] || k }}

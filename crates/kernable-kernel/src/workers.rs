@@ -10,7 +10,10 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Mutex, MutexGuard, PoisonError},
+    sync::{
+        Mutex, MutexGuard, PoisonError,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use kernable_core::proto::{Membership, Register, WorkerRecord};
@@ -26,9 +29,21 @@ struct Entry {
     dynamic: bool,
 }
 
+/// A connected worker process, for the UI.
+struct Instance {
+    worker_id: String,
+    key_id: String,
+    service: String,
+    aggregates: Vec<String>,
+    since: i64,
+}
+
 #[derive(Default)]
 pub(crate) struct Registry {
     entries: Mutex<HashMap<String, Entry>>,
+    /// Connected workers by session number.
+    instances: Mutex<HashMap<u64, Instance>>,
+    next: AtomicU64,
 }
 
 impl Registry {
@@ -46,6 +61,7 @@ impl Registry {
             .collect();
         Registry {
             entries: Mutex::new(entries),
+            ..Default::default()
         }
     }
 
@@ -103,14 +119,14 @@ impl Registry {
         kernel.store.save_workers(&changed).map_err(internal)
     }
 
-    /// Registers the aggregates of a worker that proved its key, and unregisters those its
-    /// service no longer declares. Returns the qualified command types it runs.
+    /// Registers the aggregates of a worker that proved its key. Returns the qualified command
+    /// types it runs, and its session number for `disconnect`.
     pub(crate) fn connect(
         &self,
         kernel: &Kernel,
         reg: &Register,
         permissions: &Permissions,
-    ) -> Result<Vec<String>, Status> {
+    ) -> Result<(Vec<String>, u64), Status> {
         let mut entries = self.entries();
         let now = now_ms();
         let mut registered = Vec::new();
@@ -159,16 +175,75 @@ impl Registry {
                 },
             );
         }
-        Ok(reg
+        let session = self.next.fetch_add(1, Ordering::Relaxed);
+        self.instances().insert(
+            session,
+            Instance {
+                worker_id: reg.worker_id.clone(),
+                key_id: reg.key_id.clone(),
+                service: reg.service.clone(),
+                aggregates: reg
+                    .aggregates
+                    .iter()
+                    .map(|a| a.aggregate_type.clone())
+                    .collect(),
+                since: now,
+            },
+        );
+        let types = reg
             .aggregates
             .iter()
             .flat_map(|a| a.command_types.clone())
-            .collect())
+            .collect();
+        Ok((types, session))
+    }
+
+    fn instances(&self) -> MutexGuard<'_, HashMap<u64, Instance>> {
+        self.instances
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The registered aggregates and the connected workers, for the UI.
+    pub(crate) fn view(&self) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+        let mut aggregates: Vec<serde_json::Value> = self
+            .entries()
+            .values()
+            .map(|e| {
+                serde_json::json!({
+                    "aggregate": e.record.aggregate_type,
+                    "commands": e.record.command_types,
+                    "service": e.record.service,
+                    "key": e.record.key_id,
+                    "workers": e.connected,
+                    "dynamic": e.dynamic,
+                    "lastSeen": e.record.last_seen,
+                })
+            })
+            .collect();
+        aggregates.sort_by(|a, b| a["aggregate"].as_str().cmp(&b["aggregate"].as_str()));
+        let mut instances: Vec<serde_json::Value> = self
+            .instances()
+            .iter()
+            .map(|(session, i)| {
+                serde_json::json!({
+                    "session": session,
+                    "worker": i.worker_id,
+                    "key": i.key_id,
+                    "service": i.service,
+                    "aggregates": i.aggregates,
+                    "since": i.since,
+                })
+            })
+            .collect();
+        instances.sort_by_key(|i| i["since"].as_i64());
+        (aggregates, instances)
     }
 
     /// A worker of `aggregates` went away; the last one of an aggregate updates its `last_seen`,
     /// or forgets it if it is dynamic.
-    pub(crate) fn disconnect(&self, kernel: &Kernel, aggregates: &[String]) {
+    pub(crate) fn disconnect(&self, kernel: &Kernel, session: u64, aggregates: &[String]) {
+        self.instances().remove(&session);
         let mut entries = self.entries();
         let mut changed = Vec::new();
         for a in aggregates {

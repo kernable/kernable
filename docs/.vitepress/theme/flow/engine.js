@@ -107,6 +107,24 @@ export class Graph {
     return g
   }
 
+  /* a picture from the site's public folder, e.g. the logo */
+  image (x, y, w, h, href) {
+    return svgEl('image', { x, y, width: w, height: h, href }, this.layerNodes)
+  }
+
+  /* a 24×24 icon path (see icons.js) at `size`, with an optional `text` after it */
+  icon (x, y, size, { d, color }, text) {
+    const g = svgEl('g', { class: 'kflow-icon' }, this.layerNodes)
+    svgEl('path', { d, transform: `translate(${x} ${y}) scale(${size / 24})`, style: { fill: color } }, g)
+    if (text) {
+      const t = svgEl('text', {
+        x: x + size + 5, y: y + size / 2 + 4, 'font-size': 11, style: { fill: 'var(--vp-c-text-2)' }
+      }, g)
+      t.textContent = text
+    }
+    return g
+  }
+
   node (id, { x, y, w = 150, h = 50, label, sub, kind = 'mut', shape = 'box', hidden = false }) {
     const color = KIND[kind] || kind
     const g = svgEl('g', { class: 'kflow-node' }, this.layerNodes)

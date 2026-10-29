@@ -61,6 +61,8 @@ struct Entry {
     live: bool,
     /// Its service's membership lists it, or none decides.
     listed: bool,
+    /// When it connected (ms since epoch); 0 while disconnected.
+    since: i64,
 }
 
 impl Entry {
@@ -121,6 +123,7 @@ impl Registry {
             .into_iter()
             .map(|record| {
                 let entry = Entry {
+                    since: 0,
                     listed: memberships.counts_listener(&record.service, &record.name),
                     record,
                     connected: false,
@@ -185,6 +188,47 @@ impl Registry {
         behind
     }
 
+    /// Every listener, registered or live, for the UI.
+    pub(crate) fn view(&self) -> Vec<serde_json::Value> {
+        let mut all: Vec<serde_json::Value> = self
+            .entries()
+            .values()
+            .map(|e| {
+                let middlewares: Vec<serde_json::Value> = e
+                    .record
+                    .middlewares
+                    .iter()
+                    .map(|m| {
+                        let when = if m.when() == When::After {
+                            "after"
+                        } else {
+                            "before"
+                        };
+                        serde_json::json!({ "when": when, "order": m.order, "types": m.types })
+                    })
+                    .collect();
+                serde_json::json!({
+                    "name": e.record.name,
+                    "service": e.record.service,
+                    "key": e.record.key_id,
+                    "order": e.record.order,
+                    "events": e.record.event_types,
+                    "queries": e.query_types,
+                    "middlewares": middlewares,
+                    "position": e.record.position,
+                    "connected": e.connected,
+                    "since": e.since,
+                    "caughtUpAt": e.caught_up_at,
+                    "live": e.live,
+                    "counts": e.counts(),
+                    "lastSeen": e.record.last_seen,
+                })
+            })
+            .collect();
+        all.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+        all
+    }
+
     /// Applies a service's membership to its listeners: listed ones count, others not, and a
     /// middleware it no longer lists as one stops checking. Returns the changed records.
     pub(crate) fn apply(&self, m: &Membership) -> Vec<ListenerRecord> {
@@ -243,6 +287,7 @@ impl Registry {
             entries.remove(name);
         } else if let Some(e) = entries.get_mut(name) {
             e.connected = false;
+            e.since = 0;
             e.out = None;
             e.query_types.clear();
             e.record.last_seen = crate::now_ms();
@@ -584,6 +629,7 @@ pub(crate) async fn run(
                 listed: kernel
                     .memberships
                     .counts_listener(&hello.service, &hello.name),
+                since: crate::now_ms(),
             },
         );
         position

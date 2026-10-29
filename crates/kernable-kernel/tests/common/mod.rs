@@ -157,6 +157,7 @@ pub async fn start_custom(name: &str, customize: impl FnOnce(&mut Config, &Path)
         cache: "memory:".into(),
         vault: None,
         metrics_listen: None,
+        ui_listen: None,
     };
     customize(&mut config, &dir);
     let addr = config.listen.clone();

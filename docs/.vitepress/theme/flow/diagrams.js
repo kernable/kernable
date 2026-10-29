@@ -4,46 +4,128 @@
    the command overview is wider and meant for the home page.
    Every caption restates what the concept pages say; keep them in step. */
 
+import { icons } from './icons.js'
+
 export const diagrams = {}
 
 /* ------------------------------------------------------------------
-   command — home page: one command's way through the kernel
+   hero — home page: kernable in one loop
 ------------------------------------------------------------------ */
-diagrams.command = {
-  w: 1000, h: 390,
-  intro: 'One command\'s way through kernable: your services decide, the kernel checks, stores and orders.',
+diagrams.hero = {
+  w: 760, h: 300,
+  intro: 'Your code decides, in any language. kernable checks, orders and stores — and every read is up to date.',
   legend: ['cmd', 'evt', 'ok', 'kern'],
   build (g) {
-    g.zone(660, 20, 320, 350, 'Your processes, any language')
-    g.node('client', { x: 20, y: 160, w: 150, h: 56, label: 'Client', sub: 'TypeScript API' })
-    g.node('kernel', { x: 330, y: 150, w: 190, h: 76, label: 'Kernel', sub: 'Rust', kind: 'kern' })
-    g.node('store', { x: 345, y: 290, w: 160, h: 70, label: 'Event store', sub: 'position 41', kind: 'evt', shape: 'store' })
-    g.node('mw', { x: 690, y: 50, w: 260, h: 52, label: 'Middleware', sub: 'listener · checks requests', kind: 'ok' })
-    g.node('worker', { x: 690, y: 130, w: 260, h: 52, label: 'Worker', sub: 'aggregate · Python', kind: 'cmd' })
-    g.node('rm', { x: 690, y: 220, w: 260, h: 52, label: 'Read model', sub: 'listener · order 0', kind: 'qry' })
-    g.node('reactor', { x: 690, y: 300, w: 260, h: 52, label: 'Reactor', sub: 'listener · order 10', kind: 'evt' })
-    g.wire('in', [g.port('client', 'right'), g.port('kernel', 'left')])
-    g.wire('mw', [g.port('kernel', 'right', -24), [600, 164], [600, 76], g.port('mw', 'left')])
-    g.wire('worker', [g.port('kernel', 'right', -8), [620, 180], [620, 156], g.port('worker', 'left')])
-    g.wire('store', [g.port('kernel', 'bottom'), g.port('store', 'top')])
-    g.wire('rm', [g.port('kernel', 'right', 8), [620, 196], [620, 246], g.port('rm', 'left')])
-    g.wire('reactor', [g.port('kernel', 'right', 24), [600, 212], [600, 326], g.port('reactor', 'left')])
+    // Three rows; each of your processes faces the part of kernable it talks to, so every wire
+    // is one straight line.
+    const row = (i) => 66 + i * 76 // top of row i; rows are 56 high, centers at row(i) + 28
+    g.zone(10, 14, 300, 272, 'Your code · any language')
+    // For example; any language with gRPC can take part.
+    g.icon(28, 37, 18, icons.typescript)
+    g.icon(56, 37, 18, icons.python)
+    g.icon(84, 37, 18, icons.rust)
+    g.node('client', { x: 28, y: row(0), w: 264, h: 56, label: 'Client', sub: 'submits commands, asks queries', kind: 'cmd' })
+    g.node('worker', { x: 28, y: row(1), w: 264, h: 56, label: 'Worker', sub: 'runs your aggregates: decides', kind: 'cmd' })
+    g.node('views', { x: 28, y: row(2), w: 264, h: 56, label: 'Read models · reactors', sub: 'answer queries, react to events', kind: 'qry' })
+    // The logo names this side, in place of a heading.
+    g.zone(410, 14, 340, 272, null, 'var(--vp-c-brand-1)')
+    g.image(426, 26, 99, 25, '/logo-nav.png')
+    g.node('checks', { x: 428, y: row(0), w: 304, h: 56, label: 'Checks', sub: 'signature · grant · middleware', kind: 'kern' })
+    g.node('queue', { x: 428, y: row(1), w: 304, h: 56, label: 'Execute', sub: 'on a worker · one per aggregate at a time', kind: 'kern' })
+    // The log: four events, each chained to the one before by its hash.
+    for (let i = 0; i < 4; i++) {
+      const x = 428 + i * 80
+      g.node(`e${i}`, { x, y: row(2), w: 64, h: 56, label: `#${39 + i}`, sub: i === 3 ? 'new' : 'event', kind: 'evt', shape: 'store', hidden: i === 3 })
+      if (i > 0) g.wire(`link${i}`, [[x - 16, row(2) + 28], [x, row(2) + 28]], { arrow: false, dashed: true, hidden: i === 3 })
+    }
+    g.wire('in', [g.port('client', 'right'), g.port('checks', 'left')])
+    g.wire('worker', [g.port('queue', 'left'), g.port('worker', 'right')])
+    g.wire('views', [g.port('e0', 'left'), g.port('views', 'right')])
+    g.wire('queued', [g.port('checks', 'bottom'), g.port('queue', 'top')])
+    g.wire('commit', [g.port('queue', 'bottom', 120), g.port('e3', 'top')])
+  },
+  steps () {
+    const check = (text) => ({ say: 'kernable checks it before anything happens.', hot: ['checks'], run: (g) => g.setSub('checks', text), pause: 600, after: (g) => g.setSub('checks', text) })
+    return [
+      { say: 'Your code sends a command — from any language, signed with its own key.',
+        hot: ['client', 'checks'], packets: [['in', { kind: 'cmd', label: 'PlaceOrder', dur: 900 }]] },
+      check('✓ signature'),
+      check('✓ signature  ✓ grant'),
+      check('✓ signature  ✓ grant  ✓ middleware'),
+      { say: 'It is stored, then executed on a worker: one command per aggregate at a time, so nothing overtakes.',
+        hot: ['checks', 'queue'], packets: [['queued', { kind: 'cmd', dur: 500 }]] },
+      { say: 'A worker decides: your business logic returns the events.',
+        hot: ['queue', 'worker'],
+        packets: [['worker', { kind: 'cmd', label: 'PlaceOrder', dur: 700 }], ['worker', { kind: 'evt', label: 'OrderPlaced', dur: 700, reverse: true, delay: 850 }]] },
+      { say: 'The event joins one ordered log, chained to the one before and signed.',
+        show: ['e3', 'link3'], hot: ['queue', 'e3'], packets: [['commit', { kind: 'evt', dur: 600 }]],
+        after: (g) => g.setSub('e3', 'Placed') },
+      { say: 'Read models and reactors get it in order, and confirm.',
+        hot: ['e0', 'e1', 'e2', 'e3', 'views'],
+        packets: [['views', { kind: 'evt', label: '#42', dur: 700 }], ['views', { kind: 'ok', label: 'ack', dur: 600, reverse: true, delay: 800 }]] },
+      { say: 'Then the submit returns: every read is already up to date. No polling, no "eventually".',
+        hot: ['checks', 'client'], packets: [['in', { kind: 'ok', label: 'settled ✓', dur: 900, reverse: true }]] }
+    ]
+  }
+}
+
+/* ------------------------------------------------------------------
+   command — architecture page: one command's way through the kernel
+------------------------------------------------------------------ */
+diagrams.command = {
+  w: 860, h: 420,
+  intro: 'One command\'s way through kernable: your processes, in any language, decide; the kernel checks, orders and stores.',
+  legend: ['cmd', 'evt', 'ok', 'kern'],
+  build (g) {
+    g.zone(10, 14, 320, 392, 'Your processes, any language')
+    // Clients and the rest are all processes of yours: same SDK, same key and grant.
+    const procs = [
+      ['client', 'Client', 'your API or script · TypeScript', 'cmd'],
+      ['mw', 'Middleware', 'listener · checks requests · Python', 'ok'],
+      ['worker', 'Worker', 'aggregate · Rust', 'cmd'],
+      ['rm', 'Read model', 'listener · order 0 · TypeScript', 'qry'],
+      ['reactor', 'Reactor', 'listener · order 10 · Python', 'evt']
+    ]
+    procs.forEach(([id, label, sub, kind], i) => g.node(id, { x: 30, y: 46 + i * 72, w: 280, h: 52, label, sub, kind }))
+    g.node('kernel', { x: 470, y: 166, w: 190, h: 88, label: 'Kernel', sub: 'Rust · checks, orders, stores', kind: 'kern' })
+    const stores = [
+      ['commands', 'Commands', 'queued', 'cmd'],
+      ['events', 'Events', 'signed log · 41', 'evt'],
+      ['snapshots', 'Snapshots', 'aggregate state', 'kern'],
+      ['vault', 'Vault', 'personal data', 'pii'],
+      ['files', 'Files', 'data store', 'mut'],
+      ['cache', 'Cache', 'shared values', 'mut']
+    ]
+    stores.forEach(([id, label, sub, kind], i) => {
+      g.node(id, { x: 720, y: 20 + i * 65, w: 120, h: 50, label, sub, kind, shape: 'store' })
+      const off = -35 + i * 14
+      g.wire(id, [g.port('kernel', 'right', off), [690, 210 + off], [690, 45 + i * 65], g.port(id, 'left')])
+    })
+    // Bends staggered so no two wires cross.
+    const cy = (i) => 72 + i * 72
+    g.wire('in', [g.port('client', 'right'), [430, cy(0)], [430, 174], g.port('kernel', 'left', -36)])
+    g.wire('mw', [g.port('kernel', 'left', -18), [415, 192], [415, cy(1)], g.port('mw', 'right')])
+    g.wire('worker', [g.port('kernel', 'left'), [400, 210], [400, cy(2)], g.port('worker', 'right')])
+    g.wire('rm', [g.port('kernel', 'left', 18), [415, 228], [415, cy(3)], g.port('rm', 'right')])
+    g.wire('reactor', [g.port('kernel', 'left', 36), [430, 246], [430, cy(4)], g.port('reactor', 'right')])
   },
   steps () {
     return [
-      { say: 'A client submits a command, signed with its own key.',
+      { say: 'A client — any process of yours — submits a command, signed with its own key.',
         hot: ['client', 'kernel'], packets: [['in', { kind: 'cmd', label: 'shop.PlaceOrder', dur: 900 }]] },
       { say: 'The kernel checks the signature and the key\'s grant, then asks the middleware to check the request.',
         hot: ['kernel', 'mw'],
-        packets: [['mw', { kind: 'cmd', label: 'check', dur: 800 }], ['mw', { kind: 'ok', label: 'pass', dur: 700, reverse: true, delay: 950 }]],
-        after: (g) => g.setSub('kernel', 'command stored and queued') },
+        packets: [['mw', { kind: 'cmd', label: 'check', dur: 800 }], ['mw', { kind: 'ok', label: 'pass', dur: 700, reverse: true, delay: 950 }]] },
       { say: 'It stores the command, queues it — one at a time per aggregate — and hands it to a worker with the history.',
-        hot: ['kernel', 'worker'], packets: [['worker', { kind: 'cmd', label: 'execute', dur: 800 }]] },
+        hot: ['kernel', 'commands', 'worker'],
+        packets: [['commands', { kind: 'cmd', dur: 600 }], ['worker', { kind: 'cmd', label: 'execute', dur: 800, delay: 700 }]],
+        after: (g) => g.setSub('commands', '1 queued') },
       { say: 'The worker runs your aggregate and returns new events, signed with the worker\'s key.',
         hot: ['worker', 'kernel'], packets: [['worker', { kind: 'evt', label: 'OrderPlaced', dur: 800, reverse: true }]] },
-      { say: 'The kernel commits the events on the version they were based on and extends the hash chain.',
-        hot: ['kernel', 'store'], packets: [['store', { kind: 'evt', dur: 700 }]],
-        after: (g) => { g.setSub('store', 'position 42'); g.setSub('kernel', 'committed') } },
+      { say: 'The kernel commits the events on the version they were based on, extends the hash chain, and keeps a snapshot when one is due.',
+        hot: ['kernel', 'events', 'snapshots'],
+        packets: [['events', { kind: 'evt', dur: 700 }], ['snapshots', { kind: 'kern', dur: 700, delay: 300 }]],
+        after: (g) => { g.setSub('events', 'signed log · 42'); g.setSub('commands', 'committed'); g.setSub('kernel', 'committed') } },
       { say: 'Listeners get the events in a fixed order: read models (order 0) first, and each one acknowledges.',
         hot: ['kernel', 'rm'],
         packets: [['rm', { kind: 'evt', dur: 750 }], ['rm', { kind: 'ok', label: 'ack', dur: 600, reverse: true, delay: 900 }]],
@@ -55,7 +137,8 @@ diagrams.command = {
       { say: 'The submit settles: it returns once every listener has processed the events. The next query, from anyone, sees the order.',
         hot: ['kernel', 'client'], packets: [['in', { kind: 'ok', label: 'settled', dur: 900, reverse: true }]],
         after: (g) => g.setSub('kernel', 'settled') },
-      { say: 'No polling, no "eventually": every service reads its own writes.', hot: [], pause: 1400 }
+      { say: 'No polling, no "eventually". Beside the log, the kernel keeps the vault for personal data, files and a shared cache.',
+        hot: ['vault', 'files', 'cache'], pause: 1800 }
     ]
   }
 }

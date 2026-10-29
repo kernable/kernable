@@ -506,6 +506,18 @@ impl Store for FileStore {
         Ok(())
     }
 
+    fn command(&self, command_id: &str) -> Result<Option<Pending>> {
+        Ok(self
+            .inner()
+            .state
+            .commands
+            .get(command_id)
+            .map(|c| Pending {
+                command: c.command.clone(),
+                received_at: c.received_at,
+            }))
+    }
+
     fn workers(&self) -> Result<Vec<WorkerRecord>> {
         Ok(self.inner().state.workers.values().cloned().collect())
     }

@@ -131,6 +131,15 @@ pub struct StreamId {
     pub aggregate_id: String,
 }
 
+/// An aggregate with events: its stream, version and newest event.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StreamSummary {
+    pub stream: StreamId,
+    pub version: u64,
+    /// When its newest event was stored (ms since epoch).
+    pub last_at: i64,
+}
+
 /// A command not completed yet.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pending {
@@ -195,6 +204,61 @@ pub trait Store: Send + Sync {
         producer_sig: &Signature,
         now_ms: i64,
     ) -> Result<Vec<Event>>;
+
+    /// Every aggregate with events, the most recently changed first, at most `limit`.
+    fn streams(&self, limit: usize) -> Result<Vec<StreamSummary>> {
+        let mut latest = std::collections::HashMap::<StreamId, StreamSummary>::new();
+        self.each_event(&mut |e| {
+            let stream = StreamId {
+                tenant_id: e.tenant_id.clone(),
+                domain: e.domain.clone(),
+                aggregate_type: e.aggregate_type.clone(),
+                aggregate_id: e.aggregate_id.clone(),
+            };
+            latest.insert(
+                stream.clone(),
+                StreamSummary {
+                    stream,
+                    version: e.version,
+                    last_at: e.created_at,
+                },
+            );
+        })?;
+        let mut all: Vec<StreamSummary> = latest.into_values().collect();
+        all.sort_by(|a, b| b.last_at.cmp(&a.last_at));
+        all.truncate(limit);
+        Ok(all)
+    }
+
+    /// Which aggregate types wrote which event types: `(domain, aggregate_type, event_type)`,
+    /// sorted.
+    fn event_sources(&self) -> Result<Vec<(String, String, String)>> {
+        let mut sources = std::collections::BTreeSet::new();
+        self.each_event(&mut |e| {
+            sources.insert((
+                e.domain.clone(),
+                e.aggregate_type.clone(),
+                e.event_type.clone(),
+            ));
+        })?;
+        Ok(sources.into_iter().collect())
+    }
+
+    /// Calls `f` with every event, in order.
+    fn each_event(&self, f: &mut dyn FnMut(&Event)) -> Result<()> {
+        let mut after = 0;
+        loop {
+            let events = self.read_all(after, 1000)?;
+            let Some(last) = events.last() else {
+                return Ok(());
+            };
+            after = last.global_position;
+            events.iter().for_each(&mut *f);
+        }
+    }
+
+    /// A stored command, pending or completed, with when the kernel received it.
+    fn command(&self, command_id: &str) -> Result<Option<Pending>>;
 
     /// The highest payload version (`schema`) stored per qualified event type (`domain.Type`).
     fn event_schemas(&self) -> Result<Vec<(String, u32)>> {

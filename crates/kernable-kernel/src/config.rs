@@ -82,6 +82,12 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "Address for Prometheus metrics (`GET /metrics`), `GET /health` and `GET /ready`; off when empty.",
     ),
     (
+        "--ui-listen",
+        "KERNABLE_UI_LISTEN",
+        "",
+        "Address of the kernel's UI in a browser: the map of services, aggregates and listeners, the live connections and every aggregate's history. Loopback only, no login: for development. Off when empty; `--dev` turns it on at 127.0.0.1:7234.",
+    ),
+    (
         "--lease-ttl-ms",
         "KERNABLE_LEASE_TTL_MS",
         "10000",
@@ -148,6 +154,7 @@ pub struct Config {
     pub cache: String,
     pub vault: Option<VaultConfig>,
     pub metrics_listen: Option<String>,
+    pub ui_listen: Option<String>,
 }
 
 /// The vault: where values live and the key that encrypts them.
@@ -255,6 +262,7 @@ impl Config {
                 key: key.into(),
             }),
             metrics_listen: get("--metrics-listen"),
+            ui_listen: get("--ui-listen"),
         })
     }
 }

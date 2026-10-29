@@ -23,6 +23,7 @@ mod listeners;
 mod memberships;
 mod metrics;
 mod queue;
+mod ui;
 mod workers;
 
 use std::{
@@ -846,6 +847,25 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
         _ = checkpoints(&kernel) => unreachable!(),
         _ = flush_listeners(&kernel) => unreachable!(),
         result = serve_metrics(&kernel) => result,
+        result = serve_ui(&kernel) => result,
+    }
+}
+
+async fn serve_ui(kernel: &Arc<Kernel>) -> Result<(), BoxError> {
+    match &kernel.config().ui_listen {
+        Some(addr) if !loopback(addr) => Err(format!(
+            "--ui-listen {addr}: the UI has no login, so it listens on a loopback address only (127.0.0.1:7234)"
+        )
+        .into()),
+        // The UI is a convenience: if its address is taken (another dev kernel), the kernel
+        // runs on without it.
+        Some(addr) => {
+            if let Err(e) = ui::serve(Arc::clone(kernel), addr).await {
+                tracing::warn!(%addr, error = %e, "the UI is off");
+            }
+            std::future::pending().await
+        }
+        None => std::future::pending().await,
     }
 }
 
@@ -1549,11 +1569,11 @@ impl Drop for SessionCount {
 }
 
 /// Tells the worker registry when a session ends, however it ends.
-struct DisconnectOnDrop(Arc<Kernel>, Vec<String>);
+struct DisconnectOnDrop(Arc<Kernel>, u64, Vec<String>);
 
 impl Drop for DisconnectOnDrop {
     fn drop(&mut self) {
-        self.0.workers.disconnect(&self.0, &self.1);
+        self.0.workers.disconnect(&self.0, self.1, &self.2);
     }
 }
 
@@ -1620,9 +1640,10 @@ async fn run_session(
     };
     signing::verify(&proof, &signing::challenge_message(&nonce))
         .map_err(|_| Status::unauthenticated("challenge failed"))?;
-    let command_types = kernel.workers.connect(&kernel, &reg, &permissions)?;
+    let (command_types, session) = kernel.workers.connect(&kernel, &reg, &permissions)?;
     let _unregister = DisconnectOnDrop(
         Arc::clone(&kernel),
+        session,
         reg.aggregates
             .iter()
             .map(|a| a.aggregate_type.clone())

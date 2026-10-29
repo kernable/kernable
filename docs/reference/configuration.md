@@ -25,6 +25,7 @@ The kernel holds no keys of services and no permissions: it trusts the root keys
 | `--tls-key` | `KERNABLE_KERNEL_TLS_KEY` | — | The kernel certificate's private key (PEM). |
 | `--tls-client-ca` | `KERNABLE_TLS_CLIENT_CA` | — | The CA that signs every client's certificate (PEM). |
 | `--metrics-listen` | `KERNABLE_METRICS_LISTEN` | — | Address for Prometheus metrics (`GET /metrics`), `GET /health` and `GET /ready`; off when empty. |
+| `--ui-listen` | `KERNABLE_UI_LISTEN` | — | Address of the kernel's UI in a browser: the map of services, aggregates and listeners, the live connections and every aggregate's history. Loopback only, no login: for development. Off when empty; `--dev` turns it on at 127.0.0.1:7234. |
 | `--lease-ttl-ms` | `KERNABLE_LEASE_TTL_MS` | `10000` | How long a worker may run a command before it goes to another worker. |
 | `--checkpoint-interval-ms` | `KERNABLE_CHECKPOINT_INTERVAL_MS` | `5000` | How often the kernel signs a checkpoint of the hash chain. |
 | `--submit-timeout-ms` | `KERNABLE_SUBMIT_TIMEOUT_MS` | `30000` | How long a submit waits for its command to complete before it answers with an error (the command still runs; resubmit it to get the result). |

@@ -226,6 +226,23 @@ impl Vault {
         Ok(values)
     }
 
+    /// Which of `refs` the vault still holds, with their subject and whether they are secret,
+    /// without decrypting them: what a view may show about vault fields.
+    pub fn describe(&self, refs: &[String]) -> Result<Vec<(String, String, bool)>> {
+        if refs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn();
+        let marks = vec!["?"; refs.len()].join(",");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT ref, subject, secret FROM vault WHERE ref IN ({marks})"
+        ))?;
+        let rows = stmt.query_map(params_from_iter(refs), |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Deletes every value of `subject` and returns the streams whose events referred to them,
     /// whose snapshots may hold them too. Logs the erasure without the subject itself.
     pub fn erase(&self, subject: &str, command_id: &str, now_ms: i64) -> Result<Vec<StreamId>> {

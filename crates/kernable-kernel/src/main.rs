@@ -100,6 +100,9 @@ async fn main() -> ExitCode {
                 };
                 let root = !given("--root", "KERNABLE_ROOT");
                 let vault = !given("--vault-key", "KERNABLE_VAULT_KEY");
+                if !given("--ui-listen", "KERNABLE_UI_LISTEN") {
+                    flags.extend(["--ui-listen", "127.0.0.1:7234"]);
+                }
                 if root {
                     flags.extend(["--root", "root.pub"]);
                 }
@@ -315,6 +318,13 @@ fn banner(config: &Config, dev: bool, dir: &str) -> String {
                 .metrics_listen
                 .clone()
                 .unwrap_or_else(|| "disabled".into()),
+        ),
+        (
+            "UI",
+            config
+                .ui_listen
+                .as_ref()
+                .map_or("disabled".into(), |addr| format!("http://{addr}")),
         ),
         (
             "Mode",
@@ -899,6 +909,8 @@ mod tests {
             "vault.key",
             "--metrics-listen",
             "127.0.0.1:9233",
+            "--ui-listen",
+            "127.0.0.1:7234",
         ];
         let config = Config::from_args(&args, |_| None).unwrap();
         let banner = banner(&config, true, "/tmp/demo");
@@ -914,6 +926,7 @@ mod tests {
             " » Keys.................. root ",
             " » Vault................. sqlite - vault.db",
             " » Metrics............... 127.0.0.1:9233",
+            " » UI.................... http://127.0.0.1:7234",
             " » Mode.................. development (--dev)",
         ] {
             assert!(banner.contains(line), "{line:?} missing in\n{banner}");

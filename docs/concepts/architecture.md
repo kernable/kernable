@@ -41,6 +41,10 @@ Processes talk to the kernel over gRPC: workers and listeners keep one stream op
 
 ## A command's way
 
+<FlowDiagram name="command" />
+
+The same as a sequence:
+
 ```mermaid
 sequenceDiagram
   participant C as client
