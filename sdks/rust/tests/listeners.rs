@@ -14,8 +14,8 @@ use std::{
 
 use common::{TestKernel, eventually};
 use kernable::{
-    Check, CheckKind, CheckOutcome, Error, Kernable, ListenerHandle, MiddlewareOptions, NewEvent,
-    Outcome, Query, QueryOutcome, Rejected, RequestContext, Submit, Wait, Worker, domain,
+    Check, CheckKind, CheckOutcome, Error, Kernable, ListenerHandle, Manifest, MiddlewareOptions,
+    NewEvent, Outcome, Query, QueryOutcome, Rejected, RequestContext, Submit, Wait, Worker, domain,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -173,7 +173,7 @@ async fn a_stopped_listener_still_counts_a_settling_submit_reports_not_settled()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_service_retires_the_listeners_it_no_longer_declares_live_ones_never_count() {
+async fn a_membership_decides_which_listeners_count_live_ones_never_count() {
     let kernel = TestKernel::new(&["shop.*"], &["--settle-timeout-ms", "300"]);
     kernel.start().await;
     let shop = domain("shop");
@@ -193,13 +193,21 @@ async fn a_service_retires_the_listeners_it_no_longer_declares_live_ones_never_c
     let v1 = Kernable::new(kernel.options().service("shop")).unwrap();
     let worker = v1.worker(&cart);
     let mails1 = v1.listener(&mails());
-    let audit = v1.listener(
-        &shop
-            .reactor("audit")
-            .on("shop.Added", |_: serde_json::Value, _evt, _ctx| async {
-                Ok(())
-            }),
-    );
+    let auditor = shop
+        .reactor("audit")
+        .on("shop.Added", |_: serde_json::Value, _evt, _ctx| async {
+            Ok(())
+        });
+    let audit = v1.listener(&auditor);
+    v1.apply(
+        Manifest::new()
+            .worker(&cart)
+            .listener(mails1.listener())
+            .listener(&auditor)
+            .metadata("version", "1"),
+    )
+    .await
+    .unwrap();
     let running = [spawn_worker(&worker), spawn(&mails1), spawn(&audit)];
     async fn add(k: &Kernable, id: &str) -> Result<Outcome, Error> {
         k.submit(Submit::new("shop", "Cart", id, "Add")).await
@@ -214,9 +222,18 @@ async fn a_service_retires_the_listeners_it_no_longer_declares_live_ones_never_c
     mails_run.await.unwrap();
     audit_run.await.unwrap();
 
-    // The next version of the service has no audit any more: nobody waits for it.
+    // The next version of the service has no audit any more: it counts for nobody, so a
+    // settling submit does not wait for it.
     let v2 = Kernable::new(kernel.options().service("shop")).unwrap();
     let mails2 = v2.listener(&mails());
+    v2.apply(
+        Manifest::new()
+            .worker(&cart)
+            .listener(mails2.listener())
+            .metadata("version", "2"),
+    )
+    .await
+    .unwrap();
     // A live listener counts for nobody, even while it does not get through its events.
     let (release, stuck) = tokio::sync::watch::channel(false);
     let push = v2.listener(&shop.reactor("push").live().on(

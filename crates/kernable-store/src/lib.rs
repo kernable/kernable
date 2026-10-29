@@ -27,8 +27,8 @@ use std::fmt;
 
 use ed25519_dalek::SigningKey;
 use kernable_core::proto::{
-    Command, CommandResult, Event, ListenerRecord, NewEvent, Rejected, RevocationRecord, Signature,
-    WorkerRecord,
+    Command, CommandResult, Event, ListenerRecord, MembershipRecord, NewEvent, Rejected,
+    RevocationRecord, Signature, WorkerRecord,
 };
 
 /// The version of the stored data format this build reads and writes. A store of another
@@ -233,6 +233,12 @@ pub trait Store: Send + Sync {
 
     /// Stores aggregate registrations by aggregate type; a record with `removed` set deletes it.
     fn save_workers(&self, workers: &[WorkerRecord]) -> Result<()>;
+
+    /// The applied memberships, one per service, ordered by service.
+    fn memberships(&self) -> Result<Vec<MembershipRecord>>;
+
+    /// Replaces the membership of the record's service.
+    fn save_membership(&self, membership: &MembershipRecord) -> Result<()>;
 
     /// Signs the current head of the hash chain. Returns `None` while there are no events.
     fn checkpoint(&self, kernel: &SigningKey, now_ms: i64) -> Result<Option<Checkpoint>>;

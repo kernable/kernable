@@ -2,7 +2,10 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -21,18 +24,22 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::{
     Aggregate, BoxError, Client, Rejected, State,
     domain::{Failure, Runnable},
-    listener::Service,
     log,
 };
 
 struct WorkerInner {
     client: Client,
-    service: Service,
+    /// The service it belongs to (`Options::service`); empty if none.
+    service: String,
     /// Qualified command type -> the aggregate that runs it.
     by_command: Mutex<HashMap<String, Arc<dyn Runnable>>>,
     settings: Mutex<(u32, Duration)>,
     stopped: watch::Sender<bool>,
     ready: watch::Sender<bool>,
+    /// Whether the first connect gets its own line; an app prints it in its overview instead.
+    announce: AtomicBool,
+    /// Sessions the kernel accepted so far.
+    connects: AtomicU64,
 }
 
 /// Runs the commands of its aggregates: the kernel sends each command with the aggregate's
@@ -44,7 +51,7 @@ pub struct Worker {
 }
 
 impl Worker {
-    pub(crate) fn new(client: Client, service: Service) -> Worker {
+    pub(crate) fn new(client: Client, service: String) -> Worker {
         Worker {
             inner: Arc::new(WorkerInner {
                 client,
@@ -53,17 +60,19 @@ impl Worker {
                 settings: Mutex::new((16, Duration::from_secs(1))),
                 stopped: watch::Sender::new(false),
                 ready: watch::Sender::new(false),
+                announce: AtomicBool::new(true),
+                connects: AtomicU64::new(0),
             }),
         }
     }
 
-    /// Runs the commands of `aggregate`, too; it joins the aggregates the connection's service
-    /// declares.
+    /// Runs the commands of `aggregate`, too.
     pub fn aggregate<S: State>(&self, aggregate: &Aggregate<S>) -> Worker {
-        let runnable: Arc<dyn Runnable> = Arc::new(aggregate.clone());
-        self.inner
-            .service
-            .declare_aggregate(qualified(runnable.as_ref()));
+        self.runnable(Arc::new(aggregate.clone()))
+    }
+
+    /// Runs the commands of `runnable`, too: an aggregate of any state type.
+    pub(crate) fn runnable(&self, runnable: Arc<dyn Runnable>) -> Worker {
         let mut by_command = self.inner.by_command.lock().unwrap();
         for t in runnable.command_types() {
             by_command.insert(
@@ -85,6 +94,11 @@ impl Worker {
     pub fn reconnect(&self, delay: Duration) -> Worker {
         self.inner.settings.lock().unwrap().1 = delay;
         self.clone()
+    }
+
+    /// Whether the first connect gets its own line (default); an app prints it in its overview.
+    pub(crate) fn announce(&self, announce: bool) {
+        self.inner.announce.store(announce, Ordering::SeqCst);
     }
 
     /// Returns once the kernel accepted the worker.
@@ -125,7 +139,6 @@ impl Worker {
         let by_command = self.inner.by_command.lock().unwrap().clone();
         let (tx, rx) = mpsc::channel(1024);
         let msg = |m: In| WorkerMessage { msg: Some(m) };
-        let (service, declared) = self.inner.service.aggregate_declaration();
         tx.send(msg(In::Register(Register {
             worker_id: format!("rust-{}", std::process::id()),
             key_id: client.key_id.clone(),
@@ -133,8 +146,7 @@ impl Worker {
             max_concurrency: concurrency,
             event_schemas: event_schemas(&by_command),
             protocol: PROTOCOL,
-            service,
-            declared,
+            service: self.inner.service.clone(),
         })))
         .await?;
         let mut gateway = WorkerGatewayClient::new(client.channel.clone());
@@ -160,10 +172,14 @@ impl Worker {
                         .await?;
                 }
                 Some(Out::Registered(_)) => {
-                    let command_types: Vec<String> = by_command.keys().cloned().collect();
-                    client.log.info("worker", || {
-                        log::worker_connected(&client.log.connected(&client.key_id), &command_types)
-                    });
+                    if self.inner.connects.fetch_add(1, Ordering::SeqCst) > 0 {
+                        client.log.info("worker", || "connected again".into());
+                    } else if self.inner.announce.load(Ordering::SeqCst) {
+                        let command_types: Vec<String> = by_command.keys().cloned().collect();
+                        client.log.info("worker", || {
+                            log::worker_connected(&client.log.peer, &command_types)
+                        });
+                    }
                     self.inner.ready.send_replace(true);
                 }
                 Some(Out::Execute(x)) => {

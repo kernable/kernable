@@ -223,6 +223,8 @@ are named `domain.Type`.
 - `readonly name: string`
 - `readonly events = new Map<string, EventSchema>()`: Payload versions and upcasts per event type; types not listed are at version 1.
 - `readonly commands = new Map<string, CommandSchema>()`: Vault fields per command type; see `command`.
+- `readonly aggregates: Aggregate<any>[] = []`: The aggregates defined on it, which `Kernable.app` runs.
+- `readonly listeners: Listener[] = []`: The read models and reactors defined on it, which `Kernable.app` runs.
 - `event(type: string, schema: number): EventSchema`: Declares that this domain writes `type` events at version `schema`, with an `upcast` per older version. The domain's aggregates and listeners use it; listeners of other domains get it with `use(domain)`.
 - `command(type: string): CommandSchema`: Declares which fields of `type` commands the vault keeps (`personal`, `secret`). Clients that submit them need the domain: `kernable.use(domain)`.
 - `aggregate<S>(name: string, initial: S, options?: AggregateOptions): Aggregate<S>`
@@ -256,6 +258,37 @@ belongs to a domain and produces events only of that domain; create it with
 - `schemaOf(type: string): number`: The payload version this aggregate writes `type` events at.
 - `fold(history: FoldEvent[], from: S = this.initial): S`: State after `history`, starting from `from`. Events are upcast first; events without an `apply` are skipped. Fields of `EventMeta` an event lacks are empty (0 for `version`), as is its request context.
 
+### App
+
+An app's processes: see `Kernable.app`.
+
+- `readonly ready: Promise<void>`: Resolves once every worker and listener of the app is connected.
+- `readonly manifest: Manifest`: The membership `run()` applies.
+- `readonly worker?: Worker`
+- `readonly listeners: ListenerHandle[]`
+- `async run(options: WorkerOptions = {}): Promise<void>`: Applies the membership, then runs the worker and the listeners until `stop()`. Once all are connected, it prints an overview of the app (unless `KERNABLE_LOG` is below `info`).
+- `stop(): void`
+
+### Manifest
+
+What a service consists of, for `Kernable.apply`; see `Membership` in kernable.proto.
+
+- `service?: string`: Default: this process's service (`Options.service`).
+- `workers?: Aggregate<any>[]`: The aggregates the service runs; the kernel waits for a worker of each.
+- `listeners?: Listener[]`: The listeners the kernel waits for; others of the service count for nobody.
+- `middlewares?: Listener[]`: The service's listeners that may check requests; they count like listeners.
+- `metadata?: Record<string, string>`: Free metadata, e.g. `{ version: "1.0.0" }`.
+
+### AppOptions
+
+An app: one service made of whole domains, for `Kernable.app`.
+
+- `service?: string`: Default: this process's service (`Options.service`).
+- `version?: string`: Goes into the membership's metadata, like `description`.
+- `description?: string`
+- `metadata?: Record<string, string>`: More metadata.
+- `domains: Domain[]`: Every aggregate, read model and reactor defined on them runs in this app.
+
 ### Options
 
 
@@ -264,7 +297,7 @@ belongs to a domain and produces events only of that domain; create it with
 - `key?: string`: Path to this process's `.key` file; used to sign commands and worker results. Default: `KERNABLE_KEY`, else `app.key` in the current directory.
 - `grant?: string`: Path to the key's grant (`kernable grant`), sent with every call. Default: `KERNABLE_GRANT`, else the `.grant` file next to the key file, if there is one.
 - `tenant?: string`: Default tenant for `submit`.
-- `service?: string`: The service this process's workers and listeners belong to. Each declares all workers or listeners of the service when it connects: create them all with `kernable.worker` and `kernable.listener` before running any. The kernel unregisters the service's aggregates that are no longer declared (their commands are refused), and retires its listeners that are no longer declared: nobody waits for them any more, but they keep their position (declared again, they resume) and their middleware keeps refusing until `kernable listeners remove`. Default: `KERNABLE_SERVICE`, else none (nothing is unregistered or retired).
+- `service?: string`: The service this process's workers and listeners belong to. Its membership (see `apply`) decides what the kernel waits for: what it lists counts, the service's other workers and listeners are dynamic, and only listeners it lists as middlewares may check requests. Default: `KERNABLE_SERVICE`, else none (everything registered counts).
 - `context?: RequestContext`: Default request context for `submit` and `query`, e.g. this service's identity; a request's own context replaces it.
 - `tls?: TlsFiles`: Mutual TLS for `host:port` URLs: paths of the CA certificate and this process's certificate and key. Default: `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`, if set.
 
@@ -290,6 +323,8 @@ belongs to a domain and produces events only of that domain; create it with
 - `readonly cache: Cache`: The shared cache of a domain; see `Cache`.
 - `use(...domains: Domain[]): this`: Seals the vault fields of these domains' commands when submitting them; see `Domain.command`.
 - `worker(...aggregates: Aggregate<any>[]): Worker`: Runs these aggregates' commands over this connection. The kernel registers the aggregates: commands for an aggregate or command type no worker registered are refused.
+- `app(options: AppOptions): App`: An app made of whole domains: `run()` applies the service's membership (its domains' aggregates as workers, their read models and reactors as listeners, those that check requests as middlewares; live ones are not listed), then runs all of them. One service is one app: two processes with the same service would replace each other's membership.
+- `async apply(manifest: Manifest): Promise<void>`: Replaces the membership of a service (default: this process's): the workers, listeners and middlewares the kernel waits for, and free metadata. Apply it once per deploy, e.g. from a deploy script, not from every process: the latest apply wins. The key needs `manage` for the service. A middleware the new membership no longer lists stops checking.
 - `async submit(options: SubmitOptions): Promise<Outcome>`: Runs a command and returns its outcome; see `SubmitOptions.wait`.
 - `async enqueue(options: Omit<SubmitOptions, "wait">): Promise<string>`: Stores the command in the kernel's queue and returns its ID without waiting for it to run. Submit it again with the same `id` to get the outcome.
 - `async query<T = unknown>(options: QueryOptions): Promise<T>`: Asks the read model that answers `domain.type` and returns its answer. Queries always go through the kernel, also within one process. Throws `Rejected` if the read model rejects it.
@@ -404,6 +439,8 @@ least once: if a handler throws, the listener reconnects and the event is delive
 
 - `position = 0`: Global position of the last handled event (or skipped, for other event types).
 - `readonly ready: Promise<void>`: Resolves once the kernel accepted the listener.
+- `startedAt = 0`: Position after which the kernel delivered on the first connect.
+- `announce = true`: Whether the first connect gets its own line; an `App` prints it in its overview instead.
 - `readonly listener: Listener`: The definition it runs.
 - `get store(): Store`: The listener's store (`ListenerOptions.store`), once `run()` opened it.
 - `async run(): Promise<void>`: Processes events until `stop()`, reconnecting when the stream drops.
@@ -421,6 +458,7 @@ least once: if a handler throws, the listener reconnects and the event is delive
 
 
 - `readonly ready: Promise<void>`: Resolves once the kernel accepted the worker.
+- `announce = true`: Whether the first connect gets its own line; an `App` prints it in its overview instead.
 - `async run(options: WorkerOptions = {}): Promise<void>`: Processes commands until `stop()`, reconnecting when the session drops.
 - `stop(): void`
 

@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs,
     io::{IsTerminal, Write},
     path::Path,
@@ -9,8 +10,10 @@ use std::{
 
 use kernable_core::{
     proto::{
-        Command, ListenerRecord, Permission, RevokeRequest, SubmitRequest, When, WorkerRecord,
-        command_result::Outcome, command_service_client::CommandServiceClient,
+        ApplyRequest, Attribute, Command, ListenerRecord, Membership, Permission, RevokeRequest,
+        SubmitRequest, When, WorkerRecord, command_result::Outcome,
+        command_service_client::CommandServiceClient,
+        membership_service_client::MembershipServiceClient,
         trust_service_client::TrustServiceClient,
     },
     signing, transport,
@@ -33,7 +36,7 @@ const USAGE: &str = "usage:
                                           is <action>=<type>,<type> or a bare type for every action
                                           (actions: submit run subscribe listen query answer check
                                           privileged vault_read vault_erase data_read data_write
-                                          cache)
+                                          cache manage; manage takes service names)
   kernable revoke <addr> <root.key> <key.pub> <since>
                                           revokes a key from <since> on (UTC, 2026-10-27T09:00:00Z),
                                           for good; the kernel must be running (over TCP with
@@ -48,6 +51,13 @@ const USAGE: &str = "usage:
   kernable listeners <store>              lists registered listeners with order, position, middleware
                                           and when they were last seen
   kernable listeners remove <store> <name>  removes a listener, and its middleware (kernel stopped)
+  kernable apply <addr> <key> <manifest.json>
+                                          applies a service's membership (JSON with service, workers,
+                                          listeners, middlewares and metadata); once per deploy,
+                                          with a key granted manage for the service (TLS as for
+                                          revoke)
+  kernable services <store>               lists the applied memberships, what they list, and what
+                                          their services run beyond them
   kernable workers <store>                lists registered aggregates with their command types and
                                           when a worker for them was last seen
   kernable workers remove <store> <domain.Aggregate>
@@ -134,6 +144,8 @@ async fn main() -> ExitCode {
         ["migrate", store] => migrate(store),
         ["listeners", "remove", store, name] => remove_listener(store, name),
         ["workers", store] => workers(store),
+        ["services", store] => services(store),
+        ["apply", addr, key, manifest] => apply(addr, key, manifest).await,
         ["workers", "remove", store, aggregate] => remove_worker(store, aggregate),
         [
             "submit",
@@ -572,7 +584,9 @@ fn vault_rekey(vault: &str, old: &str, new: &str) -> Result<bool> {
 }
 
 fn listeners(store: &str) -> Result<bool> {
-    for l in kernable_store::open_read_only(store)?.listeners()? {
+    let store = kernable_store::open_read_only(store)?;
+    let memberships = memberships_of(store.as_ref())?;
+    for l in store.listeners()? {
         let types = match l.event_types.as_slice() {
             [] => "*".to_owned(),
             types => types.join(","),
@@ -593,10 +607,16 @@ fn listeners(store: &str) -> Result<bool> {
                 )
             })
             .collect();
-        let service = match (l.service.as_str(), l.retired) {
+        let unlisted = memberships.get(&l.service).is_some_and(|m| {
+            !m.listeners
+                .iter()
+                .chain(&m.middlewares)
+                .any(|n| *n == l.name)
+        });
+        let service = match (l.service.as_str(), unlisted) {
             ("", _) => String::new(),
             (service, false) => format!(" service {service}"),
-            (service, true) => format!(" service {service} (retired)"),
+            (service, true) => format!(" service {service} (not listed: counts for nobody)"),
         };
         println!(
             "{} order {} position {} types {types} key {}{service}{middleware} last seen {}",
@@ -625,6 +645,130 @@ fn workers(store: &str) -> Result<bool> {
         );
     }
     Ok(true)
+}
+
+/// The applied memberships by service.
+fn memberships_of(store: &dyn kernable_store::Store) -> Result<HashMap<String, Membership>> {
+    Ok(store
+        .memberships()?
+        .into_iter()
+        .filter_map(|r| r.membership)
+        .map(|m| (m.service.clone(), m))
+        .collect())
+}
+
+fn services(store: &str) -> Result<bool> {
+    let store = kernable_store::open_read_only(store)?;
+    let listeners = store.listeners()?;
+    let workers = store.workers()?;
+    for r in store.memberships()? {
+        let (Some(m), Some(sig)) = (r.membership, r.sig) else {
+            continue;
+        };
+        let metadata: String = m
+            .metadata
+            .iter()
+            .map(|a| format!(" {}={}", a.key, a.value))
+            .collect();
+        println!(
+            "{}{metadata} (applied {} by {})",
+            m.service,
+            config::utc(r.applied_at),
+            sig.key_id
+        );
+        let registered = |found: bool| if found { "" } else { " (never registered)" };
+        for a in &m.workers {
+            let found = workers.iter().any(|w| w.aggregate_type == *a);
+            println!("  worker {a}{}", registered(found));
+        }
+        for (kind, names) in [("listener", &m.listeners), ("middleware", &m.middlewares)] {
+            for name in names {
+                let found = listeners.iter().any(|l| l.name == *name);
+                println!("  {kind} {name}{}", registered(found));
+            }
+        }
+        let listed = |name: &String| m.listeners.iter().chain(&m.middlewares).any(|n| n == name);
+        for l in listeners
+            .iter()
+            .filter(|l| l.service == m.service && !listed(&l.name))
+        {
+            println!("  dynamic listener {}", l.name);
+        }
+    }
+    Ok(true)
+}
+
+/// Applies the membership in a manifest file, signed with `key_path` (granted `manage`).
+async fn apply(addr: &str, key_path: &str, manifest: &str) -> Result<bool> {
+    let key = signing::read_signing_key(key_path)?;
+    let json: serde_json::Value = serde_json::from_str(&fs::read_to_string(manifest)?)
+        .map_err(|e| format!("{manifest}: {e}"))?;
+    let strings = |field: &str| -> Result<Vec<String>> {
+        match json.get(field) {
+            None => Ok(Vec::new()),
+            Some(v) => serde_json::from_value(v.clone())
+                .map_err(|_| format!("{manifest}: {field} is a list of strings").into()),
+        }
+    };
+    let metadata: Vec<Attribute> = match json.get("metadata") {
+        None => Vec::new(),
+        Some(serde_json::Value::Object(map)) => map
+            .iter()
+            .map(|(key, value)| Attribute {
+                key: key.clone(),
+                value: value
+                    .as_str()
+                    .map_or_else(|| value.to_string(), str::to_owned),
+            })
+            .collect(),
+        Some(_) => return Err(format!("{manifest}: metadata is an object").into()),
+    };
+    let membership = Membership {
+        service: json
+            .get("service")
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| format!("{manifest}: no service"))?
+            .to_owned(),
+        workers: strings("workers")?,
+        listeners: strings("listeners")?,
+        middlewares: strings("middlewares")?,
+        metadata,
+        issued_at: now_ms(),
+    };
+    let mut request = tonic::Request::new(ApplyRequest {
+        sig: Some(signing::sign(
+            &key,
+            &signing::membership_message(&membership),
+        )),
+        membership: Some(membership.clone()),
+        protocol: kernable_core::PROTOCOL,
+    });
+    with_key_grant(&mut request, key_path)?;
+    MembershipServiceClient::new(connect(addr).await?)
+        .apply(request)
+        .await?;
+    println!(
+        "applied {}: {} workers, {} listeners, {} middlewares",
+        membership.service,
+        membership.workers.len(),
+        membership.listeners.len(),
+        membership.middlewares.len()
+    );
+    Ok(true)
+}
+
+/// Sends the key's grant with `request`, if it lies next to the key file.
+fn with_key_grant<T>(request: &mut tonic::Request<T>, key_path: &str) -> Result<()> {
+    let grant = format!(
+        "{}.grant",
+        key_path.strip_suffix(".key").unwrap_or(key_path)
+    );
+    if let Ok(grant) = fs::read_to_string(&grant) {
+        request
+            .metadata_mut()
+            .insert(GRANT_HEADER, grant.trim().parse()?);
+    }
+    Ok(())
 }
 
 fn remove_worker(store: &str, aggregate: &str) -> Result<bool> {
@@ -702,16 +846,7 @@ async fn submit(addr: &str, key_path: &str, mut cmd: Command) -> Result<bool> {
         protocol: kernable_core::PROTOCOL,
         ..Default::default()
     });
-    // The key's grant, if it lies next to the key file.
-    let grant = format!(
-        "{}.grant",
-        key_path.strip_suffix(".key").unwrap_or(key_path)
-    );
-    if let Ok(grant) = fs::read_to_string(&grant) {
-        request
-            .metadata_mut()
-            .insert(GRANT_HEADER, grant.trim().parse()?);
-    }
+    with_key_grant(&mut request, key_path)?;
     match client.submit(request).await?.into_inner().outcome {
         Some(Outcome::Committed(c)) => {
             for e in c.events {

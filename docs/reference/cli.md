@@ -19,7 +19,7 @@ usage:
                                           is <action>=<type>,<type> or a bare type for every action
                                           (actions: submit run subscribe listen query answer check
                                           privileged vault_read vault_erase data_read data_write
-                                          cache)
+                                          cache manage; manage takes service names)
   kernable revoke <addr> <root.key> <key.pub> <since>
                                           revokes a key from <since> on (UTC, 2026-10-27T09:00:00Z),
                                           for good; the kernel must be running (over TCP with
@@ -34,6 +34,13 @@ usage:
   kernable listeners <store>              lists registered listeners with order, position, middleware
                                           and when they were last seen
   kernable listeners remove <store> <name>  removes a listener, and its middleware (kernel stopped)
+  kernable apply <addr> <key> <manifest.json>
+                                          applies a service's membership (JSON with service, workers,
+                                          listeners, middlewares and metadata); once per deploy,
+                                          with a key granted manage for the service (TLS as for
+                                          revoke)
+  kernable services <store>               lists the applied memberships, what they list, and what
+                                          their services run beyond them
   kernable workers <store>                lists registered aggregates with their command types and
                                           when a worker for them was last seen
   kernable workers remove <store> <domain.Aggregate>

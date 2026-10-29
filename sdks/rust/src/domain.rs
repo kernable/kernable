@@ -32,12 +32,19 @@ struct DomainInner {
     name: String,
     events: RwLock<HashMap<String, EventDef>>,
     commands: RwLock<HashMap<String, VaultFields>>,
+    /// The aggregates created through it, in order, whatever their state type.
+    aggregates: RwLock<Vec<Arc<dyn Runnable>>>,
+    /// The read models and reactors created through it, in order.
+    listeners: RwLock<Vec<Listener>>,
 }
 
 /// A domain: a name that scopes its aggregates, commands and events, lowercase by convention
 /// (`orders`) like aggregates, while message types are capitalized (`orders.PlaceOrder`). Both
 /// cases are valid; names are case-sensitive. Types are unique within a domain; elsewhere they
 /// are named `domain.Type`. Cloning gives another handle to the same domain.
+///
+/// A domain remembers the aggregates, read models and reactors created through it, so that an
+/// app runs all of them (see [`crate::Kernable::app`]); they live as long as the domain does.
 #[derive(Clone)]
 pub struct Domain {
     inner: Arc<DomainInner>,
@@ -60,6 +67,8 @@ pub fn domain(name: &str) -> Domain {
             name: name.to_owned(),
             events: RwLock::default(),
             commands: RwLock::default(),
+            aggregates: RwLock::default(),
+            listeners: RwLock::default(),
         }),
     }
 }
@@ -120,7 +129,7 @@ impl Domain {
     /// An aggregate of this domain named `name` (lowercase by convention, like `cart`), whose
     /// state starts as `initial`.
     pub fn aggregate<S: State>(&self, name: &str, initial: S) -> Aggregate<S> {
-        Aggregate {
+        let aggregate = Aggregate {
             inner: Arc::new(AggregateInner {
                 domain: self.clone(),
                 name: name.to_owned(),
@@ -129,21 +138,42 @@ impl Domain {
                 appliers: RwLock::default(),
                 handlers: RwLock::default(),
             }),
-        }
+        };
+        self.inner
+            .aggregates
+            .write()
+            .unwrap()
+            .push(Arc::new(aggregate.clone()));
+        aggregate
     }
 
     /// A read model of this domain named `name`: kept in memory and rebuilt from the first
-    /// event on every start (order 0). Run it with [`crate::Kernable::listen`].
+    /// event on every start (order 0). Run it with [`crate::Kernable::listener`].
     pub fn read_model(&self, name: &str) -> Listener {
-        Listener::new(self, name, 0, Some(0))
+        self.remember(Listener::new(self, name, 0, Some(0)))
     }
 
     /// A reactor of this domain named `name`: triggers side effects; starts at the newest event
     /// when it is new, then resumes after the last acknowledged event (order 10). A settling submit from its handler waits for the
     /// listeners before it (the read models), not for the reactor itself, which handles one
-    /// event at a time. Run it with [`crate::Kernable::listen`].
+    /// event at a time. Run it with [`crate::Kernable::listener`].
     pub fn reactor(&self, name: &str) -> Listener {
-        Listener::new(self, name, 10, None)
+        self.remember(Listener::new(self, name, 10, None))
+    }
+
+    fn remember(&self, listener: Listener) -> Listener {
+        self.inner.listeners.write().unwrap().push(listener.clone());
+        listener
+    }
+
+    /// The aggregates created through this domain, in order.
+    pub(crate) fn aggregates(&self) -> Vec<Arc<dyn Runnable>> {
+        self.inner.aggregates.read().unwrap().clone()
+    }
+
+    /// The read models and reactors created through this domain, in order.
+    pub(crate) fn listeners(&self) -> Vec<Listener> {
+        self.inner.listeners.read().unwrap().clone()
     }
 
     pub(crate) fn event_def(&self, event_type: &str) -> Option<EventDef> {

@@ -3,8 +3,8 @@
 use std::{collections::HashSet, path::PathBuf, sync::Arc, thread};
 
 use kernable_core::proto::{
-    Attribute, Command, ListenerRecord, Middleware, NewEvent, Rejected, RequestContext, Signature,
-    When, WorkerRecord, command_result::Outcome,
+    Attribute, Command, ListenerRecord, Membership, MembershipRecord, Middleware, NewEvent,
+    Rejected, RequestContext, Signature, When, WorkerRecord, command_result::Outcome,
 };
 use kernable_store::{Enqueued, Error, FileStore, SqliteStore, Store};
 
@@ -162,7 +162,6 @@ fn listener(name: &str, order: i32, position: u64) -> ListenerRecord {
         removed: false,
         middlewares: Vec::new(),
         service: String::new(),
-        retired: false,
         last_seen: 1_000 + position as i64,
     }
 }
@@ -176,6 +175,50 @@ fn worker(aggregate_type: &str, command_types: &[&str]) -> WorkerRecord {
         last_seen: 42,
         removed: false,
     }
+}
+
+fn memberships_are_replaced_per_service(store: &dyn Store) {
+    assert!(store.memberships().unwrap().is_empty());
+    let membership = |service: &str, listeners: &[&str], at: i64| MembershipRecord {
+        membership: Some(Membership {
+            service: service.into(),
+            workers: vec!["shop.Cart".into()],
+            listeners: listeners.iter().map(|l| l.to_string()).collect(),
+            middlewares: vec!["guard".into()],
+            metadata: vec![
+                Attribute {
+                    key: "version".into(),
+                    value: "1.0.0".into(),
+                },
+                Attribute {
+                    key: "description".into(),
+                    value: "Carts, \"quoted\"".into(),
+                },
+            ],
+            issued_at: at,
+        }),
+        sig: Some(Signature {
+            key_id: "k".into(),
+            sig: vec![1, 2, 3],
+        }),
+        applied_at: at + 1,
+    };
+    store
+        .save_membership(&membership("shop", &["carts", "mails"], 1))
+        .unwrap();
+    store
+        .save_membership(&membership("billing", &[], 2))
+        .unwrap();
+    store
+        .save_membership(&membership("shop", &["carts"], 3))
+        .unwrap();
+    assert_eq!(
+        store.memberships().unwrap(),
+        [
+            membership("billing", &[], 2),
+            membership("shop", &["carts"], 3)
+        ]
+    );
 }
 
 fn workers_are_saved_replaced_and_removed(store: &dyn Store) {
@@ -438,6 +481,7 @@ for_each_backend!(
     concurrent_threads_lose_no_updates,
     listeners_are_saved_replaced_and_removed,
     workers_are_saved_replaced_and_removed,
+    memberships_are_replaced_per_service,
     reading_after_a_version_returns_only_later_events,
     contexts_come_back_as_stored,
 );

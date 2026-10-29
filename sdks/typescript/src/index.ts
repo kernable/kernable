@@ -35,6 +35,7 @@ import {
   commandMessage,
   dataMessage,
   derivedId,
+  membershipMessage,
   queryMessage,
   rejectionMessage,
   resultMessage,
@@ -449,6 +450,10 @@ export class Domain {
   readonly events = new Map<string, EventSchema>();
   /** Vault fields per command type; see `command`. */
   readonly commands = new Map<string, CommandSchema>();
+  /** The aggregates defined on it, which `Kernable.app` runs. */
+  readonly aggregates: Aggregate<any>[] = [];
+  /** The read models and reactors defined on it, which `Kernable.app` runs. */
+  readonly listeners: Listener[] = [];
 
   constructor(name: string) {
     if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(name)) throw new Error(`invalid domain name ${JSON.stringify(name)}`);
@@ -477,7 +482,9 @@ export class Domain {
   }
 
   aggregate<S>(name: string, initial: S, options?: AggregateOptions): Aggregate<S> {
-    return new Aggregate(this.name, name, initial, options, this.events);
+    const aggregate = new Aggregate(this.name, name, initial, options, this.events);
+    this.aggregates.push(aggregate);
+    return aggregate;
   }
 
   /**
@@ -485,7 +492,9 @@ export class Domain {
    * (defaults: order 0, start 0). Run it with `kernable.listener(definition)`.
    */
   readModel(name: string, options: ListenerOptions = {}): Listener {
-    return new Listener(this, name, { order: 0, start: 0, ...options });
+    const listener = new Listener(this, name, { order: 0, start: 0, ...options });
+    this.listeners.push(listener);
+    return listener;
   }
 
   /**
@@ -495,7 +504,9 @@ export class Domain {
    * Run it with `kernable.listener(definition)`.
    */
   reactor(name: string, options: ListenerOptions = {}): Listener {
-    return new Listener(this, name, { order: 10, ...options });
+    const listener = new Listener(this, name, { order: 10, ...options });
+    this.listeners.push(listener);
+    return listener;
   }
 }
 
@@ -573,6 +584,130 @@ export class Aggregate<S> {
 }
 
 
+/** `shop.ItemAdded` as `ItemAdded` when `shop` is the only domain in `domains`. */
+function relative(type: string, domains: Set<string>): string {
+  const [domain, name] = type.split(".");
+  return domains.size === 1 && domains.has(domain) && name ? name : type;
+}
+
+/**
+ * What a listener does, one part per entry: where it starts, what it reads, answers and checks.
+ * `name` shortens the types (see `relative`).
+ */
+function listenerDetails(l: Listener, position: number, name: (type: string) => string = (t) => t): string[] {
+  const list = (types: Iterable<string>) => [...types].map(name).join(", ");
+  const details = [l.handlers.size ? `from ${position} · reads ${list(l.handlers.keys())}` : `from ${position}`];
+  if (l.queries.size) details.push(`answers ${list(l.queries.keys())}`);
+  for (const [when, m] of l.middlewares) details.push(`checks ${list(m.options.types)} ${when}`);
+  return details;
+}
+
+/** An app's processes: see `Kernable.app`. */
+export class App {
+  /** Resolves once every worker and listener of the app is connected. */
+  readonly ready: Promise<void>;
+  /** The membership `run()` applies. */
+  readonly manifest: Manifest;
+  readonly worker?: Worker;
+  readonly listeners: ListenerHandle[];
+  private readonly kernable: Kernable;
+  private readonly log: Log;
+  /** The names of the app's domains. */
+  private readonly domains: Set<string>;
+
+  constructor(kernable: Kernable, log: Log, domains: Domain[], manifest: Manifest, worker: Worker | undefined, listeners: ListenerHandle[]) {
+    this.kernable = kernable;
+    this.log = log;
+    this.domains = new Set(domains.map((d) => d.name));
+    this.manifest = manifest;
+    this.worker = worker;
+    this.listeners = listeners;
+    this.ready = Promise.all([worker?.ready, ...listeners.map((l) => l.ready)]).then(() => {});
+  }
+
+  /**
+   * Applies the membership, then runs the worker and the listeners until `stop()`. Once all
+   * are connected, it prints an overview of the app (unless `KERNABLE_LOG` is below `info`).
+   */
+  async run(options: WorkerOptions = {}): Promise<void> {
+    const started = Date.now();
+    await this.kernable.apply(this.manifest);
+    if (this.worker) this.worker.announce = false;
+    for (const l of this.listeners) l.announce = false;
+    void this.ready.then(() => this.overview(Date.now() - started));
+    await Promise.all([this.worker?.run(options), ...this.listeners.map((l) => l.run())]);
+  }
+
+  private overview(ms: number): void {
+    const log = this.log;
+    if (!log.enabled("info")) return;
+    const m = this.manifest;
+    const domains = this.domains;
+    // A single domain's own names go without it; with several, every name is qualified.
+    const short = (domain: string, name: string) => (domains.size === 1 && domains.has(domain) ? name : `${domain}.${name}`);
+    const count = (n: number, what: string) => `${n} ${what}${n === 1 ? "" : "s"}`;
+    const listed = [count(m.workers?.length ?? 0, "worker"), count(m.listeners?.length ?? 0, "listener")];
+    if (m.middlewares?.length) listed.push(count(m.middlewares.length, "middleware"));
+    const meta = m.metadata ?? {};
+    const rows: [string, string, string[]][] = [];
+    for (const a of m.workers ?? []) {
+      const types = [...a.handlers.keys()].sort().join(", ");
+      rows.push(["worker", short(a.domain, a.name), [`runs ${types}`]]);
+    }
+    for (const h of this.listeners) {
+      const l = h.listener;
+      const kind = l.options.live ? "live" : "listener";
+      rows.push([kind, short(l.domain.name, l.name), listenerDetails(l, h.startedAt, (t) => relative(t, domains))]);
+    }
+    const nameWidth = Math.max(0, ...rows.map(([, name]) => name.length));
+    const lines = [
+      log.style(1, ["kernable", [m.service, meta.version].filter(Boolean).join(" "), meta.description].filter(Boolean).join(" · ")),
+      `  ${"kernel".padEnd(10)}  ${log.peer}`,
+      `  ${"membership".padEnd(10)}  applied: ${listed.join(", ")}`,
+      "",
+    ];
+    for (const [kind, name, details] of rows) {
+      const [first, ...rest] = details;
+      lines.push(`  ${kind.padEnd(10)}  ${name.padEnd(nameWidth)}  ${first}`);
+      for (const more of rest) lines.push(`  ${"".padEnd(10)}  ${"".padEnd(nameWidth)}  ${more}`);
+    }
+    lines.push("", `  ${log.style(2, `ready in ${ms} ms`)}`, "");
+    console.error(lines.join("\n"));
+  }
+
+  stop(): void {
+    this.worker?.stop();
+    for (const l of this.listeners) l.stop();
+  }
+}
+
+/** What a service consists of, for `Kernable.apply`; see `Membership` in kernable.proto. */
+export interface Manifest {
+  /** Default: this process's service (`Options.service`). */
+  service?: string;
+  /** The aggregates the service runs; the kernel waits for a worker of each. */
+  workers?: Aggregate<any>[];
+  /** The listeners the kernel waits for; others of the service count for nobody. */
+  listeners?: Listener[];
+  /** The service's listeners that may check requests; they count like listeners. */
+  middlewares?: Listener[];
+  /** Free metadata, e.g. `{ version: "1.0.0" }`. */
+  metadata?: Record<string, string>;
+}
+
+/** An app: one service made of whole domains, for `Kernable.app`. */
+export interface AppOptions {
+  /** Default: this process's service (`Options.service`). */
+  service?: string;
+  /** Goes into the membership's metadata, like `description`. */
+  version?: string;
+  description?: string;
+  /** More metadata. */
+  metadata?: Record<string, string>;
+  /** Every aggregate, read model and reactor defined on them runs in this app. */
+  domains: Domain[];
+}
+
 export interface Options {
   /**
    * Kernel address: `http://host:port` (`host:port` works too) or, on Unix, `unix:/path/to.sock`.
@@ -592,13 +727,10 @@ export interface Options {
   /** Default tenant for `submit`. */
   tenant?: string;
   /**
-   * The service this process's workers and listeners belong to. Each declares all workers or
-   * listeners of the service when it connects: create them all with `kernable.worker` and
-   * `kernable.listener` before running any. The kernel unregisters the service's aggregates
-   * that are no longer declared (their commands are refused), and retires its listeners that are
-   * no longer declared: nobody waits for them any more, but they keep their position (declared
-   * again, they resume) and their middleware keeps refusing until `kernable listeners remove`.
-   * Default: `KERNABLE_SERVICE`, else none (nothing is unregistered or retired).
+   * The service this process's workers and listeners belong to. Its membership (see `apply`)
+   * decides what the kernel waits for: what it lists counts, the service's other workers and
+   * listeners are dynamic, and only listeners it lists as middlewares may check requests.
+   * Default: `KERNABLE_SERVICE`, else none (everything registered counts).
    */
   service?: string;
   /** Default request context for `submit` and `query`, e.g. this service's identity; a request's own context replaces it. */
@@ -638,17 +770,32 @@ type Level = Exclude<keyof typeof LEVELS, "off">;
  */
 class Log {
   private readonly level: number;
-  /** `<url> as <key name> (<key id>…)`, for the connected lines. */
+  /** Colors on a terminal, unless `NO_COLOR` is set. */
+  private readonly color = Boolean(process.stderr.isTTY) && !process.env.NO_COLOR;
+  /** `<url> · key <name> (<key id>…)`: the kernel and the key this process connects with. */
   readonly peer: string;
 
   constructor(url: string, keyPath: string, key: Key) {
     const level = process.env.KERNABLE_LOG?.toLowerCase() ?? "";
     this.level = level in LEVELS ? LEVELS[level as keyof typeof LEVELS] : LEVELS.info;
-    this.peer = `${url} as ${basename(keyPath).replace(/\.key$/, "")} (${key.id.slice(0, 12)}…)`;
+    this.peer = `${url} · key ${basename(keyPath).replace(/\.key$/, "")} (${key.id.slice(0, 12)}…)`;
   }
 
+  enabled(level: Level): boolean {
+    return LEVELS[level] <= this.level;
+  }
+
+  /** `text` in an ANSI style (1 bold, 2 dim, 31 red, 33 yellow) on a terminal. */
+  style(code: number, text: string): string {
+    return this.color ? `\x1b[${code}m${text}\x1b[0m` : text;
+  }
+
+  /** `12:04:11  listener carts  <line>`, warnings in yellow and errors in red. */
   print(level: Level, what: string, line: string): void {
-    if (LEVELS[level] <= this.level) console.error(`kernable ${what}: ${line}`);
+    if (!this.enabled(level)) return;
+    const time = new Date().toTimeString().slice(0, 8);
+    const text = level === "error" ? this.style(31, line) : level === "warn" ? this.style(33, line) : line;
+    console.error(`${this.style(2, time)}  ${this.style(1, what)}  ${text}`);
   }
 
   /** Logs the end of a session that was not stopped and waits `ms` before reconnecting. */
@@ -673,10 +820,6 @@ export class Kernable {
   private readonly context: RequestContext;
   private readonly domains = new Map<string, Domain>();
   private readonly service: string;
-  /** The names of this service's listeners, as declared to the kernel. */
-  private readonly declared = new Set<string>();
-  /** The qualified aggregate types of this service's workers, as declared to the kernel. */
-  private readonly aggregates = new Set<string>();
 
   constructor(options: Options = {}) {
     const env = process.env;
@@ -705,9 +848,55 @@ export class Kernable {
    * commands for an aggregate or command type no worker registered are refused.
    */
   worker(...aggregates: Aggregate<any>[]): Worker {
-    for (const agg of aggregates) this.aggregates.add(`${agg.domain}.${agg.name}`);
-    const service = () => ({ service: this.service, declared: this.service ? [...this.aggregates] : [] });
-    return new Worker(this.clients, this.key, aggregates, this.log, service);
+    return new Worker(this.clients, this.key, aggregates, this.log, this.service);
+  }
+
+  /**
+   * An app made of whole domains: `run()` applies the service's membership (its domains'
+   * aggregates as workers, their read models and reactors as listeners, those that check
+   * requests as middlewares; live ones are not listed), then runs all of them. One service is
+   * one app: two processes with the same service would replace each other's membership.
+   */
+  app(options: AppOptions): App {
+    const service = options.service ?? this.service;
+    if (!service) throw new Error("an app needs a service: set `service` in the app or the options");
+    const aggregates = options.domains.flatMap((d) => d.aggregates);
+    const listeners = options.domains.flatMap((d) => d.listeners);
+    const durable = listeners.filter((l) => !l.options.live);
+    const manifest: Manifest = {
+      service,
+      workers: aggregates,
+      listeners: durable.filter((l) => l.middlewares.size === 0),
+      middlewares: durable.filter((l) => l.middlewares.size > 0),
+      metadata: {
+        ...(options.version === undefined ? {} : { version: options.version }),
+        ...(options.description === undefined ? {} : { description: options.description }),
+        ...options.metadata,
+      },
+    };
+    const worker = aggregates.length ? new Worker(this.clients, this.key, aggregates, this.log, service) : undefined;
+    const handles = listeners.map((l) => new ListenerHandle(this.clients, this.key, l, this.log, service));
+    return new App(this, this.log, options.domains, manifest, worker, handles);
+  }
+
+  /**
+   * Replaces the membership of a service (default: this process's): the workers, listeners and
+   * middlewares the kernel waits for, and free metadata. Apply it once per deploy, e.g. from a
+   * deploy script, not from every process: the latest apply wins. The key needs `manage` for
+   * the service. A middleware the new membership no longer lists stops checking.
+   */
+  async apply(manifest: Manifest): Promise<void> {
+    const service = manifest.service ?? this.service;
+    if (!service) throw new Error("apply needs a service: set `service` in the manifest or the options");
+    const membership = {
+      service,
+      workers: (manifest.workers ?? []).map((agg) => `${agg.domain}.${agg.name}`),
+      listeners: (manifest.listeners ?? []).map((l) => l.name),
+      middlewares: (manifest.middlewares ?? []).map((l) => l.name),
+      metadata: Object.entries(manifest.metadata ?? {}).map(([key, value]) => ({ key, value })),
+      issued_at: Date.now(),
+    };
+    await this.clients.apply(membership, this.key.sign(membershipMessage(membership)));
   }
 
   /** Runs a command and returns its outcome; see `SubmitOptions.wait`. */
@@ -761,9 +950,7 @@ export class Kernable {
    * until `run()` connects.
    */
   listener(listener: Listener): ListenerHandle {
-    if (!listener.options.live) this.declared.add(listener.name);
-    const service = () => ({ service: this.service, declared: this.service ? [...this.declared] : [] });
-    return new ListenerHandle(this.clients, this.key, listener, this.log, service);
+    return new ListenerHandle(this.clients, this.key, listener, this.log, this.service);
   }
 
   private send(options: SubmitOptions, wait: WireWait) {
@@ -1132,15 +1319,20 @@ export class ListenerHandle {
   private stopped = false;
   /** Newest event when the kernel accepted the listener; events up to it are replayed. */
   private replayUpTo = 0;
+  /** Position after which the kernel delivered on the first connect. */
+  startedAt = 0;
+  /** Whether the first connect gets its own line; an `App` prints it in its overview instead. */
+  announce = true;
+  private connects = 0;
   private readonly clients: Clients;
   private readonly key: Key;
   private readonly log: Log;
-  /** The service and the listeners it declares, when connecting. */
-  private readonly service: () => { service: string; declared: string[] };
+  /** The service it belongs to (`Options.service`). */
+  private readonly service: string;
   /** The definition it runs. */
   readonly listener: Listener;
 
-  constructor(clients: Clients, key: Key, listener: Listener, log: Log, service: () => { service: string; declared: string[] }) {
+  constructor(clients: Clients, key: Key, listener: Listener, log: Log, service: string) {
     this.clients = clients;
     this.key = key;
     this.log = log;
@@ -1212,7 +1404,7 @@ export class ListenerHandle {
           event_types: [...handlers.keys()],
           query_types: [...queries.keys()],
           ...(start === undefined ? {} : { from_position: start }),
-          ...(options.live ? {} : this.service()),
+          service: this.service,
           live: options.live ?? false,
           middlewares: [...middlewares].map(([when, m]) => ({
             order: m.options.order ?? 0,
@@ -1253,15 +1445,12 @@ export class ListenerHandle {
   }
 
   private logConnected(): void {
-    const { handlers, queries, middlewares } = this.listener;
-    const list = (types: Iterable<string>) => [...types].sort().join(", ");
-    let line = `connected to ${this.log.peer}, at position ${this.position}, reads ${list(handlers.keys())}`;
-    if (queries.size) line += `, answers ${list(queries.keys())}`;
-    const before = middlewares.get("before");
-    const after = middlewares.get("after");
-    if (before) line += `, checks ${list(before.options.types)}`;
-    if (after) line += `, after ${list(after.options.types)}`;
-    this.log.print("info", this.what, line);
+    if (this.connects++ === 0) {
+      this.startedAt = this.position;
+      if (this.announce) this.log.print("info", this.what, [`connected to ${this.log.peer}`, ...listenerDetails(this.listener, this.position)].join(" · "));
+    } else {
+      this.log.print("info", this.what, `connected again at position ${this.position}`);
+    }
   }
 
   private async handleBatch(batch: NonNullable<ListenerDelivery["batch"]>): Promise<void> {
@@ -1333,12 +1522,15 @@ export class Worker {
   private readonly log: Log;
   private readonly byCommand = new Map<string, Aggregate<any>>();
   private readonly aggregates: Aggregate<any>[];
-  /** The service and the aggregates it declares, when connecting. */
-  private readonly service: () => { service: string; declared: string[] };
+  /** The service it belongs to (`Options.service`). */
+  private readonly service: string;
+  /** Whether the first connect gets its own line; an `App` prints it in its overview instead. */
+  announce = true;
+  private connects = 0;
   private call?: SessionCall;
   private stopped = false;
 
-  constructor(clients: Clients, key: Key, aggregates: Aggregate<any>[], log: Log, service: () => { service: string; declared: string[] }) {
+  constructor(clients: Clients, key: Key, aggregates: Aggregate<any>[], log: Log, service: string) {
     this.clients = clients;
     this.key = key;
     this.log = log;
@@ -1384,7 +1576,7 @@ export class Worker {
           })),
           max_concurrency: concurrency,
           event_schemas: this.eventSchemas(),
-          ...this.service(),
+          service: this.service,
         },
       });
     });
@@ -1408,8 +1600,8 @@ export class Worker {
     if (m.challenge) {
       call.write({ challenge_response: { sig: this.key.sign(challengeMessage(m.challenge.nonce)).sig } });
     } else if (m.registered) {
-      const types = [...this.byCommand.keys()].sort().join(", ");
-      this.log.print("info", "worker", `connected to ${this.log.peer}, runs ${types}`);
+      if (this.connects++ > 0) this.log.print("info", "worker", "connected again");
+      else if (this.announce) this.log.print("info", "worker", `connected to ${this.log.peer} · runs ${[...this.byCommand.keys()].sort().join(", ")}`);
       this.markReady();
     } else if (m.execute) {
       void this.execute(call, m.execute);

@@ -26,9 +26,9 @@ use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
         CheckpointRecord, Command, CommandResult, Committed, CommittedRecord, EnqueuedRecord,
-        Event, FormatRecord, ListenerRecord, LogRecord, LoggedEvent, NewEvent, Rejected,
-        RejectedRecord, RevocationRecord, Signature, WorkerRecord, command_result::Outcome,
-        log_record::Record,
+        Event, FormatRecord, ListenerRecord, LogRecord, LoggedEvent, MembershipRecord, NewEvent,
+        Rejected, RejectedRecord, RevocationRecord, Signature, WorkerRecord,
+        command_result::Outcome, log_record::Record,
     },
     signing::{self, GENESIS},
 };
@@ -76,6 +76,7 @@ struct State {
     checkpoints: Vec<Checkpoint>,
     listeners: BTreeMap<String, ListenerRecord>,
     workers: BTreeMap<String, WorkerRecord>,
+    memberships: BTreeMap<String, MembershipRecord>,
     revocations: Vec<RevocationRecord>,
 }
 
@@ -160,6 +161,10 @@ impl State {
             }
             Record::Worker(w) => {
                 self.workers.insert(w.aggregate_type.clone(), w);
+            }
+            Record::Membership(m) => {
+                let service = m.membership.as_ref().map(|m| m.service.clone());
+                self.memberships.insert(service.unwrap_or_default(), m);
             }
         }
         Ok(())
@@ -511,6 +516,14 @@ impl Store for FileStore {
             append(&mut inner, Record::Worker(w.clone()))?;
         }
         Ok(())
+    }
+
+    fn memberships(&self) -> Result<Vec<MembershipRecord>> {
+        Ok(self.inner().state.memberships.values().cloned().collect())
+    }
+
+    fn save_membership(&self, membership: &MembershipRecord) -> Result<()> {
+        append(&mut self.inner(), Record::Membership(membership.clone()))
     }
 
     fn checkpoint(&self, kernel: &SigningKey, now_ms: i64) -> Result<Option<Checkpoint>> {

@@ -1,4 +1,4 @@
-// Settling: a submit waits for every registered listener, also one that is stopped, and says so
+// Settling: a submit waits for every listener that counts, also one that is stopped, and says so
 // when it cannot; `wait: "committed"` does not wait.
 
 import assert from "node:assert/strict";
@@ -39,7 +39,7 @@ test("a stopped listener still counts: a settling submit reports NotSettled", as
   }
 });
 
-test("a service retires the listeners it no longer declares; live ones never count", async () => {
+test("a membership decides which listeners count; live ones never count", async () => {
   const kernel = new TestKernel(["shop.*"], ["--settle-timeout-ms", "300"]);
   await kernel.start();
   const shop = domain("shop");
@@ -48,7 +48,9 @@ test("a service retires the listeners it no longer declares; live ones never cou
   const worker = v1.worker(cart);
   const seen: string[] = [];
   const mails = v1.listener(shop.reactor("mails").on("Added", (_data, evt) => void seen.push(evt.aggregateId)));
-  const audit = v1.listener(shop.reactor("audit").on("Added", () => {}));
+  const auditor = shop.reactor("audit").on("Added", () => {});
+  const audit = v1.listener(auditor);
+  await v1.apply({ workers: [cart], listeners: [mails.listener, auditor], metadata: { version: "1" } });
   const running = [worker.run(), mails.run(), audit.run()];
   const add = (id: string) => v1.submit({ domain: "shop", aggregateType: "Cart", aggregateId: id, type: "Add" });
   try {
@@ -61,6 +63,7 @@ test("a service retires the listeners it no longer declares; live ones never cou
     // The next version of the service has no audit any more: nobody waits for it.
     const v2 = new Kernable({ url: kernel.url, key: kernel.appKey, service: "shop" });
     const mails2 = v2.listener(shop.reactor("mails").on("Added", (_data, evt) => void seen.push(evt.aggregateId)));
+    await v2.apply({ workers: [cart], listeners: [mails2.listener], metadata: { version: "2" } });
     // A live listener counts for nobody, even while it does not get through its events.
     let release = () => {};
     const stuck = new Promise<void>((resolve) => (release = resolve));

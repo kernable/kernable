@@ -1,13 +1,13 @@
 //! Registered aggregates: commands no worker registered are refused, the kernel is not ready
-//! while a registered aggregate has no worker, and a service unregisters what it no longer
-//! declares.
+//! while a registered aggregate has no worker, and a service's membership decides which
+//! aggregates it waits for.
 
 mod common;
 
 use std::time::Duration;
 
 use common::*;
-use kernable_core::proto::{Command, WorkerAggregate, command_result::Outcome};
+use kernable_core::proto::{Command, Wait, WorkerAggregate, command_result::Outcome};
 use tonic::Code;
 
 fn aggregate(aggregate_type: &str, command_types: &[&str]) -> WorkerAggregate {
@@ -17,11 +17,10 @@ fn aggregate(aggregate_type: &str, command_types: &[&str]) -> WorkerAggregate {
     }
 }
 
-fn shop(aggregates: Vec<WorkerAggregate>, declared: &[&str]) -> TestWorker {
+fn shop(aggregates: Vec<WorkerAggregate>) -> TestWorker {
     TestWorker {
         aggregates,
         service: "shop".into(),
-        declared: declared.iter().map(|a| a.to_string()).collect(),
         ..TestWorker::honest()
     }
 }
@@ -81,7 +80,7 @@ async fn commands_no_worker_registered_are_refused_and_wait_while_it_is_away() {
     running.abort();
     readiness(&env, Err("waiting for workers: orders.Order")).await;
     let queued = signed(command("c5", "PlaceOrder", "o2"), &key(1));
-    let accepted = submit_with(&env.addr, queued, kernable_core::proto::Wait::Accepted).await;
+    let accepted = submit_with(&env.addr, queued, Wait::Accepted).await;
     assert!(matches!(
         accepted.unwrap().outcome,
         Some(Outcome::Accepted(_))
@@ -91,36 +90,75 @@ async fn commands_no_worker_registered_are_refused_and_wait_while_it_is_away() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_service_unregisters_the_aggregates_it_no_longer_declares() {
-    let env = start("workers-service").await;
-    let both = ["orders.Order", "orders.Invoice"];
-    let v1 = shop(
-        vec![
-            aggregate("orders.Order", &["orders.PlaceOrder"]),
-            aggregate("orders.Invoice", &["orders.SendInvoice"]),
-        ],
-        &both,
+async fn a_membership_decides_which_aggregates_the_kernel_waits_for() {
+    let env = start("workers-membership").await;
+    let (order, invoices) = (
+        aggregate("orders.Order", &["orders.PlaceOrder"]),
+        aggregate("orders.Invoice", &["orders.SendInvoice"]),
     );
-    start_worker(env.addr.clone(), v1).await.abort();
+
+    // Listed before any worker registered: its commands wait, and so does readiness.
+    apply(
+        &env.addr,
+        membership("shop", &["orders.Order", "orders.Invoice"], &[], &[]),
+    )
+    .await
+    .unwrap();
     readiness(
         &env,
         Err("waiting for workers: orders.Invoice, orders.Order"),
     )
     .await;
-
-    // A worker must declare its own aggregates.
-    let undeclared = shop(vec![aggregate("orders.Order", &["orders.PlaceOrder"])], &[]);
-    let status = run_worker(env.addr.clone(), undeclared).await;
-    assert_eq!(status.code(), Code::InvalidArgument, "{status:?}");
-
-    // Version 2 has no invoices any more: they are refused, and nobody waits for them.
-    let v2 = shop(
-        vec![aggregate("orders.Order", &["orders.PlaceOrder"])],
-        &["orders.Order"],
-    );
-    start_worker(env.addr.clone(), v2).await;
+    let queued = signed(invoice("c1"), &key(1));
+    let accepted = submit_with(&env.addr, queued, Wait::Accepted).await;
+    assert!(matches!(
+        accepted.unwrap().outcome,
+        Some(Outcome::Accepted(_))
+    ));
+    let v1 = start_worker(env.addr.clone(), shop(vec![order.clone(), invoices])).await;
     readiness(&env, Ok(())).await;
-    let refused = submit(&env.addr, signed(invoice("c1"), &key(1)))
+
+    // An aggregate the membership does not list is dynamic: it runs, but nobody waits for it
+    // and it is forgotten once its last worker leaves.
+    let refunds = shop(vec![aggregate("orders.Refund", &["orders.Refund"])]);
+    let refunds = start_worker(env.addr.clone(), refunds).await;
+    let refund = Command {
+        aggregate_type: "Refund".into(),
+        ..command("c2", "Refund", "r1")
+    };
+    // It ran: the test worker knows no refunds and rejects it.
+    let refunded = submit(&env.addr, signed(refund.clone(), &key(1)))
+        .await
+        .unwrap();
+    assert!(
+        matches!(&refunded.outcome, Some(Outcome::Rejected(r)) if r.message == "unknown command"),
+        "{refunded:?}"
+    );
+    refunds.abort();
+    readiness(&env, Ok(())).await;
+    let refund = Command {
+        command_id: "c3".into(),
+        ..refund
+    };
+    let refused = submit(&env.addr, signed(refund, &key(1)))
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code(), Code::NotFound, "{refused:?}");
+
+    // The next version has no invoices any more: they are unregistered once no worker runs them.
+    v1.abort();
+    readiness(
+        &env,
+        Err("waiting for workers: orders.Invoice, orders.Order"),
+    )
+    .await;
+    apply(&env.addr, membership("shop", &["orders.Order"], &[], &[]))
+        .await
+        .unwrap();
+    readiness(&env, Err("waiting for workers: orders.Order")).await;
+    start_worker(env.addr.clone(), shop(vec![order])).await;
+    readiness(&env, Ok(())).await;
+    let refused = submit(&env.addr, signed(invoice("c4"), &key(1)))
         .await
         .unwrap_err();
     assert_eq!(refused.code(), Code::NotFound, "{refused:?}");

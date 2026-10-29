@@ -9,8 +9,8 @@ use ed25519_dalek::{Signature as Ed25519Signature, Signer, SigningKey, Verifying
 use sha2::{Digest, Sha256};
 
 use crate::proto::{
-    CacheRequest, Command, DataRequest, Event, Grant, NewEvent, Permission, QueryRequest, Rejected,
-    RequestContext, Signature,
+    CacheRequest, Command, DataRequest, Event, Grant, Membership, NewEvent, Permission,
+    QueryRequest, Rejected, RequestContext, Signature,
 };
 
 /// Hash that precedes the first event of the chain.
@@ -278,6 +278,22 @@ pub fn grant(
     };
     grant.root_sig = Some(sign(root, &grant_message(&grant)));
     grant
+}
+
+/// What a key granted `manage` signs to apply a service's membership.
+pub fn membership_message(m: &Membership) -> Vec<u8> {
+    let mut msg = Msg::new("kernable.v1.membership").str(&m.service);
+    for list in [&m.workers, &m.listeners, &m.middlewares] {
+        msg = msg.u64(list.len() as u64);
+        for entry in list {
+            msg = msg.str(entry);
+        }
+    }
+    msg = msg.u64(m.metadata.len() as u64);
+    for a in &m.metadata {
+        msg = msg.str(&a.key).str(&a.value);
+    }
+    msg.i64(m.issued_at).0
 }
 
 /// What a root key signs to revoke `key_id` from `since` on (both ms since epoch).

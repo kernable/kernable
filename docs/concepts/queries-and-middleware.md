@@ -23,9 +23,9 @@ flowchart LR
   M2 -- rejected --> X
 ```
 
-- **Registered in code.** A listener declares the types it checks and its order; its key needs a grant for `check` on those types. Negative orders are reserved for kernable.
+- **Registered in code.** A listener declares the types it checks and its order; its key needs a grant for `check` on those types. Negative orders are reserved for kernable. If its service has a membership, it must list the listener as a middleware ([membership](../how-to/remove-listener)).
 - **A chain.** Middlewares run by order, then by name; the first rejection refuses the request. A refused command is never stored.
-- **Fails closed.** The kernel keeps the registration. While a middleware is away, also right after a kernel restart, every request it covers is refused with `UNAVAILABLE`. Only `kernable listeners remove` unregisters it.
+- **Fails closed.** The kernel keeps the registration. While a middleware is away, also right after a kernel restart, every request it covers is refused with `UNAVAILABLE`. Only a membership of its service that no longer lists it as a middleware, or `kernable listeners remove`, unregisters it.
 - **Never stale.** After a reconnect, a middleware is asked only once it has processed every event committed before; checks travel in order with its events.
 - **Checks only.** A middleware decides; it cannot change a request, because the request is signed.
 

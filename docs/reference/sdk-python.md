@@ -18,6 +18,14 @@ How events change an aggregate's state (`apply`) and which events a command prod
 - `schema_of(event_type: str) -> int`: The payload version this aggregate writes `event_type` events at.
 - `fold(history: list[tuple], state: Any=_INITIAL) -> Any`: State after `history` (type, schema, data, and optionally an `EventMeta` and an `ApplyContext`), starting from `state` (default: `initial`). Events are upcast first; events without an `apply` are skipped.
 
+### App
+
+An app made of whole domains, returned by `kernable.app(...)`: `run()` applies its membership (`manifest`), then runs its worker and listeners until `stop()`; `ready` is set once all of them are connected (`app.ready.wait(5)`). One service is one app: two processes with the same service would replace each other's membership.
+
+- `App(k: Kernable, manifest: Manifest, worker: 'Worker | None', listeners: list['ListenerHandle'], domains: Iterable[str]=())`
+- `run() -> None`: Applies the membership, then runs the worker and the listeners, each in a thread of its own, until `stop()`. If one of them fails, stops the others and raises its error. Once all are connected, it prints an overview of the app (unless `KERNABLE_LOG` is below `info`).
+- `stop() -> None`: Stops the worker and all listeners; `run()` returns once they are done.
+
 ### ApplyContext
 
 What `apply` gets besides state, data and the event (as an optional fourth parameter). No clock and no IDs: `apply` must compute the same state on every replay.
@@ -145,9 +153,11 @@ The payload format of one event type: its current version and the steps that bri
 
 
 
-- `Kernable(url: str | None=None, key: str | None=None, tenant: str='default', tls: Tls | None=None, context: RequestContext | None=None, grant: str | None=None, service: str | None=None)`: `url`: `http://host:port` (`host:port` works too) or, on Unix, `unix:/path/to.sock`; default `KERNABLE_URL`, else `http://127.0.0.1:7233`, where `kernable start` listens; `key`: path to this process's `.key` file; default `KERNABLE_KEY`, else `app.key` in the current directory; `tls`: mutual TLS for `host:port`; default `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`, if set; `context`: default request context for submits and queries, e.g. this service's identity, replaced by a request's own; `grant`: path to the key's grant (`kernable grant`), sent with every call; default `KERNABLE_GRANT`, else the `.grant` file next to the key file, if there is one; `service`: the service this process's workers and listeners belong to, default `KERNABLE_SERVICE`, else none (nothing is retired or unregistered). Each worker declares the aggregates of all workers of the service when it connects, and each listener all listeners of the service: create them all with `kernable.worker` and `kernable.listener` before running any. The kernel unregisters the service's aggregates that are no longer declared: their commands are refused from then on. It retires the service's listeners that are no longer declared: nobody waits for them any more, but they keep their position (declared again, they resume) and their middleware keeps refusing until `kernable listeners remove`.
+- `Kernable(url: str | None=None, key: str | None=None, tenant: str='default', tls: Tls | None=None, context: RequestContext | None=None, grant: str | None=None, service: str | None=None)`: `url`: `http://host:port` (`host:port` works too) or, on Unix, `unix:/path/to.sock`; default `KERNABLE_URL`, else `http://127.0.0.1:7233`, where `kernable start` listens; `key`: path to this process's `.key` file; default `KERNABLE_KEY`, else `app.key` in the current directory; `tls`: mutual TLS for `host:port`; default `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`, if set; `context`: default request context for submits and queries, e.g. this service's identity, replaced by a request's own; `grant`: path to the key's grant (`kernable grant`), sent with every call; default `KERNABLE_GRANT`, else the `.grant` file next to the key file, if there is one; `service`: the service this process's workers and listeners belong to. The service's membership (see `apply`) decides what the kernel waits for: what it lists counts, the service's other workers and listeners are dynamic, and only listeners it lists as middlewares may check requests. Default `KERNABLE_SERVICE`, else none (everything registered counts).
 - `use(*domains: Domain) -> 'Kernable'`: Seals the vault fields of these domains' commands when submitting them; see `Domain.command`.
 - `worker(*aggregates: Aggregate) -> 'Worker'`: A worker that runs these aggregates' commands; call `run()` on it. `ready` is set once the kernel registered it.
+- `app(*, domains: Iterable[Domain], service: str | None=None, version: str | None=None, description: str | None=None, metadata: dict[str, str] | None=None) -> 'App'`: An app made of whole domains: every aggregate, read model and reactor defined on them. `run()` on it applies the service's membership (the domains' aggregates as workers, their read models and reactors as listeners, those with a middleware as middlewares; live ones are not listed), then runs all of them. `service` defaults to this client's; `version` and `description` go into the membership's metadata, followed by `metadata`. One service is one app: two processes with the same service would replace each other's membership.
+- `apply(*, service: str | None=None, workers: Iterable[Aggregate]=(), listeners: Iterable['Listener']=(), middlewares: Iterable['Listener']=(), metadata: dict[str, str] | None=None) -> None`: Replaces the membership of a service (default: this client's `service`): the workers, listeners and middlewares the kernel waits for, plus free metadata such as `{"version": "1.0.0"}`. `workers` are the aggregates the service runs (the kernel waits for a worker of each), `listeners` the listeners it waits for (the service's others count for nobody), `middlewares` the service's listeners that may check requests (they count like listeners). Apply it once per deploy, e.g. from a deploy script, not from every process: the latest apply wins. The key needs the `manage` grant for the service. A middleware the new membership no longer lists stops checking.
 - `submit(domain: str, aggregate_type: str, aggregate_id: str, type: str, data: Any=None, *, tenant: str | None=None, id: str | None=None, wait: str='settled', context: RequestContext | None=None) -> Outcome`: Runs a command and returns its outcome. `wait="settled"` (default) responds once every listener has processed the events, so read models already show them, and raises `NotSettled` on timeout; from a listener's handler, only the listeners with a lower order count. `wait="committed"` responds once the events are stored. `id` is an idempotency key. `context` replaces the client's default context; inside a listener, pass `ctx.follow()`.
 - `enqueue(domain: str, aggregate_type: str, aggregate_id: str, type: str, data: Any=None, *, tenant: str | None=None, id: str | None=None, context: RequestContext | None=None) -> str`: Stores the command in the kernel's queue and returns its ID without waiting. Submit it again with the same `id` to get the outcome.
 - `query(domain: str, type: str, data: Any=None, *, tenant: str | None=None, context: RequestContext | None=None, min_position: int=0) -> Any`: Asks the read model that answers `domain.type` and returns its answer. Queries always go through the kernel, also within one process. Raises `Rejected` if the read model rejects it. `min_position`: answer only after the read model has processed it.
@@ -185,8 +195,18 @@ What a listener handler gets besides the event's data and meta (as an optional t
 
 A running `Listener`, returned by `kernable.listener(listener)`: `run()` processes events, queries and checks until `stop()`; `ready` is set once the kernel accepted it.
 
-- `ListenerHandle(channel: grpc.Channel, key: Key, listener: Listener, log: _Log, service: Callable[[], tuple[str, list[str]]]=lambda: ('', []))`
+- `ListenerHandle(channel: grpc.Channel, key: Key, listener: Listener, log: _Log, service: str='')`
 - `run() -> None`: Processes events, queries and checks until `stop()`, reconnecting when the stream drops; with a store, opens it first and continues after its position.
+
+### Manifest
+
+What a service consists of, as `Kernable.apply` takes it; see `Kernable.app`.
+
+- `service: str`
+- `workers: list[Aggregate]`: The aggregates the service runs; the kernel waits for a worker of each.
+- `listeners: list['Listener']`: The listeners the kernel waits for.
+- `middlewares: list['Listener']`: The service's listeners that may check requests; they count like listeners.
+- `metadata: dict[str, str]`: Free metadata, e.g. `{"version": "1.0.0"}`.
 
 ### NotSettled
 
@@ -282,7 +302,7 @@ PEM files for mutual TLS: the CA of the kernel's certificate, and this process's
 
 Executes commands for its aggregates, one at a time.
 
-- `Worker(channel: grpc.Channel, key: Key, aggregates, log: _Log, service: Callable[[], tuple[str, list[str]]]=lambda: ('', []))`
+- `Worker(channel: grpc.Channel, key: Key, aggregates, log: _Log, service: str='')`
 
 ### domain()
 

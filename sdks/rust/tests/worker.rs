@@ -13,8 +13,8 @@ use std::{
 
 use common::{TestKernel, eventually};
 use kernable::{
-    CommandContext, Error, FoldEvent, Kernable, NewEvent, Outcome, Query, Rejected, RequestContext,
-    StoredEvent, Submit, SubscribeOptions, Timestamp, Wait, Worker, domain,
+    CommandContext, Error, FoldEvent, Kernable, Manifest, NewEvent, Outcome, Query, Rejected,
+    RequestContext, StoredEvent, Submit, SubscribeOptions, Timestamp, Wait, Worker, domain,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -628,8 +628,7 @@ async fn queries_without_a_read_model_are_refused() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn commands_need_a_registered_aggregate_and_a_service_unregisters_those_it_no_longer_declares()
- {
+async fn commands_need_a_registered_aggregate_and_a_membership_drops_those_it_no_longer_lists() {
     let kernel = TestKernel::new(&["shop.*"], &[]);
     kernel.start().await;
     let shop = domain("shop");
@@ -645,17 +644,30 @@ async fn commands_need_a_registered_aggregate_and_a_service_unregisters_those_it
         k.submit(Submit::new("shop", aggregate, "x1", command))
             .await
     }
-    let not_found = |r: Result<Outcome, Error>| {
-        matches!(&r, Err(Error::Status(s)) if s.code() == Code::NotFound)
-            .then_some(())
-            .ok_or(r)
-    };
+    let is_not_found = |r: &Result<Outcome, Error>| matches!(r, Err(Error::Status(s)) if s.code() == Code::NotFound);
 
-    // No worker ever registered the cart: the kernel refuses its commands.
+    // No worker ever registered the cart and no membership lists it: the kernel refuses its
+    // commands.
     let v1 = Kernable::new(kernel.options().service("shop")).unwrap();
-    not_found(submit(&v1, "Cart", "AddItem").await).unwrap();
+    let refused = submit(&v1, "Cart", "AddItem").await;
+    assert!(is_not_found(&refused), "{refused:?}");
+
+    // A manifest needs a service: from itself or from the connection.
+    let no_service = kernel.client().apply(Manifest::new().worker(&cart)).await;
+    assert!(
+        matches!(no_service, Err(Error::Config(_))),
+        "{no_service:?}"
+    );
 
     // v1 of the service runs both aggregates.
+    v1.apply(
+        Manifest::new()
+            .worker(&cart)
+            .worker(&wishlist)
+            .metadata("version", "1"),
+    )
+    .await
+    .unwrap();
     let worker = v1.worker(&cart).aggregate(&wishlist);
     let running = spawn(&worker);
     worker.ready().await;
@@ -669,12 +681,29 @@ async fn commands_need_a_registered_aggregate_and_a_service_unregisters_those_it
     worker.stop();
     running.await.unwrap();
 
-    // v2 has no wishlist any more: it is unregistered, while the cart's commands still run.
+    // v2 has no wishlist any more: once no worker runs it, it is forgotten, while the cart's
+    // commands still run.
     let v2 = Kernable::new(kernel.options().service("shop")).unwrap();
+    v2.apply(
+        Manifest::new()
+            .service("shop")
+            .worker(&cart)
+            .metadata("version", "2"),
+    )
+    .await
+    .unwrap();
     let worker = v2.worker(&cart);
     let running = spawn(&worker);
     worker.ready().await;
-    not_found(submit(&v2, "Wishlist", "Wish").await).unwrap();
+    let mut refused = submit(&v2, "Wishlist", "Wish").await;
+    for _ in 0..100 {
+        if is_not_found(&refused) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        refused = submit(&v2, "Wishlist", "Wish").await;
+    }
+    assert!(is_not_found(&refused), "{refused:?}");
     assert!(submit(&v2, "Cart", "AddItem").await.unwrap().is_committed());
     worker.stop();
     running.await.unwrap();

@@ -25,6 +25,7 @@
 //! # }
 //! ```
 
+mod app;
 mod context;
 mod data;
 mod domain;
@@ -45,8 +46,9 @@ use ed25519_dalek::SigningKey;
 use kernable_core::{
     PROTOCOL,
     proto::{
-        self, SubmitRequest, Wait as WireWait, command_result,
-        command_service_client::CommandServiceClient, query_result,
+        self, ApplyRequest, Attribute, Membership, SubmitRequest, Wait as WireWait, command_result,
+        command_service_client::CommandServiceClient,
+        membership_service_client::MembershipServiceClient, query_result,
         query_service_client::QueryServiceClient,
     },
     signing, transport,
@@ -55,6 +57,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use tonic::{metadata::MetadataValue, transport::Channel};
 
+pub use app::{App, AppHandle};
 pub use context::{RequestContext, Timestamp};
 pub use data::{Cache, Data, Files};
 pub use domain::{
@@ -72,7 +75,6 @@ pub use worker::Worker;
 
 use context::{now_ms, random_id};
 use domain::{decode, encode};
-use listener::Service;
 
 tokio::task_local! {
     /// The name of the listener whose handler is running, for requests sent from it.
@@ -142,14 +144,11 @@ impl Options {
         self
     }
 
-    /// The service this process's workers and listeners belong to. Each worker declares the
-    /// aggregates of all the service's workers when it connects, and each listener all its
-    /// listeners: create them all with [`Kernable::worker`] and [`Kernable::listener`] before
-    /// running any. The kernel unregisters the service's aggregates that are no longer declared:
-    /// their commands are refused from then on. It retires the listeners that are no longer
-    /// declared: nobody waits for them any more, but they keep their position (declared again,
-    /// they resume) and their middleware keeps refusing until `kernable listeners remove`.
-    /// Default: `KERNABLE_SERVICE`, else none (nothing is unregistered or retired).
+    /// The service this process's workers and listeners belong to. The service's membership
+    /// (see [`Kernable::apply`]) decides what the kernel waits for: what it lists counts, the
+    /// service's other workers and listeners are dynamic, and only listeners it lists as
+    /// middlewares may check requests. Default: `KERNABLE_SERVICE`, else none (everything
+    /// registered counts).
     pub fn service(mut self, service: impl Into<String>) -> Options {
         self.service = Some(service.into());
         self
@@ -229,7 +228,8 @@ pub struct Kernable {
     tenant: String,
     context: RequestContext,
     domains: Arc<RwLock<HashMap<String, Domain>>>,
-    service: Service,
+    /// The service of this process's workers and listeners; empty if none.
+    service: String,
 }
 
 impl Kernable {
@@ -275,11 +275,12 @@ impl Kernable {
             .service
             .or_else(|| std::env::var("KERNABLE_SERVICE").ok())
             .unwrap_or_default();
-        let log = log::Log::new(&url, &key_file);
+        let key_id = signing::key_id(&key.verifying_key());
+        let log = log::Log::new(&url, &key_file, &key_id);
         Ok(Kernable {
             client: Client {
                 channel,
-                key_id: signing::key_id(&key.verifying_key()),
+                key_id,
                 key: Arc::new(key),
                 grant,
                 log,
@@ -287,7 +288,7 @@ impl Kernable {
             tenant: options.tenant,
             context: options.context,
             domains: Arc::default(),
-            service: Service::new(service),
+            service,
         })
     }
 
@@ -301,19 +302,16 @@ impl Kernable {
         self.clone()
     }
 
-    /// A worker that runs the commands of `aggregate`; add more with [`Worker::aggregate`]. Its
-    /// aggregates join the aggregates this connection's service declares (see
-    /// [`Options::service`]).
+    /// A worker that runs the commands of `aggregate`; add more with [`Worker::aggregate`]. It
+    /// belongs to this connection's service (see [`Options::service`]).
     pub fn worker<S: State>(&self, aggregate: &Aggregate<S>) -> Worker {
         Worker::new(self.client.clone(), self.service.clone()).aggregate(aggregate)
     }
 
     /// Runs `listener` (a read model or reactor of a domain) on this connection: the handle
-    /// processes its events with `run()`. Each call gives a new handle. Unless it is live, the
-    /// listener joins the listeners this connection's service declares (see
-    /// [`Options::service`]).
+    /// processes its events with `run()`. Each call gives a new handle. The listener belongs to
+    /// this connection's service (see [`Options::service`]).
     pub fn listener(&self, listener: &Listener) -> ListenerHandle {
-        self.service.declare(listener);
         ListenerHandle::new(self.client.clone(), listener, self.service.clone())
     }
 
@@ -327,6 +325,53 @@ impl Kernable {
     /// TTL, lost when the kernel restarts; see [`Cache`].
     pub fn cache(&self) -> Cache {
         Cache::new(self.client.clone(), self.tenant.clone())
+    }
+
+    /// Replaces the membership of a service (default: this connection's, see
+    /// [`Options::service`]): the workers, listeners and middlewares the kernel waits for, plus
+    /// free metadata. Apply it once per deploy (e.g. from a deploy script), not from every
+    /// process: the latest apply wins. The key needs the `manage` grant for the service. A
+    /// middleware the new membership no longer lists stops checking.
+    pub async fn apply(&self, manifest: Manifest) -> Result<(), Error> {
+        let service = manifest.service.unwrap_or_else(|| self.service.clone());
+        if service.is_empty() {
+            return Err(Error::Config(
+                "apply needs a service: set it with Manifest::service or Options::service".into(),
+            ));
+        }
+        let membership = Membership {
+            service,
+            workers: manifest.workers,
+            listeners: manifest.listeners,
+            middlewares: manifest.middlewares,
+            metadata: manifest
+                .metadata
+                .into_iter()
+                .map(|(key, value)| Attribute { key, value })
+                .collect(),
+            issued_at: now_ms(),
+        };
+        let sig = self.client.sign(&signing::membership_message(&membership));
+        let request = ApplyRequest {
+            membership: Some(membership),
+            sig: Some(sig),
+            protocol: PROTOCOL,
+        };
+        let mut memberships = MembershipServiceClient::new(self.client.channel.clone());
+        memberships.apply(self.client.request(request)).await?;
+        Ok(())
+    }
+
+    /// An app made of whole domains: [`AppHandle::run`] applies the service's membership (the
+    /// domains' aggregates as workers, their read models and reactors as listeners, those that
+    /// check requests as middlewares; live ones are not listed, and the metadata is `version`
+    /// and `description`, when given, then the app's other metadata), then runs one worker for
+    /// all the aggregates and every listener, live ones too, all in the app's service.
+    ///
+    /// One service is one app: two processes with the same service would replace each other's
+    /// membership. [`Error::Config`] if neither the app nor the connection names a service.
+    pub fn app(&self, app: App) -> Result<AppHandle, Error> {
+        AppHandle::new(self, app)
     }
 
     /// Runs a command and returns its outcome; see [`Submit::wait`].
@@ -484,6 +529,58 @@ fn tls_from_env() -> Result<Option<Tls>, Error> {
         _ => Err(Error::Config(
             "set all of KERNABLE_TLS_CA, KERNABLE_TLS_CERT and KERNABLE_TLS_KEY, or none".into(),
         )),
+    }
+}
+
+/// What a service consists of, for [`Kernable::apply`]; see `Membership` in kernable.proto.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Manifest {
+    service: Option<String>,
+    workers: Vec<String>,
+    listeners: Vec<String>,
+    middlewares: Vec<String>,
+    metadata: Vec<(String, String)>,
+}
+
+impl Manifest {
+    /// An empty manifest for the connection's service.
+    pub fn new() -> Manifest {
+        Manifest::default()
+    }
+
+    /// The service it is for. Default: the connection's ([`Options::service`]).
+    pub fn service(mut self, service: impl Into<String>) -> Manifest {
+        self.service = Some(service.into());
+        self
+    }
+
+    /// An aggregate the service runs: the kernel waits for a worker of it and accepts its
+    /// commands even before a worker registered it.
+    pub fn worker<S: State>(mut self, aggregate: &Aggregate<S>) -> Manifest {
+        self.workers.push(format!(
+            "{}.{}",
+            aggregate.domain().name(),
+            aggregate.name()
+        ));
+        self
+    }
+
+    /// A listener the kernel waits for; the service's other listeners count for nobody.
+    pub fn listener(mut self, listener: &Listener) -> Manifest {
+        self.listeners.push(listener.name().to_owned());
+        self
+    }
+
+    /// A listener of the service that may check requests; it counts like a listener.
+    pub fn middleware(mut self, listener: &Listener) -> Manifest {
+        self.middlewares.push(listener.name().to_owned());
+        self
+    }
+
+    /// Free metadata, e.g. `("version", "1.0.0")`; kept in the order given.
+    pub fn metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Manifest {
+        self.metadata.push((key.into(), value.into()));
+        self
     }
 }
 

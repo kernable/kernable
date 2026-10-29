@@ -163,6 +163,35 @@ Actions: submit, run, subscribe, listen, query, answer, check, privileged, vault
 
 | Field | Type | Number | Description |
 |---|---|---|---|
+| `Apply` | `ApplyRequest` | `ApplyResult` | Replaces the membership of `membership.service`. Signed over kernable.v1.membership by a key granted `manage` for the service, and valid 60 s around issued_at. Apply it once per deploy (`kernable apply`, or a deploy script), not from every process: the latest apply wins. |
+
+### Membership
+
+What a service consists of. Once a service has one, the kernel waits (readiness) for what it lists, and treats workers and listeners of the service that it does not list as dynamic: - workers: the aggregate types the service runs (qualified: `shop.Cart`). Commands of a listed   aggregate are accepted, and queued, even before a worker registered it. An aggregate a   worker runs but the service does not list is forgotten once its last worker leaves. - listeners: listener names. A listed listener counts for readiness, settling and the order of   delivery; an unlisted one keeps its position but counts for nobody. - middlewares: names of the service's listeners that check requests; they count like   listeners. A listener of the service that is not listed here cannot connect as a   middleware, and taking one off the list removes its check: a check never appears or   disappears without a signed membership.
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `service` |  `string` | 1 |  |
+| `workers` | repeated `string` | 2 |  |
+| `listeners` | repeated `string` | 3 |  |
+| `middlewares` | repeated `string` | 4 |  |
+| `metadata` | repeated `Attribute` | 5 | free, e.g. version and description |
+| `issued_at` |  `int64` | 6 | ms since epoch |
+
+### ApplyRequest
+
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `membership` |  `Membership` | 1 |  |
+| `sig` |  `Signature` | 2 |  |
+| `protocol` |  `uint32` | 3 |  |
+
+### ApplyResult
+
+
+| Field | Type | Number | Description |
+|---|---|---|---|
 | `Submit` | `SubmitRequest` | `CommandResult` |  |
 
 ### SubmitRequest
@@ -424,9 +453,8 @@ When a middleware runs.
 | `query_types` | repeated `string` | 6 | qualified query types this listener answers |
 | `middlewares` | repeated `Middleware` | 7 | at most one per `when`; none: not a middleware |
 | `protocol` |  `uint32` | 8 |  |
-| `service` |  `string` | 9 | The service this listener belongs to, and the names of all its listeners (including this one). Listeners registered for the service with the same key and not declared are retired: they no longer count for readiness, settling and the order of delivery, but keep their position (declared again, they resume) and their middleware, which keeps refusing while they are away. Empty: no service, nothing is retired. |
-| `declared` | repeated `string` | 10 |  |
-| `live` |  `bool` | 11 | Not registered: no stored position, starts at the newest event, does not count for readiness, settling or the order of delivery, and is forgotten when it disconnects. For reactions that only matter while the process runs. Cannot be a middleware; takes no part in its service's declaration. |
+| `service` |  `string` | 9 | The service this listener belongs to; its membership (see `Membership`) decides whether it counts and whether it may be a middleware. Empty: no service, it always counts. |
+| `live` |  `bool` | 10 | Not registered: no stored position, starts at the newest event, does not count for readiness, settling or the order of delivery, and is forgotten when it disconnects. For reactions that only matter while the process runs. Cannot be a middleware. |
 
 ### Ready
 
@@ -489,8 +517,7 @@ When a middleware runs.
 | `max_concurrency` |  `uint32` | 4 |  |
 | `event_schemas` | repeated `EventSchema` | 5 | The payload version the worker writes per event type; types not listed are written at 1. The kernel refuses a worker, or a result, that would write an older version of a type than the store already holds, and a result whose events differ from what was declared. |
 | `protocol` |  `uint32` | 6 |  |
-| `service` |  `string` | 7 | The service this worker belongs to, and the aggregate types of all its workers (including this one's). Aggregates registered for the service with the same key and not declared are unregistered: their commands are refused from then on. Empty: no service. |
-| `declared` | repeated `string` | 8 |  |
+| `service` |  `string` | 7 | The service this worker belongs to; its membership (see `Membership`) decides whether the kernel waits for the worker's aggregates. Empty: no service, they are always waited for. |
 
 ### WorkerAggregate
 

@@ -57,8 +57,8 @@ struct Opts {
     order: i32,
     types: Vec<String>,
     from: Option<u64>,
-    /// The service and the names it declares (`Hello.service`).
-    service: (&'static str, Vec<&'static str>),
+    /// Its service (`Hello.service`).
+    service: &'static str,
     live: bool,
     middlewares: Vec<Middleware>,
 }
@@ -70,18 +70,15 @@ fn opts(order: i32) -> Opts {
         order,
         types: Vec::new(),
         from: None,
-        service: ("", Vec::new()),
+        service: "",
         live: false,
         middlewares: Vec::new(),
     }
 }
 
-/// Options of a listener of `service` that declares `declared`.
-fn of(service: &'static str, declared: &[&'static str]) -> Opts {
-    Opts {
-        service: (service, declared.to_vec()),
-        ..opts(0)
-    }
+/// Options of a listener of `service`.
+fn of(service: &'static str) -> Opts {
+    Opts { service, ..opts(0) }
 }
 
 async fn listen(env: &Env, name: &str, o: Opts) -> Result<Listener, Status> {
@@ -93,8 +90,7 @@ async fn listen(env: &Env, name: &str, o: Opts) -> Result<Listener, Status> {
         order: o.order,
         event_types: o.types,
         from_position: o.from,
-        service: o.service.0.into(),
-        declared: o.service.1.iter().map(|n| n.to_string()).collect(),
+        service: o.service.into(),
         live: o.live,
         middlewares: o.middlewares,
         ..Default::default()
@@ -416,68 +412,79 @@ async fn a_new_listener_starts_at_the_newest_event_and_then_resumes() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_service_retires_what_it_no_longer_declares() {
+async fn a_membership_decides_which_listeners_count_and_which_middlewares_check() {
     let metrics = free_addr();
-    let env = start_custom("listener-service", |config, _| {
+    let env = start_custom("listener-membership", |config, _| {
         config.metrics_listen = Some(metrics.clone());
     })
     .await;
     spawn_worker(&env).await;
     let ready = |body: String| body.starts_with("HTTP/1.1 200");
-    let carts = listen(&env, "carts", of("shop", &["carts", "guard"]))
-        .await
-        .unwrap();
-    let guard = Opts {
+    let guarding = || Opts {
         middlewares: vec![Middleware {
             order: 0,
             types: vec!["orders.PlaceOrder".into()],
             when: 0,
         }],
-        ..of("shop", &["carts", "guard"])
+        ..of("shop")
     };
-    let guard = listen(&env, "guard", guard).await.unwrap();
-    assert!(ready(get(&metrics, "/ready").await));
-    drop(guard);
-    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Only a key granted manage applies it; then the kernel waits for what it lists, also
+    // before it ever connected.
+    let shop = membership("shop", &[], &["carts"], &["guard"]);
+    let denied = apply_as(&env.addr, shop.clone(), &key(2))
+        .await
+        .unwrap_err();
+    assert_eq!(denied.code(), Code::PermissionDenied);
+    apply(&env.addr, shop).await.unwrap();
     let waiting = get(&metrics, "/ready").await;
     assert!(
-        waiting.ends_with("waiting for listeners: guard\n"),
+        waiting.ends_with("waiting for listeners: carts, guard\n"),
         "{waiting}"
     );
-
-    // The next version of the service no longer has the guard: nobody waits for it.
-    drop(carts);
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let carts = listen(&env, "carts", of("shop", &["carts"])).await.unwrap();
+    let carts = listen(&env, "carts", of("shop")).await.unwrap();
+    let guard = listen(&env, "guard", guarding()).await.unwrap();
     assert!(ready(get(&metrics, "/ready").await));
-    let store = kernable_store::open_read_only(&env.store).unwrap();
-    let guard = store.listeners().unwrap();
-    let guard = guard.iter().find(|l| l.name == "guard").unwrap();
-    assert!(guard.retired && !guard.middlewares.is_empty());
-    // But its middleware keeps refusing until it is removed: security fails closed.
+
+    // A listener of the service that it does not list counts for nobody, and cannot check.
+    let extra = listen(&env, "extra", of("shop")).await.unwrap();
+    drop(extra);
+    let rogue = listen(&env, "rogue", guarding()).await;
+    assert_eq!(rogue.err().unwrap().code(), Code::PermissionDenied);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(ready(get(&metrics, "/ready").await));
+
+    // A listed middleware that is away refuses what it checks: security fails closed.
+    drop(guard);
+    tokio::time::sleep(Duration::from_millis(50)).await;
     let place = signed(command("c1", "PlaceOrder", "o1"), &key(1));
-    let refused = submit(&env.addr, place).await.unwrap_err();
+    let refused = submit(&env.addr, place.clone()).await.unwrap_err();
     assert_eq!(refused.code(), Code::Unavailable);
 
-    // A listener of another service, or without one, is never retired by it.
-    let other = listen(&env, "other", of("billing", &["other"]))
+    // The next version no longer lists the guard: its check goes, and nobody waits for it.
+    apply(&env.addr, membership("shop", &[], &["carts"], &[]))
         .await
         .unwrap();
+    assert!(ready(get(&metrics, "/ready").await));
+    let placed = submit(&env.addr, place).await.unwrap();
+    assert!(matches!(placed.outcome, Some(Outcome::Committed(_))));
+    let store = kernable_store::open_read_only(&env.store).unwrap();
+    let listeners = store.listeners().unwrap();
+    let guard = listeners.iter().find(|l| l.name == "guard").unwrap();
+    assert!(
+        guard.middlewares.is_empty(),
+        "its position stays, its check goes"
+    );
+
+    // A listener without a service always counts.
     let plain = listen(&env, "plain", opts(0)).await.unwrap();
-    drop((other, plain));
-    drop(carts);
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let _carts = listen(&env, "carts", of("shop", &["carts"])).await.unwrap();
+    drop((plain, carts));
     tokio::time::sleep(Duration::from_millis(50)).await;
     let waiting = get(&metrics, "/ready").await;
     assert!(
-        waiting.ends_with("waiting for listeners: other, plain\n"),
+        waiting.ends_with("waiting for listeners: carts, plain\n"),
         "{waiting}"
     );
-
-    // A service must declare the listener that says so.
-    let undeclared = listen(&env, "stray", of("shop", &["carts"])).await;
-    assert_eq!(undeclared.err().unwrap().code(), Code::InvalidArgument);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -492,11 +499,11 @@ async fn a_live_listener_starts_at_the_newest_event_and_counts_for_nobody() {
     submit_with(&env.addr, place, Wait::Committed)
         .await
         .unwrap();
-    // It takes no part in its service's declaration.
+    // Its service's membership does not need to list it.
     let live = || Opts {
         live: true,
         from: Some(0),
-        ..of("shop", &["model"])
+        ..of("shop")
     };
     let mut push = listen(&env, "push", live()).await.unwrap();
     assert_eq!(push.start, 1, "from_position is ignored");

@@ -27,7 +27,7 @@ class TestKernel:
                       else f"sqlite:{self.dir}/k.db")
         for name in ("root", "kernel", "app"):
             self._kernable("keys", "new", name)
-        actions = ("submit", "subscribe", "listen", "query", "answer", "check", "vault_read", "vault_erase")
+        actions = ("submit", "subscribe", "listen", "query", "answer", "check", "vault_read", "vault_erase", "manage")
         self._kernable("grant", "root.key", "app.pub", f"run={','.join(command_types)}",
                        *(f"{a}=*" for a in actions), *(grants or []))
         with open(f"{self.dir}/vault.key", "w") as f:

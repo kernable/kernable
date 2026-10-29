@@ -5,7 +5,7 @@
 The tutorial uses one key for everything. In production, give every service its own key and grant it only what it needs. A root key signs the grants; the kernel trusts the root key only (`kernable start --root keys/root.pub`).
 
 ```sh
-for k in root api confirmations shop-worker read-models; do kernable keys new keys/$k; done
+for k in root api confirmations shop-worker read-models deploy; do kernable keys new keys/$k; done
 # keep keys/root.key offline
 kernable grant keys/root.key keys/api.pub \
   submit=shop.Register,shop.Place,shop.AddItem,shop.Submit 'query=shop.*'
@@ -13,6 +13,7 @@ kernable grant keys/root.key keys/confirmations.pub \
   submit=shop.Confirm listen=shop.OrderSubmitted query=shop.GetOrder,shop.GetCustomer
 kernable grant keys/root.key keys/shop-worker.pub 'run=shop.*'
 kernable grant keys/root.key keys/read-models.pub 'listen=shop.*' 'answer=shop.*' 'vault_read=shop.*'
+kernable grant keys/root.key keys/deploy.pub manage=shop   # applies the shop's membership
 ```
 
 Each call writes `<name>.grant` next to the `.pub` file. A permission is `<action>=<type>,<type>`, or a bare type for every action. The actions are in [Trust](../concepts/trust#keys-and-grants). Give each service its `.key` and `.grant` file; the SDKs read the `.grant` file next to the key file, or the file in the `grant` option or `KERNABLE_GRANT`, and send it with every call.

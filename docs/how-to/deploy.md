@@ -14,6 +14,7 @@ Processes reconnect on their own while the kernel is away; clients get connectio
 
 ## Your processes
 
+- **Apply the service's membership once per deploy** (`kernable apply` or a deploy script calling `kernable.apply`): it lists the workers, listeners and middlewares the kernel waits for; what the new version no longer has stops counting, and a middleware it no longer lists stops checking ([Remove a listener, middleware or aggregate](./remove-listener)). Not from every process: the latest apply wins.
 - **Workers and listeners restart safely at any time.** A worker's commands go to another worker; a listener continues after its last acknowledged event.
 - **Deploy readers before writers** when an event's format changes ([Change an event's format](./event-versions)).
 - **Middleware is checked always.** While a middleware restarts, the requests it checks are refused. Run two instances only if they have different names, or keep the restart short.

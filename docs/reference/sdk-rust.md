@@ -12,7 +12,7 @@ How to reach the kernel and as whom.
 - `fn url(self, url: impl Into<String>) -> Options`: Kernel address: `http://host:port` (`host:port` works too) or, on Unix, `unix:/path/to.sock`. Default: `KERNABLE_URL`, else `http://127.0.0.1:7233`, where `kernable start` listens.
 - `fn grant(self, path: impl AsRef<Path>) -> Options`: The key's grant (`kernable grant`), sent with every call. Default: `KERNABLE_GRANT`, else the `.grant` file next to the key file, if there is one.
 - `fn tenant(self, tenant: impl Into<String>) -> Options`: Default tenant for `submit`, `query`, files and the cache (default `default`).
-- `fn service(self, service: impl Into<String>) -> Options`: The service this process's workers and listeners belong to. Each worker declares the aggregates of all the service's workers when it connects, and each listener all its listeners: create them all with `Kernable::worker` and `Kernable::listener` before running any. The kernel unregisters the service's aggregates that are no longer declared: their commands are refused from then on. It retires the listeners that are no longer declared: nobody waits for them any more, but they keep their position (declared again, they resume) and their middleware keeps refusing until `kernable listeners remove`. Default: `KERNABLE_SERVICE`, else none (nothing is unregistered or retired).
+- `fn service(self, service: impl Into<String>) -> Options`: The service this process's workers and listeners belong to. The service's membership (see `Kernable::apply`) decides what the kernel waits for: what it lists counts, the service's other workers and listeners are dynamic, and only listeners it lists as middlewares may check requests. Default: `KERNABLE_SERVICE`, else none (everything registered counts).
 - `fn context(self, context: RequestContext) -> Options`: Default request context, e.g. this service's identity; a request's own context replaces it.
 - `fn tls(self, tls: Tls) -> Options`: Mutual TLS for `host:port` URLs: the CA certificate and this process's certificate and key. Default: `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`, if set.
 
@@ -23,10 +23,12 @@ Cloning gives another handle to the same connection.
 
 - `fn new(options: impl Into<Options>) -> Result<Kernable, Error>`: A client for the kernel `options` names, or with only a key file's path, for the default kernel; `Options::default()` takes everything from the environment. It connects on first use and again after the connection drops. Needs a tokio runtime.
 - `fn with_domain(&self, domain: &Domain) -> Kernable`: Seals the vault fields of this domain's commands when submitting them; see `Domain::command`.
-- `fn worker<S: State>(&self, aggregate: &Aggregate<S>) -> Worker`: A worker that runs the commands of `aggregate`; add more with `Worker::aggregate`. Its aggregates join the aggregates this connection's service declares (see `Options::service`).
-- `fn listener(&self, listener: &Listener) -> ListenerHandle`: Runs `listener` (a read model or reactor of a domain) on this connection: the handle processes its events with `run()`. Each call gives a new handle. Unless it is live, the listener joins the listeners this connection's service declares (see `Options::service`).
+- `fn worker<S: State>(&self, aggregate: &Aggregate<S>) -> Worker`: A worker that runs the commands of `aggregate`; add more with `Worker::aggregate`. It belongs to this connection's service (see `Options::service`).
+- `fn listener(&self, listener: &Listener) -> ListenerHandle`: Runs `listener` (a read model or reactor of a domain) on this connection: the handle processes its events with `run()`. Each call gives a new handle. The listener belongs to this connection's service (see `Options::service`).
 - `fn data(&self) -> Files`: Files of the default tenant: bytes up to 16 MiB per key, kept by the kernel outside the signed event log; see `Files`.
 - `fn cache(&self) -> Cache`: The kernel's cache for the default tenant: values up to 1 MiB per key, optionally with a TTL, lost when the kernel restarts; see `Cache`.
+- `async fn apply(&self, manifest: Manifest) -> Result<(), Error>`: Replaces the membership of a service (default: this connection's, see `Options::service`): the workers, listeners and middlewares the kernel waits for, plus free metadata. Apply it once per deploy (e.g. from a deploy script), not from every process: the latest apply wins. The key needs the `manage` grant for the service. A middleware the new membership no longer lists stops checking.
+- `fn app(&self, app: App) -> Result<AppHandle, Error>`: An app made of whole domains: `AppHandle::run` applies the service's membership (the domains' aggregates as workers, their read models and reactors as listeners, those that check requests as middlewares; live ones are not listed, and the metadata is `version` and `description`, when given, then the app's other metadata), then runs one worker for all the aggregates and every listener, live ones too, all in the app's service. One service is one app: two processes with the same service would replace each other's membership. `Error::Config` if neither the app nor the connection names a service.
 - `async fn submit(&self, submit: Submit) -> Result<Outcome, Error>`: Runs a command and returns its outcome; see `Submit::wait`.
 - `async fn enqueue(&self, submit: Submit) -> Result<String, Error>`: Stores the command in the kernel's queue and returns its ID without waiting for it to run. Submit it again with the same `id` to get the outcome.
 - `async fn query<T: DeserializeOwned>(&self, query: Query) -> Result<T, Error>`: Asks the read model that answers `domain.type` and returns its answer. Queries always go through the kernel, also within one process. A refusal is `Error::Rejected`.
@@ -38,6 +40,17 @@ How long `submit` waits before it responds.
 
 - `Settled`: Until every listener has processed the events, so read models already show them (default); `Error::NotSettled` on timeout. From a listener's handler, only the listeners with a lower order count.
 - `Committed`: Until the events are stored.
+
+### Manifest
+
+What a service consists of, for `Kernable::apply`; see `Membership` in kernable.proto.
+
+- `fn new() -> Manifest`: An empty manifest for the connection's service.
+- `fn service(self, service: impl Into<String>) -> Manifest`: The service it is for. Default: the connection's (`Options::service`).
+- `fn worker<S: State>(self, aggregate: &Aggregate<S>) -> Manifest`: An aggregate the service runs: the kernel waits for a worker of it and accepts its commands even before a worker registered it.
+- `fn listener(self, listener: &Listener) -> Manifest`: A listener the kernel waits for; the service's other listeners count for nobody.
+- `fn middleware(self, listener: &Listener) -> Manifest`: A listener of the service that may check requests; it counts like a listener.
+- `fn metadata(self, key: impl Into<String>, value: impl Into<String>) -> Manifest`: Free metadata, e.g. `("version", "1.0.0")`; kept in the order given.
 
 ### Submit
 
@@ -102,12 +115,15 @@ A domain: a name that scopes its aggregates, commands and events, lowercase by c
 cases are valid; names are case-sensitive. Types are unique within a domain; elsewhere they
 are named `domain.Type`. Cloning gives another handle to the same domain.
 
+A domain remembers the aggregates, read models and reactors created through it, so that an
+app runs all of them (see `crate::Kernable::app`); they live as long as the domain does.
+
 - `fn name(&self) -> &str`
 - `fn event(&self, event_type: &str, schema: u32) -> EventSchema`: Declares that this domain writes `event_type` events at version `schema`, with an `upcast` per older version. The domain's aggregates and listeners use it; other domains' listeners get it with `with_domain`. Panics if `event_type` is qualified or `schema` is 0.
 - `fn command(&self, command_type: &str) -> CommandSchema`: Declares which fields of `command_type` commands the vault keeps (`personal`, `secret`). Clients that submit them need the domain: `kernable.with_domain(&domain)`. Panics if `command_type` is qualified.
 - `fn aggregate<S: State>(&self, name: &str, initial: S) -> Aggregate<S>`: An aggregate of this domain named `name` (lowercase by convention, like `cart`), whose state starts as `initial`.
-- `fn read_model(&self, name: &str) -> Listener`: A read model of this domain named `name`: kept in memory and rebuilt from the first event on every start (order 0). Run it with `crate::Kernable::listen`.
-- `fn reactor(&self, name: &str) -> Listener`: A reactor of this domain named `name`: triggers side effects; starts at the newest event when it is new, then resumes after the last acknowledged event (order 10). A settling submit from its handler waits for the listeners before it (the read models), not for the reactor itself, which handles one event at a time. Run it with `crate::Kernable::listen`.
+- `fn read_model(&self, name: &str) -> Listener`: A read model of this domain named `name`: kept in memory and rebuilt from the first event on every start (order 0). Run it with `crate::Kernable::listener`.
+- `fn reactor(&self, name: &str) -> Listener`: A reactor of this domain named `name`: triggers side effects; starts at the newest event when it is new, then resumes after the last acknowledged event (order 10). A settling submit from its handler waits for the listeners before it (the read models), not for the reactor itself, which handles one event at a time. Run it with `crate::Kernable::listener`.
 - `fn schema_of(&self, event_type: &str) -> u32`: The payload version this domain writes `event_type` events at.
 
 ### domain()
@@ -225,7 +241,7 @@ Runs the commands of its aggregates: the kernel sends each command with the aggr
 events, the worker decides and sends the new events back, signed. Cloning gives another
 handle to the same worker.
 
-- `fn aggregate<S: State>(&self, aggregate: &Aggregate<S>) -> Worker`: Runs the commands of `aggregate`, too; it joins the aggregates the connection's service declares.
+- `fn aggregate<S: State>(&self, aggregate: &Aggregate<S>) -> Worker`: Runs the commands of `aggregate`, too.
 - `fn concurrency(&self, commands: u32) -> Worker`: Commands executed in parallel (default 16).
 - `fn reconnect(&self, delay: Duration) -> Worker`: Delay before reconnecting after the session ends (default 1 s).
 - `async fn ready(&self)`: Returns once the kernel accepted the worker.
@@ -320,7 +336,7 @@ What a middleware checks.
 ### Listener
 
 A durable, named event listener of a domain: a read model (`Domain::read_model`) or a
-reactor (`Domain::reactor`). It defines what to handle; `crate::Kernable::listen` runs
+reactor (`Domain::reactor`). It defines what to handle; `crate::Kernable::listener` runs
 it. Events arrive in order, one at a time, after every listener with a lower order has
 processed them. Delivery is at least once: if a handler fails, the listener reconnects and
 the event is delivered again.
@@ -346,7 +362,7 @@ never misreads data. Cloning gives another handle to the same definition.
 
 ### ListenerHandle
 
-A `Listener` running on a connection; see `crate::Kernable::listen`. Cloning gives
+A `Listener` running on a connection; see `crate::Kernable::listener`. Cloning gives
 another handle to the same running listener.
 
 - `fn listener(&self) -> &Listener`: The listener's definition.

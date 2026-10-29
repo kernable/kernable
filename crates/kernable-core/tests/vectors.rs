@@ -223,6 +223,19 @@ fn vectors() -> Value {
                 1_700_000_000_000,
             )),
         ),
+        "membership": entry(
+            json!({"service": "shop", "workers": ["shop.Cart", "shop.Order"], "listeners": ["carts"],
+                   "middlewares": ["guard"], "metadata": [{"key": "version", "value": "1.0.0"}],
+                   "issued_at": 1_700_000_000_000i64}),
+            signing::membership_message(&kernable_core::proto::Membership {
+                service: "shop".into(),
+                workers: vec!["shop.Cart".into(), "shop.Order".into()],
+                listeners: vec!["carts".into()],
+                middlewares: vec!["guard".into()],
+                metadata: vec![kernable_core::proto::Attribute { key: "version".into(), value: "1.0.0".into() }],
+                issued_at: 1_700_000_000_000,
+            }),
+        ),
         "revoke": entry(
             json!({"key_id": "8b84", "since": 1_700_000_000_000i64, "issued_at": 1_700_000_100_000i64}),
             signing::revoke_message("8b84", 1_700_000_000_000, 1_700_000_100_000),

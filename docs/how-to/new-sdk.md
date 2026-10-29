@@ -21,7 +21,7 @@ Test your implementation against `proto/test-vectors/signing.json`: every messag
 
 ## 4. Workers
 
-Open `WorkerGateway.Session`: send `Register` with the aggregates you run (each with its command types), your service and the aggregates it declares, and the event schemas you write, answer the `Challenge` with a signature over its nonce, then loop: for each `Execute`, fold the snapshot and history (after upcasts) into state, run the handler, and send a signed `Result` or `Rejection`. Use `received_at` for `now()` and derived IDs for `id()`.
+Open `WorkerGateway.Session`: send `Register` with the aggregates you run (each with its command types), your service and the event schemas you write, answer the `Challenge` with a signature over its nonce, then loop: for each `Execute`, fold the snapshot and history (after upcasts) into state, run the handler, and send a signed `Result` or `Rejection`. Use `received_at` for `now()` and derived IDs for `id()`.
 
 ## 5. Listeners
 
@@ -29,6 +29,10 @@ Open `ListenerService.Listen`: send `Hello` (name, order, event types, query typ
 
 Name the listener in submits and queries sent from its handlers (`listener`), so the kernel never makes them wait for it.
 
-## 6. The rest of the API
+## 6. Memberships
+
+`apply(manifest)` signs a `Membership` (`kernable.v1.membership`, see the signing test vectors) with the service, the qualified aggregate types of its workers, the names of its listeners and middlewares, and metadata, and sends it to `MembershipService.Apply`.
+
+## 7. The rest of the API
 
 To match the other SDKs: domains with event schemas and upcasts, vault fields (seal before signing, unseal on reading), read model stores, and the same names. Then run the tutorial's shop with your SDK in part 5's mix: if it works next to the TypeScript, Python and Rust processes, it speaks kernable.

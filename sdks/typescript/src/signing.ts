@@ -8,6 +8,7 @@ import type {
   WireCommand,
   WireDataRequest,
   WireEvent,
+  WireMembership,
   WireNewEvent,
   WireQueryRequest,
   WireRejected,
@@ -200,6 +201,18 @@ export function subscribeMessage(afterPosition: number, eventTypes: string[], is
   const m = new Msg("kernable.v1.subscribe").u64(afterPosition).i64(issuedAt).u64(eventTypes.length);
   for (const t of eventTypes) m.str(t);
   return m.done();
+}
+
+/** What a key granted `manage` signs to apply a service's membership. */
+export function membershipMessage(m: WireMembership): Buffer {
+  const msg = new Msg("kernable.v1.membership").str(m.service);
+  for (const list of [m.workers, m.listeners, m.middlewares]) {
+    msg.u64(list.length);
+    for (const entry of list) msg.str(entry);
+  }
+  msg.u64(m.metadata.length);
+  for (const a of m.metadata) msg.str(a.key).str(a.value);
+  return msg.i64(m.issued_at).done();
 }
 
 export function checkpointMessage(position: number, chainHash: Buffer, createdAt: number): Buffer {

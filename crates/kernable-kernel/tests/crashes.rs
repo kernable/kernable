@@ -63,19 +63,24 @@ fn workload() -> Vec<Command> {
     commands.into_iter().map(|c| signed(c, &key(1))).collect()
 }
 
-/// A worker that sends snapshots, reconnecting whenever the kernel goes away.
-fn worker(addr: &str) {
+/// A worker that sends snapshots, reconnecting whenever the kernel goes away. Returns once the
+/// kernel registered it the first time: commands for an unregistered aggregate are refused.
+async fn worker(addr: &str) {
     let addr = addr.to_owned();
+    let (tx, registered) = tokio::sync::oneshot::channel();
+    let mut first = Some(tx);
     tokio::spawn(async move {
         loop {
             let worker = TestWorker {
                 behavior: Behavior::Snapshots,
+                registered: first.take(),
                 ..TestWorker::honest()
             };
             run_worker(addr.clone(), worker).await;
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     });
+    let _ = registered.await;
 }
 
 /// A listener that acknowledges every batch and records each delivered position, resuming at
@@ -169,7 +174,7 @@ async fn crash_and_recover(point: &str, round: u32) {
 
     let mut kernel = start_kernel(&dir, &flags, Some(point));
     wait_for(&addr).await;
-    worker(&addr);
+    worker(&addr).await;
     let seen = Arc::new(Mutex::new(Vec::new()));
     listener(&addr, Arc::clone(&seen));
 

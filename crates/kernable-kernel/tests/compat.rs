@@ -13,9 +13,9 @@ use common::*;
 use kernable_core::{
     PROTOCOL,
     proto::{
-        Attribute, Command, Hello, ListenerMessage, ListenerRecord, Middleware, NewEvent,
-        QueryRequest, Register, Rejected, RequestContext, RevocationRecord, SubmitRequest,
-        SubscribeRequest, VaultValue, Wait, When, WorkerMessage, WorkerRecord,
+        Attribute, Command, Hello, ListenerMessage, ListenerRecord, Membership, MembershipRecord,
+        Middleware, NewEvent, QueryRequest, Register, Rejected, RequestContext, RevocationRecord,
+        SubmitRequest, SubscribeRequest, VaultValue, Wait, When, WorkerMessage, WorkerRecord,
         command_result::Outcome, command_service_client::CommandServiceClient,
         event_service_client::EventServiceClient, listener_message,
         listener_service_client::ListenerServiceClient, query_service_client::QueryServiceClient,
@@ -178,7 +178,6 @@ fn fill(store: &dyn Store, vault: &Vault) {
         removed: false,
         middlewares,
         service: String::new(),
-        retired: false,
         last_seen: AT,
     };
     let guard = Middleware {
@@ -201,6 +200,24 @@ fn fill(store: &dyn Store, vault: &Vault) {
             last_seen: AT,
             removed: false,
         }])
+        .unwrap();
+    let shop = Membership {
+        service: "orders".into(),
+        workers: vec!["orders.Order".into()],
+        listeners: vec!["orders".into()],
+        middlewares: vec!["guard".into()],
+        metadata: vec![Attribute {
+            key: "version".into(),
+            value: "1.0.0".into(),
+        }],
+        issued_at: AT,
+    };
+    store
+        .save_membership(&MembershipRecord {
+            sig: Some(signing::sign(&key(1), &signing::membership_message(&shop))),
+            membership: Some(shop),
+            applied_at: AT,
+        })
         .unwrap();
     // A client key stolen at AT. What it signed from then on is suspect.
     let mut stolen = command("c11", "PlaceOrder", "o4");
@@ -279,6 +296,10 @@ fn check_common(store: &dyn Store, backend: &str) {
     assert_eq!(listeners[0].last_seen, AT);
     let workers = store.workers().unwrap();
     assert_eq!(workers[0].command_types.len(), 2, "{backend}");
+    let memberships = store.memberships().unwrap();
+    let shop = memberships[0].membership.as_ref().unwrap();
+    assert_eq!(shop.middlewares, ["guard"], "{backend}");
+    assert_eq!(shop.metadata[0].value, "1.0.0", "{backend}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

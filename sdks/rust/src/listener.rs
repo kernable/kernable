@@ -1,12 +1,12 @@
 //! Listeners (read models and reactors), their queries and middleware, and subscriptions.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, HashMap},
     fmt,
     pin::Pin,
     sync::{
         Arc, Mutex, RwLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -233,6 +233,9 @@ struct ListenerInner {
     settings: Mutex<Settings>,
     /// Qualified event type or `Domain.*` -> handler and whether it is raw.
     handlers: RwLock<HashMap<String, (EventHandler, bool)>>,
+    /// The keys of `handlers` and `queries` in definition order.
+    event_types: RwLock<Vec<String>>,
+    query_types: RwLock<Vec<String>>,
     domains: RwLock<HashMap<String, Domain>>,
     /// Qualified query type -> handler.
     queries: RwLock<HashMap<String, QueryHandler>>,
@@ -241,7 +244,7 @@ struct ListenerInner {
 }
 
 /// A durable, named event listener of a domain: a read model ([`Domain::read_model`]) or a
-/// reactor ([`Domain::reactor`]). It defines what to handle; [`crate::Kernable::listen`] runs
+/// reactor ([`Domain::reactor`]). It defines what to handle; [`crate::Kernable::listener`] runs
 /// it. Events arrive in order, one at a time, after every listener with a lower order has
 /// processed them. Delivery is at least once: if a handler fails, the listener reconnects and
 /// the event is delivered again.
@@ -254,6 +257,14 @@ struct ListenerInner {
 #[derive(Clone)]
 pub struct Listener {
     inner: Arc<ListenerInner>,
+}
+
+/// Adds `t` to `types` unless it is there already.
+fn remember(types: &RwLock<Vec<String>>, t: &str) {
+    let mut types = types.write().unwrap();
+    if !types.iter().any(|known| known == t) {
+        types.push(t.to_owned());
+    }
 }
 
 fn qualified(t: &str, wildcard: bool) -> bool {
@@ -284,6 +295,8 @@ impl Listener {
                     schema: "1".into(),
                 }),
                 handlers: RwLock::default(),
+                event_types: RwLock::default(),
+                query_types: RwLock::default(),
                 domains: RwLock::new(domains),
                 queries: RwLock::default(),
                 middlewares: RwLock::default(),
@@ -335,9 +348,8 @@ impl Listener {
     ///
     /// If the listener is a middleware: a live listener cannot be one.
     pub fn live(&self) -> Listener {
-        let middleware = !self.inner.middlewares.read().unwrap().is_empty();
         assert!(
-            !middleware,
+            !self.is_middleware(),
             "{} is a middleware: a live listener cannot be one",
             self.inner.name
         );
@@ -345,8 +357,45 @@ impl Listener {
         self.clone()
     }
 
-    fn is_live(&self) -> bool {
+    pub(crate) fn is_live(&self) -> bool {
         self.inner.settings.lock().unwrap().live
+    }
+
+    /// Whether it checks requests, before or after.
+    pub(crate) fn is_middleware(&self) -> bool {
+        !self.inner.middlewares.read().unwrap().is_empty()
+    }
+
+    /// The qualified event types (or `domain.*`) it reads, in definition order.
+    pub(crate) fn event_types(&self) -> Vec<String> {
+        self.inner.event_types.read().unwrap().clone()
+    }
+
+    /// The qualified query types it answers, in definition order.
+    pub(crate) fn query_types(&self) -> Vec<String> {
+        self.inner.query_types.read().unwrap().clone()
+    }
+
+    /// The types it checks before and after requests, if it is a middleware.
+    pub(crate) fn checks(&self) -> Vec<(When, Vec<String>)> {
+        self.inner
+            .middlewares
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(when, (options, _))| (*when, options.types.clone()))
+            .collect()
+    }
+
+    /// What it does from `position`, for the log; `name` shortens the types.
+    pub(crate) fn details(&self, position: u64, name: &dyn Fn(&str) -> String) -> Vec<String> {
+        log::listener_details(
+            position,
+            &self.event_types(),
+            &self.query_types(),
+            &self.checks(),
+            name,
+        )
     }
 
     /// Delay before reconnecting after the stream drops (default 1 s).
@@ -427,6 +476,7 @@ impl Listener {
                 handler(data, meta, ctx).await
             })
         });
+        remember(&self.inner.event_types, &event_type);
         self.inner
             .handlers
             .write()
@@ -464,6 +514,7 @@ impl Listener {
                 Ok(serde_json::to_value(answer)?)
             })
         });
+        remember(&self.inner.query_types, &query_type);
         self.inner
             .queries
             .write()
@@ -528,71 +579,24 @@ impl Listener {
     }
 }
 
-/// The service a connection's workers and listeners belong to, and what it declares: the names
-/// of every listener of the connection that is not live, and the qualified types of the
-/// aggregates its workers run. Shared by the connection's clones, workers and handles.
-#[derive(Clone)]
-pub(crate) struct Service {
-    name: String,
-    declared: Arc<Mutex<BTreeSet<String>>>,
-    aggregates: Arc<Mutex<BTreeSet<String>>>,
-}
-
-impl Service {
-    pub(crate) fn new(name: String) -> Service {
-        Service {
-            name,
-            declared: Arc::default(),
-            aggregates: Arc::default(),
-        }
-    }
-
-    /// Declares a worker's aggregate, by its qualified type.
-    pub(crate) fn declare_aggregate(&self, aggregate_type: String) {
-        self.aggregates.lock().unwrap().insert(aggregate_type);
-    }
-
-    /// The service and its aggregates, as a worker declares them when it connects: none
-    /// without a service.
-    pub(crate) fn aggregate_declaration(&self) -> (String, Vec<String>) {
-        if self.name.is_empty() {
-            return (String::new(), Vec::new());
-        }
-        let declared = self.aggregates.lock().unwrap().iter().cloned().collect();
-        (self.name.clone(), declared)
-    }
-
-    pub(crate) fn declare(&self, listener: &Listener) {
-        if !listener.is_live() {
-            self.declared
-                .lock()
-                .unwrap()
-                .insert(listener.name().to_owned());
-        }
-    }
-
-    /// The service and its listeners, as a listener declares them when it connects: none
-    /// without a service.
-    fn declaration(&self) -> (String, Vec<String>) {
-        if self.name.is_empty() {
-            return (String::new(), Vec::new());
-        }
-        let declared = self.declared.lock().unwrap().iter().cloned().collect();
-        (self.name.clone(), declared)
-    }
-}
-
 struct HandleInner {
     client: Client,
     listener: Listener,
-    service: Service,
+    /// The service it belongs to (`Options::service`); empty if none.
+    service: String,
     position: AtomicU64,
     store: Mutex<Option<Store>>,
     stopped: watch::Sender<bool>,
     ready: watch::Sender<bool>,
+    /// Whether the first connect gets its own line; an app prints it in its overview instead.
+    announce: AtomicBool,
+    /// Connects the kernel accepted so far.
+    connects: AtomicU64,
+    /// Position after which the kernel delivered on the first connect.
+    started_at: AtomicU64,
 }
 
-/// A [`Listener`] running on a connection; see [`crate::Kernable::listen`]. Cloning gives
+/// A [`Listener`] running on a connection; see [`crate::Kernable::listener`]. Cloning gives
 /// another handle to the same running listener.
 #[derive(Clone)]
 pub struct ListenerHandle {
@@ -600,7 +604,7 @@ pub struct ListenerHandle {
 }
 
 impl ListenerHandle {
-    pub(crate) fn new(client: Client, listener: &Listener, service: Service) -> ListenerHandle {
+    pub(crate) fn new(client: Client, listener: &Listener, service: String) -> ListenerHandle {
         ListenerHandle {
             inner: Arc::new(HandleInner {
                 client,
@@ -610,8 +614,21 @@ impl ListenerHandle {
                 store: Mutex::default(),
                 stopped: watch::Sender::new(false),
                 ready: watch::Sender::new(false),
+                announce: AtomicBool::new(true),
+                connects: AtomicU64::new(0),
+                started_at: AtomicU64::new(0),
             }),
         }
+    }
+
+    /// Whether the first connect gets its own line (default); an app prints it in its overview.
+    pub(crate) fn announce(&self, announce: bool) {
+        self.inner.announce.store(announce, Ordering::SeqCst);
+    }
+
+    /// Position after which the kernel delivered on the first connect.
+    pub(crate) fn started_at(&self) -> u64 {
+        self.inner.started_at.load(Ordering::SeqCst)
     }
 
     /// The listener's definition.
@@ -695,12 +712,6 @@ impl ListenerHandle {
             let s = def.settings.lock().unwrap();
             (s.order, s.live)
         };
-        // A live listener takes no part in its service's declaration.
-        let (service, declared) = if live {
-            (String::new(), Vec::new())
-        } else {
-            inner.service.declaration()
-        };
         let middlewares: Vec<Middleware> = def
             .middlewares
             .read()
@@ -712,16 +723,9 @@ impl ListenerHandle {
                 when: o.when.wire().into(),
             })
             .collect();
-        let event_types: Vec<String> = def.handlers.read().unwrap().keys().cloned().collect();
-        let query_types: Vec<String> = def.queries.read().unwrap().keys().cloned().collect();
+        let event_types = self.inner.listener.event_types();
+        let query_types = self.inner.listener.query_types();
         let what = format!("listener {}", def.name);
-        let types = |when: When| {
-            middlewares
-                .iter()
-                .find(|m| m.when() == when.wire())
-                .map(|m| m.types.clone())
-        };
-        let (checks, after) = (types(When::Before), types(When::After));
         let hello = Hello {
             name: def.name.clone(),
             key_id: client.key_id.clone(),
@@ -731,8 +735,7 @@ impl ListenerHandle {
             query_types: query_types.clone(),
             middlewares,
             protocol: PROTOCOL,
-            service,
-            declared,
+            service: inner.service.clone(),
             live,
         };
         tx.send(msg(Reply::Hello(hello))).await?;
@@ -752,16 +755,20 @@ impl ListenerHandle {
                 Some(Delivery::Ready(r)) => {
                     inner.position.store(r.after_position, Ordering::SeqCst);
                     replay_up_to = r.head_position;
-                    client.log.info(&what, || {
-                        log::listener_connected(
-                            &client.log.connected(&client.key_id),
-                            r.after_position,
-                            &event_types,
-                            &query_types,
-                            checks.as_deref(),
-                            after.as_deref(),
-                        )
-                    });
+                    if inner.connects.fetch_add(1, Ordering::SeqCst) > 0 {
+                        client.log.info(&what, || {
+                            format!("connected again at position {}", r.after_position)
+                        });
+                    } else {
+                        inner.started_at.store(r.after_position, Ordering::SeqCst);
+                        if inner.announce.load(Ordering::SeqCst) {
+                            client.log.info(&what, || {
+                                let details =
+                                    self.inner.listener.details(r.after_position, &|t| t.into());
+                                log::listener_connected(&client.log.peer, &details)
+                            });
+                        }
+                    }
                     inner.ready.send_replace(true);
                     continue;
                 }

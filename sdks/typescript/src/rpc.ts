@@ -127,8 +127,7 @@ export type WorkerMessage =
         aggregates: { aggregate_type: string; command_types: string[] }[];
         max_concurrency: number;
         event_schemas: { event_type: string; schema: number }[];
-        service?: string;
-        declared?: string[];
+        service: string;
       };
     }
   | { challenge_response: { sig: Buffer } }
@@ -197,9 +196,7 @@ export type ListenerMessage =
         from_position?: number;
         query_types: string[];
         middlewares: { order: number; types: string[]; when: number }[];
-        /** Not for live listeners. */
-        service?: string;
-        declared?: string[];
+        service: string;
         live: boolean;
       };
     }
@@ -247,6 +244,16 @@ export interface WireCacheResult {
   value: Buffer;
 }
 
+/** What a service consists of; see `Membership` in kernable.proto. */
+export interface WireMembership {
+  service: string;
+  workers: string[];
+  listeners: string[];
+  middlewares: string[];
+  metadata: { key: string; value: string }[];
+  issued_at: number;
+}
+
 export type DataOp = "PutData" | "GetData" | "DeleteData";
 export type CacheOp = "SetCache" | "GetCache" | "DeleteCache";
 
@@ -259,6 +266,7 @@ export interface Clients {
   subscribe(req: WireSubscribeRequest): grpc.ClientReadableStream<WireEvent>;
   data(op: DataOp, req: WireDataRequest): Promise<WireDataResult>;
   cache(op: CacheOp, req: WireCacheRequest): Promise<WireCacheResult>;
+  apply(membership: WireMembership, sig: WireSignature): Promise<void>;
   close(): void;
 }
 
@@ -305,6 +313,7 @@ export function connect(url: string, tls?: TlsFiles, grant?: string): Clients {
     "grpc.max_receive_message_length": MAX_DATA_MESSAGE,
   });
   const cache = new v1.CacheService(url, creds);
+  const memberships = new v1.MembershipService(url, creds);
   const metadata = new grpc.Metadata();
   if (grant) metadata.set("kernable-grant", grant);
   // A unary call with the grant and the protocol version.
@@ -328,6 +337,9 @@ export function connect(url: string, tls?: TlsFiles, grant?: string): Clients {
     subscribe: (req) => events.Subscribe({ ...req, protocol: PROTOCOL }, metadata),
     data: (op, req) => unary(data, op, req),
     cache: (op, req) => unary(cache, op, req),
+    apply: async (membership, sig) => {
+      await unary(memberships, "Apply", { membership, sig });
+    },
     close: () => {
       commands.close();
       workers.close();
@@ -336,6 +348,7 @@ export function connect(url: string, tls?: TlsFiles, grant?: string): Clients {
       queries.close();
       data.close();
       cache.close();
+      memberships.close();
     },
   };
 }

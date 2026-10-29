@@ -20,6 +20,7 @@ pub mod config;
 pub mod crash;
 pub mod grants;
 mod listeners;
+mod memberships;
 mod metrics;
 mod queue;
 mod workers;
@@ -48,6 +49,7 @@ use kernable_core::{
         event_service_server::{EventService, EventServiceServer},
         kernel_message::Msg as Out,
         listener_service_server::{ListenerService, ListenerServiceServer},
+        membership_service_server::MembershipServiceServer,
         middleware_call, query_answer, query_result,
         query_service_server::{QueryService, QueryServiceServer},
         trust_service_server::{TrustService, TrustServiceServer},
@@ -148,6 +150,7 @@ pub struct Kernel {
     appended: Notify,
     listeners: listeners::Registry,
     workers: workers::Registry,
+    memberships: memberships::Memberships,
     queue: queue::Queue,
     metrics: metrics::Metrics,
     /// The highest payload version stored per qualified event type; never goes down.
@@ -176,7 +179,8 @@ impl Kernel {
             .into_iter()
             .map(|r| (r.key_id, r.since))
             .collect();
-        let listeners = listeners::Registry::load(store.listeners()?);
+        let memberships = memberships::Memberships::load(store.memberships()?);
+        let listeners = listeners::Registry::load(store.listeners()?, &memberships);
         let workers = workers::Registry::load(store.workers()?);
         let schemas = store.event_schemas()?.into_iter().collect();
         let snapshots = kernable_store::snapshots::open(&config.snapshots)?;
@@ -216,6 +220,7 @@ impl Kernel {
             appended: Notify::new(),
             listeners,
             workers,
+            memberships,
             queue,
             metrics: metrics::Metrics::default(),
             schemas: Mutex::new(schemas),
@@ -464,11 +469,12 @@ impl Kernel {
         if self.draining.load(SeqCst) {
             return Err("shutting down".into());
         }
-        let missing = self.workers.missing();
+        let (workers, listeners) = self.memberships.listed();
+        let missing = self.workers.missing(&workers);
         if !missing.is_empty() {
             return Err(format!("waiting for workers: {}", missing.join(", ")));
         }
-        match self.listeners.behind().as_slice() {
+        match self.listeners.behind(&listeners).as_slice() {
             [] => Ok(()),
             behind => Err(format!("waiting for listeners: {}", behind.join(", "))),
         }
@@ -801,6 +807,7 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
         .add_service(ListenerServiceServer::new(api.clone()))
         .add_service(QueryServiceServer::new(api.clone()))
         .add_service(TrustServiceServer::new(api.clone()))
+        .add_service(MembershipServiceServer::new(api.clone()))
         .add_service(
             DataServiceServer::new(api.clone())
                 .max_decoding_message_size(MAX_DATA_BYTES + (64 << 10))
@@ -956,7 +963,7 @@ impl CommandService for Api {
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
         }
         let aggregate = config::qualified(&cmd.domain, &cmd.aggregate_type);
-        if !kernel.workers.runs(&aggregate, &name) {
+        if !kernel.workers.runs(kernel, &aggregate, &name) {
             return Err(Status::not_found(format!(
                 "no worker registered {name} for {aggregate}"
             )));

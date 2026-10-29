@@ -10,10 +10,11 @@ use std::{
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
-        ChallengeResponse, Command, CommandResult, EventSchema, Grant, NewEvent, Permission,
-        Register, Rejected, Rejection, Result as WorkResult, Snapshot, SubmitRequest, Wait,
-        WorkerAggregate, WorkerMessage, command_result::Outcome,
+        ApplyRequest, ChallengeResponse, Command, CommandResult, EventSchema, Grant, Membership,
+        NewEvent, Permission, Register, Rejected, Rejection, Result as WorkResult, Snapshot,
+        SubmitRequest, Wait, WorkerAggregate, WorkerMessage, command_result::Outcome,
         command_service_client::CommandServiceClient, kernel_message::Msg as Out,
+        membership_service_client::MembershipServiceClient,
         worker_gateway_client::WorkerGatewayClient, worker_message::Msg as In,
     },
     signing, transport,
@@ -67,7 +68,7 @@ fn grant_at(
     signing::grant(&root(), &id(key), permissions, succeeds, issued_at)
 }
 
-/// What the test keys may do: client key 1 everything a client does, worker key 2 the
+/// What the test keys may do: client key 1 everything a client does (and manage every service), worker key 2 the
 /// `orders` domain, subscriber key 4 `orders.OrderPlaced` only, listener key 5 all events (and
 /// their vault values) and listener key 6 `orders.OrderPlaced` only. Issued at 1, so any
 /// [`grant`] replaces them.
@@ -78,6 +79,7 @@ pub fn default_grant(key_: &SigningKey) -> Option<Grant> {
             ("subscribe", &["*"]),
             ("query", &["*"]),
             ("privileged", &["bypass_authorization"]),
+            ("manage", &["*"]),
         ],
         2 => &[("run", &["orders.*"])],
         4 => &[("subscribe", &["orders.OrderPlaced"])],
@@ -287,9 +289,8 @@ pub struct TestWorker {
     pub vaults: Option<mpsc::UnboundedSender<Vec<kernable_core::proto::VaultValue>>>,
     /// The aggregates it registers; empty: `<domain>.Order` per domain of `command_types`.
     pub aggregates: Vec<WorkerAggregate>,
-    /// Its service and the aggregates the service declares.
+    /// Its service (`Register.service`).
     pub service: String,
-    pub declared: Vec<String>,
     /// Told once the kernel registered the worker.
     pub registered: Option<tokio::sync::oneshot::Sender<()>>,
 }
@@ -310,7 +311,6 @@ impl TestWorker {
             vaults: None,
             aggregates: Vec::new(),
             service: String::new(),
-            declared: Vec::new(),
             registered: None,
         }
     }
@@ -358,7 +358,6 @@ pub async fn run_worker(addr: String, mut w: TestWorker) -> tonic::Status {
         },
         max_concurrency: 4,
         service: w.service.clone(),
-        declared: w.declared.clone(),
         event_schemas: w
             .schemas
             .iter()
@@ -477,6 +476,52 @@ pub async fn run_worker(addr: String, mut w: TestWorker) -> tonic::Status {
         if tx.send(send(reply)).await.is_err() {
             return tonic::Status::ok("closed");
         }
+    }
+}
+
+/// Applies a membership, signed by key 1.
+pub async fn apply(addr: &str, membership: Membership) -> Result<(), tonic::Status> {
+    apply_as(addr, membership, &key(1)).await
+}
+
+pub async fn apply_as(
+    addr: &str,
+    mut membership: Membership,
+    key_: &SigningKey,
+) -> Result<(), tonic::Status> {
+    membership.issued_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let request = ApplyRequest {
+        sig: Some(signing::sign(
+            key_,
+            &signing::membership_message(&membership),
+        )),
+        membership: Some(membership),
+        protocol: kernable_core::PROTOCOL,
+    };
+    let channel = transport::connect(addr).await.unwrap();
+    MembershipServiceClient::new(channel)
+        .apply(with_grant(request, key_))
+        .await
+        .map(|_| ())
+}
+
+/// A membership of `service` that lists these workers, listeners and middlewares.
+pub fn membership(
+    service: &str,
+    workers: &[&str],
+    listeners: &[&str],
+    middlewares: &[&str],
+) -> Membership {
+    let strings = |s: &[&str]| s.iter().map(|s| s.to_string()).collect();
+    Membership {
+        service: service.into(),
+        workers: strings(workers),
+        listeners: strings(listeners),
+        middlewares: strings(middlewares),
+        ..Default::default()
     }
 }
 

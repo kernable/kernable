@@ -40,7 +40,7 @@ pub struct TestKernel {
 
 impl TestKernel {
     /// The app key may run `command_types` (`Orders.*`, `Orders.PlaceOrder`), use files and the
-    /// cache of `shop`, and do everything else. `extra` goes to `kernable start`, e.g.
+    /// cache of `shop`, and do everything else (also apply memberships). `extra` goes to `kernable start`, e.g.
     /// `["--lease-ttl-ms", "500"]`.
     pub fn new(command_types: &[&str], extra: &[&str]) -> TestKernel {
         // Short: Unix socket paths are limited to ~104 bytes.
@@ -72,6 +72,7 @@ impl TestKernel {
             "check",
             "vault_erase",
             "vault_read",
+            "manage",
         ]
         .iter()
         .map(|a| format!("{a}=*"))

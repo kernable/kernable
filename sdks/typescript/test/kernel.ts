@@ -65,7 +65,7 @@ export class TestKernel {
     kernable(
       "grant", "root.key", "app.pub",
       `run=${commandTypes.join(",")}`,
-      ...["submit", "subscribe", "listen", "query", "answer", "check", "vault_erase"].map((action) => `${action}=*`),
+      ...["submit", "subscribe", "listen", "query", "answer", "check", "vault_erase", "manage"].map((action) => `${action}=*`),
       `vault_read=${(options.vaultReaders ?? ["*"]).join(",")}`,
       ...["data_read", "data_write", "cache"].map((action) => `${action}=${(options.stores ?? ["*"]).join(",")}`),
     );

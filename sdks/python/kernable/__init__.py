@@ -38,19 +38,20 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 import grpc
 
 from kernable.signing import (Key, cache_message, challenge_message, command_message, data_message, derived_id,
-                              query_message, vault_ref, rejection_message, result_message, snapshot_message)
+                              membership_message, query_message, vault_ref, rejection_message, result_message,
+                              snapshot_message)
 from kernable.store import Store
 from kernable.v1 import kernable_pb2 as pb
 from kernable.v1 import kernable_pb2_grpc as rpc
 
-__all__ = ["PROTOCOL", "Aggregate", "ApplyContext", "CacheClient", "Check", "CommandContext", "CommandMeta", "CommandSchema",
+__all__ = ["PROTOCOL", "Aggregate", "App", "ApplyContext", "CacheClient", "Check", "CommandContext", "CommandMeta", "CommandSchema",
            "Data", "DataClient", "Domain",
-           "Event", "EventMeta", "EventSchema", "Kernable", "Key", "Listener", "ListenerContext", "ListenerHandle", "NotSettled", "Outcome",
+           "Event", "EventMeta", "EventSchema", "Kernable", "Key", "Listener", "ListenerContext", "ListenerHandle", "Manifest", "NotSettled", "Outcome",
            "QueryContext", "QueryMeta", "QueryOutcome", "Rejected", "RequestContext", "Store", "StoredEventMeta", "Tls", "Worker",
            "domain"]
 
@@ -467,6 +468,10 @@ class Domain:
         self.events: dict[str, EventSchema] = {}
         #: Vault fields per command type; see `command`.
         self.commands: dict[str, CommandSchema] = {}
+        #: The aggregates defined on it, which `Kernable.app` runs.
+        self.aggregates: list[Aggregate] = []
+        #: The read models and reactors defined on it, which `Kernable.app` runs.
+        self.listeners: list[Listener] = []
 
     def command(self, type: str) -> CommandSchema:
         """Declares which fields of `type` commands the vault keeps (`personal`, `secret`). Clients
@@ -485,7 +490,9 @@ class Domain:
 
     def aggregate(self, name: str, initial: Any, snapshot_every: int = 100, schema: str = "1") -> "Aggregate":
         """An aggregate of this domain; see `Aggregate`. Run it with `kernable.worker(aggregate)`."""
-        return Aggregate(self.name, name, initial, snapshot_every, schema, self.events)
+        aggregate = Aggregate(self.name, name, initial, snapshot_every, schema, self.events)
+        self.aggregates.append(aggregate)
+        return aggregate
 
     def read_model(self, name: str, *, order: int = 0, start: int | None = 0, reconnect_s: float = 1.0,
                    store: str | None = None, schema: str = "1", live: bool = False) -> "Listener":
@@ -496,7 +503,7 @@ class Domain:
         `store`: data and position are written together per batch, and a restart continues after
         the stored position. Change `schema` when the handlers store data differently: the store is
         cleared and the read model rebuilds from the first event. `live`: see `reactor`."""
-        return Listener(self, name, order, start, reconnect_s, store, schema, live=live)
+        return self._listener(Listener(self, name, order, start, reconnect_s, store, schema, live=live))
 
     def reactor(self, name: str, *, order: int = 10, start: int | None = None, reconnect_s: float = 1.0,
                 store: str | None = None, schema: str = "1", live: bool = False) -> "Listener":
@@ -512,7 +519,11 @@ class Domain:
         event, nobody waits for it, and it is forgotten when it disconnects. For reactions that
         only matter while the process runs, e.g. pushing to connected browsers. Cannot be a
         middleware."""
-        return Listener(self, name, order, start, reconnect_s, store, schema, live=live)
+        return self._listener(Listener(self, name, order, start, reconnect_s, store, schema, live=live))
+
+    def _listener(self, listener: "Listener") -> "Listener":
+        self.listeners.append(listener)
+        return listener
 
 
 def domain(name: str) -> Domain:
@@ -625,16 +636,11 @@ class Kernable:
         `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`, if set; `context`: default request context for submits
         and queries, e.g. this service's identity, replaced by a request's own; `grant`: path to the key's grant (`kernable grant`), sent
         with every call; default `KERNABLE_GRANT`, else the `.grant` file next to the key file,
-        if there is one; `service`: the service this process's workers and listeners belong to,
-        default `KERNABLE_SERVICE`, else none (nothing is retired or unregistered).
-
-        Each worker declares the aggregates of all workers of the service when it connects, and
-        each listener all listeners of the service: create them all with `kernable.worker` and
-        `kernable.listener` before running any. The kernel unregisters the service's aggregates
-        that are no longer declared: their commands are refused from then on. It retires the
-        service's listeners that are no longer declared: nobody waits for them any more, but they
-        keep their position (declared again, they resume) and their middleware keeps refusing
-        until `kernable listeners remove`."""
+        if there is one; `service`: the service this process's workers and listeners belong to.
+        The service's membership (see `apply`) decides what the kernel waits for: what it lists
+        counts, the service's other workers and listeners are dynamic, and only listeners it lists
+        as middlewares may check requests. Default `KERNABLE_SERVICE`, else none (everything
+        registered counts)."""
         key = key or os.environ.get("KERNABLE_KEY") or "app.key"
         tls = tls or _tls_from_env()
         self._context = context or RequestContext()
@@ -663,10 +669,6 @@ class Kernable:
         self._log = _Log(given_url, key, self._key.id)
         self._tenant = tenant
         self._service = service or os.environ.get("KERNABLE_SERVICE") or ""
-        #: The names of this service's listeners, as declared to the kernel.
-        self._declared: set[str] = set()
-        #: The qualified types of this service's aggregates (`shop.Cart`), as declared to the kernel.
-        self._declared_aggregates: set[str] = set()
         self._domains: dict[str, Domain] = {}
         #: Files of a domain: `k.data.put(domain, key, data)`, `get`, `delete`.
         self.data = DataClient(self)
@@ -683,13 +685,58 @@ class Kernable:
     def worker(self, *aggregates: Aggregate) -> "Worker":
         """A worker that runs these aggregates' commands; call `run()` on it. `ready` is set
         once the kernel registered it."""
-        self._declared_aggregates.update(f"{a.domain}.{a.name}" for a in aggregates)
+        return Worker(self._channel, self._key, aggregates, self._log, self._service)
 
-        def service() -> tuple[str, list[str]]:
-            # Read when connecting, so every worker declares all aggregates created before.
-            return self._service, sorted(self._declared_aggregates) if self._service else []
+    def app(self, *, domains: Iterable[Domain], service: str | None = None, version: str | None = None,
+            description: str | None = None, metadata: dict[str, str] | None = None) -> "App":
+        """An app made of whole domains: every aggregate, read model and reactor defined on them.
+        `run()` on it applies the service's membership (the domains' aggregates as workers, their
+        read models and reactors as listeners, those with a middleware as middlewares; live ones
+        are not listed), then runs all of them. `service` defaults to this client's; `version`
+        and `description` go into the membership's metadata, followed by `metadata`.
 
-        return Worker(self._channel, self._key, aggregates, self._log, service)
+        One service is one app: two processes with the same service would replace each other's
+        membership."""
+        service = service or self._service
+        if not service:
+            raise ValueError("an app needs a service: pass `service` or set it on the client (KERNABLE_SERVICE)")
+        domains = list(domains)
+        aggregates = [a for d in domains for a in d.aggregates]
+        listeners = [l for d in domains for l in d.listeners]
+        durable = [l for l in listeners if not l.live]
+        meta = {k: v for k, v in (("version", version), ("description", description)) if v is not None}
+        manifest = Manifest(service=service, workers=aggregates,
+                            listeners=[l for l in durable if not l._middlewares],
+                            middlewares=[l for l in durable if l._middlewares],
+                            metadata={**meta, **(metadata or {})})
+        worker = Worker(self._channel, self._key, aggregates, self._log, service) if aggregates else None
+        handles = [ListenerHandle(self._channel, self._key, l, self._log, service) for l in listeners]
+        return App(self, manifest, worker, handles, [d.name for d in domains])
+
+    def apply(self, *, service: str | None = None, workers: Iterable[Aggregate] = (),
+              listeners: Iterable["Listener"] = (), middlewares: Iterable["Listener"] = (),
+              metadata: dict[str, str] | None = None) -> None:
+        """Replaces the membership of a service (default: this client's `service`): the workers,
+        listeners and middlewares the kernel waits for, plus free metadata such as
+        `{"version": "1.0.0"}`. `workers` are the aggregates the service runs (the kernel waits
+        for a worker of each), `listeners` the listeners it waits for (the service's others count
+        for nobody), `middlewares` the service's listeners that may check requests (they count like
+        listeners).
+
+        Apply it once per deploy, e.g. from a deploy script, not from every process: the latest
+        apply wins. The key needs the `manage` grant for the service. A middleware the new
+        membership no longer lists stops checking."""
+        service = service or self._service
+        if not service:
+            raise ValueError("apply needs a service: pass `service` or set it on the client (KERNABLE_SERVICE)")
+        membership = pb.Membership(service=service, workers=[f"{a.domain}.{a.name}" for a in workers],
+                                   listeners=[l.name for l in listeners],
+                                   middlewares=[l.name for l in middlewares],
+                                   metadata=[pb.Attribute(key=k, value=v) for k, v in (metadata or {}).items()],
+                                   issued_at=int(time.time() * 1000))
+        rpc.MembershipServiceStub(self._channel).Apply(
+            pb.ApplyRequest(membership=membership, sig=self._key.sign(membership_message(membership)),
+                            protocol=PROTOCOL))
 
     def submit(self, domain: str, aggregate_type: str, aggregate_id: str, type: str, data: Any = None, *,
                tenant: str | None = None, id: str | None = None, wait: str = "settled",
@@ -737,14 +784,7 @@ class Kernable:
     def listener(self, listener: "Listener") -> "ListenerHandle":
         """Connects a listener defined with `Domain.read_model` or `Domain.reactor`; call `run()`
         on the result."""
-        if not listener.live:
-            self._declared.add(listener.name)
-
-        def service() -> tuple[str, list[str]]:
-            # Read when connecting, so every listener declares all those created before.
-            return self._service, sorted(self._declared) if self._service else []
-
-        return ListenerHandle(self._channel, self._key, listener, self._log, service)
+        return ListenerHandle(self._channel, self._key, listener, self._log, self._service)
 
     def close(self) -> None:
         """Closes the connection now; only needed in a long-running process that discards the client."""
@@ -849,15 +889,196 @@ class _Log:
 
     def __init__(self, url: str, key_path: str, key_id: str):
         self.level = _LOG_LEVELS.get(os.environ.get("KERNABLE_LOG", ""), _LOG_LEVELS["info"])
-        # Who connected where, as `<url> as <keyname> (<id12>…)`.
-        self.who = f"{url} as {os.path.basename(key_path).removesuffix('.key')} ({key_id[:12]}…)"
+        #: `<url> · key <name> (<key id>…)`: the kernel and the key this process connects with.
+        self.peer = f"{url} · key {os.path.basename(key_path).removesuffix('.key')} ({key_id[:12]}…)"
 
     def enabled(self, level: str) -> bool:
         return _LOG_LEVELS[level] <= self.level
 
-    def __call__(self, level: str, what: str, line: str) -> None:
-        if self.enabled(level):
-            print(f"kernable {what}: {line}", file=sys.stderr)
+    def style(self, code: int, text: str) -> str:
+        """`text` in an ANSI style (1 bold, 2 dim, 31 red, 33 yellow) on a terminal, unless
+        `NO_COLOR` is set."""
+        # Checked per line: stderr may be redirected after the client was made.
+        color = sys.stderr.isatty() and not os.environ.get("NO_COLOR")
+        return f"\x1b[{code}m{text}\x1b[0m" if color else text
+
+    def print(self, level: str, what: str, line: str) -> None:
+        """`12:04:11  listener carts  <line>`, warnings in yellow and errors in red."""
+        if not self.enabled(level):
+            return
+        text = self.style(31, line) if level == "error" else self.style(33, line) if level == "warn" else line
+        print(f"{self.style(2, time.strftime('%H:%M:%S'))}  {self.style(1, what)}  {text}", file=sys.stderr)
+
+    def reconnect(self, what: str, reason: str, seconds: float) -> None:
+        """Logs the end of a session that was not stopped and waits `seconds` before reconnecting."""
+        self.print("warn", what, f"connection lost ({reason}), reconnecting in {seconds:g} s")
+        time.sleep(seconds)
+
+
+def _relative(type: str, domains: set[str]) -> str:
+    """`shop.ItemAdded` as `ItemAdded` when `shop` is the only domain in `domains`."""
+    domain, _, name = type.partition(".")
+    return name if len(domains) == 1 and domain in domains and name else type
+
+
+def _listener_details(l: "Listener", position: int, name: Callable[[str], str] = lambda t: t) -> list[str]:
+    """What a listener does, one part per entry: where it starts, what it reads, answers and
+    checks. `name` shortens the types (see `_relative`)."""
+    def listed(types: Iterable[str]) -> str:
+        return ", ".join(name(t) for t in types)
+
+    details = [f"from {position} · reads {listed(l._handlers)}" if l._handlers else f"from {position}"]
+    if l._queries:
+        details.append(f"answers {listed(l._queries)}")
+    for when, (spec, _) in l._middlewares.items():
+        details.append(f"checks {listed(spec.types)} {when}")
+    return details
+
+
+@dataclass
+class Manifest:
+    """What a service consists of, as `Kernable.apply` takes it; see `Kernable.app`."""
+    service: str
+    #: The aggregates the service runs; the kernel waits for a worker of each.
+    workers: list[Aggregate] = field(default_factory=list)
+    #: The listeners the kernel waits for.
+    listeners: list["Listener"] = field(default_factory=list)
+    #: The service's listeners that may check requests; they count like listeners.
+    middlewares: list["Listener"] = field(default_factory=list)
+    #: Free metadata, e.g. `{"version": "1.0.0"}`.
+    metadata: dict[str, str] = field(default_factory=dict)
+
+
+class _AllReady:
+    """Set once all of some streams are connected; waits like a `threading.Event`."""
+
+    def __init__(self, events: list[threading.Event]):
+        self._events = events
+
+    def is_set(self) -> bool:
+        return all(e.is_set() for e in self._events)
+
+    def wait(self, timeout: float | None = None) -> bool:
+        """Waits until every stream is connected, at most `timeout` seconds in all; returns whether
+        they are."""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        for e in self._events:
+            if not e.wait(None if deadline is None else max(0.0, deadline - time.monotonic())):
+                return False
+        return True
+
+
+class App:
+    """An app made of whole domains, returned by `kernable.app(...)`: `run()` applies its
+    membership (`manifest`), then runs its worker and listeners until `stop()`; `ready` is set
+    once all of them are connected (`app.ready.wait(5)`).
+
+    One service is one app: two processes with the same service would replace each other's
+    membership."""
+
+    def __init__(self, k: Kernable, manifest: Manifest, worker: "Worker | None",
+                 listeners: list["ListenerHandle"], domains: Iterable[str] = ()):
+        self._kernable = k
+        self._log = k._log
+        # The names of the app's domains.
+        self._domains = set(domains)
+        self._stopped = False
+        #: The membership `run()` applies.
+        self.manifest = manifest
+        #: The worker of all the domains' aggregates, if they have any.
+        self.worker = worker
+        #: A running listener per read model and reactor, live ones too.
+        self.listeners = listeners
+        streams = [s for s in (worker, *listeners) if s is not None]
+        #: Set once every worker and listener of the app is connected.
+        self.ready = _AllReady([s.ready for s in streams])
+        self._streams = streams
+
+    def run(self) -> None:
+        """Applies the membership, then runs the worker and the listeners, each in a thread of its
+        own, until `stop()`. If one of them fails, stops the others and raises its error. Once all
+        are connected, it prints an overview of the app (unless `KERNABLE_LOG` is below `info`)."""
+        started = time.monotonic()
+        m = self.manifest
+        self._kernable.apply(service=m.service, workers=m.workers, listeners=m.listeners,
+                             middlewares=m.middlewares, metadata=m.metadata)
+        for s in self._streams:
+            s.announce = False
+        errors: list[BaseException] = []
+
+        def overview() -> None:
+            while not self.ready.wait(0.1):
+                if self._stopped:
+                    return
+            self._overview(round((time.monotonic() - started) * 1000))
+
+        def run(stream: _Stream) -> None:
+            try:
+                stream.run()
+            except BaseException as err:
+                errors.append(err)
+                self.stop()
+
+        threads = [threading.Thread(target=run, args=(s,), name=f"kernable {s._what}", daemon=True)
+                   for s in self._streams]
+        threading.Thread(target=overview, name="kernable overview", daemon=True).start()
+        for t in threads:
+            t.start()
+        try:
+            for t in threads:
+                t.join()
+        except BaseException:  # e.g. Ctrl-C: stop everything
+            self.stop()
+            raise
+        if errors:
+            raise errors[0]
+
+    def stop(self) -> None:
+        """Stops the worker and all listeners; `run()` returns once they are done."""
+        self._stopped = True
+        for s in self._streams:
+            s.stop()
+
+    def _overview(self, ms: int) -> None:
+        log = self._log
+        if not log.enabled("info"):
+            return
+        m = self.manifest
+        domains = self._domains
+
+        # A single domain's own names go without it; with several, every name is qualified.
+        def short(domain: str, name: str) -> str:
+            return name if len(domains) == 1 and domain in domains else f"{domain}.{name}"
+
+        def count(n: int, what: str) -> str:
+            return f"{n} {what}{'' if n == 1 else 's'}"
+
+        listed = [count(len(m.workers), "worker"), count(len(m.listeners), "listener")]
+        if m.middlewares:
+            listed.append(count(len(m.middlewares), "middleware"))
+        meta = m.metadata
+        rows: list[tuple[str, str, list[str]]] = []
+        for a in m.workers:
+            rows.append(("worker", short(a.domain, a.name), [f"runs {', '.join(sorted(a.handlers))}"]))
+        for h in self.listeners:
+            l = h.listener
+            rows.append(("live" if l.live else "listener", short(l.domain.name, l.name),
+                         _listener_details(l, h.started_at, lambda t: _relative(t, domains))))
+        width = max((len(name) for _, name, _ in rows), default=0)
+        header = " · ".join(p for p in ("kernable", " ".join(p for p in (m.service, meta.get("version")) if p),
+                                        meta.get("description")) if p)
+        lines = [
+            log.style(1, header),
+            f"  {'kernel':<10}  {log.peer}",
+            f"  {'membership':<10}  applied: {', '.join(listed)}",
+            "",
+        ]
+        for kind, name, (first, *rest) in rows:
+            lines.append(f"  {kind:<10}  {name:<{width}}  {first}")
+            lines.extend(f"  {'':<10}  {'':<{width}}  {more}" for more in rest)
+        lines += ["", f"  {log.style(2, f'ready in {ms} ms')}", ""]
+        # One write, so the overview's lines stay together.
+        sys.stderr.write("\n".join(lines) + "\n")
 
 
 class _Stream:
@@ -865,6 +1086,9 @@ class _Stream:
 
     def __init__(self, what: str, reconnect_s: float, log: _Log):
         self.ready = threading.Event()
+        #: Whether the first connect gets its own line; an `App` prints it in its overview instead.
+        self.announce = True
+        self._connects = 0
         self._log = log
         self._what = what
         self._reconnect_s = reconnect_s
@@ -893,9 +1117,7 @@ class _Stream:
             finally:
                 outbox.put(None)
             if not self._stopped:
-                self._log("warn", self._what,
-                          f"connection lost ({reason}), reconnecting in {self._reconnect_s:g} s")
-                time.sleep(self._reconnect_s)
+                self._log.reconnect(self._what, reason, self._reconnect_s)
 
     def stop(self) -> None:
         self._stopped = True
@@ -916,13 +1138,13 @@ class Worker(_Stream):
     """Executes commands for its aggregates, one at a time."""
 
     def __init__(self, channel: grpc.Channel, key: Key, aggregates, log: _Log,
-                 service: Callable[[], tuple[str, list[str]]] = lambda: ("", [])):
+                 service: str = ""):
         super().__init__("worker", 1.0, log)
         self._stub = rpc.WorkerGatewayStub(channel)
         self._key = key
         self._aggregates = list(aggregates)
         self._by_command = {f"{a.domain}.{t}": a for a in aggregates for t in a.handlers}
-        # The service and the aggregates it declares, when connecting.
+        # The service this worker belongs to; its membership decides whether the kernel waits for it.
         self._service = service
 
     def _open(self, requests):
@@ -937,9 +1159,8 @@ class Worker(_Stream):
                                aggregates=[pb.WorkerAggregate(aggregate_type=f"{a.domain}.{a.name}",
                                                               command_types=[f"{a.domain}.{t}" for t in a.handlers])
                                            for a in self._aggregates],
-                               event_schemas=[pb.EventSchema(event_type=t, schema=s) for t, s in schemas.items()])
-        register.service, declared = self._service()
-        register.declared.extend(declared)
+                               event_schemas=[pb.EventSchema(event_type=t, schema=s) for t, s in schemas.items()],
+                               service=self._service)
         return pb.WorkerMessage(register=register)
 
     def _on(self, msg):
@@ -948,7 +1169,11 @@ class Worker(_Stream):
             sig = self._key.sign(challenge_message(msg.challenge.nonce)).sig
             return pb.WorkerMessage(challenge_response=pb.ChallengeResponse(sig=sig))
         if kind == "registered":
-            self._log("info", self._what, f"connected to {self._log.who}, runs {', '.join(sorted(self._by_command))}")
+            if self._connects > 0:
+                self._log.print("info", self._what, "connected again")
+            elif self.announce:
+                self._log.print("info", self._what, f"connected to {self._log.peer} · runs {', '.join(sorted(self._by_command))}")
+            self._connects += 1
             self.ready.set()
         elif kind == "execute":
             reply = self._execute(msg.execute)
@@ -956,8 +1181,8 @@ class Worker(_Stream):
                 cmd = msg.execute.command
                 done = (f"rejected {reply.rejection.reason.code}" if reply.HasField("rejection")
                         else f"committed {len(reply.result.events)} events")
-                self._log("debug", self._what,
-                          f"{cmd.domain}.{cmd.command_type} {cmd.aggregate_type}/{cmd.aggregate_id} {done}")
+                self._log.print("debug", self._what,
+                                f"{cmd.domain}.{cmd.command_type} {cmd.aggregate_type}/{cmd.aggregate_id} {done}")
             return reply
         return None
 
@@ -1128,9 +1353,9 @@ class ListenerHandle(_Stream):
     queries and checks until `stop()`; `ready` is set once the kernel accepted it."""
 
     def __init__(self, channel: grpc.Channel, key: Key, listener: Listener, log: _Log,
-                 service: Callable[[], tuple[str, list[str]]] = lambda: ("", [])):
+                 service: str = ""):
         super().__init__(f"listener {listener.name}", listener.reconnect_s, log)
-        # The service and the listeners it declares, when connecting.
+        # The service this listener belongs to; its membership decides whether it counts.
         self._service = service
         #: The listener definition this runs.
         self.listener = listener
@@ -1145,6 +1370,8 @@ class ListenerHandle(_Stream):
         self._replay_up_to = 0
         # The position sent in the last hello, if any.
         self._sent_start: int | None = None
+        #: Position after which the kernel delivered on the first connect.
+        self.started_at = 0
 
     def run(self) -> None:
         """Processes events, queries and checks until `stop()`, reconnecting when the stream
@@ -1162,10 +1389,8 @@ class ListenerHandle(_Stream):
         hello = pb.Hello(name=d.name, key_id=self._key.id, protocol=PROTOCOL, order=d.order,
                          event_types=list(d._handlers),
                          query_types=list(d._queries),
-                         middlewares=[spec for spec, _ in d._middlewares.values()], live=d.live)
-        if not d.live:
-            hello.service, declared = self._service()
-            hello.declared.extend(declared)
+                         middlewares=[spec for spec, _ in d._middlewares.values()], live=d.live,
+                         service=self._service)
         # Reconnects resume after the last handled event.
         start = self.position if self.ready.is_set() else self._start
         self._sent_start = start
@@ -1190,7 +1415,7 @@ class ListenerHandle(_Stream):
         if kind == "ready":
             self.position = msg.ready.after_position
             self._replay_up_to = msg.ready.head_position
-            self._log("info", self._what, self._connected(msg.ready.after_position))
+            self._log_connected(msg.ready.after_position)
             self.ready.set()
         elif kind == "batch":
             # With a store, the batch's data and position are committed together, before the ack.
@@ -1213,25 +1438,24 @@ class ListenerHandle(_Stream):
                 q = msg.query.query
                 done = (f"rejected {q.domain}.{q.query_type} {answer.rejected.code}" if answer.HasField("rejected")
                         else f"answered {q.domain}.{q.query_type}")
-                self._log("debug", self._what, done)
+                self._log.print("debug", self._what, done)
             return pb.ListenerMessage(answer=answer)
         elif kind == "check":
             return pb.ListenerMessage(verdict=self._verdict(msg.check))
         return None
 
-    def _connected(self, after_position: int) -> str:
-        """The info line once the kernel accepted the listener; the position is the start sent
-        (the kernel's, if none was)."""
-        d = self.listener
+    def _log_connected(self, after_position: int) -> None:
+        """Logs that the kernel accepted the listener; the position is the start sent (the
+        kernel's, if none was)."""
         position = after_position if self._sent_start is None else self._sent_start
-        line = f"connected to {self._log.who}, at position {position}, reads {', '.join(sorted(d._handlers))}"
-        if d._queries:
-            line += f", answers {', '.join(sorted(d._queries))}"
-        if "before" in d._middlewares:
-            line += f", checks {', '.join(sorted(d._middlewares['before'][0].types))}"
-        if "after" in d._middlewares:
-            line += f", after {', '.join(sorted(d._middlewares['after'][0].types))}"
-        return line
+        if self._connects == 0:
+            self.started_at = position
+            if self.announce:
+                self._log.print("info", self._what, " · ".join(
+                    [f"connected to {self._log.peer}", *_listener_details(self.listener, position)]))
+        else:
+            self._log.print("info", self._what, f"connected again at position {position}")
+        self._connects += 1
 
     def _handle_batch(self, batch) -> None:
         d = self.listener
@@ -1250,7 +1474,7 @@ class ListenerHandle(_Stream):
                 ctx = ListenerContext(e.global_position <= self._replay_up_to, _from_wire_context(e.context),
                                       self.store, e.command_id)
                 _call(handler, data, evt, ctx)
-                self._log("debug", self._what, f"{e.domain}.{e.event_type} at {e.global_position}")
+                self._log.print("debug", self._what, f"{e.domain}.{e.event_type} at {e.global_position}")
             self.position = e.global_position
 
     def _verdict(self, call) -> pb.Verdict:

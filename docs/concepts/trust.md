@@ -27,6 +27,7 @@ kernable grant root.key app.pub 'submit=shop.*' 'listen=shop.*'   # writes app.g
 | `data_read` | domains whose files it may read (`shop.*`) |
 | `data_write` | domains whose files it may put and delete |
 | `cache` | domains whose cache it may use |
+| `manage` | services whose membership it may apply (service names, or `*`) |
 
 A type is a qualified type (`shop.PlaceOrder`), a whole domain (`shop.*`) or everything (`*`). A bare type (`'shop.*'`) means every action on it.
 

@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import threading
 import time
 import unittest
@@ -17,7 +18,7 @@ import grpc
 
 from kernable import Data, Kernable, NotSettled, Outcome, QueryOutcome, Rejected, RequestContext, _upcast, domain
 from kernable.signing import (Key, cache_message, challenge_message, command_message, data_message, derived_id,
-                              query_message, rejection_message, result_message, snapshot_message, vault_ref)
+                              membership_message, query_message, rejection_message, result_message, snapshot_message, vault_ref)
 from kernable.v1 import kernable_pb2 as pb
 from tests.kernel import ROOT, TestKernel
 
@@ -147,6 +148,9 @@ class SigningVectors(unittest.TestCase):
         s = dict(VECTORS["cache_set"]["input"])
         op, value = s.pop("op"), bytes.fromhex(s.pop("value_hex"))
         self.check("cache_set", cache_message(op, pb.CacheRequest(**s, value=value)))
+        m = dict(VECTORS["membership"]["input"])
+        metadata = [pb.Attribute(**a) for a in m.pop("metadata")]
+        self.check("membership", membership_message(pb.Membership(**m, metadata=metadata)))
 
 
 counters_domain = domain("counters")
@@ -302,7 +306,7 @@ class EndToEnd(unittest.TestCase):
         out = self.kernel.verify()
         self.assertEqual(out.returncode, 0, out.stdout)
 
-    def test_a_service_retires_the_listeners_it_no_longer_declares_and_live_ones_never_count(self):
+    def test_listeners_a_membership_does_not_list_and_live_ones_never_count(self):
         self.k.close()  # this test needs a short settle timeout: start a kernel of its own
         self.kernel.dispose()
         self.kernel = TestKernel(["counters.*"], ["--settle-timeout-ms", "300"])
@@ -314,8 +318,9 @@ class EndToEnd(unittest.TestCase):
         def mails():
             return counters_domain.reactor("mails").on("Incremented", lambda data, evt: seen.append(evt.aggregate_id))
 
-        # Both are created before either runs, so each declares both.
-        v1 = [self.k.listener(mails()), self.k.listener(counters_domain.reactor("audit").on("Incremented", lambda data: None))]
+        audit = counters_domain.reactor("audit").on("Incremented", lambda data: None)
+        v1 = [self.k.listener(mails()), self.k.listener(audit)]
+        self.k.apply(workers=[counter], listeners=[h.listener for h in v1], metadata={"version": "1"})
         threads = []
         for handle in v1:
             self.streams.append(handle)
@@ -330,6 +335,7 @@ class EndToEnd(unittest.TestCase):
         v2 = Kernable(self.kernel.url, self.kernel.app_key, tenant="t1", service="counters")
         self.addCleanup(v2.close)
         mails2 = v2.listener(mails())
+        v2.apply(workers=[counter], listeners=[mails2.listener], metadata={"version": "2"})
         # A live listener counts for nobody, even while it does not get through its events.
         stuck = threading.Event()
         push = v2.listener(counters_domain.reactor("push", live=True).on("Incremented", lambda data: stuck.wait(10)))
@@ -343,10 +349,23 @@ class EndToEnd(unittest.TestCase):
         finally:
             stuck.set()  # released before tearDown stops it, so it cannot hang
 
+        # A listener of the service the membership does not list counts for nobody, even running.
+        blocked = threading.Event()
+        extra = self.run_stream(v2.listener(counters_domain.reactor("extra").on("Incremented",
+                                                                            lambda data: blocked.wait(10))))
+        try:
+            self.assertTrue(self.k.submit("counters", "Counter", "c3", "Increment", {"by": 1}).committed,
+                            "settled without the unlisted listener")
+        finally:
+            blocked.set()
+            extra.stop()
+
         with self.assertRaisesRegex(ValueError, "live"):
             counters_domain.reactor("x", live=True).middleware(["*"], fn=lambda check: None)
+        with self.assertRaisesRegex(ValueError, "service"):
+            Kernable(self.kernel.url, self.kernel.app_key).apply(workers=[counter])
 
-    def test_commands_need_a_registered_aggregate_and_a_service_unregisters_the_ones_it_no_longer_declares(self):
+    def test_commands_need_a_registered_or_listed_aggregate_and_an_apply_drops_the_unlisted(self):
         self.k.close()  # needs the domain shop: start a kernel of its own
         self.kernel.dispose()
         self.kernel = TestKernel(["shop.*"])
@@ -363,30 +382,42 @@ class EndToEnd(unittest.TestCase):
         def submit(client, aggregate_type, command_type):
             return client.submit("shop", aggregate_type, "a1", command_type, {}, wait="committed")
 
-        def assert_not_found(client, aggregate_type, command_type):
-            with self.assertRaises(grpc.RpcError) as refused:
-                submit(client, aggregate_type, command_type)
-            self.assertEqual(refused.exception.code(), grpc.StatusCode.NOT_FOUND)
-            self.assertIn("no worker registered", refused.exception.details())
+        def not_found(client, aggregate_type, command_type) -> grpc.RpcError | None:
+            # Enqueued, not submitted: a listed aggregate without a worker would only be queued.
+            try:
+                client.enqueue("shop", aggregate_type, "a1", command_type, {})
+            except grpc.RpcError as e:
+                if e.code() == grpc.StatusCode.NOT_FOUND:
+                    return e
+                raise
+            return None
 
-        # No worker ever registered the aggregate: refused rather than queued.
-        assert_not_found(self.k, "Cart", "AddItem")
+        # No worker ever registered the aggregate and no membership lists it: refused rather than queued.
+        refused = not_found(self.k, "Cart", "AddItem")
+        self.assertIsNotNone(refused)
+        self.assertIn("no worker registered", refused.details())
 
         # v1 runs both aggregates in one worker, then stops.
+        self.k.apply(workers=[cart, wishlist], metadata={"version": "1"})
         v1 = self.k.worker(cart, wishlist)
         thread = background(v1.run)
         self.streams.append(v1)
         self.assertTrue(v1.ready.wait(5), "worker did not connect")
         self.assertTrue(submit(self.k, "Cart", "AddItem").committed)
         self.assertTrue(submit(self.k, "Wishlist", "Wish").committed)
-        v1.stop()
-        thread.join(5)
 
-        # v2 of the service declares only the cart: the wishlist is unregistered.
+        # v2 of the service lists only the cart: once v1's worker has stopped, the wishlist is gone.
         v2 = Kernable(self.kernel.url, self.kernel.app_key, tenant="t1", service="shop")
         self.addCleanup(v2.close)
+        v2.apply(workers=[cart], metadata={"version": "2"})
+        v1.stop()
+        thread.join(5)
         self.run_stream(v2.worker(cart))
-        assert_not_found(v2, "Wishlist", "Wish")
+        deadline = time.monotonic() + 5
+        while (refused := not_found(v2, "Wishlist", "Wish")) is None and time.monotonic() < deadline:
+            time.sleep(0.05)  # the kernel notices the worker's disconnect asynchronously
+        self.assertIsNotNone(refused, "the dropped aggregate still takes commands")
+        self.assertIn("no worker registered", refused.details())
         self.assertTrue(submit(v2, "Cart", "AddItem").committed)
 
     def test_connections_are_logged_to_stderr(self):
@@ -408,19 +439,20 @@ class EndToEnd(unittest.TestCase):
                 listener.stop()
                 time.sleep(0.1)
             k.close()
-            return out.getvalue()
+            # Without the time each line starts with (`13:12:10  `).
+            return re.sub(r"(?m)^\d\d:\d\d:\d\d  ", "", out.getvalue())
 
         id12 = Key.from_file(self.kernel.app_key).id[:12]
         info = connect("info").splitlines()
         self.assertEqual(sorted(info), [
-            f"kernable listener totals: connected to {self.kernel.url} as app ({id12}…), at position 0, "
-            "reads counters.Incremented, counters.Reset, answers counters.GetTotal",
-            f"kernable worker: connected to {self.kernel.url} as app ({id12}…), runs counters.Increment",
+            f"listener totals  connected to {self.kernel.url} · key app ({id12}…) · from 0 · "
+            "reads counters.Incremented, counters.Reset · answers counters.GetTotal",
+            f"worker  connected to {self.kernel.url} · key app ({id12}…) · runs counters.Increment",
         ])
         debug = connect("debug")
-        self.assertIn("kernable worker: counters.Increment Counter/c1 committed 1 events\n", debug)
-        self.assertRegex(debug, r"kernable listener totals: counters\.Incremented at \d+\n")
-        self.assertIn("kernable listener totals: answered counters.GetTotal\n", debug)
+        self.assertIn("worker  counters.Increment Counter/c1 committed 1 events\n", debug)
+        self.assertRegex(debug, r"listener totals  counters\.Incremented at \d+\n")
+        self.assertIn("listener totals  answered counters.GetTotal\n", debug)
         self.assertEqual(connect("warn"), "")
 
     def test_snapshots_shorten_replays_and_a_new_schema_rebuilds(self):

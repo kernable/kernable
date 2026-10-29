@@ -6,6 +6,7 @@ import type { WireCommand } from "../src/rpc.ts";
 import {
   Key,
   cacheMessage,
+  membershipMessage,
   challengeMessage,
   checkpointMessage,
   commandMessage,
@@ -57,6 +58,10 @@ test("data and cache messages match the test vectors", () => {
   check("data_put", dataMessage(d.op, { ...d, data: hex(d.data_hex) }));
   const c = v.cache_set.input;
   check("cache_set", cacheMessage(c.op, { ...c, value: hex(c.value_hex) }));
+});
+
+test("membership messages match the test vectors", () => {
+  check("membership", membershipMessage(v.membership.input));
 });
 
 test("vault references and vault fields in signed messages match the test vectors", () => {

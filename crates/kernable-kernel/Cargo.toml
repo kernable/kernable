@@ -18,6 +18,7 @@ kernable-store = { path = "../kernable-store" }
 tokio.workspace = true
 tokio-stream.workspace = true
 prost.workspace = true
+serde_json.workspace = true
 tonic.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -29,7 +30,6 @@ crash-points = []
 [dev-dependencies]
 rusqlite.workspace = true
 proptest.workspace = true
-serde_json.workspace = true
 getrandom.workspace = true
 
 [[test]]

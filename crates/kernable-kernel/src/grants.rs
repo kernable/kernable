@@ -10,7 +10,7 @@ use kernable_core::proto::Grant;
 use crate::config;
 
 /// The actions a grant names; `*` stands for all of them.
-pub const ACTIONS: [&str; 13] = [
+pub const ACTIONS: [&str; 14] = [
     "submit",
     "run",
     "subscribe",
@@ -24,6 +24,7 @@ pub const ACTIONS: [&str; 13] = [
     "data_read",
     "data_write",
     "cache",
+    "manage",
 ];
 
 /// Key ID -> the type patterns it may use for one action.
@@ -58,6 +59,8 @@ pub struct Permissions {
     pub data_write: Rules,
     /// Domains whose cache a key may use (`domain.*`).
     pub cache: Rules,
+    /// Services whose membership a key may apply (service names, or `*`).
+    pub manage: Rules,
     /// Old key ID -> new key ID: a listener registered with the old key may connect with the
     /// new one and keeps its position, order and middleware registration.
     pub successors: HashMap<String, String>,
@@ -114,6 +117,7 @@ impl Permissions {
             "data_read" => &mut self.data_read,
             "data_write" => &mut self.data_write,
             "cache" => &mut self.cache,
+            "manage" => &mut self.manage,
             _ => unreachable!("not an action: {action}"),
         }
     }
@@ -126,10 +130,11 @@ pub fn malformed(grant: &Grant) -> Option<String> {
             return Some(format!("unknown action {}", p.action));
         }
         let switch = p.action == "privileged";
+        let service = |t: &str| p.action == "manage" && (t == "*" || config::valid_domain(t));
         if let Some(t) = p
             .types
             .iter()
-            .find(|t| !(config::valid_pattern(t) || switch))
+            .find(|t| !(config::valid_pattern(t) || switch || service(t)))
         {
             return Some(format!("invalid type pattern {t}"));
         }

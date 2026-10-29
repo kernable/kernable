@@ -3,10 +3,11 @@
 //! Event N reaches a listener of order k only after every registered listener with a lower
 //! order has acknowledged N; equal orders run in parallel. A registered listener counts even
 //! while it is disconnected, so a stalled listener holds back later orders and settling
-//! submits; unless it is retired (its service no longer declares it, see `Hello.service`) or
-//! live (not registered at all, see `Hello.live`). A new listener starts at the newest event
-//! unless it asks for an earlier position. Positions are kept in memory and written to the store periodically: after a
-//! crash a listener may see a few events again (delivery is at least once).
+//! submits; unless its service's membership does not list it (see `Membership`) or it is live
+//! (not registered at all, see `Hello.live`). A new listener starts at the newest event unless
+//! it asks for an earlier position. Positions are kept in memory and written to the store
+//! periodically: after a crash a listener may see a few events again (delivery is at least
+//! once).
 //!
 //! Listeners also answer queries (read models register query types): the kernel sends a query
 //! on the listener's stream, in order with the batches, so an answer reflects every event the
@@ -14,7 +15,8 @@
 //!
 //! A listener can also be a middleware, before or after requests (see `Hello.middlewares`).
 //! Its registration is stored, so it keeps checking, and refusing while it is disconnected,
-//! the types it covers until it reconnects without that middleware or is removed. Checks are
+//! the types it covers until it reconnects without that middleware, its service's membership
+//! no longer lists it as one, or it is removed. Checks are
 //! sent in order with the batches, and only once the listener has caught up with the events
 //! committed before it connected.
 
@@ -30,15 +32,15 @@ use std::{
 use kernable_core::{
     proto::{
         Batch, Challenge, Event, Hello, ListenerDelivery, ListenerMessage, ListenerRecord,
-        MiddlewareCall, QueryAnswer, QueryCall, QueryRequest, Ready, Signature, Verdict, When,
-        listener_delivery::Msg as Out, listener_message::Msg as In,
+        Membership, MiddlewareCall, QueryAnswer, QueryCall, QueryRequest, Ready, Signature,
+        Verdict, When, listener_delivery::Msg as Out, listener_message::Msg as In,
     },
     signing,
 };
 use tokio::sync::{Notify, mpsc, oneshot};
 use tonic::{Status, Streaming};
 
-use crate::{BoxError, Kernel, SUBSCRIBE_BATCH, config, internal};
+use crate::{BoxError, Kernel, SUBSCRIBE_BATCH, config, internal, memberships::Memberships};
 
 /// How often acknowledged positions are written to the store.
 pub(crate) const FLUSH: Duration = Duration::from_millis(100);
@@ -57,12 +59,14 @@ struct Entry {
     caught_up_at: u64,
     /// Not registered: never stored, forgotten when it disconnects (`Hello.live`).
     live: bool,
+    /// Its service's membership lists it, or none decides.
+    listed: bool,
 }
 
 impl Entry {
     /// Whether others wait for it: for readiness, settling and the order of delivery.
     fn counts(&self) -> bool {
-        !self.live && !self.record.retired
+        !self.live && self.listed
     }
 }
 
@@ -112,11 +116,12 @@ pub(crate) struct Registry {
 }
 
 impl Registry {
-    pub(crate) fn load(records: Vec<ListenerRecord>) -> Self {
+    pub(crate) fn load(records: Vec<ListenerRecord>, memberships: &Memberships) -> Self {
         let entries = records
             .into_iter()
             .map(|record| {
                 let entry = Entry {
+                    listed: memberships.counts_listener(&record.service, &record.name),
                     record,
                     connected: false,
                     dirty: false,
@@ -165,17 +170,37 @@ impl Registry {
         all
     }
 
-    /// Registered listeners that are not connected or have not caught up with the events
-    /// committed before they connected, by name.
-    pub(crate) fn behind(&self) -> Vec<String> {
-        let mut behind: Vec<String> = self
-            .entries()
+    /// Listeners that count and are not connected or have not caught up with the events
+    /// committed before they connected, and `listed` ones that never registered, by name.
+    pub(crate) fn behind(&self, listed: &[String]) -> Vec<String> {
+        let entries = self.entries();
+        let mut behind: Vec<String> = entries
             .values()
             .filter(|e| e.counts() && (!e.connected || e.record.position < e.caught_up_at))
             .map(|e| e.record.name.clone())
+            .chain(listed.iter().filter(|n| !entries.contains_key(*n)).cloned())
             .collect();
         behind.sort();
+        behind.dedup();
         behind
+    }
+
+    /// Applies a service's membership to its listeners: listed ones count, others not, and a
+    /// middleware it no longer lists as one stops checking. Returns the changed records.
+    pub(crate) fn apply(&self, m: &Membership) -> Vec<ListenerRecord> {
+        let mut changed = Vec::new();
+        for e in self.entries().values_mut() {
+            if e.live || e.record.service != m.service {
+                continue;
+            }
+            e.listed = crate::memberships::listed_listener(m, &e.record.name);
+            if !e.record.middlewares.is_empty() && !m.middlewares.contains(&e.record.name) {
+                tracing::warn!(listener = %e.record.name, service = %m.service, "middleware removed: its service no longer lists it as one");
+                e.record.middlewares.clear();
+                changed.push(e.record.clone());
+            }
+        }
+        changed
     }
 
     /// The registered listener `name`, as the sender of a request.
@@ -445,10 +470,11 @@ pub(crate) async fn run(
             "a live listener cannot be a middleware",
         ));
     }
-    if !hello.live && !hello.service.is_empty() && !hello.declared.contains(&hello.name) {
-        return Err(Status::invalid_argument(
-            "a service declares all its listeners, this one too",
-        ));
+    if !hello.middlewares.is_empty() && !kernel.memberships.may_check(&hello.service, &hello.name) {
+        return Err(Status::permission_denied(format!(
+            "{} is not a middleware of {}: list it in the service's membership",
+            hello.name, hello.service
+        )));
     }
     for (i, m) in hello.middlewares.iter().enumerate() {
         if hello.middlewares[..i].iter().any(|o| o.when == m.when) {
@@ -536,34 +562,15 @@ pub(crate) async fn run(
             removed: false,
             middlewares: hello.middlewares.clone(),
             service: hello.service.clone(),
-            retired: false,
             last_seen: crate::now_ms(),
         };
-        // The service's other listeners (of this key) are retired unless it declares them.
-        let mut changed = Vec::new();
-        if !hello.live && !hello.service.is_empty() {
-            for e in entries.values_mut() {
-                if e.live
-                    || e.record.name == hello.name
-                    || e.record.service != hello.service
-                    || e.record.key_id != hello.key_id
-                {
-                    continue;
-                }
-                let retired = !hello.declared.contains(&e.record.name);
-                if e.record.retired != retired {
-                    e.record.retired = retired;
-                    let what = if retired { "retired" } else { "declared again" };
-                    tracing::info!(listener = %e.record.name, service = %hello.service, "listener {what}");
-                    changed.push(e.record.clone());
-                }
-            }
-        }
         // Registration is stored right away; positions follow with the periodic flush.
         if !hello.live {
-            changed.push(record.clone());
+            kernel
+                .store
+                .save_listeners(std::slice::from_ref(&record))
+                .map_err(internal)?;
         }
-        kernel.store.save_listeners(&changed).map_err(internal)?;
         entries.insert(
             hello.name.clone(),
             Entry {
@@ -574,6 +581,9 @@ pub(crate) async fn run(
                 out: Some(out.clone()),
                 caught_up_at: head,
                 live: hello.live,
+                listed: kernel
+                    .memberships
+                    .counts_listener(&hello.service, &hello.name),
             },
         );
         position

@@ -34,6 +34,7 @@ Each message starts with a `str` **tag** for domain separation. Payloads are sig
 | Subscriber | `kernable.v1.subscribe` | `after_position: u64`, `issued_at: i64`, `type_count: u64`, then per type `event_type` |
 | Data client | `kernable.v1.data.<op>` (`put`, `get`, `delete`) | `tenant_id`, `domain`, `key`, `content_type`, `sha256(data)` (32 bytes, as a length-prefixed field), `issued_at: i64`; get and delete sign empty `content_type` and the hash of empty data |
 | Cache client | `kernable.v1.cache.<op>` (`set`, `get`, `delete`) | `tenant_id`, `domain`, `key`, `sha256(value)`, `ttl_ms: u64`, `issued_at: i64`; get and delete sign the hash of an empty value and `ttl_ms` 0 |
+| Deploy tooling | `kernable.v1.membership` | `service`, then for `workers`, `listeners` and `middlewares` each `count: u64` and every entry, then `metadata_count: u64` and per attribute `key`, `value`, then `issued_at: i64` |
 | Kernel | `kernable.v1.checkpoint` | `global_position: u64`, `chain_hash`, `created_at: i64` |
 | Kernel | `kernable.v1.revocation` | `key_id`, `since: i64`, `created_at: i64` |
 | Root key | `kernable.v1.grant` | `key_id`, `succeeds`, `issued_at: i64`, `permission_count: u64`, then per permission `action`, `type_count: u64`, every type |
@@ -50,6 +51,8 @@ A subscribe request is valid for 60 s around `issued_at`. Within that window a c
 Data and cache requests are valid for 60 s around `issued_at`, like a subscribe request. The operation is part of the tag, so a signed get cannot be replayed as a delete.
 
 A grant says what a key may do. A root key signs it; the process of the grantee sends it, hex-encoded, in the gRPC metadata entry `kernable-grant` with every call. The grant is not part of any other signed message: the kernel checks that the grant names the key that signed the request. A grant has no time window; a newer one (by `issued_at`) replaces an older one for the same key. A revoke request is valid for 60 s around `issued_at`; the kernel then stores the revocation signed with its own key (`kernable.v1.revocation`). Only root-key tooling produces grants and revoke requests, so an SDK does not need to reproduce the `grant` and `revoke` test vectors.
+
+A membership is signed by a key granted `manage` for its service and is valid for 60 s around `issued_at`. Metadata is signed in the order it is sent.
 
 ## Derived IDs
 

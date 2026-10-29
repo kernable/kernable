@@ -14,9 +14,9 @@ use std::{
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
-        Attribute, Command, CommandResult, Committed, Event, ListenerRecord, Middleware, NewEvent,
-        Rejected, RequestContext, RevocationRecord, Signature, When, WorkerRecord,
-        command_result::Outcome,
+        Attribute, Command, CommandResult, Committed, Event, ListenerRecord, Membership,
+        MembershipRecord, Middleware, NewEvent, Rejected, RequestContext, RevocationRecord,
+        Signature, When, WorkerRecord, command_result::Outcome,
     },
     signing::{self, GENESIS},
 };
@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS events (
     version         INTEGER NOT NULL,
     event_type      TEXT    NOT NULL,
     schema          INTEGER NOT NULL,
-    payload         BLOB    NOT NULL,
+    payload         ANY     NOT NULL, -- TEXT when UTF-8 (JSON from every SDK), else BLOB
     command_id      TEXT    NOT NULL,
     created_at      INTEGER NOT NULL,
     producer_key_id TEXT    NOT NULL,
@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS commands (
     aggregate_type   TEXT    NOT NULL,
     aggregate_id     TEXT    NOT NULL,
     command_type     TEXT    NOT NULL,
-    payload          BLOB    NOT NULL,
+    payload          ANY     NOT NULL, -- TEXT when UTF-8 (JSON from every SDK), else BLOB
     client_key_id    TEXT,
     client_sig       BLOB,
     context          TEXT,             -- RequestContext, as JSON
@@ -88,8 +88,7 @@ CREATE TABLE IF NOT EXISTS listeners (
     ordering    INTEGER NOT NULL, -- delivery order: lower first
     event_types TEXT    NOT NULL, -- comma-separated patterns; empty: all the key may read
     position    INTEGER NOT NULL, -- last acknowledged global position
-    service     TEXT    NOT NULL, -- the service that declares it; empty: none
-    retired     INTEGER NOT NULL, -- 1: its service no longer declares it, nobody waits for it
+    service     TEXT    NOT NULL, -- the service it belongs to; empty: none
     last_seen   INTEGER NOT NULL  -- ms since epoch: last connected, disconnected or running at a flush
 ) STRICT;
 CREATE TABLE IF NOT EXISTS middlewares (
@@ -103,8 +102,19 @@ CREATE TABLE IF NOT EXISTS workers (
     aggregate_type TEXT PRIMARY KEY, -- qualified: shop.Cart
     key_id         TEXT    NOT NULL, -- only this key (or its successor) may run it
     command_types  TEXT    NOT NULL, -- comma-separated qualified command types
-    service        TEXT    NOT NULL, -- the service that declares it; empty: none
+    service        TEXT    NOT NULL, -- the service it belongs to; empty: none
     last_seen      INTEGER NOT NULL  -- ms since epoch: a worker for it last connected or disconnected
+) STRICT;
+CREATE TABLE IF NOT EXISTS memberships (
+    service     TEXT PRIMARY KEY,
+    workers     TEXT    NOT NULL, -- comma-separated qualified aggregate types
+    listeners   TEXT    NOT NULL, -- comma-separated listener names
+    middlewares TEXT    NOT NULL, -- comma-separated names of listeners that check requests
+    metadata    TEXT    NOT NULL, -- JSON array of [key, value], in the signed order
+    issued_at   INTEGER NOT NULL, -- ms since epoch, signed
+    key_id      TEXT    NOT NULL, -- the key that applied it (granted manage)
+    sig         BLOB    NOT NULL, -- its signature over kernable.v1.membership
+    applied_at  INTEGER NOT NULL  -- ms since epoch
 ) STRICT;
 ";
 
@@ -217,7 +227,7 @@ impl Store for SqliteStore {
                 cmd.aggregate_type,
                 cmd.aggregate_id,
                 cmd.command_type,
-                cmd.payload,
+                readable(&cmd.payload),
                 key_id,
                 sig,
                 cmd.context.as_ref().map(context_json),
@@ -329,7 +339,7 @@ impl Store for SqliteStore {
                     event.aggregate_id,
                     event.version,
                     event.event_type,
-                    event.payload,
+                    readable(&event.payload),
                     event.command_id,
                     event.created_at,
                     producer_sig.key_id,
@@ -395,7 +405,7 @@ impl Store for SqliteStore {
     fn listeners(&self) -> Result<Vec<ListenerRecord>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT name, key_id, ordering, event_types, position, service, retired, last_seen
+            "SELECT name, key_id, ordering, event_types, position, service, last_seen
              FROM listeners
              ORDER BY name",
         )?;
@@ -410,8 +420,7 @@ impl Store for SqliteStore {
                     removed: false,
                     middlewares: Vec::new(),
                     service: r.get(5)?,
-                    retired: r.get(6)?,
-                    last_seen: r.get(7)?,
+                    last_seen: r.get(6)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -450,12 +459,12 @@ impl Store for SqliteStore {
             }
             tx.execute(
                 "INSERT INTO listeners
-                     (name, key_id, ordering, event_types, position, service, retired, last_seen)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                     (name, key_id, ordering, event_types, position, service, last_seen)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT (name) DO UPDATE SET key_id = excluded.key_id,
                      ordering = excluded.ordering, event_types = excluded.event_types,
                      position = excluded.position, service = excluded.service,
-                     retired = excluded.retired, last_seen = excluded.last_seen",
+                     last_seen = excluded.last_seen",
                 params![
                     l.name,
                     l.key_id,
@@ -463,7 +472,6 @@ impl Store for SqliteStore {
                     l.event_types.join(","),
                     l.position,
                     l.service,
-                    l.retired,
                     l.last_seen
                 ],
             )?;
@@ -534,6 +542,71 @@ impl Store for SqliteStore {
             )?;
         }
         tx.commit()?;
+        Ok(())
+    }
+
+    // ---- memberships ----
+
+    fn memberships(&self) -> Result<Vec<MembershipRecord>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT service, workers, listeners, middlewares, metadata, issued_at, key_id, sig,
+                    applied_at
+             FROM memberships ORDER BY service",
+        )?;
+        let memberships = stmt
+            .query_map([], |r| {
+                let metadata: String = r.get(4)?;
+                let metadata: Vec<(String, String)> =
+                    serde_json::from_str(&metadata).unwrap_or_default();
+                Ok(MembershipRecord {
+                    membership: Some(Membership {
+                        service: r.get(0)?,
+                        workers: split_list(r.get(1)?),
+                        listeners: split_list(r.get(2)?),
+                        middlewares: split_list(r.get(3)?),
+                        metadata: metadata
+                            .into_iter()
+                            .map(|(key, value)| Attribute { key, value })
+                            .collect(),
+                        issued_at: r.get(5)?,
+                    }),
+                    sig: Some(Signature {
+                        key_id: r.get(6)?,
+                        sig: r.get(7)?,
+                    }),
+                    applied_at: r.get(8)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(memberships)
+    }
+
+    fn save_membership(&self, record: &MembershipRecord) -> Result<()> {
+        let m = record.membership.clone().unwrap_or_default();
+        let sig = record.sig.clone().unwrap_or_default();
+        let metadata: Vec<(&str, &str)> = m
+            .metadata
+            .iter()
+            .map(|a| (a.key.as_str(), a.value.as_str()))
+            .collect();
+        self.conn().execute(
+            "INSERT OR REPLACE INTO memberships
+                 (service, workers, listeners, middlewares, metadata, issued_at, key_id, sig,
+                  applied_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                m.service,
+                m.workers.join(","),
+                m.listeners.join(","),
+                m.middlewares.join(","),
+                serde_json::to_string(&metadata).expect("strings serialize"),
+                m.issued_at,
+                sig.key_id,
+                sig.sig,
+                record.applied_at
+            ],
+        )?;
         Ok(())
     }
 
@@ -666,6 +739,28 @@ fn verify_tables(conn: &Connection, kernel_key_ids: &[String]) -> Result<Report>
     Ok(v.finish())
 }
 
+/// Bytes as stored in an `ANY` column: TEXT when they are UTF-8, so JSON is readable in any
+/// SQLite browser, else BLOB. Read back with [`bytes_at`], they are the same bytes.
+pub(crate) fn readable(bytes: &[u8]) -> rusqlite::types::ToSqlOutput<'_> {
+    use rusqlite::types::{ToSqlOutput, ValueRef};
+    ToSqlOutput::Borrowed(match std::str::from_utf8(bytes) {
+        Ok(text) => ValueRef::Text(text.as_bytes()),
+        Err(_) => ValueRef::Blob(bytes),
+    })
+}
+
+/// The bytes of an `ANY` column written by [`readable`].
+pub(crate) fn bytes_at(r: &rusqlite::Row<'_>, i: usize) -> rusqlite::Result<Vec<u8>> {
+    match r.get_ref(i)? {
+        rusqlite::types::ValueRef::Text(b) | rusqlite::types::ValueRef::Blob(b) => Ok(b.to_vec()),
+        other => Err(rusqlite::Error::InvalidColumnType(
+            i,
+            "payload".into(),
+            other.data_type(),
+        )),
+    }
+}
+
 fn event_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
     Ok(Event {
         global_position: r.get(0)?,
@@ -674,7 +769,7 @@ fn event_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
         aggregate_id: r.get(3)?,
         version: r.get(4)?,
         event_type: r.get(5)?,
-        payload: r.get(6)?,
+        payload: bytes_at(r, 6)?,
         command_id: r.get(7)?,
         created_at: r.get(8)?,
         producer_sig: join_sig(r.get(9)?, r.get(10)?),
@@ -694,7 +789,7 @@ fn command_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Command> {
         aggregate_type: r.get(2)?,
         aggregate_id: r.get(3)?,
         command_type: r.get(4)?,
-        payload: r.get(5)?,
+        payload: bytes_at(r, 5)?,
         client_sig: join_sig(r.get(6)?, r.get(7)?),
         context: context_from(r.get(8)?)?,
         domain: r.get(9)?,

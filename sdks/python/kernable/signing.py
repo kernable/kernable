@@ -106,6 +106,19 @@ def cache_message(op: str, r) -> bytes:
                  .bytes(hashlib.sha256(r.value).digest()).u64(r.ttl_ms).i64(r.issued_at).buf)
 
 
+def membership_message(m) -> bytes:
+    """What a key granted `manage` signs to apply a service's membership (a `Membership`)."""
+    msg = Msg("kernable.v1.membership").str(m.service)
+    for entries in (m.workers, m.listeners, m.middlewares):
+        msg.u64(len(entries))
+        for e in entries:
+            msg.str(e)
+    msg.u64(len(m.metadata))
+    for a in m.metadata:
+        msg.str(a.key).str(a.value)
+    return bytes(msg.i64(m.issued_at).buf)
+
+
 def rejection_message(command_id: str, reason) -> bytes:
     return bytes(Msg("kernable.v1.rejection").str(command_id).str(reason.code).str(reason.message).buf)
 

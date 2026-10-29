@@ -12,14 +12,16 @@ use std::{
     time::Duration,
 };
 
-use kernable_core::proto::SnapshotRecord;
-use prost::Message;
+use kernable_core::proto::{Signature, Snapshot, SnapshotRecord};
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::{Result, StreamId};
+use crate::{
+    Result, StreamId,
+    sqlite::{bytes_at, readable},
+};
 
-/// The version of the SQLite snapshot table.
-const FORMAT: u32 = 1;
+/// The version of the SQLite snapshot table; a file of another version is emptied.
+const FORMAT: u32 = 2;
 
 pub trait SnapshotStore: Send + Sync {
     /// The latest snapshot of one aggregate.
@@ -93,11 +95,17 @@ impl SqliteSnapshots {
         }
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS snapshots (
-                tenant_id      TEXT NOT NULL,
-                domain         TEXT NOT NULL,
-                aggregate_type TEXT NOT NULL,
-                aggregate_id   TEXT NOT NULL,
-                record         BLOB NOT NULL, -- encoded SnapshotRecord
+                tenant_id      TEXT    NOT NULL,
+                domain         TEXT    NOT NULL,
+                aggregate_type TEXT    NOT NULL,
+                aggregate_id   TEXT    NOT NULL,
+                version        INTEGER NOT NULL, -- the aggregate's version it was taken at
+                schema         TEXT    NOT NULL, -- format of the state (the aggregate's schema)
+                state          ANY     NOT NULL, -- TEXT when UTF-8 (JSON from every SDK), else BLOB
+                key_id         TEXT    NOT NULL, -- the worker key that signed it
+                sig            BLOB    NOT NULL,
+                event_hash     BLOB    NOT NULL, -- hash of the stream's event at `version`
+                created_at     INTEGER NOT NULL, -- ms since epoch
                 PRIMARY KEY (tenant_id, domain, aggregate_type, aggregate_id)
             ) STRICT",
         )?;
@@ -112,32 +120,56 @@ impl SqliteSnapshots {
 
 impl SnapshotStore for SqliteSnapshots {
     fn get(&self, s: &StreamId) -> Result<Option<SnapshotRecord>> {
-        let bytes: Option<Vec<u8>> = self
+        Ok(self
             .conn()
             .query_row(
-                "SELECT record FROM snapshots
+                "SELECT version, schema, state, key_id, sig, event_hash FROM snapshots
                  WHERE tenant_id = ?1 AND domain = ?2 AND aggregate_type = ?3 AND aggregate_id = ?4",
                 params![s.tenant_id, s.domain, s.aggregate_type, s.aggregate_id],
-                |r| r.get(0),
+                |r| {
+                    Ok(SnapshotRecord {
+                        tenant_id: s.tenant_id.clone(),
+                        domain: s.domain.clone(),
+                        aggregate_type: s.aggregate_type.clone(),
+                        aggregate_id: s.aggregate_id.clone(),
+                        snapshot: Some(Snapshot {
+                            version: r.get(0)?,
+                            schema: r.get(1)?,
+                            state: bytes_at(r, 2)?,
+                            worker_sig: Some(Signature {
+                                key_id: r.get(3)?,
+                                sig: r.get(4)?,
+                            }),
+                        }),
+                        event_hash: r.get(5)?,
+                    })
+                },
             )
-            .optional()?;
-        Ok(bytes
-            .map(|b| SnapshotRecord::decode(b.as_slice()))
-            .transpose()?)
+            .optional()?)
     }
 
     fn save(&self, r: &SnapshotRecord) -> Result<()> {
+        let snapshot = r.snapshot.clone().unwrap_or_default();
+        let sig = snapshot.worker_sig.clone().unwrap_or_default();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
         self.conn().execute(
-            "INSERT INTO snapshots (tenant_id, domain, aggregate_type, aggregate_id, record)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT (tenant_id, domain, aggregate_type, aggregate_id)
-             DO UPDATE SET record = excluded.record",
+            "INSERT OR REPLACE INTO snapshots (tenant_id, domain, aggregate_type, aggregate_id,
+                 version, schema, state, key_id, sig, event_hash, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 r.tenant_id,
                 r.domain,
                 r.aggregate_type,
                 r.aggregate_id,
-                r.encode_to_vec()
+                snapshot.version,
+                snapshot.schema,
+                readable(&snapshot.state),
+                sig.key_id,
+                sig.sig,
+                r.event_hash,
+                now
             ],
         )?;
         Ok(())
