@@ -85,6 +85,7 @@ fn fill(store: &dyn Store, vault: &Vault) {
         let values: Vec<VaultValue> = values.iter().map(|v| (*v).clone()).collect();
         let owner = Owner {
             command_id: id,
+            tenant: &cmd.tenant_id,
             stream: None,
         };
         vault.put(&values, &cmd.vault_refs, &owner, AT).unwrap();
@@ -98,13 +99,16 @@ fn fill(store: &dyn Store, vault: &Vault) {
         let s = stream(&cmd.aggregate_id);
         let owner = Owner {
             command_id: &cmd.command_id,
+            tenant: &cmd.tenant_id,
             stream: Some(&s),
         };
         vault
             .put(&values, &events[0].vault_refs, &owner, AT)
             .unwrap();
         if !events[0].erases.is_empty() {
-            vault.erase(&events[0].erases, &cmd.command_id, AT).unwrap();
+            vault
+                .erase(&cmd.tenant_id, &events[0].erases, &cmd.command_id, AT)
+                .unwrap();
         }
         store
             .commit(

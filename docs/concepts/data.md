@@ -54,7 +54,7 @@ Events cannot be deleted, but personal data must be deletable. Fields declared `
 
 - Workers and listeners granted `vault_read` get the values; everyone else gets `null`.
 - Secrets are deleted once their command completes.
-- An **erasing event** deletes a person's values in every stream and domain, and the snapshots that may contain them. Read models must forget the person when they see it; rebuilt, they read `null`.
+- An **erasing event** deletes a person's values in every stream and domain of its tenant, and the snapshots that may contain them. Read models must forget the person when they see it; rebuilt, they read `null`.
 - The vault keeps each value encrypted with the vault key, together with its subject and whether it is secret. An erasure leaves a **proof** without the person: the SHA-256 of the subject, the erasing command, how many values went, and when.
 - **Files and cache values are not erased** with the person: they are not part of the vault. Delete a person's files yourself when you erase them ([Erase a person](../how-to/erasure)).
 

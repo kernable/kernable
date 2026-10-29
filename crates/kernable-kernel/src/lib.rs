@@ -435,6 +435,7 @@ impl Kernel {
         };
         let owner = Owner {
             command_id: &cmd.command_id,
+            tenant: &cmd.tenant_id,
             stream: Some(&stream),
         };
         vault
@@ -442,7 +443,7 @@ impl Kernel {
             .map_err(|e| refused("invalid_vault_values", e.to_string()))?;
         for e in &erasing {
             let streams = vault
-                .erase(&e.erases, &cmd.command_id, now_ms())
+                .erase(&cmd.tenant_id, &e.erases, &cmd.command_id, now_ms())
                 .map_err(|e| refused("vault_error", e.to_string()))?;
             // Snapshots of every stream that used the subject's values may hold them too.
             for s in streams.iter().chain([&stream]) {
@@ -1016,6 +1017,7 @@ impl CommandService for Api {
             };
             let owner = Owner {
                 command_id: &cmd.command_id,
+                tenant: &cmd.tenant_id,
                 stream: None,
             };
             if !completed()?

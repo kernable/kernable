@@ -485,3 +485,16 @@ for_each_backend!(
     reading_after_a_version_returns_only_later_events,
     contexts_come_back_as_stored,
 );
+
+#[test]
+fn inspecting_a_store_that_is_not_there_fails_and_creates_nothing() {
+    let path = std::env::temp_dir().join(format!("kernable-missing-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    for url in [
+        format!("sqlite:{}", path.display()),
+        path.display().to_string(),
+    ] {
+        assert!(kernable_store::open_read_only(&url).is_err(), "{url}");
+        assert!(!path.exists(), "{url} created a store");
+    }
+}

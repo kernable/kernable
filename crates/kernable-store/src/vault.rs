@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS vault (
     subject        TEXT    NOT NULL, -- empty for secrets
     secret         INTEGER NOT NULL,
     command_id     TEXT    NOT NULL, -- the command that wrote it
+    tenant         TEXT    NOT NULL, -- the command's tenant: an erasure stays within it
     tenant_id      TEXT,             -- the stream whose event refers to it; NULL for commands
     domain         TEXT,
     aggregate_type TEXT,
@@ -39,10 +40,11 @@ CREATE TABLE IF NOT EXISTS vault (
     value          BLOB    NOT NULL, -- encrypted
     created_at     INTEGER NOT NULL
 ) STRICT;
-CREATE INDEX IF NOT EXISTS vault_subject ON vault (subject);
+CREATE INDEX IF NOT EXISTS vault_subject ON vault (tenant, subject);
 CREATE INDEX IF NOT EXISTS vault_command ON vault (command_id);
 CREATE TABLE IF NOT EXISTS erasures (
     subject_hash TEXT    NOT NULL, -- SHA-256 of the subject: proves an erasure without keeping it
+    tenant       TEXT    NOT NULL,
     command_id   TEXT    NOT NULL,
     erased       INTEGER NOT NULL, -- number of values
     at           INTEGER NOT NULL
@@ -77,6 +79,8 @@ pub fn check(values: &[VaultValue], refs: &[String]) -> Result<()> {
 /// Who wrote values: a command, and for event values the stream of the event.
 pub struct Owner<'a> {
     pub command_id: &'a str,
+    /// The command's tenant: an erasure deletes a subject's values within it only.
+    pub tenant: &'a str,
     pub stream: Option<&'a StreamId>,
 }
 
@@ -149,14 +153,16 @@ impl Vault {
                 .map_err(|_| Error::Vault("encryption failed".into()))?;
             let s = owner.stream;
             tx.execute(
-                "INSERT OR IGNORE INTO vault (ref, subject, secret, command_id, tenant_id, domain,
-                                              aggregate_type, aggregate_id, nonce, value, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                "INSERT OR IGNORE INTO vault (ref, subject, secret, command_id, tenant, tenant_id,
+                                              domain, aggregate_type, aggregate_id, nonce, value,
+                                              created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     v.r#ref,
                     v.subject,
                     v.secret,
                     owner.command_id,
+                    owner.tenant,
                     s.map(|s| &s.tenant_id),
                     s.map(|s| &s.domain),
                     s.map(|s| &s.aggregate_type),
@@ -243,17 +249,24 @@ impl Vault {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Deletes every value of `subject` and returns the streams whose events referred to them,
-    /// whose snapshots may hold them too. Logs the erasure without the subject itself.
-    pub fn erase(&self, subject: &str, command_id: &str, now_ms: i64) -> Result<Vec<StreamId>> {
+    /// Deletes every value of `subject` in `tenant` and returns the streams whose events
+    /// referred to them, whose snapshots may hold them too. Another tenant's subject of the
+    /// same name keeps its values. Logs the erasure without the subject itself.
+    pub fn erase(
+        &self,
+        tenant: &str,
+        subject: &str,
+        command_id: &str,
+        now_ms: i64,
+    ) -> Result<Vec<StreamId>> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         let streams = {
             let mut stmt = tx.prepare(
                 "SELECT DISTINCT tenant_id, domain, aggregate_type, aggregate_id FROM vault
-                 WHERE subject = ?1 AND tenant_id IS NOT NULL",
+                 WHERE tenant = ?1 AND subject = ?2 AND tenant_id IS NOT NULL",
             )?;
-            stmt.query_map([subject], |r| {
+            stmt.query_map([tenant, subject], |r| {
                 Ok(StreamId {
                     tenant_id: r.get(0)?,
                     domain: r.get(1)?,
@@ -264,13 +277,14 @@ impl Vault {
             .collect::<rusqlite::Result<Vec<_>>>()?
         };
         let erased = tx.execute(
-            "DELETE FROM vault WHERE subject = ?1 AND secret = 0",
-            [subject],
+            "DELETE FROM vault WHERE tenant = ?1 AND subject = ?2 AND secret = 0",
+            [tenant, subject],
         )?;
         let subject_hash = hex::encode(Sha256::digest(subject.as_bytes()));
         tx.execute(
-            "INSERT INTO erasures (subject_hash, command_id, erased, at) VALUES (?1, ?2, ?3, ?4)",
-            params![subject_hash, command_id, erased as i64, now_ms],
+            "INSERT INTO erasures (subject_hash, tenant, command_id, erased, at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![subject_hash, tenant, command_id, erased as i64, now_ms],
         )?;
         tx.commit()?;
         Ok(streams)

@@ -197,14 +197,17 @@ impl Config {
             };
             given.entry(flag).or_default().push(value);
         }
+        // An empty value counts as not given, at every step: `--store=` or `KERNABLE_STORE=""`
+        // falls back to the default, and a flag without one stays off.
         let get = |flag: &str| -> Option<String> {
             let (_, var, default, _) = FLAGS.iter().find(|(f, ..)| *f == flag).expect("known flag");
+            let set = |v: &String| !v.is_empty();
             given
                 .get(flag)
                 .and_then(|v| v.last().cloned())
-                .or_else(|| env(var))
+                .filter(set)
+                .or_else(|| env(var).filter(set))
                 .or_else(|| (!default.is_empty()).then(|| default.to_string()))
-                .filter(|v| !v.is_empty())
         };
         let number = |flag: &str| -> Result<u64, Error> {
             let value = get(flag).expect("has a default");
@@ -417,6 +420,24 @@ mod tests {
         assert!(!valid_qualified("orders.Place.Order"));
         assert!(valid_pattern("*") && valid_pattern("orders.*") && valid_pattern("orders.Get"));
         assert!(!valid_pattern("orders") && valid_pattern("Orders.*") && !valid_pattern("o.*.*"));
+    }
+
+    #[test]
+    fn an_empty_value_falls_back_to_the_default() {
+        let root =
+            kernable_core::signing::key_id(&kernable_core::signing::generate_key().verifying_key());
+        let config = Config::from_args(&["--root", &root, "--store=", "--metrics-listen="], |_| {
+            None
+        })
+        .unwrap();
+        assert_eq!(config.store, "sqlite:kernable.db");
+        assert_eq!(
+            config.metrics_listen, None,
+            "a flag without a default stays off"
+        );
+        let env = |var: &str| (var == "KERNABLE_LEASE_TTL_MS").then(String::new);
+        let config = Config::from_args(&["--root", &root], env).unwrap();
+        assert_eq!(config.lease_ttl_ms, 10_000);
     }
 
     #[test]

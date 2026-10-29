@@ -73,7 +73,8 @@ The kernel does not repeat erasures by itself. If you restore a vault that is ol
 ```sh
 sqlite3 vault.db "ATTACH 'kernable.db' AS log;
   DELETE FROM vault WHERE secret = 0 AND EXISTS (
-    SELECT 1 FROM log.events e WHERE e.erases = vault.subject AND e.created_at >= vault.created_at);"
+    SELECT 1 FROM log.events e WHERE e.erases = vault.subject AND e.tenant_id = vault.tenant
+                                  AND e.created_at >= vault.created_at);"
 ```
 
 This deletes the values of each erased subject that were written up to its erasure, and nothing written later. Then delete the snapshot store, as in step 3 above.

@@ -152,7 +152,7 @@ shopDomain.event("CustomerErased", 1).erases((_d, id) => id);
 // a client that submits these commands: new Kernable().use(shopDomain)
 ```
 
-Personal fields go to the vault (the log keeps references), secret fields only until their command completes, and an erasing event deletes a person's values everywhere. Only top-level fields. Files and cache values are not erased with the person.
+Personal fields go to the vault (the log keeps references), secret fields only until their command completes, and an erasing event deletes a person's values everywhere in its tenant. Only top-level fields. Files and cache values are not erased with the person.
 
 ### Changing an event's format
 

@@ -25,7 +25,7 @@ The shop's read models forget an erased customer like this:
 <<< @/examples/shop/rs/src/bin/read_models.rs#erased [read_models.rs]
 :::
 
-The subject is a string, such as the customer ID `c1`. An erasure deletes every value of that subject, in every stream, domain and tenant, so use one subject per person and make it unique.
+The subject is a string, such as the customer ID `c1`. An erasure deletes every value of that subject in the erasing command's tenant, in every stream and domain; the same subject in another tenant keeps its values. Use one subject per person, unique within the tenant.
 
 ## The request
 
@@ -36,7 +36,7 @@ The subject is a string, such as the customer ID `c1`. An erasure deletes every 
    const outcome = await kernable.submit({ domain: "shop", aggregateType: "customer", aggregateId: "c1", type: "Erase" });
    ```
 
-   When it is committed, the kernel has deleted the person's values from the vault, in every stream and domain, and dropped the snapshots of every stream that used them. Secrets have no subject and are not affected.
+   When it is committed, the kernel has deleted the person's values from the vault, in every stream and domain of its tenant, and dropped the snapshots of every stream that used them. Secrets have no subject and are not affected.
 3. **Read models** forget the person as they process the event; rebuilt, they read `null` where the values were.
 4. **Delete the person's files** if a reactor does not do it for you.
 5. **Backups** of the vault still hold the values until they expire ([Back up and restore](./backup#backups-and-erasure)).
@@ -47,7 +47,7 @@ The subject is a string, such as the customer ID `c1`. An erasure deletes every 
 The kernel logs `erased a subject's vault values` with the command ID, and keeps a proof in the vault's `erasures` table: the SHA-256 of the subject, the erasing command, how many values went, and when. It does not keep the subject itself:
 
 ```sh
-sqlite3 vault.db "SELECT subject_hash, command_id, erased, datetime(at / 1000, 'unixepoch') FROM erasures"
+sqlite3 vault.db "SELECT subject_hash, tenant, command_id, erased, datetime(at / 1000, 'unixepoch') FROM erasures"
 printf '%s' c1 | shasum -a 256   # the subject_hash of c1
 sqlite3 vault.db "SELECT count(*) FROM vault WHERE subject = 'c1'"   # 0
 ```

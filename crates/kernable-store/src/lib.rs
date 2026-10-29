@@ -332,6 +332,15 @@ pub fn open(url: &str) -> Result<Box<dyn Store>> {
 pub fn open_read_only(url: &str) -> Result<Box<dyn Store>> {
     Ok(match backend(url) {
         ("file", path) => Box::new(FileStore::open_read_only(path)?),
+        ("memory", path) => Box::new(SqliteStore::open(path)?),
+        // A store that is not there is an error, never a new, empty one: a mistyped path must
+        // not make `kernable verify` report an intact log.
+        (_, path) if !std::path::Path::new(path).exists() => {
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("no store at {path}"),
+            )));
+        }
         (_, path) => Box::new(SqliteStore::open(path)?),
     })
 }
