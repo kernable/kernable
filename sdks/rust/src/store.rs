@@ -13,7 +13,11 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use crate::Error;
 
-/// A listener's store; see [`crate::Listener::store`]. Cloning gives another handle to it.
+/// A listener's store: JSON values under keys, grouped in namespaces (`ns`), in a SQLite file or
+/// in memory; see [`crate::Listener::store`]. Cloning gives another handle to it. Handlers get
+/// it as `ctx.store`: `if let Some(store) = &ctx.store { store.set("carts", &evt.aggregate_id,
+/// &row)?; }`. What an event handler writes takes effect together with the listener's
+/// position, once per batch. Errors are [`Error::Store`] (SQLite) or [`Error::Json`].
 #[derive(Clone)]
 pub struct Store {
     db: Arc<Mutex<Connection>>,
@@ -59,6 +63,7 @@ impl Store {
         self.committed.load(Ordering::SeqCst)
     }
 
+    /// The value under `key` in namespace `ns` as a `T`; `None` if there is none.
     pub fn get<T: DeserializeOwned>(&self, ns: &str, key: &str) -> Result<Option<T>, Error> {
         let db = self.db.lock().unwrap();
         let value: Option<String> = db
@@ -71,6 +76,7 @@ impl Store {
         Ok(value.map(|v| serde_json::from_str(&v)).transpose()?)
     }
 
+    /// Stores `value` as JSON under `key` in namespace `ns`, replacing a value there.
     pub fn set<T: Serialize + ?Sized>(&self, ns: &str, key: &str, value: &T) -> Result<(), Error> {
         let value = serde_json::to_string(value)?;
         self.db.lock().unwrap().execute(
@@ -80,6 +86,7 @@ impl Store {
         Ok(())
     }
 
+    /// Removes the value under `key` in namespace `ns`, if there is one.
     pub fn remove(&self, ns: &str, key: &str) -> Result<(), Error> {
         self.db
             .lock()

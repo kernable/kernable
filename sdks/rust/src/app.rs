@@ -11,7 +11,13 @@ use crate::{
 };
 
 /// An app: one service made of whole domains, for [`Kernable::app`]. Every aggregate, read
-/// model and reactor created through its domains runs in it.
+/// model and reactor created through its domains runs in it. Built with methods that each
+/// return the changed app:
+///
+/// `let app = kernable.app(App::new().service("shop").version("1.0.0").domain(&shop_domain))?;`
+/// then `app.run().await?`. To do something once everything is connected (e.g. in a test),
+/// spawn it and wait: `let running = tokio::spawn({ let app = app.clone(); async move {
+/// app.run().await } }); app.ready().await;`.
 #[derive(Clone, Default)]
 pub struct App {
     service: Option<String>,
@@ -22,7 +28,7 @@ pub struct App {
 }
 
 impl App {
-    /// An app without domains for the connection's service.
+    /// An app without domains for the connection's service; add them with [`App::domain`].
     pub fn new() -> App {
         App::default()
     }
@@ -51,7 +57,8 @@ impl App {
         self
     }
 
-    /// A domain of the app: its aggregates, read models and reactors run in it.
+    /// A domain of the app: its aggregates, read models and reactors run in it. Call it once per
+    /// domain.
     pub fn domain(mut self, domain: &Domain) -> App {
         self.domains.push(domain.clone());
         self
@@ -69,7 +76,7 @@ struct AppInner {
 }
 
 /// An [`App`] on a connection; see [`Kernable::app`]. Cloning gives another handle to the same
-/// app.
+/// app, e.g. to call `stop()` or `ready()` while another task awaits `run()`.
 #[derive(Clone)]
 pub struct AppHandle {
     inner: Arc<AppInner>,
@@ -148,7 +155,8 @@ impl AppHandle {
         &self.inner.listeners
     }
 
-    /// Returns once the worker and every listener of the app are connected.
+    /// Returns once the worker and every listener of the app are connected; waits forever if
+    /// one never connects, so wrap it in `tokio::time::timeout` where that matters.
     pub async fn ready(&self) {
         if let Some(worker) = &self.inner.worker {
             worker.ready().await;
@@ -158,7 +166,7 @@ impl AppHandle {
         }
     }
 
-    /// Ends `run`.
+    /// Ends `run`: stops the worker and every listener.
     pub fn stop(&self) {
         if let Some(worker) = &self.inner.worker {
             worker.stop();
@@ -171,7 +179,10 @@ impl AppHandle {
     /// Applies the membership (see [`Kernable::apply`]), then runs the worker and every
     /// listener until `stop()`. Once all are connected, it prints an overview of the app
     /// (unless `KERNABLE_LOG` is below `info`) instead of their connection lines. Fails only if
-    /// the kernel refuses the membership.
+    /// the kernel refuses the membership ([`Error::Status`]); a failing handler does not end
+    /// it (a command handler's error rejects the command, a listener handler's error makes the
+    /// listener reconnect and get the event again). A panic in a worker or listener task is
+    /// passed on.
     pub async fn run(&self) -> Result<(), Error> {
         let started = Instant::now();
         self.inner

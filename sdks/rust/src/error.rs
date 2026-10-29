@@ -4,11 +4,20 @@ use std::fmt;
 
 use crate::StoredEvent;
 
-/// Any error a handler may return; `?` converts most errors into it.
+/// Any error a listener, query or middleware handler may return; `?` converts most errors
+/// into it, a [`Rejected`] too: `return Err(Rejected::new("no such cart").code("not_found").into())`.
+/// A query or middleware handler that returns a [`Rejected`] (also one wrapped in
+/// [`Error::Rejected`], e.g. by a query it asked) refuses with its code; any other error
+/// refuses with `handler_error` (`middleware_error` from a middleware). An event handler's
+/// error makes the listener reconnect and get the event again.
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// A business reason to refuse a command or query: return it from a handler. `code` (default
 /// `rejected`) is what callers act on, `message` what they show.
+///
+/// A command handler returns `Err(Rejected::new("Cart is checked out"))`; a listener's query
+/// or middleware handler returns it as a [`BoxError`] (`.into()` or `?`). Callers see it as
+/// [`crate::Outcome::Rejected`] from `submit` and as [`Error::Rejected`] from `query`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Rejected {
     pub code: String,
@@ -16,6 +25,7 @@ pub struct Rejected {
 }
 
 impl Rejected {
+    /// A rejection with `message` and the code `rejected`.
     pub fn new(message: impl Into<String>) -> Rejected {
         Rejected {
             code: "rejected".into(),
@@ -23,7 +33,7 @@ impl Rejected {
         }
     }
 
-    /// This rejection with another code.
+    /// This rejection with another code, e.g. `Rejected::new("no such cart").code("not_found")`.
     pub fn code(mut self, code: impl Into<String>) -> Rejected {
         self.code = code.into();
         self
@@ -64,17 +74,25 @@ impl fmt::Display for Rejected {
 
 impl std::error::Error for Rejected {}
 
-/// Why a call to the kernel failed.
+/// Why a call to the kernel failed. It implements `std::error::Error`, so `?` turns it into a
+/// [`BoxError`] in handlers and `main`.
 #[derive(Debug)]
 pub enum Error {
-    /// The read model refused the query.
+    /// A rejection: the read model or a middleware refused the query
+    /// ([`crate::Kernable::query`]), or a command handler refused the command in
+    /// [`crate::Aggregate::handle`]. A rejected submit is not an error but
+    /// [`crate::Outcome::Rejected`].
     Rejected(Rejected),
-    /// The command was committed, but not every listener processed its events within the
-    /// kernel's `--settle-timeout-ms`. Read models may not show the change yet.
+    /// The command was committed, but not every listener that counts processed its events
+    /// within the kernel's `--settle-timeout-ms`. Read models may not show the change yet; the
+    /// committed events are attached. Submitting again with the same ID returns the same
+    /// outcome.
     NotSettled(Vec<StoredEvent>),
-    /// The kernel refused the call or could not be reached.
+    /// The kernel refused the call or could not be reached: the gRPC status, e.g.
+    /// `PERMISSION_DENIED` without a grant (see Errors in the reference).
     Status(tonic::Status),
-    /// A key, grant or certificate could not be read, or an option is invalid.
+    /// A key, grant or certificate could not be read, or an option is invalid; also a failing
+    /// handler in [`crate::Aggregate::fold`] and [`crate::Aggregate::handle`].
     Config(String),
     /// Data could not be encoded or decoded as JSON.
     Json(serde_json::Error),

@@ -23,54 +23,120 @@ use prost::Message;
 use tracing_subscriber::EnvFilter;
 
 const USAGE: &str = "usage:
+
+Run the kernel:
   kernable start --root <root.pub> [<flag> <value>]...
   kernable start --dev [<flag> <value>]...
-                                          runs the kernel, trusting grants of the root keys; SIGHUP
-                                          reads the kernel key again, SIGTERM or SIGINT finishes
-                                          running requests and stops (flags: kernable start --help);
-                                          --dev creates missing keys and a grant that lets app.key do
-                                          everything, and turns the vault on, for trying kernable out
-  kernable keys new <name>                writes <name>.key (secret) and <name>.pub (key ID)
+                                          Runs the kernel in the foreground, trusting grants signed
+                                          by the root keys; the flags are listed by kernable start
+                                          --help. On Unix, SIGHUP reads the kernel key again.
+                                          SIGTERM or SIGINT refuses new requests, lets running ones
+                                          finish and stops. --dev is for trying kernable out: it
+                                          creates root.key, kernel.key, vault.key, app.key and
+                                          app.grant in the working directory if missing (app may do
+                                          everything) and defaults to --root root.pub, --vault-key
+                                          vault.key and --ui-listen 127.0.0.1:7234. Exit 2 on
+                                          invalid flags; exit 1 if the kernel stops on an error.
+
+Keys and trust:
+  kernable keys new <name>                Writes <name>.key (the secret key, readable by the owner
+                                          only, never overwritten) and <name>.pub (the key ID), and
+                                          prints the key ID.
   kernable grant <root.key> <name.pub> [--succeeds <old.pub>] <permission>...
-                                          writes <name>.grant, signed by the root key; a permission
-                                          is <action>=<type>,<type> or a bare type for every action
-                                          (actions: submit run subscribe listen query answer check
-                                          privileged vault_read vault_erase data_read data_write
-                                          cache manage; manage takes service names)
+                                          Writes <name>.grant, signed by the root key, and prints
+                                          its permissions. A permission is <action>=<type>,<type>...
+                                          or a bare <type> for every action. Actions: submit run
+                                          subscribe listen query answer check privileged vault_read
+                                          vault_erase data_read data_write cache manage. A type is
+                                          *, <domain>.* or <domain>.<Type>; manage takes service
+                                          names, privileged takes bypass_authorization. --succeeds
+                                          lets this key take over the aggregates and listeners
+                                          registered with <old.pub>. A newer grant for the same key
+                                          replaces the older one.
   kernable revoke <addr> <root.key> <key.pub> <since>
-                                          revokes a key from <since> on (UTC, 2026-10-27T09:00:00Z),
-                                          for good; the kernel must be running (over TCP with
-                                          mutual TLS: KERNABLE_TLS_CA, _CERT and _KEY)
-  kernable checkpoint <store> <kernel.key>  signs the current head of the event log (kernel stopped)
-  kernable verify <store> <kernel.pub>...   checks hash chain, checkpoints and signatures, with every
-                                          key the kernel ever had (store: sqlite:<path>, file:<path>
-                                          or a bare SQLite path); exit 2: intact, but something was
-                                          signed by a revoked key (SUSPECT lines)
-  kernable certs new <dir> <client>...    writes a development CA, a kernel certificate and one
-                                          client certificate per name, for mTLS
-  kernable listeners <store>              lists registered listeners with order, position, middleware
-                                          and when they were last seen
-  kernable listeners remove <store> <name>  removes a listener, and its middleware (kernel stopped)
+                                          Revokes a key for good from <since> on (UTC, like
+                                          2026-10-27T09:00:00Z): the kernel refuses it, ends its
+                                          connections and rejects its queued commands accepted since
+                                          then (key_revoked). The kernel must be running.
+  kernable certs new <dir> <client>...    Writes a development CA (ca.tls.crt), a kernel certificate
+                                          (kernel.tls.crt, kernel.tls.key) and a certificate per
+                                          <client> (<client>.tls.crt, <client>.tls.key) to <dir>,
+                                          for mutual TLS. The CA key is not kept: issue a new set to
+                                          add clients. Production brings its own PKI.
+
+Deploy and inspect:
   kernable apply <addr> <key> <manifest.json>
-                                          applies a service's membership (JSON with service, workers,
-                                          listeners, middlewares and metadata); once per deploy,
-                                          with a key granted manage for the service (TLS as for
-                                          revoke)
-  kernable services <store>               lists the applied memberships, what they list, and what
-                                          their services run beyond them
-  kernable workers <store>                lists registered aggregates with their command types and
-                                          when a worker for them was last seen
+                                          Applies a service's membership: a JSON manifest with
+                                          service, workers, listeners, middlewares and metadata.
+                                          Signed with <key>, whose grant needs manage=<service>; the
+                                          grant file next to the key (app.grant for app.key) is sent
+                                          along. The kernel must be running. Once per deploy.
+  kernable services <store>               Lists each applied membership: the service, its metadata,
+                                          who applied it and when, and the workers, listeners and
+                                          middlewares it lists, marking those that never registered;
+                                          then the service's dynamic listeners, registered but not
+                                          listed.
+  kernable workers <store>                Lists the registered aggregate types with their command
+                                          types, key, service and when a worker for them was last
+                                          seen.
+  kernable listeners <store>              Lists the registered listeners with order, position, event
+                                          types, key, service, middleware and when they were last
+                                          seen. A listener its service's membership does not list is
+                                          marked: it counts for nobody.
+  kernable schemas <store>                Lists the highest stored schema version per event type.
+
+Check the store:
+  kernable verify <store> <kernel.pub>...
+                                          Recomputes the hash chain and checks every checkpoint and
+                                          signature, with every key the kernel ever had: give all
+                                          its .pub files. Read-only, so the kernel may run. Prints
+                                          the counts, PROBLEM and SUSPECT lines, then OK or
+                                          TAMPERED. Exit 0: intact. Exit 1: tampered, or the check
+                                          failed. Exit 2: intact, but something was signed by a key
+                                          at or after its revocation (SUSPECT lines). Events after
+                                          the last checkpoint are counted: cutting them off could
+                                          not be detected.
+  kernable checkpoint <store> <kernel.key>
+                                          Signs a checkpoint of the newest event now, as the running
+                                          kernel does every --checkpoint-interval-ms. Kernel
+                                          stopped.
+
+Maintenance, with the kernel stopped:
+  kernable listeners remove <store> <name>
+                                          Removes a listener and its middleware, so they no longer
+                                          count. If a listener connects again under that name, it
+                                          starts at the newest event. Exit 1 if there is no such
+                                          listener.
   kernable workers remove <store> <domain.Aggregate>
-                                          unregisters an aggregate: its commands are refused (kernel
-                                          stopped)
+                                          Unregisters an aggregate type: its commands are refused
+                                          (NOT_FOUND) unless a membership lists it. Exit 1 if there
+                                          is no such aggregate.
+  kernable migrate <store>                Upgrades a store to this build's data format; back the
+                                          store up first. A file: log keeps the old one as
+                                          <path>.format-<n>. Does nothing if the store is current;
+                                          exit 1 for a store of a development build, which has no
+                                          migration.
   kernable vault rekey <vault> <old.key> <new.key>
-                                          re-encrypts the vault with a new key (kernel stopped)
-  kernable schemas <store>                lists the highest stored payload version per event type
-  kernable migrate <store>                upgrades a store to this build's data format (kernel stopped;
-                                          back the store up first)
+                                          Re-encrypts every vault value with a new key; then start
+                                          the kernel with --vault-key <new.key>. <vault> is the
+                                          --vault-store, for example sqlite:vault.db.
+
+Scripting:
   kernable submit <addr> <client.key> <tenant> <domain> <aggregate_type> <aggregate_id> <command_type> <payload>
-                                          signs and submits a command (addr: http://host:port, or
-                                          unix:/path on Unix; TLS as for revoke), with <client>.grant if it exists";
+                                          Signs a command with a new ID and submits it, waiting
+                                          until it has settled; the grant file next to the key is
+                                          sent along. <payload> is sent as given, usually JSON.
+                                          Prints the command ID, then a committed line per event
+                                          with its global position, version, type and payload, or
+                                          rejected <code>: <message> with exit 1. It cannot seal
+                                          vault fields: not for commands with personal or secret
+                                          values.
+
+Arguments and exit codes:
+  <addr> is host:port, http://host:port, or unix:<path> on Unix. To reach a kernel over mutual TLS,
+  set KERNABLE_TLS_CA, KERNABLE_TLS_CERT and KERNABLE_TLS_KEY to PEM files, as for the SDKs. <store>
+  is the kernel's --store: sqlite:<path>, a bare SQLite path, or file:<path>. Exit codes, unless a
+  command says otherwise: 0 success, 1 failure, 2 unknown command or wrong arguments.";
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -224,8 +290,9 @@ fn start_help() -> String {
     let mut help = String::from(
         "kernable start flags (each also as an environment variable):\n  \
          --dev                      creates root.key, kernel.key, vault.key, app.key and app.grant\n                             \
-         (app may do everything) if missing; trusts root.pub unless --root is given and\n                             \
-         uses vault.key unless --vault-key is given\n",
+         (app may do everything) if missing; trusts root.pub unless --root is given,\n                             \
+         uses vault.key unless --vault-key is given, and serves the UI on\n                             \
+         127.0.0.1:7234 unless --ui-listen is given\n",
     );
     for (flag, var, default, _) in config::FLAGS {
         let default = if default.is_empty() {

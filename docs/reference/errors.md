@@ -1,41 +1,55 @@
 # Errors
 
-A request can fail in two ways:
+A request that does not succeed ends in one of two ways:
 
-- **Refused by the kernel:** a gRPC status, before or instead of an answer. The request was not accepted or not completed; the SDKs throw (TypeScript) or raise `grpc.RpcError` (Python).
-- **Rejected:** an answer with a code and a message. A command handler, a middleware or a query handler decided against it, or the kernel rejected a worker's result. A rejected command is completed and stored as rejected; resubmitting it with the same ID returns the same rejection. The SDKs return `{ committed: false, code, message }` from `submit` and throw `Rejected` from `query`.
+- **Rejected:** an answer with a code and a message. A command handler, a query handler or a middleware decided against the request, or the kernel rejected a worker's result. This is an outcome, not a failure of the call.
+- **Refused:** a gRPC status instead of an answer. The kernel did not accept the request or could not complete it, or it could not be reached.
 
-Handlers choose their own codes with `Rejected(message, code)`; the default code is `rejected`. The codes below come from kernable itself. `make check` fails if a code in the sources is missing from this page.
+How the SDKs report them:
+
+| | TypeScript | Python | Rust |
+|---|---|---|---|
+| rejected command | `submit` returns `{ committed: false, code, message }` | `submit` returns `Outcome(committed=False, code, message)` | `submit` returns `Outcome::Rejected` |
+| rejected query | `query` throws `Rejected` | `query` raises `Rejected` | `query` returns `Err(Error::Rejected)` |
+| refused | throws the gRPC error (`code`, `details`) | raises `grpc.RpcError` | `Err(Error::Status)` |
+| committed, not settled | throws `NotSettled` | raises `NotSettled` | `Err(Error::NotSettled)` |
+
+**A rejected command is final.** A command rejected by its worker or by the kernel is completed and stored as rejected, and resubmitting it with the same command ID returns the same rejection. To try again, submit it with a new command ID. A command that a middleware refuses before it runs is not stored, and a rejected query is never stored.
+
+Handlers choose their own codes: `Rejected(message, code)` in TypeScript and Python, `Rejected::new(message).code(code)` in Rust. The default code is `rejected`. Codes in the examples, such as `not_found`, `forbidden` or `checked_out`, are your application's; kernable gives them no meaning. The codes below come from kernable itself; `make check` fails if a code in the sources is missing from this page.
 
 ## Rejection codes
 
-| Code | From | Meaning |
-|---|---|---|
-| `handler_error` | SDK, worker | A command handler threw something other than `Rejected`. The message is the error. |
-| `unknown_command` | SDK, worker | The worker has no handler for the command type on this aggregate type. |
-| `snapshot_stale` | SDK, worker | The worker cannot read the snapshot it got (another `schema`). The kernel drops the snapshot and runs the command again with every event; this rejection is never final. |
-| `version_mismatch` | kernel | The command's `expected_version` (request context) is not the aggregate's version. |
-| `concurrency_conflict` | kernel | The aggregate kept changing while the command ran, also after retries. Retry the command. |
-| `invalid_event_type` | kernel | A worker returned an event type that is empty or contains a dot. |
-| `invalid_event_schema` | kernel | A worker wrote an event at another payload version than it declared. |
-| `no_vault` | kernel | A worker's events refer to the vault, but the kernel has no vault (`--vault-key`). |
-| `invalid_vault_values` | kernel | A worker's vault values do not match the references in its signed events. |
-| `vault_error` | kernel | The vault could not erase a subject. |
-| `key_revoked` | kernel | The command waited in the queue and was signed by a key revoked since a time before it was accepted. |
-| `erase_not_allowed` | kernel | A worker whose grant has no `vault_erase` for that event type returned an erasing event. |
-| `middleware_error` | SDK, middleware | A middleware threw something other than `Rejected`. The request is refused, as by any rejection. |
-| `not_a_middleware` | SDK, listener | A check reached a listener that registered no middleware handler. |
-| `unknown_query` | SDK, read model | The read model has no handler for the query type. |
+| Code | From | Meaning | What to do |
+|---|---|---|---|
+| `rejected` | SDK | The default code of `Rejected` when a handler gives none. | Read the message. |
+| `handler_error` | SDK: worker, read model | A command or query handler threw something other than `Rejected`; the message is the error. The command is not retried: a deterministic handler would throw again. | Fix the handler, then submit again with a new command ID. |
+| `unknown_command` | SDK: worker | The worker that got the command has no handler for its type, although the aggregate is registered for it: usually workers of different versions run side by side. | Deploy workers that handle the type, then submit again with a new command ID. |
+| `snapshot_stale` | SDK: worker | The worker cannot read the snapshot it got (another `schema`). The kernel drops the snapshot and runs the command again with all its events, so a client never gets this code for a command that ran with a snapshot. | Nothing. |
+| `version_mismatch` | kernel | The command's `expected_version` (request context) is not the aggregate's version: the aggregate changed since the client read it. | Read the current state, decide again, and submit with a new command ID. |
+| `concurrency_conflict` | kernel | The aggregate kept changing while the command ran, also after five retries. | Submit again with a new command ID. |
+| `invalid_event_type` | kernel | A worker returned an event type that is empty or contains a dot. | A bug in the worker or its SDK: fix it. |
+| `invalid_event_schema` | kernel | A worker wrote an event at another schema version than it declared when it registered. | A bug in the worker or its SDK: fix it. |
+| `no_vault` | kernel | A worker's events refer to the vault, but the kernel has none. | Start the kernel with `--vault-key`. |
+| `invalid_vault_values` | kernel | A worker's vault values do not match the references in its signed events, or could not be stored. | A bug in the worker or its SDK; check the kernel log. |
+| `vault_error` | kernel | The vault could not erase a subject. | Check the kernel log and the vault store, then submit again with a new command ID. |
+| `key_revoked` | kernel | The command waited in the queue and was signed by a key revoked from a time at or before its arrival. | If the command is legitimate, send it again signed with the sender's new key. |
+| `erase_not_allowed` | kernel | A worker returned an erasing event, but its key's grant has no `vault_erase` for that event type. | Grant the worker's key `vault_erase` for the event type ([Erase a person](../how-to/erasure)). |
+| `middleware_error` | SDK: middleware | A middleware threw something other than `Rejected`. The request is refused, as by any rejection. | Fix the middleware. |
+| `not_a_middleware` | SDK: listener | A check reached a listener that has no middleware handler for that point (before or after). | Deploy the listener with the middleware it registered. |
+| `unknown_query` | SDK: read model | The read model has no handler for the query type it registered to answer. | Deploy a read model that answers the type. |
 
 ## gRPC statuses
 
-| Status | When |
-|---|---|
-| `UNAUTHENTICATED` | A missing or invalid signature (also on a grant or a revoke request), a failed key challenge, an expired request (queries, subscriptions and revoke requests are valid 60 s around `issued_at`), or a client certificate the CA did not sign. |
-| `PERMISSION_DENIED` | The key has no grant, or its grant does not permit this action on this type (`submit`, `run`, `subscribe`, `listen`, `query`, `answer`, `check`, `privileged`, `manage`, …), or the key is revoked. Also: a grant not signed by a root key (or by a revoked one), a grant in `kernable-grant` for another key than the one that signed the request, and a revoke request not signed by a root key. Ends a worker's, listener's or subscriber's stream when a newer grant or a revocation takes its rights away, and refuses a listener registered with another key unless the new key's grant `succeeds` that key. |
-| `NOT_FOUND` | A command for an aggregate type or command type that no worker ever registered and no service's membership lists: often a typo. Commands of a registered or listed aggregate whose workers are away wait in the queue instead. |
-| `INVALID_ARGUMENT` | A malformed request: names that are not qualified, a missing command, vault values that do not match their references, an unknown listener name, a negative middleware order, a `kernable-grant` entry that is not a hex-encoded `Grant`, a malformed grant (an unknown action or type pattern). |
-| `FAILED_PRECONDITION` | A protocol version the kernel does not speak (the message names which side to update); an outdated worker (it would write an older event version than the store holds); a request from a listener's handler that would wait for that listener; vault values without a vault (`--vault-key`). |
-| `UNAVAILABLE` | A middleware that checks the request is not connected; no read model answers the query; the kernel is shutting down. Retry later. |
-| `DEADLINE_EXCEEDED` | A submit did not complete within `--submit-timeout-ms` (the command is stored and still runs: resubmit it with the same ID to get the result); a query was not answered within `--query-timeout-ms`; a middleware did not answer within `--middleware-timeout-ms`. |
-| `NotSettled` (SDK) | Not a status: the command was committed, but not every listener processed its events within `--settle-timeout-ms`. The outcome is attached. |
+| Status | When | What to do |
+|---|---|---|
+| `UNAUTHENTICATED` | A missing or invalid signature: on a command, query, subscription, result, rejection, grant, membership or revocation. A failed key challenge when a worker or listener connects. An expired request: queries, subscriptions, data and cache requests, memberships and revocations are valid for 60 s around their `issued_at`. | Check the key and the clock. |
+| `PERMISSION_DENIED` | The key has no grant, its grant does not permit this action on this type (`submit`, `run`, `subscribe`, `listen`, `query`, `answer`, `check`, `privileged`, `data_read`, `data_write`, `cache`, `manage`, …), or the key is revoked. A grant not signed by a root key or signed by a revoked one, a grant in `kernable-grant` for another key than the one that signed the request, a revocation not signed by a root key. A worker or listener that connects with another key than the one its aggregate type or listener name is registered with, unless the new key's grant `succeeds` that key. A middleware that its service's membership does not list. Also ends a worker's, listener's or subscriber's stream when a newer grant or a revocation takes its rights away. | Grant the key what it needs ([Manage keys](../how-to/keys)). |
+| `NOT_FOUND` | A command for an aggregate type that no worker registered and no membership lists, or for a command type its workers did not register: often a typo. Commands of a registered or listed aggregate whose workers are away wait in the queue instead. | Check the names; start the worker or apply the membership first. |
+| `ALREADY_EXISTS` | A listener connects under a name that a connected listener already uses, or a live listener uses the name of a registered one. | Run one process per listener name; give a live listener another name. |
+| `INVALID_ARGUMENT` | A malformed request: a name that is not a valid domain or qualified type, a missing command, vault values that do not match their references, an unknown listener name in a request from a listener's handler, a negative listener or middleware order, a data key not 1 to 512 bytes, a file over 16 MiB or a cache value over 1 MiB, a `kernable-grant` entry that is not a hex-encoded `Grant`, a malformed grant (an unknown action or type pattern), a malformed membership or worker registration. | Fix the request; these are bugs in the caller. |
+| `FAILED_PRECONDITION` | A protocol version the kernel does not speak (the message names which side to update). An outdated worker: it would write an older event version than the store holds. A request from a listener's handler that would wait for that listener itself. A request with vault values while the kernel has no vault (`--vault-key`). | Update the side the message names; route the request differently; start the kernel with a vault. |
+| `UNAVAILABLE` | The kernel cannot be reached, or the connection fails, also in the TLS handshake (for example a client certificate not signed by `--tls-client-ca`). A middleware that checks the request is not connected. No read model answers the query, or it went away while answering. The kernel is shutting down. | Retry later. Workers and listeners of the SDKs reconnect by themselves. |
+| `DEADLINE_EXCEEDED` | A submit did not complete within `--submit-timeout-ms`: the command is stored and still runs. A query was not answered within `--query-timeout-ms`, or no read model caught up to its `min_position`. A middleware did not answer within `--middleware-timeout-ms`. | Resubmit the command with the same command ID to get its result. Retry a query; look for slow or stuck listeners ([Monitor kernable](../how-to/monitor)). |
+| `INTERNAL` | The kernel's store failed, or a read model or middleware sent the wrong kind of reply. | Check the kernel log. |
+| `NotSettled` (SDK) | Not a status: the command was committed, but not every listener that counts processed its events within `--settle-timeout-ms`. The outcome is attached. | Treat the command as done; read models show it a little later. |

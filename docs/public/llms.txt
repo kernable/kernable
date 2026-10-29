@@ -1,0 +1,33 @@
+# kernable
+
+> kernable is an application kernel for event-sourced applications: one Rust process (the kernel) checks, orders, signs and stores commands and events, and your business logic runs in your own processes, in any language (TypeScript, Python and Rust SDKs). Every command and query goes through the kernel; a submit returns once every listener has processed its events, so the next read sees them.
+
+For building on kernable with an agent, start with the guide: [kernable.AGENTS.md](https://kernable.com/kernable.AGENTS.md). Everything in one file: [llms-full.txt](https://kernable.com/llms-full.txt).
+
+## Tutorials
+
+- [Getting started](https://kernable.com/tutorial/getting-started): a kernel, an aggregate, a read model and a client in TypeScript, Python or Rust; one app
+- [Build a shop](https://kernable.com/tutorial/shop/): a complete application in eight parts: aggregates, read models, a reactor, a second language, authorization, personal data, operation
+
+## Concepts
+
+- [Architecture](https://kernable.com/concepts/architecture): what the kernel does and what your processes do; a command's way and a query's way
+- [Event sourcing in kernable](https://kernable.com/concepts/event-sourcing): decide and fold, streams and the log, write and read side, rules across aggregates
+- [Domains](https://kernable.com/concepts/domains): what a domain holds, its rules, services and apps, a code layout
+- [Order and consistency](https://kernable.com/concepts/ordering): one command per aggregate, listener order, who counts, settling
+- [Trust](https://kernable.com/concepts/trust): keys, grants, signatures, the hash chain, what if something is compromised
+- [Queries and middleware](https://kernable.com/concepts/queries-and-middleware): every read through the kernel, middleware before and after, the request context
+- [Data over time](https://kernable.com/concepts/data): where kernable keeps what, event versions, the vault, snapshots
+- [Failures and recovery](https://kernable.com/concepts/failures): what happens when something fails, guarantees, finding the cause
+
+## How-to guides
+
+- [Deploy and upgrade](https://kernable.com/how-to/deploy), [Back up and restore](https://kernable.com/how-to/backup), [Monitor kernable](https://kernable.com/how-to/monitor), [Mutual TLS](https://kernable.com/how-to/tls), [Keys per service](https://kernable.com/how-to/keys)
+- [Change an event's format](https://kernable.com/how-to/event-versions), [Rebuild a read model](https://kernable.com/how-to/rebuild-read-model), [Remove a listener or aggregate](https://kernable.com/how-to/remove-listener), [Test your domain](https://kernable.com/how-to/test-domain)
+- [Handle an erasure request](https://kernable.com/how-to/erasure), [Passwords and other secrets](https://kernable.com/how-to/secrets), [Store files and cache values](https://kernable.com/how-to/data-and-cache), [Write an SDK](https://kernable.com/how-to/new-sdk)
+
+## Reference
+
+- [TypeScript SDK](https://kernable.com/reference/sdk-typescript), [Python SDK](https://kernable.com/reference/sdk-python), [Rust SDK](https://kernable.com/reference/sdk-rust)
+- [kernable start](https://kernable.com/reference/configuration), [CLI](https://kernable.com/reference/cli), [Errors](https://kernable.com/reference/errors), [Metrics and health](https://kernable.com/reference/metrics)
+- [Protocol](https://kernable.com/reference/protocol), [Signatures](https://kernable.com/reference/signing)

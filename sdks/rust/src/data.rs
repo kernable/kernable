@@ -18,9 +18,10 @@ use crate::{Client, Error, now_ms};
 /// Room for the kernel's largest file (16 MiB) and the rest of the message.
 const MAX_MESSAGE_BYTES: usize = 17 << 20;
 
-/// A file as stored by the kernel.
+/// A file as stored by the kernel, returned by [`Files::get`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Data {
+    /// The file's bytes.
     pub data: Vec<u8>,
     /// The media type given when the file was put, e.g. `image/png`.
     pub content_type: String,
@@ -28,7 +29,10 @@ pub struct Data {
 
 /// Files of up to 16 MiB under keys of 1 to 512 bytes, per tenant and domain; see
 /// [`crate::Kernable::data`]. Files are not part of the signed event log, and erasing a vault
-/// subject does not delete them.
+/// subject does not delete them, so keep personal data in vault fields instead. A refused or
+/// invalid request is [`Error::Status`]. Example:
+/// `kernable.data().put("shop", "invoices/c1.pdf", pdf, "application/pdf").await?`, then
+/// `kernable.data().get("shop", "invoices/c1.pdf").await?` returns `Some(Data { .. })`.
 #[derive(Clone)]
 pub struct Files {
     client: Client,
@@ -106,7 +110,10 @@ impl Files {
 /// Values of up to 1 MiB under keys of 1 to 512 bytes, per tenant and domain, held in the
 /// kernel's memory (granted `cache`); see [`crate::Kernable::cache`]. A restart of the kernel
 /// empties the cache; values are not part of the signed event log, and erasing a vault subject
-/// does not delete them.
+/// does not delete them. For rate limits, short-lived tokens and computed values. A refused
+/// or invalid request is [`Error::Status`]. Example:
+/// `kernable.cache().set("shop", "rate:c1", "3", Some(Duration::from_secs(60))).await?`, then
+/// `kernable.cache().get("shop", "rate:c1").await?` returns `Some(b"3".to_vec())`.
 #[derive(Clone)]
 pub struct Cache {
     client: Client,
@@ -118,8 +125,9 @@ impl Cache {
         Cache { client, tenant }
     }
 
-    /// Stores `value` as `key` of `domain`, replacing any value there. With a `ttl`, the value
-    /// expires after it; without, it stays until deleted or the kernel restarts.
+    /// Stores `value` as `key` of `domain` (granted `cache`), replacing any value there. With a
+    /// `ttl`, the value expires after it; without, it stays until deleted or the kernel
+    /// restarts. A `&str` or `String` is stored as UTF-8.
     pub async fn set(
         &self,
         domain: &str,

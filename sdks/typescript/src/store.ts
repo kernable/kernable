@@ -4,9 +4,26 @@
 
 import type { DatabaseSync } from "node:sqlite";
 
+/**
+ * A listener's store: JSON values under `(namespace, key)` in a SQLite file (or in memory),
+ * written in one transaction with the listener's position per batch of events. So after a crash
+ * every event has taken effect exactly once, and a restart continues after the stored position
+ * instead of rebuilding. Give a read model one with `ListenerOptions.store`; its handlers get it
+ * as `ctx.store` (also query handlers), or use `ListenerHandle.store`. Reads and writes are
+ * synchronous. Uses `node:sqlite`.
+ *
+ * ```ts
+ * const carts = shopDomain.readModel("carts", { store: "sqlite:carts.db" });
+ * carts.on("ItemAdded", (data: { qty: number }, evt, ctx) => {
+ *   const row = ctx.store!.get<{ items: number }>("carts", evt.aggregateId) ?? { items: 0 };
+ *   ctx.store!.set("carts", evt.aggregateId, { items: row.items + data.qty });
+ * });
+ * carts.query("GetCart", (data: { id: string }, _qry, ctx) => ctx.store!.get("carts", data.id));
+ * ```
+ */
 export class Store {
   private readonly db: DatabaseSync;
-  /** The position up to which the stored data is complete. */
+  /** The global position up to which the stored data is complete: the last committed batch. */
   committed: number;
 
   private constructor(db: DatabaseSync, committed: number) {
@@ -37,15 +54,18 @@ export class Store {
     return new Store(db, Number(meta("position") ?? 0));
   }
 
+  /** The value under `key` in namespace `ns`, or `undefined` if there is none. */
   get<T = unknown>(ns: string, key: string): T | undefined {
     const row = this.db.prepare("SELECT value FROM data WHERE ns = ? AND key = ?").get(ns, key) as { value: string } | undefined;
     return row ? (JSON.parse(row.value) as T) : undefined;
   }
 
+  /** Stores `value` (as JSON) under `key` in namespace `ns`, replacing a value there. */
   set(ns: string, key: string, value: unknown): void {
     this.db.prepare("INSERT OR REPLACE INTO data (ns, key, value) VALUES (?, ?, ?)").run(ns, key, JSON.stringify(value));
   }
 
+  /** Removes the value under `key` in namespace `ns`, if there is one. */
   remove(ns: string, key: string): void {
     this.db.prepare("DELETE FROM data WHERE ns = ? AND key = ?").run(ns, key);
   }
@@ -79,6 +99,7 @@ export class Store {
     if (this.db.isTransaction) this.db.exec("ROLLBACK");
   }
 
+  /** Closes the database. */
   close(): void {
     this.db.close();
   }

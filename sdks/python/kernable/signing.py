@@ -137,16 +137,20 @@ def derived_id(command_id: str, n: int) -> str:
 
 
 class Key:
-    """An Ed25519 key; its ID is the hex-encoded public key."""
+    """An Ed25519 key; its ID (`id`) is the hex-encoded public key. `Kernable` reads its own
+    from the `.key` file (`kernable keys new`); you rarely need this class directly."""
 
     def __init__(self, seed_hex: str):
+        """The key with this hex-encoded 32-byte seed, the content of a `.key` file."""
         self._key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(seed_hex.strip()))
         self.id = self._key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw).hex()
 
     @staticmethod
     def from_file(path: str) -> "Key":
+        """The key in the `.key` file at `path`."""
         with open(path) as f:
             return Key(f.read())
 
     def sign(self, message: bytes) -> pb.Signature:
+        """Signs `message` (the signed bytes of a request, see Signatures) with this key."""
         return pb.Signature(key_id=self.id, sig=self._key.sign(message))

@@ -2,34 +2,63 @@
 
 # kernable start
 
-The kernel takes its settings as flags of `kernable start`. Every flag has an environment variable; a flag wins over its variable, and the variable over the default. A flag is written `--flag value` or `--flag=value`. Relative paths resolve against the working directory. `kernable start --help` lists the flags.
+The kernel takes its settings as flags of `kernable start`. Every flag has an environment variable. A flag wins over its variable, and the variable over the default. Write a flag as `--flag value` or `--flag=value`; given twice, the last one wins, except `--root`, which adds a root each time. Relative paths resolve against the working directory. `kernable start --help` lists the flags. An unknown flag, a missing value or a malformed one ends `kernable start` with exit code 2 before the kernel starts.
 
 ```sh
 kernable start --root root.pub --store sqlite:kernable.db --listen 127.0.0.1:7233
 ```
 
-The kernel holds no keys of services and no permissions: it trusts the root keys, and a root key says with a grant what each key may do (see [Trust](../concepts/trust) and [Manage keys](../how-to/keys)). SIGHUP reads the kernel key file again; every other change needs a restart.
+The kernel holds no keys of services and no permissions: it trusts the root keys, and a root key says with a grant what each key may do ([Trust](../concepts/trust), [Manage keys](../how-to/keys)). SIGHUP (Unix) reads the kernel key file again; every other change needs a restart.
+
+**`--dev`** is for trying kernable out on one machine. It creates whatever is missing of `root.key`, `kernel.key`, `vault.key`, `app.key` and `app.grant` in the working directory, with a grant that lets `app.key` do everything. Unless you set them by flag or variable, it then uses `--root root.pub`, `--vault-key vault.key` and `--ui-listen 127.0.0.1:7234`. Every other flag keeps its default. In production, start with `--root` and grant each service only what it needs.
+
+**Logs** go to stderr. `KERNABLE_LOG` sets the filter (default `info`) and `KERNABLE_LOG_FORMAT=json` writes JSON ([Monitor kernable](../how-to/monitor#logs)).
+
+## Trust
+
+Which keys the kernel trusts, and its own key.
 
 | Flag | Variable | Default | Description |
 |---|---|---|---|
-| `--root` | `KERNABLE_ROOT` | **required** | A root key: its key ID or its `.pub` file. Grants and revocations must be signed by a root key. Repeat the flag for several roots (the variable takes them comma-separated); at least one is needed. |
-| `--store` | `KERNABLE_STORE` | `sqlite:kernable.db` | The event store: `sqlite:<path>` (or a bare path), `file:<path>` or `memory:`. |
-| `--listen` | `KERNABLE_LISTEN` | `127.0.0.1:7233` | Where the kernel listens: `host:port`, or `unix:<path>` on Unix. Plain TCP only on a loopback address; any other address needs mutual TLS (`--tls-cert`, `--tls-key`, `--tls-client-ca`). |
-| `--kernel-key` | `KERNABLE_KERNEL_KEY` | `kernel.key` | The kernel's own signing key (`kernable keys new kernel`): it signs checkpoints and revocations. Read again on SIGHUP (Unix). |
-| `--snapshots` | `KERNABLE_SNAPSHOTS` | `memory:` | Where snapshots live: `sqlite:<path>` or `memory:` (rebuilt after a restart). |
-| `--data-store` | `KERNABLE_DATA_STORE` | `file:data` | Where files of the data service live: `file:<directory>` or `memory:` (gone after a restart). Created on the first file. |
-| `--cache-store` | `KERNABLE_CACHE_STORE` | `memory:` | Where the cache service keeps values: `memory:`, emptied by a restart. |
-| `--vault-key` | `KERNABLE_VAULT_KEY` | — | A file with 32 random bytes, hex encoded (`kernable keys new vault` writes one). Without it the kernel has no vault, and commands and events that refer to it are refused. |
-| `--vault-store` | `KERNABLE_VAULT_STORE` | `sqlite:vault.db` | Where the vault keeps personal and secret values: `sqlite:<path>` or `memory:`. |
-| `--tls-cert` | `KERNABLE_KERNEL_TLS_CERT` | — | Mutual TLS, TCP only: the kernel's certificate (PEM; `kernable certs new` writes development ones). Needs `--tls-key` and `--tls-client-ca` too. |
-| `--tls-key` | `KERNABLE_KERNEL_TLS_KEY` | — | The kernel certificate's private key (PEM). |
-| `--tls-client-ca` | `KERNABLE_TLS_CLIENT_CA` | — | The CA that signs every client's certificate (PEM). |
-| `--metrics-listen` | `KERNABLE_METRICS_LISTEN` | — | Address for Prometheus metrics (`GET /metrics`), `GET /health` and `GET /ready`; off when empty. |
-| `--ui-listen` | `KERNABLE_UI_LISTEN` | — | Address of the kernel's UI in a browser: the map of services, aggregates and listeners, the live connections and every aggregate's history. Loopback only, no login: for development. Off when empty; `--dev` turns it on at 127.0.0.1:7234. |
-| `--lease-ttl-ms` | `KERNABLE_LEASE_TTL_MS` | `10000` | How long a worker may run a command before it goes to another worker. |
-| `--checkpoint-interval-ms` | `KERNABLE_CHECKPOINT_INTERVAL_MS` | `5000` | How often the kernel signs a checkpoint of the hash chain. |
-| `--submit-timeout-ms` | `KERNABLE_SUBMIT_TIMEOUT_MS` | `30000` | How long a submit waits for its command to complete before it answers with an error (the command still runs; resubmit it to get the result). |
-| `--settle-timeout-ms` | `KERNABLE_SETTLE_TIMEOUT_MS` | `5000` | How long a settling submit waits for listeners after the commit. |
-| `--query-timeout-ms` | `KERNABLE_QUERY_TIMEOUT_MS` | `5000` | How long a query waits for a read model to catch up and answer. |
-| `--middleware-timeout-ms` | `KERNABLE_MIDDLEWARE_TIMEOUT_MS` | `5000` | How long a request waits for one middleware to catch up and give its verdict. |
-| `--drain-timeout-ms` | `KERNABLE_DRAIN_TIMEOUT_MS` | `10000` | On SIGTERM or SIGINT: how long running submits and queries may still finish. |
+| `--root` | `KERNABLE_ROOT` | **required** | A root key the kernel trusts: its key ID (hex) or the path of its `.pub` file. Only a root key can sign grants and revocations. Repeat the flag for several roots, for example while you replace one; the variable takes them comma-separated. At least one is required; `--dev` uses `root.pub` if none is given. |
+| `--kernel-key` | `KERNABLE_KERNEL_KEY` | `kernel.key` | The kernel's own signing key, written by `kernable keys new kernel`. It signs checkpoints and stored revocations. The file must exist. On Unix, SIGHUP reads it again, so a new key signs from then on without a restart. |
+
+## Stores
+
+Where the kernel keeps what. A store URL names a backend: `sqlite:<path>` (or a bare path), `file:<path>` or `memory:`; not every store takes every backend. `memory:` keeps nothing across a restart and is for tests. What to back up: [Back up and restore](../how-to/backup).
+
+| Flag | Variable | Default | Description |
+|---|---|---|---|
+| `--store` | `KERNABLE_STORE` | `sqlite:kernable.db` | The event store. It also holds the command queue and results, checkpoints, revocations and registrations. `sqlite:<path>` or a bare path: SQLite. `file:<path>`: an append-only log file. `memory:`: nothing survives the process, for tests. |
+| `--snapshots` | `KERNABLE_SNAPSHOTS` | `memory:` | The snapshot store, a cache of aggregate states that workers rebuild from the events. `sqlite:<path>` or a bare path: SQLite, kept across restarts. `memory:`: lost on a restart, so the first command per aggregate reads all its events again. Not `file:`. |
+| `--vault-key` | `KERNABLE_VAULT_KEY` | — | The key that encrypts the vault: a file with 32 random bytes, hex encoded (`kernable keys new vault` writes one). Without it the kernel has no vault: commands and events with vault values are refused. `--dev` uses `vault.key` if none is given. |
+| `--vault-store` | `KERNABLE_VAULT_STORE` | `sqlite:vault.db` | Where the vault keeps personal and secret values, encrypted with `--vault-key`. `sqlite:<path>` or a bare path: SQLite. `memory:`: every value is lost on a restart, for tests. Not `file:`. Ignored without `--vault-key`. |
+| `--data-store` | `KERNABLE_DATA_STORE` | `file:data` | Where the data service keeps files. `file:<directory>`: one file per stored file, the directory is created with the first one. `memory:`: lost on a restart. |
+| `--cache-store` | `KERNABLE_CACHE_STORE` | `memory:` | Where the cache service keeps values. Only `memory:` exists: values last until they expire, are deleted, or the kernel restarts. |
+
+## Network
+
+Where the kernel listens. Plain TCP only on a loopback address; anything else needs mutual TLS ([Set up TLS](../how-to/tls)). The metrics and UI addresses serve plain HTTP with no login ([Monitor kernable](../how-to/monitor)).
+
+| Flag | Variable | Default | Description |
+|---|---|---|---|
+| `--listen` | `KERNABLE_LISTEN` | `127.0.0.1:7233` | The gRPC address for every service and client: `host:port`, or `unix:<path>` on Unix. Plain TCP is accepted only on a loopback address (`127.0.0.1`, `::1`, `localhost`); any other address needs mutual TLS (`--tls-cert`, `--tls-key`, `--tls-client-ca`), or the kernel does not start. |
+| `--tls-cert` | `KERNABLE_KERNEL_TLS_CERT` | — | Mutual TLS on a TCP `--listen`: the kernel's certificate (PEM). `kernable certs new` writes development certificates. Give all three TLS flags or none; TLS with a `unix:` address is an error. |
+| `--tls-key` | `KERNABLE_KERNEL_TLS_KEY` | — | Mutual TLS: the private key of `--tls-cert` (PEM). |
+| `--tls-client-ca` | `KERNABLE_TLS_CLIENT_CA` | — | Mutual TLS: the CA certificate (PEM) that must have signed every client's certificate. A client without one is refused. |
+| `--metrics-listen` | `KERNABLE_METRICS_LISTEN` | — | A TCP `host:port` for plain HTTP with no login: Prometheus metrics at `GET /metrics`, `GET /health` and `GET /ready`. Bind it to a private address. Off when empty. If the address cannot be bound, the kernel stops. |
+| `--ui-listen` | `KERNABLE_UI_LISTEN` | — | A TCP `host:port` for the kernel's UI in a browser: the map of services, aggregates and listeners, the live connections, and every aggregate's history. It has no login, so the address must be loopback, or the kernel does not start. If the address is taken, the kernel runs on without the UI and logs `the UI is off`. Off when empty; `--dev` sets `127.0.0.1:7234` unless it is given. |
+
+## Timeouts and intervals
+
+A timeout ends the wait, not the work: what happens then is in each row and in [Failures and recovery](../concepts/failures).
+
+| Flag | Variable | Default | Description |
+|---|---|---|---|
+| `--lease-ttl-ms` | `KERNABLE_LEASE_TTL_MS` | `10000` | How long a worker holds a command, in milliseconds. If its result has not arrived by then, the command goes to another worker and a late result is ignored. A worker that disconnects gives its commands back at once. Set it above your slowest command handler. |
+| `--checkpoint-interval-ms` | `KERNABLE_CHECKPOINT_INTERVAL_MS` | `5000` | How often, in milliseconds, the kernel signs a checkpoint of the hash chain with `--kernel-key`, if new events arrived. Events after the last checkpoint are not yet covered by a signature (`kernable verify` counts them). |
+| `--submit-timeout-ms` | `KERNABLE_SUBMIT_TIMEOUT_MS` | `30000` | How long a submit waits for its command to be committed or rejected, in milliseconds. After that the client gets `DEADLINE_EXCEEDED`, but the command stays queued and still runs: resubmit it with the same command ID to get the result. |
+| `--settle-timeout-ms` | `KERNABLE_SETTLE_TIMEOUT_MS` | `5000` | How long a settling submit (the default) waits after the commit for the listeners that count to process the events, in milliseconds. After that the client gets the committed outcome marked as not settled (`NotSettled` in the SDKs). |
+| `--query-timeout-ms` | `KERNABLE_QUERY_TIMEOUT_MS` | `5000` | How long a query waits, in milliseconds, for a read model that answers it to catch up and answer. After that the client gets `DEADLINE_EXCEEDED`. |
+| `--middleware-timeout-ms` | `KERNABLE_MIDDLEWARE_TIMEOUT_MS` | `5000` | How long a request waits for each middleware in its chain to catch up and give its verdict, in milliseconds. After that the request is refused with `DEADLINE_EXCEEDED`: middleware fails closed. |
+| `--drain-timeout-ms` | `KERNABLE_DRAIN_TIMEOUT_MS` | `10000` | On SIGTERM or SIGINT, the kernel refuses new submits and queries and waits this long, in milliseconds, for running ones to finish before it exits. Commands still unfinished run again after a restart. |

@@ -2,59 +2,150 @@
 
 # TypeScript SDK
 
-`npm install @kernable/sdk` (Node ≥ 22.18). Generated from the TSDoc in `sdks/typescript/src`.
+```sh
+npm install @kernable/sdk
+```
+
+The SDK needs Node.js ≥ 22.18, which runs TypeScript files directly (`node app.ts`), and an ES module project (`"type": "module"` in `package.json`). A read model with a store uses `node:sqlite`.
+
+## In one file
+
+A cart aggregate run by a worker, a read model that counts its items, a submit and a query. Start a kernel with `kernable start --dev` first; it creates the `app.key` the client signs with ([Getting started](../tutorial/getting-started)).
+
+```ts
+import { Kernable, Rejected, domain } from "@kernable/sdk";
+
+const shopDomain = domain("shop");
+
+// Write side: the aggregate decides commands into events.
+const cart = shopDomain.aggregate("cart", { items: 0 });
+cart.apply("ItemAdded", (state, data: { qty: number }) => { state.items += data.qty; });
+cart.command("AddItem", (_state, data: { sku: string; qty: number }) => {
+  if (data.qty < 1) throw new Rejected("qty must be at least 1", "invalid_qty");
+  return [{ type: "ItemAdded", data }];
+});
+
+// Read side: the read model builds a view from the events and answers queries.
+const carts = shopDomain.readModel("carts");
+const items = new Map<string, number>();
+carts.on("ItemAdded", (data: { qty: number }, evt) => {
+  items.set(evt.aggregateId, (items.get(evt.aggregateId) ?? 0) + data.qty);
+});
+carts.query("GetCart", (data: { id: string }) => ({ items: items.get(data.id) ?? 0 }));
+
+const kernable = new Kernable({ key: "app.key" });
+const worker = kernable.worker(cart);
+const readModel = kernable.listener(carts);
+void worker.run();
+void readModel.run();
+await Promise.all([worker.ready, readModel.ready]);
+
+// submit returns once the command settled: the read model already has the event.
+const outcome = await kernable.submit({
+  domain: "shop", aggregateType: "cart", aggregateId: "c1", type: "AddItem", data: { sku: "apple", qty: 2 },
+});
+console.log(outcome.committed); // true
+console.log(await kernable.query({ domain: "shop", type: "GetCart", data: { id: "c1" } }));
+// { items: 2 } on the first run; the events stay, so every run adds 2
+
+worker.stop();
+readModel.stop();
+kernable.close();
+```
+
+In a real service, the worker and the read model run as one app, `await kernable.app({ service: "shop", domains: [shopDomain] }).run()`, and the submit comes from your API.
+
+## How this page is ordered
+
+The items are generated from the TSDoc in `sdks/typescript/src`, in source order: errors (`Rejected`, `NotSettled`), what handlers get (`RequestContext`, `CommandContext`, `QueryContext`, `ListenerContext`, `StoredEvent`, `Outcome`), the definitions (`domain()`, [`Domain`](#domain), [`Aggregate`](#aggregate), `EventSchema`, `CommandSchema`), the client ([`Kernable`](#kernable), [`App`](#app), `Data`, `Cache`, `Subscription`), the processes ([`Listener`](#listener), `ListenerHandle`, `Worker`), and the read model [`Store`](#store). Each item lists its public members with their signatures; an interface named `...Options` holds the options of the method or class it is named after (`SubmitOptions` for `Kernable.submit`, `ListenerOptions` for `Domain.readModel` and `Domain.reactor`).
+
+The concepts behind the terms used here: [Event sourcing](../concepts/event-sourcing) (aggregates, commands, events), [Order and consistency](../concepts/ordering) (settled and committed, order, which listeners count, dynamic and live listeners), [Queries and middleware](../concepts/queries-and-middleware), [Data over time](../concepts/data) (event versions and upcasts, the vault, stores) and [Trust](../concepts/trust) (keys and grants).
+
+## Reference
 
 ### Rejected
 
-Throw from a command handler to reject the command with a business reason.
+A refusal with a business reason: throw it from a command handler, a query handler or a
+middleware. `code` is a short machine-readable reason (default `"rejected"`), `message` the
+text for people.
 
-- `readonly code: string`
+- From a command handler: the command is rejected and stored as rejected, with no events;
+  `submit` returns `{ committed: false, code, message }`, it does not throw.
+- From a query handler or a middleware: the request is refused; `Kernable.query` throws a
+  `Rejected` with the same code and message.
+
+Any other error a handler throws rejects too, with the code `handler_error` (a middleware's:
+`middleware_error`).
+
+```ts
+if (state.checkedOut) throw new Rejected("Cart is checked out"); // code: "rejected"
+if (!state.open) throw new Rejected("Cart was never opened", reason); // reason: a code of your own
+```
+
+- `readonly code: string`: The reason as a code, e.g. `not_found`; `"rejected"` unless given.
 
 ### NotSettled
 
-The command was committed, but not every listener processed its events within the kernel's
-`--settle-timeout-ms`. Read models may not show the change yet; `outcome` has the events.
+Thrown by a settling `submit` (`wait: "settled"`, the default) when the command was committed
+but not every listener that counts processed its events within the kernel's
+`--settle-timeout-ms` (default 5 s). The command is not lost, so do not submit it again under a
+new ID: read models may just not show the change yet. Submitting again with the same `id` returns the
+same outcome; a query with `minPosition` waits for the events.
 
-- `readonly outcome: { committed: true; events: StoredEvent[] }`
+```ts
+try {
+  await kernable.submit({ domain: "shop", aggregateType: "cart", aggregateId: "c1", id: commandId, type: "AddItem", data });
+} catch (err) {
+  if (!(err instanceof NotSettled)) throw err;
+  const position = err.outcome.events.at(-1)?.position ?? 0; // committed, not yet settled
+}
+```
+
+- `readonly outcome: { committed: true; events: StoredEvent[] }`: The committed outcome, with the stored events.
 
 ### NewEvent
 
-An event returned by a command handler; `data` is stored as JSON.
+An event a command handler returns: `{ type: "ItemAdded", data: { sku, qty } }`. The worker
+stores it at the payload version declared with `Domain.event` (1 if not declared) and moves
+fields declared `personal` to the vault.
 
-- `type: string`
-- `data?: unknown`
+- `type: string`: The event type within the aggregate's domain, unqualified: `ItemAdded`.
+- `data?: unknown`: The payload; must survive a JSON round trip. Omitted, it is stored as `{}`.
 
 ### RequestContext
 
-Who sends a request and in which context: signed with the command and stored with every
-event it causes. `attributes` are business data only, never security decisions.
+Who sends a request and in which context: signed with the command or query and stored with
+every event a command causes. Middleware decides on it; `ListenerContext.follow()` passes it on
+to follow-up commands. All fields are optional; what the sender fields hold is up to your
+application. `attributes` are business data only, never security decisions. See
+[The request context](../concepts/queries-and-middleware#the-request-context).
 
-- `senderTenant?: string`
-- `senderIdentity?: string`
-- `senderAccount?: string`
-- `senderSession?: string`
+- `senderTenant?: string`: The sender's tenant, as your application defines it.
+- `senderIdentity?: string`: The person or system the request is for: who middleware checks.
+- `senderAccount?: string`: The sender's account, as your application defines it.
+- `senderSession?: string`: The sender's session, as your application defines it.
 - `onBehalfOf?: string`: Authorize as this identity of the target tenant; the sender stays the real principal.
 - `expectedVersion?: number`: Reject the command (`version_mismatch`) unless the aggregate is at this version.
 - `correlationId?: string`: Shared by everything one original request causes; defaults to the command ID.
-- `causationId?: string`: The command that caused this one.
-- `traceId?: string`
-- `bypassAuthorization?: boolean`: Privileged: only keys granted `privileged` for it may set it.
-- `attributes?: Record<string, string>`
+- `causationId?: string`: The command that caused this one (`follow()` sets it).
+- `traceId?: string`: Your tracing system's ID.
+- `bypassAuthorization?: boolean`: Privileged: only keys granted `privileged` for `bypass_authorization` may set it; what it means, middleware decides.
+- `attributes?: Record<string, string>`: Free key-value pairs for business data, never for security decisions.
 
 ### CommandMeta
 
-What a command handler gets about the command besides its data.
+What a command handler gets about the command besides its data (its third argument, `cmd`).
 
-- `commandId: string`
+- `commandId: string`: The command's ID: the idempotency key (`SubmitOptions.id`) or a generated UUID.
 - `type: string`: The command type within the domain.
 - `domain: string`
-- `aggregateType: string`
+- `aggregateType: string`: The aggregate type, unqualified: `cart`.
 - `aggregateId: string`
 - `tenant: string`
 
 ### CommandContext
 
-What a command handler gets besides state, data and `CommandMeta`.
+What a command handler gets besides state, data and `CommandMeta` (its fourth argument, `ctx`).
 
 - `request: RequestContext`: Who sends the command: check permissions here.
 - `now(): Date`: When the kernel received the command: the same every time the command runs. Use it instead of `new Date()`.
@@ -63,48 +154,62 @@ What a command handler gets besides state, data and `CommandMeta`.
 
 ### QueryMeta
 
-What a query handler gets about the query besides its data.
+What a query handler gets about the query besides its data (its second argument, `qry`).
 
-- `queryId: string`
+- `queryId: string`: A new UUID per query.
 - `type: string`: The query type within the domain.
 - `domain: string`
 - `tenant: string`
 
 ### QueryContext
 
-What a query handler gets besides the query's data and `QueryMeta`.
+What a query handler gets besides the query's data and `QueryMeta` (its third argument, `ctx`).
 
 - `request: RequestContext`: Who asks: check permissions here.
 - `store?: Store`: The listener's store, if it has one (`ListenerOptions.store`).
 
 ### QueryOptions
 
+A query for `Kernable.query`: which query type to ask, with which data. The kernel routes it
+to the read model that answers `domain.type`.
 
+```ts
+const cart = await kernable.query<Cart>({ domain: "shop", type: "GetCart", data: { id: "c1" } });
+```
 
-- `domain: string`
-- `type: string`: The query type within the domain.
-- `data?: unknown`
-- `tenant?: string`
-- `context?: RequestContext`: Replaces the client's default context.
-- `minPosition?: number`: Answer only after the read model has processed this global position (e.g. of a `committed` submit).
+- `domain: string`: The domain of the query type: `shop`.
+- `type: string`: The query type within the domain: `GetCart`.
+- `data?: unknown`: The query's data, sent as JSON; the handler gets it as its first argument.
+- `tenant?: string`: Default: the client's tenant (`Options.tenant`).
+- `context?: RequestContext`: Replaces the client's default context (`Options.context`).
+- `minPosition?: number`: Answer only after the read model has processed this global position, e.g. the last event's `position` of a `committed` submit. Default 0: answer at once.
 
 ### Check
 
-A command or query a middleware checks, before the kernel accepts or routes it or after.
+A command or query a middleware checks (the handler's first argument), before the kernel
+accepts or routes it, or after. Vault fields of a command's data are filled in only for a
+middleware before the request whose key is granted `vault_read`; else they are `null`.
 
-- `kind: "command" | "query"`
+- `kind: "command" | "query"`: Whether a command or a query is checked; the fields below depend on it.
 - `id: string`: The command or query ID.
 - `tenant: string`
 - `domain: string`
 - `type: string`: The command or query type within the domain.
 - `aggregateType?: string`: Commands only.
-- `aggregateId?: string`
-- `data: unknown`
+- `aggregateId?: string`: Commands only.
+- `data: unknown`: The command's or query's data.
 - `request: RequestContext`: Who sends it: check permissions here.
 
 ### MiddlewareOptions
 
+What a middleware checks and where it sits in the chain: the first argument of
+`Listener.middleware`.
 
+```ts
+policy.middleware({ types: ["shop.*"] }, (check) => {
+  if (!check.request.senderIdentity) throw new Rejected("sign in first");
+});
+```
 
 - `types: string[]`: Command and query types it checks: `*` (all), a type of the listener's own domain (`Type`), another domain's type (`domain.Type`) or a whole domain (`domain.*`).
 - `when?: "before" | "after"`: `before` (default): checks a request before the kernel accepts it; throwing refuses it. `after`: gets the request's outcome too. Throwing refuses a query's response; a command's outcome, and a rejected query, it only observes, best effort (it misses what happens while it is away, and nobody waits for it).
@@ -112,10 +217,10 @@ A command or query a middleware checks, before the kernel accepts or routes it o
 
 ### ListenerContext
 
-What a listener handler gets besides the event's data and `StoredEventMeta`.
+What a listener handler gets besides the event's data and `StoredEventMeta` (its third argument, `ctx`).
 
-- `replaying: boolean`: The event was committed before the listener connected: it is being replayed.
-- `follow(): RequestContext`: A request context for commands caused by this event: same sender and correlation.
+- `replaying: boolean`: The event was committed before the listener connected (this connect): it is being replayed. A reactor can skip side effects that only matter for new events.
+- `follow(): RequestContext`: A request context for commands caused by this event: same sender and correlation, the event's command as `causationId`, without `expectedVersion` and `bypassAuthorization`. Pass it as `SubmitOptions.context`.
 - `request: RequestContext`: The request context of the command that caused the event.
 - `store?: Store`: The listener's store, if it has one (`ListenerOptions.store`).
 
@@ -125,13 +230,13 @@ What `apply` gets about an event besides its data. Only fields known before the 
 the event, so a snapshot and a replay compute the same state; put a time into the data
 (`ctx.now()`) if the state needs one.
 
-- `type: string`
+- `type: string`: The event type within its domain: `ItemAdded`.
 - `version: number`: The aggregate's version after this event: 1 for its first event.
 - `tenant: string`
 - `domain: string`: Always the domain of the command that caused the event.
-- `aggregateType: string`
+- `aggregateType: string`: The aggregate type, unqualified: `cart`.
 - `aggregateId: string`
-- `commandId: string`
+- `commandId: string`: The command that produced the event.
 
 ### ApplyContext
 
@@ -142,17 +247,20 @@ What `apply` gets besides state, data and `EventMeta`. Nothing that differs betw
 
 ### StoredEventMeta
 
-What a listener handler gets about an event besides its data and request context.
+What a listener handler gets about an event besides its data and request context (its second
+argument, `evt`): the `EventMeta` fields plus where the event is in the log.
 
-- `position: number`
+- `position: number`: The event's global position: its place in the one order of all domains and tenants.
 - `schema: number`: Version of the payload format. Listeners get `data` upcast to the version they know (see `Domain.event`), unless the handler is `raw`.
 - `redacted: string[]`: Fields kept in the vault whose value is not here (`null` in `data`): erased, or not readable with this key (granted `vault_read`).
 
 ### StoredEvent
 
-An event as stored by the kernel.
+An event as stored by the kernel, with its data and request context: in a submit's `Outcome`
+and in a subscription (`Kernable.subscribe`). Its `data` is as stored, not upcast; vault fields
+are `null` here and listed in `redacted`.
 
-- `data: unknown`
+- `data: unknown`: The payload as stored.
 - `request: RequestContext`: The request context of the command that caused the event.
 
 ### Outcome
@@ -163,7 +271,14 @@ export type Outcome =
   | { committed: false; code: string; message: string };
 ```
 
+What came of a command (`Kernable.submit`): committed with the events it stored, or rejected
+with a code and message (by its handler, a middleware or the kernel, e.g. `version_mismatch`).
+A rejection is a result, not an exception; check `committed`:
 
+```ts
+const outcome = await kernable.submit({ domain: "shop", aggregateType: "cart", aggregateId: "c1", type: "CheckOut" });
+if (!outcome.committed) console.log(outcome.code, outcome.message);
+```
 
 ### QueryOutcome
 
@@ -185,31 +300,46 @@ An event to fold: type, payload version and data, plus as much of `EventMeta` an
 
 ### AggregateOptions
 
-
+Snapshot settings of an aggregate: the third argument of `Domain.aggregate`. Snapshots are a
+cache of the state; without one, the worker folds all events of the aggregate.
 
 - `snapshotEvery?: number`: Send a snapshot of the state every this many events (default 100; 0 turns them off).
 - `schema?: string`: Version of the state format (default "1"). Change it when `apply` produces differently shaped state; older snapshots are then ignored and the state is rebuilt from the events.
 
 ### EventSchema
 
-The payload format of one event type: its current version and the steps that bring older
-payloads up to it. Events are stored as written and never changed; readers upcast them.
+The payload format of one event type: its current version, the steps that bring older
+payloads up to it, and which fields go to the vault. Create it with `Domain.event`; its
+methods return it, so they chain. Events are stored as written and never changed; readers
+upcast them. See [Data over time](../concepts/data).
 
-- `readonly type: string`
-- `readonly schema: number`
-- `readonly steps = new Map<number, Upcast>()`
+```ts
+shopDomain.event("ItemAdded", 2).upcast(1, (d) => ({ sku: d.sku, count: d.qty }));
+identityDomain.event("AccountRegistered", 1).personal(["name", "email"], (_d, id) => id);
+identityDomain.event("AccountErased", 1).erases((_d, id) => id);
+```
+
+- `readonly type: string`: The event type within its domain, unqualified.
+- `readonly schema: number`: The current payload version (from 1): what workers write and readers get.
+- `readonly steps = new Map<number, Upcast>()`: The upcasts by the version they start from.
 - `readonly vault = new VaultFields()`: The fields kept in the vault; see `personal`.
 - `eraser?: Subject`: The subject (person) this event erases, if it is an erasing event; see `erases`.
 - `personal<D = any>(fields: string[], subject: (data: D, aggregateId: string) => string): this`: Keeps these top-level fields in the vault, as personal data of the subject `subject` returns from the payload and the aggregate's ID (e.g. `(d) => d.customerId`, or `(_d, id) => id` for the aggregate itself). Events then hold only references; the kernel hands the values to workers and to listeners allowed to read them, until an event erases the subject.
 - `erases<D = any>(subject: (data: D, aggregateId: string) => string): this`: Makes this an erasing event: it deletes every vault value of the subject `subject` returns, in every stream, and the snapshots that may hold them. Read models should drop the subject's data when they see it; rebuilt, they read `null`.
-- `upcast<D = any>(from: number, fn: (data: D) => unknown): this`: Turns a payload of version `from` into one of version `from + 1`.
+- `upcast<D = any>(from: number, fn: (data: D) => unknown): this`: Turns a payload of version `from` into one of version `from + 1`; `fn` gets the old payload and returns the new one. Steps chain: version 1 reaches 3 through `upcast(1, …)` and `upcast(2, …)`. Throws unless `from` is between 1 and `schema - 1`. A reader that lacks a step stops at such an event instead of misreading it.
 
 ### CommandSchema
 
-How a command's payload is kept: which fields go to the vault.
+How a command's payload is kept: which fields go to the vault instead of the signed log.
+Create it with `Domain.command`; its methods return it, so they chain. The submitting client
+seals the fields, so it needs the domain: `kernable.use(domain)`.
 
-- `readonly type: string`
-- `readonly vault = new VaultFields()`
+```ts
+identityDomain.command("Register").personal(["name", "email"], (_d, id) => id).secret(["password"]);
+```
+
+- `readonly type: string`: The command type within its domain, unqualified.
+- `readonly vault = new VaultFields()`: The fields kept in the vault; see `personal` and `secret`.
 - `personal<D = any>(fields: string[], subject: (data: D, aggregateId: string) => string): this`: Keeps these top-level fields in the vault as personal data of `subject`; see `EventSchema.personal`.
 - `secret(fields: string[]): this`: Keeps these top-level fields (passwords, one-time tokens) in the vault only until the command completed. The handler gets them in clear; the stored command keeps a reference.
 
@@ -218,24 +348,38 @@ How a command's payload is kept: which fields go to the vault.
 A domain: a name that scopes its aggregates, commands and events, lowercase by convention
 (`orders`) like aggregates, while message types are capitalized (`orders.PlaceOrder`). Both
 cases are valid; names are case-sensitive. Types are unique within a domain; elsewhere they
-are named `domain.Type`.
+are named `domain.Type`. Create it with `domain(name)`.
 
-- `readonly name: string`
+Everything is defined on it: aggregates (`aggregate`), read models (`readModel`), reactors
+(`reactor`), event versions and vault fields (`event`, `command`). `Kernable.app` runs all of
+it; `Kernable.worker` and `Kernable.listener` run parts. See [Domains](../concepts/domains).
+
+```ts
+const shopDomain = domain("shop");
+const cart = shopDomain.aggregate("cart", { items: 0 });
+const carts = shopDomain.readModel("carts");
+const mailer = shopDomain.reactor("mailer");
+```
+
+- `readonly name: string`: The domain's name: `shop`.
 - `readonly events = new Map<string, EventSchema>()`: Payload versions and upcasts per event type; types not listed are at version 1.
 - `readonly commands = new Map<string, CommandSchema>()`: Vault fields per command type; see `command`.
 - `readonly aggregates: Aggregate<any>[] = []`: The aggregates defined on it, which `Kernable.app` runs.
 - `readonly listeners: Listener[] = []`: The read models and reactors defined on it, which `Kernable.app` runs.
-- `event(type: string, schema: number): EventSchema`: Declares that this domain writes `type` events at version `schema`, with an `upcast` per older version. The domain's aggregates and listeners use it; listeners of other domains get it with `use(domain)`.
-- `command(type: string): CommandSchema`: Declares which fields of `type` commands the vault keeps (`personal`, `secret`). Clients that submit them need the domain: `kernable.use(domain)`.
-- `aggregate<S>(name: string, initial: S, options?: AggregateOptions): Aggregate<S>`
-- `readModel(name: string, options: ListenerOptions = {}): Listener`: Defines a read model: kept in memory and rebuilt from the first event on every start (defaults: order 0, start 0). Run it with `kernable.listener(definition)`.
-- `reactor(name: string, options: ListenerOptions = {}): Listener`: Defines a reactor: triggers side effects; starts at the newest event when it is new, then resumes after the last acknowledged event (defaults: order 10, no start). A settling submit from its handler waits for the listeners before it (the read models), not for the reactor itself, which handles one event at a time. Run it with `kernable.listener(definition)`.
+- `event(type: string, schema: number): EventSchema`: Declares the payload format of `type` events (unqualified): this domain writes them at version `schema` (from 1), with an `upcast` per older version, and may keep fields in the vault (`personal`) or erase a subject (`erases`). Returns the `EventSchema` to chain on. Types not declared are at version 1. The domain's aggregates and listeners use it; listeners of other domains get it with `use(domain)`. Throws for a qualified type or a version below 1.
+- `command(type: string): CommandSchema`: Declares which fields of `type` commands (unqualified) the vault keeps: returns the `CommandSchema` to chain `personal` and `secret` on. Only needed for commands with such fields. Clients that submit them need the domain: `kernable.use(domain)`.
+- `aggregate<S>(name: string, initial: S, options?: AggregateOptions): Aggregate<S>`: Defines an aggregate type `name` (`cart`) of this domain, with the state `initial` every aggregate of it starts from: `shopDomain.aggregate("cart", { items: 0 })`. Add its event appliers and command handlers with `apply` and `command`; run it with `kernable.worker(cart)` or `kernable.app`. `options`: snapshots, see `AggregateOptions`.
+- `readModel(name: string, options: ListenerOptions = {}): Listener`: Defines a read model named `name`: a listener that builds a view from events (`on`) and answers queries from it (`query`). Without a store it is kept in memory and rebuilt from the first event on every start (defaults: order 0, start 0); with `options.store` it continues where it left off. `options` override the defaults, see `ListenerOptions`. Run it with `kernable.listener(definition)` or `kernable.app`.
+- `reactor(name: string, options: ListenerOptions = {}): Listener`: Defines a reactor named `name`: a listener that triggers side effects and follow-up commands. It starts at the newest event when it is new, then resumes after the last acknowledged event (defaults: order 10, no start), so it never reacts to what happened before it existed. Submit follow-ups with a fixed command `id` and `ctx.follow()`, so a redelivered event is harmless. A settling submit from its handler waits for the listeners before it (the read models), not for the reactor itself, which handles one event at a time. Run it with `kernable.listener(definition)` or `kernable.app`.
 
 ### domain()
 
 `export function domain(name: string): Domain`
 
-
+Creates a domain named `name`: `const shopDomain = domain("shop")`. A name starts with a
+letter, followed by letters, digits, `_` or `-`; anything else throws. Processes that share a
+domain (a worker and a read model in another process) each create it with the same name and
+the same `event` and `command` declarations.
 
 ### Aggregate
 
@@ -243,104 +387,154 @@ An aggregate: how events change its state (`apply`) and which events a command p
 (`command`). Handlers must be deterministic and free of side effects; they may run again.
 The state must survive a JSON round trip, because snapshots store it as JSON. An aggregate
 belongs to a domain and produces events only of that domain; create it with
-`domain(...).aggregate(...)`.
+`domain(...).aggregate(...)`. `apply` and `command` return the aggregate, so they chain.
 
-- `readonly domain: string`
-- `readonly name: string`
-- `readonly initial: S`
-- `readonly snapshotEvery: number`
-- `readonly schema: string`
-- `readonly appliers = new Map<string, Apply<S>>()`
-- `readonly handlers = new Map<string, Handle<S>>()`
+A worker runs a command like this: it folds the aggregate's events (from the latest snapshot,
+if any) into the state, calls the command's handler, and sends the events it returns. The
+kernel commits them only on the version the state was folded from; if another command came
+first, the command runs again on the new state.
+
+```ts
+const cart = shopDomain.aggregate("cart", { items: 0, checkedOut: false });
+cart.apply("ItemAdded", (state, data: { qty: number }) => { state.items += data.qty; });
+cart.command("AddItem", (state, data: { sku: string; qty: number }) => {
+  if (state.checkedOut) throw new Rejected("Cart is checked out");
+  return [{ type: "ItemAdded", data }];
+});
+```
+
+- `readonly domain: string`: The name of the domain it belongs to.
+- `readonly name: string`: The aggregate type, unqualified: `cart`.
+- `readonly initial: S`: The state every aggregate of this type starts from.
+- `readonly snapshotEvery: number`: See `AggregateOptions.snapshotEvery`.
+- `readonly schema: string`: The state format's version; see `AggregateOptions.schema`.
+- `readonly appliers = new Map<string, Apply<S>>()`: The `apply` functions per event type.
+- `readonly handlers = new Map<string, Handle<S>>()`: The command handlers per command type.
 - `readonly events: Map<string, EventSchema>`: The domain's event schemas.
-- `apply<D = any>(eventType: string, fn: (state: S, data: D, evt: EventMeta, ctx: ApplyContext) => S | void): this`: How an event of `eventType` changes the state: `fn(state, data, evt, ctx)` changes `state` in place and returns nothing, or returns a new state that replaces it. `state` is a copy, so changing it never touches the state it came from.
-- `command<D = any>(commandType: string, fn: (state: S, data: D, cmd: CommandMeta, ctx: CommandContext) => NewEvent[] | Promise<NewEvent[]>): this`: Which events a `commandType` command produces: `fn(state, data, cmd, ctx)` returns them.
+- `apply<D = any>(eventType: string, fn: (state: S, data: D, evt: EventMeta, ctx: ApplyContext) => S | void): this`: How an event of `eventType` (unqualified, of this domain) changes the state: `fn(state, data, evt, ctx)` changes `state` in place and returns nothing, or returns a new state that replaces it. `state` is a copy, so changing it never touches the state it came from. `data` is upcast to the version declared with `Domain.event`. Events without an `apply` leave the state as it is. Must be deterministic: no clock, no random values, no I/O.
+- `command<D = any>(commandType: string, fn: (state: S, data: D, cmd: CommandMeta, ctx: CommandContext) => NewEvent[] | Promise<NewEvent[]>): this`: Which events a `commandType` command (unqualified, of this domain) produces: `fn(state, data, cmd, ctx)` gets the current state and the command's data and returns the events (`NewEvent[]`, possibly empty), or a promise of them. Throw `Rejected` to reject the command. It may run more than once for the same command, so it must decide the same way every time: use `ctx.now()` and `ctx.id()` instead of the clock and random IDs, and leave side effects to reactors.
 - `schemaOf(type: string): number`: The payload version this aggregate writes `type` events at.
-- `fold(history: FoldEvent[], from: S = this.initial): S`: State after `history`, starting from `from`. Events are upcast first; events without an `apply` are skipped. Fields of `EventMeta` an event lacks are empty (0 for `version`), as is its request context.
+- `fold(history: FoldEvent[], from: S = this.initial): S`: State after `history`, starting from `from` (default: `initial`), as a worker computes it; no kernel needed, so it suits tests: `cart.fold([{ type: "ItemAdded", schema: 1, data: { qty: 2 } }])`. Events are upcast first; events without an `apply` are skipped. Fields of `EventMeta` an event lacks are empty (0 for `version`), as is its request context. Throws if an event's schema is newer than declared or an upcast step is missing.
 
 ### App
 
-An app's processes: see `Kernable.app`.
+A service made of whole domains, ready to run: one worker for all their aggregates and one
+`ListenerHandle` per read model and reactor. Create it with `Kernable.app`, start it with
+`run()`.
+
+```ts
+const app = new Kernable({ key: "app.key" }).app({ service: "shop", version: "1.0.0", domains: [shopDomain] });
+await app.run(); // until app.stop()
+```
 
 - `readonly ready: Promise<void>`: Resolves once every worker and listener of the app is connected.
 - `readonly manifest: Manifest`: The membership `run()` applies.
-- `readonly worker?: Worker`
-- `readonly listeners: ListenerHandle[]`
-- `async run(options: WorkerOptions = {}): Promise<void>`: Applies the membership, then runs the worker and the listeners until `stop()`. Once all are connected, it prints an overview of the app (unless `KERNABLE_LOG` is below `info`).
-- `stop(): void`
+- `readonly worker?: Worker`: The worker of all the app's aggregates; none if its domains define no aggregate.
+- `readonly listeners: ListenerHandle[]`: One handle per read model and reactor of the app's domains, live ones included.
+- `async run(options: WorkerOptions = {}): Promise<void>`: Applies the membership (see `Kernable.apply`; the key needs `manage` for the service), then runs the worker and the listeners until `stop()`, reconnecting when a connection drops. `options` go to the worker. Once all are connected, it prints an overview of the app on stderr (unless `KERNABLE_LOG` is below `info`). Rejects if the membership cannot be applied.
+- `stop(): void`: Stops the worker and every listener of the app, so `run()` resolves.
 
 ### Manifest
 
-What a service consists of, for `Kernable.apply`; see `Membership` in kernable.proto.
+What a service consists of, for `Kernable.apply`: its membership, which tells the kernel what
+to wait for. What it lists counts (also before it ever connected); the service's other workers
+and listeners are dynamic: they run, but nobody waits for them. See
+[Who counts](../concepts/ordering#who-counts) and `Membership` in kernable.proto.
+
+```ts
+await kernable.apply({ service: "shop", workers: [cart], listeners: [carts], middlewares: [policy] });
+```
 
 - `service?: string`: Default: this process's service (`Options.service`).
 - `workers?: Aggregate<any>[]`: The aggregates the service runs; the kernel waits for a worker of each.
-- `listeners?: Listener[]`: The listeners the kernel waits for; others of the service count for nobody.
-- `middlewares?: Listener[]`: The service's listeners that may check requests; they count like listeners.
+- `listeners?: Listener[]`: The listeners the kernel waits for, by name; the service's others are dynamic.
+- `middlewares?: Listener[]`: The service's listeners that may check requests (`Listener.middleware`); they count like listeners. Only middlewares listed here check requests.
 - `metadata?: Record<string, string>`: Free metadata, e.g. `{ version: "1.0.0" }`.
 
 ### AppOptions
 
-An app: one service made of whole domains, for `Kernable.app`.
+An app: one service made of whole domains, for `Kernable.app`. `version`, `description` and
+`metadata` go into the membership's metadata and the app's overview.
 
-- `service?: string`: Default: this process's service (`Options.service`).
-- `version?: string`: Goes into the membership's metadata, like `description`.
-- `description?: string`
+- `service?: string`: The service's name. Default: this process's service (`Options.service`); one of them is required.
+- `version?: string`: The app's version, e.g. `1.0.0`.
+- `description?: string`: One line about the app.
 - `metadata?: Record<string, string>`: More metadata.
 - `domains: Domain[]`: Every aggregate, read model and reactor defined on them runs in this app.
 
 ### Options
 
-
+How a `Kernable` client connects: kernel address, key, grant and defaults for its requests.
+Every option has a default, most from an environment variable, so `new Kernable()` works with
+the files `kernable start --dev` creates. The constructor reads the key, grant and TLS files:
+a missing key file, an explicitly named grant file or a missing TLS file throws.
 
 - `url?: string`: Kernel address: `http://host:port` (`host:port` works too) or, on Unix, `unix:/path/to.sock`. Default: `KERNABLE_URL`, else `http://127.0.0.1:7233`, where `kernable start` listens.
-- `key?: string`: Path to this process's `.key` file; used to sign commands and worker results. Default: `KERNABLE_KEY`, else `app.key` in the current directory.
-- `grant?: string`: Path to the key's grant (`kernable grant`), sent with every call. Default: `KERNABLE_GRANT`, else the `.grant` file next to the key file, if there is one.
-- `tenant?: string`: Default tenant for `submit`.
+- `key?: string`: Path to this process's `.key` file; it signs every request, worker result and listener handshake. Default: `KERNABLE_KEY`, else `app.key` in the current directory.
+- `grant?: string`: Path to the key's grant (`kernable grant`), sent with every call. Default: `KERNABLE_GRANT`, else the key file's path with `.grant` for `.key` (`app.grant` for `app.key`), if it exists.
+- `tenant?: string`: Default tenant for `submit`, `enqueue`, `query`, `data` and `cache`. Default: `default`.
 - `service?: string`: The service this process's workers and listeners belong to. Its membership (see `apply`) decides what the kernel waits for: what it lists counts, the service's other workers and listeners are dynamic, and only listeners it lists as middlewares may check requests. Default: `KERNABLE_SERVICE`, else none (everything registered counts).
-- `context?: RequestContext`: Default request context for `submit` and `query`, e.g. this service's identity; a request's own context replaces it.
+- `context?: RequestContext`: Default request context for `submit`, `enqueue` and `query`, e.g. this service's identity; a request's own `context` replaces it as a whole. Default: empty.
 - `tls?: TlsFiles`: Mutual TLS for `host:port` URLs: paths of the CA certificate and this process's certificate and key. Default: `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`, if set.
 
 ### SubmitOptions
 
+A command for `Kernable.submit` and `Kernable.enqueue`: the aggregate it goes to (domain,
+aggregate type and ID), the command type and its data.
 
+```ts
+await kernable.submit({ domain: "shop", aggregateType: "cart", aggregateId: "c1", type: "AddItem", data: { sku: "apple", qty: 2 } });
+```
 
-- `domain: string`
-- `aggregateType: string`
-- `aggregateId: string`
-- `type: string`
-- `data?: unknown`
-- `tenant?: string`
-- `id?: string`: Idempotency key; resubmitting the same ID returns the original outcome.
-- `context?: RequestContext`: Replaces the client's default context; inside a listener, pass `ctx.follow()`.
-- `wait?: "settled" | "committed"`: `"settled"` (default): respond once every listener has processed the events, so read models already show them; throws `NotSettled` on timeout. From a listener's handler, only the listeners with a lower order count. `"committed"`: respond once the events are stored.
+- `domain: string`: The domain of the aggregate and the command type: `shop`.
+- `aggregateType: string`: The aggregate type within the domain: `cart`.
+- `aggregateId: string`: Which aggregate: the stream the command's events go to. A new ID starts a new aggregate.
+- `type: string`: The command type within the domain: `AddItem`.
+- `data?: unknown`: The command's data, sent as JSON; fields declared with `Domain.command` go to the vault.
+- `tenant?: string`: Default: the client's tenant (`Options.tenant`).
+- `id?: string`: The command ID and idempotency key: submitting the same ID again returns the original outcome instead of running the command twice. Default: a new UUID. Give retried commands, and every command a reactor submits, a fixed ID.
+- `context?: RequestContext`: Replaces the client's default context (`Options.context`); inside a listener, pass `ctx.follow()`. Its `correlationId` defaults to the command ID.
+- `wait?: "settled" | "committed"`: When `submit` returns. `"settled"` (default): once every listener that counts has processed the events, so the next query sees them; throws `NotSettled` after `--settle-timeout-ms`. From a listener's handler, only the listeners with a lower order count. `"committed"`: once the events are stored; read with `QueryOptions.minPosition` to see them. To return once the command is only queued, use `Kernable.enqueue`. See [Settling](../concepts/ordering#settling-reading-your-own-writes).
 
 ### Kernable
 
+A client of one kernel: it submits commands, asks queries, and runs workers and listeners
+over its connection. Create one per process; the constructor reads the key, grant and TLS
+files (see `Options`) and connects on the first call. Every request is signed with the key; the kernel checks it against the
+key's grant (see [Trust](../concepts/trust)).
 
+```ts
+const kernable = new Kernable({ key: "app.key" }); // or new Kernable() with the defaults
+const outcome = await kernable.submit({ domain: "shop", aggregateType: "cart", aggregateId: "c1", type: "AddItem", data: { sku: "apple", qty: 2 } });
+const cart = await kernable.query({ domain: "shop", type: "GetCart", data: { id: "c1" } });
+```
+
+Calls the kernel refuses itself (not signed, not granted, no read model for a query, the kernel
+unreachable) reject with the gRPC error, whose `details` say why. Business rejections come
+differently: `submit` returns them in its `Outcome`, `query` throws `Rejected`.
 
 - `readonly data: Data`: Files of a domain kept by the kernel, e.g. invoices; see `Data`.
 - `readonly cache: Cache`: The shared cache of a domain; see `Cache`.
-- `use(...domains: Domain[]): this`: Seals the vault fields of these domains' commands when submitting them; see `Domain.command`.
-- `worker(...aggregates: Aggregate<any>[]): Worker`: Runs these aggregates' commands over this connection. The kernel registers the aggregates: commands for an aggregate or command type no worker registered are refused.
-- `app(options: AppOptions): App`: An app made of whole domains: `run()` applies the service's membership (its domains' aggregates as workers, their read models and reactors as listeners, those that check requests as middlewares; live ones are not listed), then runs all of them. One service is one app: two processes with the same service would replace each other's membership.
-- `async apply(manifest: Manifest): Promise<void>`: Replaces the membership of a service (default: this process's): the workers, listeners and middlewares the kernel waits for, and free metadata. Apply it once per deploy, e.g. from a deploy script, not from every process: the latest apply wins. The key needs `manage` for the service. A middleware the new membership no longer lists stops checking.
-- `async submit(options: SubmitOptions): Promise<Outcome>`: Runs a command and returns its outcome; see `SubmitOptions.wait`.
-- `async enqueue(options: Omit<SubmitOptions, "wait">): Promise<string>`: Stores the command in the kernel's queue and returns its ID without waiting for it to run. Submit it again with the same `id` to get the outcome.
-- `async query<T = unknown>(options: QueryOptions): Promise<T>`: Asks the read model that answers `domain.type` and returns its answer. Queries always go through the kernel, also within one process. Throws `Rejected` if the read model rejects it.
-- `listener(listener: Listener): ListenerHandle`: Runs a listener defined with `Domain.readModel` or `Domain.reactor` over this connection: `await kernable.listener(Carts).run()`. Handlers added to the definition later still count until `run()` connects.
-- `subscribe(options: SubscribeOptions, handler: (event: StoredEvent) => void | Promise<void>): Subscription`: Streams committed events after `options.after` (backlog first, then live) to `handler`, one at a time. Reconnects and resumes after the last handled event; if the handler throws, that event is delivered again. Persist `position` yourself to resume across restarts.
+- `use(...domains: Domain[]): this`: Seals the vault fields of these domains' commands when submitting them (see `Domain.command`); without it, those fields go into the signed log in clear. Returns the client: `new Kernable().use(identityDomain)`.
+- `worker(...aggregates: Aggregate<any>[]): Worker`: A worker for these aggregates: `await kernable.worker(cart).run()` executes their commands until `stop()`. The kernel registers the aggregates when it connects: commands for an aggregate or command type no worker registered are refused. Start as many workers as you like; the kernel spreads commands over them, one at a time per aggregate. Without `Options.service` or a membership, the aggregates count as soon as they are registered.
+- `app(options: AppOptions): App`: An app made of whole domains: `run()` applies the service's membership (its domains' aggregates as workers, their read models and reactors as listeners, those that check requests as middlewares; live ones are not listed), then runs all of them: `await kernable.app({ service: "shop", domains: [shopDomain] }).run()`. Throws if neither `options.service` nor `Options.service` names a service. One service is one app: two processes with the same service would replace each other's membership. To split a service over several processes, run `worker` and `listener` and `apply` the membership yourself.
+- `async apply(manifest: Manifest): Promise<void>`: Replaces the membership of a service (default: this process's): the workers, listeners and middlewares the kernel waits for, and free metadata. Apply it once per deploy, e.g. from a deploy script, not from every process: the latest apply wins. The key needs `manage` for the service. A middleware the new membership no longer lists stops checking. Throws if neither `manifest.service` nor `Options.service` names a service. See [Remove a listener](../how-to/remove-listener).
+- `async submit(options: SubmitOptions): Promise<Outcome>`: Runs a command and returns its outcome: `{ committed: true, events }`, or `{ committed: false, code, message }` if it was rejected (a rejection does not throw). By default it returns once the command settled, so a query right after it sees the events; see `SubmitOptions.wait`. Throws `NotSettled` if the command committed but did not settle in time. Idempotent on `options.id`.
+- `async enqueue(options: Omit<SubmitOptions, "wait">): Promise<string>`: Stores the command in the kernel's queue and returns its ID without waiting for it to run (fire and forget). Submit it again with the same `id` to get the outcome.
+- `async query<T = unknown>(options: QueryOptions): Promise<T>`: Asks the read model that answers `domain.type` and returns its answer, typed as `T` (unchecked): `await kernable.query<Cart>({ domain: "shop", type: "GetCart", data: { id: "c1" } })`. Queries always go through the kernel, also within one process, so grants and middleware apply. The kernel waits until the read model has caught up (and reached `minPosition`). Throws `Rejected` if the read model or a middleware rejects it.
+- `listener(listener: Listener): ListenerHandle`: Runs a listener defined with `Domain.readModel` or `Domain.reactor` over this connection: `await kernable.listener(carts).run()`. Handlers added to the definition later still count until `run()` connects.
+- `subscribe(options: SubscribeOptions, handler: (event: StoredEvent) => void | Promise<void>): Subscription`: Streams committed events after `options.after` (backlog first, then live) to `handler`, one at a time, e.g. to export them: `kernable.subscribe({ types: ["shop.*"] }, (e) => ...)`. Reconnects and resumes after the last handled event; if the handler throws, that event is delivered again. Persist `position` yourself to resume across restarts. Unlike a listener, a subscription is not registered: the kernel keeps no position, nobody waits for it, and events arrive as stored (not upcast, vault fields `null`). The key needs `subscribe` for the types.
 - `close(): void`: Closes the connection now; only needed in a long-running process that discards the client.
 
 ### DataOptions
 
+Options of `Data.get`, `Data.delete`, `Cache.get` and `Cache.delete`: which tenant's file or value.
 
-
-- `tenant?: string`: Default: the client's tenant.
+- `tenant?: string`: Default: the client's tenant (`Options.tenant`).
 
 ### PutDataOptions
 
-
+Options of `Data.put`: the tenant, and the content type stored with the file.
 
 - `contentType?: string`: Default: `text/plain; charset=utf-8` for a string, else `application/octet-stream`.
 
@@ -349,7 +543,14 @@ An app: one service made of whole domains, for `Kernable.app`.
 Files of a domain kept by the kernel under `(tenant, domain, key)`, at most 16 MiB each: PDFs,
 images, exports. Reading needs a grant of `data_read` for the domain (`shop.*`), putting and
 deleting one of `data_write`. Files are not part of the signed event log and are not erased
-with the vault: delete a person's files yourself when erasing them.
+with the vault: delete a person's files yourself when erasing them. Use it as `kernable.data`.
+
+```ts
+await kernable.data.put("shop", "invoices/o1.pdf", pdfBytes, { contentType: "application/pdf" });
+const file = await kernable.data.get("shop", "invoices/o1.pdf"); // { data, contentType } or undefined
+```
+
+See [Store files and cache values](../how-to/data-and-cache).
 
 - `async put(domain: string, key: string, data: Uint8Array | string, options: PutDataOptions = {}): Promise<void>`: Stores `data` under `key`, replacing a file there; a string is stored as UTF-8.
 - `async get(domain: string, key: string, options: DataOptions = {}): Promise<{ data: Uint8Array; contentType: string } | undefined>`: The file under `key`, or `undefined` if there is none.
@@ -357,7 +558,7 @@ with the vault: delete a person's files yourself when erasing them.
 
 ### SetCacheOptions
 
-
+Options of `Cache.set`: the tenant, and when the value expires.
 
 - `ttlMs?: number`: Milliseconds until the value expires; default: until deleted or the kernel restarts.
 
@@ -366,7 +567,15 @@ with the vault: delete a person's files yourself when erasing them.
 The shared cache of a domain: values of at most 1 MiB under `(tenant, domain, key)` that may
 expire, e.g. rates or tokens shared by several processes. Needs a grant of `cache` for the
 domain (`shop.*`). The cache lives in the kernel's memory: a restart empties it. Values are not
-part of the signed event log and are not erased with the vault.
+part of the signed event log and are not erased with the vault. Use it as `kernable.cache`.
+
+```ts
+await kernable.cache.set("shop", "rates/EUR", JSON.stringify(rates), { ttlMs: 60_000 });
+const value = await kernable.cache.get("shop", "rates/EUR"); // Uint8Array or undefined
+if (value) rates = JSON.parse(new TextDecoder().decode(value));
+```
+
+See [Store files and cache values](../how-to/data-and-cache).
 
 - `async set(domain: string, key: string, value: Uint8Array | string, options: SetCacheOptions = {}): Promise<void>`: Stores `value` under `key`, replacing a value there; a string is stored as UTF-8.
 - `async get(domain: string, key: string, options: DataOptions = {}): Promise<Uint8Array | undefined>`: The live value under `key`, or `undefined` if there is none or it expired.
@@ -374,34 +583,42 @@ part of the signed event log and are not erased with the vault.
 
 ### SubscribeOptions
 
+What `Kernable.subscribe` streams: from which position, and which event types.
 
-
-- `after?: number`: Global position of the last event already handled; 0 = from the beginning.
+- `after?: number`: Global position of the last event already handled; 0 = from the beginning (default).
 - `types?: string[]`: Qualified event types (`orders.OrderPlaced`) or domains (`orders.*`); empty = all the key may read.
-- `reconnectMs?: number`
+- `reconnectMs?: number`: Milliseconds to wait before reconnecting after the stream ends (default 1000).
 
 ### Subscription
 
-
+A running subscription, from `Kernable.subscribe`. It streams until `stop()`, reconnecting
+after `position` when the stream drops; `done` resolves after `stop()`.
 
 - `position: number`: Global position of the last handled event.
 - `readonly done: Promise<void>`: Resolves after `stop()`.
-- `stop(): void`
+- `stop(): void`: Stops the subscription: ends its stream; `done` then resolves.
 
 ### ListenerOptions
 
+How a listener runs: its place in the order, where it starts, whether it is live, and where it
+keeps its state. The second argument of `Domain.readModel` and `Domain.reactor`, which set the
+defaults. See [Order and consistency](../concepts/ordering).
 
+```ts
+const carts = shopDomain.readModel("carts", { store: "sqlite:carts.db" });
+const push = shopDomain.reactor("push", { live: true });
+```
 
 - `order?: number`: Listeners with a lower order process each event first; equal orders run in parallel. Defaults: 0 for read models, 10 for reactors. Negative orders are reserved for kernable.
 - `start?: number`: Position to start after on the first connect: 0 rebuilds from the beginning (default for read models); omitted, the kernel resumes after the last acknowledged event, and a new listener starts at the newest event, so it never reacts to what happened before it existed (default for reactors). Reconnects always resume after the last handled event.
 - `live?: boolean`: Not registered with the kernel: no stored position, always starts at the newest event, nobody waits for it, and it is forgotten when it disconnects. For reactions that only matter while the process runs, e.g. pushing to connected browsers. Cannot be a middleware.
-- `reconnectMs?: number`
+- `reconnectMs?: number`: Milliseconds to wait before reconnecting after the stream ends (default 1000).
 - `store?: string`: Keeps the listener's state in a store (`sqlite:<path>` or `memory:`) instead of memory: its data and position are written together per batch, and a restart continues after the stored position (`start` is then ignored). See `ListenerHandle.store`.
 - `schema?: string`: Version of the stored data's format (default "1"). Change it when the handlers store data differently: the store is cleared and the listener rebuilds from the first event.
 
 ### HandlerOptions
 
-
+Options of one event handler: the third argument of `Listener.on`.
 
 - `raw?: boolean`: Get events as stored, without upcasting, whatever their schema (for archives and exports). By default a listener stops at an event whose schema it does not know.
 
@@ -419,58 +636,107 @@ Handlers get event payloads upcast to the versions of the listener's own domain 
 domains it `use`s. An event with a newer schema than known stops the listener (it retries and
 logs) until it is updated, so it never misreads data.
 
+`use`, `on`, `query` and `middleware` return the listener, so they chain:
+
+```ts
+const carts = shopDomain.readModel("carts");
+const rows = new Map<string, { items: number }>();
+carts
+  .on("ItemAdded", (data: { qty: number }, evt) => {
+    const row = rows.get(evt.aggregateId) ?? { items: 0 };
+    row.items += data.qty;
+    rows.set(evt.aggregateId, row);
+  })
+  .query("GetCart", (data: { id: string }) => {
+    const row = rows.get(data.id);
+    if (!row) throw new Rejected("no such cart");
+    return row;
+  });
+```
+
 - `readonly domain: Domain`: The domain the listener is defined on: its unqualified types are of this domain.
 - `readonly name: string`: The listener's name, unique per tenant; the kernel tracks its position under it.
-- `readonly options: ListenerOptions`
+- `readonly options: ListenerOptions`: The options it was defined with, including the defaults of `readModel` or `reactor`.
 - `readonly handlers = new Map<string, { handler: EventHandler; raw: boolean }>()`: Event handlers per qualified event type or domain (`domain.*`).
 - `readonly queries = new Map<string, QueryHandler>()`: Query handlers per qualified query type.
 - `readonly middlewares = new Map<"before" | "after", { options: MiddlewareOptions; handler: MiddlewareHandler }>()`: The middleware handlers and their qualified types, before and after requests.
 - `readonly domains = new Map<string, Domain>()`: The domains whose event schemas upcast events, by name: the own domain and those it `use`s.
 - `use(...domains: Domain[]): this`: Upcasts the events of these other domains with their event schemas (see `Domain.event`).
-- `on<D = any>(eventType: string, handler: (data: D, evt: StoredEventMeta, ctx: ListenerContext) => void | Promise<void>, options: HandlerOptions = {}): this`: Handles events of `eventType`: a type of the own domain (`ItemAdded`), of another domain (`identity.AccountRegistered`) or a whole domain (`identity.*`): `handler(data, evt, ctx)`.
-- `query<D = any, R = unknown>(queryType: string, handler: (data: D, qry: QueryMeta, ctx: QueryContext) => R | Promise<R>): this`: Answers the query type `queryType`, of the own domain (`GetCart`) or another one (`orders.GetOrder`), from this listener's state. The kernel delivers queries in order with the events, so an answer reflects every event handled before it. Throw `Rejected` to refuse. A handler cannot query its own listener (the answer would wait behind itself): the kernel refuses it.
-- `middleware(options: MiddlewareOptions, handler: MiddlewareHandler): this`: Makes this listener a middleware: the kernel asks `handler` about every command and query of `options.types`, before accepting or routing it (or after, see `MiddlewareOptions.when`), in chain order, and only once this listener has caught up with the events. Throw `Rejected` to refuse; any other error refuses too. The registration is stored: while this listener is away, the kernel refuses those requests (`kernable listeners remove` unregisters it). The handler cannot submit or query what it checks itself (it would wait behind itself): the kernel refuses it. A listener has at most one middleware before and one after.
+- `on<D = any>(eventType: string, handler: (data: D, evt: StoredEventMeta, ctx: ListenerContext) => void | Promise<void>, options: HandlerOptions = {}): this`: Handles events of `eventType`: a type of the own domain (`ItemAdded`), of another domain (`identity.AccountRegistered`) or a whole domain (`identity.*`): `handler(data, evt, ctx)` gets the upcast payload, the event's `StoredEventMeta` and a `ListenerContext`. A handler for the exact type wins over one for its domain; one handler per type (a second replaces the first). The listener acknowledges an event only after the handler finished (a returned promise resolved); if it throws, the event is delivered again. With `options.raw`, it gets the payload as stored. Throws for a malformed type.
+- `query<D = any, R = unknown>(queryType: string, handler: (data: D, qry: QueryMeta, ctx: QueryContext) => R | Promise<R>): this`: Answers the query type `queryType`, of the own domain (`GetCart`) or another one (`orders.GetOrder`), from this listener's state. The kernel delivers queries in order with the events, so an answer reflects every event handled before it. `handler(data, qry, ctx)` gets the query's data, its `QueryMeta` and a `QueryContext`, and returns the answer (or a promise of it), sent as JSON. Throw `Rejected` to refuse; any other error refuses with `handler_error`. A handler cannot query its own listener (the answer would wait behind itself): the kernel refuses it. Throws for a malformed type.
+- `middleware(options: MiddlewareOptions, handler: MiddlewareHandler): this`: Makes this listener a middleware: the kernel asks `handler` about every command and query of `options.types`, before accepting or routing it (or after, see `MiddlewareOptions.when`), in chain order, and only once this listener has caught up with the events. Throw `Rejected` to refuse; any other error refuses too. The registration is stored: while this listener is away, the kernel refuses those requests (`kernable listeners remove` unregisters it). The handler cannot submit or query what it checks itself (it would wait behind itself): the kernel refuses it. A listener has at most one middleware before and one after. `handler(check, outcome)` gets the `Check`; after the request, also its `Outcome` (a command) or `QueryOutcome` (a query). The key needs `check` for the types; if its service has a membership, the membership must list it as a middleware (`Kernable.app` does that). Throws for a live listener, a malformed type, or a second middleware at the same `when`. See [Middleware](../concepts/queries-and-middleware#middleware).
 
 ### ListenerHandle
 
 A listener running over a connection: `kernable.listener(definition)`. Events arrive in order,
 one at a time, after every listener with a lower order has processed them. Delivery is at
 least once: if a handler throws, the listener reconnects and the event is delivered again.
+With a store, a batch's data and position are written together, so it takes effect once.
+
+```ts
+const handle = kernable.listener(carts);
+void handle.run(); // until handle.stop()
+await handle.ready;
+```
 
 - `position = 0`: Global position of the last handled event (or skipped, for other event types).
 - `readonly ready: Promise<void>`: Resolves once the kernel accepted the listener.
 - `startedAt = 0`: Position after which the kernel delivered on the first connect.
 - `announce = true`: Whether the first connect gets its own line; an `App` prints it in its overview instead.
 - `readonly listener: Listener`: The definition it runs.
-- `get store(): Store`: The listener's store (`ListenerOptions.store`), once `run()` opened it.
-- `async run(): Promise<void>`: Processes events until `stop()`, reconnecting when the stream drops.
-- `stop(): void`
+- `get store(): Store`: The listener's store (`ListenerOptions.store`), once `run()` opened it; throws before, or if the listener has no store. Handlers get it as `ctx.store`.
+- `async run(): Promise<void>`: Opens the store (if any), connects, and processes events, queries and checks until `stop()`, reconnecting after the last handled event when the stream drops or a handler throws (after `ListenerOptions.reconnectMs`). Resolves after `stop()`.
+- `stop(): void`: Stops the listener: ends its stream, so `run()` resolves.
 
 ### WorkerOptions
 
+How a worker runs: the argument of `Worker.run` and `App.run`.
 
-
-- `concurrency?: number`: Commands executed in parallel.
-- `reconnectMs?: number`: Delay before reconnecting after the session ends.
+- `concurrency?: number`: Commands executed in parallel, of different aggregates (default 16).
+- `reconnectMs?: number`: Milliseconds to wait before reconnecting after the session ends (default 1000).
 
 ### Worker
 
+A worker: runs the commands of its aggregates over a connection. Create it with
+`kernable.worker(...aggregates)` (or let `Kernable.app` do it) and start it with `run()`.
+The kernel leases it one command at a time per aggregate, with the aggregate's events (and
+latest snapshot); the worker folds them, calls the command's handler, and sends back the
+signed events, or the rejection. A command whose handler throws `Rejected` is rejected with
+its code; any other error rejects with `handler_error`. An event whose schema the worker does
+not know ends the session instead (it logs and reconnects until it is updated).
 
+```ts
+await kernable.worker(cart).run({ concurrency: 32 });
+```
 
 - `readonly ready: Promise<void>`: Resolves once the kernel accepted the worker.
 - `announce = true`: Whether the first connect gets its own line; an `App` prints it in its overview instead.
-- `async run(options: WorkerOptions = {}): Promise<void>`: Processes commands until `stop()`, reconnecting when the session drops.
-- `stop(): void`
+- `async run(options: WorkerOptions = {}): Promise<void>`: Registers the aggregates and processes commands until `stop()`, reconnecting when the session drops. Resolves after `stop()`.
+- `stop(): void`: Stops the worker: ends its session, so `run()` resolves.
 
 ### Store
 
+A listener's store: JSON values under `(namespace, key)` in a SQLite file (or in memory),
+written in one transaction with the listener's position per batch of events. So after a crash
+every event has taken effect exactly once, and a restart continues after the stored position
+instead of rebuilding. Give a read model one with `ListenerOptions.store`; its handlers get it
+as `ctx.store` (also query handlers), or use `ListenerHandle.store`. Reads and writes are
+synchronous. Uses `node:sqlite`.
 
+```ts
+const carts = shopDomain.readModel("carts", { store: "sqlite:carts.db" });
+carts.on("ItemAdded", (data: { qty: number }, evt, ctx) => {
+  const row = ctx.store!.get<{ items: number }>("carts", evt.aggregateId) ?? { items: 0 };
+  ctx.store!.set("carts", evt.aggregateId, { items: row.items + data.qty });
+});
+carts.query("GetCart", (data: { id: string }, _qry, ctx) => ctx.store!.get("carts", data.id));
+```
 
-- `committed: number`: The position up to which the stored data is complete.
+- `committed: number`: The global position up to which the stored data is complete: the last committed batch.
 - `static async open(url: string, schema: string): Promise<Store>`: Opens `url` (`sqlite:<path>`, a bare path, or `memory:`). If the stored data was built at another `schema`, it is cleared and the read model rebuilds from the first event.
-- `get<T = unknown>(ns: string, key: string): T | undefined`
-- `set(ns: string, key: string, value: unknown): void`
-- `remove(ns: string, key: string): void`
+- `get<T = unknown>(ns: string, key: string): T | undefined`: The value under `key` in namespace `ns`, or `undefined` if there is none.
+- `set(ns: string, key: string, value: unknown): void`: Stores `value` (as JSON) under `key` in namespace `ns`, replacing a value there.
+- `remove(ns: string, key: string): void`: Removes the value under `key` in namespace `ns`, if there is one.
 - `all<T = unknown>(ns: string): [string, T][]`: Every key and value of a namespace, ordered by key.
 - `reset(ns?: string): void`: Clears a namespace, or all data.
-- `close(): void`
+- `close(): void`: Closes the database.

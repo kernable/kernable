@@ -2,43 +2,85 @@
 
 # Protocol
 
-gRPC over a Unix socket or TCP (with mutual TLS), package `kernable.v1`, from `proto/kernable/v1/kernable.proto`. Signed fields and their byte layouts are in [Signatures](./signing).
+The kernel speaks gRPC over a Unix socket or TCP (with mutual TLS), package `kernable.v1`. This page is generated from the comments in `proto/kernable/v1/kernable.proto`. The byte layouts of everything that is signed are in [Signatures](./signing), rejection codes and status codes in [Errors](./errors). To implement a client in another language, follow [Write an SDK](../how-to/new-sdk).
 
-kernable protocol v1.
-Payloads are opaque bytes; signatures cover the layout defined in SIGNING.md.
+## How to read this page
+
+The sections follow the file. Each service lists its RPCs: who calls them, the permission (grant action) they need, and how they fail. Each message lists its fields with their protobuf numbers; a field without a description means what its name says. *Qualified* means `domain.Type`; an unqualified type comes with a separate `domain` field.
+
+## Call flow per role
+
+Every call carries the caller's grant in the metadata entry `kernable-grant`, and `protocol` in its request or first stream message.
+
+- **Client**: signs a `Command` and calls `CommandService.Submit`. The kernel checks the signature, the grant and the middlewares before, queues the command, and returns a `CommandResult` once the command is accepted, committed or settled (see `Wait`). Queries go through `QueryService.Query` to a read model. `EventService.Subscribe` streams the log without registering. Files and cache values go through `DataService` and `CacheService`.
+- **Worker**: opens `WorkerGateway.Session`, sends `Register`, signs the `Challenge` and gets `Registered`. Then it receives an `Execute` per command and answers each with a signed `Result` (new events, optionally a snapshot) or `Rejection`.
+- **Listener**: opens `ListenerService.Listen`, sends `Hello`, signs the `Challenge` and gets `Ready`. Then it receives `Batch`es and acknowledges each `up_to` with an `Ack`. A read model also answers `QueryCall`s with a `QueryAnswer`, a middleware answers `MiddlewareCall`s with a `Verdict`.
+- **Deploy tooling and root keys**: `MembershipService.Apply` sets what a service consists of; `TrustService.Revoke` revokes a key. Grants have no RPC: they travel with every call.
+
+## Conventions
+
+kernable protocol, version 1. Payloads (of commands, events, queries, answers and snapshots)
+are opaque bytes to the kernel. Signatures cover the byte layouts in SIGNING.md, never the
+protobuf encoding.
 
 Protocol versions: every request and stream opening (SubmitRequest, QueryRequest,
-SubscribeRequest, Register, Hello) carries `protocol`, the version its sender speaks. The
-kernel accepts a range of versions and refuses others with FAILED_PRECONDITION, naming the
-range. 0 (unset) is never accepted. Version 1 is this file.
+SubscribeRequest, DataRequest, CacheRequest, RevokeRequest, ApplyRequest, Register, Hello)
+carries `protocol`, the version its sender speaks. It is never signed. The kernel accepts a
+range of versions and refuses others with FAILED_PRECONDITION, naming the range and whether
+the SDK or the kernel needs an update. 0 (unset) is never accepted. Version 1 is this file.
+
+Names: a domain is an identifier of letters, digits, `-` and `_` that starts with a letter;
+by convention it is lowercase (`orders`), like aggregate types, while command, event and query
+types are capitalized (`PlaceOrder`); both cases are valid, and names are case-sensitive.
+Command, event, query and aggregate types are unique within their domain. Requests and events
+carry the domain and the type separately, unqualified (`orders` and `PlaceOrder`).
+Registrations, subscriptions, middlewares, memberships and grants use the qualified name
+`domain.Type` (`orders.PlaceOrder`), where `orders.*` stands for a whole domain and `*` for
+everything.
+
+Times are milliseconds since the Unix epoch. A request with `issued_at` is valid 60 s around
+the kernel's clock; outside that window it fails with UNAUTHENTICATED.
+
+Authorization: every call presents the caller's Grant in the gRPC metadata entry
+`kernable-grant` (see Grant). Rejections by a worker, a middleware or a read model are normal
+outcomes (`Rejected`, with a code); everything else (a bad signature, a missing permission, a
+timeout) is a gRPC status.
+
+## Shared
 
 ### Signature
 
+An Ed25519 signature and the key that made it.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
-| `key_id` |  `string` | 1 |  |
-| `sig` |  `bytes` | 2 | Ed25519 |
+| `key_id` |  `string` | 1 | lowercase hex of the 32-byte public key |
+| `sig` |  `bytes` | 2 | 64 bytes: Ed25519 over the message layout in SIGNING.md |
 
 ### Command
 
+A request to change one aggregate. Signed by the client over kernable.v1.command; the kernel
+queues it and hands it to a worker that registered its aggregate and command type.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
-| `command_id` |  `string` | 1 |  |
+| `command_id` |  `string` | 1 | Chosen by the client (the SDKs use a random UUID). The kernel runs a command ID once: submitting it again returns the stored result, or waits for it. |
 | `tenant_id` |  `string` | 2 |  |
-| `domain` |  `string` | 9 |  |
-| `aggregate_type` |  `string` | 3 |  |
-| `aggregate_id` |  `string` | 4 |  |
-| `command_type` |  `string` | 5 |  |
+| `domain` |  `string` | 9 | of the aggregate and the command type |
+| `aggregate_type` |  `string` | 3 | unqualified: `Order` |
+| `aggregate_id` |  `string` | 4 | chosen by the client |
+| `command_type` |  `string` | 5 | unqualified: `PlaceOrder` |
 | `payload` |  `bytes` | 6 |  |
-| `client_sig` |  `Signature` | 7 |  |
+| `client_sig` |  `Signature` | 7 | Over kernable.v1.command, by a key granted `submit` for `domain.command_type`. |
 | `context` |  `RequestContext` | 8 | signed with the command, stored with its events |
 | `vault_refs` | repeated `string` | 10 | References to the values the payload keeps in the vault (see VaultValue), in payload order. |
 
 ### RequestContext
 
-Who sends a request and in which context. Signed by the client together with the request, and stored with every event the request causes, so audit and listeners can see it. Options for a single call (how long to wait) are not part of it; see SubmitRequest.
+Who sends a request and in which context. Signed by the client together with the request,
+and stored with every event the request causes, so audit and listeners can see it. The kernel
+only acts on `expected_version` and `bypass_authorization`; the rest is for the domain.
+Options for a single call (how long to wait) are not part of it; see SubmitRequest.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
@@ -47,12 +89,12 @@ Who sends a request and in which context. Signed by the client together with the
 | `sender_account` |  `string` | 3 |  |
 | `sender_session` |  `string` | 4 |  |
 | `on_behalf_of` |  `string` | 5 | authorize as this identity of the target tenant instead |
-| `expected_version` | optional `uint64` | 6 | Reject the command unless the aggregate is at this version when it runs. |
+| `expected_version` | optional `uint64` | 6 | Commands only: rejected with `version_mismatch` unless the aggregate is at this version when the command runs (0: the aggregate has no events yet). Absent: no check. |
 | `correlation_id` |  `string` | 7 | shared by everything one original request causes |
 | `causation_id` |  `string` | 8 | the command that caused this one, if any |
 | `trace_id` |  `string` | 9 |  |
-| `bypass_authorization` |  `bool` | 10 | Privileged switch: only keys granted `privileged` for it may set it. |
-| `attributes` | repeated `Attribute` | 11 | business data only, never security decisions |
+| `bypass_authorization` |  `bool` | 10 | Privileged switch that tells the domain to skip its own authorization: only keys granted `privileged` for `bypass_authorization` may set it (otherwise PERMISSION_DENIED). |
+| `attributes` | repeated `Attribute` | 11 | Signed in the given order. Business data only, never security decisions. |
 
 ### Attribute
 
@@ -64,21 +106,22 @@ Who sends a request and in which context. Signed by the client together with the
 
 ### Event
 
+A stored event: a NewEvent of a worker, completed by the kernel when it committed it.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
-| `global_position` |  `uint64` | 1 |  |
+| `global_position` |  `uint64` | 1 | position in the whole log, from 1 |
 | `tenant_id` |  `string` | 2 |  |
 | `domain` |  `string` | 13 | always the domain of the command that caused it |
-| `aggregate_type` |  `string` | 3 |  |
+| `aggregate_type` |  `string` | 3 | unqualified |
 | `aggregate_id` |  `string` | 4 |  |
-| `version` |  `uint64` | 5 |  |
-| `event_type` |  `string` | 6 |  |
+| `version` |  `uint64` | 5 | the aggregate's version after this event, from 1 |
+| `event_type` |  `string` | 6 | unqualified: `OrderPlaced` |
 | `payload` |  `bytes` | 7 |  |
-| `command_id` |  `string` | 8 |  |
-| `created_at` |  `int64` | 9 |  |
-| `hash` |  `bytes` | 10 |  |
-| `producer_sig` |  `Signature` | 11 |  |
+| `command_id` |  `string` | 8 | the command that caused it |
+| `created_at` |  `int64` | 9 | ms since epoch, when the kernel committed it |
+| `hash` |  `bytes` | 10 | SHA-256 link of the hash chain, see SIGNING.md |
+| `producer_sig` |  `Signature` | 11 | The worker's signature over its result (kernable.v1.result); the same on every event of a command. |
 | `context` |  `RequestContext` | 12 | of the command that caused the event |
 | `schema` |  `uint32` | 14 | version of the payload format of `event_type`, from 1 |
 | `vault_refs` | repeated `string` | 15 | see NewEvent |
@@ -87,53 +130,87 @@ Who sends a request and in which context. Signed by the client together with the
 ### Snapshot
 
 An aggregate's state after `version`, made by a worker: a cache, the events stay the truth.
+The kernel drops it when it cannot be used (see Rejection) and after an erasure.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
-| `version` |  `uint64` | 1 |  |
+| `version` |  `uint64` | 1 | the aggregate version the state is after |
 | `schema` |  `string` | 2 | state format of the aggregate definition; workers reject unknown ones |
 | `state` |  `bytes` | 3 | opaque to the kernel |
 | `worker_sig` |  `Signature` | 4 | over kernable.v1.snapshot, see SIGNING.md |
 
 ### NewEvent
 
-Event proposed by a worker; the kernel assigns position, version and hash.
+An event proposed by a worker; the kernel assigns position, version, time and hash.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
-| `event_type` |  `string` | 1 |  |
+| `event_type` |  `string` | 1 | Unqualified, of the command's domain; an empty or qualified type rejects the command (`invalid_event_type`). |
 | `payload` |  `bytes` | 2 |  |
-| `schema` |  `uint32` | 3 | version of the payload format, from 1; see Register.event_schemas |
+| `schema` |  `uint32` | 3 | Version of the payload format, from 1. Must be the one declared in Register.event_schemas (1 if not declared), otherwise `invalid_event_schema`. |
 | `vault_refs` | repeated `string` | 4 | References to the values the payload keeps in the vault, in payload order. |
-| `erases` |  `string` | 5 | A subject (a person) whose vault values this event erases, everywhere; empty for none. |
+| `erases` |  `string` | 5 | A subject (a person) whose vault values this event erases, everywhere; empty for none. The worker's key needs `vault_erase` for the event type (otherwise `erase_not_allowed`). |
+
+## Vault
 
 ### VaultValue
 
-A personal or secret value that a command or event keeps outside the signed log. The payload holds `{"$vault": ref}` instead, and `vault_refs` lists the ref. The ref commits to the value:   ref = hex(SHA-256(kernable.v1.vault message)), see SIGNING.md, over a random salt, the subject, `secret` and the value, so it reveals nothing once erased. The kernel keeps values encrypted and deletable. Personal values belong to a subject and are erased by an event that `erases` it; secret values are deleted when their command completes.
+A personal or secret value that a command or event keeps outside the signed log. The payload
+holds `{"$vault": ref}` instead, and `vault_refs` lists the ref. The ref commits to the value:
+  ref = hex(SHA-256(kernable.v1.vault message)), see SIGNING.md,
+over a random salt, the subject, `secret` and the value, so it reveals nothing once erased.
+The kernel keeps values encrypted and deletable, and only with a vault key (`kernable start
+--vault-key`); without one, a submit with vault values fails with FAILED_PRECONDITION and a
+result with vault values is rejected (`no_vault`).
+Personal values belong to a subject and are erased by an event that `erases` it; secret
+values are deleted when their command completes.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
-| `ref` |  `string` | 1 |  |
+| `ref` |  `string` | 1 | lowercase hex, see above |
 | `subject` |  `string` | 2 | personal: whose value it is; empty for secrets |
 | `secret` |  `bool` | 3 |  |
 | `salt` |  `bytes` | 4 | 16 random bytes, only on writes |
 | `value` |  `bytes` | 5 | the JSON encoding of the field |
 
+## Trust
+
 ### Grant
 
-The kernel trusts root keys only (`kernable start --root`). A root key grants a key what it may do; the key's process presents the grant with every request, in the gRPC metadata entry `kernable-grant` (the hex-encoded Grant). Signed by a root key over kernable.v1.grant, see SIGNING.md. The kernel keeps the newest grant per key (by issued_at).
+What a key may do. The kernel trusts root keys only (`kernable start --root`); a root key
+signs a grant over kernable.v1.grant (`kernable grant`). The grantee's process presents it with
+every call, hex-encoded, in the gRPC metadata entry `kernable-grant`; it must name the key that
+signed the request (otherwise PERMISSION_DENIED). The kernel keeps the newest grant per key
+(by issued_at) and ignores older ones. A grant has no time window; it ends when a newer grant
+replaces it or the key, or the root key that signed it, is revoked. Streams whose key loses a
+permission they use end with PERMISSION_DENIED.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
 | `key_id` |  `string` | 1 | the grantee |
 | `permissions` | repeated `Permission` | 2 |  |
-| `succeeds` |  `string` | 3 | a listener registered with this key may move to key_id |
+| `succeeds` |  `string` | 3 | An older key this key replaces (empty: none). Listeners and aggregates registered with that key may connect with key_id and keep their registration. |
 | `issued_at` |  `int64` | 4 | ms since epoch |
 | `root_sig` |  `Signature` | 5 |  |
 
 ### Permission
 
-Actions: submit, run, subscribe, listen, query, answer, check, privileged, vault_read, vault_erase, data_read, data_write, cache, manage, or `*` for all. Types: `*`, `domain.*` or `domain.Type` (for privileged: the switch, `bypass_authorization`; for data_read, data_write and cache: a domain, `domain.*`; for manage: service names, or `*`).
+One action and the types it covers. Types are `*`, `domain.*` or a qualified `domain.Type`,
+except where noted. The action `*` stands for all actions.
+- submit: submit commands of these types (CommandService.Submit).
+- run: run commands of these types as a worker (Register).
+- subscribe: read events of these types with EventService.Subscribe.
+- listen: receive events of these types as a listener (Hello.event_types).
+- query: ask queries of these types (QueryService.Query).
+- answer: answer queries of these types as a read model (Hello.query_types).
+- check: check commands and queries of these types as a middleware (Hello.middlewares).
+- privileged: set a privileged switch; the type is the switch, `bypass_authorization`.
+- vault_read: get the vault values of these event types in listener batches, and of these
+  command types in middleware checks.
+- vault_erase: write events of these types that erase a subject (NewEvent.erases).
+- data_read, data_write: get, or put and delete, the files of a domain (`domain.*` or `*`).
+- cache: use the cache of a domain (`domain.*` or `*`).
+- manage: apply the membership of these services (service names, or `*`).
 
 | Field | Type | Number | Description |
 |---|---|---|---|
@@ -142,40 +219,59 @@ Actions: submit, run, subscribe, listen, query, answer, check, privileged, vault
 
 ### TrustService
 
+Revocation of keys, by root-key tooling (`kernable revoke`).
 
 | RPC | Request | Response | Description |
 |---|---|---|---|
-| `Revoke` | `RevokeRequest` | `RevokeResponse` | Revokes a key from `since` on, for good. Signed by a root key over kernable.v1.revoke and valid 60 s around issued_at. The kernel stores it signed with its own key (RevocationRecord). |
+| `Revoke` | `RevokeRequest` | `RevokeResponse` | Revokes `key_id` from `since` on, for good. Signed by a root key over kernable.v1.revoke and valid 60 s around issued_at. The kernel stores it signed with its own key (kernable.v1.revocation), refuses the key from then on and ends its streams; queued commands signed with it and received at or after `since` are rejected with `key_revoked`. A revoked root key takes the grants it signed with it. Revoking a key again does nothing. Errors: PERMISSION_DENIED (not a root key, or a revoked one), UNAUTHENTICATED (invalid signature, outside the time window), INVALID_ARGUMENT (`key_id` is not a key ID). |
 
 ### RevokeRequest
 
 
 | Field | Type | Number | Description |
 |---|---|---|---|
-| `key_id` |  `string` | 1 |  |
-| `since` |  `int64` | 2 | ms since epoch |
+| `key_id` |  `string` | 1 | the key to revoke |
+| `since` |  `int64` | 2 | ms since epoch; may lie in the past, e.g. when the key leaked |
 | `issued_at` |  `int64` | 3 | ms since epoch |
 | `root_sig` |  `Signature` | 4 |  |
-| `protocol` |  `uint32` | 5 |  |
+| `protocol` |  `uint32` | 5 | not signed |
 
 ### RevokeResponse
 
 
-| Field | Type | Number | Description |
+## Memberships
+
+### MembershipService
+
+What a service consists of, applied by deploy tooling.
+
+| RPC | Request | Response | Description |
 |---|---|---|---|
-| `Apply` | `ApplyRequest` | `ApplyResult` | Replaces the membership of `membership.service`. Signed over kernable.v1.membership by a key granted `manage` for the service, and valid 60 s around issued_at. Apply it once per deploy (`kernable apply`, or a deploy script), not from every process: the latest apply wins. |
+| `Apply` | `ApplyRequest` | `ApplyResult` | Replaces the membership of `membership.service`. Signed over kernable.v1.membership by a key granted `manage` for the service, and valid 60 s around issued_at. Apply it once per deploy (`kernable apply`, or a deploy script), not from every process: the latest apply wins. Errors: UNAUTHENTICATED (invalid signature, outside the time window), INVALID_ARGUMENT (no valid service name, unqualified worker entries, empty listener names), PERMISSION_DENIED. |
 
 ### Membership
 
-What a service consists of. Once a service has one, the kernel waits (readiness) for what it lists, and treats workers and listeners of the service that it does not list as dynamic: - workers: the aggregate types the service runs (qualified: `shop.Cart`). Commands of a listed   aggregate are accepted, and queued, even before a worker registered it. An aggregate a   worker runs but the service does not list is forgotten once its last worker leaves. - listeners: listener names. A listed listener counts for readiness, settling and the order of   delivery; an unlisted one keeps its position but counts for nobody. - middlewares: names of the service's listeners that check requests; they count like   listeners. A listener of the service that is not listed here cannot connect as a   middleware, and taking one off the list removes its check: a check never appears or   disappears without a signed membership.
+What a service consists of. Once a service has one, the kernel waits (readiness) for what it
+lists, and treats workers and listeners of the service that it does not list as dynamic.
+Workers and listeners name their service in Register.service and Hello.service. A service
+without a membership, and a process without a service, count as listed.
+- workers: the aggregate types the service runs (qualified: `shop.Cart`). Commands of a listed
+  aggregate are accepted, and queued, even before a worker registered it. An aggregate a
+  worker runs but the service does not list is forgotten once its last worker leaves.
+- listeners: listener names. A listed listener counts for readiness, settling and the order of
+  delivery; an unlisted one keeps its position but counts for nobody.
+- middlewares: names of the service's listeners that check requests; they count like
+  listeners. A listener of the service that is not listed here cannot connect as a
+  middleware, and taking one off the list removes its check: a check never appears or
+  disappears without a signed membership.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
-| `service` |  `string` | 1 |  |
-| `workers` | repeated `string` | 2 |  |
+| `service` |  `string` | 1 | a name like a domain: letters, digits, `-` and `_` |
+| `workers` | repeated `string` | 2 | qualified aggregate types |
 | `listeners` | repeated `string` | 3 |  |
 | `middlewares` | repeated `string` | 4 |  |
-| `metadata` | repeated `Attribute` | 5 | free, e.g. version and description |
+| `metadata` | repeated `Attribute` | 5 | free, e.g. version and description; signed in order |
 | `issued_at` |  `int64` | 6 | ms since epoch |
 
 ### ApplyRequest
@@ -184,15 +280,21 @@ What a service consists of. Once a service has one, the kernel waits (readiness)
 | Field | Type | Number | Description |
 |---|---|---|---|
 | `membership` |  `Membership` | 1 |  |
-| `sig` |  `Signature` | 2 |  |
-| `protocol` |  `uint32` | 3 |  |
+| `sig` |  `Signature` | 2 | over kernable.v1.membership |
+| `protocol` |  `uint32` | 3 | not signed |
 
 ### ApplyResult
 
 
-| Field | Type | Number | Description |
+## Clients
+
+### CommandService
+
+Commands, sent by clients and by handlers of listeners.
+
+| RPC | Request | Response | Description |
 |---|---|---|---|
-| `Submit` | `SubmitRequest` | `CommandResult` |  |
+| `Submit` | `SubmitRequest` | `CommandResult` | Submits a command and waits as `wait` says. Needs `submit` for the qualified command type, and a worker that registered it (or a membership that lists its aggregate), otherwise NOT_FOUND. Middlewares before the command may reject it; the outcome is then `rejected`. A command ID that was submitted before is not run again: Submit returns its stored result, or waits for it. If the command does not complete within the kernel's submit timeout, Submit fails with DEADLINE_EXCEEDED, but the command stays queued: resubmit it to get the result. Other errors: UNAUTHENTICATED (missing or invalid signature), PERMISSION_DENIED, INVALID_ARGUMENT, FAILED_PRECONDITION (see `listener`; vault values without a vault), UNAVAILABLE (a middleware is not connected, or the kernel shuts down), DEADLINE_EXCEEDED (a middleware did not answer in time). |
 
 ### SubmitRequest
 
@@ -201,9 +303,9 @@ What a service consists of. Once a service has one, the kernel waits (readiness)
 |---|---|---|---|
 | `command` |  `Command` | 1 |  |
 | `wait` |  `Wait` | 2 |  |
-| `protocol` |  `uint32` | 3 | see "Protocol versions" at the top |
+| `protocol` |  `uint32` | 3 | not signed |
 | `vault` | repeated `VaultValue` | 5 | the values of `command.vault_refs` |
-| `listener` |  `string` | 4 | Set by SDKs when a listener's handler submits (not signed). A listener handles its events one after another, so it cannot wait for itself: a settling submit then waits only for listeners of a lower order, and a request the listener would have to check as a middleware is refused. |
+| `listener` |  `string` | 4 | Set by SDKs when a listener's handler submits (not signed): the listener's name. A listener handles its events one after another, so it cannot wait for itself: a settling submit then waits only for listeners of a lower order, and a command the listener itself checks as a middleware before is refused (FAILED_PRECONDITION). |
 
 ### Wait
 
@@ -211,73 +313,90 @@ How long Submit waits before it responds.
 
 | Value | Number | Description |
 |---|---|---|
-| `WAIT_SETTLED` | 0 | Until every registered listener has acknowledged the command's last event (default). |
-| `WAIT_COMMITTED` | 1 | Until the command's events are stored. |
+| `WAIT_SETTLED` | 0 | Until every listener that counts has acknowledged the command's last event (default). If that takes longer than the kernel's settle timeout, Submit returns the committed events with `settled` false. |
+| `WAIT_COMMITTED` | 1 | Until the command's events are stored, or it is rejected. |
 | `WAIT_ACCEPTED` | 2 | Until the command is stored in the queue; resubmit it later to get the result. |
 
 ### CommandResult
 
+The outcome of a command; exactly one of `committed`, `rejected` or `accepted` is set.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
 | `command_id` |  `string` | 1 |  |
-| `committed` |  `Committed` | 2 |  |
-| `rejected` |  `Rejected` | 3 |  |
-| `accepted` |  `Accepted` | 4 |  |
+| `committed` |  `Committed` | 2 | the worker's events, stored |
+| `rejected` |  `Rejected` | 3 | by the worker, a middleware or the kernel; nothing was stored |
+| `accepted` |  `Accepted` | 4 | queued, not run yet (WAIT_ACCEPTED only) |
 
 ### Committed
 
 
 | Field | Type | Number | Description |
 |---|---|---|---|
-| `events` | repeated `Event` | 1 |  |
-| `settled` |  `bool` | 2 | True once every registered listener has acknowledged the events. |
+| `events` | repeated `Event` | 1 | may be empty: a command can produce no events |
+| `settled` |  `bool` | 2 | True once every listener that counts has acknowledged the events (WAIT_SETTLED only). |
 
 ### Accepted
 
 
+### Rejected
+
+Why a command or query was refused. Codes set by the kernel are listed in the errors
+reference; workers, middlewares and read models choose their own.
+
 | Field | Type | Number | Description |
 |---|---|---|---|
-| `code` |  `string` | 1 |  |
-| `message` |  `string` | 2 |  |
-| `Subscribe` | `SubscribeRequest` | stream `Event` |  |
+| `code` |  `string` | 1 | machine-readable, e.g. `version_mismatch` |
+| `message` |  `string` | 2 | for people |
+
+### EventService
+
+Plain event streams, for clients that read the log without registering as a listener.
+
+| RPC | Request | Response | Description |
+|---|---|---|---|
+| `Subscribe` | `SubscribeRequest` | stream `Event` | Streams stored events with a global position after `after_position`: first the backlog, then live, until the client cancels. Not registered, so it counts for nobody and keeps no position. Needs `subscribe` for the requested types (PERMISSION_DENIED otherwise, also later, when the key loses it). Errors: UNAUTHENTICATED (invalid signature, outside the time window), UNAVAILABLE (the kernel shuts down). |
 
 ### SubscribeRequest
 
-Streams stored events with a global position after `after_position`: first the backlog, then live. Signed by a key granted `subscribe` for the requested types.
+Signed by a key granted `subscribe` for the requested types, over kernable.v1.subscribe.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
-| `after_position` |  `uint64` | 1 |  |
+| `after_position` |  `uint64` | 1 | 0: from the first event |
 | `event_types` | repeated `string` | 2 | qualified (`orders.OrderPlaced`, `orders.*`); empty = all the key may read |
 | `issued_at` |  `int64` | 3 | ms since epoch; must be within 60 s of the kernel's clock |
 | `client_sig` |  `Signature` | 4 |  |
 | `protocol` |  `uint32` | 5 | not signed |
 
+## Queries
+
 ### QueryService
 
-Every query goes through the kernel, also between parts of one process, so that signatures, grants and the request context always apply. Read models answer them (see Hello).
+Every query goes through the kernel, also between parts of one process, so that signatures,
+grants and the request context always apply. Read models answer them (see Hello).
 
 | RPC | Request | Response | Description |
 |---|---|---|---|
-| `Query` | `QueryRequest` | `QueryResult` |  |
+| `Query` | `QueryRequest` | `QueryResult` | Asks a query and returns the answer of one read model that answers its type and has processed `min_position` (several are taken in turn). Needs `query` for the qualified query type. Middlewares before the query may reject it, middlewares after it may reject the response; the outcome is then `rejected`. Errors: UNAUTHENTICATED (invalid signature, outside the time window), PERMISSION_DENIED, INVALID_ARGUMENT, UNAVAILABLE (no connected read model answers the type, or a middleware is not connected), DEADLINE_EXCEEDED (no read model answered, or reached `min_position`, within the kernel's query timeout, or a middleware did not answer in time), FAILED_PRECONDITION (see `listener`). |
 
 ### QueryRequest
 
+Signed by the client over kernable.v1.query.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
-| `query_id` |  `string` | 1 |  |
+| `query_id` |  `string` | 1 | Chosen by the client (the SDKs use a random UUID); returned in QueryResult. Queries are not stored, so an ID is not checked for reuse. |
 | `tenant_id` |  `string` | 2 |  |
 | `domain` |  `string` | 3 |  |
-| `query_type` |  `string` | 4 |  |
+| `query_type` |  `string` | 4 | unqualified: `GetOrder` |
 | `payload` |  `bytes` | 5 |  |
 | `context` |  `RequestContext` | 6 |  |
-| `min_position` |  `uint64` | 7 | Answer only after the read model has processed this global position (0: right away). |
+| `min_position` |  `uint64` | 7 | Answer only after the read model has processed this global position (0: right away), e.g. the position of the last event of a command the client just submitted. |
 | `issued_at` |  `int64` | 8 | ms since epoch; must be within 60 s of the kernel's clock |
 | `client_sig` |  `Signature` | 9 |  |
 | `protocol` |  `uint32` | 10 | not signed |
-| `listener` |  `string` | 11 | Set by SDKs when a listener's handler asks (not signed); see SubmitRequest.listener. The query is never routed to that listener, nor to one that could reach `min_position` only after that listener, and refused if no other read model answers it. |
+| `listener` |  `string` | 11 | Set by SDKs when a listener's handler asks (not signed); see SubmitRequest.listener. The query is never routed to that listener, nor to one that could reach `min_position` only after that listener, and refused (FAILED_PRECONDITION) if no other read model answers it or if the listener itself checks the query as a middleware. |
 
 ### QueryResult
 
@@ -285,12 +404,19 @@ Every query goes through the kernel, also between parts of one process, so that 
 | Field | Type | Number | Description |
 |---|---|---|---|
 | `query_id` |  `string` | 1 |  |
-| `response` |  `bytes` | 2 |  |
-| `rejected` |  `Rejected` | 3 |  |
+| `response` |  `bytes` | 2 | the read model's answer, opaque to the kernel |
+| `rejected` |  `Rejected` | 3 | by the read model or a middleware |
+
+## Data and cache
 
 ### DataService
 
-Files of a domain, kept by the kernel under (tenant, domain, key), apart from the event log: they are neither signed into it nor erased with the vault. Every request is signed by a key granted data_read (get) or data_write (put, delete) for the domain, over `kernable.v1.data.<op>`, and valid 60 s around issued_at.
+Files of a domain, kept by the kernel under (tenant, domain, key), apart from the event log:
+they are neither signed into it nor erased with the vault. Every request is signed by a key
+granted data_read (get) or data_write (put, delete) for the domain, over
+`kernable.v1.data.<op>`, and valid 60 s around issued_at. A put replaces the file under its
+key. Errors: UNAUTHENTICATED (invalid signature, outside the time window), PERMISSION_DENIED,
+INVALID_ARGUMENT (domain, key or size).
 
 | RPC | Request | Response | Description |
 |---|---|---|---|
@@ -323,7 +449,9 @@ Files of a domain, kept by the kernel under (tenant, domain, key), apart from th
 
 ### CacheService
 
-A shared cache of a domain: values under (tenant, domain, key) that may expire. Not durable; a kernel restart may empty it. Signed like DataService requests over `kernable.v1.cache.<op>`, by a key granted cache for the domain.
+A shared cache of a domain: values under (tenant, domain, key) that may expire. Not durable;
+a kernel restart may empty it. Signed like DataService requests over `kernable.v1.cache.<op>`,
+by a key granted cache for the domain, with the same errors.
 
 | RPC | Request | Response | Description |
 |---|---|---|---|
@@ -353,43 +481,56 @@ A shared cache of a domain: values under (tenant, domain, key) that may expire. 
 | `found` |  `bool` | 1 | get and delete: whether the key had a live value; set: true |
 | `value` |  `bytes` | 2 | get only |
 
+## Listeners
+
 ### ListenerService
 
-Durable, named, ordered event listeners (read models and reactors).  Event N reaches a listener of order k only after every registered listener with a lower order has acknowledged N. Delivery is at least once.  A listener can also be a middleware: before the kernel accepts a command or routes a query whose type the middleware covers, it asks every such middleware, in chain order, and refuses the request at the first rejection. A registered middleware that is not connected refuses every request it covers (UNAVAILABLE): the chain fails closed.
+Durable, named, ordered event listeners (read models and reactors).
+
+Event N reaches a listener of order k only after every listener that counts with a lower
+order has acknowledged N; equal orders run in parallel. Delivery is at least once.
+
+A listener can also be a middleware: before the kernel accepts a command or routes a query
+whose type the middleware covers, it asks every such middleware, in chain order, and refuses
+the request at the first rejection. A registered middleware that is not connected refuses
+every request it covers (UNAVAILABLE): the chain fails closed.
 
 | RPC | Request | Response | Description |
 |---|---|---|---|
-| `Listen` | stream `ListenerMessage` | stream `ListenerDelivery` |  |
+| `Listen` | stream `ListenerMessage` | stream `ListenerDelivery` | A listener's stream. The listener sends Hello, the kernel a Challenge, the listener a ChallengeResponse, the kernel Ready; then the kernel sends batches, queries and checks, and the listener acks, answers and verdicts. Needs `listen` for the event types, `answer` for the query types and `check` for the middleware types. Errors: INVALID_ARGUMENT (malformed Hello, or an ack beyond the delivered events), PERMISSION_DENIED (missing permission, a name registered with another key, a middleware its membership does not list), ALREADY_EXISTS (a listener of that name is connected, or a live one uses a registered name), UNAUTHENTICATED (challenge failed). |
 
 ### ListenerMessage
 
+From the listener; exactly one field is set.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
-| `hello` |  `Hello` | 1 |  |
-| `challenge_response` |  `ChallengeResponse` | 2 |  |
+| `hello` |  `Hello` | 1 | first message |
+| `challenge_response` |  `ChallengeResponse` | 2 | second message |
 | `ack` |  `Ack` | 3 |  |
-| `answer` |  `QueryAnswer` | 4 |  |
-| `verdict` |  `Verdict` | 5 |  |
+| `answer` |  `QueryAnswer` | 4 | to a QueryCall |
+| `verdict` |  `Verdict` | 5 | to a MiddlewareCall |
 
 ### ListenerDelivery
 
+From the kernel; exactly one field is set.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
-| `challenge` |  `Challenge` | 1 |  |
-| `ready` |  `Ready` | 2 |  |
+| `challenge` |  `Challenge` | 1 | after Hello |
+| `ready` |  `Ready` | 2 | after a valid ChallengeResponse |
 | `batch` |  `Batch` | 3 |  |
 | `query` |  `QueryCall` | 4 | Delivered in order with the batches: the answer reflects every batch sent before it. |
 | `check` |  `MiddlewareCall` | 5 | Also in order with the batches; sent only once the listener has caught up with the events committed before it connected. |
 
 ### QueryCall
 
+A query for a read model to answer with a QueryAnswer of the same `call_id`.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
 | `call_id` |  `string` | 1 |  |
-| `query` |  `QueryRequest` | 2 |  |
+| `query` |  `QueryRequest` | 2 | as the client sent it, with its signature |
 
 ### QueryAnswer
 
@@ -402,17 +543,18 @@ Durable, named, ordered event listeners (read models and reactors).  Event N rea
 
 ### MiddlewareCall
 
-A request for a middleware to check: pass it with an empty verdict or reject it.
+A request for a middleware to check: pass it with an empty verdict or reject it. Answer with
+a Verdict of the same `call_id`, also after (where it may only count for a query's response).
 
 | Field | Type | Number | Description |
 |---|---|---|---|
 | `call_id` |  `string` | 1 |  |
-| `command` |  `Command` | 2 |  |
-| `query` |  `QueryRequest` | 3 |  |
-| `vault` | repeated `VaultValue` | 4 | Before only: the command's values, if the key may read them (granted vault_read). |
+| `command` |  `Command` | 2 | as the client sent it, with its signature |
+| `query` |  `QueryRequest` | 3 | as the client sent it, with its signature |
+| `vault` | repeated `VaultValue` | 4 | Before a command only: its vault values, if the key may read them (granted vault_read). |
 | `when` |  `When` | 5 |  |
-| `command_result` |  `CommandResult` | 6 |  |
-| `query_result` |  `QueryResult` | 7 |  |
+| `command_result` |  `CommandResult` | 6 | After only: the command's result. The middleware only observes it; its verdict is ignored. |
+| `query_result` |  `QueryResult` | 7 | After only: the query's result. A verdict that rejects a response replaces it. |
 
 ### Verdict
 
@@ -433,31 +575,36 @@ When a middleware runs.
 
 ### Middleware
 
+A listener's registration as a middleware, see Hello.middlewares.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
 | `order` |  `int32` | 1 | Position in the chain: lower runs first, equal orders by listener name. Negative orders are reserved for kernable. |
-| `types` | repeated `string` | 2 | Command and query types it checks: `*`, a domain (`orders.*`) or a qualified type. |
+| `types` | repeated `string` | 2 | Command and query types it checks: `*`, a domain (`orders.*`) or a qualified type. Not empty; needs `check` for each. |
 | `when` |  `When` | 3 |  |
 
 ### Hello
 
+The first message of a listener's stream. A registered listener (not `live`) is stored under
+its name with its key, order, event types and middlewares, and keeps its position across
+connections; it counts (see Membership) also while disconnected.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
-| `name` |  `string` | 1 |  |
-| `key_id` |  `string` | 2 |  |
-| `order` |  `int32` | 3 |  |
+| `name` |  `string` | 1 | unique; one connection per name at a time |
+| `key_id` |  `string` | 2 | the key that answers the challenge; registered with the name |
+| `order` |  `int32` | 3 | Order of delivery, from 0 (negative orders are reserved for kernable): event N reaches this listener only after every listener that counts with a lower order acknowledged N. |
 | `event_types` | repeated `string` | 4 | qualified (`orders.OrderPlaced`, `orders.*`); empty = all the key may read |
 | `from_position` | optional `uint64` | 5 | Start after this position instead of the stored one, e.g. 0 to rebuild an in-memory read model. Absent: after the stored position, or at the newest event on the first connect, so a new listener never reacts to what happened before it existed. |
 | `query_types` | repeated `string` | 6 | qualified query types this listener answers |
-| `middlewares` | repeated `Middleware` | 7 | at most one per `when`; none: not a middleware |
+| `middlewares` | repeated `Middleware` | 7 | At most one per `when`; none: not a middleware. A listener of a service with a membership must be listed in its `middlewares`. |
 | `protocol` |  `uint32` | 8 |  |
 | `service` |  `string` | 9 | The service this listener belongs to; its membership (see `Membership`) decides whether it counts and whether it may be a middleware. Empty: no service, it always counts. |
-| `live` |  `bool` | 10 | Not registered: no stored position, starts at the newest event, does not count for readiness, settling or the order of delivery, and is forgotten when it disconnects. For reactions that only matter while the process runs. Cannot be a middleware. |
+| `live` |  `bool` | 10 | Not registered: no stored position, starts at the newest event, does not count for readiness, settling or the order of delivery, and is forgotten when it disconnects. For reactions that only matter while the process runs. Cannot be a middleware, nor use the name of a registered listener. |
 
 ### Ready
 
+The kernel accepted the listener; deliveries follow.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
@@ -466,55 +613,64 @@ When a middleware runs.
 
 ### Batch
 
+Events for the listener, in order of global position.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
-| `events` | repeated `Event` | 1 | only the listener's event types |
+| `events` | repeated `Event` | 1 | only the listener's event types; may be empty |
 | `up_to` |  `uint64` | 2 | last position the batch covers; acknowledge it once processed |
 | `vault` | repeated `VaultValue` | 3 | The values the events refer to, if the key may read them (granted vault_read) and they are not erased; a missing value reads as null. |
 
 ### Ack
 
+The listener has processed everything up to `position` (a Batch.up_to). Not signed; affects
+only waiting and ordering. An ack beyond the delivered batches ends the stream.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
 | `position` |  `uint64` | 1 |  |
 
+## Workers
+
 ### WorkerGateway
 
+Workers run the commands of their aggregates.
 
 | RPC | Request | Response | Description |
 |---|---|---|---|
-| `Session` | stream `WorkerMessage` | stream `KernelMessage` |  |
+| `Session` | stream `WorkerMessage` | stream `KernelMessage` | A worker's stream. The worker sends Register, the kernel a Challenge, the worker a ChallengeResponse, the kernel Registered; then the kernel sends Execute, at most `max_concurrency` at a time, and the worker answers each with a Result or a Rejection. Needs `run` for every registered command type. When the stream ends, the kernel hands its unfinished commands to another worker. Errors: INVALID_ARGUMENT (malformed Register), PERMISSION_DENIED (missing permission, or an aggregate registered with another key), FAILED_PRECONDITION (the store holds a newer event schema than the worker writes), UNAUTHENTICATED (challenge failed, or an invalid result, rejection or snapshot signature). |
 
 ### WorkerMessage
 
+From the worker; exactly one field is set.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
-| `register` |  `Register` | 1 |  |
-| `challenge_response` |  `ChallengeResponse` | 2 |  |
+| `register` |  `Register` | 1 | first message |
+| `challenge_response` |  `ChallengeResponse` | 2 | second message |
 | `result` |  `Result` | 3 |  |
 | `rejection` |  `Rejection` | 4 |  |
 
 ### KernelMessage
 
+From the kernel; exactly one field is set.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
-| `challenge` |  `Challenge` | 1 |  |
-| `registered` |  `Registered` | 2 |  |
+| `challenge` |  `Challenge` | 1 | after Register |
+| `registered` |  `Registered` | 2 | after a valid ChallengeResponse |
 | `execute` |  `Execute` | 3 |  |
 
 ### Register
 
+The first message of a worker's stream.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
-| `worker_id` |  `string` | 1 | this process, for logs |
-| `key_id` |  `string` | 2 |  |
-| `aggregates` | repeated `WorkerAggregate` | 3 | The aggregates the worker runs. The kernel registers each one: it refuses commands for an aggregate type or command type no worker registered, and is not ready while a registered aggregate has no worker connected. Replicas register the same aggregates. |
-| `max_concurrency` |  `uint32` | 4 |  |
+| `worker_id` |  `string` | 1 | this process, for logs and the UI |
+| `key_id` |  `string` | 2 | the key that answers the challenge and signs results |
+| `aggregates` | repeated `WorkerAggregate` | 3 | The aggregates the worker runs; at least one. The kernel registers each one: it refuses commands for an aggregate type or command type no worker registered, and is not ready while a registered aggregate has no worker connected. Replicas register the same aggregates, with the same key (or its successor, see Grant.succeeds). |
+| `max_concurrency` |  `uint32` | 4 | commands in flight at once; 0 counts as 1 |
 | `event_schemas` | repeated `EventSchema` | 5 | The payload version the worker writes per event type; types not listed are written at 1. The kernel refuses a worker, or a result, that would write an older version of a type than the store already holds, and a result whose events differ from what was declared. |
 | `protocol` |  `uint32` | 6 |  |
 | `service` |  `string` | 7 | The service this worker belongs to; its membership (see `Membership`) decides whether the kernel waits for the worker's aggregates. Empty: no service, they are always waited for. |
@@ -524,47 +680,50 @@ When a middleware runs.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
-| `aggregate_type` |  `string` | 1 | qualified: `orders.Order` |
-| `command_types` | repeated `string` | 2 | qualified, of the same domain: `orders.PlaceOrder` |
+| `aggregate_type` |  `string` | 1 | qualified: `orders.Order`; once per Register |
+| `command_types` | repeated `string` | 2 | qualified, of the same domain: `orders.PlaceOrder`; not empty |
 
 ### EventSchema
 
 
 | Field | Type | Number | Description |
 |---|---|---|---|
-| `event_type` |  `string` | 1 | qualified: `orders.OrderPlaced` |
-| `schema` |  `uint32` | 2 |  |
+| `event_type` |  `string` | 1 | qualified, of a domain of the worker's aggregates: `orders.OrderPlaced` |
+| `schema` |  `uint32` | 2 | from 1 |
 
 ### Challenge
 
+Proof of key possession, for workers and listeners.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
-| `nonce` |  `bytes` | 1 |  |
+| `nonce` |  `bytes` | 1 | 32 random bytes |
 
 ### ChallengeResponse
 
 
 | Field | Type | Number | Description |
 |---|---|---|---|
-| `sig` |  `bytes` | 1 | Ed25519 over nonce |
+| `sig` |  `bytes` | 1 | Ed25519 over kernable.v1.challenge with the nonce, by Register/Hello.key_id |
 
 ### Registered
 
 
 | Field | Type | Number | Description |
 |---|---|---|---|
-| `session_id` |  `string` | 1 |  |
+| `session_id` |  `string` | 1 | currently the worker_id of the Register message |
 
 ### Execute
 
+A command for the worker to run. Answer with a Result or a Rejection of the same `lease_id`
+before `deadline`; after it, the command goes to another worker and a late answer is ignored.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
 | `lease_id` |  `string` | 1 |  |
-| `command` |  `Command` | 2 |  |
+| `command` |  `Command` | 2 | as the client sent it, with its signature |
 | `history` | repeated `Event` | 3 | events after `snapshot.version`, or all events without one |
-| `expected_version` |  `uint64` | 4 |  |
+| `expected_version` |  `uint64` | 4 | The aggregate's current version (0: no events yet); the result's events follow it. |
 | `snapshot` |  `Snapshot` | 5 | the latest snapshot, if any |
 | `received_at` |  `int64` | 6 | ms since epoch when the kernel accepted the command; stable across retries |
 | `deadline` |  `int64` | 7 | ms since epoch when the lease expires and the command goes to another worker |
@@ -572,21 +731,28 @@ When a middleware runs.
 
 ### Result
 
+The events a command produced (possibly none). Signed by the worker over kernable.v1.result,
+which covers the command and expected_version but not the lease. If another command changed
+the aggregate meanwhile, the kernel runs the command again (Execute with the new history), a
+few times before it rejects it with `concurrency_conflict`.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
 | `lease_id` |  `string` | 1 |  |
 | `events` | repeated `NewEvent` | 2 |  |
-| `worker_sig` |  `Signature` | 3 |  |
-| `snapshot` |  `Snapshot` | 4 | Optional: the state after these events, at expected_version + len(events). |
+| `worker_sig` |  `Signature` | 3 | by Register.key_id |
+| `snapshot` |  `Snapshot` | 4 | Optional: the state after these events, at expected_version + len(events), signed over kernable.v1.snapshot by the same key. Only with at least one event; an invalid snapshot ends the stream like an invalid result signature. Not stored after an erasure. |
 | `vault` | repeated `VaultValue` | 5 | the values of the events' `vault_refs` |
 
 ### Rejection
 
-A rejection with code `snapshot_stale` means the worker cannot read the snapshot it got (unknown schema): the kernel drops the snapshot and executes the command again with all events.
+The worker refuses the command: it is stored as rejected and nothing is written. Signed by
+the worker over kernable.v1.rejection.
+A rejection with code `snapshot_stale` means the worker cannot read the snapshot it got
+(unknown schema): the kernel drops the snapshot and executes the command again with all events.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
 | `lease_id` |  `string` | 1 |  |
 | `reason` |  `Rejected` | 2 |  |
-| `worker_sig` |  `Signature` | 3 |  |
+| `worker_sig` |  `Signature` | 3 | by Register.key_id |

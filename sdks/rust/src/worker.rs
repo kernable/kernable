@@ -44,7 +44,12 @@ struct WorkerInner {
 
 /// Runs the commands of its aggregates: the kernel sends each command with the aggregate's
 /// events, the worker decides and sends the new events back, signed. Cloning gives another
-/// handle to the same worker.
+/// handle to the same worker. Made with [`crate::Kernable::worker`]; the configuring methods
+/// return it, so they chain.
+///
+/// `run().await` processes commands until `stop()`. To do something once it is connected,
+/// spawn it and wait: `let worker = kernable.worker(&cart_aggregate); tokio::spawn({ let worker
+/// = worker.clone(); async move { worker.run().await } }); worker.ready().await;`.
 #[derive(Clone)]
 pub struct Worker {
     inner: Arc<WorkerInner>,
@@ -101,17 +106,18 @@ impl Worker {
         self.inner.announce.store(announce, Ordering::SeqCst);
     }
 
-    /// Returns once the kernel accepted the worker.
+    /// Returns once the kernel accepted the worker; waits forever if it never connects.
     pub async fn ready(&self) {
         let _ = self.inner.ready.subscribe().wait_for(|r| *r).await;
     }
 
-    /// Ends `run`.
+    /// Ends `run`, also from another task.
     pub fn stop(&self) {
         self.inner.stopped.send_replace(true);
     }
 
-    /// Processes commands until `stop()`, reconnecting when the session drops.
+    /// Processes commands until `stop()`, reconnecting when the session drops. A handler's
+    /// error or panic rejects that command (`handler_error`); it does not end `run`.
     pub async fn run(&self) {
         let mut stopped = self.inner.stopped.subscribe();
         while !*stopped.borrow() {

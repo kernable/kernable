@@ -2,25 +2,27 @@
 
 # Metrics and health
 
-With `--metrics-listen 127.0.0.1:9233` the kernel serves, on that address:
+With `--metrics-listen 127.0.0.1:9233` the kernel serves plain HTTP with no login on that address, so bind it to a private one. How to use it for health checks, alerts and graphs: [Monitor kernable](../how-to/monitor).
 
 - `GET /metrics`: Prometheus text format, below.
 - `GET /health`: 200 while the process runs.
 - `GET /ready`: 200 once every aggregate that counts has a worker connected and every listener that counts is connected and has caught up (see [Who counts](../concepts/ordering#who-counts)), else 503 naming the workers or listeners it waits for.
 
+Counters and durations count since the kernel started and begin at 0 again after a restart. Durations are summaries without quantiles, in seconds: `<name>_sum` and `<name>_count`. The `outcome` label takes the values named in the description; the `listener` label is a listener's name, for every registered listener, connected or not.
+
 | Metric | Type | Labels | Description |
 |---|---|---|---|
-| `kernable_commands_total` | counter | `outcome` | Completed commands by outcome. |
-| `kernable_queries_total` | counter | `outcome` | Queries by outcome; failed means no read model answered. |
-| `kernable_middleware_total` | counter | `outcome` | Commands and queries checked by middleware, by outcome; failed means a middleware was missing or too slow. |
-| `kernable_queued_commands` | gauge |  | Commands waiting or running. |
-| `kernable_worker_sessions` | gauge |  | Connected worker sessions. |
-| `kernable_head_position` | gauge |  | Global position of the newest event. |
-| `kernable_execution_seconds` | summary |  | From lease to commit. |
-| `kernable_settle_seconds` | summary |  | From commit until every listener acknowledged the events. |
-| `kernable_query_seconds` | summary |  | From a query's arrival until its answer. |
-| `kernable_middleware_seconds` | summary |  | From a request's arrival until the middleware chain passed or rejected it. |
-| `kernable_listener_position` | gauge | `listener` | Last acknowledged global position per listener. |
-| `kernable_listener_lag` | gauge | `listener` | Events a listener has not acknowledged yet. |
-| `kernable_listener_connected` | gauge | `listener` | 1 while the listener is connected. |
+| `kernable_commands_total` | counter | `outcome` | Commands completed since the kernel started, by outcome: committed, or rejected by a worker or the kernel. Commands a middleware refused before the queue are not counted. |
+| `kernable_queries_total` | counter | `outcome` | Queries since the kernel started, by outcome: answered; rejected by a read model or a middleware; failed when no read model answered, because none was connected or none answered in time. |
+| `kernable_middleware_total` | counter | `outcome` | Runs of a middleware chain, before or after a command or query, by outcome: passed, rejected, or failed when a middleware in the chain was not connected or did not answer within --middleware-timeout-ms. |
+| `kernable_queued_commands` | gauge |  | Commands stored in the queue and not completed yet: waiting for a worker or running. |
+| `kernable_worker_sessions` | gauge |  | Worker sessions connected now. |
+| `kernable_head_position` | gauge |  | Global position of the newest stored event; 0 while the store is empty. |
+| `kernable_execution_seconds` | summary |  | Seconds from handing a command to a worker until its events are committed: the worker round trip plus storage. Committed commands only. |
+| `kernable_settle_seconds` | summary |  | Seconds from the commit until every listener that counts acknowledged the events. Settling submits that settled in time only. |
+| `kernable_query_seconds` | summary |  | Seconds from handing a query to the read models until one answered or rejected it. Queries that failed are not included. |
+| `kernable_middleware_seconds` | summary |  | Seconds one middleware chain took to pass, reject or fail a request. |
+| `kernable_listener_position` | gauge | `listener` | Global position of the last event the listener acknowledged. |
+| `kernable_listener_lag` | gauge | `listener` | Global positions between the newest stored event and the listener's position: how far it is behind. |
+| `kernable_listener_connected` | gauge | `listener` | 1 while the listener is connected, 0 while it is registered but away. |
 | `kernable_ready` | gauge |  | 1 while the kernel is ready: every aggregate that counts has a worker, every listener that counts is connected and caught up, and it is not shutting down. |

@@ -42,7 +42,8 @@ type QueryHandler =
     Arc<dyn Fn(Value, QueryMeta, QueryContext) -> BoxFuture<Result<Value, BoxError>> + Send + Sync>;
 type CheckHandler = Arc<dyn Fn(Check) -> BoxFuture<Result<(), BoxError>> + Send + Sync>;
 
-/// What a listener handler gets about an event besides its payload.
+/// What a listener handler gets about an event besides its payload (the `evt` of
+/// [`Listener::on`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StoredEventMeta {
     pub event_type: String,
@@ -82,7 +83,8 @@ impl StoredEventMeta {
     }
 }
 
-/// What a listener handler gets besides the event's payload and meta.
+/// What a listener handler gets besides the event's payload and meta (the `ctx` of
+/// [`Listener::on`]).
 #[derive(Clone)]
 pub struct ListenerContext {
     /// The event was committed before the listener connected: it is being replayed.
@@ -95,15 +97,19 @@ pub struct ListenerContext {
 }
 
 impl ListenerContext {
-    /// A request context for commands caused by this event: same sender and correlation.
+    /// A request context for commands caused by this event: same sender and correlation, this
+    /// event's command as the cause, without an expected version or privileges. Pass it with
+    /// [`crate::Submit::context`].
     pub fn follow(&self) -> RequestContext {
         self.request.follow(&self.command_id)
     }
 }
 
-/// What a query handler gets about the query besides its data.
+/// What a query handler gets about the query besides its data (the `qry` of
+/// [`Listener::query`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct QueryMeta {
+    /// The query's ID, a new UUID per query.
     pub query_id: String,
     /// The query type within the domain.
     pub query_type: String,
@@ -111,18 +117,22 @@ pub struct QueryMeta {
     pub tenant: String,
 }
 
-/// What a query handler gets besides the query's data and meta.
+/// What a query handler gets besides the query's data and meta (the `ctx` of
+/// [`Listener::query`]).
 #[derive(Clone)]
 pub struct QueryContext {
     /// Who asks: check permissions here.
     pub request: RequestContext,
-    /// The listener's store, if it has one.
+    /// The listener's store, if it has one ([`Listener::store`]).
     pub store: Option<Store>,
 }
 
+/// Whether a middleware checks a command or a query ([`Check::kind`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CheckKind {
+    /// A command: [`Check::aggregate_type`] and [`Check::aggregate_id`] are set.
     Command,
+    /// A query.
     Query,
 }
 
@@ -130,11 +140,14 @@ pub enum CheckKind {
 /// [`QueryOutcome`] for a query.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CheckOutcome {
+    /// What became of a command.
     Command(Outcome),
+    /// What became of a query.
     Query(QueryOutcome),
 }
 
-/// A command or query a middleware checks, before the kernel accepts or routes it or after.
+/// A command or query a middleware checks, before the kernel accepts or routes it or after:
+/// what the handler of [`Listener::middleware`] gets.
 #[derive(Clone, Debug)]
 pub struct Check {
     pub kind: CheckKind,
@@ -146,7 +159,9 @@ pub struct Check {
     pub type_name: String,
     /// Commands only.
     pub aggregate_type: Option<String>,
+    /// Commands only.
     pub aggregate_id: Option<String>,
+    /// The request's payload; vault fields are `null` unless the key is granted `vault_read`.
     pub data: Value,
     /// Who sends it: check permissions here.
     pub request: RequestContext,
@@ -185,7 +200,9 @@ impl fmt::Display for When {
     }
 }
 
-/// What a middleware checks.
+/// What a middleware checks: `MiddlewareOptions::new(&["shop.*"])`, with
+/// `MiddlewareOptions { order: 5, ..MiddlewareOptions::new(&["*"]) }` for another order and
+/// `.after()` to run after requests.
 #[derive(Clone, Debug)]
 pub struct MiddlewareOptions {
     /// Command and query types: `*` (all), a type of the listener's domain (`Place`), of another
@@ -199,6 +216,7 @@ pub struct MiddlewareOptions {
 }
 
 impl MiddlewareOptions {
+    /// Checks `types` (see [`MiddlewareOptions::types`]) before requests, at order 0.
     pub fn new(types: &[&str]) -> MiddlewareOptions {
         MiddlewareOptions {
             types: types.iter().map(|t| (*t).to_owned()).collect(),
@@ -253,7 +271,19 @@ struct ListenerInner {
 /// qualified (`identity.AccountRegistered`). Handlers get event payloads upcast to the versions
 /// of the listener's domain and of the domains it is given with `with_domain`. An event with a
 /// newer schema than known stops the listener (it retries and logs) until it is updated, so it
-/// never misreads data. Cloning gives another handle to the same definition.
+/// never misreads data. Cloning gives another handle to the same definition, and every
+/// configuring method returns one, so they chain.
+///
+/// Handlers are closures that return a future: `Fn(data, meta, ctx) -> impl Future<Output =
+/// Result<_, BoxError>>`. They are called again for every event, so they cannot own mutable
+/// state: share it as `Arc<Mutex<…>>`, clone the `Arc` into each closure with `move`, and
+/// lock it before the `async` block (do not hold a `std::sync::MutexGuard` across `.await`):
+/// `let rows = Arc::new(Mutex::new(HashMap::<String, u32>::new())); let r = Arc::clone(&rows);
+/// carts_readmodel.on("ItemAdded", move |data: ItemAdded, evt, _ctx| {
+/// *r.lock().unwrap().entry(evt.aggregate_id).or_default() += data.qty; async { Ok(()) } });`
+///
+/// A query handler returns its answer (any `Serialize`) or a [`Rejected`] as a [`BoxError`]:
+/// `carts_readmodel.query("GetCart", move |q: GetCart, _qry, _ctx| { let row = r.lock().unwrap().get(&q.id).copied(); async move { Ok(row.ok_or_else(|| Rejected::new("no such cart").code("not_found"))?) } });`
 #[derive(Clone)]
 pub struct Listener {
     inner: Arc<ListenerInner>,
@@ -304,6 +334,7 @@ impl Listener {
         }
     }
 
+    /// The listener's name: the kernel keeps its position under it.
     pub fn name(&self) -> &str {
         &self.inner.name
     }
@@ -398,7 +429,7 @@ impl Listener {
         )
     }
 
-    /// Delay before reconnecting after the stream drops (default 1 s).
+    /// Delay before reconnecting after the stream drops or a handler fails (default 1 s).
     pub fn reconnect(&self, delay: Duration) -> Listener {
         self.inner.settings.lock().unwrap().reconnect = delay;
         self.clone()
@@ -408,6 +439,8 @@ impl Listener {
     /// memory: its data and position are written together per batch, and a restart continues
     /// after the stored position. `schema` is the version of the stored data's format: change
     /// it when the handlers store data differently, and the store is cleared and rebuilt.
+    /// Handlers get the store as `ctx.store` ([`ListenerContext::store`],
+    /// [`QueryContext::store`]). Example: `shop_domain.read_model("carts").store("sqlite:carts.db", "1")`.
     pub fn store(&self, url: &str, schema: &str) -> Listener {
         let mut settings = self.inner.settings.lock().unwrap();
         settings.store = Some(url.to_owned());
@@ -429,8 +462,10 @@ impl Listener {
 
     /// Handles `event_type` events: a type of the listener's domain (`ItemAdded`), of another
     /// domain (`orders.OrderPlaced`) or a whole domain (`orders.*`). `handler(data, evt, ctx)`
-    /// gets the payload as `D` (`serde_json::Value` for any); a payload that is not a `D` fails
-    /// the batch, so it is delivered again.
+    /// gets the payload as `D` (`serde_json::Value` for any), a [`StoredEventMeta`] and a
+    /// [`ListenerContext`], and returns a future of `Result<(), BoxError>`. A payload that is
+    /// not a `D` or an `Err` fails the batch: the listener reconnects and the event is
+    /// delivered again, so handlers must be idempotent. See [`Listener`] for an example.
     ///
     /// # Panics
     ///
@@ -487,10 +522,12 @@ impl Listener {
 
     /// Answers `query_type` queries: a type of the listener's domain (`GetOrder`) or of another
     /// one (`orders.GetOrder`), from this listener's state: `handler(data, qry, ctx)` gets the
-    /// query's data as `D`. The kernel delivers queries in order with the events, so an answer
-    /// reflects every event handled before it. Return a [`Rejected`] to refuse. A handler
-    /// cannot query its own listener (the answer would wait behind itself): the kernel refuses
-    /// it.
+    /// query's data as `D`, a [`QueryMeta`] and a [`QueryContext`], and returns a future of
+    /// the answer `R` (any `Serialize`). The kernel delivers queries in order with the events,
+    /// so an answer reflects every event handled before it. Return a [`Rejected`] (as a
+    /// [`BoxError`]) to refuse; any other error refuses with `handler_error`. A handler cannot
+    /// query its own listener (the answer would wait behind itself): the kernel refuses it. See
+    /// [`Listener`] for an example.
     ///
     /// # Panics
     ///
@@ -529,7 +566,11 @@ impl Listener {
     /// [`Rejected`] to refuse; any other error refuses too. After a request, the check carries
     /// its outcome ([`Check::outcome`]). The registration is stored: while this listener is
     /// away, the kernel refuses those requests (`kernable listeners remove` unregisters it).
-    /// A listener has at most one middleware before and one after.
+    /// A listener has at most one middleware before and one after. The handler gets a
+    /// [`Check`] and returns a future of `Result<(), BoxError>`: `Ok(())` lets the request
+    /// pass. Example: `MiddlewareOptions::new(&["shop.*"])` with a handler that returns
+    /// `Err(Rejected::new("not allowed").code("forbidden").into())` unless
+    /// `check.request.sender_identity` may send `check.type_name`.
     ///
     /// # Panics
     ///
@@ -598,6 +639,10 @@ struct HandleInner {
 
 /// A [`Listener`] running on a connection; see [`crate::Kernable::listener`]. Cloning gives
 /// another handle to the same running listener.
+///
+/// `run().await` processes events until `stop()`. To run several listeners in one process,
+/// spawn each (`tokio::spawn(async move { handle.run().await })`) and await `ready()` where
+/// the next step needs them connected, or use an app ([`crate::Kernable::app`]).
 #[derive(Clone)]
 pub struct ListenerHandle {
     inner: Arc<HandleInner>,
@@ -660,7 +705,9 @@ impl ListenerHandle {
         &self.inner.listener.inner
     }
 
-    /// Processes events until `stop()`, reconnecting when the stream drops.
+    /// Processes events, queries and checks until `stop()`, reconnecting when the stream drops
+    /// or a handler fails. With a store, opens it first and continues after its position; if
+    /// it cannot be opened, logs the error and returns.
     pub async fn run(&self) {
         let mut stopped = self.inner.stopped.subscribe();
         let log = &self.inner.client.log;
@@ -1002,7 +1049,8 @@ fn check_outcome(outcome: middleware_call::Outcome) -> CheckOutcome {
     }
 }
 
-/// Where a subscription starts and what it reads.
+/// Where a subscription starts and what it reads, for [`crate::Kernable::subscribe`]:
+/// `SubscribeOptions { after: last_seen, types: vec!["shop.*".into()], ..Default::default() }`.
 #[derive(Clone, Debug)]
 pub struct SubscribeOptions {
     /// Global position of the last event already handled; 0: from the beginning.
@@ -1010,6 +1058,7 @@ pub struct SubscribeOptions {
     /// Qualified event types (`orders.OrderPlaced`) or domains (`orders.*`); empty: all the key
     /// may read.
     pub types: Vec<String>,
+    /// Delay before reconnecting after the stream drops or the handler fails (default 1 s).
     pub reconnect: Duration,
 }
 
@@ -1023,7 +1072,8 @@ impl Default for SubscribeOptions {
     }
 }
 
-/// A running subscription; see [`crate::Kernable::subscribe`].
+/// A running subscription; see [`crate::Kernable::subscribe`]. Dropping it ends the
+/// subscription too; [`Subscription::stop`] also waits until it has ended.
 pub struct Subscription {
     position: Arc<AtomicU64>,
     stopped: watch::Sender<bool>,

@@ -55,7 +55,7 @@ or pass them in code:
 | Python | `Kernable(tls=Tls(ca, cert, key))` |
 | Rust | `Options::new("shop-worker.key").tls(Tls { ca, cert, key })` (paths) |
 
-Set all three variables or none: one or two of them is an error. The CLI commands that talk to a running kernel (`kernable apply`, `kernable revoke`, `kernable submit`) read the same variables.
+Set all three variables or none: in the SDKs, one or two of them is an error. The CLI commands that talk to a running kernel (`kernable apply`, `kernable revoke`, `kernable submit`) read the same variables, but use TLS only when all three are set; with one or two, they quietly connect without TLS, and the kernel refuses them on a non-loopback address.
 
 ## Pitfalls
 

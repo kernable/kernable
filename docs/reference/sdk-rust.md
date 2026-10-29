@@ -2,48 +2,154 @@
 
 # Rust SDK
 
-`cargo add kernable` (async, on tokio). Generated from the doc comments in `sdks/rust/src`.
+```sh
+cargo add kernable serde_json
+cargo add serde --features derive
+cargo add tokio --features macros,rt-multi-thread
+```
+
+Rust 1.88 or newer (edition 2024), on Tokio. A kernel to connect to: `kernable start --dev` (see [Getting started](../tutorial/getting-started)).
+
+A cart aggregate, a read model that answers a query, and a client that submits and reads back, in one process:
+
+```rust
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
+
+use kernable::{App, BoxError, Kernable, NewEvent, Query, Rejected, Submit, domain};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct Cart {
+    items: u32,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Item {
+    qty: u32,
+}
+
+#[derive(Deserialize)]
+struct GetCart {
+    id: String,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), BoxError> {
+    let shop_domain = domain("shop");
+
+    let cart_aggregate = shop_domain.aggregate("cart", Cart::default());
+    cart_aggregate.apply("ItemAdded", |state, data: Item, _evt, _ctx| state.items += data.qty);
+    cart_aggregate.command("AddItem", |_state, data: Item, _cmd, _ctx| {
+        if data.qty == 0 {
+            return Err(Rejected::new("qty must be at least 1"));
+        }
+        Ok(vec![NewEvent::new("ItemAdded", data)])
+    });
+
+    // Handlers are called again for every event: share their state as Arc<Mutex<…>>.
+    let rows = Arc::new(Mutex::new(HashMap::<String, u32>::new()));
+    let carts_readmodel = shop_domain.read_model("carts");
+    let r = Arc::clone(&rows);
+    carts_readmodel.on("ItemAdded", move |data: Item, evt, _ctx| {
+        *r.lock().unwrap().entry(evt.aggregate_id).or_default() += data.qty;
+        async { Ok(()) }
+    });
+    let r = Arc::clone(&rows);
+    carts_readmodel.query("GetCart", move |q: GetCart, _qry, _ctx| {
+        let items = r.lock().unwrap().get(&q.id).copied().unwrap_or(0);
+        async move { Ok(json!({ "items": items })) }
+    });
+
+    let kernable = Kernable::new("app.key")?;
+    let app = kernable.app(App::new().service("shop").domain(&shop_domain))?;
+    tokio::spawn({
+        let app = app.clone();
+        async move { app.run().await }
+    });
+    app.ready().await;
+
+    let add_apples = Submit::new("shop", "cart", "c1", "AddItem").data(json!({ "qty": 2 }));
+    kernable.submit(add_apples).await?;
+    let get_cart = Query::new("shop", "GetCart").data(json!({ "id": "c1" }));
+    let cart: Value = kernable.query(get_cart).await?;
+    println!("{cart}"); // {"items":2}
+    Ok(())
+}
+```
+
+How the SDK works:
+
+- **Async, on Tokio.** Calls to the kernel are `async fn`s; run them in a Tokio runtime (`#[tokio::main]`). `run()` of a worker, a listener or an app returns only after `stop()`: `.await` it last, or `tokio::spawn` it and `.await` its `ready()`.
+- **Builders.** `Options`, `Submit`, `Query`, `Manifest` and `App` are built with methods that each return the changed value: `Submit::new(…).data(…).wait(Wait::Committed)`. Domains, aggregates, listeners and workers are handles: their methods register on the shared definition and return another handle, so they chain too.
+- **Typed payloads.** A handler's `data` parameter has the type you annotate (`data: Item`, any `Deserialize` type, or `serde_json::Value`); state, events and answers are `Serialize`.
+- **Handler state.** Listener handlers are `Fn` closures that return a future and run again for every event: keep their state in an `Arc<Mutex<…>>` (or a store), clone the `Arc` into each `move` closure, and lock before the `async` block.
+- **Errors.** Command handlers return `Result<Vec<NewEvent>, Rejected>`; listener, query and middleware handlers return `Result<_, BoxError>`, where `?` and `.into()` turn a `Rejected` or any other error into a `BoxError`. Client calls return `Result<_, Error>`; a rejected command is `Ok(Outcome::Rejected(_))`, a rejected query `Err(Error::Rejected(_))` ([Errors](./errors)).
+
+The rest of this page is generated from the doc comments in `sdks/rust/src`.
 
 ### Options
 
-How to reach the kernel and as whom.
+How to reach the kernel and as whom: the options of `Kernable::new`, set with builder
+methods that each return the changed options.
 
-- `fn new(key: impl AsRef<Path>) -> Options`: Signs with the key in the `.key` file at `key`.
+`Options::default()` takes everything from the environment, else the defaults: the key from
+`KERNABLE_KEY`, else `app.key` in the current directory; the kernel from `KERNABLE_URL`,
+else `http://127.0.0.1:7233`; the grant from `KERNABLE_GRANT`, else the `.grant` file next
+to the key; the service from `KERNABLE_SERVICE`; TLS from `KERNABLE_TLS_CA`,
+`KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`; the tenant `default`. A key file's path (`&str`,
+`String`, `&Path`, `PathBuf`) converts into options with only the key set, so
+`Kernable::new("app.key")` works too. Example:
+`Kernable::new(Options::new("shop.key").url("http://kernel:7233").service("shop"))?`.
+
+- `fn new(key: impl AsRef<Path>) -> Options`: Options that sign with the key in the `.key` file at `key` (made with `kernable keys new`), every other option at its default.
 - `fn url(self, url: impl Into<String>) -> Options`: Kernel address: `http://host:port` (`host:port` works too) or, on Unix, `unix:/path/to.sock`. Default: `KERNABLE_URL`, else `http://127.0.0.1:7233`, where `kernable start` listens.
 - `fn grant(self, path: impl AsRef<Path>) -> Options`: The key's grant (`kernable grant`), sent with every call. Default: `KERNABLE_GRANT`, else the `.grant` file next to the key file, if there is one.
 - `fn tenant(self, tenant: impl Into<String>) -> Options`: Default tenant for `submit`, `query`, files and the cache (default `default`).
 - `fn service(self, service: impl Into<String>) -> Options`: The service this process's workers and listeners belong to. The service's membership (see `Kernable::apply`) decides what the kernel waits for: what it lists counts, the service's other workers and listeners are dynamic, and only listeners it lists as middlewares may check requests. Default: `KERNABLE_SERVICE`, else none (everything registered counts).
 - `fn context(self, context: RequestContext) -> Options`: Default request context, e.g. this service's identity; a request's own context replaces it.
-- `fn tls(self, tls: Tls) -> Options`: Mutual TLS for `host:port` URLs: the CA certificate and this process's certificate and key. Default: `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`, if set.
+- `fn tls(self, tls: Tls) -> Options`: Mutual TLS for `host:port` URLs: the CA certificate and this process's certificate and key, as paths of PEM files (`Tls { ca, cert, key }`, re-exported from the kernel's crate). Default: `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`, if set (all three or none).
 
 ### Kernable
 
 A connection to the kernel: submits commands, asks queries, and runs workers and listeners.
 Cloning gives another handle to the same connection.
 
-- `fn new(options: impl Into<Options>) -> Result<Kernable, Error>`: A client for the kernel `options` names, or with only a key file's path, for the default kernel; `Options::default()` takes everything from the environment. It connects on first use and again after the connection drops. Needs a tokio runtime.
-- `fn with_domain(&self, domain: &Domain) -> Kernable`: Seals the vault fields of this domain's commands when submitting them; see `Domain::command`.
-- `fn worker<S: State>(&self, aggregate: &Aggregate<S>) -> Worker`: A worker that runs the commands of `aggregate`; add more with `Worker::aggregate`. It belongs to this connection's service (see `Options::service`).
-- `fn listener(&self, listener: &Listener) -> ListenerHandle`: Runs `listener` (a read model or reactor of a domain) on this connection: the handle processes its events with `run()`. Each call gives a new handle. The listener belongs to this connection's service (see `Options::service`).
-- `fn data(&self) -> Files`: Files of the default tenant: bytes up to 16 MiB per key, kept by the kernel outside the signed event log; see `Files`.
-- `fn cache(&self) -> Cache`: The kernel's cache for the default tenant: values up to 1 MiB per key, optionally with a TTL, lost when the kernel restarts; see `Cache`.
-- `async fn apply(&self, manifest: Manifest) -> Result<(), Error>`: Replaces the membership of a service (default: this connection's, see `Options::service`): the workers, listeners and middlewares the kernel waits for, plus free metadata. Apply it once per deploy (e.g. from a deploy script), not from every process: the latest apply wins. The key needs the `manage` grant for the service. A middleware the new membership no longer lists stops checking.
-- `fn app(&self, app: App) -> Result<AppHandle, Error>`: An app made of whole domains: `AppHandle::run` applies the service's membership (the domains' aggregates as workers, their read models and reactors as listeners, those that check requests as middlewares; live ones are not listed, and the metadata is `version` and `description`, when given, then the app's other metadata), then runs one worker for all the aggregates and every listener, live ones too, all in the app's service. One service is one app: two processes with the same service would replace each other's membership. `Error::Config` if neither the app nor the connection names a service.
-- `async fn submit(&self, submit: Submit) -> Result<Outcome, Error>`: Runs a command and returns its outcome; see `Submit::wait`.
-- `async fn enqueue(&self, submit: Submit) -> Result<String, Error>`: Stores the command in the kernel's queue and returns its ID without waiting for it to run. Submit it again with the same `id` to get the outcome.
-- `async fn query<T: DeserializeOwned>(&self, query: Query) -> Result<T, Error>`: Asks the read model that answers `domain.type` and returns its answer. Queries always go through the kernel, also within one process. A refusal is `Error::Rejected`.
-- `fn subscribe<F, Fut>(&self, options: SubscribeOptions, handler: F) -> Subscription where F: Fn(StoredEvent) -> Fut + Send + Sync + 'static, Fut: Future<Output = Result<(), BoxError>> + Send + 'static`: Streams committed events after `options.after` (backlog first, then live) to `handler`, one at a time. Reconnects and resumes after the last handled event; if the handler fails, that event is delivered again. Persist the position yourself to resume across restarts.
+The calls to the kernel are `async` and need a Tokio runtime (`#[tokio::main]`). Workers,
+listeners and apps run until stopped: `run().await` them, or `tokio::spawn` them and wait
+for `ready()`. Workers and listeners print connection lines to stderr up to the level
+`KERNABLE_LOG` names (`off`, `error`, `warn`, `info` (default), `debug`). Example:
+`let kernable = Kernable::new("app.key")?; let outcome =
+kernable.submit(Submit::new("shop", "cart", "c1", "AddItem").data(json!({ "qty": 2 }))).await?;`
+
+- `fn new(options: impl Into<Options>) -> Result<Kernable, Error>`: A client for the kernel `options` names, or with only a key file's path, for the default kernel; `Options::default()` takes everything from the environment (see `Options`). It connects on first use and again after the connection drops. Needs a Tokio runtime. `Error::Config` if the key, grant or TLS files cannot be read, only some of the TLS variables are set, or the URL is invalid. Example: `Kernable::new("app.key")?`.
+- `fn with_domain(&self, domain: &Domain) -> Kernable`: Seals the vault fields of this domain's commands when submitting them; see `Domain::command`. Returns another handle to this connection, so it chains: `Kernable::new("app.key")?.with_domain(&shop_domain)`.
+- `fn worker<S: State>(&self, aggregate: &Aggregate<S>) -> Worker`: A worker that runs the commands of `aggregate`; add more with `Worker::aggregate`. It belongs to this connection's service (see `Options::service`). Nothing runs until `Worker::run` is awaited: `kernable.worker(&cart_aggregate).run().await`.
+- `fn listener(&self, listener: &Listener) -> ListenerHandle`: Runs `listener` (a read model or reactor of a domain) on this connection: the handle processes its events with `run()`. Each call gives a new handle. The listener belongs to this connection's service (see `Options::service`). Example: `kernable.listener(&carts_readmodel).run().await`.
+- `fn data(&self) -> Files`: Files of the default tenant: bytes up to 16 MiB per key, kept by the kernel outside the signed event log; see `Files`. Example: `kernable.data().put("shop", "invoices/c1.pdf", bytes, "application/pdf").await?`.
+- `fn cache(&self) -> Cache`: The kernel's cache for the default tenant: values up to 1 MiB per key, optionally with a TTL, lost when the kernel restarts; see `Cache`. Example: `kernable.cache().set("shop", "rate:c1", "3", Some(Duration::from_secs(60))).await?`.
+- `async fn apply(&self, manifest: Manifest) -> Result<(), Error>`: Replaces the membership of a service (default: this connection's, see `Options::service`): the workers, listeners and middlewares the kernel waits for, plus free metadata. Apply it once per deploy (e.g. from a deploy script), not from every process: the latest apply wins. The key needs the `manage` grant for the service. A middleware the new membership no longer lists stops checking. Example: `kernable.apply(Manifest::new().service("shop").worker(&cart_aggregate).listener(&carts_readmodel)).await?`. `Error::Config` if neither the manifest nor the connection names a service, `Error::Status` if the kernel refuses it.
+- `fn app(&self, app: App) -> Result<AppHandle, Error>`: An app made of whole domains: `AppHandle::run` applies the service's membership (the domains' aggregates as workers, their read models and reactors as listeners, those that check requests as middlewares; live ones are not listed, and the metadata is `version` and `description`, when given, then the app's other metadata), then runs one worker for all the aggregates and every listener, live ones too, all in the app's service. Example: `kernable.app(App::new().service("shop").version("1.0.0").domain(&shop_domain))?.run().await?`. Every start applies the membership, so the key needs the `manage` grant for the service. One service is one app: two processes with the same service would replace each other's membership. `Error::Config` if neither the app nor the connection names a service.
+- `async fn submit(&self, submit: Submit) -> Result<Outcome, Error>`: Runs a command and returns its outcome: `Outcome::Committed` with the new events, or `Outcome::Rejected` if a handler or middleware rejected it (a rejection is `Ok`, not an error). By default it waits until every listener that counts has processed the events; see `Submit::wait`. `Error::NotSettled` if they did not in time (the command is committed), `Error::Status` if the kernel refuses the call (no grant, unknown aggregate type, timeout). Example: `kernable.submit(Submit::new("shop", "cart", "c1", "AddItem").data(json!({ "sku": "apple", "qty": 2 }))).await?`.
+- `async fn enqueue(&self, submit: Submit) -> Result<String, Error>`: Stores the command in the kernel's queue and returns its ID without waiting for it to run. Submit it again with the same `id` (`Submit::id`) to get the outcome; its `wait` is ignored.
+- `async fn query<T: DeserializeOwned>(&self, query: Query) -> Result<T, Error>`: Asks the read model that answers `domain.type` and returns its answer, deserialized as `T` (`serde_json::Value` for any). Queries always go through the kernel, also within one process. A refusal by the read model or a middleware is `Error::Rejected`; the kernel's own (no grant, no read model connected) is `Error::Status`; an answer that is not a `T` is `Error::Json`. Example: `let cart: Value = kernable.query(Query::new("shop", "GetCart").data(json!({ "id": "c1" }))).await?;`
+- `fn subscribe<F, Fut>(&self, options: SubscribeOptions, handler: F) -> Subscription where F: Fn(StoredEvent) -> Fut + Send + Sync + 'static, Fut: Future<Output = Result<(), BoxError>> + Send + 'static`: Streams committed events after `options.after` (backlog first, then live) to `handler`, one at a time. Reconnects and resumes after the last handled event; if the handler fails, that event is delivered again. Persist the position yourself to resume across restarts. Needs the `subscribe` grant for the types. Unlike a listener, a subscription is not registered with the kernel: nobody waits for it, and its events carry no vault values (vault fields are `null` and listed in `redacted`). It runs in a Tokio task from the call on; `Subscription::stop` ends it.
 
 ### Wait
 
 How long `submit` waits before it responds.
 
 - `Settled`: Until every listener has processed the events, so read models already show them (default); `Error::NotSettled` on timeout. From a listener's handler, only the listeners with a lower order count.
-- `Committed`: Until the events are stored.
+- `Committed`: Until the events are stored. To read them back, ask with `Query::min_position` set to the last event's position.
 
 ### Manifest
 
 What a service consists of, for `Kernable::apply`; see `Membership` in kernable.proto.
+Built with methods that each return the changed manifest:
+`Manifest::new().service("shop").worker(&cart_aggregate).listener(&carts_readmodel).metadata("version", "1.0.0")`.
 
 - `fn new() -> Manifest`: An empty manifest for the connection's service.
 - `fn service(self, service: impl Into<String>) -> Manifest`: The service it is for. Default: the connection's (`Options::service`).
@@ -54,59 +160,96 @@ What a service consists of, for `Kernable::apply`; see `Membership` in kernable.
 
 ### Submit
 
-A command to submit.
+A command to submit with `Kernable::submit` or `Kernable::enqueue`, built with methods
+that each return the changed command:
+`Submit::new("shop", "cart", "c1", "AddItem").data(json!({ "qty": 2 })).wait(Wait::Committed)`.
+Without `data`, the payload is an empty object (`{}`).
 
 - `fn new(domain: &str, aggregate_type: &str, aggregate_id: &str, command_type: &str) -> Submit`: A `command_type` command of `domain` for the aggregate `aggregate_type` with ID `aggregate_id`.
 - `fn data(self, data: impl Serialize) -> Submit`: The command's data. Panics if `data` cannot be represented as JSON.
-- `fn tenant(self, tenant: impl Into<String>) -> Submit`
-- `fn id(self, id: impl Into<String>) -> Submit`: Idempotency key; resubmitting the same ID returns the original outcome.
+- `fn tenant(self, tenant: impl Into<String>) -> Submit`: The tenant to submit to. Default: the connection's (`Options::tenant`).
+- `fn id(self, id: impl Into<String>) -> Submit`: Idempotency key (default: a new UUID); resubmitting the same ID returns the original outcome without running the command again.
 - `fn context(self, context: RequestContext) -> Submit`: Replaces the client's default context; inside a listener, pass `ctx.follow()`.
-- `fn wait(self, wait: Wait) -> Submit`
+- `fn wait(self, wait: Wait) -> Submit`: How long `Kernable::submit` waits: `Wait::Settled` (default) or `Wait::Committed`.
 
 ### Query
 
-A query to ask.
+A query to ask with `Kernable::query`, built with methods that each return the changed
+query: `Query::new("shop", "GetCart").data(json!({ "id": "c1" }))`. Without `data`, the
+query's data is an empty object (`{}`).
 
 - `fn new(domain: &str, query_type: &str) -> Query`: A `query_type` query of `domain`.
 - `fn data(self, data: impl Serialize) -> Query`: The query's data. Panics if `data` cannot be represented as JSON.
-- `fn tenant(self, tenant: impl Into<String>) -> Query`
+- `fn tenant(self, tenant: impl Into<String>) -> Query`: The tenant to ask in. Default: the connection's (`Options::tenant`).
 - `fn context(self, context: RequestContext) -> Query`: Replaces the client's default context.
 - `fn min_position(self, position: u64) -> Query`: Answer only after the read model has processed this global position (e.g. of a committed submit).
 
 ### Outcome
 
-What became of a command.
+What became of a command, returned by `Kernable::submit`.
 
-- `Committed(Vec<StoredEvent>)`
-- `Rejected(Rejected)`
-- `fn is_committed(&self) -> bool`
+- `Committed(Vec<StoredEvent>)`: The command's events are stored, in order. Vault fields in them are `null` (see `StoredEvent::redacted`).
+- `Rejected(Rejected)`: A handler, a middleware or the kernel rejected the command; nothing was stored but the rejection.
+- `fn is_committed(&self) -> bool`: Whether the command was committed.
 - `fn events(&self) -> &[StoredEvent]`: The committed events; none if the command was rejected.
 
 ### QueryOutcome
 
-What became of a query: its response data or why it was rejected.
+What became of a query, as a middleware that runs after requests gets it
+(`CheckOutcome::Query`): its response data or why it was rejected.
 
-- `Answered(Value)`
-- `Rejected(Rejected)`
-- `fn is_answered(&self) -> bool`
+- `Answered(Value)`: The read model's answer.
+- `Rejected(Rejected)`: The read model or a middleware rejected the query.
+- `fn is_answered(&self) -> bool`: Whether the read model answered.
 
 ### StoredEvent
 
-An event as stored by the kernel.
+An event as stored by the kernel: in an `Outcome` and in a `Kernable::subscribe`
+handler.
 
-- `position: u64`
+- `position: u64`: Global position of the event in the kernel's log.
 - `tenant: String`
 - `domain: String`: Always the domain of the command that caused the event.
 - `aggregate_type: String`
 - `aggregate_id: String`
-- `version: u64`
-- `event_type: String`
+- `version: u64`: The aggregate's version after this event: 1 for its first event.
+- `event_type: String`: The event type within the domain, e.g. `ItemAdded`.
 - `schema: u32`: Version of the payload format. Listeners get `data` upcast to the version they know (see `Domain::event`), unless the handler is raw.
-- `data: Value`
+- `data: Value`: The payload; `StoredEvent::parse` deserializes it.
 - `redacted: Vec<String>`: Fields kept in the vault whose value is not here (`null` in `data`): erased, or not readable with this key (granted `vault_read`).
-- `command_id: String`
+- `command_id: String`: The command that caused the event.
 - `request: RequestContext`: The request context of the command that caused the event.
-- `fn parse<D: DeserializeOwned>(&self) -> Result<D, serde_json::Error>`: `data` as a `D`.
+- `fn parse<D: DeserializeOwned>(&self) -> Result<D, serde_json::Error>`: `data` as a `D`, e.g. `let item: ItemAdded = event.parse()?;`.
+
+### App
+
+An app: one service made of whole domains, for `Kernable::app`. Every aggregate, read
+model and reactor created through its domains runs in it. Built with methods that each
+return the changed app:
+
+`let app = kernable.app(App::new().service("shop").version("1.0.0").domain(&shop_domain))?;`
+then `app.run().await?`. To do something once everything is connected (e.g. in a test),
+spawn it and wait: `let running = tokio::spawn({ let app = app.clone(); async move {
+app.run().await } }); app.ready().await;`.
+
+- `fn new() -> App`: An app without domains for the connection's service; add them with `App::domain`.
+- `fn service(self, service: impl Into<String>) -> App`: The service it is. Default: the connection's (`crate::Options::service`).
+- `fn version(self, version: impl Into<String>) -> App`: Goes into the membership's metadata as `version`.
+- `fn description(self, description: impl Into<String>) -> App`: Goes into the membership's metadata as `description`.
+- `fn metadata(self, key: impl Into<String>, value: impl Into<String>) -> App`: More metadata, after `version` and `description`; kept in the order given.
+- `fn domain(self, domain: &Domain) -> App`: A domain of the app: its aggregates, read models and reactors run in it. Call it once per domain.
+
+### AppHandle
+
+An `App` on a connection; see `Kernable::app`. Cloning gives another handle to the same
+app, e.g. to call `stop()` or `ready()` while another task awaits `run()`.
+
+- `fn manifest(&self) -> &Manifest`: The membership `run()` applies.
+- `fn worker(&self) -> Option<&Worker>`: The worker of all the app's aggregates; none if it has none.
+- `fn listeners(&self) -> &[ListenerHandle]`: Every read model and reactor of the app, live ones too.
+- `async fn ready(&self)`: Returns once the worker and every listener of the app are connected; waits forever if one never connects, so wrap it in `tokio::time::timeout` where that matters.
+- `fn stop(&self)`: Ends `run`: stops the worker and every listener.
+- `async fn run(&self) -> Result<(), Error>`: Applies the membership (see `Kernable::apply`), then runs the worker and every listener until `stop()`. Once all are connected, it prints an overview of the app (unless `KERNABLE_LOG` is below `info`) instead of their connection lines. Fails only if the kernel refuses the membership (`Error::Status`); a failing handler does not end it (a command handler's error rejects the command, a listener handler's error makes the listener reconnect and get the event again). A panic in a worker or listener task is passed on.
 
 ### Domain
 
@@ -115,22 +258,24 @@ A domain: a name that scopes its aggregates, commands and events, lowercase by c
 cases are valid; names are case-sensitive. Types are unique within a domain; elsewhere they
 are named `domain.Type`. Cloning gives another handle to the same domain.
 
-A domain remembers the aggregates, read models and reactors created through it, so that an
-app runs all of them (see `crate::Kernable::app`); they live as long as the domain does.
+Make it with `domain`: `let shop_domain = domain("shop");`. A domain remembers the
+aggregates, read models and reactors created through it, so that an app runs all of them
+(see `crate::Kernable::app`); they live as long as the domain does.
 
-- `fn name(&self) -> &str`
-- `fn event(&self, event_type: &str, schema: u32) -> EventSchema`: Declares that this domain writes `event_type` events at version `schema`, with an `upcast` per older version. The domain's aggregates and listeners use it; other domains' listeners get it with `with_domain`. Panics if `event_type` is qualified or `schema` is 0.
-- `fn command(&self, command_type: &str) -> CommandSchema`: Declares which fields of `command_type` commands the vault keeps (`personal`, `secret`). Clients that submit them need the domain: `kernable.with_domain(&domain)`. Panics if `command_type` is qualified.
-- `fn aggregate<S: State>(&self, name: &str, initial: S) -> Aggregate<S>`: An aggregate of this domain named `name` (lowercase by convention, like `cart`), whose state starts as `initial`.
-- `fn read_model(&self, name: &str) -> Listener`: A read model of this domain named `name`: kept in memory and rebuilt from the first event on every start (order 0). Run it with `crate::Kernable::listener`.
-- `fn reactor(&self, name: &str) -> Listener`: A reactor of this domain named `name`: triggers side effects; starts at the newest event when it is new, then resumes after the last acknowledged event (order 10). A settling submit from its handler waits for the listeners before it (the read models), not for the reactor itself, which handles one event at a time. Run it with `crate::Kernable::listener`.
+- `fn name(&self) -> &str`: The domain's name, e.g. `shop`.
+- `fn event(&self, event_type: &str, schema: u32) -> EventSchema`: Declares that this domain writes `event_type` events at version `schema`, with an `upcast` per older version, and which of their fields the vault keeps; see `EventSchema`. The domain's aggregates and listeners use it; other domains' listeners get it with `Listener::with_domain`. Types not declared are at version 1. Panics if `event_type` is qualified or `schema` is 0.
+- `fn command(&self, command_type: &str) -> CommandSchema`: Declares which fields of `command_type` commands the vault keeps (`personal`, `secret`); see `CommandSchema`. Clients that submit them need the domain: `kernable.with_domain(&domain)`. Panics if `command_type` is qualified.
+- `fn aggregate<S: State>(&self, name: &str, initial: S) -> Aggregate<S>`: An aggregate of this domain named `name` (lowercase by convention, like `cart`), whose state starts as `initial`; see `Aggregate`. Example: `let cart_aggregate = shop_domain.aggregate("cart", Cart::default());`.
+- `fn read_model(&self, name: &str) -> Listener`: A read model of this domain named `name`: builds a view from events and answers queries from it; see `Listener`. Kept in memory and rebuilt from the first event on every start (order 0; `Listener::store` keeps it in a file instead). Run it with `crate::Kernable::listener` or in an app. Example: `let carts_readmodel = shop_domain.read_model("carts");`.
+- `fn reactor(&self, name: &str) -> Listener`: A reactor of this domain named `name`: triggers side effects and follow-up commands; see `Listener`. It starts at the newest event when it is new, then resumes after the last acknowledged event (order 10). A settling submit from its handler waits for the listeners before it (the read models), not for the reactor itself, which handles one event at a time. Submit with a fixed ID and `ctx.follow()`, so a redelivered event does not run the command twice. Run it with `crate::Kernable::listener` or in an app.
 - `fn schema_of(&self, event_type: &str) -> u32`: The payload version this domain writes `event_type` events at.
 
 ### domain()
 
 `fn domain(name: &str) -> Domain`
 
-A domain named `name`.
+A domain named `name`, on which you define its aggregates, read models, reactors and event
+and command schemas: `let shop_domain = domain("shop");`.
 
 Panics if `name` does not start with a letter or holds characters other than letters, digits,
 `-` and `_`.
@@ -140,23 +285,33 @@ Panics if `name` does not start with a letter or holds characters other than let
 The payload format of one event type: its current version and the steps that bring older
 payloads up to it. Events are stored as written and never changed; readers upcast them.
 
-- `fn personal(self, fields: &[&str], subject: impl Fn(&Value, &str) -> String + Send + Sync + 'static) -> Self`: Keeps these top-level fields in the vault, as personal data of the subject `subject` returns from the payload and the aggregate's ID (e.g. `\|d, _\| d["customerId"]…`, or `\|_, id\| id.to_owned()` for the aggregate itself). Events then hold only references; the kernel hands the values to workers and to listeners allowed to read them, until an event erases the subject.
+Made with `Domain::event`; its methods return it, so they chain:
+`shop_domain.event("ItemAdded", 2).upcast(1, |mut d| { d["qty"] = json!(1); d });` or
+`shop_domain.event("CustomerRegistered", 1).personal(&["email"], |_, id| id.to_owned());`.
+A subject function gets the payload and the aggregate's ID, e.g.
+`|d, _| d["customerId"].as_str().unwrap_or_default().to_owned()`.
+
+- `fn personal(self, fields: &[&str], subject: impl Fn(&Value, &str) -> String + Send + Sync + 'static) -> Self`: Keeps these top-level fields in the vault, as personal data of the subject `subject` returns from the payload and the aggregate's ID (see `EventSchema` for examples). Events then hold only references; the kernel hands the values to workers and to listeners allowed to read them, until an event erases the subject.
 - `fn erases(self, subject: impl Fn(&Value, &str) -> String + Send + Sync + 'static) -> Self`: Makes this an erasing event: it deletes every vault value of the subject `subject` returns, in every stream, and the snapshots that may hold them. Read models should drop the subject's data when they see it; rebuilt, they read `null`.
-- `fn upcast(self, from: u32, step: impl Fn(Value) -> Value + Send + Sync + 'static) -> Self`: Turns a payload of version `from` into one of version `from + 1`. Panics if `from` is not a version below the current one.
+- `fn upcast(self, from: u32, step: impl Fn(Value) -> Value + Send + Sync + 'static) -> Self`: Turns a payload of version `from` into one of version `from + 1`: `step` gets the old payload and returns the new one. Declare one step per older version. Panics if `from` is not a version below the current one.
 
 ### CommandSchema
 
-How a command's payload is kept: which fields go to the vault.
+How a command's payload is kept: which fields go to the vault. Made with
+`Domain::command`; its methods return it, so they chain:
+`shop_domain.command("Register").personal(&["email"], |_, id| id.to_owned()).secret(&["password"]);`.
+Clients that submit these commands need the domain: `kernable.with_domain(&shop_domain)`.
 
 - `fn personal(self, fields: &[&str], subject: impl Fn(&Value, &str) -> String + Send + Sync + 'static) -> Self`: Keeps these top-level fields in the vault as personal data of `subject`; see `EventSchema::personal`.
 - `fn secret(self, fields: &[&str]) -> Self`: Keeps these top-level fields (passwords, one-time tokens) in the vault only until the command completed. The handler gets them in clear; the stored command keeps a reference.
 
 ### NewEvent
 
-An event returned by a command handler; `data` is stored as JSON.
+An event returned by a command handler; `data` is stored as JSON. Make it with
+`NewEvent::new`: `NewEvent::new("ItemAdded", &item)`.
 
-- `event_type: String`
-- `data: Value`
+- `event_type: String`: The event type within the aggregate's domain, e.g. `ItemAdded`.
+- `data: Value`: The payload.
 - `fn new(event_type: &str, data: impl Serialize) -> NewEvent`: An `event_type` event with `data`; `()` stands for no data. Panics if `data` cannot be represented as JSON (a map with non-string keys).
 
 ### EventMeta
@@ -184,8 +339,8 @@ must compute the same state every time.
 
 What a command handler gets about the command besides its payload.
 
-- `command_id: String`
-- `command_type: String`
+- `command_id: String`: The command's ID: given with `crate::Submit::id`, else a new UUID.
+- `command_type: String`: The command type within the domain.
 - `domain: String`
 - `aggregate_type: String`
 - `aggregate_id: String`
@@ -196,16 +351,17 @@ What a command handler gets about the command besides its payload.
 What a command handler gets besides state, data and the command's meta: the request
 context, and the command's time and IDs.
 
-- `request: RequestContext`
-- `fn new(command_id: &str, request: RequestContext, received_at: Timestamp) -> CommandContext`: A context for calling a command handler directly, e.g. in a unit test.
+- `request: RequestContext`: Who sends the command: check permissions here.
+- `fn new(command_id: &str, request: RequestContext, received_at: Timestamp) -> CommandContext`: A context for calling a command handler directly, e.g. in a unit test with `Aggregate::handle`; its deadline is 30 s after `received_at`.
 - `fn now(&self) -> Timestamp`: When the kernel received the command: the same every time the command runs. Use it instead of the clock.
 - `fn id(&self) -> String`: A new ID that is the same every time the command runs (1st call, 2nd call, ...). Use it instead of random IDs.
 - `fn deadline(&self) -> Timestamp`: When the kernel hands the command to another worker if this one has not answered.
 
 ### FoldEvent
 
-An event to fold: type, payload version and data, and what `apply` learns about it (empty
-fields if unknown).
+An event to fold with `Aggregate::fold`: type, payload version and data, and what `apply`
+learns about it (empty fields if unknown). `FoldEvent::new("ItemAdded", json!({ "qty": 2 }))`
+is enough for most tests.
 
 - `event_type: String`
 - `schema: u32`
@@ -216,41 +372,62 @@ fields if unknown).
 
 ### State
 
-What an aggregate's state must be: copied, and stored as JSON in snapshots.
+What an aggregate's state must be: copied, and stored as JSON in snapshots. Every type that
+is `Clone + Serialize + DeserializeOwned + Send + Sync + 'static` is one, typically a struct
+with `#[derive(Clone, Default, Serialize, Deserialize)]`.
 
 ### Aggregate
 
 An aggregate: how events change its state (`apply`) and which events a command produces
 (`command`). Handlers must be deterministic and free of side effects; they may run again.
 Create it with `domain(...).aggregate(...)`; cloning gives another handle to the same
-aggregate.
+aggregate. The registering methods return the aggregate, so they chain.
 
-- `fn domain(&self) -> &Domain`
-- `fn name(&self) -> &str`
-- `fn initial(&self) -> &S`
+`apply` handlers change the state in place:
+`cart_aggregate.apply("ItemAdded", |state, data: Item, _evt, _ctx| state.items += data.qty);`.
+`command` handlers return the new events or a `Rejected`:
+`cart_aggregate.command("AddItem", |state, data: Item, _cmd, _ctx| { if state.checked_out {
+return Err(Rejected::new("Cart is checked out")); } Ok(vec![NewEvent::new("ItemAdded", data)]) });`.
+The type of `data` (here `Item`, any `Deserialize` type, or `serde_json::Value`) says how
+the payload is read; a payload that does not fit fails the command with `handler_error`.
+Handlers are synchronous and must not block.
+
+Test without a kernel: `cart_aggregate.fold([FoldEvent::new("ItemAdded", json!({ "qty": 2 }))], None)?`
+returns the state, and `cart_aggregate.handle(&state, "AddItem", json!({ "qty": 1 }), &mut ctx)`
+runs a command handler with a `CommandContext::new`.
+
+- `fn domain(&self) -> &Domain`: The domain the aggregate belongs to.
+- `fn name(&self) -> &str`: The aggregate's name within its domain, e.g. `cart`.
+- `fn initial(&self) -> &S`: The state before the first event.
 - `fn snapshot_every(&self, events: u64) -> Self`: Sends a snapshot of the state every `events` events (default 100; 0 turns them off).
 - `fn schema(&self, schema: &str) -> Self`: Version of the state format (default "1"). Change it when `apply` produces differently shaped state; older snapshots are then ignored and the state is rebuilt from the events.
-- `fn apply<D: DeserializeOwned>(&self, event_type: &str, f: impl Fn(&mut S, D, &EventMeta, &ApplyContext) + Send + Sync + 'static) -> Self`: How an event of `event_type` changes the state: `f(state, data, evt, ctx)` changes `state` in place, or replaces it with `*state = …`. `data` is the event's payload as `D`.
-- `fn command<D: DeserializeOwned>(&self, command_type: &str, f: impl Fn(&S, D, &CommandMeta, &mut CommandContext) -> Result<Vec<NewEvent>, Rejected> + Send + Sync + 'static) -> Self`: Which events a `command_type` command produces: `f(state, data, cmd, ctx)` returns them, or a `Rejected`. `data` is the command's payload as `D`.
-- `fn fold(&self, history: impl IntoIterator<Item = FoldEvent>, from: Option<S>) -> Result<S, Error>`: State after `history`, starting from `from` (default: the initial state). Events are upcast first; events without an `apply` are skipped.
-- `fn handle(&self, state: &S, command_type: &str, data: impl Serialize, ctx: &mut CommandContext) -> Result<Vec<NewEvent>, Error>`: Runs the `command_type` handler on `state`, e.g. in a unit test. The handler's `CommandMeta` has the command ID of `ctx`, this aggregate's domain and name, and an empty aggregate ID and tenant.
+- `fn apply<D: DeserializeOwned>(&self, event_type: &str, f: impl Fn(&mut S, D, &EventMeta, &ApplyContext) + Send + Sync + 'static) -> Self`: How an event of `event_type` changes the state: `f(state, data, evt, ctx)` changes `state` in place, or replaces it with `*state = …`. `data` is the event's payload as `D`, upcast to the current version; `evt` is an `EventMeta`, `ctx` an `ApplyContext`. See `Aggregate` for an example.
+- `fn command<D: DeserializeOwned>(&self, command_type: &str, f: impl Fn(&S, D, &CommandMeta, &mut CommandContext) -> Result<Vec<NewEvent>, Rejected> + Send + Sync + 'static) -> Self`: Which events a `command_type` command produces: `f(state, data, cmd, ctx)` returns them as `Ok(vec![NewEvent::new(…)])`, or `Err(Rejected::new(…))`. `data` is the command's payload as `D`; `cmd` is a `CommandMeta`, `ctx` a `CommandContext` with the request context and deterministic `now()` and `id()`. See `Aggregate` for an example.
+- `fn fold(&self, history: impl IntoIterator<Item = FoldEvent>, from: Option<S>) -> Result<S, Error>`: State after `history`, starting from `from` (default: the initial state). Events are upcast first; events without an `apply` are skipped. For tests without a kernel. `Error::Config` if an `apply` fails (also a payload that is not its `D`, or a panic) or an event's schema is newer than known.
+- `fn handle(&self, state: &S, command_type: &str, data: impl Serialize, ctx: &mut CommandContext) -> Result<Vec<NewEvent>, Error>`: Runs the `command_type` handler on `state`, e.g. in a unit test. The handler's `CommandMeta` has the command ID of `ctx`, this aggregate's domain and name, and an empty aggregate ID and tenant. `Error::Rejected` if the handler rejects the command, `Error::Config` if there is no handler for `command_type` or it fails otherwise.
 
 ### Worker
 
 Runs the commands of its aggregates: the kernel sends each command with the aggregate's
 events, the worker decides and sends the new events back, signed. Cloning gives another
-handle to the same worker.
+handle to the same worker. Made with `crate::Kernable::worker`; the configuring methods
+return it, so they chain.
+
+`run().await` processes commands until `stop()`. To do something once it is connected,
+spawn it and wait: `let worker = kernable.worker(&cart_aggregate); tokio::spawn({ let worker
+= worker.clone(); async move { worker.run().await } }); worker.ready().await;`.
 
 - `fn aggregate<S: State>(&self, aggregate: &Aggregate<S>) -> Worker`: Runs the commands of `aggregate`, too.
 - `fn concurrency(&self, commands: u32) -> Worker`: Commands executed in parallel (default 16).
 - `fn reconnect(&self, delay: Duration) -> Worker`: Delay before reconnecting after the session ends (default 1 s).
-- `async fn ready(&self)`: Returns once the kernel accepted the worker.
-- `fn stop(&self)`: Ends `run`.
-- `async fn run(&self)`: Processes commands until `stop()`, reconnecting when the session drops.
+- `async fn ready(&self)`: Returns once the kernel accepted the worker; waits forever if it never connects.
+- `fn stop(&self)`: Ends `run`, also from another task.
+- `async fn run(&self)`: Processes commands until `stop()`, reconnecting when the session drops. A handler's error or panic rejects that command (`handler_error`); it does not end `run`.
 
 ### StoredEventMeta
 
-What a listener handler gets about an event besides its payload.
+What a listener handler gets about an event besides its payload (the `evt` of
+`Listener::on`).
 
 - `event_type: String`
 - `version: u64`: The aggregate's version after this event: 1 for its first event.
@@ -265,45 +442,51 @@ What a listener handler gets about an event besides its payload.
 
 ### ListenerContext
 
-What a listener handler gets besides the event's payload and meta.
+What a listener handler gets besides the event's payload and meta (the `ctx` of
+`Listener::on`).
 
 - `replaying: bool`: The event was committed before the listener connected: it is being replayed.
 - `store: Option<Store>`: The listener's store, if it has one (`Listener::store`).
 - `request: RequestContext`: The request context of the command that caused the event.
-- `fn follow(&self) -> RequestContext`: A request context for commands caused by this event: same sender and correlation.
+- `fn follow(&self) -> RequestContext`: A request context for commands caused by this event: same sender and correlation, this event's command as the cause, without an expected version or privileges. Pass it with `crate::Submit::context`.
 
 ### QueryMeta
 
-What a query handler gets about the query besides its data.
+What a query handler gets about the query besides its data (the `qry` of
+`Listener::query`).
 
-- `query_id: String`
+- `query_id: String`: The query's ID, a new UUID per query.
 - `query_type: String`: The query type within the domain.
 - `domain: String`
 - `tenant: String`
 
 ### QueryContext
 
-What a query handler gets besides the query's data and meta.
+What a query handler gets besides the query's data and meta (the `ctx` of
+`Listener::query`).
 
 - `request: RequestContext`: Who asks: check permissions here.
-- `store: Option<Store>`: The listener's store, if it has one.
+- `store: Option<Store>`: The listener's store, if it has one (`Listener::store`).
 
 ### CheckKind
 
-- `Command`
-- `Query`
+Whether a middleware checks a command or a query (`Check::kind`).
+
+- `Command`: A command: `Check::aggregate_type` and `Check::aggregate_id` are set.
+- `Query`: A query.
 
 ### CheckOutcome
 
 What came of the request a middleware after it checks: an `Outcome` for a command, a
 `QueryOutcome` for a query.
 
-- `Command(Outcome)`
-- `Query(QueryOutcome)`
+- `Command(Outcome)`: What became of a command.
+- `Query(QueryOutcome)`: What became of a query.
 
 ### Check
 
-A command or query a middleware checks, before the kernel accepts or routes it or after.
+A command or query a middleware checks, before the kernel accepts or routes it or after:
+what the handler of `Listener::middleware` gets.
 
 - `kind: CheckKind`
 - `id: String`: The command or query ID.
@@ -311,8 +494,8 @@ A command or query a middleware checks, before the kernel accepts or routes it o
 - `domain: String`
 - `type_name: String`: The command or query type within the domain.
 - `aggregate_type: Option<String>`: Commands only.
-- `aggregate_id: Option<String>`
-- `data: Value`
+- `aggregate_id: Option<String>`: Commands only.
+- `data: Value`: The request's payload; vault fields are `null` unless the key is granted `vault_read`.
 - `request: RequestContext`: Who sends it: check permissions here.
 - `outcome: Option<CheckOutcome>`: After it, what came of the request; before it, `None`.
 
@@ -325,12 +508,14 @@ When a middleware runs.
 
 ### MiddlewareOptions
 
-What a middleware checks.
+What a middleware checks: `MiddlewareOptions::new(&["shop.*"])`, with
+`MiddlewareOptions { order: 5, ..MiddlewareOptions::new(&["*"]) }` for another order and
+`.after()` to run after requests.
 
 - `types: Vec<String>`: Command and query types: `*` (all), a type of the listener's domain (`Place`), of another domain (`orders.Place`) or a whole domain (`orders.*`).
 - `order: i32`: Position in the chain: lower runs first, equal orders by listener name (default 0). Negative orders are reserved for kernable.
 - `when: When`: Before (default) or after requests; see `When`.
-- `fn new(types: &[&str]) -> MiddlewareOptions`
+- `fn new(types: &[&str]) -> MiddlewareOptions`: Checks `types` (see `MiddlewareOptions::types`) before requests, at order 0.
 - `fn after(self) -> MiddlewareOptions`: Runs after requests instead of before: the handler gets their outcome too.
 
 ### Listener
@@ -345,72 +530,97 @@ Types without a domain (`ItemAdded`) are the listener's own domain's; other doma
 qualified (`identity.AccountRegistered`). Handlers get event payloads upcast to the versions
 of the listener's domain and of the domains it is given with `with_domain`. An event with a
 newer schema than known stops the listener (it retries and logs) until it is updated, so it
-never misreads data. Cloning gives another handle to the same definition.
+never misreads data. Cloning gives another handle to the same definition, and every
+configuring method returns one, so they chain.
 
-- `fn name(&self) -> &str`
+Handlers are closures that return a future: `Fn(data, meta, ctx) -> impl Future<Output =
+Result<_, BoxError>>`. They are called again for every event, so they cannot own mutable
+state: share it as `Arc<Mutex<…>>`, clone the `Arc` into each closure with `move`, and
+lock it before the `async` block (do not hold a `std::sync::MutexGuard` across `.await`):
+`let rows = Arc::new(Mutex::new(HashMap::<String, u32>::new())); let r = Arc::clone(&rows);
+carts_readmodel.on("ItemAdded", move |data: ItemAdded, evt, _ctx| {
+*r.lock().unwrap().entry(evt.aggregate_id).or_default() += data.qty; async { Ok(()) } });`
+
+A query handler returns its answer (any `Serialize`) or a `Rejected` as a `BoxError`:
+`carts_readmodel.query("GetCart", move |q: GetCart, _qry, _ctx| { let row = r.lock().unwrap().get(&q.id).copied(); async move { Ok(row.ok_or_else(|| Rejected::new("no such cart").code("not_found"))?) } });`
+
+- `fn name(&self) -> &str`: The listener's name: the kernel keeps its position under it.
 - `fn domain(&self) -> &Domain`: The domain the listener belongs to: types without a domain are its.
 - `fn order(&self, order: i32) -> Listener`: Listeners with a lower order process each event first; equal orders run in parallel. Defaults: 0 for read models, 10 for reactors. Negative orders are reserved for kernable.
 - `fn start(&self, position: u64) -> Listener`: Position to start after on the first connect: 0 rebuilds from the beginning (default for read models). Reactors resume after the last acknowledged event unless given one, and a new one starts at the newest event, so it never reacts to what happened before it existed. Reconnects always resume after the last handled event.
 - `fn live(&self) -> Listener`: Not registered with the kernel: no stored position, always starts at the newest event, nobody waits for it, and it is forgotten when it disconnects. For reactions that only matter while the process runs, e.g. pushing to connected browsers. Make it live before running it. Panics if the listener is a middleware: a live listener cannot be one.
-- `fn reconnect(&self, delay: Duration) -> Listener`: Delay before reconnecting after the stream drops (default 1 s).
-- `fn store(&self, url: &str, schema: &str) -> Listener`: Keeps the listener's state in a store (`sqlite:<path>` or `memory:`) instead of memory: its data and position are written together per batch, and a restart continues after the stored position. `schema` is the version of the stored data's format: change it when the handlers store data differently, and the store is cleared and rebuilt.
+- `fn reconnect(&self, delay: Duration) -> Listener`: Delay before reconnecting after the stream drops or a handler fails (default 1 s).
+- `fn store(&self, url: &str, schema: &str) -> Listener`: Keeps the listener's state in a store (`sqlite:<path>` or `memory:`) instead of memory: its data and position are written together per batch, and a restart continues after the stored position. `schema` is the version of the stored data's format: change it when the handlers store data differently, and the store is cleared and rebuilt. Handlers get the store as `ctx.store` (`ListenerContext::store`, `QueryContext::store`). Example: `shop_domain.read_model("carts").store("sqlite:carts.db", "1")`.
 - `fn with_domain(&self, domain: &Domain) -> Listener`: Upcasts the events of another `domain` with its event schemas (see `Domain::event`); the listener's own domain's apply without it.
-- `fn on<D, F, Fut>(&self, event_type: &str, handler: F) -> Listener where D: DeserializeOwned + Send + 'static, F: Fn(D, StoredEventMeta, ListenerContext) -> Fut + Send + Sync + 'static, Fut: Future<Output = Result<(), BoxError>> + Send + 'static`: Handles `event_type` events: a type of the listener's domain (`ItemAdded`), of another domain (`orders.OrderPlaced`) or a whole domain (`orders.*`). `handler(data, evt, ctx)` gets the payload as `D` (`serde_json::Value` for any); a payload that is not a `D` fails the batch, so it is delivered again. Panics if `event_type` is none of these.
+- `fn on<D, F, Fut>(&self, event_type: &str, handler: F) -> Listener where D: DeserializeOwned + Send + 'static, F: Fn(D, StoredEventMeta, ListenerContext) -> Fut + Send + Sync + 'static, Fut: Future<Output = Result<(), BoxError>> + Send + 'static`: Handles `event_type` events: a type of the listener's domain (`ItemAdded`), of another domain (`orders.OrderPlaced`) or a whole domain (`orders.*`). `handler(data, evt, ctx)` gets the payload as `D` (`serde_json::Value` for any), a `StoredEventMeta` and a `ListenerContext`, and returns a future of `Result<(), BoxError>`. A payload that is not a `D` or an `Err` fails the batch: the listener reconnects and the event is delivered again, so handlers must be idempotent. See `Listener` for an example. Panics if `event_type` is none of these.
 - `fn on_raw<D, F, Fut>(&self, event_type: &str, handler: F) -> Listener where D: DeserializeOwned + Send + 'static, F: Fn(D, StoredEventMeta, ListenerContext) -> Fut + Send + Sync + 'static, Fut: Future<Output = Result<(), BoxError>> + Send + 'static`: Like `on`, but gets events as stored, without upcasting, whatever their schema (for archives and exports).
-- `fn query<D, R, F, Fut>(&self, query_type: &str, handler: F) -> Listener where D: DeserializeOwned + Send + 'static, R: Serialize, F: Fn(D, QueryMeta, QueryContext) -> Fut + Send + Sync + 'static, Fut: Future<Output = Result<R, BoxError>> + Send + 'static`: Answers `query_type` queries: a type of the listener's domain (`GetOrder`) or of another one (`orders.GetOrder`), from this listener's state: `handler(data, qry, ctx)` gets the query's data as `D`. The kernel delivers queries in order with the events, so an answer reflects every event handled before it. Return a `Rejected` to refuse. A handler cannot query its own listener (the answer would wait behind itself): the kernel refuses it. Panics if `query_type` is neither.
-- `fn middleware<F, Fut>(&self, options: MiddlewareOptions, handler: F) -> Listener where F: Fn(Check) -> Fut + Send + Sync + 'static, Fut: Future<Output = Result<(), BoxError>> + Send + 'static`: Makes this listener a middleware: the kernel asks `handler` about every command and query of `options.types`, before accepting or routing it (or after, see `When`), in chain order, and only once this listener has caught up with the events. Return a `Rejected` to refuse; any other error refuses too. After a request, the check carries its outcome (`Check::outcome`). The registration is stored: while this listener is away, the kernel refuses those requests (`kernable listeners remove` unregisters it). A listener has at most one middleware before and one after. Panics if a type is not `*`, a type, a qualified type or a domain, the listener has a middleware at `options.when` already, or it is live.
+- `fn query<D, R, F, Fut>(&self, query_type: &str, handler: F) -> Listener where D: DeserializeOwned + Send + 'static, R: Serialize, F: Fn(D, QueryMeta, QueryContext) -> Fut + Send + Sync + 'static, Fut: Future<Output = Result<R, BoxError>> + Send + 'static`: Answers `query_type` queries: a type of the listener's domain (`GetOrder`) or of another one (`orders.GetOrder`), from this listener's state: `handler(data, qry, ctx)` gets the query's data as `D`, a `QueryMeta` and a `QueryContext`, and returns a future of the answer `R` (any `Serialize`). The kernel delivers queries in order with the events, so an answer reflects every event handled before it. Return a `Rejected` (as a `BoxError`) to refuse; any other error refuses with `handler_error`. A handler cannot query its own listener (the answer would wait behind itself): the kernel refuses it. See `Listener` for an example. Panics if `query_type` is neither.
+- `fn middleware<F, Fut>(&self, options: MiddlewareOptions, handler: F) -> Listener where F: Fn(Check) -> Fut + Send + Sync + 'static, Fut: Future<Output = Result<(), BoxError>> + Send + 'static`: Makes this listener a middleware: the kernel asks `handler` about every command and query of `options.types`, before accepting or routing it (or after, see `When`), in chain order, and only once this listener has caught up with the events. Return a `Rejected` to refuse; any other error refuses too. After a request, the check carries its outcome (`Check::outcome`). The registration is stored: while this listener is away, the kernel refuses those requests (`kernable listeners remove` unregisters it). A listener has at most one middleware before and one after. The handler gets a `Check` and returns a future of `Result<(), BoxError>`: `Ok(())` lets the request pass. Example: `MiddlewareOptions::new(&["shop.*"])` with a handler that returns `Err(Rejected::new("not allowed").code("forbidden").into())` unless `check.request.sender_identity` may send `check.type_name`. Panics if a type is not `*`, a type, a qualified type or a domain, the listener has a middleware at `options.when` already, or it is live.
 
 ### ListenerHandle
 
 A `Listener` running on a connection; see `crate::Kernable::listener`. Cloning gives
 another handle to the same running listener.
 
+`run().await` processes events until `stop()`. To run several listeners in one process,
+spawn each (`tokio::spawn(async move { handle.run().await })`) and await `ready()` where
+the next step needs them connected, or use an app (`crate::Kernable::app`).
+
 - `fn listener(&self) -> &Listener`: The listener's definition.
 - `fn position(&self) -> u64`: Global position of the last handled event (or skipped, for other event types).
 - `fn opened_store(&self) -> Option<Store>`: The listener's store, once `run()` opened it.
 - `async fn ready(&self)`: Returns once the kernel accepted the listener.
 - `fn stop(&self)`: Ends `run`.
-- `async fn run(&self)`: Processes events until `stop()`, reconnecting when the stream drops.
+- `async fn run(&self)`: Processes events, queries and checks until `stop()`, reconnecting when the stream drops or a handler fails. With a store, opens it first and continues after its position; if it cannot be opened, logs the error and returns.
 
 ### SubscribeOptions
 
-Where a subscription starts and what it reads.
+Where a subscription starts and what it reads, for `crate::Kernable::subscribe`:
+`SubscribeOptions { after: last_seen, types: vec!["shop.*".into()], ..Default::default() }`.
 
 - `after: u64`: Global position of the last event already handled; 0: from the beginning.
 - `types: Vec<String>`: Qualified event types (`orders.OrderPlaced`) or domains (`orders.*`); empty: all the key may read.
-- `reconnect: Duration`
+- `reconnect: Duration`: Delay before reconnecting after the stream drops or the handler fails (default 1 s).
 
 ### Subscription
 
-A running subscription; see `crate::Kernable::subscribe`.
+A running subscription; see `crate::Kernable::subscribe`. Dropping it ends the
+subscription too; `Subscription::stop` also waits until it has ended.
 
 - `fn position(&self) -> u64`: Global position of the last handled event.
 - `async fn stop(self)`: Ends the subscription and waits until it has.
 
 ### Store
 
-A listener's store; see `crate::Listener::store`. Cloning gives another handle to it.
+A listener's store: JSON values under keys, grouped in namespaces (`ns`), in a SQLite file or
+in memory; see `crate::Listener::store`. Cloning gives another handle to it. Handlers get
+it as `ctx.store`: `if let Some(store) = &ctx.store { store.set("carts", &evt.aggregate_id,
+&row)?; }`. What an event handler writes takes effect together with the listener's
+position, once per batch. Errors are `Error::Store` (SQLite) or `Error::Json`.
 
 - `fn open(url: &str, schema: &str) -> Result<Store, Error>`: Opens `url` (`sqlite:<path>`, a bare path, or `memory:`). If the stored data was built at another `schema`, it is cleared and the read model rebuilds from the first event.
 - `fn committed(&self) -> u64`: The position up to which the stored data is complete.
-- `fn get<T: DeserializeOwned>(&self, ns: &str, key: &str) -> Result<Option<T>, Error>`
-- `fn set<T: Serialize + ?Sized>(&self, ns: &str, key: &str, value: &T) -> Result<(), Error>`
-- `fn remove(&self, ns: &str, key: &str) -> Result<(), Error>`
+- `fn get<T: DeserializeOwned>(&self, ns: &str, key: &str) -> Result<Option<T>, Error>`: The value under `key` in namespace `ns` as a `T`; `None` if there is none.
+- `fn set<T: Serialize + ?Sized>(&self, ns: &str, key: &str, value: &T) -> Result<(), Error>`: Stores `value` as JSON under `key` in namespace `ns`, replacing a value there.
+- `fn remove(&self, ns: &str, key: &str) -> Result<(), Error>`: Removes the value under `key` in namespace `ns`, if there is one.
 - `fn all<T: DeserializeOwned>(&self, ns: &str) -> Result<Vec<(String, T)>, Error>`: Every key and value of a namespace, ordered by key.
 - `fn reset(&self, ns: Option<&str>) -> Result<(), Error>`: Clears a namespace, or all data.
 
 ### Data
 
-A file as stored by the kernel.
+A file as stored by the kernel, returned by `Files::get`.
 
-- `data: Vec<u8>`
+- `data: Vec<u8>`: The file's bytes.
 - `content_type: String`: The media type given when the file was put, e.g. `image/png`.
 
 ### Files
 
 Files of up to 16 MiB under keys of 1 to 512 bytes, per tenant and domain; see
 `crate::Kernable::data`. Files are not part of the signed event log, and erasing a vault
-subject does not delete them.
+subject does not delete them, so keep personal data in vault fields instead. A refused or
+invalid request is `Error::Status`. Example:
+`kernable.data().put("shop", "invoices/c1.pdf", pdf, "application/pdf").await?`, then
+`kernable.data().get("shop", "invoices/c1.pdf").await?` returns `Some(Data { .. })`.
 
 - `async fn put(&self, domain: &str, key: &str, data: impl Into<Vec<u8>>, content_type: &str) -> Result<(), Error>`: Stores `data` as `key` of `domain` (granted `data_write`), replacing any file there.
 - `async fn get(&self, domain: &str, key: &str) -> Result<Option<Data>, Error>`: The file `key` of `domain` (granted `data_read`); `None` if there is none.
@@ -421,9 +631,12 @@ subject does not delete them.
 Values of up to 1 MiB under keys of 1 to 512 bytes, per tenant and domain, held in the
 kernel's memory (granted `cache`); see `crate::Kernable::cache`. A restart of the kernel
 empties the cache; values are not part of the signed event log, and erasing a vault subject
-does not delete them.
+does not delete them. For rate limits, short-lived tokens and computed values. A refused
+or invalid request is `Error::Status`. Example:
+`kernable.cache().set("shop", "rate:c1", "3", Some(Duration::from_secs(60))).await?`, then
+`kernable.cache().get("shop", "rate:c1").await?` returns `Some(b"3".to_vec())`.
 
-- `async fn set(&self, domain: &str, key: &str, value: impl Into<Vec<u8>>, ttl: Option<Duration>) -> Result<(), Error>`: Stores `value` as `key` of `domain`, replacing any value there. With a `ttl`, the value expires after it; without, it stays until deleted or the kernel restarts.
+- `async fn set(&self, domain: &str, key: &str, value: impl Into<Vec<u8>>, ttl: Option<Duration>) -> Result<(), Error>`: Stores `value` as `key` of `domain` (granted `cache`), replacing any value there. With a `ttl`, the value expires after it; without, it stays until deleted or the kernel restarts. A `&str` or `String` is stored as UTF-8.
 - `async fn get(&self, domain: &str, key: &str) -> Result<Option<Vec<u8>>, Error>`: The value `key` of `domain`; `None` if there is none or it expired.
 - `async fn delete(&self, domain: &str, key: &str) -> Result<bool, Error>`: Deletes the value `key` of `domain`; whether there was one.
 
@@ -432,8 +645,14 @@ does not delete them.
 Who sends a request and in which context: signed with the command and stored with every
 event it causes. `attributes` are business data only, never security decisions.
 
-- `sender_tenant: String`
-- `sender_identity: String`
+Set a default for a connection with `crate::Options::context`, or one per request with
+`crate::Submit::context` and `crate::Query::context`. Inside a listener's handler,
+submit follow-up commands with `ctx.follow()` (`crate::ListenerContext::follow`). All
+fields default to empty; set the ones you need:
+`RequestContext { sender_identity: "customer-7".into(), expected_version: Some(3), ..Default::default() }`.
+
+- `sender_tenant: String`: The tenant the sender belongs to.
+- `sender_identity: String`: Who sends the request, e.g. a user or service ID; middlewares check permissions on it.
 - `sender_account: String`
 - `sender_session: String`
 - `on_behalf_of: String`: Authorize as this identity of the target tenant; the sender stays the real principal.
@@ -447,34 +666,45 @@ event it causes. `attributes` are business data only, never security decisions.
 ### Timestamp
 
 A point in time in milliseconds since the epoch, shown as RFC 3339 in UTC with
-milliseconds (`2026-10-27T09:00:00.000Z`), like JavaScript's `toISOString()`.
+milliseconds (`2026-10-27T09:00:00.000Z`), like JavaScript's `toISOString()`: format it
+with `to_string()`. `Timestamp(ms)` makes one from milliseconds.
 
-- `fn now() -> Timestamp`
-- `fn millis(self) -> i64`
+- `fn now() -> Timestamp`: The current time. In a command handler, use `ctx.now()` instead (`crate::CommandContext::now`), which is the same every time the command runs.
+- `fn millis(self) -> i64`: Milliseconds since the Unix epoch.
 
 ### BoxError
 
 `type BoxError = Box<dyn std::error::Error + Send + Sync>`
 
-Any error a handler may return; `?` converts most errors into it.
+Any error a listener, query or middleware handler may return; `?` converts most errors
+into it, a `Rejected` too: `return Err(Rejected::new("no such cart").code("not_found").into())`.
+A query or middleware handler that returns a `Rejected` (also one wrapped in
+`Error::Rejected`, e.g. by a query it asked) refuses with its code; any other error
+refuses with `handler_error` (`middleware_error` from a middleware). An event handler's
+error makes the listener reconnect and get the event again.
 
 ### Rejected
 
 A business reason to refuse a command or query: return it from a handler. `code` (default
 `rejected`) is what callers act on, `message` what they show.
 
+A command handler returns `Err(Rejected::new("Cart is checked out"))`; a listener's query
+or middleware handler returns it as a `BoxError` (`.into()` or `?`). Callers see it as
+`crate::Outcome::Rejected` from `submit` and as `Error::Rejected` from `query`.
+
 - `code: String`
 - `message: String`
-- `fn new(message: impl Into<String>) -> Rejected`
-- `fn code(self, code: impl Into<String>) -> Rejected`: This rejection with another code.
+- `fn new(message: impl Into<String>) -> Rejected`: A rejection with `message` and the code `rejected`.
+- `fn code(self, code: impl Into<String>) -> Rejected`: This rejection with another code, e.g. `Rejected::new("no such cart").code("not_found")`.
 
 ### Error
 
-Why a call to the kernel failed.
+Why a call to the kernel failed. It implements `std::error::Error`, so `?` turns it into a
+`BoxError` in handlers and `main`.
 
-- `Rejected(Rejected)`: The read model refused the query.
-- `NotSettled(Vec<StoredEvent>)`: The command was committed, but not every listener processed its events within the kernel's `--settle-timeout-ms`. Read models may not show the change yet.
-- `Status(tonic::Status)`: The kernel refused the call or could not be reached.
-- `Config(String)`: A key, grant or certificate could not be read, or an option is invalid.
+- `Rejected(Rejected)`: A rejection: the read model or a middleware refused the query (`crate::Kernable::query`), or a command handler refused the command in `crate::Aggregate::handle`. A rejected submit is not an error but `crate::Outcome::Rejected`.
+- `NotSettled(Vec<StoredEvent>)`: The command was committed, but not every listener that counts processed its events within the kernel's `--settle-timeout-ms`. Read models may not show the change yet; the committed events are attached. Submitting again with the same ID returns the same outcome.
+- `Status(tonic::Status)`: The kernel refused the call or could not be reached: the gRPC status, e.g. `PERMISSION_DENIED` without a grant (see Errors in the reference).
+- `Config(String)`: A key, grant or certificate could not be read, or an option is invalid; also a failing handler in `crate::Aggregate::fold` and `crate::Aggregate::handle`.
 - `Json(serde_json::Error)`: Data could not be encoded or decoded as JSON.
 - `Store(rusqlite::Error)`: A read model's store failed.

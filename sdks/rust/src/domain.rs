@@ -43,14 +43,16 @@ struct DomainInner {
 /// cases are valid; names are case-sensitive. Types are unique within a domain; elsewhere they
 /// are named `domain.Type`. Cloning gives another handle to the same domain.
 ///
-/// A domain remembers the aggregates, read models and reactors created through it, so that an
-/// app runs all of them (see [`crate::Kernable::app`]); they live as long as the domain does.
+/// Make it with [`domain`]: `let shop_domain = domain("shop");`. A domain remembers the
+/// aggregates, read models and reactors created through it, so that an app runs all of them
+/// (see [`crate::Kernable::app`]); they live as long as the domain does.
 #[derive(Clone)]
 pub struct Domain {
     inner: Arc<DomainInner>,
 }
 
-/// A domain named `name`.
+/// A domain named `name`, on which you define its aggregates, read models, reactors and event
+/// and command schemas: `let shop_domain = domain("shop");`.
 ///
 /// # Panics
 ///
@@ -74,13 +76,15 @@ pub fn domain(name: &str) -> Domain {
 }
 
 impl Domain {
+    /// The domain's name, e.g. `shop`.
     pub fn name(&self) -> &str {
         &self.inner.name
     }
 
     /// Declares that this domain writes `event_type` events at version `schema`, with an
-    /// `upcast` per older version. The domain's aggregates and listeners use it; other domains'
-    /// listeners get it with `with_domain`.
+    /// `upcast` per older version, and which of their fields the vault keeps; see
+    /// [`EventSchema`]. The domain's aggregates and listeners use it; other domains' listeners
+    /// get it with [`Listener::with_domain`]. Types not declared are at version 1.
     ///
     /// # Panics
     ///
@@ -105,7 +109,8 @@ impl Domain {
     }
 
     /// Declares which fields of `command_type` commands the vault keeps (`personal`,
-    /// `secret`). Clients that submit them need the domain: `kernable.with_domain(&domain)`.
+    /// `secret`); see [`CommandSchema`]. Clients that submit them need the domain:
+    /// `kernable.with_domain(&domain)`.
     ///
     /// # Panics
     ///
@@ -127,7 +132,8 @@ impl Domain {
     }
 
     /// An aggregate of this domain named `name` (lowercase by convention, like `cart`), whose
-    /// state starts as `initial`.
+    /// state starts as `initial`; see [`Aggregate`]. Example:
+    /// `let cart_aggregate = shop_domain.aggregate("cart", Cart::default());`.
     pub fn aggregate<S: State>(&self, name: &str, initial: S) -> Aggregate<S> {
         let aggregate = Aggregate {
             inner: Arc::new(AggregateInner {
@@ -147,16 +153,21 @@ impl Domain {
         aggregate
     }
 
-    /// A read model of this domain named `name`: kept in memory and rebuilt from the first
-    /// event on every start (order 0). Run it with [`crate::Kernable::listener`].
+    /// A read model of this domain named `name`: builds a view from events and answers queries
+    /// from it; see [`Listener`]. Kept in memory and rebuilt from the first event on every start
+    /// (order 0; [`Listener::store`] keeps it in a file instead). Run it with
+    /// [`crate::Kernable::listener`] or in an app. Example:
+    /// `let carts_readmodel = shop_domain.read_model("carts");`.
     pub fn read_model(&self, name: &str) -> Listener {
         self.remember(Listener::new(self, name, 0, Some(0)))
     }
 
-    /// A reactor of this domain named `name`: triggers side effects; starts at the newest event
-    /// when it is new, then resumes after the last acknowledged event (order 10). A settling submit from its handler waits for the
+    /// A reactor of this domain named `name`: triggers side effects and follow-up commands; see
+    /// [`Listener`]. It starts at the newest event when it is new, then resumes after the last
+    /// acknowledged event (order 10). A settling submit from its handler waits for the
     /// listeners before it (the read models), not for the reactor itself, which handles one
-    /// event at a time. Run it with [`crate::Kernable::listener`].
+    /// event at a time. Submit with a fixed ID and `ctx.follow()`, so a redelivered event does
+    /// not run the command twice. Run it with [`crate::Kernable::listener`] or in an app.
     pub fn reactor(&self, name: &str) -> Listener {
         self.remember(Listener::new(self, name, 10, None))
     }
@@ -216,6 +227,12 @@ fn unqualified(t: &str) -> bool {
 
 /// The payload format of one event type: its current version and the steps that bring older
 /// payloads up to it. Events are stored as written and never changed; readers upcast them.
+///
+/// Made with [`Domain::event`]; its methods return it, so they chain:
+/// `shop_domain.event("ItemAdded", 2).upcast(1, |mut d| { d["qty"] = json!(1); d });` or
+/// `shop_domain.event("CustomerRegistered", 1).personal(&["email"], |_, id| id.to_owned());`.
+/// A subject function gets the payload and the aggregate's ID, e.g.
+/// `|d, _| d["customerId"].as_str().unwrap_or_default().to_owned()`.
 pub struct EventSchema {
     domain: Domain,
     event_type: String,
@@ -230,10 +247,9 @@ impl EventSchema {
     }
 
     /// Keeps these top-level fields in the vault, as personal data of the subject `subject`
-    /// returns from the payload and the aggregate's ID (e.g. `|d, _| d["customerId"]…`, or
-    /// `|_, id| id.to_owned()` for the aggregate itself). Events then hold only references; the
-    /// kernel hands the values to workers and to listeners allowed to read them, until an
-    /// event erases the subject.
+    /// returns from the payload and the aggregate's ID (see [`EventSchema`] for examples).
+    /// Events then hold only references; the kernel hands the values to workers and to
+    /// listeners allowed to read them, until an event erases the subject.
     pub fn personal(
         self,
         fields: &[&str],
@@ -252,7 +268,8 @@ impl EventSchema {
         self
     }
 
-    /// Turns a payload of version `from` into one of version `from + 1`.
+    /// Turns a payload of version `from` into one of version `from + 1`: `step` gets the old
+    /// payload and returns the new one. Declare one step per older version.
     ///
     /// # Panics
     ///
@@ -271,7 +288,10 @@ impl EventSchema {
     }
 }
 
-/// How a command's payload is kept: which fields go to the vault.
+/// How a command's payload is kept: which fields go to the vault. Made with
+/// [`Domain::command`]; its methods return it, so they chain:
+/// `shop_domain.command("Register").personal(&["email"], |_, id| id.to_owned()).secret(&["password"]);`.
+/// Clients that submit these commands need the domain: `kernable.with_domain(&shop_domain)`.
 pub struct CommandSchema {
     domain: Domain,
     command_type: String,
@@ -344,10 +364,13 @@ pub(crate) fn upcast(
     Ok(data)
 }
 
-/// An event returned by a command handler; `data` is stored as JSON.
+/// An event returned by a command handler; `data` is stored as JSON. Make it with
+/// [`NewEvent::new`]: `NewEvent::new("ItemAdded", &item)`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NewEvent {
+    /// The event type within the aggregate's domain, e.g. `ItemAdded`.
     pub event_type: String,
+    /// The payload.
     pub data: Value,
 }
 
@@ -392,7 +415,9 @@ pub struct ApplyContext {
 /// What a command handler gets about the command besides its payload.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CommandMeta {
+    /// The command's ID: given with [`crate::Submit::id`], else a new UUID.
     pub command_id: String,
+    /// The command type within the domain.
     pub command_type: String,
     pub domain: String,
     pub aggregate_type: String,
@@ -404,6 +429,7 @@ pub struct CommandMeta {
 /// context, and the command's time and IDs.
 #[derive(Clone, Debug)]
 pub struct CommandContext {
+    /// Who sends the command: check permissions here.
     pub request: RequestContext,
     command_id: String,
     received_at: Timestamp,
@@ -412,7 +438,8 @@ pub struct CommandContext {
 }
 
 impl CommandContext {
-    /// A context for calling a command handler directly, e.g. in a unit test.
+    /// A context for calling a command handler directly, e.g. in a unit test with
+    /// [`Aggregate::handle`]; its deadline is 30 s after `received_at`.
     pub fn new(
         command_id: &str,
         request: RequestContext,
@@ -446,8 +473,9 @@ impl CommandContext {
     }
 }
 
-/// An event to fold: type, payload version and data, and what `apply` learns about it (empty
-/// fields if unknown).
+/// An event to fold with [`Aggregate::fold`]: type, payload version and data, and what `apply`
+/// learns about it (empty fields if unknown). `FoldEvent::new("ItemAdded", json!({ "qty": 2 }))`
+/// is enough for most tests.
 #[derive(Clone, Debug, Default)]
 pub struct FoldEvent {
     pub event_type: String,
@@ -472,7 +500,9 @@ impl FoldEvent {
     }
 }
 
-/// What an aggregate's state must be: copied, and stored as JSON in snapshots.
+/// What an aggregate's state must be: copied, and stored as JSON in snapshots. Every type that
+/// is `Clone + Serialize + DeserializeOwned + Send + Sync + 'static` is one, typically a struct
+/// with `#[derive(Clone, Default, Serialize, Deserialize)]`.
 pub trait State: Clone + Serialize + DeserializeOwned + Send + Sync + 'static {}
 
 impl<S: Clone + Serialize + DeserializeOwned + Send + Sync + 'static> State for S {}
@@ -498,7 +528,20 @@ struct AggregateInner<S> {
 /// An aggregate: how events change its state (`apply`) and which events a command produces
 /// (`command`). Handlers must be deterministic and free of side effects; they may run again.
 /// Create it with `domain(...).aggregate(...)`; cloning gives another handle to the same
-/// aggregate.
+/// aggregate. The registering methods return the aggregate, so they chain.
+///
+/// `apply` handlers change the state in place:
+/// `cart_aggregate.apply("ItemAdded", |state, data: Item, _evt, _ctx| state.items += data.qty);`.
+/// `command` handlers return the new events or a [`Rejected`]:
+/// `cart_aggregate.command("AddItem", |state, data: Item, _cmd, _ctx| { if state.checked_out {
+/// return Err(Rejected::new("Cart is checked out")); } Ok(vec![NewEvent::new("ItemAdded", data)]) });`.
+/// The type of `data` (here `Item`, any `Deserialize` type, or `serde_json::Value`) says how
+/// the payload is read; a payload that does not fit fails the command with `handler_error`.
+/// Handlers are synchronous and must not block.
+///
+/// Test without a kernel: `cart_aggregate.fold([FoldEvent::new("ItemAdded", json!({ "qty": 2 }))], None)?`
+/// returns the state, and `cart_aggregate.handle(&state, "AddItem", json!({ "qty": 1 }), &mut ctx)`
+/// runs a command handler with a [`CommandContext::new`].
 pub struct Aggregate<S> {
     inner: Arc<AggregateInner<S>>,
 }
@@ -527,14 +570,17 @@ impl From<SchemaError> for Failure {
 }
 
 impl<S: State> Aggregate<S> {
+    /// The domain the aggregate belongs to.
     pub fn domain(&self) -> &Domain {
         &self.inner.domain
     }
 
+    /// The aggregate's name within its domain, e.g. `cart`.
     pub fn name(&self) -> &str {
         &self.inner.name
     }
 
+    /// The state before the first event.
     pub fn initial(&self) -> &S {
         &self.inner.initial
     }
@@ -553,7 +599,9 @@ impl<S: State> Aggregate<S> {
     }
 
     /// How an event of `event_type` changes the state: `f(state, data, evt, ctx)` changes
-    /// `state` in place, or replaces it with `*state = …`. `data` is the event's payload as `D`.
+    /// `state` in place, or replaces it with `*state = …`. `data` is the event's payload as `D`,
+    /// upcast to the current version; `evt` is an [`EventMeta`], `ctx` an [`ApplyContext`].
+    /// See [`Aggregate`] for an example.
     pub fn apply<D: DeserializeOwned>(
         &self,
         event_type: &str,
@@ -574,7 +622,10 @@ impl<S: State> Aggregate<S> {
     }
 
     /// Which events a `command_type` command produces: `f(state, data, cmd, ctx)` returns
-    /// them, or a [`Rejected`]. `data` is the command's payload as `D`.
+    /// them as `Ok(vec![NewEvent::new(…)])`, or `Err(Rejected::new(…))`. `data` is the
+    /// command's payload as `D`; `cmd` is a [`CommandMeta`], `ctx` a [`CommandContext`] with
+    /// the request context and deterministic `now()` and `id()`. See [`Aggregate`] for an
+    /// example.
     pub fn command<D: DeserializeOwned>(
         &self,
         command_type: &str,
@@ -598,7 +649,9 @@ impl<S: State> Aggregate<S> {
     }
 
     /// State after `history`, starting from `from` (default: the initial state). Events are
-    /// upcast first; events without an `apply` are skipped.
+    /// upcast first; events without an `apply` are skipped. For tests without a kernel.
+    /// [`Error::Config`] if an `apply` fails (also a payload that is not its `D`, or a panic)
+    /// or an event's schema is newer than known.
     pub fn fold(
         &self,
         history: impl IntoIterator<Item = FoldEvent>,
@@ -645,7 +698,8 @@ impl<S: State> Aggregate<S> {
 
     /// Runs the `command_type` handler on `state`, e.g. in a unit test. The handler's
     /// [`CommandMeta`] has the command ID of `ctx`, this aggregate's domain and name, and an empty
-    /// aggregate ID and tenant.
+    /// aggregate ID and tenant. [`Error::Rejected`] if the handler rejects the command,
+    /// [`Error::Config`] if there is no handler for `command_type` or it fails otherwise.
     pub fn handle(
         &self,
         state: &S,

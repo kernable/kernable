@@ -63,7 +63,7 @@ pub(crate) fn render(kernel: &Kernel) -> String {
     metric(
         "kernable_commands_total",
         "counter",
-        "Completed commands by outcome.",
+        "Commands completed since the kernel started, by outcome: committed, or rejected by a worker or the kernel. Commands a middleware refused before the queue are not counted.",
         &[
             ("{outcome=\"committed\"}".into(), m.committed.load(Relaxed)),
             ("{outcome=\"rejected\"}".into(), m.rejected.load(Relaxed)),
@@ -72,7 +72,7 @@ pub(crate) fn render(kernel: &Kernel) -> String {
     metric(
         "kernable_queries_total",
         "counter",
-        "Queries by outcome; failed means no read model answered.",
+        "Queries since the kernel started, by outcome: answered; rejected by a read model or a middleware; failed when no read model answered, because none was connected or none answered in time.",
         &[
             (
                 "{outcome=\"answered\"}".into(),
@@ -91,7 +91,7 @@ pub(crate) fn render(kernel: &Kernel) -> String {
     metric(
         "kernable_middleware_total",
         "counter",
-        "Commands and queries checked by middleware, by outcome; failed means a middleware was missing or too slow.",
+        "Runs of a middleware chain, before or after a command or query, by outcome: passed, rejected, or failed when a middleware in the chain was not connected or did not answer within --middleware-timeout-ms.",
         &[
             (
                 "{outcome=\"passed\"}".into(),
@@ -110,40 +110,40 @@ pub(crate) fn render(kernel: &Kernel) -> String {
     metric(
         "kernable_queued_commands",
         "gauge",
-        "Commands waiting or running.",
+        "Commands stored in the queue and not completed yet: waiting for a worker or running.",
         &one(kernel.queue.len() as u64),
     );
     metric(
         "kernable_worker_sessions",
         "gauge",
-        "Connected worker sessions.",
+        "Worker sessions connected now.",
         &one(m.worker_sessions.load(Relaxed)),
     );
     metric(
         "kernable_head_position",
         "gauge",
-        "Global position of the newest event.",
+        "Global position of the newest stored event; 0 while the store is empty.",
         &one(head),
     );
     for (name, help, timer) in [
         (
             "kernable_execution_seconds",
-            "From lease to commit.",
+            "Seconds from handing a command to a worker until its events are committed: the worker round trip plus storage. Committed commands only.",
             &m.execution,
         ),
         (
             "kernable_settle_seconds",
-            "From commit until every listener acknowledged the events.",
+            "Seconds from the commit until every listener that counts acknowledged the events. Settling submits that settled in time only.",
             &m.settle,
         ),
         (
             "kernable_query_seconds",
-            "From a query's arrival until its answer.",
+            "Seconds from handing a query to the read models until one answered or rejected it. Queries that failed are not included.",
             &m.query,
         ),
         (
             "kernable_middleware_seconds",
-            "From a request's arrival until the middleware chain passed or rejected it.",
+            "Seconds one middleware chain took to pass, reject or fail a request.",
             &m.middleware,
         ),
     ] {
@@ -165,17 +165,17 @@ pub(crate) fn render(kernel: &Kernel) -> String {
     };
     metric(
         "kernable_listener_position",
-        "Last acknowledged global position per listener.",
+        "Global position of the last event the listener acknowledged.",
         per(&|l| l.position),
     );
     metric(
         "kernable_listener_lag",
-        "Events a listener has not acknowledged yet.",
+        "Global positions between the newest stored event and the listener's position: how far it is behind.",
         per(&|l| head.saturating_sub(l.position)),
     );
     metric(
         "kernable_listener_connected",
-        "1 while the listener is connected.",
+        "1 while the listener is connected, 0 while it is registered but away.",
         per(&|l| l.connected as u64),
     );
     metric(

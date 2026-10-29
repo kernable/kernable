@@ -9,6 +9,13 @@ from typing import Any
 
 
 class Store:
+    """A listener's store: JSON values under keys, grouped in namespaces (`ns`), in a SQLite file
+    or in memory. Give a read model or reactor one with `store="sqlite:carts.db"`; its handlers
+    then get it as `ctx.store` (`ListenerContext`, `QueryContext`), e.g.
+    `ctx.store.set("carts", evt.aggregate_id, row)` and `ctx.store.get("carts", data["id"])`.
+    What an event handler writes takes effect together with the listener's position, once per
+    batch. Thread-safe."""
+
     def __init__(self, url: str, schema: str):
         """Opens `url` (`sqlite:<path>`, a bare path, or `memory:`). If the stored data was built at
         another `schema`, it is cleared and the read model rebuilds from the first event."""
@@ -37,16 +44,21 @@ class Store:
         return row[0] if row else None
 
     def get(self, ns: str, key: str, default: Any = None) -> Any:
+        """The value under `key` in namespace `ns`, decoded from JSON, or `default` if there is
+        none."""
         with self._lock:
             row = self._db.execute("SELECT value FROM data WHERE ns = ? AND key = ?", (ns, key)).fetchone()
         return json.loads(row[0]) if row else default
 
     def set(self, ns: str, key: str, value: Any) -> None:
+        """Stores `value` (anything `json.dumps` takes) under `key` in namespace `ns`, replacing
+        a value there."""
         with self._lock:
             self._db.execute("INSERT OR REPLACE INTO data (ns, key, value) VALUES (?, ?, ?)",
                              (ns, key, json.dumps(value)))
 
     def remove(self, ns: str, key: str) -> None:
+        """Removes the value under `key` in namespace `ns`, if there is one."""
         with self._lock:
             self._db.execute("DELETE FROM data WHERE ns = ? AND key = ?", (ns, key))
 
@@ -84,4 +96,5 @@ class Store:
             self._lock.release()
 
     def close(self) -> None:
+        """Closes the database; the store cannot be used afterwards."""
         self._db.close()

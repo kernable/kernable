@@ -33,8 +33,70 @@ def one_line(doc: str | None) -> str:
     return " ".join((doc or "").split())
 
 
-out = ["# Python SDK", "",
-       "`pip install kernable` (Python ≥ 3.10). Generated from the docstrings in `sdks/python/kernable`.", ""]
+INTRO = '''# Python SDK
+
+```sh
+pip install kernable
+```
+
+Python ≥ 3.10; it brings `grpcio`, `protobuf` and `cryptography`. A kernel to connect to: `kernable start --dev` (see [Getting started](../tutorial/getting-started)).
+
+A cart aggregate, a read model that answers a query, and a client that submits and reads back, in one process:
+
+```python
+import threading
+
+from kernable import Kernable, Rejected, domain
+
+shop_domain = domain("shop")
+cart_aggregate = shop_domain.aggregate("cart", {"items": 0})
+carts_readmodel = shop_domain.read_model("carts")
+rows = {}
+
+
+@cart_aggregate.apply("ItemAdded")
+def _(state, data):
+    state["items"] += data["qty"]
+
+
+@cart_aggregate.command("AddItem")
+def _(state, data):
+    if data["qty"] < 1:
+        raise Rejected("qty must be at least 1")
+    return [{"type": "ItemAdded", "data": data}]
+
+
+@carts_readmodel.on("ItemAdded")
+def _(data, evt):
+    rows[evt.aggregate_id] = rows.get(evt.aggregate_id, 0) + data["qty"]
+
+
+@carts_readmodel.query("GetCart")
+def _(data):
+    return {"items": rows.get(data["id"], 0)}
+
+
+k = Kernable(key="app.key")
+app = k.app(service="shop", domains=[shop_domain])
+threading.Thread(target=app.run, daemon=True).start()
+app.ready.wait(10)
+
+k.submit("shop", "cart", "c1", "AddItem", {"sku": "apple", "qty": 2})
+print(k.query("shop", "GetCart", {"id": "c1"}))  # {'items': 2}
+```
+
+How the SDK works:
+
+- **Blocking calls.** Every call blocks the calling thread; there is no `asyncio`. `run()` of a worker, a listener or an app blocks until `stop()`; run it in a thread (`threading.Thread(target=x.run, daemon=True).start()`) to do something else, and wait for the connection with `x.ready.wait(seconds)`.
+- **Decorators.** `apply`, `command`, `on`, `query`, `middleware` and `upcast` register a handler as a decorator (`@cart_aggregate.command("AddItem")`) or directly (`cart_aggregate.command("AddItem", fn)`).
+- **Optional parameters.** A handler takes only the parameters it needs, in order: `def _(state, data)` or `def _(state, data, cmd, ctx)`.
+- **Keyword arguments.** Options after the required arguments are keyword-only where the signature has a `*`: `k.submit(..., wait="committed")`, `domain.read_model("carts", store="sqlite:carts.db")`.
+- **Errors.** A rejected command returns an `Outcome` with `committed=False`; a rejected query raises `Rejected`; a request the kernel refuses raises `grpc.RpcError` ([Errors](./errors)).
+
+The rest of this page is generated from the docstrings in `sdks/python/kernable`.
+'''
+
+out = [INTRO]
 for name in exported:
     for src, tree in modules.values():
         node = next((n for n in tree.body if getattr(n, "name", None) == name), None)

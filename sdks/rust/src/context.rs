@@ -6,9 +6,17 @@ use kernable_core::proto;
 
 /// Who sends a request and in which context: signed with the command and stored with every
 /// event it causes. `attributes` are business data only, never security decisions.
+///
+/// Set a default for a connection with [`crate::Options::context`], or one per request with
+/// [`crate::Submit::context`] and [`crate::Query::context`]. Inside a listener's handler,
+/// submit follow-up commands with `ctx.follow()` ([`crate::ListenerContext::follow`]). All
+/// fields default to empty; set the ones you need:
+/// `RequestContext { sender_identity: "customer-7".into(), expected_version: Some(3), ..Default::default() }`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RequestContext {
+    /// The tenant the sender belongs to.
     pub sender_tenant: String,
+    /// Who sends the request, e.g. a user or service ID; middlewares check permissions on it.
     pub sender_identity: String,
     pub sender_account: String,
     pub sender_session: String,
@@ -91,15 +99,19 @@ impl RequestContext {
 }
 
 /// A point in time in milliseconds since the epoch, shown as RFC 3339 in UTC with
-/// milliseconds (`2026-10-27T09:00:00.000Z`), like JavaScript's `toISOString()`.
+/// milliseconds (`2026-10-27T09:00:00.000Z`), like JavaScript's `toISOString()`: format it
+/// with `to_string()`. `Timestamp(ms)` makes one from milliseconds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Timestamp(pub i64);
 
 impl Timestamp {
+    /// The current time. In a command handler, use `ctx.now()` instead
+    /// ([`crate::CommandContext::now`]), which is the same every time the command runs.
     pub fn now() -> Timestamp {
         Timestamp(now_ms())
     }
 
+    /// Milliseconds since the Unix epoch.
     pub fn millis(self) -> i64 {
         self.0
     }

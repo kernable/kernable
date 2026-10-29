@@ -86,7 +86,17 @@ fn handling() -> String {
     HANDLING.try_with(Clone::clone).unwrap_or_default()
 }
 
-/// How to reach the kernel and as whom.
+/// How to reach the kernel and as whom: the options of [`Kernable::new`], set with builder
+/// methods that each return the changed options.
+///
+/// `Options::default()` takes everything from the environment, else the defaults: the key from
+/// `KERNABLE_KEY`, else `app.key` in the current directory; the kernel from `KERNABLE_URL`,
+/// else `http://127.0.0.1:7233`; the grant from `KERNABLE_GRANT`, else the `.grant` file next
+/// to the key; the service from `KERNABLE_SERVICE`; TLS from `KERNABLE_TLS_CA`,
+/// `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`; the tenant `default`. A key file's path (`&str`,
+/// `String`, `&Path`, `PathBuf`) converts into options with only the key set, so
+/// `Kernable::new("app.key")` works too. Example:
+/// `Kernable::new(Options::new("shop.key").url("http://kernel:7233").service("shop"))?`.
 #[derive(Clone, Debug)]
 pub struct Options {
     url: Option<String>,
@@ -115,7 +125,8 @@ impl Default for Options {
 }
 
 impl Options {
-    /// Signs with the key in the `.key` file at `key`.
+    /// Options that sign with the key in the `.key` file at `key` (made with
+    /// `kernable keys new`), every other option at its default.
     pub fn new(key: impl AsRef<Path>) -> Options {
         Options {
             key: Some(key.as_ref().to_owned()),
@@ -160,8 +171,10 @@ impl Options {
         self
     }
 
-    /// Mutual TLS for `host:port` URLs: the CA certificate and this process's certificate and key.
-    /// Default: `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`, if set.
+    /// Mutual TLS for `host:port` URLs: the CA certificate and this process's certificate and key,
+    /// as paths of PEM files (`Tls { ca, cert, key }`, re-exported from the kernel's crate).
+    /// Default: `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`, if set (all three
+    /// or none).
     pub fn tls(mut self, tls: Tls) -> Options {
         self.tls = Some(tls);
         self
@@ -222,6 +235,13 @@ impl Client {
 
 /// A connection to the kernel: submits commands, asks queries, and runs workers and listeners.
 /// Cloning gives another handle to the same connection.
+///
+/// The calls to the kernel are `async` and need a Tokio runtime (`#[tokio::main]`). Workers,
+/// listeners and apps run until stopped: `run().await` them, or `tokio::spawn` them and wait
+/// for `ready()`. Workers and listeners print connection lines to stderr up to the level
+/// `KERNABLE_LOG` names (`off`, `error`, `warn`, `info` (default), `debug`). Example:
+/// `let kernable = Kernable::new("app.key")?; let outcome =
+/// kernable.submit(Submit::new("shop", "cart", "c1", "AddItem").data(json!({ "qty": 2 }))).await?;`
 #[derive(Clone)]
 pub struct Kernable {
     client: Client,
@@ -234,8 +254,10 @@ pub struct Kernable {
 
 impl Kernable {
     /// A client for the kernel `options` names, or with only a key file's path, for the default
-    /// kernel; `Options::default()` takes everything from the environment. It connects on first
-    /// use and again after the connection drops. Needs a tokio runtime.
+    /// kernel; `Options::default()` takes everything from the environment (see [`Options`]). It
+    /// connects on first use and again after the connection drops. Needs a Tokio runtime.
+    /// [`Error::Config`] if the key, grant or TLS files cannot be read, only some of the TLS
+    /// variables are set, or the URL is invalid. Example: `Kernable::new("app.key")?`.
     pub fn new(options: impl Into<Options>) -> Result<Kernable, Error> {
         let options = options.into();
         let url = options
@@ -293,7 +315,8 @@ impl Kernable {
     }
 
     /// Seals the vault fields of this domain's commands when submitting them; see
-    /// [`Domain::command`].
+    /// [`Domain::command`]. Returns another handle to this connection, so it chains:
+    /// `Kernable::new("app.key")?.with_domain(&shop_domain)`.
     pub fn with_domain(&self, domain: &Domain) -> Kernable {
         self.domains
             .write()
@@ -303,26 +326,30 @@ impl Kernable {
     }
 
     /// A worker that runs the commands of `aggregate`; add more with [`Worker::aggregate`]. It
-    /// belongs to this connection's service (see [`Options::service`]).
+    /// belongs to this connection's service (see [`Options::service`]). Nothing runs until
+    /// [`Worker::run`] is awaited: `kernable.worker(&cart_aggregate).run().await`.
     pub fn worker<S: State>(&self, aggregate: &Aggregate<S>) -> Worker {
         Worker::new(self.client.clone(), self.service.clone()).aggregate(aggregate)
     }
 
     /// Runs `listener` (a read model or reactor of a domain) on this connection: the handle
     /// processes its events with `run()`. Each call gives a new handle. The listener belongs to
-    /// this connection's service (see [`Options::service`]).
+    /// this connection's service (see [`Options::service`]). Example:
+    /// `kernable.listener(&carts_readmodel).run().await`.
     pub fn listener(&self, listener: &Listener) -> ListenerHandle {
         ListenerHandle::new(self.client.clone(), listener, self.service.clone())
     }
 
     /// Files of the default tenant: bytes up to 16 MiB per key, kept by the kernel outside the
-    /// signed event log; see [`Files`].
+    /// signed event log; see [`Files`]. Example:
+    /// `kernable.data().put("shop", "invoices/c1.pdf", bytes, "application/pdf").await?`.
     pub fn data(&self) -> Files {
         Files::new(self.client.clone(), self.tenant.clone())
     }
 
     /// The kernel's cache for the default tenant: values up to 1 MiB per key, optionally with a
-    /// TTL, lost when the kernel restarts; see [`Cache`].
+    /// TTL, lost when the kernel restarts; see [`Cache`]. Example:
+    /// `kernable.cache().set("shop", "rate:c1", "3", Some(Duration::from_secs(60))).await?`.
     pub fn cache(&self) -> Cache {
         Cache::new(self.client.clone(), self.tenant.clone())
     }
@@ -331,7 +358,10 @@ impl Kernable {
     /// [`Options::service`]): the workers, listeners and middlewares the kernel waits for, plus
     /// free metadata. Apply it once per deploy (e.g. from a deploy script), not from every
     /// process: the latest apply wins. The key needs the `manage` grant for the service. A
-    /// middleware the new membership no longer lists stops checking.
+    /// middleware the new membership no longer lists stops checking. Example:
+    /// `kernable.apply(Manifest::new().service("shop").worker(&cart_aggregate).listener(&carts_readmodel)).await?`.
+    /// [`Error::Config`] if neither the manifest nor the connection names a service,
+    /// [`Error::Status`] if the kernel refuses it.
     pub async fn apply(&self, manifest: Manifest) -> Result<(), Error> {
         let service = manifest.service.unwrap_or_else(|| self.service.clone());
         if service.is_empty() {
@@ -368,13 +398,21 @@ impl Kernable {
     /// and `description`, when given, then the app's other metadata), then runs one worker for
     /// all the aggregates and every listener, live ones too, all in the app's service.
     ///
+    /// Example: `kernable.app(App::new().service("shop").version("1.0.0").domain(&shop_domain))?.run().await?`.
+    /// Every start applies the membership, so the key needs the `manage` grant for the service.
     /// One service is one app: two processes with the same service would replace each other's
     /// membership. [`Error::Config`] if neither the app nor the connection names a service.
     pub fn app(&self, app: App) -> Result<AppHandle, Error> {
         AppHandle::new(self, app)
     }
 
-    /// Runs a command and returns its outcome; see [`Submit::wait`].
+    /// Runs a command and returns its outcome: [`Outcome::Committed`] with the new events, or
+    /// [`Outcome::Rejected`] if a handler or middleware rejected it (a rejection is `Ok`, not
+    /// an error). By default it waits until every listener that counts has processed the
+    /// events; see [`Submit::wait`]. [`Error::NotSettled`] if they did not in time (the
+    /// command is committed), [`Error::Status`] if the kernel refuses the call (no grant,
+    /// unknown aggregate type, timeout). Example: `kernable.submit(Submit::new("shop", "cart",
+    /// "c1", "AddItem").data(json!({ "sku": "apple", "qty": 2 }))).await?`.
     pub async fn submit(&self, submit: Submit) -> Result<Outcome, Error> {
         let wait = submit.wait;
         let res = self.send(submit, wait.wire()).await?;
@@ -399,7 +437,8 @@ impl Kernable {
     }
 
     /// Stores the command in the kernel's queue and returns its ID without waiting for it to
-    /// run. Submit it again with the same `id` to get the outcome.
+    /// run. Submit it again with the same `id` ([`Submit::id`]) to get the outcome; its `wait`
+    /// is ignored.
     pub async fn enqueue(&self, submit: Submit) -> Result<String, Error> {
         Ok(self.send(submit, WireWait::Accepted).await?.command_id)
     }
@@ -445,8 +484,12 @@ impl Kernable {
             .into_inner())
     }
 
-    /// Asks the read model that answers `domain.type` and returns its answer. Queries always go
-    /// through the kernel, also within one process. A refusal is [`Error::Rejected`].
+    /// Asks the read model that answers `domain.type` and returns its answer, deserialized as
+    /// `T` (`serde_json::Value` for any). Queries always go through the kernel, also within one
+    /// process. A refusal by the read model or a middleware is [`Error::Rejected`]; the
+    /// kernel's own (no grant, no read model connected) is [`Error::Status`]; an answer that is
+    /// not a `T` is [`Error::Json`]. Example: `let cart: Value =
+    /// kernable.query(Query::new("shop", "GetCart").data(json!({ "id": "c1" }))).await?;`
     pub async fn query<T: DeserializeOwned>(&self, query: Query) -> Result<T, Error> {
         let mut request = proto::QueryRequest {
             query_id: random_id(),
@@ -485,7 +528,10 @@ impl Kernable {
     /// Streams committed events after `options.after` (backlog first, then live) to `handler`,
     /// one at a time. Reconnects and resumes after the last handled event; if the handler
     /// fails, that event is delivered again. Persist the position yourself to resume across
-    /// restarts.
+    /// restarts. Needs the `subscribe` grant for the types. Unlike a listener, a subscription is
+    /// not registered with the kernel: nobody waits for it, and its events carry no vault values
+    /// (vault fields are `null` and listed in `redacted`). It runs in a Tokio task from the
+    /// call on; [`Subscription::stop`] ends it.
     pub fn subscribe<F, Fut>(&self, options: SubscribeOptions, handler: F) -> Subscription
     where
         F: Fn(StoredEvent) -> Fut + Send + Sync + 'static,
@@ -503,7 +549,8 @@ pub enum Wait {
     /// listeners with a lower order count.
     #[default]
     Settled,
-    /// Until the events are stored.
+    /// Until the events are stored. To read them back, ask with [`Query::min_position`] set to
+    /// the last event's position.
     Committed,
 }
 
@@ -533,6 +580,8 @@ fn tls_from_env() -> Result<Option<Tls>, Error> {
 }
 
 /// What a service consists of, for [`Kernable::apply`]; see `Membership` in kernable.proto.
+/// Built with methods that each return the changed manifest:
+/// `Manifest::new().service("shop").worker(&cart_aggregate).listener(&carts_readmodel).metadata("version", "1.0.0")`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Manifest {
     service: Option<String>,
@@ -584,7 +633,10 @@ impl Manifest {
     }
 }
 
-/// A command to submit.
+/// A command to submit with [`Kernable::submit`] or [`Kernable::enqueue`], built with methods
+/// that each return the changed command:
+/// `Submit::new("shop", "cart", "c1", "AddItem").data(json!({ "qty": 2 })).wait(Wait::Committed)`.
+/// Without `data`, the payload is an empty object (`{}`).
 #[derive(Clone, Debug)]
 pub struct Submit {
     domain: String,
@@ -630,12 +682,14 @@ impl Submit {
         self
     }
 
+    /// The tenant to submit to. Default: the connection's ([`Options::tenant`]).
     pub fn tenant(mut self, tenant: impl Into<String>) -> Submit {
         self.tenant = Some(tenant.into());
         self
     }
 
-    /// Idempotency key; resubmitting the same ID returns the original outcome.
+    /// Idempotency key (default: a new UUID); resubmitting the same ID returns the original
+    /// outcome without running the command again.
     pub fn id(mut self, id: impl Into<String>) -> Submit {
         self.id = Some(id.into());
         self
@@ -647,13 +701,16 @@ impl Submit {
         self
     }
 
+    /// How long [`Kernable::submit`] waits: [`Wait::Settled`] (default) or [`Wait::Committed`].
     pub fn wait(mut self, wait: Wait) -> Submit {
         self.wait = wait;
         self
     }
 }
 
-/// A query to ask.
+/// A query to ask with [`Kernable::query`], built with methods that each return the changed
+/// query: `Query::new("shop", "GetCart").data(json!({ "id": "c1" }))`. Without `data`, the
+/// query's data is an empty object (`{}`).
 #[derive(Clone, Debug)]
 pub struct Query {
     domain: String,
@@ -687,6 +744,7 @@ impl Query {
         self
     }
 
+    /// The tenant to ask in. Default: the connection's ([`Options::tenant`]).
     pub fn tenant(mut self, tenant: impl Into<String>) -> Query {
         self.tenant = Some(tenant.into());
         self
@@ -706,14 +764,19 @@ impl Query {
     }
 }
 
-/// What became of a command.
+/// What became of a command, returned by [`Kernable::submit`].
 #[derive(Clone, Debug, PartialEq)]
 pub enum Outcome {
+    /// The command's events are stored, in order. Vault fields in them are `null` (see
+    /// [`StoredEvent::redacted`]).
     Committed(Vec<StoredEvent>),
+    /// A handler, a middleware or the kernel rejected the command; nothing was stored but the
+    /// rejection.
     Rejected(Rejected),
 }
 
 impl Outcome {
+    /// Whether the command was committed.
     pub fn is_committed(&self) -> bool {
         matches!(self, Outcome::Committed(_))
     }
@@ -727,44 +790,54 @@ impl Outcome {
     }
 }
 
-/// What became of a query: its response data or why it was rejected.
+/// What became of a query, as a middleware that runs after requests gets it
+/// ([`CheckOutcome::Query`]): its response data or why it was rejected.
 #[derive(Clone, Debug, PartialEq)]
 pub enum QueryOutcome {
+    /// The read model's answer.
     Answered(Value),
+    /// The read model or a middleware rejected the query.
     Rejected(Rejected),
 }
 
 impl QueryOutcome {
+    /// Whether the read model answered.
     pub fn is_answered(&self) -> bool {
         matches!(self, QueryOutcome::Answered(_))
     }
 }
 
-/// An event as stored by the kernel.
+/// An event as stored by the kernel: in an [`Outcome`] and in a [`Kernable::subscribe`]
+/// handler.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StoredEvent {
+    /// Global position of the event in the kernel's log.
     pub position: u64,
     pub tenant: String,
     /// Always the domain of the command that caused the event.
     pub domain: String,
     pub aggregate_type: String,
     pub aggregate_id: String,
+    /// The aggregate's version after this event: 1 for its first event.
     pub version: u64,
+    /// The event type within the domain, e.g. `ItemAdded`.
     pub event_type: String,
     /// Version of the payload format. Listeners get `data` upcast to the version they know
     /// (see [`Domain::event`]), unless the handler is raw.
     pub schema: u32,
+    /// The payload; [`StoredEvent::parse`] deserializes it.
     pub data: Value,
     /// Fields kept in the vault whose value is not here (`null` in `data`): erased, or not
     /// readable with this key (granted `vault_read`).
     pub redacted: Vec<String>,
+    /// The command that caused the event.
     pub command_id: String,
     /// The request context of the command that caused the event.
     pub request: RequestContext,
 }
 
 impl StoredEvent {
-    /// `data` as a `D`.
+    /// `data` as a `D`, e.g. `let item: ItemAdded = event.parse()?;`.
     pub fn parse<D: DeserializeOwned>(&self) -> Result<D, serde_json::Error> {
         serde_json::from_value(self.data.clone())
     }

@@ -1,6 +1,6 @@
 # Signing and hash chain (v1)
 
-Every SDK must produce these byte layouts exactly. `test-vectors/signing.json` holds the reference values; an SDK's test suite must reproduce them.
+Every SDK must produce these byte layouts exactly. The source of truth is `crates/kernable-core/src/signing.rs`; `test-vectors/signing.json` holds reference values that an SDK's test suite must reproduce (see [Test vectors](#test-vectors)).
 
 ## Primitives
 
@@ -11,13 +11,17 @@ Every SDK must produce these byte layouts exactly. `test-vectors/signing.json` h
 
 ## Encoding
 
-A message is a concatenation of fields:
+A message is a concatenation of fields. The protobuf encoding is never signed.
 
 | Type | Encoding |
 |---|---|
 | `bytes` / `str` | `u32` big-endian length, then the raw bytes (strings as UTF-8) |
 | `u64` / `i64` | 8 bytes big-endian (two's complement for `i64`) |
+| `bool` | a `u64`, 0 or 1 |
+| `u32` fields (`schema`) | widened to a `u64` |
 | `context` | a `RequestContext` (an absent one encodes like an empty one): `sender_tenant`, `sender_identity`, `sender_account`, `sender_session`, `on_behalf_of`, then `u64` 1 and `expected_version: u64` if set or `u64` 0 if not, then `correlation_id`, `causation_id`, `trace_id`, `bypass_authorization` as `u64` 0 or 1, `attribute_count: u64`, then per attribute `key`, `value` (in the given order) |
+
+Fields without a type below are `str`, except `payload`, `state`, `nonce`, `chain_hash`, `salt`, `value` and `prev_hash`, which are `bytes`. Every list is a `count: u64` followed by its entries, in the order they are sent. Names and types are encoded as sent: commands, queries, events and snapshots carry unqualified types (`PlaceOrder`) next to a `domain`; subscriptions and memberships carry qualified ones.
 
 Each message starts with a `str` **tag** for domain separation. Payloads are signed as the exact bytes sent; no JSON canonicalization.
 
@@ -25,34 +29,46 @@ Each message starts with a `str` **tag** for domain separation. Payloads are sig
 
 | Signed by | Tag | Fields after the tag |
 |---|---|---|
-| Client | `kernable.v1.command` | `command_id`, `tenant_id`, `domain`, `aggregate_type`, `aggregate_id`, `command_type`, `payload`, `context`, then the vault fields (see below) |
+| Client | `kernable.v1.command` | `command_id`, `tenant_id`, `domain`, `aggregate_type`, `aggregate_id`, `command_type`, `payload`, `context`, then the vault fields (see [Vault references](#vault-references)) |
 | Client | `kernable.v1.query` | `query_id`, `tenant_id`, `domain`, `query_type`, `payload`, `context`, `min_position: u64`, `issued_at: i64` |
-| Worker | `kernable.v1.result` | `command_id`, `tenant_id`, `domain`, `aggregate_type`, `aggregate_id`, `expected_version: u64`, `event_count: u64`, then per event `event_type`, `schema: u64`, `payload`, then the vault fields (see below) |
+| Worker | `kernable.v1.result` | `command_id`, `tenant_id`, `domain`, `aggregate_type`, `aggregate_id` (all from the command), `expected_version: u64` (from `Execute`), `event_count: u64`, then per event `event_type`, `schema: u64`, `payload`, then the vault fields |
 | Worker | `kernable.v1.rejection` | `command_id`, `code`, `message` |
-| Worker | `kernable.v1.snapshot` | `tenant_id`, `domain`, `aggregate_type`, `aggregate_id`, `version: u64`, `schema`, `state` |
-| Worker, listener | `kernable.v1.challenge` | `nonce` |
-| Subscriber | `kernable.v1.subscribe` | `after_position: u64`, `issued_at: i64`, `type_count: u64`, then per type `event_type` |
-| Data client | `kernable.v1.data.<op>` (`put`, `get`, `delete`) | `tenant_id`, `domain`, `key`, `content_type`, `sha256(data)` (32 bytes, as a length-prefixed field), `issued_at: i64`; get and delete sign empty `content_type` and the hash of empty data |
-| Cache client | `kernable.v1.cache.<op>` (`set`, `get`, `delete`) | `tenant_id`, `domain`, `key`, `sha256(value)`, `ttl_ms: u64`, `issued_at: i64`; get and delete sign the hash of an empty value and `ttl_ms` 0 |
+| Worker | `kernable.v1.snapshot` | `tenant_id`, `domain`, `aggregate_type`, `aggregate_id` (from the command), `version: u64`, `schema` (a `str`), `state` |
+| Worker, listener | `kernable.v1.challenge` | `nonce` (the 32 bytes of `Challenge.nonce`) |
+| Subscriber | `kernable.v1.subscribe` | `after_position: u64`, `issued_at: i64`, `type_count: u64`, then every event type |
+| Data client | `kernable.v1.data.<op>` (`put`, `get`, `delete`) | `tenant_id`, `domain`, `key`, `content_type`, `sha256(data)` (the 32-byte digest as a `bytes` field), `issued_at: i64`; get and delete sign an empty `content_type` and the hash of empty data |
+| Cache client | `kernable.v1.cache.<op>` (`set`, `get`, `delete`) | `tenant_id`, `domain`, `key`, `sha256(value)` (as a `bytes` field), `ttl_ms: u64`, `issued_at: i64`; get and delete sign the hash of an empty value and `ttl_ms` 0 |
 | Deploy tooling | `kernable.v1.membership` | `service`, then for `workers`, `listeners` and `middlewares` each `count: u64` and every entry, then `metadata_count: u64` and per attribute `key`, `value`, then `issued_at: i64` |
 | Kernel | `kernable.v1.checkpoint` | `global_position: u64`, `chain_hash`, `created_at: i64` |
 | Kernel | `kernable.v1.revocation` | `key_id`, `since: i64`, `created_at: i64` |
 | Root key | `kernable.v1.grant` | `key_id`, `succeeds`, `issued_at: i64`, `permission_count: u64`, then per permission `action`, `type_count: u64`, every type |
 | Root key | `kernable.v1.revoke` | `key_id`, `since: i64`, `issued_at: i64` |
 
-The result signature does not cover the lease ID. A replayed result can only reproduce the same events for the same command at the same version, so it is harmless. The commit is idempotent.
+Three more tagged messages are hashed, not signed: `kernable.v1.vault` ([Vault references](#vault-references)), `kernable.v1.id` ([Derived IDs](#derived-ids)) and `kernable.v1.event` ([Event hash chain](#event-hash-chain)).
 
-A query is valid for 60 s around `issued_at`, like a subscribe request. Answers are not signed: they travel on the read model's authenticated stream and are not stored. The same holds for middleware verdicts. A middleware gets the command or query with the client's signature, so it can check the signature itself.
+The kernel checks that a result, rejection or snapshot is signed by the key the worker registered with (`Register.key_id`), and a challenge response by the key in `Register` or `Hello`.
 
-Listener acknowledgements are not signed. They travel on a stream whose key was proven by the challenge, and they only affect waiting and ordering, never stored data.
+## What is not signed
 
-A subscribe request is valid for 60 s around `issued_at`. Within that window a captured request could be replayed, but it only grants the read access the key already has. Transport encryption (mutual TLS over TCP) closes this gap.
+- `protocol` in every request, and `listener` in `SubmitRequest` and `QueryRequest`.
+- The lease ID. A replayed result can only reproduce the same events for the same command at the same version, so it is harmless. The commit is idempotent.
+- Query answers and middleware verdicts. They travel on the read model's authenticated stream and are not stored. A middleware gets the command or query with the client's signature, so it can check the signature itself.
+- Listener acknowledgements. They travel on a stream whose key was proven by the challenge, and they only affect waiting and ordering, never stored data.
+- The grant sent with a call (see [Grants and revocation](#grants-and-revocation)).
 
-Data and cache requests are valid for 60 s around `issued_at`, like a subscribe request. The operation is part of the tag, so a signed get cannot be replayed as a delete.
+## Time windows
 
-A grant says what a key may do. A root key signs it; the process of the grantee sends it, hex-encoded, in the gRPC metadata entry `kernable-grant` with every call. The grant is not part of any other signed message: the kernel checks that the grant names the key that signed the request. A grant has no time window; a newer one (by `issued_at`) replaces an older one for the same key. A revoke request is valid for 60 s around `issued_at`; the kernel then stores the revocation signed with its own key (`kernable.v1.revocation`). Only root-key tooling produces grants and revoke requests, so an SDK does not need to reproduce the `grant` and `revoke` test vectors.
+Queries, subscribe requests, data and cache requests, memberships and revoke requests are valid for 60 s around `issued_at` (ms since epoch), measured on the kernel's clock. Commands have no time window: a command ID runs once, so a replayed command only returns its stored result.
 
-A membership is signed by a key granted `manage` for its service and is valid for 60 s around `issued_at`. Metadata is signed in the order it is sent.
+Within the window a captured subscribe or query request could be replayed, but it only grants the read access the key already has. Transport encryption (mutual TLS over TCP) closes this gap. For data and cache requests the operation is part of the tag, so a signed get cannot be replayed as a delete.
+
+## Grants and revocation
+
+A grant says what a key may do. A root key signs it; the process of the grantee sends it, hex-encoded, in the gRPC metadata entry `kernable-grant` with every call. The grant is not part of any other signed message: the kernel checks that the grant names the key that signed the request. A grant has no time window; a newer one (by `issued_at`) replaces an older one for the same key.
+
+A revoke request is signed by a root key; the kernel then stores the revocation signed with its own key (`kernable.v1.revocation`, with `created_at` the time it stored it). Only root-key tooling produces grants and revoke requests.
+
+A membership is signed by a key granted `manage` for its service. Metadata is signed in the order it is sent.
 
 ## Derived IDs
 
@@ -76,7 +92,7 @@ The salt makes a reference reveal nothing about its value, also once the value i
 **Appended only when set.** The vault fields are appended to signed messages and to the event hash only when they are set, so a message without vault data does not depend on them:
 
 - **Command:** if `vault_refs` is not empty, `count: u64`, then every ref.
-- **Result:** if any event has `vault_refs` or `erases`, then per event `count: u64`, every ref, and `erases`.
+- **Result:** if any event has `vault_refs` or `erases`, then for every event (also those without) `count: u64`, every ref, and `erases`.
 - **Event hash:** if `vault_refs` or `erases` is set, `count: u64`, every ref, and `erases`, after `context`.
 
 ## Event hash chain
@@ -95,8 +111,8 @@ Each stored event has `hash = SHA-256(message)`, where `message` has the tag `ke
 10. `payload`
 11. `command_id`
 12. `created_at: i64`
-13. `producer_key_id`
-14. `producer_sig`
+13. `producer_key_id` (`producer_sig.key_id`, a `str`)
+14. `producer_sig` (`producer_sig.sig`, `bytes`)
 15. `context` (of the command that caused the event)
 16. the vault fields, only when set (see above)
 
@@ -111,3 +127,23 @@ The kernel periodically signs a **checkpoint**, which holds the position and the
 - a consistently rewritten chain or a truncated log: checkpoint mismatch
 
 Events after the last checkpoint are only protected by the link to their predecessor, so truncating that tail cannot be detected.
+
+## Test vectors
+
+`test-vectors/signing.json` is generated by `crates/kernable-core/tests/vectors.rs`. Every signature in it is made with the key `key.seed` (its key ID is `key.key_id`); Ed25519 is deterministic, so an SDK must get the same bytes. For a signed message, an entry holds `input`, the full `message` in hex (tag included) and its `signature` in hex.
+
+An SDK must reproduce these entries byte for byte:
+
+| Entry | What to compute from `input` |
+|---|---|
+| `key` | the key ID from the seed |
+| `command`, `query`, `result`, `rejection`, `snapshot`, `challenge`, `subscribe`, `membership`, `checkpoint`, `revocation` | `message` and `signature` |
+| `data_put`, `cache_set` | `message` and `signature` for the `op` in `input` |
+| `command_vault` | as `command`, with the `vault_refs` in `input` |
+| `result_vault` | as `result`, with the input of `result` plus `vault_refs[i]` and `erases[i]` for event `i` |
+| `vault_ref` | `refs[i]` from `input[i]` |
+| `event_hash` | `hash` from the input, with `prev_hex` as `prev_hash` |
+| `event_hash_vault` | `hash` from the input of `event_hash` plus `vault_refs` and `erases` |
+| `derived_id` | `ids[i]` for `command_id` and `n[i]` |
+
+`grant` and `revoke` are only produced by root-key tooling, so an SDK need not reproduce them. The context in the vectors sets every field, including `expected_version` and two attributes; the empty and absent cases follow from the [encoding](#encoding).
