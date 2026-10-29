@@ -344,14 +344,22 @@ impl Kernable {
     /// signed event log; see [`Files`]. Example:
     /// `kernable.data().put("shop", "invoices/c1.pdf", bytes, "application/pdf").await?`.
     pub fn data(&self) -> Files {
-        Files::new(self.client.clone(), self.tenant.clone())
+        Files::new(
+            self.client.clone(),
+            self.tenant.clone(),
+            self.context.clone(),
+        )
     }
 
     /// The kernel's cache for the default tenant: values up to 1 MiB per key, optionally with a
     /// TTL, lost when the kernel restarts; see [`Cache`]. Example:
     /// `kernable.cache().set("shop", "rate:c1", "3", Some(Duration::from_secs(60))).await?`.
     pub fn cache(&self) -> Cache {
-        Cache::new(self.client.clone(), self.tenant.clone())
+        Cache::new(
+            self.client.clone(),
+            self.tenant.clone(),
+            self.context.clone(),
+        )
     }
 
     /// Replaces the membership of a service (default: this connection's, see

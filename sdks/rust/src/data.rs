@@ -1,6 +1,10 @@
 //! Files and cache values: bytes stored by the kernel under a key of a domain, outside the
 //! signed event log. Each request is signed with this process's key and needs a grant for the
 //! domain: `data_read` to read files, `data_write` to put and delete them, `cache` for the cache.
+//! Each request carries a signed request context (the client's default, see
+//! [`crate::Options::context`], or one set with [`Files::context`] or [`Cache::context`]), and
+//! the kernel runs the domain's middlewares before it (types `<domain>.PutData`, `.GetData`,
+//! `.DeleteData`, `.SetCache`, `.GetCache`, `.DeleteCache`).
 
 use std::time::Duration;
 
@@ -13,7 +17,7 @@ use kernable_core::{
     signing,
 };
 
-use crate::{Client, Error, now_ms};
+use crate::{Client, Error, RequestContext, now_ms};
 
 /// Room for the kernel's largest file (16 MiB) and the rest of the message.
 const MAX_MESSAGE_BYTES: usize = 17 << 20;
@@ -30,18 +34,34 @@ pub struct Data {
 /// Files of up to 16 MiB under keys of 1 to 512 bytes, per tenant and domain; see
 /// [`crate::Kernable::data`]. Files are not part of the signed event log, and erasing a vault
 /// subject does not delete them, so keep personal data in vault fields instead. A refused or
-/// invalid request is [`Error::Status`]. Example:
+/// invalid request is [`Error::Status`]; a middleware that refuses it (checking `PutData`,
+/// `GetData` or `DeleteData` of the domain) makes it `PERMISSION_DENIED` with
+/// `"<code>: <message>"`. Example:
 /// `kernable.data().put("shop", "invoices/c1.pdf", pdf, "application/pdf").await?`, then
 /// `kernable.data().get("shop", "invoices/c1.pdf").await?` returns `Some(Data { .. })`.
 #[derive(Clone)]
 pub struct Files {
     client: Client,
     tenant: String,
+    context: RequestContext,
 }
 
 impl Files {
-    pub(crate) fn new(client: Client, tenant: String) -> Files {
-        Files { client, tenant }
+    pub(crate) fn new(client: Client, tenant: String, context: RequestContext) -> Files {
+        Files {
+            client,
+            tenant,
+            context,
+        }
+    }
+
+    /// Replaces the client's default context for the requests of this handle (signed with
+    /// each; middlewares decide on it); inside a listener, pass `ctx.follow()`. Example:
+    /// `kernable.data().context(alice).get("shop", "k").await?`.
+    #[must_use]
+    pub fn context(mut self, context: RequestContext) -> Files {
+        self.context = context;
+        self
     }
 
     /// Stores `data` as `key` of `domain` (granted `data_write`), replacing any file there.
@@ -101,6 +121,7 @@ impl Files {
             issued_at: now_ms(),
             client_sig: None,
             protocol: PROTOCOL,
+            context: Some(self.context.to_wire()),
         };
         r.client_sig = Some(self.client.sign(&signing::data_message(op, &r)));
         self.client.request(r)
@@ -111,18 +132,34 @@ impl Files {
 /// kernel's memory (granted `cache`); see [`crate::Kernable::cache`]. A restart of the kernel
 /// empties the cache; values are not part of the signed event log, and erasing a vault subject
 /// does not delete them. For rate limits, short-lived tokens and computed values. A refused
-/// or invalid request is [`Error::Status`]. Example:
+/// or invalid request is [`Error::Status`]; a middleware that refuses it (checking `SetCache`,
+/// `GetCache` or `DeleteCache` of the domain) makes it `PERMISSION_DENIED` with
+/// `"<code>: <message>"`. Example:
 /// `kernable.cache().set("shop", "rate:c1", "3", Some(Duration::from_secs(60))).await?`, then
 /// `kernable.cache().get("shop", "rate:c1").await?` returns `Some(b"3".to_vec())`.
 #[derive(Clone)]
 pub struct Cache {
     client: Client,
     tenant: String,
+    context: RequestContext,
 }
 
 impl Cache {
-    pub(crate) fn new(client: Client, tenant: String) -> Cache {
-        Cache { client, tenant }
+    pub(crate) fn new(client: Client, tenant: String, context: RequestContext) -> Cache {
+        Cache {
+            client,
+            tenant,
+            context,
+        }
+    }
+
+    /// Replaces the client's default context for the requests of this handle (signed with
+    /// each; middlewares decide on it); inside a listener, pass `ctx.follow()`. Example:
+    /// `kernable.cache().context(alice).get("shop", "k").await?`.
+    #[must_use]
+    pub fn context(mut self, context: RequestContext) -> Cache {
+        self.context = context;
+        self
     }
 
     /// Stores `value` as `key` of `domain` (granted `cache`), replacing any value there. With a
@@ -181,6 +218,7 @@ impl Cache {
             issued_at: now_ms(),
             client_sig: None,
             protocol: PROTOCOL,
+            context: Some(self.context.to_wire()),
         };
         r.client_sig = Some(self.client.sign(&signing::cache_message(op, &r)));
         self.client.request(r)

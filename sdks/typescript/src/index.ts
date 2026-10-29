@@ -219,24 +219,36 @@ export interface QueryOptions {
 }
 
 /**
- * A command or query a middleware checks (the handler's first argument), before the kernel
- * accepts or routes it, or after. Vault fields of a command's data are filled in only for a
+ * A request a middleware checks (the handler's first argument): a command or query, before the
+ * kernel accepts or routes it, or after; or a file or cache request (`Kernable.data`,
+ * `Kernable.cache`), before it runs. Vault fields of a command's data are filled in only for a
  * middleware before the request whose key is granted `vault_read`; else they are `null`.
  */
 export interface Check {
-  /** Whether a command or a query is checked; the fields below depend on it. */
-  kind: "command" | "query";
-  /** The command or query ID. */
+  /**
+   * What is checked: a command, a query, a file request (`data`) or a cache request (`cache`);
+   * the fields below depend on it.
+   */
+  kind: "command" | "query" | "data" | "cache";
+  /** The command or query ID; empty for a file or cache request. */
   id: string;
   tenant: string;
   domain: string;
-  /** The command or query type within the domain. */
+  /**
+   * The type within the domain: the command or query type, or for a file request `PutData`,
+   * `GetData` or `DeleteData`, for a cache request `SetCache`, `GetCache` or `DeleteCache`.
+   */
   type: string;
   /** Commands only. */
   aggregateType?: string;
   /** Commands only. */
   aggregateId?: string;
-  /** The command's or query's data. */
+  /** File and cache requests only: the file's or value's key. */
+  key?: string;
+  /**
+   * The command's or query's data. `undefined` for a file or cache request: the middleware
+   * decides on who asks for which key, never sees the file or value.
+   */
   data: unknown;
   /** Who sends it: check permissions here. */
   request: RequestContext;
@@ -254,15 +266,18 @@ export interface Check {
  */
 export interface MiddlewareOptions {
   /**
-   * Command and query types it checks: `*` (all), a type of the listener's own domain (`Type`),
-   * another domain's type (`domain.Type`) or a whole domain (`domain.*`).
+   * Request types it checks: `*` (all), a type of the listener's own domain (`Type`), another
+   * domain's type (`domain.Type`) or a whole domain (`domain.*`). Besides command and query
+   * types, these cover the file and cache requests of a domain (`Kernable.data`,
+   * `Kernable.cache`) under the types `PutData`, `GetData`, `DeleteData`, `SetCache`, `GetCache`
+   * and `DeleteCache`, checked before they run: `shop.*` includes `shop.PutData`.
    */
   types: string[];
   /**
    * `before` (default): checks a request before the kernel accepts it; throwing refuses it.
    * `after`: gets the request's outcome too. Throwing refuses a query's response; a command's
    * outcome, and a rejected query, it only observes, best effort (it misses what happens while
-   * it is away, and nobody waits for it).
+   * it is away, and nobody waits for it). File and cache requests are checked only before.
    */
   when?: "before" | "after";
   /**
@@ -979,8 +994,9 @@ export interface Options {
    */
   service?: string;
   /**
-   * Default request context for `submit`, `enqueue` and `query`, e.g. this service's identity;
-   * a request's own `context` replaces it as a whole. Default: empty.
+   * Default request context for `submit`, `enqueue`, `query` and the requests of `data` and
+   * `cache`, e.g. this service's identity; a request's own `context` replaces it as a whole.
+   * Default: empty.
    */
   context?: RequestContext;
   /**
@@ -1121,8 +1137,8 @@ export class Kernable {
     this.tenant = options.tenant ?? "default";
     this.context = options.context ?? {};
     this.service = options.service ?? env.KERNABLE_SERVICE ?? "";
-    this.data = new Data(this.clients, this.key, this.tenant);
-    this.cache = new Cache(this.clients, this.key, this.tenant);
+    this.data = new Data(this.clients, this.key, this.tenant, this.context);
+    this.cache = new Cache(this.clients, this.key, this.tenant, this.context);
   }
 
   /**
@@ -1300,10 +1316,15 @@ export class Kernable {
   }
 }
 
-/** Options of `Data.get`, `Data.delete`, `Cache.get` and `Cache.delete`: which tenant's file or value. */
+/** Options of `Data.get`, `Data.delete`, `Cache.get` and `Cache.delete`: which tenant's file or value, and who asks. */
 export interface DataOptions {
   /** Default: the client's tenant (`Options.tenant`). */
   tenant?: string;
+  /**
+   * Who asks; signed, and what middlewares checking the request decide on. Replaces the
+   * client's default context (`Options.context`).
+   */
+  context?: RequestContext;
 }
 
 /** Options of `Data.put`: the tenant, and the content type stored with the file. */
@@ -1318,6 +1339,11 @@ export interface PutDataOptions extends DataOptions {
  * deleting one of `data_write`. Files are not part of the signed event log and are not erased
  * with the vault: delete a person's files yourself when erasing them. Use it as `kernable.data`.
  *
+ * Each request carries a request context (`DataOptions.context`, default `Options.context`) and
+ * passes the middleware chain first, as `<domain>.PutData`, `.GetData` or `.DeleteData` (see
+ * `Check`). A middleware that refuses it makes the call throw a gRPC error with code
+ * `PERMISSION_DENIED` and the message `<code>: <message>`.
+ *
  * ```ts
  * await kernable.data.put("shop", "invoices/o1.pdf", pdfBytes, { contentType: "application/pdf" });
  * const file = await kernable.data.get("shop", "invoices/o1.pdf"); // { data, contentType } or undefined
@@ -1329,11 +1355,13 @@ export class Data {
   private readonly clients: Clients;
   private readonly key: Key;
   private readonly tenant: string;
+  private readonly context: RequestContext;
 
-  constructor(clients: Clients, key: Key, tenant: string) {
+  constructor(clients: Clients, key: Key, tenant: string, context: RequestContext = {}) {
     this.clients = clients;
     this.key = key;
     this.tenant = tenant;
+    this.context = context;
   }
 
   /** Stores `data` under `key`, replacing a file there; a string is stored as UTF-8. */
@@ -1361,6 +1389,7 @@ export class Data {
       data,
       content_type: contentType,
       issued_at: Date.now(),
+      context: toWireContext(options.context ?? this.context),
     };
     const rpc = op === "put" ? "PutData" : op === "get" ? "GetData" : "DeleteData";
     return this.clients.data(rpc, { ...request, client_sig: this.key.sign(dataMessage(op, request)) });
@@ -1379,6 +1408,11 @@ export interface SetCacheOptions extends DataOptions {
  * domain (`shop.*`). The cache lives in the kernel's memory: a restart empties it. Values are not
  * part of the signed event log and are not erased with the vault. Use it as `kernable.cache`.
  *
+ * Each request carries a request context (`DataOptions.context`, default `Options.context`) and
+ * passes the middleware chain first, as `<domain>.SetCache`, `.GetCache` or `.DeleteCache` (see
+ * `Check`). A middleware that refuses it makes the call throw a gRPC error with code
+ * `PERMISSION_DENIED` and the message `<code>: <message>`.
+ *
  * ```ts
  * await kernable.cache.set("shop", "rates/EUR", JSON.stringify(rates), { ttlMs: 60_000 });
  * const value = await kernable.cache.get("shop", "rates/EUR"); // Uint8Array or undefined
@@ -1391,11 +1425,13 @@ export class Cache {
   private readonly clients: Clients;
   private readonly key: Key;
   private readonly tenant: string;
+  private readonly context: RequestContext;
 
-  constructor(clients: Clients, key: Key, tenant: string) {
+  constructor(clients: Clients, key: Key, tenant: string, context: RequestContext = {}) {
     this.clients = clients;
     this.key = key;
     this.tenant = tenant;
+    this.context = context;
   }
 
   /** Stores `value` under `key`, replacing a value there; a string is stored as UTF-8. */
@@ -1422,6 +1458,7 @@ export class Cache {
       value,
       ttl_ms: ttlMs,
       issued_at: Date.now(),
+      context: toWireContext(options.context ?? this.context),
     };
     const rpc = op === "set" ? "SetCache" : op === "get" ? "GetCache" : "DeleteCache";
     return this.clients.cache(rpc, { ...request, client_sig: this.key.sign(cacheMessage(op, request)) });
@@ -1650,8 +1687,8 @@ export class Listener {
   }
 
   /**
-   * Makes this listener a middleware: the kernel asks `handler` about every command and query
-   * of `options.types`, before accepting or routing it (or after, see `MiddlewareOptions.when`),
+   * Makes this listener a middleware: the kernel asks `handler` about every command, query, file
+   * and cache request of `options.types`, before accepting or routing it (or after, see `MiddlewareOptions.when`),
    * in chain order, and only once this listener has caught up with the events. Throw `Rejected`
    * to refuse; any other error refuses too. The registration is stored: while this listener is
    * away, the kernel refuses those requests (`kernable listeners remove` unregisters it). The
@@ -2193,7 +2230,25 @@ function toOutcome(c: NonNullable<ListenerDelivery["check"]>): Outcome | QueryOu
   return { answered: false, ...rejected(r.rejected) };
 }
 
+/** The type within its domain of a qualified one: `shop.PutData` → `PutData`. */
+function typeOf(qualified: string, domain: string): string {
+  return qualified.startsWith(`${domain}.`) ? qualified.slice(domain.length + 1) : qualified;
+}
+
 function toCheck(c: NonNullable<ListenerDelivery["check"]>): Check {
+  const store = c.data ?? c.cache;
+  if (store) {
+    return {
+      kind: c.data ? "data" : "cache",
+      id: "",
+      tenant: store.tenant_id,
+      domain: store.domain,
+      type: typeOf(c.type, store.domain),
+      key: store.key,
+      data: undefined,
+      request: fromWireContext(store.context),
+    };
+  }
   if (c.command) {
     const x = c.command;
     return {

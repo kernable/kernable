@@ -173,11 +173,17 @@ export interface ListenerDelivery {
   query?: { call_id: string; query: WireQueryRequest } | null;
   check?: {
     call_id: string;
-    request: "command" | "query";
+    request: "command" | "query" | "data" | "cache";
     command?: WireCommand | null;
     query?: WireQueryRequest | null;
+    /** A file request, without its data. */
+    data?: WireDataRequest | null;
+    /** A cache request, without its value. */
+    cache?: WireCacheRequest | null;
     vault: WireVaultValue[];
     /** `WireWhen`: 0 before, 1 after. */
+    /** The qualified type being checked, e.g. `shop.PutData`. */
+    type: string;
     when: number;
     /** After only: what came of the request. */
     command_result?: WireCommandResult | null;
@@ -218,6 +224,8 @@ export interface WireDataRequest {
   content_type: string;
   issued_at: number;
   client_sig?: WireSignature | null;
+  /** Who asks; signed. */
+  context?: WireRequestContext | null;
 }
 
 export interface WireDataResult {
@@ -237,6 +245,8 @@ export interface WireCacheRequest {
   ttl_ms: number;
   issued_at: number;
   client_sig?: WireSignature | null;
+  /** Who asks; signed. */
+  context?: WireRequestContext | null;
 }
 
 export interface WireCacheResult {

@@ -36,6 +36,7 @@ fn data(key: &SigningKey, op: &str, domain: &str, name: &str, bytes: &[u8]) -> D
         issued_at: now_ms(),
         client_sig: None,
         protocol: kernable_core::PROTOCOL,
+        context: None,
     };
     r.client_sig = Some(signing::sign(key, &signing::data_message(op, &r)));
     r
@@ -51,6 +52,7 @@ fn cache(key: &SigningKey, op: &str, name: &str, value: &[u8], ttl_ms: u64) -> C
         issued_at: now_ms(),
         client_sig: None,
         protocol: kernable_core::PROTOCOL,
+        context: None,
     };
     r.client_sig = Some(signing::sign(key, &signing::cache_message(op, &r)));
     r

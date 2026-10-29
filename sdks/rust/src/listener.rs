@@ -127,13 +127,20 @@ pub struct QueryContext {
     pub store: Option<Store>,
 }
 
-/// Whether a middleware checks a command or a query ([`Check::kind`]).
+/// Whether a middleware checks a command, a query, a file request or a cache request
+/// ([`Check::kind`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CheckKind {
     /// A command: [`Check::aggregate_type`] and [`Check::aggregate_id`] are set.
     Command,
     /// A query.
     Query,
+    /// A file request ([`crate::Files`]): [`Check::type_name`] is `PutData`, `GetData` or
+    /// `DeleteData`, [`Check::key`] is set.
+    Data,
+    /// A cache request ([`crate::Cache`]): [`Check::type_name`] is `SetCache`, `GetCache` or
+    /// `DeleteCache`, [`Check::key`] is set.
+    Cache,
 }
 
 /// What came of the request a middleware after it checks: an [`Outcome`] for a command, a
@@ -146,22 +153,27 @@ pub enum CheckOutcome {
     Query(QueryOutcome),
 }
 
-/// A command or query a middleware checks, before the kernel accepts or routes it or after:
-/// what the handler of [`Listener::middleware`] gets.
+/// A command, query, file or cache request a middleware checks, before the kernel accepts or
+/// routes it or after (file and cache requests: before only): what the handler of
+/// [`Listener::middleware`] gets.
 #[derive(Clone, Debug)]
 pub struct Check {
     pub kind: CheckKind,
-    /// The command or query ID.
+    /// The command or query ID; for a file or cache request, the kernel's call ID.
     pub id: String,
     pub tenant: String,
     pub domain: String,
-    /// The command or query type within the domain.
+    /// The command or query type within the domain; for a file or cache request `PutData`,
+    /// `GetData`, `DeleteData`, `SetCache`, `GetCache` or `DeleteCache`.
     pub type_name: String,
     /// Commands only.
     pub aggregate_type: Option<String>,
     /// Commands only.
     pub aggregate_id: Option<String>,
+    /// File and cache requests only: the file's or value's key.
+    pub key: Option<String>,
     /// The request's payload; vault fields are `null` unless the key is granted `vault_read`.
+    /// `Value::Null` for a file or cache request: the middleware never sees the file or value.
     pub data: Value,
     /// Who sends it: check permissions here.
     pub request: RequestContext,
@@ -206,7 +218,9 @@ impl fmt::Display for When {
 #[derive(Clone, Debug)]
 pub struct MiddlewareOptions {
     /// Command and query types: `*` (all), a type of the listener's domain (`Place`), of another
-    /// domain (`orders.Place`) or a whole domain (`orders.*`).
+    /// domain (`orders.Place`) or a whole domain (`orders.*`). File and cache requests are
+    /// types too: `PutData`, `GetData`, `DeleteData`, `SetCache`, `GetCache`, `DeleteCache`
+    /// (e.g. `shop.PutData`); `*` and `orders.*` cover them.
     pub types: Vec<String>,
     /// Position in the chain: lower runs first, equal orders by listener name (default 0).
     /// Negative orders are reserved for kernable.
@@ -560,8 +574,8 @@ impl Listener {
         self.clone()
     }
 
-    /// Makes this listener a middleware: the kernel asks `handler` about every command and
-    /// query of `options.types`, before accepting or routing it (or after, see [`When`]), in
+    /// Makes this listener a middleware: the kernel asks `handler` about every command, query,
+    /// file and cache request of `options.types` (see [`MiddlewareOptions::types`]), before accepting or routing it (or after, see [`When`]), in
     /// chain order, and only once this listener has caught up with the events. Return a
     /// [`Rejected`] to refuse; any other error refuses too. After a request, the check carries
     /// its outcome ([`Check::outcome`]). The registration is stored: while this listener is
@@ -992,6 +1006,7 @@ impl ListenerHandle {
                 type_name: x.command_type,
                 aggregate_type: Some(x.aggregate_type),
                 aggregate_id: Some(x.aggregate_id),
+                key: None,
                 data: vault::unseal(decode(&x.payload), &vault).0,
                 request: RequestContext::from_wire(x.context.as_ref()),
                 outcome,
@@ -1004,8 +1019,35 @@ impl ListenerHandle {
                 type_name: q.query_type,
                 aggregate_type: None,
                 aggregate_id: None,
+                key: None,
                 data: decode(&q.payload),
                 request: RequestContext::from_wire(q.context.as_ref()),
+                outcome,
+            },
+            Some(middleware_call::Request::Data(d)) => Check {
+                kind: CheckKind::Data,
+                type_name: type_within(&call.r#type, &d.domain),
+                id: call.call_id,
+                tenant: d.tenant_id,
+                domain: d.domain,
+                aggregate_type: None,
+                aggregate_id: None,
+                key: Some(d.key),
+                data: Value::Null,
+                request: RequestContext::from_wire(d.context.as_ref()),
+                outcome,
+            },
+            Some(middleware_call::Request::Cache(c)) => Check {
+                kind: CheckKind::Cache,
+                type_name: type_within(&call.r#type, &c.domain),
+                id: call.call_id,
+                tenant: c.tenant_id,
+                domain: c.domain,
+                aggregate_type: None,
+                aggregate_id: None,
+                key: Some(c.key),
+                data: Value::Null,
+                request: RequestContext::from_wire(c.context.as_ref()),
                 outcome,
             },
             None => {
@@ -1021,6 +1063,15 @@ impl ListenerHandle {
             Err(e) => Some(Rejected::of(&e, "middleware_error").to_wire()),
         }
     }
+}
+
+/// The type within its domain of a qualified one: `shop.PutData` → `PutData`.
+fn type_within(qualified: &str, domain: &str) -> String {
+    qualified
+        .strip_prefix(domain)
+        .and_then(|t| t.strip_prefix('.'))
+        .unwrap_or(qualified)
+        .to_owned()
 }
 
 /// What came of the request a middleware after it checks.

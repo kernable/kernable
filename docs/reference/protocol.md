@@ -437,6 +437,7 @@ INVALID_ARGUMENT (domain, key or size).
 | `issued_at` |  `int64` | 6 | ms since epoch |
 | `client_sig` |  `Signature` | 7 |  |
 | `protocol` |  `uint32` | 8 | not signed |
+| `context` |  `RequestContext` | 9 | Who asks and in which context, as for a command; signed. Middlewares checking `<domain>.PutData`, `.GetData` or `.DeleteData` decide on it. |
 
 ### DataResult
 
@@ -472,6 +473,7 @@ by a key granted cache for the domain, with the same errors.
 | `issued_at` |  `int64` | 6 | ms since epoch |
 | `client_sig` |  `Signature` | 7 |  |
 | `protocol` |  `uint32` | 8 | not signed |
+| `context` |  `RequestContext` | 9 | Who asks and in which context, as for a command; signed. Middlewares checking `<domain>.SetCache`, `.GetCache` or `.DeleteCache` decide on it. |
 
 ### CacheResult
 
@@ -551,10 +553,13 @@ a Verdict of the same `call_id`, also after (where it may only count for a query
 | `call_id` |  `string` | 1 |  |
 | `command` |  `Command` | 2 | as the client sent it, with its signature |
 | `query` |  `QueryRequest` | 3 | as the client sent it, with its signature |
+| `data` |  `DataRequest` | 8 | A file or cache request, before it runs; without the file or value itself. |
+| `cache` |  `CacheRequest` | 9 |  |
 | `vault` | repeated `VaultValue` | 4 | Before a command only: its vault values, if the key may read them (granted vault_read). |
 | `when` |  `When` | 5 |  |
 | `command_result` |  `CommandResult` | 6 | After only: the command's result. The middleware only observes it; its verdict is ignored. |
 | `query_result` |  `QueryResult` | 7 | After only: the query's result. A verdict that rejects a response replaces it. |
+| `type` |  `string` | 10 | The qualified type being checked: `shop.AddItem`, `shop.GetCart`, or for files and the cache `shop.PutData`, `shop.GetData`, `shop.DeleteData`, `shop.SetCache`, `shop.GetCache`, `shop.DeleteCache`. |
 
 ### Verdict
 

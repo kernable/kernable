@@ -178,7 +178,7 @@ fn vectors() -> Value {
         ),
         "data_put": entry(
             json!({"op": "put", "tenant_id": "t-1", "domain": "shop", "key": "invoices/o-1.pdf", "content_type": "application/pdf",
-                   "data_hex": hex::encode(b"%PDF-1.7"), "issued_at": 1_700_000_000_000i64}),
+                   "data_hex": hex::encode(b"%PDF-1.7"), "issued_at": 1_700_000_000_000i64, "context": context_json}),
             signing::data_message("put", &kernable_core::proto::DataRequest {
                 tenant_id: "t-1".into(),
                 domain: "shop".into(),
@@ -188,8 +188,10 @@ fn vectors() -> Value {
                 issued_at: 1_700_000_000_000,
                 client_sig: None,
                 protocol: kernable_core::PROTOCOL,
+                context: Some(context.clone()),
             }),
         ),
+        // Without a context: encoded like an empty one.
         "cache_set": entry(
             json!({"op": "set", "tenant_id": "t-1", "domain": "shop", "key": "rate/c-1", "value_hex": hex::encode(b"3"),
                    "ttl_ms": 60_000, "issued_at": 1_700_000_000_000i64}),
@@ -202,6 +204,7 @@ fn vectors() -> Value {
                 issued_at: 1_700_000_000_000,
                 client_sig: None,
                 protocol: kernable_core::PROTOCOL,
+                context: None,
             }),
         ),
         "challenge": entry(json!({"nonce_hex": hex::encode(nonce)}), signing::challenge_message(&nonce)),

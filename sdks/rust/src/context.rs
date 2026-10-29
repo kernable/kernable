@@ -5,10 +5,11 @@ use std::{collections::BTreeMap, fmt};
 use kernable_core::proto;
 
 /// Who sends a request and in which context: signed with the command and stored with every
-/// event it causes. `attributes` are business data only, never security decisions.
+/// event it causes; signed with file and cache requests too, for middlewares to check. `attributes` are business data only, never security decisions.
 ///
 /// Set a default for a connection with [`crate::Options::context`], or one per request with
-/// [`crate::Submit::context`] and [`crate::Query::context`]. Inside a listener's handler,
+/// [`crate::Submit::context`], [`crate::Query::context`], [`crate::Files::context`] and
+/// [`crate::Cache::context`]. Inside a listener's handler,
 /// submit follow-up commands with `ctx.follow()` ([`crate::ListenerContext::follow`]). All
 /// fields default to empty; set the ones you need:
 /// `RequestContext { sender_identity: "customer-7".into(), expected_version: Some(3), ..Default::default() }`.

@@ -12,11 +12,13 @@ use common::*;
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
-        Ack, ChallengeResponse, Hello, ListenerMessage, ListenerRecord, Middleware, MiddlewareCall,
-        QueryAnswer, QueryRequest, Rejected, RequestContext, Verdict, Wait, When,
-        command_result::Outcome, listener_delivery::Msg as Out, listener_message::Msg as In,
-        listener_service_client::ListenerServiceClient, middleware_call, middleware_call::Request,
-        query_answer, query_result, query_service_client::QueryServiceClient,
+        Ack, CacheRequest, ChallengeResponse, DataRequest, Hello, ListenerMessage, ListenerRecord,
+        Middleware, MiddlewareCall, QueryAnswer, QueryRequest, Rejected, RequestContext, Verdict,
+        Wait, When, cache_service_client::CacheServiceClient, command_result::Outcome,
+        data_service_client::DataServiceClient, listener_delivery::Msg as Out,
+        listener_message::Msg as In, listener_service_client::ListenerServiceClient,
+        middleware_call, middleware_call::Request, query_answer, query_result,
+        query_service_client::QueryServiceClient,
     },
     signing, transport,
 };
@@ -99,6 +101,8 @@ fn seen(name: &str, call: &MiddlewareCall) -> String {
     let id = match &call.request {
         Some(Request::Command(c)) => &c.command_id,
         Some(Request::Query(q)) => &q.query_id,
+        Some(Request::Data(d)) => &d.key,
+        Some(Request::Cache(c)) => &c.key,
         None => "",
     };
     format!("{name} after {id} {outcome}")
@@ -639,4 +643,120 @@ async fn a_listener_has_at_most_one_middleware_before_and_one_after() {
         Err(status) => status,
     };
     assert_eq!(status.code(), Code::InvalidArgument, "{status:?}");
+}
+
+fn now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
+/// Lets file and cache requests of alice through, refuses everyone else's, and checks that
+/// the file or value itself never reaches the middleware.
+fn only_alice(request: &Request, _: usize) -> Option<Rejected> {
+    let (context, content) = match request {
+        Request::Data(d) => (d.context.as_ref(), d.data.len()),
+        Request::Cache(c) => (c.context.as_ref(), c.value.len()),
+        _ => return None,
+    };
+    assert_eq!(content, 0, "the middleware gets no file or value");
+    let alice = context.is_some_and(|c| c.sender_identity == "alice");
+    if alice { None } else { refuse("forbidden") }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn files_and_cache_values_pass_the_middleware_chain() {
+    let env = start("middleware-data").await;
+    env.kernel
+        .grant(grant(
+            &key(7),
+            &[
+                ("data_read", &["shop.*"]),
+                ("data_write", &["shop.*"]),
+                ("cache", &["shop.*"]),
+            ],
+        ))
+        .unwrap();
+    let log = Log::default();
+    let guard = Spec {
+        types: vec!["shop.*".into()],
+        ..spec("guard", 0, only_alice)
+    };
+    let (_guard, _stop) = middleware(&env, guard, &log);
+    settle_in().await;
+
+    let as_ = |who: &str| RequestContext {
+        sender_identity: who.into(),
+        ..Default::default()
+    };
+    let data = |op: &str, who: &str| {
+        let mut r = DataRequest {
+            tenant_id: "t".into(),
+            domain: "shop".into(),
+            key: "invoice.pdf".into(),
+            data: if op == "put" {
+                b"%PDF".to_vec()
+            } else {
+                Vec::new()
+            },
+            content_type: if op == "put" {
+                "application/pdf".into()
+            } else {
+                String::new()
+            },
+            issued_at: now(),
+            context: Some(as_(who)),
+            protocol: kernable_core::PROTOCOL,
+            ..Default::default()
+        };
+        r.client_sig = Some(signing::sign(&key(7), &signing::data_message(op, &r)));
+        r
+    };
+    let channel = transport::connect(&env.addr).await.unwrap();
+    let mut files = DataServiceClient::new(channel.clone());
+    let refused = files.put_data(data("put", "mallory")).await.unwrap_err();
+    assert_eq!(refused.code(), Code::PermissionDenied, "{refused:?}");
+    assert!(refused.message().starts_with("forbidden"), "{refused:?}");
+    files.put_data(data("put", "alice")).await.unwrap();
+    let got = files
+        .get_data(data("get", "alice"))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(got.data, b"%PDF");
+    let refused = files.get_data(data("get", "mallory")).await.unwrap_err();
+    assert_eq!(refused.code(), Code::PermissionDenied);
+
+    let cache = |op: &str, who: &str| {
+        let mut r = CacheRequest {
+            tenant_id: "t".into(),
+            domain: "shop".into(),
+            key: "rate".into(),
+            value: if op == "set" {
+                b"1.08".to_vec()
+            } else {
+                Vec::new()
+            },
+            issued_at: now(),
+            context: Some(as_(who)),
+            protocol: kernable_core::PROTOCOL,
+            ..Default::default()
+        };
+        r.client_sig = Some(signing::sign(&key(7), &signing::cache_message(op, &r)));
+        r
+    };
+    let mut values = CacheServiceClient::new(channel);
+    let refused = values.set_cache(cache("set", "mallory")).await.unwrap_err();
+    assert_eq!(refused.code(), Code::PermissionDenied);
+    values.set_cache(cache("set", "alice")).await.unwrap();
+    assert_eq!(
+        values
+            .get_cache(cache("get", "alice"))
+            .await
+            .unwrap()
+            .into_inner()
+            .value,
+        b"1.08"
+    );
 }

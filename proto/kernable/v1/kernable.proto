@@ -409,6 +409,9 @@ message DataRequest {
   int64 issued_at = 6;     // ms since epoch
   Signature client_sig = 7;
   uint32 protocol = 8;     // not signed
+  // Who asks and in which context, as for a command; signed. Middlewares checking
+  // `<domain>.PutData`, `.GetData` or `.DeleteData` decide on it.
+  RequestContext context = 9;
 }
 
 message DataResult {
@@ -435,6 +438,9 @@ message CacheRequest {
   int64 issued_at = 6;   // ms since epoch
   Signature client_sig = 7;
   uint32 protocol = 8;   // not signed
+  // Who asks and in which context, as for a command; signed. Middlewares checking
+  // `<domain>.SetCache`, `.GetCache` or `.DeleteCache` decide on it.
+  RequestContext context = 9;
 }
 
 message CacheResult {
@@ -511,6 +517,9 @@ message MiddlewareCall {
   oneof request {
     Command command = 2;     // as the client sent it, with its signature
     QueryRequest query = 3;  // as the client sent it, with its signature
+    // A file or cache request, before it runs; without the file or value itself.
+    DataRequest data = 8;
+    CacheRequest cache = 9;
   }
   // Before a command only: its vault values, if the key may read them (granted vault_read).
   repeated VaultValue vault = 4;
@@ -521,6 +530,10 @@ message MiddlewareCall {
     // After only: the query's result. A verdict that rejects a response replaces it.
     QueryResult query_result = 7;
   }
+  // The qualified type being checked: `shop.AddItem`, `shop.GetCart`, or for files and the
+  // cache `shop.PutData`, `shop.GetData`, `shop.DeleteData`, `shop.SetCache`, `shop.GetCache`,
+  // `shop.DeleteCache`.
+  string type = 10;
 }
 
 message Verdict {

@@ -43,6 +43,8 @@ async fn main() -> Result<(), BoxError> {
                 let target = match check.kind {
                     CheckKind::Command => check.aggregate_id.clone(),
                     CheckKind::Query => field("id"),
+                    // The shop keeps no files: no customer's to protect.
+                    CheckKind::Data | CheckKind::Cache => None,
                 };
                 let owner = if check.type_name == "Place" {
                     field("customerId")

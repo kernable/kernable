@@ -24,6 +24,8 @@ If several read models answer the same type, the kernel spreads queries over the
 
 A **middleware** is a listener that checks commands and queries before the kernel accepts or routes them (or after, see below). It builds its knowledge from events, like a read model, and answers each check from it.
 
+It checks **file and cache requests** too, before they run, under their own types: `<domain>.PutData`, `.GetData`, `.DeleteData`, `.SetCache`, `.GetCache` and `.DeleteCache`. A middleware that covers `shop.*` or `*` gets them; one that covers `AddItem` does not. It sees who asks (the request context), the tenant, the domain and the key, never the file or the value itself. A refusal reaches the client as `PERMISSION_DENIED`, with the middleware's code.
+
 <FlowDiagram name="chain" loop bare silent />
 
 - **Registered in code.** A listener declares the types it checks and its order; its key needs a grant for `check` on those types. Negative orders are reserved for kernable. If its service has a membership, it must list the listener as a middleware ([membership](../how-to/remove-listener)).
@@ -72,7 +74,7 @@ Run it like any read model; its key needs `listen` for the identity events and `
 | Middleware | Runs | Decides on |
 |---|---|---|
 | authorization (rbac) | before | the sender, and who owns what, from events |
-| tenant isolation | before | `senderTenant` against the request's tenant |
+| tenant isolation | before | `senderTenant` against the request's tenant, for commands, queries, files and cache values |
 | quota, rate limit | before | counts from events, per sender or per aggregate |
 | maintenance mode, feature flag | before | a switch, kept as an event |
 | privacy filter | after a query | the answer against the asker |

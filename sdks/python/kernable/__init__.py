@@ -193,25 +193,32 @@ class QueryContext:
 
 @dataclass
 class Check:
-    """A command or query a middleware checks, before the kernel accepts or routes it or after:
-    the first parameter of a `Listener.middleware` handler."""
+    """A command, query, file or cache request a middleware checks, before the kernel accepts,
+    routes or runs it (or, for commands and queries, after): the first parameter of a
+    `Listener.middleware` handler."""
 
-    #: `"command"` or `"query"`.
+    #: `"command"`, `"query"`, `"data"` (a file request of `k.data`) or `"cache"` (a cache
+    #: request of `k.cache`).
     kind: str
-    #: The command or query ID.
+    #: The command or query ID; empty for a file or cache request.
     id: str
     tenant: str
     domain: str
-    #: The command or query type within the domain.
+    #: The type within the domain: the command or query type, or for a file request `PutData`,
+    #: `GetData` or `DeleteData`, for a cache request `SetCache`, `GetCache` or `DeleteCache`.
     type: str
     #: The request's payload; vault fields are `None` unless the key is granted `vault_read`.
+    #: Always `None` for a file or cache request: the middleware decides on who asks for which
+    #: key, never sees the file or value.
     data: Any
     #: Who sends it: check permissions here.
     request: RequestContext
-    #: Commands only; empty for a query.
+    #: Commands only; empty otherwise.
     aggregate_type: str = ""
-    #: Commands only; empty for a query.
+    #: Commands only; empty otherwise.
     aggregate_id: str = ""
+    #: File and cache requests only: the file or cache key; empty otherwise.
+    key: str = ""
 
 
 @dataclass
@@ -741,8 +748,8 @@ class Kernable:
         current directory. `tenant`: default tenant of submits, queries, files and the cache
         (default `default`). `tls`: mutual TLS for `host:port`; default `KERNABLE_TLS_CA`,
         `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`, if set (all three or none). `context`:
-        default request context for submits and queries, e.g. this service's identity, replaced
-        by a request's own. `grant`: path to the key's grant (`kernable grant`), sent with every
+        default request context for submits, queries, files and the cache, e.g. this service's
+        identity, replaced by a request's own. `grant`: path to the key's grant (`kernable grant`), sent with every
         call; default `KERNABLE_GRANT`, else the `.grant` file next to the key file, if there is
         one. `service`: the service this process's workers and listeners belong to. The
         service's membership (see `apply`) decides what the kernel waits for: what it lists
@@ -941,9 +948,13 @@ class DataClient:
     """Files of a domain, kept by the kernel under (tenant, domain, key): invoices, uploads,
     exports. They are not part of the signed event log and not erased with the vault; keep
     personal data in vault fields instead. Needs a grant of `data_read` (get) or `data_write`
-    (put, delete) for the domain; a refused or invalid request raises `grpc.RpcError`. Keys are
-    1 to 512 bytes, files at most 16 MiB. Use it as `k.data`: `k.data.put("shop", "invoices/c1.pdf",
-    pdf_bytes, "application/pdf")`. `tenant=` replaces the client's tenant."""
+    (put, delete) for the domain; a refused or invalid request raises `grpc.RpcError`. Each
+    request runs the middleware chain first, as `<domain>.PutData`, `.GetData` or `.DeleteData`
+    (the middleware sees the key and the request context, never the file); a middleware's
+    refusal raises `grpc.RpcError` with code `PERMISSION_DENIED` and details `"<code>:
+    <message>"`. Keys are 1 to 512 bytes, files at most 16 MiB. Use it as `k.data`:
+    `k.data.put("shop", "invoices/c1.pdf", pdf_bytes, "application/pdf")`. `tenant=` replaces the
+    client's tenant, `context=` the client's default request context."""
 
     def __init__(self, k: Kernable):
         """Use `k.data` of a `Kernable`."""
@@ -951,27 +962,30 @@ class DataClient:
         self._stub = rpc.DataServiceStub(k._channel)
 
     def put(self, domain: str, key: str, data: bytes | str, content_type: str | None = None, *,
-            tenant: str | None = None) -> None:
+            tenant: str | None = None, context: RequestContext | None = None) -> None:
         """Stores `data` under `key`, replacing a file stored there. A `str` is stored as UTF-8;
         `content_type` defaults to `text/plain; charset=utf-8` for a `str` and
         `application/octet-stream` for `bytes`."""
         if isinstance(data, str):
             data, content_type = data.encode(), content_type or "text/plain; charset=utf-8"
-        self._call("put", self._stub.PutData, tenant, domain, key, data=data,
+        self._call("put", self._stub.PutData, tenant, context, domain, key, data=data,
                    content_type=content_type or "application/octet-stream")
 
-    def get(self, domain: str, key: str, *, tenant: str | None = None) -> Data | None:
+    def get(self, domain: str, key: str, *, tenant: str | None = None,
+            context: RequestContext | None = None) -> Data | None:
         """The file stored under `key`, or `None` if there is none."""
-        res = self._call("get", self._stub.GetData, tenant, domain, key)
+        res = self._call("get", self._stub.GetData, tenant, context, domain, key)
         return Data(res.data, res.content_type) if res.found else None
 
-    def delete(self, domain: str, key: str, *, tenant: str | None = None) -> bool:
+    def delete(self, domain: str, key: str, *, tenant: str | None = None,
+               context: RequestContext | None = None) -> bool:
         """Deletes the file stored under `key`; returns whether there was one."""
-        return self._call("delete", self._stub.DeleteData, tenant, domain, key).found
+        return self._call("delete", self._stub.DeleteData, tenant, context, domain, key).found
 
-    def _call(self, op, method, tenant, domain, key, **fields):
+    def _call(self, op, method, tenant, context, domain, key, **fields):
         r = pb.DataRequest(tenant_id=tenant or self._k._tenant, domain=domain, key=key,
-                           issued_at=int(time.time() * 1000), protocol=PROTOCOL, **fields)
+                           issued_at=int(time.time() * 1000), protocol=PROTOCOL,
+                           context=_to_wire_context(context or self._k._context, ""), **fields)
         r.client_sig.CopyFrom(self._k._key.sign(data_message(op, r)))
         return method(r)
 
@@ -980,9 +994,13 @@ class CacheClient:
     """A domain's shared cache, kept in the kernel's memory under (tenant, domain, key): rate
     limits, short-lived tokens, computed values. Not durable: a kernel restart empties it. Values
     are not part of the signed event log and not erased with the vault. Needs a grant of `cache`
-    for the domain; a refused or invalid request raises `grpc.RpcError`. Keys are 1 to 512 bytes,
-    values at most 1 MiB. Use it as `k.cache`: `k.cache.set("shop", "rate:c1", "3", ttl_ms=60_000)`,
-    then `k.cache.get("shop", "rate:c1")` returns `b"3"`. `tenant=` replaces the client's tenant."""
+    for the domain; a refused or invalid request raises `grpc.RpcError`. Each request runs the
+    middleware chain first, as `<domain>.SetCache`, `.GetCache` or `.DeleteCache` (the middleware
+    sees the key and the request context, never the value); a middleware's refusal raises
+    `grpc.RpcError` with code `PERMISSION_DENIED` and details `"<code>: <message>"`. Keys are 1 to
+    512 bytes, values at most 1 MiB. Use it as `k.cache`: `k.cache.set("shop", "rate:c1", "3",
+    ttl_ms=60_000)`, then `k.cache.get("shop", "rate:c1")` returns `b"3"`. `tenant=` replaces the
+    client's tenant, `context=` the client's default request context."""
 
     def __init__(self, k: Kernable):
         """Use `k.cache` of a `Kernable`."""
@@ -990,25 +1008,28 @@ class CacheClient:
         self._stub = rpc.CacheServiceStub(k._channel)
 
     def set(self, domain: str, key: str, value: bytes | str, ttl_ms: int = 0, *,
-            tenant: str | None = None) -> None:
+            tenant: str | None = None, context: RequestContext | None = None) -> None:
         """Stores `value` under `key` for `ttl_ms` milliseconds; `0` keeps it until it is deleted
         or the kernel restarts. A `str` is stored as UTF-8."""
         value = value.encode() if isinstance(value, str) else value
-        self._call("set", self._stub.SetCache, tenant, domain, key, value=value, ttl_ms=ttl_ms)
+        self._call("set", self._stub.SetCache, tenant, context, domain, key, value=value, ttl_ms=ttl_ms)
 
-    def get(self, domain: str, key: str, *, tenant: str | None = None) -> bytes | None:
+    def get(self, domain: str, key: str, *, tenant: str | None = None,
+            context: RequestContext | None = None) -> bytes | None:
         """The live value under `key` as `bytes` (decode a `str` with `.decode()`), or `None` if
         there is none or it expired."""
-        res = self._call("get", self._stub.GetCache, tenant, domain, key)
+        res = self._call("get", self._stub.GetCache, tenant, context, domain, key)
         return res.value if res.found else None
 
-    def delete(self, domain: str, key: str, *, tenant: str | None = None) -> bool:
+    def delete(self, domain: str, key: str, *, tenant: str | None = None,
+               context: RequestContext | None = None) -> bool:
         """Deletes the value under `key`; returns whether it had a live one."""
-        return self._call("delete", self._stub.DeleteCache, tenant, domain, key).found
+        return self._call("delete", self._stub.DeleteCache, tenant, context, domain, key).found
 
-    def _call(self, op, method, tenant, domain, key, **fields):
+    def _call(self, op, method, tenant, context, domain, key, **fields):
         r = pb.CacheRequest(tenant_id=tenant or self._k._tenant, domain=domain, key=key,
-                            issued_at=int(time.time() * 1000), protocol=PROTOCOL, **fields)
+                            issued_at=int(time.time() * 1000), protocol=PROTOCOL,
+                            context=_to_wire_context(context or self._k._context, ""), **fields)
         r.client_sig.CopyFrom(self._k._key.sign(cache_message(op, r)))
         return method(r)
 
@@ -1489,7 +1510,10 @@ class Listener:
         `order` first, then by listener name), and only once this listener has caught up with the
         events. `fn(check, outcome)` gets a `Check` and, after, what came of it (optional): an
         `Outcome` for a command, a `QueryOutcome` for a query (`check.kind` tells which); before,
-        None. Raise `Rejected` to refuse; any other error refuses too. The registration is stored:
+        None. `types` cover file and cache requests too, before they run: `domain.PutData`,
+        `.GetData`, `.DeleteData`, `.SetCache`, `.GetCache` and `.DeleteCache` (and `domain.*` or
+        `*` include them); `check.kind` is then `"data"` or `"cache"`, `check.key` the key and
+        `check.data` None, and a refusal reaches the client as `PERMISSION_DENIED`. Raise `Rejected` to refuse; any other error refuses too. The registration is stored:
         while this listener is away, the kernel refuses those requests (`kernable listeners
         remove` unregisters it). `fn` cannot submit or query what it checks itself (it would wait
         behind itself): the kernel refuses it. A listener has at most one middleware before and
@@ -1753,6 +1777,11 @@ def _to_check(call) -> Check:
         return Check("command", c.command_id, c.tenant_id, c.domain, c.command_type,
                      _unseal(_decode(c.payload), call.vault)[0],
                      _from_wire_context(c.context), c.aggregate_type, c.aggregate_id)
+    kind = call.WhichOneof("request")
+    if kind in ("data", "cache"):
+        r = getattr(call, kind)
+        type = call.type.rsplit(".", 1)[-1]  # qualified, e.g. `shop.PutData`
+        return Check(kind, "", r.tenant_id, r.domain, type, None, _from_wire_context(r.context), key=r.key)
     q = call.query
     return Check("query", q.query_id, q.tenant_id, q.domain, q.query_type, _decode(q.payload),
                  _from_wire_context(q.context))

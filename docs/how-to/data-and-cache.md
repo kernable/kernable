@@ -28,6 +28,8 @@ kernable grant keys/root.key keys/api.pub 'data_write=shop.*' 'data_read=shop.*'
 
 `kernable start --dev` lets `app` do everything. A key without the grant gets `PERMISSION_DENIED` (`key may not read files in shop`). More on grants: [Keys per service](./keys).
 
+Grants decide per key and domain; **who** may read which file, and in which tenant, a middleware decides. Every file and cache request carries the client's request context (its default one, or one per call) and passes the middleware chain under the types `shop.PutData`, `shop.GetData`, `shop.DeleteData`, `shop.SetCache`, `shop.GetCache` and `shop.DeleteCache`. A middleware covering `shop.*` checks them like commands; a refusal is `PERMISSION_DENIED` with its code. Use it, for example, to keep tenants apart: refuse when `senderTenant` is not the request's tenant ([Queries and middleware](../concepts/queries-and-middleware#middleware)).
+
 ## 2. Put and get files
 
 Any client can use them: `kernable.data` on a `Kernable` (`new Kernable()`, Python `Kernable()`, Rust `Kernable::new(…)`).

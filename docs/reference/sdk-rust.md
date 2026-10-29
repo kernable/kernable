@@ -470,10 +470,13 @@ What a query handler gets besides the query's data and meta (the `ctx` of
 
 ### CheckKind
 
-Whether a middleware checks a command or a query (`Check::kind`).
+Whether a middleware checks a command, a query, a file request or a cache request
+(`Check::kind`).
 
 - `Command`: A command: `Check::aggregate_type` and `Check::aggregate_id` are set.
 - `Query`: A query.
+- `Data`: A file request (`crate::Files`): `Check::type_name` is `PutData`, `GetData` or `DeleteData`, `Check::key` is set.
+- `Cache`: A cache request (`crate::Cache`): `Check::type_name` is `SetCache`, `GetCache` or `DeleteCache`, `Check::key` is set.
 
 ### CheckOutcome
 
@@ -485,17 +488,19 @@ What came of the request a middleware after it checks: an `Outcome` for a comman
 
 ### Check
 
-A command or query a middleware checks, before the kernel accepts or routes it or after:
-what the handler of `Listener::middleware` gets.
+A command, query, file or cache request a middleware checks, before the kernel accepts or
+routes it or after (file and cache requests: before only): what the handler of
+`Listener::middleware` gets.
 
 - `kind: CheckKind`
-- `id: String`: The command or query ID.
+- `id: String`: The command or query ID; for a file or cache request, the kernel's call ID.
 - `tenant: String`
 - `domain: String`
-- `type_name: String`: The command or query type within the domain.
+- `type_name: String`: The command or query type within the domain; for a file or cache request `PutData`, `GetData`, `DeleteData`, `SetCache`, `GetCache` or `DeleteCache`.
 - `aggregate_type: Option<String>`: Commands only.
 - `aggregate_id: Option<String>`: Commands only.
-- `data: Value`: The request's payload; vault fields are `null` unless the key is granted `vault_read`.
+- `key: Option<String>`: File and cache requests only: the file's or value's key.
+- `data: Value`: The request's payload; vault fields are `null` unless the key is granted `vault_read`. `Value::Null` for a file or cache request: the middleware never sees the file or value.
 - `request: RequestContext`: Who sends it: check permissions here.
 - `outcome: Option<CheckOutcome>`: After it, what came of the request; before it, `None`.
 
@@ -512,7 +517,7 @@ What a middleware checks: `MiddlewareOptions::new(&["shop.*"])`, with
 `MiddlewareOptions { order: 5, ..MiddlewareOptions::new(&["*"]) }` for another order and
 `.after()` to run after requests.
 
-- `types: Vec<String>`: Command and query types: `*` (all), a type of the listener's domain (`Place`), of another domain (`orders.Place`) or a whole domain (`orders.*`).
+- `types: Vec<String>`: Command and query types: `*` (all), a type of the listener's domain (`Place`), of another domain (`orders.Place`) or a whole domain (`orders.*`). File and cache requests are types too: `PutData`, `GetData`, `DeleteData`, `SetCache`, `GetCache`, `DeleteCache` (e.g. `shop.PutData`); `*` and `orders.*` cover them.
 - `order: i32`: Position in the chain: lower runs first, equal orders by listener name (default 0). Negative orders are reserved for kernable.
 - `when: When`: Before (default) or after requests; see `When`.
 - `fn new(types: &[&str]) -> MiddlewareOptions`: Checks `types` (see `MiddlewareOptions::types`) before requests, at order 0.
@@ -555,7 +560,7 @@ A query handler returns its answer (any `Serialize`) or a `Rejected` as a `BoxEr
 - `fn on<D, F, Fut>(&self, event_type: &str, handler: F) -> Listener where D: DeserializeOwned + Send + 'static, F: Fn(D, StoredEventMeta, ListenerContext) -> Fut + Send + Sync + 'static, Fut: Future<Output = Result<(), BoxError>> + Send + 'static`: Handles `event_type` events: a type of the listener's domain (`ItemAdded`), of another domain (`orders.OrderPlaced`) or a whole domain (`orders.*`). `handler(data, evt, ctx)` gets the payload as `D` (`serde_json::Value` for any), a `StoredEventMeta` and a `ListenerContext`, and returns a future of `Result<(), BoxError>`. A payload that is not a `D` or an `Err` fails the batch: the listener reconnects and the event is delivered again, so handlers must be idempotent. See `Listener` for an example. Panics if `event_type` is none of these.
 - `fn on_raw<D, F, Fut>(&self, event_type: &str, handler: F) -> Listener where D: DeserializeOwned + Send + 'static, F: Fn(D, StoredEventMeta, ListenerContext) -> Fut + Send + Sync + 'static, Fut: Future<Output = Result<(), BoxError>> + Send + 'static`: Like `on`, but gets events as stored, without upcasting, whatever their schema (for archives and exports).
 - `fn query<D, R, F, Fut>(&self, query_type: &str, handler: F) -> Listener where D: DeserializeOwned + Send + 'static, R: Serialize, F: Fn(D, QueryMeta, QueryContext) -> Fut + Send + Sync + 'static, Fut: Future<Output = Result<R, BoxError>> + Send + 'static`: Answers `query_type` queries: a type of the listener's domain (`GetOrder`) or of another one (`orders.GetOrder`), from this listener's state: `handler(data, qry, ctx)` gets the query's data as `D`, a `QueryMeta` and a `QueryContext`, and returns a future of the answer `R` (any `Serialize`). The kernel delivers queries in order with the events, so an answer reflects every event handled before it. Return a `Rejected` (as a `BoxError`) to refuse; any other error refuses with `handler_error`. A handler cannot query its own listener (the answer would wait behind itself): the kernel refuses it. See `Listener` for an example. Panics if `query_type` is neither.
-- `fn middleware<F, Fut>(&self, options: MiddlewareOptions, handler: F) -> Listener where F: Fn(Check) -> Fut + Send + Sync + 'static, Fut: Future<Output = Result<(), BoxError>> + Send + 'static`: Makes this listener a middleware: the kernel asks `handler` about every command and query of `options.types`, before accepting or routing it (or after, see `When`), in chain order, and only once this listener has caught up with the events. Return a `Rejected` to refuse; any other error refuses too. After a request, the check carries its outcome (`Check::outcome`). The registration is stored: while this listener is away, the kernel refuses those requests (`kernable listeners remove` unregisters it). A listener has at most one middleware before and one after. The handler gets a `Check` and returns a future of `Result<(), BoxError>`: `Ok(())` lets the request pass. Example: `MiddlewareOptions::new(&["shop.*"])` with a handler that returns `Err(Rejected::new("not allowed").code("forbidden").into())` unless `check.request.sender_identity` may send `check.type_name`. Panics if a type is not `*`, a type, a qualified type or a domain, the listener has a middleware at `options.when` already, or it is live.
+- `fn middleware<F, Fut>(&self, options: MiddlewareOptions, handler: F) -> Listener where F: Fn(Check) -> Fut + Send + Sync + 'static, Fut: Future<Output = Result<(), BoxError>> + Send + 'static`: Makes this listener a middleware: the kernel asks `handler` about every command, query, file and cache request of `options.types` (see `MiddlewareOptions::types`), before accepting or routing it (or after, see `When`), in chain order, and only once this listener has caught up with the events. Return a `Rejected` to refuse; any other error refuses too. After a request, the check carries its outcome (`Check::outcome`). The registration is stored: while this listener is away, the kernel refuses those requests (`kernable listeners remove` unregisters it). A listener has at most one middleware before and one after. The handler gets a `Check` and returns a future of `Result<(), BoxError>`: `Ok(())` lets the request pass. Example: `MiddlewareOptions::new(&["shop.*"])` with a handler that returns `Err(Rejected::new("not allowed").code("forbidden").into())` unless `check.request.sender_identity` may send `check.type_name`. Panics if a type is not `*`, a type, a qualified type or a domain, the listener has a middleware at `options.when` already, or it is live.
 
 ### ListenerHandle
 
@@ -618,10 +623,13 @@ A file as stored by the kernel, returned by `Files::get`.
 Files of up to 16 MiB under keys of 1 to 512 bytes, per tenant and domain; see
 `crate::Kernable::data`. Files are not part of the signed event log, and erasing a vault
 subject does not delete them, so keep personal data in vault fields instead. A refused or
-invalid request is `Error::Status`. Example:
+invalid request is `Error::Status`; a middleware that refuses it (checking `PutData`,
+`GetData` or `DeleteData` of the domain) makes it `PERMISSION_DENIED` with
+`"<code>: <message>"`. Example:
 `kernable.data().put("shop", "invoices/c1.pdf", pdf, "application/pdf").await?`, then
 `kernable.data().get("shop", "invoices/c1.pdf").await?` returns `Some(Data { .. })`.
 
+- `fn context(self, context: RequestContext) -> Files`: Replaces the client's default context for the requests of this handle (signed with each; middlewares decide on it); inside a listener, pass `ctx.follow()`. Example: `kernable.data().context(alice).get("shop", "k").await?`.
 - `async fn put(&self, domain: &str, key: &str, data: impl Into<Vec<u8>>, content_type: &str) -> Result<(), Error>`: Stores `data` as `key` of `domain` (granted `data_write`), replacing any file there.
 - `async fn get(&self, domain: &str, key: &str) -> Result<Option<Data>, Error>`: The file `key` of `domain` (granted `data_read`); `None` if there is none.
 - `async fn delete(&self, domain: &str, key: &str) -> Result<bool, Error>`: Deletes the file `key` of `domain` (granted `data_write`); whether there was one.
@@ -632,10 +640,13 @@ Values of up to 1 MiB under keys of 1 to 512 bytes, per tenant and domain, held 
 kernel's memory (granted `cache`); see `crate::Kernable::cache`. A restart of the kernel
 empties the cache; values are not part of the signed event log, and erasing a vault subject
 does not delete them. For rate limits, short-lived tokens and computed values. A refused
-or invalid request is `Error::Status`. Example:
+or invalid request is `Error::Status`; a middleware that refuses it (checking `SetCache`,
+`GetCache` or `DeleteCache` of the domain) makes it `PERMISSION_DENIED` with
+`"<code>: <message>"`. Example:
 `kernable.cache().set("shop", "rate:c1", "3", Some(Duration::from_secs(60))).await?`, then
 `kernable.cache().get("shop", "rate:c1").await?` returns `Some(b"3".to_vec())`.
 
+- `fn context(self, context: RequestContext) -> Cache`: Replaces the client's default context for the requests of this handle (signed with each; middlewares decide on it); inside a listener, pass `ctx.follow()`. Example: `kernable.cache().context(alice).get("shop", "k").await?`.
 - `async fn set(&self, domain: &str, key: &str, value: impl Into<Vec<u8>>, ttl: Option<Duration>) -> Result<(), Error>`: Stores `value` as `key` of `domain` (granted `cache`), replacing any value there. With a `ttl`, the value expires after it; without, it stays until deleted or the kernel restarts. A `&str` or `String` is stored as UTF-8.
 - `async fn get(&self, domain: &str, key: &str) -> Result<Option<Vec<u8>>, Error>`: The value `key` of `domain`; `None` if there is none or it expired.
 - `async fn delete(&self, domain: &str, key: &str) -> Result<bool, Error>`: Deletes the value `key` of `domain`; whether there was one.
@@ -643,10 +654,11 @@ or invalid request is `Error::Status`. Example:
 ### RequestContext
 
 Who sends a request and in which context: signed with the command and stored with every
-event it causes. `attributes` are business data only, never security decisions.
+event it causes; signed with file and cache requests too, for middlewares to check. `attributes` are business data only, never security decisions.
 
 Set a default for a connection with `crate::Options::context`, or one per request with
-`crate::Submit::context` and `crate::Query::context`. Inside a listener's handler,
+`crate::Submit::context`, `crate::Query::context`, `crate::Files::context` and
+`crate::Cache::context`. Inside a listener's handler,
 submit follow-up commands with `ctx.follow()` (`crate::ListenerContext::follow`). All
 fields default to empty; set the ones you need:
 `RequestContext { sender_identity: "customer-7".into(), expected_version: Some(3), ..Default::default() }`.

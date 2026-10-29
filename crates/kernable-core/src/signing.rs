@@ -220,6 +220,7 @@ pub fn data_message(op: &str, r: &DataRequest) -> Vec<u8> {
         .str(&r.content_type)
         .bytes(&Sha256::digest(&r.data))
         .i64(r.issued_at)
+        .context(r.context.as_ref())
         .0
 }
 
@@ -233,6 +234,7 @@ pub fn cache_message(op: &str, r: &CacheRequest) -> Vec<u8> {
         .bytes(&Sha256::digest(&r.value))
         .u64(r.ttl_ms)
         .i64(r.issued_at)
+        .context(r.context.as_ref())
         .0
 }
 

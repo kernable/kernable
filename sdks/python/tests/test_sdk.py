@@ -26,13 +26,17 @@ with open(os.path.join(ROOT, "proto", "test-vectors", "signing.json")) as f:
     VECTORS = json.load(f)
 
 
+def vector_context(c: dict) -> pb.RequestContext:
+    context = dict(c)
+    attributes = [pb.Attribute(**a) for a in context.pop("attributes")]
+    return pb.RequestContext(**context, attributes=attributes)
+
+
 def vector_command(c) -> pb.Command:
     fields = ("command_id", "tenant_id", "domain", "aggregate_type", "aggregate_id", "command_type")
     cmd = pb.Command(**{k: c[k] for k in fields}, payload=bytes.fromhex(c["payload_hex"]))
     if "context" in c:
-        context = dict(c["context"])
-        attributes = [pb.Attribute(**a) for a in context.pop("attributes")]
-        cmd.context.CopyFrom(pb.RequestContext(**context, attributes=attributes))
+        cmd.context.CopyFrom(vector_context(c["context"]))
     return cmd
 
 
@@ -124,10 +128,9 @@ class SigningVectors(unittest.TestCase):
                             aggregate_id=n["aggregate_id"])
         self.check("snapshot", snapshot_message(stream, n["version"], n["schema"], bytes.fromhex(n["state_hex"])))
         q = dict(VECTORS["query"]["input"])
-        context = q.pop("context")
-        attributes = [pb.Attribute(**a) for a in context.pop("attributes")]
+        context = vector_context(q.pop("context"))
         payload = bytes.fromhex(q.pop("payload_hex"))
-        query = pb.QueryRequest(**q, payload=payload, context=pb.RequestContext(**context, attributes=attributes))
+        query = pb.QueryRequest(**q, payload=payload, context=context)
         self.check("query", query_message(query))
         refs = [vault_ref(bytes.fromhex(i["salt_hex"]), i["subject"], i["secret"], bytes.fromhex(i["value_hex"]))
                 for i in VECTORS["vault_ref"]["input"]]
@@ -143,11 +146,13 @@ class SigningVectors(unittest.TestCase):
         d = VECTORS["derived_id"]
         self.assertEqual([derived_id(d["input"]["command_id"], n) for n in d["input"]["n"]], d["ids"])
         p = dict(VECTORS["data_put"]["input"])
-        op, data = p.pop("op"), bytes.fromhex(p.pop("data_hex"))
-        self.check("data_put", data_message(op, pb.DataRequest(**p, data=data)))
-        s = dict(VECTORS["cache_set"]["input"])
+        op, data, context = p.pop("op"), bytes.fromhex(p.pop("data_hex")), vector_context(p.pop("context"))
+        self.check("data_put", data_message(op, pb.DataRequest(**p, data=data, context=context)))
+        s = dict(VECTORS["cache_set"]["input"])  # without a context: encoded like an empty one
         op, value = s.pop("op"), bytes.fromhex(s.pop("value_hex"))
         self.check("cache_set", cache_message(op, pb.CacheRequest(**s, value=value)))
+        self.assertEqual(cache_message(op, pb.CacheRequest(**s, value=value, context=pb.RequestContext())).hex(),
+                         VECTORS["cache_set"]["message"])
         m = dict(VECTORS["membership"]["input"])
         metadata = [pb.Attribute(**a) for a in m.pop("metadata")]
         self.check("membership", membership_message(pb.Membership(**m, metadata=metadata)))
@@ -181,6 +186,9 @@ class DataAndCache(unittest.TestCase):
     def setUp(self):
         self.kernel = TestKernel(["counters.*"], grants=["shop.*"])
         self.kernel.start()
+        env = mock.patch.dict(os.environ, {"KERNABLE_LOG": "warn"})  # quiet: no connection lines
+        env.start()
+        self.addCleanup(env.stop)
         self.k = Kernable(self.kernel.url, self.kernel.app_key, tenant="t1")
 
     def tearDown(self):
@@ -219,6 +227,43 @@ class DataAndCache(unittest.TestCase):
             with self.assertRaises(grpc.RpcError) as refused:
                 call()
             self.assertEqual(refused.exception.code(), grpc.StatusCode.PERMISSION_DENIED)
+
+    def test_a_middleware_checks_file_and_cache_requests_by_their_context(self):
+        checks = []
+        guard = domain("shop").read_model("shop_guard")
+
+        @guard.middleware(["shop.*"])
+        def _(check):
+            checks.append((check.kind, check.type, check.domain, check.tenant, check.key, check.data,
+                           check.request.sender_identity))
+            if check.request.sender_identity != "alice":
+                raise Rejected("unknown sender", "forbidden")
+
+        stream = self.k.listener(guard)
+        background(stream.run)
+        self.addCleanup(stream.stop)
+        self.assertTrue(stream.ready.wait(5), "stream did not connect")
+
+        for call in (lambda: self.k.data.put("shop", "notes/n-1.txt", "hi"),
+                     lambda: self.k.cache.set("shop", "rate/c-1", "1")):
+            with self.assertRaises(grpc.RpcError) as refused:
+                call()
+            self.assertEqual(refused.exception.code(), grpc.StatusCode.PERMISSION_DENIED)
+            self.assertEqual(refused.exception.details(), "forbidden: unknown sender")
+        alice = RequestContext(sender_identity="alice")
+        self.k.data.put("shop", "notes/n-1.txt", "hi", context=alice)
+        self.k.cache.set("shop", "rate/c-1", "1", context=alice)
+        as_alice = Kernable(self.kernel.url, self.kernel.app_key, tenant="t1", context=alice)
+        self.addCleanup(as_alice.close)
+        self.assertEqual(as_alice.data.get("shop", "notes/n-1.txt").data, b"hi")  # the client's default context
+        self.assertEqual(as_alice.cache.get("shop", "rate/c-1"), b"1")
+
+        self.assertEqual(checks[0], ("data", "PutData", "shop", "t1", "notes/n-1.txt", None, ""))
+        self.assertEqual(checks[1], ("cache", "SetCache", "shop", "t1", "rate/c-1", None, ""))
+        self.assertEqual([(c[0], c[1], c[6]) for c in checks[2:]],
+                         [("data", "PutData", "alice"), ("cache", "SetCache", "alice"),
+                          ("data", "GetData", "alice"), ("cache", "GetCache", "alice")])
+        stream.stop()  # before tearDown stops the kernel: no reconnect warning
 
 
 class EndToEnd(unittest.TestCase):

@@ -165,7 +165,10 @@ export function snapshotMessage(c: Omit<Stream, "command_id">, version: number, 
     .done();
 }
 
-/** What a client signs to put, get or delete a file (`op`: `put`, `get`, `delete`): the data's SHA-256 hash, not the data. */
+/**
+ * What a client signs to put, get or delete a file (`op`: `put`, `get`, `delete`): the data's
+ * SHA-256 hash, not the data, and the request context.
+ */
 export function dataMessage(op: "put" | "get" | "delete", r: WireDataRequest): Buffer {
   return new Msg(`kernable.v1.data.${op}`)
     .str(r.tenant_id)
@@ -174,10 +177,14 @@ export function dataMessage(op: "put" | "get" | "delete", r: WireDataRequest): B
     .str(r.content_type)
     .bytes(createHash("sha256").update(r.data).digest())
     .i64(r.issued_at)
+    .context(r.context)
     .done();
 }
 
-/** What a client signs to set, get or delete a cache value (`op`: `set`, `get`, `delete`), with the value's SHA-256 hash. */
+/**
+ * What a client signs to set, get or delete a cache value (`op`: `set`, `get`, `delete`), with
+ * the value's SHA-256 hash and the request context.
+ */
 export function cacheMessage(op: "set" | "get" | "delete", r: WireCacheRequest): Buffer {
   return new Msg(`kernable.v1.cache.${op}`)
     .str(r.tenant_id)
@@ -186,6 +193,7 @@ export function cacheMessage(op: "set" | "get" | "delete", r: WireCacheRequest):
     .bytes(createHash("sha256").update(r.value).digest())
     .u64(r.ttl_ms)
     .i64(r.issued_at)
+    .context(r.context)
     .done();
 }
 

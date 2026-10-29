@@ -602,6 +602,7 @@ impl Kernel {
             vault: Vec::new(),
             when: when.into(),
             outcome,
+            r#type: name.to_owned(),
         };
         let outcome = self.run_chain(&chain, name, id, call, values).await;
         let counter = match &outcome {
@@ -1182,8 +1183,35 @@ fn store_error(e: StoreError) -> Status {
 }
 
 impl Api {
-    /// Checks a data request for `op` (`put`, `get`, `delete`).
-    fn data_request(&self, request: Request<DataRequest>, op: &str) -> Result<DataRequest, Status> {
+    /// Runs the middleware chain on a file or cache request: the middlewares that check
+    /// `<domain>.<type_name>` decide, before the request runs. A refusal is PERMISSION_DENIED.
+    async fn check_store(
+        &self,
+        domain: &str,
+        type_name: &str,
+        request: middleware_call::Request,
+    ) -> Result<(), Status> {
+        let name = config::qualified(domain, type_name);
+        let id = format!("{name}@{}", now_ms());
+        match self
+            .0
+            .check(&name, &id, When::Before, request, &[], None)
+            .await?
+        {
+            Some(reason) => Err(Status::permission_denied(format!(
+                "{}: {}",
+                reason.code, reason.message
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// Checks a data request for `op` (`put`, `get`, `delete`): signature, grant, middleware.
+    async fn data_request(
+        &self,
+        request: Request<DataRequest>,
+        op: &str,
+    ) -> Result<DataRequest, Status> {
         let metadata = request.metadata().clone();
         let r = request.into_inner();
         protocol(r.protocol)?;
@@ -1202,11 +1230,27 @@ impl Api {
             action,
             rules,
         )?;
+        let type_name = match op {
+            "put" => "PutData",
+            "get" => "GetData",
+            _ => "DeleteData",
+        };
+        // The middleware decides on who asks for which file, not on its content.
+        let checked = DataRequest {
+            data: Vec::new(),
+            ..r.clone()
+        };
+        self.check_store(
+            &r.domain,
+            type_name,
+            middleware_call::Request::Data(checked),
+        )
+        .await?;
         Ok(r)
     }
 
-    /// Checks a cache request for `op` (`set`, `get`, `delete`).
-    fn cache_request(
+    /// Checks a cache request for `op` (`set`, `get`, `delete`): signature, grant, middleware.
+    async fn cache_request(
         &self,
         request: Request<CacheRequest>,
         op: &str,
@@ -1225,6 +1269,21 @@ impl Api {
             "use the cache",
             |p| &p.cache,
         )?;
+        let type_name = match op {
+            "set" => "SetCache",
+            "get" => "GetCache",
+            _ => "DeleteCache",
+        };
+        let checked = CacheRequest {
+            value: Vec::new(),
+            ..r.clone()
+        };
+        self.check_store(
+            &r.domain,
+            type_name,
+            middleware_call::Request::Cache(checked),
+        )
+        .await?;
         Ok(r)
     }
 }
@@ -1235,7 +1294,7 @@ impl DataService for Api {
         &self,
         request: Request<DataRequest>,
     ) -> Result<Response<DataResult>, Status> {
-        let r = self.data_request(request, "put")?;
+        let r = self.data_request(request, "put").await?;
         if r.data.len() > MAX_DATA_BYTES {
             return Err(Status::invalid_argument(format!(
                 "a file has at most {} MiB",
@@ -1257,7 +1316,7 @@ impl DataService for Api {
         &self,
         request: Request<DataRequest>,
     ) -> Result<Response<DataResult>, Status> {
-        let r = self.data_request(request, "get")?;
+        let r = self.data_request(request, "get").await?;
         let result = match self.0.data.get(&data_key(&r)).map_err(store_error)? {
             Some(d) => DataResult {
                 found: true,
@@ -1273,7 +1332,7 @@ impl DataService for Api {
         &self,
         request: Request<DataRequest>,
     ) -> Result<Response<DataResult>, Status> {
-        let r = self.data_request(request, "delete")?;
+        let r = self.data_request(request, "delete").await?;
         let found = self.0.data.delete(&data_key(&r)).map_err(store_error)?;
         Ok(Response::new(DataResult {
             found,
@@ -1288,7 +1347,7 @@ impl CacheService for Api {
         &self,
         request: Request<CacheRequest>,
     ) -> Result<Response<CacheResult>, Status> {
-        let r = self.cache_request(request, "set")?;
+        let r = self.cache_request(request, "set").await?;
         if r.value.len() > MAX_CACHE_BYTES {
             return Err(Status::invalid_argument(format!(
                 "a cache value has at most {} MiB",
@@ -1308,7 +1367,7 @@ impl CacheService for Api {
         &self,
         request: Request<CacheRequest>,
     ) -> Result<Response<CacheResult>, Status> {
-        let r = self.cache_request(request, "get")?;
+        let r = self.cache_request(request, "get").await?;
         let value = self.0.cache.get((r.tenant_id, r.domain, r.key));
         Ok(Response::new(CacheResult {
             found: value.is_some(),
@@ -1320,7 +1379,7 @@ impl CacheService for Api {
         &self,
         request: Request<CacheRequest>,
     ) -> Result<Response<CacheResult>, Status> {
-        let r = self.cache_request(request, "delete")?;
+        let r = self.cache_request(request, "delete").await?;
         let found = self.0.cache.delete((r.tenant_id, r.domain, r.key));
         Ok(Response::new(CacheResult {
             found,

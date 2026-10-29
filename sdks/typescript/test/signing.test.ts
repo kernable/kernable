@@ -54,10 +54,12 @@ test("message layouts and signatures match the test vectors", () => {
 });
 
 test("data and cache messages match the test vectors", () => {
+  // A file request with a full context; a cache request without one encodes like an empty one.
   const d = v.data_put.input;
-  check("data_put", dataMessage(d.op, { ...d, data: hex(d.data_hex) }));
+  check("data_put", dataMessage(d.op, { ...d, data: hex(d.data_hex), context: d.context }));
   const c = v.cache_set.input;
-  check("cache_set", cacheMessage(c.op, { ...c, value: hex(c.value_hex) }));
+  assert.equal(c.context, undefined);
+  check("cache_set", cacheMessage(c.op, { ...c, value: hex(c.value_hex), context: c.context }));
 });
 
 test("membership messages match the test vectors", () => {

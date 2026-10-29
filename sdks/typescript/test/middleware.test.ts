@@ -1,9 +1,11 @@
 // Middleware: a listener checks commands and queries before the kernel accepts or routes
 // them, from its own state, and the kernel refuses them while it is away; after them, it sees
-// their outcome.
+// their outcome. It checks file and cache requests before they run, too.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+
+import { status } from "@grpc/grpc-js";
 
 import { Kernable, Rejected, domain, type Check, type Outcome, type QueryOutcome } from "../src/index.ts";
 import { TestKernel } from "./kernel.ts";
@@ -148,6 +150,51 @@ test("a middleware after requests observes commands and may refuse a query's res
     audit.stop();
     await Promise.all(running);
     kernable.close();
+    await kernel.dispose();
+  }
+});
+
+test("a middleware checks file and cache requests before they run", async () => {
+  const kernel = new TestKernel(["shop.*"], [], { stores: ["shop.*"] });
+  await kernel.start();
+  const alice = new Kernable({ url: kernel.url, key: kernel.appKey, context: { senderIdentity: "alice" } });
+  const stranger = new Kernable({ url: kernel.url, key: kernel.appKey });
+
+  const checked: Check[] = [];
+  const guard = alice.listener(domain("shop").readModel("guard").middleware({ types: ["shop.*"] }, (check) => {
+    checked.push(check);
+    if (check.request.senderIdentity !== "alice") throw new Rejected("unknown sender", "forbidden");
+  }));
+  const running = guard.run();
+  try {
+    await guard.ready;
+    const denied = { code: status.PERMISSION_DENIED, details: "forbidden: unknown sender" };
+    await assert.rejects(stranger.data.put("shop", "invoices/o-1.pdf", "x"), denied);
+    await assert.rejects(stranger.cache.set("shop", "rate/eur", "1.08"), denied);
+    await alice.data.put("shop", "invoices/o-1.pdf", "%PDF", { contentType: "application/pdf" });
+    await alice.cache.set("shop", "rate/eur", "1.08");
+    // A request's own context replaces the client's default.
+    await assert.rejects(alice.data.get("shop", "invoices/o-1.pdf", { context: { senderIdentity: "mallory" } }), denied);
+    assert.equal(Buffer.from((await stranger.cache.get("shop", "rate/eur", { context: { senderIdentity: "alice" } }))!).toString(), "1.08");
+
+    assert.deepEqual(
+      checked.map((c) => [c.kind, c.domain, c.type, c.key, c.tenant, c.data, c.request.senderIdentity]),
+      [
+        ["data", "shop", "PutData", "invoices/o-1.pdf", "default", undefined, undefined],
+        ["cache", "shop", "SetCache", "rate/eur", "default", undefined, undefined],
+        ["data", "shop", "PutData", "invoices/o-1.pdf", "default", undefined, "alice"],
+        ["cache", "shop", "SetCache", "rate/eur", "default", undefined, "alice"],
+        ["data", "shop", "GetData", "invoices/o-1.pdf", "default", undefined, "mallory"],
+        ["cache", "shop", "GetCache", "rate/eur", "default", undefined, "alice"],
+      ],
+    );
+    // Only alice's put went through.
+    assert.equal(Buffer.from((await alice.data.get("shop", "invoices/o-1.pdf"))!.data).toString(), "%PDF");
+  } finally {
+    guard.stop();
+    await running;
+    alice.close();
+    stranger.close();
     await kernel.dispose();
   }
 });
