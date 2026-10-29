@@ -12,6 +12,7 @@ How to reach the kernel and as whom.
 - `fn url(self, url: impl Into<String>) -> Options`: Kernel address: `http://host:port` (`host:port` works too) or, on Unix, `unix:/path/to.sock`. Default: `KERNABLE_URL`, else `http://127.0.0.1:7233`, where `kernable start` listens.
 - `fn grant(self, path: impl AsRef<Path>) -> Options`: The key's grant (`kernable grant`), sent with every call. Default: `KERNABLE_GRANT`, else the `.grant` file next to the key file, if there is one.
 - `fn tenant(self, tenant: impl Into<String>) -> Options`: Default tenant for `submit`, `query`, files and the cache (default `default`).
+- `fn service(self, service: impl Into<String>) -> Options`: The service this process's workers and listeners belong to. Each worker declares the aggregates of all the service's workers when it connects, and each listener all its listeners: create them all with `Kernable::worker` and `Kernable::listener` before running any. The kernel unregisters the service's aggregates that are no longer declared: their commands are refused from then on. It retires the listeners that are no longer declared: nobody waits for them any more, but they keep their position (declared again, they resume) and their middleware keeps refusing until `kernable listeners remove`. Default: `KERNABLE_SERVICE`, else none (nothing is unregistered or retired).
 - `fn context(self, context: RequestContext) -> Options`: Default request context, e.g. this service's identity; a request's own context replaces it.
 - `fn tls(self, tls: Tls) -> Options`: Mutual TLS for `host:port` URLs: the CA certificate and this process's certificate and key. Default: `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`, if set.
 
@@ -22,8 +23,8 @@ Cloning gives another handle to the same connection.
 
 - `fn new(options: impl Into<Options>) -> Result<Kernable, Error>`: A client for the kernel `options` names, or with only a key file's path, for the default kernel; `Options::default()` takes everything from the environment. It connects on first use and again after the connection drops. Needs a tokio runtime.
 - `fn with_domain(&self, domain: &Domain) -> Kernable`: Seals the vault fields of this domain's commands when submitting them; see `Domain::command`.
-- `fn worker<S: State>(&self, aggregate: &Aggregate<S>) -> Worker`: A worker that runs the commands of `aggregate`; add more with `Worker::aggregate`.
-- `fn listener(&self, listener: &Listener) -> ListenerHandle`: Runs `listener` (a read model or reactor of a domain) on this connection: the handle processes its events with `run()`. Each call gives a new handle.
+- `fn worker<S: State>(&self, aggregate: &Aggregate<S>) -> Worker`: A worker that runs the commands of `aggregate`; add more with `Worker::aggregate`. Its aggregates join the aggregates this connection's service declares (see `Options::service`).
+- `fn listener(&self, listener: &Listener) -> ListenerHandle`: Runs `listener` (a read model or reactor of a domain) on this connection: the handle processes its events with `run()`. Each call gives a new handle. Unless it is live, the listener joins the listeners this connection's service declares (see `Options::service`).
 - `fn data(&self) -> Files`: Files of the default tenant: bytes up to 16 MiB per key, kept by the kernel outside the signed event log; see `Files`.
 - `fn cache(&self) -> Cache`: The kernel's cache for the default tenant: values up to 1 MiB per key, optionally with a TTL, lost when the kernel restarts; see `Cache`.
 - `async fn submit(&self, submit: Submit) -> Result<Outcome, Error>`: Runs a command and returns its outcome; see `Submit::wait`.
@@ -68,6 +69,14 @@ What became of a command.
 - `fn is_committed(&self) -> bool`
 - `fn events(&self) -> &[StoredEvent]`: The committed events; none if the command was rejected.
 
+### QueryOutcome
+
+What became of a query: its response data or why it was rejected.
+
+- `Answered(Value)`
+- `Rejected(Rejected)`
+- `fn is_answered(&self) -> bool`
+
 ### StoredEvent
 
 An event as stored by the kernel.
@@ -98,7 +107,7 @@ are named `domain.Type`. Cloning gives another handle to the same domain.
 - `fn command(&self, command_type: &str) -> CommandSchema`: Declares which fields of `command_type` commands the vault keeps (`personal`, `secret`). Clients that submit them need the domain: `kernable.with_domain(&domain)`. Panics if `command_type` is qualified.
 - `fn aggregate<S: State>(&self, name: &str, initial: S) -> Aggregate<S>`: An aggregate of this domain named `name` (lowercase by convention, like `cart`), whose state starts as `initial`.
 - `fn read_model(&self, name: &str) -> Listener`: A read model of this domain named `name`: kept in memory and rebuilt from the first event on every start (order 0). Run it with `crate::Kernable::listen`.
-- `fn reactor(&self, name: &str) -> Listener`: A reactor of this domain named `name`: triggers side effects; resumes after the last acknowledged event (order 10). A settling submit from its handler waits for the listeners before it (the read models), not for the reactor itself, which handles one event at a time. Run it with `crate::Kernable::listen`.
+- `fn reactor(&self, name: &str) -> Listener`: A reactor of this domain named `name`: triggers side effects; starts at the newest event when it is new, then resumes after the last acknowledged event (order 10). A settling submit from its handler waits for the listeners before it (the read models), not for the reactor itself, which handles one event at a time. Run it with `crate::Kernable::listen`.
 - `fn schema_of(&self, event_type: &str) -> u32`: The payload version this domain writes `event_type` events at.
 
 ### domain()
@@ -216,7 +225,7 @@ Runs the commands of its aggregates: the kernel sends each command with the aggr
 events, the worker decides and sends the new events back, signed. Cloning gives another
 handle to the same worker.
 
-- `fn aggregate<S: State>(&self, aggregate: &Aggregate<S>) -> Worker`: Runs the commands of `aggregate`, too.
+- `fn aggregate<S: State>(&self, aggregate: &Aggregate<S>) -> Worker`: Runs the commands of `aggregate`, too; it joins the aggregates the connection's service declares.
 - `fn concurrency(&self, commands: u32) -> Worker`: Commands executed in parallel (default 16).
 - `fn reconnect(&self, delay: Duration) -> Worker`: Delay before reconnecting after the session ends (default 1 s).
 - `async fn ready(&self)`: Returns once the kernel accepted the worker.
@@ -268,9 +277,17 @@ What a query handler gets besides the query's data and meta.
 - `Command`
 - `Query`
 
+### CheckOutcome
+
+What came of the request a middleware after it checks: an `Outcome` for a command, a
+`QueryOutcome` for a query.
+
+- `Command(Outcome)`
+- `Query(QueryOutcome)`
+
 ### Check
 
-A command or query a middleware checks before the kernel accepts or routes it.
+A command or query a middleware checks, before the kernel accepts or routes it or after.
 
 - `kind: CheckKind`
 - `id: String`: The command or query ID.
@@ -281,6 +298,14 @@ A command or query a middleware checks before the kernel accepts or routes it.
 - `aggregate_id: Option<String>`
 - `data: Value`
 - `request: RequestContext`: Who sends it: check permissions here.
+- `outcome: Option<CheckOutcome>`: After it, what came of the request; before it, `None`.
+
+### When
+
+When a middleware runs.
+
+- `Before`: Checks a request before the kernel accepts or routes it; a rejection refuses it (default).
+- `After`: Gets the request's outcome too. A rejection refuses a query's response; a command's outcome, and a rejected query, it only observes, best effort (it misses what happens while it is away, and nobody waits for it).
 
 ### MiddlewareOptions
 
@@ -288,7 +313,9 @@ What a middleware checks.
 
 - `types: Vec<String>`: Command and query types: `*` (all), a type of the listener's domain (`Place`), of another domain (`orders.Place`) or a whole domain (`orders.*`).
 - `order: i32`: Position in the chain: lower runs first, equal orders by listener name (default 0). Negative orders are reserved for kernable.
+- `when: When`: Before (default) or after requests; see `When`.
 - `fn new(types: &[&str]) -> MiddlewareOptions`
+- `fn after(self) -> MiddlewareOptions`: Runs after requests instead of before: the handler gets their outcome too.
 
 ### Listener
 
@@ -307,14 +334,15 @@ never misreads data. Cloning gives another handle to the same definition.
 - `fn name(&self) -> &str`
 - `fn domain(&self) -> &Domain`: The domain the listener belongs to: types without a domain are its.
 - `fn order(&self, order: i32) -> Listener`: Listeners with a lower order process each event first; equal orders run in parallel. Defaults: 0 for read models, 10 for reactors. Negative orders are reserved for kernable.
-- `fn start(&self, position: u64) -> Listener`: Position to start after on the first connect: 0 rebuilds from the beginning (default for read models). Reactors resume after the last acknowledged event unless given one. Reconnects always resume after the last handled event.
+- `fn start(&self, position: u64) -> Listener`: Position to start after on the first connect: 0 rebuilds from the beginning (default for read models). Reactors resume after the last acknowledged event unless given one, and a new one starts at the newest event, so it never reacts to what happened before it existed. Reconnects always resume after the last handled event.
+- `fn live(&self) -> Listener`: Not registered with the kernel: no stored position, always starts at the newest event, nobody waits for it, and it is forgotten when it disconnects. For reactions that only matter while the process runs, e.g. pushing to connected browsers. Make it live before running it. Panics if the listener is a middleware: a live listener cannot be one.
 - `fn reconnect(&self, delay: Duration) -> Listener`: Delay before reconnecting after the stream drops (default 1 s).
 - `fn store(&self, url: &str, schema: &str) -> Listener`: Keeps the listener's state in a store (`sqlite:<path>` or `memory:`) instead of memory: its data and position are written together per batch, and a restart continues after the stored position. `schema` is the version of the stored data's format: change it when the handlers store data differently, and the store is cleared and rebuilt.
 - `fn with_domain(&self, domain: &Domain) -> Listener`: Upcasts the events of another `domain` with its event schemas (see `Domain::event`); the listener's own domain's apply without it.
 - `fn on<D, F, Fut>(&self, event_type: &str, handler: F) -> Listener where D: DeserializeOwned + Send + 'static, F: Fn(D, StoredEventMeta, ListenerContext) -> Fut + Send + Sync + 'static, Fut: Future<Output = Result<(), BoxError>> + Send + 'static`: Handles `event_type` events: a type of the listener's domain (`ItemAdded`), of another domain (`orders.OrderPlaced`) or a whole domain (`orders.*`). `handler(data, evt, ctx)` gets the payload as `D` (`serde_json::Value` for any); a payload that is not a `D` fails the batch, so it is delivered again. Panics if `event_type` is none of these.
 - `fn on_raw<D, F, Fut>(&self, event_type: &str, handler: F) -> Listener where D: DeserializeOwned + Send + 'static, F: Fn(D, StoredEventMeta, ListenerContext) -> Fut + Send + Sync + 'static, Fut: Future<Output = Result<(), BoxError>> + Send + 'static`: Like `on`, but gets events as stored, without upcasting, whatever their schema (for archives and exports).
 - `fn query<D, R, F, Fut>(&self, query_type: &str, handler: F) -> Listener where D: DeserializeOwned + Send + 'static, R: Serialize, F: Fn(D, QueryMeta, QueryContext) -> Fut + Send + Sync + 'static, Fut: Future<Output = Result<R, BoxError>> + Send + 'static`: Answers `query_type` queries: a type of the listener's domain (`GetOrder`) or of another one (`orders.GetOrder`), from this listener's state: `handler(data, qry, ctx)` gets the query's data as `D`. The kernel delivers queries in order with the events, so an answer reflects every event handled before it. Return a `Rejected` to refuse. A handler cannot query its own listener (the answer would wait behind itself): the kernel refuses it. Panics if `query_type` is neither.
-- `fn middleware<F, Fut>(&self, options: MiddlewareOptions, handler: F) -> Listener where F: Fn(Check) -> Fut + Send + Sync + 'static, Fut: Future<Output = Result<(), BoxError>> + Send + 'static`: Makes this listener a middleware: the kernel asks `handler` about every command and query of `options.types` before accepting or routing it, in chain order, and only once this listener has caught up with the events. Return a `Rejected` to refuse; any other error refuses too. The registration is stored: while this listener is away, the kernel refuses those requests (`kernable listeners remove` unregisters it). Panics if a type is not `*`, a type, a qualified type or a domain.
+- `fn middleware<F, Fut>(&self, options: MiddlewareOptions, handler: F) -> Listener where F: Fn(Check) -> Fut + Send + Sync + 'static, Fut: Future<Output = Result<(), BoxError>> + Send + 'static`: Makes this listener a middleware: the kernel asks `handler` about every command and query of `options.types`, before accepting or routing it (or after, see `When`), in chain order, and only once this listener has caught up with the events. Return a `Rejected` to refuse; any other error refuses too. After a request, the check carries its outcome (`Check::outcome`). The registration is stored: while this listener is away, the kernel refuses those requests (`kernable listeners remove` unregisters it). A listener has at most one middleware before and one after. Panics if a type is not `*`, a type, a qualified type or a domain, the listener has a middleware at `options.when` already, or it is live.
 
 ### ListenerHandle
 

@@ -51,7 +51,7 @@ from kernable.v1 import kernable_pb2_grpc as rpc
 __all__ = ["PROTOCOL", "Aggregate", "ApplyContext", "CacheClient", "Check", "CommandContext", "CommandMeta", "CommandSchema",
            "Data", "DataClient", "Domain",
            "Event", "EventMeta", "EventSchema", "Kernable", "Key", "Listener", "ListenerContext", "ListenerHandle", "NotSettled", "Outcome",
-           "QueryContext", "QueryMeta", "Rejected", "RequestContext", "Store", "StoredEventMeta", "Tls", "Worker",
+           "QueryContext", "QueryMeta", "QueryOutcome", "Rejected", "RequestContext", "Store", "StoredEventMeta", "Tls", "Worker",
            "domain"]
 
 
@@ -176,7 +176,7 @@ class QueryContext:
 
 @dataclass
 class Check:
-    """A command or query a middleware checks before the kernel accepts or routes it."""
+    """A command or query a middleware checks, before the kernel accepts or routes it or after."""
 
     kind: str  # "command" or "query"
     #: The command or query ID.
@@ -256,6 +256,16 @@ class ListenerContext:
 class Outcome:
     committed: bool
     events: list[Event] = field(default_factory=list)
+    code: str = ""
+    message: str = ""
+
+
+@dataclass
+class QueryOutcome:
+    """What came of a query: its response data or why it was rejected."""
+
+    answered: bool
+    data: Any = None
     code: str = ""
     message: str = ""
 
@@ -478,25 +488,31 @@ class Domain:
         return Aggregate(self.name, name, initial, snapshot_every, schema, self.events)
 
     def read_model(self, name: str, *, order: int = 0, start: int | None = 0, reconnect_s: float = 1.0,
-                   store: str | None = None, schema: str = "1") -> "Listener":
+                   store: str | None = None, schema: str = "1", live: bool = False) -> "Listener":
         """A read model of this domain: kept in memory and rebuilt from the first event on every
         start (default). Run it with `kernable.listener(read_model)`.
 
         With `store` (`sqlite:<path>` or `memory:`), its state lives in the running listener's
         `store`: data and position are written together per batch, and a restart continues after
         the stored position. Change `schema` when the handlers store data differently: the store is
-        cleared and the read model rebuilds from the first event."""
-        return Listener(self, name, order, start, reconnect_s, store, schema)
+        cleared and the read model rebuilds from the first event. `live`: see `reactor`."""
+        return Listener(self, name, order, start, reconnect_s, store, schema, live=live)
 
     def reactor(self, name: str, *, order: int = 10, start: int | None = None, reconnect_s: float = 1.0,
-                store: str | None = None, schema: str = "1") -> "Listener":
-        """A reactor of this domain: triggers side effects; resumes after the last acknowledged
-        event (default). Run it with `kernable.listener(reactor)`.
+                store: str | None = None, schema: str = "1", live: bool = False) -> "Listener":
+        """A reactor of this domain: triggers side effects; starts at the newest event when it is
+        new, then resumes after the last acknowledged event (default), so it never reacts to what
+        happened before it existed. Run it with `kernable.listener(reactor)`.
 
         A settling submit from its handler waits for the listeners before it (the read models),
         not for the reactor itself, which handles one event at a time. `store` and `schema`: see
-        `read_model`."""
-        return Listener(self, name, order, start, reconnect_s, store, schema)
+        `read_model`.
+
+        `live`: not registered with the kernel: no stored position, always starts at the newest
+        event, nobody waits for it, and it is forgotten when it disconnects. For reactions that
+        only matter while the process runs, e.g. pushing to connected browsers. Cannot be a
+        middleware."""
+        return Listener(self, name, order, start, reconnect_s, store, schema, live=live)
 
 
 def domain(name: str) -> Domain:
@@ -601,7 +617,7 @@ class _WithGrant(grpc.UnaryUnaryClientInterceptor, grpc.UnaryStreamClientInterce
 class Kernable:
     def __init__(self, url: str | None = None, key: str | None = None, tenant: str = "default",
                  tls: Tls | None = None, context: RequestContext | None = None,
-                 grant: str | None = None):
+                 grant: str | None = None, service: str | None = None):
         """`url`: `http://host:port` (`host:port` works too) or, on Unix, `unix:/path/to.sock`;
         default `KERNABLE_URL`, else `http://127.0.0.1:7233`, where `kernable start` listens;
         `key`: path to this process's `.key` file; default `KERNABLE_KEY`, else `app.key` in the
@@ -609,7 +625,16 @@ class Kernable:
         `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`, if set; `context`: default request context for submits
         and queries, e.g. this service's identity, replaced by a request's own; `grant`: path to the key's grant (`kernable grant`), sent
         with every call; default `KERNABLE_GRANT`, else the `.grant` file next to the key file,
-        if there is one."""
+        if there is one; `service`: the service this process's workers and listeners belong to,
+        default `KERNABLE_SERVICE`, else none (nothing is retired or unregistered).
+
+        Each worker declares the aggregates of all workers of the service when it connects, and
+        each listener all listeners of the service: create them all with `kernable.worker` and
+        `kernable.listener` before running any. The kernel unregisters the service's aggregates
+        that are no longer declared: their commands are refused from then on. It retires the
+        service's listeners that are no longer declared: nobody waits for them any more, but they
+        keep their position (declared again, they resume) and their middleware keeps refusing
+        until `kernable listeners remove`."""
         key = key or os.environ.get("KERNABLE_KEY") or "app.key"
         tls = tls or _tls_from_env()
         self._context = context or RequestContext()
@@ -637,6 +662,11 @@ class Kernable:
         self._key = Key.from_file(key)
         self._log = _Log(given_url, key, self._key.id)
         self._tenant = tenant
+        self._service = service or os.environ.get("KERNABLE_SERVICE") or ""
+        #: The names of this service's listeners, as declared to the kernel.
+        self._declared: set[str] = set()
+        #: The qualified types of this service's aggregates (`shop.Cart`), as declared to the kernel.
+        self._declared_aggregates: set[str] = set()
         self._domains: dict[str, Domain] = {}
         #: Files of a domain: `k.data.put(domain, key, data)`, `get`, `delete`.
         self.data = DataClient(self)
@@ -651,7 +681,15 @@ class Kernable:
         return self
 
     def worker(self, *aggregates: Aggregate) -> "Worker":
-        return Worker(self._channel, self._key, aggregates, self._log)
+        """A worker that runs these aggregates' commands; call `run()` on it. `ready` is set
+        once the kernel registered it."""
+        self._declared_aggregates.update(f"{a.domain}.{a.name}" for a in aggregates)
+
+        def service() -> tuple[str, list[str]]:
+            # Read when connecting, so every worker declares all aggregates created before.
+            return self._service, sorted(self._declared_aggregates) if self._service else []
+
+        return Worker(self._channel, self._key, aggregates, self._log, service)
 
     def submit(self, domain: str, aggregate_type: str, aggregate_id: str, type: str, data: Any = None, *,
                tenant: str | None = None, id: str | None = None, wait: str = "settled",
@@ -699,7 +737,14 @@ class Kernable:
     def listener(self, listener: "Listener") -> "ListenerHandle":
         """Connects a listener defined with `Domain.read_model` or `Domain.reactor`; call `run()`
         on the result."""
-        return ListenerHandle(self._channel, self._key, listener, self._log)
+        if not listener.live:
+            self._declared.add(listener.name)
+
+        def service() -> tuple[str, list[str]]:
+            # Read when connecting, so every listener declares all those created before.
+            return self._service, sorted(self._declared) if self._service else []
+
+        return ListenerHandle(self._channel, self._key, listener, self._log, service)
 
     def close(self) -> None:
         """Closes the connection now; only needed in a long-running process that discards the client."""
@@ -870,11 +915,15 @@ class _Stream:
 class Worker(_Stream):
     """Executes commands for its aggregates, one at a time."""
 
-    def __init__(self, channel: grpc.Channel, key: Key, aggregates, log: _Log):
+    def __init__(self, channel: grpc.Channel, key: Key, aggregates, log: _Log,
+                 service: Callable[[], tuple[str, list[str]]] = lambda: ("", [])):
         super().__init__("worker", 1.0, log)
         self._stub = rpc.WorkerGatewayStub(channel)
         self._key = key
+        self._aggregates = list(aggregates)
         self._by_command = {f"{a.domain}.{t}": a for a in aggregates for t in a.handlers}
+        # The service and the aggregates it declares, when connecting.
+        self._service = service
 
     def _open(self, requests):
         return self._stub.Session(requests)
@@ -884,8 +933,13 @@ class Worker(_Stream):
         schemas = {f"{a.domain}.{t}": a.schema_of(t) for a in self._by_command.values()
                    for t in [*a.appliers, *a.events]}
         register = pb.Register(worker_id=f"py-{uuid.uuid4().hex[:8]}", key_id=self._key.id, protocol=PROTOCOL,
-                               command_types=list(self._by_command), max_concurrency=1,
+                               max_concurrency=1,
+                               aggregates=[pb.WorkerAggregate(aggregate_type=f"{a.domain}.{a.name}",
+                                                              command_types=[f"{a.domain}.{t}" for t in a.handlers])
+                                           for a in self._aggregates],
                                event_schemas=[pb.EventSchema(event_type=t, schema=s) for t, s in schemas.items()])
+        register.service, declared = self._service()
+        register.declared.extend(declared)
         return pb.WorkerMessage(register=register)
 
     def _on(self, msg):
@@ -976,7 +1030,7 @@ class Listener:
     until it is updated, so it never misreads data."""
 
     def __init__(self, domain: Domain, name: str, order: int, start: int | None, reconnect_s: float,
-                 store: str | None = None, schema: str = "1"):
+                 store: str | None = None, schema: str = "1", *, live: bool = False):
         #: The domain the listener belongs to: unqualified type names are its types.
         self.domain = domain
         self.name = name
@@ -986,11 +1040,14 @@ class Listener:
         #: Where the running listener keeps its state (`sqlite:<path>` or `memory:`), if anywhere.
         self.store_url = store
         self.schema = schema
+        #: Not registered with the kernel: see `Domain.reactor`.
+        self.live = live
         self._handlers: dict[str, Callable] = {}
         self._raw: set[str] = set()
         self._domains: dict[str, dict[str, EventSchema]] = {domain.name: domain.events}
         self._queries: dict[str, Callable] = {}
-        self._middleware: tuple[pb.Middleware, Callable] | None = None
+        #: The middleware handlers and their specs, by when they run: "before" and "after".
+        self._middlewares: dict[str, tuple[pb.Middleware, Callable]] = {}
 
     def _qualify(self, type: str) -> str:
         return type if "." in type else f"{self.domain.name}.{type}"
@@ -1027,27 +1084,40 @@ class Listener:
             raise ValueError(f"answer a query type (Query or domain.Query), not {query_type!r}")
         return _register(self, self._queries, qualified, fn)
 
-    def middleware(self, types: list[str], order: int = 0, fn: Callable | None = None):
+    def middleware(self, types: list[str], order: int = 0, fn: Callable | None = None, *, when: str = "before"):
         """Makes this listener a middleware; works as a decorator too. The kernel asks `fn` about
         every command and query of `types` (`*` for all, `Type` of the own domain, `domain.*` or
-        `domain.Type`) before accepting or routing it, in chain order (lower `order` first, then by
-        listener name), and only once this listener has caught up with the events. `fn` gets a
-        `Check`; raise `Rejected` to refuse; any other error refuses too. The registration is
-        stored: while this listener is away, the kernel refuses those requests (`kernable listeners
+        `domain.Type`) before accepting or routing it (or after, see `when`), in chain order (lower
+        `order` first, then by listener name), and only once this listener has caught up with the
+        events. `fn(check, outcome)` gets a `Check` and, after, what came of it (optional): an
+        `Outcome` for a command, a `QueryOutcome` for a query (`check.kind` tells which); before,
+        None. Raise `Rejected` to refuse; any other error refuses too. The registration is stored:
+        while this listener is away, the kernel refuses those requests (`kernable listeners
         remove` unregisters it). `fn` cannot submit or query what it checks itself (it would wait
-        behind itself): the kernel refuses it.
-        Negative orders are reserved for kernable."""
+        behind itself): the kernel refuses it. A listener has at most one middleware before and
+        one after.
+        `when`: "before" (default) checks a request before the kernel accepts it; raising refuses
+        it. "after" gets the request's outcome too: raising refuses a query's response; a
+        command's outcome, and a rejected query, it only observes, best effort (it misses what
+        happens while it is away, and nobody waits for it).
+        Negative orders are reserved for kernable. A live listener cannot be a middleware."""
+        if self.live:
+            raise ValueError(f"{self.name} is live: a live listener cannot be a middleware")
         qualified = [t if t == "*" else self._qualify(t) for t in types]
         for t, q in zip(types, qualified):
             if not _CHECKED.match(q):
                 raise ValueError(f"check `*`, a type (Type or domain.Type) or a domain (domain.*), not {t!r}")
-        spec = pb.Middleware(order=order, types=qualified)
+        if when not in ("before", "after"):
+            raise ValueError(f"run a middleware \"before\" or \"after\", not {when!r}")
+        if when in self._middlewares:
+            raise ValueError(f"{self.name} has a middleware {when} already")
+        spec = pb.Middleware(order=order, types=qualified, when=pb.WHEN_AFTER if when == "after" else pb.WHEN_BEFORE)
         if fn is not None:
-            self._middleware = (spec, fn)
+            self._middlewares[when] = (spec, fn)
             return self
 
         def decorator(f: Callable) -> Callable:
-            self._middleware = (spec, f)
+            self._middlewares[when] = (spec, f)
             return f
 
         return decorator
@@ -1057,8 +1127,11 @@ class ListenerHandle(_Stream):
     """A running `Listener`, returned by `kernable.listener(listener)`: `run()` processes events,
     queries and checks until `stop()`; `ready` is set once the kernel accepted it."""
 
-    def __init__(self, channel: grpc.Channel, key: Key, listener: Listener, log: _Log):
+    def __init__(self, channel: grpc.Channel, key: Key, listener: Listener, log: _Log,
+                 service: Callable[[], tuple[str, list[str]]] = lambda: ("", [])):
         super().__init__(f"listener {listener.name}", listener.reconnect_s, log)
+        # The service and the listeners it declares, when connecting.
+        self._service = service
         #: The listener definition this runs.
         self.listener = listener
         #: The listener's store, once `run()` opened it (with `store=`).
@@ -1088,9 +1161,11 @@ class ListenerHandle(_Stream):
         d = self.listener
         hello = pb.Hello(name=d.name, key_id=self._key.id, protocol=PROTOCOL, order=d.order,
                          event_types=list(d._handlers),
-                         query_types=list(d._queries))
-        if d._middleware:
-            hello.middleware.CopyFrom(d._middleware[0])
+                         query_types=list(d._queries),
+                         middlewares=[spec for spec, _ in d._middlewares.values()], live=d.live)
+        if not d.live:
+            hello.service, declared = self._service()
+            hello.declared.extend(declared)
         # Reconnects resume after the last handled event.
         start = self.position if self.ready.is_set() else self._start
         self._sent_start = start
@@ -1152,8 +1227,10 @@ class ListenerHandle(_Stream):
         line = f"connected to {self._log.who}, at position {position}, reads {', '.join(sorted(d._handlers))}"
         if d._queries:
             line += f", answers {', '.join(sorted(d._queries))}"
-        if d._middleware:
-            line += f", checks {', '.join(sorted(d._middleware[0].types))}"
+        if "before" in d._middlewares:
+            line += f", checks {', '.join(sorted(d._middlewares['before'][0].types))}"
+        if "after" in d._middlewares:
+            line += f", after {', '.join(sorted(d._middlewares['after'][0].types))}"
         return line
 
     def _handle_batch(self, batch) -> None:
@@ -1178,10 +1255,11 @@ class ListenerHandle(_Stream):
 
     def _verdict(self, call) -> pb.Verdict:
         try:
-            middleware = self.listener._middleware
+            when = "after" if call.when == pb.WHEN_AFTER else "before"
+            middleware = self.listener._middlewares.get(when)
             if middleware is None:
-                raise Rejected("not a middleware", "not_a_middleware")
-            middleware[1](_to_check(call))
+                raise Rejected(f"no middleware {when}", "not_a_middleware")
+            _call(middleware[1], _to_check(call), _to_outcome(call) if when == "after" else None)
             return pb.Verdict(call_id=call.call_id)
         except Exception as err:
             reason = (pb.Rejected(code=err.code, message=str(err)) if isinstance(err, Rejected)
@@ -1267,6 +1345,19 @@ def _to_check(call) -> Check:
     q = call.query
     return Check("query", q.query_id, q.tenant_id, q.domain, q.query_type, _decode(q.payload),
                  _from_wire_context(q.context))
+
+
+def _to_outcome(call) -> Outcome | QueryOutcome:
+    """What came of the request a middleware after it checks."""
+    if call.WhichOneof("outcome") == "command_result":
+        r = call.command_result
+        if r.WhichOneof("outcome") == "committed":
+            return Outcome(committed=True, events=[_to_event(e) for e in r.committed.events])
+        return Outcome(committed=False, code=r.rejected.code, message=r.rejected.message)
+    r = call.query_result
+    if r.WhichOneof("outcome") == "response":
+        return QueryOutcome(answered=True, data=_decode(r.response))
+    return QueryOutcome(answered=False, code=r.rejected.code, message=r.rejected.message)
 
 
 def _to_event(e, vault=None) -> Event:

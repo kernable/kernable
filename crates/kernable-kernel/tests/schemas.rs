@@ -38,10 +38,7 @@ fn rejection(result: &kernable_core::proto::CommandResult) -> &Rejected {
 #[tokio::test(flavor = "multi_thread")]
 async fn events_keep_their_schema_and_an_outdated_worker_cannot_write() {
     let env = start("schema-outdated").await;
-    let v2 = tokio::spawn(run_worker(
-        env.addr.clone(),
-        worker(&[("orders.OrderPlaced", 2)], None),
-    ));
+    let v2 = start_worker(env.addr.clone(), worker(&[("orders.OrderPlaced", 2)], None)).await;
     let placed = submit(&env.addr, place("c1", "o1")).await.unwrap();
     assert_eq!(schemas(&placed), [2]);
     v2.abort();
@@ -58,10 +55,7 @@ async fn events_keep_their_schema_and_an_outdated_worker_cannot_write() {
     assert_eq!(silent.code(), tonic::Code::FailedPrecondition);
 
     // A current worker runs it.
-    tokio::spawn(run_worker(
-        env.addr.clone(),
-        worker(&[("orders.OrderPlaced", 2)], None),
-    ));
+    start_worker(env.addr.clone(), worker(&[("orders.OrderPlaced", 2)], None)).await;
     assert_eq!(schemas(&pending.await.unwrap().unwrap()), [2]);
 
     let store = kernable_store::open_read_only(&env.store).unwrap();
@@ -96,10 +90,7 @@ async fn the_kernel_remembers_stored_schemas_across_restarts() {
     let refused = run_worker(env.addr.clone(), worker(&[("orders.OrderPlaced", 2)], None)).await;
     assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
 
-    tokio::spawn(run_worker(
-        env.addr.clone(),
-        worker(&[("orders.OrderPlaced", 3)], None),
-    ));
+    start_worker(env.addr.clone(), worker(&[("orders.OrderPlaced", 3)], None)).await;
     assert_eq!(
         schemas(&submit(&env.addr, place("c1", "o1")).await.unwrap()),
         [3]
@@ -109,16 +100,17 @@ async fn the_kernel_remembers_stored_schemas_across_restarts() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_worker_writes_exactly_what_it_declared() {
     let env = start("schema-declared").await;
-    let liar = tokio::spawn(run_worker(
+    let liar = start_worker(
         env.addr.clone(),
         worker(&[("orders.OrderPlaced", 2)], Some(3)),
-    ));
+    )
+    .await;
     let result = submit(&env.addr, place("c1", "o1")).await.unwrap();
     assert_eq!(rejection(&result).code, "invalid_event_schema");
     liar.abort();
 
     // Undeclared types are written at 1, never at 0.
-    let zero = tokio::spawn(run_worker(env.addr.clone(), worker(&[], Some(0))));
+    let zero = start_worker(env.addr.clone(), worker(&[], Some(0))).await;
     let result = submit(&env.addr, place("c2", "o2")).await.unwrap();
     assert_eq!(rejection(&result).code, "invalid_event_schema");
     zero.abort();

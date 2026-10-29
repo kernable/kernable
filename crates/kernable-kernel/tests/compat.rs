@@ -15,11 +15,11 @@ use kernable_core::{
     proto::{
         Attribute, Command, Hello, ListenerMessage, ListenerRecord, Middleware, NewEvent,
         QueryRequest, Register, Rejected, RequestContext, RevocationRecord, SubmitRequest,
-        SubscribeRequest, VaultValue, Wait, WorkerMessage, command_result::Outcome,
-        command_service_client::CommandServiceClient, event_service_client::EventServiceClient,
-        listener_message, listener_service_client::ListenerServiceClient,
-        query_service_client::QueryServiceClient, worker_gateway_client::WorkerGatewayClient,
-        worker_message,
+        SubscribeRequest, VaultValue, Wait, When, WorkerMessage, WorkerRecord,
+        command_result::Outcome, command_service_client::CommandServiceClient,
+        event_service_client::EventServiceClient, listener_message,
+        listener_service_client::ListenerServiceClient, query_service_client::QueryServiceClient,
+        worker_gateway_client::WorkerGatewayClient, worker_message,
     },
     signing, transport,
 };
@@ -169,24 +169,38 @@ fn fill(store: &dyn Store, vault: &Vault) {
     let mut erased = event("CustomerErased", 1, r#"{"customer":"k-2"}"#.into(), &[]);
     erased.erases = "k-2".into();
     commit(&c7, 1, erased, &[]);
-    let listener = |name: &str, types: &str, middleware: Option<Middleware>| ListenerRecord {
+    let listener = |name: &str, types: &str, middlewares: Vec<Middleware>| ListenerRecord {
         name: name.into(),
         key_id: id(&key(5)),
         order: 0,
         event_types: vec![types.into()],
         position: 2,
         removed: false,
-        middleware,
+        middlewares,
+        service: String::new(),
+        retired: false,
+        last_seen: AT,
     };
     let guard = Middleware {
         order: 0,
         types: vec!["identity.*".into()],
+        when: When::Before.into(),
     };
     store
         .save_listeners(&[
-            listener("orders", "orders.*", None),
-            listener("guard", "identity.*", Some(guard)),
+            listener("orders", "orders.*", Vec::new()),
+            listener("guard", "identity.*", vec![guard]),
         ])
+        .unwrap();
+    store
+        .save_workers(&[WorkerRecord {
+            aggregate_type: "orders.Order".into(),
+            key_id: id(&key(2)),
+            command_types: vec!["orders.PlaceOrder".into(), "orders.AddItem".into()],
+            service: "orders".into(),
+            last_seen: AT,
+            removed: false,
+        }])
         .unwrap();
     // A client key stolen at AT. What it signed from then on is suspect.
     let mut stolen = command("c11", "PlaceOrder", "o4");
@@ -259,9 +273,12 @@ fn check_common(store: &dyn Store, backend: &str) {
     let listeners = store.listeners().unwrap();
     assert_eq!(listeners.len(), 2);
     assert!(
-        listeners[0].middleware.is_some(),
+        !listeners[0].middlewares.is_empty(),
         "{backend}: guard is a middleware"
     );
+    assert_eq!(listeners[0].last_seen, AT);
+    let workers = store.workers().unwrap();
+    assert_eq!(workers[0].command_types.len(), 2, "{backend}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -304,14 +321,15 @@ async fn stores_of_format_1_verify_and_run_with_their_vault() {
 
         // A worker of today gets the pending command's secret; the secret goes once it ran.
         let (tx, mut vaults) = mpsc::unbounded_channel();
-        tokio::spawn(run_worker(
+        start_worker(
             env.addr.clone(),
             TestWorker {
                 schemas: vec![("orders.OrderPlaced".into(), 2)],
                 vaults: Some(tx),
                 ..TestWorker::honest()
             },
-        ));
+        )
+        .await;
         let coupon = value(3, "", "SAVE10");
         let mut pending = command("c4", "PlaceOrder", "o2");
         pending.context = Some(context());

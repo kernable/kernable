@@ -15,7 +15,7 @@ from unittest import mock
 
 import grpc
 
-from kernable import Data, Kernable, NotSettled, Rejected, RequestContext, _upcast, domain
+from kernable import Data, Kernable, NotSettled, Outcome, QueryOutcome, Rejected, RequestContext, _upcast, domain
 from kernable.signing import (Key, cache_message, challenge_message, command_message, data_message, derived_id,
                               query_message, rejection_message, result_message, snapshot_message, vault_ref)
 from kernable.v1 import kernable_pb2 as pb
@@ -78,7 +78,7 @@ class ListenerDefinitionTest(unittest.TestCase):
         carts.middleware(["*", "Checkout", "Identity.*"], fn=lambda check: None)
         self.assertEqual(list(carts._handlers), ["Shop.ItemAdded", "Identity.AccountRegistered", "Identity.*"])
         self.assertEqual(list(carts._queries), ["Shop.GetCart", "Identity.GetAccount"])
-        self.assertEqual(list(carts._middleware[0].types), ["*", "Shop.Checkout", "Identity.*"])
+        self.assertEqual(list(carts._middlewares["before"][0].types), ["*", "Shop.Checkout", "Identity.*"])
         with self.assertRaises(ValueError):
             carts.query("Identity.*")
         with self.assertRaises(ValueError):
@@ -302,6 +302,93 @@ class EndToEnd(unittest.TestCase):
         out = self.kernel.verify()
         self.assertEqual(out.returncode, 0, out.stdout)
 
+    def test_a_service_retires_the_listeners_it_no_longer_declares_and_live_ones_never_count(self):
+        self.k.close()  # this test needs a short settle timeout: start a kernel of its own
+        self.kernel.dispose()
+        self.kernel = TestKernel(["counters.*"], ["--settle-timeout-ms", "300"])
+        self.kernel.start()
+        self.k = Kernable(self.kernel.url, self.kernel.app_key, tenant="t1", service="counters")
+        self.run_stream(self.k.worker(counter))
+        seen: list[str] = []
+
+        def mails():
+            return counters_domain.reactor("mails").on("Incremented", lambda data, evt: seen.append(evt.aggregate_id))
+
+        # Both are created before either runs, so each declares both.
+        v1 = [self.k.listener(mails()), self.k.listener(counters_domain.reactor("audit").on("Incremented", lambda data: None))]
+        threads = []
+        for handle in v1:
+            self.streams.append(handle)
+            threads.append(background(handle.run))
+        self.assertTrue(all(h.ready.wait(5) for h in v1), "listeners did not connect")
+        self.assertTrue(self.k.submit("counters", "Counter", "c1", "Increment", {"by": 1}).committed)
+        for handle, thread in zip(v1, threads):
+            handle.stop()
+            thread.join(5)
+
+        # The next version of the service has no audit any more: nobody waits for it.
+        v2 = Kernable(self.kernel.url, self.kernel.app_key, tenant="t1", service="counters")
+        self.addCleanup(v2.close)
+        mails2 = v2.listener(mails())
+        # A live listener counts for nobody, even while it does not get through its events.
+        stuck = threading.Event()
+        push = v2.listener(counters_domain.reactor("push", live=True).on("Incremented", lambda data: stuck.wait(10)))
+        try:
+            self.run_stream(mails2)
+            self.run_stream(push)
+            self.assertTrue(self.k.submit("counters", "Counter", "c2", "Increment", {"by": 1}).committed,
+                            "settled without audit and push")
+            # mails resumed where it left off.
+            self.assertEqual(seen, ["c1", "c2"])
+        finally:
+            stuck.set()  # released before tearDown stops it, so it cannot hang
+
+        with self.assertRaisesRegex(ValueError, "live"):
+            counters_domain.reactor("x", live=True).middleware(["*"], fn=lambda check: None)
+
+    def test_commands_need_a_registered_aggregate_and_a_service_unregisters_the_ones_it_no_longer_declares(self):
+        self.k.close()  # needs the domain shop: start a kernel of its own
+        self.kernel.dispose()
+        self.kernel = TestKernel(["shop.*"])
+        self.kernel.start()
+        self.k = Kernable(self.kernel.url, self.kernel.app_key, tenant="t1", service="shop")
+        shop = domain("shop")
+        cart = shop.aggregate("Cart", 0)
+        cart.apply("ItemAdded", lambda state, data: state + 1)
+        cart.command("AddItem", lambda state, data: [{"type": "ItemAdded", "data": {}}])
+        wishlist = shop.aggregate("Wishlist", 0)
+        wishlist.apply("Wished", lambda state, data: state + 1)
+        wishlist.command("Wish", lambda state, data: [{"type": "Wished", "data": {}}])
+
+        def submit(client, aggregate_type, command_type):
+            return client.submit("shop", aggregate_type, "a1", command_type, {}, wait="committed")
+
+        def assert_not_found(client, aggregate_type, command_type):
+            with self.assertRaises(grpc.RpcError) as refused:
+                submit(client, aggregate_type, command_type)
+            self.assertEqual(refused.exception.code(), grpc.StatusCode.NOT_FOUND)
+            self.assertIn("no worker registered", refused.exception.details())
+
+        # No worker ever registered the aggregate: refused rather than queued.
+        assert_not_found(self.k, "Cart", "AddItem")
+
+        # v1 runs both aggregates in one worker, then stops.
+        v1 = self.k.worker(cart, wishlist)
+        thread = background(v1.run)
+        self.streams.append(v1)
+        self.assertTrue(v1.ready.wait(5), "worker did not connect")
+        self.assertTrue(submit(self.k, "Cart", "AddItem").committed)
+        self.assertTrue(submit(self.k, "Wishlist", "Wish").committed)
+        v1.stop()
+        thread.join(5)
+
+        # v2 of the service declares only the cart: the wishlist is unregistered.
+        v2 = Kernable(self.kernel.url, self.kernel.app_key, tenant="t1", service="shop")
+        self.addCleanup(v2.close)
+        self.run_stream(v2.worker(cart))
+        assert_not_found(v2, "Wishlist", "Wish")
+        self.assertTrue(submit(v2, "Cart", "AddItem").committed)
+
     def test_connections_are_logged_to_stderr(self):
         model = counters_domain.read_model("totals")
         model.on("counters.Incremented", lambda data: None)
@@ -462,6 +549,88 @@ class EndToEnd(unittest.TestCase):
         with self.assertRaises(grpc.RpcError) as away:
             self.increment(1)
         self.assertEqual(away.exception.code(), grpc.StatusCode.UNAVAILABLE)
+
+    def test_a_middleware_after_requests_observes_commands_and_may_refuse_a_querys_response(self):
+        self.k.close()  # this test needs other command types: start a kernel of its own
+        self.kernel.dispose()
+        self.kernel = TestKernel(["support.*"])
+        self.kernel.start()
+        self.k = Kernable(self.kernel.url, self.kernel.app_key)
+
+        support = domain("support")
+        ticket = support.aggregate("Ticket", False)
+        ticket.apply("Opened", lambda state, data: True)
+
+        @ticket.command("Open")
+        def _(state, data):
+            if state:
+                raise Rejected("already open", "invalid_state")
+            return [{"type": "Opened"}]
+
+        tickets: set[str] = set()
+        model = support.read_model("tickets")
+        model.on("Opened", lambda data, evt: tickets.add(evt.aggregate_id))
+        model.query("ListTickets", lambda data: sorted(tickets))
+
+        seen = []
+        audit = support.read_model("audit")
+
+        @audit.middleware(["*"])
+        def _(check):
+            if check.request.sender_identity == "mallory":
+                raise Rejected("banned", "forbidden")
+
+        @audit.middleware(["*"], when="after")
+        def _(check, outcome):
+            seen.append((check, outcome))
+            # Only the response of a query can still be refused.
+            if check.kind == "query" and outcome.answered and "secret" in outcome.data:
+                raise Rejected("hidden", "hidden")
+            if check.kind == "command":
+                raise Rejected("ignored for commands")
+
+        self.run_stream(self.k.worker(ticket))
+        self.run_stream(self.k.listener(model))
+        self.run_stream(self.k.listener(audit))
+
+        def after(n: int):
+            for _ in range(100):
+                if len(seen) >= n:
+                    break
+                time.sleep(0.02)
+            taken = [(c.kind, c.type, o) for c, o in seen]
+            seen.clear()
+            return taken
+
+        def open_ticket(id: str, sender_identity: str = "alice"):
+            return self.k.submit("support", "Ticket", id, "Open", context=RequestContext(sender_identity=sender_identity))
+
+        self.assertTrue(open_ticket("t1").committed)
+        [(kind, type, outcome)] = after(1)
+        self.assertEqual((kind, type), ("command", "Open"))
+        self.assertTrue(outcome.committed)
+        self.assertEqual(outcome.events[0].type, "Opened")
+
+        # Rejected by the aggregate or refused before: it still hears of it, and refuses nothing.
+        self.assertFalse(open_ticket("t1").committed)
+        self.assertFalse(open_ticket("t2", "mallory").committed)
+        self.assertEqual([o for _, _, o in after(2)], [
+            Outcome(committed=False, code="invalid_state", message="already open"),
+            Outcome(committed=False, code="forbidden", message="banned"),
+        ])
+
+        # A query's response passes it, or not.
+        self.assertEqual(self.k.query("support", "ListTickets"), ["t1"])
+        self.assertEqual(after(1)[0][2], QueryOutcome(answered=True, data=["t1"]))
+        self.assertTrue(open_ticket("secret").committed)
+        after(1)
+        with self.assertRaises(Rejected) as refused:
+            self.k.query("support", "ListTickets")
+        self.assertEqual(refused.exception.code, "hidden")
+        self.assertEqual(after(1)[0][2], QueryOutcome(answered=True, data=["secret", "t1"]))
+
+        with self.assertRaisesRegex(ValueError, "already"):
+            support.read_model("x").middleware(["*"], fn=lambda check: None).middleware(["*"], fn=lambda check: None)
 
     def test_a_new_event_schema_is_upcast_and_outdated_processes_stop(self):
         # Version 1 stores the increment as `by`.

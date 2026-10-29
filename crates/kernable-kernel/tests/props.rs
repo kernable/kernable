@@ -176,7 +176,7 @@ fn arbitrary_requests_never_crash_or_hang_the_kernel() {
         config.settle_timeout_ms = 300;
         config.query_timeout_ms = 300;
     }));
-    rt.spawn(run_worker(env.addr.clone(), TestWorker::honest()));
+    rt.block_on(start_worker(env.addr.clone(), TestWorker::honest()));
 
     proptest!(config(), |(calls in proptest::collection::vec(call(), 1..6))| {
         rt.block_on(async {

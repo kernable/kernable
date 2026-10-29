@@ -21,11 +21,11 @@ Test your implementation against `proto/test-vectors/signing.json`: every messag
 
 ## 4. Workers
 
-Open `WorkerGateway.Session`: send `Register` with the command types and the event schemas you write, answer the `Challenge` with a signature over its nonce, then loop: for each `Execute`, fold the snapshot and history (after upcasts) into state, run the handler, and send a signed `Result` or `Rejection`. Use `received_at` for `now()` and derived IDs for `id()`.
+Open `WorkerGateway.Session`: send `Register` with the aggregates you run (each with its command types), your service and the aggregates it declares, and the event schemas you write, answer the `Challenge` with a signature over its nonce, then loop: for each `Execute`, fold the snapshot and history (after upcasts) into state, run the handler, and send a signed `Result` or `Rejection`. Use `received_at` for `now()` and derived IDs for `id()`.
 
 ## 5. Listeners
 
-Open `ListenerService.Listen`: send `Hello` (name, order, event types, query types, middleware), answer the challenge, wait for `Ready`, then handle messages **one at a time**: run handlers for a `Batch` and acknowledge its `up_to`; answer a `QueryCall`; give a `Verdict` on a `MiddlewareCall`. Reconnect after errors with `from_position` set to your last handled position.
+Open `ListenerService.Listen`: send `Hello` (name, order, event types, query types, middlewares before and after), answer the challenge, wait for `Ready`, then handle messages **one at a time**: run handlers for a `Batch` and acknowledge its `up_to`; answer a `QueryCall`; give a `Verdict` on a `MiddlewareCall` (its `when` says which middleware; after, it carries the outcome). Reconnect after errors with `from_position` set to your last handled position.
 
 Name the listener in submits and queries sent from its handlers (`listener`), so the kernel never makes them wait for it.
 

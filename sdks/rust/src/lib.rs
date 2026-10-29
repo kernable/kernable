@@ -64,14 +64,15 @@ pub use domain::{
 pub use error::{BoxError, Error, Rejected};
 pub use kernable_core::transport::Tls;
 pub use listener::{
-    Check, CheckKind, Listener, ListenerContext, ListenerHandle, MiddlewareOptions, QueryContext,
-    QueryMeta, StoredEventMeta, SubscribeOptions, Subscription,
+    Check, CheckKind, CheckOutcome, Listener, ListenerContext, ListenerHandle, MiddlewareOptions,
+    QueryContext, QueryMeta, StoredEventMeta, SubscribeOptions, Subscription, When,
 };
 pub use store::Store;
 pub use worker::Worker;
 
 use context::{now_ms, random_id};
 use domain::{decode, encode};
+use listener::Service;
 
 tokio::task_local! {
     /// The name of the listener whose handler is running, for requests sent from it.
@@ -90,12 +91,13 @@ pub struct Options {
     key: Option<PathBuf>,
     grant: Option<PathBuf>,
     tenant: String,
+    service: Option<String>,
     context: RequestContext,
     tls: Option<Tls>,
 }
 
 /// Every option at its default: the key from `KERNABLE_KEY`, else `app.key` in the current
-/// directory; TLS from `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`, if set.
+/// directory; the service from `KERNABLE_SERVICE`, if set; TLS from `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`, if set.
 impl Default for Options {
     fn default() -> Options {
         Options {
@@ -103,6 +105,7 @@ impl Default for Options {
             key: None,
             grant: None,
             tenant: "default".into(),
+            service: None,
             context: RequestContext::default(),
             tls: None,
         }
@@ -136,6 +139,19 @@ impl Options {
     /// Default tenant for `submit`, `query`, files and the cache (default `default`).
     pub fn tenant(mut self, tenant: impl Into<String>) -> Options {
         self.tenant = tenant.into();
+        self
+    }
+
+    /// The service this process's workers and listeners belong to. Each worker declares the
+    /// aggregates of all the service's workers when it connects, and each listener all its
+    /// listeners: create them all with [`Kernable::worker`] and [`Kernable::listener`] before
+    /// running any. The kernel unregisters the service's aggregates that are no longer declared:
+    /// their commands are refused from then on. It retires the listeners that are no longer
+    /// declared: nobody waits for them any more, but they keep their position (declared again,
+    /// they resume) and their middleware keeps refusing until `kernable listeners remove`.
+    /// Default: `KERNABLE_SERVICE`, else none (nothing is unregistered or retired).
+    pub fn service(mut self, service: impl Into<String>) -> Options {
+        self.service = Some(service.into());
         self
     }
 
@@ -213,6 +229,7 @@ pub struct Kernable {
     tenant: String,
     context: RequestContext,
     domains: Arc<RwLock<HashMap<String, Domain>>>,
+    service: Service,
 }
 
 impl Kernable {
@@ -254,6 +271,10 @@ impl Kernable {
         };
         let channel = transport::connect_lazy(&url, tls.as_ref())
             .map_err(|e| Error::Config(format!("kernel {url}: {e}")))?;
+        let service = options
+            .service
+            .or_else(|| std::env::var("KERNABLE_SERVICE").ok())
+            .unwrap_or_default();
         let log = log::Log::new(&url, &key_file);
         Ok(Kernable {
             client: Client {
@@ -266,6 +287,7 @@ impl Kernable {
             tenant: options.tenant,
             context: options.context,
             domains: Arc::default(),
+            service: Service::new(service),
         })
     }
 
@@ -279,15 +301,20 @@ impl Kernable {
         self.clone()
     }
 
-    /// A worker that runs the commands of `aggregate`; add more with [`Worker::aggregate`].
+    /// A worker that runs the commands of `aggregate`; add more with [`Worker::aggregate`]. Its
+    /// aggregates join the aggregates this connection's service declares (see
+    /// [`Options::service`]).
     pub fn worker<S: State>(&self, aggregate: &Aggregate<S>) -> Worker {
-        Worker::new(self.client.clone()).aggregate(aggregate)
+        Worker::new(self.client.clone(), self.service.clone()).aggregate(aggregate)
     }
 
     /// Runs `listener` (a read model or reactor of a domain) on this connection: the handle
-    /// processes its events with `run()`. Each call gives a new handle.
+    /// processes its events with `run()`. Each call gives a new handle. Unless it is live, the
+    /// listener joins the listeners this connection's service declares (see
+    /// [`Options::service`]).
     pub fn listener(&self, listener: &Listener) -> ListenerHandle {
-        ListenerHandle::new(self.client.clone(), listener)
+        self.service.declare(listener);
+        ListenerHandle::new(self.client.clone(), listener, self.service.clone())
     }
 
     /// Files of the default tenant: bytes up to 16 MiB per key, kept by the kernel outside the
@@ -600,6 +627,19 @@ impl Outcome {
             Outcome::Committed(events) => events,
             Outcome::Rejected(_) => &[],
         }
+    }
+}
+
+/// What became of a query: its response data or why it was rejected.
+#[derive(Clone, Debug, PartialEq)]
+pub enum QueryOutcome {
+    Answered(Value),
+    Rejected(Rejected),
+}
+
+impl QueryOutcome {
+    pub fn is_answered(&self) -> bool {
+        matches!(self, QueryOutcome::Answered(_))
     }
 }
 

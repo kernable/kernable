@@ -11,11 +11,11 @@ use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
         Ack, ChallengeResponse, Command, Hello, ListenerMessage, NewEvent, Register,
-        Result as WorkResult, SubmitRequest, Wait, WorkerMessage, command_result::Outcome,
-        command_service_client::CommandServiceClient, kernel_message::Msg as Out,
-        listener_delivery::Msg as Delivery, listener_message::Msg as Listen,
-        listener_service_client::ListenerServiceClient, worker_gateway_client::WorkerGatewayClient,
-        worker_message::Msg as In,
+        Result as WorkResult, SubmitRequest, Wait, WorkerAggregate, WorkerMessage,
+        command_result::Outcome, command_service_client::CommandServiceClient,
+        kernel_message::Msg as Out, listener_delivery::Msg as Delivery,
+        listener_message::Msg as Listen, listener_service_client::ListenerServiceClient,
+        worker_gateway_client::WorkerGatewayClient, worker_message::Msg as In,
     },
     signing, transport,
 };
@@ -224,9 +224,12 @@ async fn worker(addr: &str, key: &str, concurrency: u32) -> Result<(), BoxError>
         protocol: kernable_core::PROTOCOL,
         worker_id: format!("rust-bench-{}", std::process::id()),
         key_id: signing::key_id(&key.verifying_key()),
-        command_types: vec!["bench.Write".into()],
+        aggregates: vec![WorkerAggregate {
+            aggregate_type: "bench.Bench".into(),
+            command_types: vec!["bench.Write".into()],
+        }],
         max_concurrency: concurrency,
-        event_schemas: vec![],
+        ..Default::default()
     })))
     .await?;
     let mut client = WorkerGatewayClient::new(transport::connect(addr).await?);
@@ -280,8 +283,7 @@ async fn listener(addr: &str, key: &str, name: &str, order: i32) -> Result<(), B
         order,
         event_types: Vec::new(),
         from_position: None,
-        query_types: Vec::new(),
-        middleware: None,
+        ..Default::default()
     })))
     .await?;
     let mut client = ListenerServiceClient::new(transport::connect(addr).await?);

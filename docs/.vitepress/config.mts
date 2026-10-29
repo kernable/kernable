@@ -71,7 +71,7 @@ export default withMermaid(
             { text: "Keys per service", link: "/how-to/keys" },
             { text: "Change an event's format", link: "/how-to/event-versions" },
             { text: "Rebuild a read model", link: "/how-to/rebuild-read-model" },
-            { text: "Remove a listener", link: "/how-to/remove-listener" },
+            { text: "Remove a listener or aggregate", link: "/how-to/remove-listener" },
             { text: "Test your domain", link: "/how-to/test-domain" },
             { text: "Handle an erasure request", link: "/how-to/erasure" },
             { text: "Passwords and other secrets", link: "/how-to/secrets" },

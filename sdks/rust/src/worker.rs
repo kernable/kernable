@@ -1,7 +1,7 @@
 //! Workers: run the commands of aggregates.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -9,8 +9,8 @@ use std::{
 use kernable_core::{
     PROTOCOL,
     proto::{
-        self, ChallengeResponse, EventSchema, Register, Rejection, Snapshot, WorkerMessage,
-        kernel_message::Msg as Out, worker_gateway_client::WorkerGatewayClient,
+        self, ChallengeResponse, EventSchema, Register, Rejection, Snapshot, WorkerAggregate,
+        WorkerMessage, kernel_message::Msg as Out, worker_gateway_client::WorkerGatewayClient,
         worker_message::Msg as In,
     },
     signing,
@@ -21,11 +21,13 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::{
     Aggregate, BoxError, Client, Rejected, State,
     domain::{Failure, Runnable},
+    listener::Service,
     log,
 };
 
 struct WorkerInner {
     client: Client,
+    service: Service,
     /// Qualified command type -> the aggregate that runs it.
     by_command: Mutex<HashMap<String, Arc<dyn Runnable>>>,
     settings: Mutex<(u32, Duration)>,
@@ -42,10 +44,11 @@ pub struct Worker {
 }
 
 impl Worker {
-    pub(crate) fn new(client: Client) -> Worker {
+    pub(crate) fn new(client: Client, service: Service) -> Worker {
         Worker {
             inner: Arc::new(WorkerInner {
                 client,
+                service,
                 by_command: Mutex::default(),
                 settings: Mutex::new((16, Duration::from_secs(1))),
                 stopped: watch::Sender::new(false),
@@ -54,9 +57,13 @@ impl Worker {
         }
     }
 
-    /// Runs the commands of `aggregate`, too.
+    /// Runs the commands of `aggregate`, too; it joins the aggregates the connection's service
+    /// declares.
     pub fn aggregate<S: State>(&self, aggregate: &Aggregate<S>) -> Worker {
         let runnable: Arc<dyn Runnable> = Arc::new(aggregate.clone());
+        self.inner
+            .service
+            .declare_aggregate(qualified(runnable.as_ref()));
         let mut by_command = self.inner.by_command.lock().unwrap();
         for t in runnable.command_types() {
             by_command.insert(
@@ -118,13 +125,16 @@ impl Worker {
         let by_command = self.inner.by_command.lock().unwrap().clone();
         let (tx, rx) = mpsc::channel(1024);
         let msg = |m: In| WorkerMessage { msg: Some(m) };
+        let (service, declared) = self.inner.service.aggregate_declaration();
         tx.send(msg(In::Register(Register {
             worker_id: format!("rust-{}", std::process::id()),
             key_id: client.key_id.clone(),
-            command_types: by_command.keys().cloned().collect(),
+            aggregates: aggregates(&by_command),
             max_concurrency: concurrency,
             event_schemas: event_schemas(&by_command),
             protocol: PROTOCOL,
+            service,
+            declared,
         })))
         .await?;
         let mut gateway = WorkerGatewayClient::new(client.channel.clone());
@@ -254,6 +264,32 @@ fn reply(
         reason: Some(reason),
         worker_sig: Some(worker_sig),
     }))
+}
+
+/// An aggregate's qualified type: `shop.Cart`.
+fn qualified(aggregate: &dyn Runnable) -> String {
+    format!("{}.{}", aggregate.domain().name(), aggregate.name())
+}
+
+/// The worker's aggregates with their qualified command types, as it registers them.
+fn aggregates(by_command: &HashMap<String, Arc<dyn Runnable>>) -> Vec<WorkerAggregate> {
+    let mut grouped: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (command_type, aggregate) in by_command {
+        grouped
+            .entry(qualified(aggregate.as_ref()))
+            .or_default()
+            .push(command_type.clone());
+    }
+    grouped
+        .into_iter()
+        .map(|(aggregate_type, mut command_types)| {
+            command_types.sort();
+            WorkerAggregate {
+                aggregate_type,
+                command_types,
+            }
+        })
+        .collect()
 }
 
 /// The payload versions the worker writes, for every event type its aggregates know: the

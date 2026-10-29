@@ -151,7 +151,7 @@ export interface QueryOptions {
   minPosition?: number;
 }
 
-/** A command or query a middleware checks before the kernel accepts or routes it. */
+/** A command or query a middleware checks, before the kernel accepts or routes it or after. */
 export interface Check {
   kind: "command" | "query";
   /** The command or query ID. */
@@ -174,6 +174,13 @@ export interface MiddlewareOptions {
    * another domain's type (`domain.Type`) or a whole domain (`domain.*`).
    */
   types: string[];
+  /**
+   * `before` (default): checks a request before the kernel accepts it; throwing refuses it.
+   * `after`: gets the request's outcome too. Throwing refuses a query's response; a command's
+   * outcome, and a rejected query, it only observes, best effort (it misses what happens while
+   * it is away, and nobody waits for it).
+   */
+  when?: "before" | "after";
   /**
    * Position in the chain: lower runs first, equal orders by listener name (default 0).
    * Negative orders are reserved for kernable.
@@ -244,6 +251,11 @@ export interface StoredEvent extends StoredEventMeta {
 export type Outcome =
   | { committed: true; events: StoredEvent[] }
   | { committed: false; code: string; message: string };
+
+/** What came of a query: its response data or why it was rejected. */
+export type QueryOutcome =
+  | { answered: true; data: unknown }
+  | { answered: false; code: string; message: string };
 
 /** An event to fold: type, payload version and data, plus as much of `EventMeta` and its request context as known. */
 export type FoldEvent = Partial<EventMeta> & { type: string; schema: number; data: unknown; request?: RequestContext };
@@ -477,8 +489,8 @@ export class Domain {
   }
 
   /**
-   * Defines a reactor: triggers side effects; resumes after the last acknowledged event
-   * (defaults: order 10, no start). A settling submit from its handler waits for the listeners
+   * Defines a reactor: triggers side effects; starts at the newest event when it is new, then
+   * resumes after the last acknowledged event (defaults: order 10, no start). A settling submit from its handler waits for the listeners
    * before it (the read models), not for the reactor itself, which handles one event at a time.
    * Run it with `kernable.listener(definition)`.
    */
@@ -579,6 +591,16 @@ export interface Options {
   grant?: string;
   /** Default tenant for `submit`. */
   tenant?: string;
+  /**
+   * The service this process's workers and listeners belong to. Each declares all workers or
+   * listeners of the service when it connects: create them all with `kernable.worker` and
+   * `kernable.listener` before running any. The kernel unregisters the service's aggregates
+   * that are no longer declared (their commands are refused), and retires its listeners that are
+   * no longer declared: nobody waits for them any more, but they keep their position (declared
+   * again, they resume) and their middleware keeps refusing until `kernable listeners remove`.
+   * Default: `KERNABLE_SERVICE`, else none (nothing is unregistered or retired).
+   */
+  service?: string;
   /** Default request context for `submit` and `query`, e.g. this service's identity; a request's own context replaces it. */
   context?: RequestContext;
   /**
@@ -650,6 +672,11 @@ export class Kernable {
   private readonly tenant: string;
   private readonly context: RequestContext;
   private readonly domains = new Map<string, Domain>();
+  private readonly service: string;
+  /** The names of this service's listeners, as declared to the kernel. */
+  private readonly declared = new Set<string>();
+  /** The qualified aggregate types of this service's workers, as declared to the kernel. */
+  private readonly aggregates = new Set<string>();
 
   constructor(options: Options = {}) {
     const env = process.env;
@@ -662,6 +689,7 @@ export class Kernable {
     this.log = new Log(url, key, this.key);
     this.tenant = options.tenant ?? "default";
     this.context = options.context ?? {};
+    this.service = options.service ?? env.KERNABLE_SERVICE ?? "";
     this.data = new Data(this.clients, this.key, this.tenant);
     this.cache = new Cache(this.clients, this.key, this.tenant);
   }
@@ -672,8 +700,14 @@ export class Kernable {
     return this;
   }
 
+  /**
+   * Runs these aggregates' commands over this connection. The kernel registers the aggregates:
+   * commands for an aggregate or command type no worker registered are refused.
+   */
   worker(...aggregates: Aggregate<any>[]): Worker {
-    return new Worker(this.clients, this.key, aggregates, this.log);
+    for (const agg of aggregates) this.aggregates.add(`${agg.domain}.${agg.name}`);
+    const service = () => ({ service: this.service, declared: this.service ? [...this.aggregates] : [] });
+    return new Worker(this.clients, this.key, aggregates, this.log, service);
   }
 
   /** Runs a command and returns its outcome; see `SubmitOptions.wait`. */
@@ -727,7 +761,9 @@ export class Kernable {
    * until `run()` connects.
    */
   listener(listener: Listener): ListenerHandle {
-    return new ListenerHandle(this.clients, this.key, listener, this.log);
+    if (!listener.options.live) this.declared.add(listener.name);
+    const service = () => ({ service: this.service, declared: this.service ? [...this.declared] : [] });
+    return new ListenerHandle(this.clients, this.key, listener, this.log, service);
   }
 
   private send(options: SubmitOptions, wait: WireWait) {
@@ -933,10 +969,17 @@ export interface ListenerOptions {
   order?: number;
   /**
    * Position to start after on the first connect: 0 rebuilds from the beginning (default for
-   * read models); omitted, the kernel resumes after the last acknowledged event (default for
-   * reactors). Reconnects always resume after the last handled event.
+   * read models); omitted, the kernel resumes after the last acknowledged event, and a new
+   * listener starts at the newest event, so it never reacts to what happened before it existed
+   * (default for reactors). Reconnects always resume after the last handled event.
    */
   start?: number;
+  /**
+   * Not registered with the kernel: no stored position, always starts at the newest event,
+   * nobody waits for it, and it is forgotten when it disconnects. For reactions that only
+   * matter while the process runs, e.g. pushing to connected browsers. Cannot be a middleware.
+   */
+  live?: boolean;
   reconnectMs?: number;
   /**
    * Keeps the listener's state in a store (`sqlite:<path>` or `memory:`) instead of memory:
@@ -961,7 +1004,11 @@ export interface HandlerOptions {
   raw?: boolean;
 }
 type QueryHandler = (data: unknown, qry: QueryMeta, ctx: QueryContext) => unknown;
-type MiddlewareHandler = (check: Check) => void | Promise<void>;
+/**
+ * Checks a request. After it, `outcome` is what came of it: an `Outcome` for a command, a
+ * `QueryOutcome` for a query (`check.kind` tells which); before it, `undefined`.
+ */
+type MiddlewareHandler = (check: Check, outcome?: Outcome | QueryOutcome) => void | Promise<void>;
 
 /** A type within its domain (`ItemAdded`), not qualified and no wildcard. */
 const UNQUALIFIED = /^[^.*]+$/;
@@ -991,8 +1038,8 @@ export class Listener {
   readonly handlers = new Map<string, { handler: EventHandler; raw: boolean }>();
   /** Query handlers per qualified query type. */
   readonly queries = new Map<string, QueryHandler>();
-  /** The middleware handler and its qualified types, if this listener is one. */
-  checker?: { options: MiddlewareOptions; handler: MiddlewareHandler };
+  /** The middleware handlers and their qualified types, before and after requests. */
+  readonly middlewares = new Map<"before" | "after", { options: MiddlewareOptions; handler: MiddlewareHandler }>();
   /** The domains whose event schemas upcast events, by name: the own domain and those it `use`s. */
   readonly domains = new Map<string, Domain>();
 
@@ -1042,20 +1089,24 @@ export class Listener {
 
   /**
    * Makes this listener a middleware: the kernel asks `handler` about every command and query
-   * of `options.types` before accepting or routing it, in chain order, and only once this
-   * listener has caught up with the events. Throw `Rejected` to refuse; any other error
-   * refuses too. The registration is stored: while this listener is away, the kernel refuses
-   * those requests (`kernable listeners remove` unregisters it). The handler cannot submit or
-   * query what it checks itself (it would wait behind itself): the kernel refuses it.
+   * of `options.types`, before accepting or routing it (or after, see `MiddlewareOptions.when`),
+   * in chain order, and only once this listener has caught up with the events. Throw `Rejected`
+   * to refuse; any other error refuses too. The registration is stored: while this listener is
+   * away, the kernel refuses those requests (`kernable listeners remove` unregisters it). The
+   * handler cannot submit or query what it checks itself (it would wait behind itself): the
+   * kernel refuses it. A listener has at most one middleware before and one after.
    */
   middleware(options: MiddlewareOptions, handler: MiddlewareHandler): this {
+    if (this.options.live) throw new Error(`${this.name} is live: a live listener cannot be a middleware`);
     for (const t of options.types) {
       if (t !== "*" && !UNQUALIFIED.test(t) && !QUALIFIED_OR_DOMAIN.test(t)) {
         throw new Error(`check \`*\`, a type (Type), a qualified type (domain.Type) or a domain (domain.*), not ${JSON.stringify(t)}`);
       }
     }
+    const when = options.when ?? "before";
+    if (this.middlewares.has(when)) throw new Error(`${this.name} has a middleware ${when} already`);
     const types = options.types.map((t) => (t === "*" ? t : this.qualify(t)));
-    this.checker = { options: { ...options, types }, handler };
+    this.middlewares.set(when, { options: { ...options, types }, handler });
     return this;
   }
 
@@ -1084,13 +1135,16 @@ export class ListenerHandle {
   private readonly clients: Clients;
   private readonly key: Key;
   private readonly log: Log;
+  /** The service and the listeners it declares, when connecting. */
+  private readonly service: () => { service: string; declared: string[] };
   /** The definition it runs. */
   readonly listener: Listener;
 
-  constructor(clients: Clients, key: Key, listener: Listener, log: Log) {
+  constructor(clients: Clients, key: Key, listener: Listener, log: Log, service: () => { service: string; declared: string[] }) {
     this.clients = clients;
     this.key = key;
     this.log = log;
+    this.service = service;
     this.listener = listener;
     this.ready = new Promise((resolve) => (this.markReady = resolve));
   }
@@ -1133,7 +1187,7 @@ export class ListenerHandle {
   }
 
   private listen(start: number | undefined): Promise<void> {
-    const { name, options, handlers, queries, checker } = this.listener;
+    const { name, options, handlers, queries, middlewares } = this.listener;
     return new Promise((resolve, reject) => {
       const call = this.clients.listen();
       this.call = call;
@@ -1158,7 +1212,13 @@ export class ListenerHandle {
           event_types: [...handlers.keys()],
           query_types: [...queries.keys()],
           ...(start === undefined ? {} : { from_position: start }),
-          ...(checker ? { middleware: { order: checker.options.order ?? 0, types: checker.options.types } } : {}),
+          ...(options.live ? {} : this.service()),
+          live: options.live ?? false,
+          middlewares: [...middlewares].map(([when, m]) => ({
+            order: m.options.order ?? 0,
+            types: m.options.types,
+            when: when === "after" ? 1 : 0,
+          })),
         },
       });
     });
@@ -1193,11 +1253,14 @@ export class ListenerHandle {
   }
 
   private logConnected(): void {
-    const { handlers, queries, checker } = this.listener;
+    const { handlers, queries, middlewares } = this.listener;
     const list = (types: Iterable<string>) => [...types].sort().join(", ");
     let line = `connected to ${this.log.peer}, at position ${this.position}, reads ${list(handlers.keys())}`;
     if (queries.size) line += `, answers ${list(queries.keys())}`;
-    if (checker) line += `, checks ${list(checker.options.types)}`;
+    const before = middlewares.get("before");
+    const after = middlewares.get("after");
+    if (before) line += `, checks ${list(before.options.types)}`;
+    if (after) line += `, after ${list(after.options.types)}`;
     this.log.print("info", this.what, line);
   }
 
@@ -1220,9 +1283,10 @@ export class ListenerHandle {
 
   private async verdict(c: NonNullable<ListenerDelivery["check"]>): Promise<{ rejected?: WireRejected }> {
     try {
-      const checker = this.listener.checker;
-      if (!checker) throw new Rejected("not a middleware", "not_a_middleware");
-      await checker.handler(toCheck(c));
+      const when = c.when === 1 ? "after" : "before";
+      const middleware = this.listener.middlewares.get(when);
+      if (!middleware) throw new Rejected(`no middleware ${when}`, "not_a_middleware");
+      await middleware.handler(toCheck(c), when === "after" ? toOutcome(c) : undefined);
       return {};
     } catch (err) {
       return {
@@ -1268,13 +1332,18 @@ export class Worker {
   private readonly key: Key;
   private readonly log: Log;
   private readonly byCommand = new Map<string, Aggregate<any>>();
+  private readonly aggregates: Aggregate<any>[];
+  /** The service and the aggregates it declares, when connecting. */
+  private readonly service: () => { service: string; declared: string[] };
   private call?: SessionCall;
   private stopped = false;
 
-  constructor(clients: Clients, key: Key, aggregates: Aggregate<any>[], log: Log) {
+  constructor(clients: Clients, key: Key, aggregates: Aggregate<any>[], log: Log, service: () => { service: string; declared: string[] }) {
     this.clients = clients;
     this.key = key;
     this.log = log;
+    this.aggregates = aggregates;
+    this.service = service;
     for (const agg of aggregates) for (const type of agg.handlers.keys()) this.byCommand.set(`${agg.domain}.${type}`, agg);
     this.ready = new Promise((resolve) => (this.markReady = resolve));
   }
@@ -1309,9 +1378,13 @@ export class Worker {
           worker_id: `ts-${process.pid}`,
           key_id: this.key.id,
           protocol: PROTOCOL,
-          command_types: [...this.byCommand.keys()],
+          aggregates: this.aggregates.map((agg) => ({
+            aggregate_type: `${agg.domain}.${agg.name}`,
+            command_types: [...agg.handlers.keys()].map((type) => `${agg.domain}.${type}`),
+          })),
           max_concurrency: concurrency,
           event_schemas: this.eventSchemas(),
+          ...this.service(),
         },
       });
     });
@@ -1500,6 +1573,19 @@ function fromWireContext(c: WireRequestContext | null | undefined): RequestConte
     attributes: c.attributes.length ? Object.fromEntries(c.attributes.map((a) => [a.key, a.value])) : undefined,
   };
   return Object.fromEntries(Object.entries(all).filter(([, v]) => v !== undefined && v !== "")) as RequestContext;
+}
+
+/** What came of the request a middleware after it checks. */
+function toOutcome(c: NonNullable<ListenerDelivery["check"]>): Outcome | QueryOutcome {
+  const rejected = (r: WireRejected | null | undefined) => ({ code: r?.code ?? "", message: r?.message ?? "" });
+  if (c.command_result) {
+    const r = c.command_result;
+    if (r.outcome === "committed") return { committed: true, events: r.committed!.events.map((e) => toStored(e)) };
+    return { committed: false, ...rejected(r.rejected) };
+  }
+  const r = c.query_result!;
+  if (r.outcome === "response") return { answered: true, data: decode(r.response ?? Buffer.alloc(0)) };
+  return { answered: false, ...rejected(r.rejected) };
 }
 
 function toCheck(c: NonNullable<ListenerDelivery["check"]>): Check {

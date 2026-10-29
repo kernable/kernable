@@ -3,17 +3,20 @@
 //! Event N reaches a listener of order k only after every registered listener with a lower
 //! order has acknowledged N; equal orders run in parallel. A registered listener counts even
 //! while it is disconnected, so a stalled listener holds back later orders and settling
-//! submits. Positions are kept in memory and written to the store periodically: after a
+//! submits; unless it is retired (its service no longer declares it, see `Hello.service`) or
+//! live (not registered at all, see `Hello.live`). A new listener starts at the newest event
+//! unless it asks for an earlier position. Positions are kept in memory and written to the store periodically: after a
 //! crash a listener may see a few events again (delivery is at least once).
 //!
 //! Listeners also answer queries (read models register query types): the kernel sends a query
 //! on the listener's stream, in order with the batches, so an answer reflects every event the
 //! listener was sent before it.
 //!
-//! A listener can also be a middleware (see `Hello.middleware`). Its registration is stored,
-//! so it keeps checking, and refusing while it is disconnected, the types it covers until it
-//! reconnects without a middleware or is removed. Checks are sent in order with the batches,
-//! and only once the listener has caught up with the events committed before it connected.
+//! A listener can also be a middleware, before or after requests (see `Hello.middlewares`).
+//! Its registration is stored, so it keeps checking, and refusing while it is disconnected,
+//! the types it covers until it reconnects without that middleware or is removed. Checks are
+//! sent in order with the batches, and only once the listener has caught up with the events
+//! committed before it connected.
 
 use std::{
     collections::HashMap,
@@ -27,8 +30,8 @@ use std::{
 use kernable_core::{
     proto::{
         Batch, Challenge, Event, Hello, ListenerDelivery, ListenerMessage, ListenerRecord,
-        MiddlewareCall, QueryAnswer, QueryCall, QueryRequest, Ready, Signature, VaultValue,
-        Verdict, listener_delivery::Msg as Out, listener_message::Msg as In, middleware_call,
+        MiddlewareCall, QueryAnswer, QueryCall, QueryRequest, Ready, Signature, Verdict, When,
+        listener_delivery::Msg as Out, listener_message::Msg as In,
     },
     signing,
 };
@@ -52,6 +55,15 @@ struct Entry {
     /// The newest event when the listener connected: a middleware checks requests only
     /// once it has processed it.
     caught_up_at: u64,
+    /// Not registered: never stored, forgotten when it disconnects (`Hello.live`).
+    live: bool,
+}
+
+impl Entry {
+    /// Whether others wait for it: for readiness, settling and the order of delivery.
+    fn counts(&self) -> bool {
+        !self.live && !self.record.retired
+    }
 }
 
 /// What a listener sends back for a call.
@@ -111,6 +123,7 @@ impl Registry {
                     query_types: Vec::new(),
                     out: None,
                     caught_up_at: 0,
+                    live: false,
                 };
                 (entry.record.name.clone(), entry)
             })
@@ -132,7 +145,7 @@ impl Registry {
     fn gate(&self, order: i32) -> u64 {
         self.entries()
             .values()
-            .filter(|e| e.record.order < order)
+            .filter(|e| e.counts() && e.record.order < order)
             .map(|e| e.record.position)
             .min()
             .unwrap_or(u64::MAX)
@@ -158,7 +171,7 @@ impl Registry {
         let mut behind: Vec<String> = self
             .entries()
             .values()
-            .filter(|e| !e.connected || e.record.position < e.caught_up_at)
+            .filter(|e| e.counts() && (!e.connected || e.record.position < e.caught_up_at))
             .map(|e| e.record.name.clone())
             .collect();
         behind.sort();
@@ -181,7 +194,7 @@ impl Registry {
     pub(crate) fn settled(&self, position: u64, caller: Option<&Caller>) -> bool {
         self.entries()
             .values()
-            .filter(|e| caller.is_none_or(|c| e.record.order < c.order))
+            .filter(|e| e.counts() && caller.is_none_or(|c| e.record.order < c.order))
             .all(|e| e.record.position >= position)
     }
 
@@ -200,11 +213,17 @@ impl Registry {
     }
 
     fn disconnect(&self, name: &str) {
-        if let Some(e) = self.entries().get_mut(name) {
+        let mut entries = self.entries();
+        if entries.get(name).is_some_and(|e| e.live) {
+            entries.remove(name);
+        } else if let Some(e) = entries.get_mut(name) {
             e.connected = false;
             e.out = None;
             e.query_types.clear();
+            e.record.last_seen = crate::now_ms();
+            e.dirty = true;
         }
+        drop(entries);
         // Dropping the senders tells the waiting callers that no answer will come.
         self.calls().retain(|_, (listener, _)| listener != name);
     }
@@ -263,14 +282,14 @@ impl Registry {
         })
     }
 
-    /// The middlewares that check `name` (a qualified command or query type), in chain order:
-    /// by order, then by listener name. Includes disconnected ones.
-    pub(crate) fn chain(&self, name: &str) -> Vec<String> {
+    /// The middlewares that check `name` (a qualified command or query type) at `when`, in
+    /// chain order: by order, then by listener name. Includes disconnected ones.
+    pub(crate) fn chain(&self, name: &str, when: When) -> Vec<String> {
         let mut chain: Vec<(i32, String)> = self
             .entries()
             .values()
             .filter_map(|e| {
-                let m = e.record.middleware.as_ref()?;
+                let m = e.record.middlewares.iter().find(|m| m.when() == when)?;
                 m.types
                     .iter()
                     .any(|p| config::covers(p, name))
@@ -286,13 +305,13 @@ impl Registry {
         self.entries().get(name).map(|e| e.record.key_id.clone())
     }
 
-    /// Registers a check of `request` by the middleware `listener`. `Ok(None)` while the
-    /// middleware is still catching up; an error if it is not connected.
+    /// Registers `call` (its ID is set here) for the middleware `listener`. `Ok(None)` while
+    /// the middleware is still catching up; an error if it is not connected.
     pub(crate) fn check(
         &self,
         listener: &str,
         id: &str,
-        (request, vault): (middleware_call::Request, Vec<VaultValue>),
+        mut call: MiddlewareCall,
     ) -> Result<Option<Dispatched>, Status> {
         let entries = self.entries();
         let Some(out) = entries.get(listener).and_then(|e| {
@@ -307,15 +326,10 @@ impl Registry {
             return Ok(None);
         };
         let turn = self.turn.fetch_add(1, Ordering::Relaxed);
-        let call_id = format!("{id}#{turn}");
+        call.call_id = format!("{id}#{turn}");
         let (tx, rx) = oneshot::channel();
         self.calls()
-            .insert(call_id.clone(), (listener.to_owned(), tx));
-        let call = MiddlewareCall {
-            call_id,
-            request: Some(request),
-            vault,
-        };
+            .insert(call.call_id.clone(), (listener.to_owned(), tx));
         Ok(Some(Dispatched {
             out: out.clone(),
             msg: Out::Check(call),
@@ -332,16 +346,27 @@ impl Registry {
         }
     }
 
-    /// Records changed since the last call.
+    /// Records changed since the last call; connected ones are seen now.
     pub(crate) fn take_dirty(&self) -> Vec<ListenerRecord> {
+        let now = crate::now_ms();
         self.entries()
             .values_mut()
-            .filter(|e| e.dirty)
+            .filter(|e| e.dirty && !e.live)
             .map(|e| {
                 e.dirty = false;
+                if e.connected {
+                    e.record.last_seen = now;
+                }
                 e.record.clone()
             })
             .collect()
+    }
+
+    /// Marks every connected listener changed, so the next flush stores it as seen now.
+    pub(crate) fn seen_now(&self) {
+        for e in self.entries().values_mut().filter(|e| e.connected) {
+            e.dirty = true;
+        }
     }
 }
 
@@ -415,7 +440,27 @@ pub(crate) async fn run(
             "key may not answer these query types",
         ));
     }
-    if let Some(m) = &hello.middleware {
+    if hello.live && !hello.middlewares.is_empty() {
+        return Err(Status::invalid_argument(
+            "a live listener cannot be a middleware",
+        ));
+    }
+    if !hello.live && !hello.service.is_empty() && !hello.declared.contains(&hello.name) {
+        return Err(Status::invalid_argument(
+            "a service declares all its listeners, this one too",
+        ));
+    }
+    for (i, m) in hello.middlewares.iter().enumerate() {
+        if hello.middlewares[..i].iter().any(|o| o.when == m.when) {
+            return Err(Status::invalid_argument(
+                "a listener has at most one middleware before and one after",
+            ));
+        }
+        if When::try_from(m.when).is_err() {
+            return Err(Status::invalid_argument(
+                "a middleware runs before or after",
+            ));
+        }
         if m.order < 0 {
             return Err(Status::invalid_argument(
                 "negative middleware orders are reserved for kernable",
@@ -461,6 +506,11 @@ pub(crate) async fn run(
         if previous.is_some_and(|e| e.connected) {
             return Err(Status::already_exists("listener is already connected"));
         }
+        if hello.live && previous.is_some() {
+            return Err(Status::already_exists(
+                "a registered listener has this name: remove it, or use another name",
+            ));
+        }
         // Another key only as the registered key's successor (`succeeds` in its grant).
         if let Some(e) = previous.filter(|e| e.record.key_id != hello.key_id) {
             if permissions.successors.get(&e.record.key_id) != Some(&hello.key_id) {
@@ -470,9 +520,13 @@ pub(crate) async fn run(
             }
             tracing::info!(listener = %hello.name, key = %hello.key_id, "listener moves to its successor key");
         }
-        let position = hello
-            .from_position
-            .unwrap_or_else(|| previous.map_or(0, |e| e.record.position));
+        // A new listener starts at the newest event: it never reacts to what happened before
+        // it existed, unless it asks to (a read model rebuilding from 0).
+        let position = match (hello.live, hello.from_position) {
+            (true, _) => head,
+            (false, Some(from)) => from,
+            (false, None) => previous.map_or(head, |e| e.record.position),
+        };
         let record = ListenerRecord {
             name: hello.name.clone(),
             key_id: hello.key_id.clone(),
@@ -480,13 +534,36 @@ pub(crate) async fn run(
             event_types: hello.event_types.clone(),
             position,
             removed: false,
-            middleware: hello.middleware.clone(),
+            middlewares: hello.middlewares.clone(),
+            service: hello.service.clone(),
+            retired: false,
+            last_seen: crate::now_ms(),
         };
+        // The service's other listeners (of this key) are retired unless it declares them.
+        let mut changed = Vec::new();
+        if !hello.live && !hello.service.is_empty() {
+            for e in entries.values_mut() {
+                if e.live
+                    || e.record.name == hello.name
+                    || e.record.service != hello.service
+                    || e.record.key_id != hello.key_id
+                {
+                    continue;
+                }
+                let retired = !hello.declared.contains(&e.record.name);
+                if e.record.retired != retired {
+                    e.record.retired = retired;
+                    let what = if retired { "retired" } else { "declared again" };
+                    tracing::info!(listener = %e.record.name, service = %hello.service, "listener {what}");
+                    changed.push(e.record.clone());
+                }
+            }
+        }
         // Registration is stored right away; positions follow with the periodic flush.
-        kernel
-            .store
-            .save_listeners(std::slice::from_ref(&record))
-            .map_err(internal)?;
+        if !hello.live {
+            changed.push(record.clone());
+        }
+        kernel.store.save_listeners(&changed).map_err(internal)?;
         entries.insert(
             hello.name.clone(),
             Entry {
@@ -496,6 +573,7 @@ pub(crate) async fn run(
                 query_types: hello.query_types.clone(),
                 out: Some(out.clone()),
                 caught_up_at: head,
+                live: hello.live,
             },
         );
         position
@@ -657,7 +735,7 @@ fn still_allowed(permissions: &crate::Permissions, hello: &Hello) -> bool {
             .query_types
             .iter()
             .all(|t| config::allowed(&permissions.answer, key, t))
-        && hello.middleware.as_ref().is_none_or(|m| {
+        && hello.middlewares.iter().all(|m| {
             m.types
                 .iter()
                 .all(|t| config::allowed(&permissions.check, key, t))

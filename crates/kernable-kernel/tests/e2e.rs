@@ -15,7 +15,7 @@ use tonic::Code;
 #[tokio::test(flavor = "multi_thread")]
 async fn signed_commands_run_end_to_end() {
     let env = start("happy").await;
-    spawn_worker(&env);
+    spawn_worker(&env).await;
     let client = key(1);
 
     let placed = submit(
@@ -57,7 +57,7 @@ async fn signed_commands_run_end_to_end() {
 #[tokio::test(flavor = "multi_thread")]
 async fn unsigned_forged_and_unauthorized_commands_are_refused() {
     let env = start("clients").await;
-    spawn_worker(&env);
+    spawn_worker(&env).await;
 
     let unsigned = submit(&env.addr, command("c1", "PlaceOrder", "o1"))
         .await
@@ -110,8 +110,8 @@ async fn unauthorized_and_impostor_workers_are_refused() {
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_commands_on_one_aggregate_are_queued() {
     let env = Arc::new(start("concurrent").await);
-    spawn_worker(&env);
-    spawn_worker(&env);
+    spawn_worker(&env).await;
+    spawn_worker(&env).await;
     let client = key(1);
     submit(
         &env.addr,
@@ -162,17 +162,18 @@ async fn equal_names_in_two_domains_do_not_collide() {
         .unwrap();
     let (orders_seen, mut orders_rx) = mpsc::unbounded_channel();
     let (billing_seen, mut billing_rx) = mpsc::unbounded_channel();
-    tokio::spawn(run_worker(
+    start_worker(
         env.addr.clone(),
         TestWorker::with(Behavior::Honest, orders_seen),
-    ));
+    )
+    .await;
     let billing = TestWorker {
         claimed: key(7),
         signer: key(7),
         command_types: vec!["billing.PlaceOrder".into()],
         ..TestWorker::with(Behavior::Honest, billing_seen)
     };
-    tokio::spawn(run_worker(env.addr.clone(), billing));
+    start_worker(env.addr.clone(), billing).await;
 
     let mut in_billing = command("c2", "PlaceOrder", "o1");
     in_billing.domain = "billing".into();

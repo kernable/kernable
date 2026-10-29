@@ -1,5 +1,5 @@
 //! Middleware: listeners that check commands and queries before the kernel accepts or routes
-//! them, in chain order, failing closed.
+//! them, in chain order, failing closed; and after, seeing their outcome.
 
 mod common;
 
@@ -12,11 +12,11 @@ use common::*;
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
-        Ack, ChallengeResponse, Hello, ListenerMessage, ListenerRecord, Middleware, QueryRequest,
-        Rejected, RequestContext, Verdict, Wait, command_result::Outcome,
-        listener_delivery::Msg as Out, listener_message::Msg as In,
-        listener_service_client::ListenerServiceClient, middleware_call::Request, query_result,
-        query_service_client::QueryServiceClient,
+        Ack, ChallengeResponse, Hello, ListenerMessage, ListenerRecord, Middleware, MiddlewareCall,
+        QueryAnswer, QueryRequest, Rejected, RequestContext, Verdict, Wait, When,
+        command_result::Outcome, listener_delivery::Msg as Out, listener_message::Msg as In,
+        listener_service_client::ListenerServiceClient, middleware_call, middleware_call::Request,
+        query_answer, query_result, query_service_client::QueryServiceClient,
     },
     signing, transport,
 };
@@ -24,7 +24,8 @@ use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Code;
 
-/// Names of the middlewares that checked a request, in the order they did.
+/// Names of the middlewares that checked a request, in the order they did; after a request
+/// with what came of it (see [`seen`]).
 type Log = Arc<Mutex<Vec<String>>>;
 
 /// What a test middleware knows when it checks a request: the request and the number of
@@ -41,6 +42,10 @@ struct Spec {
     listener_order: i32,
     /// Acknowledges batches; a listener that does not holds back higher listener orders.
     acks: bool,
+    /// Before or after requests; `None`: no middleware, only a read model.
+    when: Option<When>,
+    /// Answers `orders.CountOrders` with the number of orders it has seen.
+    answers: bool,
 }
 
 fn spec(name: &'static str, order: i32, decide: Decide) -> Spec {
@@ -52,7 +57,51 @@ fn spec(name: &'static str, order: i32, decide: Decide) -> Spec {
         decide,
         listener_order: 0,
         acks: true,
+        when: Some(When::Before),
+        answers: false,
     }
+}
+
+/// A middleware after requests.
+fn after(name: &'static str, order: i32, decide: Decide) -> Spec {
+    Spec {
+        when: Some(When::After),
+        ..spec(name, order, decide)
+    }
+}
+
+/// A read model answering `orders.CountOrders`, no middleware.
+fn counter() -> Spec {
+    Spec {
+        when: None,
+        answers: true,
+        ..spec("counter", 0, pass)
+    }
+}
+
+/// How a test middleware logs a call: its name, and after a request what came of it.
+fn seen(name: &str, call: &MiddlewareCall) -> String {
+    let outcome = match &call.outcome {
+        None => return name.into(),
+        Some(middleware_call::Outcome::CommandResult(r)) => match &r.outcome {
+            Some(Outcome::Committed(c)) => format!("committed {}", c.events.len()),
+            Some(Outcome::Rejected(r)) => format!("rejected {}", r.code),
+            _ => "?".into(),
+        },
+        Some(middleware_call::Outcome::QueryResult(r)) => match &r.outcome {
+            Some(query_result::Outcome::Response(b)) => {
+                format!("answered {}", String::from_utf8_lossy(b))
+            }
+            Some(query_result::Outcome::Rejected(r)) => format!("rejected {}", r.code),
+            None => "?".into(),
+        },
+    };
+    let id = match &call.request {
+        Some(Request::Command(c)) => &c.command_id,
+        Some(Request::Query(q)) => &q.query_id,
+        None => "",
+    };
+    format!("{name} after {id} {outcome}")
 }
 
 fn pass(_: &Request, _: usize) -> Option<Rejected> {
@@ -82,11 +131,21 @@ fn middleware(env: &Env, spec: Spec, log: &Log) -> (JoinHandle<tonic::Status>, m
             order: spec.listener_order,
             event_types: vec!["orders.OrderPlaced".into()],
             from_position: Some(0),
-            query_types: Vec::new(),
-            middleware: Some(Middleware {
-                order: spec.order,
-                types: spec.types,
-            }),
+            query_types: if spec.answers {
+                vec!["orders.CountOrders".into()]
+            } else {
+                Vec::new()
+            },
+            middlewares: spec
+                .when
+                .map(|when| Middleware {
+                    order: spec.order,
+                    types: spec.types,
+                    when: when.into(),
+                })
+                .into_iter()
+                .collect(),
+            ..Default::default()
         };
         tx.send(send(In::Hello(hello))).await.unwrap();
         let channel = transport::connect(&addr).await.unwrap();
@@ -121,13 +180,16 @@ fn middleware(env: &Env, spec: Spec, log: &Log) -> (JoinHandle<tonic::Status>, m
                     In::Ack(Ack { position: b.up_to })
                 }
                 Out::Check(call) => {
-                    log.lock().unwrap().push(spec.name.into());
+                    log.lock().unwrap().push(self::seen(spec.name, &call));
                     In::Verdict(Verdict {
                         call_id: call.call_id,
                         rejected: (spec.decide)(&call.request.unwrap(), seen),
                     })
                 }
-                Out::Query(_) => unreachable!("answers no queries"),
+                Out::Query(call) => In::Answer(QueryAnswer {
+                    call_id: call.call_id,
+                    outcome: Some(query_answer::Outcome::Response(seen.to_string().into())),
+                }),
             };
             if tx.send(send(reply)).await.is_err() {
                 return tonic::Status::ok("closed");
@@ -139,6 +201,28 @@ fn middleware(env: &Env, spec: Spec, log: &Log) -> (JoinHandle<tonic::Status>, m
 
 async fn settle_in() {
     tokio::time::sleep(Duration::from_millis(150)).await;
+}
+
+/// Waits until `log` holds `n` entries (a middleware after commands is told in the background).
+async fn logged(log: &Log, n: usize) -> Vec<String> {
+    for _ in 0..100 {
+        if log.lock().unwrap().len() >= n {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    log.lock().unwrap().clone()
+}
+
+async fn ask(
+    env: &Env,
+    q: QueryRequest,
+) -> Result<kernable_core::proto::QueryResult, tonic::Status> {
+    let channel = transport::connect(&env.addr).await.unwrap();
+    QueryServiceClient::new(channel)
+        .query(q)
+        .await
+        .map(|r| r.into_inner())
 }
 
 fn rejected_code(result: &kernable_core::proto::CommandResult) -> Option<&str> {
@@ -173,7 +257,7 @@ fn query(query_type: &str, key: &SigningKey) -> QueryRequest {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_chain_runs_in_order_and_the_first_rejection_refuses() {
     let env = start("mw-chain").await;
-    spawn_worker(&env);
+    spawn_worker(&env).await;
     let log = Log::default();
     // Registered in reverse: the chain is ordered by `order`, then by name.
     fn no_o2(r: &Request, _: usize) -> Option<Rejected> {
@@ -225,7 +309,7 @@ async fn the_chain_runs_in_order_and_the_first_rejection_refuses() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_middleware_cannot_send_what_it_checks_itself() {
     let env = start("mw-self").await;
-    spawn_worker(&env);
+    spawn_worker(&env).await;
     let log = Log::default();
     let mut orders_only = spec("guard", 0, pass);
     orders_only.types = vec!["orders.PlaceOrder".into()];
@@ -254,7 +338,7 @@ async fn a_middleware_cannot_send_what_it_checks_itself() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_missing_middleware_refuses_everything_it_covers() {
     let env = start("mw-closed").await;
-    spawn_worker(&env);
+    spawn_worker(&env).await;
     let log = Log::default();
     let mut only_orders = spec("orders-only", 0, pass);
     only_orders.types = vec!["orders.PlaceOrder".into()];
@@ -300,16 +384,17 @@ async fn a_registered_middleware_survives_a_kernel_restart() {
         let record = ListenerRecord {
             name: "rbac".into(),
             key_id: id(&key(5)),
-            middleware: Some(Middleware {
+            middlewares: vec![Middleware {
                 order: 0,
                 types: vec!["orders.*".into()],
-            }),
+                when: When::Before.into(),
+            }],
             ..Default::default()
         };
         store.save_listeners(&[record]).unwrap();
     })
     .await;
-    spawn_worker(&env);
+    spawn_worker(&env).await;
     let refused = submit(
         &env.addr,
         signed(command("c1", "PlaceOrder", "o1"), &key(1)),
@@ -337,16 +422,17 @@ async fn a_reconnected_middleware_checks_only_after_catching_up() {
         let record = ListenerRecord {
             name: "counter".into(),
             key_id: id(&key(5)),
-            middleware: Some(Middleware {
+            middlewares: vec![Middleware {
                 order: 0,
                 types: vec!["orders.AddItem".into()],
-            }),
+                when: When::Before.into(),
+            }],
             ..Default::default()
         };
         store.save_listeners(&[record]).unwrap();
     })
     .await;
-    spawn_worker(&env);
+    spawn_worker(&env).await;
     let log = Log::default();
     // A listener of a lower order that never acknowledges: the middleware gets no events.
     let mut stuck = spec("stuck", 0, pass);
@@ -395,4 +481,162 @@ async fn middleware_registration_is_allowed_per_key() {
     bad.types = vec!["orders".into()];
     let (task, _stop) = middleware(&env, bad, &log);
     assert_eq!(task.await.unwrap().code(), Code::InvalidArgument);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_middleware_after_commands_sees_every_outcome_and_holds_nothing_up() {
+    let env = start("mw-after-commands").await;
+    spawn_worker(&env).await;
+    let log = Log::default();
+    fn no_o2(r: &Request, _: usize) -> Option<Rejected> {
+        match r {
+            Request::Command(c) if c.aggregate_id == "o2" => refuse("forbidden"),
+            _ => None,
+        }
+    }
+    let _guard = middleware(&env, spec("guard", 0, no_o2), &log);
+    // Its verdict does not count: the command has happened.
+    let _audit = middleware(&env, after("audit", 0, |_, _| refuse("ignored")), &log);
+    settle_in().await;
+
+    let placed = signed(command("c1", "PlaceOrder", "o1"), &key(1));
+    let placed = submit(&env.addr, placed).await.unwrap();
+    assert_eq!(committed_versions(&placed), [1]);
+    assert_eq!(
+        logged(&log, 2).await,
+        ["guard", "audit after c1 committed 1"]
+    );
+
+    // Refused before: the middleware after still hears of it.
+    log.lock().unwrap().clear();
+    let refused = signed(command("c2", "PlaceOrder", "o2"), &key(1));
+    let refused = submit(&env.addr, refused).await.unwrap();
+    assert_eq!(rejected_code(&refused), Some("forbidden"));
+    assert_eq!(
+        logged(&log, 2).await,
+        ["guard", "audit after c2 rejected forbidden"]
+    );
+
+    // Rejected by the worker, and accepted without waiting: told once it completes.
+    log.lock().unwrap().clear();
+    let twice = signed(command("c3", "PlaceOrder", "o1"), &key(1));
+    let twice = submit(&env.addr, twice).await.unwrap();
+    assert!(rejected_code(&twice).is_some());
+    let item = signed(command("c4", "AddItem", "o1"), &key(1));
+    submit_with(&env.addr, item, Wait::Accepted).await.unwrap();
+    let mut entries = logged(&log, 4).await;
+    entries.sort();
+    assert_eq!(
+        entries,
+        [
+            "audit after c3 rejected invalid_state".to_owned(),
+            "audit after c4 committed 1".into(),
+            "guard".into(),
+            "guard".into(),
+        ]
+    );
+
+    // A resubmitted command only gets its stored result: nothing new to observe.
+    log.lock().unwrap().clear();
+    let again = signed(command("c1", "PlaceOrder", "o1"), &key(1));
+    submit(&env.addr, again).await.unwrap();
+    settle_in().await;
+    assert_eq!(*log.lock().unwrap(), ["guard"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_middleware_after_commands_holds_nothing_up() {
+    let env = start("mw-after-missing").await;
+    spawn_worker(&env).await;
+    let log = Log::default();
+    let (task, stop) = middleware(&env, after("audit", 0, pass), &log);
+    settle_in().await;
+    drop(stop);
+    task.await.unwrap();
+    settle_in().await;
+    let placed = signed(command("c1", "PlaceOrder", "o1"), &key(1));
+    let placed = submit(&env.addr, placed).await.unwrap();
+    assert_eq!(committed_versions(&placed), [1]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_middleware_after_queries_may_refuse_a_response_and_fails_closed() {
+    let env = start("mw-after-queries").await;
+    spawn_worker(&env).await;
+    let log = Log::default();
+    let _counter = middleware(&env, counter(), &log);
+    fn no_count(r: &Request, _: usize) -> Option<Rejected> {
+        match r {
+            Request::Query(q) if q.query_type == "CountOrders" => refuse("hidden"),
+            _ => None,
+        }
+    }
+    let mut filter = after("filter", 0, no_count);
+    filter.types = vec!["orders.CountOrders".into()];
+    let (task, stop) = middleware(&env, filter, &log);
+    settle_in().await;
+
+    let refused = ask(&env, query("CountOrders", &key(1))).await.unwrap();
+    assert!(
+        matches!(refused.outcome, Some(query_result::Outcome::Rejected(r)) if r.code == "hidden")
+    );
+    assert_eq!(*log.lock().unwrap(), ["filter after q1 answered 0"]);
+
+    // Away, it refuses what it covers: the response is never sent unchecked.
+    drop(stop);
+    task.await.unwrap();
+    settle_in().await;
+    let status = ask(&env, query("CountOrders", &key(1))).await.unwrap_err();
+    assert_eq!(status.code(), Code::Unavailable);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_middleware_after_queries_observes_refused_ones() {
+    let env = start("mw-after-refused").await;
+    spawn_worker(&env).await;
+    let log = Log::default();
+    let _counter = middleware(&env, counter(), &log);
+    let _guard = middleware(&env, spec("guard", 0, |_, _| refuse("forbidden")), &log);
+    let _audit = middleware(&env, after("audit", 0, pass), &log);
+    settle_in().await;
+    let refused = ask(&env, query("CountOrders", &key(1))).await.unwrap();
+    assert!(matches!(
+        refused.outcome,
+        Some(query_result::Outcome::Rejected(_))
+    ));
+    assert_eq!(
+        logged(&log, 2).await,
+        ["guard", "audit after q1 rejected forbidden"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_listener_has_at_most_one_middleware_before_and_one_after() {
+    let env = start("mw-two").await;
+    let channel = transport::connect(&env.addr).await.unwrap();
+    let (tx, rx) = mpsc::channel(4);
+    let both = |when: When| Middleware {
+        order: 0,
+        types: vec!["*".into()],
+        when: when.into(),
+    };
+    tx.send(ListenerMessage {
+        msg: Some(In::Hello(Hello {
+            protocol: kernable_core::PROTOCOL,
+            name: "double".into(),
+            key_id: id(&key(5)),
+            middlewares: vec![both(When::Before), both(When::Before)],
+            ..Default::default()
+        })),
+    })
+    .await
+    .unwrap();
+    let status = ListenerServiceClient::new(channel)
+        .listen(ReceiverStream::new(rx))
+        .await;
+    let status = match status {
+        Ok(r) => r.into_inner().message().await.unwrap_err(),
+        Err(status) => status,
+    };
+    assert_eq!(status.code(), Code::InvalidArgument, "{status:?}");
 }

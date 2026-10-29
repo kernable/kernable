@@ -1,7 +1,8 @@
 //! Listeners (read models and reactors), their queries and middleware, and subscriptions.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, BTreeSet, HashMap},
+    fmt,
     pin::Pin,
     sync::{
         Arc, Mutex, RwLock,
@@ -17,6 +18,7 @@ use kernable_core::{
         SubscribeRequest, Verdict, event_service_client::EventServiceClient,
         listener_delivery::Msg as Delivery, listener_message::Msg as Reply,
         listener_service_client::ListenerServiceClient, middleware_call, query_answer,
+        query_result,
     },
     signing,
 };
@@ -26,7 +28,8 @@ use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::{
-    BoxError, Client, Domain, HANDLING, Rejected, RequestContext, Store, StoredEvent,
+    BoxError, Client, Domain, HANDLING, Outcome, QueryOutcome, Rejected, RequestContext, Store,
+    StoredEvent,
     context::now_ms,
     domain::{decode, encode, upcast},
     log, vault,
@@ -123,7 +126,15 @@ pub enum CheckKind {
     Query,
 }
 
-/// A command or query a middleware checks before the kernel accepts or routes it.
+/// What came of the request a middleware after it checks: an [`Outcome`] for a command, a
+/// [`QueryOutcome`] for a query.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CheckOutcome {
+    Command(Outcome),
+    Query(QueryOutcome),
+}
+
+/// A command or query a middleware checks, before the kernel accepts or routes it or after.
 #[derive(Clone, Debug)]
 pub struct Check {
     pub kind: CheckKind,
@@ -139,6 +150,39 @@ pub struct Check {
     pub data: Value,
     /// Who sends it: check permissions here.
     pub request: RequestContext,
+    /// After it, what came of the request; before it, `None`.
+    pub outcome: Option<CheckOutcome>,
+}
+
+/// When a middleware runs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum When {
+    /// Checks a request before the kernel accepts or routes it; a rejection refuses it
+    /// (default).
+    #[default]
+    Before,
+    /// Gets the request's outcome too. A rejection refuses a query's response; a command's
+    /// outcome, and a rejected query, it only observes, best effort (it misses what happens
+    /// while it is away, and nobody waits for it).
+    After,
+}
+
+impl When {
+    fn wire(self) -> proto::When {
+        match self {
+            When::Before => proto::When::Before,
+            When::After => proto::When::After,
+        }
+    }
+}
+
+impl fmt::Display for When {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            When::Before => "before",
+            When::After => "after",
+        })
+    }
 }
 
 /// What a middleware checks.
@@ -150,6 +194,8 @@ pub struct MiddlewareOptions {
     /// Position in the chain: lower runs first, equal orders by listener name (default 0).
     /// Negative orders are reserved for kernable.
     pub order: i32,
+    /// Before (default) or after requests; see [`When`].
+    pub when: When,
 }
 
 impl MiddlewareOptions {
@@ -157,14 +203,25 @@ impl MiddlewareOptions {
         MiddlewareOptions {
             types: types.iter().map(|t| (*t).to_owned()).collect(),
             order: 0,
+            when: When::Before,
         }
+    }
+
+    /// Runs after requests instead of before: the handler gets their outcome too.
+    #[must_use]
+    pub fn after(mut self) -> MiddlewareOptions {
+        self.when = When::After;
+        self
     }
 }
 
 struct Settings {
     order: i32,
-    /// Position to start after on the first connect; `None`: the kernel's stored one.
+    /// Position to start after on the first connect; `None`: the kernel's stored one, or the
+    /// newest event for a new listener.
     start: Option<u64>,
+    /// Not registered with the kernel; see [`Listener::live`].
+    live: bool,
     reconnect: Duration,
     store: Option<String>,
     schema: String,
@@ -179,8 +236,8 @@ struct ListenerInner {
     domains: RwLock<HashMap<String, Domain>>,
     /// Qualified query type -> handler.
     queries: RwLock<HashMap<String, QueryHandler>>,
-    /// Middleware options with qualified types, and the handler.
-    checker: RwLock<Option<(MiddlewareOptions, CheckHandler)>>,
+    /// Middleware options with qualified types, and the handler, before and after requests.
+    middlewares: RwLock<BTreeMap<When, (MiddlewareOptions, CheckHandler)>>,
 }
 
 /// A durable, named event listener of a domain: a read model ([`Domain::read_model`]) or a
@@ -221,6 +278,7 @@ impl Listener {
                 settings: Mutex::new(Settings {
                     order,
                     start,
+                    live: false,
                     reconnect: Duration::from_secs(1),
                     store: None,
                     schema: "1".into(),
@@ -228,7 +286,7 @@ impl Listener {
                 handlers: RwLock::default(),
                 domains: RwLock::new(domains),
                 queries: RwLock::default(),
-                checker: RwLock::default(),
+                middlewares: RwLock::default(),
             }),
         }
     }
@@ -260,11 +318,35 @@ impl Listener {
     }
 
     /// Position to start after on the first connect: 0 rebuilds from the beginning (default
-    /// for read models). Reactors resume after the last acknowledged event unless given one.
-    /// Reconnects always resume after the last handled event.
+    /// for read models). Reactors resume after the last acknowledged event unless given one,
+    /// and a new one starts at the newest event, so it never reacts to what happened before it
+    /// existed. Reconnects always resume after the last handled event.
     pub fn start(&self, position: u64) -> Listener {
         self.inner.settings.lock().unwrap().start = Some(position);
         self.clone()
+    }
+
+    /// Not registered with the kernel: no stored position, always starts at the newest event,
+    /// nobody waits for it, and it is forgotten when it disconnects. For reactions that only
+    /// matter while the process runs, e.g. pushing to connected browsers. Make it live before
+    /// running it.
+    ///
+    /// # Panics
+    ///
+    /// If the listener is a middleware: a live listener cannot be one.
+    pub fn live(&self) -> Listener {
+        let middleware = !self.inner.middlewares.read().unwrap().is_empty();
+        assert!(
+            !middleware,
+            "{} is a middleware: a live listener cannot be one",
+            self.inner.name
+        );
+        self.inner.settings.lock().unwrap().live = true;
+        self.clone()
+    }
+
+    fn is_live(&self) -> bool {
+        self.inner.settings.lock().unwrap().live
     }
 
     /// Delay before reconnecting after the stream drops (default 1 s).
@@ -391,19 +473,27 @@ impl Listener {
     }
 
     /// Makes this listener a middleware: the kernel asks `handler` about every command and
-    /// query of `options.types` before accepting or routing it, in chain order, and only once
-    /// this listener has caught up with the events. Return a [`Rejected`] to refuse; any other
-    /// error refuses too. The registration is stored: while this listener is away, the kernel
-    /// refuses those requests (`kernable listeners remove` unregisters it).
+    /// query of `options.types`, before accepting or routing it (or after, see [`When`]), in
+    /// chain order, and only once this listener has caught up with the events. Return a
+    /// [`Rejected`] to refuse; any other error refuses too. After a request, the check carries
+    /// its outcome ([`Check::outcome`]). The registration is stored: while this listener is
+    /// away, the kernel refuses those requests (`kernable listeners remove` unregisters it).
+    /// A listener has at most one middleware before and one after.
     ///
     /// # Panics
     ///
-    /// If a type is not `*`, a type, a qualified type or a domain.
+    /// If a type is not `*`, a type, a qualified type or a domain, the listener has a
+    /// middleware at `options.when` already, or it is live.
     pub fn middleware<F, Fut>(&self, options: MiddlewareOptions, handler: F) -> Listener
     where
         F: Fn(Check) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(), BoxError>> + Send + 'static,
     {
+        assert!(
+            !self.is_live(),
+            "{} is live: a live listener cannot be a middleware",
+            self.inner.name
+        );
         let types = options
             .types
             .iter()
@@ -420,16 +510,82 @@ impl Listener {
                 })
             })
             .collect();
+        let when = options.when;
+        let taken = self.inner.middlewares.read().unwrap().contains_key(&when);
+        assert!(
+            !taken,
+            "{} has a middleware {when} already",
+            self.inner.name
+        );
         let options = MiddlewareOptions { types, ..options };
         let handler: CheckHandler = Arc::new(move |c| Box::pin(handler(c)));
-        *self.inner.checker.write().unwrap() = Some((options, handler));
+        self.inner
+            .middlewares
+            .write()
+            .unwrap()
+            .insert(when, (options, handler));
         self.clone()
+    }
+}
+
+/// The service a connection's workers and listeners belong to, and what it declares: the names
+/// of every listener of the connection that is not live, and the qualified types of the
+/// aggregates its workers run. Shared by the connection's clones, workers and handles.
+#[derive(Clone)]
+pub(crate) struct Service {
+    name: String,
+    declared: Arc<Mutex<BTreeSet<String>>>,
+    aggregates: Arc<Mutex<BTreeSet<String>>>,
+}
+
+impl Service {
+    pub(crate) fn new(name: String) -> Service {
+        Service {
+            name,
+            declared: Arc::default(),
+            aggregates: Arc::default(),
+        }
+    }
+
+    /// Declares a worker's aggregate, by its qualified type.
+    pub(crate) fn declare_aggregate(&self, aggregate_type: String) {
+        self.aggregates.lock().unwrap().insert(aggregate_type);
+    }
+
+    /// The service and its aggregates, as a worker declares them when it connects: none
+    /// without a service.
+    pub(crate) fn aggregate_declaration(&self) -> (String, Vec<String>) {
+        if self.name.is_empty() {
+            return (String::new(), Vec::new());
+        }
+        let declared = self.aggregates.lock().unwrap().iter().cloned().collect();
+        (self.name.clone(), declared)
+    }
+
+    pub(crate) fn declare(&self, listener: &Listener) {
+        if !listener.is_live() {
+            self.declared
+                .lock()
+                .unwrap()
+                .insert(listener.name().to_owned());
+        }
+    }
+
+    /// The service and its listeners, as a listener declares them when it connects: none
+    /// without a service.
+    fn declaration(&self) -> (String, Vec<String>) {
+        if self.name.is_empty() {
+            return (String::new(), Vec::new());
+        }
+        let declared = self.declared.lock().unwrap().iter().cloned().collect();
+        (self.name.clone(), declared)
     }
 }
 
 struct HandleInner {
     client: Client,
     listener: Listener,
+    service: Service,
     position: AtomicU64,
     store: Mutex<Option<Store>>,
     stopped: watch::Sender<bool>,
@@ -444,11 +600,12 @@ pub struct ListenerHandle {
 }
 
 impl ListenerHandle {
-    pub(crate) fn new(client: Client, listener: &Listener) -> ListenerHandle {
+    pub(crate) fn new(client: Client, listener: &Listener, service: Service) -> ListenerHandle {
         ListenerHandle {
             inner: Arc::new(HandleInner {
                 client,
                 listener: listener.clone(),
+                service,
                 position: AtomicU64::new(0),
                 store: Mutex::default(),
                 stopped: watch::Sender::new(false),
@@ -534,20 +691,37 @@ impl ListenerHandle {
         let client = &inner.client;
         let (tx, rx) = mpsc::channel(1024);
         let msg = |m: Reply| ListenerMessage { msg: Some(m) };
-        let order = def.settings.lock().unwrap().order;
-        let middleware = def
-            .checker
+        let (order, live) = {
+            let s = def.settings.lock().unwrap();
+            (s.order, s.live)
+        };
+        // A live listener takes no part in its service's declaration.
+        let (service, declared) = if live {
+            (String::new(), Vec::new())
+        } else {
+            inner.service.declaration()
+        };
+        let middlewares: Vec<Middleware> = def
+            .middlewares
             .read()
             .unwrap()
-            .as_ref()
+            .values()
             .map(|(o, _)| Middleware {
                 order: o.order,
                 types: o.types.clone(),
-            });
+                when: o.when.wire().into(),
+            })
+            .collect();
         let event_types: Vec<String> = def.handlers.read().unwrap().keys().cloned().collect();
         let query_types: Vec<String> = def.queries.read().unwrap().keys().cloned().collect();
         let what = format!("listener {}", def.name);
-        let checks = middleware.as_ref().map(|m| m.types.clone());
+        let types = |when: When| {
+            middlewares
+                .iter()
+                .find(|m| m.when() == when.wire())
+                .map(|m| m.types.clone())
+        };
+        let (checks, after) = (types(When::Before), types(When::After));
         let hello = Hello {
             name: def.name.clone(),
             key_id: client.key_id.clone(),
@@ -555,8 +729,11 @@ impl ListenerHandle {
             event_types: event_types.clone(),
             from_position: start,
             query_types: query_types.clone(),
-            middleware,
+            middlewares,
             protocol: PROTOCOL,
+            service,
+            declared,
+            live,
         };
         tx.send(msg(Reply::Hello(hello))).await?;
         let mut service = ListenerServiceClient::new(client.channel.clone());
@@ -582,6 +759,7 @@ impl ListenerHandle {
                             &event_types,
                             &query_types,
                             checks.as_deref(),
+                            after.as_deref(),
                         )
                     });
                     inner.ready.send_replace(true);
@@ -631,13 +809,9 @@ impl ListenerHandle {
                     })
                 }
                 Some(Delivery::Check(c)) => {
-                    let rejected = HANDLING
-                        .scope(def.name.clone(), self.verdict(c.request, c.vault))
-                        .await;
-                    Reply::Verdict(Verdict {
-                        call_id: c.call_id,
-                        rejected,
-                    })
+                    let call_id = c.call_id.clone();
+                    let rejected = HANDLING.scope(def.name.clone(), self.verdict(c)).await;
+                    Reply::Verdict(Verdict { call_id, rejected })
                 }
                 None => continue,
             };
@@ -723,26 +897,39 @@ impl ListenerHandle {
         }
     }
 
-    async fn verdict(
-        &self,
-        request: Option<middleware_call::Request>,
-        vault: Vec<proto::VaultValue>,
-    ) -> Option<proto::Rejected> {
+    async fn verdict(&self, call: proto::MiddlewareCall) -> Option<proto::Rejected> {
+        let when = match call.when() {
+            proto::When::Before => When::Before,
+            proto::When::After => When::After,
+        };
         let checker = self
             .def()
-            .checker
+            .middlewares
             .read()
             .unwrap()
-            .as_ref()
+            .get(&when)
             .map(|(_, h)| Arc::clone(h));
         let Some(checker) = checker else {
             return Some(
-                Rejected::new("not a middleware")
+                Rejected::new(format!("no middleware {when}"))
                     .code("not_a_middleware")
                     .to_wire(),
             );
         };
-        let check = match request {
+        // After calls carry no vault values.
+        let outcome = match (when, call.outcome) {
+            (When::Before, _) => None,
+            (When::After, Some(outcome)) => Some(check_outcome(outcome)),
+            (When::After, None) => {
+                return Some(
+                    Rejected::new("no outcome to check")
+                        .code("middleware_error")
+                        .to_wire(),
+                );
+            }
+        };
+        let vault = call.vault;
+        let check = match call.request {
             Some(middleware_call::Request::Command(x)) => Check {
                 kind: CheckKind::Command,
                 id: x.command_id,
@@ -753,6 +940,7 @@ impl ListenerHandle {
                 aggregate_id: Some(x.aggregate_id),
                 data: vault::unseal(decode(&x.payload), &vault).0,
                 request: RequestContext::from_wire(x.context.as_ref()),
+                outcome,
             },
             Some(middleware_call::Request::Query(q)) => Check {
                 kind: CheckKind::Query,
@@ -764,6 +952,7 @@ impl ListenerHandle {
                 aggregate_id: None,
                 data: decode(&q.payload),
                 request: RequestContext::from_wire(q.context.as_ref()),
+                outcome,
             },
             None => {
                 return Some(
@@ -777,6 +966,32 @@ impl ListenerHandle {
             Ok(()) => None,
             Err(e) => Some(Rejected::of(&e, "middleware_error").to_wire()),
         }
+    }
+}
+
+/// What came of the request a middleware after it checks.
+fn check_outcome(outcome: middleware_call::Outcome) -> CheckOutcome {
+    match outcome {
+        middleware_call::Outcome::CommandResult(r) => CheckOutcome::Command(match r.outcome {
+            Some(proto::command_result::Outcome::Committed(c)) => Outcome::Committed(
+                c.events
+                    .into_iter()
+                    .map(|e| StoredEvent::from_wire(e, &[]))
+                    .collect(),
+            ),
+            Some(proto::command_result::Outcome::Rejected(r)) => {
+                Outcome::Rejected(Rejected::from_wire(r))
+            }
+            // Accepted only queues a command: an after call never carries it.
+            _ => Outcome::Rejected(Rejected::new("no outcome")),
+        }),
+        middleware_call::Outcome::QueryResult(r) => CheckOutcome::Query(match r.outcome {
+            Some(query_result::Outcome::Response(data)) => QueryOutcome::Answered(decode(&data)),
+            Some(query_result::Outcome::Rejected(r)) => {
+                QueryOutcome::Rejected(Rejected::from_wire(r))
+            }
+            None => QueryOutcome::Rejected(Rejected::new("no outcome")),
+        }),
     }
 }
 

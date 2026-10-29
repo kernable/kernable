@@ -70,13 +70,14 @@ fn on_disk(env: &Env, needle: &str) -> bool {
 async fn commands_keep_personal_and_secret_values_in_the_vault() {
     let env = start_custom("vault-commands", with_vault).await;
     let (tx, mut vaults) = mpsc::unbounded_channel();
-    tokio::spawn(run_worker(
+    start_worker(
         env.addr.clone(),
         TestWorker {
             vaults: Some(tx),
             ..TestWorker::honest()
         },
-    ));
+    )
+    .await;
 
     let email = vault_value("k-1", "max@firma.de");
     let password = vault_value("", "correct horse");
@@ -218,7 +219,7 @@ async fn an_erasing_event_deletes_a_subject_and_its_snapshots_everywhere() {
     );
     env.kernel.grant(eraser).unwrap();
     let (tx, mut vaults) = mpsc::unbounded_channel();
-    tokio::spawn(run_worker(env.addr.clone(), customer_worker(Some(tx))));
+    start_worker(env.addr.clone(), customer_worker(Some(tx))).await;
     let (reader_tx, mut reader) = mpsc::unbounded_channel();
     let (other_tx, mut other) = mpsc::unbounded_channel();
     listen(&env, "reader", 5, reader_tx);
@@ -289,7 +290,7 @@ async fn an_erasing_event_deletes_a_subject_and_its_snapshots_everywhere() {
 #[tokio::test(flavor = "multi_thread")]
 async fn only_allowed_workers_may_erase() {
     let env = start_custom("vault-no-erase", with_vault).await;
-    tokio::spawn(run_worker(env.addr.clone(), customer_worker(None)));
+    start_worker(env.addr.clone(), customer_worker(None)).await;
     let place = order("c1", "PlaceOrder", "o1", r#"{"customer":"k-1"}"#);
     submit(&env.addr, place).await.unwrap();
     let erase = order("c2", "AddItem", "o1", r#"{"erase":"k-1"}"#);

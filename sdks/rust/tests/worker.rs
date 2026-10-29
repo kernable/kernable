@@ -13,11 +13,12 @@ use std::{
 
 use common::{TestKernel, eventually};
 use kernable::{
-    CommandContext, Error, FoldEvent, NewEvent, Outcome, Query, Rejected, RequestContext,
+    CommandContext, Error, FoldEvent, Kernable, NewEvent, Outcome, Query, Rejected, RequestContext,
     StoredEvent, Submit, SubscribeOptions, Timestamp, Wait, Worker, domain,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tonic::Code;
 
 fn spawn(worker: &Worker) -> tokio::task::JoinHandle<()> {
     let worker = worker.clone();
@@ -624,4 +625,57 @@ async fn queries_without_a_read_model_are_refused() {
     let kernable = kernel.client();
     let answer: Result<serde_json::Value, _> = kernable.query(Query::new("shop", "GetCart")).await;
     assert!(answer.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn commands_need_a_registered_aggregate_and_a_service_unregisters_those_it_no_longer_declares()
+ {
+    let kernel = TestKernel::new(&["shop.*"], &[]);
+    kernel.start().await;
+    let shop = domain("shop");
+    let cart = shop.aggregate("Cart", 0i64);
+    cart.command("AddItem", |_, _: serde_json::Value, _cmd, _ctx| {
+        Ok(vec![NewEvent::new("ItemAdded", ())])
+    });
+    let wishlist = shop.aggregate("Wishlist", 0i64);
+    wishlist.command("Wish", |_, _: serde_json::Value, _cmd, _ctx| {
+        Ok(vec![NewEvent::new("Wished", ())])
+    });
+    async fn submit(k: &Kernable, aggregate: &str, command: &str) -> Result<Outcome, Error> {
+        k.submit(Submit::new("shop", aggregate, "x1", command))
+            .await
+    }
+    let not_found = |r: Result<Outcome, Error>| {
+        matches!(&r, Err(Error::Status(s)) if s.code() == Code::NotFound)
+            .then_some(())
+            .ok_or(r)
+    };
+
+    // No worker ever registered the cart: the kernel refuses its commands.
+    let v1 = Kernable::new(kernel.options().service("shop")).unwrap();
+    not_found(submit(&v1, "Cart", "AddItem").await).unwrap();
+
+    // v1 of the service runs both aggregates.
+    let worker = v1.worker(&cart).aggregate(&wishlist);
+    let running = spawn(&worker);
+    worker.ready().await;
+    assert!(submit(&v1, "Cart", "AddItem").await.unwrap().is_committed());
+    assert!(
+        submit(&v1, "Wishlist", "Wish")
+            .await
+            .unwrap()
+            .is_committed()
+    );
+    worker.stop();
+    running.await.unwrap();
+
+    // v2 has no wishlist any more: it is unregistered, while the cart's commands still run.
+    let v2 = Kernable::new(kernel.options().service("shop")).unwrap();
+    let worker = v2.worker(&cart);
+    let running = spawn(&worker);
+    worker.ready().await;
+    not_found(submit(&v2, "Wishlist", "Wish").await).unwrap();
+    assert!(submit(&v2, "Cart", "AddItem").await.unwrap().is_committed());
+    worker.stop();
+    running.await.unwrap();
 }

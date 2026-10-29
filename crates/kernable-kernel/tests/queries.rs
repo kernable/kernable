@@ -36,7 +36,7 @@ fn read_model(env: &Env, name: &str, key: SigningKey, ack: bool) -> JoinHandle<t
             event_types: vec!["orders.OrderPlaced".into()],
             from_position: Some(0),
             query_types: vec!["orders.CountOrders".into(), "orders.Fail".into()],
-            middleware: None,
+            ..Default::default()
         };
         tx.send(send(In::Hello(hello))).await.unwrap();
         let channel = transport::connect(&addr).await.unwrap();
@@ -144,7 +144,7 @@ async fn submit(
 #[tokio::test(flavor = "multi_thread")]
 async fn a_query_reaches_the_read_model_and_sees_its_own_writes() {
     let env = start("query-answer").await;
-    spawn_worker(&env);
+    spawn_worker(&env).await;
     let _model = read_model(&env, "orders", key(5), true);
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -197,7 +197,7 @@ async fn queries_are_signed_allowed_per_key_and_need_a_read_model() {
 #[tokio::test(flavor = "multi_thread")]
 async fn min_position_waits_for_the_read_model_to_catch_up() {
     let env = start("query-position").await;
-    spawn_worker(&env);
+    spawn_worker(&env).await;
     // This read model never acknowledges, so its position stays 0.
     let _model = read_model(&env, "orders", key(5), false);
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -221,7 +221,7 @@ async fn min_position_waits_for_the_read_model_to_catch_up() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_read_model_is_never_asked_from_its_own_handler() {
     let env = start("query-self").await;
-    spawn_worker(&env);
+    spawn_worker(&env).await;
     let _counts = read_model(&env, "counts", key(5), true);
     place(&env, "c1", "o1").await;
 
@@ -254,7 +254,7 @@ async fn a_read_model_that_goes_away_fails_the_query_at_once() {
         event_types: Vec::new(),
         from_position: None,
         query_types: vec!["orders.CountOrders".into()],
-        middleware: None,
+        ..Default::default()
     };
     tx.send(ListenerMessage {
         msg: Some(In::Hello(hello)),

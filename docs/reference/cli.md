@@ -31,8 +31,14 @@ usage:
                                           signed by a revoked key (SUSPECT lines)
   kernable certs new <dir> <client>...    writes a development CA, a kernel certificate and one
                                           client certificate per name, for mTLS
-  kernable listeners <store>              lists registered listeners with order, position and middleware
+  kernable listeners <store>              lists registered listeners with order, position, middleware
+                                          and when they were last seen
   kernable listeners remove <store> <name>  removes a listener, and its middleware (kernel stopped)
+  kernable workers <store>                lists registered aggregates with their command types and
+                                          when a worker for them was last seen
+  kernable workers remove <store> <domain.Aggregate>
+                                          unregisters an aggregate: its commands are refused (kernel
+                                          stopped)
   kernable vault rekey <vault> <old.key> <new.key>
                                           re-encrypts the vault with a new key (kernel stopped)
   kernable schemas <store>                lists the highest stored payload version per event type

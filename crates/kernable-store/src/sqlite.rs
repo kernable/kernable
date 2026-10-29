@@ -14,12 +14,12 @@ use std::{
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
-        Attribute, Command, CommandResult, Committed, Event, ListenerRecord, NewEvent, Rejected,
-        RequestContext, RevocationRecord, Signature, command_result::Outcome,
+        Attribute, Command, CommandResult, Committed, Event, ListenerRecord, Middleware, NewEvent,
+        Rejected, RequestContext, RevocationRecord, Signature, When, WorkerRecord,
+        command_result::Outcome,
     },
     signing::{self, GENESIS},
 };
-use prost::Message;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::{
@@ -76,12 +76,35 @@ CREATE TABLE IF NOT EXISTS checkpoints (
     created_at      INTEGER NOT NULL
 ) STRICT;
 CREATE TABLE IF NOT EXISTS revocations (
-    key_id TEXT PRIMARY KEY,
-    record BLOB NOT NULL -- encoded RevocationRecord
+    key_id        TEXT PRIMARY KEY,
+    since         INTEGER NOT NULL, -- from then on its signatures are suspect (ms since epoch)
+    created_at    INTEGER NOT NULL,
+    kernel_key_id TEXT    NOT NULL,
+    kernel_sig    BLOB    NOT NULL
 ) STRICT;
 CREATE TABLE IF NOT EXISTS listeners (
-    name   TEXT PRIMARY KEY,
-    record BLOB NOT NULL -- encoded ListenerRecord
+    name        TEXT PRIMARY KEY,
+    key_id      TEXT    NOT NULL, -- only this key (or its successor) may resume it
+    ordering    INTEGER NOT NULL, -- delivery order: lower first
+    event_types TEXT    NOT NULL, -- comma-separated patterns; empty: all the key may read
+    position    INTEGER NOT NULL, -- last acknowledged global position
+    service     TEXT    NOT NULL, -- the service that declares it; empty: none
+    retired     INTEGER NOT NULL, -- 1: its service no longer declares it, nobody waits for it
+    last_seen   INTEGER NOT NULL  -- ms since epoch: last connected, disconnected or running at a flush
+) STRICT;
+CREATE TABLE IF NOT EXISTS middlewares (
+    listener TEXT    NOT NULL REFERENCES listeners (name) ON DELETE CASCADE,
+    phase    TEXT    NOT NULL, -- before | after
+    ordering INTEGER NOT NULL, -- position in the chain: lower first
+    types    TEXT    NOT NULL, -- comma-separated patterns of command and query types
+    PRIMARY KEY (listener, phase)
+) STRICT;
+CREATE TABLE IF NOT EXISTS workers (
+    aggregate_type TEXT PRIMARY KEY, -- qualified: shop.Cart
+    key_id         TEXT    NOT NULL, -- only this key (or its successor) may run it
+    command_types  TEXT    NOT NULL, -- comma-separated qualified command types
+    service        TEXT    NOT NULL, -- the service that declares it; empty: none
+    last_seen      INTEGER NOT NULL  -- ms since epoch: a worker for it last connected or disconnected
 ) STRICT;
 ";
 
@@ -112,6 +135,7 @@ impl SqliteStore {
 
     /// Creates the tables of a new database; refuses one of another data format.
     fn init(conn: Connection) -> Result<Self> {
+        conn.pragma_update(None, "foreign_keys", true)?;
         let format: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         let tables: u32 = conn.query_row("SELECT COUNT(*) FROM sqlite_master", [], |r| r.get(0))?;
         match (format, tables) {
@@ -370,25 +394,144 @@ impl Store for SqliteStore {
 
     fn listeners(&self) -> Result<Vec<ListenerRecord>> {
         let conn = self.conn();
-        let mut stmt = conn.prepare("SELECT record FROM listeners ORDER BY name")?;
-        let rows = stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
-        rows.map(|bytes| Ok(ListenerRecord::decode(bytes?.as_slice())?))
-            .collect()
+        let mut stmt = conn.prepare(
+            "SELECT name, key_id, ordering, event_types, position, service, retired, last_seen
+             FROM listeners
+             ORDER BY name",
+        )?;
+        let mut listeners = stmt
+            .query_map([], |r| {
+                Ok(ListenerRecord {
+                    name: r.get(0)?,
+                    key_id: r.get(1)?,
+                    order: r.get(2)?,
+                    event_types: split_list(r.get(3)?),
+                    position: r.get(4)?,
+                    removed: false,
+                    middlewares: Vec::new(),
+                    service: r.get(5)?,
+                    retired: r.get(6)?,
+                    last_seen: r.get(7)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut stmt = conn.prepare(
+            "SELECT phase, ordering, types FROM middlewares WHERE listener = ?1 ORDER BY phase DESC",
+        )?;
+        for l in &mut listeners {
+            l.middlewares = stmt
+                .query_map([&l.name], |r| {
+                    let phase: String = r.get(0)?;
+                    let when = if phase == "after" {
+                        When::After
+                    } else {
+                        When::Before
+                    };
+                    Ok(Middleware {
+                        order: r.get(1)?,
+                        types: split_list(r.get(2)?),
+                        when: when.into(),
+                    })
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+        }
+        Ok(listeners)
     }
 
     fn save_listeners(&self, listeners: &[ListenerRecord]) -> Result<()> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for l in listeners {
+            // Removing a listener removes its middlewares too (ON DELETE CASCADE).
+            tx.execute("DELETE FROM middlewares WHERE listener = ?1", [&l.name])?;
             if l.removed {
                 tx.execute("DELETE FROM listeners WHERE name = ?1", [&l.name])?;
-            } else {
+                continue;
+            }
+            tx.execute(
+                "INSERT INTO listeners
+                     (name, key_id, ordering, event_types, position, service, retired, last_seen)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT (name) DO UPDATE SET key_id = excluded.key_id,
+                     ordering = excluded.ordering, event_types = excluded.event_types,
+                     position = excluded.position, service = excluded.service,
+                     retired = excluded.retired, last_seen = excluded.last_seen",
+                params![
+                    l.name,
+                    l.key_id,
+                    l.order,
+                    l.event_types.join(","),
+                    l.position,
+                    l.service,
+                    l.retired,
+                    l.last_seen
+                ],
+            )?;
+            for m in &l.middlewares {
+                let phase = if m.when() == When::After {
+                    "after"
+                } else {
+                    "before"
+                };
                 tx.execute(
-                    "INSERT INTO listeners (name, record) VALUES (?1, ?2)
-                     ON CONFLICT (name) DO UPDATE SET record = excluded.record",
-                    params![l.name, l.encode_to_vec()],
+                    "INSERT INTO middlewares (listener, phase, ordering, types)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![l.name, phase, m.order, m.types.join(",")],
                 )?;
             }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    // ---- workers ----
+
+    fn workers(&self) -> Result<Vec<WorkerRecord>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT aggregate_type, key_id, command_types, service, last_seen FROM workers
+             ORDER BY aggregate_type",
+        )?;
+        let workers = stmt
+            .query_map([], |r| {
+                Ok(WorkerRecord {
+                    aggregate_type: r.get(0)?,
+                    key_id: r.get(1)?,
+                    command_types: split_list(r.get(2)?),
+                    service: r.get(3)?,
+                    last_seen: r.get(4)?,
+                    removed: false,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(workers)
+    }
+
+    fn save_workers(&self, workers: &[WorkerRecord]) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for w in workers {
+            if w.removed {
+                tx.execute(
+                    "DELETE FROM workers WHERE aggregate_type = ?1",
+                    [&w.aggregate_type],
+                )?;
+                continue;
+            }
+            tx.execute(
+                "INSERT INTO workers (aggregate_type, key_id, command_types, service, last_seen)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT (aggregate_type) DO UPDATE SET key_id = excluded.key_id,
+                     command_types = excluded.command_types, service = excluded.service,
+                     last_seen = excluded.last_seen",
+                params![
+                    w.aggregate_type,
+                    w.key_id,
+                    w.command_types.join(","),
+                    w.service,
+                    w.last_seen
+                ],
+            )?;
         }
         tx.commit()?;
         Ok(())
@@ -434,9 +577,17 @@ impl Store for SqliteStore {
     }
 
     fn revoke(&self, revocation: &RevocationRecord) -> Result<()> {
+        let sig = revocation.kernel_sig.as_ref();
         self.conn().execute(
-            "INSERT OR IGNORE INTO revocations (key_id, record) VALUES (?1, ?2)",
-            params![revocation.key_id, revocation.encode_to_vec()],
+            "INSERT OR IGNORE INTO revocations (key_id, since, created_at, kernel_key_id, kernel_sig)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                revocation.key_id,
+                revocation.since,
+                revocation.created_at,
+                sig.map(|s| &s.key_id),
+                sig.map(|s| &s.sig),
+            ],
         )?;
         Ok(())
     }
@@ -471,13 +622,22 @@ fn read_checkpoints(conn: &Connection, at: Option<u64>) -> Result<Vec<Checkpoint
 }
 
 fn read_revocations(conn: &Connection) -> Result<Vec<RevocationRecord>> {
-    let mut stmt = conn.prepare("SELECT record FROM revocations ORDER BY rowid")?;
-    let rows = stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
-    let mut out = Vec::new();
-    for bytes in rows {
-        out.push(RevocationRecord::decode(bytes?.as_slice())?);
-    }
-    Ok(out)
+    let mut stmt = conn.prepare(
+        "SELECT key_id, since, created_at, kernel_key_id, kernel_sig FROM revocations
+         ORDER BY rowid",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(RevocationRecord {
+            key_id: r.get(0)?,
+            since: r.get(1)?,
+            created_at: r.get(2)?,
+            kernel_sig: Some(Signature {
+                key_id: r.get(3)?,
+                sig: r.get(4)?,
+            }),
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 fn verify_tables(conn: &Connection, kernel_key_ids: &[String]) -> Result<Report> {

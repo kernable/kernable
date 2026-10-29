@@ -11,10 +11,11 @@ use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
         ChallengeResponse, Hello, ListenerMessage, Register, RevokeRequest, SubmitRequest, Wait,
-        WorkerMessage, command_result::Outcome, command_service_client::CommandServiceClient,
-        listener_delivery::Msg as Out, listener_message::Msg as In,
-        listener_service_client::ListenerServiceClient, trust_service_client::TrustServiceClient,
-        worker_gateway_client::WorkerGatewayClient, worker_message,
+        WorkerAggregate, WorkerMessage, command_result::Outcome,
+        command_service_client::CommandServiceClient, listener_delivery::Msg as Out,
+        listener_message::Msg as In, listener_service_client::ListenerServiceClient,
+        trust_service_client::TrustServiceClient, worker_gateway_client::WorkerGatewayClient,
+        worker_message,
     },
     signing, transport,
 };
@@ -61,7 +62,7 @@ async fn revoke(env: &Env, key_id: &str, since: i64) {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_revoked_key_is_refused_at_once_and_what_it_signed_is_flagged() {
     let env = start("keys-revoke").await;
-    let worker = tokio::spawn(run_worker(env.addr.clone(), TestWorker::honest()));
+    let worker = start_worker(env.addr.clone(), TestWorker::honest()).await;
     // Key 8 submits a command before it is stolen, and one after.
     env.kernel
         .grant(grant(&key(8), &[("submit", &["*"])]))
@@ -119,7 +120,10 @@ async fn commands_of_a_revoked_client_that_wait_in_the_queue_are_rejected() {
     env.kernel
         .grant(grant(&key(8), &[("submit", &["*"])]))
         .unwrap();
-    // No worker yet: the command waits in the queue.
+    // The worker is away: the command waits in the queue.
+    start_worker(env.addr.clone(), TestWorker::honest())
+        .await
+        .abort();
     let queued = signed(command("c1", "PlaceOrder", "o1"), &key(8));
     let accepted = submit_with(&env.addr, queued.clone(), Wait::Accepted).await;
     assert!(matches!(
@@ -128,7 +132,7 @@ async fn commands_of_a_revoked_client_that_wait_in_the_queue_are_rejected() {
     ));
     revoke(&env, &id(&key(8)), now_ms() - 60_000).await;
 
-    spawn_worker(&env);
+    spawn_worker(&env).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     let store = kernable_store::open_read_only(&env.store).unwrap();
     let result = store.result("c1").unwrap().unwrap();
@@ -141,7 +145,7 @@ async fn commands_of_a_revoked_client_that_wait_in_the_queue_are_rejected() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_newer_grant_takes_rights_away_without_a_restart() {
     let env = start("keys-narrower").await;
-    spawn_worker(&env);
+    spawn_worker(&env).await;
     let place = signed(command("c1", "PlaceOrder", "o1"), &key(1));
     assert_eq!(
         committed_versions(&submit(&env.addr, place).await.unwrap()),
@@ -184,7 +188,10 @@ async fn grants_must_be_signed_by_a_root_key_for_the_presenting_key() {
         protocol: kernable_core::PROTOCOL,
         worker_id: "w".into(),
         key_id: id(&key(2)),
-        command_types: vec!["orders.PlaceOrder".into()],
+        aggregates: vec![WorkerAggregate {
+            aggregate_type: "orders.Order".into(),
+            command_types: vec!["orders.PlaceOrder".into()],
+        }],
         ..Default::default()
     };
     tx.send(WorkerMessage {
@@ -262,7 +269,7 @@ async fn a_listener_moves_to_its_successor_key_and_keeps_its_place() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_kernel_key_can_change() {
     let env = start("keys-kernel").await;
-    spawn_worker(&env);
+    spawn_worker(&env).await;
     let place = signed(command("c1", "PlaceOrder", "o1"), &key(1));
     submit(&env.addr, place).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await; // a checkpoint with key 3
@@ -314,7 +321,7 @@ async fn sighup_reads_the_kernel_key_of_the_running_kernel_again() {
         .unwrap();
     wait_for(&addr).await;
     // The worker and the client present their grants, as the SDKs do.
-    tokio::spawn(run_worker(addr.clone(), TestWorker::honest()));
+    start_worker(addr.clone(), TestWorker::honest()).await;
     let place = signed(command("c1", "PlaceOrder", "o1"), &key(1));
     assert_eq!(
         committed_versions(&submit(&addr, place).await.unwrap()),
@@ -361,7 +368,8 @@ async fn start_dev_creates_keys_and_a_grant_that_allows_everything_and_turns_the
     assert!(dir.join("vault.key").exists());
     assert!(dir.join("vault.db").exists(), "the vault is on");
 
-    // app.key, with the app.grant next to it, may submit anything.
+    // app.key, with the app.grant next to it, may submit anything: it passes the grant check
+    // and is refused only because no worker registered the aggregate.
     let app = signing::read_signing_key(dir.join("app.key")).unwrap();
     let grant = std::fs::read_to_string(dir.join("app.grant")).unwrap();
     let mut request = tonic::Request::new(SubmitRequest {
@@ -374,15 +382,11 @@ async fn start_dev_creates_keys_and_a_grant_that_allows_everything_and_turns_the
         .metadata_mut()
         .insert("kernable-grant", grant.trim().parse().unwrap());
     let channel = transport::connect(&addr).await.unwrap();
-    let result = CommandServiceClient::new(channel)
+    let status = CommandServiceClient::new(channel)
         .submit(request)
         .await
-        .unwrap()
-        .into_inner();
-    assert!(
-        matches!(result.outcome, Some(Outcome::Accepted(_))),
-        "{result:?}"
-    );
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::NotFound, "{status:?}");
     let _ = kernel.kill();
     let _ = kernel.wait();
     let _ = std::fs::remove_dir_all(&dir);

@@ -5,7 +5,7 @@ With `--metrics-listen` set, the kernel serves Prometheus metrics at `/metrics`,
 ## Health checks
 
 - **Liveness:** `GET /health` answers 200 while the process runs.
-- **Readiness:** `GET /ready` answers 200 once every registered listener is connected and has caught up, and 503 with the missing listeners otherwise. Use it to gate traffic and deploys.
+- **Readiness:** `GET /ready` answers 200 once every registered aggregate has a worker connected and every registered listener is connected and has caught up, and 503 with the missing workers or listeners otherwise. Use it to gate traffic and deploys.
 
 ## Alerts worth having
 

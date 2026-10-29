@@ -46,10 +46,7 @@ fn snapshot_version(env: &Env) -> Option<u64> {
 async fn workers_get_the_latest_snapshot_and_only_the_events_after_it() {
     let env = start("snap-latest").await;
     let (tx, mut executions) = mpsc::unbounded_channel();
-    tokio::spawn(run_worker(
-        env.addr.clone(),
-        worker(Behavior::Snapshots, tx),
-    ));
+    start_worker(env.addr.clone(), worker(Behavior::Snapshots, tx)).await;
 
     run(&env, 0..4).await;
     let seen: Vec<_> = std::iter::from_fn(|| executions.try_recv().ok()).collect();
@@ -64,19 +61,13 @@ async fn workers_get_the_latest_snapshot_and_only_the_events_after_it() {
 async fn a_stale_snapshot_is_dropped_and_the_command_runs_with_all_events() {
     let env = start("snap-stale").await;
     let (tx, mut executions) = mpsc::unbounded_channel();
-    let first = tokio::spawn(run_worker(
-        env.addr.clone(),
-        worker(Behavior::Snapshots, tx.clone()),
-    ));
+    let first = start_worker(env.addr.clone(), worker(Behavior::Snapshots, tx.clone())).await;
     run(&env, 0..2).await;
     first.abort();
     while executions.try_recv().is_ok() {}
 
     // A new worker version cannot read the old snapshot; it gets the full history instead.
-    tokio::spawn(run_worker(
-        env.addr.clone(),
-        worker(Behavior::StaleSnapshots, tx),
-    ));
+    start_worker(env.addr.clone(), worker(Behavior::StaleSnapshots, tx)).await;
     run(&env, 2..3).await;
     let seen: Vec<_> = std::iter::from_fn(|| executions.try_recv().ok()).collect();
     assert_eq!(seen, [(Some(2), 0), (None, 2)]);
@@ -88,10 +79,7 @@ async fn a_stale_snapshot_is_dropped_and_the_command_runs_with_all_events() {
 async fn a_forged_snapshot_ends_the_session_and_nothing_is_committed() {
     let env = start("snap-forged").await;
     let (tx, _executions) = mpsc::unbounded_channel();
-    let forger = tokio::spawn(run_worker(
-        env.addr.clone(),
-        worker(Behavior::ForgeSnapshot, tx),
-    ));
+    let forger = start_worker(env.addr.clone(), worker(Behavior::ForgeSnapshot, tx)).await;
     let addr = env.addr.clone();
     let pending = tokio::spawn(async move {
         submit(&addr, signed(command("c0", "PlaceOrder", "o1"), &key(1))).await
@@ -100,7 +88,7 @@ async fn a_forged_snapshot_ends_the_session_and_nothing_is_committed() {
     assert_eq!(status.code(), tonic::Code::Unauthenticated);
 
     // An honest worker takes over; the forged snapshot was never stored.
-    spawn_worker(&env);
+    spawn_worker(&env).await;
     assert_eq!(committed_versions(&pending.await.unwrap().unwrap()), [1]);
     assert_eq!(snapshot_version(&env), None);
     assert!(verify(&env).is_ok());

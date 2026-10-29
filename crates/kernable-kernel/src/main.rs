@@ -9,8 +9,9 @@ use std::{
 
 use kernable_core::{
     proto::{
-        Command, ListenerRecord, Permission, RevokeRequest, SubmitRequest, command_result::Outcome,
-        command_service_client::CommandServiceClient, trust_service_client::TrustServiceClient,
+        Command, ListenerRecord, Permission, RevokeRequest, SubmitRequest, When, WorkerRecord,
+        command_result::Outcome, command_service_client::CommandServiceClient,
+        trust_service_client::TrustServiceClient,
     },
     signing, transport,
 };
@@ -44,8 +45,14 @@ const USAGE: &str = "usage:
                                           signed by a revoked key (SUSPECT lines)
   kernable certs new <dir> <client>...    writes a development CA, a kernel certificate and one
                                           client certificate per name, for mTLS
-  kernable listeners <store>              lists registered listeners with order, position and middleware
+  kernable listeners <store>              lists registered listeners with order, position, middleware
+                                          and when they were last seen
   kernable listeners remove <store> <name>  removes a listener, and its middleware (kernel stopped)
+  kernable workers <store>                lists registered aggregates with their command types and
+                                          when a worker for them was last seen
+  kernable workers remove <store> <domain.Aggregate>
+                                          unregisters an aggregate: its commands are refused (kernel
+                                          stopped)
   kernable vault rekey <vault> <old.key> <new.key>
                                           re-encrypts the vault with a new key (kernel stopped)
   kernable schemas <store>                lists the highest stored payload version per event type
@@ -126,6 +133,8 @@ async fn main() -> ExitCode {
         ["schemas", store] => schemas(store),
         ["migrate", store] => migrate(store),
         ["listeners", "remove", store, name] => remove_listener(store, name),
+        ["workers", store] => workers(store),
+        ["workers", "remove", store, aggregate] => remove_worker(store, aggregate),
         [
             "submit",
             addr,
@@ -568,14 +577,72 @@ fn listeners(store: &str) -> Result<bool> {
             [] => "*".to_owned(),
             types => types.join(","),
         };
-        let middleware = l.middleware.map_or(String::new(), |m| {
-            format!(" middleware order {} checks {}", m.order, m.types.join(","))
-        });
+        let middleware: String = l
+            .middlewares
+            .iter()
+            .map(|m| {
+                let when = if m.when() == When::After {
+                    "after"
+                } else {
+                    "before"
+                };
+                format!(
+                    " middleware {when} order {} checks {}",
+                    m.order,
+                    m.types.join(",")
+                )
+            })
+            .collect();
+        let service = match (l.service.as_str(), l.retired) {
+            ("", _) => String::new(),
+            (service, false) => format!(" service {service}"),
+            (service, true) => format!(" service {service} (retired)"),
+        };
         println!(
-            "{} order {} position {} types {types} key {}{middleware}",
-            l.name, l.order, l.position, l.key_id
+            "{} order {} position {} types {types} key {}{service}{middleware} last seen {}",
+            l.name,
+            l.order,
+            l.position,
+            l.key_id,
+            config::utc(l.last_seen)
         );
     }
+    Ok(true)
+}
+
+fn workers(store: &str) -> Result<bool> {
+    for w in kernable_store::open_read_only(store)?.workers()? {
+        let service = match w.service.as_str() {
+            "" => String::new(),
+            service => format!(" service {service}"),
+        };
+        println!(
+            "{} commands {} key {}{service} last seen {}",
+            w.aggregate_type,
+            w.command_types.join(","),
+            w.key_id,
+            config::utc(w.last_seen)
+        );
+    }
+    Ok(true)
+}
+
+fn remove_worker(store: &str, aggregate: &str) -> Result<bool> {
+    let store = kernable_store::open(store)?;
+    if !store
+        .workers()?
+        .iter()
+        .any(|w| w.aggregate_type == aggregate)
+    {
+        println!("no aggregate {aggregate}");
+        return Ok(false);
+    }
+    store.save_workers(&[WorkerRecord {
+        aggregate_type: aggregate.to_owned(),
+        removed: true,
+        ..Default::default()
+    }])?;
+    println!("removed {aggregate}");
     Ok(true)
 }
 

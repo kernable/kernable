@@ -14,7 +14,7 @@ Step-by-step guides for tasks you will meet once your application runs. They ass
 
 - [Change an event's format](./event-versions)
 - [Rebuild a read model](./rebuild-read-model)
-- [Remove a listener or middleware](./remove-listener)
+- [Remove a listener, middleware or aggregate](./remove-listener)
 - [Test your domain](./test-domain)
 
 **Data**

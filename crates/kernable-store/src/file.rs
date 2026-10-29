@@ -27,7 +27,8 @@ use kernable_core::{
     proto::{
         CheckpointRecord, Command, CommandResult, Committed, CommittedRecord, EnqueuedRecord,
         Event, FormatRecord, ListenerRecord, LogRecord, LoggedEvent, NewEvent, Rejected,
-        RejectedRecord, RevocationRecord, Signature, command_result::Outcome, log_record::Record,
+        RejectedRecord, RevocationRecord, Signature, WorkerRecord, command_result::Outcome,
+        log_record::Record,
     },
     signing::{self, GENESIS},
 };
@@ -74,6 +75,7 @@ struct State {
     next_seq: u64,
     checkpoints: Vec<Checkpoint>,
     listeners: BTreeMap<String, ListenerRecord>,
+    workers: BTreeMap<String, WorkerRecord>,
     revocations: Vec<RevocationRecord>,
 }
 
@@ -152,6 +154,12 @@ impl State {
             }
             Record::Listener(l) => {
                 self.listeners.insert(l.name.clone(), l);
+            }
+            Record::Worker(w) if w.removed => {
+                self.workers.remove(&w.aggregate_type);
+            }
+            Record::Worker(w) => {
+                self.workers.insert(w.aggregate_type.clone(), w);
             }
         }
         Ok(())
@@ -489,6 +497,18 @@ impl Store for FileStore {
         let mut inner = self.inner();
         for l in listeners {
             append(&mut inner, Record::Listener(l.clone()))?;
+        }
+        Ok(())
+    }
+
+    fn workers(&self) -> Result<Vec<WorkerRecord>> {
+        Ok(self.inner().state.workers.values().cloned().collect())
+    }
+
+    fn save_workers(&self, workers: &[WorkerRecord]) -> Result<()> {
+        let mut inner = self.inner();
+        for w in workers {
+            append(&mut inner, Record::Worker(w.clone()))?;
         }
         Ok(())
     }

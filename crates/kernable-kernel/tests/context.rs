@@ -30,7 +30,7 @@ fn sender() -> RequestContext {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_context_is_stored_with_the_events_and_covered_by_the_chain() {
     let env = start("ctx-stored").await;
-    spawn_worker(&env);
+    spawn_worker(&env).await;
     let result = submit(&env.addr, with_context("c1", "PlaceOrder", sender()))
         .await
         .unwrap();
@@ -55,7 +55,7 @@ async fn the_context_is_stored_with_the_events_and_covered_by_the_chain() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_expected_version_that_does_not_match_rejects_the_command() {
     let env = start("ctx-version").await;
-    spawn_worker(&env);
+    spawn_worker(&env).await;
     let at = |v| RequestContext {
         expected_version: Some(v),
         ..Default::default()
@@ -92,7 +92,7 @@ async fn only_privileged_keys_may_bypass_authorization() {
         ..Default::default()
     };
     let privileged = start("ctx-privileged").await;
-    spawn_worker(&privileged);
+    spawn_worker(&privileged).await;
     let ok = submit(&privileged.addr, with_context("c1", "PlaceOrder", bypass())).await;
     assert_eq!(committed_versions(&ok.unwrap()), [1]);
 

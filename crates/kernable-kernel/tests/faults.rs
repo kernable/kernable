@@ -22,10 +22,7 @@ fn stream_versions(env: &Env) -> Vec<u64> {
 async fn crashed_worker_command_is_redelivered_without_waiting_for_the_lease() {
     let env = start_with("crash", 30_000).await;
     let (seen, mut seen_rx) = mpsc::unbounded_channel();
-    let crashed = tokio::spawn(run_worker(
-        env.addr.clone(),
-        TestWorker::with(Behavior::Crash, seen),
-    ));
+    let crashed = start_worker(env.addr.clone(), TestWorker::with(Behavior::Crash, seen)).await;
 
     let addr = env.addr.clone();
     let pending = tokio::spawn(async move {
@@ -35,7 +32,7 @@ async fn crashed_worker_command_is_redelivered_without_waiting_for_the_lease() {
     crashed.await.unwrap();
 
     let started = Instant::now();
-    spawn_worker(&env);
+    spawn_worker(&env).await;
     let result = pending.await.unwrap().unwrap();
     assert_eq!(committed_versions(&result), [1]);
     assert!(
@@ -51,14 +48,14 @@ async fn hung_worker_loses_its_lease_and_its_late_result_is_discarded() {
     let env = start_with("hung", 200).await;
     let (seen, mut seen_rx) = mpsc::unbounded_channel();
     let slow = TestWorker::with(Behavior::Slow(Duration::from_millis(600)), seen);
-    tokio::spawn(run_worker(env.addr.clone(), slow));
+    start_worker(env.addr.clone(), slow).await;
 
     let addr = env.addr.clone();
     let pending = tokio::spawn(async move {
         submit(&addr, signed(command("c1", "PlaceOrder", "o1"), &key(1))).await
     });
     assert_eq!(seen_rx.recv().await.unwrap(), "c1");
-    spawn_worker(&env);
+    spawn_worker(&env).await;
 
     let result = pending.await.unwrap().unwrap();
     assert_eq!(committed_versions(&result), [1]);
@@ -71,10 +68,11 @@ async fn hung_worker_loses_its_lease_and_its_late_result_is_discarded() {
 async fn forged_result_ends_the_session_and_an_honest_worker_takes_over() {
     let env = start_with("forge", 30_000).await;
     let (seen, mut seen_rx) = mpsc::unbounded_channel();
-    let forger = tokio::spawn(run_worker(
+    let forger = start_worker(
         env.addr.clone(),
         TestWorker::with(Behavior::ForgeResult, seen),
-    ));
+    )
+    .await;
 
     let addr = env.addr.clone();
     let pending = tokio::spawn(async move {
@@ -83,7 +81,7 @@ async fn forged_result_ends_the_session_and_an_honest_worker_takes_over() {
     assert_eq!(seen_rx.recv().await.unwrap(), "c1");
     assert_eq!(forger.await.unwrap().code(), Code::Unauthenticated);
 
-    spawn_worker(&env);
+    spawn_worker(&env).await;
     let result = pending.await.unwrap().unwrap();
     assert_eq!(committed_versions(&result), [1]);
     assert_eq!(stream_versions(&env), [1]);
@@ -138,14 +136,14 @@ async fn sigterm_checkpoints_and_in_flight_commands_run_right_after_a_restart() 
     wait_for(&addr).await;
 
     // One committed command, so the final checkpoint has something to anchor.
-    let honest = tokio::spawn(run_worker(addr.clone(), TestWorker::honest()));
+    let honest = start_worker(addr.clone(), TestWorker::honest()).await;
     let c0 = signed(command("c0", "PlaceOrder", "o0"), &key(1));
     assert_eq!(committed_versions(&submit(&addr, c0).await.unwrap()), [1]);
     honest.abort();
 
     let (seen, mut seen_rx) = mpsc::unbounded_channel();
     let slow = TestWorker::with(Behavior::Slow(Duration::from_secs(30)), seen);
-    tokio::spawn(run_worker(addr.clone(), slow));
+    start_worker(addr.clone(), slow).await;
     let submitter = addr.clone();
     tokio::spawn(async move {
         submit(
@@ -198,7 +196,7 @@ async fn sigterm_checkpoints_and_in_flight_commands_run_right_after_a_restart() 
         .spawn()
         .unwrap();
     wait_for(&addr).await;
-    tokio::spawn(run_worker(addr.clone(), TestWorker::honest()));
+    start_worker(addr.clone(), TestWorker::honest()).await;
     let started = Instant::now();
     let c1 = signed(command("c1", "PlaceOrder", "o1"), &key(1));
     assert_eq!(committed_versions(&submit(&addr, c1).await.unwrap()), [1]);

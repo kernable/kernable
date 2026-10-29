@@ -33,7 +33,7 @@ async fn tcp_with_mutual_tls_admits_only_clients_of_the_ca() {
         tls: Some(client_tls(&env.dir, "worker")),
         ..TestWorker::honest()
     };
-    tokio::spawn(run_worker(env.addr.clone(), worker));
+    start_worker(env.addr.clone(), worker).await;
 
     let cmd = || signed(command("c1", "PlaceOrder", "o1"), &key(1));
     let ok = channel(&env.addr, Some(&client_tls(&env.dir, "app")))
@@ -69,7 +69,7 @@ async fn metrics_report_commands_queue_and_sessions() {
         config.metrics_listen = Some(metrics.clone());
     })
     .await;
-    spawn_worker(&env);
+    spawn_worker(&env).await;
     let place = signed(command("c1", "PlaceOrder", "o1"), &key(1));
     submit(&env.addr, place).await.unwrap();
     let again = signed(command("c2", "PlaceOrder", "o1"), &key(1));
@@ -93,18 +93,18 @@ async fn metrics_report_commands_queue_and_sessions() {
     assert!(get(&metrics, "/").await.starts_with("HTTP/1.1 404"));
 }
 
-fn slow_worker(env: &Env, delay_ms: u64) {
+async fn slow_worker(env: &Env, delay_ms: u64) {
     let worker = TestWorker {
         behavior: Behavior::Slow(std::time::Duration::from_millis(delay_ms)),
         ..TestWorker::honest()
     };
-    tokio::spawn(run_worker(env.addr.clone(), worker));
+    start_worker(env.addr.clone(), worker).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn draining_lets_running_requests_finish_and_refuses_new_ones() {
     let env = start("drain").await;
-    slow_worker(&env, 300);
+    slow_worker(&env, 300).await;
     let addr = env.addr.clone();
     let place = signed(command("c1", "PlaceOrder", "o1"), &key(1));
     let running = tokio::spawn(async move { submit(&addr, place).await });
@@ -126,7 +126,7 @@ async fn draining_lets_running_requests_finish_and_refuses_new_ones() {
 #[tokio::test(flavor = "multi_thread")]
 async fn draining_gives_up_after_its_timeout() {
     let env = start_custom("drain-timeout", |config, _| config.drain_timeout_ms = 200).await;
-    slow_worker(&env, 1_000);
+    slow_worker(&env, 1_000).await;
     let addr = env.addr.clone();
     let place = signed(command("c1", "PlaceOrder", "o1"), &key(1));
     tokio::spawn(async move { submit(&addr, place).await });

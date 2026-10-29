@@ -96,7 +96,7 @@ test("listener types without a domain are the listener's own", () => {
     .middleware({ types: ["*", "AddItem", "Identity.*"] }, () => {});
   assert.deepEqual([...Carts.handlers.keys()], ["Shop.ItemAdded", "Identity.AccountRegistered", "Billing.*"]);
   assert.deepEqual([...Carts.queries.keys()], ["Shop.GetCart", "Identity.GetAccount"]);
-  assert.deepEqual(Carts.checker?.options.types, ["*", "Shop.AddItem", "Identity.*"]);
+  assert.deepEqual(Carts.middlewares.get("before")?.options.types, ["*", "Shop.AddItem", "Identity.*"]);
   // The own domain's event schemas apply without `use`.
   assert.deepEqual([...Carts.domains.keys()], ["Shop", "Identity"]);
   assert.deepEqual([Carts.options.order, Carts.options.start], [0, 0]);

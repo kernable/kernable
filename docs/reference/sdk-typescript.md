@@ -90,7 +90,7 @@ What a query handler gets besides the query's data and `QueryMeta`.
 
 ### Check
 
-A command or query a middleware checks before the kernel accepts or routes it.
+A command or query a middleware checks, before the kernel accepts or routes it or after.
 
 - `kind: "command" | "query"`
 - `id: string`: The command or query ID.
@@ -107,6 +107,7 @@ A command or query a middleware checks before the kernel accepts or routes it.
 
 
 - `types: string[]`: Command and query types it checks: `*` (all), a type of the listener's own domain (`Type`), another domain's type (`domain.Type`) or a whole domain (`domain.*`).
+- `when?: "before" | "after"`: `before` (default): checks a request before the kernel accepts it; throwing refuses it. `after`: gets the request's outcome too. Throwing refuses a query's response; a command's outcome, and a rejected query, it only observes, best effort (it misses what happens while it is away, and nobody waits for it).
 - `order?: number`: Position in the chain: lower runs first, equal orders by listener name (default 0). Negative orders are reserved for kernable.
 
 ### ListenerContext
@@ -164,6 +165,16 @@ export type Outcome =
 
 
 
+### QueryOutcome
+
+```ts
+export type QueryOutcome =
+  | { answered: true; data: unknown }
+  | { answered: false; code: string; message: string };
+```
+
+What came of a query: its response data or why it was rejected.
+
 ### FoldEvent
 
 ```ts
@@ -216,7 +227,7 @@ are named `domain.Type`.
 - `command(type: string): CommandSchema`: Declares which fields of `type` commands the vault keeps (`personal`, `secret`). Clients that submit them need the domain: `kernable.use(domain)`.
 - `aggregate<S>(name: string, initial: S, options?: AggregateOptions): Aggregate<S>`
 - `readModel(name: string, options: ListenerOptions = {}): Listener`: Defines a read model: kept in memory and rebuilt from the first event on every start (defaults: order 0, start 0). Run it with `kernable.listener(definition)`.
-- `reactor(name: string, options: ListenerOptions = {}): Listener`: Defines a reactor: triggers side effects; resumes after the last acknowledged event (defaults: order 10, no start). A settling submit from its handler waits for the listeners before it (the read models), not for the reactor itself, which handles one event at a time. Run it with `kernable.listener(definition)`.
+- `reactor(name: string, options: ListenerOptions = {}): Listener`: Defines a reactor: triggers side effects; starts at the newest event when it is new, then resumes after the last acknowledged event (defaults: order 10, no start). A settling submit from its handler waits for the listeners before it (the read models), not for the reactor itself, which handles one event at a time. Run it with `kernable.listener(definition)`.
 
 ### domain()
 
@@ -253,6 +264,7 @@ belongs to a domain and produces events only of that domain; create it with
 - `key?: string`: Path to this process's `.key` file; used to sign commands and worker results. Default: `KERNABLE_KEY`, else `app.key` in the current directory.
 - `grant?: string`: Path to the key's grant (`kernable grant`), sent with every call. Default: `KERNABLE_GRANT`, else the `.grant` file next to the key file, if there is one.
 - `tenant?: string`: Default tenant for `submit`.
+- `service?: string`: The service this process's workers and listeners belong to. Each declares all workers or listeners of the service when it connects: create them all with `kernable.worker` and `kernable.listener` before running any. The kernel unregisters the service's aggregates that are no longer declared (their commands are refused), and retires its listeners that are no longer declared: nobody waits for them any more, but they keep their position (declared again, they resume) and their middleware keeps refusing until `kernable listeners remove`. Default: `KERNABLE_SERVICE`, else none (nothing is unregistered or retired).
 - `context?: RequestContext`: Default request context for `submit` and `query`, e.g. this service's identity; a request's own context replaces it.
 - `tls?: TlsFiles`: Mutual TLS for `host:port` URLs: paths of the CA certificate and this process's certificate and key. Default: `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`, if set.
 
@@ -277,7 +289,7 @@ belongs to a domain and produces events only of that domain; create it with
 - `readonly data: Data`: Files of a domain kept by the kernel, e.g. invoices; see `Data`.
 - `readonly cache: Cache`: The shared cache of a domain; see `Cache`.
 - `use(...domains: Domain[]): this`: Seals the vault fields of these domains' commands when submitting them; see `Domain.command`.
-- `worker(...aggregates: Aggregate<any>[]): Worker`
+- `worker(...aggregates: Aggregate<any>[]): Worker`: Runs these aggregates' commands over this connection. The kernel registers the aggregates: commands for an aggregate or command type no worker registered are refused.
 - `async submit(options: SubmitOptions): Promise<Outcome>`: Runs a command and returns its outcome; see `SubmitOptions.wait`.
 - `async enqueue(options: Omit<SubmitOptions, "wait">): Promise<string>`: Stores the command in the kernel's queue and returns its ID without waiting for it to run. Submit it again with the same `id` to get the outcome.
 - `async query<T = unknown>(options: QueryOptions): Promise<T>`: Asks the read model that answers `domain.type` and returns its answer. Queries always go through the kernel, also within one process. Throws `Rejected` if the read model rejects it.
@@ -346,7 +358,8 @@ part of the signed event log and are not erased with the vault.
 
 
 - `order?: number`: Listeners with a lower order process each event first; equal orders run in parallel. Defaults: 0 for read models, 10 for reactors. Negative orders are reserved for kernable.
-- `start?: number`: Position to start after on the first connect: 0 rebuilds from the beginning (default for read models); omitted, the kernel resumes after the last acknowledged event (default for reactors). Reconnects always resume after the last handled event.
+- `start?: number`: Position to start after on the first connect: 0 rebuilds from the beginning (default for read models); omitted, the kernel resumes after the last acknowledged event, and a new listener starts at the newest event, so it never reacts to what happened before it existed (default for reactors). Reconnects always resume after the last handled event.
+- `live?: boolean`: Not registered with the kernel: no stored position, always starts at the newest event, nobody waits for it, and it is forgotten when it disconnects. For reactions that only matter while the process runs, e.g. pushing to connected browsers. Cannot be a middleware.
 - `reconnectMs?: number`
 - `store?: string`: Keeps the listener's state in a store (`sqlite:<path>` or `memory:`) instead of memory: its data and position are written together per batch, and a restart continues after the stored position (`start` is then ignored). See `ListenerHandle.store`.
 - `schema?: string`: Version of the stored data's format (default "1"). Change it when the handlers store data differently: the store is cleared and the listener rebuilds from the first event.
@@ -376,12 +389,12 @@ logs) until it is updated, so it never misreads data.
 - `readonly options: ListenerOptions`
 - `readonly handlers = new Map<string, { handler: EventHandler; raw: boolean }>()`: Event handlers per qualified event type or domain (`domain.*`).
 - `readonly queries = new Map<string, QueryHandler>()`: Query handlers per qualified query type.
-- `checker?: { options: MiddlewareOptions; handler: MiddlewareHandler }`: The middleware handler and its qualified types, if this listener is one.
+- `readonly middlewares = new Map<"before" | "after", { options: MiddlewareOptions; handler: MiddlewareHandler }>()`: The middleware handlers and their qualified types, before and after requests.
 - `readonly domains = new Map<string, Domain>()`: The domains whose event schemas upcast events, by name: the own domain and those it `use`s.
 - `use(...domains: Domain[]): this`: Upcasts the events of these other domains with their event schemas (see `Domain.event`).
 - `on<D = any>(eventType: string, handler: (data: D, evt: StoredEventMeta, ctx: ListenerContext) => void | Promise<void>, options: HandlerOptions = {}): this`: Handles events of `eventType`: a type of the own domain (`ItemAdded`), of another domain (`identity.AccountRegistered`) or a whole domain (`identity.*`): `handler(data, evt, ctx)`.
 - `query<D = any, R = unknown>(queryType: string, handler: (data: D, qry: QueryMeta, ctx: QueryContext) => R | Promise<R>): this`: Answers the query type `queryType`, of the own domain (`GetCart`) or another one (`orders.GetOrder`), from this listener's state. The kernel delivers queries in order with the events, so an answer reflects every event handled before it. Throw `Rejected` to refuse. A handler cannot query its own listener (the answer would wait behind itself): the kernel refuses it.
-- `middleware(options: MiddlewareOptions, handler: MiddlewareHandler): this`: Makes this listener a middleware: the kernel asks `handler` about every command and query of `options.types` before accepting or routing it, in chain order, and only once this listener has caught up with the events. Throw `Rejected` to refuse; any other error refuses too. The registration is stored: while this listener is away, the kernel refuses those requests (`kernable listeners remove` unregisters it). The handler cannot submit or query what it checks itself (it would wait behind itself): the kernel refuses it.
+- `middleware(options: MiddlewareOptions, handler: MiddlewareHandler): this`: Makes this listener a middleware: the kernel asks `handler` about every command and query of `options.types`, before accepting or routing it (or after, see `MiddlewareOptions.when`), in chain order, and only once this listener has caught up with the events. Throw `Rejected` to refuse; any other error refuses too. The registration is stored: while this listener is away, the kernel refuses those requests (`kernable listeners remove` unregisters it). The handler cannot submit or query what it checks itself (it would wait behind itself): the kernel refuses it. A listener has at most one middleware before and one after.
 
 ### ListenerHandle
 

@@ -63,7 +63,7 @@ async fn place_and_add(env: &Env) {
 #[tokio::test(flavor = "multi_thread")]
 async fn backlog_then_live_events_in_order() {
     let env = start("sub-live").await;
-    spawn_worker(&env);
+    spawn_worker(&env).await;
     place_and_add(&env).await;
 
     let mut all = subscribe(&env, request(&key(1), 0, &[], now_ms()))
@@ -94,7 +94,7 @@ async fn backlog_then_live_events_in_order() {
 #[tokio::test(flavor = "multi_thread")]
 async fn event_types_are_filtered_and_restricted_per_key() {
     let env = start("sub-filter").await;
-    spawn_worker(&env);
+    spawn_worker(&env).await;
     place_and_add(&env).await;
     submit(
         &env.addr,

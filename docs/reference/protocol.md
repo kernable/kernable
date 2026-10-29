@@ -380,7 +380,10 @@ A request for a middleware to check: pass it with an empty verdict or reject it.
 | `call_id` |  `string` | 1 |  |
 | `command` |  `Command` | 2 |  |
 | `query` |  `QueryRequest` | 3 |  |
-| `vault` | repeated `VaultValue` | 4 | the command's values, if the key may read them (granted vault_read) |
+| `vault` | repeated `VaultValue` | 4 | Before only: the command's values, if the key may read them (granted vault_read). |
+| `when` |  `When` | 5 |  |
+| `command_result` |  `CommandResult` | 6 |  |
+| `query_result` |  `QueryResult` | 7 |  |
 
 ### Verdict
 
@@ -390,6 +393,15 @@ A request for a middleware to check: pass it with an empty verdict or reject it.
 | `call_id` |  `string` | 1 |  |
 | `rejected` |  `Rejected` | 2 | absent: the request passes |
 
+### When
+
+When a middleware runs.
+
+| Value | Number | Description |
+|---|---|---|
+| `WHEN_BEFORE` | 0 | Before the kernel accepts a command or routes a query; a rejection refuses it. Fails closed: while the middleware is away, the requests it covers are refused. |
+| `WHEN_AFTER` | 1 | Once the outcome is known. A query's response is sent only if the middleware passes it (fails closed, like before). A command's result, and a rejected query, it only observes, best effort: it is told once the command completes, nobody waits for it, and it misses what happens while it is away. |
+
 ### Middleware
 
 
@@ -397,6 +409,7 @@ A request for a middleware to check: pass it with an empty verdict or reject it.
 |---|---|---|---|
 | `order` |  `int32` | 1 | Position in the chain: lower runs first, equal orders by listener name. Negative orders are reserved for kernable. |
 | `types` | repeated `string` | 2 | Command and query types it checks: `*`, a domain (`orders.*`) or a qualified type. |
+| `when` |  `When` | 3 |  |
 
 ### Hello
 
@@ -407,10 +420,13 @@ A request for a middleware to check: pass it with an empty verdict or reject it.
 | `key_id` |  `string` | 2 |  |
 | `order` |  `int32` | 3 |  |
 | `event_types` | repeated `string` | 4 | qualified (`orders.OrderPlaced`, `orders.*`); empty = all the key may read |
-| `from_position` | optional `uint64` | 5 | Start after this position instead of the stored one, e.g. 0 to rebuild an in-memory read model. |
+| `from_position` | optional `uint64` | 5 | Start after this position instead of the stored one, e.g. 0 to rebuild an in-memory read model. Absent: after the stored position, or at the newest event on the first connect, so a new listener never reacts to what happened before it existed. |
 | `query_types` | repeated `string` | 6 | qualified query types this listener answers |
-| `middleware` |  `Middleware` | 7 | absent: not a middleware |
+| `middlewares` | repeated `Middleware` | 7 | at most one per `when`; none: not a middleware |
 | `protocol` |  `uint32` | 8 |  |
+| `service` |  `string` | 9 | The service this listener belongs to, and the names of all its listeners (including this one). Listeners registered for the service with the same key and not declared are retired: they no longer count for readiness, settling and the order of delivery, but keep their position (declared again, they resume) and their middleware, which keeps refusing while they are away. Empty: no service, nothing is retired. |
+| `declared` | repeated `string` | 10 |  |
+| `live` |  `bool` | 11 | Not registered: no stored position, starts at the newest event, does not count for readiness, settling or the order of delivery, and is forgotten when it disconnects. For reactions that only matter while the process runs. Cannot be a middleware; takes no part in its service's declaration. |
 
 ### Ready
 
@@ -467,12 +483,22 @@ A request for a middleware to check: pass it with an empty verdict or reject it.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
-| `worker_id` |  `string` | 1 |  |
+| `worker_id` |  `string` | 1 | this process, for logs |
 | `key_id` |  `string` | 2 |  |
-| `command_types` | repeated `string` | 3 | qualified: `orders.PlaceOrder` |
+| `aggregates` | repeated `WorkerAggregate` | 3 | The aggregates the worker runs. The kernel registers each one: it refuses commands for an aggregate type or command type no worker registered, and is not ready while a registered aggregate has no worker connected. Replicas register the same aggregates. |
 | `max_concurrency` |  `uint32` | 4 |  |
 | `event_schemas` | repeated `EventSchema` | 5 | The payload version the worker writes per event type; types not listed are written at 1. The kernel refuses a worker, or a result, that would write an older version of a type than the store already holds, and a result whose events differ from what was declared. |
 | `protocol` |  `uint32` | 6 |  |
+| `service` |  `string` | 7 | The service this worker belongs to, and the aggregate types of all its workers (including this one's). Aggregates registered for the service with the same key and not declared are unregistered: their commands are refused from then on. Empty: no service. |
+| `declared` | repeated `string` | 8 |  |
+
+### WorkerAggregate
+
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `aggregate_type` |  `string` | 1 | qualified: `orders.Order` |
+| `command_types` | repeated `string` | 2 | qualified, of the same domain: `orders.PlaceOrder` |
 
 ### EventSchema
 

@@ -9,7 +9,8 @@
 //! completes at most once, a commit appends all events of a command atomically and only on the
 //! expected stream version, and events form a hash chain (see `proto/SIGNING.md`). Which
 //! command runs when (one per aggregate, in submission order) is up to the kernel's queue.
-//! They also keep the registered event listeners with their acknowledged positions.
+//! They also keep the registered event listeners with their acknowledged positions, and the
+//! aggregates workers registered.
 //!
 //! Two more stores live apart from the log, because what they hold must be deletable:
 //! [`snapshots`] (the latest snapshot per aggregate, a cache) and the [`vault`] (personal and
@@ -27,6 +28,7 @@ use std::fmt;
 use ed25519_dalek::SigningKey;
 use kernable_core::proto::{
     Command, CommandResult, Event, ListenerRecord, NewEvent, Rejected, RevocationRecord, Signature,
+    WorkerRecord,
 };
 
 /// The version of the stored data format this build reads and writes. A store of another
@@ -225,6 +227,12 @@ pub trait Store: Send + Sync {
     /// Stores listener registrations and positions by name; a record with `removed` set
     /// deletes the listener.
     fn save_listeners(&self, listeners: &[ListenerRecord]) -> Result<()>;
+
+    /// Registered aggregates (see `Register.aggregates`), ordered by aggregate type.
+    fn workers(&self) -> Result<Vec<WorkerRecord>>;
+
+    /// Stores aggregate registrations by aggregate type; a record with `removed` set deletes it.
+    fn save_workers(&self, workers: &[WorkerRecord]) -> Result<()>;
 
     /// Signs the current head of the hash chain. Returns `None` while there are no events.
     fn checkpoint(&self, kernel: &SigningKey, now_ms: i64) -> Result<Option<Checkpoint>>;

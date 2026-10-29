@@ -107,7 +107,7 @@ When you change how the handlers store data, raise `schema`: the store is cleare
 
 ## Readiness, deploys and shutdown
 
-- `GET /ready` on the metrics address answers 200 once every registered listener is connected and has caught up; let your deploy wait for it. `GET /health` answers while the process runs, and `GET /metrics` serves Prometheus metrics.
+- `GET /ready` on the metrics address answers 200 once every registered aggregate has a worker connected and every registered listener is connected and has caught up; let your deploy wait for it. `GET /health` answers while the process runs, and `GET /metrics` serves Prometheus metrics.
 - **Deploy readers before writers.** When an event's format changes (a new event version), a process that does not know the new version stops at it instead of misreading it.
 - On SIGTERM the kernel **drains**: it refuses new requests, lets running ones finish for up to `--drain-timeout-ms`, then stores its state and exits. Commands that did not finish run right after the restart.
 - Restarting a worker or a listener loses nothing: commands go to another worker, and listeners continue after their last acknowledged event.

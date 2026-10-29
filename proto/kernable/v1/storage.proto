@@ -15,6 +15,7 @@ message LogRecord {
     ListenerRecord listener = 5;
     FormatRecord format = 6;
     RevocationRecord revocation = 7;
+    WorkerRecord worker = 8;
   }
 }
 
@@ -69,7 +70,20 @@ message ListenerRecord {
   repeated string event_types = 4;
   uint64 position = 5;
   bool removed = 6;
-  Middleware middleware = 7; // kept while disconnected, so the chain fails closed
+  repeated Middleware middlewares = 7; // kept while disconnected, so the chain fails closed
+  string service = 8; // see Hello.service
+  bool retired = 9;   // not declared by its service any more; see Hello.service
+  int64 last_seen = 10; // ms since epoch when it last connected, disconnected or was running at a flush
+}
+
+// A registered aggregate (see Register.aggregates); the latest record per aggregate type wins.
+message WorkerRecord {
+  string aggregate_type = 1; // qualified
+  string key_id = 2;
+  repeated string command_types = 3;
+  string service = 4;
+  int64 last_seen = 5; // ms since epoch when a worker for it last connected or disconnected
+  bool removed = 6;
 }
 
 // The latest snapshot of a stream, in the snapshot store; the latest record per stream wins.

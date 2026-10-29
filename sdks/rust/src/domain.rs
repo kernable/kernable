@@ -138,8 +138,8 @@ impl Domain {
         Listener::new(self, name, 0, Some(0))
     }
 
-    /// A reactor of this domain named `name`: triggers side effects; resumes after the last
-    /// acknowledged event (order 10). A settling submit from its handler waits for the
+    /// A reactor of this domain named `name`: triggers side effects; starts at the newest event
+    /// when it is new, then resumes after the last acknowledged event (order 10). A settling submit from its handler waits for the
     /// listeners before it (the read models), not for the reactor itself, which handles one
     /// event at a time. Run it with [`crate::Kernable::listen`].
     pub fn reactor(&self, name: &str) -> Listener {

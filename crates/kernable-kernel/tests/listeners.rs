@@ -1,4 +1,5 @@
-//! Ordered listeners and the settling submit: lower orders first, submits wait for everyone.
+//! Ordered listeners and the settling submit: lower orders first, submits wait for everyone
+//! that counts: not listeners their service retired, not live ones.
 
 mod common;
 
@@ -8,7 +9,7 @@ use common::*;
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
-        Ack, Batch, ChallengeResponse, CommandResult, Hello, ListenerMessage, Wait,
+        Ack, Batch, ChallengeResponse, CommandResult, Hello, ListenerMessage, Middleware, Wait,
         command_result::Outcome, listener_delivery::Msg as Out, listener_message::Msg as In,
         listener_service_client::ListenerServiceClient,
     },
@@ -56,6 +57,10 @@ struct Opts {
     order: i32,
     types: Vec<String>,
     from: Option<u64>,
+    /// The service and the names it declares (`Hello.service`).
+    service: (&'static str, Vec<&'static str>),
+    live: bool,
+    middlewares: Vec<Middleware>,
 }
 
 fn opts(order: i32) -> Opts {
@@ -65,6 +70,17 @@ fn opts(order: i32) -> Opts {
         order,
         types: Vec::new(),
         from: None,
+        service: ("", Vec::new()),
+        live: false,
+        middlewares: Vec::new(),
+    }
+}
+
+/// Options of a listener of `service` that declares `declared`.
+fn of(service: &'static str, declared: &[&'static str]) -> Opts {
+    Opts {
+        service: (service, declared.to_vec()),
+        ..opts(0)
     }
 }
 
@@ -77,8 +93,11 @@ async fn listen(env: &Env, name: &str, o: Opts) -> Result<Listener, Status> {
         order: o.order,
         event_types: o.types,
         from_position: o.from,
-        query_types: Vec::new(),
-        middleware: None,
+        service: o.service.0.into(),
+        declared: o.service.1.iter().map(|n| n.to_string()).collect(),
+        live: o.live,
+        middlewares: o.middlewares,
+        ..Default::default()
     });
     tx.send(ListenerMessage { msg: Some(hello) }).await.unwrap();
     let channel = transport::connect(&env.addr).await.unwrap();
@@ -125,7 +144,7 @@ fn positions(batch: &Batch) -> Vec<u64> {
 #[tokio::test(flavor = "multi_thread")]
 async fn lower_orders_go_first_and_submit_waits_for_every_listener() {
     let env = start("listener-order").await;
-    spawn_worker(&env);
+    spawn_worker(&env).await;
     let mut auth = listen(&env, "auth", opts(0)).await.unwrap();
     let mut reactor = listen(&env, "reactor", opts(10)).await.unwrap();
 
@@ -145,7 +164,7 @@ async fn lower_orders_go_first_and_submit_waits_for_every_listener() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_listener_settles_only_on_the_listeners_before_it() {
     let env = start("listener-caller").await;
-    spawn_worker(&env);
+    spawn_worker(&env).await;
     let mut model = listen(&env, "model", opts(0)).await.unwrap();
     let mut reactor = listen(&env, "reactor", opts(10)).await.unwrap();
     let _later = listen(&env, "later", opts(20)).await.unwrap();
@@ -184,7 +203,7 @@ async fn the_kernel_is_ready_once_every_listener_is_connected_and_caught_up() {
         config.metrics_listen = Some(metrics.clone());
     })
     .await;
-    spawn_worker(&env);
+    spawn_worker(&env).await;
     let place = signed(command("c1", "PlaceOrder", "o1"), &key(1));
     submit_with(&env.addr, place, Wait::Committed)
         .await
@@ -192,7 +211,12 @@ async fn the_kernel_is_ready_once_every_listener_is_connected_and_caught_up() {
     let ready = |body: String| body.starts_with("HTTP/1.1 200");
     assert!(ready(get(&metrics, "/ready").await), "no listeners yet");
 
-    let mut model = listen(&env, "model", opts(0)).await.unwrap();
+    // A read model rebuilding from the first event.
+    let from_start = Opts {
+        from: Some(0),
+        ..opts(0)
+    };
+    let mut model = listen(&env, "model", from_start).await.unwrap();
     let waiting = get(&metrics, "/ready").await;
     assert!(waiting.starts_with("HTTP/1.1 503"), "{waiting}");
     assert!(
@@ -225,7 +249,7 @@ async fn the_kernel_is_ready_once_every_listener_is_connected_and_caught_up() {
 #[tokio::test(flavor = "multi_thread")]
 async fn committed_and_accepted_submits_do_not_wait_and_a_stalled_listener_times_out() {
     let env = start("listener-modes").await;
-    spawn_worker(&env);
+    spawn_worker(&env).await;
     let _stalled = listen(&env, "stalled", opts(0)).await.unwrap();
 
     let place = signed(command("c1", "PlaceOrder", "o1"), &key(1));
@@ -253,7 +277,7 @@ async fn committed_and_accepted_submits_do_not_wait_and_a_stalled_listener_times
 #[tokio::test(flavor = "multi_thread")]
 async fn a_disconnected_listener_still_counts_and_resumes_where_it_left_off() {
     let env = start("listener-resume").await;
-    spawn_worker(&env);
+    spawn_worker(&env).await;
     let mut orders = listen(&env, "orders", opts(0)).await.unwrap();
     let first = spawn_submit(&env, "c1", "PlaceOrder");
     assert_eq!(positions(&orders.next().await), [1]);
@@ -284,7 +308,7 @@ async fn a_disconnected_listener_still_counts_and_resumes_where_it_left_off() {
 #[tokio::test(flavor = "multi_thread")]
 async fn events_of_other_types_do_not_hold_back_a_filtered_listener() {
     let env = start("listener-filter").await;
-    spawn_worker(&env);
+    spawn_worker(&env).await;
     let placed_only = Opts {
         key: key(6),
         signer: key(6),
@@ -363,4 +387,143 @@ async fn invalid_listeners_are_refused() {
         code(listen(&env, "orders", other_key).await),
         Some(Code::PermissionDenied)
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_listener_starts_at_the_newest_event_and_then_resumes() {
+    let env = start("listener-head").await;
+    spawn_worker(&env).await;
+    let place = signed(command("c1", "PlaceOrder", "o1"), &key(1));
+    submit_with(&env.addr, place, Wait::Committed)
+        .await
+        .unwrap();
+
+    // It never reacts to what happened before it existed.
+    let mut mails = listen(&env, "mails", opts(10)).await.unwrap();
+    assert_eq!(mails.start, 1);
+    spawn_submit(&env, "c2", "AddItem");
+    assert_eq!(positions(&mails.next().await), [2]);
+    mails.ack(2).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    drop(mails);
+
+    // What happens while it is away it gets when it is back.
+    let add = signed(command("c3", "AddItem", "o1"), &key(1));
+    submit_with(&env.addr, add, Wait::Committed).await.unwrap();
+    let mut mails = listen(&env, "mails", opts(10)).await.unwrap();
+    assert_eq!(mails.start, 2);
+    assert_eq!(positions(&mails.next().await), [3]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_service_retires_what_it_no_longer_declares() {
+    let metrics = free_addr();
+    let env = start_custom("listener-service", |config, _| {
+        config.metrics_listen = Some(metrics.clone());
+    })
+    .await;
+    spawn_worker(&env).await;
+    let ready = |body: String| body.starts_with("HTTP/1.1 200");
+    let carts = listen(&env, "carts", of("shop", &["carts", "guard"]))
+        .await
+        .unwrap();
+    let guard = Opts {
+        middlewares: vec![Middleware {
+            order: 0,
+            types: vec!["orders.PlaceOrder".into()],
+            when: 0,
+        }],
+        ..of("shop", &["carts", "guard"])
+    };
+    let guard = listen(&env, "guard", guard).await.unwrap();
+    assert!(ready(get(&metrics, "/ready").await));
+    drop(guard);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let waiting = get(&metrics, "/ready").await;
+    assert!(
+        waiting.ends_with("waiting for listeners: guard\n"),
+        "{waiting}"
+    );
+
+    // The next version of the service no longer has the guard: nobody waits for it.
+    drop(carts);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let carts = listen(&env, "carts", of("shop", &["carts"])).await.unwrap();
+    assert!(ready(get(&metrics, "/ready").await));
+    let store = kernable_store::open_read_only(&env.store).unwrap();
+    let guard = store.listeners().unwrap();
+    let guard = guard.iter().find(|l| l.name == "guard").unwrap();
+    assert!(guard.retired && !guard.middlewares.is_empty());
+    // But its middleware keeps refusing until it is removed: security fails closed.
+    let place = signed(command("c1", "PlaceOrder", "o1"), &key(1));
+    let refused = submit(&env.addr, place).await.unwrap_err();
+    assert_eq!(refused.code(), Code::Unavailable);
+
+    // A listener of another service, or without one, is never retired by it.
+    let other = listen(&env, "other", of("billing", &["other"]))
+        .await
+        .unwrap();
+    let plain = listen(&env, "plain", opts(0)).await.unwrap();
+    drop((other, plain));
+    drop(carts);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let _carts = listen(&env, "carts", of("shop", &["carts"])).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let waiting = get(&metrics, "/ready").await;
+    assert!(
+        waiting.ends_with("waiting for listeners: other, plain\n"),
+        "{waiting}"
+    );
+
+    // A service must declare the listener that says so.
+    let undeclared = listen(&env, "stray", of("shop", &["carts"])).await;
+    assert_eq!(undeclared.err().unwrap().code(), Code::InvalidArgument);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_listener_starts_at_the_newest_event_and_counts_for_nobody() {
+    let metrics = free_addr();
+    let env = start_custom("listener-live", |config, _| {
+        config.metrics_listen = Some(metrics.clone());
+    })
+    .await;
+    spawn_worker(&env).await;
+    let place = signed(command("c1", "PlaceOrder", "o1"), &key(1));
+    submit_with(&env.addr, place, Wait::Committed)
+        .await
+        .unwrap();
+    // It takes no part in its service's declaration.
+    let live = || Opts {
+        live: true,
+        from: Some(0),
+        ..of("shop", &["model"])
+    };
+    let mut push = listen(&env, "push", live()).await.unwrap();
+    assert_eq!(push.start, 1, "from_position is ignored");
+    // It does not hold up a settling submit, even without acknowledging.
+    let added = spawn_submit(&env, "c2", "AddItem").await.unwrap();
+    assert!(settled(&added));
+    assert_eq!(positions(&push.next().await), [2]);
+    drop(push);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(get(&metrics, "/ready").await.starts_with("HTTP/1.1 200"));
+    let store = kernable_store::open_read_only(&env.store).unwrap();
+    assert!(store.listeners().unwrap().is_empty(), "never stored");
+
+    // Not a middleware, and not under the name of a registered listener.
+    let checking = Opts {
+        middlewares: vec![Middleware {
+            order: 0,
+            types: vec!["*".into()],
+            when: 0,
+        }],
+        ..live()
+    };
+    let refused = listen(&env, "push", checking).await;
+    assert_eq!(refused.err().unwrap().code(), Code::InvalidArgument);
+    let model = listen(&env, "model", opts(0)).await.unwrap();
+    drop(model);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let taken = listen(&env, "model", live()).await;
+    assert_eq!(taken.err().unwrap().code(), Code::AlreadyExists);
 }

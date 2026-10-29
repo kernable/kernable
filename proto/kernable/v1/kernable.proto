@@ -365,12 +365,31 @@ message MiddlewareCall {
     Command command = 2;
     QueryRequest query = 3;
   }
-  repeated VaultValue vault = 4; // the command's values, if the key may read them (granted vault_read)
+  // Before only: the command's values, if the key may read them (granted vault_read).
+  repeated VaultValue vault = 4;
+  When when = 5;
+  // After only: what came of the request. The verdict counts only for a query's response.
+  oneof outcome {
+    CommandResult command_result = 6;
+    QueryResult query_result = 7;
+  }
 }
 
 message Verdict {
   string call_id = 1;
   Rejected rejected = 2; // absent: the request passes
+}
+
+// When a middleware runs.
+enum When {
+  // Before the kernel accepts a command or routes a query; a rejection refuses it. Fails
+  // closed: while the middleware is away, the requests it covers are refused.
+  WHEN_BEFORE = 0;
+  // Once the outcome is known. A query's response is sent only if the middleware passes it
+  // (fails closed, like before). A command's result, and a rejected query, it only observes,
+  // best effort: it is told once the command completes, nobody waits for it, and it misses
+  // what happens while it is away.
+  WHEN_AFTER = 1;
 }
 
 message Middleware {
@@ -379,6 +398,7 @@ message Middleware {
   int32 order = 1;
   // Command and query types it checks: `*`, a domain (`orders.*`) or a qualified type.
   repeated string types = 2;
+  When when = 3;
 }
 
 message Hello {
@@ -386,11 +406,25 @@ message Hello {
   string key_id = 2;
   int32 order = 3;
   repeated string event_types = 4; // qualified (`orders.OrderPlaced`, `orders.*`); empty = all the key may read
-  // Start after this position instead of the stored one, e.g. 0 to rebuild an in-memory read model.
+  // Start after this position instead of the stored one, e.g. 0 to rebuild an in-memory read
+  // model. Absent: after the stored position, or at the newest event on the first connect, so
+  // a new listener never reacts to what happened before it existed.
   optional uint64 from_position = 5;
   repeated string query_types = 6; // qualified query types this listener answers
-  Middleware middleware = 7;        // absent: not a middleware
+  repeated Middleware middlewares = 7; // at most one per `when`; none: not a middleware
   uint32 protocol = 8;
+  // The service this listener belongs to, and the names of all its listeners (including this
+  // one). Listeners registered for the service with the same key and not declared are retired:
+  // they no longer count for readiness, settling and the order of delivery, but keep their
+  // position (declared again, they resume) and their middleware, which keeps refusing while
+  // they are away. Empty: no service, nothing is retired.
+  string service = 9;
+  repeated string declared = 10;
+  // Not registered: no stored position, starts at the newest event, does not count for
+  // readiness, settling or the order of delivery, and is forgotten when it disconnects. For
+  // reactions that only matter while the process runs. Cannot be a middleware; takes no part
+  // in its service's declaration.
+  bool live = 11;
 }
 
 message Ready {
@@ -434,15 +468,28 @@ message KernelMessage {
 }
 
 message Register {
-  string worker_id = 1;
+  string worker_id = 1; // this process, for logs
   string key_id = 2;
-  repeated string command_types = 3; // qualified: `orders.PlaceOrder`
+  // The aggregates the worker runs. The kernel registers each one: it refuses commands for an
+  // aggregate type or command type no worker registered, and is not ready while a registered
+  // aggregate has no worker connected. Replicas register the same aggregates.
+  repeated WorkerAggregate aggregates = 3;
   uint32 max_concurrency = 4;
   // The payload version the worker writes per event type; types not listed are written at 1.
   // The kernel refuses a worker, or a result, that would write an older version of a type
   // than the store already holds, and a result whose events differ from what was declared.
   repeated EventSchema event_schemas = 5;
   uint32 protocol = 6;
+  // The service this worker belongs to, and the aggregate types of all its workers (including
+  // this one's). Aggregates registered for the service with the same key and not declared are
+  // unregistered: their commands are refused from then on. Empty: no service.
+  string service = 7;
+  repeated string declared = 8;
+}
+
+message WorkerAggregate {
+  string aggregate_type = 1;         // qualified: `orders.Order`
+  repeated string command_types = 2; // qualified, of the same domain: `orders.PlaceOrder`
 }
 
 message EventSchema {

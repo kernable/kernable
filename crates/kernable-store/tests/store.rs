@@ -4,7 +4,7 @@ use std::{collections::HashSet, path::PathBuf, sync::Arc, thread};
 
 use kernable_core::proto::{
     Attribute, Command, ListenerRecord, Middleware, NewEvent, Rejected, RequestContext, Signature,
-    command_result::Outcome,
+    When, WorkerRecord, command_result::Outcome,
 };
 use kernable_store::{Enqueued, Error, FileStore, SqliteStore, Store};
 
@@ -160,17 +160,57 @@ fn listener(name: &str, order: i32, position: u64) -> ListenerRecord {
         event_types: vec!["OrderPlaced".into()],
         position,
         removed: false,
-        middleware: None,
+        middlewares: Vec::new(),
+        service: String::new(),
+        retired: false,
+        last_seen: 1_000 + position as i64,
     }
+}
+
+fn worker(aggregate_type: &str, command_types: &[&str]) -> WorkerRecord {
+    WorkerRecord {
+        aggregate_type: aggregate_type.into(),
+        key_id: "k".into(),
+        command_types: command_types.iter().map(|t| t.to_string()).collect(),
+        service: "shop".into(),
+        last_seen: 42,
+        removed: false,
+    }
+}
+
+fn workers_are_saved_replaced_and_removed(store: &dyn Store) {
+    assert!(store.workers().unwrap().is_empty());
+    let order = worker("orders.Order", &["orders.PlaceOrder"]);
+    store
+        .save_workers(&[worker("shop.Cart", &["shop.AddItem"]), order.clone()])
+        .unwrap();
+    let cart = worker("shop.Cart", &["shop.AddItem", "shop.RemoveItem"]);
+    store.save_workers(std::slice::from_ref(&cart)).unwrap();
+    assert_eq!(store.workers().unwrap(), [order.clone(), cart]);
+
+    let removed = WorkerRecord {
+        removed: true,
+        ..worker("shop.Cart", &[])
+    };
+    store.save_workers(&[removed]).unwrap();
+    assert_eq!(store.workers().unwrap(), [order]);
 }
 
 fn listeners_are_saved_replaced_and_removed(store: &dyn Store) {
     assert!(store.listeners().unwrap().is_empty());
     let auth = ListenerRecord {
-        middleware: Some(Middleware {
-            order: 0,
-            types: vec!["*".into()],
-        }),
+        middlewares: vec![
+            Middleware {
+                order: 0,
+                types: vec!["*".into()],
+                when: When::Before.into(),
+            },
+            Middleware {
+                order: 5,
+                types: vec!["orders.*".into(), "billing.GetInvoice".into()],
+                when: When::After.into(),
+            },
+        ],
         ..listener("auth", -30, 0)
     };
     store
@@ -397,6 +437,7 @@ for_each_backend!(
     reject_completes_command_without_events,
     concurrent_threads_lose_no_updates,
     listeners_are_saved_replaced_and_removed,
+    workers_are_saved_replaced_and_removed,
     reading_after_a_version_returns_only_later_events,
     contexts_come_back_as_stored,
 );

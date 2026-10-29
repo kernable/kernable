@@ -12,9 +12,9 @@ use kernable_core::{
     proto::{
         ChallengeResponse, Command, CommandResult, EventSchema, Grant, NewEvent, Permission,
         Register, Rejected, Rejection, Result as WorkResult, Snapshot, SubmitRequest, Wait,
-        WorkerMessage, command_result::Outcome, command_service_client::CommandServiceClient,
-        kernel_message::Msg as Out, worker_gateway_client::WorkerGatewayClient,
-        worker_message::Msg as In,
+        WorkerAggregate, WorkerMessage, command_result::Outcome,
+        command_service_client::CommandServiceClient, kernel_message::Msg as Out,
+        worker_gateway_client::WorkerGatewayClient, worker_message::Msg as In,
     },
     signing, transport,
 };
@@ -285,6 +285,13 @@ pub struct TestWorker {
     pub writes_vault: Option<VaultWriter>,
     /// Receives, per execution, the vault values the kernel sent along.
     pub vaults: Option<mpsc::UnboundedSender<Vec<kernable_core::proto::VaultValue>>>,
+    /// The aggregates it registers; empty: `<domain>.Order` per domain of `command_types`.
+    pub aggregates: Vec<WorkerAggregate>,
+    /// Its service and the aggregates the service declares.
+    pub service: String,
+    pub declared: Vec<String>,
+    /// Told once the kernel registered the worker.
+    pub registered: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl TestWorker {
@@ -301,6 +308,10 @@ impl TestWorker {
             writes: None,
             writes_vault: None,
             vaults: None,
+            aggregates: Vec::new(),
+            service: String::new(),
+            declared: Vec::new(),
+            registered: None,
         }
     }
 
@@ -313,16 +324,41 @@ impl TestWorker {
     }
 }
 
+/// The aggregates of qualified command types: `<domain>.Order` per domain, as test commands use.
+pub fn aggregates(command_types: &[String]) -> Vec<WorkerAggregate> {
+    let mut aggregates: Vec<WorkerAggregate> = Vec::new();
+    for t in command_types {
+        let aggregate_type = format!("{}.Order", t.split_once('.').map_or("", |(d, _)| d));
+        match aggregates
+            .iter_mut()
+            .find(|a| a.aggregate_type == aggregate_type)
+        {
+            Some(a) => a.command_types.push(t.clone()),
+            None => aggregates.push(WorkerAggregate {
+                aggregate_type,
+                command_types: vec![t.clone()],
+            }),
+        }
+    }
+    aggregates
+}
+
 /// Runs a worker on raw generated stubs. Returns how the session ended.
-pub async fn run_worker(addr: String, w: TestWorker) -> tonic::Status {
+pub async fn run_worker(addr: String, mut w: TestWorker) -> tonic::Status {
     let (tx, rx) = mpsc::channel(16);
     let send = |msg: In| WorkerMessage { msg: Some(msg) };
     tx.send(send(In::Register(Register {
         protocol: kernable_core::PROTOCOL,
         worker_id: "test-worker".into(),
         key_id: id(&w.claimed),
-        command_types: w.command_types.clone(),
+        aggregates: if w.aggregates.is_empty() {
+            aggregates(&w.command_types)
+        } else {
+            w.aggregates.clone()
+        },
         max_concurrency: 4,
+        service: w.service.clone(),
+        declared: w.declared.clone(),
         event_schemas: w
             .schemas
             .iter()
@@ -352,7 +388,12 @@ pub async fn run_worker(addr: String, w: TestWorker) -> tonic::Status {
             Out::Challenge(c) => In::ChallengeResponse(ChallengeResponse {
                 sig: signing::sign(&w.signer, &signing::challenge_message(&c.nonce)).sig,
             }),
-            Out::Registered(_) => continue,
+            Out::Registered(_) => {
+                if let Some(registered) = w.registered.take() {
+                    let _ = registered.send(());
+                }
+                continue;
+            }
             Out::Execute(x) => {
                 let cmd = x.command.unwrap();
                 if let Some(seen) = &w.seen {
@@ -439,8 +480,21 @@ pub async fn run_worker(addr: String, w: TestWorker) -> tonic::Status {
     }
 }
 
-pub fn spawn_worker(env: &Env) {
-    tokio::spawn(run_worker(env.addr.clone(), TestWorker::honest()));
+/// Runs a worker in the background, once the kernel registered it (or refused it): commands
+/// for aggregates no worker registered are refused.
+pub async fn start_worker(
+    addr: String,
+    mut w: TestWorker,
+) -> tokio::task::JoinHandle<tonic::Status> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    w.registered = Some(tx);
+    let worker = tokio::spawn(run_worker(addr, w));
+    let _ = rx.await;
+    worker
+}
+
+pub async fn spawn_worker(env: &Env) {
+    start_worker(env.addr.clone(), TestWorker::honest()).await;
 }
 
 pub fn command(id: &str, command_type: &str, aggregate_id: &str) -> Command {

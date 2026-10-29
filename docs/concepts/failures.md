@@ -6,6 +6,7 @@ kernable is built so that a crash anywhere loses nothing and does nothing twice.
 |---|---|---|
 | A **worker** crashes during a command | The kernel hands the command to another worker at once (or after `--lease-ttl-ms` if the connection hangs). It runs again from the same history, so it decides the same way. | nothing; keep handlers deterministic |
 | A **listener** crashes | It reconnects and gets the events after its last acknowledgement again. Submits that settle wait for it (up to `--settle-timeout-ms`). | make handlers idempotent, or use a store |
+| No worker **registered** an aggregate | Its commands are refused with `NOT_FOUND` at once, also a typo in a type. Once registered, its commands wait in the queue while its workers are away, and `/ready` answers 503. | start the worker before sending its commands |
 | A **middleware** is away | Everything it checks is refused with `UNAVAILABLE` until it is back. | run it next to the kernel; deploy scripts wait for `/ready` |
 | The **kernel** crashes | Every stored command is still queued and runs right after the restart; listeners resume after their last acknowledgement. Clients get a connection error. | resubmit with the same command ID: you get the original outcome |
 | The kernel gets **SIGTERM** | It refuses new requests, lets running ones finish for `--drain-timeout-ms`, stores its state and exits cleanly. | stop the kernel this way for deploys |

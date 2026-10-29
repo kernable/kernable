@@ -1,10 +1,11 @@
 // Middleware: a listener checks commands and queries before the kernel accepts or routes
-// them, from its own state, and the kernel refuses them while it is away.
+// them, from its own state, and the kernel refuses them while it is away; after them, it sees
+// their outcome.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { Kernable, Rejected, domain, type Check } from "../src/index.ts";
+import { Kernable, Rejected, domain, type Check, type Outcome, type QueryOutcome } from "../src/index.ts";
 import { TestKernel } from "./kernel.ts";
 
 test("a middleware checks commands and queries from its own state and fails closed", async () => {
@@ -17,7 +18,8 @@ test("a middleware checks commands and queries from its own state and fails clos
   const ticket = support.aggregate("Ticket", { open: false })
     .apply("Opened", () => ({ open: true }))
     .command("Open", () => [{ type: "Opened" }])
-    .command("Ban", (_s, data: { identity: string }) => [{ type: "Banned", data }]);
+    .command("Ban", (_s, data: { identity: string }) => [{ type: "Banned", data }])
+    .command("Crash", () => []); // the middleware fails on it before it runs
   const tickets = new Set<string>();
   const model = kernable.listener(support.readModel("tickets")
     .on("Opened", (_data, evt) => void tickets.add(evt.aggregateId))
@@ -69,6 +71,81 @@ test("a middleware checks commands and queries from its own state and fails clos
     worker.stop();
     model.stop();
     guard.stop();
+    await Promise.all(running);
+    kernable.close();
+    await kernel.dispose();
+  }
+});
+
+test("a middleware after requests observes commands and may refuse a query's response", async () => {
+  const kernel = new TestKernel(["support.*"]);
+  await kernel.start();
+  const kernable = new Kernable({ url: kernel.url, key: kernel.appKey });
+
+  const support = domain("support");
+  const ticket = support.aggregate("Ticket", { open: false })
+    .apply("Opened", () => ({ open: true }))
+    .command("Open", (state) => {
+      if (state.open) throw new Rejected("already open", "invalid_state");
+      return [{ type: "Opened" }];
+    });
+  const tickets = new Set<string>();
+  const model = kernable.listener(support.readModel("tickets")
+    .on("Opened", (_data, evt) => void tickets.add(evt.aggregateId))
+    .query("ListTickets", () => [...tickets].sort()));
+
+  const seen: [Check, Outcome | QueryOutcome | undefined][] = [];
+  const audit = kernable.listener(support.readModel("audit")
+    .middleware({ types: ["*"] }, (check) => {
+      if (check.request.senderIdentity === "mallory") throw new Rejected("banned", "forbidden");
+    })
+    .middleware({ types: ["*"], when: "after" }, (check, outcome) => {
+      seen.push([check, outcome]);
+      // Only the response of a query can still be refused.
+      if (check.kind === "query" && outcome && "answered" in outcome && outcome.answered) {
+        if ((outcome.data as string[]).includes("secret")) throw new Rejected("hidden", "hidden");
+      }
+      if (check.kind === "command") throw new Rejected("ignored for commands");
+    }));
+
+  const worker = kernable.worker(ticket);
+  const running = [worker.run({ reconnectMs: 100 }), model.run(), audit.run()];
+  const after = async (n: number) => {
+    for (let i = 0; i < 100 && seen.length < n; i++) await new Promise((r) => setTimeout(r, 20));
+    return seen.splice(0).map(([c, o]) => [c.kind, c.type, o] as const);
+  };
+  try {
+    await Promise.all([worker.ready, model.ready, audit.ready]);
+    const open = (id: string, senderIdentity = "alice") =>
+      kernable.submit({ domain: "support", aggregateType: "Ticket", aggregateId: id, type: "Open", context: { senderIdentity } });
+
+    const opened = await open("t1");
+    assert.ok(opened.committed);
+    const [[kind, type, outcome]] = await after(1);
+    assert.deepEqual([kind, type], ["command", "Open"]);
+    assert.ok(outcome && "committed" in outcome && outcome.committed && outcome.events[0].type === "Opened");
+
+    // Rejected by the aggregate or refused before: it still hears of it, and refuses nothing.
+    assert.equal((await open("t1")).committed, false);
+    assert.equal((await open("t2", "mallory")).committed, false);
+    assert.deepEqual((await after(2)).map(([, , o]) => o), [
+      { committed: false, code: "invalid_state", message: "already open" },
+      { committed: false, code: "forbidden", message: "banned" },
+    ]);
+
+    // A query's response passes it, or not.
+    assert.deepEqual(await kernable.query({ domain: "support", type: "ListTickets" }), ["t1"]);
+    assert.deepEqual((await after(1))[0][2], { answered: true, data: ["t1"] });
+    assert.ok((await open("secret")).committed);
+    await after(1);
+    await assert.rejects(kernable.query({ domain: "support", type: "ListTickets" }), /hidden/);
+    assert.deepEqual((await after(1))[0][2], { answered: true, data: ["secret", "t1"] });
+
+    assert.throws(() => support.readModel("x").middleware({ types: ["*"] }, () => {}).middleware({ types: ["*"] }, () => {}), /already/);
+  } finally {
+    worker.stop();
+    model.stop();
+    audit.stop();
     await Promise.all(running);
     kernable.close();
     await kernel.dispose();

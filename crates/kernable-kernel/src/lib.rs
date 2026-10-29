@@ -11,7 +11,9 @@
 //! Before a command is accepted or a query routed, every middleware covering its type checks
 //! it, in chain order; the first rejection refuses the request. A missing middleware refuses
 //! too: the chain fails closed. Refused commands are not stored, like any other request the
-//! kernel does not accept.
+//! kernel does not accept. Middleware after a request sees its outcome: it may still refuse a
+//! query's response (failing closed as well), and it observes, best effort, every completed
+//! command and every rejected query.
 
 mod cache;
 pub mod config;
@@ -20,6 +22,7 @@ pub mod grants;
 mod listeners;
 mod metrics;
 mod queue;
+mod workers;
 
 use std::{
     collections::HashMap,
@@ -35,9 +38,9 @@ use kernable_core::{
     proto::{
         Accepted, CacheRequest, CacheResult, Challenge, Command, CommandResult, Committed,
         DataRequest, DataResult, Event, Execute, Grant, KernelMessage, ListenerDelivery,
-        ListenerMessage, NewEvent, QueryRequest, QueryResult, Register, Registered, Rejected,
-        RevocationRecord, RevokeRequest, RevokeResponse, Signature, Snapshot, SnapshotRecord,
-        SubmitRequest, SubscribeRequest, VaultValue, Wait, WorkerMessage,
+        ListenerMessage, MiddlewareCall, NewEvent, QueryRequest, QueryResult, Register, Registered,
+        Rejected, RevocationRecord, RevokeRequest, RevokeResponse, Signature, Snapshot,
+        SnapshotRecord, SubmitRequest, SubscribeRequest, VaultValue, Wait, When, WorkerMessage,
         cache_service_server::{CacheService, CacheServiceServer},
         command_result::Outcome,
         command_service_server::{CommandService, CommandServiceServer},
@@ -144,6 +147,7 @@ pub struct Kernel {
     /// Wakes subscriptions and listeners when events were committed.
     appended: Notify,
     listeners: listeners::Registry,
+    workers: workers::Registry,
     queue: queue::Queue,
     metrics: metrics::Metrics,
     /// The highest payload version stored per qualified event type; never goes down.
@@ -173,6 +177,7 @@ impl Kernel {
             .map(|r| (r.key_id, r.since))
             .collect();
         let listeners = listeners::Registry::load(store.listeners()?);
+        let workers = workers::Registry::load(store.workers()?);
         let schemas = store.event_schemas()?.into_iter().collect();
         let snapshots = kernable_store::snapshots::open(&config.snapshots)?;
         let vault = match &config.vault {
@@ -210,6 +215,7 @@ impl Kernel {
             work: Notify::new(),
             appended: Notify::new(),
             listeners,
+            workers,
             queue,
             metrics: metrics::Metrics::default(),
             schemas: Mutex::new(schemas),
@@ -458,6 +464,10 @@ impl Kernel {
         if self.draining.load(SeqCst) {
             return Err("shutting down".into());
         }
+        let missing = self.workers.missing();
+        if !missing.is_empty() {
+            return Err(format!("waiting for workers: {}", missing.join(", ")));
+        }
         match self.listeners.behind().as_slice() {
             [] => Ok(()),
             behind => Err(format!("waiting for listeners: {}", behind.join(", "))),
@@ -542,11 +552,14 @@ impl Kernel {
     /// after a restart, every unfinished command is delivered again right away.
     pub fn shutdown(&self) -> Result<(), BoxError> {
         self.store.checkpoint(&self.key(), now_ms())?;
+        self.listeners.seen_now();
         listeners::flush(self)?;
+        self.store.save_workers(&self.workers.seen_now())?;
         Ok(())
     }
 
-    fn complete(&self, result: CommandResult) {
+    fn complete(self: &Arc<Self>, command: &Command, result: CommandResult) {
+        self.observe(command, &result);
         // The aggregate is free again: its next queued command can be leased now.
         self.work.notify_waiters();
         for waiter in self
@@ -558,21 +571,31 @@ impl Kernel {
         }
     }
 
-    /// Runs `request` (of the qualified type `name`) through the middleware chain.
-    /// `Ok(Some(reason))` if a middleware rejected it; an error if one is missing or too slow.
+    /// Runs `request` (of the qualified type `name`) through the middleware chain at `when`,
+    /// with the request's `outcome` after it. `Ok(Some(reason))` if a middleware rejected it;
+    /// an error if one is missing or too slow.
     async fn check(
         &self,
         name: &str,
         id: &str,
+        when: When,
         request: middleware_call::Request,
         values: &[VaultValue],
+        outcome: Option<middleware_call::Outcome>,
     ) -> Result<Option<Rejected>, Status> {
-        let chain = self.listeners.chain(name);
+        let chain = self.listeners.chain(name, when);
         if chain.is_empty() {
             return Ok(None);
         }
         let started = Instant::now();
-        let outcome = self.run_chain(&chain, name, id, request, values).await;
+        let call = MiddlewareCall {
+            call_id: String::new(),
+            request: Some(request),
+            vault: Vec::new(),
+            when: when.into(),
+            outcome,
+        };
+        let outcome = self.run_chain(&chain, name, id, call, values).await;
         let counter = match &outcome {
             Ok(None) => &self.metrics.middleware_passed,
             Ok(Some(_)) => &self.metrics.middleware_rejected,
@@ -588,23 +611,25 @@ impl Kernel {
         chain: &[String],
         name: &str,
         id: &str,
-        request: middleware_call::Request,
+        call: MiddlewareCall,
         values: &[VaultValue],
     ) -> Result<Option<Rejected>, Status> {
         let timeout = Duration::from_millis(self.config().middleware_timeout_ms);
         for middleware in chain {
             let key = self.listeners.key(middleware).unwrap_or_default();
-            let readable = if self.reads_vault(&key, name) {
-                values.to_vec()
-            } else {
-                Vec::new()
+            let call = MiddlewareCall {
+                vault: if self.reads_vault(&key, name) {
+                    values.to_vec()
+                } else {
+                    Vec::new()
+                },
+                ..call.clone()
             };
             let checked = tokio::time::timeout(timeout, async {
                 // Wait until the middleware has caught up with what it missed while away.
                 let dispatched = loop {
                     let progressed = self.listeners.progress.notified();
-                    let call = (request.clone(), readable.clone());
-                    if let Some(d) = self.listeners.check(middleware, id, call)? {
+                    if let Some(d) = self.listeners.check(middleware, id, call.clone())? {
                         break d;
                     }
                     progressed.await;
@@ -628,9 +653,61 @@ impl Kernel {
         Ok(None)
     }
 
+    /// Tells the middleware after `command` its result, in the background: nobody waits for
+    /// it, and a missing or failing middleware is only logged.
+    fn observe(self: &Arc<Self>, command: &Command, result: &CommandResult) {
+        let name = config::qualified(&command.domain, &command.command_type);
+        if self.listeners.chain(&name, When::After).is_empty() {
+            return;
+        }
+        let kernel = Arc::clone(self);
+        let (command, result) = (command.clone(), result.clone());
+        tokio::spawn(async move {
+            let id = command.command_id.clone();
+            let request = middleware_call::Request::Command(command);
+            let outcome = middleware_call::Outcome::CommandResult(result);
+            let checked = kernel
+                .check(&name, &id, When::After, request, &[], Some(outcome))
+                .await;
+            if let Err(e) = checked {
+                tracing::warn!(command = %id, error = %e.message(), "middleware after a command missed it");
+            }
+        });
+    }
+
+    /// Tells the middleware after `query` that it was rejected, like [`Kernel::observe`].
+    fn observe_query(self: &Arc<Self>, name: &str, query: &QueryRequest, reason: &Rejected) {
+        if self.listeners.chain(name, When::After).is_empty() {
+            return;
+        }
+        let kernel = Arc::clone(self);
+        let name = name.to_owned();
+        let result = QueryResult {
+            query_id: query.query_id.clone(),
+            outcome: Some(query_result::Outcome::Rejected(reason.clone())),
+        };
+        let query = query.clone();
+        tokio::spawn(async move {
+            let id = query.query_id.clone();
+            let request = middleware_call::Request::Query(query);
+            let outcome = middleware_call::Outcome::QueryResult(result);
+            let checked = kernel
+                .check(&name, &id, When::After, request, &[], Some(outcome))
+                .await;
+            if let Err(e) = checked {
+                tracing::warn!(query = %id, error = %e.message(), "middleware after a query missed it");
+            }
+        });
+    }
+
     /// The listener `name` that sent a request from its handler (none if empty), and a refusal
     /// if the request (of the qualified type `request_type`) would have to wait for it.
-    fn caller(&self, name: &str, request_type: &str) -> Result<Option<listeners::Caller>, Status> {
+    fn caller(
+        &self,
+        name: &str,
+        request_type: &str,
+        waits_after: bool,
+    ) -> Result<Option<listeners::Caller>, Status> {
         if name.is_empty() {
             return Ok(None);
         }
@@ -638,7 +715,16 @@ impl Kernel {
             .listeners
             .caller(name)
             .ok_or_else(|| Status::invalid_argument(format!("no listener {name}")))?;
-        if self.listeners.chain(request_type).contains(&caller.name) {
+        let checks_itself = self
+            .listeners
+            .chain(request_type, When::Before)
+            .contains(&caller.name)
+            || waits_after
+                && self
+                    .listeners
+                    .chain(request_type, When::After)
+                    .contains(&caller.name);
+        if checks_itself {
             return Err(Status::failed_precondition(format!(
                 "middleware {name} checks {request_type} itself: a request from its own handler \
                  would wait behind itself"
@@ -863,21 +949,29 @@ impl CommandService for Api {
                 "key may not set bypass_authorization",
             ));
         }
-        let caller = kernel.caller(&listener, &name)?;
+        let caller = kernel.caller(&listener, &name, false)?;
         if !cmd.vault_refs.is_empty() || !values.is_empty() {
             kernel.vault()?;
             vault::check(&values, &cmd.vault_refs)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
         }
+        let aggregate = config::qualified(&cmd.domain, &cmd.aggregate_type);
+        if !kernel.workers.runs(&aggregate, &name) {
+            return Err(Status::not_found(format!(
+                "no worker registered {name} for {aggregate}"
+            )));
+        }
         let request = middleware_call::Request::Command(cmd.clone());
         if let Some(reason) = kernel
-            .check(&name, &cmd.command_id, request, &values)
+            .check(&name, &cmd.command_id, When::Before, request, &values, None)
             .await?
         {
-            return Ok(Response::new(CommandResult {
-                command_id: cmd.command_id,
+            let result = CommandResult {
+                command_id: cmd.command_id.clone(),
                 outcome: Some(Outcome::Rejected(reason)),
-            }));
+            };
+            kernel.observe(&cmd, &result);
+            return Ok(Response::new(result));
         }
 
         if let Some(vault) = &kernel.vault
@@ -1244,10 +1338,14 @@ impl QueryService for Api {
                 "key may not set bypass_authorization",
             ));
         }
-        let caller = kernel.caller(&query.listener, &name)?;
+        let caller = kernel.caller(&query.listener, &name, true)?;
         let request = middleware_call::Request::Query(query.clone());
-        if let Some(reason) = kernel.check(&name, &query.query_id, request, &[]).await? {
+        if let Some(reason) = kernel
+            .check(&name, &query.query_id, When::Before, request, &[], None)
+            .await?
+        {
             kernel.metrics.queries_rejected.fetch_add(1, Relaxed);
+            kernel.observe_query(&name, &query, &reason);
             return Ok(Response::new(QueryResult {
                 query_id: query.query_id,
                 outcome: Some(query_result::Outcome::Rejected(reason)),
@@ -1302,11 +1400,34 @@ impl QueryService for Api {
         kernel.metrics.query.record(started.elapsed());
         let outcome = match answer.outcome {
             Some(query_answer::Outcome::Response(r)) => {
-                kernel.metrics.queries_answered.fetch_add(1, Relaxed);
-                query_result::Outcome::Response(r)
+                // The middleware after it may still refuse the response; it fails closed.
+                let result = QueryResult {
+                    query_id: query.query_id.clone(),
+                    outcome: Some(query_result::Outcome::Response(r.clone())),
+                };
+                let request = middleware_call::Request::Query(query.clone());
+                let outcome = middleware_call::Outcome::QueryResult(result);
+                let checked = kernel
+                    .check(
+                        &name,
+                        &query.query_id,
+                        When::After,
+                        request,
+                        &[],
+                        Some(outcome),
+                    )
+                    .await?;
+                if let Some(reason) = checked {
+                    kernel.metrics.queries_rejected.fetch_add(1, Relaxed);
+                    query_result::Outcome::Rejected(reason)
+                } else {
+                    kernel.metrics.queries_answered.fetch_add(1, Relaxed);
+                    query_result::Outcome::Response(r)
+                }
             }
             Some(query_answer::Outcome::Rejected(r)) => {
                 kernel.metrics.queries_rejected.fetch_add(1, Relaxed);
+                kernel.observe_query(&name, &query, &r);
                 query_result::Outcome::Rejected(r)
             }
             None => return Err(Status::internal("empty answer")),
@@ -1420,6 +1541,15 @@ impl Drop for SessionCount {
     }
 }
 
+/// Tells the worker registry when a session ends, however it ends.
+struct DisconnectOnDrop(Arc<Kernel>, Vec<String>);
+
+impl Drop for DisconnectOnDrop {
+    fn drop(&mut self) {
+        self.0.workers.disconnect(&self.0, &self.1);
+    }
+}
+
 /// Aborts a session's background task when the session ends, however it ends.
 struct AbortOnDrop(JoinHandle<()>);
 
@@ -1450,18 +1580,14 @@ async fn run_session(
         return Err(Status::invalid_argument("expected Register"));
     };
     protocol(reg.protocol)?;
-    if !reg.command_types.iter().all(|t| config::valid_qualified(t)) {
-        return Err(Status::invalid_argument(
-            "register qualified command types: domain.CommandType",
-        ));
-    }
+    workers::validate(&reg)?;
     kernel.present(metadata, &reg.key_id)?;
     let permissions = kernel.permissions();
-    let authorized = !reg.command_types.is_empty()
-        && reg
-            .command_types
-            .iter()
-            .all(|t| config::allowed(&permissions.run, &reg.key_id, t));
+    let authorized = reg
+        .aggregates
+        .iter()
+        .flat_map(|a| &a.command_types)
+        .all(|t| config::allowed(&permissions.run, &reg.key_id, t));
     if !authorized {
         return Err(Status::permission_denied(
             "worker key may not handle these command types",
@@ -1487,6 +1613,14 @@ async fn run_session(
     };
     signing::verify(&proof, &signing::challenge_message(&nonce))
         .map_err(|_| Status::unauthenticated("challenge failed"))?;
+    let command_types = kernel.workers.connect(&kernel, &reg, &permissions)?;
+    let _unregister = DisconnectOnDrop(
+        Arc::clone(&kernel),
+        reg.aggregates
+            .iter()
+            .map(|a| a.aggregate_type.clone())
+            .collect(),
+    );
     send(
         out,
         Out::Registered(Registered {
@@ -1504,13 +1638,12 @@ async fn run_session(
         in_flight: Mutex::default(),
     });
     let permits = Arc::new(Semaphore::new(reg.max_concurrency.max(1) as usize));
-    let command_types = reg.command_types.clone();
     let mut changes = session.kernel.changes();
     // Declared first, dropped last: stop dispatching, then release what is in flight.
     let _release = ReleaseOnDrop(Arc::clone(&session));
     let _dispatch = AbortOnDrop(tokio::spawn(dispatch(
         Arc::clone(&session),
-        reg.command_types,
+        command_types.clone(),
         permits,
     )));
 
@@ -1539,9 +1672,9 @@ async fn run_session(
 /// older version of an event type than the store holds is outdated and refused.
 fn declared_schemas(kernel: &Kernel, reg: &Register) -> Result<HashMap<String, u32>, Status> {
     let domains: Vec<&str> = reg
-        .command_types
+        .aggregates
         .iter()
-        .filter_map(|t| t.split_once('.').map(|(domain, _)| domain))
+        .filter_map(|a| a.aggregate_type.split_once('.').map(|(domain, _)| domain))
         .collect();
     let stored = kernel.schemas();
     let mut declared = HashMap::new();
@@ -1656,7 +1789,7 @@ impl Session {
                 message: "the command was signed with a key revoked since then".into(),
             };
             drop(permit);
-            self.reject(&lease_id, command.command_id, reason);
+            self.reject(&lease_id, command, reason);
             return true;
         }
         let required = command.context.as_ref().and_then(|c| c.expected_version);
@@ -1669,7 +1802,7 @@ impl Session {
                 ),
             };
             drop(permit);
-            self.reject(&lease_id, command.command_id, reason);
+            self.reject(&lease_id, command, reason);
             return true;
         }
         self.in_flight().insert(
@@ -1732,7 +1865,7 @@ impl Session {
                 code: "invalid_event_type".into(),
                 message: "event types must be non-empty and without dots".into(),
             };
-            self.reject(&r.lease_id, f.command.command_id, reason);
+            self.reject(&r.lease_id, f.command, reason);
             return Ok(());
         }
 
@@ -1750,7 +1883,7 @@ impl Session {
                     e.schema
                 ),
             };
-            self.reject(&r.lease_id, f.command.command_id, reason);
+            self.reject(&r.lease_id, f.command, reason);
             return Ok(());
         }
 
@@ -1760,7 +1893,7 @@ impl Session {
         {
             Ok(erased) => erased,
             Err(reason) => {
-                self.reject(&r.lease_id, f.command.command_id, reason);
+                self.reject(&r.lease_id, f.command, reason);
                 return Ok(());
             }
         };
@@ -1822,13 +1955,14 @@ impl Session {
                 self.kernel.metrics.committed.fetch_add(1, Relaxed);
                 self.kernel.metrics.execution.record(f.leased_at.elapsed());
                 self.kernel.appended.notify_waiters();
-                self.kernel.complete(CommandResult {
-                    command_id: f.command.command_id,
+                let result = CommandResult {
+                    command_id: f.command.command_id.clone(),
                     outcome: Some(Outcome::Committed(Committed {
                         events,
                         settled: false,
                     })),
-                });
+                };
+                self.kernel.complete(&f.command, result);
             }
             Err(StoreError::VersionConflict { .. }) if f.attempts < MAX_CONFLICT_RETRIES => {
                 self.execute(
@@ -1845,7 +1979,7 @@ impl Session {
                     code: "concurrency_conflict".into(),
                     message: "aggregate kept changing; retry the command".into(),
                 };
-                self.reject(&r.lease_id, f.command.command_id, reason);
+                self.reject(&r.lease_id, f.command, reason);
             }
             Err(StoreError::NotPending) => self.done(&r.lease_id),
             Err(e) => {
@@ -1891,7 +2025,7 @@ impl Session {
             .await;
             return Ok(());
         }
-        self.reject(&r.lease_id, f.command.command_id, reason);
+        self.reject(&r.lease_id, f.command, reason);
         Ok(())
     }
 
@@ -1906,20 +2040,22 @@ impl Session {
                 .is_some_and(|sig| sig.key_id == self.key_id && signing::verify(sig, &msg).is_ok())
     }
 
-    fn reject(&self, lease_id: &str, command_id: String, reason: Rejected) {
+    fn reject(&self, lease_id: &str, command: Command, reason: Rejected) {
         if !self.kernel.queue.holds(lease_id) {
             return;
         }
+        let command_id = command.command_id.clone();
         match self.kernel.store.reject(&command_id, reason.clone()) {
             Ok(()) => {
                 crash::point("reject.stored");
                 self.kernel.drop_secrets(&command_id);
                 self.kernel.queue.done(lease_id);
                 self.kernel.metrics.rejected.fetch_add(1, Relaxed);
-                self.kernel.complete(CommandResult {
+                let result = CommandResult {
                     command_id,
                     outcome: Some(Outcome::Rejected(reason)),
-                });
+                };
+                self.kernel.complete(&command, result);
             }
             Err(StoreError::NotPending) => self.done(lease_id),
             Err(e) => {

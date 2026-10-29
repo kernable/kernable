@@ -124,9 +124,11 @@ export type WorkerMessage =
         worker_id: string;
         key_id: string;
         protocol: number;
-        command_types: string[];
+        aggregates: { aggregate_type: string; command_types: string[] }[];
         max_concurrency: number;
         event_schemas: { event_type: string; schema: number }[];
+        service?: string;
+        declared?: string[];
       };
     }
   | { challenge_response: { sig: Buffer } }
@@ -176,6 +178,11 @@ export interface ListenerDelivery {
     command?: WireCommand | null;
     query?: WireQueryRequest | null;
     vault: WireVaultValue[];
+    /** `WireWhen`: 0 before, 1 after. */
+    when: number;
+    /** After only: what came of the request. */
+    command_result?: WireCommandResult | null;
+    query_result?: WireQueryResult | null;
   } | null;
 }
 
@@ -189,7 +196,11 @@ export type ListenerMessage =
         event_types: string[];
         from_position?: number;
         query_types: string[];
-        middleware?: { order: number; types: string[] };
+        middlewares: { order: number; types: string[]; when: number }[];
+        /** Not for live listeners. */
+        service?: string;
+        declared?: string[];
+        live: boolean;
       };
     }
   | { challenge_response: { sig: Buffer } }

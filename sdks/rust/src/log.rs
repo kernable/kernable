@@ -100,13 +100,14 @@ pub(crate) fn worker_connected(connected: &str, command_types: &[String]) -> Str
 }
 
 /// The listener's connected line after the prefix: where it resumes, what it reads, and what
-/// it answers and checks, if anything.
+/// it answers and checks before and after requests, if anything.
 pub(crate) fn listener_connected(
     connected: &str,
     position: u64,
     event_types: &[String],
     query_types: &[String],
     checks: Option<&[String]>,
+    after: Option<&[String]>,
 ) -> String {
     let mut line = format!(
         "{connected}, at position {position}, reads {}",
@@ -117,6 +118,9 @@ pub(crate) fn listener_connected(
     }
     if let Some(checks) = checks {
         line.push_str(&format!(", checks {}", sorted_list(checks)));
+    }
+    if let Some(after) = after {
+        line.push_str(&format!(", after {}", sorted_list(after)));
     }
     line
 }
@@ -226,7 +230,8 @@ mod tests {
                 42,
                 &strings(&["shop.*", "billing.Paid"]),
                 &[],
-                None
+                None,
+                None,
             ),
             "connected to http://127.0.0.1:7233 as app (0123456789ab…), at position 42, \
              reads billing.Paid, shop.*"
@@ -238,9 +243,22 @@ mod tests {
                 &strings(&["shop.ItemAdded"]),
                 &strings(&["shop.Cart", "shop.Carts"]),
                 Some(&strings(&["shop.*", "*"])),
+                None,
             ),
             "connected to http://127.0.0.1:7233 as app (0123456789ab…), at position 0, \
              reads shop.ItemAdded, answers shop.Cart, shop.Carts, checks *, shop.*"
+        );
+        assert_eq!(
+            listener_connected(
+                &connected,
+                0,
+                &strings(&["shop.ItemAdded"]),
+                &[],
+                Some(&strings(&["*"])),
+                Some(&strings(&["shop.Cart", "*"])),
+            ),
+            "connected to http://127.0.0.1:7233 as app (0123456789ab…), at position 0, \
+             reads shop.ItemAdded, checks *, after *, shop.Cart"
         );
     }
 
