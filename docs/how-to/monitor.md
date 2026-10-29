@@ -1,21 +1,44 @@
 # Monitor kernable
 
-With `--metrics-listen` set, the kernel serves Prometheus metrics at `/metrics`, and health checks at `/health` and `/ready` ([reference](../reference/metrics)). Bind it to a private address.
+Use this page to see what a running kernel is doing: in a browser while you develop or debug, and with health checks, metrics and alerts in production. To find the cause of a specific problem, start at [Failures and recovery](../concepts/failures#finding-the-cause).
+
+| Want to | Use |
+|---|---|
+| see services, aggregates, listeners and their state, or one aggregate's history | the UI (`--ui-listen`) |
+| gate traffic and deploys | `GET /ready` (`--metrics-listen`) |
+| alert and graph | `GET /metrics` (`--metrics-listen`) |
+| list registrations with the kernel stopped or running | `kernable services`, `kernable workers`, `kernable listeners` |
 
 ## The UI
 
-With `--ui-listen` (on by default with `--dev`, at http://127.0.0.1:7234), the kernel shows itself in a browser:
+With `--ui-listen` (on by default with `--dev`, at http://127.0.0.1:7234), the kernel shows itself in a browser. The start banner shows its address in the `UI` line, or `disabled`.
 
-- **Map:** services, aggregates, event types, listeners and queries, and what connects them: which service runs what, which aggregate writes which event, who reacts to it, who answers which query, and which middleware checks which commands. Each node shows its live state: connected, behind, missing (the kernel waits for it), dynamic, or live. Click one for its details.
+- **Map:** services, aggregates, event types, listeners and queries, and what connects them: which service runs what, which aggregate writes which event, who reacts to it, who answers which query, and which middleware checks which commands. Each node shows its state: connected, behind, missing (the kernel waits for it), dynamic or away (counts for nobody), or live. Click one for its details.
 - **Connections:** every connected worker process and every listener, with its service, key, position and since when.
 - **History:** any aggregate's events in order, each with the command that caused it, its sender and correlation. Vault fields show as `personal · <subject>`, `secret` or `erased`; the UI never decrypts the vault, and it does not show snapshot states, which may hold personal values.
 
-The UI has no login, so it listens on a loopback address only; reach it on a server through an SSH tunnel (`ssh -L 7234:127.0.0.1:7234 host`). If the address is taken, the kernel runs on without it and logs a warning.
+The UI has no login, so it listens on a loopback address only; the kernel refuses to start with another address. Reach it on a server through an SSH tunnel:
+
+```sh
+ssh -L 7234:127.0.0.1:7234 host   # then open http://127.0.0.1:7234
+```
+
+If the address is taken (another kernel in development), the kernel runs on without the UI and logs the warning `the UI is off`.
 
 ## Health checks
 
-- **Liveness:** `GET /health` answers 200 while the process runs.
-- **Readiness:** `GET /ready` answers 200 once every registered aggregate has a worker connected and every registered listener is connected and has caught up, and 503 with the missing workers or listeners otherwise. Use it to gate traffic and deploys.
+Set `--metrics-listen` (for example `127.0.0.1:9233`). It serves plain HTTP with no login: bind it to a private address.
+
+- **Liveness:** `GET /health` answers 200 `ok` while the process runs.
+- **Readiness:** `GET /ready` answers 200 `ready` when the kernel can serve, and 503 with the reason otherwise:
+
+  | 503 body | Meaning |
+  |---|---|
+  | `waiting for workers: shop.Cart` | no worker is connected for these aggregates |
+  | `waiting for listeners: carts, guard` | these listeners or middlewares are not connected, or have not caught up yet |
+  | `shutting down` | the kernel got SIGTERM and finishes running requests |
+
+  It waits for what **counts**: what a service's membership lists, also members that never registered, and for services without a membership everything they registered. Dynamic members (registered, but not listed) and live listeners do not count ([Order and consistency](../concepts/ordering#who-counts)). Use it to gate traffic and deploys ([Deploy and upgrade](./deploy)).
 
 ## Alerts worth having
 
@@ -23,7 +46,7 @@ The UI has no login, so it listens on a loopback address only; reach it on a ser
 groups:
   - name: kernable
     rules:
-      - alert: KernableNotReady          # a listener is down or behind
+      - alert: KernableNotReady          # a worker or listener that counts is missing or behind
         expr: kernable_ready == 0
         for: 2m
       - alert: KernableListenerLagging   # a listener falls behind the log
@@ -38,16 +61,47 @@ groups:
       - alert: KernableMiddlewareFailing # checks refused because a middleware is away or slow
         expr: rate(kernable_middleware_total{outcome="failed"}[5m]) > 0
         for: 5m
+      - alert: KernableQueriesFailing    # no read model answered in time
+        expr: rate(kernable_queries_total{outcome="failed"}[5m]) > 0
+        for: 5m
 ```
 
-A listener stopping at an event it cannot read (a newer event version) shows as lag that keeps growing while the listener stays connected.
+- The per-listener metrics (`kernable_listener_lag`, `kernable_listener_connected`) cover every listener the kernel knows, also dynamic ones that nobody waits for. Exclude those by their `listener` label, or remove them ([Remove a listener](./remove-listener)).
+- A listener stuck at an event it cannot handle (a throwing handler, or a newer event version) shows as lag that keeps growing while the listener stays connected ([When a listener is slow or stuck](../concepts/ordering#when-a-listener-is-slow-or-stuck)).
 
 ## Useful views
 
-- `rate(kernable_commands_total[5m])` by outcome: throughput and the share of rejections.
-- `kernable_settle_seconds_sum / kernable_settle_seconds_count`: how long submits wait for listeners.
-- `kernable_query_seconds_sum / kernable_query_seconds_count`: query latency through the kernel.
+| Query | Shows |
+|---|---|
+| `sum by (outcome) (rate(kernable_commands_total[5m]))` | throughput and the share of rejections |
+| `rate(kernable_execution_seconds_sum[5m]) / rate(kernable_execution_seconds_count[5m])` | how long a command takes from lease to commit |
+| `rate(kernable_settle_seconds_sum[5m]) / rate(kernable_settle_seconds_count[5m])` | how long submits wait for listeners |
+| `rate(kernable_query_seconds_sum[5m]) / rate(kernable_query_seconds_count[5m])` | query latency through the kernel |
+| `rate(kernable_middleware_seconds_sum[5m]) / rate(kernable_middleware_seconds_count[5m])` | time spent in middleware checks |
+| `kernable_queued_commands` | commands waiting or running |
+
+The timings are summaries without quantiles: they give averages. All metrics are in the [reference](../reference/metrics).
+
+## From the command line
+
+These read the store, whether the kernel runs or not; the UI shows the live state:
+
+```sh
+kernable services sqlite:shop.db    # each membership: who applied it, what it lists, (never registered), dynamic listeners
+kernable workers sqlite:shop.db     # aggregate, command types, key, service, last seen
+kernable listeners sqlite:shop.db   # name, order, position, types, key, service, middleware, last seen
+```
+
+`last seen` tells you when a worker or listener was last connected. See the [CLI reference](../reference/cli).
 
 ## Logs
 
-The kernel logs to stderr. `KERNABLE_LOG` sets the level (default `info`) and `KERNABLE_LOG_FORMAT=json` switches to JSON for your log pipeline.
+The kernel logs to stderr. `KERNABLE_LOG` sets the filter (default `info`; e.g. `debug` or `warn`) and `KERNABLE_LOG_FORMAT=json` switches to JSON for your log pipeline. The start banner appears only on a terminal, and not with JSON logs. Watch for `key revoked` and `drain timed out` warnings.
+
+The SDKs print what their workers and listeners do to stderr, one line each:
+
+```text
+12:04:10  worker  connected to http://127.0.0.1:7233 · key app (69212a19f36f…) · runs shop.AddItem
+```
+
+There, `KERNABLE_LOG` is `off`, `error`, `warn`, `info` (default) or `debug`. Lines have colors on a terminal unless `NO_COLOR` is set. An app prints an overview of its workers and listeners once all are connected.

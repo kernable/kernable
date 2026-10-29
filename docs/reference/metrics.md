@@ -6,7 +6,7 @@ With `--metrics-listen 127.0.0.1:9233` the kernel serves, on that address:
 
 - `GET /metrics`: Prometheus text format, below.
 - `GET /health`: 200 while the process runs.
-- `GET /ready`: 200 once every registered listener is connected and has caught up, else 503 naming the listeners it waits for.
+- `GET /ready`: 200 once every aggregate that counts has a worker connected and every listener that counts is connected and has caught up (see [Who counts](../concepts/ordering#who-counts)), else 503 naming the workers or listeners it waits for.
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|
@@ -23,4 +23,4 @@ With `--metrics-listen 127.0.0.1:9233` the kernel serves, on that address:
 | `kernable_listener_position` | gauge | `listener` | Last acknowledged global position per listener. |
 | `kernable_listener_lag` | gauge | `listener` | Events a listener has not acknowledged yet. |
 | `kernable_listener_connected` | gauge | `listener` | 1 while the listener is connected. |
-| `kernable_ready` | gauge |  | 1 while the kernel is ready: every listener connected and caught up, not shutting down. |
+| `kernable_ready` | gauge |  | 1 while the kernel is ready: every aggregate that counts has a worker, every listener that counts is connected and caught up, and it is not shutting down. |

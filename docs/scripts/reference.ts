@@ -155,7 +155,7 @@ With \`--metrics-listen 127.0.0.1:9233\` the kernel serves, on that address:
 
 - \`GET /metrics\`: Prometheus text format, below.
 - \`GET /health\`: 200 while the process runs.
-- \`GET /ready\`: 200 once every registered listener is connected and has caught up, else 503 naming the listeners it waits for.
+- \`GET /ready\`: 200 once every aggregate that counts has a worker connected and every listener that counts is connected and has caught up (see [Who counts](../concepts/ordering#who-counts)), else 503 naming the workers or listeners it waits for.
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|

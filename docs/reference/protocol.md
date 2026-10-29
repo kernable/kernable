@@ -133,7 +133,7 @@ The kernel trusts root keys only (`kernable start --root`). A root key grants a 
 
 ### Permission
 
-Actions: submit, run, subscribe, listen, query, answer, check, privileged, vault_read, vault_erase, data_read, data_write, cache, or `*` for all. Types: `*`, `domain.*` or `domain.Type` (for privileged: the switch, `bypass_authorization`; for data_read, data_write and cache: a domain, `domain.*`).
+Actions: submit, run, subscribe, listen, query, answer, check, privileged, vault_read, vault_erase, data_read, data_write, cache, manage, or `*` for all. Types: `*`, `domain.*` or `domain.Type` (for privileged: the switch, `bypass_authorization`; for data_read, data_write and cache: a domain, `domain.*`; for manage: service names, or `*`).
 
 | Field | Type | Number | Description |
 |---|---|---|---|

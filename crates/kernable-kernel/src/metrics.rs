@@ -180,7 +180,7 @@ pub(crate) fn render(kernel: &Kernel) -> String {
     );
     metric(
         "kernable_ready",
-        "1 while the kernel is ready: every listener connected and caught up, not shutting down.",
+        "1 while the kernel is ready: every aggregate that counts has a worker, every listener that counts is connected and caught up, and it is not shutting down.",
         vec![(String::new(), kernel.readiness().is_ok() as u64)],
     );
     out

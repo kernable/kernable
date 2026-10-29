@@ -70,75 +70,313 @@ diagrams.hero = {
 }
 
 /* ------------------------------------------------------------------
-   command — architecture page: one command's way through the kernel
+   architecture — a still picture: your processes, the kernel, its stores
 ------------------------------------------------------------------ */
-diagrams.command = {
-  w: 860, h: 420,
-  intro: 'One command\'s way through kernable: your processes, in any language, decide; the kernel checks, orders and stores.',
-  legend: ['cmd', 'evt', 'ok', 'kern'],
+diagrams.architecture = {
+  w: 800, h: 372,
+  intro: 'Your processes hold the business logic, in any language. The kernel checks, executes, orders and stores, and keeps every store.',
+  legend: [],
   build (g) {
-    g.zone(10, 14, 320, 392, 'Your processes, any language')
-    // Clients and the rest are all processes of yours: same SDK, same key and grant.
-    const procs = [
-      ['client', 'Client', 'your API or script · TypeScript', 'cmd'],
-      ['mw', 'Middleware', 'listener · checks requests · Python', 'ok'],
-      ['worker', 'Worker', 'aggregate · Rust', 'cmd'],
-      ['rm', 'Read model', 'listener · order 0 · TypeScript', 'qry'],
-      ['reactor', 'Reactor', 'listener · order 10 · Python', 'evt']
+    const mid = (i) => 76 + i * 62 // the rows' centers; each side lines up with the other
+    g.zone(10, 14, 200, 222, 'Your code')
+    g.icon(118, 22, 16, icons.typescript)
+    g.icon(142, 22, 16, icons.python)
+    g.icon(166, 22, 16, icons.rust)
+    const yours = [
+      ['clients', 'Clients', 'commands, queries', 'cmd'],
+      ['workers', 'Workers', 'run aggregates: decide', 'cmd'],
+      ['listeners', 'Listeners', 'views · reactors · checks', 'qry']
     ]
-    procs.forEach(([id, label, sub, kind], i) => g.node(id, { x: 30, y: 46 + i * 72, w: 280, h: 52, label, sub, kind }))
-    g.node('kernel', { x: 470, y: 166, w: 190, h: 88, label: 'Kernel', sub: 'Rust · checks, orders, stores', kind: 'kern' })
+    yours.forEach(([id, label, sub, kind], i) => g.node(id, { x: 22, y: mid(i) - 27, w: 176, h: 54, label, sub, kind }))
+
+    g.zone(300, 14, 260, 344, null, 'var(--vp-c-brand-1)')
+    g.image(314, 22, 80, 20, '/logo-nav.png')
+    const kernel = [
+      ['checks', 'Checks', 'signatures · grants · middleware'],
+      ['execute', 'Execute', 'one per aggregate, on a worker'],
+      ['log', 'Log', 'commit · hash chain · order'],
+      ['services', 'Services', 'memberships · readiness'],
+      ['ui', 'UI', 'map · connections · history']
+    ]
+    kernel.forEach(([id, label, sub], i) => g.node(id, { x: 314, y: mid(i) - 25, w: 232, h: 50, label, sub, kind: 'kern' }))
+
+    g.zone(610, 14, 180, 344, 'Stores')
     const stores = [
-      ['commands', 'Commands', 'queued', 'cmd'],
-      ['events', 'Events', 'signed log · 41', 'evt'],
-      ['snapshots', 'Snapshots', 'aggregate state', 'kern'],
-      ['vault', 'Vault', 'personal data', 'pii'],
-      ['files', 'Files', 'data store', 'mut'],
-      ['cache', 'Cache', 'shared values', 'mut']
+      ['events', 'Events · commands', 'the signed log', 'evt'],
+      ['snapshots', 'Snapshots', 'state cache', 'kern'],
+      ['vault', 'Vault', 'personal, encrypted', 'pii'],
+      ['files', 'Files', 'PDFs, images', 'mut'],
+      ['cache', 'Cache', 'shared, expiring', 'mut']
     ]
     stores.forEach(([id, label, sub, kind], i) => {
-      g.node(id, { x: 720, y: 20 + i * 65, w: 120, h: 50, label, sub, kind, shape: 'store' })
-      const off = -35 + i * 14
-      g.wire(id, [g.port('kernel', 'right', off), [690, 210 + off], [690, 45 + i * 65], g.port(id, 'left')])
+      g.node(id, { x: 622, y: mid(i) - 25, w: 156, h: 50, label, sub, kind, shape: 'store' })
+      g.wire(`to-${id}`, [[588, mid(i)], g.port(id, 'left')])
     })
-    // Bends staggered so no two wires cross.
-    const cy = (i) => 72 + i * 72
-    g.wire('in', [g.port('client', 'right'), [430, cy(0)], [430, 174], g.port('kernel', 'left', -36)])
-    g.wire('mw', [g.port('kernel', 'left', -18), [415, 192], [415, cy(1)], g.port('mw', 'right')])
-    g.wire('worker', [g.port('kernel', 'left'), [400, 210], [400, cy(2)], g.port('worker', 'right')])
-    g.wire('rm', [g.port('kernel', 'left', 18), [415, 228], [415, cy(3)], g.port('rm', 'right')])
-    g.wire('reactor', [g.port('kernel', 'left', 36), [430, 246], [430, cy(4)], g.port('reactor', 'right')])
+    // One bus from the kernel to its stores.
+    g.wire('bus', [[588, mid(0)], [588, mid(4)]], { arrow: false })
+    g.wire('trunk', [[560, mid(2)], [588, mid(2)]], { arrow: false })
+
+    const label = (y, text) => g.text(255, y, text, { size: 9.5 })
+    g.wire('requests', [g.port('clients', 'right'), g.port('checks', 'left')])
+    label(mid(0) - 7, 'commands, queries')
+    g.wire('execute', [g.port('execute', 'left', -6), g.port('workers', 'right', -6)])
+    label(mid(1) - 13, 'commands, history')
+    g.wire('results', [g.port('workers', 'right', 6), g.port('execute', 'left', 6)])
+    label(mid(1) + 22, 'events, signed')
+    g.wire('deliver', [g.port('log', 'left'), g.port('listeners', 'right')])
+    label(mid(2) - 7, 'events, queries, checks')
   },
   steps () {
+    return []
+  }
+}
+
+/* ------------------------------------------------------------------
+   query — architecture page: one query's way, the counterpart of `hero`
+------------------------------------------------------------------ */
+diagrams.query = {
+  w: 760, h: 300,
+  intro: 'A query goes through the kernel too: checked, answered by a read model in order with its events, checked again.',
+  legend: ['qry', 'evt', 'ok', 'kern'],
+  build (g) {
+    const row = (i) => 66 + i * 76 // as in `hero`: rows are 56 high
+    g.zone(10, 14, 300, 272, 'Your code · any language')
+    g.icon(28, 37, 18, icons.typescript)
+    g.icon(56, 37, 18, icons.python)
+    g.icon(84, 37, 18, icons.rust)
+    g.node('client', { x: 28, y: row(0), w: 264, h: 56, label: 'Client', sub: 'asks a query', kind: 'qry' })
+    // One read model faces both the router and the log: it gets queries and events on one stream.
+    g.node('rm', { x: 28, y: row(1), w: 264, h: row(2) + 56 - row(1), label: 'Read model', sub: 'answers from its own state', kind: 'qry' })
+    g.zone(410, 14, 340, 272, null, 'var(--vp-c-brand-1)')
+    g.image(426, 26, 99, 25, '/logo-nav.png')
+    g.node('checks', { x: 428, y: row(0), w: 304, h: 56, label: 'Checks', sub: 'signature · grant · middleware', kind: 'kern' })
+    g.node('route', { x: 428, y: row(1), w: 304, h: 56, label: 'Route', sub: 'to a read model that answers it', kind: 'kern' })
+    for (let i = 0; i < 4; i++) {
+      const x = 428 + i * 80
+      g.node(`e${i}`, { x, y: row(2), w: 64, h: 56, label: `#${39 + i}`, sub: 'event', kind: 'evt', shape: 'store' })
+      if (i > 0) g.wire(`link${i}`, [[x - 16, row(2) + 28], [x, row(2) + 28]], { arrow: false, dashed: true })
+    }
+    g.wire('in', [g.port('client', 'right'), g.port('checks', 'left')])
+    g.wire('routed', [g.port('checks', 'bottom'), g.port('route', 'top')])
+    g.wire('ask', [g.port('route', 'left'), [292, row(1) + 28]])
+    g.wire('feed', [g.port('e0', 'left'), [292, row(2) + 28]])
+  },
+  steps () {
+    const check = (text) => ({ say: 'kernable checks it, as it checks a command.', hot: ['checks'], run: (g) => g.setSub('checks', text), pause: 600, after: (g) => g.setSub('checks', text) })
     return [
-      { say: 'A client — any process of yours — submits a command, signed with its own key.',
-        hot: ['client', 'kernel'], packets: [['in', { kind: 'cmd', label: 'shop.PlaceOrder', dur: 900 }]] },
-      { say: 'The kernel checks the signature and the key\'s grant, then asks the middleware to check the request.',
-        hot: ['kernel', 'mw'],
-        packets: [['mw', { kind: 'cmd', label: 'check', dur: 800 }], ['mw', { kind: 'ok', label: 'pass', dur: 700, reverse: true, delay: 950 }]] },
-      { say: 'It stores the command, queues it — one at a time per aggregate — and hands it to a worker with the history.',
-        hot: ['kernel', 'commands', 'worker'],
-        packets: [['commands', { kind: 'cmd', dur: 600 }], ['worker', { kind: 'cmd', label: 'execute', dur: 800, delay: 700 }]],
-        after: (g) => g.setSub('commands', '1 queued') },
-      { say: 'The worker runs your aggregate and returns new events, signed with the worker\'s key.',
-        hot: ['worker', 'kernel'], packets: [['worker', { kind: 'evt', label: 'OrderPlaced', dur: 800, reverse: true }]] },
-      { say: 'The kernel commits the events on the version they were based on, extends the hash chain, and keeps a snapshot when one is due.',
-        hot: ['kernel', 'events', 'snapshots'],
-        packets: [['events', { kind: 'evt', dur: 700 }], ['snapshots', { kind: 'kern', dur: 700, delay: 300 }]],
-        after: (g) => { g.setSub('events', 'signed log · 42'); g.setSub('commands', 'committed'); g.setSub('kernel', 'committed') } },
-      { say: 'Listeners get the events in a fixed order: read models (order 0) first, and each one acknowledges.',
-        hot: ['kernel', 'rm'],
-        packets: [['rm', { kind: 'evt', dur: 750 }], ['rm', { kind: 'ok', label: 'ack', dur: 600, reverse: true, delay: 900 }]],
-        after: (g) => g.setSub('rm', 'listener · at position 42') },
-      { say: 'Only then the reactors (order 10): when a reactor queries, the read model already has the event.',
-        hot: ['kernel', 'reactor'],
-        packets: [['reactor', { kind: 'evt', dur: 750 }], ['reactor', { kind: 'ok', label: 'ack', dur: 600, reverse: true, delay: 900 }]],
-        after: (g) => g.setSub('reactor', 'listener · at position 42') },
-      { say: 'The submit settles: it returns once every listener has processed the events. The next query, from anyone, sees the order.',
-        hot: ['kernel', 'client'], packets: [['in', { kind: 'ok', label: 'settled', dur: 900, reverse: true }]],
-        after: (g) => g.setSub('kernel', 'settled') },
-      { say: 'No polling, no "eventually". Beside the log, the kernel keeps the vault for personal data, files and a shared cache.',
-        hot: ['vault', 'files', 'cache'], pause: 1800 }
+      { say: 'A client asks a query, signed with its own key.',
+        hot: ['client', 'checks'], packets: [['in', { kind: 'qry', label: 'GetCart', dur: 900 }]] },
+      check('✓ signature'),
+      check('✓ signature  ✓ grant'),
+      check('✓ signature  ✓ grant  ✓ middleware'),
+      { say: 'It is routed to a read model that answers GetCart.',
+        hot: ['checks', 'route'], packets: [['routed', { kind: 'qry', dur: 500 }]] },
+      { say: 'The read model gets the query in order with its events: first everything committed before it…',
+        hot: ['e3', 'rm'], packets: [['feed', { kind: 'evt', label: '#42', dur: 700 }]],
+        after: (g) => g.setSub('rm', 'has processed #42') },
+      { say: '…then the query. So its answer reflects every event it was sent before.',
+        hot: ['route', 'rm'],
+        packets: [['ask', { kind: 'qry', label: 'GetCart', dur: 700 }], ['ask', { kind: 'ok', label: 'answer', dur: 700, reverse: true, delay: 850 }]] },
+      { say: 'A middleware after the query may still refuse the answer, e.g. another customer\'s cart.',
+        ...check('✓ after: may see it') },
+      { say: 'The client gets the answer, up to date with every settled submit.',
+        hot: ['checks', 'client'], packets: [['in', { kind: 'ok', label: 'answer', dur: 900, reverse: true }]] }
+    ]
+  }
+}
+
+/* ------------------------------------------------------------------
+   decide — event sourcing in one loop: a command is decided into events, events fold into state
+------------------------------------------------------------------ */
+diagrams.decide = {
+  w: 760, h: 310,
+  intro: 'Decide: state + command → events. Fold: events → state. That is all of event sourcing.',
+  legend: ['cmd', 'evt', 'err'],
+  build (g) {
+    g.node('cmd', { x: 20, y: 50, w: 210, h: 56, label: 'Command', sub: 'AddItem · qty 1', kind: 'cmd' })
+    g.node('state', { x: 20, y: 194, w: 210, h: 56, label: 'State', sub: 'items 2', kind: 'kern' })
+    g.node('decide', { x: 290, y: 122, w: 160, h: 76, label: 'Command handler', sub: 'decides', kind: 'ok' })
+    g.zone(515, 14, 235, 250, 'Stream shop/cart/c1')
+    const events = [['v1', 'v1 · ItemAdded', 'qty 2'], ['v2', 'v2 · ItemAdded', 'qty 1'], ['v3', 'v3 · CheckedOut', 'order o-7']]
+    events.forEach(([id, label, sub], i) => g.node(id, { x: 532, y: 44 + i * 72, w: 200, h: 54, label, sub, kind: 'evt', hidden: i > 0 }))
+    g.wire('in', [g.port('cmd', 'right'), [258, 78], [258, 145], g.port('decide', 'left', -15)])
+    g.wire('read', [g.port('state', 'right'), [258, 222], [258, 175], g.port('decide', 'left', 15)])
+    g.wire('emit2', [g.port('decide', 'right', -10), [490, 150], [490, 143], g.port('v2', 'left')], { hidden: true })
+    g.wire('emit3', [g.port('decide', 'right', 10), [490, 170], [490, 215], g.port('v3', 'left')], { hidden: true })
+    // Fold: the events, in order, through `apply` back into the state.
+    g.wire('fold', [[632, 264], [632, 290], [125, 290], g.port('state', 'bottom')])
+    g.text(380, 284, 'apply: fold the events, in order, into the state')
+  },
+  steps () {
+    const ask = (label) => ({ hot: ['cmd', 'state', 'decide'], run: (g) => g.setSub('cmd', label), after: (g) => g.setSub('cmd', label),
+      packets: [['in', { kind: 'cmd', label, dur: 800 }], ['read', { kind: 'kern', label: 'state', dur: 800, delay: 0 }]] })
+    return [
+      { say: 'A command arrives; the handler looks at the current state.', ...ask('AddItem · qty 1') },
+      { say: 'It decides: the cart is open, so it returns an event.',
+        show: ['v2', 'emit2'], hot: ['decide', 'v2'], packets: [['emit2', { kind: 'evt', label: 'ItemAdded', dur: 800 }]] },
+      { say: 'The new event is folded into the state.',
+        hot: ['v2', 'state'], packets: [['fold', { kind: 'evt', dur: 1000 }]], after: (g) => g.setSub('state', 'items 3') },
+      { say: 'Checking out works the same way.', ...ask('CheckOut') },
+      { say: 'Another event, the next version.',
+        show: ['v3', 'emit3'], hot: ['decide', 'v3'], packets: [['emit3', { kind: 'evt', label: 'CheckedOut', dur: 800 }]] },
+      { say: 'Folded too: now the cart is checked out.',
+        hot: ['v3', 'state'], packets: [['fold', { kind: 'evt', dur: 1000 }]], after: (g) => g.setSub('state', 'items 3 · checked out') },
+      { say: 'A late AddItem is decided against that state…', ...ask('AddItem · qty 1') },
+      { say: '…and rejected: no event, the state stays as it is.',
+        hot: ['decide', 'cmd'], packets: [['in', { kind: 'err', label: 'Rejected', dur: 900, reverse: true }]] }
+    ]
+  }
+}
+
+/* ------------------------------------------------------------------
+   streams — one stream per aggregate, all of them in one log
+------------------------------------------------------------------ */
+diagrams.streams = {
+  w: 760, h: 270,
+  intro: 'Every aggregate has its own stream, numbered by version. All streams interleave in one log, numbered by position.',
+  legend: [],
+  build (g) {
+    const lanes = { c1: 40, c2: 112 }
+    const events = [['c1', 1, 'ItemAdded'], ['c2', 1, 'ItemAdded'], ['c1', 2, 'ItemAdded'], ['c1', 3, 'CheckedOut'], ['c2', 2, 'ItemAdded']]
+    g.text(14, lanes.c1 + 32, 'cart c1', { anchor: 'start', size: 11 })
+    g.text(14, lanes.c2 + 32, 'cart c2', { anchor: 'start', size: 11 })
+    g.text(14, 222, 'the log', { anchor: 'start', size: 11 })
+    events.forEach(([cart, version, type], i) => {
+      const x = 96 + i * 132
+      g.node(`s${i}`, { x, y: lanes[cart], w: 116, h: 50, label: `${cart} · v${version}`, sub: type, kind: 'evt' })
+      g.node(`p${i}`, { x, y: 196, w: 116, h: 50, label: `#${41 + i}`, sub: `${cart} v${version}`, kind: 'kern', shape: 'store' })
+      g.wire(`w${i}`, [g.port(`s${i}`, 'bottom'), g.port(`p${i}`, 'top')], { dashed: true })
+    })
+  },
+  steps () {
+    return []
+  }
+}
+
+/* ------------------------------------------------------------------
+   saga — a rule across two aggregates, carried by a reactor
+------------------------------------------------------------------ */
+diagrams.saga = {
+  w: 760, h: 250,
+  intro: 'Two aggregates, one rule: a reactor turns one aggregate\'s event into a command for the other, and back.',
+  legend: ['cmd', 'evt', 'err'],
+  build (g) {
+    g.node('order', { x: 30, y: 30, w: 230, h: 62, label: 'Order', sub: 'o-7 · new', kind: 'cmd' })
+    g.node('stock', { x: 30, y: 168, w: 230, h: 62, label: 'Stock', sub: 'apple · 5 left', kind: 'cmd' })
+    g.node('reactor', { x: 500, y: 99, w: 230, h: 62, label: 'Reactor', sub: 'reservations', kind: 'evt' })
+    // Wires leave and enter on separate tracks, so none crosses another.
+    g.wire('placed', [g.port('order', 'right', 14), [400, 75], [400, 115], g.port('reactor', 'left', -15)])
+    g.wire('reserve', [g.port('reactor', 'left', 15), [400, 145], [400, 199], g.port('stock', 'right')])
+    g.wire('answer', [g.port('order', 'right', -14), [615, 47], g.port('reactor', 'top')], { arrow: false })
+  },
+  steps () {
+    const round = (order, qty, left, ok) => [
+      { say: `Order ${order} is placed: an event of the order alone.`, hot: ['order'],
+        run: (g) => g.setSub('order', `${order} · placed · ${qty} apples`), after: (g) => g.setSub('order', `${order} · placed · ${qty} apples`),
+        packets: [['placed', { kind: 'evt', label: 'OrderPlaced', dur: 900 }]] },
+      { say: 'The reactor reacts with a command for the stock, with a fixed ID.', hot: ['reactor', 'stock'],
+        packets: [['reserve', { kind: 'cmd', label: `Reserve ${qty}`, dur: 900 }]] },
+      ok
+        ? { say: 'The stock decides: enough left, reserved.', hot: ['stock', 'reactor'],
+            packets: [['reserve', { kind: 'evt', label: 'StockReserved', dur: 900, reverse: true }]],
+            after: (g) => g.setSub('stock', `apple · ${left} left`) }
+        : { say: 'The stock decides: not enough left, rejected.', hot: ['stock', 'reactor'],
+            packets: [['reserve', { kind: 'err', label: 'Rejected', dur: 900, reverse: true }]] },
+      { say: ok ? 'The reactor confirms the order.' : 'The reactor cancels the order.', hot: ['reactor', 'order'],
+        packets: [['answer', { kind: 'cmd', label: ok ? 'Confirm' : 'Cancel', dur: 900, reverse: true }]],
+        after: (g) => g.setSub('order', `${order} · ${ok ? 'confirmed' : 'cancelled'}`) }
+    ]
+    return [
+      ...round('o-7', 2, 3, true),
+      { say: 'Next order.', hot: [], run: (g) => g.setSub('order', 'o-8 · new'), pause: 900, after: (g) => g.setSub('order', 'o-8 · new') },
+      ...round('o-8', 9, 3, false)
+    ]
+  }
+}
+
+/* ------------------------------------------------------------------
+   lanes — commands: one at a time per aggregate, aggregates in parallel
+------------------------------------------------------------------ */
+diagrams.lanes = {
+  w: 740, h: 210,
+  intro: 'Commands of one aggregate run one after another; different aggregates run at the same time.',
+  legend: [],
+  build (g) {
+    const lane = (y, name) => g.text(14, y + 31, name, { anchor: 'start', size: 11 })
+    lane(30, 'cart c1')
+    lane(110, 'cart c2')
+    const box = (id, x, y, label, sub) => g.node(id, { x, y, w: 150, h: 52, label, sub, kind: 'cmd' })
+    box('a1', 100, 30, 'AddItem', 'decided on v0 → v1')
+    box('a2', 260, 30, 'AddItem', 'on v1 → v2')
+    box('a3', 420, 30, 'CheckOut', 'on v2 → v3')
+    box('b1', 170, 110, 'AddItem', 'decided on v0 → v1')
+    box('b2', 330, 110, 'CheckOut', 'on v1 → v2')
+    g.wire('time', [[100, 186], [730, 186]])
+    g.text(715, 202, 'time', { anchor: 'end', size: 10.5 })
+  },
+  steps () {
+    return []
+  }
+}
+
+/* ------------------------------------------------------------------
+   layers — who checks what, from the connection to the stored log
+------------------------------------------------------------------ */
+diagrams.layers = {
+  w: 760, h: 120,
+  intro: 'Five checks, from the connection to the stored log: each answers its own question.',
+  legend: [],
+  build (g) {
+    const layers = [
+      ['tls', 'TLS', 'may it connect?', 'mut'],
+      ['sig', 'Signature', 'which key sent it?', 'sig'],
+      ['grant', 'Grant', 'may that key do it?', 'kern'],
+      ['mw', 'Middleware', 'may this person?', 'ok'],
+      ['chain', 'Hash chain', 'unchanged since?', 'evt']
+    ]
+    layers.forEach(([id, label, sub, kind], i) => {
+      g.node(id, { x: 10 + i * 152, y: 30, w: 132, h: 60, label, sub, kind })
+      if (i > 0) g.wire(`to-${id}`, [[10 + i * 152 - 20, 60], [10 + i * 152, 60]])
+    })
+  },
+  steps () {
+    return []
+  }
+}
+
+/* ------------------------------------------------------------------
+   chain — the middleware chain: by order, and the first rejection refuses
+------------------------------------------------------------------ */
+diagrams.chain = {
+  w: 760, h: 140,
+  intro: 'Middlewares check a request in order; the first rejection refuses it, and it is never stored.',
+  legend: ['cmd', 'ok', 'err'],
+  build (g) {
+    g.node('req', { x: 10, y: 40, w: 150, h: 60, label: 'Request', sub: 'AddItem · alice', kind: 'cmd' })
+    g.node('rbac', { x: 205, y: 40, w: 150, h: 60, label: 'rbac', sub: 'order 0', kind: 'ok' })
+    g.node('quota', { x: 400, y: 40, w: 150, h: 60, label: 'quota', sub: 'order 5', kind: 'ok' })
+    g.node('done', { x: 595, y: 40, w: 155, h: 60, label: 'Accepted', sub: 'stored and queued', kind: 'kern' })
+    g.wire('a', [g.port('req', 'right'), g.port('rbac', 'left')])
+    g.wire('b', [g.port('rbac', 'right'), g.port('quota', 'left')])
+    g.wire('c', [g.port('quota', 'right'), g.port('done', 'left')])
+  },
+  steps () {
+    const reset = (g, item) => { g.setSub('req', `AddItem · alice, ${item}`); g.setSub('rbac', 'order 0'); g.setSub('quota', 'order 5') }
+    return [
+      { say: 'A request reaches the chain.', hot: ['req', 'rbac'], run: (g) => reset(g, '3rd item'), after: (g) => reset(g, '3rd item'),
+        packets: [['a', { kind: 'cmd', dur: 700 }]] },
+      { say: 'rbac: alice is a customer.', hot: ['rbac', 'quota'], after: (g) => g.setSub('rbac', '✓ a customer'),
+        packets: [['b', { kind: 'cmd', dur: 700 }]] },
+      { say: 'quota: her cart has room.', hot: ['quota', 'done'], after: (g) => g.setSub('quota', '✓ 3 of 3'),
+        packets: [['c', { kind: 'cmd', dur: 700 }]] },
+      { say: 'Accepted.', hot: ['done'], pause: 900 },
+      { say: 'The next request…', hot: ['req', 'rbac'], run: (g) => reset(g, '4th item'), after: (g) => reset(g, '4th item'),
+        packets: [['a', { kind: 'cmd', dur: 700 }]] },
+      { say: '…passes rbac…', hot: ['rbac', 'quota'], after: (g) => g.setSub('rbac', '✓ a customer'),
+        packets: [['b', { kind: 'cmd', dur: 700 }]] },
+      { say: '…and quota refuses it: no further check runs, nothing is stored.', hot: ['quota', 'rbac', 'req'],
+        after: (g) => g.setSub('quota', '✗ cart full'),
+        packets: [['b', { kind: 'err', label: 'quota', dur: 700, reverse: true }], ['a', { kind: 'err', label: 'refused', dur: 700, reverse: true, delay: 750 }]] }
     ]
   }
 }

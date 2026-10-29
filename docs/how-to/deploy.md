@@ -1,21 +1,60 @@
 # Deploy and upgrade
 
+Use this page when you put a new version of a service into production, or upgrade the kernel itself. Both can happen while the other side keeps running: processes reconnect on their own, and the kernel keeps commands queued until a worker takes them.
+
+Before you start, give the kernel a metrics address (`--metrics-listen 127.0.0.1:9233`): `GET /ready` there tells you when a deploy is done ([Monitor kernable](./monitor#health-checks)).
+
+## A new version of a service
+
+1. **Issue grants for anything new.** A new service, or a service that needs more rights, gets a new grant from the root key ([Keys per service](./keys)). The kernel does not change.
+2. **Deploy readers before writers** when an event's format changes: listeners that read the new format go first, workers that write it after ([Change an event's format](./event-versions)).
+3. **Apply the service's membership, once per deploy.** It lists the workers (aggregate types), listeners and middlewares the kernel waits for. From a pipeline, with a key granted `manage=<service>`:
+
+   ```sh
+   kernable apply 127.0.0.1:7233 keys/deploy.key shop.json
+   # shop.json: {"service": "shop", "workers": ["shop.cart"], "listeners": ["carts", "mails"],
+   #             "middlewares": ["guard"], "metadata": {"version": "1.4.0"}}
+   ```
+
+   It answers `applied shop: 1 workers, 2 listeners, 1 middlewares`. From code, call `kernable.apply(...)` in a deploy script; an app (`kernable.app({ service, version, domains }).run()`) builds the membership from its domains and applies it itself on every start, so its key needs `manage` for the service.
+4. **Start the new processes and stop the old ones.** Workers and listeners can restart at any time: a worker's commands go to another worker, a listener continues after its last acknowledged event.
+5. **Wait for `/ready`.** It answers 200 once every listed worker and listener is connected and the listeners have caught up; until then 503 names what it waits for:
+
+   ```sh
+   $ curl -s 127.0.0.1:9233/ready
+   waiting for listeners: carts
+   $ curl -s 127.0.0.1:9233/ready
+   ready
+   ```
+
+6. **Check the result.** `kernable services <store>` shows each applied membership, who applied it and when; a listed member that never connected is marked `(never registered)`. The kernel UI shows the same live ([Monitor kernable](./monitor#the-ui)).
+
+What the new membership no longer lists stops counting: the kernel stops waiting for it, and a middleware that is no longer listed stops checking ([Remove a listener, middleware or aggregate](./remove-listener)).
+
+### Pitfalls
+
+- **The latest apply wins.** Apply from one place per deploy, not from every process. With `app()`, every start applies: an old replica that restarts during a rolling deploy brings the old list back until a new one starts. Finish the rollout, or apply from the pipeline afterwards.
+- **One service is one membership.** Two different apps with the same service name replace each other's list.
+- **Commands of unknown types are refused.** A worker registers its aggregate and command types when it connects; until then, commands for an aggregate or command type that no worker registered and the membership does not list get `NOT_FOUND`. Start the worker of a new aggregate before clients send its commands, or list it in the membership: commands of a listed aggregate wait in the queue until its worker comes.
+- **Middleware is always checked.** While a listed middleware restarts, the requests it checks are refused. Keep the restart short, or run a second instance under a different name.
+
 ## The kernel
 
 1. **Back up** the store and the vault ([Back up and restore](./backup)).
-2. **Stop the kernel with SIGTERM.** It refuses new requests, lets running ones finish for `--drain-timeout-ms` (default 10 s), saves listener positions and a checkpoint, and exits. Commands that did not finish stay queued.
+2. **Stop the kernel with SIGTERM** (or SIGINT). It refuses new submits and queries, lets running ones finish for `--drain-timeout-ms` (default 10 s), then signs a checkpoint, saves listener positions and exits. Commands that did not finish stay queued and run again after the restart.
 3. **Install the new `kernable` binary.**
-4. **Migrate the store if needed.** `kernable migrate <store>` says "nothing to migrate" when the format is current; otherwise it upgrades the store. A kernel refuses to start on a store of another format, so you cannot forget this step.
-5. **Start the kernel** and wait until `GET /ready` on its metrics address answers 200: every registered aggregate has a worker connected, and every registered listener is connected and has caught up.
+4. **Migrate the store if needed.** `kernable migrate <store>` answers `store is at format N; nothing to migrate` when the format is current, and otherwise upgrades the store. A kernel refuses to start on a store of another format, so you cannot forget this step.
+5. **Start the kernel** with the same flags, and wait until `GET /ready` answers 200.
 
-New services, new grants and revocations need no change to the kernel: issue a grant, or send a revocation with `kernable revoke`. A new kernel key needs SIGHUP only. Every other setting is a flag of `kernable start` and needs a restart ([Keys](./keys)).
+While the kernel is away, workers and listeners reconnect on their own (their console shows `connection lost (…), reconnecting`, then `connected again`). Clients get connection errors and should resubmit with the same command ID: a command ID runs once.
 
-Processes reconnect on their own while the kernel is away; clients get connection errors and should resubmit with the same command ID.
+**SDK versions.** Every SDK sends its protocol version. A kernel accepts a range and refuses others with a message saying whether the SDK or the kernel needs an update. Upgrade the kernel first when a release says so.
 
-## Your processes
+## What needs a restart
 
-- **Apply the service's membership once per deploy** (`kernable apply` or a deploy script calling `kernable.apply`): it lists the workers, listeners and middlewares the kernel waits for; what the new version no longer has stops counting, and a middleware it no longer lists stops checking ([Remove a listener, middleware or aggregate](./remove-listener)). Not from every process: the latest apply wins.
-- **Workers and listeners restart safely at any time.** A worker's commands go to another worker; a listener continues after its last acknowledged event.
-- **Deploy readers before writers** when an event's format changes ([Change an event's format](./event-versions)).
-- **Middleware is checked always.** While a middleware restarts, the requests it checks are refused. Run two instances only if they have different names, or keep the restart short.
-- **SDK versions.** Every SDK sends its protocol version. A kernel accepts a range and refuses others with a message saying whether the SDK or the kernel needs an update: upgrade the kernel first when a release says so.
+| Change | What to do |
+|---|---|
+| a new service, new rights | issue a grant; no change to the kernel |
+| a leaked key | `kernable revoke` against the running kernel ([Keys](./keys#revoking-a-stolen-key)) |
+| the kernel's key | replace the file and send SIGHUP ([Keys](./keys#the-kernel-s-key)) |
+| TLS certificates, the vault key, any other flag of `kernable start` | restart the kernel ([kernable start](../reference/configuration)) |

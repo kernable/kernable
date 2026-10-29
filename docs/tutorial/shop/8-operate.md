@@ -40,10 +40,11 @@ A key and its grant are public; only the `.key` file is secret. Start the kernel
 
 <<< @/examples/shop/production.sh#start{sh}
 
-Besides TLS and the keys, three things differ from part 1:
+Besides TLS and the keys, four things differ from part 1:
 
 - **Snapshots** go to their own SQLite file. A worker sends a snapshot of an aggregate every 100 events, so a long-lived aggregate does not have to replay its whole history. Snapshots are a cache: delete them, and workers rebuild them.
 - **Metrics** and health checks are served on `--metrics-listen`; keep that address private.
+- **No UI.** `--dev` turned on the kernel's UI at http://127.0.0.1:7234; in production it is off unless you set `--ui-listen`. It has no login and listens on loopback only, so reach it through an SSH tunnel ([Monitor](../../how-to/monitor#the-ui)).
 - Paths point into `data/` and `keys/`. Back up `data/` (the log, the vault) and `keys/`, and keep a copy of the root key, offline too; `kernable verify` checks a log and its signatures at any time.
 
 Every flag can also be set as an environment variable (`KERNABLE_STORE`, `KERNABLE_TLS_CERT`, …), which suits a service manager or a container better than a long command line.
@@ -107,6 +108,7 @@ When you change how the handlers store data, raise `schema`: the store is cleare
 
 ## Readiness, deploys and shutdown
 
+- **Tell the kernel what each service consists of**, once per deploy: `kernable apply` with a key granted `manage`, or an SDK app (`kernable.app(...)`) that applies its membership when it starts. Then the kernel waits for exactly that, and what a new version no longer has stops counting ([Remove a listener, middleware or aggregate](../../how-to/remove-listener)).
 - `GET /ready` on the metrics address answers 200 once every registered aggregate has a worker connected and every registered listener is connected and has caught up; let your deploy wait for it. `GET /health` answers while the process runs, and `GET /metrics` serves Prometheus metrics.
 - **Deploy readers before writers.** When an event's format changes (a new event version), a process that does not know the new version stops at it instead of misreading it.
 - On SIGTERM the kernel **drains**: it refuses new requests, lets running ones finish for up to `--drain-timeout-ms`, then stores its state and exits. Commands that did not finish run right after the restart.

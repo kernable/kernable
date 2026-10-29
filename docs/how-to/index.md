@@ -1,28 +1,41 @@
 # How-to guides
 
-Step-by-step guides for tasks you will meet once your application runs. They assume you know the [concepts](../concepts/); the [tutorial](../tutorial/shop/) shows the code they refer to.
+Short guides for tasks you meet once your application runs. They assume you know the [concepts](../concepts/); the [tutorial](../tutorial/shop/) shows the code they refer to.
 
-**Operations**
+## Build and change your application
 
-- [Deploy and upgrade](./deploy)
-- [Back up and restore](./backup)
-- [Monitor kernable](./monitor)
-- [Mutual TLS with your own PKI](./tls)
-- [Keys per service, and changing a key](./keys)
+| Guide | When you need it |
+|---|---|
+| [Test your domain](./test-domain) | You want to test aggregates without a kernel, or against a real one. |
+| [Change an event's format](./event-versions) | An event must carry something new, but stored events stay as they are. |
+| [Rebuild a read model](./rebuild-read-model) | You fixed a handler bug, or a read model should hold something new. |
+| [Remove a listener, middleware or aggregate](./remove-listener) | You stop running something, and the kernel should stop waiting for it. Covers memberships. |
 
-**Development**
+## Run it in production
 
-- [Change an event's format](./event-versions)
-- [Rebuild a read model](./rebuild-read-model)
-- [Remove a listener, middleware or aggregate](./remove-listener)
-- [Test your domain](./test-domain)
+| Guide | When you need it |
+|---|---|
+| [Deploy and upgrade](./deploy) | You start, stop or upgrade the kernel and your processes. |
+| [Back up and restore](./backup) | You set up backups, or you need to restore. |
+| [Monitor kernable](./monitor) | You want metrics, health checks, alerts and logs. |
 
-**Data**
+## Security
 
-- [Handle an erasure request](./erasure)
-- [Passwords and other secrets](./secrets)
-- [Store files and cache values](./data-and-cache)
+| Guide | When you need it |
+|---|---|
+| [Keys per service, and changing a key](./keys) | You give each service its own key and grant, or you change, revoke or replace a key. |
+| [Mutual TLS with your own PKI](./tls) | You run over TCP with your own CA instead of development certificates. |
+| [Passwords and other secrets](./secrets) | A command carries a value that must never be stored. |
 
-**Extending kernable**
+## Data
 
-- [Write an SDK for another language](./new-sdk)
+| Guide | When you need it |
+|---|---|
+| [Handle an erasure request](./erasure) | A person asks you to erase their personal data. |
+| [Store files and cache values](./data-and-cache) | A domain needs files (an invoice PDF) or values that expire (a rate limit). |
+
+## Extend kernable
+
+| Guide | When you need it |
+|---|---|
+| [Write an SDK for another language](./new-sdk) | You want processes in a language without an SDK. |

@@ -52,6 +52,7 @@ export default withMermaid(
             { text: "Overview", link: "/concepts/" },
             { text: "Architecture", link: "/concepts/architecture" },
             { text: "Event sourcing in kernable", link: "/concepts/event-sourcing" },
+            { text: "Domains", link: "/concepts/domains" },
             { text: "Order and consistency", link: "/concepts/ordering" },
             { text: "Trust", link: "/concepts/trust" },
             { text: "Queries and middleware", link: "/concepts/queries-and-middleware" },

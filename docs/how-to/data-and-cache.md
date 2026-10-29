@@ -1,10 +1,18 @@
 # Store files and cache values
 
-Besides commands and events, the kernel keeps two things for your processes: **files** of a domain (an invoice PDF, an upload) in its data store, and **cache values** that may expire (a rate limit, a computed answer) in its cache. Both are kept under tenant, domain and key, and every call is signed and checked against the key's grant, like a query.
+Use this page when a process needs to keep something that is not an event: a **file** of a domain (an invoice PDF, an upload) or a **cache value** that may expire (a rate limit, a computed answer). The kernel keeps both for your processes, so you need no separate file server or cache. Both are kept under tenant, domain and key, and every call is signed and checked against the key's grant, like a query.
 
-Neither is part of the signed event log: they are not hash-chained, not verified, and not erased with the vault. If a file holds personal data, delete it yourself when you erase the person, for example in the listener that handles the erasing event.
+Neither is part of the signed event log: they are not hash-chained, not verified by `kernable verify`, and **not erased with the vault**. If a file holds personal data, delete it yourself when you erase the person ([below](#personal-data-in-files)).
 
-## Grant access
+| | Files | Cache |
+|---|---|---|
+| Kept | until deleted | until they expire, are deleted, or the kernel restarts |
+| Largest value | 16 MiB | 1 MiB |
+| Key | 1 to 512 bytes | 1 to 512 bytes |
+| Grant | `data_read`, `data_write` | `cache` |
+| Flag | `--data-store` (default `file:data`) | `--cache-store` (only `memory:`) |
+
+## 1. Grant access
 
 | Action | Allows |
 |---|---|
@@ -12,9 +20,17 @@ Neither is part of the signed event log: they are not hash-chained, not verified
 | `data_write` | putting and deleting them |
 | `cache` | setting, getting and deleting cache values |
 
-Grant them per domain: `kernable grant root.key api.pub 'data_write=shop.*' 'data_read=shop.*' 'cache=shop.*'`. `kernable start --dev` lets `app` do everything.
+Grant them per domain:
 
-## Files
+```sh
+kernable grant keys/root.key keys/api.pub 'data_write=shop.*' 'data_read=shop.*' 'cache=shop.*'
+```
+
+`kernable start --dev` lets `app` do everything. A key without the grant gets `PERMISSION_DENIED` (`key may not read files in shop`). More on grants: [Keys per service](./keys).
+
+## 2. Put and get files
+
+Any client can use them: `kernable.data` on a `Kernable` (`new Kernable()`, Python `Kernable()`, Rust `Kernable::new(…)`).
 
 ::: code-group
 ```ts [TypeScript]
@@ -34,9 +50,12 @@ kernable.data().delete("shop", "invoices/o-1.pdf").await?;         // whether it
 ```
 :::
 
-A key is any string of up to 512 bytes; a file has at most 16 MiB. Putting a file replaces the one under the same key. Text is stored as UTF-8.
+- Putting a file replaces the one under the same key. A reader gets the old file or the new one, never half of it.
+- Text is stored as UTF-8. Without a content type, a string is stored as `text/plain; charset=utf-8`, bytes as `application/octet-stream`.
+- The tenant is the client's; TypeScript (`{ tenant }`) and Python (`tenant=`) can name another per call.
+- There is no listing: choose keys you can compute again, such as `invoices/<order ID>.pdf`.
 
-## Cache values
+## 3. Set and get cache values
 
 ::: code-group
 ```ts [TypeScript]
@@ -53,8 +72,31 @@ let cached = kernable.cache().get("shop", "quote/c-1").await?; // Option<Vec<u8>
 ```
 :::
 
-A value has at most 1 MiB and lives until it expires, is deleted, or the kernel restarts: keep in the cache only what you can compute again.
+Without a TTL (`0`, `None`), a value lives until it is deleted or the kernel restarts. A restart always empties the cache: keep in it only what you can compute again. Every process connected to the kernel sees the same values.
+
+## Personal data in files
+
+An erasure deletes vault values only. To delete a person's files with them, handle the erasing event in a reactor whose key may `listen` to it and has `data_write`, and delete the files under keys you can derive from the person:
+
+```ts
+const erasedFiles = shopDomain.reactor("erased-files")
+  .on("CustomerErased", async (_data, evt) => {
+    await kernable.data.delete("shop", `customers/${evt.aggregateId}/avatar.png`);
+  });
+await kernable.listener(erasedFiles).run();
+```
+
+Deleting a missing file is no error, so a redelivered event does no harm.
+
+Keep personal data out of cache values, or give them a short TTL. See [Handle an erasure request](./erasure).
 
 ## Where they live
 
-The data store is set with `--data-store`: `file:data` (the default, a directory next to the kernel's working directory) or `memory:`. Back up the directory with the event log. The cache store, `--cache-store`, is `memory:`. See [kernable start](../reference/configuration).
+| Flag | Values | Notes |
+|---|---|---|
+| `--data-store` | `file:<directory>` (default `file:data`), `memory:` | The directory is created on the first file. Each file is `<directory>/<tenant>/<domain>/<key>`, every part hex-encoded. `memory:` loses the files on a restart. |
+| `--cache-store` | `memory:` | The only backend. |
+
+With `file:`, a key becomes a file name of twice its length in bytes. Most file systems allow 255 bytes per name, so keep keys under 128 bytes there.
+
+Back up the data directory together with the event store ([Back up and restore](./backup)). All flags: [Configuration](../reference/configuration).

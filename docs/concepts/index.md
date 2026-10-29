@@ -6,6 +6,7 @@ How kernable works and why. Each page is short; the [tutorials](../tutorial/) sh
 |---|---|
 | [Architecture](./architecture) | What the kernel does and what your processes do |
 | [Event sourcing in kernable](./event-sourcing) | Aggregates, commands, events, and how it differs from CRUD |
+| [Domains](./domains) | What a domain holds, its rules, how it relates to services, a code layout |
 | [Order and consistency](./ordering) | One command per aggregate, listener order, settling, at-least-once delivery |
 | [Trust](./trust) | Keys, grants, signatures, the hash chain |
 | [Queries and middleware](./queries-and-middleware) | Why every read goes through the kernel, and how checks fail closed |

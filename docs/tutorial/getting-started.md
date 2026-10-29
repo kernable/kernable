@@ -30,6 +30,8 @@ kernable start --dev
 
 The kernel keeps its events in `kernable.db` in this directory and listens on `http://127.0.0.1:7233`, for this machine only. `--dev` also creates the keys this guide uses, among them `app.key`, which may do everything here. [Keys and grants](#keys-and-grants) below explains what that means.
 
+`--dev` also turns on the kernel's UI: open **http://127.0.0.1:7234** in a browser. It stays empty until the next steps connect something; then it shows them live.
+
 Leave the kernel running and continue in a second terminal.
 
 ## 3. Business logic
@@ -68,7 +70,11 @@ A shopping cart: commands add items and check it out; events record what happene
 <<< @/examples/getting-started/cart.rs#worker{rust} [Rust]
 :::
 
-In a second terminal, in `kernable-demo`, set up a project, save the whole file and run it. Leave it running.
+In a second terminal, in `kernable-demo`, set up a project, save the whole file and run it. Leave it running; it prints where it connected and what it runs:
+
+```text
+12:04:10  worker  connected to http://127.0.0.1:7233 · key app (69212a19f36f…) · runs shop.AddItem, shop.CheckOut
+```
 
 ::: code-group
 
@@ -144,7 +150,11 @@ A read model is a **listener**: it builds its own view from the events and answe
 <<< @/examples/getting-started/carts.rs#run{rust} [Rust]
 :::
 
-In a third terminal, in `kernable-demo`, set up the language as in step 3 if it is new to you, save the whole file and run it:
+In a third terminal, in `kernable-demo`, set up the language as in step 3 if it is new to you, save the whole file and run it. It prints where it starts and what it reads and answers:
+
+```text
+12:04:31  listener carts  connected to http://127.0.0.1:7233 · key app (69212a19f36f…) · from 0 · reads shop.ItemAdded, shop.CheckedOut · answers shop.GetCart
+```
 
 ::: code-group
 
@@ -198,7 +208,53 @@ cargo run --bin submit            # saved as src/bin/submit.rs
 
 :::
 
-## 6. The reference application
+Now look at it in the UI, http://127.0.0.1:7234:
+
+- **Map:** the cart writes `ItemAdded` and `CheckedOut`, the carts read model reads them and answers `GetCart`; green dots show both connected and up to date.
+- **Connections:** the worker and the read model, each with its key and since when.
+- **History:** pick `c1` and see its events in order, each with the command that caused it and who sent it.
+
+## 6. One app
+
+The worker and the read model ran as two processes. When they belong together, run them as one **app**: it runs everything defined on its domains and tells the kernel what the service consists of, so the kernel knows what to wait for (see [Remove a listener, middleware or aggregate](../how-to/remove-listener)). In one file with the aggregate and the read model, replace both run blocks with:
+
+::: code-group
+
+```ts [TypeScript]
+await new Kernable({ key: "app.key" })
+  .app({ service: "shop", version: "1.0.0", domains: [shopDomain] })
+  .run();
+```
+
+```python [Python]
+Kernable(key="app.key").app(service="shop", version="1.0.0", domains=[shop_domain]).run()
+```
+
+```rust [Rust]
+use kernable::App;
+
+let kernable = Kernable::new("app.key")?;
+let app = kernable.app(App::new().service("shop").version("1.0.0").domain(&shop_domain))?;
+app.run().await?;
+```
+
+:::
+
+It prints one overview once everything is connected:
+
+```text
+kernable · shop 1.0.0
+  kernel      http://127.0.0.1:7233 · key app (69212a19f36f…)
+  membership  applied: 1 worker, 1 listener
+
+  worker      cart   runs AddItem, CheckOut
+  listener    carts  from 0 · reads ItemAdded, CheckedOut
+                     answers GetCart
+
+  ready in 12 ms
+```
+
+## 7. The reference application
 
 `examples/shop` is a two-domain shop. The `identity` domain is written in Python, the `orders` domain and the HTTP API in TypeScript. A reactor confirms orders using the other domain's read model. Its acceptance tests run everything over TCP with mutual TLS and kill each process once:
 

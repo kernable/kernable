@@ -2,7 +2,7 @@
 
 An **aggregate** is one thing your business makes decisions about: a customer, an order. It has a **state**, built from its **events**, and **commands** that ask it to change. A command handler looks at the state and either returns new events or rejects the command. Nothing else changes state: the events are the truth, and the kernel stores them forever.
 
-Aggregates belong to a **domain**, here `shop`. Types are unique within a domain and named `shop.Register` elsewhere.
+Aggregates belong to a **domain**, here `shop`: one area of the business, and in code one object that holds everything of it, its aggregates, read models and reactors, its event versions and which fields go to the vault. Types are unique within a domain and named `shop.Register` elsewhere. A domain writes only its own events and learns about other domains through listeners; [Domains](../../concepts/domains) explains the rules and a code layout for when it grows.
 
 ## The domain
 

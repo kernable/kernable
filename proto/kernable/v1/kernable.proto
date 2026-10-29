@@ -131,9 +131,9 @@ message Grant {
 }
 
 // Actions: submit, run, subscribe, listen, query, answer, check, privileged, vault_read,
-// vault_erase, data_read, data_write, cache, or `*` for all. Types: `*`, `domain.*` or
+// vault_erase, data_read, data_write, cache, manage, or `*` for all. Types: `*`, `domain.*` or
 // `domain.Type` (for privileged: the switch, `bypass_authorization`; for data_read, data_write
-// and cache: a domain, `domain.*`).
+// and cache: a domain, `domain.*`; for manage: service names, or `*`).
 message Permission {
   string action = 1;
   repeated string types = 2;

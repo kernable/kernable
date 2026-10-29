@@ -1655,7 +1655,8 @@ export class Worker {
       snapshot = this.snapshot(agg, cmd, x.expected_version, state, produced);
     } catch (err) {
       if (err instanceof SchemaError) {
-        // Not the command's fault: this worker cannot read the aggregate. Stop until updated.
+        // Not the command's fault: this worker cannot read the aggregate. End the session; run()
+        // reconnects and meets the same event again until the worker is updated.
         this.log.print("error", "worker", err.message);
         call.cancel();
         return;

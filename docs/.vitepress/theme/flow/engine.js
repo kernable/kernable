@@ -107,6 +107,15 @@ export class Graph {
     return g
   }
 
+  /* a short label, e.g. what travels along a wire */
+  text (x, y, str, { anchor = 'middle', size = 10.5 } = {}) {
+    const t = svgEl('text', {
+      x, y, 'text-anchor': anchor, 'font-size': size, style: { fill: 'var(--vp-c-text-2)' }
+    }, this.layerNodes)
+    t.textContent = str
+    return t
+  }
+
   /* a picture from the site's public folder, e.g. the logo */
   image (x, y, w, h, href) {
     return svgEl('image', { x, y, width: w, height: h, href }, this.layerNodes)

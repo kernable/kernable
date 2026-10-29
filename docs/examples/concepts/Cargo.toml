@@ -1,0 +1,15 @@
+# The Rust code on the concept pages, compiled with the workspace so it cannot drift from the SDK.
+[package]
+name = "concepts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "lib.rs"
+test = false
+
+[dependencies]
+kernable = { path = "../../../sdks/rust" }
+serde_json.workspace = true

@@ -13,7 +13,9 @@ const props = defineProps({
   /* start over after the last step, forever (an eye-catcher) */
   loop: { type: Boolean, default: false },
   /* no legend and no buttons: only the caption and the figure */
-  bare: { type: Boolean, default: false }
+  bare: { type: Boolean, default: false },
+  /* no caption either: the figure alone */
+  silent: { type: Boolean, default: false }
 })
 
 const LEGEND = {
@@ -86,7 +88,7 @@ onBeforeUnmount(() => {
 
 <template>
   <figure ref="root" class="kflow" :class="{ 'kflow-wide': wide }">
-    <figcaption class="kflow-caption" aria-live="polite">{{ caption }}</figcaption>
+    <figcaption v-if="!silent" class="kflow-caption" aria-live="polite">{{ caption }}</figcaption>
     <div v-if="!bare" class="kflow-bar">
       <span class="kflow-legend">
         <span v-for="k in legend" :key="k" class="kflow-key">

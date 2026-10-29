@@ -589,7 +589,7 @@ fn vault_rekey(vault: &str, old: &str, new: &str) -> Result<bool> {
             .ok_or_else(|| format!("{path}: not a 32-byte key in hex").into())
     };
     let count = kernable_store::vault::Vault::open(vault, &read(old)?)?.rekey(&read(new)?)?;
-    println!("re-encrypted {count} values; put the new key into [vault] key");
+    println!("re-encrypted {count} values; start the kernel with --vault-key <new.key>");
     Ok(true)
 }
 
