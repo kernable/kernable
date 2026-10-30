@@ -48,6 +48,8 @@ struct Spec {
     when: Option<When>,
     /// Answers `orders.CountOrders` with the number of orders it has seen.
     answers: bool,
+    /// Takes this long to decide.
+    deliberates: Duration,
 }
 
 fn spec(name: &'static str, order: i32, decide: Decide) -> Spec {
@@ -61,6 +63,7 @@ fn spec(name: &'static str, order: i32, decide: Decide) -> Spec {
         acks: true,
         when: Some(When::Before),
         answers: false,
+        deliberates: Duration::ZERO,
     }
 }
 
@@ -184,6 +187,7 @@ fn middleware(env: &Env, spec: Spec, log: &Log) -> (JoinHandle<tonic::Status>, m
                     In::Ack(Ack { position: b.up_to })
                 }
                 Out::Check(call) => {
+                    tokio::time::sleep(spec.deliberates).await;
                     log.lock().unwrap().push(self::seen(spec.name, &call));
                     In::Verdict(Verdict {
                         call_id: call.call_id,
@@ -366,6 +370,89 @@ async fn naming_a_listener_never_skips_a_middleware() {
     .await
     .unwrap_err();
     assert_eq!(unknown.code(), Code::InvalidArgument);
+}
+
+/// A listener that, once connected, sends passing verdicts for every call ID it can guess
+/// (`<request ID>#<n>`) for `request_id`, until stopped.
+fn verdict_spammer(env: &Env, request_id: &'static str) -> JoinHandle<()> {
+    let addr = env.addr.clone();
+    tokio::spawn(async move {
+        let (tx, rx) = mpsc::channel(256);
+        let send = |m: In| ListenerMessage { msg: Some(m) };
+        let hello = Hello {
+            protocol: kernable_core::PROTOCOL,
+            name: "mallory".into(),
+            key_id: id(&key(5)),
+            event_types: vec!["orders.OrderPlaced".into()],
+            ..Default::default()
+        };
+        tx.send(send(In::Hello(hello))).await.unwrap();
+        let channel = transport::connect(&addr).await.unwrap();
+        let mut inbound = ListenerServiceClient::new(channel)
+            .listen(ReceiverStream::new(rx))
+            .await
+            .unwrap()
+            .into_inner();
+        while let Ok(Some(msg)) = inbound.message().await {
+            match msg.msg.unwrap() {
+                Out::Challenge(c) => {
+                    let sig = signing::sign(&key(5), &signing::challenge_message(&c.nonce)).sig;
+                    tx.send(send(In::ChallengeResponse(ChallengeResponse { sig })))
+                        .await
+                        .unwrap();
+                }
+                Out::Ready(_) => {
+                    let tx = tx.clone();
+                    tokio::spawn(async move {
+                        loop {
+                            for n in 0..64 {
+                                let verdict = Verdict {
+                                    call_id: format!("{request_id}#{n}"),
+                                    rejected: None,
+                                };
+                                if tx.send(send(In::Verdict(verdict))).await.is_err() {
+                                    return;
+                                }
+                            }
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                    });
+                }
+                _ => {}
+            }
+        }
+    })
+}
+
+/// X8: verdicts are matched to calls by an unsigned, guessable call ID. Only the middleware a
+/// call went to decides it: another listener's verdicts for it count for nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_the_asked_middleware_decides() {
+    let env = start("mw-spoofed-verdicts").await;
+    spawn_worker(&env).await;
+    let log = Log::default();
+    fn deny(r: &Request, _: usize) -> Option<Rejected> {
+        match r {
+            Request::Command(c) if c.aggregate_id == "o2" => refuse("forbidden"),
+            _ => None,
+        }
+    }
+    let slow_guard = Spec {
+        deliberates: Duration::from_millis(300),
+        ..spec("guard", 0, deny)
+    };
+    let _guard = middleware(&env, slow_guard, &log);
+    let mallory = verdict_spammer(&env, "c2");
+    settle_in().await;
+
+    let refused = submit(
+        &env.addr,
+        signed(command("c2", "PlaceOrder", "o2"), &key(1)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(rejected_code(&refused), Some("forbidden"));
+    mallory.abort();
 }
 
 #[tokio::test(flavor = "multi_thread")]

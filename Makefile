@@ -29,10 +29,12 @@ check-packages:
 	./scripts/check-packages.sh
 
 # Long robustness runs: every crash point ROUNDS times per backend, KILLS random kills under
-# load, SEEDS storage-fault seeds, CASES property cases.
+# load, SEEDS storage-fault seeds, MODEL_SEEDS model-based runs of 300 steps, CASES property
+# cases.
 ROUNDS ?= 20
 KILLS ?= 200
 SEEDS ?= 200
+MODEL_SEEDS ?= 100
 CASES ?= 10000
 torture:
 	CARGO_TARGET_DIR=target/crash KERNABLE_CRASH_ROUNDS=$(ROUNDS) KERNABLE_KILLS=$(KILLS) cargo test -p kernable-kernel --features crash-points --test crashes
@@ -40,6 +42,9 @@ torture:
 	KERNABLE_FAULT_SEEDS=$(SEEDS) cargo test -p kernable-kernel --test storage
 	KERNABLE_FAULT_SEEDS=$(SEEDS) KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --test storage
 	PROPTEST_CASES=$(CASES) cargo test -p kernable-store --test props
+	KERNABLE_MODEL_SEEDS=$(MODEL_SEEDS) KERNABLE_MODEL_STEPS=300 cargo test -p kernable-kernel --test model
+	KERNABLE_MODEL_SEEDS=$(MODEL_SEEDS) KERNABLE_MODEL_STEPS=300 KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --test model
+	PROPTEST_CASES=$(CASES) cargo test -p kernable-core --test layouts
 	PROPTEST_CASES=$(CASES) cargo test -p kernable-kernel --test props
 	PROPTEST_CASES=$(CASES) KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --test props
 

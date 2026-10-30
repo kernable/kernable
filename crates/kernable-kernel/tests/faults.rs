@@ -87,6 +87,33 @@ async fn forged_result_ends_the_session_and_an_honest_worker_takes_over() {
     assert_eq!(stream_versions(&env), [1]);
 }
 
+/// X8: the lease ID is not signed. A result under a lease the worker was not given never
+/// commits, whatever command that lease is for; the command runs once, on an honest worker.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_result_under_a_wrong_lease_never_commits() {
+    let env = start_with("wrong-lease", 30_000).await;
+    let (seen, mut seen_rx) = mpsc::unbounded_channel();
+    let liar = start_worker(
+        env.addr.clone(),
+        TestWorker::with(Behavior::WrongLease, seen),
+    )
+    .await;
+
+    let addr = env.addr.clone();
+    let pending = tokio::spawn(async move {
+        submit(&addr, signed(command("c1", "PlaceOrder", "o1"), &key(1))).await
+    });
+    assert_eq!(seen_rx.recv().await.unwrap(), "c1");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(stream_versions(&env).is_empty(), "a wrong lease committed");
+
+    liar.abort();
+    spawn_worker(&env).await;
+    let result = pending.await.unwrap().unwrap();
+    assert_eq!(committed_versions(&result), [1]);
+    assert_eq!(stream_versions(&env), [1]);
+}
+
 /// Never leave a kernel process behind when a test fails.
 struct KillOnDrop(Child);
 

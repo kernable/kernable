@@ -2,8 +2,12 @@
 #![allow(dead_code)] // each test file uses a different subset
 
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicI64, Ordering},
+    sync::{
+        Mutex,
+        atomic::{AtomicI64, AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -275,6 +279,8 @@ pub enum Behavior {
     Crash,
     /// Answers each command only after this delay.
     Slow(Duration),
+    /// Answers with a lease ID that is not the one it was given (an unsigned field).
+    WrongLease,
     /// Signs results with a key other than its registered one.
     ForgeResult,
     /// Sends a snapshot with every result.
@@ -318,6 +324,16 @@ pub struct TestWorker {
     pub registered: Option<tokio::sync::oneshot::Sender<()>>,
     /// The grant it presents; `None`: the [`default_grant`] of its key.
     pub grant: Option<Grant>,
+    /// Shared by workers that must never execute one aggregate at the same time.
+    pub held: Option<std::sync::Arc<Held>>,
+}
+
+/// The aggregates some workers are executing: one lease per aggregate at a time (O7).
+#[derive(Default)]
+pub struct Held {
+    running: Mutex<HashSet<String>>,
+    /// Executions of an aggregate that another execution was still running.
+    pub overlaps: AtomicUsize,
 }
 
 impl TestWorker {
@@ -338,6 +354,7 @@ impl TestWorker {
             service: String::new(),
             registered: None,
             grant: None,
+            held: None,
         }
     }
 
@@ -416,6 +433,7 @@ pub async fn run_worker(addr: String, mut w: TestWorker) -> tonic::Status {
             Ok(None) => return tonic::Status::ok("closed"),
             Err(status) => return status,
         };
+        let mut executing = None;
         let reply = match msg {
             Out::Challenge(c) => In::ChallengeResponse(ChallengeResponse {
                 sig: signing::sign(&w.signer, &signing::challenge_message(&c.nonce)).sig,
@@ -428,6 +446,13 @@ pub async fn run_worker(addr: String, mut w: TestWorker) -> tonic::Status {
             }
             Out::Execute(x) => {
                 let cmd = x.command.unwrap();
+                if let Some(held) = &w.held {
+                    let aggregate = format!("{}/{}", cmd.tenant_id, cmd.aggregate_id);
+                    if !held.running.lock().unwrap().insert(aggregate.clone()) {
+                        held.overlaps.fetch_add(1, Ordering::SeqCst);
+                    }
+                    executing = Some(aggregate);
+                }
                 if let Some(seen) = &w.seen {
                     let _ = seen.send(cmd.command_id.clone());
                 }
@@ -446,6 +471,11 @@ pub async fn run_worker(addr: String, mut w: TestWorker) -> tonic::Status {
                 let result_key = match w.behavior {
                     Behavior::ForgeResult => key(9),
                     _ => w.signer.clone(),
+                };
+                let lease_id = match w.behavior {
+                    // A guess at one: lease IDs are `<command ID>#<n>`.
+                    Behavior::WrongLease => format!("{}0", x.lease_id),
+                    _ => x.lease_id.clone(),
                 };
                 let exists = x.snapshot.is_some() || !x.history.is_empty();
                 let outcome = match w.behavior {
@@ -489,7 +519,7 @@ pub async fn run_worker(addr: String, mut w: TestWorker) -> tonic::Status {
                         });
                         In::Result(WorkResult {
                             vault,
-                            lease_id: x.lease_id,
+                            lease_id,
                             events,
                             worker_sig: Some(signing::sign(&result_key, &msg)),
                             snapshot,
@@ -498,7 +528,7 @@ pub async fn run_worker(addr: String, mut w: TestWorker) -> tonic::Status {
                     Err(reason) => {
                         let msg = signing::rejection_message(&cmd.command_id, &reason);
                         In::Rejection(Rejection {
-                            lease_id: x.lease_id,
+                            lease_id,
                             reason: Some(reason),
                             worker_sig: Some(signing::sign(&result_key, &msg)),
                         })
@@ -506,6 +536,10 @@ pub async fn run_worker(addr: String, mut w: TestWorker) -> tonic::Status {
                 }
             }
         };
+        // Done before the kernel hears of it: until then, no one else may hold the lease.
+        if let (Some(held), Some(aggregate)) = (&w.held, executing) {
+            held.running.lock().unwrap().remove(&aggregate);
+        }
         if tx.send(send(reply)).await.is_err() {
             return tonic::Status::ok("closed");
         }

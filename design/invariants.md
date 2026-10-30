@@ -1,6 +1,6 @@
 # Invariants
 
-Status: H0 of the hardening plan.
+Status: H0 of the hardening plan; O5–O7 and X1–X8 made executable in H4.
 
 What must hold whatever happens: any input, any crash, any fault, any interleaving. Every robustness test checks these invariants rather than its own ad-hoc assertions, so a failure names the guarantee that broke. The threat model is in [threat-model.md](threat-model.md).
 
@@ -9,7 +9,7 @@ The **S** and **O** invariants are executable today, in `kernable_store::invaria
 - `Log::read(store, kernel_keys)` then `Log::check()` for S1–S8;
 - a harness records what it was told in an `Observed`, and `Observed::check(&log)` checks O1–O4.
 
-The crash test (`crates/kernable-kernel/tests/crashes.rs`) runs all of them after every crash. The others become executable in the milestone named.
+The crash test (`crates/kernable-kernel/tests/crashes.rs`), the storage-fault test (`storage.rs`) and the model-based test (`model.rs`) run all of them. The model-based test also checks O5–O7, X1, X7 and X8 while a seeded random sequence of legitimate and hostile requests runs (`KERNABLE_MODEL_SEEDS`, `KERNABLE_MODEL_STEPS`).
 
 ## S: the store
 
@@ -36,24 +36,24 @@ Recorded by the test harness while it runs; checked against the store afterwards
 | O2 | **Acknowledged means delivered.** On each connection, a listener got every event of its types up to what it acknowledged; it never acknowledges beyond a batch; a reconnect never resumes beyond what it acknowledged; its stored position was acknowledged | at least once | `Observed::check` |
 | O3 | **Delivery in order.** On one connection, positions strictly increase and start after `Ready.after_position` | ordered delivery | `Observed::check` |
 | O4 | **Faithful delivery.** Every delivered event is exactly the stored one and of a type the listener asked for | integrity, confidentiality | `Observed::check` |
-| O5 | **Settled means processed.** When a submit returns `settled`, every listener that counts has acknowledged its last event | — | H4 |
-| O6 | **Listener order.** Event N reaches order k only after every counting listener of a lower order acknowledged N | — | H4 |
-| O7 | **One writer.** At most one lease per aggregate at any time | — | H4 |
+| O5 | **Settled means processed.** When a submit returns `settled`, every listener that counts has acknowledged its last event | read your writes | `model.rs`, at every settled submit, also for requests from a listener's handler |
+| O6 | **Listener order.** Event N reaches order k only after every counting listener of a lower order acknowledged N | listener order | `model.rs`: every delivery to order 1 against order 0's acknowledgements |
+| O7 | **One writer.** At most one lease per aggregate at any time | one writer | `model.rs`: two workers record what they execute (`Held`) |
 
 ## X: security
 
-Checked by the attacker suite against a running kernel, with S and O run afterwards.
+Checked against a running kernel, with S and O run afterwards.
 
-| # | Invariant |
-|---|---|
-| X1 | Nothing is accepted without a valid signature by a key whose current grant covers the action and type, and that is not revoked at the time |
-| X2 | A domain only writes its own events, and a command's events stay on its stream and tenant |
-| X3 | No request covered by a registered middleware passes without that middleware's verdict, also while it is away, retired or being replaced |
-| X4 | Signed byte layouts are injective: two different messages never sign the same bytes |
-| X5 | Vault values reach only `vault_read` keys; an erased value never comes back; an erasure stays within its tenant |
-| X6 | A listener name or aggregate registration moves to another key only as its declared successor |
-| X7 | A membership changes only by a signed apply that is newer than the stored one (after F1) |
-| X8 | Unsigned fields (`protocol`, `listener`, acks, verdicts, the lease ID) never widen what anyone may do |
+| # | Invariant | Checked by |
+|---|---|---|
+| X1 | Nothing is accepted without a valid signature by a key whose current grant covers the action and type, and that is not revoked at the time | `model.rs` (forged, unauthorized, revoked, narrowed and replayed-grant submits; refused commands never stored), `e2e.rs` `unsigned_forged_and_unauthorized_commands_are_refused`, `replays.rs` |
+| X2 | A domain only writes its own events, and a command's events stay on its stream and tenant | S5 in every `Log::check`; `e2e.rs` `unauthorized_and_impostor_workers_are_refused`, `equal_names_in_two_domains_do_not_collide` |
+| X3 | No request covered by a registered middleware passes without that middleware's verdict, also while it is away, retired or being replaced | `middleware.rs`: missing, reconnecting and restarted middlewares, spoofed verdicts; `listeners.rs`: retired by a membership |
+| X4 | Signed byte layouts are injective: two different messages never sign the same bytes | `kernable-core/tests/layouts.rs`: property test over commands, results, grants, memberships and queries |
+| X5 | Vault values reach only `vault_read` keys; an erased value never comes back; an erasure stays within its tenant | `vault.rs` (a listener without `vault_read` gets none; only allowed workers erase), store `an_erasure_deletes_the_subject_of_its_own_tenant_only` |
+| X6 | A listener name or aggregate registration moves to another key only as its declared successor | `keys.rs` `a_listener_moves_to_its_successor_key_and_keeps_its_place`, `e2e.rs` impostor workers |
+| X7 | A membership changes only by a signed apply that is newer than the stored one (after F1) | `model.rs`, `replays.rs` |
+| X8 | Unsigned fields (`protocol`, `listener`, acks, verdicts, the lease ID) never widen what anyone may do | `model.rs` (random `listener` values); `middleware.rs` `naming_a_listener_never_skips_a_middleware`, `only_the_asked_middleware_decides` (spoofed verdicts); `faults.rs` `a_result_under_a_wrong_lease_never_commits`; acks: O2 |
 
 ## R: resources and liveness
 

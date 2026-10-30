@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 09ea84d985ab1072c1fd882d0adc4769186fd62dc6a3e3eac111067c823b2423 # shrinks to a = Grant { key_id: "bb", permissions: [], succeeds: "b", issued_at: 0, root_sig: None }, b = Grant { key_id: "", permissions: [], succeeds: "bbb", issued_at: 0, root_sig: None }
+cc d115facee87147d1e61ca5a354adaedff83451d06bd83aa03768d33fdf9d6803 # shrinks to a = QueryRequest { query_id: "a", tenant_id: "bb", domain: "", query_type: "ba", payload: [], context: Some(RequestContext { sender_tenant: "", sender_identity: "", sender_account: "", sender_session: "", on_behalf_of: "", expected_version: None, correlation_id: "", causation_id: "", trace_id: "", bypass_authorization: false, attributes: [] }), min_position: 1, issued_at: 0, client_sig: None, protocol: 0, listener: "" }, b = QueryRequest { query_id: "", tenant_id: "", domain: "abb", query_type: "ba", payload: [], context: Some(RequestContext { sender_tenant: "", sender_identity: "", sender_account: "", sender_session: "", on_behalf_of: "", expected_version: None, correlation_id: "", causation_id: "", trace_id: "", bypass_authorization: false, attributes: [] }), min_position: 1, issued_at: 0, client_sig: None, protocol: 0, listener: "" }
+cc fd006cdd10179860d1c24b062dda4902821682107f927f14a621edb4c3785f7e # shrinks to a = Command { command_id: "", tenant_id: "b", domain: "", aggregate_type: "ba", aggregate_id: "bb", command_type: "", payload: [], client_sig: None, context: None, vault_refs: [] }, b = Command { command_id: "bb", tenant_id: "ab", domain: "", aggregate_type: "b", aggregate_id: "", command_type: "", payload: [], client_sig: None, context: None, vault_refs: [] }, va = 1, vb = 1, ea = [], eb = []
