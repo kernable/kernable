@@ -863,6 +863,11 @@ impl Kernel {
         if name.is_empty() {
             return Ok(None);
         }
+        if !config::valid_name(name) {
+            return Err(Status::invalid_argument(
+                "a listener name has 1 to 128 letters, digits, `-`, `_` and `.`",
+            ));
+        }
         let caller = self
             .listeners
             .caller(name)

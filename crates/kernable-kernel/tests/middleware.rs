@@ -310,6 +310,64 @@ async fn the_chain_runs_in_order_and_the_first_rejection_refuses() {
     );
 }
 
+/// F8: `listener` in a submit or query is not signed, so anyone may set it. It only narrows
+/// what the request itself waits for and where its query may go; every middleware still checks
+/// the request, whichever listener it names.
+#[tokio::test(flavor = "multi_thread")]
+async fn naming_a_listener_never_skips_a_middleware() {
+    let env = start("mw-unsigned-listener").await;
+    spawn_worker(&env).await;
+    let log = Log::default();
+    fn deny(r: &Request, _: usize) -> Option<Rejected> {
+        match r {
+            Request::Command(c) if c.aggregate_id == "o2" => refuse("forbidden"),
+            Request::Query(_) => refuse("no_queries"),
+            _ => None,
+        }
+    }
+    let _first = middleware(&env, spec("a-first", 1, pass), &log);
+    let _deny = middleware(&env, spec("b-deny", 2, deny), &log);
+    let _counter = middleware(&env, counter(), &log);
+    let audit = Spec {
+        when: None,
+        ..spec("audit", 0, pass)
+    };
+    let _audit = middleware(&env, audit, &log);
+    settle_in().await;
+
+    for name in ["counter", "audit"] {
+        log.lock().unwrap().clear();
+        let refused = submit_from(
+            &env.addr,
+            signed(command("c2", "PlaceOrder", "o2"), &key(1)),
+            Wait::Committed,
+            name,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rejected_code(&refused), Some("forbidden"), "as {name}");
+        assert_eq!(*log.lock().unwrap(), ["a-first", "b-deny"], "as {name}");
+
+        let mut q = query("CountOrders", &key(1));
+        q.listener = name.into();
+        let answered = ask(&env, q).await.unwrap();
+        assert!(
+            matches!(answered.outcome, Some(query_result::Outcome::Rejected(r)) if r.code == "no_queries"),
+            "as {name}"
+        );
+    }
+    // A listener that is not there is refused, not ignored.
+    let unknown = submit_from(
+        &env.addr,
+        signed(command("c3", "PlaceOrder", "o3"), &key(1)),
+        Wait::Committed,
+        "nobody",
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(unknown.code(), Code::InvalidArgument);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_middleware_cannot_send_what_it_checks_itself() {
     let env = start("mw-self").await;
