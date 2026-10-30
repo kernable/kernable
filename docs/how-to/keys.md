@@ -49,7 +49,7 @@ A key without a grant, or whose grant does not cover a type, gets `PERMISSION_DE
 
 Issue a new grant for the key and restart the service with it. The kernel keeps the newest grant per key: once it has seen the new one, it refuses the old one, and workers, listeners and subscriptions whose key may no longer do what it does are disconnected. A new service needs only its grant; the kernel does not change.
 
-A grant cannot be withdrawn. After a kernel restart, the kernel accepts an older grant again until the newer one is presented. To take rights away for certain, change the key and revoke the old one.
+A grant cannot be withdrawn, only replaced by a newer one, which the kernel keeps across restarts. To take rights away from a key that may be stolen, change the key and revoke the old one.
 
 ## Changing a key
 

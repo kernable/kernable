@@ -14,12 +14,13 @@ use std::{
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
-        Attribute, Command, CommandResult, Committed, Event, ListenerRecord, Membership,
+        Attribute, Command, CommandResult, Committed, Event, Grant, ListenerRecord, Membership,
         MembershipRecord, Middleware, NewEvent, Rejected, RequestContext, RevocationRecord,
         Signature, When, WorkerRecord, command_result::Outcome,
     },
     signing::{self, GENESIS},
 };
+use prost::Message;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::{
@@ -120,6 +121,16 @@ CREATE TABLE IF NOT EXISTS memberships (
 ) STRICT;
 ";
 
+/// Added in format 2.
+const GRANTS: &str = "
+CREATE TABLE IF NOT EXISTS grants (
+    key_id    TEXT PRIMARY KEY, -- the grantee
+    issued_at INTEGER NOT NULL, -- ms since epoch, signed
+    root_id   TEXT    NOT NULL, -- the root key that signed it
+    grant     BLOB    NOT NULL  -- the Grant message as presented, with its root signature
+) STRICT;
+";
+
 const EVENT_COLUMNS: &str = "global_position, tenant_id, aggregate_type, aggregate_id, version, \
                              event_type, payload, command_id, created_at, \
                              producer_key_id, producer_sig, hash, context, domain, schema, \
@@ -211,6 +222,7 @@ impl SqliteStore {
         match (format, tables) {
             (0, 0) => {
                 conn.execute_batch(SCHEMA)?;
+                conn.execute_batch(GRANTS)?;
                 conn.pragma_update(None, "user_version", FORMAT)?;
             }
             (FORMAT, _) => {}
@@ -805,6 +817,37 @@ impl Store for SqliteStore {
         read_revocations(&self.conn())
     }
 
+    fn grants(&self) -> Result<Vec<Grant>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT grant FROM grants ORDER BY key_id")?;
+        let blobs = stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
+        let mut grants = Vec::new();
+        for blob in blobs {
+            grants.push(Grant::decode(blob?.as_slice())?);
+        }
+        Ok(grants)
+    }
+
+    fn save_grant(&self, grant: &Grant) -> Result<()> {
+        self.conn().execute(
+            "INSERT INTO grants (key_id, issued_at, root_id, grant) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (key_id) DO UPDATE
+             SET issued_at = excluded.issued_at, root_id = excluded.root_id, grant = excluded.grant
+             WHERE excluded.issued_at > grants.issued_at",
+            params![
+                grant.key_id,
+                grant.issued_at,
+                grant
+                    .root_sig
+                    .as_ref()
+                    .map(|s| s.key_id.as_str())
+                    .unwrap_or_default(),
+                grant.encode_to_vec(),
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Recomputes the hash chain and checks all signatures; see [`Report`].
     fn verify(&self, kernel_key_ids: &[String]) -> Result<Report> {
         verify_tables(&self.conn(), kernel_key_ids)
@@ -1123,9 +1166,17 @@ fn stored_result(conn: &Connection, command_id: &str) -> Result<Option<CommandRe
 
 /// Upgrades a SQLite store to [`FORMAT`]; returns the format it had.
 pub(crate) fn migrate(path: &Path) -> Result<u32> {
-    let conn = Connection::open(path)?;
+    let mut conn = Connection::open(path)?;
     match conn.pragma_query_value(None, "user_version", |r| r.get(0))? {
         FORMAT => Ok(FORMAT),
+        1 => {
+            // One transaction: the table and the format change together.
+            let tx = conn.transaction()?;
+            tx.execute_batch(GRANTS)?;
+            tx.pragma_update(None, "user_version", FORMAT)?;
+            tx.commit()?;
+            Ok(1)
+        }
         found => Err(Error::Format(found)),
     }
 }

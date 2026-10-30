@@ -31,7 +31,7 @@ use std::fmt;
 
 use ed25519_dalek::SigningKey;
 use kernable_core::proto::{
-    Command, CommandResult, Event, ListenerRecord, MembershipRecord, NewEvent, Rejected,
+    Command, CommandResult, Event, Grant, ListenerRecord, MembershipRecord, NewEvent, Rejected,
     RevocationRecord, Signature, WorkerRecord,
 };
 
@@ -39,7 +39,8 @@ use kernable_core::proto::{
 /// format is refused; `kernable migrate` upgrades older ones.
 ///
 /// - 1: the first release format.
-pub const FORMAT: u32 = 1;
+/// - 2: adds the newest grant per key ([`Store::grants`]).
+pub const FORMAT: u32 = 2;
 
 pub use file::FileStore;
 pub use sqlite::SqliteStore;
@@ -328,6 +329,12 @@ pub trait Store: Send + Sync {
     /// Every revocation, in the order they were stored.
     fn revocations(&self) -> Result<Vec<RevocationRecord>>;
 
+    /// The newest grant the kernel took into effect per key, ordered by key ID.
+    fn grants(&self) -> Result<Vec<Grant>>;
+
+    /// Keeps `grant` unless the store holds a grant of its key issued at the same time or later.
+    fn save_grant(&self, grant: &Grant) -> Result<()>;
+
     /// Recomputes the hash chain and checks all signatures against the kernel's keys (the
     /// current one and any it had before); see [`Report`].
     fn verify(&self, kernel_key_ids: &[String]) -> Result<Report>;
@@ -377,7 +384,7 @@ pub fn open_read_only(url: &str) -> Result<Box<dyn Store>> {
 }
 
 /// Upgrades the store at `url` to [`FORMAT`] (kernel stopped; back it up first) and returns
-/// the format it had. There is no older format yet.
+/// the format it had.
 pub fn migrate(url: &str) -> Result<u32> {
     match backend(url) {
         ("memory", _) => Ok(FORMAT),

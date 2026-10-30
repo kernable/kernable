@@ -17,6 +17,7 @@ message LogRecord {
     RevocationRecord revocation = 7;
     WorkerRecord worker = 8;
     MembershipRecord membership = 9;
+    Grant grant = 10; // since format 2
   }
 }
 

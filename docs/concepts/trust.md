@@ -54,7 +54,7 @@ The process sends its grant with every call, in the gRPC metadata entry `kernabl
 
 The root key is used only to issue grants and revocations, so it can stay offline. Several roots (`--root` repeated) allow replacing one.
 
-A grant cannot be withdrawn. A newer grant for the same key (by its issue time) replaces it, and the kernel refuses the older one once it has seen the newer one. After a kernel restart, it accepts the older one again until the newer one is presented; to take rights away for certain, give the service a new key and revoke the old one.
+A grant cannot be withdrawn. A newer grant for the same key (by its issue time) replaces it, and the kernel refuses the older one once it has seen the newer one, also after a restart: it stores the newest grant per key. Rights a key used before the newer grant stay used; to take rights away from a key that may be stolen, give the service a new key and revoke the old one.
 
 ## What is signed
 

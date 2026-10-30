@@ -3,8 +3,8 @@
 use std::{collections::HashSet, path::PathBuf, sync::Arc, thread};
 
 use kernable_core::proto::{
-    Attribute, Command, ListenerRecord, Membership, MembershipRecord, Middleware, NewEvent,
-    Rejected, RequestContext, Signature, When, WorkerRecord, command_result::Outcome,
+    Attribute, Command, Grant, ListenerRecord, Membership, MembershipRecord, Middleware, NewEvent,
+    Permission, Rejected, RequestContext, Signature, When, WorkerRecord, command_result::Outcome,
 };
 use kernable_store::{Enqueued, Error, FileStore, SqliteStore, Store};
 
@@ -218,6 +218,33 @@ fn memberships_are_replaced_per_service(store: &dyn Store) {
             membership("billing", &[], 2),
             membership("shop", &["carts"], 3)
         ]
+    );
+}
+
+fn grant(key_id: &str, action: &str, issued_at: i64) -> Grant {
+    Grant {
+        key_id: key_id.into(),
+        permissions: vec![Permission {
+            action: action.into(),
+            types: vec!["*".into()],
+        }],
+        succeeds: String::new(),
+        issued_at,
+        root_sig: Some(sig()),
+    }
+}
+
+fn the_newest_grant_per_key_is_kept(store: &dyn Store) {
+    assert!(store.grants().unwrap().is_empty());
+    store.save_grant(&grant("b", "submit", 5)).unwrap();
+    store.save_grant(&grant("a", "submit", 1)).unwrap();
+    store.save_grant(&grant("a", "query", 2)).unwrap();
+    // Older, or as old: kept out.
+    store.save_grant(&grant("a", "*", 1)).unwrap();
+    store.save_grant(&grant("b", "*", 5)).unwrap();
+    assert_eq!(
+        store.grants().unwrap(),
+        [grant("a", "query", 2), grant("b", "submit", 5)]
     );
 }
 
@@ -521,6 +548,7 @@ for_each_backend!(
     listeners_are_saved_replaced_and_removed,
     workers_are_saved_replaced_and_removed,
     memberships_are_replaced_per_service,
+    the_newest_grant_per_key_is_kept,
     reading_after_a_version_returns_only_later_events,
     contexts_come_back_as_stored,
 );

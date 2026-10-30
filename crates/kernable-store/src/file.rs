@@ -30,8 +30,8 @@ use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
         CheckpointRecord, Command, CommandResult, Committed, CommittedRecord, EnqueuedRecord,
-        Event, FormatRecord, ListenerRecord, LogRecord, LoggedEvent, MembershipRecord, NewEvent,
-        Rejected, RejectedRecord, RevocationRecord, Signature, WorkerRecord,
+        Event, FormatRecord, Grant, ListenerRecord, LogRecord, LoggedEvent, MembershipRecord,
+        NewEvent, Rejected, RejectedRecord, RevocationRecord, Signature, WorkerRecord,
         command_result::Outcome, log_record::Record,
     },
     signing::{self, GENESIS},
@@ -83,6 +83,7 @@ struct State {
     workers: BTreeMap<String, WorkerRecord>,
     memberships: BTreeMap<String, MembershipRecord>,
     revocations: Vec<RevocationRecord>,
+    grants: BTreeMap<String, Grant>,
 }
 
 impl State {
@@ -170,6 +171,15 @@ impl State {
             Record::Membership(m) => {
                 let service = m.membership.as_ref().map(|m| m.service.clone());
                 self.memberships.insert(service.unwrap_or_default(), m);
+            }
+            Record::Grant(g) => {
+                if self
+                    .grants
+                    .get(&g.key_id)
+                    .is_none_or(|held| held.issued_at < g.issued_at)
+                {
+                    self.grants.insert(g.key_id.clone(), g);
+                }
             }
         }
         Ok(())
@@ -657,6 +667,23 @@ impl Store for FileStore {
         Ok(self.inner().state.revocations.clone())
     }
 
+    fn grants(&self) -> Result<Vec<Grant>> {
+        Ok(self.inner().state.grants.values().cloned().collect())
+    }
+
+    fn save_grant(&self, grant: &Grant) -> Result<()> {
+        let mut inner = self.inner();
+        if inner
+            .state
+            .grants
+            .get(&grant.key_id)
+            .is_some_and(|held| held.issued_at >= grant.issued_at)
+        {
+            return Ok(());
+        }
+        append(&mut inner, Record::Grant(grant.clone()))
+    }
+
     fn verify(&self, kernel_key_ids: &[String]) -> Result<Report> {
         let inner = self.inner();
         let state = &inner.state;
@@ -690,6 +717,30 @@ pub(crate) fn migrate(path: &Path) -> Result<u32> {
         .ok_or_else(|| corrupt("first record: open the store once to repair it"))?;
     match LogRecord::decode(body)?.record {
         Some(Record::Format(f)) if f.version == FORMAT => Ok(FORMAT),
+        // Format 2 only adds a record type: the first record changes, nothing else.
+        Some(Record::Format(f)) if f.version == 1 => {
+            let first = LogRecord {
+                record: Some(Record::Format(FormatRecord { version: FORMAT })),
+            }
+            .encode_to_vec();
+            assert_eq!(first.len(), len, "a format record keeps its length");
+            let mut file = OpenOptions::new().write(true).open(path)?;
+            file.try_lock().map_err(|_| {
+                Error::Io(std::io::Error::other("store is in use by another process"))
+            })?;
+            // The old log stays, as `kernable migrate` promises.
+            let old = PathBuf::from(format!("{}.format-1", path.display()));
+            fs::write(&old, &bytes)?;
+            File::open(&old)?.sync_all()?;
+            let mut record = Vec::with_capacity(HEADER + len);
+            record.extend((len as u32).to_be_bytes());
+            record.extend(checksum(&first));
+            record.extend(&first);
+            // A few bytes in the first sector: written whole or not at all.
+            file.write_all(&record)?;
+            file.sync_all()?;
+            Ok(1)
+        }
         Some(Record::Format(f)) => Err(Error::Format(f.version)),
         _ => Err(Error::Format(0)),
     }

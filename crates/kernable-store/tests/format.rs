@@ -3,7 +3,9 @@
 
 use std::{fs, path::PathBuf};
 
-use kernable_core::proto::{Command, EnqueuedRecord, FormatRecord, LogRecord, log_record::Record};
+use kernable_core::proto::{
+    Command, EnqueuedRecord, FormatRecord, Grant, LogRecord, log_record::Record,
+};
 use kernable_store::{Error, FORMAT, FileStore, SqliteStore, Store};
 use prost::Message;
 use sha2::{Digest, Sha256};
@@ -111,4 +113,76 @@ fn a_new_sqlite_database_records_its_format_and_others_are_refused() {
     conn.pragma_update(None, "user_version", FORMAT + 1)
         .unwrap();
     assert_eq!(format_error(SqliteStore::open(&path.0)), FORMAT + 1);
+}
+
+fn grant(issued_at: i64) -> Grant {
+    Grant {
+        key_id: "k".into(),
+        issued_at,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_file_log_of_format_1_migrates_to_format_2() {
+    let path = Temp::new("file-migrate");
+    log(&path.0, vec![format(1), enqueued()]);
+    assert_eq!(format_error(FileStore::open(&path.0)), 1);
+    let url = format!("file:{}", path.0.display());
+    assert_eq!(kernable_store::migrate(&url).unwrap(), 1);
+    assert_eq!(
+        kernable_store::migrate(&url).unwrap(),
+        FORMAT,
+        "nothing left"
+    );
+    let kept = PathBuf::from(format!("{}.format-1", path.0.display()));
+    assert_eq!(
+        format_error(FileStore::open_read_only(&kept)),
+        1,
+        "the old log is kept as it was"
+    );
+    fs::remove_file(&kept).unwrap();
+
+    let store = FileStore::open(&path.0).unwrap();
+    assert_eq!(store.pending().unwrap()[0].command.command_id, "c1");
+    store.save_grant(&grant(7)).unwrap();
+    drop(store);
+    let store = FileStore::open(&path.0).unwrap();
+    assert_eq!(store.grants().unwrap(), [grant(7)]);
+}
+
+#[test]
+fn a_sqlite_database_of_format_1_migrates_to_format_2() {
+    let path = Temp::new("sqlite-migrate");
+    let store = SqliteStore::open(&path.0).unwrap();
+    store
+        .enqueue(
+            &Command {
+                command_id: "c1".into(),
+                ..Default::default()
+            },
+            0,
+        )
+        .unwrap();
+    drop(store);
+    // As format 1 wrote it: no grants table.
+    let conn = rusqlite::Connection::open(&path.0).unwrap();
+    conn.execute_batch("DROP TABLE grants; PRAGMA user_version = 1;")
+        .unwrap();
+    drop(conn);
+    assert_eq!(format_error(SqliteStore::open(&path.0)), 1);
+    let url = format!("sqlite:{}", path.0.display());
+    assert_eq!(kernable_store::migrate(&url).unwrap(), 1);
+    assert_eq!(
+        kernable_store::migrate(&url).unwrap(),
+        FORMAT,
+        "nothing left"
+    );
+
+    let store = SqliteStore::open(&path.0).unwrap();
+    assert_eq!(store.pending().unwrap()[0].command.command_id, "c1");
+    store.save_grant(&grant(7)).unwrap();
+    drop(store);
+    let store = SqliteStore::open(&path.0).unwrap();
+    assert_eq!(store.grants().unwrap(), [grant(7)]);
 }

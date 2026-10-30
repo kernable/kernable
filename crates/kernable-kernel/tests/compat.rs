@@ -73,10 +73,10 @@ fn stream(order: &str) -> StreamId {
     }
 }
 
-/// What the format-1 fixture holds: the customer's email in `c1` and its event (subject `k-1`),
-/// an item added by `c2`, a rejected `c3`, a secret coupon code with the pending `c4`, an order
-/// `o3` whose customer `k-2` was erased (by `c7`), two listeners, and `c11` signed by a key
-/// revoked since.
+/// What the fixtures hold: the customer's email in `c1` and its event (subject `k-1`), an item
+/// added by `c2`, a rejected `c3`, a secret coupon code with the pending `c4`, an order `o3`
+/// whose customer `k-2` was erased (by `c7`), two listeners, and `c11` signed by a key revoked
+/// since. From format 2 on: key 8's grant, which replaced a broader one.
 fn fill(store: &dyn Store, vault: &Vault) {
     let cmd = |id: &str, command_type: &str, aggregate: &str, values: &[&VaultValue]| {
         let mut cmd = command(id, command_type, aggregate);
@@ -238,6 +238,21 @@ fn fill(store: &dyn Store, vault: &Vault) {
     };
     store.revoke(&revocation).unwrap();
     store.checkpoint(&key(3), AT).unwrap();
+    store.save_grant(&narrow_grant()).unwrap();
+}
+
+/// Key 8's grant in the format-2 fixture: query only, issued after one that let it submit.
+fn narrow_grant() -> kernable_core::proto::Grant {
+    signing::grant(
+        &root(),
+        &id(&key(8)),
+        vec![kernable_core::proto::Permission {
+            action: "query".into(),
+            types: vec!["*".into()],
+        }],
+        "",
+        AT + 1,
+    )
 }
 
 /// Copies the store file of `format` and `backend` into `dir` with its vault,
@@ -258,6 +273,7 @@ fn copy(format: u32, backend: &str, file: &str, dir: &Path) -> String {
             // One self-contained file: fold the write-ahead log into it.
             let conn = rusqlite::Connection::open(&fixture).unwrap();
             conn.pragma_update(None, "journal_mode", "DELETE").unwrap();
+            let _ = std::fs::remove_file(format!("{}.lock", fixture.display()));
         }
     }
     let target = dir.join(file);
@@ -306,17 +322,27 @@ fn check_common(store: &dyn Store, backend: &str) {
     assert_eq!(shop.metadata[0].value, "1.0.0", "{backend}");
 }
 
+/// Each format, and each backend.
+const STORES: [(u32, &str, &str); 4] = [
+    (1, "sqlite", "k.db"),
+    (1, "file", "k.log"),
+    (2, "sqlite", "k.db"),
+    (2, "file", "k.log"),
+];
+
 #[tokio::test(flavor = "multi_thread")]
-async fn stores_of_format_1_verify_and_run_with_their_vault() {
-    for (backend, file) in [("sqlite", "k.db"), ("file", "k.log")] {
+async fn stores_of_every_format_verify_and_run_with_their_vault() {
+    for (format, backend, file) in STORES {
         let mut url = String::new();
         let mut vault_url = String::new();
-        let env = start_custom(&format!("compat-vault-{backend}"), |config, dir| {
-            url = copy(1, backend, file, dir);
+        let name = format!("compat-vault-{format}-{backend}");
+        let env = start_custom(&name, |config, dir| {
+            url = copy(format, backend, file, dir);
+            assert_eq!(kernable_store::migrate(&url).unwrap(), format);
             assert_eq!(
                 kernable_store::migrate(&url).unwrap(),
                 kernable_store::FORMAT,
-                "nothing to migrate"
+                "nothing left to migrate"
             );
             vault_url = format!(
                 "sqlite:{}",
@@ -338,6 +364,18 @@ async fn stores_of_format_1_verify_and_run_with_their_vault() {
         );
         let store = kernable_store::open_read_only(&url).unwrap();
         check_common(store.as_ref(), backend);
+        let kept: Vec<_> = store
+            .grants()
+            .unwrap()
+            .into_iter()
+            .filter(|g| g.key_id == id(&key(8)))
+            .collect();
+        let expected = if format >= 2 {
+            vec![narrow_grant()]
+        } else {
+            vec![]
+        };
+        assert_eq!(kept, expected, "format {format}, {backend}");
         let events = store.read_all(0, 10).unwrap();
         let (placed, erased_order, erasure) = (&events[0], &events[2], &events[3]);
         assert_eq!(placed.vault_refs.len(), 1);
@@ -384,11 +422,13 @@ async fn stores_of_format_1_verify_and_run_with_their_vault() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn stores_of_format_1_report_what_revoked_keys_signed() {
-    for (backend, file) in [("sqlite", "k.db"), ("file", "k.log")] {
+async fn stores_of_every_format_report_what_revoked_keys_signed() {
+    for (format, backend, file) in STORES {
         let mut url = String::new();
-        let env = start_custom(&format!("compat-revoked-{backend}"), |config, dir| {
-            url = copy(1, backend, file, dir);
+        let name = format!("compat-revoked-{format}-{backend}");
+        let env = start_custom(&name, |config, dir| {
+            url = copy(format, backend, file, dir);
+            kernable_store::migrate(&url).unwrap();
             config.store = url.clone();
             config.vault = Some(VaultConfig {
                 store: format!(

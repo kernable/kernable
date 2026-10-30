@@ -14,7 +14,7 @@ use std::sync::{
 
 use ed25519_dalek::SigningKey;
 use kernable_core::proto::{
-    Command, CommandResult, Event, ListenerRecord, MembershipRecord, NewEvent, Rejected,
+    Command, CommandResult, Event, Grant, ListenerRecord, MembershipRecord, NewEvent, Rejected,
     RevocationRecord, Signature, WorkerRecord,
 };
 
@@ -252,6 +252,15 @@ impl Store for FaultyStore {
     fn revocations(&self) -> Result<Vec<RevocationRecord>> {
         self.faults.read()?;
         self.inner.revocations()
+    }
+
+    fn grants(&self) -> Result<Vec<Grant>> {
+        self.faults.read()?;
+        self.inner.grants()
+    }
+
+    fn save_grant(&self, grant: &Grant) -> Result<()> {
+        self.faults.write(|| self.inner.save_grant(grant))
     }
 
     /// Never fails on purpose: a failed flush stops the kernel, which an in-process test cannot

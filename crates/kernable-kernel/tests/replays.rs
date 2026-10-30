@@ -4,7 +4,11 @@
 mod common;
 
 use common::*;
-use kernable_core::proto::Membership;
+use kernable_core::{
+    proto::{Membership, SubmitRequest, Wait, command_service_client::CommandServiceClient},
+    transport,
+};
+use kernable_kernel::Kernel;
 use tonic::Code;
 
 /// The middlewares of `service` as the store holds them.
@@ -73,4 +77,34 @@ async fn racing_deploys_end_with_the_newer_membership() {
         }
         assert_eq!(stored_middlewares(&env, &service), ["new"], "round {round}");
     }
+}
+
+/// F7: a narrower grant replaced a broader one. After a restart, the broader one, presented
+/// again by a key that kept it, stays refused.
+#[tokio::test]
+async fn an_older_grant_stays_refused_after_a_restart() {
+    let thief = key(8);
+    let broad = grant(&thief, &[("submit", &["*"])]);
+    let narrow = grant(&thief, &[("query", &["*"])]);
+    let env = start_custom("replay-grant", |config, _| {
+        // The kernel before the restart.
+        let store = kernable_store::open_with(&config.store, config.durability).unwrap();
+        let before = Kernel::open_on(config.clone(), store).unwrap();
+        before.grant(broad.clone()).unwrap();
+        before.grant(narrow.clone()).unwrap();
+    })
+    .await;
+
+    let request = SubmitRequest {
+        command: Some(signed(command("c1", "PlaceOrder", "o1"), &thief)),
+        wait: Wait::Committed.into(),
+        protocol: kernable_core::PROTOCOL,
+        ..Default::default()
+    };
+    let channel = transport::connect(&env.addr).await.unwrap();
+    let refused = CommandServiceClient::new(channel)
+        .submit(presenting(request, &broad))
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code(), Code::PermissionDenied, "{refused:?}");
 }

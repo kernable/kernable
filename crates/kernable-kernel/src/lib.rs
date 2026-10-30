@@ -265,7 +265,7 @@ impl Kernel {
         for pending in store.pending()? {
             queue.push(pending.command, pending.received_at);
         }
-        Ok(Arc::new(Kernel {
+        let kernel = Arc::new(Kernel {
             config: Arc::new(config),
             grants: Mutex::default(),
             permissions: RwLock::default(),
@@ -292,7 +292,18 @@ impl Kernel {
             requests_by_key: PerKey::default(),
             subscriptions_by_key: PerKey::default(),
             durable,
-        }))
+        });
+        // The newest grants it had, checked again: a root key may be gone or revoked since.
+        for grant in kernel.store.grants()? {
+            let key_id = grant.key_id.clone();
+            if let Err(e) = kernel
+                .check_grant(&grant)
+                .and_then(|()| kernel.keep(grant, false))
+            {
+                tracing::warn!(key = %key_id, error = %e.message(), "stored grant no longer valid");
+            }
+        }
+        Ok(kernel)
     }
 
     /// The configuration in effect.
@@ -347,25 +358,41 @@ impl Kernel {
     }
 
     /// Takes a grant into effect: checks its root signature and keeps it if it is the newest
-    /// for its key. Sessions are checked again when it replaces another grant.
+    /// for its key, in the store too, so that an older grant stays refused after a restart
+    ///. Sessions are checked again when it replaces another grant.
     pub fn grant(&self, grant: Grant) -> Result<(), Status> {
+        self.check_grant(&grant)?;
+        self.keep(grant, true)
+    }
+
+    fn check_grant(&self, grant: &Grant) -> Result<(), Status> {
         let sig = grant
             .root_sig
             .as_ref()
             .ok_or_else(|| Status::unauthenticated("grant is not signed"))?;
-        self.by_root(sig, &signing::grant_message(&grant))?;
-        if let Some(reason) = grants::malformed(&grant) {
+        self.by_root(sig, &signing::grant_message(grant))?;
+        if let Some(reason) = grants::malformed(grant) {
             return Err(Status::invalid_argument(format!("grant: {reason}")));
         }
         if self.revoked_since(&grant.key_id).is_some() {
             return Err(Status::permission_denied("key was revoked"));
         }
+        Ok(())
+    }
+
+    /// Keeps a checked grant unless one of its key issued at the same time or later is held;
+    /// `store`: also in the store, before it takes effect.
+    fn keep(&self, grant: Grant, store: bool) -> Result<(), Status> {
         let replaced = {
             let mut grants = self.grants.lock().unwrap_or_else(PoisonError::into_inner);
             match grants.get(&grant.key_id) {
                 Some(held) if held.issued_at >= grant.issued_at => return Ok(()),
                 held => {
                     let replaced = held.is_some();
+                    if store {
+                        self.store.save_grant(&grant).map_err(internal)?;
+                        self.sync(0);
+                    }
                     grants.insert(grant.key_id.clone(), grant);
                     replaced
                 }
