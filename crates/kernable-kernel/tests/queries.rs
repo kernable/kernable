@@ -189,6 +189,21 @@ async fn queries_are_signed_allowed_per_key_and_need_a_read_model() {
     stale.client_sig = Some(signing::sign(&key(1), &signing::query_message(&stale)));
     assert_eq!(code(ask(&env, stale).await), Code::Unauthenticated);
 
+    // Key 8 may ask what it is allowed to, but not past authorization (no `privileged`).
+    assert!(ask(&env, signed_query("Fail", 0, &key(8))).await.is_ok());
+    let mut bypass = signed_query("Fail", 0, &key(8));
+    bypass.context = Some(kernable_core::proto::RequestContext {
+        bypass_authorization: true,
+        ..Default::default()
+    });
+    bypass.client_sig = Some(signing::sign(&key(8), &signing::query_message(&bypass)));
+    assert_eq!(code(ask(&env, bypass).await), Code::PermissionDenied);
+    // A query type is a name without dots.
+    assert_eq!(
+        code(ask(&env, signed_query("Count.Orders", 0, &key(1))).await),
+        Code::InvalidArgument
+    );
+
     // A listener key may only answer the queries it is allowed to (key 6 may not).
     let status = read_model(&env, "impostor", key(6), true).await.unwrap();
     assert_eq!(status.code(), Code::PermissionDenied);

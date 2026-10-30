@@ -2,7 +2,7 @@
 
 mod common;
 
-use std::path::Path;
+use std::{path::Path, time::Duration};
 
 use common::*;
 use kernable_core::{certs, proto::Wait, transport::Tls};
@@ -69,7 +69,7 @@ async fn metrics_report_commands_queue_and_sessions() {
         config.metrics_listen = Some(metrics.clone());
     })
     .await;
-    spawn_worker(&env).await;
+    let worker = start_worker(env.addr.clone(), TestWorker::honest()).await;
     let place = signed(command("c1", "PlaceOrder", "o1"), &key(1));
     submit(&env.addr, place).await.unwrap();
     let again = signed(command("c2", "PlaceOrder", "o1"), &key(1));
@@ -91,6 +91,22 @@ async fn metrics_report_commands_queue_and_sessions() {
         );
     }
     assert!(get(&metrics, "/").await.starts_with("HTTP/1.1 404"));
+
+    // A worker that goes away is no longer counted.
+    worker.abort();
+    let mut gone = false;
+    for _ in 0..100 {
+        if get(&metrics, "/metrics")
+            .await
+            .lines()
+            .any(|l| l == "kernable_worker_sessions 0")
+        {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(gone, "the session is still counted");
 }
 
 #[tokio::test(flavor = "multi_thread")]
