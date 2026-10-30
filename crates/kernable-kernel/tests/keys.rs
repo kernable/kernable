@@ -389,5 +389,19 @@ async fn start_dev_creates_keys_and_a_grant_that_allows_everything_and_turns_the
     assert_eq!(status.code(), tonic::Code::NotFound, "{status:?}");
     let _ = kernel.kill();
     let _ = kernel.wait();
+
+    // A vault key that is not 32 bytes in hex stops the start, and says so.
+    std::fs::write(dir.join("vault.key"), "abcd\n").unwrap();
+    let out = Process::new(env!("CARGO_BIN_EXE_kernable"))
+        .current_dir(&dir)
+        .args(["start", "--dev", "--listen", &free_addr()])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(
+        stderr.contains("the vault key must be 32 bytes, hex encoded"),
+        "{stderr}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
