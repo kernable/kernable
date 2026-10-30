@@ -1,14 +1,14 @@
 //! Crash points (`--features crash-points`): the real kernel aborts at each point where it has
 //! stored something but not yet told anyone, is restarted, and the workload is resubmitted.
 //! Afterwards every command has exactly one outcome, nothing is lost or duplicated, the chain
-//! verifies, and the listener has seen every event.
+//! verifies, and the listener has seen every event: the workload's own expectations, and every
+//! store and observation invariant (`kernable_store::invariants`).
 //!
 //! `KERNABLE_CRASH_ROUNDS=<n>` repeats every point n times (`make torture`).
 
 mod common;
 
 use std::{
-    collections::BTreeSet,
     path::Path,
     process::{Child, Command as Process, Stdio},
     sync::{Arc, Mutex},
@@ -25,6 +25,7 @@ use kernable_core::{
     signing, transport,
 };
 use kernable_kernel::crash::POINTS;
+use kernable_store::invariants::{Log, Observed};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -83,9 +84,9 @@ async fn worker(addr: &str) {
     let _ = registered.await;
 }
 
-/// A listener that acknowledges every batch and records each delivered position, resuming at
-/// its stored position whenever the kernel goes away.
-fn listener(addr: &str, seen: Arc<Mutex<Vec<u64>>>) {
+/// A listener that acknowledges every batch and records its connections, batches and
+/// acknowledgements, resuming at its stored position whenever the kernel goes away.
+fn listener(addr: &str, seen: Arc<Mutex<Observed>>) {
     let addr = addr.to_owned();
     tokio::spawn(async move {
         loop {
@@ -95,7 +96,7 @@ fn listener(addr: &str, seen: Arc<Mutex<Vec<u64>>>) {
     });
 }
 
-async fn listen_once(addr: &str, seen: &Mutex<Vec<u64>>) -> Result<(), tonic::Status> {
+async fn listen_once(addr: &str, seen: &Mutex<Observed>) -> Result<(), tonic::Status> {
     let (tx, rx) = mpsc::channel(16);
     let send = |m: In| ListenerMessage { msg: Some(m) };
     let hello = Hello {
@@ -118,9 +119,16 @@ async fn listen_once(addr: &str, seen: &Mutex<Vec<u64>>) -> Result<(), tonic::St
             Out::Challenge(c) => In::ChallengeResponse(ChallengeResponse {
                 sig: signing::sign(&key(5), &signing::challenge_message(&c.nonce)).sig,
             }),
+            Out::Ready(r) => {
+                seen.lock()
+                    .unwrap()
+                    .connected("audit", &[], r.after_position);
+                continue;
+            }
             Out::Batch(b) => {
                 let mut seen = seen.lock().unwrap();
-                seen.extend(b.events.iter().map(|e| e.global_position));
+                seen.delivered("audit", &b);
+                seen.acked("audit", b.up_to);
                 In::Ack(Ack { position: b.up_to })
             }
             _ => continue,
@@ -175,20 +183,21 @@ async fn crash_and_recover(point: &str, round: u32) {
     let mut kernel = start_kernel(&dir, &flags, Some(point));
     wait_for(&addr).await;
     worker(&addr).await;
-    let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::new(Mutex::new(Observed::default()));
     listener(&addr, Arc::clone(&seen));
 
     // Run the workload until the kernel crashes at the point.
     let commands = workload();
     for cmd in &commands {
         let channel = transport::connect(&addr).await;
-        let answered = match channel {
-            Ok(channel) => submit_on(channel, cmd.clone(), Wait::Settled).await.is_ok(),
-            Err(_) => false,
+        let result = match channel {
+            Ok(channel) => submit_on(channel, cmd.clone(), Wait::Settled).await.ok(),
+            Err(_) => None,
         };
-        if !answered {
+        let Some(result) = result else {
             break;
-        }
+        };
+        seen.lock().unwrap().outcome(&result);
     }
     let started = Instant::now();
     let exit = loop {
@@ -212,7 +221,9 @@ async fn crash_and_recover(point: &str, round: u32) {
     wait_for(&addr).await;
     let mut outcomes = Vec::new();
     for cmd in &commands {
-        outcomes.push(submit_until_answered(&addr, cmd.clone()).await);
+        let result = submit_until_answered(&addr, cmd.clone()).await;
+        seen.lock().unwrap().outcome(&result);
+        outcomes.push(result);
     }
 
     // Every command has exactly the outcome it would have had without the crash.
@@ -239,7 +250,7 @@ async fn crash_and_recover(point: &str, round: u32) {
     // The listener saw every event (at least once) and its stored position caught up.
     let started = Instant::now();
     loop {
-        let unique: BTreeSet<u64> = seen.lock().unwrap().iter().copied().collect();
+        let unique = seen.lock().unwrap().delivered_positions("audit");
         // Opened again each time: a read-only file store is a snapshot of the log.
         let stored = kernable_store::open_read_only(&store)
             .unwrap()
@@ -259,11 +270,13 @@ async fn crash_and_recover(point: &str, round: u32) {
     }
     drop(read);
     tokio::time::sleep(Duration::from_millis(50)).await; // a checkpoint at the head
-    let report = kernable_store::open_read_only(&store)
-        .unwrap()
-        .verify(&[id(&key(3)).to_string()])
-        .unwrap();
-    assert!(report.is_ok(), "{point}: {:?}", report.problems);
+    let read = kernable_store::open_read_only(&store).unwrap();
+    let ids = seen.lock().unwrap().command_ids();
+    let log = Log::read_with(read.as_ref(), &[id(&key(3)).to_string()], &ids).unwrap();
+    let mut violations = log.check();
+    violations.extend(seen.lock().unwrap().check(&log));
+    assert!(violations.is_empty(), "{point}: {violations:#?}");
+    drop(read);
     drop(kernel);
     let _ = std::fs::remove_dir_all(&dir);
 }

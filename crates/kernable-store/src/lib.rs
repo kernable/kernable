@@ -18,6 +18,7 @@
 
 pub mod data;
 mod file;
+pub mod invariants;
 pub mod snapshots;
 mod sqlite;
 pub mod vault;
