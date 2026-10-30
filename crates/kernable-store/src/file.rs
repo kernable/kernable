@@ -394,7 +394,7 @@ fn flush_handle(file: &File, durability: Durability) -> Result<Option<File>> {
 }
 
 /// Syncs the directory holding `path`, so a newly created file is found after a power loss.
-fn sync_directory(path: &Path) -> Result<()> {
+pub(crate) fn sync_directory(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         let dir = match path.parent() {

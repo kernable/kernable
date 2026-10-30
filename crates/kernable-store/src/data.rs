@@ -114,7 +114,9 @@ impl DataStore for FileData {
 
     fn put(&self, key: &DataKey, data: &Data) -> Result<()> {
         let path = self.path(key);
-        fs::create_dir_all(path.parent().expect("has a directory"))?;
+        let dir = path.parent().expect("has a directory");
+        let created = !dir.exists();
+        fs::create_dir_all(dir)?;
         // Write next to it and rename: a reader sees the old file or the new one, never half.
         let partial = path.with_extension("partial");
         let mut file = fs::File::create(&partial)?;
@@ -123,6 +125,12 @@ impl DataStore for FileData {
         file.write_all(&data.data)?;
         file.sync_all()?;
         fs::rename(&partial, &path)?;
+        // The rename, and the directories created for it, survive a power loss.
+        crate::file::sync_directory(&path)?;
+        if created {
+            crate::file::sync_directory(dir)?;
+            crate::file::sync_directory(dir.parent().expect("has a directory"))?;
+        }
         Ok(())
     }
 

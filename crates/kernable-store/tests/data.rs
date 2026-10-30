@@ -42,3 +42,19 @@ fn an_unknown_backend_is_refused() {
     assert!(data::open("s3://bucket").is_err());
     assert!(data::open("file:").is_err());
 }
+
+#[test]
+fn a_file_that_cannot_be_read_is_an_error_not_a_missing_value() {
+    let dir = std::env::temp_dir().join(format!("kn-data-unreadable-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = data::open(&format!("file:{}", dir.display())).unwrap();
+    // A directory where the value's file belongs: reading and removing it fail.
+    let path = dir
+        .join(hex::encode("t"))
+        .join(hex::encode("shop"))
+        .join(hex::encode("o-1"));
+    std::fs::create_dir_all(&path).unwrap();
+    assert!(store.get(&key("o-1")).is_err());
+    assert!(store.delete(&key("o-1")).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}

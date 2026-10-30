@@ -124,15 +124,17 @@ mod tests {
 
     #[test]
     fn expired_signatures_are_forgotten() {
-        let replays = Replays::new(0);
+        let start = 1_700_000_000_000;
+        let replays = Replays::new(start);
         for i in 0..2_000u32 {
-            replays.claim(&i.to_be_bytes(), 0, 0).unwrap().done();
+            replays
+                .claim(&i.to_be_bytes(), start, start)
+                .unwrap()
+                .done();
         }
         // Long after they expired, the next claim drops them.
-        replays
-            .claim(b"late", MAX_REQUEST_AGE_MS * 3, MAX_REQUEST_AGE_MS * 3)
-            .unwrap()
-            .done();
+        let late = start + MAX_REQUEST_AGE_MS * 3;
+        replays.claim(b"late", late, late).unwrap().done();
         assert_eq!(replays.seen().expires.len(), 1);
     }
 }

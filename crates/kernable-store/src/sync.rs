@@ -138,6 +138,24 @@ mod tests {
     }
 
     #[test]
+    fn a_growing_counter_counts_writes() {
+        let syncer = Syncer::default();
+        let flushes = AtomicU32::new(0);
+        let flush = || {
+            flushes.fetch_add(1, SeqCst);
+            Ok(())
+        };
+        syncer.wrote_up_to(3);
+        syncer.sync(flush).unwrap();
+        assert_eq!(flushes.load(SeqCst), 1);
+        syncer.wrote_up_to(2); // read before the last flush
+        assert!(syncer.sync(|| panic!("nothing new to flush")).is_ok());
+        syncer.wrote_up_to(4);
+        syncer.sync(flush).unwrap();
+        assert_eq!(flushes.load(SeqCst), 2);
+    }
+
+    #[test]
     fn a_failed_flush_refuses_everything_after() {
         let syncer = Syncer::default();
         syncer.wrote();
