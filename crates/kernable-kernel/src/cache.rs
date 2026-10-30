@@ -165,5 +165,24 @@ mod tests {
         );
         assert!(cache.delete(key("b")));
         assert_eq!(cache.values().bytes, 14);
+        assert!(
+            cache.set(key("g"), vec![0; 18], 0),
+            "exactly as large as the cache"
+        );
+        assert_eq!(cache.values().bytes, 21);
+    }
+
+    #[test]
+    fn expired_values_make_room_before_live_ones() {
+        let cache = Cache::open("memory:", 21).unwrap();
+        assert!(cache.set(key("a"), b"1234".to_vec(), 1));
+        assert!(cache.set(key("b"), b"1234".to_vec(), 0));
+        assert!(cache.set(key("c"), b"1234".to_vec(), 3_600_000));
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(cache.set(key("d"), b"1234".to_vec(), 0));
+        assert_eq!(cache.get(key("a")), None);
+        for k in ["b", "c", "d"] {
+            assert!(cache.get(key(k)).is_some(), "{k} is live and stays");
+        }
     }
 }

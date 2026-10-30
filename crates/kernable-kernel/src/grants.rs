@@ -130,7 +130,8 @@ pub fn malformed(grant: &Grant) -> Option<String> {
             return Some(format!("unknown action {}", p.action));
         }
         let switch = p.action == "privileged";
-        let service = |t: &str| p.action == "manage" && (t == "*" || config::valid_domain(t));
+        // `manage` also takes a service (a domain); "*" is a valid pattern already.
+        let service = |t: &str| p.action == "manage" && config::valid_domain(t);
         if let Some(t) = p
             .types
             .iter()

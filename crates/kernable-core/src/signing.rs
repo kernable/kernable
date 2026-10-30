@@ -445,6 +445,28 @@ mod tests {
     }
 
     #[test]
+    fn key_files_read_back_as_written() {
+        let key = generate_key();
+        let dir = std::env::temp_dir().join(format!("kernable-keys-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("k.key"), hex::encode(key.as_bytes())).unwrap();
+        fs::write(
+            dir.join("k.pub"),
+            format!("{}\n", key_id(&key.verifying_key())),
+        )
+        .unwrap();
+        assert_eq!(
+            read_signing_key(dir.join("k.key")).unwrap().as_bytes(),
+            key.as_bytes()
+        );
+        assert_eq!(
+            read_verifying_key(dir.join("k.pub")).unwrap(),
+            key.verifying_key()
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn a_secret_key_is_exactly_32_bytes_in_hex() {
         let hex = "11".repeat(32);
         let key = signing_key_from_hex(&format!("  {hex}\n")).unwrap();

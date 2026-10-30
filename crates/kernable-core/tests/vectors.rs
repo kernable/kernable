@@ -311,3 +311,18 @@ fn signatures_verify_and_reject_tampering() {
     sig.key_id = signing::key_id(&signing::generate_key().verifying_key());
     assert!(signing::verify(&sig, &msg).is_err());
 }
+
+#[test]
+fn the_event_hash_covers_vault_refs_and_erasures_each_on_their_own() {
+    let plain = Event::default();
+    let refs = Event {
+        vault_refs: vec!["r".into()],
+        ..Default::default()
+    };
+    let erases = Event {
+        erases: "k-1".into(),
+        ..Default::default()
+    };
+    let [p, r, e] = [&plain, &refs, &erases].map(|e| signing::event_hash(&GENESIS, e));
+    assert!(p != r && p != e && r != e);
+}
