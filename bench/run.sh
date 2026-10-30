@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Runs the benchmark matrix on this machine and prints one line per run.
 # Release builds, 1 KB payloads, warm connections. STORE=file:k.log or STORE=memory: picks the backend
-# (default: sqlite:k.db, WAL with synchronous=NORMAL).
+# (default: sqlite:k.db); DURABILITY=normal hands writes to the OS instead of syncing them
+# (default: full, as `kernable start`).
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -19,11 +20,12 @@ SOCK="unix:$DIR/k.sock"
 TCP="127.0.0.1:47233"
 
 STORE=${STORE:-sqlite:k.db}
+DURABILITY=${DURABILITY:-full}
 
 start_kernel() { # <listen>
   rm -f "$DIR"/k.db* "$DIR"/k.log* "$DIR/k.sock" # a stale socket would look like a ready kernel
   # Relative store paths resolve against the working directory: run the kernel in $DIR.
-  (cd "$DIR" && exec "$BIN/kernable" start --root root.pub --store "$STORE" --listen "$1" --kernel-key kernel.key 2>/dev/null) &
+  (cd "$DIR" && exec "$BIN/kernable" start --root root.pub --store "$STORE" --durability "$DURABILITY" --listen "$1" --kernel-key kernel.key 2>/dev/null) &
   KERNEL=$!
   # Wait until it accepts connections; the Rust worker does not retry.
   for _ in $(seq 200); do
@@ -64,7 +66,7 @@ scenario() { # <label> <kind> <workers> <addr> <load args...>
   stop_all
 }
 
-echo "== $(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -m), $(date -u +%F), store=$STORE"
+echo "== $(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -m), $(date -u +%F), store=$STORE, durability=$DURABILITY"
 "$BIN/kernable-bench" crypto
 printf '%-28s ' "baseline in-process"
 case "$STORE" in

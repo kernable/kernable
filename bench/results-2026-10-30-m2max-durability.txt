@@ -1,0 +1,15 @@
+# H2: cost of --durability full (fsync with F_FULLFSYNC per write) against normal. Rust worker over
+# a Unix socket, 1 KB payloads, 5 s per run, release build, Apple M2 Max (internal SSD), macOS.
+
+== store=sqlite:k.db, durability=normal
+rust worker, UDS, sequential load concurrency=1: n=14087 throughput=2817/s p50=0.31ms p95=0.41ms p99=1.56ms p99.9=2.13ms max=4.12ms rejected=0 errors=0
+rust worker, UDS, max        load concurrency=64: n=35020 throughput=6993/s p50=9.22ms p95=11.21ms p99=13.08ms p99.9=16.07ms max=21.87ms rejected=0 errors=0
+== store=sqlite:k.db, durability=full
+rust worker, UDS, sequential load concurrency=1: n=485 throughput=97/s p50=9.97ms p95=11.94ms p99=15.85ms p99.9=19.86ms max=19.86ms rejected=0 errors=0
+rust worker, UDS, max        load concurrency=64: n=574 throughput=108/s p50=580.94ms p95=638.32ms p99=810.61ms p99.9=851.40ms max=851.40ms rejected=0 errors=0
+== store=file:k.log, durability=normal
+rust worker, UDS, sequential load concurrency=1: n=18646 throughput=3729/s p50=0.24ms p95=0.28ms p99=0.35ms p99.9=0.65ms max=3.67ms rejected=0 errors=0
+rust worker, UDS, max        load concurrency=64: n=62738 throughput=12536/s p50=4.81ms p95=5.26ms p99=7.49ms p99.9=188.53ms max=188.67ms rejected=0 errors=0
+== store=file:k.log, durability=full
+rust worker, UDS, sequential load concurrency=1: n=541 throughput=108/s p50=9.05ms p95=10.45ms p99=11.88ms p99.9=14.28ms max=14.28ms rejected=0 errors=0
+rust worker, UDS, max        load concurrency=64: n=609 throughput=115/s p50=538.76ms p95=615.83ms p99=840.38ms p99.9=888.38ms max=888.38ms rejected=0 errors=0
