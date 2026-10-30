@@ -247,7 +247,7 @@ What a service consists of, applied by deploy tooling.
 
 | RPC | Request | Response | Description |
 |---|---|---|---|
-| `Apply` | `ApplyRequest` | `ApplyResult` | Replaces the membership of `membership.service`. Signed over kernable.v1.membership by a key granted `manage` for the service, and valid 60 s around issued_at. Apply it once per deploy (`kernable apply`, or a deploy script), not from every process: the latest apply wins. Errors: UNAUTHENTICATED (invalid signature, outside the time window), INVALID_ARGUMENT (no valid service name, unqualified worker entries, empty listener names), PERMISSION_DENIED. |
+| `Apply` | `ApplyRequest` | `ApplyResult` | Replaces the membership of `membership.service`. Signed over kernable.v1.membership by a key granted `manage` for the service, and valid 60 s around issued_at. Apply it once per deploy (`kernable apply`, or a deploy script), not from every process: the newest issued_at wins, and an older membership is refused. Errors: UNAUTHENTICATED (invalid signature, outside the time window), INVALID_ARGUMENT (no valid service name, unqualified worker entries, empty listener names), PERMISSION_DENIED, FAILED_PRECONDITION (a membership issued at the same time or later is applied). |
 
 ### Membership
 

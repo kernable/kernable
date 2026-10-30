@@ -844,8 +844,8 @@ class Kernable:
         for nobody), `middlewares` the service's listeners that may check requests (they count like
         listeners).
 
-        Apply it once per deploy, e.g. from a deploy script, not from every process: the latest
-        apply wins. The key needs the `manage` grant for the service. A middleware the new
+        Apply it once per deploy, e.g. from a deploy script, not from every process: the newest
+        apply wins, and an older one that arrives late is refused. The key needs the `manage` grant for the service. A middleware the new
         membership no longer lists stops checking. Example: `k.apply(service="shop",
         workers=[cart_aggregate], listeners=[carts_readmodel], metadata={"version": "1.0.0"})`.
         Raises `ValueError` without a service, `grpc.RpcError` if the kernel refuses it."""

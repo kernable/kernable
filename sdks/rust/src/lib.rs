@@ -365,7 +365,7 @@ impl Kernable {
     /// Replaces the membership of a service (default: this connection's, see
     /// [`Options::service`]): the workers, listeners and middlewares the kernel waits for, plus
     /// free metadata. Apply it once per deploy (e.g. from a deploy script), not from every
-    /// process: the latest apply wins. The key needs the `manage` grant for the service. A
+    /// process: the newest apply wins, and an older one that arrives late is refused. The key needs the `manage` grant for the service. A
     /// middleware the new membership no longer lists stops checking. Example:
     /// `kernable.apply(Manifest::new().service("shop").worker(&cart_aggregate).listener(&carts_readmodel)).await?`.
     /// [`Error::Config`] if neither the manifest nor the connection names a service,

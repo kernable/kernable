@@ -517,15 +517,22 @@ pub async fn apply(addr: &str, membership: Membership) -> Result<(), tonic::Stat
     apply_as(addr, membership, &key(1)).await
 }
 
+/// Applies a membership, issued now, signed by `key_`.
 pub async fn apply_as(
     addr: &str,
     mut membership: Membership,
     key_: &SigningKey,
 ) -> Result<(), tonic::Status> {
-    membership.issued_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    membership.issued_at = issued_now();
+    apply_issued(addr, membership, key_).await
+}
+
+/// Applies a membership with the `issued_at` it has, as a replay would.
+pub async fn apply_issued(
+    addr: &str,
+    membership: Membership,
+    key_: &SigningKey,
+) -> Result<(), tonic::Status> {
     let request = ApplyRequest {
         sig: Some(signing::sign(
             key_,
@@ -539,6 +546,24 @@ pub async fn apply_as(
         .apply(with_grant(request, key_))
         .await
         .map(|_| ())
+}
+
+/// Now in milliseconds, later than every earlier call: the kernel refuses a membership that is
+/// not newer than the applied one, and two applies can fall within one millisecond.
+pub fn issued_now() -> i64 {
+    static LAST: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let previous = LAST
+        .fetch_update(
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+            |last| Some(now.max(last + 1)),
+        )
+        .unwrap();
+    now.max(previous + 1)
 }
 
 /// A membership of `service` that lists these workers, listeners and middlewares.

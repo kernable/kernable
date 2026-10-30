@@ -1196,7 +1196,8 @@ export class Kernable {
   /**
    * Replaces the membership of a service (default: this process's): the workers, listeners and
    * middlewares the kernel waits for, and free metadata. Apply it once per deploy, e.g. from a
-   * deploy script, not from every process: the latest apply wins. The key needs `manage` for
+   * deploy script, not from every process: the newest apply wins, and an older one that arrives
+   * late is refused. The key needs `manage` for
    * the service. A middleware the new membership no longer lists stops checking. Throws if
    * neither `manifest.service` nor `Options.service` names a service. See
    * [Remove a listener](../how-to/remove-listener).

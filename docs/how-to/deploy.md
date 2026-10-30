@@ -33,7 +33,7 @@ What the new membership no longer lists stops counting: the kernel stops waiting
 
 ### Pitfalls
 
-- **The latest apply wins.** Apply from one place per deploy, not from every process. With `app()`, every start applies: an old replica that restarts during a rolling deploy brings the old list back until a new one starts. Finish the rollout, or apply from the pipeline afterwards.
+- **The newest apply wins.** The kernel refuses a membership issued before the one it holds, so a late or replayed apply cannot bring an old list back. Apply from one place per deploy, not from every process. With `app()`, every start applies: an old replica that restarts during a rolling deploy brings the old list back until a new one starts. Finish the rollout, or apply from the pipeline afterwards.
 - **One service is one membership.** Two different apps with the same service name replace each other's list.
 - **Commands of unknown types are refused.** A worker registers its aggregate and command types when it connects; until then, commands for an aggregate or command type that no worker registered and the membership does not list get `NOT_FOUND`. Start the worker of a new aggregate before clients send its commands, or list it in the membership: commands of a listed aggregate wait in the queue until its worker comes.
 - **Middleware is always checked.** While a listed middleware restarts, the requests it checks are refused. Keep the restart short, or run a second instance under a different name.

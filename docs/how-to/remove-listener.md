@@ -52,7 +52,7 @@ Workers are named `domain.aggregate`, listeners and middlewares by their name. T
 - **Not listed** ones of the service are **dynamic**. They run, but nobody waits for them. A dynamic listener keeps its stored position; a dynamic aggregate is forgotten once its last worker leaves, and its commands are refused from then on.
 - **Middlewares** must be listed as such: a listener of the service that is not listed under `middlewares` cannot connect as one. Taking a middleware off the list removes its check. A check never appears or disappears without a signed membership, so a missing process never switches security off: while a listed middleware is away, what it checks is refused.
 
-Apply it **once per deploy**, not from every process: the latest apply wins, and an old replica that restarted during a rolling deploy would otherwise bring the old list back.
+Apply it **once per deploy**, not from every process: the newest apply wins, and an old replica that restarted during a rolling deploy would otherwise bring the old list back.
 
 Processes without a service, and services without a membership, keep the simple rule: everything registered counts. To remove one of those, remove it for good.
 

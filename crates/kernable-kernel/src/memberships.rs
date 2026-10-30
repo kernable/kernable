@@ -8,7 +8,7 @@
 
 use std::{
     collections::HashMap,
-    sync::{PoisonError, RwLock},
+    sync::{Mutex, MutexGuard, PoisonError, RwLock},
 };
 
 use kernable_core::{
@@ -23,7 +23,12 @@ use tonic::{Request, Response, Status};
 use crate::{Api, MAX_REQUEST_AGE_MS, config, internal, now_ms, protocol};
 
 #[derive(Default)]
-pub(crate) struct Memberships(RwLock<HashMap<String, Membership>>);
+pub(crate) struct Memberships {
+    all: RwLock<HashMap<String, Membership>>,
+    /// Held while a membership is applied, so that the newest one wins in whatever order they
+    /// arrive.
+    applying: Mutex<()>,
+}
 
 impl Memberships {
     pub(crate) fn load(records: Vec<MembershipRecord>) -> Self {
@@ -32,45 +37,68 @@ impl Memberships {
             .filter_map(|r| r.membership)
             .map(|m| (m.service.clone(), m))
             .collect();
-        Memberships(RwLock::new(all))
+        Memberships {
+            all: RwLock::new(all),
+            applying: Mutex::default(),
+        }
+    }
+
+    fn applying(&self) -> MutexGuard<'_, ()> {
+        self.applying.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Refuses `m` unless it is newer than the applied membership of its service: an older
+    /// one, replayed or from a slower deploy, would undo the newer, and could remove a
+    /// middleware's check. The applied one again is fine: a retried deploy.
+    fn admit(&self, m: &Membership) -> Result<(), Status> {
+        let all = self.all.read().unwrap_or_else(PoisonError::into_inner);
+        match all.get(&m.service) {
+            Some(applied) if applied != m && applied.issued_at >= m.issued_at => {
+                Err(Status::failed_precondition(format!(
+                    "{} has a membership issued at the same time or later; apply again",
+                    m.service
+                )))
+            }
+            _ => Ok(()),
+        }
     }
 
     fn set(&self, m: Membership) {
-        let mut all = self.0.write().unwrap_or_else(PoisonError::into_inner);
+        let mut all = self.all.write().unwrap_or_else(PoisonError::into_inner);
         all.insert(m.service.clone(), m);
     }
 
     /// Whether the listener `name` of `service` counts: listed, or no membership decides.
     pub(crate) fn counts_listener(&self, service: &str, name: &str) -> bool {
-        let all = self.0.read().unwrap_or_else(PoisonError::into_inner);
+        let all = self.all.read().unwrap_or_else(PoisonError::into_inner);
         all.get(service).is_none_or(|m| listed_listener(m, name))
     }
 
     /// Whether the listener `name` of `service` may be a middleware: listed as one, or no
     /// membership decides.
     pub(crate) fn may_check(&self, service: &str, name: &str) -> bool {
-        let all = self.0.read().unwrap_or_else(PoisonError::into_inner);
+        let all = self.all.read().unwrap_or_else(PoisonError::into_inner);
         all.get(service)
             .is_none_or(|m| m.middlewares.iter().any(|n| n == name))
     }
 
     /// Whether the kernel waits for the aggregate of `service`: listed, or no membership decides.
     pub(crate) fn counts_worker(&self, service: &str, aggregate_type: &str) -> bool {
-        let all = self.0.read().unwrap_or_else(PoisonError::into_inner);
+        let all = self.all.read().unwrap_or_else(PoisonError::into_inner);
         all.get(service)
             .is_none_or(|m| m.workers.iter().any(|a| a == aggregate_type))
     }
 
     /// Whether any service lists the aggregate.
     pub(crate) fn lists_worker(&self, aggregate_type: &str) -> bool {
-        let all = self.0.read().unwrap_or_else(PoisonError::into_inner);
+        let all = self.all.read().unwrap_or_else(PoisonError::into_inner);
         all.values()
             .any(|m| m.workers.iter().any(|a| a == aggregate_type))
     }
 
     /// Every listed aggregate type, and every listed listener and middleware name.
     pub(crate) fn listed(&self) -> (Vec<String>, Vec<String>) {
-        let all = self.0.read().unwrap_or_else(PoisonError::into_inner);
+        let all = self.all.read().unwrap_or_else(PoisonError::into_inner);
         let workers = all.values().flat_map(|m| m.workers.clone()).collect();
         let listeners = all
             .values()
@@ -136,6 +164,8 @@ impl MembershipService for Api {
             )));
         }
 
+        let _applying = kernel.memberships.applying();
+        kernel.memberships.admit(&m)?;
         let record = MembershipRecord {
             membership: Some(m.clone()),
             sig: Some(sig),
