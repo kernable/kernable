@@ -4,7 +4,7 @@
 mod common;
 
 use std::{
-    process::{Child, Command as Process, Stdio},
+    process::{Command as Process, Stdio},
     time::{Duration, Instant},
 };
 
@@ -112,15 +112,6 @@ async fn a_result_under_a_wrong_lease_never_commits() {
     let result = pending.await.unwrap().unwrap();
     assert_eq!(committed_versions(&result), [1]);
     assert_eq!(stream_versions(&env), [1]);
-}
-
-/// Never leave a kernel process behind when a test fails.
-struct KillOnDrop(Child);
-
-impl Drop for KillOnDrop {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-    }
 }
 
 /// SIGTERM: the kernel lets running commands finish for `drain_timeout_ms`, then exits cleanly

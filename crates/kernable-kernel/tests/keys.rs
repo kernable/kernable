@@ -303,22 +303,24 @@ async fn sighup_reads_the_kernel_key_of_the_running_kernel_again() {
     std::fs::write(dir.join("kernel.key"), hex(key(3).as_bytes())).unwrap();
     let addr = format!("unix:{}", dir.join("k.sock").display());
     let store = store_url(&dir);
-    let mut kernel = Process::new(env!("CARGO_BIN_EXE_kernable"))
-        .current_dir(&dir)
-        .args([
-            "start",
-            "--root",
-            &id(&root()),
-            "--store",
-            &store,
-            "--listen",
-            &addr,
-        ])
-        .args(["--checkpoint-interval-ms", "50"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut kernel = KillOnDrop(
+        Process::new(env!("CARGO_BIN_EXE_kernable"))
+            .current_dir(&dir)
+            .args([
+                "start",
+                "--root",
+                &id(&root()),
+                "--store",
+                &store,
+                "--listen",
+                &addr,
+            ])
+            .args(["--checkpoint-interval-ms", "50"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     wait_for(&addr).await;
     // The worker and the client present their grants, as the SDKs do.
     start_worker(addr.clone(), TestWorker::honest()).await;
@@ -331,16 +333,15 @@ async fn sighup_reads_the_kernel_key_of_the_running_kernel_again() {
 
     std::fs::write(dir.join("kernel.key"), hex(key(4).as_bytes())).unwrap();
     let hup = Process::new("kill")
-        .args(["-HUP", &kernel.id().to_string()])
+        .args(["-HUP", &kernel.0.id().to_string()])
         .status();
     assert!(hup.unwrap().success());
     tokio::time::sleep(Duration::from_millis(200)).await;
     let add = signed(command("c2", "AddItem", "o1"), &key(1));
     submit(&addr, add).await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await; // a checkpoint with key 4
-    assert!(kernel.try_wait().unwrap().is_none(), "still running");
-    let _ = kernel.kill();
-    let _ = kernel.wait();
+    assert!(kernel.0.try_wait().unwrap().is_none(), "still running");
+    drop(kernel);
 
     let store = kernable_store::open_read_only(&store).unwrap();
     let both = store.verify(&[id(&key(3)), id(&key(4))]).unwrap();
@@ -357,13 +358,15 @@ async fn start_dev_creates_keys_and_a_grant_that_allows_everything_and_turns_the
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let addr = free_addr(); // the default, 127.0.0.1:7233, may be taken
-    let mut kernel = Process::new(env!("CARGO_BIN_EXE_kernable"))
-        .current_dir(&dir)
-        .args(["start", "--dev", "--listen", &addr])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let kernel = KillOnDrop(
+        Process::new(env!("CARGO_BIN_EXE_kernable"))
+            .current_dir(&dir)
+            .args(["start", "--dev", "--listen", &addr])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     wait_for(&addr).await;
     assert!(dir.join("vault.key").exists());
     assert!(dir.join("vault.db").exists(), "the vault is on");
@@ -387,8 +390,7 @@ async fn start_dev_creates_keys_and_a_grant_that_allows_everything_and_turns_the
         .await
         .unwrap_err();
     assert_eq!(status.code(), tonic::Code::NotFound, "{status:?}");
-    let _ = kernel.kill();
-    let _ = kernel.wait();
+    drop(kernel);
 
     // A vault key that is not 32 bytes in hex stops the start, and says so.
     std::fs::write(dir.join("vault.key"), "abcd\n").unwrap();

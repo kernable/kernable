@@ -760,3 +760,13 @@ pub fn vault_value(subject: &str, value: &str) -> kernable_core::proto::VaultVal
         value,
     }
 }
+
+/// A kernel process that never outlives its test, also when the test fails.
+pub struct KillOnDrop(pub std::process::Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
