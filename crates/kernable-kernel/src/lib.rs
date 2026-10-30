@@ -32,7 +32,7 @@ use std::{
     collections::HashMap,
     sync::{
         Arc, Mutex, MutexGuard, PoisonError, RwLock,
-        atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed, Ordering::SeqCst},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed, Ordering::SeqCst},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -214,6 +214,9 @@ pub struct Kernel {
     requests_by_key: PerKey,
     /// Open subscriptions per key.
     subscriptions_by_key: PerKey,
+    /// The newest global position known to be on the disk: listeners, subscribers and workers
+    /// never get an event beyond it, so nobody acts on what a power loss could take back.
+    durable: AtomicU64,
 }
 
 impl Kernel {
@@ -255,6 +258,7 @@ impl Kernel {
         };
         let data = kernable_store::data::open(&config.data)?;
         let cache = cache::Cache::open(&config.cache, config.limits.cache_bytes)?;
+        let durable = AtomicU64::new(store.head_position()?);
         let queue = queue::Queue::default();
         for pending in store.pending()? {
             queue.push(pending.command, pending.received_at);
@@ -285,6 +289,7 @@ impl Kernel {
             idle: Notify::new(),
             requests_by_key: PerKey::default(),
             subscriptions_by_key: PerKey::default(),
+            durable,
         }))
     }
 
@@ -403,6 +408,7 @@ impl Kernel {
             created_at,
             kernel_sig: Some(signing::sign(&self.key(), &msg)),
         })?;
+        self.sync(0);
         crash::point("revocation.stored");
         tracing::warn!(key = %key_id, since, "key revoked");
         self.revoked
@@ -555,6 +561,19 @@ impl Kernel {
             }
         };
         tokio::time::timeout(timeout, idle).await.is_ok()
+    }
+
+    /// Puts every write so far on the disk, shared with concurrent callers (group commit), and
+    /// records that the log is durable up to `position`. Called before anyone is told of a
+    /// write. If the disk fails, the kernel stops: only a restart, reading what is on the disk,
+    /// knows what was kept, and answering on would promise what may be lost.
+    fn sync(&self, position: u64) {
+        if let Err(e) = self.store.sync() {
+            tracing::error!(error = %e, "the store could not put a write on the disk: stopping");
+            eprintln!("kernable: the store could not put a write on the disk ({e}); stopping");
+            std::process::exit(70);
+        }
+        self.durable.fetch_max(position, SeqCst);
     }
 
     /// A slot for one more request of `key_id`, or RESOURCE_EXHAUSTED at `--max-requests-per-key`.
@@ -1198,6 +1217,7 @@ impl CommandService for Api {
             Enqueued::Duplicate {
                 result: Some(result),
             } => {
+                kernel.sync(last_position(&result));
                 kernel.waiters().remove(&cmd.command_id);
                 kernel.drop_secrets(&cmd.command_id); // a resubmission brought them again
                 Some(result)
@@ -1222,6 +1242,8 @@ impl CommandService for Api {
         let mut result = match done {
             Some(result) => result,
             None if wait == Wait::Accepted => {
+                // Told it is accepted, the client may never send it again: on the disk first.
+                kernel.sync(0);
                 kernel.waiters().remove(&cmd.command_id);
                 return Ok(Response::new(CommandResult {
                     command_id: cmd.command_id,
@@ -1325,12 +1347,20 @@ async fn stream_events(
             return;
         }
         let appended = kernel.appended.notified();
-        let batch = match kernel.store.read_all(after, SUBSCRIBE_BATCH) {
-            Ok(batch) => batch,
-            Err(e) => {
-                let _ = tx.send(Err(internal(e))).await;
-                return;
+        let durable = kernel.durable.load(SeqCst);
+        let batch = if after < durable {
+            match kernel.store.read_all(after, SUBSCRIBE_BATCH) {
+                Ok(mut batch) => {
+                    batch.retain(|e| e.global_position <= durable);
+                    batch
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(internal(e))).await;
+                    return;
+                }
             }
+        } else {
+            Vec::new()
         };
         if batch.is_empty() {
             tokio::select! {
@@ -2229,36 +2259,48 @@ impl Session {
         match committed {
             Ok(events) => {
                 crash::point("commit.stored");
-                self.kernel.drop_secrets(&f.command.command_id);
-                // After an erasure the worker's state may still hold erased values: no snapshot.
+                // The flush and what follows it run apart from the session, so the next results
+                // commit meanwhile and share the flush (group commit). The lease and the
+                // worker's permit are held until then: the aggregate's next command waits for
+                // its history to be on the disk.
+                let kernel = Arc::clone(&self.kernel);
                 let snapshot = r.snapshot.filter(|_| !erased);
-                if let (Some(snapshot), Some(last)) = (snapshot, events.last()) {
-                    let record = SnapshotRecord {
-                        tenant_id: last.tenant_id.clone(),
-                        domain: last.domain.clone(),
-                        aggregate_type: last.aggregate_type.clone(),
-                        aggregate_id: last.aggregate_id.clone(),
-                        snapshot: Some(snapshot),
-                        event_hash: last.hash.clone(),
-                    };
-                    // A snapshot is only a cache: losing one costs time, not data.
-                    match self.kernel.snapshots.save(&record) {
-                        Ok(()) => crash::point("snapshot.stored"),
-                        Err(e) => tracing::warn!(error = %e, "saving snapshot failed"),
+                let lease_id = r.lease_id;
+                tokio::spawn(async move {
+                    let last = events.last().map_or(0, |e| e.global_position);
+                    let syncing = Arc::clone(&kernel);
+                    let _ = tokio::task::spawn_blocking(move || syncing.sync(last)).await;
+                    kernel.drop_secrets(&f.command.command_id);
+                    // After an erasure the worker's state may still hold erased values: no
+                    // snapshot.
+                    if let (Some(snapshot), Some(last)) = (snapshot, events.last()) {
+                        let record = SnapshotRecord {
+                            tenant_id: last.tenant_id.clone(),
+                            domain: last.domain.clone(),
+                            aggregate_type: last.aggregate_type.clone(),
+                            aggregate_id: last.aggregate_id.clone(),
+                            snapshot: Some(snapshot),
+                            event_hash: last.hash.clone(),
+                        };
+                        // A snapshot is only a cache: losing one costs time, not data.
+                        match kernel.snapshots.save(&record) {
+                            Ok(()) => crash::point("snapshot.stored"),
+                            Err(e) => tracing::warn!(error = %e, "saving snapshot failed"),
+                        }
                     }
-                }
-                self.kernel.queue.done(&r.lease_id);
-                self.kernel.metrics.committed.fetch_add(1, Relaxed);
-                self.kernel.metrics.execution.record(f.leased_at.elapsed());
-                self.kernel.appended.notify_waiters();
-                let result = CommandResult {
-                    command_id: f.command.command_id.clone(),
-                    outcome: Some(Outcome::Committed(Committed {
-                        events,
-                        settled: false,
-                    })),
-                };
-                self.kernel.complete(&f.command, result);
+                    kernel.queue.done(&lease_id);
+                    kernel.metrics.committed.fetch_add(1, Relaxed);
+                    kernel.metrics.execution.record(f.leased_at.elapsed());
+                    kernel.appended.notify_waiters();
+                    let result = CommandResult {
+                        command_id: f.command.command_id.clone(),
+                        outcome: Some(Outcome::Committed(Committed {
+                            events,
+                            settled: false,
+                        })),
+                    };
+                    kernel.complete(&f.command, result);
+                });
             }
             Err(StoreError::VersionConflict { .. }) if f.attempts < MAX_CONFLICT_RETRIES => {
                 self.execute(
@@ -2350,6 +2392,7 @@ impl Session {
         match self.kernel.store.reject(&command_id, reason.clone()) {
             Ok(()) => {
                 crash::point("reject.stored");
+                self.kernel.sync(0);
                 self.kernel.drop_secrets(&command_id);
                 self.kernel.queue.done(lease_id);
                 self.kernel.metrics.rejected.fetch_add(1, Relaxed);
@@ -2380,6 +2423,7 @@ impl Session {
             return false;
         };
         tracing::warn!(command = %command.command_id, "a failed write had taken effect: answering with the stored result");
+        self.kernel.sync(last_position(&result));
         self.kernel.queue.done(lease_id);
         self.kernel.drop_secrets(&command.command_id);
         self.kernel.appended.notify_waiters();
@@ -2406,6 +2450,14 @@ fn wanted(types: Option<&[String]>, event: &Event) -> bool {
         let name = config::qualified(&event.domain, &event.event_type);
         patterns.iter().any(|p| config::covers(p, &name))
     })
+}
+
+/// The global position of a result's last event; 0 for none.
+fn last_position(result: &CommandResult) -> u64 {
+    match &result.outcome {
+        Some(Outcome::Committed(c)) => c.events.last().map_or(0, |e| e.global_position),
+        _ => 0,
+    }
 }
 
 fn internal(e: StoreError) -> Status {

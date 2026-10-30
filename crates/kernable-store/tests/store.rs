@@ -325,15 +325,23 @@ fn sqlite_admits_one_writer() {
     SqliteStore::open(&db.0).expect("free again once the writer closed it");
 }
 
-/// `Full` makes SQLite sync every commit, and flush the disk's cache on macOS; `Normal` only
-/// hands the WAL to the OS.
+/// Commits only hand the WAL to the OS; `Full` flushes it in `sync` (group commit) and makes
+/// SQLite's own flushes real ones on macOS.
 #[test]
 fn sqlite_durability_sets_how_commits_sync() {
     use kernable_store::Durability;
-    for (durability, synchronous) in [(Durability::Full, 2), (Durability::Normal, 1)] {
-        let db = TempDb::new(&format!("sqlite-durability-{synchronous}.db"));
+    for (durability, fullfsync) in [(Durability::Full, 1), (Durability::Normal, 0)] {
+        let db = TempDb::new(&format!("sqlite-durability-{fullfsync}.db"));
         let store = SqliteStore::open_with(&db.0, durability).unwrap();
-        assert_eq!(store.synchronous().unwrap(), synchronous, "{durability:?}");
+        assert_eq!(store.pragma("synchronous").unwrap(), 1, "{durability:?}");
+        assert_eq!(
+            store.pragma("fullfsync").unwrap(),
+            fullfsync,
+            "{durability:?}"
+        );
+        store.enqueue(&cmd("c1", "PlaceOrder"), 0).unwrap();
+        store.sync().unwrap();
+        store.sync().unwrap();
     }
 }
 

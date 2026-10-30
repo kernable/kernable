@@ -25,6 +25,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use crate::{
     Checkpoint, Durability, Enqueued, Error, FORMAT, Pending, Result, Store, StreamId,
     StreamSummary,
+    sync::Syncer,
     verify::{Report, Verifier},
 };
 
@@ -132,6 +133,9 @@ pub struct SqliteStore {
     /// `<path>.lock`, held exclusively while a writer has the store open: the queue lives in
     /// one kernel's memory, so a second kernel on the same store would run commands twice.
     _lock: Option<std::fs::File>,
+    /// The write-ahead log to flush in [`Store::sync`]; `None` unless [`Durability::Full`].
+    wal: Option<std::path::PathBuf>,
+    syncer: Syncer,
 }
 
 impl SqliteStore {
@@ -160,15 +164,17 @@ impl SqliteStore {
             Some(lock)
         };
         let mut store = Self::configure(path, durability)?;
+        let on_disk = lock.is_some();
         store._lock = lock;
+        if durability == Durability::Full && on_disk {
+            store.wal = Some(std::path::PathBuf::from(format!("{}-wal", path.display())));
+        }
         Ok(store)
     }
 
-    /// SQLite's `synchronous` setting of this connection: 2 FULL, 1 NORMAL.
-    pub fn synchronous(&self) -> Result<i64> {
-        Ok(self
-            .conn()
-            .pragma_query_value(None, "synchronous", |r| r.get(0))?)
+    /// A numeric setting of this connection (`synchronous`, `fullfsync`), for tests.
+    pub fn pragma(&self, name: &str) -> Result<i64> {
+        Ok(self.conn().pragma_query_value(None, name, |r| r.get(0))?)
     }
 
     /// Opens the store without taking the writer's lock, for inspection next to a running
@@ -180,15 +186,14 @@ impl SqliteStore {
     fn configure(path: &Path, durability: Durability) -> Result<Self> {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        match durability {
-            // FULL syncs the WAL on every commit; fullfsync makes that a real flush on macOS,
-            // where fsync alone may leave the data in the disk's cache.
-            Durability::Full => {
-                conn.pragma_update(None, "synchronous", "FULL")?;
-                conn.pragma_update(None, "fullfsync", true)?;
-                conn.pragma_update(None, "checkpoint_fullfsync", true)?;
-            }
-            Durability::Normal => conn.pragma_update(None, "synchronous", "NORMAL")?,
+        // A commit writes the WAL without a flush; `Store::sync` flushes it once for every
+        // commit waiting (group commit), and SQLite flushes before and after it copies the WAL
+        // into the database. fullfsync makes those real flushes on macOS, where fsync alone
+        // may leave the data in the disk's cache.
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        if durability == Durability::Full {
+            conn.pragma_update(None, "fullfsync", true)?;
+            conn.pragma_update(None, "checkpoint_fullfsync", true)?;
         }
         conn.busy_timeout(Duration::from_secs(5))?;
         Self::init(conn)
@@ -214,6 +219,8 @@ impl SqliteStore {
         Ok(Self {
             conn: Mutex::new(conn),
             _lock: None,
+            wal: None,
+            syncer: Syncer::default(),
         })
     }
 
@@ -458,6 +465,21 @@ impl Store for SqliteStore {
         )?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    fn sync(&self) -> Result<()> {
+        let Some(wal) = &self.wal else {
+            return Ok(());
+        };
+        // Every row changed so far counts as a write the flush must cover.
+        let changes = self.conn().total_changes();
+        self.syncer.wrote_up_to(changes);
+        self.syncer.sync(|| match std::fs::File::open(wal) {
+            Ok(file) => file.sync_data(),
+            // No WAL: nothing written since SQLite copied it into the synced database.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        })
     }
 
     fn command_ids(&self) -> Result<Vec<String>> {

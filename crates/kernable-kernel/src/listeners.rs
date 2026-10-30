@@ -761,7 +761,11 @@ async fn deliver(
         let progressed = kernel.listeners.progress.notified();
         let appended = kernel.appended.notified();
         let after = sent.load(Ordering::SeqCst);
-        let gate = kernel.listeners.gate(order);
+        // Never beyond the order gate, nor beyond what is on the disk.
+        let gate = kernel
+            .listeners
+            .gate(order)
+            .min(kernel.durable.load(Ordering::SeqCst));
         let batch = if gate > after {
             match kernel.store.read_all(after, SUBSCRIBE_BATCH) {
                 Ok(batch) => batch,

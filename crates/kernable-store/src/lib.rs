@@ -23,6 +23,7 @@ mod file;
 pub mod invariants;
 pub mod snapshots;
 mod sqlite;
+mod sync;
 pub mod vault;
 mod verify;
 
@@ -265,6 +266,14 @@ pub trait Store: Send + Sync {
 
     /// The IDs of every stored command, pending or completed, in the order they were stored.
     fn command_ids(&self) -> Result<Vec<String>>;
+
+    /// Puts every write that returned before this call on the disk, if the store was opened
+    /// with [`Durability::Full`]; concurrent calls share one flush (group commit). Call it
+    /// before telling anyone about a write. An error means the store refuses every further
+    /// write: stop and restart.
+    fn sync(&self) -> Result<()> {
+        Ok(())
+    }
 
     /// The highest payload version (`schema`) stored per qualified event type (`domain.Type`).
     fn event_schemas(&self) -> Result<Vec<(String, u32)>> {

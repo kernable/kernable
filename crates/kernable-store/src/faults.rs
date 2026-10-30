@@ -254,6 +254,12 @@ impl Store for FaultyStore {
         self.inner.revocations()
     }
 
+    /// Never fails on purpose: a failed flush stops the kernel, which an in-process test cannot
+    /// survive. The file log's refusal after a failed flush has its own test.
+    fn sync(&self) -> Result<()> {
+        self.inner.sync()
+    }
+
     fn verify(&self, kernel_key_ids: &[String]) -> Result<Report> {
         self.inner.verify(kernel_key_ids)
     }

@@ -135,7 +135,7 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "--durability",
         "KERNABLE_DURABILITY",
         "full",
-        "When a write to the event store counts as done. `full`: on the disk (fsync, a full flush on macOS), so a committed command survives a power loss or an OS crash; every commit waits for the disk. `normal`: handed to the OS, which survives a crash of the kernel but not of the machine, and is several times faster; `--dev` uses it unless given. The vault and the data service always write to the disk.",
+        "When a write to the event store counts as done. `full`: on the disk (fsync, a full flush on macOS) before a client, listener or worker hears of it, so a committed command survives a power loss or an OS crash. Commits waiting at the same time share one flush (group commit), so throughput holds up under concurrent load, while a single client waits about one flush per command. `normal`: handed to the OS, which survives a crash of the kernel but not of the machine, and is faster; `--dev` uses it unless given. The vault and the data service always write to the disk.",
     ),
     (
         "--max-connections",
