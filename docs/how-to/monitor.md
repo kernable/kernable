@@ -27,7 +27,7 @@ If the address is taken (another kernel in development), the kernel runs on with
 
 ## Health checks
 
-Set `--metrics-listen` (for example `127.0.0.1:9233`). It serves plain HTTP with no login: bind it to a private address.
+Set `--metrics-listen` (for example `127.0.0.1:9233`). It serves plain HTTP with no login: bind it to a private address. On a loopback address it answers only requests whose `Host` is a loopback name (`localhost`, `127.0.0.1`, `[::1]`), as the UI does, so a web page cannot read it through DNS rebinding; health checks and Prometheus on the same machine send one anyway.
 
 - **Liveness:** `GET /health` answers 200 `ok` while the process runs.
 - **Readiness:** `GET /ready` answers 200 `ready` when the kernel can serve, and 503 with the reason otherwise:
@@ -64,8 +64,12 @@ groups:
       - alert: KernableQueriesFailing    # no read model answered in time
         expr: rate(kernable_queries_total{outcome="failed"}[5m]) > 0
         for: 5m
+      - alert: KernableLimitReached      # requests refused by a limit (--max-*)
+        expr: rate(kernable_refused_total[5m]) > 0
+        for: 5m
 ```
 
+- `kernable_refused_total` names the limit in its `reason` label ([Limits](../reference/configuration#limits)). A growing `queued_commands` or `queued_per_aggregate` usually means a worker is away; `requests_per_key` a client that does not wait for its answers; `handshake_timeout` or `connections` something that opens connections and never uses them.
 - The per-listener metrics (`kernable_listener_lag`, `kernable_listener_connected`) cover every listener the kernel knows, also dynamic ones that nobody waits for. Exclude those by their `listener` label, or remove them ([Remove a listener](./remove-listener)).
 - A listener stuck at an event it cannot handle (a throwing handler, or a newer event version) shows as lag that keeps growing while the listener stays connected ([When a listener is slow or stuck](../concepts/ordering#when-a-listener-is-slow-or-stuck)).
 

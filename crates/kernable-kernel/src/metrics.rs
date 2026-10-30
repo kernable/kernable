@@ -1,17 +1,16 @@
 //! Prometheus metrics, served as text at `GET /metrics` on `metrics_listen`.
 
 use std::{
+    collections::BTreeMap,
     fmt::Write,
-    sync::atomic::{AtomicU64, Ordering::Relaxed},
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicU64, Ordering::Relaxed},
+    },
     time::Duration,
 };
 
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
-};
-
-use crate::{BoxError, Kernel};
+use crate::{BoxError, Kernel, http::reply};
 
 /// A running sum and count, rendered as a Prometheus summary without quantiles.
 #[derive(Default)]
@@ -46,6 +45,24 @@ pub(crate) struct Metrics {
     pub(crate) execution: Timer,
     /// From commit until every listener acknowledged the events (settling submits only).
     pub(crate) settle: Timer,
+    /// What a limit refused, by reason (see `Limits`).
+    refused: Mutex<BTreeMap<&'static str, u64>>,
+}
+
+impl Metrics {
+    /// Counts a refusal by a limit.
+    pub(crate) fn limited(&self, reason: &'static str) {
+        let mut refused = self.refused.lock().unwrap_or_else(PoisonError::into_inner);
+        *refused.entry(reason).or_default() += 1;
+    }
+}
+
+/// A Prometheus label value: backslash, quote and newline escaped.
+fn label_value(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
 }
 
 /// The metrics in Prometheus text format.
@@ -107,6 +124,19 @@ pub(crate) fn render(kernel: &Kernel) -> String {
             ),
         ],
     );
+    let refused: Vec<(String, u64)> = m
+        .refused
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .map(|(reason, n)| (format!("{{reason=\"{reason}\"}}"), *n))
+        .collect();
+    metric(
+        "kernable_refused_total",
+        "counter",
+        "Requests and connections a limit refused since the kernel started, by reason: connections, requests_per_key, subscriptions_per_key, listeners_per_key, queued_commands, queued_per_aggregate, queued_bytes, cache_bytes, handshake_timeout, too_large, http_host, http_connections.",
+        &refused,
+    );
     metric(
         "kernable_queued_commands",
         "gauge",
@@ -153,7 +183,7 @@ pub(crate) fn render(kernel: &Kernel) -> String {
         let _ = writeln!(out, "{name}_count {}", timer.count.load(Relaxed));
     }
     let listeners = kernel.listeners.snapshot();
-    let label = |name: &str| format!("{{listener=\"{name}\"}}");
+    let label = |name: &str| format!("{{listener=\"{}\"}}", label_value(name));
     let per = |f: &dyn Fn(&crate::listeners::ListenerStatus) -> u64| -> Vec<(String, u64)> {
         listeners.iter().map(|l| (label(&l.name), f(l))).collect()
     };
@@ -186,38 +216,33 @@ pub(crate) fn render(kernel: &Kernel) -> String {
     out
 }
 
-fn reply(status: &str, content_type: &str, body: &str) -> String {
-    format!(
-        "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-        body.len()
-    )
+/// Serves `GET /metrics`, `GET /health` (the process runs) and `GET /ready` (see
+/// `Kernel::readiness`) until the listener fails. Deliberately minimal HTTP/1, each connection
+/// on its own, so a slow one cannot hold up the health checks.
+pub(crate) async fn serve(kernel: Arc<Kernel>, addr: &str) -> Result<(), BoxError> {
+    tracing::info!(%addr, "serving metrics");
+    crate::http::serve(kernel, addr, respond).await
 }
 
-/// Serves `GET /metrics`, `GET /health` (the process runs) and `GET /ready` (see
-/// `Kernel::readiness`) until the listener fails. Deliberately minimal HTTP/1.
-pub(crate) async fn serve(kernel: &Kernel, addr: &str) -> Result<(), BoxError> {
-    let listener = TcpListener::bind(addr).await?;
-    tracing::info!(%addr, "serving metrics");
-    loop {
-        let (mut conn, _) = listener.accept().await?;
-        let mut request = [0u8; 1024];
-        let n = match tokio::time::timeout(Duration::from_secs(5), conn.read(&mut request)).await {
-            Ok(Ok(n)) => n,
-            _ => continue,
-        };
-        let request = &request[..n];
-        let response = if request.starts_with(b"GET /metrics ") {
-            reply("200 OK", "text/plain; version=0.0.4", &render(kernel))
-        } else if request.starts_with(b"GET /health ") {
-            reply("200 OK", "text/plain", "ok\n")
-        } else if request.starts_with(b"GET /ready ") {
-            match kernel.readiness() {
-                Ok(()) => reply("200 OK", "text/plain", "ready\n"),
-                Err(why) => reply("503 Service Unavailable", "text/plain", &format!("{why}\n")),
-            }
-        } else {
-            reply("404 Not Found", "text/plain", "")
-        };
-        let _ = conn.write_all(response.as_bytes()).await;
+fn respond(kernel: &Kernel, request: &[u8]) -> Vec<u8> {
+    if request.starts_with(b"GET /metrics ") {
+        reply(
+            "200 OK",
+            "text/plain; version=0.0.4",
+            render(kernel).as_bytes(),
+        )
+    } else if request.starts_with(b"GET /health ") {
+        reply("200 OK", "text/plain", b"ok\n")
+    } else if request.starts_with(b"GET /ready ") {
+        match kernel.readiness() {
+            Ok(()) => reply("200 OK", "text/plain", b"ready\n"),
+            Err(why) => reply(
+                "503 Service Unavailable",
+                "text/plain",
+                format!("{why}\n").as_bytes(),
+            ),
+        }
+    } else {
+        reply("404 Not Found", "text/plain", b"")
     }
 }

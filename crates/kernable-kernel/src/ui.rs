@@ -14,12 +14,8 @@ use std::{collections::HashMap, sync::Arc};
 use kernable_core::proto::{Event, RequestContext};
 use kernable_store::StreamId;
 use serde_json::{Value, json};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
-};
 
-use crate::{BoxError, Kernel, now_ms};
+use crate::{BoxError, Kernel, http::reply, now_ms};
 
 const PAGE: &str = include_str!("ui.html");
 
@@ -28,22 +24,8 @@ const STREAMS: usize = 500;
 
 /// Serves the UI until the listener fails.
 pub(crate) async fn serve(kernel: Arc<Kernel>, addr: &str) -> Result<(), BoxError> {
-    let listener = TcpListener::bind(addr).await?;
     tracing::info!(%addr, "serving the UI");
-    loop {
-        let (mut conn, _) = listener.accept().await?;
-        let kernel = Arc::clone(&kernel);
-        tokio::spawn(async move {
-            let mut request = [0u8; 4096];
-            let read =
-                tokio::time::timeout(std::time::Duration::from_secs(5), conn.read(&mut request));
-            let Ok(Ok(n)) = read.await else {
-                return;
-            };
-            let response = respond(&kernel, &request[..n]);
-            let _ = conn.write_all(&response).await;
-        });
-    }
+    crate::http::serve(kernel, addr, respond).await
 }
 
 fn respond(kernel: &Kernel, request: &[u8]) -> Vec<u8> {
@@ -69,17 +51,6 @@ fn respond(kernel: &Kernel, request: &[u8]) -> Vec<u8> {
             json!({ "error": e.to_string() }).to_string().as_bytes(),
         ),
     }
-}
-
-fn reply(status: &str, content_type: &str, body: &[u8]) -> Vec<u8> {
-    let mut out = format!(
-        "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\n\
-         cache-control: no-store\r\nconnection: close\r\n\r\n",
-        body.len()
-    )
-    .into_bytes();
-    out.extend_from_slice(body);
-    out
 }
 
 /// `a=1&b=x%20y` as a map, percent-decoded.

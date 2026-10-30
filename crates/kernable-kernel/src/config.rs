@@ -129,6 +129,72 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "10000",
         "On SIGTERM or SIGINT, the kernel refuses new submits and queries and waits this long, in milliseconds, for running ones to finish before it exits. Commands still unfinished run again after a restart.",
     ),
+    (
+        "--max-connections",
+        "KERNABLE_MAX_CONNECTIONS",
+        "1024",
+        "Connections to the gRPC address at once. A connection beyond it is closed right away and counted in `kernable_refused_total{reason=\"connections\"}`. Keep it below the process's limit of open files.",
+    ),
+    (
+        "--max-streams-per-connection",
+        "KERNABLE_MAX_STREAMS_PER_CONNECTION",
+        "256",
+        "Requests and streams at once on one connection (HTTP/2 concurrent streams). Further ones wait in the client until one ends.",
+    ),
+    (
+        "--max-message-bytes",
+        "KERNABLE_MAX_MESSAGE_BYTES",
+        "4194304",
+        "The largest gRPC message the kernel receives or sends, in bytes; the SDKs' default is the same 4 MiB. The data service takes files up to 16 MiB regardless. A command whose `Execute` (the command, its snapshot and the events after it) would be larger is rejected with `too_large`: snapshot such aggregates more often, or raise the limit in the kernel and every SDK. Listener batches are cut to fit.",
+    ),
+    (
+        "--handshake-timeout-ms",
+        "KERNABLE_HANDSHAKE_TIMEOUT_MS",
+        "10000",
+        "How long a worker or listener stream may take to send its first message and to answer the challenge, in milliseconds. A stream that is slower ends with `DEADLINE_EXCEEDED`.",
+    ),
+    (
+        "--max-queued-commands",
+        "KERNABLE_MAX_QUEUED_COMMANDS",
+        "100000",
+        "Commands in the queue at once, waiting or running. A new command beyond it is refused with `RESOURCE_EXHAUSTED` and not stored; resubmitting one that is already stored is always answered.",
+    ),
+    (
+        "--max-queued-per-aggregate",
+        "KERNABLE_MAX_QUEUED_PER_AGGREGATE",
+        "1000",
+        "Commands in the queue at once for one aggregate. A new command beyond it is refused with `RESOURCE_EXHAUSTED`, so one busy aggregate cannot fill the queue.",
+    ),
+    (
+        "--max-queued-bytes",
+        "KERNABLE_MAX_QUEUED_BYTES",
+        "536870912",
+        "Bytes of commands in the queue at once (the queue lives in the kernel's memory). A new command beyond it is refused with `RESOURCE_EXHAUSTED`.",
+    ),
+    (
+        "--max-requests-per-key",
+        "KERNABLE_MAX_REQUESTS_PER_KEY",
+        "1000",
+        "Submits, queries, file and cache requests of one key in progress at once. One beyond it is refused with `RESOURCE_EXHAUSTED`, so one service cannot take all the kernel's capacity.",
+    ),
+    (
+        "--max-subscriptions-per-key",
+        "KERNABLE_MAX_SUBSCRIPTIONS_PER_KEY",
+        "16",
+        "Open event subscriptions (`EventService.Subscribe`) of one key at once. One beyond it is refused with `RESOURCE_EXHAUSTED`.",
+    ),
+    (
+        "--max-listeners-per-key",
+        "KERNABLE_MAX_LISTENERS_PER_KEY",
+        "64",
+        "Listeners one key may register (connected or not) or run live at once. A new name beyond it is refused with `RESOURCE_EXHAUSTED`; registered ones always reconnect. A registered listener counts for settling and readiness, so this bounds how many a key can make everyone wait for.",
+    ),
+    (
+        "--max-cache-bytes",
+        "KERNABLE_MAX_CACHE_BYTES",
+        "268435456",
+        "Bytes the cache service keeps (values and keys). When a value would exceed it, the oldest values are dropped first, as a cache may; a single value larger than the limit is refused with `RESOURCE_EXHAUSTED`.",
+    ),
 ];
 
 /// Kernel configuration, from the flags of `kernable start` (see [`FLAGS`]).
@@ -155,6 +221,43 @@ pub struct Config {
     pub vault: Option<VaultConfig>,
     pub metrics_listen: Option<String>,
     pub ui_listen: Option<String>,
+    pub limits: Limits,
+}
+
+/// What the kernel takes on at most. Beyond a limit, a request is refused with
+/// `RESOURCE_EXHAUSTED` (a connection is closed) and counted in `kernable_refused_total`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Limits {
+    pub connections: usize,
+    pub streams_per_connection: u32,
+    pub message_bytes: usize,
+    pub handshake_timeout_ms: u64,
+    pub queued_commands: usize,
+    pub queued_per_aggregate: usize,
+    pub queued_bytes: usize,
+    pub requests_per_key: usize,
+    pub subscriptions_per_key: usize,
+    pub listeners_per_key: usize,
+    pub cache_bytes: usize,
+}
+
+/// The defaults of the `--max-*` flags and `--handshake-timeout-ms`.
+impl Default for Limits {
+    fn default() -> Self {
+        Limits {
+            connections: 1024,
+            streams_per_connection: 256,
+            message_bytes: 4 << 20,
+            handshake_timeout_ms: 10_000,
+            queued_commands: 100_000,
+            queued_per_aggregate: 1000,
+            queued_bytes: 512 << 20,
+            requests_per_key: 1000,
+            subscriptions_per_key: 16,
+            listeners_per_key: 64,
+            cache_bytes: 256 << 20,
+        }
+    }
 }
 
 /// The vault: where values live and the key that encrypts them.
@@ -215,6 +318,13 @@ impl Config {
                 .parse()
                 .map_err(|_| format!("{flag}: {value} is not a number").into())
         };
+        // A limit of 0 would refuse everything: a mistake, not a setting.
+        let positive = |flag: &str| -> Result<u64, Error> {
+            match number(flag)? {
+                0 => Err(format!("{flag} must be at least 1").into()),
+                n => Ok(n),
+            }
+        };
         let roots = match given.get("--root") {
             Some(roots) => roots.clone(),
             None => env("KERNABLE_ROOT")
@@ -266,6 +376,20 @@ impl Config {
             }),
             metrics_listen: get("--metrics-listen"),
             ui_listen: get("--ui-listen"),
+            limits: Limits {
+                connections: positive("--max-connections")? as usize,
+                streams_per_connection: u32::try_from(positive("--max-streams-per-connection")?)
+                    .map_err(|_| "--max-streams-per-connection is too large")?,
+                message_bytes: positive("--max-message-bytes")? as usize,
+                handshake_timeout_ms: positive("--handshake-timeout-ms")?,
+                queued_commands: positive("--max-queued-commands")? as usize,
+                queued_per_aggregate: positive("--max-queued-per-aggregate")? as usize,
+                queued_bytes: positive("--max-queued-bytes")? as usize,
+                requests_per_key: positive("--max-requests-per-key")? as usize,
+                subscriptions_per_key: positive("--max-subscriptions-per-key")? as usize,
+                listeners_per_key: positive("--max-listeners-per-key")? as usize,
+                cache_bytes: positive("--max-cache-bytes")? as usize,
+            },
         })
     }
 }
@@ -382,6 +506,15 @@ pub fn valid_domain(domain: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// A listener or membership name: 1 to 128 ASCII letters, digits, `-`, `_` and `.`. Names
+/// appear in metrics labels, logs and the UI, so nothing else.
+pub fn valid_name(name: &str) -> bool {
+    (1..=128).contains(&name.len())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
 /// A type name within a domain: not empty and without dots.
 pub fn valid_type(type_name: &str) -> bool {
     !type_name.is_empty() && !type_name.contains('.')
@@ -438,6 +571,26 @@ mod tests {
         let env = |var: &str| (var == "KERNABLE_LEASE_TTL_MS").then(String::new);
         let config = Config::from_args(&["--root", &root], env).unwrap();
         assert_eq!(config.lease_ttl_ms, 10_000);
+    }
+
+    #[test]
+    fn limits_default_to_the_flag_defaults_and_are_positive() {
+        let root =
+            kernable_core::signing::key_id(&kernable_core::signing::generate_key().verifying_key());
+        let config = Config::from_args(&["--root", &root], |_| None).unwrap();
+        assert_eq!(config.limits, Limits::default());
+        let config =
+            Config::from_args(&["--root", &root, "--max-queued-commands", "5"], |_| None).unwrap();
+        assert_eq!(config.limits.queued_commands, 5);
+        let zero = Config::from_args(&["--root", &root, "--max-connections=0"], |_| None);
+        assert!(zero.is_err());
+    }
+
+    #[test]
+    fn names_are_plain() {
+        assert!(valid_name("carts") && valid_name("shop.carts-v2_1"));
+        assert!(!valid_name("") && !valid_name("a b") && !valid_name("a\"b"));
+        assert!(!valid_name("x\n") && !valid_name(&"a".repeat(129)));
     }
 
     #[test]

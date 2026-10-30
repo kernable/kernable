@@ -40,6 +40,8 @@ use kernable_core::{
 use tokio::sync::{Notify, mpsc, oneshot};
 use tonic::{Status, Streaming};
 
+use prost::Message;
+
 use crate::{BoxError, Kernel, SUBSCRIBE_BATCH, config, internal, memberships::Memberships};
 
 /// How often acknowledged positions are written to the store.
@@ -480,12 +482,14 @@ pub(crate) async fn run(
     out: &Outbox,
 ) -> Result<(), Status> {
     // Handshake: Hello -> Challenge -> ChallengeResponse -> Ready.
-    let Some(In::Hello(hello)) = next(inbound).await? else {
+    let Some(In::Hello(hello)) = kernel.handshake(next(inbound)).await? else {
         return Err(Status::invalid_argument("expected Hello"));
     };
     crate::protocol(hello.protocol)?;
-    if hello.name.is_empty() {
-        return Err(Status::invalid_argument("listener name is empty"));
+    if !config::valid_name(&hello.name) {
+        return Err(Status::invalid_argument(
+            "a listener name has 1 to 128 letters, digits, `-`, `_` and `.`",
+        ));
     }
     if hello.order < 0 {
         return Err(Status::invalid_argument(
@@ -560,7 +564,7 @@ pub(crate) async fn run(
         }),
     )
     .await?;
-    let Some(In::ChallengeResponse(resp)) = next(inbound).await? else {
+    let Some(In::ChallengeResponse(resp)) = kernel.handshake(next(inbound)).await? else {
         return Err(Status::invalid_argument("expected ChallengeResponse"));
     };
     let proof = Signature {
@@ -581,6 +585,21 @@ pub(crate) async fn run(
             return Err(Status::already_exists(
                 "a registered listener has this name: remove it, or use another name",
             ));
+        }
+        // A new name counts against the key's limit; a registered one always reconnects.
+        let max = kernel.config().limits.listeners_per_key;
+        if previous.is_none()
+            && entries
+                .values()
+                .filter(|e| e.record.key_id == hello.key_id)
+                .count()
+                >= max
+        {
+            kernel.metrics.limited("listeners_per_key");
+            return Err(Status::resource_exhausted(format!(
+                "the key has {max} listeners (--max-listeners-per-key): remove unused ones with \
+                 `kernable listeners remove`"
+            )));
         }
         // Another key only as the registered key's successor (`succeeds` in its grant).
         if let Some(e) = previous.filter(|e| e.record.key_id != hello.key_id) {
@@ -756,17 +775,31 @@ async fn deliver(
             }
             continue;
         }
-        sent.store(up_to, Ordering::SeqCst);
         if events.is_empty() && kernel.listeners.position(&name) == after {
             // Nothing to process and nothing outstanding: skip ahead without a round trip.
+            sent.store(up_to, Ordering::SeqCst);
             kernel.listeners.ack(&name, up_to);
-        } else if send(&out, Out::Batch(batch_of(&kernel, &key_id, events, up_to)))
-            .await
-            .is_err()
-        {
+            continue;
+        }
+        let batch = fitted(&kernel, &key_id, events, up_to);
+        sent.store(batch.up_to, Ordering::SeqCst);
+        if send(&out, Out::Batch(batch)).await.is_err() {
             return;
         }
     }
+}
+
+/// A batch of `events` up to `up_to` that fits `--max-message-bytes`: halved, ending at its
+/// last event, until it does. A single event always goes; it came from a result that fit.
+fn fitted(kernel: &Kernel, key_id: &str, mut events: Vec<Event>, up_to: u64) -> Batch {
+    let max = kernel.config().limits.message_bytes;
+    let mut batch = batch_of(kernel, key_id, events.clone(), up_to);
+    while events.len() > 1 && batch.encoded_len() + crate::ENVELOPE_BYTES > max {
+        events.truncate(events.len() / 2);
+        let up_to = events.last().map_or(up_to, |e| e.global_position);
+        batch = batch_of(kernel, key_id, events.clone(), up_to);
+    }
+    batch
 }
 
 /// A batch with the vault values of its events that the listener's key may read.

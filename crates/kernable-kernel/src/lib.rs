@@ -17,8 +17,10 @@
 
 mod cache;
 pub mod config;
+mod connections;
 pub mod crash;
 pub mod grants;
+mod http;
 mod listeners;
 mod memberships;
 mod metrics;
@@ -71,7 +73,7 @@ use tokio::{
     sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch},
     task::JoinHandle,
 };
-use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::{
     Request, Response, Status, Streaming,
     metadata::MetadataMap,
@@ -100,6 +102,45 @@ const MAX_KEY_BYTES: usize = 512;
 const SUBSCRIBE_BATCH: u32 = 500;
 /// The metadata entry that carries a request's grant: the hex-encoded `Grant`.
 pub const GRANT_HEADER: &str = "kernable-grant";
+
+/// How often the kernel pings an idle HTTP/2 connection, and how long it waits for the answer
+/// before it drops the connection: a peer that vanished without closing it frees its slot.
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Bytes a message adds around an `Execute` or `Batch` (field tag and length).
+const ENVELOPE_BYTES: usize = 16;
+
+/// Requests or streams in progress per key, each counted until its [`Slot`] drops.
+#[derive(Default)]
+struct PerKey(Arc<Mutex<HashMap<String, usize>>>);
+
+/// One counted request or stream of a key.
+struct Slot(Arc<Mutex<HashMap<String, usize>>>, String);
+
+impl PerKey {
+    /// A slot for `key_id`, unless it holds `max` already.
+    fn take(&self, key_id: &str, max: usize) -> Option<Slot> {
+        let mut counts = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let held = counts.get(key_id).copied().unwrap_or(0);
+        if held >= max {
+            return None;
+        }
+        counts.insert(key_id.to_owned(), held + 1);
+        Some(Slot(Arc::clone(&self.0), key_id.to_owned()))
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let mut counts = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(held) = counts.get_mut(&self.1) {
+            *held -= 1;
+            if *held == 0 {
+                counts.remove(&self.1);
+            }
+        }
+    }
+}
 
 /// A submit or query in progress, see [`Kernel::request`].
 struct Running<'a>(&'a Kernel);
@@ -169,6 +210,10 @@ pub struct Kernel {
     /// Submits and queries being handled, and a wake-up when one ends.
     requests: AtomicUsize,
     idle: Notify,
+    /// Submits, queries, file and cache requests in progress per key.
+    requests_by_key: PerKey,
+    /// Open subscriptions per key.
+    subscriptions_by_key: PerKey,
 }
 
 impl Kernel {
@@ -203,7 +248,7 @@ impl Kernel {
             None => None,
         };
         let data = kernable_store::data::open(&config.data)?;
-        let cache = cache::Cache::open(&config.cache)?;
+        let cache = cache::Cache::open(&config.cache, config.limits.cache_bytes)?;
         let queue = queue::Queue::default();
         for pending in store.pending()? {
             queue.push(pending.command, pending.received_at);
@@ -232,6 +277,8 @@ impl Kernel {
             draining: Default::default(),
             requests: Default::default(),
             idle: Notify::new(),
+            requests_by_key: PerKey::default(),
+            subscriptions_by_key: PerKey::default(),
         }))
     }
 
@@ -500,9 +547,35 @@ impl Kernel {
         tokio::time::timeout(timeout, idle).await.is_ok()
     }
 
-    /// Counts a submit or query until the returned guard drops; refused while draining.
+    /// A slot for one more request of `key_id`, or RESOURCE_EXHAUSTED at `--max-requests-per-key`.
+    fn request_slot(&self, key_id: &str) -> Result<Slot, Status> {
+        let max = self.config.limits.requests_per_key;
+        self.requests_by_key.take(key_id, max).ok_or_else(|| {
+            self.metrics.limited("requests_per_key");
+            Status::resource_exhausted(format!(
+                "the key has {max} requests in progress (--max-requests-per-key); retry later"
+            ))
+        })
+    }
+
+    /// The next message of a worker's or listener's handshake, within `--handshake-timeout-ms`.
+    async fn handshake<T>(
+        &self,
+        next: impl Future<Output = Result<T, Status>>,
+    ) -> Result<T, Status> {
+        let timeout = Duration::from_millis(self.config.limits.handshake_timeout_ms);
+        tokio::time::timeout(timeout, next)
+            .await
+            .unwrap_or_else(|_| {
+                self.metrics.limited("handshake_timeout");
+                Err(Status::deadline_exceeded(
+                    "the stream did not complete its handshake in time (--handshake-timeout-ms)",
+                ))
+            })
+    }
+
     /// Checks a data or cache request: the signature over `msg`, its age, a valid domain and
-    /// key, and that the key may do `action` (`rules`) in the domain.
+    /// key, and that the key may do `action` (`rules`) in the domain. Returns the request's slot.
     #[allow(clippy::too_many_arguments)]
     fn authorize_store(
         &self,
@@ -514,11 +587,12 @@ impl Kernel {
         key: &str,
         action: &str,
         rules: fn(&Permissions) -> &grants::Rules,
-    ) -> Result<(), Status> {
+    ) -> Result<Slot, Status> {
         let sig = sig.ok_or_else(|| Status::unauthenticated("request is not signed"))?;
         signing::verify(sig, msg)
             .map_err(|_| Status::unauthenticated("invalid request signature"))?;
         self.present(metadata, &sig.key_id)?;
+        let slot = self.request_slot(&sig.key_id)?;
         if (now_ms() - issued_at).abs() > MAX_REQUEST_AGE_MS {
             return Err(Status::unauthenticated("request expired; check the clock"));
         }
@@ -536,9 +610,10 @@ impl Kernel {
                 "key may not {action} in {domain}"
             )));
         }
-        Ok(())
+        Ok(slot)
     }
 
+    /// Counts a submit or query until the returned guard drops; refused while draining.
     fn request(&self) -> Result<Running<'_>, Status> {
         self.requests.fetch_add(1, SeqCst);
         let running = Running(self);
@@ -804,23 +879,59 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
                 .client_ca_root(client_ca),
         )?;
     }
+    let limits = kernel.config().limits.clone();
+    let max = limits.message_bytes;
+    let data_max = max.max(MAX_DATA_BYTES + (64 << 10));
+    let cache_max = max.max(MAX_CACHE_BYTES + (64 << 10));
     let router = builder
-        .add_service(CommandServiceServer::new(api.clone()))
-        .add_service(EventServiceServer::new(api.clone()))
-        .add_service(ListenerServiceServer::new(api.clone()))
-        .add_service(QueryServiceServer::new(api.clone()))
-        .add_service(TrustServiceServer::new(api.clone()))
-        .add_service(MembershipServiceServer::new(api.clone()))
+        .max_concurrent_streams(Some(limits.streams_per_connection))
+        .http2_keepalive_interval(Some(KEEPALIVE_INTERVAL))
+        .http2_keepalive_timeout(Some(KEEPALIVE_TIMEOUT))
+        .add_service(
+            CommandServiceServer::new(api.clone())
+                .max_decoding_message_size(max)
+                .max_encoding_message_size(max),
+        )
+        .add_service(
+            EventServiceServer::new(api.clone())
+                .max_decoding_message_size(max)
+                .max_encoding_message_size(max),
+        )
+        .add_service(
+            ListenerServiceServer::new(api.clone())
+                .max_decoding_message_size(max)
+                .max_encoding_message_size(max),
+        )
+        .add_service(
+            QueryServiceServer::new(api.clone())
+                .max_decoding_message_size(max)
+                .max_encoding_message_size(max),
+        )
+        .add_service(
+            TrustServiceServer::new(api.clone())
+                .max_decoding_message_size(max)
+                .max_encoding_message_size(max),
+        )
+        .add_service(
+            MembershipServiceServer::new(api.clone())
+                .max_decoding_message_size(max)
+                .max_encoding_message_size(max),
+        )
         .add_service(
             DataServiceServer::new(api.clone())
-                .max_decoding_message_size(MAX_DATA_BYTES + (64 << 10))
-                .max_encoding_message_size(MAX_DATA_BYTES + (64 << 10)),
+                .max_decoding_message_size(data_max)
+                .max_encoding_message_size(data_max),
         )
         .add_service(
             CacheServiceServer::new(api.clone())
-                .max_decoding_message_size(MAX_CACHE_BYTES + (64 << 10)),
+                .max_decoding_message_size(cache_max)
+                .max_encoding_message_size(cache_max),
         )
-        .add_service(WorkerGatewayServer::new(api));
+        .add_service(
+            WorkerGatewayServer::new(api)
+                .max_decoding_message_size(max)
+                .max_encoding_message_size(max),
+        );
 
     let server = async {
         match transport::unix_path(&listen) {
@@ -832,13 +943,14 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
                     std::fs::remove_file(path)?;
                 }
                 let listener = tokio::net::UnixListener::bind(path)?;
-                let incoming = tokio_stream::wrappers::UnixListenerStream::new(listener);
+                let incoming = connections::limited(Arc::clone(&kernel), listener);
                 router.serve_with_incoming(incoming).await?;
             }
             #[cfg(not(unix))]
             Some(_) => return Err("unix: sockets need Unix; listen on host:port".into()),
             None => {
-                let incoming = TcpListenerStream::new(TcpListener::bind(&listen).await?);
+                let listener = TcpListener::bind(&listen).await?;
+                let incoming = connections::limited(Arc::clone(&kernel), listener);
                 router.serve_with_incoming(incoming).await?;
             }
         }
@@ -871,9 +983,9 @@ async fn serve_ui(kernel: &Arc<Kernel>) -> Result<(), BoxError> {
     }
 }
 
-async fn serve_metrics(kernel: &Kernel) -> Result<(), BoxError> {
+async fn serve_metrics(kernel: &Arc<Kernel>) -> Result<(), BoxError> {
     match &kernel.config().metrics_listen {
-        Some(addr) => metrics::serve(kernel, addr).await,
+        Some(addr) => metrics::serve(Arc::clone(kernel), addr).await,
         None => std::future::pending().await,
     }
 }
@@ -959,6 +1071,7 @@ impl CommandService for Api {
         signing::verify(sig, &signing::command_message(&cmd))
             .map_err(|_| Status::unauthenticated("invalid command signature"))?;
         kernel.present(&metadata, &sig.key_id)?;
+        let _slot = kernel.request_slot(&sig.key_id)?;
         let permissions = kernel.permissions();
         if !config::valid_domain(&cmd.domain) || !config::valid_type(&cmd.command_type) {
             return Err(Status::invalid_argument(
@@ -988,6 +1101,20 @@ impl CommandService for Api {
         if !kernel.workers.runs(kernel, &aggregate, &name) {
             return Err(Status::not_found(format!(
                 "no worker registered {name} for {aggregate}"
+            )));
+        }
+        // A full queue refuses new commands before anything is stored; a stored one is always
+        // answered.
+        if let Err(reason) = kernel.queue.room(&cmd, &kernel.config().limits)
+            && kernel
+                .store
+                .command(&cmd.command_id)
+                .map_err(internal)?
+                .is_none()
+        {
+            kernel.metrics.limited(reason);
+            return Err(Status::resource_exhausted(format!(
+                "the command queue is full ({reason}); retry later"
             )));
         }
         let request = middleware_call::Request::Command(cmd.clone());
@@ -1121,10 +1248,23 @@ impl EventService for Api {
             &req.event_types,
         )
         .map_err(Status::permission_denied)?;
+        let max = kernel.config.limits.subscriptions_per_key;
+        let slot = kernel
+            .subscriptions_by_key
+            .take(&sig.key_id, max)
+            .ok_or_else(|| {
+                kernel.metrics.limited("subscriptions_per_key");
+                Status::resource_exhausted(format!(
+                    "the key has {max} open subscriptions (--max-subscriptions-per-key)"
+                ))
+            })?;
 
         let (tx, rx) = mpsc::channel(SUBSCRIBE_BATCH as usize);
         let reader = (sig.key_id.clone(), req.event_types.clone());
-        tokio::spawn(stream_events(kernel, req.after_position, types, reader, tx));
+        tokio::spawn(async move {
+            let _slot = slot;
+            stream_events(kernel, req.after_position, types, reader, tx).await;
+        });
         Ok(Response::new(ReceiverStream::new(rx)))
     }
 }
@@ -1211,7 +1351,7 @@ impl Api {
         &self,
         request: Request<DataRequest>,
         op: &str,
-    ) -> Result<DataRequest, Status> {
+    ) -> Result<(DataRequest, Slot), Status> {
         let metadata = request.metadata().clone();
         let r = request.into_inner();
         protocol(r.protocol)?;
@@ -1220,7 +1360,7 @@ impl Api {
             _ => ("write files", |p| &p.data_write),
         };
         let msg = signing::data_message(op, &r);
-        self.0.authorize_store(
+        let slot = self.0.authorize_store(
             &metadata,
             r.client_sig.as_ref(),
             &msg,
@@ -1246,7 +1386,7 @@ impl Api {
             middleware_call::Request::Data(checked),
         )
         .await?;
-        Ok(r)
+        Ok((r, slot))
     }
 
     /// Checks a cache request for `op` (`set`, `get`, `delete`): signature, grant, middleware.
@@ -1254,12 +1394,12 @@ impl Api {
         &self,
         request: Request<CacheRequest>,
         op: &str,
-    ) -> Result<CacheRequest, Status> {
+    ) -> Result<(CacheRequest, Slot), Status> {
         let metadata = request.metadata().clone();
         let r = request.into_inner();
         protocol(r.protocol)?;
         let msg = signing::cache_message(op, &r);
-        self.0.authorize_store(
+        let slot = self.0.authorize_store(
             &metadata,
             r.client_sig.as_ref(),
             &msg,
@@ -1284,7 +1424,7 @@ impl Api {
             middleware_call::Request::Cache(checked),
         )
         .await?;
-        Ok(r)
+        Ok((r, slot))
     }
 }
 
@@ -1294,7 +1434,7 @@ impl DataService for Api {
         &self,
         request: Request<DataRequest>,
     ) -> Result<Response<DataResult>, Status> {
-        let r = self.data_request(request, "put").await?;
+        let (r, _slot) = self.data_request(request, "put").await?;
         if r.data.len() > MAX_DATA_BYTES {
             return Err(Status::invalid_argument(format!(
                 "a file has at most {} MiB",
@@ -1316,7 +1456,7 @@ impl DataService for Api {
         &self,
         request: Request<DataRequest>,
     ) -> Result<Response<DataResult>, Status> {
-        let r = self.data_request(request, "get").await?;
+        let (r, _slot) = self.data_request(request, "get").await?;
         let result = match self.0.data.get(&data_key(&r)).map_err(store_error)? {
             Some(d) => DataResult {
                 found: true,
@@ -1332,7 +1472,7 @@ impl DataService for Api {
         &self,
         request: Request<DataRequest>,
     ) -> Result<Response<DataResult>, Status> {
-        let r = self.data_request(request, "delete").await?;
+        let (r, _slot) = self.data_request(request, "delete").await?;
         let found = self.0.data.delete(&data_key(&r)).map_err(store_error)?;
         Ok(Response::new(DataResult {
             found,
@@ -1347,16 +1487,23 @@ impl CacheService for Api {
         &self,
         request: Request<CacheRequest>,
     ) -> Result<Response<CacheResult>, Status> {
-        let r = self.cache_request(request, "set").await?;
+        let (r, _slot) = self.cache_request(request, "set").await?;
         if r.value.len() > MAX_CACHE_BYTES {
             return Err(Status::invalid_argument(format!(
                 "a cache value has at most {} MiB",
                 MAX_CACHE_BYTES >> 20
             )));
         }
-        self.0
+        let kept = self
+            .0
             .cache
             .set((r.tenant_id, r.domain, r.key), r.value, r.ttl_ms);
+        if !kept {
+            self.0.metrics.limited("cache_bytes");
+            return Err(Status::resource_exhausted(
+                "the value is larger than the whole cache (--max-cache-bytes)",
+            ));
+        }
         Ok(Response::new(CacheResult {
             found: true,
             value: Vec::new(),
@@ -1367,7 +1514,7 @@ impl CacheService for Api {
         &self,
         request: Request<CacheRequest>,
     ) -> Result<Response<CacheResult>, Status> {
-        let r = self.cache_request(request, "get").await?;
+        let (r, _slot) = self.cache_request(request, "get").await?;
         let value = self.0.cache.get((r.tenant_id, r.domain, r.key));
         Ok(Response::new(CacheResult {
             found: value.is_some(),
@@ -1379,7 +1526,7 @@ impl CacheService for Api {
         &self,
         request: Request<CacheRequest>,
     ) -> Result<Response<CacheResult>, Status> {
-        let r = self.cache_request(request, "delete").await?;
+        let (r, _slot) = self.cache_request(request, "delete").await?;
         let found = self.0.cache.delete((r.tenant_id, r.domain, r.key));
         Ok(Response::new(CacheResult {
             found,
@@ -1403,6 +1550,7 @@ impl QueryService for Api {
         signing::verify(sig, &signing::query_message(&query))
             .map_err(|_| Status::unauthenticated("invalid query signature"))?;
         kernel.present(&metadata, &sig.key_id)?;
+        let _slot = kernel.request_slot(&sig.key_id)?;
         let permissions = kernel.permissions();
         if (now_ms() - query.issued_at).abs() > MAX_REQUEST_AGE_MS {
             return Err(Status::unauthenticated("query expired; check the clock"));
@@ -1664,7 +1812,7 @@ async fn run_session(
     out: &Outbox,
 ) -> Result<(), Status> {
     // Handshake: Register -> Challenge -> ChallengeResponse -> Registered.
-    let Some(In::Register(reg)) = next(inbound).await? else {
+    let Some(In::Register(reg)) = kernel.handshake(next(inbound)).await? else {
         return Err(Status::invalid_argument("expected Register"));
     };
     protocol(reg.protocol)?;
@@ -1692,7 +1840,7 @@ async fn run_session(
         }),
     )
     .await?;
-    let Some(In::ChallengeResponse(resp)) = next(inbound).await? else {
+    let Some(In::ChallengeResponse(resp)) = kernel.handshake(next(inbound)).await? else {
         return Err(Status::invalid_argument("expected ChallengeResponse"));
     };
     let proof = Signature {
@@ -1913,7 +2061,7 @@ impl Session {
             .cloned()
             .collect();
         let vault = self.kernel.values_of(&refs);
-        let execute = Execute {
+        let mut execute = Execute {
             vault,
             lease_id,
             command: Some(command),
@@ -1923,6 +2071,26 @@ impl Session {
             received_at,
             deadline: now_ms() + self.kernel.config().lease_ttl_ms,
         };
+        let size = execute.encoded_len() + ENVELOPE_BYTES;
+        let max = self.kernel.config.limits.message_bytes;
+        if size > max {
+            // No worker could receive it: a final rejection instead of a retry forever.
+            let in_flight = self.in_flight().remove(&execute.lease_id);
+            drop(in_flight);
+            self.kernel.metrics.limited("too_large");
+            let reason = Rejected {
+                code: "too_large".into(),
+                message: format!(
+                    "the command with its snapshot and the {} events after it is {size} bytes, \
+                     more than --max-message-bytes {max}: snapshot the aggregate more often, or \
+                     raise the limit in the kernel and the SDKs",
+                    execute.history.len()
+                ),
+            };
+            let command = execute.command.take().unwrap_or_default();
+            self.reject(&execute.lease_id, command, reason);
+            return true;
+        }
         let sent = send(&self.out, Out::Execute(execute)).await.is_ok();
         crash::point("execute.sent");
         sent

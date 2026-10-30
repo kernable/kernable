@@ -62,7 +62,7 @@ Checked by overload and soak runs.
 | # | Invariant |
 |---|---|
 | R1 | Every request gets an answer or an error within its timeout, also under overload |
-| R2 | Memory stays bounded whatever the input rate, the payload sizes and the number of connections; overload is refused with `RESOURCE_EXHAUSTED` |
+| R2 | Memory stays bounded whatever the input rate, the payload sizes and the number of connections; overload is refused with `RESOURCE_EXHAUSTED`. Each limit is tested in `tests/limits.rs`; bounded memory under sustained load is measured in H7 |
 | R3 | A stored command completes once a worker for its aggregate is connected |
 | R4 | A failed write (ENOSPC, EIO, fsync) stops the kernel or the request; it never leaves the store inconsistent (fail stop, never fail corrupt) |
 | R5 | After any crash and restart, S1–S8 hold and processing resumes without help |

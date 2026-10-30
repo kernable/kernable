@@ -98,9 +98,11 @@ fn validate(m: &Membership) -> Result<(), Status> {
     if m.listeners
         .iter()
         .chain(&m.middlewares)
-        .any(String::is_empty)
+        .any(|name| !config::valid_name(name))
     {
-        return Err(Status::invalid_argument("a listener name is empty"));
+        return Err(Status::invalid_argument(
+            "a listener name has 1 to 128 letters, digits, `-`, `_` and `.`",
+        ));
     }
     Ok(())
 }

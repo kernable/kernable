@@ -11,6 +11,9 @@ use std::{
 };
 
 use kernable_core::proto::Command;
+use prost::Message;
+
+use crate::config::Limits;
 
 /// Tenant, domain, aggregate type, aggregate ID.
 type StreamKey = (String, String, String, String);
@@ -40,6 +43,8 @@ struct Inner {
     leases: HashMap<String, Held>,
     /// IDs of all queued commands, so a repeated push is ignored.
     queued: HashSet<String>,
+    /// The encoded size of all queued commands.
+    bytes: usize,
     next_seq: u64,
     next_lease: u64,
 }
@@ -86,12 +91,36 @@ impl Queue {
         self.inner().queued.len()
     }
 
+    /// Whether a new `command` fits the queue's limits; otherwise which limit it exceeds
+    /// (the reason counted in `kernable_refused_total`). A command already queued always fits.
+    pub(crate) fn room(&self, command: &Command, limits: &Limits) -> Result<(), &'static str> {
+        let inner = self.inner();
+        if inner.queued.contains(&command.command_id) {
+            return Ok(());
+        }
+        if inner.queued.len() >= limits.queued_commands {
+            return Err("queued_commands");
+        }
+        let behind = inner
+            .aggregates
+            .get(&stream_key(command))
+            .map_or(0, VecDeque::len);
+        if behind >= limits.queued_per_aggregate {
+            return Err("queued_per_aggregate");
+        }
+        if inner.bytes + command.encoded_len() > limits.queued_bytes {
+            return Err("queued_bytes");
+        }
+        Ok(())
+    }
+
     /// Adds a command behind the others of its aggregate. Returns false if it is queued already.
     pub(crate) fn push(&self, command: Command, received_at: i64) -> bool {
         let mut inner = self.inner();
         if !inner.queued.insert(command.command_id.clone()) {
             return false;
         }
+        inner.bytes += command.encoded_len();
         let key = stream_key(&command);
         let commands = inner.aggregates.entry(key.clone()).or_default();
         commands.push_back((command, received_at));
@@ -152,6 +181,7 @@ impl Queue {
             inner.aggregates.remove(&held.key);
         }
         inner.queued.remove(&command.command_id);
+        inner.bytes = inner.bytes.saturating_sub(command.encoded_len());
         inner.make_ready(held.key);
     }
 
@@ -228,6 +258,46 @@ mod tests {
         let (again, id) = lease(&q, &["d.A"]).unwrap(); // the zero-TTL lease has expired
         assert_eq!(id, "c1");
         assert!(q.holds(&again));
+    }
+
+    #[test]
+    fn room_counts_commands_per_aggregate_and_bytes() {
+        let q = Queue::default();
+        let limits = Limits {
+            queued_commands: 3,
+            queued_per_aggregate: 2,
+            ..Limits::default()
+        };
+        q.push(cmd("c1", "A", "o1"), 0);
+        q.push(cmd("c2", "A", "o1"), 0);
+        assert_eq!(
+            q.room(&cmd("c3", "A", "o1"), &limits),
+            Err("queued_per_aggregate")
+        );
+        assert_eq!(
+            q.room(&cmd("c1", "A", "o1"), &limits),
+            Ok(()),
+            "already queued"
+        );
+        assert_eq!(q.room(&cmd("c3", "A", "o2"), &limits), Ok(()));
+        q.push(cmd("c3", "A", "o2"), 0);
+        assert_eq!(
+            q.room(&cmd("c4", "A", "o3"), &limits),
+            Err("queued_commands")
+        );
+
+        let bytes = q.inner().bytes;
+        let small = Limits {
+            queued_bytes: bytes + 1,
+            ..Limits::default()
+        };
+        assert_eq!(q.room(&cmd("c4", "A", "o3"), &small), Err("queued_bytes"));
+        let (lease, _, _) = q.lease(&["d.A"], Duration::from_secs(9)).unwrap();
+        q.done(&lease);
+        assert!(
+            q.inner().bytes < bytes,
+            "a completed command frees its bytes"
+        );
     }
 
     #[test]

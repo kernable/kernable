@@ -158,6 +158,7 @@ pub async fn start_custom(name: &str, customize: impl FnOnce(&mut Config, &Path)
         vault: None,
         metrics_listen: None,
         ui_listen: None,
+        limits: Default::default(),
     };
     customize(&mut config, &dir);
     let addr = config.listen.clone();
@@ -188,7 +189,7 @@ pub fn free_addr() -> String {
 pub async fn get(addr: &str, path: &str) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut conn = tokio::net::TcpStream::connect(addr).await.unwrap();
-    conn.write_all(format!("GET {path} HTTP/1.1\r\nhost: x\r\n\r\n").as_bytes())
+    conn.write_all(format!("GET {path} HTTP/1.1\r\nhost: localhost\r\n\r\n").as_bytes())
         .await
         .unwrap();
     let mut response = String::new();

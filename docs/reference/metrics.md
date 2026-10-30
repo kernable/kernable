@@ -14,7 +14,8 @@ Counters and durations count since the kernel started and begin at 0 again after
 |---|---|---|---|
 | `kernable_commands_total` | counter | `outcome` | Commands completed since the kernel started, by outcome: committed, or rejected by a worker or the kernel. Commands a middleware refused before the queue are not counted. |
 | `kernable_queries_total` | counter | `outcome` | Queries since the kernel started, by outcome: answered; rejected by a read model or a middleware; failed when no read model answered, because none was connected or none answered in time. |
-| `kernable_middleware_total` | counter | `outcome` | Runs of a middleware chain, before or after a command or query, by outcome: passed, rejected, or failed when a middleware in the chain was not connected or did not answer within --middleware-timeout-ms. |
+| `kernable_middleware_total` | counter | `outcome`, `reason` | Runs of a middleware chain, before or after a command or query, by outcome: passed, rejected, or failed when a middleware in the chain was not connected or did not answer within --middleware-timeout-ms. |
+| `kernable_refused_total` | counter |  | Requests and connections a limit refused since the kernel started, by reason: connections, requests_per_key, subscriptions_per_key, listeners_per_key, queued_commands, queued_per_aggregate, queued_bytes, cache_bytes, handshake_timeout, too_large, http_host, http_connections. |
 | `kernable_queued_commands` | gauge |  | Commands stored in the queue and not completed yet: waiting for a worker or running. |
 | `kernable_worker_sessions` | gauge |  | Worker sessions connected now. |
 | `kernable_head_position` | gauge |  | Global position of the newest stored event; 0 while the store is empty. |

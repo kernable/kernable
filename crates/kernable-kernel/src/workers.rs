@@ -282,6 +282,12 @@ impl Registry {
 
 /// Checks the aggregates a worker registers, before its key is proven.
 pub(crate) fn validate(reg: &Register) -> Result<(), Status> {
+    // The worker ID only names the process in logs and the UI.
+    if reg.worker_id.len() > 256 || reg.worker_id.chars().any(char::is_control) {
+        return Err(Status::invalid_argument(
+            "a worker ID has at most 256 bytes and no control characters",
+        ));
+    }
     if reg.aggregates.is_empty() {
         return Err(Status::invalid_argument(
             "a worker runs at least one aggregate",

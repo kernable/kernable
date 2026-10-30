@@ -62,3 +62,21 @@ A timeout ends the wait, not the work: what happens then is in each row and in [
 | `--query-timeout-ms` | `KERNABLE_QUERY_TIMEOUT_MS` | `5000` | How long a query waits, in milliseconds, for a read model that answers it to catch up and answer. After that the client gets `DEADLINE_EXCEEDED`. |
 | `--middleware-timeout-ms` | `KERNABLE_MIDDLEWARE_TIMEOUT_MS` | `5000` | How long a request waits for each middleware in its chain to catch up and give its verdict, in milliseconds. After that the request is refused with `DEADLINE_EXCEEDED`: middleware fails closed. |
 | `--drain-timeout-ms` | `KERNABLE_DRAIN_TIMEOUT_MS` | `10000` | On SIGTERM or SIGINT, the kernel refuses new submits and queries and waits this long, in milliseconds, for running ones to finish before it exits. Commands still unfinished run again after a restart. |
+
+## Limits
+
+What the kernel takes on at most, so that no client, service or connection can exhaust its memory or capacity. Beyond a limit it refuses with `RESOURCE_EXHAUSTED` (a connection beyond `--max-connections` is closed) and counts the refusal in `kernable_refused_total` ([Metrics](./metrics)). Every limit is at least 1.
+
+| Flag | Variable | Default | Description |
+|---|---|---|---|
+| `--max-connections` | `KERNABLE_MAX_CONNECTIONS` | `1024` | Connections to the gRPC address at once. A connection beyond it is closed right away and counted in `kernable_refused_total{reason="connections"}`. Keep it below the process's limit of open files. |
+| `--max-streams-per-connection` | `KERNABLE_MAX_STREAMS_PER_CONNECTION` | `256` | Requests and streams at once on one connection (HTTP/2 concurrent streams). Further ones wait in the client until one ends. |
+| `--max-message-bytes` | `KERNABLE_MAX_MESSAGE_BYTES` | `4194304` | The largest gRPC message the kernel receives or sends, in bytes; the SDKs' default is the same 4 MiB. The data service takes files up to 16 MiB regardless. A command whose `Execute` (the command, its snapshot and the events after it) would be larger is rejected with `too_large`: snapshot such aggregates more often, or raise the limit in the kernel and every SDK. Listener batches are cut to fit. |
+| `--handshake-timeout-ms` | `KERNABLE_HANDSHAKE_TIMEOUT_MS` | `10000` | How long a worker or listener stream may take to send its first message and to answer the challenge, in milliseconds. A stream that is slower ends with `DEADLINE_EXCEEDED`. |
+| `--max-queued-commands` | `KERNABLE_MAX_QUEUED_COMMANDS` | `100000` | Commands in the queue at once, waiting or running. A new command beyond it is refused with `RESOURCE_EXHAUSTED` and not stored; resubmitting one that is already stored is always answered. |
+| `--max-queued-per-aggregate` | `KERNABLE_MAX_QUEUED_PER_AGGREGATE` | `1000` | Commands in the queue at once for one aggregate. A new command beyond it is refused with `RESOURCE_EXHAUSTED`, so one busy aggregate cannot fill the queue. |
+| `--max-queued-bytes` | `KERNABLE_MAX_QUEUED_BYTES` | `536870912` | Bytes of commands in the queue at once (the queue lives in the kernel's memory). A new command beyond it is refused with `RESOURCE_EXHAUSTED`. |
+| `--max-requests-per-key` | `KERNABLE_MAX_REQUESTS_PER_KEY` | `1000` | Submits, queries, file and cache requests of one key in progress at once. One beyond it is refused with `RESOURCE_EXHAUSTED`, so one service cannot take all the kernel's capacity. |
+| `--max-subscriptions-per-key` | `KERNABLE_MAX_SUBSCRIPTIONS_PER_KEY` | `16` | Open event subscriptions (`EventService.Subscribe`) of one key at once. One beyond it is refused with `RESOURCE_EXHAUSTED`. |
+| `--max-listeners-per-key` | `KERNABLE_MAX_LISTENERS_PER_KEY` | `64` | Listeners one key may register (connected or not) or run live at once. A new name beyond it is refused with `RESOURCE_EXHAUSTED`; registered ones always reconnect. A registered listener counts for settling and readiness, so this bounds how many a key can make everyone wait for. |
+| `--max-cache-bytes` | `KERNABLE_MAX_CACHE_BYTES` | `268435456` | Bytes the cache service keeps (values and keys). When a value would exceed it, the oldest values are dropped first, as a cache may; a single value larger than the limit is refused with `RESOURCE_EXHAUSTED`. |
