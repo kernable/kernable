@@ -407,3 +407,63 @@ async fn start_dev_creates_keys_and_a_grant_that_allows_everything_and_turns_the
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revocation_signed_outside_its_window_is_refused() {
+    let env = start("revoke-window").await;
+    for skew in [-120_000, 120_000] {
+        let issued_at = now_ms() + skew;
+        let target = id(&key(1));
+        let request = RevokeRequest {
+            key_id: target.clone(),
+            since: 0,
+            issued_at,
+            root_sig: Some(signing::sign(
+                &root(),
+                &signing::revoke_message(&target, 0, issued_at),
+            )),
+            protocol: kernable_core::PROTOCOL,
+        };
+        let channel = transport::connect(&env.addr).await.unwrap();
+        let refused = TrustServiceClient::new(channel)
+            .revoke(request)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), tonic::Code::Unauthenticated, "{skew}");
+    }
+}
+
+#[test]
+fn the_ui_listens_on_a_loopback_address_only() {
+    use std::process::{Command as Process, Stdio};
+    let dir = std::env::temp_dir().join(format!("kn-ui-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("stderr.txt");
+    let mut kernel = KillOnDrop(
+        Process::new(env!("CARGO_BIN_EXE_kernable"))
+            .current_dir(&dir)
+            .args(["start", "--dev", "--listen", &free_addr()])
+            .args(["--ui-listen", "0.0.0.0:0"])
+            .stdout(Stdio::null())
+            .stderr(std::fs::File::create(&log).unwrap())
+            .spawn()
+            .unwrap(),
+    );
+    // It must stop on its own; a kernel still running after 10 s serves the UI to everyone.
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = kernel.0.try_wait().unwrap() {
+            break Some(status);
+        }
+        if started.elapsed() > Duration::from_secs(10) {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let stderr = std::fs::read_to_string(&log).unwrap();
+    assert!(status.is_some_and(|s| !s.success()), "{stderr}");
+    assert!(stderr.contains("loopback address only"), "{stderr}");
+    drop(kernel);
+    let _ = std::fs::remove_dir_all(&dir);
+}

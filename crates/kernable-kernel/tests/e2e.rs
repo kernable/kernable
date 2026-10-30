@@ -8,7 +8,7 @@ use std::{
 };
 
 use common::*;
-use kernable_core::proto::command_result::Outcome;
+use kernable_core::proto::{Wait, command_result::Outcome};
 use tokio::sync::mpsc;
 use tonic::Code;
 
@@ -194,5 +194,49 @@ async fn equal_names_in_two_domains_do_not_collide() {
         let events = store.read_stream("t1", domain, "Order", "o1").unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].domain, domain);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn malformed_names_and_vault_references_without_a_vault_are_refused() {
+    let env = start("e2e-malformed").await;
+    let code = |r: Result<_, tonic::Status>| r.map(|_| ()).map_err(|e| e.code());
+    let mut dotted = command("c1", "PlaceOrder", "o1");
+    dotted.command_type = "Place.Order".into();
+    let mut nameless = command("c2", "PlaceOrder", "o1");
+    nameless.domain = String::new();
+    for cmd in [dotted, nameless] {
+        let r = submit_with(&env.addr, signed(cmd, &key(1)), Wait::Accepted).await;
+        assert_eq!(code(r), Err(Code::InvalidArgument));
+    }
+    // References to vault values on a kernel without a vault, with or without the values.
+    let mut refs_only = command("c3", "PlaceOrder", "o1");
+    refs_only.vault_refs = vec!["r".into()];
+    let r = submit_with(&env.addr, signed(refs_only, &key(1)), Wait::Accepted).await;
+    assert_eq!(code(r), Err(Code::FailedPrecondition));
+}
+
+/// Several submits of one command, waiting at once, all get its result.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_waiting_submit_of_a_command_gets_its_result() {
+    let env = start("e2e-resubmits").await;
+    let (seen, _) = mpsc::unbounded_channel();
+    let slow = TestWorker::with(Behavior::Slow(Duration::from_millis(500)), seen);
+    start_worker(env.addr.clone(), slow).await;
+    let cmd = signed(command("c1", "PlaceOrder", "o1"), &key(1));
+    let waiting: Vec<_> = (0..3)
+        .map(|_| {
+            let (addr, cmd) = (env.addr.clone(), cmd.clone());
+            tokio::spawn(async move { submit(&addr, cmd).await })
+        })
+        .collect();
+    // All three wait while the worker takes its time.
+    for w in waiting {
+        let result = tokio::time::timeout(Duration::from_secs(10), w)
+            .await
+            .expect("answered")
+            .unwrap()
+            .unwrap();
+        assert_eq!(committed_versions(&result), [1]);
     }
 }
