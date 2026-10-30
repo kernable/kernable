@@ -5,8 +5,12 @@ mod common;
 
 use common::*;
 use kernable_core::{
-    proto::{Membership, SubmitRequest, Wait, command_service_client::CommandServiceClient},
-    transport,
+    proto::{
+        CacheRequest, DataRequest, Membership, SubmitRequest, Wait,
+        cache_service_client::CacheServiceClient, command_service_client::CommandServiceClient,
+        data_service_client::DataServiceClient,
+    },
+    signing, transport,
 };
 use kernable_kernel::Kernel;
 use tonic::Code;
@@ -107,4 +111,131 @@ async fn an_older_grant_stays_refused_after_a_restart() {
         .await
         .unwrap_err();
     assert_eq!(refused.code(), Code::PermissionDenied, "{refused:?}");
+}
+
+/// A data request of key 7, signed at `issued_at`.
+fn data(op: &str, bytes: &[u8], issued_at: i64) -> DataRequest {
+    let mut r = DataRequest {
+        tenant_id: "t".into(),
+        domain: "shop".into(),
+        key: "terms.txt".into(),
+        data: bytes.to_vec(),
+        content_type: if op == "put" {
+            "text/plain".into()
+        } else {
+            String::new()
+        },
+        issued_at,
+        protocol: kernable_core::PROTOCOL,
+        ..Default::default()
+    };
+    r.client_sig = Some(signing::sign(&key(7), &signing::data_message(op, &r)));
+    r
+}
+
+/// A cache request of key 7, signed at `issued_at`.
+fn cache(op: &str, value: &[u8], issued_at: i64) -> CacheRequest {
+    let mut r = CacheRequest {
+        tenant_id: "t".into(),
+        domain: "shop".into(),
+        key: "price".into(),
+        value: value.to_vec(),
+        ttl_ms: 60_000,
+        issued_at,
+        protocol: kernable_core::PROTOCOL,
+        ..Default::default()
+    };
+    r.client_sig = Some(signing::sign(&key(7), &signing::cache_message(op, &r)));
+    r
+}
+
+async fn start_with_writer(name: &str) -> Env {
+    let env = start(name).await;
+    let shop: &[&str] = &["shop.*"];
+    env.kernel
+        .grant(grant(
+            &key(7),
+            &[("data_read", shop), ("data_write", shop), ("cache", shop)],
+        ))
+        .unwrap();
+    env
+}
+
+/// F2: a captured write, sent again within its 60 s, would undo the newer write after it.
+#[tokio::test]
+async fn a_replayed_data_write_never_undoes_a_newer_one() {
+    let env = start_with_writer("replay-data").await;
+    let mut files = DataServiceClient::new(transport::connect(&env.addr).await.unwrap());
+    let old = data("put", b"old terms", issued_now());
+    files.put_data(old.clone()).await.unwrap();
+    files
+        .put_data(data("put", b"new terms", issued_now()))
+        .await
+        .unwrap();
+
+    let replayed = files.put_data(old).await.unwrap_err();
+    assert_eq!(replayed.code(), Code::AlreadyExists, "{replayed:?}");
+    let read = files
+        .get_data(data("get", b"", issued_now()))
+        .await
+        .unwrap();
+    assert_eq!(read.into_inner().data, b"new terms");
+
+    // A replayed delete neither.
+    let delete = data("delete", b"", issued_now());
+    files.delete_data(delete.clone()).await.unwrap();
+    files
+        .put_data(data("put", b"newest terms", issued_now()))
+        .await
+        .unwrap();
+    let replayed = files.delete_data(delete).await.unwrap_err();
+    assert_eq!(replayed.code(), Code::AlreadyExists, "{replayed:?}");
+    let read = files
+        .get_data(data("get", b"", issued_now()))
+        .await
+        .unwrap();
+    assert_eq!(read.into_inner().data, b"newest terms");
+
+    // Reads are not writes: the same read twice is fine.
+    let get = data("get", b"", issued_now());
+    files.get_data(get.clone()).await.unwrap();
+    files.get_data(get).await.unwrap();
+}
+
+/// F2, for the cache.
+#[tokio::test]
+async fn a_replayed_cache_write_never_undoes_a_newer_one() {
+    let env = start_with_writer("replay-cache").await;
+    let mut cached = CacheServiceClient::new(transport::connect(&env.addr).await.unwrap());
+    let old = cache("set", b"10", issued_now());
+    cached.set_cache(old.clone()).await.unwrap();
+    cached
+        .set_cache(cache("set", b"12", issued_now()))
+        .await
+        .unwrap();
+    let replayed = cached.set_cache(old).await.unwrap_err();
+    assert_eq!(replayed.code(), Code::AlreadyExists, "{replayed:?}");
+    let read = cached
+        .get_cache(cache("get", b"", issued_now()))
+        .await
+        .unwrap();
+    assert_eq!(read.into_inner().value, b"12");
+}
+
+/// F2 across a restart: the kernel cannot know which writes ran before it started, so it
+/// refuses writes signed before then, though they are still within their 60 s.
+#[tokio::test]
+async fn a_write_signed_before_the_kernel_started_is_refused() {
+    let signed_before = issued_now() - 1;
+    let env = start_with_writer("replay-restart").await;
+    let mut files = DataServiceClient::new(transport::connect(&env.addr).await.unwrap());
+    let refused = files
+        .put_data(data("put", b"old terms", signed_before))
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code(), Code::FailedPrecondition, "{refused:?}");
+    files
+        .put_data(data("put", b"old terms", issued_now()))
+        .await
+        .unwrap();
 }

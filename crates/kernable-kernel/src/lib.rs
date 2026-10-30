@@ -27,6 +27,7 @@ mod listeners;
 mod memberships;
 mod metrics;
 mod queue;
+mod replays;
 mod ui;
 mod workers;
 
@@ -219,6 +220,8 @@ pub struct Kernel {
     /// The newest global position known to be on the disk: listeners, subscribers and workers
     /// never get an event beyond it, so nobody acts on what a power loss could take back.
     durable: AtomicU64,
+    /// Data and cache writes seen within their time window.
+    replays: replays::Replays,
 }
 
 impl Kernel {
@@ -292,6 +295,7 @@ impl Kernel {
             requests_by_key: PerKey::default(),
             subscriptions_by_key: PerKey::default(),
             durable,
+            replays: replays::Replays::new(now_ms()),
         });
         // The newest grants it had, checked again: a root key may be gone or revoked since.
         for grant in kernel.store.grants()? {
@@ -669,6 +673,12 @@ impl Kernel {
             )));
         }
         Ok(slot)
+    }
+
+    /// Claims a data or cache write, authorized already, so that it runs at most once.
+    fn claim(&self, sig: Option<&Signature>, issued_at: i64) -> Result<replays::Claim<'_>, Status> {
+        let sig = sig.map_or(&[][..], |s| s.sig.as_slice());
+        self.replays.claim(sig, issued_at, now_ms())
     }
 
     /// Counts a submit or query until the returned guard drops; refused while draining.
@@ -1539,11 +1549,13 @@ impl DataService for Api {
                 MAX_DATA_BYTES >> 20
             )));
         }
+        let claim = self.0.claim(r.client_sig.as_ref(), r.issued_at)?;
         let data = Data {
             content_type: r.content_type.clone(),
             data: r.data.clone(),
         };
         self.0.data.put(&data_key(&r), &data).map_err(store_error)?;
+        claim.done();
         Ok(Response::new(DataResult {
             found: true,
             ..Default::default()
@@ -1571,7 +1583,9 @@ impl DataService for Api {
         request: Request<DataRequest>,
     ) -> Result<Response<DataResult>, Status> {
         let (r, _slot) = self.data_request(request, "delete").await?;
+        let claim = self.0.claim(r.client_sig.as_ref(), r.issued_at)?;
         let found = self.0.data.delete(&data_key(&r)).map_err(store_error)?;
+        claim.done();
         Ok(Response::new(DataResult {
             found,
             ..Default::default()
@@ -1592,6 +1606,7 @@ impl CacheService for Api {
                 MAX_CACHE_BYTES >> 20
             )));
         }
+        let claim = self.0.claim(r.client_sig.as_ref(), r.issued_at)?;
         let kept = self
             .0
             .cache
@@ -1602,6 +1617,7 @@ impl CacheService for Api {
                 "the value is larger than the whole cache (--max-cache-bytes)",
             ));
         }
+        claim.done();
         Ok(Response::new(CacheResult {
             found: true,
             value: Vec::new(),
@@ -1625,7 +1641,9 @@ impl CacheService for Api {
         request: Request<CacheRequest>,
     ) -> Result<Response<CacheResult>, Status> {
         let (r, _slot) = self.cache_request(request, "delete").await?;
+        let claim = self.0.claim(r.client_sig.as_ref(), r.issued_at)?;
         let found = self.0.cache.delete((r.tenant_id, r.domain, r.key));
+        claim.done();
         Ok(Response::new(CacheResult {
             found,
             value: Vec::new(),
