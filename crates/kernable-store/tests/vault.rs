@@ -86,3 +86,52 @@ fn an_erasure_deletes_the_subject_of_its_own_tenant_only() {
         "tenant b's k-1 keeps its value"
     );
 }
+
+#[test]
+fn describe_tells_what_the_vault_holds_without_the_values() {
+    let vault = Vault::open("memory:", &[4u8; 32]).unwrap();
+    let salt = vec![5u8; 16];
+    let email = b"\"max@example.com\"".to_vec();
+    let token = b"\"123456\"".to_vec();
+    let personal = VaultValue {
+        r#ref: signing::vault_ref(&salt, "k-1", false, &email),
+        subject: "k-1".into(),
+        secret: false,
+        salt: salt.clone(),
+        value: email,
+    };
+    let secret = VaultValue {
+        r#ref: signing::vault_ref(&salt, "", true, &token),
+        subject: String::new(),
+        secret: true,
+        salt,
+        value: token,
+    };
+    let refs = vec![personal.r#ref.clone(), secret.r#ref.clone()];
+    let owner = Owner {
+        command_id: "c1",
+        tenant: "t1",
+        stream: None,
+    };
+    vault
+        .put(&[personal.clone(), secret.clone()], &refs, &owner, 0)
+        .unwrap();
+
+    let mut asked = refs.clone();
+    asked.push("unknown".into());
+    let mut described = vault.describe(&asked).unwrap();
+    described.sort();
+    let mut expected = vec![
+        (personal.r#ref.clone(), "k-1".to_owned(), false),
+        (secret.r#ref.clone(), String::new(), true),
+    ];
+    expected.sort();
+    assert_eq!(described, expected);
+
+    vault.erase("t1", "k-1", "c2", 0).unwrap();
+    assert_eq!(
+        vault.describe(&refs).unwrap(),
+        [(secret.r#ref.clone(), String::new(), true)],
+        "an erased value is no longer held"
+    );
+}

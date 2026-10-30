@@ -141,6 +141,33 @@ fn s1_integrity_reports_what_verify_finds() {
 }
 
 #[test]
+fn s1_fires_on_a_store_whose_event_was_changed() {
+    let path =
+        std::env::temp_dir().join(format!("kernable-invariants-s1-{}.db", std::process::id()));
+    let store = SqliteStore::open(&path).unwrap();
+    workload(&store);
+    drop(store);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute(
+        "UPDATE events SET payload = '{\"x\":1}' WHERE global_position = 2",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    let store = SqliteStore::open(&path).unwrap();
+    // The checkpoint over the changed event no longer matches either: S1 at least once.
+    let violations = Log::read(&store, &kernel_ids()).unwrap().check();
+    assert!(
+        violations.iter().any(|v| v.invariant == invariants::S1),
+        "{violations:#?}"
+    );
+    drop(store);
+    for suffix in ["", "-wal", "-shm", ".lock"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+}
+
+#[test]
 fn s2_positions_have_no_gaps_and_match_the_head() {
     let mut log = healthy();
     log.events.remove(2);
