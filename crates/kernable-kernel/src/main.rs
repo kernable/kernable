@@ -166,8 +166,13 @@ async fn main() -> ExitCode {
                 };
                 let root = !given("--root", "KERNABLE_ROOT");
                 let vault = !given("--vault-key", "KERNABLE_VAULT_KEY");
-                if !given("--ui-listen", "KERNABLE_UI_LISTEN") {
+                let ui = !given("--ui-listen", "KERNABLE_UI_LISTEN");
+                let durability = !given("--durability", "KERNABLE_DURABILITY");
+                if ui {
                     flags.extend(["--ui-listen", "127.0.0.1:7234"]);
+                }
+                if durability {
+                    flags.extend(["--durability", "normal"]);
                 }
                 if root {
                     flags.extend(["--root", "root.pub"]);
@@ -392,6 +397,14 @@ fn banner(config: &Config, dev: bool, dir: &str) -> String {
                 .ui_listen
                 .as_ref()
                 .map_or("disabled".into(), |addr| format!("http://{addr}")),
+        ),
+        (
+            "Durability",
+            match config.durability {
+                kernable_store::Durability::Full => "full (on the disk at every commit)",
+                kernable_store::Durability::Normal => "normal (survives a crash, not a power loss)",
+            }
+            .into(),
         ),
         (
             "Mode",

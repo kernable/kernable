@@ -302,9 +302,38 @@ impl TempDb {
 
 impl Drop for TempDb {
     fn drop(&mut self) {
-        for suffix in ["", "-wal", "-shm"] {
+        for suffix in ["", "-wal", "-shm", ".lock"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", self.0.display()));
         }
+    }
+}
+
+/// One writer at a time: a second kernel on the same SQLite file would run queued commands
+/// twice. Readers (`kernable verify`) open it unlocked.
+#[test]
+fn sqlite_admits_one_writer() {
+    let db = TempDb::new("sqlite-one-writer.db");
+    let writer = SqliteStore::open(&db.0).unwrap();
+    let second = SqliteStore::open(&db.0)
+        .err()
+        .expect("a second writer is refused");
+    assert!(second.to_string().contains("in use"), "{second}");
+    let reader = SqliteStore::open_unlocked(&db.0).unwrap();
+    writer.enqueue(&cmd("c1", "PlaceOrder"), 0).unwrap();
+    assert_eq!(reader.pending().unwrap().len(), 1);
+    drop(writer);
+    SqliteStore::open(&db.0).expect("free again once the writer closed it");
+}
+
+/// `Full` makes SQLite sync every commit, and flush the disk's cache on macOS; `Normal` only
+/// hands the WAL to the OS.
+#[test]
+fn sqlite_durability_sets_how_commits_sync() {
+    use kernable_store::Durability;
+    for (durability, synchronous) in [(Durability::Full, 2), (Durability::Normal, 1)] {
+        let db = TempDb::new(&format!("sqlite-durability-{synchronous}.db"));
+        let store = SqliteStore::open_with(&db.0, durability).unwrap();
+        assert_eq!(store.synchronous().unwrap(), synchronous, "{durability:?}");
     }
 }
 
@@ -329,7 +358,9 @@ fn sqlite_concurrent_connections_lose_no_updates() {
         .map(|t| {
             let path = Arc::clone(&path);
             thread::spawn(move || {
-                let store = SqliteStore::open(path.as_path()).unwrap();
+                // Unlocked: a second writer is refused (see below), so this tests the version
+                // checks of SQLite itself.
+                let store = SqliteStore::open_unlocked(path.as_path()).unwrap();
                 for i in (t..THREADS * COMMANDS).step_by(THREADS) {
                     loop {
                         let current = store

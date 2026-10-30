@@ -8,8 +8,11 @@
 //! crash is moved to `<path>.torn-<offset>` and cut off; damage anywhere else refuses to open.
 //!
 //! One process writes (exclusive file lock); others may open the log read-only.
-//! Writes reach the OS before a call returns but are not fsynced, which survives a process
-//! crash but not a power loss (like SQLite with `synchronous=NORMAL`).
+//! With [`Durability::Full`] every record is on the disk (`sync_data`) before a call returns,
+//! so it survives a power loss; with [`Durability::Normal`] it has only reached the OS, which
+//! survives a process crash (like SQLite with `synchronous=NORMAL`). A failed sync makes the
+//! store refuse every further write: what the OS still buffers can no longer be trusted, and
+//! only a restart, which replays the log from the disk, knows what was kept.
 //!
 //! `memory:` keeps the state only in memory: nothing survives the process. For tests and
 //! benchmarks.
@@ -36,7 +39,7 @@ use prost::Message;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    Checkpoint, Enqueued, Error, FORMAT, Pending, Result, Store,
+    Checkpoint, Durability, Enqueued, Error, FORMAT, Pending, Result, Store,
     verify::{Report, Verifier},
 };
 
@@ -208,6 +211,9 @@ struct Inner {
     sink: Sink,
     /// Length of the log; a failed write is cut back to it.
     len: u64,
+    durability: Durability,
+    /// Set once a sync failed: every write is refused from then on.
+    failed: Option<String>,
 }
 
 pub struct FileStore {
@@ -215,7 +221,12 @@ pub struct FileStore {
 }
 
 impl FileStore {
+    /// Opens the log with [`Durability::Full`].
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with(path, Durability::Full)
+    }
+
+    pub fn open_with(path: impl AsRef<Path>, durability: Durability) -> Result<Self> {
         let path = path.as_ref();
         let file = OpenOptions::new()
             .read(true)
@@ -230,22 +241,32 @@ impl FileStore {
             // A new log (or one torn before its first record ended) starts with its format.
             file.set_len(0)?;
             let store = Self::new(state, Sink::File(file), 0);
+            store.inner().durability = durability;
             append(
                 &mut store.inner(),
                 Record::Format(FormatRecord { version: FORMAT }),
             )?;
+            if durability == Durability::Full {
+                // The new file's name must survive a power loss, too.
+                sync_directory(path)?;
+            }
             return Ok(store);
         }
         if valid < bytes.len() {
             let aside = PathBuf::from(format!("{}.torn-{valid}", path.display()));
             fs::write(&aside, &bytes[valid..])?;
             file.set_len(valid as u64)?;
+            if durability == Durability::Full {
+                file.sync_data()?;
+            }
             eprintln!(
                 "file store: cut off a torn record at byte {valid}, saved to {}",
                 aside.display()
             );
         }
-        Ok(Self::new(state, Sink::File(file), valid as u64))
+        let store = Self::new(state, Sink::File(file), valid as u64);
+        store.inner().durability = durability;
+        Ok(store)
     }
 
     /// Replays the log without locking or repairing it; all writes fail with `ReadOnly`.
@@ -268,7 +289,13 @@ impl FileStore {
 
     fn new(state: State, sink: Sink, len: u64) -> Self {
         FileStore {
-            inner: Mutex::new(Inner { state, sink, len }),
+            inner: Mutex::new(Inner {
+                state,
+                sink,
+                len,
+                durability: Durability::Normal,
+                failed: None,
+            }),
         }
     }
 
@@ -279,6 +306,11 @@ impl FileStore {
 
 /// Writes one record, then applies it to the in-memory state.
 fn append(inner: &mut Inner, record: Record) -> Result<()> {
+    if let Some(failed) = &inner.failed {
+        return Err(Error::Io(std::io::Error::other(format!(
+            "the log refuses writes since a sync failed ({failed}); restart the kernel"
+        ))));
+    }
     let file = match &mut inner.sink {
         Sink::File(file) => file,
         Sink::Memory => return inner.state.apply(record),
@@ -295,6 +327,12 @@ fn append(inner: &mut Inner, record: Record) -> Result<()> {
     if let Err(e) = file.write_all(&buf) {
         // Never leave a partial record in front of the next one.
         let _ = file.set_len(inner.len);
+        return Err(e.into());
+    }
+    if inner.durability == Durability::Full
+        && let Err(e) = file.sync_data()
+    {
+        inner.failed = Some(e.to_string());
         return Err(e.into());
     }
     inner.len += buf.len() as u64;
@@ -335,6 +373,21 @@ fn replay(bytes: &[u8]) -> Result<(State, usize)> {
         at += HEADER + len;
     }
     Ok((state, at))
+}
+
+/// Syncs the directory holding `path`, so a newly created file is found after a power loss.
+fn sync_directory(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let dir = match path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("."),
+        };
+        File::open(dir)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 fn checksum(body: &[u8]) -> [u8; 4] {
@@ -504,6 +557,18 @@ impl Store for FileStore {
             append(&mut inner, Record::Listener(l.clone()))?;
         }
         Ok(())
+    }
+
+    fn command_ids(&self) -> Result<Vec<String>> {
+        let inner = self.inner();
+        let mut commands: Vec<(&u64, &String)> = inner
+            .state
+            .commands
+            .iter()
+            .map(|(id, c)| (&c.seq, id))
+            .collect();
+        commands.sort();
+        Ok(commands.into_iter().map(|(_, id)| id.clone()).collect())
     }
 
     fn command(&self, command_id: &str) -> Result<Option<Pending>> {

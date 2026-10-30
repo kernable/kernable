@@ -96,7 +96,7 @@ fn workload(store: &dyn Store) {
 fn healthy() -> Log {
     let store = FileStore::in_memory();
     workload(&store);
-    Log::read_with(&store, &kernel_ids(), &["c3".into()]).unwrap()
+    Log::read(&store, &kernel_ids()).unwrap()
 }
 
 /// Asserts that `violations` hold exactly one, of `invariant`.
@@ -118,10 +118,16 @@ fn a_healthy_store_holds_every_invariant() {
         let log = Log::read(store, &kernel_ids()).unwrap();
         assert_eq!(log.events.len(), 4);
         assert_eq!(log.pending.len(), 1);
+        assert_eq!(
+            store.command_ids().unwrap(),
+            ["c1", "c2", "c3", "c4", "c5"],
+            "every command, the rejected one too, in the order stored"
+        );
+        assert_eq!(log.commands.len(), 5);
         assert_eq!(log.check(), []);
     }
     drop(sqlite);
-    for suffix in ["", "-wal", "-shm"] {
+    for suffix in ["", "-wal", "-shm", ".lock"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
     }
 }

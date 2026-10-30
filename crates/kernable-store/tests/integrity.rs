@@ -19,7 +19,7 @@ struct Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        for suffix in ["", "-wal", "-shm"] {
+        for suffix in ["", "-wal", "-shm", ".lock"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", self.path.display()));
         }
     }

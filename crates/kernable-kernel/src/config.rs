@@ -1,5 +1,7 @@
 use std::{collections::HashMap, path::PathBuf};
 
+pub use kernable_store::Durability;
+
 /// The flags of `kernable start`: flag, environment variable, default, description. A flag
 /// wins over its variable; relative paths resolve against the working directory.
 pub const FLAGS: &[(&str, &str, &str, &str)] = &[
@@ -130,6 +132,12 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "On SIGTERM or SIGINT, the kernel refuses new submits and queries and waits this long, in milliseconds, for running ones to finish before it exits. Commands still unfinished run again after a restart.",
     ),
     (
+        "--durability",
+        "KERNABLE_DURABILITY",
+        "full",
+        "When a write to the event store counts as done. `full`: on the disk (fsync, a full flush on macOS), so a committed command survives a power loss or an OS crash; every commit waits for the disk. `normal`: handed to the OS, which survives a crash of the kernel but not of the machine, and is several times faster; `--dev` uses it unless given. The vault and the data service always write to the disk.",
+    ),
+    (
         "--max-connections",
         "KERNABLE_MAX_CONNECTIONS",
         "1024",
@@ -221,6 +229,8 @@ pub struct Config {
     pub vault: Option<VaultConfig>,
     pub metrics_listen: Option<String>,
     pub ui_listen: Option<String>,
+    /// `--durability` of the event store.
+    pub durability: Durability,
     pub limits: Limits,
 }
 
@@ -376,6 +386,13 @@ impl Config {
             }),
             metrics_listen: get("--metrics-listen"),
             ui_listen: get("--ui-listen"),
+            durability: match get("--durability").expect("has a default").as_str() {
+                "full" => Durability::Full,
+                "normal" => Durability::Normal,
+                other => {
+                    return Err(format!("--durability: {other} is neither full nor normal").into());
+                }
+            },
             limits: Limits {
                 connections: positive("--max-connections")? as usize,
                 streams_per_connection: u32::try_from(positive("--max-streams-per-connection")?)
@@ -584,6 +601,10 @@ mod tests {
         assert_eq!(config.limits.queued_commands, 5);
         let zero = Config::from_args(&["--root", &root, "--max-connections=0"], |_| None);
         assert!(zero.is_err());
+        assert_eq!(config.durability, Durability::Full, "durable by default");
+        let normal = Config::from_args(&["--root", &root, "--durability", "normal"], |_| None);
+        assert_eq!(normal.unwrap().durability, Durability::Normal);
+        assert!(Config::from_args(&["--root", &root, "--durability", "fast"], |_| None).is_err());
     }
 
     #[test]

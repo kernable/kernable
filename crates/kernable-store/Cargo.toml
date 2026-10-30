@@ -16,5 +16,9 @@ getrandom.workspace = true
 hex.workspace = true
 serde_json.workspace = true
 
+[features]
+# Test builds only: a store that fails on purpose (see src/faults.rs).
+faults = []
+
 [dev-dependencies]
 proptest.workspace = true

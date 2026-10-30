@@ -101,6 +101,9 @@ impl Vault {
         conn.busy_timeout(Duration::from_secs(5))?;
         // Deleted values are overwritten on disk, not only unlinked.
         conn.pragma_update(None, "secure_delete", "ON")?;
+        // A value is on the disk when a write returns (rollback journal, synchronous FULL by
+        // default; fullfsync makes that a real flush on macOS), as the log refers to it.
+        conn.pragma_update(None, "fullfsync", true)?;
         let format: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         let tables: u32 = conn.query_row("SELECT COUNT(*) FROM sqlite_master", [], |r| r.get(0))?;
         match (format, tables) {

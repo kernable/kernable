@@ -142,6 +142,7 @@ impl MembershipService for Api {
             applied_at: now_ms(),
         };
         kernel.store.save_membership(&record).map_err(internal)?;
+        crate::crash::point("membership.stored");
         kernel.memberships.set(m.clone());
         let changed = kernel.listeners.apply(&m);
         kernel.store.save_listeners(&changed).map_err(internal)?;

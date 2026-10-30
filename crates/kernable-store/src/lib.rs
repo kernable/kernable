@@ -17,6 +17,8 @@
 //! secret values that commands and events refer to).
 
 pub mod data;
+#[cfg(feature = "faults")]
+pub mod faults;
 mod file;
 pub mod invariants;
 pub mod snapshots;
@@ -261,6 +263,9 @@ pub trait Store: Send + Sync {
     /// A stored command, pending or completed, with when the kernel received it.
     fn command(&self, command_id: &str) -> Result<Option<Pending>>;
 
+    /// The IDs of every stored command, pending or completed, in the order they were stored.
+    fn command_ids(&self) -> Result<Vec<String>>;
+
     /// The highest payload version (`schema`) stored per qualified event type (`domain.Type`).
     fn event_schemas(&self) -> Result<Vec<(String, u32)>> {
         let mut max = std::collections::BTreeMap::<String, u32>::new();
@@ -319,13 +324,29 @@ pub trait Store: Send + Sync {
     fn verify(&self, kernel_key_ids: &[String]) -> Result<Report>;
 }
 
+/// How far a write has come when a store call returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Durability {
+    /// On the disk (fsync, `F_FULLFSYNC` on macOS): survives a power loss or an OS crash.
+    #[default]
+    Full,
+    /// Handed to the OS: survives a crash of the process, not of the machine. Faster; for
+    /// development, or where the disk itself is replicated.
+    Normal,
+}
+
 /// Opens a store for reading and writing: `sqlite:<path>`, `file:<path>`, `memory:` or a bare
-/// SQLite path.
+/// SQLite path, with [`Durability::Full`].
 pub fn open(url: &str) -> Result<Box<dyn Store>> {
+    open_with(url, Durability::Full)
+}
+
+/// Like [`open`], with the given durability.
+pub fn open_with(url: &str, durability: Durability) -> Result<Box<dyn Store>> {
     Ok(match backend(url) {
         ("memory", _) => Box::new(FileStore::in_memory()),
-        ("file", path) => Box::new(FileStore::open(path)?),
-        (_, path) => Box::new(SqliteStore::open(path)?),
+        ("file", path) => Box::new(FileStore::open_with(path, durability)?),
+        (_, path) => Box::new(SqliteStore::open_with(path, durability)?),
     })
 }
 
@@ -333,7 +354,7 @@ pub fn open(url: &str) -> Result<Box<dyn Store>> {
 pub fn open_read_only(url: &str) -> Result<Box<dyn Store>> {
     Ok(match backend(url) {
         ("file", path) => Box::new(FileStore::open_read_only(path)?),
-        ("memory", path) => Box::new(SqliteStore::open(path)?),
+        ("memory", path) => Box::new(SqliteStore::open_unlocked(path)?),
         // A store that is not there is an error, never a new, empty one: a mistyped path must
         // not make `kernable verify` report an intact log.
         (_, path) if !std::path::Path::new(path).exists() => {
@@ -342,7 +363,7 @@ pub fn open_read_only(url: &str) -> Result<Box<dyn Store>> {
                 format!("no store at {path}"),
             )));
         }
-        (_, path) => Box::new(SqliteStore::open(path)?),
+        (_, path) => Box::new(SqliteStore::open_unlocked(path)?),
     })
 }
 

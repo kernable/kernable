@@ -28,6 +28,7 @@ tracing-subscriber.workspace = true
 crash-points = []
 
 [dev-dependencies]
+kernable-store = { path = "../kernable-store", features = ["faults"] }
 rusqlite.workspace = true
 proptest.workspace = true
 getrandom.workspace = true

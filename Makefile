@@ -28,12 +28,17 @@ py:
 check-packages:
 	./scripts/check-packages.sh
 
-# Long robustness runs: every crash point ROUNDS times per backend, CASES property cases.
+# Long robustness runs: every crash point ROUNDS times per backend, KILLS random kills under
+# load, SEEDS storage-fault seeds, CASES property cases.
 ROUNDS ?= 20
+KILLS ?= 200
+SEEDS ?= 200
 CASES ?= 10000
 torture:
-	CARGO_TARGET_DIR=target/crash KERNABLE_CRASH_ROUNDS=$(ROUNDS) cargo test -p kernable-kernel --features crash-points --test crashes
-	CARGO_TARGET_DIR=target/crash KERNABLE_CRASH_ROUNDS=$(ROUNDS) KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --features crash-points --test crashes
+	CARGO_TARGET_DIR=target/crash KERNABLE_CRASH_ROUNDS=$(ROUNDS) KERNABLE_KILLS=$(KILLS) cargo test -p kernable-kernel --features crash-points --test crashes
+	CARGO_TARGET_DIR=target/crash KERNABLE_CRASH_ROUNDS=$(ROUNDS) KERNABLE_KILLS=$(KILLS) KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --features crash-points --test crashes
+	KERNABLE_FAULT_SEEDS=$(SEEDS) cargo test -p kernable-kernel --test storage
+	KERNABLE_FAULT_SEEDS=$(SEEDS) KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --test storage
 	PROPTEST_CASES=$(CASES) cargo test -p kernable-store --test props
 	PROPTEST_CASES=$(CASES) cargo test -p kernable-kernel --test props
 	PROPTEST_CASES=$(CASES) KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --test props

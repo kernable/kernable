@@ -1,0 +1,260 @@
+//! A store that fails on purpose, for robustness tests (feature `faults`, never in a release).
+//!
+//! [`FaultyStore`] wraps any store and, while its [`Faults`] are armed, fails a seeded share of
+//! the calls with an I/O error (`StorageFull`). A write fails either **before** it reaches the
+//! store (nothing happened) or **after** (it happened, but the caller is told it failed), as a
+//! full disk, a failed fsync or a lost connection would. The kernel must then fail without
+//! corrupting anything: once the faults stop, every invariant holds and every command still
+//! gets exactly one outcome.
+
+use std::sync::{
+    Arc, Mutex, PoisonError,
+    atomic::{AtomicBool, AtomicU64, Ordering::SeqCst},
+};
+
+use ed25519_dalek::SigningKey;
+use kernable_core::proto::{
+    Command, CommandResult, Event, ListenerRecord, MembershipRecord, NewEvent, Rejected,
+    RevocationRecord, Signature, WorkerRecord,
+};
+
+use crate::{Checkpoint, Enqueued, Error, Pending, Report, Result, Store, StreamSummary};
+
+/// What fails, and how often.
+pub struct Faults {
+    armed: AtomicBool,
+    /// One write in this many fails; 0 never.
+    write_one_in: AtomicU64,
+    /// One read in this many fails; 0 never.
+    read_one_in: AtomicU64,
+    /// xorshift state: the same seed fails the same calls.
+    rng: Mutex<u64>,
+    /// Failures so far: before a write, after a write, of a read.
+    pub failed_before: AtomicU64,
+    pub failed_after: AtomicU64,
+    pub failed_reads: AtomicU64,
+}
+
+impl Faults {
+    /// Faults that fail one write in `write_one_in` and one read in `read_one_in` (0: none),
+    /// armed from the start.
+    pub fn new(seed: u64, write_one_in: u64, read_one_in: u64) -> Arc<Faults> {
+        Arc::new(Faults {
+            armed: AtomicBool::new(true),
+            write_one_in: AtomicU64::new(write_one_in),
+            read_one_in: AtomicU64::new(read_one_in),
+            rng: Mutex::new(seed.max(1)),
+            failed_before: AtomicU64::default(),
+            failed_after: AtomicU64::default(),
+            failed_reads: AtomicU64::default(),
+        })
+    }
+
+    /// Stops or resumes failing.
+    pub fn arm(&self, armed: bool) {
+        self.armed.store(armed, SeqCst);
+    }
+
+    fn next(&self) -> u64 {
+        let mut x = self.rng.lock().unwrap_or_else(PoisonError::into_inner);
+        *x ^= *x << 13;
+        *x ^= *x >> 7;
+        *x ^= *x << 17;
+        *x
+    }
+
+    fn hit(&self, one_in: &AtomicU64) -> bool {
+        let n = one_in.load(SeqCst);
+        self.armed.load(SeqCst) && n > 0 && self.next().is_multiple_of(n)
+    }
+
+    /// Whether this read fails.
+    fn read(&self) -> Result<()> {
+        if self.hit(&self.read_one_in) {
+            self.failed_reads.fetch_add(1, SeqCst);
+            return Err(injected("read"));
+        }
+        Ok(())
+    }
+
+    /// Runs `write`, failing before it, or after it with its effect kept.
+    fn write<T>(&self, write: impl FnOnce() -> Result<T>) -> Result<T> {
+        if !self.hit(&self.write_one_in) {
+            return write();
+        }
+        if self.next().is_multiple_of(2) {
+            self.failed_before.fetch_add(1, SeqCst);
+            return Err(injected("write, not done"));
+        }
+        let done = write();
+        self.failed_after.fetch_add(1, SeqCst);
+        done.and(Err(injected("write, done")))
+    }
+}
+
+fn injected(what: &str) -> Error {
+    Error::Io(std::io::Error::new(
+        std::io::ErrorKind::StorageFull,
+        format!("injected fault: {what}"),
+    ))
+}
+
+/// A store whose calls fail as its [`Faults`] say.
+pub struct FaultyStore {
+    inner: Box<dyn Store>,
+    faults: Arc<Faults>,
+}
+
+impl FaultyStore {
+    pub fn new(inner: Box<dyn Store>, faults: Arc<Faults>) -> Self {
+        FaultyStore { inner, faults }
+    }
+}
+
+impl Store for FaultyStore {
+    fn read_stream(
+        &self,
+        tenant_id: &str,
+        domain: &str,
+        aggregate_type: &str,
+        aggregate_id: &str,
+    ) -> Result<Vec<Event>> {
+        self.faults.read()?;
+        self.inner
+            .read_stream(tenant_id, domain, aggregate_type, aggregate_id)
+    }
+
+    fn read_stream_after(
+        &self,
+        tenant_id: &str,
+        domain: &str,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        after_version: u64,
+    ) -> Result<Vec<Event>> {
+        self.faults.read()?;
+        self.inner.read_stream_after(
+            tenant_id,
+            domain,
+            aggregate_type,
+            aggregate_id,
+            after_version,
+        )
+    }
+
+    fn read_all(&self, after: u64, limit: u32) -> Result<Vec<Event>> {
+        self.faults.read()?;
+        self.inner.read_all(after, limit)
+    }
+
+    fn head_position(&self) -> Result<u64> {
+        self.faults.read()?;
+        self.inner.head_position()
+    }
+
+    fn enqueue(&self, cmd: &Command, now_ms: i64) -> Result<Enqueued> {
+        self.faults.write(|| self.inner.enqueue(cmd, now_ms))
+    }
+
+    fn pending(&self) -> Result<Vec<Pending>> {
+        self.faults.read()?;
+        self.inner.pending()
+    }
+
+    fn commit(
+        &self,
+        command_id: &str,
+        expected_version: u64,
+        events: &[NewEvent],
+        producer_sig: &Signature,
+        now_ms: i64,
+    ) -> Result<Vec<Event>> {
+        self.faults.write(|| {
+            self.inner
+                .commit(command_id, expected_version, events, producer_sig, now_ms)
+        })
+    }
+
+    fn streams(&self, limit: usize) -> Result<Vec<StreamSummary>> {
+        self.faults.read()?;
+        self.inner.streams(limit)
+    }
+
+    fn event_sources(&self) -> Result<Vec<(String, String, String)>> {
+        self.faults.read()?;
+        self.inner.event_sources()
+    }
+
+    fn each_event(&self, f: &mut dyn FnMut(&Event)) -> Result<()> {
+        self.faults.read()?;
+        self.inner.each_event(f)
+    }
+
+    fn command(&self, command_id: &str) -> Result<Option<Pending>> {
+        self.faults.read()?;
+        self.inner.command(command_id)
+    }
+
+    fn command_ids(&self) -> Result<Vec<String>> {
+        self.faults.read()?;
+        self.inner.command_ids()
+    }
+
+    fn event_schemas(&self) -> Result<Vec<(String, u32)>> {
+        self.faults.read()?;
+        self.inner.event_schemas()
+    }
+
+    fn reject(&self, command_id: &str, reason: Rejected) -> Result<()> {
+        self.faults.write(|| self.inner.reject(command_id, reason))
+    }
+
+    fn result(&self, command_id: &str) -> Result<Option<CommandResult>> {
+        self.faults.read()?;
+        self.inner.result(command_id)
+    }
+
+    fn listeners(&self) -> Result<Vec<ListenerRecord>> {
+        self.faults.read()?;
+        self.inner.listeners()
+    }
+
+    fn save_listeners(&self, listeners: &[ListenerRecord]) -> Result<()> {
+        self.faults.write(|| self.inner.save_listeners(listeners))
+    }
+
+    fn workers(&self) -> Result<Vec<WorkerRecord>> {
+        self.faults.read()?;
+        self.inner.workers()
+    }
+
+    fn save_workers(&self, workers: &[WorkerRecord]) -> Result<()> {
+        self.faults.write(|| self.inner.save_workers(workers))
+    }
+
+    fn memberships(&self) -> Result<Vec<MembershipRecord>> {
+        self.faults.read()?;
+        self.inner.memberships()
+    }
+
+    fn save_membership(&self, membership: &MembershipRecord) -> Result<()> {
+        self.faults.write(|| self.inner.save_membership(membership))
+    }
+
+    fn checkpoint(&self, kernel: &SigningKey, now_ms: i64) -> Result<Option<Checkpoint>> {
+        self.faults.write(|| self.inner.checkpoint(kernel, now_ms))
+    }
+
+    fn revoke(&self, revocation: &RevocationRecord) -> Result<()> {
+        self.faults.write(|| self.inner.revoke(revocation))
+    }
+
+    fn revocations(&self) -> Result<Vec<RevocationRecord>> {
+        self.faults.read()?;
+        self.inner.revocations()
+    }
+
+    fn verify(&self, kernel_key_ids: &[String]) -> Result<Report> {
+        self.inner.verify(kernel_key_ids)
+    }
+}

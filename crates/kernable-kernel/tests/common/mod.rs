@@ -95,6 +95,15 @@ pub fn default_grant(key_: &SigningKey) -> Option<Grant> {
     Some(grant_at(key_, permissions, "", 1))
 }
 
+/// `message` as a request that carries `grant`.
+pub fn presenting<T>(message: T, grant: &Grant) -> tonic::Request<T> {
+    use prost::Message;
+    let mut request = tonic::Request::new(message);
+    let value = hex(&grant.encode_to_vec()).parse().unwrap();
+    request.metadata_mut().insert(GRANT_HEADER, value);
+    request
+}
+
 /// `message` as a request that carries `key`'s default grant, as an SDK sends it.
 pub fn with_grant<T>(message: T, key: &SigningKey) -> tonic::Request<T> {
     let mut request = tonic::Request::new(message);
@@ -134,6 +143,15 @@ pub async fn start_with(name: &str, lease_ttl_ms: i64) -> Env {
 
 /// Like [`start`], with `customize` applied to the config (it gets the test's directory).
 pub async fn start_custom(name: &str, customize: impl FnOnce(&mut Config, &Path)) -> Env {
+    start_wrapped(name, customize, |store| store).await
+}
+
+/// Like [`start_custom`], with the opened store passed through `wrap` before the kernel gets it.
+pub async fn start_wrapped(
+    name: &str,
+    customize: impl FnOnce(&mut Config, &Path),
+    wrap: impl FnOnce(Box<dyn kernable_store::Store>) -> Box<dyn kernable_store::Store>,
+) -> Env {
     let dir = std::env::temp_dir().join(format!("kn-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let kernel_key = key(3);
@@ -158,12 +176,15 @@ pub async fn start_custom(name: &str, customize: impl FnOnce(&mut Config, &Path)
         vault: None,
         metrics_listen: None,
         ui_listen: None,
+        // The logic under test does not depend on it; Full is covered on its own.
+        durability: kernable_kernel::config::Durability::Normal,
         limits: Default::default(),
     };
     customize(&mut config, &dir);
     let addr = config.listen.clone();
     let snapshots = config.snapshots.clone();
-    let kernel = Kernel::open(config).unwrap();
+    let opened = kernable_store::open_with(&config.store, config.durability).unwrap();
+    let kernel = Kernel::open_on(config, wrap(opened)).unwrap();
     for seed in [1, 2, 4, 5, 6] {
         kernel.grant(default_grant(&key(seed)).unwrap()).unwrap();
     }
@@ -295,6 +316,8 @@ pub struct TestWorker {
     pub service: String,
     /// Told once the kernel registered the worker.
     pub registered: Option<tokio::sync::oneshot::Sender<()>>,
+    /// The grant it presents; `None`: the [`default_grant`] of its key.
+    pub grant: Option<Grant>,
 }
 
 impl TestWorker {
@@ -314,6 +337,7 @@ impl TestWorker {
             aggregates: Vec::new(),
             service: String::new(),
             registered: None,
+            grant: None,
         }
     }
 
@@ -372,9 +396,16 @@ pub async fn run_worker(addr: String, mut w: TestWorker) -> tonic::Status {
     .await
     .unwrap();
 
-    let channel = channel(&addr, w.tls.as_ref()).await.unwrap();
+    let channel = match channel(&addr, w.tls.as_ref()).await {
+        Ok(channel) => channel,
+        // The kernel is away (a crash test restarts it): the caller retries.
+        Err(e) => return tonic::Status::unavailable(e.to_string()),
+    };
     let mut client = WorkerGatewayClient::new(channel);
-    let session = with_grant(ReceiverStream::new(rx), &w.claimed);
+    let session = match &w.grant {
+        Some(grant) => presenting(ReceiverStream::new(rx), grant),
+        None => with_grant(ReceiverStream::new(rx), &w.claimed),
+    };
     let mut inbound = match client.session(session).await {
         Ok(r) => r.into_inner(),
         Err(status) => return status,

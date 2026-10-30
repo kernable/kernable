@@ -23,7 +23,8 @@ use kernable_core::{
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::{
-    Checkpoint, Enqueued, Error, FORMAT, Pending, Result, Store, StreamId, StreamSummary,
+    Checkpoint, Durability, Enqueued, Error, FORMAT, Pending, Result, Store, StreamId,
+    StreamSummary,
     verify::{Report, Verifier},
 };
 
@@ -128,13 +129,67 @@ const COMMAND_COLUMNS: &str = "command_id, tenant_id, aggregate_type, aggregate_
 
 pub struct SqliteStore {
     conn: Mutex<Connection>,
+    /// `<path>.lock`, held exclusively while a writer has the store open: the queue lives in
+    /// one kernel's memory, so a second kernel on the same store would run commands twice.
+    _lock: Option<std::fs::File>,
 }
 
 impl SqliteStore {
+    /// Opens the store with [`Durability::Full`].
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with(path, Durability::Full)
+    }
+
+    /// Opens the store for writing, as the only writer: refused while another process holds
+    /// it (see [`SqliteStore::open_unlocked`] for readers).
+    pub fn open_with(path: impl AsRef<Path>, durability: Durability) -> Result<Self> {
+        let path = path.as_ref();
+        let lock = if path.as_os_str() == ":memory:" {
+            None
+        } else {
+            let lock = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(format!("{}.lock", path.display()))?;
+            lock.try_lock().map_err(|_| {
+                Error::Io(std::io::Error::other(
+                    "store is in use by another process (a running kernel?)",
+                ))
+            })?;
+            Some(lock)
+        };
+        let mut store = Self::configure(path, durability)?;
+        store._lock = lock;
+        Ok(store)
+    }
+
+    /// SQLite's `synchronous` setting of this connection: 2 FULL, 1 NORMAL.
+    pub fn synchronous(&self) -> Result<i64> {
+        Ok(self
+            .conn()
+            .pragma_query_value(None, "synchronous", |r| r.get(0))?)
+    }
+
+    /// Opens the store without taking the writer's lock, for inspection next to a running
+    /// kernel (`kernable verify`). SQLite keeps the reads consistent.
+    pub fn open_unlocked(path: impl AsRef<Path>) -> Result<Self> {
+        Self::configure(path.as_ref(), Durability::Normal)
+    }
+
+    fn configure(path: &Path, durability: Durability) -> Result<Self> {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        match durability {
+            // FULL syncs the WAL on every commit; fullfsync makes that a real flush on macOS,
+            // where fsync alone may leave the data in the disk's cache.
+            Durability::Full => {
+                conn.pragma_update(None, "synchronous", "FULL")?;
+                conn.pragma_update(None, "fullfsync", true)?;
+                conn.pragma_update(None, "checkpoint_fullfsync", true)?;
+            }
+            Durability::Normal => conn.pragma_update(None, "synchronous", "NORMAL")?,
+        }
         conn.busy_timeout(Duration::from_secs(5))?;
         Self::init(conn)
     }
@@ -158,6 +213,7 @@ impl SqliteStore {
         }
         Ok(Self {
             conn: Mutex::new(conn),
+            _lock: None,
         })
     }
 
@@ -402,6 +458,15 @@ impl Store for SqliteStore {
         )?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    fn command_ids(&self) -> Result<Vec<String>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT command_id FROM commands ORDER BY rowid")?;
+        let ids = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(ids)
     }
 
     fn command(&self, command_id: &str) -> Result<Option<Pending>> {

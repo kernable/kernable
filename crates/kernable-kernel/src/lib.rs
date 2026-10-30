@@ -218,7 +218,13 @@ pub struct Kernel {
 
 impl Kernel {
     pub fn open(config: Config) -> Result<Arc<Self>, BoxError> {
-        let store = kernable_store::open(&config.store)?;
+        let store = kernable_store::open_with(&config.store, config.durability)?;
+        Self::open_on(config, store)
+    }
+
+    /// Like [`Kernel::open`], on a store opened already (`config.store` is not opened): for
+    /// tests that wrap the store, e.g. in one that fails on purpose.
+    pub fn open_on(config: Config, store: Box<dyn Store>) -> Result<Arc<Self>, BoxError> {
         let key = signing::read_signing_key(&config.kernel_key)?;
         let revoked: HashMap<String, i64> = store
             .revocations()?
@@ -397,6 +403,7 @@ impl Kernel {
             created_at,
             kernel_sig: Some(signing::sign(&self.key(), &msg)),
         })?;
+        crash::point("revocation.stored");
         tracing::warn!(key = %key_id, since, "key revoked");
         self.revoked
             .lock()
@@ -499,6 +506,9 @@ impl Kernel {
                 }
             }
             tracing::info!(command = %cmd.command_id, "erased a subject's vault values");
+        }
+        if !erasing.is_empty() {
+            crash::point("erasure.done");
         }
         Ok(!erasing.is_empty())
     }
@@ -1148,23 +1158,43 @@ impl CommandService for Api {
                 tenant: &cmd.tenant_id,
                 stream: None,
             };
-            if !completed()?
-                && let Err(e) = vault.put(&values, &cmd.vault_refs, &owner, now_ms())
-                && !completed()?
-            {
-                return Err(Status::invalid_argument(e.to_string()));
+            if !completed()? {
+                match vault.put(&values, &cmd.vault_refs, &owner, now_ms()) {
+                    Ok(()) => crash::point("vault.stored"),
+                    Err(e) if !completed()? => {
+                        return Err(Status::invalid_argument(e.to_string()));
+                    }
+                    Err(_) => {}
+                }
             }
         }
 
-        // Register before enqueueing, so a fast completion cannot be missed.
+        // Register before enqueueing, so a fast completion cannot be missed. Waiters of
+        // earlier submits that gave up are dropped here.
         let (tx, rx) = oneshot::channel();
-        kernel
-            .waiters()
-            .entry(cmd.command_id.clone())
-            .or_default()
-            .push(tx);
+        {
+            let mut waiters = kernel.waiters();
+            let waiting = waiters.entry(cmd.command_id.clone()).or_default();
+            waiting.retain(|w| !w.is_closed());
+            waiting.push(tx);
+        }
         let received_at = now_ms();
-        let done = match kernel.store.enqueue(&cmd, received_at).map_err(internal)? {
+        let enqueued = match kernel.store.enqueue(&cmd, received_at) {
+            Ok(enqueued) => enqueued,
+            Err(e) => {
+                // Not answered: our waiter goes, and the entry with it if it was the last.
+                drop(rx);
+                let mut waiters = kernel.waiters();
+                if let Some(waiting) = waiters.get_mut(&cmd.command_id) {
+                    waiting.retain(|w| !w.is_closed());
+                    if waiting.is_empty() {
+                        waiters.remove(&cmd.command_id);
+                    }
+                }
+                return Err(internal(e));
+            }
+        };
+        let done = match enqueued {
             Enqueued::Duplicate {
                 result: Some(result),
             } => {
@@ -1172,7 +1202,16 @@ impl CommandService for Api {
                 kernel.drop_secrets(&cmd.command_id); // a resubmission brought them again
                 Some(result)
             }
-            Enqueued::Duplicate { result: None } => None,
+            Enqueued::Duplicate { result: None } => {
+                // Stored and pending, but perhaps not queued: an enqueue that failed after it
+                // took effect. Queue it as stored (a queued one is not queued twice).
+                if let Some(stored) = kernel.store.command(&cmd.command_id).map_err(internal)?
+                    && kernel.queue.push(stored.command, stored.received_at)
+                {
+                    kernel.work.notify_waiters();
+                }
+                None
+            }
             Enqueued::New => {
                 crash::point("submit.enqueued");
                 kernel.queue.push(cmd.clone(), received_at);
@@ -2238,10 +2277,16 @@ impl Session {
                 };
                 self.reject(&r.lease_id, f.command, reason);
             }
-            Err(StoreError::NotPending) => self.done(&r.lease_id),
+            Err(StoreError::NotPending) => {
+                if !self.completed_earlier(&r.lease_id, &f.command) {
+                    self.done(&r.lease_id);
+                }
+            }
             Err(e) => {
                 tracing::error!(error = %e, "commit failed");
-                self.release(&r.lease_id);
+                if !self.completed_earlier(&r.lease_id, &f.command) {
+                    self.release(&r.lease_id);
+                }
             }
         }
         Ok(())
@@ -2314,12 +2359,32 @@ impl Session {
                 };
                 self.kernel.complete(&command, result);
             }
-            Err(StoreError::NotPending) => self.done(lease_id),
+            Err(StoreError::NotPending) => {
+                if !self.completed_earlier(lease_id, &command) {
+                    self.done(lease_id);
+                }
+            }
             Err(e) => {
                 tracing::error!(error = %e, "reject failed");
-                self.release(lease_id);
+                if !self.completed_earlier(lease_id, &command) {
+                    self.release(lease_id);
+                }
             }
         }
+    }
+
+    /// Whether `command` is completed in the store already, by an earlier attempt whose write
+    /// took effect although it reported a failure; if so, it is answered with what is stored.
+    fn completed_earlier(&self, lease_id: &str, command: &Command) -> bool {
+        let Ok(Some(result)) = self.kernel.store.result(&command.command_id) else {
+            return false;
+        };
+        tracing::warn!(command = %command.command_id, "a failed write had taken effect: answering with the stored result");
+        self.kernel.queue.done(lease_id);
+        self.kernel.drop_secrets(&command.command_id);
+        self.kernel.appended.notify_waiters();
+        self.kernel.complete(command, result);
+        true
     }
 
     /// The command was completed under an earlier lease: drop it from the queue.

@@ -52,9 +52,8 @@ pub const O4: &str = "O4 faithful delivery";
 pub struct Log {
     /// Every event, in the order the store returns them.
     pub events: Vec<Event>,
-    /// Every command that has events, is pending or was named to [`Log::read_with`], by ID;
-    /// `None` if the store does not know it. The store cannot list completed commands, so a
-    /// rejected command is only here when named.
+    /// Every stored command, and every command named to [`Log::read_with`], by ID; `None` if
+    /// the store does not know it.
     pub commands: BTreeMap<String, Option<Command>>,
     /// The stored result of every command in `commands`; `None` while it is pending.
     pub results: BTreeMap<String, Option<CommandResult>>,
@@ -86,10 +85,10 @@ impl Log {
         for p in store.pending()? {
             log.pending.insert(p.command.command_id);
         }
-        let ids: BTreeSet<String> = log
-            .events
-            .iter()
-            .map(|e| e.command_id.clone())
+        let ids: BTreeSet<String> = store
+            .command_ids()?
+            .into_iter()
+            .chain(log.events.iter().map(|e| e.command_id.clone()))
             .chain(log.pending.iter().cloned())
             .chain(ids.iter().cloned())
             .collect();

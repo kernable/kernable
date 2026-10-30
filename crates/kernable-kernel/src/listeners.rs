@@ -434,6 +434,16 @@ impl Registry {
             .collect()
     }
 
+    /// Marks these listeners changed again, after storing them failed.
+    fn dirty_again(&self, records: &[ListenerRecord]) {
+        let mut entries = self.entries();
+        for r in records {
+            if let Some(e) = entries.get_mut(&r.name) {
+                e.dirty = true;
+            }
+        }
+    }
+
     /// Marks every connected listener changed, so the next flush stores it as seen now.
     pub(crate) fn seen_now(&self) {
         for e in self.entries().values_mut().filter(|e| e.connected) {
@@ -446,7 +456,11 @@ impl Registry {
 pub(crate) fn flush(kernel: &Kernel) -> Result<(), BoxError> {
     let dirty = kernel.listeners.take_dirty();
     if !dirty.is_empty() {
-        kernel.store.save_listeners(&dirty)?;
+        if let Err(e) = kernel.store.save_listeners(&dirty) {
+            // Tried again at the next flush.
+            kernel.listeners.dirty_again(&dirty);
+            return Err(e.into());
+        }
         crate::crash::point("listeners.flushed");
     }
     Ok(())
