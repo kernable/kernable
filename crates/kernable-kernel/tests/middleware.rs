@@ -87,7 +87,8 @@ fn counter() -> Spec {
 /// How a test middleware logs a call: its name, and after a request what came of it.
 fn seen(name: &str, call: &MiddlewareCall) -> String {
     let outcome = match &call.outcome {
-        None => return name.into(),
+        None if call.vault.is_empty() => return name.into(),
+        None => return format!("{name} with {} vault values", call.vault.len()),
         Some(middleware_call::Outcome::CommandResult(r)) => match &r.outcome {
             Some(Outcome::Committed(c)) => format!("committed {}", c.events.len()),
             Some(Outcome::Rejected(r)) => format!("rejected {}", r.code),
@@ -903,5 +904,132 @@ async fn files_and_cache_values_pass_the_middleware_chain() {
             .into_inner()
             .value,
         b"1.08"
+    );
+}
+
+fn refuse_all(_: &Request, _: usize) -> Option<Rejected> {
+    refuse("closed")
+}
+
+/// Each file and cache operation reaches the middlewares of its own name only.
+#[tokio::test(flavor = "multi_thread")]
+async fn file_and_cache_operations_reach_the_middleware_of_their_name() {
+    let env = start("middleware-ops").await;
+    let all: &[&str] = &["shop.*"];
+    env.kernel
+        .grant(grant(
+            &key(7),
+            &[("data_read", all), ("data_write", all), ("cache", all)],
+        ))
+        .unwrap();
+    env.kernel
+        .grant(grant(&key(6), &[("listen", &["*"]), ("check", &["*"])]))
+        .unwrap();
+    let log = Log::default();
+    let reads = Spec {
+        types: vec!["shop.GetData".into(), "shop.GetCache".into()],
+        ..spec("reads", 0, refuse_all)
+    };
+    let puts = Spec {
+        types: vec!["shop.PutData".into()],
+        key: key(6),
+        ..spec("puts", 0, refuse_all)
+    };
+    let (_reads, _stop_reads) = middleware(&env, reads, &log);
+    let (_puts, _stop_puts) = middleware(&env, puts, &log);
+    settle_in().await;
+
+    let data = |op: &str| {
+        let mut r = DataRequest {
+            tenant_id: "t".into(),
+            domain: "shop".into(),
+            key: "a.txt".into(),
+            issued_at: now(),
+            protocol: kernable_core::PROTOCOL,
+            ..Default::default()
+        };
+        r.client_sig = Some(signing::sign(&key(7), &signing::data_message(op, &r)));
+        r
+    };
+    let cache = |op: &str| {
+        let mut r = CacheRequest {
+            tenant_id: "t".into(),
+            domain: "shop".into(),
+            key: "rate".into(),
+            issued_at: now(),
+            protocol: kernable_core::PROTOCOL,
+            ..Default::default()
+        };
+        r.client_sig = Some(signing::sign(&key(7), &signing::cache_message(op, &r)));
+        r
+    };
+    let channel = transport::connect(&env.addr).await.unwrap();
+    let mut files = DataServiceClient::new(channel.clone());
+    let mut values = CacheServiceClient::new(channel);
+    let code = |r: Result<(), tonic::Status>| r.map_err(|e| e.code());
+    assert_eq!(
+        code(files.put_data(data("put")).await.map(|_| ())),
+        Err(Code::PermissionDenied)
+    );
+    assert_eq!(
+        code(files.get_data(data("get")).await.map(|_| ())),
+        Err(Code::PermissionDenied)
+    );
+    assert_eq!(
+        code(files.delete_data(data("delete")).await.map(|_| ())),
+        Ok(())
+    );
+    assert_eq!(
+        code(values.set_cache(cache("set")).await.map(|_| ())),
+        Ok(())
+    );
+    assert_eq!(
+        code(values.get_cache(cache("get")).await.map(|_| ())),
+        Err(Code::PermissionDenied)
+    );
+    assert_eq!(
+        code(values.delete_cache(cache("delete")).await.map(|_| ())),
+        Ok(())
+    );
+    assert_eq!(*log.lock().unwrap(), ["puts", "reads", "reads"]);
+}
+
+/// Before a command, a middleware gets its vault values only if its key may read them.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_middleware_gets_vault_values_only_if_its_key_may_read_them() {
+    let env = start_custom("middleware-vault", with_vault).await;
+    env.kernel
+        .grant(grant(&key(6), &[("listen", &["*"]), ("check", &["*"])]))
+        .unwrap();
+    let log = Log::default();
+    let reader = spec("reader", 0, pass); // key 5 reads every vault value
+    let blind = Spec {
+        key: key(6), // may check, but read no vault values
+        ..spec("blind", 1, pass)
+    };
+    let (_reader, _stop_reader) = middleware(&env, reader, &log);
+    let (_blind, _stop_blind) = middleware(&env, blind, &log);
+    settle_in().await;
+    start_worker(env.addr.clone(), TestWorker::honest()).await;
+
+    let value = vault_value("k-1", "max@example.com");
+    let mut cmd = command("c1", "PlaceOrder", "o1");
+    cmd.payload = format!(r#"{{"email":{{"$vault":"{}"}}}}"#, value.r#ref).into_bytes();
+    cmd.vault_refs = vec![value.r#ref.clone()];
+    let request = kernable_core::proto::SubmitRequest {
+        command: Some(signed(cmd, &key(1))),
+        wait: Wait::Accepted.into(),
+        protocol: kernable_core::PROTOCOL,
+        vault: vec![value],
+        ..Default::default()
+    };
+    let channel = transport::connect(&env.addr).await.unwrap();
+    kernable_core::proto::command_service_client::CommandServiceClient::new(channel)
+        .submit(request)
+        .await
+        .unwrap();
+    assert_eq!(
+        logged(&log, 2).await,
+        ["reader with 1 vault values", "blind"]
     );
 }

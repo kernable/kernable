@@ -13,6 +13,8 @@ use std::{
     sync::{Mutex, MutexGuard, PoisonError},
 };
 
+use sha2::{Digest, Sha256};
+
 use crate::{Error, Result};
 
 /// Where a file lives.
@@ -83,9 +85,21 @@ pub struct FileData(PathBuf);
 impl FileData {
     fn path(&self, k: &DataKey) -> PathBuf {
         self.0
-            .join(hex::encode(&k.tenant_id))
-            .join(hex::encode(&k.domain))
-            .join(hex::encode(&k.key))
+            .join(file_name(&k.tenant_id))
+            .join(file_name(&k.domain))
+            .join(file_name(&k.key))
+    }
+}
+
+/// A name's file: its hex, which keeps it readable, or for a name too long for a file system
+/// (255 bytes, with room for `.partial`), `h-` and its SHA-256, which no hex name collides
+/// with. Every name that fits is spelled as before.
+fn file_name(name: &str) -> String {
+    const LONGEST: usize = 123;
+    if name.len() <= LONGEST {
+        hex::encode(name)
+    } else {
+        format!("h-{}", hex::encode(Sha256::digest(name)))
     }
 }
 

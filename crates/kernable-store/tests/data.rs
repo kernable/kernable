@@ -58,3 +58,37 @@ fn a_file_that_cannot_be_read_is_an_error_not_a_missing_value() {
     assert!(store.delete(&key("o-1")).is_err());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn keys_of_any_allowed_length_are_stored_apart() {
+    let dir = std::env::temp_dir().join(format!("kn-data-long-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = data::open(&format!("file:{}", dir.display())).unwrap();
+    // File names hold 255 bytes: hex names up to 123-byte keys, hashed names beyond.
+    let lengths = [1, 123, 124, 127, 128, 511, 512];
+    for n in lengths {
+        let d = Data {
+            content_type: "text/plain".into(),
+            data: n.to_string().into_bytes(),
+        };
+        store.put(&key(&"k".repeat(n)), &d).unwrap();
+    }
+    for n in lengths {
+        let got = store.get(&key(&"k".repeat(n))).unwrap().unwrap();
+        assert_eq!(got.data, n.to_string().into_bytes());
+    }
+    // A long tenant and domain too.
+    let long = DataKey {
+        tenant_id: "t".repeat(300),
+        domain: "d".repeat(300),
+        key: "k".into(),
+    };
+    let d = Data {
+        content_type: String::new(),
+        data: b"x".to_vec(),
+    };
+    store.put(&long, &d).unwrap();
+    assert_eq!(store.get(&long).unwrap(), Some(d));
+    assert!(store.delete(&long).unwrap());
+    let _ = std::fs::remove_dir_all(&dir);
+}

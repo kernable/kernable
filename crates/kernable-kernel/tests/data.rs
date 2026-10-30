@@ -220,3 +220,79 @@ async fn cache_values_expire_and_need_a_grant() {
         .unwrap_err();
     assert_eq!(err.code(), Code::PermissionDenied, "{err:?}");
 }
+
+/// The outcome of a call, by its code.
+fn code<T>(r: Result<tonic::Response<T>, tonic::Status>) -> Result<(), Code> {
+    r.map(|_| ()).map_err(|e| e.code())
+}
+
+/// Signs `r` again, as issued at `issued_at`.
+fn data_at(key: &SigningKey, op: &str, mut r: DataRequest, issued_at: i64) -> DataRequest {
+    r.issued_at = issued_at;
+    r.client_sig = Some(signing::sign(key, &signing::data_message(op, &r)));
+    r
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn requests_are_held_to_their_window_key_length_and_size() {
+    let env = start("data-limits").await;
+    let channel = transport::connect(&env.addr).await.unwrap();
+    let mut files = DataServiceClient::new(channel.clone()).max_decoding_message_size(32 << 20);
+    let mut cache_client = CacheServiceClient::new(channel);
+    let writer = key(7);
+
+    // A put says it found its place.
+    let put = files
+        .put_data(data(&writer, "put", "shop", "a.txt", b"x"))
+        .await
+        .unwrap();
+    assert!(put.into_inner().found);
+
+    // Signed too long ago or too far ahead.
+    for skew in [-120_000, 120_000] {
+        let r = data(&writer, "put", "shop", "late.txt", b"x");
+        let r = data_at(&writer, "put", r, now_ms() + skew);
+        assert_eq!(
+            code(files.put_data(r).await),
+            Err(Code::Unauthenticated),
+            "{skew}"
+        );
+        let mut c = cache(&writer, "set", "late", b"x", 0);
+        c.issued_at = now_ms() + skew;
+        c.client_sig = Some(signing::sign(&writer, &signing::cache_message("set", &c)));
+        assert_eq!(
+            code(cache_client.set_cache(c).await),
+            Err(Code::Unauthenticated),
+            "{skew}"
+        );
+    }
+
+    // A key has 1 to 512 bytes.
+    let longest = "k".repeat(512);
+    for (name, expected) in [
+        ("", Err(Code::InvalidArgument)),
+        (&"k".repeat(513), Err(Code::InvalidArgument)),
+        (&longest, Ok(())),
+    ] {
+        let r = data(&writer, "put", "shop", name, b"x");
+        assert_eq!(
+            code(files.put_data(r).await),
+            expected,
+            "{} bytes",
+            name.len()
+        );
+    }
+
+    // A file of 16 MiB and a cache value of 1 MiB fit, a byte more does not.
+    let r = data(&writer, "put", "shop", "full.bin", &vec![1; 16 << 20]);
+    assert_eq!(code(files.put_data(r).await), Ok(()));
+    let r = data(&writer, "put", "shop", "over.bin", &vec![1; (16 << 20) + 1]);
+    assert_eq!(code(files.put_data(r).await), Err(Code::InvalidArgument));
+    let c = cache(&writer, "set", "full", &vec![1; 1 << 20], 0);
+    assert_eq!(code(cache_client.set_cache(c).await), Ok(()));
+    let c = cache(&writer, "set", "over", &vec![1; (1 << 20) + 1], 0);
+    assert_eq!(
+        code(cache_client.set_cache(c).await),
+        Err(Code::InvalidArgument)
+    );
+}

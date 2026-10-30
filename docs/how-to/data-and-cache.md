@@ -96,7 +96,7 @@ Keep personal data out of cache values, or give them a short TTL. See [Handle an
 
 | Flag | Values | Notes |
 |---|---|---|
-| `--data-store` | `file:<directory>` (default `file:data`), `memory:` | The directory is created on the first file. Each file is `<directory>/<tenant>/<domain>/<key>`, every part hex-encoded. `memory:` loses the files on a restart. |
+| `--data-store` | `file:<directory>` (default `file:data`), `memory:` | The directory is created on the first file. Each file is `<directory>/<tenant>/<domain>/<key>`, every part hex-encoded; a part over 123 bytes, whose hex would not fit in a file name, is `h-` and the SHA-256 of it instead. `memory:` loses the files on a restart. |
 | `--cache-store` | `memory:` | The only backend. |
 
 With `file:`, a key becomes a file name of twice its length in bytes. Most file systems allow 255 bytes per name, so keep keys under 128 bytes there.
