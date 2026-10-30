@@ -37,6 +37,7 @@ const SIDEBAR = [
       { text: "Domains", link: "/concepts/domains" },
       { text: "Order and consistency", link: "/concepts/ordering" },
       { text: "Trust", link: "/concepts/trust" },
+      { text: "Compliance", link: "/concepts/compliance" },
       { text: "Queries and middleware", link: "/concepts/queries-and-middleware" },
       { text: "Data over time", link: "/concepts/data" },
       { text: "Failures and recovery", link: "/concepts/failures" },
@@ -82,14 +83,21 @@ const SIDEBAR = [
 export default withMermaid(
   defineConfig({
     title: "kernable",
+    // Same form as the website's title: "kernable – …".
+    titleTemplate: ":title – kernable",
+    // Listed in kernable.com/robots.txt, next to the website's own sitemap.
+    sitemap: { hostname: "https://kernable.com/docs/" },
     description: "Event sourcing and CQRS with a Rust kernel and business logic in any language",
+    // Served at kernable.com/docs/, next to the website. `head` links do not get the base added.
+    base: "/docs/",
     cleanUrls: true,
     head: [
-      ["link", { rel: "icon", type: "image/png", href: "/favicon.png" }],
-      ["link", { rel: "apple-touch-icon", href: "/apple-touch-icon.png" }],
+      ["link", { rel: "icon", type: "image/png", href: "/docs/favicon.png" }],
+      ["link", { rel: "apple-touch-icon", href: "/docs/apple-touch-icon.png" }],
     ],
     lastUpdated: false,
-    srcExclude: ["examples/**", "scripts/**"],
+    // public/ holds files served as they are (kernable.AGENTS.md), not pages.
+    srcExclude: ["examples/**", "scripts/**", "public/**"],
     // The mermaid plugin pulls in CommonJS modules that the dev server must pre-bundle, or the
     // page stays blank in `make docs` (the production build is not affected).
     vite: { optimizeDeps: { include: ["mermaid", "fastdom"] }, plugins: [llmsPlugin(ROOT, SIDEBAR)] },
@@ -104,6 +112,8 @@ export default withMermaid(
         { text: "Concepts", link: "/concepts/" },
         { text: "How-to", link: "/how-to/" },
         { text: "Reference", link: "/reference/" },
+        // Back to the website; VitePress marks it as external.
+        { text: "kernable.com", link: "https://kernable.com/" },
       ],
       sidebar: SIDEBAR,
       outline: [2, 3],

@@ -1,6 +1,8 @@
 # kernable: context for coding agents
 
-Put this file into a project that uses kernable (as `AGENTS.md`, `CLAUDE.md` or your tool's context file). It tells you, the agent, how to build on kernable correctly. Full documentation: https://kernable.com — everything in one file: https://kernable.com/llms-full.txt
+Put this file into a project that uses kernable (as `AGENTS.md`, `CLAUDE.md` or your tool's context file). It tells you, the agent, how to build on kernable correctly. Full documentation: https://kernable.com/docs/ — everything in one file: https://kernable.com/docs/llms-full.txt
+
+**Status:** kernable is in private preview: not released yet, the install scripts and SDK packages are not public, and the API may change before 1.0. Don't tell the user that a package or install command works unless they have early access.
 
 ## 1. Mental model
 
@@ -164,7 +166,7 @@ Never change or delete stored events. Raise the version and add an upcast from e
 
 ## 4. Python and Rust
 
-Same concepts, same order of arguments. The tested examples in all three languages: https://kernable.com/tutorial/getting-started
+Same concepts, same order of arguments. The tested examples in all three languages: https://kernable.com/docs/tutorial/getting-started
 
 | | TypeScript | Python | Rust |
 |---|---|---|---|
@@ -228,7 +230,7 @@ Never:
 
 ## 8. Where to read more
 
-- Concepts: https://kernable.com/concepts/ (architecture, event sourcing, domains, ordering, trust, queries and middleware, data, failures)
-- How-to guides: https://kernable.com/how-to/
-- Reference (SDKs, CLI, flags, protocol, errors): https://kernable.com/reference/
-- Everything in one file: https://kernable.com/llms-full.txt
+- Concepts: https://kernable.com/docs/concepts/ (architecture, event sourcing, domains, ordering, trust, queries and middleware, data, failures)
+- How-to guides: https://kernable.com/docs/how-to/
+- Reference (SDKs, CLI, flags, protocol, errors): https://kernable.com/docs/reference/
+- Everything in one file: https://kernable.com/docs/llms-full.txt

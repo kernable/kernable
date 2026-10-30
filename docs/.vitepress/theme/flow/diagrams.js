@@ -29,7 +29,7 @@ diagrams.hero = {
     g.node('views', { x: 28, y: row(2), w: 264, h: 56, label: 'Read models · reactors', sub: 'answer queries, react to events', kind: 'qry' })
     // The logo names this side, in place of a heading.
     g.zone(410, 14, 340, 272, null, 'var(--vp-c-brand-1)')
-    g.image(426, 26, 99, 25, '/logo-nav.png')
+    g.image(426, 26, 99, 25, 'logo-nav.png')
     g.node('checks', { x: 428, y: row(0), w: 304, h: 56, label: 'Checks', sub: 'signature · grant · middleware', kind: 'kern' })
     g.node('queue', { x: 428, y: row(1), w: 304, h: 56, label: 'Execute', sub: 'on a worker · one per aggregate at a time', kind: 'kern' })
     // The log: four events, each chained to the one before by its hash.
@@ -90,7 +90,7 @@ diagrams.architecture = {
     yours.forEach(([id, label, sub, kind], i) => g.node(id, { x: 22, y: mid(i) - 27, w: 176, h: 54, label, sub, kind }))
 
     g.zone(300, 14, 260, 344, null, 'var(--vp-c-brand-1)')
-    g.image(314, 22, 80, 20, '/logo-nav.png')
+    g.image(314, 22, 80, 20, 'logo-nav.png')
     const kernel = [
       ['checks', 'Checks', 'signatures · grants · middleware'],
       ['execute', 'Execute', 'one per aggregate, on a worker'],
@@ -148,7 +148,7 @@ diagrams.query = {
     // One read model faces both the router and the log: it gets queries and events on one stream.
     g.node('rm', { x: 28, y: row(1), w: 264, h: row(2) + 56 - row(1), label: 'Read model', sub: 'answers from its own state', kind: 'qry' })
     g.zone(410, 14, 340, 272, null, 'var(--vp-c-brand-1)')
-    g.image(426, 26, 99, 25, '/logo-nav.png')
+    g.image(426, 26, 99, 25, 'logo-nav.png')
     g.node('checks', { x: 428, y: row(0), w: 304, h: 56, label: 'Checks', sub: 'signature · grant · middleware', kind: 'kern' })
     g.node('route', { x: 428, y: row(1), w: 304, h: 56, label: 'Route', sub: 'to a read model that answers it', kind: 'kern' })
     for (let i = 0; i < 4; i++) {

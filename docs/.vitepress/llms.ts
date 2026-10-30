@@ -8,7 +8,7 @@ import type { Plugin } from "vite";
 
 type Item = { text?: string; link?: string; items?: Item[] };
 
-const SITE = "https://kernable.com";
+const SITE = "https://kernable.com/docs";
 
 /** The pages' links in sidebar order. */
 function links(items: Item[]): string[] {
@@ -55,16 +55,16 @@ function page(root: string, link: string): string {
 }
 
 export function llmsFull(root: string, sidebar: Item[]): string {
-  const intro = `# kernable documentation\n\nEvery page of ${SITE}, in the order of its sidebar. For a short guide to building on kernable, see ${SITE}/kernable.AGENTS.md.\n`;
+  const intro = `# kernable documentation\n\nEvery page of ${SITE}, in the order of its sidebar. For a short guide to building on kernable, see ${SITE}/kernable.AGENTS.md.\n\n**Status:** kernable is in private preview: not released yet, the install scripts and SDK packages are not public, and the API may change before 1.0.\n`;
   return [intro, ...links(sidebar).map((l) => page(root, l))].join("\n\n---\n\n");
 }
 
-/** Serves `/llms-full.txt` in the dev server. */
+/** Serves `/docs/llms-full.txt` in the dev server (under the base). */
 export function llmsPlugin(root: string, sidebar: Item[]): Plugin {
   return {
     name: "kernable-llms-full",
     configureServer(server) {
-      server.middlewares.use("/llms-full.txt", (_req, res) => {
+      server.middlewares.use("/docs/llms-full.txt", (_req, res) => {
         res.setHeader("content-type", "text/plain; charset=utf-8");
         res.end(llmsFull(root, sidebar));
       });

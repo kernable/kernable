@@ -1,5 +1,6 @@
 <script setup>
 import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { withBase } from 'vitepress'
 import { Graph, Runner, KIND, reducedMotion } from './engine'
 import { diagrams } from './diagrams'
 import { useFlowControls } from './useFlowControls'
@@ -47,7 +48,7 @@ let alive = true
 function build () {
   if (!svg.value || !def) return
   svg.value.innerHTML = ''
-  graph = new Graph(svg.value, { w: def.w, h: def.h })
+  graph = new Graph(svg.value, { w: def.w, h: def.h, base: withBase('/') })
   def.build(graph)
   runner = new Runner(graph, def.steps(graph), { onSay: c.onSay })
   c.bind(graph, runner, def.intro, build)

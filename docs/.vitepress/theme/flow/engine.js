@@ -58,8 +58,10 @@ export function roundedPath (pts, r = 12) {
 let uid = 0
 
 export class Graph {
-  constructor (svg, { w, h, flow = 1.45 } = {}) {
+  /* base: where the site's public files are served, so pictures work under any path */
+  constructor (svg, { w, h, flow = 1.45, base = '/' } = {}) {
     this.svg = svg
+    this.base = base
     this.w = w
     this.h = h
     this.flow = flow
@@ -116,9 +118,9 @@ export class Graph {
     return t
   }
 
-  /* a picture from the site's public folder, e.g. the logo */
+  /* a picture from the site's public folder, e.g. the logo: `href` is relative to `base` */
   image (x, y, w, h, href) {
-    return svgEl('image', { x, y, width: w, height: h, href }, this.layerNodes)
+    return svgEl('image', { x, y, width: w, height: h, href: this.base + href }, this.layerNodes)
   }
 
   /* a 24×24 icon path (see icons.js) at `size`, with an optional `text` after it */

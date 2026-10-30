@@ -9,6 +9,7 @@ How kernable works and why. Each page is short; the [tutorials](../tutorial/) sh
 | [Domains](./domains) | What a domain holds, its rules, how it relates to services, a code layout |
 | [Order and consistency](./ordering) | One command per aggregate, listener order, settling, at-least-once delivery |
 | [Trust](./trust) | Keys, grants, signatures, the hash chain |
+| [Compliance](./compliance) | The technical controls kernable covers for ISO 27001, SOC 2, the GDPR and others, and where it stops |
 | [Queries and middleware](./queries-and-middleware) | Why every read goes through the kernel, and how checks fail closed |
 | [Data over time](./data) | Event versions, formats and migration, the vault, snapshots |
 | [Failures and recovery](./failures) | What happens when something crashes |

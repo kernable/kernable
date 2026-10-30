@@ -4,6 +4,10 @@ kernable splits an application in two. The **kernel** stores commands and events
 
 ## Install
 
+::: warning Not released yet
+kernable is in private preview: the install scripts and the SDK packages (`@kernable/sdk` on npm, `kernable` on PyPI and crates.io) are not public yet, so the commands below do not work for everyone yet. [Request early access](https://kernable.com/#access) to get the binaries and the SDKs.
+:::
+
 Install the kernel as in [Getting started](../getting-started#_1-install-the-kernel):
 
 ::: code-group

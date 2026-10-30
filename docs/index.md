@@ -1,5 +1,7 @@
 ---
 layout: home
+title: kernable – Documentation
+titleTemplate: false
 hero:
   name: kernable
   text: Event sourcing with business logic in any language
@@ -11,6 +13,9 @@ hero:
     - theme: alt
       text: Reference
       link: /reference/
+    - theme: alt
+      text: Request early access
+      link: https://kernable.com/#access
 features:
   - title: Any language
     details: Aggregates, read models and reactors run in your own processes and talk to the kernel over gRPC. TypeScript, Python and Rust SDKs share one API.
