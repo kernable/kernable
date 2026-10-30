@@ -224,7 +224,7 @@ pub(crate) async fn serve(kernel: Arc<Kernel>, addr: &str) -> Result<(), BoxErro
     crate::http::serve(kernel, addr, respond).await
 }
 
-fn respond(kernel: &Kernel, request: &[u8]) -> Vec<u8> {
+pub(crate) fn respond(kernel: &Kernel, request: &[u8]) -> Vec<u8> {
     if request.starts_with(b"GET /metrics ") {
         reply(
             "200 OK",

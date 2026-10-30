@@ -13,6 +13,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 kernable-core = { path = "../crates/kernable-core" }
 kernable-store = { path = "../crates/kernable-store" }
+kernable-kernel = { path = "../crates/kernable-kernel", features = ["fuzzing"] }
 prost = "0.14"
 sha2 = "0.10"
 
@@ -36,6 +37,41 @@ bench = false
 [[bin]]
 name = "log_records"
 path = "fuzz_targets/log_records.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config"
+path = "fuzz_targets/config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grants"
+path = "fuzz_targets/grants.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http"
+path = "fuzz_targets/http.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "registrations"
+path = "fuzz_targets/registrations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "store_files"
+path = "fuzz_targets/store_files.rs"
 test = false
 doc = false
 bench = false

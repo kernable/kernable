@@ -84,7 +84,7 @@ pub(crate) fn listed_listener(m: &Membership, name: &str) -> bool {
     m.listeners.iter().chain(&m.middlewares).any(|n| n == name)
 }
 
-fn validate(m: &Membership) -> Result<(), Status> {
+pub(crate) fn validate(m: &Membership) -> Result<(), Status> {
     if !config::valid_domain(&m.service) {
         return Err(Status::invalid_argument(
             "a membership names its service: letters, digits, - and _",

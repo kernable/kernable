@@ -26,6 +26,8 @@ tracing-subscriber.workspace = true
 [features]
 # Test builds only: KERNABLE_CRASH_AT=<point> aborts the kernel there (see src/crash.rs).
 crash-points = []
+# Fuzz builds only: entry points for the targets in fuzz/ (see src/fuzzing.rs).
+fuzzing = []
 
 [dev-dependencies]
 kernable-store = { path = "../kernable-store", features = ["faults"] }

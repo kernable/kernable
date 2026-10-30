@@ -1,0 +1,4 @@
+GET /api/history?tenant=t1&domain=orders&type=Order&id=o1 HTTP/1.1
+Host: localhost:7234
+Accept: */*
+

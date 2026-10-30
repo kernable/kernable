@@ -88,18 +88,27 @@ async fn worker(addr: &str) {
 }
 
 /// A listener that acknowledges every batch and records its connections, batches and
-/// acknowledgements, resuming at its stored position whenever the kernel goes away.
-fn listener(addr: &str, seen: Arc<Mutex<Observed>>) {
+/// acknowledgements, resuming at its stored position whenever the kernel goes away. Returns
+/// once it is registered: a new listener starts at the newest event, so commands sent before
+/// would never reach it.
+async fn listener(addr: &str, seen: Arc<Mutex<Observed>>) {
     let addr = addr.to_owned();
+    let (tx, ready) = tokio::sync::oneshot::channel();
+    let mut first = Some(tx);
     tokio::spawn(async move {
         loop {
-            let _ = listen_once(&addr, &seen).await;
+            let _ = listen_once(&addr, &seen, &mut first).await;
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     });
+    let _ = ready.await;
 }
 
-async fn listen_once(addr: &str, seen: &Mutex<Observed>) -> Result<(), tonic::Status> {
+async fn listen_once(
+    addr: &str,
+    seen: &Mutex<Observed>,
+    ready: &mut Option<tokio::sync::oneshot::Sender<()>>,
+) -> Result<(), tonic::Status> {
     let (tx, rx) = mpsc::channel(16);
     let send = |m: In| ListenerMessage { msg: Some(m) };
     let hello = Hello {
@@ -126,6 +135,9 @@ async fn listen_once(addr: &str, seen: &Mutex<Observed>) -> Result<(), tonic::St
                 seen.lock()
                     .unwrap()
                     .connected("audit", &[], r.after_position);
+                if let Some(ready) = ready.take() {
+                    let _ = ready.send(());
+                }
                 continue;
             }
             Out::Batch(b) => {
@@ -187,7 +199,7 @@ async fn crash_and_recover(point: &str, round: u32) {
     wait_for(&addr).await;
     worker(&addr).await;
     let seen = Arc::new(Mutex::new(Observed::default()));
-    listener(&addr, Arc::clone(&seen));
+    listener(&addr, Arc::clone(&seen)).await;
 
     // Run the workload until the kernel crashes at the point.
     let commands = workload();
@@ -338,7 +350,7 @@ async fn random_kills_under_load_lose_nothing() {
     wait_for(&addr).await;
     worker(&addr).await;
     let seen = Arc::new(Mutex::new(Observed::default()));
-    listener(&addr, Arc::clone(&seen));
+    listener(&addr, Arc::clone(&seen)).await;
 
     // Orders as the clients placed them: each its three commands.
     let placed: Arc<Mutex<Vec<Vec<Command>>>> = Arc::default();

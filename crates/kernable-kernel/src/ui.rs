@@ -28,7 +28,7 @@ pub(crate) async fn serve(kernel: Arc<Kernel>, addr: &str) -> Result<(), BoxErro
     crate::http::serve(kernel, addr, respond).await
 }
 
-fn respond(kernel: &Kernel, request: &[u8]) -> Vec<u8> {
+pub(crate) fn respond(kernel: &Kernel, request: &[u8]) -> Vec<u8> {
     let line = String::from_utf8_lossy(request);
     let target = line
         .strip_prefix("GET ")

@@ -47,7 +47,7 @@ torture:
 # Findings land in fuzz/artifacts/<target>; add them to fuzz/seeds/<target> once fixed.
 FUZZ_SECONDS ?= 300
 fuzz:
-	cd fuzz && for t in file_log log_records messages; do \
+	cd fuzz && for t in file_log log_records messages config grants http registrations store_files; do \
 		mkdir -p corpus/$$t seeds/$$t && \
 		cargo +nightly fuzz run $$t corpus/$$t seeds/$$t -- -max_total_time=$(FUZZ_SECONDS) || exit 1; \
 	done

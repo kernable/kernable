@@ -19,6 +19,8 @@ mod cache;
 pub mod config;
 mod connections;
 pub mod crash;
+#[cfg(feature = "fuzzing")]
+pub mod fuzzing;
 pub mod grants;
 mod http;
 mod listeners;

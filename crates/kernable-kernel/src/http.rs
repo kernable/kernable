@@ -70,7 +70,7 @@ pub(crate) fn reply(status: &str, content_type: &str, body: &[u8]) -> Vec<u8> {
 }
 
 /// The `Host` header of a request, if it has one.
-fn host(request: &[u8]) -> Option<String> {
+pub(crate) fn host(request: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(request);
     text.lines()
         .skip(1)
@@ -84,7 +84,7 @@ fn host(request: &[u8]) -> Option<String> {
 }
 
 /// Whether a `Host` value (with or without a port) names this machine.
-fn loopback_host(host: &str) -> bool {
+pub(crate) fn loopback_host(host: &str) -> bool {
     let name = match host.strip_prefix('[') {
         Some(bracketed) => bracketed.split(']').next().unwrap_or_default(),
         None => host.rsplit_once(':').map_or(host, |(name, _)| name),

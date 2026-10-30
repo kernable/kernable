@@ -437,7 +437,9 @@ pub fn utc_ms(s: &str) -> Option<i64> {
         return None;
     };
     let sec = sec.first().copied().unwrap_or(0);
-    let valid = (1..=12).contains(m)
+    // Four-digit years only: anything else is a typo, and would overflow below.
+    let valid = (0..=9999).contains(y)
+        && (1..=12).contains(m)
         && (1..=31).contains(day)
         && (0..24).contains(h)
         && (0..60).contains(min)
