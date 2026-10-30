@@ -21,6 +21,7 @@ dependencies = [
  "cfg-if",
  "cipher",
  "cpufeatures 0.2.17",
+ "zeroize",
 ]
 
 [[package]]
@@ -35,6 +36,7 @@ dependencies = [
  "ctr",
  "ghash",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -635,6 +637,7 @@ checksum = "f0d8a4362ccb29cb0b265253fb0a2728f592895ee6854fd9bc13f2ffda266ff1"
 dependencies = [
  "opaque-debug",
  "polyval",
+ "zeroize",
 ]
 
 [[package]]
@@ -888,6 +891,7 @@ dependencies = [
  "tonic-prost",
  "tonic-prost-build",
  "tower",
+ "zeroize",
 ]
 
 [[package]]
@@ -909,15 +913,18 @@ dependencies = [
  "tonic",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]
 name = "kernable-store"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "aes-gcm",
  "ed25519-dalek",
  "getrandom 0.3.4",
+ "ghash",
  "hex",
  "kernable-core",
  "proptest",
@@ -925,6 +932,7 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "sha2",
+ "zeroize",
 ]
 
 [[package]]

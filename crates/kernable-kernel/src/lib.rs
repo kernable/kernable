@@ -15,6 +15,8 @@
 //! query's response (failing closed as well), and it observes, best effort, every completed
 //! command and every rejected query.
 
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 mod cache;
 pub mod config;
 mod connections;
@@ -246,11 +248,22 @@ impl Kernel {
         let snapshots = kernable_store::snapshots::open(&config.snapshots)?;
         let vault = match &config.vault {
             Some(v) => {
-                let key: [u8; 32] = hex::decode(std::fs::read_to_string(&v.key)?.trim())
-                    .ok()
-                    .and_then(|k: Vec<u8>| k.try_into().ok())
-                    .ok_or("the vault key must be 32 bytes, hex encoded")?;
+                let key = signing::read_secret(&v.key).map_err(|e| match e.kind() {
+                    std::io::ErrorKind::InvalidData => {
+                        "the vault key must be 32 bytes, hex encoded".into()
+                    }
+                    _ => BoxError::from(e),
+                })?;
                 let vault = Vault::open(&v.store, &key)?;
+                let sealed = vault.sealed()?;
+                if sealed > kernable_store::vault::MAX_SEALED / 2 {
+                    tracing::warn!(
+                        sealed,
+                        limit = kernable_store::vault::MAX_SEALED,
+                        "the vault key is past half its limit of values; \
+                         plan a `kernable vault rekey`"
+                    );
+                }
                 // Secrets of commands that completed while the kernel was down.
                 for command_id in vault.secret_commands()? {
                     if store.result(&command_id)?.is_some() {

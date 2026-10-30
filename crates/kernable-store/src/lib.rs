@@ -16,6 +16,8 @@
 //! [`snapshots`] (the latest snapshot per aggregate, a cache) and the [`vault`] (personal and
 //! secret values that commands and events refer to).
 
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 pub mod data;
 #[cfg(feature = "faults")]
 pub mod faults;

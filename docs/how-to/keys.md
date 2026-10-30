@@ -118,6 +118,8 @@ kernable vault rekey sqlite:data/vault.db keys/vault.key keys/vault-2.key
 
 The old key cannot read the vault afterwards. Backups made before still need the old key.
 
+Rekey also when a key has encrypted many values. Each value gets a random nonce, and one key is safe for 2^32 of them. The kernel counts them, logs a warning at startup past 2^31, and refuses new values at 2^32 until the vault is rekeyed.
+
 ## The root key
 
 The root key signs only grants and revocations, so it can stay offline: issue grants on a separate machine and copy the `.grant` files. To replace it, start the kernel with both roots (`--root keys/root.pub --root keys/root-2.pub`), issue new grants with the new root and restart the services with them. Then restart the kernel without the old `--root`: grants signed by it are refused from then on. If the old root leaked, revoke it first, signed with the new root (`kernable revoke <addr> keys/root-2.key keys/root.pub <since>`): the kernel drops the grants the old root signed at once and refuses them from then on.

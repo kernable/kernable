@@ -7,6 +7,7 @@ use std::{fmt, fs, io, path::Path};
 
 use ed25519_dalek::{Signature as Ed25519Signature, Signer, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 use crate::proto::{
     CacheRequest, Command, DataRequest, Event, Grant, Membership, NewEvent, Permission,
@@ -372,8 +373,8 @@ pub fn key_id(key: &VerifyingKey) -> String {
 }
 
 pub fn generate_key() -> SigningKey {
-    let mut seed = [0u8; 32];
-    getrandom::fill(&mut seed).expect("OS randomness unavailable");
+    let mut seed = Zeroizing::new([0u8; 32]);
+    getrandom::fill(seed.as_mut()).expect("OS randomness unavailable");
     SigningKey::from_bytes(&seed)
 }
 
@@ -400,16 +401,27 @@ pub fn verifying_key_from_hex(s: &str) -> Result<VerifyingKey, SignError> {
 }
 
 pub fn signing_key_from_hex(s: &str) -> Result<SigningKey, SignError> {
-    let seed: [u8; 32] = hex::decode(s.trim())
-        .ok()
-        .and_then(|b| b.try_into().ok())
-        .ok_or(SignError::InvalidKey)?;
+    let seed = secret_from_hex(s)?;
     Ok(SigningKey::from_bytes(&seed))
+}
+
+/// 32 secret bytes from hex, decoded in place: no copy of the secret is left behind.
+fn secret_from_hex(s: &str) -> Result<Zeroizing<[u8; 32]>, SignError> {
+    let mut secret = Zeroizing::new([0u8; 32]);
+    hex::decode_to_slice(s.trim(), secret.as_mut()).map_err(|_| SignError::InvalidKey)?;
+    Ok(secret)
+}
+
+/// Reads a file of 32 secret bytes in hex, such as a `.key` file or a vault key. The secret
+/// and the text it was read from are wiped from memory when dropped.
+pub fn read_secret(path: impl AsRef<Path>) -> io::Result<Zeroizing<[u8; 32]>> {
+    secret_from_hex(&Zeroizing::new(fs::read_to_string(path)?)).map_err(invalid_data)
 }
 
 /// Reads a `.key` file (hex-encoded 32-byte seed).
 pub fn read_signing_key(path: impl AsRef<Path>) -> io::Result<SigningKey> {
-    signing_key_from_hex(&fs::read_to_string(path)?).map_err(invalid_data)
+    let seed = read_secret(path)?;
+    Ok(SigningKey::from_bytes(&seed))
 }
 
 /// Reads a `.pub` file (hex-encoded public key, i.e. the key ID).
@@ -419,4 +431,35 @@ pub fn read_verifying_key(path: impl AsRef<Path>) -> io::Result<VerifyingKey> {
 
 fn invalid_data(e: SignError) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, e)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secret_keys_are_wiped_when_dropped() {
+        fn wiped<T: zeroize::ZeroizeOnDrop>() {}
+        wiped::<SigningKey>();
+        wiped::<Zeroizing<[u8; 32]>>();
+    }
+
+    #[test]
+    fn a_secret_key_is_exactly_32_bytes_in_hex() {
+        let hex = "11".repeat(32);
+        let key = signing_key_from_hex(&format!("  {hex}\n")).unwrap();
+        assert_eq!(key.as_bytes(), &[0x11; 32]);
+        for bad in [
+            &hex[..62],
+            &format!("{hex}11"),
+            &format!("{}x", &hex[..63]),
+            "",
+        ] {
+            assert_eq!(
+                signing_key_from_hex(bad).err(),
+                Some(SignError::InvalidKey),
+                "{bad}"
+            );
+        }
+    }
 }

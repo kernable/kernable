@@ -16,6 +16,7 @@ tonic-prost.workspace = true
 tokio.workspace = true
 hyper-util.workspace = true
 tower.workspace = true
+zeroize.workspace = true
 rcgen = { workspace = true, optional = true }
 
 [features]

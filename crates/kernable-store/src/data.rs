@@ -97,7 +97,13 @@ impl DataStore for FileData {
             Err(e) => return Err(e.into()),
         };
         let corrupt = || Error::Corrupt(format!("data file {} is cut short", key.key));
-        let len = u32::from_be_bytes(bytes.get(..4).ok_or_else(corrupt)?.try_into().unwrap());
+        let len = u32::from_be_bytes(
+            bytes
+                .get(..4)
+                .ok_or_else(corrupt)?
+                .try_into()
+                .expect("4 bytes"),
+        );
         let end = 4 + len as usize;
         let content_type = bytes.get(4..end).ok_or_else(corrupt)?;
         Ok(Some(Data {

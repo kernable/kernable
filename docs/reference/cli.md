@@ -143,7 +143,7 @@ Upgrades a store to this build's data format; back the store up first. A `file:`
 kernable vault rekey <vault> <old.key> <new.key>
 ```
 
-Re-encrypts every vault value with a new key; then start the kernel with `--vault-key <new.key>`. `<vault>` is the `--vault-store`, for example `sqlite:vault.db`.
+Re-encrypts every vault value with a new key; then start the kernel with `--vault-key <new.key>`. `<vault>` is the `--vault-store`, for example `sqlite:vault.db`. A key encrypts at most 2^32 values (each with a random nonce): the kernel warns at startup past half of that and refuses new values at the limit, until the vault is rekeyed.
 
 ## Scripting
 

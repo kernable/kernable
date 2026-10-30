@@ -9,7 +9,11 @@ license = "Apache-2.0"
 publish = false
 
 [workspace.dependencies]
-aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc", "zeroize"] }
+# Only to wipe the AES and GHASH key schedules when a vault is dropped.
+aes = { version = "0.8", features = ["zeroize"] }
+ghash = { version = "0.5", features = ["zeroize"] }
+zeroize = "1"
 proptest = "1"
 prost = "0.14"
 tonic = { version = "0.14", features = ["tls-ring"] }

@@ -51,6 +51,18 @@ CREATE TABLE IF NOT EXISTS erasures (
 ) STRICT;
 ";
 
+/// How many values one key may encrypt. Each value gets a random 96-bit nonce; NIST SP
+/// 800-38D allows 2^32 of them per key, which keeps the chance of a repeated nonce below 2^-32.
+pub const MAX_SEALED: u64 = 1 << 32;
+
+/// The number of values encrypted with the current key, created on open so that a vault of
+/// format 1 counts too: it starts at the number of values held, as earlier ones were not
+/// counted.
+const SEALED: &str = "
+CREATE TABLE IF NOT EXISTS sealed (count INTEGER NOT NULL) STRICT;
+INSERT INTO sealed SELECT COUNT(*) FROM vault WHERE NOT EXISTS (SELECT 1 FROM sealed);
+";
+
 /// Checks that every value matches its reference and is referred to by `refs`.
 pub fn check(values: &[VaultValue], refs: &[String]) -> Result<()> {
     for v in values {
@@ -118,6 +130,7 @@ impl Vault {
                 )));
             }
         }
+        conn.execute_batch(SEALED)?;
         Ok(Vault {
             conn: Mutex::new(conn),
             cipher: Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key)),
@@ -126,6 +139,13 @@ impl Vault {
 
     fn conn(&self) -> MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The number of values encrypted with the current key; see [`MAX_SEALED`].
+    pub fn sealed(&self) -> Result<u64> {
+        Ok(self
+            .conn()
+            .query_row("SELECT count FROM sealed", [], |r| r.get(0))?)
     }
 
     /// Checks `values` against `refs` (the signed references of one command or event) and
@@ -141,6 +161,15 @@ impl Vault {
         check(values, refs)?;
         let mut conn = self.conn();
         let tx = conn.transaction()?;
+        let sealed: u64 = tx.query_row("SELECT count FROM sealed", [], |r| r.get(0))?;
+        let sealed = sealed + values.len() as u64;
+        if sealed > MAX_SEALED {
+            return Err(Error::Vault(format!(
+                "the vault key has encrypted its limit of {MAX_SEALED} values; \
+                 encrypt the vault with a new key (kernable vault rekey)"
+            )));
+        }
+        tx.execute("UPDATE sealed SET count = ?1", [sealed])?;
         for v in values {
             let mut nonce = [0u8; 12];
             getrandom::fill(&mut nonce).map_err(|_| Error::Vault("no randomness".into()))?;
@@ -321,6 +350,7 @@ impl Vault {
                 params![fresh.to_vec(), resealed, r],
             )?;
         }
+        tx.execute("UPDATE sealed SET count = ?1", [rows.len() as u64])?;
         tx.commit()?;
         Ok(rows.len())
     }
@@ -340,5 +370,82 @@ impl Vault {
         let mut stmt = conn.prepare("SELECT DISTINCT command_id FROM vault WHERE secret = 1")?;
         let rows = stmt.query_map([], |r| r.get(0))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn value(n: u8) -> VaultValue {
+        let salt = vec![n; 16];
+        VaultValue {
+            r#ref: signing::vault_ref(&salt, "", true, b"\"s\""),
+            salt,
+            secret: true,
+            value: b"\"s\"".to_vec(),
+            ..Default::default()
+        }
+    }
+
+    fn put(vault: &Vault, values: &[VaultValue]) -> Result<()> {
+        let refs: Vec<_> = values.iter().map(|v| v.r#ref.clone()).collect();
+        let owner = Owner {
+            command_id: "c1",
+            tenant: "t1",
+            stream: None,
+        };
+        vault.put(values, &refs, &owner, 0)
+    }
+
+    #[test]
+    fn a_key_encrypts_at_most_max_sealed_values() {
+        let vault = Vault::open("memory:", &[1; 32]).unwrap();
+        put(&vault, &[value(1), value(2)]).unwrap();
+        assert_eq!(vault.sealed().unwrap(), 2);
+
+        let near = MAX_SEALED - 1;
+        vault
+            .conn()
+            .execute("UPDATE sealed SET count = ?1", [near])
+            .unwrap();
+        let refused = put(&vault, &[value(3), value(4)]).err().unwrap();
+        assert!(
+            refused.to_string().contains("kernable vault rekey"),
+            "{refused}"
+        );
+        assert_eq!(
+            vault.sealed().unwrap(),
+            near,
+            "a refused put counts nothing"
+        );
+        put(&vault, &[value(3)]).unwrap();
+        assert_eq!(vault.sealed().unwrap(), MAX_SEALED);
+
+        // A new key starts over, counting the values it encrypted again.
+        vault.rekey(&[2; 32]).unwrap();
+        assert_eq!(vault.sealed().unwrap(), 3);
+    }
+
+    #[test]
+    fn a_vault_of_format_1_starts_counting_at_the_values_it_holds() {
+        let path =
+            std::env::temp_dir().join(format!("kernable-vault-sealed-{}", std::process::id()));
+        let url = format!("sqlite:{}", path.display());
+        let vault = Vault::open(&url, &[1; 32]).unwrap();
+        put(&vault, &[value(1), value(2), value(3)]).unwrap();
+        vault.conn().execute_batch("DROP TABLE sealed").unwrap();
+        drop(vault);
+        assert_eq!(Vault::open(&url, &[1; 32]).unwrap().sealed().unwrap(), 3);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_vault_key_schedules_are_wiped_when_dropped() {
+        fn wiped<T: zeroize::ZeroizeOnDrop>() {}
+        // The AES round keys an `Aes256Gcm` holds. Its GHASH key is wiped too, except on ARM,
+        // where `polyval` does not wipe it yet; it is derived from the vault key but does not
+        // reveal it.
+        wiped::<aes::Aes256>();
     }
 }

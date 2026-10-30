@@ -1,7 +1,9 @@
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 use std::{
     collections::HashMap,
     fs,
-    io::{IsTerminal, Write},
+    io::{self, IsTerminal, Write},
     path::Path,
     process::ExitCode,
     sync::Arc,
@@ -21,6 +23,7 @@ use kernable_core::{
 use kernable_kernel::{BoxError, Config, GRANT_HEADER, Kernel, config, grants, serve};
 use prost::Message;
 use tracing_subscriber::EnvFilter;
+use zeroize::Zeroizing;
 
 const USAGE: &str = "usage:
 
@@ -610,7 +613,7 @@ fn write_key(name: &str) -> Result<String> {
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     options
         .open(format!("{name}.key"))?
-        .write_all(format!("{}\n", hex(key.as_bytes())).as_bytes())?;
+        .write_all(Zeroizing::new(format!("{}\n", hex::encode(key.as_bytes()))).as_bytes())?;
     fs::write(format!("{name}.pub"), format!("{key_id}\n"))?;
     Ok(key_id)
 }
@@ -654,21 +657,14 @@ fn verify(store: &str, keys: &[&str]) -> Result<ExitCode> {
 }
 
 fn vault_rekey(vault: &str, old: &str, new: &str) -> Result<bool> {
-    let read = |path: &str| -> Result<[u8; 32]> {
-        let text = fs::read_to_string(path)?;
-        let text = text.trim();
-        let bytes: Option<Vec<u8>> = (0..text.len())
-            .step_by(2)
-            .map(|i| {
-                text.get(i..i + 2)
-                    .and_then(|b| u8::from_str_radix(b, 16).ok())
-            })
-            .collect();
-        bytes
-            .and_then(|b| b.try_into().ok())
-            .ok_or_else(|| format!("{path}: not a 32-byte key in hex").into())
+    let read = |path: &str| -> Result<Zeroizing<[u8; 32]>> {
+        signing::read_secret(path).map_err(|e| match e.kind() {
+            io::ErrorKind::InvalidData => format!("{path}: not a 32-byte key in hex").into(),
+            _ => e.into(),
+        })
     };
-    let count = kernable_store::vault::Vault::open(vault, &read(old)?)?.rekey(&read(new)?)?;
+    let (old, new) = (read(old)?, read(new)?);
+    let count = kernable_store::vault::Vault::open(vault, &old)?.rekey(&new)?;
     println!("re-encrypted {count} values; start the kernel with --vault-key <new.key>");
     Ok(true)
 }

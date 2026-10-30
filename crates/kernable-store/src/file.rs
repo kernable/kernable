@@ -358,7 +358,7 @@ fn replay(bytes: &[u8]) -> Result<(State, usize)> {
         let Some(header) = bytes.get(at..at + HEADER) else {
             break; // torn header
         };
-        let len = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
+        let len = u32::from_be_bytes(header[..4].try_into().expect("4 bytes")) as usize;
         let Some(body) = bytes.get(at + HEADER..at + HEADER + len) else {
             break; // torn body
         };
@@ -409,7 +409,7 @@ fn sync_directory(path: &Path) -> Result<()> {
 }
 
 fn checksum(body: &[u8]) -> [u8; 4] {
-    Sha256::digest(body)[..4].try_into().unwrap()
+    Sha256::digest(body)[..4].try_into().expect("4 bytes")
 }
 
 fn corrupt(what: &str) -> Error {
@@ -710,7 +710,7 @@ pub(crate) fn migrate(path: &Path) -> Result<u32> {
     let Some(header) = bytes.get(..HEADER) else {
         return Ok(FORMAT); // empty: a new log
     };
-    let len = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
+    let len = u32::from_be_bytes(header[..4].try_into().expect("4 bytes")) as usize;
     let body = bytes
         .get(HEADER..HEADER + len)
         .filter(|body| checksum(body) == header[4..])

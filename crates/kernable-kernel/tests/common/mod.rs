@@ -230,9 +230,10 @@ pub fn store_url(dir: &std::path::Path) -> String {
     }
 }
 
-/// Waits until the kernel accepts connections (at the socket level, so TLS works too).
+/// Waits until the kernel accepts connections (at the socket level, so TLS works too), for up
+/// to 10 s: a loaded machine starts a kernel slowly.
 pub async fn wait_for(addr: &str) {
-    for _ in 0..200 {
+    for _ in 0..1_000 {
         let up = match transport::unix_path(addr) {
             Some(path) => tokio::net::UnixStream::connect(path).await.is_ok(),
             None => tokio::net::TcpStream::connect(addr).await.is_ok(),
