@@ -10,7 +10,8 @@ use serde_json::json;
 
 fn order() -> kernable::Aggregate<bool> {
     let shop = domain("shop");
-    let order = shop.aggregate("Order", false);
+    // Snapshots off (0): commands still run.
+    let order = shop.aggregate("Order", false).snapshot_every(0);
     order.command("Place", |_, _: serde_json::Value, _cmd, _ctx| {
         Ok(vec![NewEvent::new("Placed", json!({}))])
     });
@@ -169,4 +170,10 @@ fn a_query_outcome_says_whether_it_was_answered() {
     use kernable::{QueryOutcome, Rejected};
     assert!(QueryOutcome::Answered(json!(1)).is_answered());
     assert!(!QueryOutcome::Rejected(Rejected::new("no")).is_answered());
+}
+
+#[test]
+fn a_rejection_reads_as_its_message() {
+    let rejected = kernable::Rejected::new("out of stock").code("empty");
+    assert_eq!(rejected.to_string(), "out of stock");
 }

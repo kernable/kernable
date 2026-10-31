@@ -49,6 +49,9 @@ fn apply_changes_the_state_in_place_or_replaces_it() {
             s.tags.push(format!("by {}", ctx.request.sender_identity));
         }
     });
+    account.apply("Tagged", |s, _: serde_json::Value, evt, _ctx| {
+        s.status = format!("{} {} {}", evt.event_type, evt.domain, evt.aggregate_type);
+    });
     account.apply("Erased", |s, _: serde_json::Value, _evt, _ctx| {
         s.email = None
     });
@@ -114,6 +117,9 @@ fn apply_changes_the_state_in_place_or_replaces_it() {
         )
         .unwrap();
     assert_eq!(by_alice.tags, ["open", "by alice"]);
+    // Without meta, `apply` learns the event's type and its own domain and aggregate.
+    let tagged = account.fold([FoldEvent::new("Tagged", ())], None).unwrap();
+    assert_eq!(tagged.status, "Tagged Crm Account");
 
     // A command handler can be called directly, e.g. in a unit test.
     account.command("Close", |s: &Account, _: serde_json::Value, cmd, ctx| {
@@ -183,6 +189,14 @@ async fn snapshots_shorten_replays_and_a_new_schema_rebuilds_from_the_events() {
         s.n += data.by;
         s.version = evt.version;
         s.id = evt.aggregate_id.clone();
+        if (
+            evt.event_type.as_str(),
+            evt.domain.as_str(),
+            evt.aggregate_type.as_str(),
+        ) != ("Incremented", "counters", "Counter")
+        {
+            s.id = format!("{} {} {}", evt.event_type, evt.domain, evt.aggregate_type);
+        }
     });
     v1.command("Increment", |s, data: By, cmd, _ctx| {
         assert_eq!(cmd.aggregate_id, "c1");
@@ -196,6 +210,12 @@ async fn snapshots_shorten_replays_and_a_new_schema_rebuilds_from_the_events() {
             return Err(Rejected::new("limit"));
         }
         Ok(vec![NewEvent::new("Incremented", By { by: data.by })])
+    });
+    v1.command("Twice", |_, _: serde_json::Value, _cmd, _ctx| {
+        Ok(vec![
+            NewEvent::new("Incremented", By { by: 1 }),
+            NewEvent::new("Incremented", By { by: 1 }),
+        ])
     });
     // v2 keeps it as a number: old snapshots do not fit.
     let v2 = domain("counters")
@@ -220,20 +240,23 @@ async fn snapshots_shorten_replays_and_a_new_schema_rebuilds_from_the_events() {
         assert!(increment(1).await.unwrap().is_committed());
     }
     // Without snapshots, folding the history alone would apply 0 + 1 + ... + 9 = 45 events.
-    assert!(
-        applied.load(Ordering::SeqCst) <= 25,
-        "applied {applied:?} events"
-    );
+    // With one at versions 3, 6 and 9, a command folds at most two events, and taking a
+    // snapshot applies its command's event: 3 × (0 + 1 + 2 + 1) + 0 for the tenth = 12.
+    assert_eq!(applied.load(Ordering::SeqCst), 12);
+    // A snapshot after several events gives each its own version (11 and 12 here).
+    let twice = Submit::new("counters", "Counter", "c1", "Twice");
+    assert!(kernable.submit(twice).await.unwrap().is_committed());
+    assert!(increment(1).await.unwrap().is_committed());
     worker.stop();
     running.await.unwrap();
 
     let worker = kernable.worker(&v2).reconnect(Duration::from_millis(100));
     let running = spawn(&worker);
     worker.ready().await;
-    assert!(!increment(11).await.unwrap().is_committed()); // 10 + 11 > 20: the state is right
-    assert!(increment(10).await.unwrap().is_committed());
+    assert!(!increment(8).await.unwrap().is_committed()); // 13 + 8 > 20: the state is right
+    assert!(increment(7).await.unwrap().is_committed());
     assert!(!increment(1).await.unwrap().is_committed()); // 21 > 20
-    assert!(increment(0).await.unwrap().is_committed()); // version 12: a v2 snapshot
+    assert!(increment(0).await.unwrap().is_committed()); // version 15: a v2 snapshot
     assert!(kernel.verify().ends_with("\nOK\n"));
     worker.stop();
     running.await.unwrap();
@@ -346,6 +369,9 @@ async fn request_context_reaches_handlers_events_and_follow_up_commands() {
         async { Ok(()) }
     });
     eventually(|| events.lock().unwrap().len() >= 2).await;
+    let last = events.lock().unwrap()[1].position;
+    eventually(|| subscription.position() == last).await;
+    assert_eq!(subscription.position(), last);
     subscription.stop().await;
     let requests: Vec<_> = events
         .lock()
@@ -501,6 +527,23 @@ async fn a_new_event_schema_is_upcast_for_aggregates_and_listeners() {
             .is_err()
     );
     outdated.stop();
+    // So is one that writes it at version 1 without applying it: its domain declares it.
+    let declared = domain("shop");
+    declared.event("ItemAdded", 1);
+    let writer = declared.aggregate("Cart", 0i64);
+    writer.command("AddItem", |_, _: serde_json::Value, _cmd, _ctx| {
+        Ok(vec![NewEvent::new("ItemAdded", json!({ "sku": "fig" }))])
+    });
+    let blind = kernable
+        .worker(&writer)
+        .reconnect(Duration::from_millis(50));
+    running.push(spawn(&blind));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), blind.ready())
+            .await
+            .is_err()
+    );
+    blind.stop();
 
     eventually(|| counts.lock().unwrap().len() >= 2).await;
     assert_eq!(

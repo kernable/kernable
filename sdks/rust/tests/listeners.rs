@@ -791,6 +791,8 @@ fn listener_types_are_a_type_a_qualified_type_or_a_domain() {
     };
     assert!(on("Added") && on("crm.Created") && on("crm.*"));
     assert!(!on("*") && !on("") && !on("crm.a.b") && !on("Add*"));
+    assert!(on("my-crm.Created") && on("my_crm.Created"));
+    assert!(!on("my crm.Created") && !on("1crm.Created") && !on("crm.*x"));
     let check = |t: &'static str| {
         // A listener has one middleware before requests: each check gets its own.
         let model = shop.read_model("model");

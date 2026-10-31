@@ -396,8 +396,9 @@ impl kernable_core::proto::listener_service_server::ListenerService for FakeKern
                 head_position: 0,
             }))
             .await;
-            let batches = [vec![1, 2], vec![1, 2, 3], vec![2]];
-            let ups = [2, 3, 2];
+            // Then the same batch again: handled already, but not behind.
+            let batches = [vec![1, 2], vec![1, 2, 3], vec![3], vec![2]];
+            let ups = [2, 3, 3, 2];
             for (events, up_to) in batches.into_iter().zip(ups) {
                 let batch = Batch {
                     events: events.into_iter().map(event).collect(),
@@ -456,7 +457,7 @@ async fn a_listener_handles_each_event_once_when_the_kernel_repeats_batches_or_g
     assert_eq!(*handled.lock().unwrap(), [1, 2, 3], "each event once");
     assert_eq!(
         *acks.lock().unwrap(),
-        [2, 3],
+        [2, 3, 3],
         "no ack for the batch that went back"
     );
     assert_eq!(

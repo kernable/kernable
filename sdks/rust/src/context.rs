@@ -181,4 +181,64 @@ mod tests {
             "2000-02-29T00:00:00.000Z"
         );
     }
+
+    #[test]
+    fn every_day_from_1960_to_2400_is_written_as_the_calendar_has_it() {
+        let leap = |y: i64| (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+        let length = |y: i64, m: i64| match m {
+            2 if leap(y) => 29,
+            2 => 28,
+            4 | 6 | 9 | 11 => 30,
+            _ => 31,
+        };
+        let (mut y, mut m, mut d) = (1960, 1, 1);
+        let first = -3653; // 1960-01-01, days before 1970-01-01
+        for day in first..first + 160_707 {
+            let ms = day * 86_400_000 + 45_296_789; // 12:34:56.789
+            let expected = format!("{y:04}-{m:02}-{d:02}T12:34:56.789Z");
+            assert_eq!(Timestamp(ms).to_string(), expected);
+            d += 1;
+            if d > length(y, m) {
+                (d, m) = (1, m + 1);
+                if m > 12 {
+                    (m, y) = (1, y + 1);
+                }
+            }
+        }
+        assert_eq!((y, m, d), (2400, 1, 1));
+    }
+
+    #[test]
+    fn ids_are_version_4_uuids() {
+        for _ in 0..1000 {
+            let id = random_id();
+            assert_eq!(id.len(), 36);
+            assert_eq!(&id[14..15], "4", "{id}");
+            assert!("89ab".contains(&id[19..20]), "{id}");
+        }
+    }
+
+    #[test]
+    fn a_follow_up_keeps_sender_and_correlation_but_no_expected_version_or_privileges() {
+        let request = RequestContext {
+            sender_identity: "svc-1".into(),
+            expected_version: Some(3),
+            bypass_authorization: true,
+            trace_id: "tr-1".into(),
+            ..Default::default()
+        };
+        let follow = request.follow("cmd-1");
+        assert_eq!(
+            follow,
+            RequestContext {
+                sender_identity: "svc-1".into(),
+                trace_id: "tr-1".into(),
+                correlation_id: "cmd-1".into(),
+                causation_id: "cmd-1".into(),
+                ..Default::default()
+            }
+        );
+        // An existing correlation is kept.
+        assert_eq!(follow.follow("cmd-2").correlation_id, "cmd-1");
+    }
 }

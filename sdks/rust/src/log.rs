@@ -615,6 +615,12 @@ mod tests {
              \x20 \x1b[2mready in 84 ms\x1b[0m\n\
              \n"
         );
+        // An empty version is no version.
+        let o = Overview {
+            version: Some(String::new()),
+            ..o
+        };
+        assert!(render_overview(&o, false).starts_with("kernable · shop\n"));
     }
 
     #[test]
@@ -640,5 +646,10 @@ mod tests {
         assert!(refused(Some(&denied)));
         assert!(!refused(Some(&unavailable)));
         assert!(!refused(None));
+        // A refusal the SDK's own calls return, wrapped in its error.
+        let wrapped: crate::BoxError = Box::new(crate::Error::Status(
+            tonic::Status::unauthenticated("unknown key"),
+        ));
+        assert!(refused(Some(&wrapped)));
     }
 }

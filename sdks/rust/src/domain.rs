@@ -934,3 +934,19 @@ pub(crate) fn decode(payload: &[u8]) -> Value {
     }
     serde_json::from_slice(payload).unwrap_or(Value::Null)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_panic_says_what_it_said_as_far_as_it_can() {
+        let text = |f: fn()| panic_text(catch_unwind(f).unwrap_err().as_ref());
+        std::panic::set_hook(Box::new(|_| {}));
+        assert_eq!(text(|| panic!("plain")), "plain");
+        assert_eq!(text(|| panic!("formatted {}", 7)), "formatted 7");
+        assert_eq!(text(|| std::panic::panic_any(7)), "handler panicked");
+        let _ = std::panic::take_hook();
+        assert_eq!(SchemaError("too new".into()).to_string(), "too new");
+    }
+}
