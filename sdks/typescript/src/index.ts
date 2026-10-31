@@ -1109,6 +1109,28 @@ export interface SubmitOptions {
 
 const LEVELS = { off: 0, error: 1, warn: 2, info: 3, debug: 4 };
 
+/** A wait before reconnecting that `stop()` cuts short, so a stopped stream ends at once. */
+class Wake {
+  private wake?: () => void;
+  private woken = false;
+
+  sleep(ms: number): Promise<void> {
+    if (this.woken) return Promise.resolve();
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      this.wake = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+    });
+  }
+
+  now(): void {
+    this.woken = true;
+    this.wake?.();
+  }
+}
+
 /** gRPC codes that a retry does not change: INVALID_ARGUMENT, PERMISSION_DENIED, FAILED_PRECONDITION, UNIMPLEMENTED, UNAUTHENTICATED. */
 const REFUSALS = new Set([3, 7, 9, 12, 16]);
 type Level = Exclude<keyof typeof LEVELS, "off">;
@@ -1154,14 +1176,14 @@ class Log {
    * a fifth, so processes do not reconnect in lockstep after a kernel restart. A refusal that
    * will not go away by itself (no grant, an invalid registration) is an error, not a warning.
    */
-  async reconnect(what: string, err: unknown, ms: number, attempt = 1): Promise<void> {
+  async reconnect(what: string, err: unknown, ms: number, attempt: number, stopped: Wake): Promise<void> {
     // A gRPC error by its details only (`Connection dropped`, not `14 UNAVAILABLE: …`).
     const e = err as Error & { details?: string; code?: number };
     const reason = e.details || e.message;
     const delay = Math.round(Math.min(ms * 2 ** (attempt - 1), 30_000) * (0.8 + Math.random() * 0.4));
     const refused = e.code !== undefined && REFUSALS.has(e.code);
     this.print(refused ? "error" : "warn", what, `${refused ? "refused" : "connection lost"} (${reason}), reconnecting in ${delay / 1000} s`);
-    await new Promise((r) => setTimeout(r, delay));
+    await stopped.sleep(delay);
   }
 }
 
@@ -1570,6 +1592,7 @@ export class Subscription {
   readonly done: Promise<void>;
   private call?: ClientReadableStream<WireEvent>;
   private stopped = false;
+  private readonly wake = new Wake();
 
   constructor(clients: Clients, key: Key, options: SubscribeOptions, handler: (event: StoredEvent) => void | Promise<void>, log: Log) {
     this.position = options.after ?? 0;
@@ -1580,6 +1603,7 @@ export class Subscription {
   stop(): void {
     this.stopped = true;
     this.call?.cancel();
+    this.wake.now();
   }
 
   private async loop(clients: Clients, key: Key, options: SubscribeOptions, handler: (event: StoredEvent) => void | Promise<void>, log: Log) {
@@ -1600,7 +1624,7 @@ export class Subscription {
         error = err;
       }
       attempt = this.position > from ? 1 : attempt + 1;
-      if (!this.stopped) await log.reconnect("subscription", error, options.reconnectMs ?? 1000, attempt);
+      if (!this.stopped) await log.reconnect("subscription", error, options.reconnectMs ?? 1000, attempt, this.wake);
     }
   }
 }
@@ -1826,6 +1850,7 @@ export class ListenerHandle {
   private markReady!: () => void;
   private call?: ListenCall;
   private stopped = false;
+  private readonly wake = new Wake();
   /** Newest event when the kernel accepted the listener; events up to it are replayed. */
   private replayUpTo = 0;
   /** Position after which the kernel delivered on the first connect. */
@@ -1887,7 +1912,7 @@ export class ListenerHandle {
       // Resume after the last handled event, once there is one: before the first `ready`, the
       // position says nothing (a new reactor would replay everything from 0).
       if (this.connects > 0) start = this.position;
-      if (!this.stopped) await this.log.reconnect(this.what, error, options.reconnectMs ?? 1000, attempt);
+      if (!this.stopped) await this.log.reconnect(this.what, error, options.reconnectMs ?? 1000, attempt, this.wake);
     }
   }
 
@@ -1895,6 +1920,7 @@ export class ListenerHandle {
   stop(): void {
     this.stopped = true;
     this.call?.cancel();
+    this.wake.now();
   }
 
   /** `listener <name>`, for log lines. */
@@ -2087,6 +2113,7 @@ export class Worker {
   private connects = 0;
   private call?: SessionCall;
   private stopped = false;
+  private readonly wake = new Wake();
 
   constructor(clients: Clients, key: Key, aggregates: Aggregate<any>[], log: Log, service: string) {
     this.clients = clients;
@@ -2113,7 +2140,7 @@ export class Worker {
         error = err;
       }
       attempt = this.connects > connects ? 1 : attempt + 1;
-      if (!this.stopped) await this.log.reconnect("worker", error, options.reconnectMs ?? 1000, attempt);
+      if (!this.stopped) await this.log.reconnect("worker", error, options.reconnectMs ?? 1000, attempt, this.wake);
     }
   }
 
@@ -2121,6 +2148,7 @@ export class Worker {
   stop(): void {
     this.stopped = true;
     this.call?.cancel();
+    this.wake.now();
   }
 
   private session(concurrency: number): Promise<void> {

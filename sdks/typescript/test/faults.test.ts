@@ -291,3 +291,23 @@ test("a handler that hangs is reported: a command past its lease, a query past 5
     await kernel.dispose();
   }
 });
+
+test("stop ends a worker at once, also while it waits to reconnect", async () => {
+  const kernel = new TestKernel(["counters.*"]); // never started
+  const kernable = new Kernable({ url: kernel.url, key: kernel.appKey });
+  const print = console.error;
+  console.error = () => {};
+  const worker = kernable.worker(counter);
+  const running = worker.run({ reconnectMs: 2_000 });
+  try {
+    await sleep(300); // the first attempt failed; it waits 2 s
+    const started = Date.now();
+    worker.stop();
+    await running;
+    assert.ok(Date.now() - started < 500, `${Date.now() - started} ms`);
+  } finally {
+    console.error = print;
+    kernable.close();
+    await kernel.dispose();
+  }
+});

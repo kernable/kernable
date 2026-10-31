@@ -1113,15 +1113,17 @@ class _Log:
         text = self.style(31, line) if level == "error" else self.style(33, line) if level == "warn" else line
         print(f"{self.style(2, time.strftime('%H:%M:%S'))}  {self.style(1, what)}  {text}", file=sys.stderr)
 
-    def reconnect(self, what: str, reason: str, seconds: float, attempt: int = 1, refused: bool = False) -> None:
+    def reconnect(self, what: str, reason: str, seconds: float, attempt: int, refused: bool,
+                  stopped: threading.Event) -> None:
         """Logs the end of a session that was not stopped and waits before reconnecting:
         `seconds` after the first failed attempt, twice as long after each further one, at most
         30 s, give or take a fifth, so processes do not reconnect in lockstep after a kernel
-        restart. A refusal that will not go away by itself is an error, not a warning."""
+        restart. A refusal that will not go away by itself is an error, not a warning. `stopped`
+        cuts the wait short."""
         delay = min(seconds * 2 ** (attempt - 1), 30.0) * random.uniform(0.8, 1.2)
         self.print("error" if refused else "warn", what,
                    f"{'refused' if refused else 'connection lost'} ({reason}), reconnecting in {delay:.2f} s")
-        time.sleep(delay)
+        stopped.wait(delay)
 
 
 class _Watch:
@@ -1353,6 +1355,8 @@ class _Stream:
         self._what = what
         self._reconnect_s = reconnect_s
         self._stopped = False
+        #: Set by `stop()`: cuts the wait before a reconnect short.
+        self._wake = threading.Event()
         self._call = None
         self._outbox: queue.Queue | None = None
 
@@ -1382,10 +1386,11 @@ class _Stream:
                 outbox.put(None)
             attempt = 1 if self._connects > connects else attempt + 1
             if not self._stopped:
-                self._log.reconnect(self._what, reason, self._reconnect_s, attempt, refused)
+                self._log.reconnect(self._what, reason, self._reconnect_s, attempt, refused, self._wake)
 
     def stop(self) -> None:
         self._stopped = True
+        self._wake.set()
         if self._call is not None:
             self._call.cancel()
 

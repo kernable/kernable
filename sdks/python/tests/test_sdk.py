@@ -328,6 +328,24 @@ class Reconnects(unittest.TestCase):
         self.assertTrue(any("refused (" in l for l in lines()), stderr.getvalue())
 
 
+class Stopping(unittest.TestCase):
+    def test_stop_ends_a_listener_at_once_also_while_it_waits_to_reconnect(self):
+        kernel = TestKernel(["counters.*"])  # never started
+        self.addCleanup(kernel.dispose)
+        with mock.patch.dict(os.environ, {"KERNABLE_LOG": "off"}):
+            k = Kernable(kernel.url, kernel.app_key)
+        self.addCleanup(k.close)
+        handle = k.listener(counters_domain.read_model("waiting", reconnect_s=2))
+        thread = threading.Thread(target=handle.run, daemon=True)
+        thread.start()
+        time.sleep(0.3)  # the first attempt failed; it waits 2 s
+        started = time.monotonic()
+        handle.stop()
+        thread.join(2)
+        self.assertFalse(thread.is_alive())
+        self.assertLess(time.monotonic() - started, 0.5)
+
+
 class Hangs(unittest.TestCase):
     def test_a_handler_that_hangs_is_reported(self):
         kernel = TestKernel(["counters.*"], ["--lease-ttl-ms", "500", "--query-timeout-ms", "8000"])
