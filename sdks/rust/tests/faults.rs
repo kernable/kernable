@@ -342,3 +342,126 @@ async fn a_panicking_command_handler_is_rejected_without_its_text() {
     }
     worker.stop();
 }
+
+/// A kernel that misbehaves: repeats a batch with a new event, then sends one that goes back.
+struct FakeKernel {
+    hellos: Arc<Mutex<Vec<Option<u64>>>>,
+    acks: Arc<Mutex<Vec<u64>>>,
+}
+
+#[tonic::async_trait]
+impl kernable_core::proto::listener_service_server::ListenerService for FakeKernel {
+    type ListenStream = tokio_stream::wrappers::ReceiverStream<
+        Result<kernable_core::proto::ListenerDelivery, tonic::Status>,
+    >;
+
+    async fn listen(
+        &self,
+        request: tonic::Request<tonic::Streaming<kernable_core::proto::ListenerMessage>>,
+    ) -> Result<tonic::Response<Self::ListenStream>, tonic::Status> {
+        use kernable_core::proto::{
+            Batch, Event, ListenerDelivery, Ready, listener_delivery::Msg as Out,
+            listener_message::Msg as In,
+        };
+        let mut inbound = request.into_inner();
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let (hellos, acks) = (Arc::clone(&self.hellos), Arc::clone(&self.acks));
+        tokio::spawn(async move {
+            let event = |position: u64| Event {
+                global_position: position,
+                tenant_id: "t1".into(),
+                domain: "counters".into(),
+                aggregate_type: "Counter".into(),
+                aggregate_id: "c1".into(),
+                event_type: "Incremented".into(),
+                version: position,
+                schema: 1,
+                payload: format!(r#"{{"by":{position}}}"#).into_bytes(),
+                ..Event::default()
+            };
+            let send = |msg: Out| tx.send(Ok(ListenerDelivery { msg: Some(msg) }));
+            let Ok(Some(first)) = inbound.message().await else {
+                return;
+            };
+            let Some(In::Hello(hello)) = first.msg else {
+                return;
+            };
+            hellos.lock().unwrap().push(hello.from_position);
+            if hellos.lock().unwrap().len() > 1 {
+                return; // the reconnect: seen, that is all
+            }
+            let _ = send(Out::Ready(Ready {
+                after_position: 0,
+                head_position: 0,
+            }))
+            .await;
+            let batches = [vec![1, 2], vec![1, 2, 3], vec![2]];
+            let ups = [2, 3, 2];
+            for (events, up_to) in batches.into_iter().zip(ups) {
+                let batch = Batch {
+                    events: events.into_iter().map(event).collect(),
+                    up_to,
+                    vault: Vec::new(),
+                };
+                let _ = send(Out::Batch(batch)).await;
+                match inbound.message().await {
+                    Ok(Some(m)) => {
+                        if let Some(In::Ack(a)) = m.msg {
+                            acks.lock().unwrap().push(a.position);
+                        }
+                    }
+                    _ => return,
+                }
+            }
+        });
+        Ok(tonic::Response::new(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        ))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_listener_handles_each_event_once_when_the_kernel_repeats_batches_or_goes_back() {
+    let keys = TestKernel::new(&["counters.*"], &[]); // only for its key files
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let fake = FakeKernel {
+        hellos: Arc::default(),
+        acks: Arc::default(),
+    };
+    let (hellos, acks) = (Arc::clone(&fake.hellos), Arc::clone(&fake.acks));
+    tokio::spawn(
+        tonic::transport::Server::builder()
+            .add_service(
+                kernable_core::proto::listener_service_server::ListenerServiceServer::new(fake),
+            )
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
+    );
+    let kernable =
+        Kernable::new(Options::new(&keys.app_key).url(format!("http://{addr}"))).unwrap();
+    let handled = Arc::new(Mutex::new(Vec::new()));
+    let h = Arc::clone(&handled);
+    let model = domain("counters")
+        .read_model("fake")
+        .reconnect(Duration::from_millis(50))
+        .on("counters.Incremented", move |data: By, _evt, _ctx| {
+            h.lock().unwrap().push(data.by);
+            async { Ok(()) }
+        });
+    let handle = kernable.listener(&model);
+    let h = handle.clone();
+    tokio::spawn(async move { h.run().await });
+    eventually(|| hellos.lock().unwrap().len() >= 2).await;
+    assert_eq!(*handled.lock().unwrap(), [1, 2, 3], "each event once");
+    assert_eq!(
+        *acks.lock().unwrap(),
+        [2, 3],
+        "no ack for the batch that went back"
+    );
+    assert_eq!(
+        *hellos.lock().unwrap(),
+        [Some(0), Some(3)],
+        "the reconnect resumes after what was handled"
+    );
+    handle.stop();
+}

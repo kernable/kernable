@@ -1909,6 +1909,11 @@ export class ListenerHandle {
       this.logConnected();
       this.markReady();
     } else if (m.batch) {
+      // A kernel that goes back (a bug, or not the kernel) must not make a store apply events
+      // twice: the session ends, and the next resumes after what was handled.
+      if (m.batch.up_to < this.position) {
+        throw new Error(`the kernel sent a batch up to ${m.batch.up_to}, behind position ${this.position}`);
+      }
       // With a store, the batch's data and position are committed together, before the ack.
       this.stored?.begin();
       try {
@@ -1940,6 +1945,7 @@ export class ListenerHandle {
   private async handleBatch(batch: NonNullable<ListenerDelivery["batch"]>): Promise<void> {
     const { handlers, domains } = this.listener;
     for (const e of batch.events) {
+      if (e.global_position <= this.position) continue; // handled already
       const entry = handlers.get(`${e.domain}.${e.event_type}`) ?? handlers.get(`${e.domain}.*`);
       if (entry) {
         const stored = toStored(e, batch.vault);

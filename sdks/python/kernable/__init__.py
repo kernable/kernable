@@ -1685,6 +1685,10 @@ class ListenerHandle(_Stream):
             self._log_connected(msg.ready.after_position)
             self.ready.set()
         elif kind == "batch":
+            # A kernel that goes back (a bug, or not the kernel) must not make a store apply
+            # events twice: the session ends, and the next resumes after what was handled.
+            if msg.batch.up_to < self.position:
+                raise RuntimeError(f"the kernel sent a batch up to {msg.batch.up_to}, behind position {self.position}")
             # With a store, the batch's data and position are committed together, before the ack.
             if self.store:
                 self.store._begin()
@@ -1727,6 +1731,8 @@ class ListenerHandle(_Stream):
     def _handle_batch(self, batch) -> None:
         d = self.listener
         for e in batch.events:
+            if e.global_position <= self.position:
+                continue  # handled already
             name = f"{e.domain}.{e.event_type}"
             if name not in d._handlers:
                 name = f"{e.domain}.*"

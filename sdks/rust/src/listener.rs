@@ -843,6 +843,16 @@ impl ListenerHandle {
                 }
                 Some(Delivery::Batch(batch)) => {
                     let up_to = batch.up_to;
+                    // A kernel that goes back (a bug, or not the kernel) must not make a store
+                    // apply events twice: the session ends, and the next resumes after what
+                    // was handled.
+                    let at = inner.position.load(Ordering::SeqCst);
+                    if up_to < at {
+                        return Err(format!(
+                            "the kernel sent a batch up to {up_to}, behind position {at}"
+                        )
+                        .into());
+                    }
                     let store = self.opened_store();
                     // With a store, the batch's data and position are committed together,
                     // before the ack.
@@ -915,6 +925,9 @@ impl ListenerHandle {
         let def = self.def();
         for e in batch.events {
             let position = e.global_position;
+            if position <= self.position() {
+                continue; // handled already
+            }
             let entry = {
                 let handlers = def.handlers.read().unwrap();
                 handlers
