@@ -17,7 +17,7 @@ from unittest import mock
 
 import grpc
 
-from kernable import Data, Kernable, NotSettled, Outcome, QueryOutcome, Rejected, RequestContext, _upcast, domain
+from kernable import ClientClosed, Data, Kernable, NotSettled, Outcome, QueryOutcome, Rejected, RequestContext, _upcast, domain
 from kernable.signing import (Key, cache_message, challenge_message, command_message, data_message, derived_id,
                               membership_message, query_message, rejection_message, result_message, snapshot_message, vault_ref)
 from kernable.v1 import kernable_pb2 as pb
@@ -344,6 +344,31 @@ class Stopping(unittest.TestCase):
         thread.join(2)
         self.assertFalse(thread.is_alive())
         self.assertLess(time.monotonic() - started, 0.5)
+
+    def test_a_closed_client_refuses_requests_and_ends_its_streams(self):
+        kernel = TestKernel(["counters.*"])
+        self.addCleanup(kernel.dispose)
+        with mock.patch.dict(os.environ, {"KERNABLE_LOG": "off"}):
+            k = Kernable(kernel.url, kernel.app_key)
+        k.close()  # grpcio would crash the process on a call over the closed channel
+        with self.assertRaises(ClientClosed):
+            k.submit("counters", "Counter", "c1", "Increment", {"by": 1})
+        with self.assertRaises(ClientClosed):
+            k.query("counters", "GetTotal", {"id": "c1"})
+        handle = k.listener(counters_domain.read_model("closed", reconnect_s=0.05))
+        errors = []
+        thread = threading.Thread(target=lambda: _record(errors, handle.run), daemon=True)
+        thread.start()
+        thread.join(2)
+        self.assertFalse(thread.is_alive(), "run() ends")
+        self.assertEqual(errors, [])
+
+
+def _record(errors, run):
+    try:
+        run()
+    except Exception as err:  # what would kill the thread
+        errors.append(repr(err))
 
 
 class Hangs(unittest.TestCase):

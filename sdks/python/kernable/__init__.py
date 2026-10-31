@@ -51,7 +51,8 @@ from kernable.store import Store
 from kernable.v1 import kernable_pb2 as pb
 from kernable.v1 import kernable_pb2_grpc as rpc
 
-__all__ = ["PROTOCOL", "Aggregate", "App", "ApplyContext", "CacheClient", "Check", "CommandContext", "CommandMeta", "CommandSchema",
+__all__ = ["PROTOCOL", "Aggregate", "App", "ApplyContext", "CacheClient", "Check", "ClientClosed", "CommandContext", "CommandMeta",
+           "CommandSchema",
            "Data", "DataClient", "Domain",
            "Event", "EventMeta", "EventSchema", "Kernable", "Key", "Listener", "ListenerContext", "ListenerHandle", "Manifest", "NotSettled", "Outcome",
            "QueryContext", "QueryMeta", "QueryOutcome", "Rejected", "RequestContext", "Store", "StoredEventMeta", "Tls", "Worker",
@@ -341,6 +342,14 @@ class Data:
     data: bytes
     #: The media type given when the file was put, e.g. `image/png`.
     content_type: str
+
+
+class ClientClosed(RuntimeError):
+    """Raised by a request on a client after `Kernable.close()`. Workers and listeners of a
+    closed client end their `run()`."""
+
+    def __init__(self):
+        super().__init__("the kernable client is closed")
 
 
 class NotSettled(Exception):
@@ -741,6 +750,35 @@ class _WithGrant(grpc.UnaryUnaryClientInterceptor, grpc.UnaryStreamClientInterce
         return continuation(self._details(details), requests)
 
 
+class _Open(grpc.UnaryUnaryClientInterceptor, grpc.UnaryStreamClientInterceptor,
+            grpc.StreamUnaryClientInterceptor, grpc.StreamStreamClientInterceptor):
+    """Refuses every call once the client is closed: grpcio crashes the process on a call over a
+    closed channel."""
+
+    def __init__(self):
+        self.closed = False
+
+    def _check(self):
+        if self.closed:
+            raise ClientClosed()
+
+    def intercept_unary_unary(self, continuation, details, request):
+        self._check()
+        return continuation(details, request)
+
+    def intercept_unary_stream(self, continuation, details, request):
+        self._check()
+        return continuation(details, request)
+
+    def intercept_stream_unary(self, continuation, details, requests):
+        self._check()
+        return continuation(details, requests)
+
+    def intercept_stream_stream(self, continuation, details, requests):
+        self._check()
+        return continuation(details, requests)
+
+
 class _Deadline(grpc.UnaryUnaryClientInterceptor):
     """Lets every request wait for the connection (e.g. while the kernel restarts) and gives it a
     deadline, unless the call has its own."""
@@ -830,6 +868,9 @@ class Kernable:
             with open(grant) as f:
                 self._channel = grpc.intercept_channel(self._channel, _WithGrant(f.read().strip()))
         self._channel = grpc.intercept_channel(self._channel, _Deadline(timeout_s))
+        # The outermost interceptor: checked before anything touches the channel.
+        self._open = _Open()
+        self._channel = grpc.intercept_channel(self._channel, self._open)
         self._key = Key.from_file(key)
         self._log = _Log(given_url, key, self._key.id)
         self._tenant = tenant
@@ -974,7 +1015,9 @@ class Kernable:
         return ListenerHandle(self._channel, self._key, listener, self._log, self._service)
 
     def close(self) -> None:
-        """Closes the connection now; only needed in a long-running process that discards the client."""
+        """Closes the connection now; only needed in a long-running process that discards the
+        client. Requests afterwards raise `ClientClosed`, and its workers and listeners end."""
+        self._open.closed = True
         self._channel.close()
 
     def _send(self, domain, aggregate_type, aggregate_id, command_type, data, tenant, id, wait, context, timeout_s):
@@ -1369,19 +1412,25 @@ class _Stream:
             outbox: queue.Queue = queue.Queue()
             self._outbox = outbox
             try:
+                self._call = None
                 self._call = self._open(iter(outbox.get, None))
+                if self._stopped:  # stopped while it opened: stop() missed this call
+                    self._call.cancel()
                 outbox.put(self._hello())
                 for msg in self._call:
                     reply = self._on(msg)
                     if reply is not None:
                         outbox.put(reply)
                 reason = "stream ended"
+            except ClientClosed:
+                return
             except grpc.RpcError as err:
                 reason = err.details()
                 refused = err.code() in _REFUSALS
             except Exception as err:  # a failing handler: reconnect and get the event again
                 reason = str(err) or type(err).__name__
-                self._call.cancel()
+                if self._call is not None:
+                    self._call.cancel()
             finally:
                 outbox.put(None)
             attempt = 1 if self._connects > connects else attempt + 1
