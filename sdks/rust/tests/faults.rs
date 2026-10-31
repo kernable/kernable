@@ -13,7 +13,9 @@ use std::{
 };
 
 use common::{TestKernel, eventually};
-use kernable::{Aggregate, Domain, Error, Kernable, NewEvent, Query, Submit, Wait, domain};
+use kernable::{
+    Aggregate, Domain, Error, Kernable, NewEvent, Options, Outcome, Query, Submit, Wait, domain,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -44,7 +46,11 @@ async fn increment(kernable: &Kernable, id: &str, by: i64) {
 }
 
 fn start_worker(kernable: &Kernable, counter: &Aggregate<i64>) -> kernable::Worker {
-    let worker = kernable.worker(counter);
+    start_worker_of(kernable, counter)
+}
+
+fn start_worker_of(kernable: &Kernable, aggregate: &Aggregate<i64>) -> kernable::Worker {
+    let worker = kernable.worker(aggregate);
     let w = worker.clone();
     tokio::spawn(async move { w.run().await });
     worker
@@ -234,5 +240,105 @@ async fn a_new_reactor_with_a_store_starts_at_the_newest_event() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(*seen.lock().unwrap(), [3]);
     reactor.stop();
+    worker.stop();
+}
+
+#[test]
+fn plain_text_goes_only_to_a_kernel_on_this_machine_unless_allowed() {
+    let kernel = TestKernel::new(&["counters.*"], &[]);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let _entered = runtime.enter(); // a channel needs a runtime, though it connects lazily
+    let client = |url: &str, insecure: bool| {
+        let options = Options::new(&kernel.app_key).url(url);
+        Kernable::new(if insecure {
+            options.insecure()
+        } else {
+            options
+        })
+    };
+    for url in [
+        "unix:/tmp/k.sock",
+        "http://127.0.0.1:7233",
+        "localhost:7233",
+        "[::1]:7233",
+        "127.0.0.2:7233",
+    ] {
+        assert!(client(url, false).is_ok(), "{url}");
+    }
+    for url in [
+        "http://10.0.0.5:7233",
+        "kernel.internal:7233",
+        "http://127.0.0.1.example.com:7233",
+    ] {
+        let refused = client(url, false).err();
+        assert!(
+            matches!(&refused, Some(Error::Config(m)) if m.contains("not on this machine")),
+            "{url}: {refused:?}"
+        );
+    }
+    assert!(client("http://10.0.0.5:7233", true).is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_waits_for_the_kernel_to_come_back_until_its_deadline() {
+    let kernel = TestKernel::new(&["counters.*"], &[]);
+    kernel.start().await;
+    let kernable = kernel.client();
+    let (_, counter) = counters();
+    let worker = start_worker(&kernable, &counter);
+    worker.ready().await;
+    kernel.kill();
+    let submit = |id: &str| {
+        Submit::new("counters", "Counter", "c1", "Increment")
+            .data(By { by: 1 })
+            .id(id)
+            .wait(Wait::Committed)
+    };
+    let started = std::time::Instant::now();
+    let refused = kernable
+        .submit(submit("i0").timeout(Duration::from_millis(300)))
+        .await;
+    assert!(
+        matches!(&refused, Err(Error::Status(s)) if s.code() == tonic::Code::DeadlineExceeded),
+        "{refused:?}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
+    // Back while the request waits: it goes through.
+    let waiting = {
+        let kernable = kernable.clone();
+        tokio::spawn(async move { kernable.submit(submit("i1")).await })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    kernel.start().await;
+    let outcome = waiting.await.unwrap();
+    assert!(matches!(outcome, Ok(Outcome::Committed(_))), "{outcome:?}");
+    worker.stop();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_panicking_command_handler_is_rejected_without_its_text() {
+    let kernel = TestKernel::new(&["counters.*"], &[]);
+    kernel.start().await;
+    let kernable = kernel.client();
+    let counters = domain("counters");
+    let leaky = counters.aggregate("Leaky", 0i64);
+    leaky.command("Do", |_, _: serde_json::Value, _cmd, _ctx| {
+        panic!("password hunter2 rejected by db://admin@10.0.0.5")
+    });
+    let worker = start_worker_of(&kernable, &leaky);
+    worker.ready().await;
+    let outcome = kernable
+        .submit(Submit::new("counters", "Leaky", "l1", "Do").wait(Wait::Committed))
+        .await
+        .unwrap();
+    match outcome {
+        Outcome::Rejected(r) => {
+            assert_eq!(
+                (r.code.as_str(), r.message.as_str()),
+                ("handler_error", "handler failed")
+            );
+        }
+        other => panic!("expected a rejection, got {other:?}"),
+    }
     worker.stop();
 }

@@ -38,8 +38,10 @@ mod worker;
 
 use std::{
     collections::HashMap,
+    future::Future,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
+    time::{Duration, Instant},
 };
 
 use ed25519_dalek::SigningKey;
@@ -106,7 +108,13 @@ pub struct Options {
     service: Option<String>,
     context: RequestContext,
     tls: Option<Tls>,
+    insecure: Option<bool>,
+    timeout: Duration,
 }
+
+/// How long a request waits, for the connection and the answer, unless told otherwise: above
+/// the kernel's own submit and settle timeouts.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Every option at its default: the key from `KERNABLE_KEY`, else `app.key` in the current
 /// directory; the service from `KERNABLE_SERVICE`, if set; TLS from `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`, if set.
@@ -120,6 +128,8 @@ impl Default for Options {
             service: None,
             context: RequestContext::default(),
             tls: None,
+            insecure: None,
+            timeout: DEFAULT_TIMEOUT,
         }
     }
 }
@@ -179,6 +189,22 @@ impl Options {
         self.tls = Some(tls);
         self
     }
+
+    /// Allows plain text to a kernel that is not on this machine. Without TLS, grants, signed
+    /// requests and vault values cross the network readable, so [`Kernable::new`] refuses such
+    /// a URL unless this is set. Default: `KERNABLE_INSECURE=1`, else not allowed.
+    pub fn insecure(mut self) -> Options {
+        self.insecure = Some(true);
+        self
+    }
+
+    /// How long a request (`submit`, `query`, files, cache, `apply`) waits in all: for the
+    /// connection, e.g. while the kernel restarts, and for its answer. Default 60 s. A
+    /// connection the network dropped silently is noticed within 40 s by keepalive pings.
+    pub fn timeout(mut self, timeout: Duration) -> Options {
+        self.timeout = timeout;
+        self
+    }
 }
 
 /// The options for the key file at a path, with every other option at its default.
@@ -214,9 +240,55 @@ pub(crate) struct Client {
     key_id: String,
     grant: Option<MetadataValue<tonic::metadata::Ascii>>,
     log: log::Log,
+    timeout: Duration,
 }
 
 impl Client {
+    /// A unary call of `message` (sent with the grant) through `call`. While the kernel cannot
+    /// be reached it waits and tries again, but only after failures to connect: the request
+    /// never left, so a write cannot run twice. Gives up after `timeout` (default: the
+    /// client's) in all.
+    async fn call<T: Clone, R, Fut>(
+        &self,
+        timeout: Option<Duration>,
+        message: T,
+        mut call: impl FnMut(tonic::Request<T>) -> Fut,
+    ) -> Result<R, tonic::Status>
+    where
+        Fut: Future<Output = Result<tonic::Response<R>, tonic::Status>>,
+    {
+        let timeout = timeout.unwrap_or(self.timeout);
+        let deadline = Instant::now() + timeout;
+        let mut pause = Duration::from_millis(50);
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let mut request = self.request(message.clone());
+            request.set_timeout(left);
+            let result = match tokio::time::timeout(left, call(request)).await {
+                Ok(result) => result,
+                Err(_) => Err(tonic::Status::deadline_exceeded(format!(
+                    "no answer from the kernel within {} ms",
+                    timeout.as_millis()
+                ))),
+            };
+            match result {
+                Ok(response) => return Ok(response.into_inner()),
+                Err(status) if not_connected(&status) && Instant::now() + pause < deadline => {
+                    tokio::time::sleep(pause).await;
+                    pause = (pause * 2).min(Duration::from_secs(1));
+                }
+                Err(status) if not_connected(&status) => {
+                    return Err(tonic::Status::deadline_exceeded(format!(
+                        "no connection to the kernel within {} ms: {}",
+                        timeout.as_millis(),
+                        status.message()
+                    )));
+                }
+                Err(status) => return Err(status),
+            }
+        }
+    }
+
     /// `message` as a request that carries the grant.
     fn request<T>(&self, message: T) -> tonic::Request<T> {
         let mut request = tonic::Request::new(message);
@@ -291,6 +363,15 @@ impl Kernable {
             Some(tls) => Some(tls),
             None => tls_from_env()?,
         };
+        let insecure = options
+            .insecure
+            .unwrap_or_else(|| std::env::var("KERNABLE_INSECURE").is_ok_and(|v| v == "1"));
+        if tls.is_none() && !insecure && !local(&url) {
+            return Err(Error::Config(format!(
+                "{url} is not on this machine: connect with TLS (Options::tls), or allow plain \
+                 text with Options::insecure"
+            )));
+        }
         let channel = transport::connect_lazy(&url, tls.as_ref())
             .map_err(|e| Error::Config(format!("kernel {url}: {e}")))?;
         let service = options
@@ -306,6 +387,7 @@ impl Kernable {
                 key: Arc::new(key),
                 grant,
                 log,
+                timeout: options.timeout,
             },
             tenant: options.tenant,
             context: options.context,
@@ -395,8 +477,13 @@ impl Kernable {
             sig: Some(sig),
             protocol: PROTOCOL,
         };
-        let mut memberships = MembershipServiceClient::new(self.client.channel.clone());
-        memberships.apply(self.client.request(request)).await?;
+        let memberships = MembershipServiceClient::new(self.client.channel.clone());
+        self.client
+            .call(None, request, |r| {
+                let mut memberships = memberships.clone();
+                async move { memberships.apply(r).await }
+            })
+            .await?;
         Ok(())
     }
 
@@ -485,11 +572,14 @@ impl Kernable {
             vault: sealed.values,
             listener: handling(),
         };
-        let mut commands = CommandServiceClient::new(self.client.channel.clone());
-        Ok(commands
-            .submit(self.client.request(request))
-            .await?
-            .into_inner())
+        let commands = CommandServiceClient::new(self.client.channel.clone());
+        Ok(self
+            .client
+            .call(s.timeout, request, |r| {
+                let mut commands = commands.clone();
+                async move { commands.submit(r).await }
+            })
+            .await?)
     }
 
     /// Asks the read model that answers `domain.type` and returns its answer, deserialized as
@@ -519,11 +609,14 @@ impl Kernable {
         };
         request.client_sig = Some(self.client.sign(&signing::query_message(&request)));
         request.listener = handling();
-        let mut queries = QueryServiceClient::new(self.client.channel.clone());
-        let res = queries
-            .query(self.client.request(request))
-            .await?
-            .into_inner();
+        let queries = QueryServiceClient::new(self.client.channel.clone());
+        let res = self
+            .client
+            .call(query.timeout, request, |r| {
+                let mut queries = queries.clone();
+                async move { queries.query(r).await }
+            })
+            .await?;
         match res.outcome {
             Some(query_result::Outcome::Response(r)) => Ok(serde_json::from_value(decode(&r))?),
             Some(query_result::Outcome::Rejected(r)) => {
@@ -656,6 +749,7 @@ pub struct Submit {
     id: Option<String>,
     context: Option<RequestContext>,
     wait: Wait,
+    timeout: Option<Duration>,
 }
 
 impl Submit {
@@ -677,6 +771,7 @@ impl Submit {
             id: None,
             context: None,
             wait: Wait::Settled,
+            timeout: None,
         }
     }
 
@@ -714,6 +809,12 @@ impl Submit {
         self.wait = wait;
         self
     }
+
+    /// How long to wait for the connection and the outcome; default [`Options::timeout`].
+    pub fn timeout(mut self, timeout: Duration) -> Submit {
+        self.timeout = Some(timeout);
+        self
+    }
 }
 
 /// A query to ask with [`Kernable::query`], built with methods that each return the changed
@@ -727,6 +828,7 @@ pub struct Query {
     tenant: Option<String>,
     context: Option<RequestContext>,
     min_position: u64,
+    timeout: Option<Duration>,
 }
 
 impl Query {
@@ -739,6 +841,7 @@ impl Query {
             tenant: None,
             context: None,
             min_position: 0,
+            timeout: None,
         }
     }
 
@@ -768,6 +871,12 @@ impl Query {
     /// committed submit).
     pub fn min_position(mut self, position: u64) -> Query {
         self.min_position = position;
+        self
+    }
+
+    /// How long to wait for the connection and the answer; default [`Options::timeout`].
+    pub fn timeout(mut self, timeout: Duration) -> Query {
+        self.timeout = Some(timeout);
         self
     }
 }
@@ -867,4 +976,44 @@ impl StoredEvent {
             request: RequestContext::from_wire(e.context.as_ref()),
         }
     }
+}
+
+/// Whether `status` says the connection could not be made: the request was not sent.
+fn not_connected(status: &tonic::Status) -> bool {
+    use std::io::ErrorKind::{AddrNotAvailable, ConnectionRefused, NotFound, TimedOut};
+    let mut source = std::error::Error::source(status);
+    while let Some(e) = source {
+        if let Some(io) = e.downcast_ref::<std::io::Error>() {
+            return matches!(
+                io.kind(),
+                ConnectionRefused | NotFound | AddrNotAvailable | TimedOut
+            );
+        }
+        if e.to_string().contains("error trying to connect") {
+            return true;
+        }
+        source = e.source();
+    }
+    false
+}
+
+/// Whether `url` is a Unix socket or a loopback address: plain text never leaves the machine.
+fn local(url: &str) -> bool {
+    if url.starts_with("unix:") {
+        return true;
+    }
+    let host = transport::tcp_addr(url);
+    let host = host.rsplit_once(':').map_or(host, |(host, port)| {
+        if port.chars().all(|c| c.is_ascii_digit()) {
+            host
+        } else {
+            url
+        }
+    });
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host == "localhost"
+        || host == "::1"
+        || host.strip_prefix("127.").is_some_and(|rest| {
+            rest.split('.').count() == 3 && rest.split('.').all(|p| p.parse::<u8>().is_ok())
+        })
 }

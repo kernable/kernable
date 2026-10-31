@@ -66,6 +66,16 @@ pub async fn connect(addr: &str) -> Result<Channel, Error> {
     }
 }
 
+/// Pings on the connection, also when idle, so one the network dropped without a word (a dead
+/// host, a NAT that forgot it) ends within 40 s; and a bound on connecting.
+fn sdk_endpoint(endpoint: Endpoint) -> Endpoint {
+    endpoint
+        .http2_keep_alive_interval(std::time::Duration::from_secs(30))
+        .keep_alive_timeout(std::time::Duration::from_secs(10))
+        .keep_alive_while_idle(true)
+        .connect_timeout(std::time::Duration::from_secs(10))
+}
+
 /// A channel to a kernel that connects on first use and again after the connection drops, so
 /// a process can start before the kernel and survive its restarts (SDK clients). With `tls`,
 /// `addr` is `host:port` over mutual TLS. Needs a tokio runtime.
@@ -80,31 +90,35 @@ pub fn connect_lazy(
                 std::fs::read(&tls.cert)?,
                 std::fs::read(&tls.key)?,
             ));
-        return Ok(
-            Endpoint::from_shared(format!("https://{}", tcp_addr(addr)))?
-                .tls_config(config)?
-                .connect_lazy(),
-        );
+        return Ok(sdk_endpoint(Endpoint::from_shared(format!(
+            "https://{}",
+            tcp_addr(addr)
+        ))?)
+        .tls_config(config)?
+        .connect_lazy());
     }
     match unix_path(addr) {
         #[cfg(unix)]
         Some(path) => {
             let path = path.to_owned();
             Ok(
-                Endpoint::from_static("http://kernable").connect_with_connector_lazy(service_fn(
-                    move |_: Uri| {
+                sdk_endpoint(Endpoint::from_static("http://kernable")).connect_with_connector_lazy(
+                    service_fn(move |_: Uri| {
                         let path = path.clone();
                         async move {
                             let stream = tokio::net::UnixStream::connect(path).await?;
                             Ok::<_, std::io::Error>(TokioIo::new(stream))
                         }
-                    },
-                )),
+                    }),
+                ),
             )
         }
         #[cfg(not(unix))]
         Some(_) => Err("unix sockets need Unix".into()),
-        None => Ok(Endpoint::from_shared(format!("http://{}", tcp_addr(addr)))?.connect_lazy()),
+        None => Ok(
+            sdk_endpoint(Endpoint::from_shared(format!("http://{}", tcp_addr(addr)))?)
+                .connect_lazy(),
+        ),
     }
 }
 

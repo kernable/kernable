@@ -73,14 +73,27 @@ impl Files {
         content_type: &str,
     ) -> Result<(), Error> {
         let request = self.request("put", domain, key, data.into(), content_type);
-        self.service().put_data(request).await?;
+        let service = self.service();
+        self.client
+            .call(None, request, |r| {
+                let mut service = service.clone();
+                async move { service.put_data(r).await }
+            })
+            .await?;
         Ok(())
     }
 
     /// The file `key` of `domain` (granted `data_read`); `None` if there is none.
     pub async fn get(&self, domain: &str, key: &str) -> Result<Option<Data>, Error> {
         let request = self.request("get", domain, key, Vec::new(), "");
-        let res = self.service().get_data(request).await?.into_inner();
+        let service = self.service();
+        let res = self
+            .client
+            .call(None, request, |r| {
+                let mut service = service.clone();
+                async move { service.get_data(r).await }
+            })
+            .await?;
         Ok(res.found.then_some(Data {
             data: res.data,
             content_type: res.content_type,
@@ -90,12 +103,15 @@ impl Files {
     /// Deletes the file `key` of `domain` (granted `data_write`); whether there was one.
     pub async fn delete(&self, domain: &str, key: &str) -> Result<bool, Error> {
         let request = self.request("delete", domain, key, Vec::new(), "");
-        Ok(self
-            .service()
-            .delete_data(request)
-            .await?
-            .into_inner()
-            .found)
+        let service = self.service();
+        let res = self
+            .client
+            .call(None, request, |r| {
+                let mut service = service.clone();
+                async move { service.delete_data(r).await }
+            })
+            .await?;
+        Ok(res.found)
     }
 
     fn service(&self) -> DataServiceClient<tonic::transport::Channel> {
@@ -111,7 +127,7 @@ impl Files {
         key: &str,
         data: Vec<u8>,
         content_type: &str,
-    ) -> tonic::Request<DataRequest> {
+    ) -> DataRequest {
         let mut r = DataRequest {
             tenant_id: self.tenant.clone(),
             domain: domain.to_owned(),
@@ -124,7 +140,7 @@ impl Files {
             context: Some(self.context.to_wire()),
         };
         r.client_sig = Some(self.client.sign(&signing::data_message(op, &r)));
-        self.client.request(r)
+        r
     }
 }
 
@@ -175,26 +191,42 @@ impl Cache {
         // A TTL under a millisecond would mean none on the wire.
         let ttl_ms = ttl.map_or(0, |t| (t.as_millis() as u64).max(1));
         let request = self.request("set", domain, key, value.into(), ttl_ms);
-        self.service().set_cache(request).await?;
+        let service = self.service();
+        self.client
+            .call(None, request, |r| {
+                let mut service = service.clone();
+                async move { service.set_cache(r).await }
+            })
+            .await?;
         Ok(())
     }
 
     /// The value `key` of `domain`; `None` if there is none or it expired.
     pub async fn get(&self, domain: &str, key: &str) -> Result<Option<Vec<u8>>, Error> {
         let request = self.request("get", domain, key, Vec::new(), 0);
-        let res = self.service().get_cache(request).await?.into_inner();
+        let service = self.service();
+        let res = self
+            .client
+            .call(None, request, |r| {
+                let mut service = service.clone();
+                async move { service.get_cache(r).await }
+            })
+            .await?;
         Ok(res.found.then_some(res.value))
     }
 
     /// Deletes the value `key` of `domain`; whether there was one.
     pub async fn delete(&self, domain: &str, key: &str) -> Result<bool, Error> {
         let request = self.request("delete", domain, key, Vec::new(), 0);
-        Ok(self
-            .service()
-            .delete_cache(request)
-            .await?
-            .into_inner()
-            .found)
+        let service = self.service();
+        let res = self
+            .client
+            .call(None, request, |r| {
+                let mut service = service.clone();
+                async move { service.delete_cache(r).await }
+            })
+            .await?;
+        Ok(res.found)
     }
 
     fn service(&self) -> CacheServiceClient<tonic::transport::Channel> {
@@ -208,7 +240,7 @@ impl Cache {
         key: &str,
         value: Vec<u8>,
         ttl_ms: u64,
-    ) -> tonic::Request<CacheRequest> {
+    ) -> CacheRequest {
         let mut r = CacheRequest {
             tenant_id: self.tenant.clone(),
             domain: domain.to_owned(),
@@ -221,6 +253,6 @@ impl Cache {
             context: Some(self.context.to_wire()),
         };
         r.client_sig = Some(self.client.sign(&signing::cache_message(op, &r)));
-        self.client.request(r)
+        r
     }
 }

@@ -197,12 +197,25 @@ impl Worker {
                     let (client, tx, fail) = (client.clone(), tx.clone(), fail.clone());
                     tokio::spawn(async move {
                         let outcome = match aggregate {
-                            Some(aggregate) => tokio::task::spawn_blocking(move || {
-                                let outcome = aggregate.execute(&x);
-                                (x, outcome)
-                            })
-                            .await
-                            .expect("execute does not panic"),
+                            Some(aggregate) => {
+                                let execute = x.clone();
+                                match tokio::task::spawn_blocking(move || {
+                                    aggregate.execute(&execute)
+                                })
+                                .await
+                                {
+                                    Ok(outcome) => (x, outcome),
+                                    // A panic outside the handlers' own guard (an eraser, say)
+                                    // still answers the command.
+                                    Err(e) => {
+                                        let text = match e.try_into_panic() {
+                                            Ok(panic) => crate::domain::panic_text(panic.as_ref()),
+                                            Err(e) => e.to_string(),
+                                        };
+                                        (x, Err(Failure::Error(text)))
+                                    }
+                                }
+                            }
                             None => {
                                 let reason = Rejected::new(format!(
                                     "no handler for {} on {}.{}",
@@ -277,7 +290,17 @@ fn reply(
         }
         Err(Failure::Schema(reason)) => return Err(reason),
         Err(Failure::Rejected(r)) => r,
-        Err(Failure::Error(message)) => Rejected::new(message).code("handler_error"),
+        Err(Failure::Error(message)) => {
+            // An unexpected error's text may hold personal data or internals, and a rejection is
+            // kept for good: it says only that the handler failed; the log has the rest.
+            client.log.error("worker", || {
+                format!(
+                    "{}.{} {}/{} failed: {message}",
+                    cmd.domain, cmd.command_type, cmd.aggregate_type, cmd.aggregate_id
+                )
+            });
+            Rejected::new("handler failed").code("handler_error")
+        }
     };
     let reason = reason.to_wire();
     let worker_sig = client.sign(&signing::rejection_message(&cmd.command_id, &reason));
