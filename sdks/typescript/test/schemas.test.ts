@@ -100,10 +100,23 @@ test("listener types without a domain are the listener's own", () => {
   // The own domain's event schemas apply without `use`.
   assert.deepEqual([...Carts.domains.keys()], ["Shop", "Identity"]);
   assert.deepEqual([Carts.options.order, Carts.options.start], [0, 0]);
-  assert.deepEqual([shop.reactor("mails").options.order, shop.reactor("mails").options.start], [10, undefined]);
+  const mails = shop.reactor("mails");
+  assert.deepEqual([mails.options.order, mails.options.start], [10, undefined]);
 
   assert.throws(() => Carts.on("*", () => {}), /listen to a type/);
   assert.throws(() => Carts.on("a.b.c", () => {}), /listen to a type/);
   assert.throws(() => Carts.query("Identity.*", () => null), /answer a query type/);
   assert.throws(() => Carts.middleware({ types: ["a.b.c"] }, () => {}), /check `\*`/);
+});
+
+test("a domain's aggregates and listeners have names of their own", () => {
+  const shop = domain("shop");
+  shop.aggregate("cart", 0);
+  shop.readModel("carts");
+  assert.throws(() => shop.aggregate("cart", 1), /shop has an aggregate cart already/);
+  assert.throws(() => shop.readModel("carts"), /shop has a listener carts already/);
+  assert.throws(() => shop.reactor("carts"), /shop has a listener carts already/);
+  // Another domain, or the other kind, may use the name.
+  assert.ok(domain("billing").readModel("carts"));
+  assert.ok(shop.reactor("cart"));
 });

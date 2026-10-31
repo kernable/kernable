@@ -162,16 +162,36 @@ export interface CommandMeta {
   tenant: string;
 }
 
-/** What a command handler gets besides state, data and `CommandMeta` (its fourth argument, `ctx`). */
-export interface CommandContext {
+/**
+ * What a command handler gets besides state, data and `CommandMeta` (its fourth argument, `ctx`).
+ * The worker creates it; create one yourself to call a handler directly, e.g. in a unit test with
+ * `Aggregate.handle`: `new CommandContext("close-1", {}, new Date(0))`.
+ */
+export class CommandContext {
+  /** The command's ID, as in `CommandMeta.commandId`: what `id()` derives its IDs from. */
+  readonly commandId: string;
   /** Who sends the command: check permissions here. */
   request: RequestContext;
   /** When the kernel received the command: the same every time the command runs. Use it instead of `new Date()`. */
-  now(): Date;
+  readonly now: () => Date;
   /** A new ID that is the same every time the command runs (1st call, 2nd call, ...). Use it instead of random IDs. */
-  id(): string;
+  readonly id: () => string;
   /** When the kernel hands the command to another worker if this one has not answered. */
   deadline: Date;
+
+  /**
+   * A context for command `commandId`, sent with `request` and received at `receivedAt` (default:
+   * the epoch); its deadline is 30 s after `receivedAt` unless given.
+   */
+  constructor(commandId: string, request: RequestContext = {}, receivedAt = new Date(0), deadline = new Date(receivedAt.getTime() + 30_000)) {
+    const at = receivedAt.getTime();
+    let ids = 0;
+    this.commandId = commandId;
+    this.request = request;
+    this.now = () => new Date(at);
+    this.id = () => derivedId(commandId, ids++);
+    this.deadline = deadline;
+  }
 }
 
 /** What a query handler gets about the query besides its data (its second argument, `qry`). */
@@ -292,8 +312,12 @@ export interface MiddlewareOptions {
 /** What a listener handler gets besides the event's data and `StoredEventMeta` (its third argument, `ctx`). */
 export interface ListenerContext {
   /**
-   * The event was committed before the listener connected (this connect): it is being replayed.
-   * A reactor can skip side effects that only matter for new events.
+   * The event was committed before this connection began: a read model rebuilding from the
+   * start, and equally the backlog a reactor catches up on after a restart or a lost connection.
+   * A reactor must not skip side effects because of it (those events are new to it); submit
+   * follow-ups with fixed command IDs instead, so they are safe to repeat. Use it to skip work
+   * that only matters live, e.g. a notification about something long past in a listener that
+   * starts at 0.
    */
   replaying: boolean;
   /**
@@ -344,6 +368,8 @@ export interface ApplyContext {
 export interface StoredEventMeta extends EventMeta {
   /** The event's global position: its place in the one order of all domains and tenants. */
   position: number;
+  /** When the kernel committed the event. */
+  createdAt: Date;
   /**
    * Version of the payload format. Listeners get `data` upcast to the version they know (see
    * `Domain.event`), unless the handler is `raw`.
@@ -407,6 +433,13 @@ export interface AggregateOptions {
   schema?: string;
 }
 
+/**
+ * A field kept in the vault (`EventSchema.personal`), as a listener reads it: `null` after its
+ * subject was erased, or for a reader whose key is not granted `vault_read`. Type such fields
+ * with it, so handlers deal with the `null`: `data: { email: Personal<string> }`.
+ */
+export type Personal<T> = T | null;
+
 /** The name of the listener whose handler is running, for requests sent from it. */
 const handling = new AsyncLocalStorage<string>();
 
@@ -422,6 +455,7 @@ type Upcast = (data: any) => unknown;
  * shopDomain.event("ItemAdded", 2).upcast(1, (d) => ({ sku: d.sku, count: d.qty }));
  * identityDomain.event("AccountRegistered", 1).personal(["name", "email"], (_d, id) => id);
  * identityDomain.event("AccountErased", 1).erases((_d, id) => id);
+ * accounts.on("AccountRegistered", (data: { name: Personal<string>; email: Personal<string> }) => { … });
  * ```
  */
 export class EventSchema {
@@ -660,10 +694,12 @@ export class Domain {
    * Defines an aggregate type `name` (`cart`) of this domain, with the state `initial` every
    * aggregate of it starts from: `shopDomain.aggregate("cart", { items: 0 })`. Add its event
    * appliers and command handlers with `apply` and `command`; run it with `kernable.worker(cart)`
-   * or `kernable.app`. `options`: snapshots, see `AggregateOptions`.
+   * or `kernable.app`. `options`: snapshots, see `AggregateOptions`. Throws if the domain has an
+   * aggregate `name` already.
    */
   aggregate<S>(name: string, initial: S, options?: AggregateOptions): Aggregate<S> {
-    const aggregate = new Aggregate(this.name, name, initial, options, this.events);
+    if (this.aggregates.some((a) => a.name === name)) throw new Error(`${this.name} has an aggregate ${name} already`);
+    const aggregate = new Aggregate(this.name, name, initial, options, this.events, this.commands);
     this.aggregates.push(aggregate);
     return aggregate;
   }
@@ -673,12 +709,11 @@ export class Domain {
    * answers queries from it (`query`). Without a store it is kept in memory and rebuilt from
    * the first event on every start (defaults: order 0, start 0); with `options.store` it
    * continues where it left off. `options` override the defaults, see `ListenerOptions`. Run it
-   * with `kernable.listener(definition)` or `kernable.app`.
+   * with `kernable.listener(definition)` or `kernable.app`. Throws if the domain has a listener
+   * `name` already.
    */
   readModel(name: string, options: ListenerOptions = {}): Listener {
-    const listener = new Listener(this, name, { order: 0, start: 0, ...options });
-    this.listeners.push(listener);
-    return listener;
+    return this.listen(new Listener(this, name, { order: 0, start: 0, ...options }));
   }
 
   /**
@@ -688,10 +723,16 @@ export class Domain {
    * it existed. Submit follow-ups with a fixed command `id` and `ctx.follow()`, so a redelivered
    * event is harmless. A settling submit from its handler waits for the listeners before it (the
    * read models), not for the reactor itself, which handles one event at a time. Run it with
-   * `kernable.listener(definition)` or `kernable.app`.
+   * `kernable.listener(definition)` or `kernable.app`. Throws if the domain has a listener `name`
+   * already.
    */
   reactor(name: string, options: ListenerOptions = {}): Listener {
-    const listener = new Listener(this, name, { order: 10, ...options });
+    return this.listen(new Listener(this, name, { order: 10, ...options }));
+  }
+
+  /** Adds `listener`, unless the domain has one of its name: a read model or a reactor. */
+  private listen(listener: Listener): Listener {
+    if (this.listeners.some((l) => l.name === listener.name)) throw new Error(`${this.name} has a listener ${listener.name} already`);
     this.listeners.push(listener);
     return listener;
   }
@@ -745,11 +786,21 @@ export class Aggregate<S> {
   readonly handlers = new Map<string, Handle<S>>();
   /** The domain's event schemas. */
   readonly events: Map<string, EventSchema>;
+  /** The domain's command schemas: which fields of a command are personal. */
+  readonly commands: Map<string, CommandSchema>;
 
-  constructor(domain: string, name: string, initial: S, options: AggregateOptions = {}, events = new Map<string, EventSchema>()) {
+  constructor(
+    domain: string,
+    name: string,
+    initial: S,
+    options: AggregateOptions = {},
+    events = new Map<string, EventSchema>(),
+    commands = new Map<string, CommandSchema>(),
+  ) {
     this.domain = domain;
     this.name = name;
     this.events = events;
+    this.commands = commands;
     this.initial = initial;
     this.snapshotEvery = options.snapshotEvery ?? 100;
     this.schema = options.schema ?? "1";
@@ -781,6 +832,21 @@ export class Aggregate<S> {
   ): this {
     this.handlers.set(commandType, fn);
     return this;
+  }
+
+  /**
+   * Runs the `commandType` handler on a copy of `state`, as a worker does, e.g. in a unit test,
+   * and returns the events it produces: `await cart.handle(state, "AddItem", { sku: "apple", qty: 2 }, new CommandContext("c-1"))`.
+   * The handler's `CommandMeta` has the command ID of `ctx`, this aggregate's domain and name,
+   * and an empty aggregate ID and tenant; `data` goes through JSON as it would on the wire.
+   * Rejects with the handler's `Rejected` (or other error), or with an error if there is no
+   * handler for `commandType`.
+   */
+  async handle(state: S, commandType: string, data: unknown, ctx: CommandContext): Promise<NewEvent[]> {
+    const handler = this.handlers.get(commandType);
+    if (!handler) throw new Error(`no handler for ${commandType} on ${this.name}`);
+    const cmd: CommandMeta = { commandId: ctx.commandId, type: commandType, domain: this.domain, aggregateType: this.name, aggregateId: "", tenant: "" };
+    return handler(structuredClone(state), decode(encode(data)), cmd, ctx);
   }
 
   /** The payload version this aggregate writes `type` events at. */
@@ -1889,8 +1955,9 @@ export class ListenerHandle {
   }
 
   /**
-   * The listener's store (`ListenerOptions.store`), once `run()` opened it; throws before, or if
-   * the listener has no store. Handlers get it as `ctx.store`.
+   * The listener's store (`ListenerOptions.store`) while `run()` runs: it opens the store and
+   * closes it when it ends. Throws outside of that, or if the listener has no store. Handlers get
+   * it as `ctx.store`.
    */
   get store(): Store {
     if (!this.stored) throw new Error(`listener ${this.listener.name} has no store, or run() has not opened it yet`);
@@ -1901,9 +1968,19 @@ export class ListenerHandle {
    * Opens the store (if any; trying again while it cannot be opened, e.g. on a full disk),
    * connects, and processes events, queries and checks until `stop()`, reconnecting after the
    * last handled event when the stream drops or a handler throws (after
-   * `ListenerOptions.reconnectMs`). Resolves after `stop()`.
+   * `ListenerOptions.reconnectMs`). Resolves after `stop()`, having closed the store.
    */
   async run(): Promise<void> {
+    try {
+      await this.runUntilStopped();
+    } finally {
+      // Stopped: the store is released; a later run() opens it again.
+      this.stored?.close();
+      this.stored = undefined;
+    }
+  }
+
+  private async runUntilStopped(): Promise<void> {
     const options = this.listener.options;
     let start = options.start;
     if (options.store && !this.stored) {
@@ -2018,7 +2095,8 @@ export class ListenerHandle {
       this.stored?.begin();
       try {
         await this.handleBatch(m.batch);
-        this.stored?.commit(m.batch.up_to);
+        // After an erasure, nothing the handlers removed may stay in the store's files.
+        this.stored?.commit(m.batch.up_to, m.batch.events.some((e) => e.erases));
       } catch (err) {
         this.stored?.rollback();
         if (this.stored) this.position = this.stored.committed;
@@ -2087,7 +2165,8 @@ export class ListenerHandle {
       if (!handler) throw new Rejected(`no handler for ${q.domain}.${q.query_type}`, "unknown_query");
       const qry: QueryMeta = { queryId: q.query_id, type: q.query_type, domain: q.domain, tenant: q.tenant_id };
       const result = await handler(decode(q.payload), qry, { request: fromWireContext(q.context), store: this.stored });
-      return { response: encode(result) };
+      // No answer is `null`, not `{}` as for commands and events without data.
+      return { response: Buffer.from(JSON.stringify(result ?? null)) };
     } catch (err) {
       return {
         rejected: err instanceof Rejected ? { code: err.code, message: err.message } : { code: "handler_error", message: String(err) },
@@ -2264,7 +2343,6 @@ export class Worker {
         data: unseal(decode(e.payload), x.vault).data,
       }));
       const state = agg.fold(history, from);
-      let ids = 0;
       const meta: CommandMeta = {
         commandId: cmd.command_id,
         type: cmd.command_type,
@@ -2273,14 +2351,10 @@ export class Worker {
         aggregateId: cmd.aggregate_id,
         tenant: cmd.tenant_id,
       };
-      const ctx: CommandContext = {
-        request: fromWireContext(cmd.context),
-        now: () => new Date(x.received_at),
-        id: () => derivedId(cmd.command_id, ids++),
-        deadline: new Date(x.deadline),
-      };
+      const ctx = new CommandContext(cmd.command_id, fromWireContext(cmd.context), new Date(x.received_at), new Date(x.deadline));
       // A copy: a handler that changes it must not change the snapshot, nor `initial`.
       const produced = await agg.handlers.get(cmd.command_type)!(structuredClone(state), unseal(decode(cmd.payload), x.vault).data, meta, ctx);
+      inClear(agg, cmd.command_type, produced);
       events = produced.map((e) => {
         const def = agg.events.get(e.type);
         const sealed = seal(e.data, def?.vault, cmd.aggregate_id);
@@ -2327,6 +2401,29 @@ export class Worker {
     const snapshot = { version, schema: agg.schema, state: encode(after) };
     const message = snapshotMessage(cmd, version, snapshot.schema, snapshot.state);
     return { ...snapshot, worker_sig: this.key.sign(message) };
+  }
+}
+
+/**
+ * Rejects the command (`personal_in_clear`) if an event carries a field that the command
+ * declares personal but the event does not: forgotten on the event, the value would go into the
+ * signed log in clear, for good.
+ */
+function inClear(agg: Aggregate<any>, commandType: string, events: NewEvent[]): void {
+  const personal = agg.commands.get(commandType)?.vault.personal.flatMap((p) => p.fields) ?? [];
+  if (personal.length === 0) return;
+  for (const e of events) {
+    if (e.data === null || typeof e.data !== "object") continue;
+    const data = e.data as Record<string, unknown>;
+    const sealed = new Set(agg.events.get(e.type)?.vault.personal.flatMap((p) => p.fields));
+    for (const field of personal) {
+      if (data[field] !== undefined && data[field] !== null && !sealed.has(field)) {
+        throw new Rejected(
+          `${commandType} declares ${field} personal, but ${e.type} does not: it would be stored in clear (declare it with Domain.event(${JSON.stringify(e.type)}, …).personal)`,
+          "personal_in_clear",
+        );
+      }
+    }
   }
 }
 
@@ -2484,6 +2581,7 @@ function toStored(e: WireEvent, vault?: WireVaultValue[]): StoredEvent {
   return {
     redacted,
     position: e.global_position,
+    createdAt: new Date(e.created_at),
     tenant: e.tenant_id,
     domain: e.domain,
     aggregateType: e.aggregate_type,

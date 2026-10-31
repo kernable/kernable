@@ -222,6 +222,7 @@ handler.
 - `data: Value`: The payload; `StoredEvent::parse` deserializes it.
 - `redacted: Vec<String>`: Fields kept in the vault whose value is not here (`null` in `data`): erased, or not readable with this key (granted `vault_read`).
 - `command_id: String`: The command that caused the event.
+- `created_at: Timestamp`: When the kernel committed the event.
 - `request: RequestContext`: The request context of the command that caused the event.
 - `fn parse<D: DeserializeOwned>(&self) -> Result<D, serde_json::Error>`: `data` as a `D`, e.g. `let item: ItemAdded = event.parse()?;`.
 
@@ -269,9 +270,9 @@ aggregates, read models and reactors created through it, so that an app runs all
 - `fn name(&self) -> &str`: The domain's name, e.g. `shop`.
 - `fn event(&self, event_type: &str, schema: u32) -> EventSchema`: Declares that this domain writes `event_type` events at version `schema`, with an `upcast` per older version, and which of their fields the vault keeps; see `EventSchema`. The domain's aggregates and listeners use it; other domains' listeners get it with `Listener::with_domain`. Types not declared are at version 1. Panics if `event_type` is qualified or `schema` is 0.
 - `fn command(&self, command_type: &str) -> CommandSchema`: Declares which fields of `command_type` commands the vault keeps (`personal`, `secret`); see `CommandSchema`. Clients that submit them need the domain: `kernable.with_domain(&domain)`. Panics if `command_type` is qualified.
-- `fn aggregate<S: State>(&self, name: &str, initial: S) -> Aggregate<S>`: An aggregate of this domain named `name` (lowercase by convention, like `cart`), whose state starts as `initial`; see `Aggregate`. Example: `let cart_aggregate = shop_domain.aggregate("cart", Cart::default());`.
-- `fn read_model(&self, name: &str) -> Listener`: A read model of this domain named `name`: builds a view from events and answers queries from it; see `Listener`. Kept in memory and rebuilt from the first event on every start (order 0; `Listener::store` keeps it in a file instead). Run it with `crate::Kernable::listener` or in an app. Example: `let carts_readmodel = shop_domain.read_model("carts");`.
-- `fn reactor(&self, name: &str) -> Listener`: A reactor of this domain named `name`: triggers side effects and follow-up commands; see `Listener`. It starts at the newest event when it is new, then resumes after the last acknowledged event (order 10). A settling submit from its handler waits for the listeners before it (the read models), not for the reactor itself, which handles one event at a time. Submit with a fixed ID and `ctx.follow()`, so a redelivered event does not run the command twice. Run it with `crate::Kernable::listener` or in an app.
+- `fn aggregate<S: State>(&self, name: &str, initial: S) -> Aggregate<S>`: An aggregate of this domain named `name` (lowercase by convention, like `cart`), whose state starts as `initial`; see `Aggregate`. Example: `let cart_aggregate = shop_domain.aggregate("cart", Cart::default());`. Panics if the domain has an aggregate named `name` already.
+- `fn read_model(&self, name: &str) -> Listener`: A read model of this domain named `name`: builds a view from events and answers queries from it; see `Listener`. Kept in memory and rebuilt from the first event on every start (order 0; `Listener::store` keeps it in a file instead). Run it with `crate::Kernable::listener` or in an app. Example: `let carts_readmodel = shop_domain.read_model("carts");`. Panics if the domain has a read model or reactor named `name` already.
+- `fn reactor(&self, name: &str) -> Listener`: A reactor of this domain named `name`: triggers side effects and follow-up commands; see `Listener`. It starts at the newest event when it is new, then resumes after the last acknowledged event (order 10). A settling submit from its handler waits for the listeners before it (the read models), not for the reactor itself, which handles one event at a time. Submit with a fixed ID and `ctx.follow()`, so a redelivered event does not run the command twice. Run it with `crate::Kernable::listener` or in an app. Panics if the domain has a read model or reactor named `name` already.
 - `fn schema_of(&self, event_type: &str) -> u32`: The payload version this domain writes `event_type` events at.
 
 ### domain()
@@ -441,6 +442,7 @@ What a listener handler gets about an event besides its payload (the `evt` of
 - `aggregate_id: String`
 - `command_id: String`: The command that caused the event.
 - `position: u64`: Global position of the event.
+- `created_at: Timestamp`: When the kernel committed the event.
 - `schema: u32`: Version of the payload format as stored; the handler gets the payload upcast to the version it knows, unless it is raw.
 - `redacted: Vec<String>`: Fields kept in the vault whose value is not in the payload (`null`): erased, or not readable with this key (granted `vault_read`).
 
@@ -449,7 +451,7 @@ What a listener handler gets about an event besides its payload (the `evt` of
 What a listener handler gets besides the event's payload and meta (the `ctx` of
 `Listener::on`).
 
-- `replaying: bool`: The event was committed before the listener connected: it is being replayed.
+- `replaying: bool`: The event was committed before this connection began: a read model rebuilding from the start, and equally the backlog a reactor catches up on after a restart or a lost connection. A reactor must not skip side effects because of it (those events are new to it); submit with fixed command IDs instead, so they are safe to repeat. Use it to skip work that only matters live, e.g. a notification about something long past in a listener that starts at 0.
 - `store: Option<Store>`: The listener's store, if it has one (`Listener::store`).
 - `request: RequestContext`: The request context of the command that caused the event.
 - `fn follow(&self) -> RequestContext`: A request context for commands caused by this event: same sender and correlation, this event's command as the cause, without an expected version or privileges. Pass it with `crate::Submit::context`.
@@ -577,10 +579,10 @@ the next step needs them connected, or use an app (`crate::Kernable::app`).
 
 - `fn listener(&self) -> &Listener`: The listener's definition.
 - `fn position(&self) -> u64`: Global position of the last handled event (or skipped, for other event types).
-- `fn opened_store(&self) -> Option<Store>`: The listener's store, once `run()` opened it.
+- `fn opened_store(&self) -> Option<Store>`: The listener's store, while `run()` has it open.
 - `async fn ready(&self)`: Returns once the kernel accepted the listener.
 - `fn stop(&self)`: Ends `run`.
-- `async fn run(&self)`: Processes events, queries and checks until `stop()`, reconnecting when the stream drops or a handler fails. With a store, opens it first and continues after its position; if it cannot be opened (a full disk), logs the error and tries again, backing off like a reconnect.
+- `async fn run(&self)`: Processes events, queries and checks until `stop()`, reconnecting when the stream drops or a handler fails. With a store, opens it first and continues after its position; if it cannot be opened (a full disk), logs the error and tries again, backing off like a reconnect. When it ends, it closes the store (`Store::close`); a later run opens it again.
 
 ### SubscribeOptions
 
@@ -614,6 +616,7 @@ position, once per batch. Errors are `Error::Store` (SQLite) or `Error::Json`.
 - `fn remove(&self, ns: &str, key: &str) -> Result<(), Error>`: Removes the value under `key` in namespace `ns`, if there is one.
 - `fn all<T: DeserializeOwned>(&self, ns: &str) -> Result<Vec<(String, T)>, Error>`: Every key and value of a namespace, ordered by key.
 - `fn reset(&self, ns: Option<&str>) -> Result<(), Error>`: Clears a namespace, or all data.
+- `fn close(&self)`: Closes the store for every handle to it: a batch still open is dropped, the write-ahead log emptied into the file (so data removed is gone from disk too), and the file released. Using it afterwards is an `Error::Store`. A listener closes its store when its `run()` ends; a later run opens it again.
 
 ### Data
 
@@ -683,7 +686,7 @@ fields default to empty; set the ones you need:
 
 A point in time in milliseconds since the epoch, shown as RFC 3339 in UTC with
 milliseconds (`2026-10-27T09:00:00.000Z`), like JavaScript's `toISOString()`: format it
-with `to_string()`. `Timestamp(ms)` makes one from milliseconds.
+with `to_string()`. `Timestamp(ms)` makes one from milliseconds; the default is the epoch.
 
 - `fn now() -> Timestamp`: The current time. In a command handler, use `ctx.now()` instead (`crate::CommandContext::now`), which is the same every time the command runs.
 - `fn millis(self) -> i64`: Milliseconds since the Unix epoch.

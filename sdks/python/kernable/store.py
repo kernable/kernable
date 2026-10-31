@@ -22,6 +22,7 @@ class Store:
         path = ":memory:" if url == "memory:" else url.removeprefix("sqlite:")
         self._db = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
         self._lock = threading.RLock()
+        self._closed = False
         self._db.executescript("""
             PRAGMA journal_mode = WAL;
             PRAGMA secure_delete = ON;
@@ -91,6 +92,13 @@ class Store:
         self.committed = position
         self._lock.release()
 
+    def _checkpoint(self) -> None:
+        """Copies the WAL into the database and truncates it: old page images, e.g. of values a
+        read model removed after an erasure, stay in the WAL until then (`secure_delete` clears
+        only the database's freed pages)."""
+        with self._lock:
+            self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
     def _rollback(self) -> None:
         try:
             if self._db.in_transaction:
@@ -99,5 +107,11 @@ class Store:
             self._lock.release()
 
     def close(self) -> None:
-        """Closes the database; the store cannot be used afterwards."""
-        self._db.close()
+        """Closes the database, truncating its WAL first; the store cannot be used afterwards. A
+        listener closes its store when its `run()` ends; closing it again does nothing."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            self._db.close()

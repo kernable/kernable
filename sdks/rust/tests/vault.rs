@@ -230,6 +230,127 @@ async fn personal_fields_and_secrets_live_in_the_vault_and_an_erasing_event_dele
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn an_erased_value_is_in_no_file_of_a_read_models_store() {
+    let kernel = TestKernel::new(&["identity.*"], &[]);
+    kernel.start().await;
+    let (identity, account) = identity_domain();
+    let kernable = kernel.client().with_domain(&identity);
+    let path = kernel.dir.join("emails.db");
+    let emails = identity
+        .read_model("emails")
+        .store(&format!("sqlite:{}", path.display()), "1")
+        .on("AccountRegistered", |data: Value, evt, ctx| async move {
+            let store = ctx.store.expect("a store");
+            Ok(store.set("emails", &evt.aggregate_id, &field(&data, "email"))?)
+        })
+        .on("AccountErased", |_: Value, evt, ctx| async move {
+            Ok(ctx
+                .store
+                .expect("a store")
+                .remove("emails", &evt.aggregate_id)?)
+        });
+    let worker = kernable.worker(&account);
+    let emails = kernable.listener(&emails);
+    let running = [
+        {
+            let w = worker.clone();
+            tokio::spawn(async move { w.run().await })
+        },
+        {
+            let e = emails.clone();
+            tokio::spawn(async move { e.run().await })
+        },
+    ];
+    worker.ready().await;
+    emails.ready().await;
+    let send = |command_type: &str, data: Value| {
+        kernable.submit(Submit::new("identity", "Account", "a1", command_type).data(data))
+    };
+    // Every file of the store: the database, its write-ahead log and its shared memory.
+    let stored = || {
+        ["", "-wal", "-shm"].into_iter().any(|suffix| {
+            let bytes = std::fs::read(format!("{}{suffix}", path.display())).unwrap_or_default();
+            bytes.windows(12).any(|w| w == b"max@firma.de")
+        })
+    };
+
+    let registered = json!({ "id": "a1", "email": "max@firma.de", "password": "pw" });
+    assert!(
+        send("RegisterAccount", registered)
+            .await
+            .unwrap()
+            .is_committed()
+    );
+    assert!(stored(), "the read model keeps the email");
+    // Settled: the batch with the erasing event is acknowledged.
+    let erased = send("EraseAccount", json!({ "id": "a1" })).await.unwrap();
+    assert!(erased.is_committed());
+    assert!(
+        !stored(),
+        "the erased email is still in a file of the store"
+    );
+    worker.stop();
+    emails.stop();
+    for r in running {
+        r.await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_personal_command_field_in_an_event_that_does_not_declare_it_is_rejected() {
+    let kernel = TestKernel::new(&["identity.*"], &[]);
+    kernel.start().await;
+    let (identity, account) = identity_domain();
+    identity
+        .command("ChangeEmail")
+        .personal(&["email"], |_, id| id.to_owned());
+    // The event forgets to declare the email personal.
+    account.command("ChangeEmail", |_, data: Value, _cmd, _ctx| {
+        Ok(vec![NewEvent::new(
+            "EmailChanged",
+            json!({ "email": data["email"] }),
+        )])
+    });
+    let kernable = kernel.client().with_domain(&identity);
+    let worker = kernable.worker(&account);
+    let running = {
+        let w = worker.clone();
+        tokio::spawn(async move { w.run().await })
+    };
+    worker.ready().await;
+    let send = |command_type: &str, data: Value| {
+        kernable.submit(Submit::new("identity", "Account", "a1", command_type).data(data))
+    };
+
+    // Declared on the command and on its event: committed.
+    let registered = json!({ "id": "a1", "email": "max@firma.de", "password": "pw" });
+    assert!(
+        send("RegisterAccount", registered)
+            .await
+            .unwrap()
+            .is_committed()
+    );
+    let changed = send("ChangeEmail", json!({ "email": "moritz@firma.de" }))
+        .await
+        .unwrap();
+    assert_eq!(
+        changed,
+        Outcome::Rejected(
+            Rejected::new(
+                "ChangeEmail declares email personal, but EmailChanged does not: it would be \
+                 stored in clear (declare it with Domain.event(\"EmailChanged\", …).personal)"
+            )
+            .code("personal_in_clear")
+        )
+    );
+    // Without the value (null or absent), nothing leaks: committed.
+    let cleared = send("ChangeEmail", json!({ "email": null })).await.unwrap();
+    assert!(cleared.is_committed(), "{cleared:?}");
+    worker.stop();
+    running.await.unwrap();
+}
+
 #[test]
 #[should_panic(expected = "unqualified")]
 fn command_definitions_take_unqualified_types() {

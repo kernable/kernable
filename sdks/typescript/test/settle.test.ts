@@ -62,7 +62,7 @@ test("a membership decides which listeners count; live ones never count", async 
 
     // The next version of the service has no audit any more: nobody waits for it.
     const v2 = new Kernable({ url: kernel.url, key: kernel.appKey, service: "shop" });
-    const mails2 = v2.listener(shop.reactor("mails").on("Added", (_data, evt) => void seen.push(evt.aggregateId)));
+    const mails2 = v2.listener(mails.listener);
     await v2.apply({ workers: [cart], listeners: [mails2.listener], metadata: { version: "2" } });
     // A live listener counts for nobody, even while it does not get through its events.
     let release = () => {};

@@ -134,7 +134,17 @@ impl Domain {
     /// An aggregate of this domain named `name` (lowercase by convention, like `cart`), whose
     /// state starts as `initial`; see [`Aggregate`]. Example:
     /// `let cart_aggregate = shop_domain.aggregate("cart", Cart::default());`.
+    ///
+    /// # Panics
+    ///
+    /// If the domain has an aggregate named `name` already.
     pub fn aggregate<S: State>(&self, name: &str, initial: S) -> Aggregate<S> {
+        let taken = self.aggregates().iter().any(|a| a.name() == name);
+        assert!(
+            !taken,
+            "{} has an aggregate {name} already",
+            self.inner.name
+        );
         let aggregate = Aggregate {
             inner: Arc::new(AggregateInner {
                 domain: self.clone(),
@@ -158,6 +168,10 @@ impl Domain {
     /// (order 0; [`Listener::store`] keeps it in a file instead). Run it with
     /// [`crate::Kernable::listener`] or in an app. Example:
     /// `let carts_readmodel = shop_domain.read_model("carts");`.
+    ///
+    /// # Panics
+    ///
+    /// If the domain has a read model or reactor named `name` already.
     pub fn read_model(&self, name: &str) -> Listener {
         self.remember(Listener::new(self, name, 0, Some(0)))
     }
@@ -168,11 +182,22 @@ impl Domain {
     /// listeners before it (the read models), not for the reactor itself, which handles one
     /// event at a time. Submit with a fixed ID and `ctx.follow()`, so a redelivered event does
     /// not run the command twice. Run it with [`crate::Kernable::listener`] or in an app.
+    ///
+    /// # Panics
+    ///
+    /// If the domain has a read model or reactor named `name` already.
     pub fn reactor(&self, name: &str) -> Listener {
         self.remember(Listener::new(self, name, 10, None))
     }
 
     fn remember(&self, listener: Listener) -> Listener {
+        let taken = self.listeners().iter().any(|l| l.name() == listener.name());
+        assert!(
+            !taken,
+            "{} has a listener {} already",
+            self.inner.name,
+            listener.name()
+        );
         self.inner.listeners.write().unwrap().push(listener.clone());
         listener
     }
@@ -736,6 +761,38 @@ impl<S: State> Aggregate<S> {
             .get(command_type)
             .cloned()
     }
+
+    /// A rejection (`personal_in_clear`) if an event holds, in a field the event type does not
+    /// declare personal, a non-null value under the name of a personal field of the command:
+    /// it would be stored in the signed log in clear, for good.
+    fn personal_in_clear(&self, command_type: &str, events: &[NewEvent]) -> Result<(), Failure> {
+        let domain = &self.inner.domain;
+        let Some(command) = domain.command_vault(command_type) else {
+            return Ok(());
+        };
+        for e in events {
+            let def = domain.event_def(&e.event_type);
+            let declared = |field: &String| {
+                def.as_ref()
+                    .is_some_and(|d| d.vault.personal.iter().any(|(f, _)| f.contains(field)))
+            };
+            for field in command.personal.iter().flat_map(|(fields, _)| fields) {
+                let held = e.data.get(field).is_some_and(|v| !v.is_null());
+                if held && !declared(field) {
+                    return Err(Failure::Rejected(
+                        Rejected::new(format!(
+                            "{command_type} declares {field} personal, but {event} does not: it \
+                             would be stored in clear (declare it with Domain.event({event:?}, \
+                             …).personal)",
+                            event = e.event_type,
+                        ))
+                        .code("personal_in_clear"),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// `f()`, with a panic turned into an error.
@@ -855,6 +912,7 @@ impl<S: State> Runnable for Aggregate<S> {
         })?;
         let data = vault::unseal(decode(&cmd.payload), &x.vault).0;
         let produced = caught(|| handler(&state, data, &meta, &mut ctx))??;
+        self.personal_in_clear(&cmd.command_type, &produced)?;
 
         let mut events = Vec::with_capacity(produced.len());
         let mut values = Vec::new();

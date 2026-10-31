@@ -15,7 +15,8 @@ use std::{
 use common::{TestKernel, eventually};
 use kernable::{
     Check, CheckKind, CheckOutcome, Error, Kernable, ListenerHandle, Manifest, MiddlewareOptions,
-    NewEvent, Outcome, Query, QueryOutcome, Rejected, RequestContext, Submit, Wait, Worker, domain,
+    NewEvent, Outcome, Query, QueryOutcome, Rejected, RequestContext, StoredEvent, StoredEventMeta,
+    Submit, SubscribeOptions, Timestamp, Wait, Worker, domain,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -182,9 +183,11 @@ async fn a_membership_decides_which_listeners_count_live_ones_never_count() {
         Ok(vec![NewEvent::new("Added", ())])
     });
     let seen = Arc::new(Mutex::new(Vec::new()));
+    // Each version of the service defines it anew, as another process would.
     let mails = || {
         let s = Arc::clone(&seen);
-        shop.reactor("mails")
+        domain("shop")
+            .reactor("mails")
             .on("shop.Added", move |_: serde_json::Value, evt, _ctx| {
                 s.lock().unwrap().push(evt.aggregate_id);
                 async { Ok(()) }
@@ -295,9 +298,10 @@ async fn a_read_model_with_a_store_continues_where_it_left_off_and_rebuilds_on_a
     let url = format!("sqlite:{}", kernel.dir.join("totals.db").display());
     let handled = Arc::new(AtomicUsize::new(0));
     let fail_on = Arc::new(AtomicI64::new(-1));
+    // Each run defines it anew, as another process would.
     let totals = |schema: &str| {
         let (handled, fail_on) = (Arc::clone(&handled), Arc::clone(&fail_on));
-        counters
+        domain("counters")
             .read_model("totals")
             .store(&url, schema)
             .reconnect(Duration::from_millis(50))
@@ -795,7 +799,7 @@ fn listener_types_are_a_type_a_qualified_type_or_a_domain() {
     assert!(!on("my crm.Created") && !on("1crm.Created") && !on("crm.*x"));
     let check = |t: &'static str| {
         // A listener has one middleware before requests: each check gets its own.
-        let model = shop.read_model("model");
+        let model = domain("shop").read_model("model");
         std::panic::catch_unwind(move || {
             model.middleware(MiddlewareOptions::new(&[t]), |_| async { Ok(()) });
         })
@@ -812,4 +816,165 @@ fn listener_types_are_a_type_a_qualified_type_or_a_domain() {
     };
     assert!(query("GetCart") && query("crm.GetContact"));
     assert!(!query("crm.*"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn listeners_and_subscriptions_see_when_an_event_was_committed() {
+    let kernel = TestKernel::new(&["shop.*"], &[]);
+    kernel.start().await;
+    let kernable = kernel.client();
+    let shop = domain("shop");
+    let cart = shop.aggregate("Cart", 0i64);
+    cart.command("Add", |_, _: serde_json::Value, _cmd, _ctx| {
+        Ok(vec![NewEvent::new("Added", ())])
+    });
+    let seen = Arc::new(Mutex::new(Vec::<StoredEventMeta>::new()));
+    let s = Arc::clone(&seen);
+    let carts = shop
+        .read_model("carts")
+        .on("Added", move |_: serde_json::Value, evt, _ctx| {
+            s.lock().unwrap().push(evt);
+            async { Ok(()) }
+        });
+    let worker = kernable.worker(&cart);
+    let carts = kernable.listener(&carts);
+    let running = [spawn_worker(&worker), spawn(&carts)];
+    worker.ready().await;
+    carts.ready().await;
+    let before = Timestamp::now();
+    let added = kernable
+        .submit(Submit::new("shop", "Cart", "c1", "Add"))
+        .await
+        .unwrap();
+    let after = Timestamp::now();
+
+    let created_at = seen.lock().unwrap()[0].created_at;
+    assert!(
+        before.millis() - 5000 <= created_at.millis() && created_at <= after,
+        "{created_at} is not between {before} and {after}"
+    );
+    assert_eq!(added.events()[0].created_at, created_at);
+    let events = Arc::new(Mutex::new(Vec::<StoredEvent>::new()));
+    let e = Arc::clone(&events);
+    let subscription = kernable.subscribe(SubscribeOptions::default(), move |event| {
+        e.lock().unwrap().push(event);
+        async { Ok(()) }
+    });
+    eventually(|| !events.lock().unwrap().is_empty()).await;
+    subscription.stop().await;
+    assert_eq!(events.lock().unwrap()[0].created_at, created_at);
+    worker.stop();
+    carts.stop();
+    for r in running {
+        r.await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_query_answered_with_nothing_arrives_as_null() {
+    let kernel = TestKernel::new(&["shop.*"], &[]);
+    kernel.start().await;
+    let kernable = kernel.client();
+    let carts = domain("shop")
+        .read_model("carts")
+        .query("GetCart", |_: serde_json::Value, _qry, _ctx| async {
+            Ok(None::<i64>)
+        })
+        .query("Ping", |_: serde_json::Value, _qry, _ctx| async { Ok(()) });
+    let carts = kernable.listener(&carts);
+    let running = spawn(&carts);
+    carts.ready().await;
+
+    let answer: serde_json::Value = kernable.query(Query::new("shop", "GetCart")).await.unwrap();
+    assert_eq!(answer, serde_json::Value::Null);
+    let answer: Option<i64> = kernable.query(Query::new("shop", "GetCart")).await.unwrap();
+    assert_eq!(answer, None);
+    let answer: serde_json::Value = kernable.query(Query::new("shop", "Ping")).await.unwrap();
+    assert_eq!(answer, serde_json::Value::Null);
+    carts.stop();
+    running.await.unwrap();
+}
+
+#[test]
+fn listener_and_aggregate_names_are_unique_within_a_domain() {
+    let shop = domain("shop");
+    shop.read_model("carts");
+    shop.aggregate("Cart", 0i64);
+    let twice = |define: &dyn Fn()| {
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(define)).unwrap_err();
+        panic.downcast_ref::<String>().cloned().unwrap_or_default()
+    };
+    assert_eq!(
+        twice(&|| drop(shop.reactor("carts"))),
+        "shop has a listener carts already"
+    );
+    assert_eq!(
+        twice(&|| drop(shop.read_model("carts"))),
+        "shop has a listener carts already"
+    );
+    assert_eq!(
+        twice(&|| drop(shop.aggregate("Cart", 0i64))),
+        "shop has an aggregate Cart already"
+    );
+    // Other domains have their own names, and so do aggregates and listeners.
+    domain("crm").read_model("carts");
+    domain("crm").aggregate("Cart", 0i64);
+    shop.reactor("Cart");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_listener_closes_its_store_when_it_stops_and_a_later_run_opens_it_again() {
+    let kernel = TestKernel::new(&["counters.*"], &[]);
+    kernel.start().await;
+    let kernable = kernel.client();
+    let counters = domain("counters");
+    let counter = counters.aggregate("Counter", 0i64);
+    counter.command("Increment", |_, data: By, _cmd, _ctx| {
+        Ok(vec![NewEvent::new("Incremented", By { by: data.by })])
+    });
+    let path = kernel.dir.join("totals.db");
+    let totals = counters
+        .read_model("totals")
+        .store(&format!("sqlite:{}", path.display()), "1")
+        .on("Incremented", |data: By, evt, ctx| async move {
+            let store = ctx.store.expect("a store");
+            let total = store.get::<i64>("totals", &evt.aggregate_id)?.unwrap_or(0) + data.by;
+            Ok(store.set("totals", &evt.aggregate_id, &total)?)
+        });
+    let worker = kernable.worker(&counter);
+    let model = kernable.listener(&totals);
+    let mut running = vec![spawn_worker(&worker), spawn(&model)];
+    worker.ready().await;
+    model.ready().await;
+    let increment = Submit::new("counters", "Counter", "c1", "Increment").data(By { by: 2 });
+    kernable.submit(increment.clone()).await.unwrap();
+    // Something still holds the store when the listener stops.
+    let held = model.opened_store().unwrap();
+    assert_eq!(held.get::<i64>("totals", "c1").unwrap(), Some(2));
+    model.stop();
+    running.pop().unwrap().await.unwrap();
+
+    assert!(model.opened_store().is_none());
+    assert!(
+        matches!(held.get::<i64>("totals", "c1"), Err(Error::Store(_))),
+        "the store is closed for every handle"
+    );
+    let wal = kernel.dir.join("totals.db-wal");
+    assert!(
+        std::fs::metadata(&wal).map_or(true, |m| m.len() == 0),
+        "the write-ahead log is released"
+    );
+
+    // A later run of the listener opens the store again.
+    let model = kernable.listener(&totals);
+    running.push(spawn(&model));
+    model.ready().await;
+    kernable.submit(increment).await.unwrap();
+    let store = model.opened_store().unwrap();
+    assert_eq!(store.get::<i64>("totals", "c1").unwrap(), Some(4));
+    model.stop();
+    worker.stop();
+    for r in running {
+        r.await.unwrap();
+    }
 }

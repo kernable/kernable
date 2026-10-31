@@ -96,3 +96,35 @@ test("command definitions take unqualified types", () => {
   assert.ok(identity.commands.get("RegisterAccount"));
   assert.throws(() => identity.command("shop.Register"), /unqualified/);
 });
+
+test("a personal field of a command that its event does not declare personal rejects the command", async () => {
+  const kernel = new TestKernel(["people.*"]);
+  await kernel.start();
+  const people = domain("people");
+  people.command("Register").personal(["email"], (_d, id) => id);
+  people.command("Leak").personal(["email"], (_d, id) => id);
+  people.event("Registered", 1).personal(["email"], (_d, id) => id);
+  // `Leaked` forgets to declare `email`: written as is, it would go into the signed log in clear.
+  const person = people.aggregate("Person", {})
+    .command("Register", (_s, data: { email: string }) => [{ type: "Registered", data: { email: data.email } }])
+    .command("Leak", (_s, data: { email: string }) => [{ type: "Leaked", data: { email: data.email, other: 1 } }]);
+  const kernable = new Kernable({ url: kernel.url, key: kernel.appKey }).use(people);
+  const worker = kernable.worker(person);
+  const running = [worker.run()];
+  const send = (type: string) =>
+    kernable.submit({ domain: "people", aggregateType: "Person", aggregateId: "p1", type, data: { email: "ann@example.com" }, wait: "committed" });
+  try {
+    await worker.ready;
+    assert.deepEqual(await send("Leak"), {
+      committed: false,
+      code: "personal_in_clear",
+      message: 'Leak declares email personal, but Leaked does not: it would be stored in clear (declare it with Domain.event("Leaked", …).personal)',
+    });
+    assert.ok((await send("Register")).committed);
+  } finally {
+    worker.stop();
+    await Promise.allSettled(running);
+    kernable.close();
+    await kernel.dispose();
+  }
+});

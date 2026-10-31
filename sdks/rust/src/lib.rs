@@ -960,6 +960,8 @@ pub struct StoredEvent {
     pub redacted: Vec<String>,
     /// The command that caused the event.
     pub command_id: String,
+    /// When the kernel committed the event.
+    pub created_at: Timestamp,
     /// The request context of the command that caused the event.
     pub request: RequestContext,
 }
@@ -984,6 +986,7 @@ impl StoredEvent {
             data,
             redacted,
             command_id: e.command_id,
+            created_at: Timestamp(e.created_at),
             request: RequestContext::from_wire(e.context.as_ref()),
         }
     }

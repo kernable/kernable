@@ -146,10 +146,13 @@ What a command handler gets about the command besides its data (its third argume
 ### CommandContext
 
 What a command handler gets besides state, data and `CommandMeta` (its fourth argument, `ctx`).
+The worker creates it; create one yourself to call a handler directly, e.g. in a unit test with
+`Aggregate.handle`: `new CommandContext("close-1", {}, new Date(0))`.
 
+- `readonly commandId: string`: The command's ID, as in `CommandMeta.commandId`: what `id()` derives its IDs from.
 - `request: RequestContext`: Who sends the command: check permissions here.
-- `now(): Date`: When the kernel received the command: the same every time the command runs. Use it instead of `new Date()`.
-- `id(): string`: A new ID that is the same every time the command runs (1st call, 2nd call, ...). Use it instead of random IDs.
+- `readonly now: () => Date`: When the kernel received the command: the same every time the command runs. Use it instead of `new Date()`.
+- `readonly id: () => string`: A new ID that is the same every time the command runs (1st call, 2nd call, ...). Use it instead of random IDs.
 - `deadline: Date`: When the kernel hands the command to another worker if this one has not answered.
 
 ### QueryMeta
@@ -222,7 +225,7 @@ policy.middleware({ types: ["shop.*"] }, (check) => {
 
 What a listener handler gets besides the event's data and `StoredEventMeta` (its third argument, `ctx`).
 
-- `replaying: boolean`: The event was committed before the listener connected (this connect): it is being replayed. A reactor can skip side effects that only matter for new events.
+- `replaying: boolean`: The event was committed before this connection began: a read model rebuilding from the start, and equally the backlog a reactor catches up on after a restart or a lost connection. A reactor must not skip side effects because of it (those events are new to it); submit follow-ups with fixed command IDs instead, so they are safe to repeat. Use it to skip work that only matters live, e.g. a notification about something long past in a listener that starts at 0.
 - `follow(): RequestContext`: A request context for commands caused by this event: same sender and correlation, the event's command as `causationId`, without `expectedVersion` and `bypassAuthorization`. Pass it as `SubmitOptions.context`.
 - `request: RequestContext`: The request context of the command that caused the event.
 - `store?: Store`: The listener's store, if it has one (`ListenerOptions.store`).
@@ -254,6 +257,7 @@ What a listener handler gets about an event besides its data and request context
 argument, `evt`): the `EventMeta` fields plus where the event is in the log.
 
 - `position: number`: The event's global position: its place in the one order of all domains and tenants.
+- `createdAt: Date`: When the kernel committed the event.
 - `schema: number`: Version of the payload format. Listeners get `data` upcast to the version they know (see `Domain.event`), unless the handler is `raw`.
 - `redacted: string[]`: Fields kept in the vault whose value is not here (`null` in `data`): erased, or not readable with this key (granted `vault_read`).
 
@@ -309,6 +313,16 @@ cache of the state; without one, the worker folds all events of the aggregate.
 - `snapshotEvery?: number`: Send a snapshot of the state every this many events (default 100; 0 turns them off).
 - `schema?: string`: Version of the state format (default "1"). Change it when `apply` produces differently shaped state; older snapshots are then ignored and the state is rebuilt from the events.
 
+### Personal
+
+```ts
+export type Personal<T> = T | null;
+```
+
+A field kept in the vault (`EventSchema.personal`), as a listener reads it: `null` after its
+subject was erased, or for a reader whose key is not granted `vault_read`. Type such fields
+with it, so handlers deal with the `null`: `data: { email: Personal<string> }`.
+
 ### EventSchema
 
 The payload format of one event type: its current version, the steps that bring older
@@ -320,6 +334,7 @@ upcast them. See [Data over time](../concepts/data).
 shopDomain.event("ItemAdded", 2).upcast(1, (d) => ({ sku: d.sku, count: d.qty }));
 identityDomain.event("AccountRegistered", 1).personal(["name", "email"], (_d, id) => id);
 identityDomain.event("AccountErased", 1).erases((_d, id) => id);
+accounts.on("AccountRegistered", (data: { name: Personal<string>; email: Personal<string> }) => { … });
 ```
 
 - `readonly type: string`: The event type within its domain, unqualified.
@@ -371,9 +386,9 @@ const mailer = shopDomain.reactor("mailer");
 - `readonly listeners: Listener[] = []`: The read models and reactors defined on it, which `Kernable.app` runs.
 - `event(type: string, schema: number): EventSchema`: Declares the payload format of `type` events (unqualified): this domain writes them at version `schema` (from 1), with an `upcast` per older version, and may keep fields in the vault (`personal`) or erase a subject (`erases`). Returns the `EventSchema` to chain on. Types not declared are at version 1. The domain's aggregates and listeners use it; listeners of other domains get it with `use(domain)`. Throws for a qualified type or a version below 1.
 - `command(type: string): CommandSchema`: Declares which fields of `type` commands (unqualified) the vault keeps: returns the `CommandSchema` to chain `personal` and `secret` on. Only needed for commands with such fields. Clients that submit them need the domain: `kernable.use(domain)`.
-- `aggregate<S>(name: string, initial: S, options?: AggregateOptions): Aggregate<S>`: Defines an aggregate type `name` (`cart`) of this domain, with the state `initial` every aggregate of it starts from: `shopDomain.aggregate("cart", { items: 0 })`. Add its event appliers and command handlers with `apply` and `command`; run it with `kernable.worker(cart)` or `kernable.app`. `options`: snapshots, see `AggregateOptions`.
-- `readModel(name: string, options: ListenerOptions = {}): Listener`: Defines a read model named `name`: a listener that builds a view from events (`on`) and answers queries from it (`query`). Without a store it is kept in memory and rebuilt from the first event on every start (defaults: order 0, start 0); with `options.store` it continues where it left off. `options` override the defaults, see `ListenerOptions`. Run it with `kernable.listener(definition)` or `kernable.app`.
-- `reactor(name: string, options: ListenerOptions = {}): Listener`: Defines a reactor named `name`: a listener that triggers side effects and follow-up commands. It starts at the newest event when it is new, then resumes after the last acknowledged event (defaults: order 10, no start), so it never reacts to what happened before it existed. Submit follow-ups with a fixed command `id` and `ctx.follow()`, so a redelivered event is harmless. A settling submit from its handler waits for the listeners before it (the read models), not for the reactor itself, which handles one event at a time. Run it with `kernable.listener(definition)` or `kernable.app`.
+- `aggregate<S>(name: string, initial: S, options?: AggregateOptions): Aggregate<S>`: Defines an aggregate type `name` (`cart`) of this domain, with the state `initial` every aggregate of it starts from: `shopDomain.aggregate("cart", { items: 0 })`. Add its event appliers and command handlers with `apply` and `command`; run it with `kernable.worker(cart)` or `kernable.app`. `options`: snapshots, see `AggregateOptions`. Throws if the domain has an aggregate `name` already.
+- `readModel(name: string, options: ListenerOptions = {}): Listener`: Defines a read model named `name`: a listener that builds a view from events (`on`) and answers queries from it (`query`). Without a store it is kept in memory and rebuilt from the first event on every start (defaults: order 0, start 0); with `options.store` it continues where it left off. `options` override the defaults, see `ListenerOptions`. Run it with `kernable.listener(definition)` or `kernable.app`. Throws if the domain has a listener `name` already.
+- `reactor(name: string, options: ListenerOptions = {}): Listener`: Defines a reactor named `name`: a listener that triggers side effects and follow-up commands. It starts at the newest event when it is new, then resumes after the last acknowledged event (defaults: order 10, no start), so it never reacts to what happened before it existed. Submit follow-ups with a fixed command `id` and `ctx.follow()`, so a redelivered event is harmless. A settling submit from its handler waits for the listeners before it (the read models), not for the reactor itself, which handles one event at a time. Run it with `kernable.listener(definition)` or `kernable.app`. Throws if the domain has a listener `name` already.
 
 ### domain()
 
@@ -414,8 +429,10 @@ cart.command("AddItem", (state, data: { sku: string; qty: number }) => {
 - `readonly appliers = new Map<string, Apply<S>>()`: The `apply` functions per event type.
 - `readonly handlers = new Map<string, Handle<S>>()`: The command handlers per command type.
 - `readonly events: Map<string, EventSchema>`: The domain's event schemas.
+- `readonly commands: Map<string, CommandSchema>`: The domain's command schemas: which fields of a command are personal.
 - `apply<D = any>(eventType: string, fn: (state: S, data: D, evt: EventMeta, ctx: ApplyContext) => S | void): this`: How an event of `eventType` (unqualified, of this domain) changes the state: `fn(state, data, evt, ctx)` changes `state` in place and returns nothing, or returns a new state that replaces it. `state` is a copy, so changing it never touches the state it came from. `data` is upcast to the version declared with `Domain.event`. Events without an `apply` leave the state as it is. Must be deterministic: no clock, no random values, no I/O.
 - `command<D = any>(commandType: string, fn: (state: S, data: D, cmd: CommandMeta, ctx: CommandContext) => NewEvent[] | Promise<NewEvent[]>): this`: Which events a `commandType` command (unqualified, of this domain) produces: `fn(state, data, cmd, ctx)` gets the current state and the command's data and returns the events (`NewEvent[]`, possibly empty), or a promise of them. Throw `Rejected` to reject the command. It may run more than once for the same command, so it must decide the same way every time: use `ctx.now()` and `ctx.id()` instead of the clock and random IDs, and leave side effects to reactors.
+- `async handle(state: S, commandType: string, data: unknown, ctx: CommandContext): Promise<NewEvent[]>`: Runs the `commandType` handler on a copy of `state`, as a worker does, e.g. in a unit test, and returns the events it produces: `await cart.handle(state, "AddItem", { sku: "apple", qty: 2 }, new CommandContext("c-1"))`. The handler's `CommandMeta` has the command ID of `ctx`, this aggregate's domain and name, and an empty aggregate ID and tenant; `data` goes through JSON as it would on the wire. Rejects with the handler's `Rejected` (or other error), or with an error if there is no handler for `commandType`.
 - `schemaOf(type: string): number`: The payload version this aggregate writes `type` events at.
 - `fold(history: FoldEvent[], from: S = this.initial): S`: State after `history`, starting from `from` (default: `initial`), as a worker computes it; no kernel needed, so it suits tests: `cart.fold([{ type: "ItemAdded", schema: 1, data: { qty: 2 } }])`. Events are upcast first; events without an `apply` are skipped. Fields of `EventMeta` an event lacks are empty (0 for `version`), as is its request context. Throws if an event's schema is newer than declared or an upcast step is missing.
 
@@ -701,8 +718,8 @@ await handle.ready;
 - `startedAt = 0`: Position after which the kernel delivered on the first connect.
 - `announce = true`: Whether the first connect gets its own line; an `App` prints it in its overview instead.
 - `readonly listener: Listener`: The definition it runs.
-- `get store(): Store`: The listener's store (`ListenerOptions.store`), once `run()` opened it; throws before, or if the listener has no store. Handlers get it as `ctx.store`.
-- `async run(): Promise<void>`: Opens the store (if any; trying again while it cannot be opened, e.g. on a full disk), connects, and processes events, queries and checks until `stop()`, reconnecting after the last handled event when the stream drops or a handler throws (after `ListenerOptions.reconnectMs`). Resolves after `stop()`.
+- `get store(): Store`: The listener's store (`ListenerOptions.store`) while `run()` runs: it opens the store and closes it when it ends. Throws outside of that, or if the listener has no store. Handlers get it as `ctx.store`.
+- `async run(): Promise<void>`: Opens the store (if any; trying again while it cannot be opened, e.g. on a full disk), connects, and processes events, queries and checks until `stop()`, reconnecting after the last handled event when the stream drops or a handler throws (after `ListenerOptions.reconnectMs`). Resolves after `stop()`, having closed the store.
 - `stop(): void`: Stops the listener: ends its stream, so `run()` resolves.
 
 ### WorkerOptions
@@ -756,4 +773,4 @@ carts.query("GetCart", (data: { id: string }, _qry, ctx) => ctx.store!.get("cart
 - `remove(ns: string, key: string): void`: Removes the value under `key` in namespace `ns`, if there is one.
 - `all<T = unknown>(ns: string): [string, T][]`: Every key and value of a namespace, ordered by key.
 - `reset(ns?: string): void`: Clears a namespace, or all data.
-- `close(): void`: Closes the database.
+- `close(): void`: Closes the database, leaving no old pages behind.

@@ -13,11 +13,12 @@ import sqlite3
 import threading
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 import grpc
 
-from kernable import ClientClosed, Data, Kernable, NotSettled, Outcome, QueryOutcome, Rejected, RequestContext, _upcast, domain
+from kernable import ClientClosed, CommandContext, Data, Kernable, NotSettled, Outcome, QueryOutcome, Rejected, RequestContext, _upcast, domain
 from kernable.signing import (Key, cache_message, challenge_message, command_message, data_message, derived_id,
                               membership_message, query_message, rejection_message, result_message, snapshot_message, vault_ref)
 from kernable.v1 import kernable_pb2 as pb
@@ -68,6 +69,30 @@ class ApplyTest(unittest.TestCase):
         self.assertEqual(account.fold([("Opened", 1, {"email": "b@example.com"}), ("Reset", 1, {})]),
                          {"tags": [], "status": "reset"})
 
+    def test_a_command_handler_runs_directly_with_a_command_context(self):
+        account = domain("crm").aggregate("Account", {"email": None})
+
+        @account.command("Close")
+        def _(state, data, cmd, ctx):
+            if state["email"] is None:
+                raise Rejected("no account", "not_found")
+            what = f"{cmd.domain}.{cmd.aggregate_type}.{cmd.type}"
+            return [{"type": "Closed", "data": {"id": ctx.id(), "by": cmd.command_id, "what": what, "data": data,
+                                                "at": ctx.now().isoformat(), "who": ctx.request.sender_identity}}]
+
+        at = datetime(2026, 1, 2, tzinfo=timezone.utc)
+        ctx = CommandContext.new("close-1", RequestContext(sender_identity="alice"), at)
+        self.assertEqual(ctx.deadline, at + timedelta(seconds=30))
+        with self.assertRaises(Rejected) as rejected:
+            account.handle({"email": None}, "Close", None, ctx)
+        self.assertEqual(rejected.exception.code, "not_found")
+        closed = account.handle({"email": "a@example.com"}, "Close", None, ctx)
+        self.assertEqual(closed, [{"type": "Closed", "data": {
+            "id": derived_id("close-1", 0), "by": "close-1", "what": "crm.Account.Close", "data": {},
+            "at": "2026-01-02T00:00:00+00:00", "who": "alice"}}])
+        with self.assertRaisesRegex(ValueError, "no handler for Open on crm.Account"):
+            account.handle({}, "Open", {}, ctx)
+
 class ListenerDefinitionTest(unittest.TestCase):
     """Listeners are defined on a domain: unqualified types are the domain's own."""
 
@@ -75,7 +100,8 @@ class ListenerDefinitionTest(unittest.TestCase):
         shop, identity = domain("Shop"), domain("Identity")
         carts = shop.read_model("carts").use(identity)
         self.assertEqual((carts.name, carts.order, carts.start), ("carts", 0, 0))
-        self.assertEqual((shop.reactor("mailer").order, shop.reactor("mailer").start), (10, None))
+        mailer = shop.reactor("mailer")
+        self.assertEqual((mailer.order, mailer.start), (10, None))
         carts.on("ItemAdded", lambda data: None)
         carts.on("Identity.AccountRegistered", lambda data: None)
         carts.on("Identity.*", lambda data: None)
@@ -99,6 +125,17 @@ class ListenerDefinitionTest(unittest.TestCase):
         for event_type in ("*", "", "crm.a.b", "Add*"):
             with self.assertRaises(ValueError, msg=event_type):
                 model.on(event_type, lambda data: None)
+
+    def test_a_name_is_defined_once_per_domain(self):
+        shop = domain("shop")
+        shop.aggregate("Cart", 0)
+        shop.read_model("carts")
+        with self.assertRaisesRegex(ValueError, "shop has an aggregate Cart already"):
+            shop.aggregate("Cart", 1)
+        for define in (shop.read_model, shop.reactor):
+            with self.assertRaisesRegex(ValueError, "shop has a listener carts already"):
+                define("carts")
+        self.assertEqual(([a.name for a in shop.aggregates], [l.name for l in shop.listeners]), (["Cart"], ["carts"]))
 
     def test_the_own_domains_event_schemas_apply_without_use(self):
         shop = domain("Shop")
@@ -301,7 +338,7 @@ class Reconnects(unittest.TestCase):
         with mock.patch.dict(os.environ, {"KERNABLE_LOG": "warn"}):
             k = Kernable(kernel.url, kernel.app_key)
         self.addCleanup(k.close)
-        watcher = k.listener(counters_domain.read_model("watcher", reconnect_s=0.05))
+        watcher = k.listener(domain("counters").read_model("watcher", reconnect_s=0.05))
         threading.Thread(target=watcher.run, daemon=True).start()
         until(lambda: len(lines()) >= 4)
         watcher.stop()
@@ -335,7 +372,7 @@ class Stopping(unittest.TestCase):
         with mock.patch.dict(os.environ, {"KERNABLE_LOG": "off"}):
             k = Kernable(kernel.url, kernel.app_key)
         self.addCleanup(k.close)
-        handle = k.listener(counters_domain.read_model("waiting", reconnect_s=2))
+        handle = k.listener(domain("counters").read_model("waiting", reconnect_s=2))
         thread = threading.Thread(target=handle.run, daemon=True)
         thread.start()
         time.sleep(0.3)  # the first attempt failed; it waits 2 s
@@ -355,7 +392,7 @@ class Stopping(unittest.TestCase):
             k.submit("counters", "Counter", "c1", "Increment", {"by": 1})
         with self.assertRaises(ClientClosed):
             k.query("counters", "GetTotal", {"id": "c1"})
-        handle = k.listener(counters_domain.read_model("closed", reconnect_s=0.05))
+        handle = k.listener(domain("counters").read_model("closed", reconnect_s=0.05))
         errors = []
         thread = threading.Thread(target=lambda: _record(errors, handle.run), daemon=True)
         thread.start()
@@ -474,7 +511,7 @@ class EndToEnd(unittest.TestCase):
         totals: dict[str, int] = {}
         seen_by_reactor: list[tuple[int, int]] = []
 
-        model = counters_domain.read_model("totals")
+        model = domain("counters").read_model("totals")
         model.on("counters.Incremented", lambda data, evt: totals.__setitem__(evt.aggregate_id, totals.get(evt.aggregate_id, 0) + data["by"]))
 
         @model.query("counters.GetTotal")
@@ -486,7 +523,7 @@ class EndToEnd(unittest.TestCase):
 
         def total(counter: str) -> int:
             return self.k.query("counters", "GetTotal", {"id": counter})
-        reactor = counters_domain.reactor("audit")
+        reactor = domain("counters").reactor("audit")
 
         @reactor.on("counters.Incremented")
         def _(data, evt):
@@ -538,9 +575,9 @@ class EndToEnd(unittest.TestCase):
         seen: list[str] = []
 
         def mails():
-            return counters_domain.reactor("mails").on("Incremented", lambda data, evt: seen.append(evt.aggregate_id))
+            return domain("counters").reactor("mails").on("Incremented", lambda data, evt: seen.append(evt.aggregate_id))
 
-        audit = counters_domain.reactor("audit").on("Incremented", lambda data: None)
+        audit = domain("counters").reactor("audit").on("Incremented", lambda data: None)
         v1 = [self.k.listener(mails()), self.k.listener(audit)]
         self.k.apply(workers=[counter], listeners=[h.listener for h in v1], metadata={"version": "1"})
         threads = []
@@ -560,7 +597,7 @@ class EndToEnd(unittest.TestCase):
         v2.apply(workers=[counter], listeners=[mails2.listener], metadata={"version": "2"})
         # A live listener counts for nobody, even while it does not get through its events.
         stuck = threading.Event()
-        push = v2.listener(counters_domain.reactor("push", live=True).on("Incremented", lambda data: stuck.wait(10)))
+        push = v2.listener(domain("counters").reactor("push", live=True).on("Incremented", lambda data: stuck.wait(10)))
         try:
             self.run_stream(mails2)
             self.run_stream(push)
@@ -573,7 +610,7 @@ class EndToEnd(unittest.TestCase):
 
         # A listener of the service the membership does not list counts for nobody, even running.
         blocked = threading.Event()
-        extra = self.run_stream(v2.listener(counters_domain.reactor("extra").on("Incremented",
+        extra = self.run_stream(v2.listener(domain("counters").reactor("extra").on("Incremented",
                                                                             lambda data: blocked.wait(10))))
         try:
             self.assertTrue(self.k.submit("counters", "Counter", "c3", "Increment", {"by": 1}).committed,
@@ -583,7 +620,7 @@ class EndToEnd(unittest.TestCase):
             extra.stop()
 
         with self.assertRaisesRegex(ValueError, "live"):
-            counters_domain.reactor("x", live=True).middleware(["*"], fn=lambda check: None)
+            domain("counters").reactor("x", live=True).middleware(["*"], fn=lambda check: None)
         with self.assertRaisesRegex(ValueError, "service"):
             Kernable(self.kernel.url, self.kernel.app_key).apply(workers=[counter])
 
@@ -643,7 +680,7 @@ class EndToEnd(unittest.TestCase):
         self.assertTrue(submit(v2, "Cart", "AddItem").committed)
 
     def test_connections_are_logged_to_stderr(self):
-        model = counters_domain.read_model("totals")
+        model = domain("counters").read_model("totals")
         model.on("counters.Incremented", lambda data: None)
         model.on("Reset", lambda data: None)
         model.query("GetTotal", lambda data: 0)
@@ -773,7 +810,7 @@ class EndToEnd(unittest.TestCase):
         self.run_stream(self.k.worker(counter))
         totals: dict[str, int] = {}
         checks = []
-        guard = counters_domain.read_model("guard")
+        guard = domain("counters").read_model("guard")
         guard.on("counters.Incremented", lambda data, evt: totals.__setitem__(evt.aggregate_id, totals.get(evt.aggregate_id, 0) + data["by"]))
 
         @guard.query("counters.GetTotal")
@@ -939,7 +976,7 @@ class EndToEnd(unittest.TestCase):
     def test_a_reactor_settles_on_the_read_models_before_it_and_never_waits_for_itself(self):
         self.run_stream(self.k.worker(counter))
         totals: dict[str, int] = {}
-        model = counters_domain.read_model("totals")
+        model = domain("counters").read_model("totals")
         model.on("counters.Incremented", lambda data, evt: totals.__setitem__(evt.aggregate_id, totals.get(evt.aggregate_id, 0) + data["by"]))
 
         @model.query("counters.GetTotal")
@@ -949,7 +986,7 @@ class EndToEnd(unittest.TestCase):
             return totals.get(data["id"], 0)
 
         seen = []
-        reactor = counters_domain.reactor("mirror")
+        reactor = domain("counters").reactor("mirror")
 
         @reactor.on("counters.Incremented")
         def _(data, evt, ctx):
@@ -1023,7 +1060,7 @@ class EndToEnd(unittest.TestCase):
         handled = []
 
         def totals(schema="1"):
-            model = counters_domain.read_model("totals", store=url, schema=schema, reconnect_s=0.05)
+            model = domain("counters").read_model("totals", store=url, schema=schema, reconnect_s=0.05)
 
             @model.on("counters.Incremented")
             def _(data, evt, ctx):
@@ -1078,7 +1115,7 @@ class EndToEnd(unittest.TestCase):
 
     def test_a_read_model_whose_commit_fails_handles_the_batch_again(self):
         self.run_stream(self.k.worker(counter))
-        model = counters_domain.read_model("sums", store=f"sqlite:{self.kernel.dir}/sums.db", reconnect_s=0.05)
+        model = domain("counters").read_model("sums", store=f"sqlite:{self.kernel.dir}/sums.db", reconnect_s=0.05)
 
         @model.on("counters.Incremented")
         def _(data, evt, ctx):
@@ -1118,7 +1155,7 @@ class EndToEnd(unittest.TestCase):
         for by in (1, 2):
             self.increment(by, wait="committed")
         seen = []
-        mailer = counters_domain.reactor("stored-mailer", store=f"sqlite:{self.kernel.dir}/mailer.db")
+        mailer = domain("counters").reactor("stored-mailer", store=f"sqlite:{self.kernel.dir}/mailer.db")
 
         @mailer.on("counters.Incremented")
         def _(data, evt, ctx):
@@ -1138,7 +1175,7 @@ class EndToEnd(unittest.TestCase):
         # Its directory is missing at first (as a full disk fails an open).
         later = f"{self.kernel.dir}/later"
         seen = []
-        model = counters_domain.read_model("late-model", store=f"sqlite:{later}/model.db", reconnect_s=0.05)
+        model = domain("counters").read_model("late-model", store=f"sqlite:{later}/model.db", reconnect_s=0.05)
 
         @model.on("counters.Incremented")
         def _(data, evt, ctx):
@@ -1171,7 +1208,7 @@ class EndToEnd(unittest.TestCase):
         self.assertTrue(self.increment(1, wait="committed", id="i1").committed)
 
     def test_an_unexpected_error_is_rejected_with_its_type_only(self):
-        leaky = counters_domain.aggregate("Leaky", 0)
+        leaky = domain("counters").aggregate("Leaky", 0)
 
         @leaky.command("Do")
         def _(state, data):
@@ -1186,7 +1223,7 @@ class EndToEnd(unittest.TestCase):
     def test_a_middleware_that_returns_false_or_something_else_refuses(self):
         self.run_stream(self.k.worker(counter))
         verdicts = {"value": None}
-        guard = counters_domain.read_model("guard")
+        guard = domain("counters").read_model("guard")
 
         @guard.middleware(["counters.*"])
         def _(check, outcome=None):
@@ -1199,7 +1236,7 @@ class EndToEnd(unittest.TestCase):
             self.assertEqual(outcome.code, code, repr(value))
 
     def test_a_command_handler_that_changes_its_state_does_not_change_the_snapshot(self):
-        box = counters_domain.aggregate("Box", {"items": []}, snapshot_every=1)
+        box = domain("counters").aggregate("Box", {"items": []}, snapshot_every=1)
 
         @box.apply("Opened")
         def _(state, data):
@@ -1218,6 +1255,121 @@ class EndToEnd(unittest.TestCase):
         self.assertTrue(self.k.submit("counters", "Box", "b1", "Open", {}, wait="committed").committed)
         counted = self.k.submit("counters", "Box", "b1", "Count", {}, wait="committed")
         self.assertEqual((counted.code, counted.message), ("count", "1"), "the snapshot equals a replay")
+
+    def test_a_query_answer_of_none_arrives_as_none(self):
+        model = domain("counters").read_model("finder")
+        model.query("Find", lambda data: None)
+        model.query("FindEmpty", lambda data: {})
+        self.run_stream(self.k.listener(model))
+        self.assertIsNone(self.k.query("counters", "Find"))
+        self.assertEqual(self.k.query("counters", "FindEmpty"), {})
+
+    def test_a_listener_sees_when_an_event_was_committed(self):
+        self.run_stream(self.k.worker(counter))
+        seen = []
+        model = domain("counters").read_model("stamps")
+        model.on("Incremented", lambda data, evt: seen.append(evt.created_at))
+        self.run_stream(self.k.listener(model))
+        outcome = self.increment(1)
+        self.assertEqual(len(seen), 1)
+        self.assertLess(abs(datetime.now(timezone.utc) - seen[0]), timedelta(seconds=5))
+        self.assertEqual(seen[0], outcome.events[0].created_at)
+
+    def test_a_listener_closes_its_store_when_it_stops_and_a_later_run_opens_it_again(self):
+        self.run_stream(self.k.worker(counter))
+        path = f"{self.kernel.dir}/closing.db"
+        model = domain("counters").read_model("closing", store=f"sqlite:{path}", reconnect_s=0.05)
+
+        @model.on("Incremented")
+        def _(data, evt, ctx):
+            ctx.store.set("sums", evt.aggregate_id, ctx.store.get("sums", evt.aggregate_id, 0) + data["by"])
+
+        handle = self.k.listener(model)
+        self.streams.append(handle)
+        thread = background(handle.run)
+        self.assertTrue(handle.ready.wait(5))
+        self.increment(2)
+        store = handle.store
+        handle.stop()
+        thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertIsNone(handle.store)
+        with self.assertRaises(sqlite3.ProgrammingError):
+            store.get("sums", "c1")
+        self.assertFalse(os.path.exists(f"{path}-wal"), "the database is released")
+        again = self.run_stream(self.k.listener(model))
+        self.assertEqual(again.store.get("sums", "c1"), 2)
+
+    def identity_kernel(self, *domains):
+        """Replaces the counters kernel with one that runs the identity domain's commands."""
+        self.k.close()
+        self.kernel.dispose()
+        self.kernel = TestKernel(["identity.*"])
+        self.kernel.start()
+        self.k = Kernable(self.kernel.url, self.kernel.app_key).use(*domains)
+
+    def test_a_read_model_store_keeps_no_erased_value_on_disk(self):
+        identity = domain("identity")
+        identity.command("RegisterAccount").personal(["email"], lambda d: d["id"])
+        identity.event("AccountRegistered", 1).personal(["email"], lambda d: d["id"])
+        identity.event("AccountErased", 1).erases(lambda d: d["id"])
+        account = identity.aggregate("Account", {})
+        account.command("RegisterAccount", lambda s, data: [{"type": "AccountRegistered", "data": data}])
+        account.command("EraseAccount", lambda s, data: [{"type": "AccountErased", "data": data}])
+        self.identity_kernel(identity)
+        self.run_stream(self.k.worker(account))
+        directory = f"{self.kernel.dir}/store"
+        os.mkdir(directory)
+        model = identity.read_model("accounts", store=f"sqlite:{directory}/accounts.db")
+        model.on("AccountRegistered", lambda data, evt, ctx: ctx.store.set("accounts", data["id"], data))
+        model.on("AccountErased", lambda data, evt, ctx: ctx.store.remove("accounts", data["id"]))
+        handle = self.run_stream(self.k.listener(model))
+
+        def on_disk() -> list[str]:
+            found = []
+            for name in os.listdir(directory):
+                with open(os.path.join(directory, name), "rb") as f:
+                    if b"max@firma.de" in f.read():
+                        found.append(name)
+            return found
+
+        send = lambda type, data: self.k.submit("identity", "Account", "a1", type, data)  # noqa: E731
+        self.assertTrue(send("RegisterAccount", {"id": "a1", "email": "max@firma.de"}).committed)
+        self.assertEqual(handle.store.get("accounts", "a1")["email"], "max@firma.de")
+        self.assertTrue(on_disk(), "the store holds the value")
+        # Settled: the read model acknowledged the erasing event's batch.
+        self.assertTrue(send("EraseAccount", {"id": "a1"}).committed)
+        self.assertIsNone(handle.store.get("accounts", "a1"))
+        self.assertEqual(on_disk(), [], "no file of the store keeps the erased value")
+
+    def test_a_personal_field_an_event_does_not_declare_is_refused(self):
+        identity = domain("identity")
+        identity.command("RegisterAccount").personal(["email"], lambda d: d["id"])
+        identity.command("NoteAccount").personal(["email"], lambda d: d["id"])
+        identity.event("AccountRegistered", 1).personal(["email"], lambda d: d["id"])
+        account = identity.aggregate("Account", {})
+        account.command("RegisterAccount", lambda s, data: [{"type": "AccountRegistered", "data": data}])
+        # Forgot `identity.event("AccountNoted", 1).personal(...)`: the email would be in clear.
+        account.command("NoteAccount", lambda s, data: [{"type": "AccountNoted", "data": data}])
+        self.identity_kernel(identity)
+        self.run_stream(self.k.worker(account))
+
+        def send(type: str, email: str | None = "max@firma.de"):
+            return self.k.submit("identity", "Account", "a1", type, {"id": "a1", "email": email})
+
+        refused = send("NoteAccount")
+        self.assertEqual((refused.committed, refused.code), (False, "personal_in_clear"))
+        for name in ("NoteAccount", "AccountNoted", "email"):
+            self.assertIn(name, refused.message)
+        self.assertTrue(send("NoteAccount", None).committed, "a null value holds nothing personal")
+        registered = send("RegisterAccount")
+        self.assertTrue(registered.committed, "a field declared on both is kept in the vault")
+        self.assertEqual(registered.events[0].redacted, ["email"])
+        for name in os.listdir(self.kernel.dir):
+            path = os.path.join(self.kernel.dir, name)
+            if os.path.isfile(path):
+                with open(path, "rb") as f:
+                    self.assertNotIn(b"max@firma.de", f.read(), name)
 
     def test_event_schemas_are_checked_when_defined(self):
         counters = domain("counters")

@@ -78,7 +78,7 @@ Every handler gets the same kinds of arguments, in the same order: the **data** 
 | `apply(type, …)` | `state, data, evt, ctx` | `evt`: type, version, domain, aggregate type and ID, tenant, command ID | `ctx`: the request context of the command that caused the event |
 | `command(type, …)` | `state, data, cmd, ctx` | `cmd`: command ID, type, domain, aggregate type and ID, tenant | `ctx`: the request context, `now()`, `id()`, the deadline |
 | `query(type, …)` | `data, qry, ctx` | `qry`: query ID, type, domain, tenant | `ctx`: the request context of who asks, the listener's store |
-| `on(type, …)` | `data, evt, ctx` | `evt`: as for `apply`, plus position, payload version and redacted fields | `ctx`: the request context, `replaying`, `follow()`, the store |
+| `on(type, …)` | `data, evt, ctx` | `evt`: as for `apply`, plus position, payload version, redacted fields and when the kernel committed it | `ctx`: the request context, `replaying` (committed before this connection: a rebuild, or a reactor's backlog after a restart, so never a reason to skip a reactor's side effects), `follow()`, the store |
 
 `apply` gets no `now()` and no `id()`: replaying the events must give the same state every time, so a time or an ID the state needs goes into the event's data.
 

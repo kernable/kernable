@@ -11,7 +11,8 @@ check: prune py
 	cd sdks/typescript && npm install --no-audit --no-fund --silent && npm run -s check \
 		&& KERNABLE_TEST_STORE=file npm run -s check
 	cd sdks/python && .venv/bin/python -m unittest discover tests \
-		&& KERNABLE_TEST_STORE=file .venv/bin/python -m unittest discover tests
+		&& KERNABLE_TEST_STORE=file .venv/bin/python -m unittest discover tests \
+		&& .venv/bin/python -m unittest discover -s ../../docs/examples/how-to -t ../../docs/examples/how-to
 	cd docs && npm install --no-audit --no-fund --silent && npm run -s check
 
 # The documentation site at http://localhost:5173; `npm run reference` in docs/ regenerates the

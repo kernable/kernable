@@ -29,9 +29,9 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::{
     BoxError, Client, Domain, HANDLING, Outcome, QueryOutcome, Rejected, RequestContext, Store,
-    StoredEvent,
+    StoredEvent, Timestamp,
     context::now_ms,
-    domain::{decode, encode, upcast},
+    domain::{decode, upcast},
     log, vault,
 };
 
@@ -58,6 +58,8 @@ pub struct StoredEventMeta {
     pub command_id: String,
     /// Global position of the event.
     pub position: u64,
+    /// When the kernel committed the event.
+    pub created_at: Timestamp,
     /// Version of the payload format as stored; the handler gets the payload upcast to the
     /// version it knows, unless it is raw.
     pub schema: u32,
@@ -77,6 +79,7 @@ impl StoredEventMeta {
             aggregate_id: e.aggregate_id.clone(),
             command_id: e.command_id.clone(),
             position: e.position,
+            created_at: e.created_at,
             schema: e.schema,
             redacted: e.redacted.clone(),
         }
@@ -87,7 +90,12 @@ impl StoredEventMeta {
 /// [`Listener::on`]).
 #[derive(Clone)]
 pub struct ListenerContext {
-    /// The event was committed before the listener connected: it is being replayed.
+    /// The event was committed before this connection began: a read model rebuilding from the
+    /// start, and equally the backlog a reactor catches up on after a restart or a lost
+    /// connection. A reactor must not skip side effects because of it (those events are new to
+    /// it); submit with fixed command IDs instead, so they are safe to repeat. Use it to skip
+    /// work that only matters live, e.g. a notification about something long past in a
+    /// listener that starts at 0.
     pub replaying: bool,
     /// The listener's store, if it has one ([`Listener::store`]).
     pub store: Option<Store>,
@@ -701,7 +709,7 @@ impl ListenerHandle {
         self.inner.position.load(Ordering::SeqCst)
     }
 
-    /// The listener's store, once `run()` opened it.
+    /// The listener's store, while `run()` has it open.
     pub fn opened_store(&self) -> Option<Store> {
         self.inner.store.lock().unwrap().clone()
     }
@@ -723,8 +731,19 @@ impl ListenerHandle {
     /// Processes events, queries and checks until `stop()`, reconnecting when the stream drops
     /// or a handler fails. With a store, opens it first and continues after its position; if
     /// it cannot be opened (a full disk), logs the error and tries again, backing off like a
-    /// reconnect.
+    /// reconnect. When it ends, it closes the store ([`Store::close`]); a later run opens it
+    /// again.
     pub async fn run(&self) {
+        // Also when the caller drops the future (a timeout, an aborted task).
+        struct Closing<'a>(&'a HandleInner);
+        impl Drop for Closing<'_> {
+            fn drop(&mut self) {
+                if let Some(store) = self.0.store.lock().unwrap().take() {
+                    store.close();
+                }
+            }
+        }
+        let _closing = Closing(&self.inner);
         let mut stopped = self.inner.stopped.subscribe();
         let log = &self.inner.client.log;
         let what = format!("listener {}", self.def().name);
@@ -861,6 +880,7 @@ impl ListenerHandle {
                 }
                 Some(Delivery::Batch(batch)) => {
                     let up_to = batch.up_to;
+                    let erased = batch.events.iter().any(|e| !e.erases.is_empty());
                     // A kernel that goes back (a bug, or not the kernel) must not make a store
                     // apply events twice: the session ends, and the next resumes after what
                     // was handled.
@@ -890,7 +910,7 @@ impl ListenerHandle {
                     .await
                     .unwrap_or_else(|panic| Err(panic.into()))
                     .and_then(|()| match &store {
-                        Some(s) => Ok(s.commit(up_to)?),
+                        Some(s) => Ok(s.commit(up_to, erased)?),
                         None => Ok(()),
                     });
                     if let Err(e) = handled {
@@ -1028,7 +1048,11 @@ impl ListenerHandle {
             store: self.opened_store(),
         };
         match handler(decode(&q.payload), qry, ctx).await {
-            Ok(answer) => query_answer::Outcome::Response(encode(&answer)),
+            // `None` or `()` is answered as `null`: only commands and events send `{}` for no
+            // data.
+            Ok(answer) => query_answer::Outcome::Response(
+                serde_json::to_vec(&answer).expect("a JSON value encodes"),
+            ),
             Err(e) => query_answer::Outcome::Rejected(Rejected::of(&e, "handler_error").to_wire()),
         }
     }

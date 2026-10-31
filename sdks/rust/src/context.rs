@@ -101,8 +101,8 @@ impl RequestContext {
 
 /// A point in time in milliseconds since the epoch, shown as RFC 3339 in UTC with
 /// milliseconds (`2026-10-27T09:00:00.000Z`), like JavaScript's `toISOString()`: format it
-/// with `to_string()`. `Timestamp(ms)` makes one from milliseconds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// with `to_string()`. `Timestamp(ms)` makes one from milliseconds; the default is the epoch.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Timestamp(pub i64);
 
 impl Timestamp {

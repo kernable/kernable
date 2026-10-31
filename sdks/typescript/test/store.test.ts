@@ -2,10 +2,11 @@
 // after the stored position, a failed batch leaves no trace, and a new schema rebuilds.
 
 import assert from "node:assert/strict";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { Kernable, Rejected, domain, type ListenerHandle } from "../src/index.ts";
+import { Kernable, Rejected, domain, type ListenerHandle, type Personal } from "../src/index.ts";
 import { TestKernel } from "./kernel.ts";
 
 const counters = domain("counters");
@@ -21,7 +22,8 @@ test("a read model with a store continues where it left off and rebuilds on a ne
   let handled = 0;
   let failOn = -1;
   const totals = (schema?: string) => {
-    const Totals = counters.readModel("totals", { store: url, schema, reconnectMs: 50 })
+    // Another process's definition: a domain has one listener of a name.
+    const Totals = domain("counters").readModel("totals", { store: url, schema, reconnectMs: 50 })
       .on("Incremented", (data: { by: number }, evt, ctx) => {
         handled++;
         const total = (ctx.store!.get<number>("totals", evt.aggregateId) ?? 0) + data.by;
@@ -85,6 +87,80 @@ test("a read model with a store continues where it left off and rebuilds on a ne
   } finally {
     worker.stop();
     for (const m of models) m.stop();
+    await Promise.allSettled(running);
+    kernable.close();
+    await kernel.dispose();
+  }
+});
+
+test("a listener closes its store when it stops and opens it again on its next run", async () => {
+  const kernel = new TestKernel(["counters.*"]);
+  await kernel.start();
+  const kernable = new Kernable({ url: kernel.url, key: kernel.appKey });
+  const path = join(kernel.dir, "sums.db");
+  const sums = domain("counters").readModel("sums", { store: `sqlite:${path}` })
+    .on("Incremented", (data: { by: number }, evt, ctx) => ctx.store!.set("sums", evt.aggregateId, (ctx.store!.get<number>("sums", evt.aggregateId) ?? 0) + data.by));
+  const worker = kernable.worker(counter);
+  const first = kernable.listener(sums);
+  const running = [worker.run(), first.run()];
+  let second: ListenerHandle | undefined;
+  try {
+    await Promise.all([worker.ready, first.ready]);
+    await kernable.submit({ domain: "counters", aggregateType: "Counter", aggregateId: "c1", type: "Increment", data: { by: 2 } });
+    const store = first.store;
+    assert.deepEqual(store.all("sums"), [["c1", 2]]);
+    first.stop();
+    await running[1];
+    assert.throws(() => store.all("sums"), /not open/, "the store is closed");
+    assert.throws(() => first.store, /has no store/);
+    assert.ok(!existsSync(`${path}-wal`), "the database is released");
+
+    second = kernable.listener(sums);
+    running.push(second.run());
+    await second.ready;
+    assert.deepEqual(second.store.all("sums"), [["c1", 2]]);
+  } finally {
+    worker.stop();
+    first.stop();
+    second?.stop();
+    await Promise.allSettled(running);
+    kernable.close();
+    await kernel.dispose();
+  }
+});
+
+test("an erased value is in no file of a read model's store once the erasure is acknowledged", async () => {
+  const kernel = new TestKernel(["people.*"]);
+  await kernel.start();
+  const people = domain("people");
+  people.command("Register").personal(["email"], (_d, id) => id);
+  people.event("Registered", 1).personal(["email"], (_d, id) => id);
+  people.event("Erased", 1).erases((_d, id) => id);
+  const person = people.aggregate("Person", {})
+    .command("Register", (_s, data: { email: string }) => [{ type: "Registered", data: { email: data.email } }])
+    .command("Erase", () => [{ type: "Erased" }]);
+  const kernable = new Kernable({ url: kernel.url, key: kernel.appKey }).use(people);
+  const emails = kernable.listener(people.readModel("emails", { store: `sqlite:${join(kernel.dir, "emails.db")}` })
+    .on("Registered", (data: { email: Personal<string> }, evt, ctx) => ctx.store!.set("emails", evt.aggregateId, { email: data.email }))
+    .on("Erased", (_data, evt, ctx) => ctx.store!.remove("emails", evt.aggregateId)));
+  const worker = kernable.worker(person);
+  const running = [worker.run(), emails.run()];
+  const send = (type: string, data?: object) => kernable.submit({ domain: "people", aggregateType: "Person", aggregateId: "p1", type, data });
+  // Every file of the store: the database, its write-ahead log and its shared memory.
+  const inStore = (value: string) =>
+    readdirSync(kernel.dir).filter((f) => f.startsWith("emails.db")).some((f) => readFileSync(join(kernel.dir, f)).includes(value));
+  try {
+    await Promise.all([worker.ready, emails.ready]);
+    assert.ok((await send("Register", { email: "ann@example.com" })).committed);
+    assert.deepEqual(emails.store.get("emails", "p1"), { email: "ann@example.com" });
+    assert.ok(inStore("ann@example.com"), "the value is on disk before the erasure");
+
+    assert.ok((await send("Erase")).committed);
+    assert.equal(emails.store.get("emails", "p1"), undefined);
+    assert.ok(!inStore("ann@example.com"), "the erased value stays on disk");
+  } finally {
+    worker.stop();
+    emails.stop();
     await Promise.allSettled(running);
     kernable.close();
     await kernel.dispose();

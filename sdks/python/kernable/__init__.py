@@ -39,7 +39,7 @@ import time
 import traceback
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable
 
 import grpc
@@ -57,6 +57,9 @@ __all__ = ["PROTOCOL", "Aggregate", "App", "ApplyContext", "CacheClient", "Check
            "Event", "EventMeta", "EventSchema", "Kernable", "Key", "Listener", "ListenerContext", "ListenerHandle", "Manifest", "NotSettled", "Outcome",
            "QueryContext", "QueryMeta", "QueryOutcome", "Rejected", "RequestContext", "Store", "StoredEventMeta", "Tls", "Worker",
            "domain"]
+
+#: Time zero (UTC): the default of times not known.
+_EPOCH = datetime.fromtimestamp(0, timezone.utc)
 
 
 class Rejected(Exception):
@@ -133,6 +136,14 @@ class CommandContext:
     #: The command whose IDs `id()` derives.
     _command_id: str = field(default="", repr=False)
     _ids: int = field(default=0, repr=False)
+
+    @classmethod
+    def new(cls, command_id: str, request: RequestContext | None = None,
+            received_at: datetime = _EPOCH) -> "CommandContext":
+        """A context for calling a command handler directly, e.g. in a unit test with
+        `Aggregate.handle`: `id()` derives from `command_id` as in a real command, `now()` returns
+        `received_at` (default: the epoch), and its deadline is 30 s after that."""
+        return cls(request or RequestContext(), received_at + timedelta(seconds=30), received_at, command_id)
 
     def now(self) -> datetime:
         """When the kernel received the command: the same every time the command runs.
@@ -250,6 +261,8 @@ class Event:
     #: Fields kept in the vault whose value is not here (None in `data`): erased, or not readable
     #: with this key (granted `vault_read`).
     redacted: list[str] = field(default_factory=list)
+    #: When the kernel committed the event (UTC).
+    created_at: datetime = _EPOCH
 
 
 @dataclass
@@ -257,7 +270,8 @@ class StoredEventMeta(EventMeta):
     """What a listener handler gets about the event besides its data (as an optional second
     parameter): the stored event without its payload and request context. It has every field
     of `EventMeta` (`type`, `version`, `tenant`, `domain`, `aggregate_type`, `aggregate_id`,
-    `command_id`), and these:"""
+    `command_id`), and these. Unlike `EventMeta`, it says when the event was committed: a read
+    model may show that time, `apply` may not depend on it."""
 
     #: Global position of the event in the kernel's log.
     position: int = 0
@@ -267,6 +281,8 @@ class StoredEventMeta(EventMeta):
     #: Fields kept in the vault whose value is not in the data (None there): erased, or not
     #: readable with this key (granted `vault_read`).
     redacted: list[str] = field(default_factory=list)
+    #: When the kernel committed the event (UTC).
+    created_at: datetime = _EPOCH
 
 
 @dataclass
@@ -274,7 +290,12 @@ class ListenerContext:
     """What a listener handler gets besides the event's data and meta (as an optional third
     parameter)."""
 
-    #: The event was committed before the listener connected: it is being replayed.
+    #: The event was committed before this connection began: a read model rebuilding from the
+    #: start, and equally the backlog a reactor catches up on after a restart or a lost
+    #: connection. A reactor must not skip side effects because of it (those events are new to
+    #: it); submitting with fixed command IDs makes them safe to repeat instead. Use it to skip
+    #: work that only matters live, e.g. a notification about something long past, in a listener
+    #: that starts at 0.
     replaying: bool
     #: The request context of the command that caused the event.
     request: RequestContext = field(default_factory=RequestContext)
@@ -466,7 +487,9 @@ class CommandSchema:
 
     def personal(self, fields: list[str], subject: Callable) -> "CommandSchema":
         """Keeps these top-level fields in the vault as personal data of `subject`; see
-        `EventSchema.personal`."""
+        `EventSchema.personal`. Declare them on the events that carry them too: a worker rejects
+        the command (`personal_in_clear`) if one of its events holds such a field, under the same
+        name, without declaring it."""
         self.vault.personal.append((fields, subject))
         return self
 
@@ -588,8 +611,11 @@ class Domain:
         """An aggregate of this domain named `name` (lowercase by convention, like `cart`), whose
         state starts as `initial` (a JSON-like value, usually a dict); see `Aggregate` for
         `snapshot_every` and `schema`. Run it with `kernable.worker(aggregate)` or in an app.
-        Example: `cart_aggregate = shop_domain.aggregate("cart", {"items": 0})`."""
-        aggregate = Aggregate(self.name, name, initial, snapshot_every, schema, self.events)
+        Example: `cart_aggregate = shop_domain.aggregate("cart", {"items": 0})`. Raises
+        `ValueError` if the domain has an aggregate of that name already."""
+        if any(a.name == name for a in self.aggregates):
+            raise ValueError(f"{self.name} has an aggregate {name} already")
+        aggregate = Aggregate(self.name, name, initial, snapshot_every, schema, self.events, self.commands)
         self.aggregates.append(aggregate)
         return aggregate
 
@@ -609,7 +635,8 @@ class Domain:
         With `store` (`sqlite:<path>` or `memory:`), its state lives in the running listener's
         `store`: data and position are written together per batch, and a restart continues after
         the stored position. Change `schema` when the handlers store data differently: the store is
-        cleared and the read model rebuilds from the first event. `live`: see `reactor`."""
+        cleared and the read model rebuilds from the first event. `live`: see `reactor`. Raises
+        `ValueError` if the domain has a listener (read model or reactor) of that name already."""
         return self._listener(Listener(self, name, order, start, reconnect_s, store, schema, live=live))
 
     def reactor(self, name: str, *, order: int = 10, start: int | None = None, reconnect_s: float = 1.0,
@@ -627,10 +654,12 @@ class Domain:
         `live`: not registered with the kernel: no stored position, always starts at the newest
         event, nobody waits for it, and it is forgotten when it disconnects. For reactions that
         only matter while the process runs, e.g. pushing to connected browsers. Cannot be a
-        middleware."""
+        middleware. Raises `ValueError` if the domain has a listener of that name already."""
         return self._listener(Listener(self, name, order, start, reconnect_s, store, schema, live=live))
 
     def _listener(self, listener: "Listener") -> "Listener":
+        if any(l.name == listener.name for l in self.listeners):
+            raise ValueError(f"{self.name} has a listener {listener.name} already")
         self.listeners.append(listener)
         return listener
 
@@ -658,11 +687,13 @@ class Aggregate:
     """
 
     def __init__(self, domain: str, name: str, initial: Any, snapshot_every: int = 100, schema: str = "1",
-                 events: dict[str, EventSchema] | None = None):
-        """Use `Domain.aggregate`, which passes the domain's event schemas."""
+                 events: dict[str, EventSchema] | None = None, commands: dict[str, CommandSchema] | None = None):
+        """Use `Domain.aggregate`, which passes the domain's event and command schemas."""
         self.domain = domain
         #: The domain's event schemas.
         self.events = {} if events is None else events
+        #: The domain's command schemas: which command fields are personal.
+        self.commands = {} if commands is None else commands
         self.name = name
         self.initial = initial
         self.snapshot_every = snapshot_every
@@ -712,6 +743,42 @@ class Aggregate:
                 result = _call(fn, draft, _upcast(self.events, self.domain, event_type, schema, data)[1], meta, ctx)
                 state = draft if result is None else result
         return state
+
+    def handle(self, state: Any, command_type: str, data: Any, ctx: CommandContext) -> list[dict]:
+        """Runs the `command_type` handler on `state`, e.g. in a unit test, and returns its events.
+        `data` reaches it as from a client (after a JSON round trip; `None` as `{}`), `state` as a
+        copy. The handler's `CommandMeta` has the command ID of `ctx` (see `CommandContext.new`),
+        this aggregate's domain and name, and an empty aggregate ID and tenant: `cart_aggregate.handle(
+        state, "AddItem", {"qty": 2}, CommandContext.new("add-1"))`. Raises the handler's `Rejected`
+        (or other exception), `ValueError` if there is no handler for `command_type`."""
+        fn = self.handlers.get(command_type)
+        if fn is None:
+            raise ValueError(f"no handler for {command_type} on {self.domain}.{self.name}")
+        meta = CommandMeta(ctx._command_id, command_type, self.domain, self.name)
+        return _call(fn, copy.deepcopy(state), _decode(_encode(data)), meta, ctx)
+
+
+def _personal(vault: _VaultFields) -> set[str]:
+    return {f for fields, _ in vault.personal for f in fields}
+
+
+def _check_personal(agg: Aggregate, cmd, produced: list[dict]) -> None:
+    """Rejects (`personal_in_clear`) an event that holds a personal field of its command, under the
+    same name, but does not declare it personal: the value would go into the log in clear, for good."""
+    spec = agg.commands.get(cmd.command_type)
+    personal = _personal(spec.vault) if spec else set()
+    if not personal:
+        return
+    for e in produced:
+        data, event = e.get("data"), agg.events.get(e["type"])
+        if not isinstance(data, dict):
+            continue
+        declared = _personal(event.vault) if event else set()
+        for f in sorted(personal - declared):
+            if data.get(f) is not None:
+                raise Rejected(f"{cmd.command_type} declares {f} personal, but {e['type']} does not: it would be "
+                               f"stored in clear (declare it with Domain.event({e['type']!r}, …).personal)",
+                               "personal_in_clear")
 
 
 def _register(owner, table: dict, name: str, fn: Callable | None):
@@ -1558,6 +1625,7 @@ class Worker(_Stream):
             # A copy: a handler that changes it must not change the snapshot.
             produced = _call(agg.handlers[cmd.command_type], copy.deepcopy(state), _unseal(_decode(cmd.payload), x.vault)[0],
                              meta, ctx)
+            _check_personal(agg, cmd, produced)
             events, vault = [], []
             for e in produced:
                 spec = agg.events.get(e["type"])
@@ -1672,7 +1740,7 @@ class Listener:
         listener's state; works as a decorator too: `fn(data, qry, ctx)` gets the query's data, a
         `QueryMeta` and a `QueryContext` (both optional). The kernel delivers queries in order with
         the events, so an answer reflects every event handled before it. Return the answer
-        (JSON-like); raise `Rejected` to refuse (any other exception refuses with
+        (JSON-like; `None` reaches the caller as `None`); raise `Rejected` to refuse (any other exception refuses with
         `handler_error`). A handler cannot query its own listener (the answer would wait behind
         itself): the kernel refuses it. Example: `@carts_readmodel.query("GetCart")` over
         `def _(data): return rows[data["id"]]`. Raises `ValueError` if `query_type` is invalid."""
@@ -1739,8 +1807,8 @@ class ListenerHandle(_Stream):
     `Kernable.app`. `ready` is a `threading.Event`: `handle.ready.wait(5)` returns whether the
     kernel accepted the listener within 5 seconds. `stop()` ends `run()`, also from another
     thread. Attributes: `listener` (the definition), `position` (global position of the last
-    handled event, or skipped, for other event types) and `store` (the listener's `Store`, once
-    `run()` opened it)."""
+    handled event, or skipped, for other event types) and `store` (the listener's `Store`, while
+    `run()` has it open)."""
 
     def __init__(self, channel: grpc.Channel, key: Key, listener: Listener, log: _Log,
                  service: str = ""):
@@ -1750,7 +1818,7 @@ class ListenerHandle(_Stream):
         self._service = service
         #: The listener definition this runs.
         self.listener = listener
-        #: The listener's store, once `run()` opened it (with `store=`).
+        #: The listener's store, while `run()` has it open (with `store=`).
         self.store: Store | None = None
         self._stub = rpc.ListenerServiceStub(channel)
         self._key = key
@@ -1766,8 +1834,9 @@ class ListenerHandle(_Stream):
 
     def run(self) -> None:
         """Processes events, queries and checks until `stop()`, reconnecting when the stream
-        drops; with a store, opens it first and continues after its position. A store that
-        cannot be opened (a full disk) is tried again, backing off like a reconnect."""
+        drops; with a store, opens it first and continues after its position, and closes it when
+        `run()` ends. A store that cannot be opened (a full disk) is tried again, backing off like
+        a reconnect."""
         if self.listener.store_url and self.store is None:
             attempt = 0
             while self.store is None:
@@ -1783,7 +1852,13 @@ class ListenerHandle(_Stream):
             # starts at the newest event).
             if self.store.committed > 0:
                 self._start = self.store.committed
-        super().run()
+        try:
+            super().run()
+        finally:
+            # Stopping releases the store; a later run opens it again.
+            if self.store is not None:
+                self.store.close()
+                self.store = None
 
     def _open(self, requests):
         return self._stub.Listen(requests)
@@ -1840,6 +1915,9 @@ class ListenerHandle(_Stream):
                     self.position = self.store.committed
                 raise
             self.position = msg.batch.up_to
+            # Values removed after an erasure must not stay behind in the WAL, outside the batch.
+            if self.store and any(e.erases for e in msg.batch.events):
+                self.store._checkpoint()
             return pb.ListenerMessage(ack=pb.Ack(position=msg.batch.up_to))
         elif kind == "query":
             answer = self._answer(msg.query.call_id, msg.query.query)
@@ -1881,7 +1959,7 @@ class ListenerHandle(_Stream):
                 if name not in d._raw:
                     schema, data = _upcast(d._domains.get(e.domain), e.domain, e.event_type, schema, data)
                 evt = StoredEventMeta(e.event_type, e.version, e.tenant_id, e.domain, e.aggregate_type, e.aggregate_id,
-                                      e.command_id, e.global_position, schema, redacted)
+                                      e.command_id, e.global_position, schema, redacted, _time(e.created_at))
                 ctx = ListenerContext(e.global_position <= self._replay_up_to, _from_wire_context(e.context),
                                       self.store, e.command_id)
                 _call(handler, data, evt, ctx)
@@ -1914,7 +1992,8 @@ class ListenerHandle(_Stream):
                 raise Rejected(f"no handler for {q.domain}.{q.query_type}", "unknown_query")
             meta = QueryMeta(q.query_id, q.query_type, q.domain, q.tenant_id)
             result = _call(handler, _decode(q.payload), meta, QueryContext(_from_wire_context(q.context), self.store))
-            return pb.QueryAnswer(call_id=call_id, response=_encode(result))
+            # An answer of None is JSON `null`, not `{}`: "nothing" must not look like an empty object.
+            return pb.QueryAnswer(call_id=call_id, response=b"null" if result is None else _encode(result))
         except Exception as err:
             reason = (pb.Rejected(code=err.code, message=str(err)) if isinstance(err, Rejected)
                       else pb.Rejected(code="handler_error", message=repr(err)))
@@ -2012,4 +2091,4 @@ def _to_event(e, vault=None) -> Event:
     return Event(position=e.global_position, tenant=e.tenant_id, domain=e.domain, aggregate_type=e.aggregate_type,
                  aggregate_id=e.aggregate_id, version=e.version, type=e.event_type,
                  data=data, command_id=e.command_id, request=_from_wire_context(e.context),
-                 schema=e.schema, redacted=redacted)
+                 schema=e.schema, redacted=redacted, created_at=_time(e.created_at))

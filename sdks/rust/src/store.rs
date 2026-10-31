@@ -20,7 +20,8 @@ use crate::Error;
 /// position, once per batch. Errors are [`Error::Store`] (SQLite) or [`Error::Json`].
 #[derive(Clone)]
 pub struct Store {
-    db: Arc<Mutex<Connection>>,
+    /// `None` once closed.
+    db: Arc<Mutex<Option<Connection>>>,
     committed: Arc<AtomicU64>,
 }
 
@@ -53,7 +54,7 @@ impl Store {
         }
         let committed = meta("position")?.and_then(|p| p.parse().ok()).unwrap_or(0);
         Ok(Store {
-            db: Arc::new(Mutex::new(db)),
+            db: Arc::new(Mutex::new(Some(db))),
             committed: Arc::new(AtomicU64::new(committed)),
         })
     }
@@ -63,47 +64,58 @@ impl Store {
         self.committed.load(Ordering::SeqCst)
     }
 
+    /// `f` on the connection; [`Error::Store`] if the store is closed.
+    fn with<T>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Result<T, Error> {
+        let db = self.db.lock().unwrap();
+        let db = db.as_ref().ok_or_else(|| {
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+                Some("the store is closed".into()),
+            )
+        })?;
+        Ok(f(db)?)
+    }
+
     /// The value under `key` in namespace `ns` as a `T`; `None` if there is none.
     pub fn get<T: DeserializeOwned>(&self, ns: &str, key: &str) -> Result<Option<T>, Error> {
-        let db = self.db.lock().unwrap();
-        let value: Option<String> = db
-            .query_row(
+        let value: Option<String> = self.with(|db| {
+            db.query_row(
                 "SELECT value FROM data WHERE ns = ? AND key = ?",
                 [ns, key],
                 |r| r.get(0),
             )
-            .optional()?;
+            .optional()
+        })?;
         Ok(value.map(|v| serde_json::from_str(&v)).transpose()?)
     }
 
     /// Stores `value` as JSON under `key` in namespace `ns`, replacing a value there.
     pub fn set<T: Serialize + ?Sized>(&self, ns: &str, key: &str, value: &T) -> Result<(), Error> {
         let value = serde_json::to_string(value)?;
-        self.db.lock().unwrap().execute(
-            "INSERT OR REPLACE INTO data (ns, key, value) VALUES (?, ?, ?)",
-            params![ns, key, value],
-        )?;
+        self.with(|db| {
+            db.execute(
+                "INSERT OR REPLACE INTO data (ns, key, value) VALUES (?, ?, ?)",
+                params![ns, key, value],
+            )
+        })?;
         Ok(())
     }
 
     /// Removes the value under `key` in namespace `ns`, if there is one.
     pub fn remove(&self, ns: &str, key: &str) -> Result<(), Error> {
-        self.db
-            .lock()
-            .unwrap()
-            .execute("DELETE FROM data WHERE ns = ? AND key = ?", [ns, key])?;
+        self.with(|db| db.execute("DELETE FROM data WHERE ns = ? AND key = ?", [ns, key]))?;
         Ok(())
     }
 
     /// Every key and value of a namespace, ordered by key.
     pub fn all<T: DeserializeOwned>(&self, ns: &str) -> Result<Vec<(String, T)>, Error> {
-        let db = self.db.lock().unwrap();
-        let mut statement = db.prepare("SELECT key, value FROM data WHERE ns = ? ORDER BY key")?;
-        let rows = statement
-            .query_map([ns], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
+        let rows = self.with(|db| {
+            db.prepare("SELECT key, value FROM data WHERE ns = ? ORDER BY key")?
+                .query_map([ns], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()
+        })?;
         rows.into_iter()
             .map(|(k, v)| Ok((k, serde_json::from_str(&v)?)))
             .collect()
@@ -111,40 +123,68 @@ impl Store {
 
     /// Clears a namespace, or all data.
     pub fn reset(&self, ns: Option<&str>) -> Result<(), Error> {
-        let db = self.db.lock().unwrap();
-        match ns {
-            Some(ns) => db.execute("DELETE FROM data WHERE ns = ?", [ns])?,
-            None => db.execute("DELETE FROM data", [])?,
-        };
+        self.with(|db| match ns {
+            Some(ns) => db.execute("DELETE FROM data WHERE ns = ?", [ns]),
+            None => db.execute("DELETE FROM data", []),
+        })?;
         Ok(())
     }
 
     /// Starts a batch, dropping what is left of one that never ended (its future was dropped).
     pub(crate) fn begin(&self) -> Result<(), Error> {
-        let db = self.db.lock().unwrap();
-        if !db.is_autocommit() {
-            db.execute_batch("ROLLBACK")?;
-        }
-        Ok(db.execute_batch("BEGIN")?)
+        self.with(|db| {
+            if !db.is_autocommit() {
+                db.execute_batch("ROLLBACK")?;
+            }
+            db.execute_batch("BEGIN")
+        })
     }
 
-    /// Ends a batch: its data and `position` take effect together.
-    pub(crate) fn commit(&self, position: u64) -> Result<(), Error> {
-        let db = self.db.lock().unwrap();
-        db.execute(
-            "UPDATE meta SET value = ? WHERE key = 'position'",
-            [position.to_string()],
-        )?;
-        db.execute_batch("COMMIT")?;
+    /// Ends a batch: its data and `position` take effect together. After a batch that
+    /// `erased` a subject, the write-ahead log is emptied too: it still holds the pages from
+    /// before the handlers removed the subject's data.
+    pub(crate) fn commit(&self, position: u64, erased: bool) -> Result<(), Error> {
+        self.with(|db| {
+            db.execute(
+                "UPDATE meta SET value = ? WHERE key = 'position'",
+                [position.to_string()],
+            )?;
+            db.execute_batch("COMMIT")?;
+            if erased {
+                truncate(db)?;
+            }
+            Ok(())
+        })?;
         self.committed.store(position, Ordering::SeqCst);
         Ok(())
     }
 
     /// Drops a failed batch.
     pub(crate) fn rollback(&self) {
-        let db = self.db.lock().unwrap();
-        if !db.is_autocommit() {
-            let _ = db.execute_batch("ROLLBACK");
+        let _ = self.with(|db| {
+            if !db.is_autocommit() {
+                db.execute_batch("ROLLBACK")?;
+            }
+            Ok(())
+        });
+    }
+
+    /// Closes the store for every handle to it: a batch still open is dropped, the
+    /// write-ahead log emptied into the file (so data removed is gone from disk too), and the
+    /// file released. Using it afterwards is an [`Error::Store`]. A listener closes its store
+    /// when its `run()` ends; a later run opens it again.
+    pub fn close(&self) {
+        if let Some(db) = self.db.lock().unwrap().take() {
+            if !db.is_autocommit() {
+                let _ = db.execute_batch("ROLLBACK");
+            }
+            let _ = truncate(&db);
+            let _ = db.close();
         }
     }
+}
+
+/// Moves the write-ahead log into the database file and truncates it to zero bytes.
+fn truncate(db: &Connection) -> rusqlite::Result<()> {
+    db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
 }

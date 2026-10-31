@@ -87,11 +87,16 @@ export class Store {
     this.db.exec("BEGIN");
   }
 
-  /** @internal Ends a batch: its data and `position` take effect together. */
-  commit(position: number): void {
+  /**
+   * @internal Ends a batch: its data and `position` take effect together. After a batch with an
+   * erasure (`erased`), the log of old pages is emptied too: what the batch removed must not
+   * stay on disk.
+   */
+  commit(position: number, erased = false): void {
     this.db.prepare("UPDATE meta SET value = ? WHERE key = 'position'").run(String(position));
     this.db.exec("COMMIT");
     this.committed = position;
+    if (erased) this.checkpoint();
   }
 
   /** @internal Drops a failed batch. */
@@ -99,8 +104,19 @@ export class Store {
     if (this.db.isTransaction) this.db.exec("ROLLBACK");
   }
 
-  /** Closes the database. */
+  /** Closes the database, leaving no old pages behind. */
   close(): void {
+    if (!this.db.isOpen) return;
+    this.checkpoint();
     this.db.close();
+  }
+
+  /**
+   * Writes the write-ahead log into the database file and truncates it: until then, the log
+   * keeps old page images, values deleted since included (`secure_delete` clears only the
+   * database file).
+   */
+  private checkpoint(): void {
+    this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
   }
 }

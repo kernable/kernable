@@ -31,9 +31,11 @@ test("request context reaches handlers, events and follow-up commands", async ()
 
   const replayed: boolean[] = [];
   const seenByListener: RequestContext[] = [];
+  const committedAt: Date[] = [];
   const notes = kernable.listener(support.reactor("notes").on("Opened", async (_data, evt, ctx) => {
     replayed.push(ctx.replaying);
     seenByListener.push(ctx.request);
+    committedAt.push(evt.createdAt);
     await kernable.submit({ domain: "support", aggregateType: "Ticket", aggregateId: evt.aggregateId, type: "Note", id: `note-${evt.aggregateId}`, context: ctx.follow(), wait: "committed" });
   }));
   const worker = kernable.worker(ticket);
@@ -61,6 +63,9 @@ test("request context reaches handlers, events and follow-up commands", async ()
     for (let i = 0; i < 100 && events.length < 2; i++) await new Promise((r) => setTimeout(r, 20));
     sub.stop();
     assert.deepEqual(events.map((e) => e.request), [request, followUp]);
+    // Listeners, subscriptions and outcomes see when the kernel committed an event.
+    assert.ok(committedAt[0] instanceof Date && Math.abs(committedAt[0].getTime() - Date.now()) < 5000);
+    assert.deepEqual([events[0].createdAt, opened.committed && opened.events[0].createdAt], [committedAt[0], committedAt[0]]);
 
     // An expected version that no longer matches rejects the command.
     const stale = await kernable.submit({ domain: "support", aggregateType: "Ticket", aggregateId: "t1", type: "Note", context: { expectedVersion: 1 } });

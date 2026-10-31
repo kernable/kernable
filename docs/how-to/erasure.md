@@ -5,7 +5,7 @@ A person asks you to erase their personal data, for example under the GDPR. Even
 ## Before the first request: declare
 
 1. **Turn the vault on:** start the kernel with `--vault-key` (`kernable start --dev` does). Without it, commands and events with vault fields are refused.
-2. **Mark every personal field**, in commands and events, with the person it belongs to (`personal(fields, subject)`; [tutorial, part 7](../tutorial/shop/7-personal-data)). Fields of other aggregates and domains count too: the shop marks the email in an order's confirmation as personal data of the customer. Only top-level fields can be marked.
+2. **Mark every personal field**, in commands and events, with the person it belongs to (`personal(fields, subject)`; [tutorial, part 7](../tutorial/shop/7-personal-data)). Fields of other aggregates and domains count too: the shop marks the email in an order's confirmation as personal data of the customer. Only top-level fields can be marked. A worker rejects a command (`personal_in_clear`) whose handler puts a field the command marks personal, under the same name, into an event that does not: it would be stored in clear. After an erasure, and for a reader without `vault_read`, such a field is `null`: in TypeScript, type it `Personal<string>` so the compiler finds the handlers that must allow for that.
 3. **Declare an erasing event**, e.g. `CustomerErased` with `erases(subject)`, and a command that writes it, e.g. `Erase` on the customer.
 4. **Grant the worker** that writes it `vault_erase` for that event type:
 
@@ -14,7 +14,7 @@ A person asks you to erase their personal data, for example under the GDPR. Even
    ```
 
    Without it, the command is rejected with `erase_not_allowed`.
-5. **Make every read model that holds personal data forget the person** when it sees the erasing event. Do the same for files: an erasure does not touch them ([Personal data in files](./data-and-cache#personal-data-in-files)).
+5. **Make every read model that holds personal data forget the person** when it sees the erasing event. A read model's store then also removes the old values from its write-ahead log, so they are not left on the disk. Do the same for files: an erasure does not touch them ([Personal data in files](./data-and-cache#personal-data-in-files)).
 6. **Let clients seal the fields:** a client that sends commands with personal fields needs the domain's declarations (`.use(shopDomain)`, Python `.use(shop_domain)`, Rust `.with_domain(&shop_domain)`). Without them, it sends the values in clear and they are stored in the command log.
 
 The shop's read models forget an erased customer like this:
