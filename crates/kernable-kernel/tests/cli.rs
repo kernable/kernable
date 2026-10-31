@@ -597,3 +597,53 @@ async fn the_commands_reach_a_kernel_over_mutual_tls() {
     let (code, printed) = tokio::task::spawn_blocking(apply(empty)).await.unwrap();
     assert_eq!(code, 1, "{printed}");
 }
+
+#[test]
+fn start_explains_its_flags_and_logs_json_if_asked() {
+    let dir = temp_dir("start");
+    let (code, printed) = kernable(&dir, &["start", "--help"]);
+    assert_eq!(code, 0, "{printed}");
+    assert!(printed.starts_with("kernable start flags"), "{printed}");
+    assert!(printed.contains("--durability"), "{printed}");
+    let (code, printed) = kernable(&dir, &["start", "--no-such-flag", "x"]);
+    assert_eq!(code, 2, "{printed}");
+    assert!(printed.contains("\n\nkernable start flags"), "{printed}");
+
+    let log = std::fs::File::create(dir.join("stderr")).unwrap();
+    let addr = free_addr();
+    let _kernel = KillOnDrop(
+        Process::new(env!("CARGO_BIN_EXE_kernable"))
+            .current_dir(&dir)
+            .args([
+                "start",
+                "--dev",
+                "--listen",
+                &addr,
+                "--ui-listen",
+                "127.0.0.1:0",
+            ])
+            .env("KERNABLE_LOG_FORMAT", "json")
+            .stderr(log)
+            .spawn()
+            .unwrap(),
+    );
+    let started = std::time::Instant::now();
+    let line = loop {
+        let stderr = std::fs::read_to_string(dir.join("stderr")).unwrap();
+        // The development notes are for a person; the log lines are JSON.
+        if let Some(line) = stderr.lines().find(|l| l.contains("\"level\"")) {
+            break line.to_owned();
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "no log line: {stderr}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&line).is_ok(),
+        "{line}"
+    );
+    drop(_kernel);
+    let _ = std::fs::remove_dir_all(&dir);
+}

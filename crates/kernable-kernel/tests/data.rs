@@ -2,7 +2,10 @@
 
 mod common;
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    path::Path,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use common::*;
 use ed25519_dalek::SigningKey;
@@ -13,6 +16,7 @@ use kernable_core::{
     },
     signing, transport,
 };
+use kernable_kernel::Config;
 use tonic::Code;
 
 fn now_ms() -> i64 {
@@ -60,7 +64,12 @@ fn cache(key: &SigningKey, op: &str, name: &str, value: &[u8], ttl_ms: u64) -> C
 
 /// Key 7 may read, write and cache in `shop`; key 8 may only read its files.
 async fn start(name: &str) -> Env {
-    let env = common::start(name).await;
+    start_custom(name, |_, _| {}).await
+}
+
+/// Like [`start`], with `customize` applied to the config.
+async fn start_custom(name: &str, customize: impl FnOnce(&mut Config, &Path)) -> Env {
+    let env = common::start_custom(name, customize).await;
     let all: &[&str] = &["shop.*"];
     env.kernel
         .grant(grant(
@@ -235,7 +244,11 @@ fn data_at(key: &SigningKey, op: &str, mut r: DataRequest, issued_at: i64) -> Da
 
 #[tokio::test(flavor = "multi_thread")]
 async fn requests_are_held_to_their_window_key_length_and_size() {
-    let env = start("data-limits").await;
+    // Files and cache values have their own size limits, above a smaller general one.
+    let env = start_custom("data-limits", |config, _| {
+        config.limits.message_bytes = 64 << 10
+    })
+    .await;
     let channel = transport::connect(&env.addr).await.unwrap();
     let mut files = DataServiceClient::new(channel.clone()).max_decoding_message_size(32 << 20);
     let mut cache_client = CacheServiceClient::new(channel);
