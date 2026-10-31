@@ -807,6 +807,15 @@ export class Aggregate<S> {
 }
 
 
+/** An error as text, even one whose own conversion throws. */
+function describe(err: unknown): string {
+  try {
+    return String(err);
+  } catch {
+    return "an error that cannot be shown as text";
+  }
+}
+
 /** `shop.ItemAdded` as `ItemAdded` when `shop` is the only domain in `domains`. */
 function relative(type: string, domains: Set<string>): string {
   const [domain, name] = type.split(".");
@@ -1794,7 +1803,9 @@ export class ListenerHandle {
       } catch (err) {
         error = err;
       }
-      start = this.position;
+      // Resume after the last handled event, once there is one: before the first `ready`, the
+      // position says nothing (a new reactor would replay everything from 0).
+      if (this.connects > 0) start = this.position;
       if (!this.stopped) await this.log.reconnect(this.what, error, options.reconnectMs ?? 1000);
     }
   }
@@ -1815,18 +1826,29 @@ export class ListenerHandle {
     return new Promise((resolve, reject) => {
       const call = this.clients.listen();
       this.call = call;
-      // Batches are handled strictly one after another.
+      // Batches are handled strictly one after another. Once one fails or the stream is over,
+      // the messages queued behind it are dropped (the next connect resumes after the last
+      // handled event), and the connection ends only after the one being handled: two batches
+      // never run at once.
       let queue = Promise.resolve();
+      let over = false;
       call.on("data", (m: ListenerDelivery) => {
         // Requests sent from the handlers name this listener, so the kernel never makes them
         // wait for it (it handles one message at a time).
-        queue = queue.then(() => handling.run(name, () => this.onMessage(call, m))).catch((err) => {
-          call.cancel();
-          reject(err);
-        });
+        queue = queue
+          .then(() => (over ? undefined : handling.run(name, () => this.onMessage(call, m))))
+          .catch((err) => {
+            over = true;
+            call.cancel();
+            reject(err);
+          });
       });
-      call.on("error", reject);
-      call.on("end", resolve);
+      const end = (settle: () => void) => {
+        over = true;
+        void queue.then(settle);
+      };
+      call.on("error", (err) => end(() => reject(err)));
+      call.on("end", () => end(resolve));
       call.write({
         hello: {
           name,
@@ -2054,7 +2076,12 @@ export class Worker {
       else if (this.announce) this.log.print("info", "worker", `connected to ${this.log.peer} · runs ${[...this.byCommand.keys()].sort().join(", ")}`);
       this.markReady();
     } else if (m.execute) {
-      void this.execute(call, m.execute);
+      // Whatever goes wrong outside the handler (a malformed message) ends the session, not
+      // the process.
+      this.execute(call, m.execute).catch((err) => {
+        this.log.print("error", "worker", `cannot execute: ${describe(err)}`);
+        call.cancel();
+      });
     }
   }
 
@@ -2094,7 +2121,8 @@ export class Worker {
         id: () => derivedId(cmd.command_id, ids++),
         deadline: new Date(x.deadline),
       };
-      const produced = await agg.handlers.get(cmd.command_type)!(state, unseal(decode(cmd.payload), x.vault).data, meta, ctx);
+      // A copy: a handler that changes it must not change the snapshot, nor `initial`.
+      const produced = await agg.handlers.get(cmd.command_type)!(structuredClone(state), unseal(decode(cmd.payload), x.vault).data, meta, ctx);
       events = produced.map((e) => {
         const def = agg.events.get(e.type);
         const sealed = seal(e.data, def?.vault, cmd.aggregate_id);
@@ -2112,7 +2140,7 @@ export class Worker {
         return;
       }
       const reason: WireRejected =
-        err instanceof Rejected ? { code: err.code, message: err.message } : { code: "handler_error", message: String(err) };
+        err instanceof Rejected ? { code: err.code, message: err.message } : { code: "handler_error", message: describe(err) };
       const worker_sig = this.key.sign(rejectionMessage(cmd.command_id, reason));
       call.write({ rejection: { lease_id: x.lease_id, reason, worker_sig } });
       this.log.print("debug", "worker", `${stream} rejected ${reason.code}`);
