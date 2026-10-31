@@ -1,0 +1,599 @@
+//! The command line: each command run as the binary, against copies of the frozen stores in
+//! `tests/fixtures` (see compat.rs for what they hold) and against a running kernel.
+
+mod common;
+
+use std::{
+    path::{Path, PathBuf},
+    process::Command as Process,
+};
+
+use common::*;
+use kernable_core::{
+    proto::{ListenerRecord, Membership, MembershipRecord, Middleware, When},
+    signing,
+};
+use kernable_store::vault::Vault;
+
+/// Runs `kernable <args>` in `dir`; returns the exit code and what it printed (stdout, then
+/// stderr).
+fn kernable(dir: &Path, args: &[&str]) -> (i32, String) {
+    kernable_with(dir, args, &[])
+}
+
+fn kernable_with(dir: &Path, args: &[&str], vars: &[(&str, PathBuf)]) -> (i32, String) {
+    let mut process = Process::new(env!("CARGO_BIN_EXE_kernable"));
+    process.current_dir(dir).args(args);
+    for var in ["KERNABLE_TLS_CA", "KERNABLE_TLS_CERT", "KERNABLE_TLS_KEY"] {
+        process.env_remove(var);
+    }
+    for (var, value) in vars {
+        process.env(var, value);
+    }
+    let out = process.output().unwrap();
+    let printed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (out.status.code().unwrap(), printed)
+}
+
+/// Whether `printed` has `line` as a whole line.
+fn has_line(printed: &str, line: &str) -> bool {
+    printed.lines().any(|l| l == line)
+}
+
+fn temp_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("kn-cli-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// The backend under test, as compat.rs names its fixture files.
+fn backend() -> (&'static str, &'static str) {
+    match std::env::var("KERNABLE_TEST_STORE").as_deref() {
+        Ok("file") => ("file", "k.log"),
+        _ => ("sqlite", "k.db"),
+    }
+}
+
+/// Copies the fixture store of `format` into `dir` as `name`; returns its store URL.
+fn fixture(format: u32, dir: &Path, name: &str) -> String {
+    let (backend, file) = backend();
+    fixture_of(backend, file, format, dir, name)
+}
+
+fn fixture_of(backend: &str, file: &str, format: u32, dir: &Path, name: &str) -> String {
+    let fixtures =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/format-{format}"));
+    std::fs::copy(fixtures.join(file), dir.join(name)).unwrap();
+    format!("{backend}:{}", dir.join(name).display())
+}
+
+fn write_key(dir: &Path, name: &str, seed: u8) {
+    let key = key(seed);
+    std::fs::write(dir.join(format!("{name}.key")), hex(key.as_bytes())).unwrap();
+    std::fs::write(dir.join(format!("{name}.pub")), id(&key)).unwrap();
+}
+
+#[test]
+fn keys_are_written_once_and_readable_by_the_owner_only() {
+    let dir = temp_dir("keys");
+    let (code, printed) = kernable(&dir, &["keys", "new", "ops"]);
+    assert_eq!(code, 0, "{printed}");
+    let public = std::fs::read_to_string(dir.join("ops.pub")).unwrap();
+    assert_eq!(printed.trim(), public.trim());
+    let secret = std::fs::read(dir.join("ops.key")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dir.join("ops.key"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    let (code, _) = kernable(&dir, &["keys", "new", "ops"]);
+    assert_eq!(code, 1, "an existing key is never overwritten");
+    assert_eq!(std::fs::read(dir.join("ops.key")).unwrap(), secret);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn arguments_a_command_does_not_take_are_refused_with_the_usage() {
+    let dir = temp_dir("usage");
+    write_key(&dir, "root", 9);
+    for args in [
+        &["grant", "root.key", "root.pub"][..],
+        &["verify", "k.db"],
+        &["certs", "new", "certs"],
+        &["keys", "old", "x"],
+        &[],
+    ] {
+        let (code, printed) = kernable(&dir, args);
+        assert_eq!(code, 2, "{args:?}");
+        assert!(printed.starts_with("usage:"), "{args:?}: {printed}");
+    }
+    assert!(!dir.join("root.grant").exists());
+
+    let (code, printed) = kernable(&dir, &["certs", "new", "certs", "app"]);
+    assert_eq!(code, 0, "{printed}");
+    for file in [
+        "ca.tls.crt",
+        "kernel.tls.crt",
+        "kernel.tls.key",
+        "app.tls.crt",
+        "app.tls.key",
+    ] {
+        assert!(dir.join("certs").join(file).exists(), "{file}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_inspection_commands_show_what_the_store_holds() {
+    let dir = temp_dir("inspect");
+    let store = fixture(2, &dir, "store");
+    {
+        // A listener of the orders service that its membership does not list, and a
+        // membership whose worker, listener and middleware never registered.
+        let store = kernable_store::open(&store).unwrap();
+        store
+            .save_listeners(&[ListenerRecord {
+                name: "stray".into(),
+                key_id: id(&key(5)),
+                event_types: vec!["orders.OrderPlaced".into()],
+                position: 1,
+                service: "orders".into(),
+                middlewares: vec![Middleware {
+                    order: 4,
+                    types: vec!["orders.*".into()],
+                    when: When::After.into(),
+                }],
+                ..Default::default()
+            }])
+            .unwrap();
+        let billing = Membership {
+            service: "billing".into(),
+            workers: vec!["billing.Invoice".into()],
+            listeners: vec!["ghost".into()],
+            middlewares: vec!["orders".into()],
+            ..Default::default()
+        };
+        store
+            .save_membership(&MembershipRecord {
+                sig: Some(signing::sign(
+                    &key(4),
+                    &signing::membership_message(&billing),
+                )),
+                membership: Some(billing),
+                applied_at: 0,
+            })
+            .unwrap();
+    }
+
+    let (code, printed) = kernable(&dir, &["schemas", &store]);
+    assert_eq!(code, 0, "{printed}");
+    assert!(
+        has_line(&printed, "orders.OrderPlaced schema 2"),
+        "{printed}"
+    );
+    assert!(has_line(&printed, "orders.ItemAdded schema 1"), "{printed}");
+
+    let (code, printed) = kernable(&dir, &["workers", &store]);
+    assert_eq!(code, 0, "{printed}");
+    assert_eq!(
+        printed.trim(),
+        format!(
+            "orders.Order commands orders.PlaceOrder,orders.AddItem key {} service orders \
+             last seen 2023-11-14T22:13:20Z",
+            id(&key(2))
+        )
+    );
+
+    let (code, printed) = kernable(&dir, &["listeners", &store]);
+    assert_eq!(code, 0, "{printed}");
+    let k5 = id(&key(5));
+    assert!(
+        has_line(
+            &printed,
+            &format!(
+                "guard order 0 position 2 types identity.* key {k5} middleware before order 0 \
+                 checks identity.* last seen 2023-11-14T22:13:20Z"
+            )
+        ),
+        "{printed}"
+    );
+    assert!(
+        has_line(
+            &printed,
+            &format!(
+                "stray order 0 position 1 types orders.OrderPlaced key {k5} service orders \
+                 (not listed: counts for nobody) middleware after order 4 checks orders.* \
+                 last seen 1970-01-01T00:00:00Z"
+            )
+        ),
+        "{printed}"
+    );
+
+    let (code, printed) = kernable(&dir, &["services", &store]);
+    assert_eq!(code, 0, "{printed}");
+    let expected = format!(
+        "billing (applied 1970-01-01T00:00:00Z by {})
+  worker billing.Invoice (never registered)
+  listener ghost (never registered)
+  middleware orders
+orders version=1.0.0 (applied 2023-11-14T22:13:20Z by {})
+  worker orders.Order
+  listener orders
+  middleware guard
+  dynamic listener stray",
+        id(&key(4)),
+        id(&key(1))
+    );
+    assert_eq!(printed.trim(), expected);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn listeners_and_workers_are_removed_by_name() {
+    let dir = temp_dir("remove");
+    let store = fixture(2, &dir, "store");
+
+    let (code, printed) = kernable(&dir, &["listeners", "remove", &store, "guard"]);
+    assert_eq!((code, printed.trim()), (0, "removed guard"));
+    let (code, printed) = kernable(&dir, &["listeners", "remove", &store, "guard"]);
+    assert_eq!((code, printed.trim()), (1, "no listener guard"));
+    let names: Vec<String> = kernable_store::open_read_only(&store)
+        .unwrap()
+        .listeners()
+        .unwrap()
+        .into_iter()
+        .map(|l| l.name)
+        .collect();
+    assert_eq!(names, ["orders"]);
+
+    let (code, printed) = kernable(&dir, &["workers", "remove", &store, "orders.Order"]);
+    assert_eq!((code, printed.trim()), (0, "removed orders.Order"));
+    let (code, printed) = kernable(&dir, &["workers", "remove", &store, "orders.Order"]);
+    assert_eq!((code, printed.trim()), (1, "no aggregate orders.Order"));
+    let store = kernable_store::open_read_only(&store).unwrap();
+    assert_eq!(store.workers().unwrap(), []);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn verify_tells_intact_suspect_and_tampered_stores_apart() {
+    let dir = temp_dir("verify");
+    write_key(&dir, "kernel", 3);
+    let store = fixture(2, &dir, "store");
+
+    // The fixture holds c11, signed by key 7 after its revocation: intact, one suspect.
+    let (code, printed) = kernable(&dir, &["verify", &store, "kernel.pub"]);
+    assert_eq!(code, 2, "{printed}");
+    assert!(
+        printed.starts_with("5 events, 7 commands, 1 checkpoints, 0 events after the last"),
+        "{printed}"
+    );
+    assert!(printed.contains("SUSPECT "), "{printed}");
+    assert!(has_line(&printed, "OK, 1 suspect"), "{printed}");
+
+    // A key that never signed a checkpoint: the checkpoint does not verify.
+    write_key(&dir, "other", 9);
+    let (code, printed) = kernable(&dir, &["verify", &store, "other.pub"]);
+    assert_eq!(code, 1, "{printed}");
+    assert!(printed.contains("PROBLEM "), "{printed}");
+    assert!(has_line(&printed, "TAMPERED"), "{printed}");
+
+    if backend().0 == "sqlite" {
+        let path = dir.join("changed");
+        let changed = fixture(2, &dir, "changed");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute(
+            "UPDATE events SET payload = '{\"sku\":\"pear\"}' WHERE global_position = 2",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let (code, printed) = kernable(&dir, &["verify", &changed, "kernel.pub"]);
+        assert_eq!(code, 1, "{printed}");
+        assert!(has_line(&printed, "TAMPERED"), "{printed}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_checkpoint_signs_the_newest_event() {
+    let dir = temp_dir("checkpoint");
+    write_key(&dir, "kernel", 3);
+    let (backend, _) = backend();
+    let empty = format!("{backend}:{}", dir.join("empty").display());
+    let (code, printed) = kernable(&dir, &["checkpoint", &empty, "kernel.key"]);
+    assert_eq!((code, printed.trim()), (0, "no events yet"));
+
+    let store = fixture(2, &dir, "store");
+    let (code, printed) = kernable(&dir, &["checkpoint", &store, "kernel.key"]);
+    assert_eq!((code, printed.trim()), (0, "checkpoint at position 5"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn migrate_upgrades_old_stores_and_leaves_current_ones() {
+    let dir = temp_dir("migrate");
+    // Both backends whichever is under test: they report a migration differently.
+    for (backend, file) in [("sqlite", "k.db"), ("file", "k.log")] {
+        let store = fixture_of(backend, file, 1, &dir, file);
+        let (code, printed) = kernable(&dir, &["migrate", &store]);
+        assert_eq!(code, 0, "{printed}");
+        let path = dir.join(file).display().to_string();
+        let expected = match backend {
+            "file" => {
+                format!("migrated from format 1 to 2; the old log is kept as {path}.format-1")
+            }
+            _ => "migrated from format 1 to 2".to_owned(),
+        };
+        assert_eq!(printed.trim(), expected);
+        assert!(kernable_store::open_read_only(&store).is_ok());
+    }
+    let (backend, _) = backend();
+    let store = fixture(1, &dir, "store");
+    let (code, printed) = kernable(&dir, &["migrate", &store]);
+    assert_eq!(code, 0, "{printed}");
+
+    let (code, printed) = kernable(&dir, &["migrate", &store]);
+    assert_eq!(
+        (code, printed.trim()),
+        (0, "store is at format 2; nothing to migrate")
+    );
+
+    let missing = format!("{backend}:{}", dir.join("missing").display());
+    let (code, printed) = kernable(&dir, &["migrate", &missing]);
+    assert_eq!(code, 1, "{printed}");
+    assert!(printed.contains("no store at"), "{printed}");
+    assert!(!dir.join("missing").exists(), "migrate creates no store");
+
+    if backend == "sqlite" {
+        // Tables without a recorded format: a development build's, which has no migration.
+        let conn = rusqlite::Connection::open(dir.join("store")).unwrap();
+        conn.pragma_update(None, "user_version", 0).unwrap();
+        drop(conn);
+        let (code, printed) = kernable(&dir, &["migrate", &store]);
+        assert_eq!(code, 1, "{printed}");
+        assert!(
+            printed.starts_with("no migration from format 0"),
+            "{printed}"
+        );
+
+        // One of a newer build: an error, not a migration.
+        let conn = rusqlite::Connection::open(dir.join("store")).unwrap();
+        conn.pragma_update(None, "user_version", 3).unwrap();
+        drop(conn);
+        let (code, printed) = kernable(&dir, &["migrate", &store]);
+        assert_eq!(code, 1, "{printed}");
+        assert!(printed.starts_with("error: "), "{printed}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn vault_rekey_moves_every_value_to_the_new_key() {
+    let dir = temp_dir("rekey");
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/format-2");
+    std::fs::copy(fixtures.join("vault-sqlite.db"), dir.join("vault.db")).unwrap();
+    std::fs::copy(fixtures.join("vault.key"), dir.join("old.key")).unwrap();
+    std::fs::write(dir.join("new.key"), hex(&[7; 32])).unwrap();
+    std::fs::write(dir.join("short.key"), "abcd\n").unwrap();
+    let vault = format!("sqlite:{}", dir.join("vault.db").display());
+
+    let (code, printed) = kernable(&dir, &["vault", "rekey", &vault, "old.key", "short.key"]);
+    assert_eq!(code, 1, "{printed}");
+    assert_eq!(printed.trim(), "error: short.key: not a 32-byte key in hex");
+
+    let (code, printed) = kernable(&dir, &["vault", "rekey", &vault, "old.key", "new.key"]);
+    assert_eq!(code, 0, "{printed}");
+    assert!(printed.starts_with("re-encrypted "), "{printed}");
+    // The customer's email in c1, as compat.rs seals it.
+    let email = signing::vault_ref(&[1; 16], "k-1", false, b"\"max@firma.de\"");
+    let values = Vault::open(&vault, &[7; 32])
+        .unwrap()
+        .get(&[email])
+        .unwrap();
+    assert_eq!(values[0].value, b"\"max@firma.de\"");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn grant_apply_submit_and_revoke_work_against_a_running_kernel() {
+    let env = start("cli-online").await;
+    spawn_worker(&env).await;
+    let dir = &env.dir;
+    std::fs::write(dir.join("root.key"), hex(root().as_bytes())).unwrap();
+    write_key(dir, "ops", 9);
+    write_key(dir, "next", 10);
+    let ops = id(&key(9));
+
+    let (code, printed) = kernable(dir, &["grant", "root.key", "ops.pub", "bogus=x"]);
+    assert_eq!(code, 1, "{printed}");
+    assert!(!dir.join("ops.grant").exists());
+    let (code, printed) = kernable(
+        dir,
+        &[
+            "grant",
+            "root.key",
+            "ops.pub",
+            "submit=orders.*",
+            "manage=orders",
+            "orders.*",
+        ],
+    );
+    assert_eq!(code, 0, "{printed}");
+    assert_eq!(
+        printed.trim(),
+        "submit orders.*\nmanage orders\n* orders.*\nwrote ops.grant"
+    );
+    let (code, printed) = kernable(
+        dir,
+        &[
+            "grant",
+            "root.key",
+            "next.pub",
+            "--succeeds",
+            "ops.pub",
+            "query=*",
+        ],
+    );
+    assert_eq!(code, 0, "{printed}");
+    assert_eq!(
+        printed.trim(),
+        format!("query *\nsucceeds {ops}\nwrote next.grant")
+    );
+
+    // Key 9 has no grant but the one in ops.grant, which the commands send along.
+    let submit = |aggregate: &'static str| {
+        let addr = env.addr.clone();
+        let dir = dir.clone();
+        move || {
+            kernable(
+                &dir,
+                &[
+                    "submit",
+                    &addr,
+                    "ops.key",
+                    "t1",
+                    "orders",
+                    "Order",
+                    aggregate,
+                    "PlaceOrder",
+                    "{}",
+                ],
+            )
+        }
+    };
+    let (code, first) = tokio::task::spawn_blocking(submit("o1")).await.unwrap();
+    assert_eq!(code, 0, "{first}");
+    let lines: Vec<&str> = first.lines().collect();
+    assert_eq!(lines.len(), 2, "{first}");
+    let command_id = lines[0].strip_prefix("command ").unwrap();
+    assert!(
+        command_id.len() == 32 && command_id.chars().all(|c| c.is_ascii_hexdigit()),
+        "{first}"
+    );
+    assert!(
+        lines[1].starts_with("committed #1 v1 OrderPlaced "),
+        "{first}"
+    );
+    let (code, again) = tokio::task::spawn_blocking(submit("o1")).await.unwrap();
+    assert_eq!(code, 1, "{again}");
+    assert_ne!(
+        again.lines().next(),
+        first.lines().next(),
+        "a new command ID each time"
+    );
+    assert!(again.contains("\nrejected invalid_state: "), "{again}");
+
+    std::fs::write(
+        dir.join("orders.json"),
+        r#"{"service": "orders", "workers": ["orders.Order"], "listeners": ["audit"],
+            "metadata": {"team": "shop", "replicas": 2}}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("broken.json"), r#"{"workers": []}"#).unwrap();
+    let apply = |manifest: &'static str| {
+        let addr = env.addr.clone();
+        let dir = dir.clone();
+        move || kernable(&dir, &["apply", &addr, "ops.key", manifest])
+    };
+    let (code, printed) = tokio::task::spawn_blocking(apply("broken.json"))
+        .await
+        .unwrap();
+    assert_eq!(code, 1, "{printed}");
+    assert!(printed.contains("broken.json: no service"), "{printed}");
+    let (code, printed) = tokio::task::spawn_blocking(apply("orders.json"))
+        .await
+        .unwrap();
+    assert_eq!(code, 0, "{printed}");
+    assert_eq!(
+        printed.trim(),
+        "applied orders: 1 workers, 1 listeners, 0 middlewares"
+    );
+    let applied = kernable_store::open_read_only(&env.store)
+        .unwrap()
+        .memberships()
+        .unwrap();
+    let membership = applied[0].membership.as_ref().unwrap();
+    let metadata: Vec<(&str, &str)> = membership
+        .metadata
+        .iter()
+        .map(|a| (a.key.as_str(), a.value.as_str()))
+        .collect();
+    assert_eq!(metadata, [("team", "shop"), ("replicas", "2")]);
+    assert_eq!(applied[0].sig.as_ref().unwrap().key_id, ops);
+
+    // Revoked from a minute ago: its commands are refused, and the one it submitted is suspect.
+    let since = kernable_kernel::config::utc(issued_now() - 60_000);
+    let revoke = {
+        let addr = env.addr.clone();
+        let dir = dir.clone();
+        move || kernable(&dir, &["revoke", &addr, "root.key", "ops.pub", &since])
+    };
+    let (code, printed) = tokio::task::spawn_blocking(revoke).await.unwrap();
+    assert_eq!(
+        (code, printed.trim()),
+        (0, format!("revoked {ops}").as_str())
+    );
+    let (code, printed) = tokio::task::spawn_blocking(submit("o2")).await.unwrap();
+    assert_eq!(code, 1, "{printed}");
+    assert!(printed.contains("error: "), "{printed}");
+    let bad = {
+        let addr = env.addr.clone();
+        let dir = dir.clone();
+        move || kernable(&dir, &["revoke", &addr, "root.key", "ops.pub", "yesterday"])
+    };
+    let (code, printed) = tokio::task::spawn_blocking(bad).await.unwrap();
+    assert_eq!(code, 1, "{printed}");
+    assert!(printed.contains("yesterday is not a UTC time"), "{printed}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_commands_reach_a_kernel_over_mutual_tls() {
+    let env = start_custom("cli-tls", |config, dir| {
+        kernable_core::certs::create(dir, &["app", "worker"]).unwrap();
+        config.listen = free_addr();
+        config.tls = Some(kernable_kernel::config::Tls {
+            cert: dir.join("kernel.tls.crt"),
+            key: dir.join("kernel.tls.key"),
+            client_ca: dir.join("ca.tls.crt"),
+        });
+    })
+    .await;
+    write_key(&env.dir, "app", 1);
+    let vars = [
+        ("KERNABLE_TLS_CA", env.dir.join("ca.tls.crt")),
+        ("KERNABLE_TLS_CERT", env.dir.join("app.tls.crt")),
+        ("KERNABLE_TLS_KEY", env.dir.join("app.tls.key")),
+    ];
+    std::fs::write(env.dir.join("app.json"), r#"{"service": "app"}"#).unwrap();
+    let apply = |vars: Vec<(&'static str, PathBuf)>| {
+        let addr = env.addr.clone();
+        let dir = env.dir.clone();
+        move || {
+            let vars: Vec<(&str, PathBuf)> = vars;
+            kernable_with(&dir, &["apply", &addr, "app.key", "app.json"], &vars)
+        }
+    };
+    let (code, printed) = tokio::task::spawn_blocking(apply(vars.to_vec()))
+        .await
+        .unwrap();
+    assert_eq!(code, 0, "{printed}");
+    // Without a client certificate, or with an empty variable: plain HTTP/2, refused.
+    let (code, printed) = tokio::task::spawn_blocking(apply(Vec::new()))
+        .await
+        .unwrap();
+    assert_eq!(code, 1, "{printed}");
+    let mut empty = vars.to_vec();
+    empty[2].1 = PathBuf::new();
+    let (code, printed) = tokio::task::spawn_blocking(apply(empty)).await.unwrap();
+    assert_eq!(code, 1, "{printed}");
+}
