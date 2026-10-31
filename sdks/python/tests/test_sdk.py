@@ -372,6 +372,15 @@ def _record(errors, run):
 
 
 class Keys(unittest.TestCase):
+    def test_data_that_is_not_json_is_refused_before_it_is_sent(self):
+        kernel = TestKernel(["counters.*"])
+        self.addCleanup(kernel.dispose)
+        k = Kernable(kernel.url, kernel.app_key)
+        self.addCleanup(k.close)
+        for bad in (float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                k.enqueue("counters", "Counter", "c1", "Increment", {"by": bad})
+
     def test_a_key_file_others_can_read_is_warned_about(self):
         kernel = TestKernel(["counters.*"])
         self.addCleanup(kernel.dispose)

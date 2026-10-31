@@ -1899,7 +1899,8 @@ class ListenerHandle(_Stream):
 
 
 def _encode(data: Any) -> bytes:
-    return json.dumps({} if data is None else data).encode()
+    # NaN and Infinity are not JSON: other SDKs could not read them back.
+    return json.dumps({} if data is None else data, allow_nan=False).encode()
 
 
 def _decode(payload: bytes) -> Any:
