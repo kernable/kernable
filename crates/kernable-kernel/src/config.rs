@@ -639,4 +639,30 @@ mod tests {
             assert_eq!(utc_ms(bad), None, "{bad}");
         }
     }
+
+    #[test]
+    fn every_day_from_1960_to_2400_is_written_as_the_calendar_has_it() {
+        let leap = |y: i64| (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+        let length = |y: i64, m: i64| match m {
+            2 if leap(y) => 29,
+            2 => 28,
+            4 | 6 | 9 | 11 => 30,
+            _ => 31,
+        };
+        let (mut y, mut m, mut d) = (1960, 1, 1);
+        let first = utc_ms("1960-01-01T00:00:00Z").unwrap();
+        for day in 0..160_707 {
+            let ms = first + day * 86_400_000 + 45_296_000; // 12:34:56
+            assert_eq!(utc(ms), format!("{y:04}-{m:02}-{d:02}T12:34:56Z"));
+            assert_eq!(utc_ms(&utc(ms)), Some(ms));
+            d += 1;
+            if d > length(y, m) {
+                (m, d) = (m + 1, 1);
+            }
+            if m > 12 {
+                (y, m) = (y + 1, 1);
+            }
+        }
+        assert_eq!((y, m, d), (2400, 1, 1));
+    }
 }
