@@ -274,6 +274,23 @@ pub(crate) fn reconnecting(
     delay
 }
 
+/// Awaits `f`, logging `line()` as an error if it still runs after `after`: a handler cannot be
+/// stopped from outside, but a stuck one shows.
+pub(crate) async fn watched<T>(
+    log: &Log,
+    what: &str,
+    after: Duration,
+    line: impl FnOnce() -> String,
+    f: impl std::future::Future<Output = T>,
+) -> T {
+    let mut f = std::pin::pin!(f);
+    tokio::select! {
+        value = &mut f => return value,
+        () = tokio::time::sleep(after) => log.error(what, line),
+    }
+    f.await
+}
+
 /// Whether the kernel refused in a way a retry does not change: INVALID_ARGUMENT,
 /// PERMISSION_DENIED, FAILED_PRECONDITION, UNIMPLEMENTED, UNAUTHENTICATED.
 fn refused(error: Option<&crate::BoxError>) -> bool {

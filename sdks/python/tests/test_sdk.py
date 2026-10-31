@@ -328,6 +328,57 @@ class Reconnects(unittest.TestCase):
         self.assertTrue(any("refused (" in l for l in lines()), stderr.getvalue())
 
 
+class Hangs(unittest.TestCase):
+    def test_a_handler_that_hangs_is_reported(self):
+        kernel = TestKernel(["counters.*"], ["--lease-ttl-ms", "500", "--query-timeout-ms", "8000"])
+        kernel.start()
+        self.addCleanup(kernel.dispose)
+        stderr = io.StringIO()
+        patched = mock.patch("sys.stderr", stderr)
+        patched.start()
+        self.addCleanup(patched.stop)
+        with mock.patch.dict(os.environ, {"KERNABLE_LOG": "error"}):
+            k = Kernable(kernel.url, kernel.app_key)
+        self.addCleanup(k.close)
+        release = threading.Event()
+        self.addCleanup(release.set)
+        slow = domain("counters").aggregate("Slow", 0)
+
+        @slow.command("Do")
+        def _(state, data):
+            release.wait(10)
+            return []
+
+        answers = domain("counters").read_model("slow-answers")
+
+        @answers.query("counters.Ask")
+        def _(data, qry, ctx):
+            release.wait(10)
+            return 1
+
+        worker, listener = k.worker(slow), k.listener(answers)
+        for s in (worker, listener):
+            threading.Thread(target=s.run, daemon=True).start()
+            self.addCleanup(s.stop)
+            self.assertTrue(s.ready.wait(5))
+        k.enqueue("counters", "Slow", "s1", "Do")
+        for _ in range(150):
+            if "Slow/s1 still running after its lease ended" in stderr.getvalue():
+                break
+            time.sleep(0.02)
+        self.assertIn("Slow/s1 still running after its lease ended", stderr.getvalue())
+        threading.Thread(target=lambda: self._ask(k), daemon=True).start()
+        time.sleep(5.5)
+        self.assertIn("still handling the query counters.Ask after 5 s", stderr.getvalue())
+
+    @staticmethod
+    def _ask(k):
+        try:
+            k.query("counters", "Ask")
+        except grpc.RpcError:
+            pass
+
+
 class EndToEnd(unittest.TestCase):
     def setUp(self):
         self.kernel = TestKernel(["counters.*"], ["--settle-timeout-ms", "500"])

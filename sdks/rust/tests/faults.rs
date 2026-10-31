@@ -465,3 +465,75 @@ async fn a_listener_handles_each_event_once_when_the_kernel_repeats_batches_or_g
     );
     handle.stop();
 }
+
+const HANGS_CHILD: &str = "KERNABLE_TEST_HANGS_CHILD";
+static RELEASED: AtomicBool = AtomicBool::new(false);
+
+/// Hangs a command past its lease and a query past 5 s, in a child process whose stderr the
+/// parent test reads. Does nothing in a normal test run.
+#[tokio::test(flavor = "multi_thread")]
+async fn hangs_child() {
+    if std::env::var_os(HANGS_CHILD).is_none() {
+        return;
+    }
+    let kernel = TestKernel::new(
+        &["counters.*"],
+        &["--lease-ttl-ms", "500", "--query-timeout-ms", "8000"],
+    );
+    kernel.start().await;
+    let kernable = kernel.client();
+    let counters = domain("counters");
+    let slow = counters.aggregate("Slow", 0i64);
+    slow.command("Do", |_, _: serde_json::Value, _cmd, _ctx| {
+        while !RELEASED.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Ok(vec![])
+    });
+    let answers = counters.read_model("slow-answers").query(
+        "counters.Ask",
+        |_: serde_json::Value, _qry, _ctx| async {
+            while !RELEASED.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Ok(1)
+        },
+    );
+    let worker = start_worker_of(&kernable, &slow);
+    let listener = kernable.listener(&answers);
+    let l = listener.clone();
+    tokio::spawn(async move { l.run().await });
+    worker.ready().await;
+    listener.ready().await;
+    kernable
+        .enqueue(Submit::new("counters", "Slow", "s1", "Do"))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let k = kernable.clone();
+    tokio::spawn(async move { k.query::<i64>(Query::new("counters", "Ask")).await });
+    tokio::time::sleep(Duration::from_millis(5_500)).await;
+    RELEASED.store(true, Ordering::SeqCst);
+    worker.stop();
+    listener.stop();
+}
+
+#[test]
+fn a_handler_that_hangs_is_reported() {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["hangs_child", "--exact", "--nocapture", "--test-threads=1"])
+        .env(HANGS_CHILD, "1")
+        .env("KERNABLE_LOG", "error")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(out.status.success(), "the child runs: {stderr}");
+    assert!(
+        stderr.contains("Slow/s1 still running after its lease ended"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("still handling the query counters.Ask after 5 s"),
+        "{stderr}"
+    );
+}

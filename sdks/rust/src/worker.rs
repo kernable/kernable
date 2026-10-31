@@ -204,11 +204,34 @@ impl Worker {
                         let outcome = match aggregate {
                             Some(aggregate) => {
                                 let execute = x.clone();
-                                match tokio::task::spawn_blocking(move || {
+                                let running = tokio::task::spawn_blocking(move || {
                                     aggregate.execute(&execute)
-                                })
-                                .await
-                                {
+                                });
+                                // A handler cannot be stopped from outside; one that runs past
+                                // its lease at least shows.
+                                let lease = u64::try_from(x.deadline - crate::context::now_ms())
+                                    .unwrap_or(0);
+                                let stream = format!(
+                                    "{}.{} {}/{}",
+                                    command.domain,
+                                    command.command_type,
+                                    command.aggregate_type,
+                                    command.aggregate_id
+                                );
+                                let line = || {
+                                    format!(
+                                        "{stream} still running after its lease ended: the kernel \
+                                         gives it to another worker; is the handler stuck?"
+                                    )
+                                };
+                                let finished = log::watched(
+                                    &client.log,
+                                    "worker",
+                                    Duration::from_millis(lease),
+                                    line,
+                                    running,
+                                );
+                                match finished.await {
                                     Ok(outcome) => (x, outcome),
                                     // A panic outside the handlers' own guard (an eraser, say)
                                     // still answers the command.

@@ -1124,6 +1124,41 @@ class _Log:
         time.sleep(delay)
 
 
+class _Watch:
+    """Logs `line` as an error if the block still runs after `seconds`: a handler cannot be
+    stopped from outside, but a stuck one shows."""
+
+    def __init__(self, log: "_Log", what: str, seconds: float | None, line: str = ""):
+        self._timer = None
+        if seconds is not None:
+            self._timer = threading.Timer(seconds, log.print, ("error", what, line))
+            self._timer.daemon = True
+
+    def __enter__(self):
+        if self._timer:
+            self._timer.start()
+
+    def __exit__(self, *exc):
+        if self._timer:
+            self._timer.cancel()
+
+
+def _handling(msg) -> tuple[float | None, str]:
+    """After how long a listener's message is too long, and what to log then: a query or check
+    after 5 s (the kernel's default `--query-timeout-ms` and `--middleware-timeout-ms`, after
+    which the request has failed), a batch after 30 s (everything behind it waits)."""
+    kind = msg.WhichOneof("msg")
+    if kind == "batch":
+        what, seconds = f"the batch up to {msg.batch.up_to}", 30
+    elif kind == "query":
+        what, seconds = f"the query {msg.query.query.domain}.{msg.query.query.query_type}", 5
+    elif kind == "check":
+        what, seconds = "a middleware check", 5
+    else:
+        return None, ""
+    return seconds, f"still handling {what} after {seconds} s: everything behind it waits; is a handler stuck?"
+
+
 def _relative(type: str, domains: set[str]) -> str:
     """`shop.ItemAdded` as `ItemAdded` when `shop` is the only domain in `domains`."""
     domain, _, name = type.partition(".")
@@ -1416,7 +1451,13 @@ class Worker(_Stream):
             self._connects += 1
             self.ready.set()
         elif kind == "execute":
-            reply = self._execute(msg.execute)
+            cmd = msg.execute.command
+            stream = f"{cmd.domain}.{cmd.command_type} {cmd.aggregate_type}/{cmd.aggregate_id}"
+            # A handler cannot be stopped from outside; one that runs past its lease at least shows.
+            with _Watch(self._log, self._what, max(0.0, msg.execute.deadline / 1000 - time.time()),
+                        f"{stream} still running after its lease ended: the kernel gives it to another worker; "
+                        "is the handler stuck?"):
+                reply = self._execute(msg.execute)
             if self._log.enabled("debug"):
                 cmd = msg.execute.command
                 done = (f"rejected {reply.rejection.reason.code}" if reply.HasField("rejection")
@@ -1685,7 +1726,8 @@ class ListenerHandle(_Stream):
         # wait for it (it handles one message at a time).
         token = _HANDLING.set(self.listener.name)
         try:
-            return self._handle(msg)
+            with _Watch(self._log, self._what, *_handling(msg)):
+                return self._handle(msg)
         finally:
             _HANDLING.reset(token)
 

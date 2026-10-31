@@ -248,3 +248,46 @@ test("reconnects back off, and a refusal is logged as an error", async () => {
     await kernel.dispose();
   }
 });
+
+test("a handler that hangs is reported: a command past its lease, a query past 5 s", async () => {
+  const kernel = new TestKernel(["counters.*"], ["--lease-ttl-ms", "500", "--query-timeout-ms", "8000"]);
+  await kernel.start();
+  const before = process.env.KERNABLE_LOG;
+  process.env.KERNABLE_LOG = "error";
+  const kernable = new Kernable({ url: kernel.url, key: kernel.appKey });
+  if (before === undefined) delete process.env.KERNABLE_LOG;
+  else process.env.KERNABLE_LOG = before;
+  let release!: () => void;
+  const stuck = new Promise<void>((resolve) => (release = resolve));
+  const slow = domain("counters").aggregate("Slow", 0).command("Do", async () => {
+    await stuck;
+    return [];
+  });
+  const model = domain("counters").readModel("slow-answers").query("Ask", async () => {
+    await stuck;
+    return 1;
+  });
+  const lines: string[] = [];
+  const print = console.error;
+  console.error = (line: string) => void lines.push(line);
+  const worker = kernable.worker(slow);
+  const listener = kernable.listener(model);
+  const running = [worker.run(), listener.run()];
+  try {
+    await Promise.all([worker.ready, listener.ready]);
+    void kernable.enqueue({ domain: "counters", aggregateType: "Slow", aggregateId: "s1", type: "Do" });
+    await until("the command is reported", () => lines.some((l) => /Slow\/s1 still running after its lease ended/.test(l)));
+    const asked = kernable.query({ domain: "counters", type: "Ask" }).catch(() => undefined);
+    await sleep(5_500);
+    assert.ok(lines.some((l) => /still handling the query counters\.Ask after 5 s/.test(l)), lines.join("\n"));
+    release();
+    await asked;
+  } finally {
+    console.error = print;
+    worker.stop();
+    listener.stop();
+    await Promise.allSettled(running);
+    kernable.close();
+    await kernel.dispose();
+  }
+});

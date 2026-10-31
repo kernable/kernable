@@ -809,6 +809,34 @@ export class Aggregate<S> {
 }
 
 
+/**
+ * What a listener is handling, and after how long that is too long: a query or check after 5 s
+ * (the kernel's default `--query-timeout-ms` and `--middleware-timeout-ms`, after which the
+ * request has failed), a batch after 30 s (every batch, query and check behind it waits).
+ */
+function handlingOf(m: ListenerDelivery): { what: string; ms: number } | undefined {
+  if (m.batch) return { what: `the batch up to ${m.batch.up_to}`, ms: 30_000 };
+  if (m.query) return { what: `the query ${m.query.query.domain}.${m.query.query.query_type}`, ms: 5_000 };
+  if (m.check) return { what: `a middleware check`, ms: 5_000 };
+  return undefined;
+}
+
+/** Runs `f`, logging an error if it is still running after `handling.ms`: a handler cannot be stopped from outside, but a stuck one shows. */
+async function watched<T>(log: Log, what: string, handling: { what: string; ms: number } | undefined, f: () => Promise<T>): Promise<T> {
+  if (!handling) return f();
+  const started = Date.now();
+  const hung = setTimeout(
+    () => log.print("error", what, `still handling ${handling.what} after ${Math.round((Date.now() - started) / 1000)} s: everything behind it waits; is a handler stuck?`),
+    handling.ms,
+  );
+  hung.unref();
+  try {
+    return await f();
+  } finally {
+    clearTimeout(hung);
+  }
+}
+
 /** The type of what was thrown: `TypeError`, or `string` for a thrown string. */
 function errorType(err: unknown): string {
   return err instanceof Error ? err.name : err === null ? "null" : typeof err;
@@ -1889,7 +1917,7 @@ export class ListenerHandle {
         // Requests sent from the handlers name this listener, so the kernel never makes them
         // wait for it (it handles one message at a time).
         queue = queue
-          .then(() => (over ? undefined : handling.run(name, () => this.onMessage(call, m))))
+          .then(() => (over ? undefined : watched(this.log, this.what, handlingOf(m), () => handling.run(name, () => this.onMessage(call, m)))))
           .catch((err) => {
             over = true;
             call.cancel();
@@ -2153,6 +2181,20 @@ export class Worker {
   private async execute(call: SessionCall, x: NonNullable<KernelMessage["execute"]>): Promise<void> {
     const cmd = x.command;
     const stream = `${cmd.domain}.${cmd.command_type} ${cmd.aggregate_type}/${cmd.aggregate_id}`;
+    // A handler cannot be stopped from outside; one that runs past its lease at least shows.
+    const hung = setTimeout(
+      () => this.log.print("error", "worker", `${stream} still running after its lease ended: the kernel gives it to another worker; is the handler stuck?`),
+      Math.max(0, x.deadline - Date.now()),
+    );
+    hung.unref();
+    try {
+      await this.handle(call, x, cmd, stream);
+    } finally {
+      clearTimeout(hung);
+    }
+  }
+
+  private async handle(call: SessionCall, x: NonNullable<KernelMessage["execute"]>, cmd: WireCommand, stream: string): Promise<void> {
     let events: WireNewEvent[];
     let vault: WireVaultValue[] = [];
     let snapshot: WireSnapshot | undefined;
