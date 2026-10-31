@@ -78,15 +78,18 @@ class Store:
 
     def _begin(self) -> None:
         self._lock.acquire()
-        self._db.execute("BEGIN")
+        try:
+            self._db.execute("BEGIN")
+        except BaseException:
+            self._lock.release()
+            raise
 
     def _commit(self, position: int) -> None:
-        try:
-            self._db.execute("UPDATE meta SET value = ? WHERE key = 'position'", (str(position),))
-            self._db.execute("COMMIT")
-            self.committed = position
-        finally:
-            self._lock.release()
+        """Ends the batch; if this raises, the batch is still open and `_rollback` ends it."""
+        self._db.execute("UPDATE meta SET value = ? WHERE key = 'position'", (str(position),))
+        self._db.execute("COMMIT")
+        self.committed = position
+        self._lock.release()
 
     def _rollback(self) -> None:
         try:

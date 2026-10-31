@@ -9,6 +9,7 @@ import io
 import json
 import os
 import re
+import sqlite3
 import threading
 import time
 import unittest
@@ -898,6 +899,64 @@ class EndToEnd(unittest.TestCase):
         self.run_stream(totals("2"))
         self.assertEqual(total(5), 9)
         self.assertEqual(handled, [1, 2, 3, 4, 5])
+
+    def test_a_read_model_whose_commit_fails_handles_the_batch_again(self):
+        self.run_stream(self.k.worker(counter))
+        model = counters_domain.read_model("sums", store=f"sqlite:{self.kernel.dir}/sums.db", reconnect_s=0.05)
+
+        @model.on("counters.Incremented")
+        def _(data, evt, ctx):
+            ctx.store.set("sums", evt.aggregate_id, ctx.store.get("sums", evt.aggregate_id, 0) + data["by"])
+
+        handle = self.run_stream(self.k.listener(model))
+
+        class FullDisk:
+            """The store's connection, failing the first position update as a full disk would."""
+
+            def __init__(self, db):
+                self.db, self.failed = db, False
+
+            def execute(self, sql, *args):
+                if sql.startswith("UPDATE meta") and not self.failed:
+                    self.failed = True
+                    raise sqlite3.OperationalError("database or disk is full")
+                return self.db.execute(sql, *args)
+
+            def __getattr__(self, name):
+                return getattr(self.db, name)
+
+        disk = FullDisk(handle.store._db)
+        handle.store._db = disk
+        self.increment(1, wait="committed")
+        self.increment(2, wait="committed")
+        for _ in range(150):
+            if handle.store.committed >= 2:
+                break
+            time.sleep(0.02)
+        self.assertTrue(disk.failed)
+        self.assertEqual(handle.store.committed, 2)
+        self.assertEqual(handle.store.get("sums", "c1"), 3, "the failed batch was handled again, once")
+
+    def test_a_command_handler_that_changes_its_state_does_not_change_the_snapshot(self):
+        box = counters_domain.aggregate("Box", {"items": []}, snapshot_every=1)
+
+        @box.apply("Opened")
+        def _(state, data):
+            state["items"].append("opened")
+
+        @box.command("Open")
+        def _(state, data):
+            state["items"].append("opened")  # changes its copy only
+            return [{"type": "Opened"}]
+
+        @box.command("Count")
+        def _(state, data):
+            raise Rejected(str(len(state["items"])), "count")
+
+        self.run_stream(self.k.worker(box))
+        self.assertTrue(self.k.submit("counters", "Box", "b1", "Open", {}, wait="committed").committed)
+        counted = self.k.submit("counters", "Box", "b1", "Count", {}, wait="committed")
+        self.assertEqual((counted.code, counted.message), ("count", "1"), "the snapshot equals a replay")
 
     def test_event_schemas_are_checked_when_defined(self):
         counters = domain("counters")

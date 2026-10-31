@@ -1384,7 +1384,9 @@ class Worker(_Stream):
             meta = CommandMeta(cmd.command_id, cmd.command_type, cmd.domain, cmd.aggregate_type, cmd.aggregate_id,
                                cmd.tenant_id)
             ctx = CommandContext(_from_wire_context(cmd.context), _time(x.deadline), _time(x.received_at), cmd.command_id)
-            produced = _call(agg.handlers[cmd.command_type], state, _unseal(_decode(cmd.payload), x.vault)[0], meta, ctx)
+            # A copy: a handler that changes it must not change the snapshot.
+            produced = _call(agg.handlers[cmd.command_type], copy.deepcopy(state), _unseal(_decode(cmd.payload), x.vault)[0],
+                             meta, ctx)
             events, vault = [], []
             for e in produced:
                 spec = agg.events.get(e["type"])
