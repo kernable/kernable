@@ -937,6 +937,26 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(handle.store.committed, 2)
         self.assertEqual(handle.store.get("sums", "c1"), 3, "the failed batch was handled again, once")
 
+    def test_a_new_reactor_with_a_store_starts_at_the_newest_event(self):
+        self.run_stream(self.k.worker(counter))
+        for by in (1, 2):
+            self.increment(by, wait="committed")
+        seen = []
+        mailer = counters_domain.reactor("stored-mailer", store=f"sqlite:{self.kernel.dir}/mailer.db")
+
+        @mailer.on("counters.Incremented")
+        def _(data, evt, ctx):
+            seen.append(data["by"])
+
+        self.run_stream(self.k.listener(mailer))
+        self.increment(3, wait="committed")
+        for _ in range(100):
+            if seen:
+                break
+            time.sleep(0.02)
+        time.sleep(0.1)
+        self.assertEqual(seen, [3])
+
     def test_a_command_handler_that_changes_its_state_does_not_change_the_snapshot(self):
         box = counters_domain.aggregate("Box", {"items": []}, snapshot_every=1)
 

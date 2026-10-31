@@ -126,3 +126,33 @@ test("a command handler that changes its state changes neither the initial state
     await kernel.dispose();
   }
 });
+
+test("a new reactor with a store starts at the newest event, then resumes from its store", async () => {
+  const kernel = new TestKernel(["counters.*"]);
+  await kernel.start();
+  const kernable = new Kernable({ url: kernel.url, key: kernel.appKey });
+  const increment = (id: string, by: number) =>
+    kernable.submit({ domain: "counters", aggregateType: "Counter", aggregateId: id, type: "Increment", data: { by }, wait: "committed" });
+  const worker = kernable.worker(counter);
+  const running = [worker.run()];
+  const seen: number[] = [];
+  const mailer = counters.reactor("stored-mailer", { store: `sqlite:${join(kernel.dir, "mailer.db")}` })
+    .on("Incremented", (data: { by: number }) => void seen.push(data.by));
+  const reactor = kernable.listener(mailer);
+  try {
+    await worker.ready;
+    for (const by of [1, 2]) await increment("c1", by);
+    running.push(reactor.run());
+    await reactor.ready;
+    await increment("c1", 3);
+    await until("the new event arrives", () => seen.length > 0);
+    await sleep(100);
+    assert.deepEqual(seen, [3]);
+  } finally {
+    worker.stop();
+    reactor.stop();
+    await Promise.allSettled(running);
+    kernable.close();
+    await kernel.dispose();
+  }
+});

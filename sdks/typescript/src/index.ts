@@ -1794,7 +1794,9 @@ export class ListenerHandle {
     if (options.store && !this.stored) {
       this.stored = await Store.open(options.store, options.schema ?? "1");
       this.position = this.stored.committed;
-      start = this.position;
+      // A new (or cleared) store says nothing: the listener's own start applies (a reactor
+      // starts at the newest event).
+      if (this.position > 0) start = this.position;
     }
     while (!this.stopped) {
       let error: unknown = new Error("stream ended");

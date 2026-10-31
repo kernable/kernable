@@ -203,3 +203,36 @@ async fn a_handler_that_panics_fails_its_batch_or_query_not_the_listener() {
     model.stop();
     worker.stop();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_reactor_with_a_store_starts_at_the_newest_event() {
+    let kernel = TestKernel::new(&["counters.*"], &[]);
+    kernel.start().await;
+    let kernable = kernel.client();
+    let (counters, counter) = counters();
+    let worker = start_worker(&kernable, &counter);
+    worker.ready().await;
+    for by in [1, 2] {
+        increment(&kernable, "c1", by).await;
+    }
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let s = Arc::clone(&seen);
+    let url = format!("sqlite:{}", kernel.dir.join("mailer.db").display());
+    let mailer = counters.reactor("stored-mailer").store(&url, "1").on(
+        "counters.Incremented",
+        move |data: By, _evt, _ctx| {
+            s.lock().unwrap().push(data.by);
+            async { Ok(()) }
+        },
+    );
+    let reactor = kernable.listener(&mailer);
+    let r = reactor.clone();
+    tokio::spawn(async move { r.run().await });
+    reactor.ready().await;
+    increment(&kernable, "c1", 3).await;
+    eventually(|| !seen.lock().unwrap().is_empty()).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(*seen.lock().unwrap(), [3]);
+    reactor.stop();
+    worker.stop();
+}

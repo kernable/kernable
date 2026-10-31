@@ -738,7 +738,11 @@ impl ListenerHandle {
                     self.inner
                         .position
                         .store(store.committed(), Ordering::SeqCst);
-                    start = Some(store.committed());
+                    // A new (or cleared) store says nothing: the listener's own start applies
+                    // (a reactor starts at the newest event).
+                    if store.committed() > 0 {
+                        start = Some(store.committed());
+                    }
                     *self.inner.store.lock().unwrap() = Some(store);
                 }
                 Err(e) => {

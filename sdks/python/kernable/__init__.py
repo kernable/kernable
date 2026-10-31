@@ -1591,7 +1591,11 @@ class ListenerHandle(_Stream):
         drops; with a store, opens it first and continues after its position."""
         if self.listener.store_url and self.store is None:
             self.store = Store(self.listener.store_url, self.listener.schema)
-            self.position = self._start = self.store.committed
+            self.position = self.store.committed
+            # A new (or cleared) store says nothing: the listener's own start applies (a reactor
+            # starts at the newest event).
+            if self.store.committed > 0:
+                self._start = self.store.committed
         super().run()
 
     def _open(self, requests):
