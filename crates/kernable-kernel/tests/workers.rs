@@ -175,3 +175,38 @@ async fn a_membership_decides_which_aggregates_the_kernel_waits_for() {
     );
     assert!(workers[0].last_seen > 0);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn aggregates_registered_before_a_restart_queue_their_commands_until_a_worker_is_back() {
+    // orders.Order was registered before the kernel started; no worker is connected yet.
+    let env = start_custom("workers-restart", |config, _| {
+        let store = kernable_store::open(&config.store).unwrap();
+        let record = kernable_core::proto::WorkerRecord {
+            aggregate_type: "orders.Order".into(),
+            key_id: id(&key(2)),
+            command_types: vec!["orders.PlaceOrder".into(), "orders.AddItem".into()],
+            ..Default::default()
+        };
+        store.save_workers(&[record]).unwrap();
+    })
+    .await;
+    let accepted = submit_with(
+        &env.addr,
+        signed(command("c1", "PlaceOrder", "o1"), &key(1)),
+        Wait::Accepted,
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(accepted.outcome, Some(Outcome::Accepted(_))),
+        "{accepted:?}"
+    );
+    spawn_worker(&env).await;
+    let placed = submit(
+        &env.addr,
+        signed(command("c1", "PlaceOrder", "o1"), &key(1)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(committed_versions(&placed), [1]);
+}

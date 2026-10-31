@@ -10,7 +10,7 @@ use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
         Ack, Batch, ChallengeResponse, CommandResult, Hello, ListenerMessage, Middleware, Wait,
-        command_result::Outcome, listener_delivery::Msg as Out, listener_message::Msg as In,
+        When, command_result::Outcome, listener_delivery::Msg as Out, listener_message::Msg as In,
         listener_service_client::ListenerServiceClient,
     },
     signing, transport,
@@ -533,4 +533,56 @@ async fn a_live_listener_starts_at_the_newest_event_and_counts_for_nobody() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     let taken = listen(&env, "model", live()).await;
     assert_eq!(taken.err().unwrap().code(), Code::AlreadyExists);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_ack_beyond_the_delivered_events_ends_the_session() {
+    let env = start("listener-ack-beyond").await;
+    spawn_worker(&env).await;
+    let mut orders = listen(&env, "orders", opts(0)).await.unwrap();
+    let _first = spawn_submit(&env, "c1", "PlaceOrder");
+    assert_eq!(positions(&orders.next().await), [1]);
+    orders.ack(2).await;
+    let ended = tokio::time::timeout(Duration::from_secs(2), orders.inbound.message())
+        .await
+        .unwrap();
+    assert_eq!(ended.unwrap_err().code(), Code::InvalidArgument);
+    // Nothing of it was kept: the listener resumes after what it had acknowledged, nothing.
+    let orders = listen(&env, "orders", opts(0)).await.unwrap();
+    assert_eq!(orders.start, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_listener_whose_grant_no_longer_covers_it_is_disconnected() {
+    let env = start("listener-narrowed").await;
+    let check = || Middleware {
+        order: 1,
+        types: vec!["orders.*".into()],
+        when: When::Before.into(),
+    };
+    let guard = Opts {
+        middlewares: vec![check()],
+        ..opts(0)
+    };
+    let mut guard = listen(&env, "guard", guard).await.unwrap();
+    let mut audit = listen(&env, "audit", opts(0)).await.unwrap();
+
+    // Key 5 keeps listen but loses check: the middleware goes, the plain listener stays.
+    env.kernel
+        .grant(grant(&key(5), &[("listen", &["*"])]))
+        .unwrap();
+    let ended = tokio::time::timeout(Duration::from_secs(2), guard.inbound.message())
+        .await
+        .unwrap();
+    assert_eq!(ended.unwrap_err().code(), Code::PermissionDenied);
+    audit.nothing_for(300).await;
+
+    // Then it loses listen too.
+    env.kernel
+        .grant(grant(&key(5), &[("query", &["*"])]))
+        .unwrap();
+    let ended = tokio::time::timeout(Duration::from_secs(2), audit.inbound.message())
+        .await
+        .unwrap();
+    assert_eq!(ended.unwrap_err().code(), Code::PermissionDenied);
 }

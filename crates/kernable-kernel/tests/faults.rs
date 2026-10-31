@@ -9,6 +9,7 @@ use std::{
 };
 
 use common::*;
+use kernable_core::proto::command_result::Outcome;
 use tokio::sync::mpsc;
 use tonic::Code;
 
@@ -85,6 +86,41 @@ async fn forged_result_ends_the_session_and_an_honest_worker_takes_over() {
     let result = pending.await.unwrap().unwrap();
     assert_eq!(committed_versions(&result), [1]);
     assert_eq!(stream_versions(&env), [1]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forged_rejection_ends_the_session_and_an_honest_worker_rejects_instead() {
+    let env = start_with("forge-rejection", 30_000).await;
+    let (seen, mut seen_rx) = mpsc::unbounded_channel();
+    let forger = start_worker(
+        env.addr.clone(),
+        TestWorker::with(Behavior::ForgeResult, seen),
+    )
+    .await;
+
+    // No order o1: the domain rejects AddItem, and the forger signs that with another key.
+    let addr = env.addr.clone();
+    let pending = tokio::spawn(async move {
+        submit(&addr, signed(command("c1", "AddItem", "o1"), &key(1))).await
+    });
+    assert_eq!(seen_rx.recv().await.unwrap(), "c1");
+    let ended = tokio::time::timeout(Duration::from_secs(5), forger)
+        .await
+        .expect("the forged rejection was accepted");
+    assert_eq!(ended.unwrap().code(), Code::Unauthenticated);
+
+    let (seen, mut seen_rx) = mpsc::unbounded_channel();
+    start_worker(env.addr.clone(), TestWorker::with(Behavior::Honest, seen)).await;
+    assert_eq!(
+        seen_rx.recv().await.unwrap(),
+        "c1",
+        "the command runs again"
+    );
+    let result = pending.await.unwrap().unwrap();
+    assert!(
+        matches!(&result.outcome, Some(Outcome::Rejected(r)) if r.code == "invalid_state"),
+        "{result:?}"
+    );
 }
 
 /// X8: the lease ID is not signed. A result under a lease the worker was not given never
