@@ -183,6 +183,7 @@ const cart = await kernable.query<Cart>({ domain: "shop", type: "GetCart", data:
 - `tenant?: string`: Default: the client's tenant (`Options.tenant`).
 - `context?: RequestContext`: Replaces the client's default context (`Options.context`).
 - `minPosition?: number`: Answer only after the read model has processed this global position, e.g. the last event's `position` of a `committed` submit. Default 0: answer at once.
+- `timeoutMs?: number`: How long to wait for the connection and the answer; default `Options.timeoutMs`.
 
 ### Check
 
@@ -478,6 +479,8 @@ a missing key file, an explicitly named grant file or a missing TLS file throws.
 - `service?: string`: The service this process's workers and listeners belong to. Its membership (see `apply`) decides what the kernel waits for: what it lists counts, the service's other workers and listeners are dynamic, and only listeners it lists as middlewares may check requests. Default: `KERNABLE_SERVICE`, else none (everything registered counts).
 - `context?: RequestContext`: Default request context for `submit`, `enqueue`, `query` and the requests of `data` and `cache`, e.g. this service's identity; a request's own `context` replaces it as a whole. Default: empty.
 - `tls?: TlsFiles`: Mutual TLS for `host:port` URLs: paths of the CA certificate and this process's certificate and key. Default: `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`, if set.
+- `insecure?: boolean`: Allows plain text to a kernel that is not on this machine. Without TLS, grants, signed requests and vault values cross the network readable, so the client refuses such a URL unless this is set. Default: `KERNABLE_INSECURE=1`, else false.
+- `timeoutMs?: number`: How long a request (`submit`, `query`, files, cache, `apply`) waits in all: for the connection, e.g. while the kernel restarts, and for its answer. Default 60 000 ms, above the kernel's own submit and settle timeouts.
 
 ### SubmitOptions
 
@@ -497,6 +500,7 @@ await kernable.submit({ domain: "shop", aggregateType: "cart", aggregateId: "c1"
 - `id?: string`: The command ID and idempotency key: submitting the same ID again returns the original outcome instead of running the command twice. Default: a new UUID. Give retried commands, and every command a reactor submits, a fixed ID.
 - `context?: RequestContext`: Replaces the client's default context (`Options.context`); inside a listener, pass `ctx.follow()`. Its `correlationId` defaults to the command ID.
 - `wait?: "settled" | "committed"`: When `submit` returns. `"settled"` (default): once every listener that counts has processed the events, so the next query sees them; throws `NotSettled` after `--settle-timeout-ms`. From a listener's handler, only the listeners with a lower order count. `"committed"`: once the events are stored; read with `QueryOptions.minPosition` to see them. To return once the command is only queued, use `Kernable.enqueue`. See [Settling](../concepts/ordering#settling-reading-your-own-writes).
+- `timeoutMs?: number`: How long to wait for the connection and the outcome; default `Options.timeoutMs`.
 
 ### Kernable
 
@@ -600,7 +604,7 @@ What `Kernable.subscribe` streams: from which position, and which event types.
 
 - `after?: number`: Global position of the last event already handled; 0 = from the beginning (default).
 - `types?: string[]`: Qualified event types (`orders.OrderPlaced`) or domains (`orders.*`); empty = all the key may read.
-- `reconnectMs?: number`: Milliseconds to wait before reconnecting after the stream ends (default 1000).
+- `reconnectMs?: number`: Milliseconds to wait before reconnecting after the stream ends (default 1000); twice as long after each further failed attempt, at most 30 s.
 
 ### Subscription
 
@@ -625,7 +629,7 @@ const push = shopDomain.reactor("push", { live: true });
 - `order?: number`: Listeners with a lower order process each event first; equal orders run in parallel. Defaults: 0 for read models, 10 for reactors. Negative orders are reserved for kernable.
 - `start?: number`: Position to start after on the first connect: 0 rebuilds from the beginning (default for read models); omitted, the kernel resumes after the last acknowledged event, and a new listener starts at the newest event, so it never reacts to what happened before it existed (default for reactors). Reconnects always resume after the last handled event.
 - `live?: boolean`: Not registered with the kernel: no stored position, always starts at the newest event, nobody waits for it, and it is forgotten when it disconnects. For reactions that only matter while the process runs, e.g. pushing to connected browsers. Cannot be a middleware.
-- `reconnectMs?: number`: Milliseconds to wait before reconnecting after the stream ends (default 1000).
+- `reconnectMs?: number`: Milliseconds to wait before reconnecting after the stream ends (default 1000); twice as long after each further failed attempt, at most 30 s.
 - `store?: string`: Keeps the listener's state in a store (`sqlite:<path>` or `memory:`) instead of memory: its data and position are written together per batch, and a restart continues after the stored position (`start` is then ignored). See `ListenerHandle.store`.
 - `schema?: string`: Version of the stored data's format (default "1"). Change it when the handlers store data differently: the store is cleared and the listener rebuilds from the first event.
 
@@ -706,7 +710,7 @@ await handle.ready;
 How a worker runs: the argument of `Worker.run` and `App.run`.
 
 - `concurrency?: number`: Commands executed in parallel, of different aggregates (default 16).
-- `reconnectMs?: number`: Milliseconds to wait before reconnecting after the session ends (default 1000).
+- `reconnectMs?: number`: Milliseconds to wait before reconnecting after the session ends (default 1000); twice as long after each further failed attempt, at most 30 s.
 
 ### Worker
 

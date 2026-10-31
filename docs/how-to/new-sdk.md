@@ -23,13 +23,18 @@ Generate gRPC stubs from `proto/kernable/v1/kernable.proto`, package `kernable.v
 | Address | `url` | `KERNABLE_URL` | `http://127.0.0.1:7233` |
 | Key file | `key` | `KERNABLE_KEY` | `app.key` in the current directory |
 | Grant file | `grant` | `KERNABLE_GRANT` | the `.grant` file next to the key (`app.key` → `app.grant`), if it exists |
-| Mutual TLS | `tls` | `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT`, `KERNABLE_TLS_KEY` (all three or none) | plain connection |
+| Mutual TLS | `tls` | `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT`, `KERNABLE_TLS_KEY` (all three or none) | plain connection, on this machine only |
+| Plain text off the machine | `insecure` | `KERNABLE_INSECURE=1` | refused |
+| Request timeout | `timeoutMs` (or your language's unit) | — | 60 s |
 | Service | `service` | `KERNABLE_SERVICE` | none |
 
 - Accept `http://host:port`, `host:port` and, on Unix, `unix:/path`.
 - **Grant:** send the grant file's content (trimmed) as the gRPC metadata entry `kernable-grant` on every call and every stream opening. It is a hex-encoded `Grant`; send it as it is. Without a grant file, send no entry: the kernel then uses the grant it already holds for the key, if any.
 - **Protocol version:** set `protocol: 1` on every request and stream opening (`SubmitRequest`, `QueryRequest`, `SubscribeRequest`, `Register`, `Hello`, and the data, cache and apply requests). Export it as a constant (`PROTOCOL`). The kernel refuses other versions with `FAILED_PRECONDITION`.
 - Raise the message size limit for `DataService`: a file can be 16 MiB.
+- **Plain text stays on the machine:** without TLS, refuse a URL that is not a Unix socket or a loopback address (`localhost`, `127.x.x.x`, `::1`) unless `insecure` is set.
+- **Requests wait for the connection:** every unary call (submit, query, data, cache, apply) waits while the kernel cannot be reached (gRPC's wait-for-ready) and has a deadline, 60 s by default, above the kernel's own submit and settle timeouts; submit and query take their own. Never retry a call that may have reached the kernel: a data or cache write sent twice is refused as a replay.
+- **Keepalive:** ping every 30 s, also when idle, and drop the connection after 10 s without an answer, so streams on a connection that died silently reconnect.
 
 ## 3. Clients
 
@@ -61,7 +66,9 @@ Answer the `Challenge` with a signature over `kernable.v1.challenge` and the non
 3. Fold the snapshot state (or the initial state) and the `history`, upcast and unsealed with the `vault` values.
 4. Run the handler with the unsealed command. `now()` is `received_at`; `id()` is the n-th derived ID of the command.
 5. Seal the new events' vault fields, sign `kernable.v1.result` and send a `Result` with the events, their vault values and, optionally, a signed snapshot.
-6. If the handler fails, sign `kernable.v1.rejection` and send a `Rejection`: the handler's own `Rejected` code, else `handler_error` with the error text.
+6. If the handler fails, sign `kernable.v1.rejection` and send a `Rejection`: the handler's own `Rejected` code and message, else `handler_error` with only the error's type as the message. The rejection is stored for good and returned to the sender, and an error's text can hold personal data; log the whole error instead.
+
+Give the handler a copy of the state: the snapshot is computed from the state after the new events, and a handler that changed the state in place would sign a snapshot no replay produces. Catch everything that can go wrong outside the handler too (a malformed `Execute`, an eraser that fails), so a command is always answered or the session ends.
 
 If the worker meets an event with a newer schema than it knows, it must not reject the command: log an error and end the session. The worker needs an update.
 
@@ -77,13 +84,17 @@ Handle the deliveries **one at a time, in order**:
 | `QueryCall` | Run the query handler and send a `QueryAnswer` with the JSON response, or a rejection: the handler's code, `unknown_query` if there is no handler, `handler_error` if it fails. |
 | `MiddlewareCall` | Run the middleware for its `when` and send a `Verdict`: empty to pass, else a rejection (`not_a_middleware` if there is none for that `when`, `middleware_error` if it fails). After calls carry the outcome. |
 
-**Delivery is at least once.** If a handler fails, end the stream and reconnect with `from_position` set to the last handled position: the kernel delivers the rest again. Handlers must be safe to run twice.
+**Delivery is at least once.** If a handler fails, end the stream and reconnect with `from_position` set to the last handled position: the kernel delivers the rest again. Handlers must be safe to run twice. Batches may arrive before the previous one is acknowledged: once one fails, drop the ones queued behind it, and end the connection only after the one being handled, so two batches never run at once.
+
+**Never go back.** Skip events at or below the last handled position, and end the session, without an ack, on a batch whose `up_to` is below it: a buggy kernel, or something posing as one, must not make a store apply events twice. Send `from_position` only once a session reached `Ready` (or from a store that committed something): a new reactor whose first connect fails must still start at the newest event, not at 0.
+
+**With a store**, write the batch's data and position in one transaction; if the commit fails, roll back and resume from the stored position, and if a batch was abandoned half-way, roll back what is left of it before the next one.
 
 Submits and queries sent from inside a handler must set `listener` to the listener's name, so the kernel never makes them wait for the listener that is busy sending them. A context for a follow-up command keeps the event's correlation ID and sets `causation_id` to the event's command ID.
 
 ## 6. Reconnect
 
-Workers, listeners and subscriptions run until stopped. When a stream ends or fails for any reason, log it and reconnect after a delay (TypeScript: 1 s, option `reconnectMs`). A listener resumes from its last handled position, a subscription from its last handled event. Commands in flight when a worker drops go to another worker once their lease expires.
+Workers, listeners and subscriptions run until stopped. When a stream ends or fails for any reason, log it and reconnect after a delay (TypeScript: 1 s, option `reconnectMs`), twice as long after each further failed attempt, up to 30 s, give or take a fifth so processes do not reconnect in lockstep; start over once a session is accepted. Log refusals a retry cannot change (`INVALID_ARGUMENT`, `PERMISSION_DENIED`, `FAILED_PRECONDITION`, `UNIMPLEMENTED`, `UNAUTHENTICATED`) as errors. A listener resumes from its last handled position, a subscription from its last handled event. Commands in flight when a worker drops go to another worker once their lease expires.
 
 ## 7. Vault fields
 
@@ -115,7 +126,7 @@ Pass the kernel's gRPC status to the caller with its code, so callers can act on
 | `PERMISSION_DENIED` | any call or stream | The grant does not allow it, or the key is revoked. Raise it; on a stream, log and reconnect. |
 | `FAILED_PRECONDITION` | any | Unsupported protocol version, an outdated worker, or a handler request that would wait for its own listener. Raise it. |
 | `version_mismatch` and other rejections | submit outcome | Not an error: return `committed: false` with the code. |
-| `handler_error` | worker, read model | What the SDK sends when a handler fails with something other than `Rejected`. |
+| `handler_error` | worker, read model | What the SDK sends when a handler fails with something other than `Rejected`; for a command, with the error's type only. |
 
 ## 11. Logs
 

@@ -55,7 +55,7 @@ or pass them in code:
 | Python | `Kernable(tls=Tls(ca, cert, key))` |
 | Rust | `Options::new("shop-worker.key").tls(Tls { ca, cert, key })` (paths) |
 
-Set all three variables or none: in the SDKs, one or two of them is an error. The CLI commands that talk to a running kernel (`kernable apply`, `kernable revoke`, `kernable submit`) read the same variables, but use TLS only when all three are set; with one or two, they quietly connect without TLS, and the kernel refuses them on a non-loopback address.
+Set all three variables or none: in the SDKs, one or two of them is an error. Without TLS, the SDKs refuse a kernel that is not on the same machine (anything but a Unix socket or a loopback address): grants, signed requests and vault values would cross the network readable. To allow it anyway, for example through a tunnel that encrypts on its own, set `KERNABLE_INSECURE=1` or the option `insecure` (TypeScript, Python) or `Options::insecure()` (Rust). The CLI commands that talk to a running kernel (`kernable apply`, `kernable revoke`, `kernable submit`) read the same variables, but use TLS only when all three are set; with one or two, they quietly connect without TLS, and the kernel refuses them on a non-loopback address.
 
 ## Pitfalls
 

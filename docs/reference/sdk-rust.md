@@ -112,6 +112,8 @@ to the key; the service from `KERNABLE_SERVICE`; TLS from `KERNABLE_TLS_CA`,
 - `fn service(self, service: impl Into<String>) -> Options`: The service this process's workers and listeners belong to. The service's membership (see `Kernable::apply`) decides what the kernel waits for: what it lists counts, the service's other workers and listeners are dynamic, and only listeners it lists as middlewares may check requests. Default: `KERNABLE_SERVICE`, else none (everything registered counts).
 - `fn context(self, context: RequestContext) -> Options`: Default request context, e.g. this service's identity; a request's own context replaces it.
 - `fn tls(self, tls: Tls) -> Options`: Mutual TLS for `host:port` URLs: the CA certificate and this process's certificate and key, as paths of PEM files (`Tls { ca, cert, key }`, re-exported from the kernel's crate). Default: `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`, if set (all three or none).
+- `fn insecure(self) -> Options`: Allows plain text to a kernel that is not on this machine. Without TLS, grants, signed requests and vault values cross the network readable, so `Kernable::new` refuses such a URL unless this is set. Default: `KERNABLE_INSECURE=1`, else not allowed.
+- `fn timeout(self, timeout: Duration) -> Options`: How long a request (`submit`, `query`, files, cache, `apply`) waits in all: for the connection, e.g. while the kernel restarts, and for its answer. Default 60 s. A connection the network dropped silently is noticed within 40 s by keepalive pings.
 
 ### Kernable
 
@@ -171,6 +173,7 @@ Without `data`, the payload is an empty object (`{}`).
 - `fn id(self, id: impl Into<String>) -> Submit`: Idempotency key (default: a new UUID); resubmitting the same ID returns the original outcome without running the command again.
 - `fn context(self, context: RequestContext) -> Submit`: Replaces the client's default context; inside a listener, pass `ctx.follow()`.
 - `fn wait(self, wait: Wait) -> Submit`: How long `Kernable::submit` waits: `Wait::Settled` (default) or `Wait::Committed`.
+- `fn timeout(self, timeout: Duration) -> Submit`: How long to wait for the connection and the outcome; default `Options::timeout`.
 
 ### Query
 
@@ -183,6 +186,7 @@ query's data is an empty object (`{}`).
 - `fn tenant(self, tenant: impl Into<String>) -> Query`: The tenant to ask in. Default: the connection's (`Options::tenant`).
 - `fn context(self, context: RequestContext) -> Query`: Replaces the client's default context.
 - `fn min_position(self, position: u64) -> Query`: Answer only after the read model has processed this global position (e.g. of a committed submit).
+- `fn timeout(self, timeout: Duration) -> Query`: How long to wait for the connection and the answer; default `Options::timeout`.
 
 ### Outcome
 
@@ -419,7 +423,7 @@ spawn it and wait: `let worker = kernable.worker(&cart_aggregate); tokio::spawn(
 
 - `fn aggregate<S: State>(&self, aggregate: &Aggregate<S>) -> Worker`: Runs the commands of `aggregate`, too.
 - `fn concurrency(&self, commands: u32) -> Worker`: Commands executed in parallel (default 16).
-- `fn reconnect(&self, delay: Duration) -> Worker`: Delay before reconnecting after the session ends (default 1 s).
+- `fn reconnect(&self, delay: Duration) -> Worker`: Delay before reconnecting after the session ends (default 1 s); twice as long after each further failed attempt, at most 30 s.
 - `async fn ready(&self)`: Returns once the kernel accepted the worker; waits forever if it never connects.
 - `fn stop(&self)`: Ends `run`, also from another task.
 - `async fn run(&self)`: Processes commands until `stop()`, reconnecting when the session drops. A handler's error or panic rejects that command (`handler_error`); it does not end `run`.
@@ -554,7 +558,7 @@ A query handler returns its answer (any `Serialize`) or a `Rejected` as a `BoxEr
 - `fn order(&self, order: i32) -> Listener`: Listeners with a lower order process each event first; equal orders run in parallel. Defaults: 0 for read models, 10 for reactors. Negative orders are reserved for kernable.
 - `fn start(&self, position: u64) -> Listener`: Position to start after on the first connect: 0 rebuilds from the beginning (default for read models). Reactors resume after the last acknowledged event unless given one, and a new one starts at the newest event, so it never reacts to what happened before it existed. Reconnects always resume after the last handled event.
 - `fn live(&self) -> Listener`: Not registered with the kernel: no stored position, always starts at the newest event, nobody waits for it, and it is forgotten when it disconnects. For reactions that only matter while the process runs, e.g. pushing to connected browsers. Make it live before running it. Panics if the listener is a middleware: a live listener cannot be one.
-- `fn reconnect(&self, delay: Duration) -> Listener`: Delay before reconnecting after the stream drops or a handler fails (default 1 s).
+- `fn reconnect(&self, delay: Duration) -> Listener`: Delay before reconnecting after the stream drops or a handler fails (default 1 s); twice as long after each further failed attempt, at most 30 s.
 - `fn store(&self, url: &str, schema: &str) -> Listener`: Keeps the listener's state in a store (`sqlite:<path>` or `memory:`) instead of memory: its data and position are written together per batch, and a restart continues after the stored position. `schema` is the version of the stored data's format: change it when the handlers store data differently, and the store is cleared and rebuilt. Handlers get the store as `ctx.store` (`ListenerContext::store`, `QueryContext::store`). Example: `shop_domain.read_model("carts").store("sqlite:carts.db", "1")`.
 - `fn with_domain(&self, domain: &Domain) -> Listener`: Upcasts the events of another `domain` with its event schemas (see `Domain::event`); the listener's own domain's apply without it.
 - `fn on<D, F, Fut>(&self, event_type: &str, handler: F) -> Listener where D: DeserializeOwned + Send + 'static, F: Fn(D, StoredEventMeta, ListenerContext) -> Fut + Send + Sync + 'static, Fut: Future<Output = Result<(), BoxError>> + Send + 'static`: Handles `event_type` events: a type of the listener's domain (`ItemAdded`), of another domain (`orders.OrderPlaced`) or a whole domain (`orders.*`). `handler(data, evt, ctx)` gets the payload as `D` (`serde_json::Value` for any), a `StoredEventMeta` and a `ListenerContext`, and returns a future of `Result<(), BoxError>`. A payload that is not a `D` or an `Err` fails the batch: the listener reconnects and the event is delivered again, so handlers must be idempotent. See `Listener` for an example. Panics if `event_type` is none of these.
@@ -585,7 +589,7 @@ Where a subscription starts and what it reads, for `crate::Kernable::subscribe`:
 
 - `after: u64`: Global position of the last event already handled; 0: from the beginning.
 - `types: Vec<String>`: Qualified event types (`orders.OrderPlaced`) or domains (`orders.*`); empty: all the key may read.
-- `reconnect: Duration`: Delay before reconnecting after the stream drops or the handler fails (default 1 s).
+- `reconnect: Duration`: Delay before reconnecting after the stream drops or the handler fails (default 1 s); twice as long after each further failed attempt, at most 30 s.
 
 ### Subscription
 

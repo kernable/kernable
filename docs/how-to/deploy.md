@@ -46,7 +46,7 @@ What the new membership no longer lists stops counting: the kernel stops waiting
 4. **Migrate the store if needed.** `kernable migrate <store>` answers `store is at format N; nothing to migrate` when the format is current, and otherwise upgrades the store. A kernel refuses to start on a store of another format, so you cannot forget this step.
 5. **Start the kernel** with the same flags, and wait until `GET /ready` answers 200.
 
-While the kernel is away, workers and listeners reconnect on their own (their console shows `connection lost (…), reconnecting`, then `connected again`). Clients get connection errors and should resubmit with the same command ID: a command ID runs once.
+While the kernel is away, workers and listeners reconnect on their own (their console shows `connection lost (…), reconnecting`, then `connected again`), waiting a little longer after each failed attempt, up to 30 s. A client's requests wait for the kernel up to their timeout (60 s by default); a request that gives up gets `DEADLINE_EXCEEDED`, and should be resubmitted with the same command ID: a command ID runs once.
 
 **SDK versions.** Every SDK sends its protocol version. A kernel accepts a range and refuses others with a message saying whether the SDK or the kernel needs an update. Upgrade the kernel first when a release says so.
 
