@@ -152,6 +152,25 @@ fn a_file_log_of_format_1_migrates_to_format_2() {
 }
 
 #[test]
+fn migrate_leaves_a_file_log_it_has_no_migration_for() {
+    let path = Temp::new("file-no-migration");
+    let url = format!("file:{}", path.0.display());
+    for (first, found) in [(Some(format(FORMAT + 1)), FORMAT + 1), (None, 0)] {
+        let records = first.into_iter().chain([enqueued()]).collect();
+        log(&path.0, records);
+        let before = fs::read(&path.0).unwrap();
+        assert_eq!(format_error(kernable_store::migrate(&url)), found);
+        assert_eq!(
+            fs::read(&path.0).unwrap(),
+            before,
+            "format {found}: unchanged"
+        );
+        let kept = PathBuf::from(format!("{}.format-{found}", path.0.display()));
+        assert!(!kept.exists());
+    }
+}
+
+#[test]
 fn a_sqlite_database_of_format_1_migrates_to_format_2() {
     let path = Temp::new("sqlite-migrate");
     let store = SqliteStore::open(&path.0).unwrap();
