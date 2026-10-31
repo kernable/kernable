@@ -268,11 +268,14 @@ export type DataOp = "PutData" | "GetData" | "DeleteData";
 export type CacheOp = "SetCache" | "GetCache" | "DeleteCache";
 
 export interface Clients {
-  /** `listener`: the listener whose handler submits (see `SubmitRequest.listener`). */
-  submit(command: WireCommand, wait: WireWait, listener?: string, vault?: WireVaultValue[]): Promise<WireCommandResult>;
+  /**
+   * `listener`: the listener whose handler submits (see `SubmitRequest.listener`); `timeoutMs`
+   * replaces the client's deadline for this call.
+   */
+  submit(command: WireCommand, wait: WireWait, listener?: string, vault?: WireVaultValue[], timeoutMs?: number): Promise<WireCommandResult>;
   session(): SessionCall;
   listen(): ListenCall;
-  query(req: WireQueryRequest): Promise<WireQueryResult>;
+  query(req: WireQueryRequest, timeoutMs?: number): Promise<WireQueryResult>;
   subscribe(req: WireSubscribeRequest): grpc.ClientReadableStream<WireEvent>;
   data(op: DataOp, req: WireDataRequest): Promise<WireDataResult>;
   cache(op: CacheOp, req: WireCacheRequest): Promise<WireCacheResult>;
@@ -299,11 +302,27 @@ export interface TlsFiles {
   key: string;
 }
 
+/** How long a request waits, for the connection and the answer, unless told otherwise. */
+export const DEFAULT_TIMEOUT_MS = 60_000;
+
+/**
+ * Pings on every connection, also idle ones: a connection the network dropped without a word
+ * (a dead host, a NAT that forgot it) ends within 40 s, and the workers and listeners on it
+ * reconnect.
+ */
+const KEEPALIVE = {
+  "grpc.keepalive_time_ms": 30_000,
+  "grpc.keepalive_timeout_ms": 10_000,
+  "grpc.keepalive_permit_without_calls": 1,
+};
+
 /**
  * Clients for a kernel at `unix:/path` or `host:port` (with `tls`: over mutual TLS). `grant`,
  * the hex-encoded grant of this process's key, goes with every call (see `Grant` in kernable.proto).
+ * A request waits for the connection (after a kernel restart, say) and gives up after
+ * `timeoutMs` in all.
  */
-export function connect(url: string, tls?: TlsFiles, grant?: string): Clients {
+export function connect(url: string, tls?: TlsFiles, grant?: string, timeoutMs = DEFAULT_TIMEOUT_MS): Clients {
   url = url.replace(/^https?:\/\//, "").replace(/\/$/, "");
   v1 ??= (
     grpc.loadPackageDefinition(
@@ -313,37 +332,39 @@ export function connect(url: string, tls?: TlsFiles, grant?: string): Clients {
   const creds = tls
     ? grpc.credentials.createSsl(readFileSync(tls.ca), readFileSync(tls.key), readFileSync(tls.cert))
     : grpc.credentials.createInsecure();
-  const commands = new v1.CommandService(url, creds);
-  const workers = new v1.WorkerGateway(url, creds);
-  const events = new v1.EventService(url, creds);
-  const listeners = new v1.ListenerService(url, creds);
-  const queries = new v1.QueryService(url, creds);
+  const commands = new v1.CommandService(url, creds, KEEPALIVE);
+  const workers = new v1.WorkerGateway(url, creds, KEEPALIVE);
+  const events = new v1.EventService(url, creds, KEEPALIVE);
+  const listeners = new v1.ListenerService(url, creds, KEEPALIVE);
+  const queries = new v1.QueryService(url, creds, KEEPALIVE);
   const data = new v1.DataService(url, creds, {
+    ...KEEPALIVE,
     "grpc.max_send_message_length": MAX_DATA_MESSAGE,
     "grpc.max_receive_message_length": MAX_DATA_MESSAGE,
   });
-  const cache = new v1.CacheService(url, creds);
-  const memberships = new v1.MembershipService(url, creds);
+  const cache = new v1.CacheService(url, creds, KEEPALIVE);
+  const memberships = new v1.MembershipService(url, creds, KEEPALIVE);
   const metadata = new grpc.Metadata();
   if (grant) metadata.set("kernable-grant", grant);
-  // A unary call with the grant and the protocol version.
-  const unary = <R>(client: any, rpc: string, req: object) =>
-    new Promise<R>((resolve, reject) =>
-      client[rpc]({ ...req, protocol: PROTOCOL }, metadata, (err: grpc.ServiceError | null, res: R) => (err ? reject(err) : resolve(res))),
-    );
-  return {
-    submit: (command, wait, listener = "", vault = []) =>
-      new Promise((resolve, reject) =>
-        commands.Submit({ command, wait, protocol: PROTOCOL, listener, vault }, metadata, (err: grpc.ServiceError | null, res: WireCommandResult) =>
-          err ? reject(err) : resolve(res),
-        ),
+  // A unary call with the grant and the protocol version: it waits for the connection, then
+  // for the answer, until the deadline.
+  const unary = async <R>(client: any, rpc: string, req: object, ms = timeoutMs): Promise<R> => {
+    const deadline = Date.now() + ms;
+    await new Promise<void>((resolve, reject) =>
+      client.waitForReady(deadline, (err?: Error) =>
+        err ? reject(Object.assign(new Error(`no connection to the kernel within ${ms} ms`), { code: grpc.status.DEADLINE_EXCEEDED })) : resolve(),
       ),
+    );
+    return new Promise<R>((resolve, reject) =>
+      client[rpc]({ ...req, protocol: PROTOCOL }, metadata, { deadline }, (err: grpc.ServiceError | null, res: R) => (err ? reject(err) : resolve(res))),
+    );
+  };
+  return {
+    submit: (command, wait, listener = "", vault = [], ms) =>
+      unary<WireCommandResult>(commands, "Submit", { command, wait, listener, vault }, ms),
     session: () => workers.Session(metadata),
     listen: () => listeners.Listen(metadata),
-    query: (req) =>
-      new Promise((resolve, reject) =>
-        queries.Query({ ...req, protocol: PROTOCOL }, metadata, (err: grpc.ServiceError | null, res: WireQueryResult) => (err ? reject(err) : resolve(res))),
-      ),
+    query: (req, ms) => unary<WireQueryResult>(queries, "Query", req, ms),
     subscribe: (req) => events.Subscribe({ ...req, protocol: PROTOCOL }, metadata),
     data: (op, req) => unary(data, op, req),
     cache: (op, req) => unary(cache, op, req),

@@ -105,6 +105,9 @@ test("a command handler that changes its state changes neither the initial state
     })
     .command("Fail", () => {
       throw Object.create(null); // cannot even be shown as text
+    })
+    .command("Leak", () => {
+      throw new TypeError("password hunter2 rejected by db://admin@10.0.0.5");
     });
   const kernel = new TestKernel(["boxes.*"]);
   await kernel.start();
@@ -118,6 +121,9 @@ test("a command handler that changes its state changes neither the initial state
     for (const id of ["b1", "b2", "b3"]) assert.ok((await submit(id, "Open")).committed, id);
     const failed = await submit("b4", "Fail");
     assert.ok(!failed.committed && failed.code === "handler_error", JSON.stringify(failed));
+    // The rejection is kept for good: it names the error's type, not its text.
+    const leaked = await submit("b6", "Leak");
+    assert.deepEqual(leaked, { committed: false, code: "handler_error", message: "TypeError" });
     assert.ok((await submit("b5", "Open")).committed, "the worker is still there");
   } finally {
     worker.stop();
@@ -152,6 +158,48 @@ test("a new reactor with a store starts at the newest event, then resumes from i
     worker.stop();
     reactor.stop();
     await Promise.allSettled(running);
+    kernable.close();
+    await kernel.dispose();
+  }
+});
+
+test("plain text goes only to a kernel on this machine, unless allowed", () => {
+  const kernel = new TestKernel(["counters.*"]);
+  try {
+    const client = (url: string, insecure?: boolean) => new Kernable({ url, key: kernel.appKey, insecure }).close();
+    for (const url of ["unix:/tmp/k.sock", "http://127.0.0.1:7233", "localhost:7233", "[::1]:7233", "127.0.0.2:7233"]) client(url);
+    for (const url of ["http://10.0.0.5:7233", "kernel.internal:7233", "http://127.0.0.1.example.com:7233"]) {
+      assert.throws(() => client(url), /not on this machine/, url);
+    }
+    client("http://10.0.0.5:7233", true);
+  } finally {
+    void kernel.dispose();
+  }
+});
+
+test("a request waits for the kernel to come back, until its deadline", async () => {
+  const kernel = new TestKernel(["counters.*"]);
+  await kernel.start();
+  const kernable = new Kernable({ url: kernel.url, key: kernel.appKey });
+  const increment = (id: string, timeoutMs?: number) =>
+    kernable.submit({ domain: "counters", aggregateType: "Counter", aggregateId: "c1", type: "Increment", data: { by: 1 }, id, wait: "committed", timeoutMs });
+  const worker = kernable.worker(counter);
+  const running = worker.run({ reconnectMs: 50 });
+  try {
+    await worker.ready;
+    await kernel.kill();
+    // Down for good, as far as this request knows: it gives up at its deadline.
+    const started = Date.now();
+    await assert.rejects(increment("i0", 300), (err: { code: number }) => err.code === 4); // DEADLINE_EXCEEDED
+    assert.ok(Date.now() - started < 2_000);
+    // Back while the request waits: it goes through.
+    const waiting = increment("i1");
+    await sleep(300);
+    await kernel.start();
+    assert.ok((await waiting).committed);
+  } finally {
+    worker.stop();
+    await running;
     kernable.close();
     await kernel.dispose();
   }

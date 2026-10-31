@@ -216,6 +216,8 @@ export interface QueryOptions {
    * `position` of a `committed` submit. Default 0: answer at once.
    */
   minPosition?: number;
+  /** How long to wait for the connection and the answer; default `Options.timeoutMs`. */
+  timeoutMs?: number;
 }
 
 /**
@@ -807,6 +809,11 @@ export class Aggregate<S> {
 }
 
 
+/** The type of what was thrown: `TypeError`, or `string` for a thrown string. */
+function errorType(err: unknown): string {
+  return err instanceof Error ? err.name : err === null ? "null" : typeof err;
+}
+
 /** An error as text, even one whose own conversion throws. */
 function describe(err: unknown): string {
   try {
@@ -1013,6 +1020,18 @@ export interface Options {
    * and key. Default: `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`, if set.
    */
   tls?: TlsFiles;
+  /**
+   * Allows plain text to a kernel that is not on this machine. Without TLS, grants, signed
+   * requests and vault values cross the network readable, so the client refuses such a URL
+   * unless this is set. Default: `KERNABLE_INSECURE=1`, else false.
+   */
+  insecure?: boolean;
+  /**
+   * How long a request (`submit`, `query`, files, cache, `apply`) waits in all: for the
+   * connection, e.g. while the kernel restarts, and for its answer. Default 60 000 ms, above
+   * the kernel's own submit and settle timeouts.
+   */
+  timeoutMs?: number;
 }
 
 /**
@@ -1056,6 +1075,8 @@ export interface SubmitOptions {
    * [Settling](../concepts/ordering#settling-reading-your-own-writes).
    */
   wait?: "settled" | "committed";
+  /** How long to wait for the connection and the outcome; default `Options.timeoutMs`. */
+  timeoutMs?: number;
 }
 
 const LEVELS = { off: 0, error: 1, warn: 2, info: 3, debug: 4 };
@@ -1140,7 +1161,11 @@ export class Kernable {
     const grant = options.grant ?? env.KERNABLE_GRANT ?? key.replace(/\.key$/, "") + ".grant";
     const explicit = options.grant !== undefined || env.KERNABLE_GRANT !== undefined;
     const url = options.url ?? env.KERNABLE_URL ?? "http://127.0.0.1:7233";
-    this.clients = connect(url, options.tls ?? tlsFromEnv(), explicit || existsSync(grant) ? readFileSync(grant, "utf8").trim() : undefined);
+    const tls = options.tls ?? tlsFromEnv();
+    if (!tls && !(options.insecure ?? env.KERNABLE_INSECURE === "1") && !local(url)) {
+      throw new Error(`${url} is not on this machine: connect with TLS (Options.tls), or set Options.insecure to send in plain text`);
+    }
+    this.clients = connect(url, tls, explicit || existsSync(grant) ? readFileSync(grant, "utf8").trim() : undefined, options.timeoutMs);
     this.key = Key.fromFile(key);
     this.log = new Log(url, key, this.key);
     this.tenant = options.tenant ?? "default";
@@ -1270,11 +1295,14 @@ export class Kernable {
       min_position: options.minPosition ?? 0,
       issued_at: Date.now(),
     };
-    const res = await this.clients.query({
-      ...request,
-      client_sig: this.key.sign(queryMessage(request)),
-      listener: handling.getStore() ?? "",
-    });
+    const res = await this.clients.query(
+      {
+        ...request,
+        client_sig: this.key.sign(queryMessage(request)),
+        listener: handling.getStore() ?? "",
+      },
+      options.timeoutMs,
+    );
     if (res.outcome === "rejected") throw new Rejected(res.rejected!.message, res.rejected!.code);
     return decode(res.response!) as T;
   }
@@ -1305,7 +1333,7 @@ export class Kernable {
       vault_refs: sealed.refs,
     };
     const signed = { ...cmd, client_sig: this.key.sign(commandMessage(cmd)) };
-    return this.clients.submit(signed, wait, handling.getStore(), sealed.values);
+    return this.clients.submit(signed, wait, handling.getStore(), sealed.values, options.timeoutMs);
   }
 
   /**
@@ -2141,8 +2169,11 @@ export class Worker {
         call.cancel();
         return;
       }
+      // An unexpected error's text may hold personal data or internals, and a rejection is
+      // kept for good: it names only the error's type; the log has the rest.
+      if (!(err instanceof Rejected)) this.log.print("error", "worker", `${stream} failed: ${err instanceof Error && err.stack ? err.stack : describe(err)}`);
       const reason: WireRejected =
-        err instanceof Rejected ? { code: err.code, message: err.message } : { code: "handler_error", message: describe(err) };
+        err instanceof Rejected ? { code: err.code, message: err.message } : { code: "handler_error", message: errorType(err) };
       const worker_sig = this.key.sign(rejectionMessage(cmd.command_id, reason));
       call.write({ rejection: { lease_id: x.lease_id, reason, worker_sig } });
       this.log.print("debug", "worker", `${stream} rejected ${reason.code}`);
@@ -2203,6 +2234,13 @@ function metaOf(
 function follow(event: StoredEvent): RequestContext {
   const { expectedVersion, bypassAuthorization, ...rest } = event.request;
   return { ...rest, correlationId: rest.correlationId || event.commandId, causationId: event.commandId };
+}
+
+/** Whether `url` is a Unix socket or a loopback address: plain text never leaves the machine. */
+function local(url: string): boolean {
+  if (url.startsWith("unix:")) return true;
+  const host = url.replace(/^https?:\/\//, "").replace(/:\d+\/?$/, "").replace(/^\[|\]$/g, "");
+  return host === "localhost" || host === "::1" || /^127\.\d+\.\d+\.\d+$/.test(host);
 }
 
 /** Mutual TLS from `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`: all or none. */
