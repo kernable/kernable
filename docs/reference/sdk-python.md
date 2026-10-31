@@ -114,6 +114,12 @@ A command, query, file or cache request a middleware checks, before the kernel a
 - `aggregate_id: str`: Commands only; empty otherwise.
 - `key: str`: File and cache requests only: the file or cache key; empty otherwise.
 
+### ClientClosed
+
+Raised by a request on a client after `Kernable.close()`. Workers and listeners of a closed client end their `run()`.
+
+- `ClientClosed()`
+
 ### CommandContext
 
 What a command handler gets besides state, data and the command (as an optional fourth parameter).
@@ -221,7 +227,7 @@ A connection to the kernel: submits commands (`submit`, `enqueue`), asks queries
 - `enqueue(domain: str, aggregate_type: str, aggregate_id: str, type: str, data: Any=None, *, tenant: str | None=None, id: str | None=None, context: RequestContext | None=None, timeout_s: float | None=None) -> str`: Stores the command in the kernel's queue and returns its ID without waiting for it to run (`wait="accepted"`). Submit it again with the same `id` to get the outcome. The parameters are those of `submit`.
 - `query(domain: str, type: str, data: Any=None, *, tenant: str | None=None, context: RequestContext | None=None, min_position: int=0, timeout_s: float | None=None) -> Any`: Asks the read model that answers `domain.type` with `data` and returns its answer, decoded from JSON. Queries always go through the kernel, also within one process. `min_position`: answer only after the read model has processed this global position (e.g. of an event from a `wait="committed"` submit). `tenant` and `context` replace the client's; `timeout_s` its deadline for this call. Raises `Rejected` if the read model or a middleware rejects it, `grpc.RpcError` if the kernel refuses the call (e.g. `UNAVAILABLE` when no read model answers it). Example: `cart = k.query("shop", "GetCart", {"id": "c1"})`.
 - `listener(listener: 'Listener') -> 'ListenerHandle'`: A handle that runs a listener defined with `Domain.read_model` or `Domain.reactor`, in this client's service; see `ListenerHandle`. `run()` on it blocks until `stop()`: `k.listener(carts_readmodel).run()`. Each call gives a new handle.
-- `close() -> None`: Closes the connection now; only needed in a long-running process that discards the client.
+- `close() -> None`: Closes the connection now; only needed in a long-running process that discards the client. Requests afterwards raise `ClientClosed`, and its workers and listeners end.
 
 ### Key
 

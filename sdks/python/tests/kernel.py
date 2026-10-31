@@ -61,6 +61,8 @@ class TestKernel:
         if self._watchdog:
             self._watchdog.kill()
             self._watchdog.wait()
+            if self._watchdog.stdin:
+                self._watchdog.stdin.close()
             self._watchdog = None
 
     def verify(self) -> subprocess.CompletedProcess:
