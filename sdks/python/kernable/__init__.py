@@ -35,6 +35,7 @@ import re
 import sys
 import threading
 import time
+import traceback
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -365,8 +366,16 @@ _HANDLING: contextvars.ContextVar[str] = contextvars.ContextVar("kernable_listen
 _INITIAL = object()
 #: Room for the largest file (16 MiB) and the rest of its message; grpcio receives 4 MiB by default.
 _MAX_MESSAGE = 17 * 1024 * 1024
+#: Pings on every connection, also idle ones: a connection the network dropped without a word (a
+#: dead host, a NAT that forgot it) ends within 40 s, and the workers and listeners on it reconnect.
 _CHANNEL_OPTIONS = [("grpc.max_send_message_length", _MAX_MESSAGE),
-                    ("grpc.max_receive_message_length", _MAX_MESSAGE)]
+                    ("grpc.max_receive_message_length", _MAX_MESSAGE),
+                    ("grpc.keepalive_time_ms", 30_000),
+                    ("grpc.keepalive_timeout_ms", 10_000),
+                    ("grpc.keepalive_permit_without_calls", 1)]
+#: How long a request waits, for the connection and the answer, unless told otherwise: above the
+#: kernel's own submit and settle timeouts.
+DEFAULT_TIMEOUT_S = 60.0
 _DOMAIN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 _UNQUALIFIED = re.compile(r"^[^.*]+$")
 _LISTENED = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*\.([^.]+|\*)$")
@@ -727,6 +736,26 @@ class _WithGrant(grpc.UnaryUnaryClientInterceptor, grpc.UnaryStreamClientInterce
         return continuation(self._details(details), requests)
 
 
+class _Deadline(grpc.UnaryUnaryClientInterceptor):
+    """Lets every request wait for the connection (e.g. while the kernel restarts) and gives it a
+    deadline, unless the call has its own."""
+
+    def __init__(self, timeout_s: float):
+        self._timeout_s = timeout_s
+
+    def intercept_unary_unary(self, continuation, details, request):
+        timeout = self._timeout_s if details.timeout is None else details.timeout
+        return continuation(details._replace(timeout=timeout, wait_for_ready=True), request)
+
+
+def _local(url: str) -> bool:
+    """Whether `url` is a Unix socket or a loopback address: plain text never leaves the machine."""
+    if url.startswith("unix:"):
+        return True
+    host = re.sub(r":\d+/?$", "", re.sub(r"^https?://", "", url)).strip("[]")
+    return host in ("localhost", "::1") or re.fullmatch(r"127\.\d+\.\d+\.\d+", host) is not None
+
+
 class Kernable:
     """A connection to the kernel: submits commands (`submit`, `enqueue`), asks queries
     (`query`), runs workers, listeners and apps, and applies memberships. All calls block the
@@ -738,7 +767,8 @@ class Kernable:
 
     def __init__(self, url: str | None = None, key: str | None = None, tenant: str = "default",
                  tls: Tls | None = None, context: RequestContext | None = None,
-                 grant: str | None = None, service: str | None = None):
+                 grant: str | None = None, service: str | None = None, insecure: bool | None = None,
+                 timeout_s: float = DEFAULT_TIMEOUT_S):
         """A client for the kernel at `url`, signing with the key in the file `key`. It
         connects on first use and again after the connection drops.
 
@@ -755,7 +785,12 @@ class Kernable:
         service's membership (see `apply`) decides what the kernel waits for: what it lists
         counts, the service's other workers and listeners are dynamic, and only listeners it lists
         as middlewares may check requests. Default `KERNABLE_SERVICE`, else none (everything
-        registered counts).
+        registered counts). `insecure`: allows plain text to a kernel that is not on this machine;
+        without TLS, grants, signed requests and vault values would cross the network readable,
+        so such a URL raises `ValueError` unless this is set; default `KERNABLE_INSECURE=1`, else
+        False. `timeout_s`: how long a request (submit, query, files, cache, apply) waits in all,
+        for the connection (e.g. while the kernel restarts) and its answer; default 60 s. A
+        connection the network dropped silently is noticed within 40 s by keepalive pings.
 
         Workers and listeners print connection lines to stderr up to the level `KERNABLE_LOG`
         names (`off`, `error`, `warn`, `info` (default), `debug`). Raises `OSError` if the key
@@ -766,6 +801,11 @@ class Kernable:
         url = url or os.environ.get("KERNABLE_URL") or "http://127.0.0.1:7233"
         given_url = url
         url = re.sub(r"^https?://", "", url).rstrip("/")
+        if insecure is None:
+            insecure = os.environ.get("KERNABLE_INSECURE") == "1"
+        if not tls and not insecure and not _local(url):
+            raise ValueError(f"{given_url} is not on this machine: connect with TLS (tls=...), or pass "
+                             "insecure=True to send in plain text")
         if tls:
             def read(path: str) -> bytes:
                 with open(path, "rb") as f:
@@ -784,6 +824,7 @@ class Kernable:
         if grant is not None:
             with open(grant) as f:
                 self._channel = grpc.intercept_channel(self._channel, _WithGrant(f.read().strip()))
+        self._channel = grpc.intercept_channel(self._channel, _Deadline(timeout_s))
         self._key = Key.from_file(key)
         self._log = _Log(given_url, key, self._key.id)
         self._tenant = tenant
@@ -863,7 +904,7 @@ class Kernable:
 
     def submit(self, domain: str, aggregate_type: str, aggregate_id: str, type: str, data: Any = None, *,
                tenant: str | None = None, id: str | None = None, wait: str = "settled",
-               context: RequestContext | None = None) -> Outcome:
+               context: RequestContext | None = None, timeout_s: float | None = None) -> Outcome:
         """Runs a `type` command of `domain` on the aggregate `aggregate_type` with ID
         `aggregate_id` and returns its `Outcome`. `data` is the command's payload (JSON-like; `None` sends `{}`).
 
@@ -873,7 +914,8 @@ class Kernable:
         responds once the events are stored; then query with `min_position`. `id` is an
         idempotency key (default: a new UUID): submitting the same `id` again returns the
         original outcome. `tenant` replaces the client's tenant. `context` replaces the client's
-        default context; inside a listener, pass `ctx.follow()`.
+        default context; inside a listener, pass `ctx.follow()`. `timeout_s` replaces the
+        client's deadline for this call.
 
         A rejected command returns `Outcome(committed=False, code=..., message=...)`; it does not
         raise. Raises `grpc.RpcError` if the kernel refuses the call (no grant, unknown aggregate
@@ -881,7 +923,7 @@ class Kernable:
         "qty": 2})`.
         """
         mode = pb.WAIT_COMMITTED if wait == "committed" else pb.WAIT_SETTLED
-        res = self._send(domain, aggregate_type, aggregate_id, type, data, tenant, id, mode, context)
+        res = self._send(domain, aggregate_type, aggregate_id, type, data, tenant, id, mode, context, timeout_s)
         if res.WhichOneof("outcome") == "rejected":
             return Outcome(committed=False, code=res.rejected.code, message=res.rejected.message)
         outcome = Outcome(committed=True, events=[_to_event(e) for e in res.committed.events])
@@ -890,20 +932,21 @@ class Kernable:
         return outcome
 
     def enqueue(self, domain: str, aggregate_type: str, aggregate_id: str, type: str, data: Any = None, *,
-                tenant: str | None = None, id: str | None = None, context: RequestContext | None = None) -> str:
+                tenant: str | None = None, id: str | None = None, context: RequestContext | None = None,
+                timeout_s: float | None = None) -> str:
         """Stores the command in the kernel's queue and returns its ID without waiting for it to
         run (`wait="accepted"`). Submit it again with the same `id` to get the outcome. The
         parameters are those of `submit`."""
         return self._send(domain, aggregate_type, aggregate_id, type, data, tenant, id, pb.WAIT_ACCEPTED,
-                          context).command_id
+                          context, timeout_s).command_id
 
     def query(self, domain: str, type: str, data: Any = None, *, tenant: str | None = None,
-              context: RequestContext | None = None, min_position: int = 0) -> Any:
+              context: RequestContext | None = None, min_position: int = 0, timeout_s: float | None = None) -> Any:
         """Asks the read model that answers `domain.type` with `data` and returns its answer,
         decoded from JSON. Queries always go through the kernel, also within one process.
         `min_position`: answer only after the read model has processed this global position
         (e.g. of an event from a `wait="committed"` submit). `tenant` and `context` replace the
-        client's.
+        client's; `timeout_s` its deadline for this call.
 
         Raises `Rejected` if the read model or a middleware rejects it, `grpc.RpcError` if the
         kernel refuses the call (e.g. `UNAVAILABLE` when no read model answers it). Example:
@@ -914,7 +957,7 @@ class Kernable:
                             min_position=min_position, issued_at=int(time.time() * 1000), protocol=PROTOCOL,
                             listener=_HANDLING.get())
         q.client_sig.CopyFrom(self._key.sign(query_message(q)))
-        res = rpc.QueryServiceStub(self._channel).Query(q)
+        res = rpc.QueryServiceStub(self._channel).Query(q, timeout=timeout_s)
         if res.WhichOneof("outcome") == "rejected":
             raise Rejected(res.rejected.message, res.rejected.code)
         return _decode(res.response)
@@ -929,7 +972,7 @@ class Kernable:
         """Closes the connection now; only needed in a long-running process that discards the client."""
         self._channel.close()
 
-    def _send(self, domain, aggregate_type, aggregate_id, command_type, data, tenant, id, wait, context):
+    def _send(self, domain, aggregate_type, aggregate_id, command_type, data, tenant, id, wait, context, timeout_s):
         command_id = id or str(uuid.uuid4())
         context = context or self._context
         spec = self._domains[domain].commands.get(command_type) if domain in self._domains else None
@@ -941,7 +984,7 @@ class Kernable:
         cmd.client_sig.CopyFrom(self._key.sign(command_message(cmd)))
         request = pb.SubmitRequest(command=cmd, wait=wait, protocol=PROTOCOL, listener=_HANDLING.get(),
                                    vault=values)
-        return rpc.CommandServiceStub(self._channel).Submit(request)
+        return rpc.CommandServiceStub(self._channel).Submit(request, timeout=timeout_s)
 
 
 class DataClient:
@@ -1399,8 +1442,13 @@ class Worker(_Stream):
         except SchemaError:
             raise  # not the command's fault: this worker cannot read the aggregate; stop until updated
         except Exception as err:
+            # An unexpected error's text may hold personal data or internals, and a rejection is
+            # kept for good: it names only the error's type; the log has the rest.
+            if not isinstance(err, Rejected):
+                self._log.print("error", "worker", f"{cmd.domain}.{cmd.command_type} "
+                                f"{cmd.aggregate_type}/{cmd.aggregate_id} failed:\n{traceback.format_exc()}")
             reason = (pb.Rejected(code=err.code, message=str(err)) if isinstance(err, Rejected)
-                      else pb.Rejected(code="handler_error", message=repr(err)))
+                      else pb.Rejected(code="handler_error", message=type(err).__name__))
             sig = self._key.sign(rejection_message(cmd.command_id, reason))
             return pb.WorkerMessage(rejection=pb.Rejection(lease_id=x.lease_id, reason=reason, worker_sig=sig))
         sig = self._key.sign(result_message(cmd, x.expected_version, events))
@@ -1515,7 +1563,9 @@ class Listener:
         None. `types` cover file and cache requests too, before they run: `domain.PutData`,
         `.GetData`, `.DeleteData`, `.SetCache`, `.GetCache` and `.DeleteCache` (and `domain.*` or
         `*` include them); `check.kind` is then `"data"` or `"cache"`, `check.key` the key and
-        `check.data` None, and a refusal reaches the client as `PERMISSION_DENIED`. Raise `Rejected` to refuse; any other error refuses too. The registration is stored:
+        `check.data` None, and a refusal reaches the client as `PERMISSION_DENIED`. Return False or
+        raise `Rejected` to refuse; any other error refuses too, and so does a return value other
+        than None, True or False. The registration is stored:
         while this listener is away, the kernel refuses those requests (`kernable listeners
         remove` unregisters it). `fn` cannot submit or query what it checks itself (it would wait
         behind itself): the kernel refuses it. A listener has at most one middleware before and
@@ -1700,7 +1750,13 @@ class ListenerHandle(_Stream):
             middleware = self.listener._middlewares.get(when)
             if middleware is None:
                 raise Rejected(f"no middleware {when}", "not_a_middleware")
-            _call(middleware[1], _to_check(call), _to_outcome(call) if when == "after" else None)
+            verdict = _call(middleware[1], _to_check(call), _to_outcome(call) if when == "after" else None)
+            if verdict is False:
+                raise Rejected(f"refused by {self.listener.name}", "refused")
+            if verdict is not None and verdict is not True:
+                # Fails closed: a middleware that returns something else is a mistake.
+                raise Rejected(f"{self.listener.name} returned {type(verdict).__name__}, not True, False or None",
+                               "middleware_error")
             return pb.Verdict(call_id=call.call_id)
         except Exception as err:
             reason = (pb.Rejected(code=err.code, message=str(err)) if isinstance(err, Rejected)

@@ -267,6 +267,18 @@ class DataAndCache(unittest.TestCase):
         stream.stop()  # before tearDown stops the kernel: no reconnect warning
 
 
+class Connection(unittest.TestCase):
+    def test_plain_text_goes_only_to_a_kernel_on_this_machine_unless_allowed(self):
+        kernel = TestKernel(["counters.*"])
+        self.addCleanup(kernel.dispose)
+        for url in ("unix:/tmp/k.sock", "http://127.0.0.1:7233", "localhost:7233", "[::1]:7233", "127.0.0.2:7233"):
+            Kernable(url, kernel.app_key).close()
+        for url in ("http://10.0.0.5:7233", "kernel.internal:7233", "http://127.0.0.1.example.com:7233"):
+            with self.assertRaisesRegex(ValueError, "not on this machine", msg=url):
+                Kernable(url, kernel.app_key)
+        Kernable("http://10.0.0.5:7233", kernel.app_key, insecure=True).close()
+
+
 class EndToEnd(unittest.TestCase):
     def setUp(self):
         self.kernel = TestKernel(["counters.*"], ["--settle-timeout-ms", "500"])
@@ -956,6 +968,46 @@ class EndToEnd(unittest.TestCase):
             time.sleep(0.02)
         time.sleep(0.1)
         self.assertEqual(seen, [3])
+
+    def test_a_request_waits_for_the_kernel_to_come_back_until_its_deadline(self):
+        self.run_stream(self.k.worker(counter))
+        self.kernel.kill()
+        started = time.monotonic()
+        with self.assertRaises(grpc.RpcError) as refused:
+            self.increment(1, wait="committed", id="i0", timeout_s=0.3)
+        self.assertEqual(refused.exception.code(), grpc.StatusCode.DEADLINE_EXCEEDED)
+        self.assertLess(time.monotonic() - started, 2)
+        # Back while the request waits: it goes through.
+        threading.Timer(0.3, self.kernel.start).start()
+        self.assertTrue(self.increment(1, wait="committed", id="i1").committed)
+
+    def test_an_unexpected_error_is_rejected_with_its_type_only(self):
+        leaky = counters_domain.aggregate("Leaky", 0)
+
+        @leaky.command("Do")
+        def _(state, data):
+            raise TypeError("password hunter2 rejected by db://admin@10.0.0.5")
+
+        self.run_stream(self.k.worker(leaky))
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            outcome = self.k.submit("counters", "Leaky", "l1", "Do", {}, wait="committed")
+        self.assertEqual((outcome.committed, outcome.code, outcome.message), (False, "handler_error", "TypeError"))
+        self.assertIn("hunter2", stderr.getvalue(), "the worker's log has the whole error")
+
+    def test_a_middleware_that_returns_false_or_something_else_refuses(self):
+        self.run_stream(self.k.worker(counter))
+        verdicts = {"value": None}
+        guard = counters_domain.read_model("guard")
+
+        @guard.middleware(["counters.*"])
+        def _(check, outcome=None):
+            return verdicts["value"]
+
+        self.run_stream(self.k.listener(guard))
+        for value, code in ((None, ""), (True, ""), (False, "refused"), ("no", "middleware_error"), (0, "middleware_error")):
+            verdicts["value"] = value
+            outcome = self.k.submit("counters", "Counter", "m1", "Increment", {"by": 1}, wait="committed")
+            self.assertEqual(outcome.code, code, repr(value))
 
     def test_a_command_handler_that_changes_its_state_does_not_change_the_snapshot(self):
         box = counters_domain.aggregate("Box", {"items": []}, snapshot_every=1)
