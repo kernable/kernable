@@ -269,6 +269,7 @@ fn plain_text_goes_only_to_a_kernel_on_this_machine_unless_allowed() {
         "http://10.0.0.5:7233",
         "kernel.internal:7233",
         "http://127.0.0.1.example.com:7233",
+        "127.a.b.c:7233",
     ] {
         let refused = client(url, false).err();
         assert!(

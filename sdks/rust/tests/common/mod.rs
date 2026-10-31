@@ -128,13 +128,61 @@ impl TestKernel {
         let watchdog = watchdog(child.id());
         *self.child.lock().unwrap() = Some((child, watchdog));
         let socket = self.dir.join("kernable.sock");
+        let tcp = self.url.strip_prefix("https://").map(str::to_owned);
         for _ in 0..250 {
-            if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+            let up = match &tcp {
+                Some(addr) => std::net::TcpStream::connect(addr).is_ok(),
+                None => std::os::unix::net::UnixStream::connect(&socket).is_ok(),
+            };
+            if up {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         panic!("kernel did not start");
+    }
+
+    /// Like [`TestKernel::new`], listening on 127.0.0.1 over mutual TLS; `tls()` has the app's
+    /// certificate files.
+    pub fn with_tls(command_types: &[&str]) -> TestKernel {
+        let mut kernel = TestKernel::new(command_types, &[]);
+        let status = Command::new(binary())
+            .args(["certs", "new", ".", "app"])
+            .current_dir(&kernel.dir)
+            .output()
+            .unwrap()
+            .status;
+        assert!(status.success());
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let addr = format!("127.0.0.1:{port}");
+        let at = kernel.flags.iter().position(|f| f == "--listen").unwrap();
+        kernel.flags[at + 1] = addr.clone();
+        kernel.flags.extend(
+            [
+                "--tls-cert",
+                "kernel.tls.crt",
+                "--tls-key",
+                "kernel.tls.key",
+                "--tls-client-ca",
+                "ca.tls.crt",
+            ]
+            .map(String::from),
+        );
+        kernel.url = format!("https://{addr}");
+        kernel
+    }
+
+    /// The app's certificate files, for a kernel made with [`TestKernel::with_tls`].
+    pub fn tls(&self) -> kernable::Tls {
+        kernable::Tls {
+            ca: self.dir.join("ca.tls.crt"),
+            cert: self.dir.join("app.tls.crt"),
+            key: self.dir.join("app.tls.key"),
+        }
     }
 
     /// Kills the kernel (SIGKILL).
