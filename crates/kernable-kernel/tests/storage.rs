@@ -234,3 +234,42 @@ async fn storage_faults_lose_nothing_and_do_nothing_twice() {
         run(seed).await;
     }
 }
+
+/// A commit that loses a race for its aggregate runs the command again on the new state, up to
+/// five times; then the command is rejected instead of retried forever.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_version_conflict_is_retried_five_times_then_rejected() {
+    let faults = Faults::new(1, 0, 0);
+    let wrapped = Arc::clone(&faults);
+    let env = start_wrapped(
+        "storage-conflict",
+        |_, _| {},
+        |store| Box::new(FaultyStore::new(store, wrapped)) as Box<dyn Store>,
+    )
+    .await;
+    spawn_worker(&env).await;
+
+    faults.conflict(5);
+    let placed = submit(
+        &env.addr,
+        signed(command("c1", "PlaceOrder", "o1"), &key(1)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(committed_versions(&placed), [1]);
+
+    faults.conflict(6);
+    let added = submit(&env.addr, signed(command("c2", "AddItem", "o1"), &key(1)))
+        .await
+        .unwrap();
+    match added.outcome {
+        Some(Outcome::Rejected(r)) => assert_eq!(r.code, "concurrency_conflict"),
+        other => panic!("expected a rejection, got {other:?}"),
+    }
+    let store = kernable_store::open_read_only(&env.store).unwrap();
+    assert_eq!(
+        store.head_position().unwrap(),
+        1,
+        "nothing of c2 was stored"
+    );
+}

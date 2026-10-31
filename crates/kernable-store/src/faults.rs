@@ -33,6 +33,8 @@ pub struct Faults {
     pub failed_before: AtomicU64,
     pub failed_after: AtomicU64,
     pub failed_reads: AtomicU64,
+    /// Commits still to fail with a version conflict, as if another writer got there first.
+    conflicts: AtomicU64,
 }
 
 impl Faults {
@@ -47,12 +49,18 @@ impl Faults {
             failed_before: AtomicU64::default(),
             failed_after: AtomicU64::default(),
             failed_reads: AtomicU64::default(),
+            conflicts: AtomicU64::default(),
         })
     }
 
     /// Stops or resumes failing.
     pub fn arm(&self, armed: bool) {
         self.armed.store(armed, SeqCst);
+    }
+
+    /// Fails the next `n` commits with a version conflict, armed or not, writing nothing.
+    pub fn conflict(&self, n: u64) {
+        self.conflicts.store(n, SeqCst);
     }
 
     fn next(&self) -> u64 {
@@ -169,6 +177,16 @@ impl Store for FaultyStore {
         producer_sig: &Signature,
         now_ms: i64,
     ) -> Result<Vec<Event>> {
+        let conflicts = &self.faults.conflicts;
+        if conflicts
+            .fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err(Error::VersionConflict {
+                expected: expected_version,
+                actual: expected_version + 1,
+            });
+        }
         self.faults.write(|| {
             self.inner
                 .commit(command_id, expected_version, events, producer_sig, now_ms)
