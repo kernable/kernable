@@ -1133,6 +1133,31 @@ class EndToEnd(unittest.TestCase):
         time.sleep(0.1)
         self.assertEqual(seen, [3])
 
+    def test_a_store_that_cannot_be_opened_yet_is_tried_again(self):
+        self.run_stream(self.k.worker(counter))
+        # Its directory is missing at first (as a full disk fails an open).
+        later = f"{self.kernel.dir}/later"
+        seen = []
+        model = counters_domain.read_model("late-model", store=f"sqlite:{later}/model.db", reconnect_s=0.05)
+
+        @model.on("counters.Incremented")
+        def _(data, evt, ctx):
+            seen.append(data["by"])
+
+        listener = self.k.listener(model)
+        self.streams.append(listener)
+        thread = background(listener.run)
+        time.sleep(0.3)
+        self.assertTrue(thread.is_alive(), "it gave up")
+        os.mkdir(later)
+        self.assertTrue(listener.ready.wait(10), "it never opened the store")
+        self.increment(4, wait="committed")
+        for _ in range(100):
+            if seen:
+                break
+            time.sleep(0.02)
+        self.assertEqual(seen, [4])
+
     def test_a_request_waits_for_the_kernel_to_come_back_until_its_deadline(self):
         self.run_stream(self.k.worker(counter))
         self.kernel.kill()

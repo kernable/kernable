@@ -1167,10 +1167,24 @@ class _Log:
         30 s, give or take a fifth, so processes do not reconnect in lockstep after a kernel
         restart. A refusal that will not go away by itself is an error, not a warning. `stopped`
         cuts the wait short."""
-        delay = min(seconds * 2 ** (attempt - 1), 30.0) * random.uniform(0.8, 1.2)
+        delay = _backoff(seconds, attempt)
         self.print("error" if refused else "warn", what,
                    f"{'refused' if refused else 'connection lost'} ({reason}), reconnecting in {delay:.2f} s")
         stopped.wait(delay)
+
+    def store_failed(self, what: str, err: BaseException, seconds: float, attempt: int,
+                     stopped: threading.Event) -> None:
+        """Logs that a store could not be opened and waits before the next try, backing off
+        like `reconnect`."""
+        delay = _backoff(seconds, attempt)
+        self.print("error", what, f"store: {err}; trying again in {delay:.2f} s")
+        stopped.wait(delay)
+
+
+def _backoff(seconds: float, attempt: int) -> float:
+    """The pause before try `attempt` (from 1): `seconds`, doubled each time up to 30 s, give or
+    take a fifth."""
+    return min(seconds * 2 ** (attempt - 1), 30.0) * random.uniform(0.8, 1.2)
 
 
 class _Watch:
@@ -1303,8 +1317,8 @@ class App:
         each in a thread of its own, until `stop()`; blocks until then. A failing handler does
         not end it: a command handler's error rejects the command (`handler_error`), a listener
         handler's error makes the listener reconnect and get the event again. If a worker or
-        listener itself fails (e.g. its store cannot be opened), it stops the others and raises
-        that error; Ctrl-C stops all of them too. Once all are connected, it prints an overview of the app (unless
+        listener itself fails, it stops the others and raises that error (a store that cannot
+        be opened is tried again instead); Ctrl-C stops all of them too. Once all are connected, it prints an overview of the app (unless
         `KERNABLE_LOG` is below `info`). Raises `grpc.RpcError` if the kernel refuses the
         membership."""
         started = time.monotonic()
@@ -1752,9 +1766,18 @@ class ListenerHandle(_Stream):
 
     def run(self) -> None:
         """Processes events, queries and checks until `stop()`, reconnecting when the stream
-        drops; with a store, opens it first and continues after its position."""
+        drops; with a store, opens it first and continues after its position. A store that
+        cannot be opened (a full disk) is tried again, backing off like a reconnect."""
         if self.listener.store_url and self.store is None:
-            self.store = Store(self.listener.store_url, self.listener.schema)
+            attempt = 0
+            while self.store is None:
+                try:
+                    self.store = Store(self.listener.store_url, self.listener.schema)
+                except Exception as err:  # sqlite3 and OS errors alike
+                    attempt += 1
+                    self._log.store_failed(self._what, err, self._reconnect_s, attempt, self._wake)
+                    if self._stopped:
+                        return
             self.position = self.store.committed
             # A new (or cleared) store says nothing: the listener's own start applies (a reactor
             # starts at the newest event).

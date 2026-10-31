@@ -3,6 +3,7 @@
 // replayed.
 
 import assert from "node:assert/strict";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -157,6 +158,38 @@ test("a new reactor with a store starts at the newest event, then resumes from i
   } finally {
     worker.stop();
     reactor.stop();
+    await Promise.allSettled(running);
+    kernable.close();
+    await kernel.dispose();
+  }
+});
+
+test("a store that cannot be opened yet is tried again", async () => {
+  const kernel = new TestKernel(["counters.*"]);
+  await kernel.start();
+  const kernable = new Kernable({ url: kernel.url, key: kernel.appKey });
+  const worker = kernable.worker(counter);
+  const running = [worker.run()];
+  // Its directory is missing at first (as a full disk fails an open).
+  const dir = join(kernel.dir, "later");
+  const seen: number[] = [];
+  const model = counters.readModel("late-model", { store: `sqlite:${join(dir, "model.db")}`, reconnectMs: 50 })
+    .on("Incremented", (data: { by: number }) => void seen.push(data.by));
+  const listener = kernable.listener(model);
+  let ended = false;
+  try {
+    await worker.ready;
+    running.push(listener.run().finally(() => (ended = true)));
+    await sleep(300);
+    assert.ok(!ended, "it gave up");
+    mkdirSync(dir);
+    await listener.ready;
+    await kernable.submit({ domain: "counters", aggregateType: "Counter", aggregateId: "c1", type: "Increment", data: { by: 4 }, wait: "committed" });
+    await until("the event arrives", () => seen.length > 0);
+    assert.deepEqual(seen, [4]);
+  } finally {
+    worker.stop();
+    listener.stop();
     await Promise.allSettled(running);
     kernable.close();
     await kernel.dispose();

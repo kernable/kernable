@@ -241,6 +241,18 @@ pub(crate) fn connection_lost(error: &str, delay: Duration) -> String {
     )
 }
 
+/// The pause before try `attempt` (from 1): `base`, doubled each time up to 30 s, ±20% jitter.
+pub(crate) fn backoff(base: Duration, attempt: u32) -> Duration {
+    let doubled = base.saturating_mul(1 << attempt.saturating_sub(1).min(16));
+    let jitter = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos() % 401);
+    let delay = doubled
+        .min(Duration::from_secs(30))
+        .mul_f64(0.8 + f64::from(jitter) / 1000.0);
+    Duration::from_millis(delay.as_millis() as u64) // readable in the log
+}
+
 /// Logs the end of a session that was not stopped and says how long to wait before attempt
 /// `attempt` (1: the first after it ended): `base`, twice as long after each further failed
 /// attempt, at most 30 s, give or take a fifth, so processes do not reconnect in lockstep after
@@ -252,14 +264,7 @@ pub(crate) fn reconnecting(
     base: Duration,
     attempt: u32,
 ) -> Duration {
-    let doubled = base.saturating_mul(1 << attempt.saturating_sub(1).min(16));
-    let jitter = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.subsec_nanos() % 401);
-    let delay = doubled
-        .min(Duration::from_secs(30))
-        .mul_f64(0.8 + f64::from(jitter) / 1000.0);
-    let delay = Duration::from_millis(delay.as_millis() as u64); // readable in the log
+    let delay = backoff(base, attempt);
     let reason = reason(error);
     if refused(error) {
         log.error(what, || {

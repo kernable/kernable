@@ -1180,11 +1180,23 @@ class Log {
     // A gRPC error by its details only (`Connection dropped`, not `14 UNAVAILABLE: …`).
     const e = err as Error & { details?: string; code?: number };
     const reason = e.details || e.message;
-    const delay = Math.round(Math.min(ms * 2 ** (attempt - 1), 30_000) * (0.8 + Math.random() * 0.4));
+    const delay = backoff(ms, attempt);
     const refused = e.code !== undefined && REFUSALS.has(e.code);
     this.print(refused ? "error" : "warn", what, `${refused ? "refused" : "connection lost"} (${reason}), reconnecting in ${delay / 1000} s`);
     await stopped.sleep(delay);
   }
+
+  /** Logs that a store could not be opened, and waits before the next try. */
+  async storeFailed(what: string, err: unknown, ms: number, attempt: number, stopped: Wake): Promise<void> {
+    const delay = backoff(ms, attempt);
+    this.print("error", what, `store: ${(err as Error).message}; trying again in ${delay / 1000} s`);
+    await stopped.sleep(delay);
+  }
+}
+
+/** The pause before try `attempt` (from 1): `ms`, doubled each time up to 30 s, ±20% jitter. */
+function backoff(ms: number, attempt: number): number {
+  return Math.round(Math.min(ms * 2 ** (attempt - 1), 30_000) * (0.8 + Math.random() * 0.4));
 }
 
 /**
@@ -1886,15 +1898,25 @@ export class ListenerHandle {
   }
 
   /**
-   * Opens the store (if any), connects, and processes events, queries and checks until
-   * `stop()`, reconnecting after the last handled event when the stream drops or a handler
-   * throws (after `ListenerOptions.reconnectMs`). Resolves after `stop()`.
+   * Opens the store (if any; trying again while it cannot be opened, e.g. on a full disk),
+   * connects, and processes events, queries and checks until `stop()`, reconnecting after the
+   * last handled event when the stream drops or a handler throws (after
+   * `ListenerOptions.reconnectMs`). Resolves after `stop()`.
    */
   async run(): Promise<void> {
     const options = this.listener.options;
     let start = options.start;
     if (options.store && !this.stored) {
-      this.stored = await Store.open(options.store, options.schema ?? "1");
+      // A store that cannot be opened (a full disk) is tried again, backing off like a reconnect.
+      for (let attempt = 1; !this.stored; attempt++) {
+        try {
+          this.stored = await Store.open(options.store, options.schema ?? "1");
+        } catch (err) {
+          if (this.stopped) return;
+          await this.log.storeFailed(this.what, err, options.reconnectMs ?? 1000, attempt, this.wake);
+          if (this.stopped) return;
+        }
+      }
       this.position = this.stored.committed;
       // A new (or cleared) store says nothing: the listener's own start applies (a reactor
       // starts at the newest event).

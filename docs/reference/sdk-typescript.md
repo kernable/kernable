@@ -702,7 +702,7 @@ await handle.ready;
 - `announce = true`: Whether the first connect gets its own line; an `App` prints it in its overview instead.
 - `readonly listener: Listener`: The definition it runs.
 - `get store(): Store`: The listener's store (`ListenerOptions.store`), once `run()` opened it; throws before, or if the listener has no store. Handlers get it as `ctx.store`.
-- `async run(): Promise<void>`: Opens the store (if any), connects, and processes events, queries and checks until `stop()`, reconnecting after the last handled event when the stream drops or a handler throws (after `ListenerOptions.reconnectMs`). Resolves after `stop()`.
+- `async run(): Promise<void>`: Opens the store (if any; trying again while it cannot be opened, e.g. on a full disk), connects, and processes events, queries and checks until `stop()`, reconnecting after the last handled event when the stream drops or a handler throws (after `ListenerOptions.reconnectMs`). Resolves after `stop()`.
 - `stop(): void`: Stops the listener: ends its stream, so `run()` resolves.
 
 ### WorkerOptions

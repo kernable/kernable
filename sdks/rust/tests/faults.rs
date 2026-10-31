@@ -243,6 +243,42 @@ async fn a_new_reactor_with_a_store_starts_at_the_newest_event() {
     worker.stop();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_store_that_cannot_be_opened_yet_is_tried_again() {
+    let kernel = TestKernel::new(&["counters.*"], &[]);
+    kernel.start().await;
+    let kernable = kernel.client();
+    let (counters, counter) = counters();
+    let worker = start_worker(&kernable, &counter);
+    worker.ready().await;
+    // Its directory is missing at first (as a full disk fails an open).
+    let dir = kernel.dir.join("later");
+    let url = format!("sqlite:{}", dir.join("model.db").display());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let s = Arc::clone(&seen);
+    let model = counters
+        .read_model("late-model")
+        .reconnect(Duration::from_millis(50))
+        .store(&url, "1")
+        .on("counters.Incremented", move |data: By, _evt, _ctx| {
+            s.lock().unwrap().push(data.by);
+            async { Ok(()) }
+        });
+    let listener = kernable.listener(&model);
+    let l = listener.clone();
+    let running = tokio::spawn(async move { l.run().await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!running.is_finished(), "it gave up");
+    std::fs::create_dir(&dir).unwrap();
+    listener.ready().await;
+    increment(&kernable, "c1", 4).await;
+    eventually(|| !seen.lock().unwrap().is_empty()).await;
+    assert_eq!(*seen.lock().unwrap(), [4]);
+    listener.stop();
+    running.await.unwrap();
+    worker.stop();
+}
+
 #[test]
 fn plain_text_goes_only_to_a_kernel_on_this_machine_unless_allowed() {
     let kernel = TestKernel::new(&["counters.*"], &[]);

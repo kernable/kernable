@@ -722,7 +722,8 @@ impl ListenerHandle {
 
     /// Processes events, queries and checks until `stop()`, reconnecting when the stream drops
     /// or a handler fails. With a store, opens it first and continues after its position; if
-    /// it cannot be opened, logs the error and returns.
+    /// it cannot be opened (a full disk), logs the error and tries again, backing off like a
+    /// reconnect.
     pub async fn run(&self) {
         let mut stopped = self.inner.stopped.subscribe();
         let log = &self.inner.client.log;
@@ -734,23 +735,33 @@ impl ListenerHandle {
         if let Some((url, schema)) = store
             && self.opened_store().is_none()
         {
-            match Store::open(&url, &schema) {
-                Ok(store) => {
-                    self.inner
-                        .position
-                        .store(store.committed(), Ordering::SeqCst);
-                    // A new (or cleared) store says nothing: the listener's own start applies
-                    // (a reactor starts at the newest event).
-                    if store.committed() > 0 {
-                        start = Some(store.committed());
+            let mut attempt = 0;
+            let store = loop {
+                match Store::open(&url, &schema) {
+                    Ok(store) => break store,
+                    Err(e) => {
+                        attempt += 1;
+                        let base = self.def().settings.lock().unwrap().reconnect;
+                        let delay = log::backoff(base, attempt);
+                        log.error(&what, || {
+                            format!("store: {e}; trying again in {} s", delay.as_secs_f64())
+                        });
+                        tokio::select! {
+                            () = tokio::time::sleep(delay) => {}
+                            _ = stopped.wait_for(|s| *s) => return,
+                        }
                     }
-                    *self.inner.store.lock().unwrap() = Some(store);
                 }
-                Err(e) => {
-                    log.error(&what, || e.to_string());
-                    return;
-                }
+            };
+            self.inner
+                .position
+                .store(store.committed(), Ordering::SeqCst);
+            // A new (or cleared) store says nothing: the listener's own start applies (a
+            // reactor starts at the newest event).
+            if store.committed() > 0 {
+                start = Some(store.committed());
             }
+            *self.inner.store.lock().unwrap() = Some(store);
         }
         let mut attempt = 0;
         while !*stopped.borrow() {

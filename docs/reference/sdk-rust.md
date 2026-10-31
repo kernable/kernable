@@ -580,7 +580,7 @@ the next step needs them connected, or use an app (`crate::Kernable::app`).
 - `fn opened_store(&self) -> Option<Store>`: The listener's store, once `run()` opened it.
 - `async fn ready(&self)`: Returns once the kernel accepted the listener.
 - `fn stop(&self)`: Ends `run`.
-- `async fn run(&self)`: Processes events, queries and checks until `stop()`, reconnecting when the stream drops or a handler fails. With a store, opens it first and continues after its position; if it cannot be opened, logs the error and returns.
+- `async fn run(&self)`: Processes events, queries and checks until `stop()`, reconnecting when the stream drops or a handler fails. With a store, opens it first and continues after its position; if it cannot be opened (a full disk), logs the error and tries again, backing off like a reconnect.
 
 ### SubscribeOptions
 
