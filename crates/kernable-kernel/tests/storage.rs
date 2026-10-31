@@ -9,7 +9,7 @@
 mod common;
 
 use std::{
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, atomic::Ordering::SeqCst},
     time::{Duration, Instant},
 };
 
@@ -272,4 +272,32 @@ async fn a_version_conflict_is_retried_five_times_then_rejected() {
         1,
         "nothing of c2 was stored"
     );
+}
+
+/// A store that cannot write (a full disk) is not hammered: the command runs again after a
+/// pause that doubles each time, and commits once the store can write again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failing_commit_is_retried_after_growing_pauses_until_it_succeeds() {
+    let faults = Faults::new(1, 0, 0);
+    let wrapped = Arc::clone(&faults);
+    let env = start_wrapped(
+        "storage-full",
+        |_, _| {},
+        |store| Box::new(FaultyStore::new(store, wrapped)) as Box<dyn Store>,
+    )
+    .await;
+    spawn_worker(&env).await;
+
+    faults.full(true);
+    let addr = env.addr.clone();
+    let placing = tokio::spawn(async move {
+        submit(&addr, signed(command("c1", "PlaceOrder", "o1"), &key(1))).await
+    });
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    // Pauses of 50, 100, 200 and 400 ms: about five tries in a second, not thousands.
+    let tries = faults.failed_full.load(SeqCst);
+    assert!((3..=7).contains(&tries), "{tries} tries in a second");
+    faults.full(false);
+    let placed = placing.await.unwrap().unwrap();
+    assert_eq!(committed_versions(&placed), [1]);
 }

@@ -192,6 +192,17 @@ impl Queue {
             inner.make_ready(held.key);
         }
     }
+    /// Hands a leased command back after `delay`; until then its aggregate stays held. For a
+    /// result the store could not take: trying again at once would only fail again.
+    pub(crate) fn release_after(&self, lease_id: &str, delay: Duration) {
+        let mut inner = self.inner();
+        if let Some(mut held) = inner.leases.remove(lease_id) {
+            held.expires_at = Instant::now() + delay;
+            inner.next_lease += 1;
+            let hold = format!("held#{}", inner.next_lease);
+            inner.leases.insert(hold, held);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -233,6 +244,18 @@ mod tests {
         assert_eq!(id, "c2");
         q.done(&l3);
         assert!(lease(&q, &["d.AddItem"]).is_none());
+    }
+
+    #[test]
+    fn a_command_released_after_a_delay_waits_for_it() {
+        let q = Queue::default();
+        q.push(cmd("c1", "A", "o1"), 0);
+        let (l1, _) = lease(&q, &["d.A"]).unwrap();
+        q.release_after(&l1, Duration::from_millis(50));
+        assert!(!q.holds(&l1));
+        assert!(lease(&q, &["d.A"]).is_none(), "not before the delay");
+        std::thread::sleep(Duration::from_millis(60));
+        assert_eq!(lease(&q, &["d.A"]).map(|(_, id)| id).as_deref(), Some("c1"));
     }
 
     #[test]

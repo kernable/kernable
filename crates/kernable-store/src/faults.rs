@@ -35,6 +35,10 @@ pub struct Faults {
     pub failed_reads: AtomicU64,
     /// Commits still to fail with a version conflict, as if another writer got there first.
     conflicts: AtomicU64,
+    /// While set, every commit fails before it writes, as on a full disk.
+    full: AtomicBool,
+    /// Commits failed because of `full`.
+    pub failed_full: AtomicU64,
 }
 
 impl Faults {
@@ -50,6 +54,8 @@ impl Faults {
             failed_after: AtomicU64::default(),
             failed_reads: AtomicU64::default(),
             conflicts: AtomicU64::default(),
+            full: AtomicBool::default(),
+            failed_full: AtomicU64::default(),
         })
     }
 
@@ -61,6 +67,12 @@ impl Faults {
     /// Fails the next `n` commits with a version conflict, armed or not, writing nothing.
     pub fn conflict(&self, n: u64) {
         self.conflicts.store(n, SeqCst);
+    }
+
+    /// Fails every commit before it writes, armed or not, until called with `false`: a full
+    /// disk.
+    pub fn full(&self, full: bool) {
+        self.full.store(full, SeqCst);
     }
 
     fn next(&self) -> u64 {
@@ -186,6 +198,10 @@ impl Store for FaultyStore {
                 expected: expected_version,
                 actual: expected_version + 1,
             });
+        }
+        if self.faults.full.load(SeqCst) {
+            self.faults.failed_full.fetch_add(1, SeqCst);
+            return Err(injected("disk full"));
         }
         self.faults.write(|| {
             self.inner

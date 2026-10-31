@@ -37,7 +37,9 @@ use std::{
     collections::HashMap,
     sync::{
         Arc, Mutex, MutexGuard, PoisonError, RwLock,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed, Ordering::SeqCst},
+        atomic::{
+            AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed, Ordering::SeqCst,
+        },
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -96,6 +98,8 @@ const MAX_CONFLICT_RETRIES: u32 = 5;
 const SNAPSHOT_STALE: &str = "snapshot_stale";
 /// How often idle workers look for expired leases.
 const POLL: Duration = Duration::from_millis(100);
+/// The longest pause before a command whose commit failed runs again.
+const COMMIT_BACKOFF_MAX: Duration = Duration::from_secs(5);
 /// Accepted clock difference for signed subscribe requests.
 const MAX_REQUEST_AGE_MS: i64 = 60_000;
 
@@ -193,6 +197,8 @@ pub struct Kernel {
     waiters: Mutex<HashMap<String, Vec<oneshot::Sender<CommandResult>>>>,
     /// Wakes idle dispatch loops when new commands arrive.
     work: Notify,
+    /// Commits that failed in a row (a full disk): their commands wait longer each time.
+    failed_commits: AtomicU32,
     /// Wakes subscriptions and listeners when events were committed.
     appended: Notify,
     listeners: listeners::Registry,
@@ -291,6 +297,7 @@ impl Kernel {
             changes: watch::channel(0).0,
             waiters: Mutex::default(),
             work: Notify::new(),
+            failed_commits: AtomicU32::new(0),
             appended: Notify::new(),
             listeners,
             workers,
@@ -2324,6 +2331,7 @@ impl Session {
         match committed {
             Ok(events) => {
                 crash::point("commit.stored");
+                self.kernel.failed_commits.store(0, Relaxed);
                 // The flush and what follows it run apart from the session, so the next results
                 // commit meanwhile and share the flush (group commit). The lease and the
                 // worker's permit are held until then: the aggregate's next command waits for
@@ -2390,9 +2398,17 @@ impl Session {
                 }
             }
             Err(e) => {
-                tracing::error!(error = %e, "commit failed");
+                // The command runs again after a pause that doubles with every failure in a
+                // row, up to 5 s: a store that cannot write (a full disk) is not hammered, and
+                // the log gets a line at the 1st, 2nd, 4th, 8th, ... failure.
+                let failed = self.kernel.failed_commits.fetch_add(1, Relaxed) + 1;
+                let delay =
+                    Duration::from_millis(50 << (failed - 1).min(7)).min(COMMIT_BACKOFF_MAX);
+                if failed.is_power_of_two() {
+                    tracing::error!(error = %e, failed, "commit failed; trying again after a pause");
+                }
                 if !self.completed_earlier(&r.lease_id, &f.command) {
-                    self.release(&r.lease_id);
+                    self.kernel.queue.release_after(&r.lease_id, delay);
                 }
             }
         }

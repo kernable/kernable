@@ -174,11 +174,10 @@ const FAULTS: [&str; 9] = [
     "power-loss",
 ];
 
-/// Something to do later: restart or resume a process, or free the disk.
+/// Something to do later: restart or resume a process.
 enum Later {
     Start(usize),
     Resume(usize),
-    Unfill(PathBuf),
 }
 
 async fn run(a: Args) -> Result<(), String> {
@@ -371,6 +370,7 @@ async fn run(a: Args) -> Result<(), String> {
     let mut next_fault = Instant::now() + rng.ms(2_000, fault_every * 1000);
     let mut later: Vec<(Instant, Later)> = Vec::new();
     let mut injected: BTreeMap<String, u64> = BTreeMap::new();
+    let filling = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut exits: BTreeMap<String, u64> = BTreeMap::new();
     let mut rounds = Vec::new();
     let failed = loop {
@@ -406,6 +406,9 @@ async fn run(a: Args) -> Result<(), String> {
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
             proxy.heal();
+            while filling.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
             for (_, action) in later.drain(..) {
                 do_later(action, &mut procs);
             }
@@ -473,11 +476,15 @@ async fn run(a: Args) -> Result<(), String> {
                 "net-down" => proxy.down(rng.ms(1_000, 20_000)),
                 "net-slow" => proxy.slow(rng.ms(20, 400), rng.ms(10_000, 40_000)),
                 "disk-full" => {
-                    if let Some(fill) = &fill {
-                        let filler = fill.join("filler");
-                        let f = filler.clone();
-                        tokio::task::spawn_blocking(move || fill_up(&f));
-                        later.push((now + rng.ms(5_000, 20_000), Later::Unfill(filler)));
+                    if let Some(fill) = &fill
+                        && !filling.swap(true, Ordering::SeqCst)
+                    {
+                        let (path, hold) = (fill.join("filler"), rng.ms(5_000, 20_000));
+                        let filling = Arc::clone(&filling);
+                        tokio::task::spawn_blocking(move || {
+                            fill_up(&path, hold);
+                            filling.store(false, Ordering::SeqCst);
+                        });
                     }
                 }
                 "power-loss" => {
@@ -540,20 +547,30 @@ fn do_later(action: Later, procs: &mut [Proc]) {
                 procs[i].resume();
             }
         }
-        Later::Unfill(path) => {
-            let _ = std::fs::remove_file(path);
-        }
     }
 }
 
-/// Writes `path` until the file system is full.
-fn fill_up(path: &Path) {
+/// Writes `path` until the file system is full, keeps it full for `hold`, then removes it.
+fn fill_up(path: &Path, hold: Duration) {
     let Ok(mut f) = std::fs::File::create(path) else {
         return;
     };
+    let started = Instant::now();
     let chunk = vec![0u8; 1 << 20];
-    while f.write_all(&chunk).is_ok() {}
+    let mut written = 0;
+    while f.write_all(&chunk).is_ok() {
+        written += 1;
+    }
     let _ = f.sync_all();
+    say(&format!(
+        "disk full ({written} MiB in {:.0} s), for {:.0} s",
+        started.elapsed().as_secs_f64(),
+        hold.as_secs_f64()
+    ));
+    std::thread::sleep(hold);
+    drop(f);
+    let _ = std::fs::remove_file(path);
+    say("disk free again");
 }
 
 async fn wait_for_port(port: u64, limit: Duration) -> Result<(), String> {
