@@ -119,9 +119,13 @@ impl Store {
         Ok(())
     }
 
-    /// Starts a batch.
+    /// Starts a batch, dropping what is left of one that never ended (its future was dropped).
     pub(crate) fn begin(&self) -> Result<(), Error> {
-        Ok(self.db.lock().unwrap().execute_batch("BEGIN")?)
+        let db = self.db.lock().unwrap();
+        if !db.is_autocommit() {
+            db.execute_batch("ROLLBACK")?;
+        }
+        Ok(db.execute_batch("BEGIN")?)
     }
 
     /// Ends a batch: its data and `position` take effect together.

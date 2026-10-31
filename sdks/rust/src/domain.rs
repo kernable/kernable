@@ -740,14 +740,16 @@ impl<S: State> Aggregate<S> {
 
 /// `f()`, with a panic turned into an error.
 fn caught<T>(f: impl FnOnce() -> T) -> Result<T, Failure> {
-    catch_unwind(AssertUnwindSafe(f)).map_err(|panic| {
-        let text = panic
-            .downcast_ref::<&str>()
-            .map(|s| (*s).to_owned())
-            .or_else(|| panic.downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "handler panicked".into());
-        Failure::Error(text)
-    })
+    catch_unwind(AssertUnwindSafe(f)).map_err(|panic| Failure::Error(panic_text(panic.as_ref())))
+}
+
+/// What a panic said, as far as it can be shown.
+pub(crate) fn panic_text(panic: &(dyn std::any::Any + Send)) -> String {
+    panic
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_owned())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "handler panicked".into())
 }
 
 /// What a worker sends back for a command it executed.

@@ -752,7 +752,11 @@ impl ListenerHandle {
                 result = self.listen(start) => result,
                 _ = stopped.wait_for(|s| *s) => return,
             };
-            start = Some(self.position());
+            // Resume after the last handled event, once there is one: before the first ready,
+            // the position says nothing (a new reactor would replay everything from 0).
+            if self.inner.connects.load(Ordering::SeqCst) > 0 {
+                start = Some(self.position());
+            }
             let delay = self.def().settings.lock().unwrap().reconnect;
             let error = log::reason(result.err().as_ref());
             log.warn(&what, || log::connection_lost(&error, delay));
@@ -841,12 +845,16 @@ impl ListenerHandle {
                     if let Some(s) = &store {
                         s.begin()?;
                     }
-                    let handled = HANDLING
-                        .scope(
-                            def.name.clone(),
-                            self.handle_batch(batch, replay_up_to, store.clone()),
-                        )
-                        .await;
+                    let handled = unwinding(HANDLING.scope(
+                        def.name.clone(),
+                        self.handle_batch(batch, replay_up_to, store.clone()),
+                    ))
+                    .await
+                    .unwrap_or_else(|panic| Err(panic.into()))
+                    .and_then(|()| match &store {
+                        Some(s) => Ok(s.commit(up_to)?),
+                        None => Ok(()),
+                    });
                     if let Err(e) = handled {
                         if let Some(s) = &store {
                             s.rollback();
@@ -854,16 +862,18 @@ impl ListenerHandle {
                         }
                         return Err(e);
                     }
-                    if let Some(s) = &store {
-                        s.commit(up_to)?;
-                    }
                     inner.position.store(up_to, Ordering::SeqCst);
                     Reply::Ack(Ack { position: up_to })
                 }
                 Some(Delivery::Query(q)) => {
                     let query = q.query.unwrap_or_default();
                     let query_type = format!("{}.{}", query.domain, query.query_type);
-                    let answer = HANDLING.scope(def.name.clone(), self.answer(query)).await;
+                    let answer = unwinding(HANDLING.scope(def.name.clone(), self.answer(query)))
+                        .await
+                        .unwrap_or_else(|panic| {
+                            let rejected = Rejected::new(panic).code("handler_error");
+                            query_answer::Outcome::Rejected(rejected.to_wire())
+                        });
                     client.log.debug(&what, || {
                         let rejected = match &answer {
                             query_answer::Outcome::Rejected(r) => Some(r.code.as_str()),
@@ -878,7 +888,11 @@ impl ListenerHandle {
                 }
                 Some(Delivery::Check(c)) => {
                     let call_id = c.call_id.clone();
-                    let rejected = HANDLING.scope(def.name.clone(), self.verdict(c)).await;
+                    let rejected = unwinding(HANDLING.scope(def.name.clone(), self.verdict(c)))
+                        .await
+                        .unwrap_or_else(|panic| {
+                            Some(Rejected::new(panic).code("middleware_error").to_wire())
+                        });
                     Reply::Verdict(Verdict { call_id, rejected })
                 }
                 None => continue,
@@ -1220,4 +1234,18 @@ async fn subscription<F, Fut>(
             _ = stopped.wait_for(|s| *s) => return,
         }
     }
+}
+
+/// `f`, with a panic in it as an error: a handler that panics fails its batch, query or check
+/// instead of ending the listener, or an app's process.
+async fn unwinding<T>(f: impl Future<Output = T>) -> Result<T, String> {
+    let mut f = std::pin::pin!(f);
+    std::future::poll_fn(|cx| {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f.as_mut().poll(cx))) {
+            Ok(std::task::Poll::Ready(v)) => std::task::Poll::Ready(Ok(v)),
+            Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+            Err(panic) => std::task::Poll::Ready(Err(crate::domain::panic_text(panic.as_ref()))),
+        }
+    })
+    .await
 }
