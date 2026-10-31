@@ -149,14 +149,10 @@ async fn files_are_put_read_and_deleted_by_keys_granted_for_their_domain() {
             .into_inner()
             .found
     );
-    assert!(
-        !client
-            .delete_data(data(&writer, "delete", "shop", "a.txt", b""))
-            .await
-            .unwrap()
-            .into_inner()
-            .found
-    );
+    // Signed a millisecond later: within one, it would be the same request, a replay.
+    let again = data(&writer, "delete", "shop", "a.txt", b"");
+    let again = data_at(&writer, "delete", again, now_ms() + 1);
+    assert!(!client.delete_data(again).await.unwrap().into_inner().found);
     assert!(
         !client
             .get_data(data(&reader, "get", "shop", "a.txt", b""))
