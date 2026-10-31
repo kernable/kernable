@@ -4,7 +4,8 @@ use std::{collections::HashSet, path::PathBuf, sync::Arc, thread};
 
 use kernable_core::proto::{
     Attribute, Command, Grant, ListenerRecord, Membership, MembershipRecord, Middleware, NewEvent,
-    Permission, Rejected, RequestContext, Signature, When, WorkerRecord, command_result::Outcome,
+    Permission, Rejected, RequestContext, RevocationRecord, Signature, When, WorkerRecord,
+    command_result::Outcome,
 };
 use kernable_store::{Enqueued, Error, FileStore, SqliteStore, Store};
 
@@ -507,6 +508,107 @@ fn contexts_come_back_as_stored(store: &dyn Store) {
     }
 }
 
+/// The overviews the UI and `kernable schemas` show, which the file backend derives from the
+/// events and SQLite queries for.
+fn overviews_of_the_stored_events(store: &dyn Store) {
+    assert_eq!(store.streams(10).unwrap(), []);
+    assert_eq!(store.event_sources().unwrap(), []);
+    assert_eq!(store.event_schemas().unwrap(), []);
+    let on = |id: &str, aggregate_type: &str, aggregate_id: &str| Command {
+        aggregate_type: aggregate_type.into(),
+        aggregate_id: aggregate_id.into(),
+        ..cmd(id, "Do")
+    };
+    let schema = |event_type: &str, schema: u32| NewEvent {
+        schema,
+        ..ev(event_type)
+    };
+    store.enqueue(&on("c1", "Order", "o1"), 0).unwrap();
+    store
+        .commit(
+            "c1",
+            0,
+            &[schema("OrderPlaced", 2), ev("ItemAdded")],
+            &sig(),
+            10,
+        )
+        .unwrap();
+    store.enqueue(&on("c2", "Invoice", "i1"), 0).unwrap();
+    store
+        .commit("c2", 0, &[schema("InvoiceSent", 3)], &sig(), 20)
+        .unwrap();
+    store.enqueue(&on("c3", "Order", "o1"), 0).unwrap();
+    store
+        .commit("c3", 2, &[schema("OrderPlaced", 1)], &sig(), 30)
+        .unwrap();
+
+    let stream = |aggregate_type: &str, aggregate_id: &str| kernable_store::StreamId {
+        tenant_id: "t1".into(),
+        domain: "orders".into(),
+        aggregate_type: aggregate_type.into(),
+        aggregate_id: aggregate_id.into(),
+    };
+    let summary = |aggregate_type: &str, aggregate_id: &str, version, last_at| {
+        kernable_store::StreamSummary {
+            stream: stream(aggregate_type, aggregate_id),
+            version,
+            last_at,
+        }
+    };
+    assert_eq!(
+        store.streams(10).unwrap(),
+        [
+            summary("Order", "o1", 3, 30),
+            summary("Invoice", "i1", 1, 20)
+        ],
+        "the most recently changed first"
+    );
+    assert_eq!(store.streams(1).unwrap(), [summary("Order", "o1", 3, 30)]);
+    let source = |aggregate_type: &str, event_type: &str| {
+        (
+            "orders".to_owned(),
+            aggregate_type.to_owned(),
+            event_type.to_owned(),
+        )
+    };
+    assert_eq!(
+        store.event_sources().unwrap(),
+        [
+            source("Invoice", "InvoiceSent"),
+            source("Order", "ItemAdded"),
+            source("Order", "OrderPlaced"),
+        ]
+    );
+    assert_eq!(
+        store.event_schemas().unwrap(),
+        [
+            ("orders.InvoiceSent".to_owned(), 3),
+            ("orders.ItemAdded".to_owned(), 1),
+            ("orders.OrderPlaced".to_owned(), 2),
+        ],
+        "the highest schema, not the latest"
+    );
+}
+
+fn revocation(key_id: &str, since: i64) -> RevocationRecord {
+    RevocationRecord {
+        key_id: key_id.into(),
+        since,
+        created_at: since,
+        kernel_sig: Some(sig()),
+    }
+}
+
+fn a_key_is_revoked_once_as_it_was_first(store: &dyn Store) {
+    store.revoke(&revocation("a", 1)).unwrap();
+    store.revoke(&revocation("b", 2)).unwrap();
+    store.revoke(&revocation("a", 5)).unwrap();
+    assert_eq!(
+        store.revocations().unwrap(),
+        [revocation("a", 1), revocation("b", 2)]
+    );
+}
+
 fn file_store(name: &str) -> (TempDb, Box<dyn Store>) {
     let db = TempDb::new(&format!("{name}.log"));
     let store = FileStore::open(&db.0).unwrap();
@@ -551,6 +653,8 @@ for_each_backend!(
     the_newest_grant_per_key_is_kept,
     reading_after_a_version_returns_only_later_events,
     contexts_come_back_as_stored,
+    overviews_of_the_stored_events,
+    a_key_is_revoked_once_as_it_was_first,
 );
 
 #[test]

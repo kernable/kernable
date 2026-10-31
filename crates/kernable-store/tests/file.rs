@@ -193,6 +193,58 @@ fn torn_last_record_is_cut_off_and_kept_aside() {
 }
 
 #[test]
+fn a_last_record_that_fails_its_checksum_is_cut_off_as_torn() {
+    let log = TempLog::new("torn-checksum");
+    {
+        let store = FileStore::open(&log.0).unwrap();
+        run(&store, "c1", "o1");
+    }
+    let intact = fs::metadata(&log.0).unwrap().len();
+    {
+        // One record.
+        let store = FileStore::open(&log.0).unwrap();
+        store
+            .revoke(&kernable_core::proto::RevocationRecord {
+                key_id: "a".into(),
+                ..Default::default()
+            })
+            .unwrap();
+    }
+    // The last record arrived whole in length, but not in content.
+    let mut bytes = fs::read(&log.0).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xff;
+    fs::write(&log.0, bytes).unwrap();
+
+    let store = FileStore::open(&log.0).unwrap();
+    assert_eq!(fs::metadata(&log.0).unwrap().len(), intact);
+    assert_eq!(log.torn_files().len(), 1);
+    assert_eq!(store.revocations().unwrap(), []);
+    assert_eq!(store.read_all(0, 10).unwrap().len(), 1);
+}
+
+#[test]
+fn revocations_come_back_after_reopening() {
+    let log = TempLog::new("revocations");
+    let revocation = |key_id: &str, since| kernable_core::proto::RevocationRecord {
+        key_id: key_id.into(),
+        since,
+        created_at: since,
+        kernel_sig: None,
+    };
+    {
+        let store = FileStore::open(&log.0).unwrap();
+        store.revoke(&revocation("a", 1)).unwrap();
+        store.revoke(&revocation("b", 2)).unwrap();
+    }
+    let store = FileStore::open(&log.0).unwrap();
+    assert_eq!(
+        store.revocations().unwrap(),
+        [revocation("a", 1), revocation("b", 2)]
+    );
+}
+
+#[test]
 fn damaged_record_in_the_middle_refuses_to_open() {
     let log = TempLog::new("damaged");
     {
