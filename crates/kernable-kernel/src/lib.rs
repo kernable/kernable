@@ -418,11 +418,13 @@ impl Kernel {
                         self.sync(0);
                     }
                     grants.insert(grant.key_id.clone(), grant);
+                    // Before the lock is released: a request presenting the same grant meanwhile
+                    // finds it held and goes on, so the permissions must already include it.
+                    self.set_permissions(&grants);
                     replaced
                 }
             }
         };
-        self.update_permissions();
         if replaced {
             self.changes.send_modify(|n| *n += 1);
         }
@@ -475,10 +477,15 @@ impl Kernel {
     }
 
     fn update_permissions(&self) {
+        let grants = self.grants.lock().unwrap_or_else(PoisonError::into_inner);
+        self.set_permissions(&grants);
+    }
+
+    /// Rebuilds the permissions from `grants` (held locked by the caller) and the revocations.
+    fn set_permissions(&self, grants: &HashMap<String, Grant>) {
         let permissions = {
-            let grants = self.grants.lock().unwrap_or_else(PoisonError::into_inner);
             let revoked = self.revoked.lock().unwrap_or_else(PoisonError::into_inner);
-            Permissions::new(&grants, &revoked)
+            Permissions::new(grants, &revoked)
         };
         *self
             .permissions

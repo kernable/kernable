@@ -461,3 +461,41 @@ fn the_ui_listens_on_a_loopback_address_only() {
     drop(kernel);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A new key's processes connect at the same moment, each presenting the key's grant for the
+/// first time: none may be refused while another one's presentation takes effect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_grant_presented_by_several_requests_at_once_lets_each_of_them_in() {
+    let env = start("grant-race").await;
+    for seed in 20..60u8 {
+        let client = key(seed);
+        let granted = grant(&client, &[("submit", &["orders.*"])]);
+        let calls = (0..8).map(|i| {
+            let (addr, granted, client) = (env.addr.clone(), granted.clone(), client.clone());
+            tokio::spawn(async move {
+                let id = format!("k{seed}-{i}");
+                let request = SubmitRequest {
+                    command: Some(signed(command(&id, "PlaceOrder", &id), &client)),
+                    wait: Wait::Committed.into(),
+                    protocol: kernable_core::PROTOCOL,
+                    ..Default::default()
+                };
+                let channel = transport::connect(&addr).await.unwrap();
+                let mut commands = CommandServiceClient::new(channel);
+                let call = commands.submit(presenting(request, &granted));
+                tokio::time::timeout(Duration::from_millis(500), call).await
+            })
+        });
+        for call in calls.collect::<Vec<_>>() {
+            // No worker runs orders: the command waits (or is refused as unknown), but the key
+            // is never refused.
+            if let Ok(Err(status)) = call.await.unwrap() {
+                assert_ne!(
+                    status.code(),
+                    Code::PermissionDenied,
+                    "key {seed}: {status:?}"
+                );
+            }
+        }
+    }
+}
