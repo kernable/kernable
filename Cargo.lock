@@ -917,6 +917,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "kernable-soak"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "getrandom 0.3.4",
+ "hex",
+ "kernable",
+ "kernable-core",
+ "kernable-store",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+]
+
+[[package]]
 name = "kernable-store"
 version = "0.1.0"
 dependencies = [
