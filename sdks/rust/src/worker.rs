@@ -95,7 +95,8 @@ impl Worker {
         self.clone()
     }
 
-    /// Delay before reconnecting after the session ends (default 1 s).
+    /// Delay before reconnecting after the session ends (default 1 s); twice as long after each
+    /// further failed attempt, at most 30 s.
     pub fn reconnect(&self, delay: Duration) -> Worker {
         self.inner.settings.lock().unwrap().1 = delay;
         self.clone()
@@ -120,18 +121,22 @@ impl Worker {
     /// error or panic rejects that command (`handler_error`); it does not end `run`.
     pub async fn run(&self) {
         let mut stopped = self.inner.stopped.subscribe();
+        let mut attempt = 0;
         while !*stopped.borrow() {
+            let connects = self.inner.connects.load(Ordering::SeqCst);
             let session = self.session();
             let result = tokio::select! {
                 result = session => result,
                 _ = stopped.wait_for(|s| *s) => return,
             };
-            let delay = self.inner.settings.lock().unwrap().1;
-            let error = log::reason(result.err().as_ref());
-            self.inner
-                .client
-                .log
-                .warn("worker", || log::connection_lost(&error, delay));
+            attempt = if self.inner.connects.load(Ordering::SeqCst) > connects {
+                1
+            } else {
+                attempt + 1
+            };
+            let base = self.inner.settings.lock().unwrap().1;
+            let log = &self.inner.client.log;
+            let delay = log::reconnecting(log, "worker", result.err().as_ref(), base, attempt);
             tokio::select! {
                 () = tokio::time::sleep(delay) => {}
                 _ = stopped.wait_for(|s| *s) => return,

@@ -241,6 +241,64 @@ pub(crate) fn connection_lost(error: &str, delay: Duration) -> String {
     )
 }
 
+/// Logs the end of a session that was not stopped and says how long to wait before attempt
+/// `attempt` (1: the first after it ended): `base`, twice as long after each further failed
+/// attempt, at most 30 s, give or take a fifth, so processes do not reconnect in lockstep after
+/// a kernel restart. A refusal that will not go away by itself is an error, not a warning.
+pub(crate) fn reconnecting(
+    log: &Log,
+    what: &str,
+    error: Option<&crate::BoxError>,
+    base: Duration,
+    attempt: u32,
+) -> Duration {
+    let doubled = base.saturating_mul(1 << attempt.saturating_sub(1).min(16));
+    let jitter = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos() % 401);
+    let delay = doubled
+        .min(Duration::from_secs(30))
+        .mul_f64(0.8 + f64::from(jitter) / 1000.0);
+    let delay = Duration::from_millis(delay.as_millis() as u64); // readable in the log
+    let reason = reason(error);
+    if refused(error) {
+        log.error(what, || {
+            format!(
+                "refused ({reason}), reconnecting in {} s",
+                delay.as_secs_f64()
+            )
+        });
+    } else {
+        log.warn(what, || connection_lost(&reason, delay));
+    }
+    delay
+}
+
+/// Whether the kernel refused in a way a retry does not change: INVALID_ARGUMENT,
+/// PERMISSION_DENIED, FAILED_PRECONDITION, UNIMPLEMENTED, UNAUTHENTICATED.
+fn refused(error: Option<&crate::BoxError>) -> bool {
+    use tonic::Code::{
+        FailedPrecondition, InvalidArgument, PermissionDenied, Unauthenticated, Unimplemented,
+    };
+    let status = error.and_then(|e| {
+        e.downcast_ref::<tonic::Status>()
+            .or(match e.downcast_ref::<crate::Error>() {
+                Some(crate::Error::Status(status)) => Some(status),
+                _ => None,
+            })
+    });
+    status.is_some_and(|s| {
+        matches!(
+            s.code(),
+            InvalidArgument
+                | PermissionDenied
+                | FailedPrecondition
+                | Unimplemented
+                | Unauthenticated
+        )
+    })
+}
+
 /// What became of a command a worker ran.
 pub(crate) fn command_done(
     command: &str,
@@ -540,5 +598,30 @@ mod tests {
              \x20 \x1b[2mready in 84 ms\x1b[0m\n\
              \n"
         );
+    }
+
+    #[test]
+    fn reconnects_back_off_to_30_seconds_and_refusals_are_errors() {
+        let log = Log::new("unix:/k.sock", std::path::Path::new("app.key"), "ab");
+        let base = Duration::from_millis(100);
+        for (attempt, expected) in [
+            (1, 100),
+            (2, 200),
+            (3, 400),
+            (4, 800),
+            (12, 30_000),
+            (40, 30_000),
+        ] {
+            let delay = reconnecting(&log, "worker", None, base, attempt).as_millis();
+            assert!(
+                (expected * 8 / 10..=expected * 12 / 10).contains(&delay),
+                "attempt {attempt}: {delay} ms"
+            );
+        }
+        let denied: crate::BoxError = Box::new(tonic::Status::permission_denied("no grant"));
+        let unavailable: crate::BoxError = Box::new(tonic::Status::unavailable("gone"));
+        assert!(refused(Some(&denied)));
+        assert!(!refused(Some(&unavailable)));
+        assert!(!refused(None));
     }
 }

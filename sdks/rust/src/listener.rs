@@ -443,7 +443,8 @@ impl Listener {
         )
     }
 
-    /// Delay before reconnecting after the stream drops or a handler fails (default 1 s).
+    /// Delay before reconnecting after the stream drops or a handler fails (default 1 s); twice
+    /// as long after each further failed attempt, at most 30 s.
     pub fn reconnect(&self, delay: Duration) -> Listener {
         self.inner.settings.lock().unwrap().reconnect = delay;
         self.clone()
@@ -751,19 +752,25 @@ impl ListenerHandle {
                 }
             }
         }
+        let mut attempt = 0;
         while !*stopped.borrow() {
+            let connects = self.inner.connects.load(Ordering::SeqCst);
             let result = tokio::select! {
                 result = self.listen(start) => result,
                 _ = stopped.wait_for(|s| *s) => return,
+            };
+            attempt = if self.inner.connects.load(Ordering::SeqCst) > connects {
+                1
+            } else {
+                attempt + 1
             };
             // Resume after the last handled event, once there is one: before the first ready,
             // the position says nothing (a new reactor would replay everything from 0).
             if self.inner.connects.load(Ordering::SeqCst) > 0 {
                 start = Some(self.position());
             }
-            let delay = self.def().settings.lock().unwrap().reconnect;
-            let error = log::reason(result.err().as_ref());
-            log.warn(&what, || log::connection_lost(&error, delay));
+            let base = self.def().settings.lock().unwrap().reconnect;
+            let delay = log::reconnecting(log, &what, result.err().as_ref(), base, attempt);
             tokio::select! {
                 () = tokio::time::sleep(delay) => {}
                 _ = stopped.wait_for(|s| *s) => return,
@@ -1140,7 +1147,8 @@ pub struct SubscribeOptions {
     /// Qualified event types (`orders.OrderPlaced`) or domains (`orders.*`); empty: all the key
     /// may read.
     pub types: Vec<String>,
-    /// Delay before reconnecting after the stream drops or the handler fails (default 1 s).
+    /// Delay before reconnecting after the stream drops or the handler fails (default 1 s);
+    /// twice as long after each further failed attempt, at most 30 s.
     pub reconnect: Duration,
 }
 
@@ -1237,17 +1245,27 @@ async fn subscription<F, Fut>(
         }
         Ok(())
     };
+    let mut attempt = 0;
     while !*stopped.borrow() {
+        let from = position.load(Ordering::SeqCst);
         let result = tokio::select! {
             result = read(&position) => result,
             _ = stopped.wait_for(|s| *s) => return,
         };
-        let error = log::reason(result.err().as_ref());
-        client.log.warn("subscription", || {
-            log::connection_lost(&error, options.reconnect)
-        });
+        attempt = if position.load(Ordering::SeqCst) > from {
+            1
+        } else {
+            attempt + 1
+        };
+        let delay = log::reconnecting(
+            &client.log,
+            "subscription",
+            result.err().as_ref(),
+            options.reconnect,
+            attempt,
+        );
         tokio::select! {
-            () = tokio::time::sleep(options.reconnect) => {}
+            () = tokio::time::sleep(delay) => {}
             _ = stopped.wait_for(|s| *s) => return,
         }
     }

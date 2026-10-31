@@ -1080,6 +1080,9 @@ export interface SubmitOptions {
 }
 
 const LEVELS = { off: 0, error: 1, warn: 2, info: 3, debug: 4 };
+
+/** gRPC codes that a retry does not change: INVALID_ARGUMENT, PERMISSION_DENIED, FAILED_PRECONDITION, UNIMPLEMENTED, UNAUTHENTICATED. */
+const REFUSALS = new Set([3, 7, 9, 12, 16]);
 type Level = Exclude<keyof typeof LEVELS, "off">;
 
 /**
@@ -1117,12 +1120,20 @@ class Log {
   }
 
   /** Logs the end of a session that was not stopped and waits `ms` before reconnecting. */
-  async reconnect(what: string, err: unknown, ms: number): Promise<void> {
+  /**
+   * Logs the end of a session that was not stopped and waits before reconnecting: `ms` after
+   * the first failed attempt, twice as long after each further one, at most 30 s, give or take
+   * a fifth, so processes do not reconnect in lockstep after a kernel restart. A refusal that
+   * will not go away by itself (no grant, an invalid registration) is an error, not a warning.
+   */
+  async reconnect(what: string, err: unknown, ms: number, attempt = 1): Promise<void> {
     // A gRPC error by its details only (`Connection dropped`, not `14 UNAVAILABLE: …`).
-    const e = err as Error & { details?: string };
+    const e = err as Error & { details?: string; code?: number };
     const reason = e.details || e.message;
-    this.print("warn", what, `connection lost (${reason}), reconnecting in ${ms / 1000} s`);
-    await new Promise((r) => setTimeout(r, ms));
+    const delay = Math.round(Math.min(ms * 2 ** (attempt - 1), 30_000) * (0.8 + Math.random() * 0.4));
+    const refused = e.code !== undefined && REFUSALS.has(e.code);
+    this.print(refused ? "error" : "warn", what, `${refused ? "refused" : "connection lost"} (${reason}), reconnecting in ${delay / 1000} s`);
+    await new Promise((r) => setTimeout(r, delay));
   }
 }
 
@@ -1513,7 +1524,10 @@ export interface SubscribeOptions {
   after?: number;
   /** Qualified event types (`orders.OrderPlaced`) or domains (`orders.*`); empty = all the key may read. */
   types?: string[];
-  /** Milliseconds to wait before reconnecting after the stream ends (default 1000). */
+  /**
+   * Milliseconds to wait before reconnecting after the stream ends (default 1000); twice as
+   * long after each further failed attempt, at most 30 s.
+   */
   reconnectMs?: number;
 }
 
@@ -1542,7 +1556,9 @@ export class Subscription {
 
   private async loop(clients: Clients, key: Key, options: SubscribeOptions, handler: (event: StoredEvent) => void | Promise<void>, log: Log) {
     const event_types = options.types ?? [];
+    let attempt = 0;
     while (!this.stopped) {
+      const from = this.position;
       const issued_at = Date.now();
       const client_sig = key.sign(subscribeMessage(this.position, event_types, issued_at));
       this.call = clients.subscribe({ after_position: this.position, event_types, issued_at, client_sig });
@@ -1555,7 +1571,8 @@ export class Subscription {
       } catch (err) {
         error = err;
       }
-      if (!this.stopped) await log.reconnect("subscription", error, options.reconnectMs ?? 1000);
+      attempt = this.position > from ? 1 : attempt + 1;
+      if (!this.stopped) await log.reconnect("subscription", error, options.reconnectMs ?? 1000, attempt);
     }
   }
 }
@@ -1589,7 +1606,10 @@ export interface ListenerOptions {
    * matter while the process runs, e.g. pushing to connected browsers. Cannot be a middleware.
    */
   live?: boolean;
-  /** Milliseconds to wait before reconnecting after the stream ends (default 1000). */
+  /**
+   * Milliseconds to wait before reconnecting after the stream ends (default 1000); twice as
+   * long after each further failed attempt, at most 30 s.
+   */
   reconnectMs?: number;
   /**
    * Keeps the listener's state in a store (`sqlite:<path>` or `memory:`) instead of memory:
@@ -1826,17 +1846,20 @@ export class ListenerHandle {
       // starts at the newest event).
       if (this.position > 0) start = this.position;
     }
+    let attempt = 0;
     while (!this.stopped) {
+      const connects = this.connects;
       let error: unknown = new Error("stream ended");
       try {
         await this.listen(start);
       } catch (err) {
         error = err;
       }
+      attempt = this.connects > connects ? 1 : attempt + 1;
       // Resume after the last handled event, once there is one: before the first `ready`, the
       // position says nothing (a new reactor would replay everything from 0).
       if (this.connects > 0) start = this.position;
-      if (!this.stopped) await this.log.reconnect(this.what, error, options.reconnectMs ?? 1000);
+      if (!this.stopped) await this.log.reconnect(this.what, error, options.reconnectMs ?? 1000, attempt);
     }
   }
 
@@ -2000,7 +2023,10 @@ export class ListenerHandle {
 export interface WorkerOptions {
   /** Commands executed in parallel, of different aggregates (default 16). */
   concurrency?: number;
-  /** Milliseconds to wait before reconnecting after the session ends (default 1000). */
+  /**
+   * Milliseconds to wait before reconnecting after the session ends (default 1000); twice as
+   * long after each further failed attempt, at most 30 s.
+   */
   reconnectMs?: number;
 }
 
@@ -2049,14 +2075,17 @@ export class Worker {
    * session drops. Resolves after `stop()`.
    */
   async run(options: WorkerOptions = {}): Promise<void> {
+    let attempt = 0;
     while (!this.stopped) {
+      const connects = this.connects;
       let error: unknown = new Error("stream ended");
       try {
         await this.session(options.concurrency ?? 16);
       } catch (err) {
         error = err;
       }
-      if (!this.stopped) await this.log.reconnect("worker", error, options.reconnectMs ?? 1000);
+      attempt = this.connects > connects ? 1 : attempt + 1;
+      if (!this.stopped) await this.log.reconnect("worker", error, options.reconnectMs ?? 1000, attempt);
     }
   }
 

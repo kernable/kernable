@@ -204,3 +204,47 @@ test("a request waits for the kernel to come back, until its deadline", async ()
     await kernel.dispose();
   }
 });
+
+test("reconnects back off, and a refusal is logged as an error", async () => {
+  const kernel = new TestKernel(["counters.*"]);
+  const before = process.env.KERNABLE_LOG;
+  process.env.KERNABLE_LOG = "warn";
+  const kernable = new Kernable({ url: kernel.url, key: kernel.appKey });
+  if (before === undefined) delete process.env.KERNABLE_LOG;
+  else process.env.KERNABLE_LOG = before;
+  const lines: string[] = [];
+  const print = console.error;
+  console.error = (line: string) => void lines.push(line);
+  // No kernel at all: every attempt fails, and each waits longer.
+  const worker = kernable.worker(counter);
+  const running = worker.run({ reconnectMs: 50 });
+  try {
+    await until("four attempts", () => lines.length >= 4);
+    const delays = lines.slice(0, 4).map((l) => Number(/reconnecting in ([\d.]+) s/.exec(l)![1]));
+    for (let i = 1; i < delays.length; i++) assert.ok(delays[i] > delays[i - 1] * 1.3, `${delays}`);
+  } finally {
+    worker.stop();
+    await running;
+  }
+  // A worker for an aggregate the key may not run: refused, an error (a client that logs errors
+  // only still prints it).
+  lines.length = 0;
+  await kernel.start();
+  process.env.KERNABLE_LOG = "error";
+  const strict = new Kernable({ url: kernel.url, key: kernel.appKey });
+  if (before === undefined) delete process.env.KERNABLE_LOG;
+  else process.env.KERNABLE_LOG = before;
+  const other = domain("other").aggregate("Thing", 0).command("Do", () => []);
+  const refused = strict.worker(other);
+  const refusing = refused.run({ reconnectMs: 50 });
+  try {
+    await until("a refusal", () => lines.some((l) => /refused \(/.test(l)));
+  } finally {
+    refused.stop();
+    await refusing;
+    console.error = print;
+    strict.close();
+    kernable.close();
+    await kernel.dispose();
+  }
+});

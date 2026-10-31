@@ -31,6 +31,7 @@ import inspect
 import json
 import os
 import queue
+import random
 import re
 import sys
 import threading
@@ -373,6 +374,9 @@ _CHANNEL_OPTIONS = [("grpc.max_send_message_length", _MAX_MESSAGE),
                     ("grpc.keepalive_time_ms", 30_000),
                     ("grpc.keepalive_timeout_ms", 10_000),
                     ("grpc.keepalive_permit_without_calls", 1)]
+#: gRPC codes that a retry does not change.
+_REFUSALS = {grpc.StatusCode.INVALID_ARGUMENT, grpc.StatusCode.PERMISSION_DENIED, grpc.StatusCode.FAILED_PRECONDITION,
+             grpc.StatusCode.UNIMPLEMENTED, grpc.StatusCode.UNAUTHENTICATED}
 #: How long a request waits, for the connection and the answer, unless told otherwise: above the
 #: kernel's own submit and settle timeouts.
 DEFAULT_TIMEOUT_S = 60.0
@@ -590,7 +594,8 @@ class Domain:
         `order` (default 0): listeners with a lower order process each event first. `start`:
         the position to start after on the first connect (default 0, from the beginning; `None`:
         the kernel's stored position, or the newest event for a new listener). `reconnect_s`:
-        seconds to wait before reconnecting after the stream drops (default 1).
+        seconds to wait before reconnecting after the stream drops (default 1), twice as long
+        after each further failed attempt, at most 30.
 
         With `store` (`sqlite:<path>` or `memory:`), its state lives in the running listener's
         `store`: data and position are written together per batch, and a restart continues after
@@ -1108,10 +1113,15 @@ class _Log:
         text = self.style(31, line) if level == "error" else self.style(33, line) if level == "warn" else line
         print(f"{self.style(2, time.strftime('%H:%M:%S'))}  {self.style(1, what)}  {text}", file=sys.stderr)
 
-    def reconnect(self, what: str, reason: str, seconds: float) -> None:
-        """Logs the end of a session that was not stopped and waits `seconds` before reconnecting."""
-        self.print("warn", what, f"connection lost ({reason}), reconnecting in {seconds:g} s")
-        time.sleep(seconds)
+    def reconnect(self, what: str, reason: str, seconds: float, attempt: int = 1, refused: bool = False) -> None:
+        """Logs the end of a session that was not stopped and waits before reconnecting:
+        `seconds` after the first failed attempt, twice as long after each further one, at most
+        30 s, give or take a fifth, so processes do not reconnect in lockstep after a kernel
+        restart. A refusal that will not go away by itself is an error, not a warning."""
+        delay = min(seconds * 2 ** (attempt - 1), 30.0) * random.uniform(0.8, 1.2)
+        self.print("error" if refused else "warn", what,
+                   f"{'refused' if refused else 'connection lost'} ({reason}), reconnecting in {delay:.2f} s")
+        time.sleep(delay)
 
 
 def _relative(type: str, domains: set[str]) -> str:
@@ -1313,7 +1323,10 @@ class _Stream:
 
     def run(self) -> None:
         """Processes messages until `stop()`, reconnecting when the stream drops."""
+        attempt = 0
         while not self._stopped:
+            connects = self._connects
+            refused = False
             outbox: queue.Queue = queue.Queue()
             self._outbox = outbox
             try:
@@ -1326,13 +1339,15 @@ class _Stream:
                 reason = "stream ended"
             except grpc.RpcError as err:
                 reason = err.details()
+                refused = err.code() in _REFUSALS
             except Exception as err:  # a failing handler: reconnect and get the event again
                 reason = str(err) or type(err).__name__
                 self._call.cancel()
             finally:
                 outbox.put(None)
+            attempt = 1 if self._connects > connects else attempt + 1
             if not self._stopped:
-                self._log.reconnect(self._what, reason, self._reconnect_s)
+                self._log.reconnect(self._what, reason, self._reconnect_s, attempt, refused)
 
     def stop(self) -> None:
         self._stopped = True

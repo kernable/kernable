@@ -279,6 +279,55 @@ class Connection(unittest.TestCase):
         Kernable("http://10.0.0.5:7233", kernel.app_key, insecure=True).close()
 
 
+class Reconnects(unittest.TestCase):
+    def test_reconnects_back_off_and_a_refusal_is_logged_as_an_error(self):
+        kernel = TestKernel(["counters.*"])
+        self.addCleanup(kernel.dispose)
+        stderr = io.StringIO()
+        patched = mock.patch("sys.stderr", stderr)
+        patched.start()
+        self.addCleanup(patched.stop)
+
+        def lines():
+            return [l for l in stderr.getvalue().splitlines() if "reconnecting in" in l]
+
+        def until(done):
+            for _ in range(250):
+                if done():
+                    return
+                time.sleep(0.02)
+
+        # No kernel at all: every attempt fails, and each waits longer.
+        with mock.patch.dict(os.environ, {"KERNABLE_LOG": "warn"}):
+            k = Kernable(kernel.url, kernel.app_key)
+        self.addCleanup(k.close)
+        watcher = k.listener(counters_domain.read_model("watcher", reconnect_s=0.05))
+        threading.Thread(target=watcher.run, daemon=True).start()
+        until(lambda: len(lines()) >= 4)
+        watcher.stop()
+        delays = [float(re.search(r"reconnecting in ([\d.]+) s", l).group(1)) for l in lines()[:4]]
+        self.assertTrue(all(b > a * 1.3 for a, b in zip(delays, delays[1:])), delays)
+
+        # A worker for an aggregate the key may not run: refused, an error (a client that logs
+        # errors only still prints it).
+        kernel.start()
+        stderr.truncate(0)
+        with mock.patch.dict(os.environ, {"KERNABLE_LOG": "error"}):
+            strict = Kernable(kernel.url, kernel.app_key)
+        self.addCleanup(strict.close)
+        other = domain("other").aggregate("Thing", 0)
+
+        @other.command("Do")
+        def _(state, data):
+            return []
+
+        refused = strict.worker(other)
+        threading.Thread(target=refused.run, daemon=True).start()
+        self.addCleanup(refused.stop)
+        until(lambda: any("refused (" in l for l in lines()))
+        self.assertTrue(any("refused (" in l for l in lines()), stderr.getvalue())
+
+
 class EndToEnd(unittest.TestCase):
     def setUp(self):
         self.kernel = TestKernel(["counters.*"], ["--settle-timeout-ms", "500"])
