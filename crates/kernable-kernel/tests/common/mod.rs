@@ -761,12 +761,38 @@ pub fn vault_value(subject: &str, value: &str) -> kernable_core::proto::VaultVal
     }
 }
 
-/// A kernel process that never outlives its test, also when the test fails.
-pub struct KillOnDrop(pub std::process::Child);
+/// A kernel process that never outlives its test: killed when dropped, also when the test
+/// fails, and by a [`watchdog`] when the test process itself is killed (a timeout, Ctrl-C).
+pub struct KillOnDrop {
+    pub child: std::process::Child,
+    watchdog: std::process::Child,
+}
+
+impl KillOnDrop {
+    pub fn spawn(command: &mut std::process::Command) -> Self {
+        let child = command.spawn().unwrap();
+        let watchdog = watchdog(child.id());
+        KillOnDrop { child, watchdog }
+    }
+}
 
 impl Drop for KillOnDrop {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = self.watchdog.kill();
+        let _ = self.watchdog.wait();
     }
+}
+
+/// A shell reading a pipe from this process. However this process ends, the pipe closes and
+/// the shell kills `pid`; kill the watchdog once `pid` is gone.
+pub fn watchdog(pid: u32) -> std::process::Child {
+    std::process::Command::new("sh")
+        .args(["-c", &format!("read _; kill -9 {pid} 2>/dev/null")])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap()
 }

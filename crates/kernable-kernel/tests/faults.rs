@@ -177,15 +177,13 @@ async fn sigterm_checkpoints_and_in_flight_commands_run_right_after_a_restart() 
         "500",
     ]
     .map(String::from);
-    let mut kernel = KillOnDrop(
+    let mut kernel = KillOnDrop::spawn(
         Process::new(env!("CARGO_BIN_EXE_kernable"))
             .current_dir(&dir)
             .arg("start")
             .args(&flags)
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
+            .stderr(Stdio::null()),
     );
     wait_for(&addr).await;
 
@@ -209,13 +207,13 @@ async fn sigterm_checkpoints_and_in_flight_commands_run_right_after_a_restart() 
     assert_eq!(seen_rx.recv().await.unwrap(), "c1");
 
     let status = Process::new("kill")
-        .args(["-TERM", &kernel.0.id().to_string()])
+        .args(["-TERM", &kernel.child.id().to_string()])
         .status()
         .unwrap();
     assert!(status.success());
     let started = Instant::now();
     let exit = loop {
-        if let Some(exit) = kernel.0.try_wait().unwrap() {
+        if let Some(exit) = kernel.child.try_wait().unwrap() {
             break exit;
         }
         assert!(
@@ -241,14 +239,15 @@ async fn sigterm_checkpoints_and_in_flight_commands_run_right_after_a_restart() 
     }
 
     // After a restart, c1 runs at once and its result reaches a resubmit.
-    kernel.0 = Process::new(env!("CARGO_BIN_EXE_kernable"))
-        .current_dir(&dir)
-        .arg("start")
-        .args(&flags)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    drop(kernel);
+    let kernel = KillOnDrop::spawn(
+        Process::new(env!("CARGO_BIN_EXE_kernable"))
+            .current_dir(&dir)
+            .arg("start")
+            .args(&flags)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
     wait_for(&addr).await;
     start_worker(addr.clone(), TestWorker::honest()).await;
     let started = Instant::now();

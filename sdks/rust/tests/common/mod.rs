@@ -35,7 +35,8 @@ pub struct TestKernel {
     pub app_key: PathBuf,
     store: String,
     flags: Vec<String>,
-    child: Mutex<Option<Child>>,
+    /// The kernel and its watchdog.
+    child: Mutex<Option<(Child, Child)>>,
 }
 
 impl TestKernel {
@@ -124,7 +125,8 @@ impl TestKernel {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        *self.child.lock().unwrap() = Some(child);
+        let watchdog = watchdog(child.id());
+        *self.child.lock().unwrap() = Some((child, watchdog));
         let socket = self.dir.join("kernable.sock");
         for _ in 0..250 {
             if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
@@ -137,9 +139,11 @@ impl TestKernel {
 
     /// Kills the kernel (SIGKILL).
     pub fn kill(&self) {
-        if let Some(mut child) = self.child.lock().unwrap().take() {
+        if let Some((mut child, mut watchdog)) = self.child.lock().unwrap().take() {
             let _ = child.kill();
             let _ = child.wait();
+            let _ = watchdog.kill();
+            let _ = watchdog.wait();
         }
     }
 
@@ -201,4 +205,16 @@ pub async fn eventually(mut done: impl FnMut() -> bool) {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+/// A shell reading a pipe from this process. However this process ends (a timeout, Ctrl-C),
+/// the pipe closes and the shell kills the kernel `pid`; kill the watchdog once it is gone.
+fn watchdog(pid: u32) -> Child {
+    Command::new("sh")
+        .args(["-c", &format!("read _; kill -9 {pid} 2>/dev/null")])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap()
 }

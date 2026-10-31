@@ -48,6 +48,7 @@ export class TestKernel {
   /** Backend under test: KERNABLE_TEST_STORE=file selects the file store, else SQLite. */
   readonly store = process.env.KERNABLE_TEST_STORE === "file" ? `file:${join(this.dir, "k.log")}` : `sqlite:${join(this.dir, "k.db")}`;
   private process?: ChildProcess;
+  private watchdog?: ChildProcess;
 
   /**
    * The app key may run `commandTypes` (`orders.*`, `orders.PlaceOrder`) and do everything else.
@@ -98,6 +99,7 @@ export class TestKernel {
   async start(): Promise<void> {
     await this.configure();
     this.process = spawn(join(BIN, "kernable"), ["start", ...this.flags], { cwd: this.dir, stdio: "ignore" });
+    this.watchdog = watchdog(this.process.pid!);
     for (let i = 0; i < 200; i++) {
       if (await accepts(this.url)) return;
       await new Promise((r) => setTimeout(r, 20));
@@ -107,9 +109,12 @@ export class TestKernel {
 
   async kill(signal: NodeJS.Signals = "SIGTERM"): Promise<void> {
     const p = this.process;
-    if (!p || p.exitCode !== null || p.signalCode !== null) return;
-    p.kill(signal);
-    await once(p, "exit");
+    if (p && p.exitCode === null && p.signalCode === null) {
+      p.kill(signal);
+      await once(p, "exit");
+    }
+    this.watchdog?.kill("SIGKILL");
+    this.watchdog = undefined;
   }
 
   /** Output of `kernable verify` on the event log. */
@@ -123,6 +128,18 @@ export class TestKernel {
     await this.kill("SIGKILL");
     rmSync(this.dir, { recursive: true, force: true });
   }
+}
+
+/**
+ * A shell reading a pipe from this process. However this process ends (a test runner's
+ * timeout, Ctrl-C, a crash), the pipe closes and the shell kills the kernel `pid`; kill the
+ * watchdog once the kernel is gone. It does not keep this process alive.
+ */
+function watchdog(pid: number): ChildProcess {
+  const w = spawn("sh", ["-c", `read _; kill -9 ${pid} 2>/dev/null`], { stdio: ["pipe", "ignore", "ignore"] });
+  w.unref();
+  (w.stdin as unknown as { unref(): void }).unref();
+  return w;
 }
 
 function accepts(url: string): Promise<boolean> {

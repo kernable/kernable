@@ -611,7 +611,7 @@ fn start_explains_its_flags_and_logs_json_if_asked() {
 
     let log = std::fs::File::create(dir.join("stderr")).unwrap();
     let addr = free_addr();
-    let _kernel = KillOnDrop(
+    let _kernel = KillOnDrop::spawn(
         Process::new(env!("CARGO_BIN_EXE_kernable"))
             .current_dir(&dir)
             .args([
@@ -623,9 +623,7 @@ fn start_explains_its_flags_and_logs_json_if_asked() {
                 "127.0.0.1:0",
             ])
             .env("KERNABLE_LOG_FORMAT", "json")
-            .stderr(log)
-            .spawn()
-            .unwrap(),
+            .stderr(log),
     );
     let started = std::time::Instant::now();
     let line = loop {

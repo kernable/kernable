@@ -35,6 +35,7 @@ class TestKernel:
         self.flags = ["--root", "root.pub", "--store", self.store, "--listen", self.url,
                       "--checkpoint-interval-ms", "50", "--vault-key", "vault.key", *(extra_flags or [])]
         self.process: subprocess.Popen | None = None
+        self._watchdog: subprocess.Popen | None = None
 
     def _kernable(self, *args: str) -> str:
         return subprocess.run([f"{BIN}/kernable", *args], cwd=self.dir, check=True,
@@ -43,6 +44,7 @@ class TestKernel:
     def start(self) -> None:
         self.process = subprocess.Popen([f"{BIN}/kernable", "start", *self.flags], cwd=self.dir,
                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self._watchdog = _watchdog(self.process.pid)
         for _ in range(200):
             try:
                 with socket.socket(socket.AF_UNIX) as s:
@@ -56,6 +58,10 @@ class TestKernel:
         if self.process and self.process.poll() is None:
             self.process.kill()
             self.process.wait()
+        if self._watchdog:
+            self._watchdog.kill()
+            self._watchdog.wait()
+            self._watchdog = None
 
     def verify(self) -> subprocess.CompletedProcess:
         return subprocess.run([f"{BIN}/kernable", "verify", self.store, f"{self.dir}/kernel.pub"],
@@ -64,3 +70,12 @@ class TestKernel:
     def dispose(self) -> None:
         self.kill()
         shutil.rmtree(self.dir, ignore_errors=True)
+
+
+def _watchdog(pid: int) -> subprocess.Popen:
+    """A shell reading a pipe from this process. However this process ends (a timeout, Ctrl-C,
+    a crash), the pipe closes and the shell kills the kernel `pid`; kill the watchdog once the
+    kernel is gone."""
+    return subprocess.Popen(["sh", "-c", f"read _; kill -9 {pid} 2>/dev/null"],
+                            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)

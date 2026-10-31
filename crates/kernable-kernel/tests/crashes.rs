@@ -10,7 +10,7 @@ mod common;
 
 use std::{
     path::Path,
-    process::{Child, Command as Process, Stdio},
+    process::{Command as Process, Stdio},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -32,14 +32,7 @@ use kernable_store::invariants::{Log, Observed};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-struct Kernel(Child);
-
-impl Drop for Kernel {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
+type Kernel = KillOnDrop;
 
 fn start_kernel(dir: &Path, flags: &[String], crash_at: Option<&str>) -> Kernel {
     let mut process = Process::new(env!("CARGO_BIN_EXE_kernable"));
@@ -52,7 +45,7 @@ fn start_kernel(dir: &Path, flags: &[String], crash_at: Option<&str>) -> Kernel 
     if let Some(point) = crash_at {
         process.env("KERNABLE_CRASH_AT", point);
     }
-    Kernel(process.spawn().unwrap())
+    KillOnDrop::spawn(&mut process)
 }
 
 /// The workload: three orders with items, and one command the domain rejects.
@@ -216,7 +209,7 @@ async fn crash_and_recover(point: &str, round: u32) {
     }
     let started = Instant::now();
     let exit = loop {
-        if let Some(exit) = kernel.0.try_wait().unwrap() {
+        if let Some(exit) = kernel.child.try_wait().unwrap() {
             break exit;
         }
         assert!(
@@ -452,7 +445,7 @@ async fn random_kills_under_load_lose_nothing() {
 async fn crashed(kernel: &mut Kernel, point: &str) {
     let started = Instant::now();
     let exit = loop {
-        if let Some(exit) = kernel.0.try_wait().unwrap() {
+        if let Some(exit) = kernel.child.try_wait().unwrap() {
             break exit;
         }
         assert!(

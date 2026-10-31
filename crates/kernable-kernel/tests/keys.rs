@@ -303,7 +303,7 @@ async fn sighup_reads_the_kernel_key_of_the_running_kernel_again() {
     std::fs::write(dir.join("kernel.key"), hex(key(3).as_bytes())).unwrap();
     let addr = format!("unix:{}", dir.join("k.sock").display());
     let store = store_url(&dir);
-    let mut kernel = KillOnDrop(
+    let mut kernel = KillOnDrop::spawn(
         Process::new(env!("CARGO_BIN_EXE_kernable"))
             .current_dir(&dir)
             .args([
@@ -317,9 +317,7 @@ async fn sighup_reads_the_kernel_key_of_the_running_kernel_again() {
             ])
             .args(["--checkpoint-interval-ms", "50"])
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
+            .stderr(Stdio::null()),
     );
     wait_for(&addr).await;
     // The worker and the client present their grants, as the SDKs do.
@@ -333,14 +331,14 @@ async fn sighup_reads_the_kernel_key_of_the_running_kernel_again() {
 
     std::fs::write(dir.join("kernel.key"), hex(key(4).as_bytes())).unwrap();
     let hup = Process::new("kill")
-        .args(["-HUP", &kernel.0.id().to_string()])
+        .args(["-HUP", &kernel.child.id().to_string()])
         .status();
     assert!(hup.unwrap().success());
     tokio::time::sleep(Duration::from_millis(200)).await;
     let add = signed(command("c2", "AddItem", "o1"), &key(1));
     submit(&addr, add).await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await; // a checkpoint with key 4
-    assert!(kernel.0.try_wait().unwrap().is_none(), "still running");
+    assert!(kernel.child.try_wait().unwrap().is_none(), "still running");
     drop(kernel);
 
     let store = kernable_store::open_read_only(&store).unwrap();
@@ -358,14 +356,12 @@ async fn start_dev_creates_keys_and_a_grant_that_allows_everything_and_turns_the
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let addr = free_addr(); // the default, 127.0.0.1:7233, may be taken
-    let kernel = KillOnDrop(
+    let kernel = KillOnDrop::spawn(
         Process::new(env!("CARGO_BIN_EXE_kernable"))
             .current_dir(&dir)
             .args(["start", "--dev", "--listen", &addr])
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
+            .stderr(Stdio::null()),
     );
     wait_for(&addr).await;
     assert!(dir.join("vault.key").exists());
@@ -440,20 +436,18 @@ fn the_ui_listens_on_a_loopback_address_only() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let log = dir.join("stderr.txt");
-    let mut kernel = KillOnDrop(
+    let mut kernel = KillOnDrop::spawn(
         Process::new(env!("CARGO_BIN_EXE_kernable"))
             .current_dir(&dir)
             .args(["start", "--dev", "--listen", &free_addr()])
             .args(["--ui-listen", "0.0.0.0:0"])
             .stdout(Stdio::null())
-            .stderr(std::fs::File::create(&log).unwrap())
-            .spawn()
-            .unwrap(),
+            .stderr(std::fs::File::create(&log).unwrap()),
     );
     // It must stop on its own; a kernel still running after 10 s serves the UI to everyone.
     let started = std::time::Instant::now();
     let status = loop {
-        if let Some(status) = kernel.0.try_wait().unwrap() {
+        if let Some(status) = kernel.child.try_wait().unwrap() {
             break Some(status);
         }
         if started.elapsed() > Duration::from_secs(10) {
