@@ -873,6 +873,10 @@ class Kernable:
         self._channel = grpc.intercept_channel(self._channel, self._open)
         self._key = Key.from_file(key)
         self._log = _Log(given_url, key, self._key.id)
+        # Whoever can read the key file can sign as this process.
+        mode = os.stat(key).st_mode & 0o777
+        if os.name == "posix" and mode & 0o077:
+            self._log.print("warn", "key", f"{key} can be read by other users (mode {mode:o}): chmod 600 {key}")
         self._tenant = tenant
         self._service = service or os.environ.get("KERNABLE_SERVICE") or ""
         self._domains: dict[str, Domain] = {}

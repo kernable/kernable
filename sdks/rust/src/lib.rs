@@ -380,6 +380,17 @@ impl Kernable {
             .unwrap_or_default();
         let key_id = signing::key_id(&key.verifying_key());
         let log = log::Log::new(&url, &key_file, &key_id);
+        // Whoever can read the key file can sign as this process.
+        #[cfg(unix)]
+        if let Ok(meta) = std::fs::metadata(&key_file) {
+            let mode = std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o777;
+            if mode & 0o077 != 0 {
+                let path = key_file.display();
+                log.warn("key", || {
+                    format!("{path} can be read by other users (mode {mode:o}): chmod 600 {path}")
+                });
+            }
+        }
         Ok(Kernable {
             client: Client {
                 channel,

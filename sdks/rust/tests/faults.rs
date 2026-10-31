@@ -537,3 +537,41 @@ fn a_handler_that_hangs_is_reported() {
         "{stderr}"
     );
 }
+
+const KEYS_CHILD: &str = "KERNABLE_TEST_KEYS_CHILD";
+
+/// Makes a client with a key file others can read, in a child process whose stderr the parent
+/// test reads. Does nothing in a normal test run.
+#[tokio::test(flavor = "multi_thread")]
+async fn keys_child() {
+    let Some(key) = std::env::var_os(KEYS_CHILD) else {
+        return;
+    };
+    drop(Kernable::new(Options::new(std::path::PathBuf::from(key))).unwrap());
+}
+
+#[test]
+fn a_key_file_others_can_read_is_warned_about() {
+    use std::os::unix::fs::PermissionsExt;
+    let kernel = TestKernel::new(&["counters.*"], &[]);
+    let child = |key: &std::path::Path| {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["keys_child", "--exact", "--nocapture", "--test-threads=1"])
+            .env(KEYS_CHILD, key)
+            .env("KERNABLE_LOG", "warn")
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stderr).unwrap()
+    };
+    assert!(
+        !child(&kernel.app_key).contains("can be read"),
+        "mode 600: no warning"
+    );
+    std::fs::set_permissions(&kernel.app_key, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let stderr = child(&kernel.app_key);
+    assert!(
+        stderr.contains("app.key can be read by other users (mode 644): chmod 600"),
+        "{stderr}"
+    );
+}

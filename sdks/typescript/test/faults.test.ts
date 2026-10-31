@@ -311,3 +311,24 @@ test("stop ends a worker at once, also while it waits to reconnect", async () =>
     await kernel.dispose();
   }
 });
+
+test("a key file others can read is warned about, and a malformed one refused", async () => {
+  const kernel = new TestKernel(["counters.*"]);
+  const { chmodSync, writeFileSync } = await import("node:fs");
+  const lines: string[] = [];
+  const print = console.error;
+  console.error = (line: string) => void lines.push(line);
+  try {
+    new Kernable({ url: kernel.url, key: kernel.appKey }).close();
+    assert.deepEqual(lines, [], "mode 600: no warning");
+    chmodSync(kernel.appKey, 0o644);
+    new Kernable({ url: kernel.url, key: kernel.appKey }).close();
+    assert.match(lines.join("\n"), /app\.key can be read by other users \(mode 644\): chmod 600/);
+    const bad = join(kernel.dir, "bad.key");
+    writeFileSync(bad, "abcd\n", { mode: 0o600 });
+    assert.throws(() => new Kernable({ url: kernel.url, key: bad }), /bad\.key: not a 32-byte key in hex/);
+  } finally {
+    console.error = print;
+    await kernel.dispose();
+  }
+});

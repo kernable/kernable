@@ -2,7 +2,7 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomBytes, randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename } from "node:path";
 
 import type { ClientReadableStream } from "@grpc/grpc-js";
@@ -1229,6 +1229,7 @@ export class Kernable {
     this.clients = connect(url, tls, explicit || existsSync(grant) ? readFileSync(grant, "utf8").trim() : undefined, options.timeoutMs);
     this.key = Key.fromFile(key);
     this.log = new Log(url, key, this.key);
+    warnIfShared(this.log, key);
     this.tenant = options.tenant ?? "default";
     this.context = options.context ?? {};
     this.service = options.service ?? env.KERNABLE_SERVICE ?? "";
@@ -2339,6 +2340,13 @@ function metaOf(
 function follow(event: StoredEvent): RequestContext {
   const { expectedVersion, bypassAuthorization, ...rest } = event.request;
   return { ...rest, correlationId: rest.correlationId || event.commandId, causationId: event.commandId };
+}
+
+/** Warns if other users can read the key file: whoever reads it can sign as this process. */
+function warnIfShared(log: Log, key: string): void {
+  if (process.platform === "win32") return;
+  const mode = statSync(key).mode & 0o777;
+  if (mode & 0o077) log.print("warn", "key", `${key} can be read by other users (mode ${mode.toString(8)}): chmod 600 ${key}`);
 }
 
 /** Whether `url` is a Unix socket or a loopback address: plain text never leaves the machine. */

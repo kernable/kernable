@@ -371,6 +371,18 @@ def _record(errors, run):
         errors.append(repr(err))
 
 
+class Keys(unittest.TestCase):
+    def test_a_key_file_others_can_read_is_warned_about(self):
+        kernel = TestKernel(["counters.*"])
+        self.addCleanup(kernel.dispose)
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            Kernable(kernel.url, kernel.app_key).close()
+            self.assertEqual(stderr.getvalue(), "", "mode 600: no warning")
+            os.chmod(kernel.app_key, 0o644)
+            Kernable(kernel.url, kernel.app_key).close()
+        self.assertRegex(stderr.getvalue(), r"app\.key can be read by other users \(mode 644\): chmod 600")
+
+
 class Hangs(unittest.TestCase):
     def test_a_handler_that_hangs_is_reported(self):
         kernel = TestKernel(["counters.*"], ["--lease-ttl-ms", "500", "--query-timeout-ms", "8000"])

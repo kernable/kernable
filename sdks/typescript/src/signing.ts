@@ -30,11 +30,17 @@ export class Key {
 
   /** From a hex-encoded 32-byte seed (the content of a `.key` file). */
   static fromHex(hex: string): Key {
+    // Buffer.from would quietly stop at the first character that is not hex.
+    if (!/^[0-9a-fA-F]{64}$/.test(hex.trim())) throw new Error("not a 32-byte key in hex");
     return new Key(Buffer.from(hex.trim(), "hex"));
   }
 
   static fromFile(path: string): Key {
-    return Key.fromHex(readFileSync(path, "utf8"));
+    try {
+      return Key.fromHex(readFileSync(path, "utf8"));
+    } catch (err) {
+      throw new Error(`key ${path}: ${(err as Error).message}`);
+    }
   }
 
   sign(message: Buffer): WireSignature {
