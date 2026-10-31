@@ -6,10 +6,12 @@
 //!
 //! ```text
 //! kernable-soak run [--minutes 60] [--dir DIR] [--backend sqlite|file] [--check-every 10]
-//!                   [--clients 8] [--seed N] [--fault-every 45] [--faults a,b,...]
+//!                   [--clients 8] [--rate 0] [--seed N] [--fault-every 45] [--faults a,b,...]
 //!                   [--data DIR] [--fill DIR] [--power-loss-cmd CMD]
 //! kernable-soak app    (the Rust app; started by `run`)
 //! ```
+//!
+//! `--rate` limits the load to that many commands per second (0: as fast as they are answered).
 //!
 //! Faults: kernel-kill, kernel-term, app-kill, app-pause, net-reset, net-down, net-slow, and
 //! with `--fill` (a directory on a small file system that also holds `--data`) disk-full, with
@@ -184,6 +186,7 @@ async fn run(a: Args) -> Result<(), String> {
     let check_every = Duration::from_secs(a.num("check-every", 10)? * 60);
     let fault_every = a.num("fault-every", 45)?;
     let clients = a.num("clients", 8)?;
+    let rate = a.num("rate", 0)?;
     let seed = a.num(
         "seed",
         SystemTime::now()
@@ -350,8 +353,14 @@ async fn run(a: Args) -> Result<(), String> {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     say("everything is connected; load starts");
+    // `--rate`: commands per second over all clients (0: as fast as they are answered).
+    let every = match rate {
+        0 => Duration::ZERO,
+        r => Duration::from_secs_f64(clients as f64 / r as f64),
+    };
     for n in 0..clients {
-        load.client(n as u32, url.clone(), me.clone(), seed.wrapping_add(n + 1));
+        let seed = seed.wrapping_add(n + 1);
+        load.client(n as u32, url.clone(), me.clone(), seed, every);
     }
     let client =
         Kernable::new(Options::new(dir.join("app.key")).url(&url)).map_err(|e| e.to_string())?;

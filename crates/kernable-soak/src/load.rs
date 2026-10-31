@@ -80,8 +80,9 @@ impl Load {
         }
     }
 
-    /// A client submitting one command after another while the load runs.
-    pub fn client(&self, n: u32, addr: String, me: Identity, seed: u64) {
+    /// A client submitting one command after another while the load runs, at most one per
+    /// `every` (zero: as fast as answers come).
+    pub fn client(&self, n: u32, addr: String, me: Identity, seed: u64, every: Duration) {
         let load = self.clone();
         tokio::spawn(async move {
             let mut rng = Rng::new(seed);
@@ -90,11 +91,13 @@ impl Load {
                 while !load.running.load(Ordering::SeqCst) {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
+                let started = Instant::now();
                 load.stats.in_flight.fetch_add(1, Ordering::SeqCst);
                 let cmd = command(&load.run, n, i, &mut rng, &me.key);
                 load.submit_until_answered(&addr, &me, cmd, &mut channel)
                     .await;
                 load.stats.in_flight.fetch_sub(1, Ordering::SeqCst);
+                tokio::time::sleep(every.saturating_sub(started.elapsed())).await;
             }
         });
     }
