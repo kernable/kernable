@@ -443,6 +443,78 @@ async fn a_personal_key_lives_in_the_vault_and_erasing_its_subject_frees_it() {
     assert_eq!(outcome(&after, take("c8", "o3")).await, "committed");
 }
 
+/// The vault value of the personal key `stream` holds.
+fn personal_ref(env: &Env, stream: &StreamId) -> String {
+    let store = kernable_store::open_read_only(&env.store).unwrap();
+    let index = store.index().unwrap();
+    let (_, held) = index.iter().find(|(s, _)| s == stream).unwrap();
+    held.keys[0].vault_ref.clone()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_personal_key_keeps_its_vault_value_while_held_across_a_restart() {
+    let env = start_custom("unique-personal-kept", with_vault).await;
+    let erasing_worker = || {
+        let writes: VaultWriter = Arc::new(|cmd: &Command| {
+            let p: Value = serde_json::from_slice(&cmd.payload).unwrap_or_default();
+            (
+                Vec::<VaultValue>::new(),
+                p["erase"].as_str().unwrap_or_default().to_owned(),
+            )
+        });
+        TestWorker {
+            writes_vault: Some(writes),
+            ..indexing_worker()
+        }
+    };
+    start_worker(env.addr.clone(), erasing_worker()).await;
+    let email = ("email", "max@firma.de", false, "k-1");
+    let with = |facts: &[&str]| payload(&[email], facts, &[]);
+    let o1 = stream("t1", "o1");
+
+    assert_eq!(
+        outcome(&env, order("c1", "PlaceOrder", "o1", "t1", with(&[]))).await,
+        "committed"
+    );
+    let first = personal_ref(&env, &o1);
+    // A new set that keeps the key keeps its vault value; it does not seal another.
+    assert_eq!(
+        outcome(&env, order("c2", "AddItem", "o1", "t1", with(&["open"]))).await,
+        "committed"
+    );
+    assert_eq!(personal_ref(&env, &o1), first);
+
+    // So does the index a restarted kernel loads.
+    let after = restarted(&env, "unique-personal-kept-restarted").await;
+    let eraser = grant(
+        &key(2),
+        &[("run", &["orders.*"]), ("vault_erase", &["orders.*"])],
+    );
+    after.kernel.grant(eraser).unwrap();
+    start_worker(after.addr.clone(), erasing_worker()).await;
+    assert_eq!(
+        outcome(&after, order("c3", "AddItem", "o1", "t1", with(&[]))).await,
+        "committed"
+    );
+    assert_eq!(personal_ref(&after, &o1), first);
+
+    // Erasing the subject still frees the key.
+    let take = order("c4", "PlaceOrder", "o2", "t1", with(&[]));
+    assert_eq!(outcome(&after, take).await, "unique_taken");
+    let opened = order("c5", "PlaceOrder", "e1", "t1", payload(&[], &[], &[]));
+    assert_eq!(outcome(&after, opened).await, "committed");
+    let erasing = order(
+        "c6",
+        "AddItem",
+        "e1",
+        "t1",
+        json!({"erase": "k-1"}).to_string(),
+    );
+    assert_eq!(outcome(&after, erasing).await, "committed");
+    let take = order("c7", "PlaceOrder", "o2", "t1", with(&[]));
+    assert_eq!(outcome(&after, take).await, "committed");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_kernel_needs_a_vault_for_personal_keys() {
     let env = start_custom("unique-personal-vault", with_vault).await;
@@ -628,28 +700,41 @@ async fn keys_facts_and_requirements_over_a_limit_are_an_invalid_index() {
         let result = submit(&env.addr, cmd).await.unwrap();
         assert_eq!(rejection(&result).code, "invalid_index", "{case}");
     }
-    // At the limits, a result commits.
+    // At the limits, a result commits: o1 holds 64 keys and 64 facts, then o2 requires all 64.
     let at_limits: Index = (
         (0..64).map(|n| key_(&"k".repeat(128), hash(n))).collect(),
         (0..64).map(|n| format!("f{n}")).collect(),
         vec![],
     );
-    let id = format!("c{}", cases.len());
-    let worker_index = at_limits.clone();
+    let requiring: Index = (
+        vec![],
+        vec![],
+        (0..64)
+            .map(|n| requirement("orders", "Order", "o1", &format!("f{n}")))
+            .collect(),
+    );
     let env2 = start("unique-limits-at").await;
     start_worker(
         env2.addr.clone(),
         TestWorker {
-            index: Some(Arc::new(move |_: &Command| worker_index.clone())),
+            index: Some(Arc::new(move |cmd: &Command| {
+                match cmd.command_id.as_str() {
+                    "held" => at_limits.clone(),
+                    _ => requiring.clone(),
+                }
+            })),
             ..TestWorker::honest()
         },
     )
     .await;
-    let cmd = signed(command(&id, "PlaceOrder", "o1"), &key(1));
-    assert_eq!(
-        committed_versions(&submit(&env2.addr, cmd).await.unwrap()),
-        [1]
-    );
+    for (id, order) in [("held", "o1"), ("requiring", "o2")] {
+        let cmd = signed(command(id, "PlaceOrder", order), &key(1));
+        assert_eq!(
+            committed_versions(&submit(&env2.addr, cmd).await.unwrap()),
+            [1],
+            "{id}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
