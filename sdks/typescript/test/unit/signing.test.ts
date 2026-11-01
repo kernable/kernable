@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-import type { WireCommand } from "../src/rpc.ts";
+import type { WireCommand } from "../../src/rpc.ts";
 import {
   Key,
   cacheMessage,
@@ -19,9 +19,9 @@ import {
   snapshotMessage,
   subscribeMessage,
   vaultRef,
-} from "../src/signing.ts";
+} from "../../src/signing.ts";
 
-const v = JSON.parse(readFileSync(new URL("../../../proto/test-vectors/signing.json", import.meta.url), "utf8"));
+const v = JSON.parse(readFileSync(new URL("../../../../proto/test-vectors/signing.json", import.meta.url), "utf8"));
 const hex = (s: string) => Buffer.from(s, "hex");
 const key = Key.fromHex(v.key.seed);
 

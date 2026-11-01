@@ -1,4 +1,4 @@
-"""Python SDK: signing vectors, and a counter domain end to end against the real kernel.
+"""Python SDK: a counter domain end to end against the real kernel.
 
 Run from sdks/python: .venv/bin/python -m unittest discover tests   (after `cargo build`)
 """
@@ -6,7 +6,6 @@ Run from sdks/python: .venv/bin/python -m unittest discover tests   (after `carg
 import contextlib
 import hashlib
 import io
-import json
 import os
 import re
 import sqlite3
@@ -18,182 +17,9 @@ from unittest import mock
 
 import grpc
 
-from kernable import ClientClosed, CommandContext, Data, Kernable, NotSettled, Outcome, QueryOutcome, Rejected, RequestContext, _upcast, domain
-from kernable.signing import (Key, cache_message, challenge_message, command_message, data_message, derived_id,
-                              membership_message, query_message, rejection_message, result_message, snapshot_message, vault_ref)
-from kernable.v1 import kernable_pb2 as pb
-from tests.kernel import ROOT, TestKernel
-
-with open(os.path.join(ROOT, "proto", "test-vectors", "signing.json")) as f:
-    VECTORS = json.load(f)
-
-
-def vector_context(c: dict) -> pb.RequestContext:
-    context = dict(c)
-    attributes = [pb.Attribute(**a) for a in context.pop("attributes")]
-    return pb.RequestContext(**context, attributes=attributes)
-
-
-def vector_command(c) -> pb.Command:
-    fields = ("command_id", "tenant_id", "domain", "aggregate_type", "aggregate_id", "command_type")
-    cmd = pb.Command(**{k: c[k] for k in fields}, payload=bytes.fromhex(c["payload_hex"]))
-    if "context" in c:
-        cmd.context.CopyFrom(vector_context(c["context"]))
-    return cmd
-
-
-
-class ApplyTest(unittest.TestCase):
-    """apply: a handler changes a copy of the state in place, or returns a state that replaces it."""
-
-    def test_apply_changes_a_copy_in_place_deletes_or_replaces(self):
-        account = domain("crm").aggregate("Account", {"tags": [], "status": "new"})
-
-        @account.apply("Opened")
-        def _(state, data):
-            state["email"] = data["email"]
-            state["tags"].append("open")
-
-        account.apply("Reset", lambda state, data: {"tags": [], "status": "reset"})
-
-        @account.apply("Closed")
-        def _(state, data):
-            del state["email"]
-
-        opened = account.fold([("Opened", 1, {"email": "a@example.com"})])
-        self.assertEqual(opened, {"email": "a@example.com", "tags": ["open"], "status": "new"})
-        self.assertEqual(account.initial, {"tags": [], "status": "new"})  # untouched
-        closed = account.fold([("Closed", 1, {})], opened)
-        self.assertEqual(closed, {"tags": ["open"], "status": "new"})
-        self.assertIn("email", opened)  # the state before is untouched
-        self.assertEqual(account.fold([("Opened", 1, {"email": "b@example.com"}), ("Reset", 1, {})]),
-                         {"tags": [], "status": "reset"})
-
-    def test_a_command_handler_runs_directly_with_a_command_context(self):
-        account = domain("crm").aggregate("Account", {"email": None})
-
-        @account.command("Close")
-        def _(state, data, cmd, ctx):
-            if state["email"] is None:
-                raise Rejected("no account", "not_found")
-            what = f"{cmd.domain}.{cmd.aggregate_type}.{cmd.type}"
-            return [{"type": "Closed", "data": {"id": ctx.id(), "by": cmd.command_id, "what": what, "data": data,
-                                                "at": ctx.now().isoformat(), "who": ctx.request.sender_identity}}]
-
-        at = datetime(2026, 1, 2, tzinfo=timezone.utc)
-        ctx = CommandContext.new("close-1", RequestContext(sender_identity="alice"), at)
-        self.assertEqual(ctx.deadline, at + timedelta(seconds=30))
-        with self.assertRaises(Rejected) as rejected:
-            account.handle({"email": None}, "Close", None, ctx)
-        self.assertEqual(rejected.exception.code, "not_found")
-        closed = account.handle({"email": "a@example.com"}, "Close", None, ctx)
-        self.assertEqual(closed, [{"type": "Closed", "data": {
-            "id": derived_id("close-1", 0), "by": "close-1", "what": "crm.Account.Close", "data": {},
-            "at": "2026-01-02T00:00:00+00:00", "who": "alice"}}])
-        with self.assertRaisesRegex(ValueError, "no handler for Open on crm.Account"):
-            account.handle({}, "Open", {}, ctx)
-
-class ListenerDefinitionTest(unittest.TestCase):
-    """Listeners are defined on a domain: unqualified types are the domain's own."""
-
-    def test_unqualified_types_are_the_own_domains_and_qualified_ones_stay(self):
-        shop, identity = domain("Shop"), domain("Identity")
-        carts = shop.read_model("carts").use(identity)
-        self.assertEqual((carts.name, carts.order, carts.start), ("carts", 0, 0))
-        mailer = shop.reactor("mailer")
-        self.assertEqual((mailer.order, mailer.start), (10, None))
-        carts.on("ItemAdded", lambda data: None)
-        carts.on("Identity.AccountRegistered", lambda data: None)
-        carts.on("Identity.*", lambda data: None)
-        carts.query("GetCart", lambda data: None)
-        carts.query("Identity.GetAccount", lambda data: None)
-        carts.middleware(["*", "Checkout", "Identity.*"], fn=lambda check: None)
-        self.assertEqual(list(carts._handlers), ["Shop.ItemAdded", "Identity.AccountRegistered", "Identity.*"])
-        self.assertEqual(list(carts._queries), ["Shop.GetCart", "Identity.GetAccount"])
-        self.assertEqual(list(carts._middlewares["before"][0].types), ["*", "Shop.Checkout", "Identity.*"])
-        with self.assertRaises(ValueError):
-            carts.query("Identity.*")
-        with self.assertRaises(ValueError):
-            carts.on("Identity.Account.Registered")
-
-    def test_listener_types_are_checked_when_defined(self):
-        # A bare `*` is not the own domain (that is `counters.*`), as in TypeScript and Rust.
-        model = domain("counters").read_model("model")
-        for event_type in ("Added", "crm.Created", "crm.*", "counters.*"):
-            model.on(event_type, lambda data: None)
-        self.assertEqual(list(model._handlers), ["counters.Added", "crm.Created", "crm.*", "counters.*"])
-        for event_type in ("*", "", "crm.a.b", "Add*"):
-            with self.assertRaises(ValueError, msg=event_type):
-                model.on(event_type, lambda data: None)
-
-    def test_a_name_is_defined_once_per_domain(self):
-        shop = domain("shop")
-        shop.aggregate("Cart", 0)
-        shop.read_model("carts")
-        with self.assertRaisesRegex(ValueError, "shop has an aggregate Cart already"):
-            shop.aggregate("Cart", 1)
-        for define in (shop.read_model, shop.reactor):
-            with self.assertRaisesRegex(ValueError, "shop has a listener carts already"):
-                define("carts")
-        self.assertEqual(([a.name for a in shop.aggregates], [l.name for l in shop.listeners]), (["Cart"], ["carts"]))
-
-    def test_the_own_domains_event_schemas_apply_without_use(self):
-        shop = domain("Shop")
-        carts = shop.read_model("carts")
-        shop.event("ItemAdded", 2).upcast(1, lambda d: {"sku": d["id"]})  # declared after the listener
-        self.assertEqual(_upcast(carts._domains.get("Shop"), "Shop", "ItemAdded", 1, {"id": "x"}),
-                         (2, {"sku": "x"}))
-        self.assertIsNone(carts._domains.get("Identity"))
-
-
-class SigningVectors(unittest.TestCase):
-    def check(self, name: str, message: bytes):
-        key = Key(VECTORS["key"]["seed"])
-        self.assertEqual(key.id, VECTORS["key"]["key_id"])
-        self.assertEqual(message.hex(), VECTORS[name]["message"])
-        self.assertEqual(key.sign(message).sig.hex(), VECTORS[name]["signature"])
-
-    def test_messages_and_signatures_match(self):
-        self.check("command", command_message(vector_command(VECTORS["command"]["input"])))
-        r = VECTORS["result"]["input"]
-        events = [pb.NewEvent(event_type=e["event_type"], schema=e["schema"], payload=bytes.fromhex(e["payload_hex"])) for e in r["events"]]
-        self.check("result", result_message(vector_command(r["command"]), r["expected_version"], events))
-        j = VECTORS["rejection"]["input"]
-        self.check("rejection", rejection_message(j["command_id"], pb.Rejected(code=j["code"], message=j["message"])))
-        self.check("challenge", challenge_message(bytes.fromhex(VECTORS["challenge"]["input"]["nonce_hex"])))
-        n = VECTORS["snapshot"]["input"]
-        stream = pb.Command(tenant_id=n["tenant_id"], domain=n["domain"], aggregate_type=n["aggregate_type"],
-                            aggregate_id=n["aggregate_id"])
-        self.check("snapshot", snapshot_message(stream, n["version"], n["schema"], bytes.fromhex(n["state_hex"])))
-        q = dict(VECTORS["query"]["input"])
-        context = vector_context(q.pop("context"))
-        payload = bytes.fromhex(q.pop("payload_hex"))
-        query = pb.QueryRequest(**q, payload=payload, context=context)
-        self.check("query", query_message(query))
-        refs = [vault_ref(bytes.fromhex(i["salt_hex"]), i["subject"], i["secret"], bytes.fromhex(i["value_hex"]))
-                for i in VECTORS["vault_ref"]["input"]]
-        self.assertEqual(refs, VECTORS["vault_ref"]["refs"])
-        c = vector_command(VECTORS["command_vault"]["input"]["command"])
-        c.vault_refs.extend(VECTORS["command_vault"]["input"]["vault_refs"])
-        self.check("command_vault", command_message(c))
-        v = VECTORS["result_vault"]["input"]
-        for e, refs_, erases in zip(events, v["vault_refs"], v["erases"]):
-            e.vault_refs.extend(refs_)
-            e.erases = erases
-        self.check("result_vault", result_message(vector_command(r["command"]), r["expected_version"], events))
-        d = VECTORS["derived_id"]
-        self.assertEqual([derived_id(d["input"]["command_id"], n) for n in d["input"]["n"]], d["ids"])
-        p = dict(VECTORS["data_put"]["input"])
-        op, data, context = p.pop("op"), bytes.fromhex(p.pop("data_hex")), vector_context(p.pop("context"))
-        self.check("data_put", data_message(op, pb.DataRequest(**p, data=data, context=context)))
-        s = dict(VECTORS["cache_set"]["input"])  # without a context: encoded like an empty one
-        op, value = s.pop("op"), bytes.fromhex(s.pop("value_hex"))
-        self.check("cache_set", cache_message(op, pb.CacheRequest(**s, value=value)))
-        self.assertEqual(cache_message(op, pb.CacheRequest(**s, value=value, context=pb.RequestContext())).hex(),
-                         VECTORS["cache_set"]["message"])
-        m = dict(VECTORS["membership"]["input"])
-        metadata = [pb.Attribute(**a) for a in m.pop("metadata")]
-        self.check("membership", membership_message(pb.Membership(**m, metadata=metadata)))
+from kernable import ClientClosed, Data, Kernable, NotSettled, Outcome, QueryOutcome, Rejected, RequestContext, domain
+from kernable.signing import Key, derived_id
+from tests.kernel import TestKernel
 
 
 counters_domain = domain("counters")
@@ -1370,15 +1196,6 @@ class EndToEnd(unittest.TestCase):
             if os.path.isfile(path):
                 with open(path, "rb") as f:
                     self.assertNotIn(b"max@firma.de", f.read(), name)
-
-    def test_event_schemas_are_checked_when_defined(self):
-        counters = domain("counters")
-        with self.assertRaises(ValueError):
-            counters.event("Incremented", 0)
-        with self.assertRaises(ValueError):
-            counters.event("counters.Incremented", 2)
-        with self.assertRaises(ValueError):
-            counters.event("Incremented", 2).upcast(2, lambda d: d)
 
 
 if __name__ == "__main__":

@@ -3,8 +3,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { CommandContext, Rejected, domain } from "../src/index.ts";
-import { derivedId } from "../src/signing.ts";
+import { CommandContext, Rejected, domain } from "../../src/index.ts";
+import { derivedId } from "../../src/signing.ts";
 
 type Account = { email?: string; tags: string[]; status: string };
 
