@@ -244,7 +244,7 @@ impl Vault {
             let value = self
                 .cipher
                 .decrypt(
-                    Nonce::from_slice(&nonce),
+                    stored_nonce(&r, &nonce)?,
                     Payload {
                         msg: &sealed,
                         aad: r.as_bytes(),
@@ -336,7 +336,7 @@ impl Vault {
             let aad = r.as_bytes();
             let value = self
                 .cipher
-                .decrypt(Nonce::from_slice(nonce), Payload { msg: sealed, aad })
+                .decrypt(stored_nonce(r, nonce)?, Payload { msg: sealed, aad })
                 .map_err(|_| {
                     Error::Vault(format!("value {r} cannot be decrypted with the old key"))
                 })?;
@@ -384,6 +384,18 @@ impl Vault {
         let rows = stmt.query_map([], |r| r.get(0))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
+}
+
+/// The nonce a value was stored with. A damaged vault may hold one of another length, which
+/// `Nonce::from_slice` would panic on.
+fn stored_nonce<'a>(r: &str, nonce: &'a [u8]) -> Result<&'a Nonce<aes_gcm::aead::consts::U12>> {
+    if nonce.len() != 12 {
+        return Err(Error::Vault(format!(
+            "value {r} has a nonce of {} bytes, not 12: the vault is damaged",
+            nonce.len()
+        )));
+    }
+    Ok(Nonce::from_slice(nonce))
 }
 
 #[cfg(test)]
@@ -438,6 +450,25 @@ mod tests {
         // A new key starts over, counting the values it encrypted again.
         vault.rekey(&[2; 32]).unwrap();
         assert_eq!(vault.sealed().unwrap(), 3);
+    }
+
+    #[test]
+    fn a_damaged_nonce_is_an_error_not_a_panic() {
+        // Found by the store_files fuzz target.
+        let vault = Vault::open("memory:", &[1; 32]).unwrap();
+        let v = value(1);
+        put(&vault, &[v.clone()]).unwrap();
+        vault
+            .conn()
+            .execute("UPDATE vault SET nonce = ?1", [vec![0u8; 10]])
+            .unwrap();
+        let got = vault.get(&[v.r#ref.clone()]).err().unwrap();
+        assert!(got.to_string().contains("nonce of 10 bytes"), "{got}");
+        let rekeyed = vault.rekey(&[2; 32]).err().unwrap();
+        assert!(
+            rekeyed.to_string().contains("nonce of 10 bytes"),
+            "{rekeyed}"
+        );
     }
 
     #[test]
