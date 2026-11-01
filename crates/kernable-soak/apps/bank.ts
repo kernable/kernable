@@ -56,10 +56,12 @@ const kernable = new Kernable();
 bank.reactor("flagger-ts")
   .on("Withdrawn", async (d: { amount: number }, evt, ctx) => {
     if (d.amount < 50) return;
-    await kernable.submit({
+    const outcome = await kernable.submit({
       domain: "bank_ts", aggregateType: "account", aggregateId: evt.aggregateId, type: "Flag",
       data: { position: evt.position }, id: `flag-${evt.position}`, wait: "committed", context: ctx.follow(),
     });
+    // A rejection is stored for good under this ID: say so, B2 names it too.
+    if (!outcome.committed) console.error(`flagger-ts: flag-${evt.position} rejected (${outcome.code}: ${outcome.message})`);
   });
 
 await kernable.app({ service: "bank-ts", domains: [bank] }).run();

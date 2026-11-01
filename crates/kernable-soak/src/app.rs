@@ -154,7 +154,13 @@ pub async fn run() -> Result<(), BoxError> {
                         .id(format!("flag-{}", evt.position))
                         .wait(Wait::Committed)
                         .context(ctx.follow());
-                    k.submit(flag).await?;
+                    // A rejection is stored for good under this ID: say so, B2 names it too.
+                    if let kernable::Outcome::Rejected(r) = k.submit(flag).await? {
+                        eprintln!(
+                            "flagger-rs: flag-{} rejected ({}: {})",
+                            evt.position, r.code, r.message
+                        );
+                    }
                 }
                 Ok(())
             }

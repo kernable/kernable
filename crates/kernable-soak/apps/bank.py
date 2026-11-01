@@ -5,6 +5,7 @@ while open, the fact open, which a withdrawal sent to an account requires of tha
 soak checks all three against the log."""
 
 import os
+import sys
 
 from kernable import Kernable, Rejected, Requirement, domain
 
@@ -112,8 +113,12 @@ flagger = bank.reactor("flagger-py")
 def _(d, evt, ctx):
     if d["amount"] < 50:
         return
-    k.submit("bank_py", "account", evt.aggregate_id, "Flag", {"position": evt.position},
-             id=f"flag-{evt.position}", wait="committed", context=ctx.follow())
+    outcome = k.submit("bank_py", "account", evt.aggregate_id, "Flag", {"position": evt.position},
+                       id=f"flag-{evt.position}", wait="committed", context=ctx.follow())
+    # A rejection is stored for good under this ID: say so, B2 names it too.
+    if not outcome.committed:
+        print(f"flagger-py: flag-{evt.position} rejected ({outcome.code}: {outcome.message})",
+              file=sys.stderr, flush=True)
 
 
 k.app(service="bank-py", domains=[bank]).run()

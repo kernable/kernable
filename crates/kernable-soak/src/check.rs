@@ -20,7 +20,7 @@ use std::{
 
 use kernable::{Kernable, Query};
 use kernable_core::{
-    proto::{Command, Event, UniqueKey},
+    proto::{Command, UniqueKey, command_result::Outcome},
     signing,
 };
 use kernable_store::invariants::Log;
@@ -119,7 +119,7 @@ pub async fn round(store: &str, kernel_key_id: &str, load: &Load, client: &Kerna
             .iter()
             .map(ToString::to_string),
     );
-    let expected = bank_rules(&log.events, &mut violations);
+    let expected = bank_rules(&log, &mut violations);
     index_rules(&log, &load.refusals.lock().unwrap(), &mut violations);
 
     // B3: every account of every app, as its read model answers.
@@ -153,9 +153,10 @@ pub async fn round(store: &str, kernel_key_id: &str, load: &Load, client: &Kerna
 
 /// B1 and B2 over the log; the balance and flags of every account.
 fn bank_rules(
-    events: &[Event],
+    log: &Log,
     violations: &mut Vec<String>,
 ) -> BTreeMap<(&'static str, String), (i64, i64)> {
+    let events = &log.events;
     let mut accounts: BTreeMap<(&'static str, String), (i64, i64)> = BTreeMap::new();
     // Withdrawals of 50 or more by position, and how often each was flagged.
     let mut big: BTreeMap<u64, (&'static str, String)> = BTreeMap::new();
@@ -198,7 +199,9 @@ fn bank_rules(
                 "B2 flagged once: the withdrawal at {position} ({key:?}) was flagged as {flags:?}"
             )),
             None => violations.push(format!(
-                "B2 flagged once: the withdrawal at {position} ({key:?}) was never flagged"
+                "B2 flagged once: the withdrawal at {position} ({key:?}) was never flagged; \
+                 its Flag command: {}",
+                flag_command(log, *position)
             )),
         }
     }
@@ -210,6 +213,20 @@ fn bank_rules(
         }
     }
     accounts
+}
+
+/// What became of the reactor's Flag command for the withdrawal at `position`.
+fn flag_command(log: &Log, position: u64) -> String {
+    let id = format!("flag-{position}");
+    match log.results.get(&id) {
+        None => format!("{id} was never stored"),
+        Some(None) => format!("{id} is pending"),
+        Some(Some(result)) => match &result.outcome {
+            Some(Outcome::Rejected(r)) => format!("{id} rejected ({}: {})", r.code, r.message),
+            Some(Outcome::Committed(_)) => format!("{id} committed, without a Flagged event"),
+            other => format!("{id}: {other:?}"),
+        },
+    }
 }
 
 /// What held a number or whether an account was open, from a log position on: in order.
