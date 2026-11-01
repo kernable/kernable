@@ -1,4 +1,15 @@
-.PHONY: check prune py check-packages torture fuzz docs soak
+.PHONY: test check prune py check-packages torture fuzz docs soak
+# The simple tier: syntax, types and in-process tests, with no kernel or worker process and no
+# real waiting (W6). Runs in about a minute; `make check` runs everything.
+test: py
+	cargo fmt --all --check
+	cargo clippy --workspace --all-targets -- -D warnings
+	cargo test --workspace --lib
+	cargo test -p kernable-core -p kernable-store --tests
+	cargo test -p kernable --test store
+	cd sdks/typescript && npm install --no-audit --no-fund --silent && npm test
+	cd sdks/python && .venv/bin/python -m unittest discover -s tests/unit -t .
+
 check: prune py
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets -- -D warnings

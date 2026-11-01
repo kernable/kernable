@@ -32,6 +32,7 @@ Every code example in the documentation is a file that runs in `make check` agai
 ## Develop
 
 ```sh
+make test           # the simple tier: fmt, clippy and in-process tests, no kernel processes (about a minute)
 make check          # Rust, TypeScript, Python, the SDKs and the documentation, against every storage backend
                     # (Python ≥ 3.10; the first run installs the Python SDK's venv)
 make check-packages # builds the npm package and the Python wheel, installs and runs them
