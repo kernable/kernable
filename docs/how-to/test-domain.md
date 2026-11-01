@@ -18,6 +18,8 @@ These run with `node --test`, `python -m unittest` and `cargo test`. They test t
 
 `fold` upcasts every event first, as a worker does. To test an upcast ([Change an event's format](./event-versions)), fold an event at its old schema, such as `{ type: "ItemAdded", schema: 1, data: { sku: "apple", qty: 2 } }`, and check the state.
 
+To test unique keys and facts, pass a folded state to the aggregate's `index`: it returns the keys and facts a worker would send for it ([Unique keys and conditions](../concepts/uniqueness#testing)).
+
 ## Read models, reactors and middleware, against a real kernel
 
 These depend on the kernel: order, settling, queries and checks. Test them end to end:

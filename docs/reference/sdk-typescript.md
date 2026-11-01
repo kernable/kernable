@@ -280,7 +280,12 @@ export type Outcome =
 
 What came of a command (`Kernable.submit`): committed with the events it stored, or rejected
 with a code and message (by its handler, a middleware or the kernel, e.g. `version_mismatch`).
-A rejection is a result, not an exception; check `committed`:
+The kernel's codes for unique keys and requirements (see `Aggregate.unique`):
+`unique_taken` (another aggregate holds one of the keys the command would leave its aggregate
+with: `orders.Order key number is taken`, never the value), `requirement_missing` (an aggregate
+the command requires does not hold the fact: `orders.Vehicle v1 does not hold open`) and
+`invalid_index` (too many keys, facts or requirements, or a malformed name: a bug in the
+aggregate's definition). A rejection is a result, not an exception; check `committed`:
 
 ```ts
 const outcome = await kernable.submit({ domain: "shop", aggregateType: "cart", aggregateId: "c1", type: "CheckOut" });
@@ -304,6 +309,58 @@ export type FoldEvent = Partial<EventMeta> & { type: string; schema: number; dat
 ```
 
 An event to fold: type, payload version and data, plus as much of `EventMeta` and its request context as known.
+
+### Requirement
+
+A fact another aggregate of the command's tenant must hold when the command commits: what
+`CommandOptions.requires` returns. The kernel checks it atomically with the commit; if the
+aggregate does not hold the fact (see `Aggregate.fact`), the command is rejected with
+`requirement_missing`.
+
+```ts
+{ domain: "funds", aggregateType: "Vehicle", aggregateId: data.vehicleId, fact: "open" }
+```
+
+- `domain: string`: The domain of the aggregate: `funds`.
+- `aggregateType: string`: The aggregate type within the domain, unqualified: `Vehicle`.
+- `aggregateId: string`
+- `fact: string`: The fact it must hold, as declared with `Aggregate.fact`: `open`.
+
+### CommandOptions
+
+Options of one command handler: the third argument of `Aggregate.command`.
+
+- `requires?: (data: D, state: S) => Requirement[]`: The facts other aggregates of the command's tenant must hold for the command to commit, from the command's data and the state before it: `(data, state) => Requirement[]`. Checked by the kernel at commit, so no command in between can remove a fact unseen; a missing one rejects the command with `requirement_missing`. If it throws, the command is rejected as for a handler error.
+
+### UniqueOptions
+
+Options of a unique key: the third argument of `Aggregate.unique`.
+
+- `scope?: "tenant" | "global"`: `tenant` (default): no two aggregates of this type in the same tenant hold the same value; `global`: none in any tenant. A global key tells a worker of any tenant whether a value is taken.
+- `personal?: (state: S) => string | null | undefined`: Makes the key personal: the person (subject) its values belong to, from the state, e.g. `(state) => state.customerId`. The kernel keeps the key in the vault, and erasing the subject frees it. An empty or missing subject: the aggregate holds no value of the key.
+
+### HeldKey
+
+A unique key an aggregate holds, as `Aggregate.index` returns it.
+
+- `name: string`: The key's name, as declared with `Aggregate.unique`.
+- `value: string`: The value, as the key's function returned it. The kernel gets only its SHA-256 hash.
+- `scope: "tenant" | "global"`
+- `subject?: string`: For a personal key: the person the value belongs to.
+
+### Index
+
+The unique keys and facts an aggregate holds in a state: what `Aggregate.index` returns.
+
+- `keys: HeldKey[]`: In the order of declaration, the values of a key in the order its function returned them.
+- `facts: string[]`: The facts that are true, in the order of declaration.
+
+### reindexType()
+
+`export function reindexType(aggregateType: string): string`
+
+The command an aggregate type with unique keys or facts runs itself, one per aggregate type
+because command types are unique within a domain: `_reindex_Customer`. See `Kernable.reindex`.
 
 ### AggregateOptions
 
@@ -412,6 +469,11 @@ if any) into the state, calls the command's handler, and sends the events it ret
 kernel commits them only on the version the state was folded from; if another command came
 first, the command runs again on the new state.
 
+An aggregate may hold unique keys (`unique`: no other aggregate holds the same value) and facts
+(`fact`), both computed from its state; a command may require facts of other aggregates
+(`CommandOptions.requires`). The kernel checks both atomically with the commit, so neither a
+read model nor a registry of claims is needed to keep a value unique or a condition true.
+
 ```ts
 const cart = shopDomain.aggregate("cart", { items: 0, checkedOut: false });
 cart.apply("ItemAdded", (state, data: { qty: number }) => { state.items += data.qty; });
@@ -430,8 +492,14 @@ cart.command("AddItem", (state, data: { sku: string; qty: number }) => {
 - `readonly handlers = new Map<string, Handle<S>>()`: The command handlers per command type.
 - `readonly events: Map<string, EventSchema>`: The domain's event schemas.
 - `readonly commands: Map<string, CommandSchema>`: The domain's command schemas: which fields of a command are personal.
+- `readonly keys = new Map<string, KeyDefinition<S>>()`: The unique keys by name; see `unique`.
+- `readonly facts = new Map<string, (state: S) => boolean>()`: The facts by name; see `fact`.
+- `readonly requirements = new Map<string, (data: any, state: S) => Requirement[]>()`: What the commands require, per command type; see `CommandOptions.requires`.
 - `apply<D = any>(eventType: string, fn: (state: S, data: D, evt: EventMeta, ctx: ApplyContext) => S | void): this`: How an event of `eventType` (unqualified, of this domain) changes the state: `fn(state, data, evt, ctx)` changes `state` in place and returns nothing, or returns a new state that replaces it. `state` is a copy, so changing it never touches the state it came from. `data` is upcast to the version declared with `Domain.event`. Events without an `apply` leave the state as it is. Must be deterministic: no clock, no random values, no I/O.
-- `command<D = any>(commandType: string, fn: (state: S, data: D, cmd: CommandMeta, ctx: CommandContext) => NewEvent[] | Promise<NewEvent[]>): this`: Which events a `commandType` command (unqualified, of this domain) produces: `fn(state, data, cmd, ctx)` gets the current state and the command's data and returns the events (`NewEvent[]`, possibly empty), or a promise of them. Throw `Rejected` to reject the command. It may run more than once for the same command, so it must decide the same way every time: use `ctx.now()` and `ctx.id()` instead of the clock and random IDs, and leave side effects to reactors.
+- `command<D = any>(commandType: string, fn: (state: S, data: D, cmd: CommandMeta, ctx: CommandContext) => NewEvent[] | Promise<NewEvent[]>, options: CommandOptions<S, D> = {}): this`: Which events a `commandType` command (unqualified, of this domain) produces: `fn(state, data, cmd, ctx)` gets the current state and the command's data and returns the events (`NewEvent[]`, possibly empty), or a promise of them. Throw `Rejected` to reject the command. It may run more than once for the same command, so it must decide the same way every time: use `ctx.now()` and `ctx.id()` instead of the clock and random IDs, and leave side effects to reactors. `options.requires`: facts other aggregates must hold for the command to commit, see `CommandOptions`. Throws for a type starting with `_reindex_`: the built-in commands aggregates with unique keys or facts run themselves (`_reindex_Customer`, see `Kernable.reindex`).
+- `unique(name: string, fn: (state: S) => string | string[] | null | undefined, options: UniqueOptions<S> = {}): this`: Declares a unique key `name`: `fn(state)` returns the value (or values) this aggregate holds, or `null`/`undefined` for none, and no other aggregate of this type holds the same value within the tenant (`options.scope`, default `tenant`) or in any tenant (`global`). After every command the aggregate holds exactly the values its new state yields: a changed value frees the old one in the same commit. A command that would leave the aggregate with a value another one holds is rejected with `unique_taken`, and nothing is written. Normalise the value yourself (`email.trim().toLowerCase()`); the kernel gets only its SHA-256 hash. `options.personal` keeps the key in the vault, freed by erasing its subject. Aggregates that existed before the key was declared hold it from their next command on; run `Kernable.reindex` to give it to them at once. Two of them with the same value: the second to run a command is rejected with `unique_taken` until its value changes. `fn` must be deterministic, as `apply` must; if it throws, the command is rejected as for a handler error. Throws for a name declared already, an empty name, or one with a dot or over 128 bytes. ```ts customer.unique("email", (state) => state.email?.toLowerCase(), { personal: (state) => state.id }); ```
+- `fact(name: string, fn: (state: S) => boolean): this`: Declares a fact `name` this aggregate holds while `fn(state)` is true: what other aggregates' commands require (`CommandOptions.requires`). The kernel keeps the facts each aggregate holds after its last command. `fn` must be deterministic, as `apply` must. Throws for a name declared already, an empty name, or one with a dot or over 128 bytes. ```ts vehicle.fact("open", (state) => state.status === "open"); ```
+- `index(state: S): Index`: The unique keys and facts this aggregate holds in `state`, as a worker computes them after a command; no kernel needed, so it suits tests next to `handle`: `cart.index(cart.fold(history))`. A key's values come once each; a personal key without a subject holds none. Throws what a key's or fact's function throws, or if a key's function returns something other than a string, a list of strings, `null` or `undefined`.
 - `async handle(state: S, commandType: string, data: unknown, ctx: CommandContext): Promise<NewEvent[]>`: Runs the `commandType` handler on a copy of `state`, as a worker does, e.g. in a unit test, and returns the events it produces: `await cart.handle(state, "AddItem", { sku: "apple", qty: 2 }, new CommandContext("c-1"))`. The handler's `CommandMeta` has the command ID of `ctx`, this aggregate's domain and name, and an empty aggregate ID and tenant; `data` goes through JSON as it would on the wire. Rejects with the handler's `Rejected` (or other error), or with an error if there is no handler for `commandType`.
 - `schemaOf(type: string): number`: The payload version this aggregate writes `type` events at.
 - `fold(history: FoldEvent[], from: S = this.initial): S`: State after `history`, starting from `from` (default: `initial`), as a worker computes it; no kernel needed, so it suits tests: `cart.fold([{ type: "ItemAdded", schema: 1, data: { qty: 2 } }])`. Events are upcast first; events without an `apply` are skipped. Fields of `EventMeta` an event lacks are empty (0 for `version`), as is its request context. Throws if an event's schema is newer than declared or an upcast step is missing.
@@ -519,6 +587,21 @@ await kernable.submit({ domain: "shop", aggregateType: "cart", aggregateId: "c1"
 - `wait?: "settled" | "committed"`: When `submit` returns. `"settled"` (default): once every listener that counts has processed the events, so the next query sees them; throws `NotSettled` after `--settle-timeout-ms`. From a listener's handler, only the listeners with a lower order count. `"committed"`: once the events are stored; read with `QueryOptions.minPosition` to see them. To return once the command is only queued, use `Kernable.enqueue`. See [Settling](../concepts/ordering#settling-reading-your-own-writes).
 - `timeoutMs?: number`: How long to wait for the connection and the outcome; default `Options.timeoutMs`.
 
+### ReindexOptions
+
+Which aggregates `Kernable.reindex` reindexes: domain, aggregate type and IDs.
+
+```ts
+await kernable.reindex({ domain: "crm", aggregateType: "Customer", aggregateIds: ["k1", "k2"] });
+```
+
+- `domain: string`: The domain of the aggregate type: `crm`.
+- `aggregateType: string`: The aggregate type within the domain, unqualified: `Customer`.
+- `aggregateIds: string[]`: The aggregates to reindex; each ID once.
+- `tenant?: string`: Default: the client's tenant (`Options.tenant`).
+- `context?: RequestContext`: Replaces the client's default context (`Options.context`).
+- `timeoutMs?: number`: How long to wait for each outcome; default `Options.timeoutMs`.
+
 ### Kernable
 
 A client of one kernel: it submits commands, asks queries, and runs workers and listeners
@@ -544,6 +627,7 @@ differently: `submit` returns them in its `Outcome`, `query` throws `Rejected`.
 - `async apply(manifest: Manifest): Promise<void>`: Replaces the membership of a service (default: this process's): the workers, listeners and middlewares the kernel waits for, and free metadata. Apply it once per deploy, e.g. from a deploy script, not from every process: the newest apply wins, and an older one that arrives late is refused. The key needs `manage` for the service. A middleware the new membership no longer lists stops checking. Throws if neither `manifest.service` nor `Options.service` names a service. See [Remove a listener](../how-to/remove-listener).
 - `async submit(options: SubmitOptions): Promise<Outcome>`: Runs a command and returns its outcome: `{ committed: true, events }`, or `{ committed: false, code, message }` if it was rejected (a rejection does not throw). By default it returns once the command settled, so a query right after it sees the events; see `SubmitOptions.wait`. Throws `NotSettled` if the command committed but did not settle in time. Idempotent on `options.id`.
 - `async enqueue(options: Omit<SubmitOptions, "wait">): Promise<string>`: Stores the command in the kernel's queue and returns its ID without waiting for it to run (fire and forget). Submit it again with the same `id` to get the outcome.
+- `async reindex(options: ReindexOptions): Promise<Map<string, Outcome>>`: Has these aggregates store the unique keys and facts their current state yields, e.g. after declaring a key on an aggregate type with existing aggregates: each runs the built-in reindex command of its type (`_reindex_<aggregateType>`, see `reindexType`), which produces no events. Returns the outcome per ID, once committed: committed (with no events), or rejected, e.g. with `unique_taken` if another aggregate holds the same value. An ID without events holds nothing. The key needs `run` for `<domain>._reindex_<aggregateType>` on the worker and `submit` here. ```ts const outcomes = await kernable.reindex({ domain: "crm", aggregateType: "Customer", aggregateIds: ["k1", "k2"] }); ```
 - `async query<T = unknown>(options: QueryOptions): Promise<T>`: Asks the read model that answers `domain.type` and returns its answer, typed as `T` (unchecked): `await kernable.query<Cart>({ domain: "shop", type: "GetCart", data: { id: "c1" } })`. Queries always go through the kernel, also within one process, so grants and middleware apply. The kernel waits until the read model has caught up (and reached `minPosition`). Throws `Rejected` if the read model or a middleware rejects it.
 - `listener(listener: Listener): ListenerHandle`: Runs a listener defined with `Domain.readModel` or `Domain.reactor` over this connection: `await kernable.listener(carts).run()`. Handlers added to the definition later still count until `run()` connects.
 - `subscribe(options: SubscribeOptions, handler: (event: StoredEvent) => void | Promise<void>): Subscription`: Streams committed events after `options.after` (backlog first, then live) to `handler`, one at a time, e.g. to export them: `kernable.subscribe({ types: ["shop.*"] }, (e) => ...)`. Reconnects and resumes after the last handled event; if the handler throws, that event is delivered again. Persist `position` yourself to resume across restarts. Unlike a listener, a subscription is not registered: the kernel keeps no position, nobody waits for it, and events arrive as stored (not upcast, vault fields `null`). The key needs `subscribe` for the types.

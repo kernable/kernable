@@ -192,6 +192,7 @@ Always:
 - Decide only from the aggregate's own state and the command's data; use `ctx.now()` and `ctx.id()`.
 - Name events in the past tense (`ItemAdded`), commands in the imperative (`AddItem`), queries as questions (`GetCart`); domains and aggregates lowercase.
 - Keep aggregates small: one is the unit of consistency; rules across aggregates go through a reactor and follow-up commands.
+- Declare values that must be unique across aggregates as `unique` keys, and conditions on another aggregate as a `fact` it holds and a command `requires`: the kernel checks both at commit. Never build a registry of claims or check a read model before a submit for this.
 - Give follow-up and retried commands a fixed ID; pass `ctx.follow()` from reactors.
 - Mark personal data `personal` and passwords or tokens `secret`.
 - Run everything through `app()` (or apply the membership once per deploy) so the kernel knows what to wait for.

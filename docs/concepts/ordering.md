@@ -65,6 +65,7 @@ A query can also wait on its own: `minPosition` answers only after the read mode
 | Within one aggregate | always | one command at a time, committed on the version it was decided on |
 | A read after a settled submit | from the moment the submit returns | every listener that counts has processed the events |
 | A read after a `committed` submit | from the given position on | ask with `minPosition`, or the read model may not have it yet |
+| Unique keys and required facts | at every commit | the kernel checks them atomically with the commit ([Unique keys and conditions](./uniqueness)) |
 | Across aggregates | step by step | a reactor turns one aggregate's event into the next command ([rules across aggregates](./event-sourcing#rules-across-aggregates)); each step is consistent in itself |
 | Across domains and tenants | in one global order | every listener sees the same sequence of positions |
 

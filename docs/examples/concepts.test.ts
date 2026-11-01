@@ -7,6 +7,7 @@ import { Rejected } from "@kernable/sdk";
 
 import { rbacReadmodel } from "./concepts/rbac.ts";
 import { shopDomain } from "./concepts/upcast.ts";
+import { accountAggregate, fundAggregate, investorAggregate } from "./concepts/uniqueness.ts";
 
 test("an upcast turns version 1 payloads into version 2 before apply", () => {
   const cartAggregate = shopDomain.aggregate("cart", 0).apply("ItemAdded", (n, data: { count: number }) => n + data.count);
@@ -35,4 +36,27 @@ test("the rbac middleware decides from the events it has seen", async () => {
   assert.equal(await code("max"), "passed");
   await on("CustomerBlocked", "max");
   assert.equal(await code("max"), "blocked");
+});
+
+test("a fund holds its keys and facts from its state, and frees its name when wound up", () => {
+  const launched = fundAggregate.fold([{ type: "FundLaunched", schema: 1, data: { pmdxId: "lu0001 ", name: " Alpha Fund" } }]);
+  assert.deepEqual(fundAggregate.index(launched), {
+    keys: [
+      { name: "pmdxId", value: "LU0001", scope: "global" },
+      { name: "name", value: "alpha fund", scope: "tenant" },
+    ],
+    facts: ["open"],
+  });
+  const woundUp = fundAggregate.fold([{ type: "FundWoundUp", schema: 1, data: {} }], launched);
+  assert.deepEqual(fundAggregate.index(woundUp), { keys: [{ name: "pmdxId", value: "LU0001", scope: "global" }], facts: [] });
+});
+
+test("opening an account requires its fund to be open", () => {
+  const requires = accountAggregate.requirements.get("OpenAccount")!;
+  assert.deepEqual(requires({ fundId: "f1" }, { status: "none" }), [{ domain: "funds", aggregateType: "fund", aggregateId: "f1", fact: "open" }]);
+});
+
+test("an investor's email is a personal key of the investor", () => {
+  const registered = investorAggregate.fold([{ type: "InvestorRegistered", schema: 1, data: { investorId: "i1", email: "Max@Example.com" } }]);
+  assert.deepEqual(investorAggregate.index(registered).keys, [{ name: "email", value: "max@example.com", scope: "tenant", subject: "i1" }]);
 });

@@ -12,4 +12,5 @@ test = false
 
 [dependencies]
 kernable = { path = "../../../sdks/rust" }
+serde.workspace = true
 serde_json.workspace = true

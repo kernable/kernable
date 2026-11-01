@@ -139,6 +139,7 @@ kernable.submit(Submit::new("shop", "cart", "c1", "AddItem").data(json!({ "qty":
 - `async fn enqueue(&self, submit: Submit) -> Result<String, Error>`: Stores the command in the kernel's queue and returns its ID without waiting for it to run. Submit it again with the same `id` (`Submit::id`) to get the outcome; its `wait` is ignored.
 - `async fn query<T: DeserializeOwned>(&self, query: Query) -> Result<T, Error>`: Asks the read model that answers `domain.type` and returns its answer, deserialized as `T` (`serde_json::Value` for any). Queries always go through the kernel, also within one process. A refusal by the read model or a middleware is `Error::Rejected`; the kernel's own (no grant, no read model connected) is `Error::Status`; an answer that is not a `T` is `Error::Json`. Example: `let cart: Value = kernable.query(Query::new("shop", "GetCart").data(json!({ "id": "c1" }))).await?;`
 - `fn subscribe<F, Fut>(&self, options: SubscribeOptions, handler: F) -> Subscription where F: Fn(StoredEvent) -> Fut + Send + Sync + 'static, Fut: Future<Output = Result<(), BoxError>> + Send + 'static`: Streams committed events after `options.after` (backlog first, then live) to `handler`, one at a time. Reconnects and resumes after the last handled event; if the handler fails, that event is delivered again. Persist the position yourself to resume across restarts. Needs the `subscribe` grant for the types. Unlike a listener, a subscription is not registered with the kernel: nobody waits for it, and its events carry no vault values (vault fields are `null` and listed in `redacted`). It runs in a Tokio task from the call on; `Subscription::stop` ends it.
+- `async fn reindex(&self, reindex: Reindex) -> Result<Vec<(String, Outcome)>, Error>`: Stores the unique keys and facts of aggregates as their current state yields them: submits the built-in `_reindex_<aggregate_type>` command (`reindex_type`; no events) to each ID in turn and returns each ID with its outcome. Run it after declaring a key or fact on an aggregate that has events already: until an aggregate runs a command, it holds what its last command left. An ID without events holds nothing and commits. A rejection is an outcome, e.g. `unique_taken` if another aggregate holds one of its keys (a duplicate from before the key was declared). `Error` as for `Kernable::submit`, for the first ID that fails; the ones before it are done. Needs the `submit` grant for `<domain>._reindex_<aggregate_type>`. Example: `kernable.reindex(Reindex::new("shop", "customer", ["k1", "k2"])).await?`.
 
 ### Wait
 
@@ -397,9 +398,21 @@ The type of `data` (here `Item`, any `Deserialize` type, or `serde_json::Value`)
 the payload is read; a payload that does not fit fails the command with `handler_error`.
 Handlers are synchronous and must not block.
 
+Unique keys, facts and requirements reach across aggregates; the kernel checks them
+atomically when a command commits. `unique` declares a key computed from the state, which
+no two aggregates hold with the same value: `customer_aggregate.unique("email", |s|
+s.email.clone(), Unique::tenant());`. `fact` declares a condition of the state that other
+aggregates' commands may require: `vehicle_aggregate.fact("open", |s| !s.wound_up);`.
+`requires` names the facts a command needs:
+`account_aggregate.requires("OpenAccount", |_state, data: Open| [Requirement::new("funds",
+"vehicle", &data.vehicle_id, "open")]);`. After every command, the worker sends the keys and
+facts of the new state, so an aggregate always holds exactly what its state yields.
+
 Test without a kernel: `cart_aggregate.fold([FoldEvent::new("ItemAdded", json!({ "qty": 2 }))], None)?`
-returns the state, and `cart_aggregate.handle(&state, "AddItem", json!({ "qty": 1 }), &mut ctx)`
-runs a command handler with a `CommandContext::new`.
+returns the state, `cart_aggregate.handle(&state, "AddItem", json!({ "qty": 1 }), &mut ctx)`
+runs a command handler with a `CommandContext::new`, and `cart_aggregate.index(&state)?`
+and `cart_aggregate.requirements(&state, "AddItem", json!({ "qty": 1 }))?` compute the keys,
+facts and requirements.
 
 - `fn domain(&self) -> &Domain`: The domain the aggregate belongs to.
 - `fn name(&self) -> &str`: The aggregate's name within its domain, e.g. `cart`.
@@ -407,7 +420,12 @@ runs a command handler with a `CommandContext::new`.
 - `fn snapshot_every(&self, events: u64) -> Self`: Sends a snapshot of the state every `events` events (default 100; 0 turns them off).
 - `fn schema(&self, schema: &str) -> Self`: Version of the state format (default "1"). Change it when `apply` produces differently shaped state; older snapshots are then ignored and the state is rebuilt from the events.
 - `fn apply<D: DeserializeOwned>(&self, event_type: &str, f: impl Fn(&mut S, D, &EventMeta, &ApplyContext) + Send + Sync + 'static) -> Self`: How an event of `event_type` changes the state: `f(state, data, evt, ctx)` changes `state` in place, or replaces it with `*state = …`. `data` is the event's payload as `D`, upcast to the current version; `evt` is an `EventMeta`, `ctx` an `ApplyContext`. See `Aggregate` for an example.
-- `fn command<D: DeserializeOwned>(&self, command_type: &str, f: impl Fn(&S, D, &CommandMeta, &mut CommandContext) -> Result<Vec<NewEvent>, Rejected> + Send + Sync + 'static) -> Self`: Which events a `command_type` command produces: `f(state, data, cmd, ctx)` returns them as `Ok(vec![NewEvent::new(…)])`, or `Err(Rejected::new(…))`. `data` is the command's payload as `D`; `cmd` is a `CommandMeta`, `ctx` a `CommandContext` with the request context and deterministic `now()` and `id()`. See `Aggregate` for an example.
+- `fn command<D: DeserializeOwned>(&self, command_type: &str, f: impl Fn(&S, D, &CommandMeta, &mut CommandContext) -> Result<Vec<NewEvent>, Rejected> + Send + Sync + 'static) -> Self`: Which events a `command_type` command produces: `f(state, data, cmd, ctx)` returns them as `Ok(vec![NewEvent::new(…)])`, or `Err(Rejected::new(…))`. `data` is the command's payload as `D`; `cmd` is a `CommandMeta`, `ctx` a `CommandContext` with the request context and deterministic `now()` and `id()`. See `Aggregate` for an example. Panics if `command_type` starts with `_reindex_`: those are reserved for the built-in command of aggregates with unique keys or facts (see `crate::reindex_type`), and an aggregate cannot see the other aggregate types of its domain.
+- `fn unique<I: IntoIterator<Item = String>>(&self, name: &str, values: impl Fn(&S) -> I + Send + Sync + 'static, options: Unique<S>) -> Self`: Declares a unique key named `name`: `values(state)` returns the values the aggregate holds in that state, as anything that iterates over `String`s (values are strings by type; format numbers yourself): `None` (holds nothing), `Some(value)` (one value) or a `Vec` (several; repeated ones count once). No two aggregates of this type hold the same value of the key at the same time; a command that would make its aggregate hold a value another one holds is rejected with `unique_taken`. The value is compared as is: normalize it in `values` (e.g. lowercase an email); an empty string is a value like any other. `options` says where it is unique (within the tenant, or `Unique::global`) and whether the value is personal (`Unique::personal`). Example: `customer_aggregate.unique("email", |s| s.email.as_ref().map(|e| e.to_lowercase()), Unique::tenant());`. The worker computes the keys from the state after every command, also one without events; `values` must be deterministic like `apply`, and one that panics fails the command with `handler_error`. An aggregate that had events before the key was declared holds none of its values until it runs a command: `crate::Kernable::reindex` runs one. Panics if `name` is empty, longer than 128 bytes or holds `.` or `*`, or the aggregate declares a key named `name` already (a fact may have the same name).
+- `fn fact(&self, name: &str, holds: impl Fn(&S) -> bool + Send + Sync + 'static) -> Self`: Declares a fact named `name`, which the aggregate holds while `holds(state)` is true. Commands of other aggregates of the tenant may require it (see `Aggregate::requires`). Computed like the keys (see `Aggregate::unique`). Example: `vehicle_aggregate.fact("open", |s| !s.wound_up);`. Panics if `name` is empty, longer than 128 bytes or holds `.` or `*`, or the aggregate declares a fact named `name` already (a key may have the same name).
+- `fn requires<D: DeserializeOwned, I: IntoIterator<Item = Requirement>>(&self, command_type: &str, f: impl Fn(&S, D) -> I + Send + Sync + 'static) -> Self`: Which facts of other aggregates of the tenant a `command_type` command requires: `f(state, data)` returns `Requirement`s (anything that iterates over them), from the state before the command and its payload as `D`. The command commits only if each named aggregate holds its fact at that moment, otherwise it is rejected with `requirement_missing`; nothing is locked in between. Example: `account_aggregate.requires("OpenAccount", |_state, data: Open| [Requirement::new("funds", "vehicle", &data.vehicle_id, "open")]);`. A payload that is not a `D`, or an `f` that panics, fails the command with `handler_error`. Panics if the aggregate has no `command_type` handler (declare it with `Aggregate::command` first).
+- `fn index(&self, state: &S) -> Result<Index, Error>`: The unique keys and facts the aggregate holds in `state`, as the worker sends them after a command that leaves it in `state`; for tests without a kernel. `Error::Config` if a key or fact function panics.
+- `fn requirements(&self, state: &S, command_type: &str, data: impl Serialize) -> Result<Vec<Requirement>, Error>`: The requirements of a `command_type` command with `data` on `state` (none if it declares none, see `Aggregate::requires`); for tests without a kernel. `Error::Config` if `data` is not the function's `D` or it panics.
 - `fn fold(&self, history: impl IntoIterator<Item = FoldEvent>, from: Option<S>) -> Result<S, Error>`: State after `history`, starting from `from` (default: the initial state). Events are upcast first; events without an `apply` are skipped. For tests without a kernel. `Error::Config` if an `apply` fails (also a payload that is not its `D`, or a panic) or an event's schema is newer than known.
 - `fn handle(&self, state: &S, command_type: &str, data: impl Serialize, ctx: &mut CommandContext) -> Result<Vec<NewEvent>, Error>`: Runs the `command_type` handler on `state`, e.g. in a unit test. The handler's `CommandMeta` has the command ID of `ctx`, this aggregate's domain and name, and an empty aggregate ID and tenant. `Error::Rejected` if the handler rejects the command, `Error::Config` if there is no handler for `command_type` or it fails otherwise.
 
@@ -727,3 +745,61 @@ Why a call to the kernel failed. It implements `std::error::Error`, so `?` turns
 - `Config(String)`: A key, grant or certificate could not be read, or an option is invalid; also a failing handler in `crate::Aggregate::fold` and `crate::Aggregate::handle`.
 - `Json(serde_json::Error)`: Data could not be encoded or decoded as JSON.
 - `Store(rusqlite::Error)`: A read model's store failed.
+
+### reindex_type()
+
+`fn reindex_type(aggregate_type: &str) -> String`
+
+The type of the command every aggregate that declares unique keys or facts runs without a
+handler of its own: `_reindex_<aggregate_type>`, e.g. `reindex_type("customer")` is
+`_reindex_customer` (command types are unique within a domain). It produces no events, so
+the worker sends the keys and facts of the current state; `Kernable::reindex` submits it.
+Command types starting with `_reindex_` are reserved for it.
+
+### Unique
+
+How a unique key is unique, for `crate::Aggregate::unique`: within the command's tenant
+(`Unique::tenant`, also `Unique::default()`) or across tenants (`Unique::global`), and
+optionally personal: `Unique::global().personal(|s: &Customer| Some(s.id.clone()))`.
+
+- `fn tenant() -> Self`: Unique within the command's tenant: another tenant may hold the same value.
+- `fn global() -> Self`: Unique across tenants. The key's identity has no tenant, so a command that is rejected with `unique_taken` learns that some tenant holds the value.
+- `fn personal(self, subject: impl Fn(&S) -> Option<String> + Send + Sync + 'static) -> Self`: Makes the value personal data of the subject `subject` returns from the state: the kernel keeps the key in its vault, and erasing the subject frees it. `None` or an empty subject: the aggregate holds no value of this key.
+
+### Index
+
+The unique keys and facts an aggregate holds in some state, as
+`crate::Aggregate::index` computes them for a test, in the order they are declared.
+
+- `keys: Vec<UniqueKey>`
+- `facts: Vec<String>`: The names of the facts that are true.
+
+### UniqueKey
+
+A value of a unique key: no other aggregate holds the same value of the same key (of the
+same domain and aggregate type, in the same tenant unless global) at the same time.
+
+- `name: String`: The key's name, as declared.
+- `value: String`: The value. The kernel gets only its SHA-256, never the value.
+- `global: bool`: Unique across tenants.
+- `subject: Option<String>`: The person the value belongs to, for a personal key.
+
+### Requirement
+
+A fact that another aggregate of the command's tenant must hold when a command commits,
+returned by the function given to `crate::Aggregate::requires`:
+`Requirement::new("shop", "vehicle", &data.vehicle_id, "open")`.
+
+- `domain: String`
+- `aggregate_type: String`: Unqualified, e.g. `vehicle`.
+- `aggregate_id: String`
+- `fact: String`: The name of a fact that aggregate declares.
+- `fn new(domain: &str, aggregate_type: &str, aggregate_id: &str, fact: &str) -> Requirement`: The fact `fact` of the `domain.aggregate_type` aggregate with ID `aggregate_id`.
+
+### Reindex
+
+Aggregates to reindex with `Kernable::reindex`, built with methods that each return the
+changed request: `Reindex::new("shop", "customer", ["k1", "k2"]).tenant("t1")`.
+
+- `fn new(domain: &str, aggregate_type: &str, aggregate_ids: impl IntoIterator<Item = impl Into<String>>) -> Reindex`: The `domain.aggregate_type` aggregates with these IDs.
+- `fn tenant(self, tenant: impl Into<String>) -> Reindex`: The tenant they belong to. Default: the connection's (`crate::Options::tenant`).

@@ -390,7 +390,7 @@ function pyReference(): string {
  * A line-based reading of rustfmt-formatted sources, enough for this crate.
  */
 function rustReference(): string {
-  const files = ["lib.rs", "app.rs", "domain.rs", "worker.rs", "listener.rs", "store.rs", "data.rs", "context.rs", "error.rs"];
+  const files = ["lib.rs", "app.rs", "domain.rs", "worker.rs", "listener.rs", "store.rs", "data.rs", "context.rs", "error.rs", "index.rs"];
   const sections = new Map<string, { head: string; doc: string; members: string[] }>();
   const section = (name: string, head = "", doc = "") => {
     const s = sections.get(name) ?? { head: "", doc: "", members: [] };

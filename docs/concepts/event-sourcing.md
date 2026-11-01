@@ -114,7 +114,7 @@ An aggregate decides alone, on its own history. A rule that spans two aggregates
 
 - **The reactor submits follow-up commands** with `ctx.follow()`, so the sender and the correlation of the original request carry over, and with a fixed command ID (`reserve-o-7`), so a redelivered event changes nothing.
 - **Each step is a decision of one aggregate**, with its own rejection. Until the last step, the order is in an intermediate state (`placed`, not yet `confirmed`): model it explicitly.
-- **Uniqueness is an aggregate too.** "Every email only once" is a decision about the email, not about a customer: claim it on an aggregate whose ID is the email (`identity/email/max@example.com`), and only then register the customer.
+- **Uniqueness and conditions are checked by the kernel.** "Every email only once" or "open an account only while its fund is open" need no reactor: an aggregate declares unique keys and facts from its state, a command the facts it requires, and the kernel checks them when the command commits ([Unique keys and conditions](./uniqueness)).
 
 ## When it fits
 
