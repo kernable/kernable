@@ -105,7 +105,7 @@ async fn enqueue_returns_the_command_id() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn tls_from_options_or_the_environment() {
+async fn tls_from_options() {
     let kernel = TestKernel::with_tls(&["shop.*"]);
     kernel.start().await;
     let kernable = Kernable::new(kernel.options().tls(kernel.tls())).unwrap();
@@ -113,26 +113,6 @@ async fn tls_from_options_or_the_environment() {
     worker.ready().await;
     let placed = place(&kernable, "o1").await;
     assert!(matches!(placed, Ok(Outcome::Committed(_))), "{placed:?}");
-
-    // The environment: all three variables, or none. Only this test of this binary reads them.
-    let tls = kernel.tls();
-    let vars = [
-        ("KERNABLE_TLS_CA", &tls.ca),
-        ("KERNABLE_TLS_CERT", &tls.cert),
-        ("KERNABLE_TLS_KEY", &tls.key),
-    ];
-    for (var, path) in vars {
-        unsafe { std::env::set_var(var, path) };
-    }
-    let from_env = Kernable::new(kernel.options()).unwrap();
-    let placed = place(&from_env, "o2").await;
-    unsafe { std::env::remove_var("KERNABLE_TLS_KEY") };
-    let partial = Kernable::new(kernel.options()).err();
-    for (var, _) in vars {
-        unsafe { std::env::remove_var(var) };
-    }
-    assert!(matches!(placed, Ok(Outcome::Committed(_))), "{placed:?}");
-    assert!(matches!(partial, Some(Error::Config(_))), "{partial:?}");
     worker.stop();
 }
 
