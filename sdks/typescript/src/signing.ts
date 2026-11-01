@@ -13,7 +13,9 @@ import type {
   WireQueryRequest,
   WireRejected,
   WireRequestContext,
+  WireRequirement,
   WireSignature,
+  WireUniqueKey,
 } from "./rpc.ts";
 
 // PKCS#8 DER prefix for a raw 32-byte Ed25519 seed.
@@ -157,6 +159,36 @@ export function resultMessage(c: Stream, expectedVersion: number, events: WireNe
     }
   }
   return m.done();
+}
+
+/**
+ * What a worker signs for the unique keys, facts and requirements of its result (protocol 2):
+ * a message of its own, not part of `resultMessage`, because every event stores the result
+ * signature and `kernable verify` checks it against the stored events alone.
+ */
+export function indexMessage(c: Stream, expectedVersion: number, keys: WireUniqueKey[], facts: string[], requires: WireRequirement[]): Buffer {
+  const m = stream(new Msg("kernable.v1.index"), c).u64(expectedVersion).u64(keys.length);
+  for (const k of keys) m.str(k.name).u64(k.global ? 1 : 0).bytes(k.value_hash).str(k.subject);
+  m.u64(facts.length);
+  for (const f of facts) m.str(f);
+  m.u64(requires.length);
+  for (const r of requires) m.str(r.domain).str(r.aggregate_type).str(r.aggregate_id).str(r.fact);
+  return m.done();
+}
+
+/** A unique key's `value_hash`: the SHA-256 of the value's UTF-8 bytes. */
+export function valueHash(value: string): Buffer {
+  return createHash("sha256").update(value, "utf8").digest();
+}
+
+/**
+ * The identity of a unique key in the kernel's index, from the command's tenant (none for a
+ * global key), domain and aggregate type. The kernel computes it; workers send only the value's
+ * hash. Here for the test vectors.
+ */
+export function uniqueKeyId(tenant: string, domain: string, aggregateType: string, key: WireUniqueKey): Buffer {
+  const m = new Msg("kernable.v1.key").str(key.global ? "" : tenant).str(domain).str(aggregateType).str(key.name).bytes(key.value_hash);
+  return createHash("sha256").update(m.done()).digest();
 }
 
 export function snapshotMessage(c: Omit<Stream, "command_id">, version: number, schema: string, state: Buffer): Buffer {

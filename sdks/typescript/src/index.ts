@@ -24,7 +24,9 @@ import {
   type WireQueryRequest,
   type WireRejected,
   type WireRequestContext,
+  type WireRequirement,
   type WireSnapshot,
+  type WireUniqueKey,
   type WireVaultValue,
   type WireWait,
 } from "./rpc.ts";
@@ -35,12 +37,14 @@ import {
   commandMessage,
   dataMessage,
   derivedId,
+  indexMessage,
   membershipMessage,
   queryMessage,
   rejectionMessage,
   resultMessage,
   snapshotMessage,
   subscribeMessage,
+  valueHash,
   vaultRef,
 } from "./signing.ts";
 import { Store } from "./store.ts";
@@ -397,7 +401,12 @@ export interface StoredEvent extends StoredEventMeta {
 /**
  * What came of a command (`Kernable.submit`): committed with the events it stored, or rejected
  * with a code and message (by its handler, a middleware or the kernel, e.g. `version_mismatch`).
- * A rejection is a result, not an exception; check `committed`:
+ * The kernel's codes for unique keys and requirements (see `Aggregate.unique`):
+ * `unique_taken` (another aggregate holds one of the keys the command would leave its aggregate
+ * with: `orders.Order key number is taken`, never the value), `requirement_missing` (an aggregate
+ * the command requires does not hold the fact: `orders.Vehicle v1 does not hold open`) and
+ * `invalid_index` (too many keys, facts or requirements, or a malformed name: a bug in the
+ * aggregate's definition). A rejection is a result, not an exception; check `committed`:
  *
  * ```ts
  * const outcome = await kernable.submit({ domain: "shop", aggregateType: "cart", aggregateId: "c1", type: "CheckOut" });
@@ -418,6 +427,91 @@ export type FoldEvent = Partial<EventMeta> & { type: string; schema: number; dat
 
 type Apply<S> = (state: S, data: any, evt: EventMeta, ctx: ApplyContext) => S | void;
 type Handle<S> = (state: S, data: any, cmd: CommandMeta, ctx: CommandContext) => NewEvent[] | Promise<NewEvent[]>;
+
+/**
+ * A fact another aggregate of the command's tenant must hold when the command commits: what
+ * `CommandOptions.requires` returns. The kernel checks it atomically with the commit; if the
+ * aggregate does not hold the fact (see `Aggregate.fact`), the command is rejected with
+ * `requirement_missing`.
+ *
+ * ```ts
+ * { domain: "funds", aggregateType: "Vehicle", aggregateId: data.vehicleId, fact: "open" }
+ * ```
+ */
+export interface Requirement {
+  /** The domain of the aggregate: `funds`. */
+  domain: string;
+  /** The aggregate type within the domain, unqualified: `Vehicle`. */
+  aggregateType: string;
+  aggregateId: string;
+  /** The fact it must hold, as declared with `Aggregate.fact`: `open`. */
+  fact: string;
+}
+
+/** Options of one command handler: the third argument of `Aggregate.command`. */
+export interface CommandOptions<S, D = any> {
+  /**
+   * The facts other aggregates of the command's tenant must hold for the command to commit,
+   * from the command's data and the state before it: `(data, state) => Requirement[]`. Checked
+   * by the kernel at commit, so no command in between can remove a fact unseen; a missing one
+   * rejects the command with `requirement_missing`. If it throws, the command is rejected as for
+   * a handler error.
+   */
+  requires?: (data: D, state: S) => Requirement[];
+}
+
+/** Options of a unique key: the third argument of `Aggregate.unique`. */
+export interface UniqueOptions<S> {
+  /**
+   * `tenant` (default): no two aggregates of this type in the same tenant hold the same value;
+   * `global`: none in any tenant. A global key tells a worker of any tenant whether a value is
+   * taken.
+   */
+  scope?: "tenant" | "global";
+  /**
+   * Makes the key personal: the person (subject) its values belong to, from the state, e.g.
+   * `(state) => state.customerId`. The kernel keeps the key in the vault, and erasing the
+   * subject frees it. An empty or missing subject: the aggregate holds no value of the key.
+   */
+  personal?: (state: S) => string | null | undefined;
+}
+
+/** A unique key an aggregate holds, as `Aggregate.index` returns it. */
+export interface HeldKey {
+  /** The key's name, as declared with `Aggregate.unique`. */
+  name: string;
+  /** The value, as the key's function returned it. The kernel gets only its SHA-256 hash. */
+  value: string;
+  scope: "tenant" | "global";
+  /** For a personal key: the person the value belongs to. */
+  subject?: string;
+}
+
+/** The unique keys and facts an aggregate holds in a state: what `Aggregate.index` returns. */
+export interface Index {
+  /** In the order of declaration, the values of a key in the order its function returned them. */
+  keys: HeldKey[];
+  /** The facts that are true, in the order of declaration. */
+  facts: string[];
+}
+
+/** A unique key as declared with `Aggregate.unique`. */
+interface KeyDefinition<S> {
+  values: (state: S) => string | string[] | null | undefined;
+  scope: "tenant" | "global";
+  personal?: (state: S) => string | null | undefined;
+}
+
+/** What the built-in reindex commands start with; reserved for them. */
+const REINDEX = "_reindex_";
+
+/**
+ * The command an aggregate type with unique keys or facts runs itself, one per aggregate type
+ * because command types are unique within a domain: `_reindex_Customer`. See `Kernable.reindex`.
+ */
+export function reindexType(aggregateType: string): string {
+  return `${REINDEX}${aggregateType}`;
+}
 
 /**
  * Snapshot settings of an aggregate: the third argument of `Domain.aggregate`. Snapshots are a
@@ -760,6 +854,11 @@ export function domain(name: string): Domain {
  * kernel commits them only on the version the state was folded from; if another command came
  * first, the command runs again on the new state.
  *
+ * An aggregate may hold unique keys (`unique`: no other aggregate holds the same value) and facts
+ * (`fact`), both computed from its state; a command may require facts of other aggregates
+ * (`CommandOptions.requires`). The kernel checks both atomically with the commit, so neither a
+ * read model nor a registry of claims is needed to keep a value unique or a condition true.
+ *
  * ```ts
  * const cart = shopDomain.aggregate("cart", { items: 0, checkedOut: false });
  * cart.apply("ItemAdded", (state, data: { qty: number }) => { state.items += data.qty; });
@@ -788,6 +887,12 @@ export class Aggregate<S> {
   readonly events: Map<string, EventSchema>;
   /** The domain's command schemas: which fields of a command are personal. */
   readonly commands: Map<string, CommandSchema>;
+  /** The unique keys by name; see `unique`. */
+  readonly keys = new Map<string, KeyDefinition<S>>();
+  /** The facts by name; see `fact`. */
+  readonly facts = new Map<string, (state: S) => boolean>();
+  /** What the commands require, per command type; see `CommandOptions.requires`. */
+  readonly requirements = new Map<string, (data: any, state: S) => Requirement[]>();
 
   constructor(
     domain: string,
@@ -824,14 +929,98 @@ export class Aggregate<S> {
    * events (`NewEvent[]`, possibly empty), or a promise of them. Throw `Rejected` to reject the
    * command. It may run more than once for the same command, so it must decide the same way
    * every time: use `ctx.now()` and `ctx.id()` instead of the clock and random IDs, and leave
-   * side effects to reactors.
+   * side effects to reactors. `options.requires`: facts other aggregates must hold for the
+   * command to commit, see `CommandOptions`. Throws for a type starting with `_reindex_`: the
+   * built-in commands aggregates with unique keys or facts run themselves (`_reindex_Customer`,
+   * see `Kernable.reindex`).
    */
   command<D = any>(
     commandType: string,
     fn: (state: S, data: D, cmd: CommandMeta, ctx: CommandContext) => NewEvent[] | Promise<NewEvent[]>,
+    options: CommandOptions<S, D> = {},
   ): this {
+    if (commandType.startsWith(REINDEX)) {
+      throw new Error(`${commandType}: command types starting with ${REINDEX} are reserved for the reindex commands aggregates with unique keys or facts run themselves`);
+    }
     this.handlers.set(commandType, fn);
+    if (options.requires) this.requirements.set(commandType, options.requires);
+    else this.requirements.delete(commandType);
     return this;
+  }
+
+  /**
+   * Declares a unique key `name`: `fn(state)` returns the value (or values) this aggregate holds,
+   * or `null`/`undefined` for none, and no other aggregate of this type holds the same value
+   * within the tenant (`options.scope`, default `tenant`) or in any tenant (`global`). After
+   * every command the aggregate holds exactly the values its new state yields: a changed value
+   * frees the old one in the same commit. A command that would leave the aggregate with a value
+   * another one holds is rejected with `unique_taken`, and nothing is written. Normalise the
+   * value yourself (`email.trim().toLowerCase()`); the kernel gets only its SHA-256 hash.
+   * `options.personal` keeps the key in the vault, freed by erasing its subject.
+   *
+   * Aggregates that existed before the key was declared hold it from their next command on; run
+   * `Kernable.reindex` to give it to them at once. Two of them with the same value: the second to
+   * run a command is rejected with `unique_taken` until its value changes. `fn` must be
+   * deterministic, as `apply` must; if it throws, the command is rejected as for a handler error.
+   * Throws for a name declared already, an empty name, or one with a dot or over 128 bytes.
+   *
+   * ```ts
+   * customer.unique("email", (state) => state.email?.toLowerCase(), { personal: (state) => state.id });
+   * ```
+   */
+  unique(name: string, fn: (state: S) => string | string[] | null | undefined, options: UniqueOptions<S> = {}): this {
+    this.named("key", name, this.keys);
+    this.keys.set(name, { values: fn, scope: options.scope ?? "tenant", personal: options.personal });
+    return this;
+  }
+
+  /**
+   * Declares a fact `name` this aggregate holds while `fn(state)` is true: what other aggregates'
+   * commands require (`CommandOptions.requires`). The kernel keeps the facts each aggregate
+   * holds after its last command. `fn` must be deterministic, as `apply` must. Throws for a name
+   * declared already, an empty name, or one with a dot or over 128 bytes.
+   *
+   * ```ts
+   * vehicle.fact("open", (state) => state.status === "open");
+   * ```
+   */
+  fact(name: string, fn: (state: S) => boolean): this {
+    this.named("fact", name, this.facts);
+    this.facts.set(name, fn);
+    return this;
+  }
+
+  /** Checks a key's or fact's name, and adds the built-in reindex command (`_reindex_<name>`). */
+  private named(what: "key" | "fact", name: string, declared: Map<string, unknown>): void {
+    if (!name || name.includes(".") || Buffer.byteLength(name) > 128) {
+      throw new Error(`a ${what} name is non-empty, without dots and at most 128 bytes, not ${JSON.stringify(name)}`);
+    }
+    if (declared.has(name)) throw new Error(`${this.name} has a ${what} ${name} already`);
+    this.handlers.set(reindexType(this.name), () => []);
+  }
+
+  /**
+   * The unique keys and facts this aggregate holds in `state`, as a worker computes them after a
+   * command; no kernel needed, so it suits tests next to `handle`:
+   * `cart.index(cart.fold(history))`. A key's values come once each; a personal key without a
+   * subject holds none. Throws what a key's or fact's function throws, or if a key's function
+   * returns something other than a string, a list of strings, `null` or `undefined`.
+   */
+  index(state: S): Index {
+    const keys: HeldKey[] = [];
+    for (const [name, def] of this.keys) {
+      const returned = def.values(state);
+      if (returned === null || returned === undefined) continue;
+      const values = Array.isArray(returned) ? returned : [returned];
+      if (!values.every((v) => typeof v === "string")) {
+        throw new TypeError(`key ${name} of ${this.name}: return a string, a list of strings, null or undefined`);
+      }
+      const subject = def.personal ? def.personal(state) : undefined;
+      if (def.personal && !subject) continue;
+      for (const value of new Set(values)) keys.push({ name, value, scope: def.scope, ...(subject ? { subject } : {}) });
+    }
+    const facts = [...this.facts].filter(([, fn]) => fn(state)).map(([name]) => name);
+    return { keys, facts };
   }
 
   /**
@@ -1173,6 +1362,28 @@ export interface SubmitOptions {
   timeoutMs?: number;
 }
 
+/**
+ * Which aggregates `Kernable.reindex` reindexes: domain, aggregate type and IDs.
+ *
+ * ```ts
+ * await kernable.reindex({ domain: "crm", aggregateType: "Customer", aggregateIds: ["k1", "k2"] });
+ * ```
+ */
+export interface ReindexOptions {
+  /** The domain of the aggregate type: `crm`. */
+  domain: string;
+  /** The aggregate type within the domain, unqualified: `Customer`. */
+  aggregateType: string;
+  /** The aggregates to reindex; each ID once. */
+  aggregateIds: string[];
+  /** Default: the client's tenant (`Options.tenant`). */
+  tenant?: string;
+  /** Replaces the client's default context (`Options.context`). */
+  context?: RequestContext;
+  /** How long to wait for each outcome; default `Options.timeoutMs`. */
+  timeoutMs?: number;
+}
+
 const LEVELS = { off: 0, error: 1, warn: 2, info: 3, debug: 4 };
 
 /** A wait before reconnecting that `stop()` cuts short, so a stopped stream ends at once. */
@@ -1415,6 +1626,36 @@ export class Kernable {
    */
   async enqueue(options: Omit<SubmitOptions, "wait">): Promise<string> {
     return (await this.send(options, "WAIT_ACCEPTED")).command_id;
+  }
+
+  /**
+   * Has these aggregates store the unique keys and facts their current state yields, e.g. after
+   * declaring a key on an aggregate type with existing aggregates: each runs the built-in
+   * reindex command of its type (`_reindex_<aggregateType>`, see `reindexType`), which produces
+   * no events. Returns the outcome per ID, once committed:
+   * committed (with no events), or rejected, e.g. with `unique_taken` if another aggregate holds
+   * the same value. An ID without events holds nothing. The key needs `run` for
+   * `<domain>._reindex_<aggregateType>` on the worker and `submit` here.
+   *
+   * ```ts
+   * const outcomes = await kernable.reindex({ domain: "crm", aggregateType: "Customer", aggregateIds: ["k1", "k2"] });
+   * ```
+   */
+  async reindex(options: ReindexOptions): Promise<Map<string, Outcome>> {
+    const outcomes = new Map<string, Outcome>();
+    const { aggregateIds, ...command } = options;
+    const ids = [...new Set(aggregateIds)];
+    // A few at a time, so a long list does not open thousands of calls at once.
+    for (let i = 0; i < ids.length; i += 16) {
+      const batch = ids.slice(i, i + 16);
+      const done = await Promise.all(
+        batch.map((aggregateId) =>
+          this.submit({ ...command, aggregateId, type: reindexType(options.aggregateType), data: {}, wait: "committed" }),
+        ),
+      );
+      batch.forEach((id, j) => outcomes.set(id, done[j]));
+    }
+    return outcomes;
   }
 
   /**
@@ -2207,6 +2448,8 @@ export class Worker {
   private readonly key: Key;
   private readonly log: Log;
   private readonly byCommand = new Map<string, Aggregate<any>>();
+  /** By qualified aggregate type, the command's aggregate type decides which aggregate runs it. */
+  private readonly byAggregate = new Map<string, Aggregate<any>>();
   private readonly aggregates: Aggregate<any>[];
   /** The service it belongs to (`Options.service`). */
   private readonly service: string;
@@ -2223,7 +2466,10 @@ export class Worker {
     this.log = log;
     this.aggregates = aggregates;
     this.service = service;
-    for (const agg of aggregates) for (const type of agg.handlers.keys()) this.byCommand.set(`${agg.domain}.${type}`, agg);
+    for (const agg of aggregates) {
+      for (const type of agg.handlers.keys()) this.byCommand.set(`${agg.domain}.${type}`, agg);
+      this.byAggregate.set(`${agg.domain}.${agg.name}`, agg);
+    }
     this.ready = new Promise((resolve) => (this.markReady = resolve));
   }
 
@@ -2328,9 +2574,10 @@ export class Worker {
     let events: WireNewEvent[];
     let vault: WireVaultValue[] = [];
     let snapshot: WireSnapshot | undefined;
+    let index: { keys: WireUniqueKey[]; facts: string[]; requires: WireRequirement[] } | undefined;
     try {
-      const agg = this.byCommand.get(`${cmd.domain}.${cmd.command_type}`);
-      if (!agg || agg.name !== cmd.aggregate_type) {
+      const agg = this.byAggregate.get(`${cmd.domain}.${cmd.aggregate_type}`);
+      if (!agg?.handlers.has(cmd.command_type)) {
         throw new Rejected(`no handler for ${cmd.command_type} on ${cmd.domain}.${cmd.aggregate_type}`, "unknown_command");
       }
       if (x.snapshot && x.snapshot.schema !== agg.schema) {
@@ -2362,7 +2609,24 @@ export class Worker {
         const erases = def?.eraser ? String(def.eraser(e.data, cmd.aggregate_id) ?? "") : "";
         return { event_type: e.type, schema: agg.schemaOf(e.type), payload: sealed.payload, vault_refs: sealed.refs, erases };
       });
-      snapshot = this.snapshot(agg, cmd, x.expected_version, state, produced);
+      let folded: { state: unknown } | undefined;
+      const after = () => (folded ??= { state: this.after(agg, cmd, x.expected_version, state, produced) }).state;
+      snapshot = this.snapshot(agg, cmd, x.expected_version, produced, after);
+      // The requirements from the data and the state before; keys and facts from the state after.
+      const requires = agg.requirements.get(cmd.command_type)?.(unseal(decode(cmd.payload), x.vault).data, structuredClone(state)) ?? [];
+      if (agg.keys.size || agg.facts.size || requires.length) {
+        const held = agg.keys.size || agg.facts.size ? agg.index(after()) : { keys: [], facts: [] };
+        index = {
+          keys: held.keys.map((k) => ({
+            name: k.name,
+            global: k.scope === "global",
+            value_hash: valueHash(k.value),
+            subject: k.subject ?? "",
+          })),
+          facts: held.facts,
+          requires: requires.map((r) => ({ domain: r.domain, aggregate_type: r.aggregateType, aggregate_id: r.aggregateId, fact: r.fact })),
+        };
+      }
     } catch (err) {
       if (err instanceof SchemaError) {
         // Not the command's fault: this worker cannot read the aggregate. End the session; run()
@@ -2382,23 +2646,34 @@ export class Worker {
       return;
     }
     const worker_sig = this.key.sign(resultMessage(cmd, x.expected_version, events));
-    call.write({ result: { lease_id: x.lease_id, events, worker_sig, vault, ...(snapshot && { snapshot }) } });
+    // An aggregate that holds nothing and requires nothing sends no index, and no signature over it.
+    const indexed =
+      index && (index.keys.length || index.facts.length || index.requires.length)
+        ? { ...index, index_sig: this.key.sign(indexMessage(cmd, x.expected_version, index.keys, index.facts, index.requires)) }
+        : {};
+    call.write({ result: { lease_id: x.lease_id, events, worker_sig, vault, ...(snapshot && { snapshot }), ...indexed } });
     this.log.print("debug", "worker", `${stream} committed ${events.length} events`);
   }
 
-  /** A snapshot of the state after `events`, if they cross a multiple of `snapshotEvery`. */
-  private snapshot(agg: Aggregate<any>, cmd: WireCommand, before: number, state: unknown, events: NewEvent[]) {
-    const version = before + events.length;
-    const every = agg.snapshotEvery;
-    if (every <= 0 || events.length === 0 || Math.floor(version / every) === Math.floor(before / every)) return undefined;
-    // Apply the events as they will be read back (a JSON round trip), so the snapshot equals a replay.
+  /**
+   * The state after `events`, applied as they will be read back (a JSON round trip), so it
+   * equals a replay: what a snapshot stores and keys and facts are computed from.
+   */
+  private after(agg: Aggregate<any>, cmd: WireCommand, before: number, state: unknown, events: NewEvent[]): unknown {
     const read = events.map((e, i) => ({
       ...metaOf(e.type, before + i + 1, cmd, cmd.command_id, cmd.context),
       schema: agg.schemaOf(e.type),
       data: decode(encode(e.data)),
     }));
-    const after = agg.fold(read, state);
-    const snapshot = { version, schema: agg.schema, state: encode(after) };
+    return agg.fold(read, state);
+  }
+
+  /** A snapshot of the state `after` the events, if they cross a multiple of `snapshotEvery`. */
+  private snapshot(agg: Aggregate<any>, cmd: WireCommand, before: number, events: NewEvent[], after: () => unknown) {
+    const version = before + events.length;
+    const every = agg.snapshotEvery;
+    if (every <= 0 || events.length === 0 || Math.floor(version / every) === Math.floor(before / every)) return undefined;
+    const snapshot = { version, schema: agg.schema, state: encode(after()) };
     const message = snapshotMessage(cmd, version, snapshot.schema, snapshot.state);
     return { ...snapshot, worker_sig: this.key.sign(message) };
   }

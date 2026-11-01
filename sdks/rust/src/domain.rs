@@ -13,6 +13,7 @@ use serde_json::{Map, Value};
 use crate::{
     BoxError, Error, Listener, Rejected, RequestContext,
     context::Timestamp,
+    index::{Index, KeySubject, Requirement, Unique, UniqueKey, reindex_type},
     vault::{self, VaultFields},
 };
 
@@ -153,6 +154,9 @@ impl Domain {
                 settings: Mutex::new((100, "1".to_owned())),
                 appliers: RwLock::default(),
                 handlers: RwLock::default(),
+                keys: RwLock::default(),
+                facts: RwLock::default(),
+                requires: RwLock::default(),
             }),
         };
         self.inner
@@ -540,6 +544,29 @@ type Handle<S> = Arc<
         + Sync,
 >;
 
+type Fact<S> = Arc<dyn Fn(&S) -> bool + Send + Sync>;
+type KeyValues<S> = Arc<dyn Fn(&S) -> Vec<String> + Send + Sync>;
+type Requires<S> = Arc<dyn Fn(&S, Value) -> Result<Vec<Requirement>, Failure> + Send + Sync>;
+
+/// A unique key as declared: its values in a state, its scope and whose data the values are.
+struct KeyDef<S> {
+    name: String,
+    values: KeyValues<S>,
+    global: bool,
+    personal: Option<KeySubject<S>>,
+}
+
+impl<S> Clone for KeyDef<S> {
+    fn clone(&self) -> Self {
+        KeyDef {
+            name: self.name.clone(),
+            values: Arc::clone(&self.values),
+            global: self.global,
+            personal: self.personal.clone(),
+        }
+    }
+}
+
 struct AggregateInner<S> {
     domain: Domain,
     name: String,
@@ -548,6 +575,11 @@ struct AggregateInner<S> {
     settings: Mutex<(u64, String)>,
     appliers: RwLock<HashMap<String, Apply<S>>>,
     handlers: RwLock<HashMap<String, Handle<S>>>,
+    /// Unique keys and facts, in the order declared.
+    keys: RwLock<Vec<KeyDef<S>>>,
+    facts: RwLock<Vec<(String, Fact<S>)>>,
+    /// Command type -> the facts of other aggregates its commands require.
+    requires: RwLock<HashMap<String, Requires<S>>>,
 }
 
 /// An aggregate: how events change its state (`apply`) and which events a command produces
@@ -564,9 +596,21 @@ struct AggregateInner<S> {
 /// the payload is read; a payload that does not fit fails the command with `handler_error`.
 /// Handlers are synchronous and must not block.
 ///
+/// Unique keys, facts and requirements reach across aggregates; the kernel checks them
+/// atomically when a command commits. `unique` declares a key computed from the state, which
+/// no two aggregates hold with the same value: `customer_aggregate.unique("email", |s|
+/// s.email.clone(), Unique::tenant());`. `fact` declares a condition of the state that other
+/// aggregates' commands may require: `vehicle_aggregate.fact("open", |s| !s.wound_up);`.
+/// `requires` names the facts a command needs:
+/// `account_aggregate.requires("OpenAccount", |_state, data: Open| [Requirement::new("funds",
+/// "vehicle", &data.vehicle_id, "open")]);`. After every command, the worker sends the keys and
+/// facts of the new state, so an aggregate always holds exactly what its state yields.
+///
 /// Test without a kernel: `cart_aggregate.fold([FoldEvent::new("ItemAdded", json!({ "qty": 2 }))], None)?`
-/// returns the state, and `cart_aggregate.handle(&state, "AddItem", json!({ "qty": 1 }), &mut ctx)`
-/// runs a command handler with a [`CommandContext::new`].
+/// returns the state, `cart_aggregate.handle(&state, "AddItem", json!({ "qty": 1 }), &mut ctx)`
+/// runs a command handler with a [`CommandContext::new`], and `cart_aggregate.index(&state)?`
+/// and `cart_aggregate.requirements(&state, "AddItem", json!({ "qty": 1 }))?` compute the keys,
+/// facts and requirements.
 pub struct Aggregate<S> {
     inner: Arc<AggregateInner<S>>,
 }
@@ -586,6 +630,16 @@ pub(crate) enum Failure {
     Error(String),
     /// This process cannot read the aggregate's events: not the command's fault.
     Schema(String),
+}
+
+impl Failure {
+    /// As a test helper reports it.
+    fn into_error(self) -> Error {
+        match self {
+            Failure::Rejected(r) => Error::Rejected(r),
+            Failure::Error(m) | Failure::Schema(m) => Error::Config(m),
+        }
+    }
 }
 
 impl From<SchemaError> for Failure {
@@ -651,6 +705,12 @@ impl<S: State> Aggregate<S> {
     /// command's payload as `D`; `cmd` is a [`CommandMeta`], `ctx` a [`CommandContext`] with
     /// the request context and deterministic `now()` and `id()`. See [`Aggregate`] for an
     /// example.
+    ///
+    /// # Panics
+    ///
+    /// If `command_type` starts with `_reindex_`: those are reserved for the built-in command
+    /// of aggregates with unique keys or facts (see [`crate::reindex_type`]), and an aggregate
+    /// cannot see the other aggregate types of its domain.
     pub fn command<D: DeserializeOwned>(
         &self,
         command_type: &str,
@@ -659,6 +719,11 @@ impl<S: State> Aggregate<S> {
         + Sync
         + 'static,
     ) -> Self {
+        assert!(
+            !command_type.starts_with("_reindex_"),
+            "{command_type}: command types starting with _reindex_ are reserved for the built-in \
+             command of aggregates with unique keys or facts; name yours otherwise"
+        );
         let name = command_type.to_owned();
         let handle: Handle<S> = Arc::new(move |state, data, cmd, ctx| {
             let data = serde_json::from_value(data)
@@ -671,6 +736,204 @@ impl<S: State> Aggregate<S> {
             .unwrap()
             .insert(command_type.to_owned(), handle);
         self.clone()
+    }
+
+    /// Declares a unique key named `name`: `values(state)` returns the values the aggregate
+    /// holds in that state, as anything that iterates over `String`s (values are strings by
+    /// type; format numbers yourself): `None` (holds nothing),
+    /// `Some(value)` (one value) or a `Vec` (several; repeated ones count once). No two
+    /// aggregates of this type hold the same value of the key at the same time; a command that
+    /// would make its aggregate hold a value another one holds is rejected with `unique_taken`.
+    /// The value is compared as is: normalize it in `values` (e.g. lowercase an email); an empty
+    /// string is a value like any other. `options` says where it is unique (within the tenant,
+    /// or [`Unique::global`]) and whether the value is personal ([`Unique::personal`]). Example:
+    /// `customer_aggregate.unique("email", |s| s.email.as_ref().map(|e| e.to_lowercase()),
+    /// Unique::tenant());`.
+    ///
+    /// The worker computes the keys from the state after every command, also one without
+    /// events; `values` must be deterministic like `apply`, and one that panics fails the command
+    /// with `handler_error`. An aggregate that had events before the key was declared holds
+    /// none of its values until it runs a command: [`crate::Kernable::reindex`] runs one.
+    ///
+    /// # Panics
+    ///
+    /// If `name` is empty, longer than 128 bytes or holds `.` or `*`, or the aggregate declares
+    /// a key named `name` already (a fact may have the same name).
+    pub fn unique<I: IntoIterator<Item = String>>(
+        &self,
+        name: &str,
+        values: impl Fn(&S) -> I + Send + Sync + 'static,
+        options: Unique<S>,
+    ) -> Self {
+        let taken = self
+            .inner
+            .keys
+            .read()
+            .unwrap()
+            .iter()
+            .any(|k| k.name == name);
+        self.declarable("key", name, taken);
+        self.inner.keys.write().unwrap().push(KeyDef {
+            name: name.to_owned(),
+            values: Arc::new(move |state| values(state).into_iter().collect()),
+            global: options.global,
+            personal: options.personal,
+        });
+        self.clone()
+    }
+
+    /// Declares a fact named `name`, which the aggregate holds while `holds(state)` is true.
+    /// Commands of other aggregates of the tenant may require it (see [`Aggregate::requires`]).
+    /// Computed like the keys (see [`Aggregate::unique`]). Example:
+    /// `vehicle_aggregate.fact("open", |s| !s.wound_up);`.
+    ///
+    /// # Panics
+    ///
+    /// If `name` is empty, longer than 128 bytes or holds `.` or `*`, or the aggregate declares
+    /// a fact named `name` already (a key may have the same name).
+    pub fn fact(&self, name: &str, holds: impl Fn(&S) -> bool + Send + Sync + 'static) -> Self {
+        let taken = self
+            .inner
+            .facts
+            .read()
+            .unwrap()
+            .iter()
+            .any(|(f, _)| f == name);
+        self.declarable("fact", name, taken);
+        self.inner
+            .facts
+            .write()
+            .unwrap()
+            .push((name.to_owned(), Arc::new(holds)));
+        self.clone()
+    }
+
+    /// Which facts of other aggregates of the tenant a `command_type` command requires:
+    /// `f(state, data)` returns [`Requirement`]s (anything that iterates over them), from the
+    /// state before the command and its payload as `D`. The command commits only if each
+    /// named aggregate holds its fact at that moment, otherwise it is rejected with
+    /// `requirement_missing`; nothing is locked in between. Example:
+    /// `account_aggregate.requires("OpenAccount", |_state, data: Open| [Requirement::new("funds",
+    /// "vehicle", &data.vehicle_id, "open")]);`. A payload that is not a `D`, or an `f` that
+    /// panics, fails the command with `handler_error`.
+    ///
+    /// # Panics
+    ///
+    /// If the aggregate has no `command_type` handler (declare it with
+    /// [`Aggregate::command`] first).
+    pub fn requires<D: DeserializeOwned, I: IntoIterator<Item = Requirement>>(
+        &self,
+        command_type: &str,
+        f: impl Fn(&S, D) -> I + Send + Sync + 'static,
+    ) -> Self {
+        assert!(
+            self.handler(command_type).is_some(),
+            "{} has no command {command_type} to require facts for: declare it first",
+            self.inner.name
+        );
+        let name = command_type.to_owned();
+        let requires: Requires<S> = Arc::new(move |state, data| {
+            let data = serde_json::from_value(data)
+                .map_err(|e| Failure::Error(format!("{name} data: {e}")))?;
+            Ok(f(state, data).into_iter().collect())
+        });
+        self.inner
+            .requires
+            .write()
+            .unwrap()
+            .insert(command_type.to_owned(), requires);
+        self.clone()
+    }
+
+    /// Panics unless `name` can name a new key or fact (`kind`) of this aggregate; `taken`:
+    /// one of that kind has the name already.
+    fn declarable(&self, kind: &str, name: &str, taken: bool) {
+        let aggregate = format!("{}.{}", self.inner.domain.name(), self.inner.name);
+        assert!(
+            unqualified(name) && name.len() <= 128,
+            "{aggregate}: a {kind} name is 1 to 128 bytes without `.` or `*`, not {name:?}"
+        );
+        assert!(!taken, "{aggregate} declares a {kind} {name} already");
+    }
+
+    /// Whether the aggregate declares unique keys or facts.
+    fn indexed(&self) -> bool {
+        !self.inner.keys.read().unwrap().is_empty() || !self.inner.facts.read().unwrap().is_empty()
+    }
+
+    /// The unique keys and facts the aggregate holds in `state`, as the worker sends them after
+    /// a command that leaves it in `state`; for tests without a kernel. [`Error::Config`] if a
+    /// key or fact function panics.
+    pub fn index(&self, state: &S) -> Result<Index, Error> {
+        self.index_of(state).map_err(Failure::into_error)
+    }
+
+    /// The requirements of a `command_type` command with `data` on `state` (none if it declares
+    /// none, see [`Aggregate::requires`]); for tests without a kernel. [`Error::Config`] if
+    /// `data` is not the function's `D` or it panics.
+    pub fn requirements(
+        &self,
+        state: &S,
+        command_type: &str,
+        data: impl Serialize,
+    ) -> Result<Vec<Requirement>, Error> {
+        let data = serde_json::to_value(data)?;
+        self.requirements_of(state, command_type, data)
+            .map_err(Failure::into_error)
+    }
+
+    fn index_of(&self, state: &S) -> Result<Index, Failure> {
+        let keys = self.inner.keys.read().unwrap().clone();
+        let facts = self.inner.facts.read().unwrap().clone();
+        caught(|| {
+            let mut index = Index::default();
+            for key in &keys {
+                let subject = match &key.personal {
+                    None => None,
+                    Some(subject) => match subject(state) {
+                        Some(s) if !s.is_empty() => Some(s),
+                        _ => continue,
+                    },
+                };
+                let mut values: Vec<String> = Vec::new();
+                for value in (key.values)(state) {
+                    if !values.contains(&value) {
+                        values.push(value);
+                    }
+                }
+                index.keys.extend(values.into_iter().map(|value| UniqueKey {
+                    name: key.name.clone(),
+                    value,
+                    global: key.global,
+                    subject: subject.clone(),
+                }));
+            }
+            index.facts = facts
+                .iter()
+                .filter(|(_, holds)| holds(state))
+                .map(|(name, _)| name.clone())
+                .collect();
+            index
+        })
+    }
+
+    fn requirements_of(
+        &self,
+        state: &S,
+        command_type: &str,
+        data: Value,
+    ) -> Result<Vec<Requirement>, Failure> {
+        let requires = self
+            .inner
+            .requires
+            .read()
+            .unwrap()
+            .get(command_type)
+            .cloned();
+        match requires {
+            Some(requires) => caught(|| requires(state, data))?,
+            None => Ok(Vec::new()),
+        }
     }
 
     /// State after `history`, starting from `from` (default: the initial state). Events are
@@ -815,6 +1078,11 @@ pub(crate) struct Executed {
     pub vault: Vec<proto::VaultValue>,
     /// Version, state format and state, if the events cross a multiple of `snapshot_every`.
     pub snapshot: Option<(u64, String, Vec<u8>)>,
+    /// The unique keys and facts of the state after the events, and the facts the command
+    /// requires of other aggregates.
+    pub keys: Vec<proto::UniqueKey>,
+    pub facts: Vec<String>,
+    pub requires: Vec<proto::Requirement>,
 }
 
 /// An aggregate as a worker runs it, whatever its state type.
@@ -837,13 +1105,18 @@ impl<S: State> Runnable for Aggregate<S> {
     }
 
     fn command_types(&self) -> Vec<String> {
-        self.inner
+        let mut types: Vec<String> = self
+            .inner
             .handlers
             .read()
             .unwrap()
             .keys()
             .cloned()
-            .collect()
+            .collect();
+        if self.indexed() {
+            types.push(reindex_type(&self.inner.name));
+        }
+        types
     }
 
     fn event_types(&self) -> Vec<String> {
@@ -901,18 +1174,25 @@ impl<S: State> Runnable for Aggregate<S> {
             deadline: Timestamp(x.deadline),
             ids: 0,
         };
-        let handler = self.handler(&cmd.command_type).ok_or_else(|| {
-            Failure::Rejected(
-                Rejected::new(format!(
-                    "no handler for {} on {}.{}",
-                    cmd.command_type, cmd.domain, cmd.aggregate_type
-                ))
-                .code("unknown_command"),
-            )
-        })?;
+        let indexed = self.indexed();
+        let handler = self.handler(&cmd.command_type);
         let data = vault::unseal(decode(&cmd.payload), &x.vault).0;
-        let produced = caught(|| handler(&state, data, &meta, &mut ctx))??;
+        let produced = match handler {
+            Some(handler) => caught(|| handler(&state, data.clone(), &meta, &mut ctx))??,
+            // Produces nothing, so the result carries the keys and facts of the current state.
+            None if indexed && cmd.command_type == reindex_type(&self.inner.name) => Vec::new(),
+            None => {
+                return Err(Failure::Rejected(
+                    Rejected::new(format!(
+                        "no handler for {} on {}.{}",
+                        cmd.command_type, cmd.domain, cmd.aggregate_type
+                    ))
+                    .code("unknown_command"),
+                ));
+            }
+        };
         self.personal_in_clear(&cmd.command_type, &produced)?;
+        let requires = self.requirements_of(&state, &cmd.command_type, data)?;
 
         let mut events = Vec::with_capacity(produced.len());
         let mut values = Vec::new();
@@ -937,14 +1217,14 @@ impl<S: State> Runnable for Aggregate<S> {
 
         let before = x.expected_version;
         let version = before + produced.len() as u64;
-        let snapshot = if snapshot_every == 0
-            || produced.is_empty()
-            || version / snapshot_every == before / snapshot_every
-        {
-            None
+        let snapshot_due = snapshot_every != 0
+            && !produced.is_empty()
+            && version / snapshot_every != before / snapshot_every;
+        let after = if produced.is_empty() || !(snapshot_due || indexed) {
+            state
         } else {
             // Apply the events as they will be read back (a JSON round trip), so the snapshot
-            // equals a replay.
+            // and the keys equal those of a replay.
             let read = produced.iter().enumerate().map(|(i, e)| FoldEvent {
                 event_type: e.event_type.clone(),
                 schema: self.inner.domain.schema_of(&e.event_type),
@@ -952,14 +1232,26 @@ impl<S: State> Runnable for Aggregate<S> {
                 meta: meta_of(&e.event_type, before + i as u64 + 1, &cmd, &cmd.command_id),
                 request: request.clone(),
             });
-            let after = self.fold_inner(read.collect::<Vec<_>>(), Some(state))?;
+            self.fold_inner(read.collect::<Vec<_>>(), Some(state))?
+        };
+        let snapshot = if snapshot_due {
             let state = serde_json::to_vec(&after).map_err(|e| Failure::Error(e.to_string()))?;
             Some((version, schema, state))
+        } else {
+            None
+        };
+        let index = if indexed {
+            self.index_of(&after)?
+        } else {
+            Index::default()
         };
         Ok(Executed {
             events,
             vault: values,
             snapshot,
+            keys: index.keys.iter().map(UniqueKey::to_wire).collect(),
+            facts: index.facts,
+            requires: requires.iter().map(Requirement::to_wire).collect(),
         })
     }
 }

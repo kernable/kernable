@@ -30,6 +30,7 @@ mod context;
 mod data;
 mod domain;
 mod error;
+mod index;
 mod listener;
 mod log;
 mod store;
@@ -67,6 +68,7 @@ pub use domain::{
     EventSchema, FoldEvent, NewEvent, State, domain,
 };
 pub use error::{BoxError, Error, Rejected};
+pub use index::{Index, Reindex, Requirement, Unique, UniqueKey, reindex_type};
 pub use kernable_core::transport::Tls;
 pub use listener::{
     Check, CheckKind, CheckOutcome, Listener, ListenerContext, ListenerHandle, MiddlewareOptions,

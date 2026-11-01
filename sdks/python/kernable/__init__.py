@@ -27,6 +27,7 @@ Stubs: generate them first (`make py-stubs`), see sdks/python/README.md.
 
 import contextvars
 import copy
+import hashlib
 import inspect
 import json
 import os
@@ -45,7 +46,7 @@ from typing import Any, Callable, Iterable
 import grpc
 
 from kernable.signing import (Key, cache_message, challenge_message, command_message, data_message, derived_id,
-                              membership_message, query_message, vault_ref, rejection_message, result_message,
+                              index_message, membership_message, query_message, vault_ref, rejection_message, result_message,
                               snapshot_message)
 from kernable.store import Store
 from kernable.v1 import kernable_pb2 as pb
@@ -54,9 +55,9 @@ from kernable.v1 import kernable_pb2_grpc as rpc
 __all__ = ["PROTOCOL", "Aggregate", "App", "ApplyContext", "CacheClient", "Check", "ClientClosed", "CommandContext", "CommandMeta",
            "CommandSchema",
            "Data", "DataClient", "Domain",
-           "Event", "EventMeta", "EventSchema", "Kernable", "Key", "Listener", "ListenerContext", "ListenerHandle", "Manifest", "NotSettled", "Outcome",
-           "QueryContext", "QueryMeta", "QueryOutcome", "Rejected", "RequestContext", "Store", "StoredEventMeta", "Tls", "Worker",
-           "domain"]
+           "Event", "EventMeta", "EventSchema", "HeldKey", "Index", "Kernable", "Key", "Listener", "ListenerContext", "ListenerHandle", "Manifest", "NotSettled", "Outcome",
+           "QueryContext", "QueryMeta", "QueryOutcome", "Rejected", "RequestContext", "Requirement", "Store", "StoredEventMeta", "Tls", "Worker",
+           "domain", "reindex_type"]
 
 #: Time zero (UTC): the default of times not known.
 _EPOCH = datetime.fromtimestamp(0, timezone.utc)
@@ -330,6 +331,44 @@ class Outcome:
 
 
 @dataclass
+class Requirement:
+    """A fact another aggregate of the command's tenant must hold when the command commits, as
+    `requires=` of `Aggregate.command` returns them: `Requirement("funds", "vehicle", data["vehicleId"],
+    "open")`. The kernel checks it atomically with the commit; if the aggregate does not hold the
+    fact (see `Aggregate.fact`), the command is rejected with `requirement_missing`."""
+
+    domain: str
+    #: Unqualified, e.g. `vehicle`.
+    aggregate_type: str
+    aggregate_id: str
+    #: A fact the aggregate declares with `Aggregate.fact`.
+    fact: str
+
+
+@dataclass
+class HeldKey:
+    """A unique key an aggregate holds for a state, as `Aggregate.index` returns it: the value in
+    clear (the worker sends only its SHA-256 hash)."""
+
+    #: The name declared with `Aggregate.unique`.
+    name: str
+    value: str
+    #: `"tenant"` or `"global"`; see `Aggregate.unique`.
+    scope: str = "tenant"
+    #: The person the value belongs to, for a personal key; empty otherwise.
+    subject: str = ""
+
+
+@dataclass
+class Index:
+    """The unique keys and facts an aggregate holds for a state, returned by `Aggregate.index`."""
+
+    keys: list[HeldKey] = field(default_factory=list)
+    #: The names of the facts that are true, in the order they were declared.
+    facts: list[str] = field(default_factory=list)
+
+
+@dataclass
 class QueryOutcome:
     """What came of a query, as a middleware that runs after requests (`when="after"`) gets it:
     its response data or why it was rejected."""
@@ -389,7 +428,7 @@ class NotSettled(Exception):
 
 
 #: The protocol version this SDK speaks; see "Protocol versions" in `kernable.proto`.
-PROTOCOL = 1
+PROTOCOL = 2
 
 #: The name of the listener whose handler is running, for requests sent from it.
 _HANDLING: contextvars.ContextVar[str] = contextvars.ContextVar("kernable_listener", default="")
@@ -415,6 +454,12 @@ _UNQUALIFIED = re.compile(r"^[^.*]+$")
 _LISTENED = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*\.([^.]+|\*)$")
 _QUERY = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*\.[^.*]+$")
 _CHECKED = re.compile(r"^(\*|[A-Za-z][A-Za-z0-9_-]*\.([^.]+|\*))$")
+def reindex_type(aggregate_type: str) -> str:
+    """The type of the built-in command an aggregate with unique keys or facts runs without
+    events, `_reindex_<aggregate_type>` (see `Aggregate.unique` and `Kernable.reindex`): one per
+    aggregate, as command types are unique within a domain. `reindex_type("fund")` is
+    `"_reindex_fund"`."""
+    return f"_reindex_{aggregate_type}"
 
 
 class EventSchema:
@@ -684,6 +729,11 @@ class Aggregate:
     later commands fold only the events after it. The state must survive a JSON round trip.
     Change `schema` when `apply` produces differently shaped state: older snapshots are then
     ignored and the state is rebuilt from the events.
+
+    Uniqueness and conditions across aggregates: `unique` declares keys no other aggregate may
+    hold at the same time (an email, an order number), `fact` what other aggregates' commands may
+    require of this one (`requires=` of `command`). The kernel checks both atomically with the
+    commit.
     """
 
     def __init__(self, domain: str, name: str, initial: Any, snapshot_every: int = 100, schema: str = "1",
@@ -700,6 +750,12 @@ class Aggregate:
         self.schema = schema
         self.appliers: dict[str, Callable] = {}
         self.handlers: dict[str, Callable] = {}
+        #: Per command type, the facts of other aggregates it requires; see `command`.
+        self.requirements: dict[str, Callable] = {}
+        #: The unique keys, by name: `(fn, scope, personal)`; see `unique`.
+        self.keys: dict[str, tuple[Callable, str, Callable | None]] = {}
+        #: The facts, by name; see `fact`.
+        self.facts: dict[str, Callable] = {}
 
     def apply(self, event_type: str, fn: Callable | None = None):
         """How an event of `event_type` changes the state: `fn(state, data, evt, ctx)` changes
@@ -711,15 +767,107 @@ class Aggregate:
         the aggregate when `fn` is given."""
         return _register(self, self.appliers, event_type, fn)
 
-    def command(self, command_type: str, fn: Callable | None = None):
+    def command(self, command_type: str, fn: Callable | None = None, *, requires: Callable | None = None):
         """Which events a `command_type` command produces: `fn(state, data, cmd, ctx)` returns
         them as a list of `{"type": ..., "data": ...}`, or raises
         `Rejected`; `cmd` (a `CommandMeta`) and `ctx` (a `CommandContext`) are optional. `state`
         is the state after every earlier event; do not change it. Works as a decorator too:
         `@cart_aggregate.command("AddItem")` over `def _(state, data): return [{"type":
         "ItemAdded", "data": data}]`. Returns the decorated function, or the aggregate when `fn`
-        is given."""
+        is given.
+
+        `requires(data, state)` returns the facts other aggregates of the command's tenant must
+        hold when it commits, as a list of `Requirement` (`state` is the state before the
+        command): `requires=lambda data, state: [Requirement("funds", "vehicle", data["vehicleId"],
+        "open")]`. The kernel checks them atomically with the commit and rejects the command with
+        `requirement_missing` if one is not held, so no other command can change them in between.
+        Raises `ValueError` for a type that starts with `_reindex_`: aggregates with keys or
+        facts run `_reindex_<aggregate_type>` themselves (see `unique`), and one of another aggregate
+        of the domain could clash."""
+        if command_type.startswith("_reindex_"):
+            raise ValueError(f"{command_type}: command types starting with _reindex_ are the built-in commands "
+                             "of aggregates with keys or facts; name yours differently")
+        if requires is not None:
+            self.requirements[command_type] = requires
         return _register(self, self.handlers, command_type, fn)
+
+    def unique(self, name: str, fn: Callable | None = None, *, scope: str = "tenant",
+               personal: Callable | None = None):
+        """A unique key: `fn(state)` returns its value (a `str`), several values (a list of `str`), or
+        `None` for none. After every command the aggregate holds exactly the values of its new
+        state, and no two aggregates of this type hold the same value of `name` at the same time:
+        a command that would take a value another one holds is rejected with `unique_taken`
+        (the message names the key, never the value). Normalise the value in `fn` (e.g.
+        `.lower()` for an email); the kernel compares its SHA-256 hash.
+
+        `scope`: `"tenant"` (default) for unique within the command's tenant, `"global"` for
+        across tenants. `personal(state)`: the person the value belongs to, for personal data
+        such as an email; the kernel keeps the key in the vault, and erasing that subject frees
+        it. A personal key whose subject is empty or `None` is not held.
+
+        Example: `account_aggregate.unique("email", lambda s: s.get("email"), scope="global")`.
+        Works as a decorator too (`@account_aggregate.unique("email")` over `def _(state):`) and
+        returns the decorated function, or the aggregate when `fn` is given, so it chains.
+
+        Keys come from the state, so aggregates that existed before a key was declared hold it
+        only after their next command: `Kernable.reindex` runs the built-in command
+        `_reindex_<aggregate_type>` (`reindex_type`, e.g. `_reindex_account`; no events) on them.
+        Workers of an aggregate with keys or facts run it too, so their key needs `run` for
+        `<domain>._reindex_<aggregate_type>` (`<domain>.*` covers it). An aggregate whose value another
+        one already holds (a duplicate from before) is rejected with `unique_taken` until its
+        value changes or becomes `None`. Raises `ValueError` if the name is declared twice, is
+        empty, holds a dot or is longer than 128 bytes, or `scope` is neither of the two."""
+        _check_index_name("key", name, self.keys, self)
+        if scope not in ("tenant", "global"):
+            raise ValueError(f'the scope of a key is "tenant" or "global", not {scope!r}')
+
+        def define(f: Callable) -> None:
+            self.keys[name] = (f, scope, personal)
+            self.handlers.setdefault(reindex_type(self.name), _no_events)
+
+        return _define(self, define, fn)
+
+    def fact(self, name: str, fn: Callable | None = None):
+        """A fact: `fn(state)` returns whether the aggregate holds it. After every command the
+        aggregate holds the facts that are true for its new state, and commands of other
+        aggregates may require them (`requires=` of `command`), checked atomically with their
+        commit (`requirement_missing` if not held). Example: `vehicle_aggregate.fact("open",
+        lambda s: s["status"] == "open")`. Works as a decorator too and chains like `unique`;
+        aggregates that existed before a fact was declared hold it after `Kernable.reindex`.
+        Raises `ValueError` if the name is declared twice, is empty, holds a dot or is longer
+        than 128 bytes."""
+        _check_index_name("fact", name, self.facts, self)
+
+        def define(f: Callable) -> None:
+            self.facts[name] = f
+            self.handlers.setdefault(reindex_type(self.name), _no_events)
+
+        return _define(self, define, fn)
+
+    def index(self, state: Any) -> Index:
+        """The unique keys and facts this aggregate holds for `state`, as the worker computes them
+        after a command; for unit tests next to `handle`: `account_aggregate.index(state).keys`.
+        Raises the exception of a key's or fact's function, `TypeError` if a key's value is not a
+        string."""
+        keys: list[HeldKey] = []
+        for name, (fn, scope, personal) in self.keys.items():
+            values = fn(state)
+            if values is None:
+                continue
+            for value in values if isinstance(values, (list, tuple)) else [values]:
+                if not isinstance(value, str):
+                    raise TypeError(f"the key {name} of {self.domain}.{self.name} is a string, not {type(value).__name__}")
+                subject = ""
+                if personal is not None:
+                    subject = personal(state) or ""
+                    if not isinstance(subject, str):
+                        raise TypeError(f"the subject of the key {name} is a string, not {type(subject).__name__}")
+                    if not subject:
+                        continue
+                held = HeldKey(name, value, scope, subject)
+                if held not in keys:
+                    keys.append(held)
+        return Index(keys, [name for name, fn in self.facts.items() if fn(state)])
 
     def schema_of(self, event_type: str) -> int:
         """The payload version this aggregate writes `event_type` events at."""
@@ -756,6 +904,32 @@ class Aggregate:
             raise ValueError(f"no handler for {command_type} on {self.domain}.{self.name}")
         meta = CommandMeta(ctx._command_id, command_type, self.domain, self.name)
         return _call(fn, copy.deepcopy(state), _decode(_encode(data)), meta, ctx)
+
+
+def _no_events(state, data) -> list[dict]:
+    """The built-in `_reindex_<aggregate_type>` command: no events, so the worker sends the keys and facts of the
+    current state."""
+    return []
+
+
+def _check_index_name(kind: str, name: str, declared: dict, agg: Aggregate) -> None:
+    if not isinstance(name, str) or not name or "." in name or len(name.encode()) > 128:
+        raise ValueError(f"a {kind} name is not empty, has no dots and at most 128 bytes, not {name!r}")
+    if name in declared:
+        raise ValueError(f"{agg.domain}.{agg.name} has a {kind} {name} already")
+
+
+def _define(owner, define: Callable, fn: Callable | None):
+    """Defines `fn` with `define` and returns `owner`, or, without `fn`, a decorator that does."""
+    if fn is not None:
+        define(fn)
+        return owner
+
+    def decorator(f: Callable) -> Callable:
+        define(f)
+        return f
+
+    return decorator
 
 
 def _personal(vault: _VaultFields) -> set[str]:
@@ -1078,6 +1252,20 @@ class Kernable:
         if res.WhichOneof("outcome") == "rejected":
             raise Rejected(res.rejected.message, res.rejected.code)
         return _decode(res.response)
+
+    def reindex(self, domain: str, aggregate_type: str, aggregate_ids: Iterable[str], *,
+                tenant: str | None = None, context: RequestContext | None = None) -> dict[str, Outcome]:
+        """Runs the built-in command `_reindex_<aggregate_type>` on these aggregates, one after
+        the other, so they hold the unique keys and facts of their current state, e.g. after
+        declaring a key (`Aggregate.unique`) for aggregates that existed before. It produces no events. Returns
+        the `Outcome` per ID: committed, or rejected, e.g. with `unique_taken` for an aggregate
+        whose value another one holds already. An ID without events holds nothing. `tenant` and
+        `context` replace the client's. Raises `grpc.RpcError` if the kernel refuses a call
+        (e.g. the aggregate's worker declares no keys or facts). Example:
+        `k.reindex("identity", "account", ["a1", "a2"])`."""
+        command_type = reindex_type(aggregate_type)
+        return {id: self.submit(domain, aggregate_type, id, command_type, None, tenant=tenant, wait="committed",
+                                context=context) for id in aggregate_ids}
 
     def listener(self, listener: "Listener") -> "ListenerHandle":
         """A handle that runs a listener defined with `Domain.read_model` or `Domain.reactor`, in
@@ -1558,6 +1746,8 @@ class Worker(_Stream):
         self._key = key
         self._aggregates = list(aggregates)
         self._by_command = {f"{a.domain}.{t}": a for a in aggregates for t in a.handlers}
+        # By stream: the kernel names the aggregate type of every command.
+        self._by_stream = {(a.domain, a.name): a for a in aggregates}
         # The service this worker belongs to; its membership decides whether the kernel waits for it.
         self._service = service
 
@@ -1609,8 +1799,8 @@ class Worker(_Stream):
     def _execute(self, x):
         cmd = x.command
         try:
-            agg = self._by_command.get(f"{cmd.domain}.{cmd.command_type}")
-            if agg is None or agg.name != cmd.aggregate_type:
+            agg = self._by_stream.get((cmd.domain, cmd.aggregate_type))
+            if agg is None or cmd.command_type not in agg.handlers:
                 raise Rejected(f"no handler for {cmd.command_type} on {cmd.domain}.{cmd.aggregate_type}",
                                "unknown_command")
             if x.HasField("snapshot") and x.snapshot.schema != agg.schema:
@@ -1622,10 +1812,11 @@ class Worker(_Stream):
             meta = CommandMeta(cmd.command_id, cmd.command_type, cmd.domain, cmd.aggregate_type, cmd.aggregate_id,
                                cmd.tenant_id)
             ctx = CommandContext(_from_wire_context(cmd.context), _time(x.deadline), _time(x.received_at), cmd.command_id)
+            data = _unseal(_decode(cmd.payload), x.vault)[0]
             # A copy: a handler that changes it must not change the snapshot.
-            produced = _call(agg.handlers[cmd.command_type], copy.deepcopy(state), _unseal(_decode(cmd.payload), x.vault)[0],
-                             meta, ctx)
+            produced = _call(agg.handlers[cmd.command_type], copy.deepcopy(state), data, meta, ctx)
             _check_personal(agg, cmd, produced)
+            requires = self._requires(agg, cmd, data, state)
             events, vault = [], []
             for e in produced:
                 spec = agg.events.get(e["type"])
@@ -1634,7 +1825,12 @@ class Worker(_Stream):
                 erases = str(_call(spec.eraser, e.get("data"), cmd.aggregate_id) or "") if spec and spec.eraser else ""
                 events.append(pb.NewEvent(event_type=e["type"], schema=agg.schema_of(e["type"]), payload=payload,
                                           vault_refs=refs, erases=erases))
-            snapshot = self._snapshot(agg, cmd, x.expected_version, state, produced)
+            indexed = bool(agg.keys or agg.facts)
+            after = (self._after(agg, cmd, x.expected_version, state, produced)
+                     if indexed or _snapshot_due(agg, x.expected_version, len(produced)) else None)
+            snapshot = self._snapshot(agg, cmd, x.expected_version, after, produced)
+            # Every command, also one without events: the set the aggregate holds now.
+            index = agg.index(after) if indexed else Index()
         except SchemaError:
             raise  # not the command's fault: this worker cannot read the aggregate; stop until updated
         except Exception as err:
@@ -1649,23 +1845,57 @@ class Worker(_Stream):
             return pb.WorkerMessage(rejection=pb.Rejection(lease_id=x.lease_id, reason=reason, worker_sig=sig))
         sig = self._key.sign(result_message(cmd, x.expected_version, events))
         result = pb.Result(lease_id=x.lease_id, events=events, worker_sig=sig, snapshot=snapshot, vault=vault)
+        # The full set of keys and facts after the events (none: holds nothing), and what the
+        # command requires; signed apart from the events, only when there is any.
+        result.keys.extend(pb.UniqueKey(name=k.name, value_hash=hashlib.sha256(k.value.encode()).digest(),
+                                        subject=k.subject, **{"global": k.scope == "global"}) for k in index.keys)
+        result.facts.extend(index.facts)
+        result.requires.extend(requires)
+        if result.keys or result.facts or result.requires:
+            result.index_sig.CopyFrom(self._key.sign(index_message(cmd, x.expected_version, result.keys, result.facts,
+                                                                   result.requires)))
         return pb.WorkerMessage(result=result)
 
-    def _snapshot(self, agg: Aggregate, cmd, before: int, state, events):
-        """A snapshot of the state after the produced `events`, if they cross a multiple of
-        `snapshot_every`."""
-        version = before + len(events)
-        every = agg.snapshot_every
-        if every <= 0 or not events or version // every == before // every:
-            return None
-        # Apply the events as they will be read back (a JSON round trip), so the snapshot equals a replay.
+    @staticmethod
+    def _requires(agg: Aggregate, cmd, data, state) -> list:
+        """The facts of other aggregates the command requires, from its data and the state before it."""
+        fn = agg.requirements.get(cmd.command_type)
+        if fn is None:
+            return []
+        wire = []
+        for r in _call(fn, data, copy.deepcopy(state)) or []:
+            if not isinstance(r, Requirement):
+                raise TypeError(f"requires of {cmd.domain}.{cmd.command_type} returns Requirement, not {type(r).__name__}")
+            wire.append(pb.Requirement(domain=r.domain, aggregate_type=r.aggregate_type, aggregate_id=r.aggregate_id,
+                                       fact=r.fact))
+        return wire
+
+    @staticmethod
+    def _after(agg: Aggregate, cmd, before: int, state, events):
+        """The state after the produced `events`, applied as they will be read back (a JSON round
+        trip), so it equals a replay."""
+        if not events:
+            return state
         apply_ctx = ApplyContext(_from_wire_context(cmd.context))
         read = [(e["type"], agg.schema_of(e["type"]), _decode(_encode(e.get("data"))),
                  _meta(e["type"], before + i + 1, cmd, cmd.command_id), apply_ctx) for i, e in enumerate(events)]
-        after = agg.fold(read, state)
+        return agg.fold(read, state)
+
+    def _snapshot(self, agg: Aggregate, cmd, before: int, after, events):
+        """A snapshot of the state `after` the produced `events`, if they cross a multiple of
+        `snapshot_every`."""
+        if not _snapshot_due(agg, before, len(events)):
+            return None
+        version = before + len(events)
         state_bytes = _encode(after)
         sig = self._key.sign(snapshot_message(cmd, version, agg.schema, state_bytes))
         return pb.Snapshot(version=version, schema=agg.schema, state=state_bytes, worker_sig=sig)
+
+
+def _snapshot_due(agg: Aggregate, before: int, produced: int) -> bool:
+    """Whether `produced` events after version `before` cross a multiple of `snapshot_every`."""
+    every = agg.snapshot_every
+    return every > 0 and produced > 0 and (before + produced) // every != before // every
 
 
 class Listener:

@@ -14,10 +14,13 @@ import {
   derivedId,
   queryMessage,
   eventHash,
+  indexMessage,
   rejectionMessage,
   resultMessage,
   snapshotMessage,
   subscribeMessage,
+  uniqueKeyId,
+  valueHash,
   vaultRef,
 } from "../../src/signing.ts";
 
@@ -105,4 +108,16 @@ test("event hash matches the test vector", () => {
     producer_sig: { key_id: e.producer_key_id, sig: hex(e.producer_sig_hex) },
   };
   assert.equal(eventHash(hex(e.prev_hex), event).toString("hex"), v.event_hash.hash);
+});
+
+test("index messages and unique key IDs match the test vectors", () => {
+  const i = v.result_index.input;
+  const keys = i.keys.map((k: any) => ({ ...k, value_hash: hex(k.value_hash_hex) }));
+  const requires = i.requires;
+  check("result_index", indexMessage(command(i.command), i.expected_version, keys, i.facts, requires));
+  // The values behind the vectors' hashes.
+  assert.deepEqual([valueHash("A-1001"), valueHash("max@firma.de")].map((h) => h.toString("hex")), i.keys.map((k: any) => k.value_hash_hex));
+  const u = v.unique_key_id.input;
+  const ids = u.keys.map((k: any) => uniqueKeyId(u.tenant_id, u.domain, u.aggregate_type, { ...k, value_hash: hex(k.value_hash_hex) }).toString("hex"));
+  assert.deepEqual(ids, v.unique_key_id.ids);
 });

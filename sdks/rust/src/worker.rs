@@ -308,16 +308,22 @@ fn reply(
                 x.expected_version,
                 &done.events,
             ));
+            let index_sig = index_sig(
+                &cmd,
+                x.expected_version,
+                (&done.keys, &done.facts, &done.requires),
+                |m| client.sign(m),
+            );
             return Ok(In::Result(proto::Result {
                 lease_id: x.lease_id,
                 events: done.events,
                 worker_sig: Some(worker_sig),
                 snapshot,
                 vault: done.vault,
-                keys: Vec::new(),
-                facts: Vec::new(),
-                requires: Vec::new(),
-                index_sig: None,
+                keys: done.keys,
+                facts: done.facts,
+                requires: done.requires,
+                index_sig,
             }));
         }
         Err(Failure::Schema(reason)) => return Err(reason),
@@ -341,6 +347,26 @@ fn reply(
         reason: Some(reason),
         worker_sig: Some(worker_sig),
     }))
+}
+
+/// The signature over the unique keys, facts and requirements of a result for `cmd` at
+/// `expected_version`; none if it has none of them.
+fn index_sig(
+    cmd: &proto::Command,
+    expected_version: u64,
+    (keys, facts, requires): (&[proto::UniqueKey], &[String], &[proto::Requirement]),
+    sign: impl FnOnce(&[u8]) -> proto::Signature,
+) -> Option<proto::Signature> {
+    if keys.is_empty() && facts.is_empty() && requires.is_empty() {
+        return None;
+    }
+    Some(sign(&signing::index_message(
+        cmd,
+        expected_version,
+        keys,
+        facts,
+        requires,
+    )))
 }
 
 /// An aggregate's qualified type: `shop.Cart`.
@@ -383,4 +409,111 @@ fn event_schemas(by_command: &HashMap<String, Arc<dyn Runnable>>) -> Vec<EventSc
         .into_iter()
         .map(|(event_type, schema)| EventSchema { event_type, schema })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use serde::{Deserialize, Serialize};
+    use serde_json::{Value, json};
+
+    use super::*;
+    use crate::{NewEvent, Requirement, Unique, domain, domain::Runnable};
+
+    #[derive(Clone, Default, Serialize, Deserialize)]
+    struct Order {
+        number: Option<String>,
+        email: Option<String>,
+        customer: String,
+        open: bool,
+        paid: bool,
+    }
+
+    /// The index of a result is signed as the shared test vector `result_index` says: value
+    /// hashes, scopes and subjects of the keys in declaration order, the true facts, and the
+    /// requirements from the command's data.
+    #[test]
+    fn the_index_of_a_result_is_signed_as_the_test_vectors_say() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../proto/test-vectors/signing.json"
+        );
+        let vectors: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let vector = &vectors["result_index"];
+        let input = &vector["input"]["command"];
+        fn text(v: &Value) -> String {
+            v.as_str().unwrap().to_owned()
+        }
+
+        let orders = domain("orders");
+        let order = orders.aggregate("Order", Order::default());
+        order.apply("OrderPlaced", |s, d: Value, _evt, _ctx| {
+            *s = Order {
+                number: Some(text(&d["number"])),
+                email: Some(text(&d["email"])),
+                customer: text(&d["customerId"]),
+                open: true,
+                paid: true,
+            }
+        });
+        order.command("PlaceOrder", |_, d: Value, _cmd, _ctx| {
+            let placed = json!({ "number": "A-1001", "email": "max@firma.de", "customerId": d["customerId"] });
+            Ok(vec![NewEvent::new("OrderPlaced", placed)])
+        });
+        order
+            .unique("number", |s| s.number.clone(), Unique::tenant())
+            .unique(
+                "email",
+                |s| s.email.clone(),
+                Unique::global().personal(|s: &Order| Some(s.customer.clone())),
+            )
+            .fact("open", |s| s.open)
+            .fact("closed", |s| !s.open)
+            .fact("paid", |s| s.paid)
+            .requires("PlaceOrder", |_, d: Value| {
+                [Requirement::new(
+                    "identity",
+                    "Customer",
+                    d["customerId"].as_str().unwrap(),
+                    "active",
+                )]
+            });
+
+        let cmd = proto::Command {
+            command_id: text(&input["command_id"]),
+            tenant_id: text(&input["tenant_id"]),
+            domain: text(&input["domain"]),
+            aggregate_type: text(&input["aggregate_type"]),
+            aggregate_id: text(&input["aggregate_id"]),
+            command_type: text(&input["command_type"]),
+            payload: hex::decode(text(&input["payload_hex"])).unwrap(),
+            ..Default::default()
+        };
+        let expected_version = vector["input"]["expected_version"].as_u64().unwrap();
+        let execute = proto::Execute {
+            command: Some(cmd.clone()),
+            expected_version,
+            ..Default::default()
+        };
+        let done = order
+            .execute(&execute)
+            .unwrap_or_else(|_| panic!("executes"));
+        let key = signing::signing_key_from_hex(&text(&vectors["key"]["seed"])).unwrap();
+        let mut signed = Vec::new();
+        let sig = index_sig(
+            &cmd,
+            expected_version,
+            (&done.keys, &done.facts, &done.requires),
+            |m| {
+                signed = m.to_vec();
+                signing::sign(&key, m)
+            },
+        )
+        .unwrap();
+        assert_eq!(hex::encode(&signed), text(&vector["message"]));
+        assert_eq!(hex::encode(&sig.sig), text(&vector["signature"]));
+
+        // Without keys, facts or requirements, a result has no index signature.
+        let none = index_sig(&cmd, expected_version, (&[], &[], &[]), |_| unreachable!());
+        assert!(none.is_none());
+    }
 }

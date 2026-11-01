@@ -81,6 +81,24 @@ export interface WireSnapshot {
   worker_sig: WireSignature;
 }
 
+/** A unique key an aggregate holds; see `UniqueKey` in kernable.proto. */
+export interface WireUniqueKey {
+  name: string;
+  global: boolean;
+  /** SHA-256 of the value's UTF-8 bytes. */
+  value_hash: Buffer;
+  /** Personal: the person the value belongs to; empty otherwise. */
+  subject: string;
+}
+
+/** A fact another aggregate of the command's tenant must hold; see `Requirement` in kernable.proto. */
+export interface WireRequirement {
+  domain: string;
+  aggregate_type: string;
+  aggregate_id: string;
+  fact: string;
+}
+
 export interface WireRejected {
   code: string;
   message: string;
@@ -138,6 +156,12 @@ export type WorkerMessage =
         worker_sig: WireSignature;
         snapshot?: WireSnapshot;
         vault: WireVaultValue[];
+        /** Protocol 2: the full set the aggregate holds after the events, and what the command requires. */
+        keys?: WireUniqueKey[];
+        facts?: string[];
+        requires?: WireRequirement[];
+        /** Over `kernable.v1.index`; only when keys, facts or requires are set. */
+        index_sig?: WireSignature;
       };
     }
   | { rejection: { lease_id: string; reason: WireRejected; worker_sig: WireSignature } };
@@ -288,7 +312,7 @@ const BUNDLED = fileURLToPath(new URL("../proto/kernable/v1/kernable.proto", imp
 const PROTO = existsSync(BUNDLED) ? BUNDLED : fileURLToPath(new URL("../../../proto/kernable/v1/kernable.proto", import.meta.url));
 
 /** The protocol version this SDK speaks; see "Protocol versions" in `kernable.proto`. */
-export const PROTOCOL = 1;
+export const PROTOCOL = 2;
 
 /** Room for a file of 16 MiB, the kernel's limit, plus the rest of the message (grpc-js receives 4 MiB by default). */
 const MAX_DATA_MESSAGE = 17 << 20;

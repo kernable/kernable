@@ -82,6 +82,23 @@ def result_message(c, expected_version: int, events) -> bytes:
     return bytes(m.buf)
 
 
+def index_message(c, expected_version: int, keys, facts, requires) -> bytes:
+    """What a worker signs for the unique keys, facts and requirements of its result (protocol 2,
+    `Result.index_sig`): a message of its own, apart from `result_message`, which every event
+    stores and `kernable verify` checks against the events alone."""
+    m = _stream(Msg("kernable.v1.index"), c).u64(expected_version).u64(len(keys))
+    for k in keys:
+        # `global` is a Python keyword: the protobuf field is read with getattr.
+        m.str(k.name).u64(1 if getattr(k, "global") else 0).bytes(k.value_hash).str(k.subject)
+    m.u64(len(facts))
+    for f in facts:
+        m.str(f)
+    m.u64(len(requires))
+    for r in requires:
+        m.str(r.domain).str(r.aggregate_type).str(r.aggregate_id).str(r.fact)
+    return bytes(m.buf)
+
+
 def snapshot_message(c, version: int, schema: str, state: bytes) -> bytes:
     return bytes(Msg("kernable.v1.snapshot").str(c.tenant_id).str(c.domain).str(c.aggregate_type).str(c.aggregate_id)
                  .u64(version).str(schema).bytes(state).buf)
