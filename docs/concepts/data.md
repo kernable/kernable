@@ -40,7 +40,7 @@ Rules:
 ## Formats and protocol
 
 - **Protocol versions.** Every request carries the protocol version of its SDK; the kernel accepts a range and names the side to update otherwise.
-- **Store formats.** A store records its data format. A kernel opens only its own format and refuses others at startup; `kernable migrate` upgrades an older store, explicitly and after a backup. Stores of every past format are kept in kernable's tests and must stay readable.
+- **Store formats.** A store records its data format. A kernel opens only its own format and refuses others at startup. There are no migrations before the first release: a store of an earlier development build does not carry over. A frozen store of the current format is kept in kernable's tests and must stay readable.
 
 ## Personal data: the vault
 

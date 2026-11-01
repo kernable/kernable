@@ -22,7 +22,7 @@ Every code example in the documentation is a file that runs in `make check` agai
 | `proto/` | The protocol (`kernable.proto`), the store's log format (`storage.proto`), `SIGNING.md` and test vectors |
 | `crates/kernable-core` | Protocol types, signing, hash chain, client transport |
 | `crates/kernable-store` | The event store (`sqlite:`, `file:`, `memory:`), the snapshot store and the vault |
-| `crates/kernable-kernel` | The kernel and the `kernable` command: `kernable start --root <root.pub>`, keys, grants, revocation, certificates, verify, migrate, listeners, vault |
+| `crates/kernable-kernel` | The kernel and the `kernable` command: `kernable start --root <root.pub>`, keys, grants, revocation, certificates, verify, listeners, vault |
 | `crates/kernable-bench`, `bench/` | Load generator, benchmark matrix, results |
 | `sdks/typescript`, `sdks/python`, `sdks/rust` | The SDKs |
 | `examples/shop` | Reference application: identity in Python, orders and an HTTP API in TypeScript, with kill tests |
@@ -43,6 +43,6 @@ make fuzz           # fuzzes the file log and the wire messages (nightly Rust, c
 
 `make check` also aborts the real kernel at every crash point (`crates/kernable-kernel/src/crash.rs`, built only with `--features crash-points`) and runs property tests on damaged logs, all storage backends and arbitrary requests.
 
-`crates/kernable-kernel/tests/fixtures/format-<n>` holds frozen stores of every data format; `make check` migrates, verifies and runs them. Never regenerate them: a new format adds a directory (`KERNABLE_WRITE_FIXTURES=1` fills only missing ones) and a `kernable migrate` step.
+`crates/kernable-kernel/tests/fixtures/format-<n>` holds a frozen store of the current data format; `make check` verifies and runs it. There are no migrations before the first release: a format change bumps `kernable_store::FORMAT`, and the fixture is regenerated in a new directory (`KERNABLE_WRITE_FIXTURES=1` fills only missing ones).
 
 The repository is private.

@@ -2,7 +2,7 @@
 
 # kernable (CLI)
 
-The `kernable` command runs the kernel and does everything around it: it creates keys, grants and development certificates, revokes keys, applies a service's membership, lists what is registered, checks and migrates stores, and submits single commands for scripting. `kernable` without arguments prints this page as text. The flags of `kernable start` are in [kernable start](./configuration).
+The `kernable` command runs the kernel and does everything around it: it creates keys, grants and development certificates, revokes keys, applies a service's membership, lists what is registered, checks stores, and submits single commands for scripting. `kernable` without arguments prints this page as text. The flags of `kernable start` are in [kernable start](./configuration).
 
 Commands that take an `<addr>` talk to a running kernel. Commands that take a `<store>` open the store file directly: the ones that only read it work while the kernel runs, the ones that change it need the kernel stopped.
 
@@ -128,14 +128,6 @@ kernable workers remove <store> <domain.Aggregate>
 ```
 
 Unregisters an aggregate type: its commands are refused (`NOT_FOUND`) unless a membership lists it. Exit 1 if there is no such aggregate.
-
-### `kernable migrate`
-
-```text
-kernable migrate <store>
-```
-
-Upgrades a store to this build's data format; back the store up first. A `file:` log keeps the old one as `<path>.format-<n>`. Does nothing if the store is current; exit 1 for a store of a development build, which has no migration.
 
 ### `kernable vault rekey`
 

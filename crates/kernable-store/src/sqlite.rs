@@ -119,20 +119,12 @@ CREATE TABLE IF NOT EXISTS memberships (
     sig         BLOB    NOT NULL, -- its signature over kernable.v1.membership
     applied_at  INTEGER NOT NULL  -- ms since epoch
 ) STRICT;
-";
-
-/// Added in format 2.
-const GRANTS: &str = "
 CREATE TABLE IF NOT EXISTS grants (
     key_id    TEXT PRIMARY KEY, -- the grantee
     issued_at INTEGER NOT NULL, -- ms since epoch, signed
     root_id   TEXT    NOT NULL, -- the root key that signed it
     grant     BLOB    NOT NULL  -- the Grant message as presented, with its root signature
 ) STRICT;
-";
-
-/// Added in format 3, with no migration from format 2: no release wrote format 2.
-const AGGREGATE_INDEX: &str = "
 CREATE TABLE IF NOT EXISTS aggregate_index (
     tenant_id      TEXT NOT NULL,
     domain         TEXT NOT NULL,
@@ -234,8 +226,6 @@ impl SqliteStore {
         match (format, tables) {
             (0, 0) => {
                 conn.execute_batch(SCHEMA)?;
-                conn.execute_batch(GRANTS)?;
-                conn.execute_batch(AGGREGATE_INDEX)?;
                 conn.pragma_update(None, "user_version", FORMAT)?;
             }
             (FORMAT, _) => {}
@@ -1232,22 +1222,4 @@ fn stored_result(conn: &Connection, command_id: &str) -> Result<Option<CommandRe
         command_id: command_id.to_owned(),
         outcome: Some(outcome),
     }))
-}
-
-/// Upgrades a SQLite store to [`FORMAT`]; returns the format it had.
-pub(crate) fn migrate(path: &Path) -> Result<u32> {
-    let mut conn = Connection::open(path)?;
-    match conn.pragma_query_value(None, "user_version", |r| r.get(0))? {
-        FORMAT => Ok(FORMAT),
-        1 => {
-            // One transaction: the tables and the format change together.
-            let tx = conn.transaction()?;
-            tx.execute_batch(GRANTS)?;
-            tx.execute_batch(AGGREGATE_INDEX)?;
-            tx.pragma_update(None, "user_version", FORMAT)?;
-            tx.commit()?;
-            Ok(1)
-        }
-        found => Err(Error::Format(found)),
-    }
 }

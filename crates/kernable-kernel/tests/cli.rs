@@ -320,67 +320,9 @@ fn a_checkpoint_signs_the_newest_event() {
 }
 
 #[test]
-fn migrate_upgrades_old_stores_and_leaves_current_ones() {
-    let dir = temp_dir("migrate");
-    // Both backends whichever is under test: they report a migration differently.
-    for (backend, file) in [("sqlite", "k.db"), ("file", "k.log")] {
-        let store = fixture_of(backend, file, 1, &dir, file);
-        let (code, printed) = kernable(&dir, &["migrate", &store]);
-        assert_eq!(code, 0, "{printed}");
-        let path = dir.join(file).display().to_string();
-        let expected = match backend {
-            "file" => {
-                format!("migrated from format 1 to 3; the old log is kept as {path}.format-1")
-            }
-            _ => "migrated from format 1 to 3".to_owned(),
-        };
-        assert_eq!(printed.trim(), expected);
-        assert!(kernable_store::open_read_only(&store).is_ok());
-    }
-    let (backend, _) = backend();
-    let store = fixture(1, &dir, "store");
-    let (code, printed) = kernable(&dir, &["migrate", &store]);
-    assert_eq!(code, 0, "{printed}");
-
-    let (code, printed) = kernable(&dir, &["migrate", &store]);
-    assert_eq!(
-        (code, printed.trim()),
-        (0, "store is at format 3; nothing to migrate")
-    );
-
-    let missing = format!("{backend}:{}", dir.join("missing").display());
-    let (code, printed) = kernable(&dir, &["migrate", &missing]);
-    assert_eq!(code, 1, "{printed}");
-    assert!(printed.contains("no store at"), "{printed}");
-    assert!(!dir.join("missing").exists(), "migrate creates no store");
-
-    if backend == "sqlite" {
-        // Tables without a recorded format: a development build's, which has no migration.
-        let conn = rusqlite::Connection::open(dir.join("store")).unwrap();
-        conn.pragma_update(None, "user_version", 0).unwrap();
-        drop(conn);
-        let (code, printed) = kernable(&dir, &["migrate", &store]);
-        assert_eq!(code, 1, "{printed}");
-        assert!(
-            printed.starts_with("no migration from format 0"),
-            "{printed}"
-        );
-
-        // One of a newer build: an error, not a migration.
-        let conn = rusqlite::Connection::open(dir.join("store")).unwrap();
-        conn.pragma_update(None, "user_version", 4).unwrap();
-        drop(conn);
-        let (code, printed) = kernable(&dir, &["migrate", &store]);
-        assert_eq!(code, 1, "{printed}");
-        assert!(printed.starts_with("error: "), "{printed}");
-    }
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
 fn vault_rekey_moves_every_value_to_the_new_key() {
     let dir = temp_dir("rekey");
-    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/format-2");
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/format-3");
     std::fs::copy(fixtures.join("vault-sqlite.db"), dir.join("vault.db")).unwrap();
     std::fs::copy(fixtures.join("vault.key"), dir.join("old.key")).unwrap();
     std::fs::write(dir.join("new.key"), hex(&[7; 32])).unwrap();

@@ -31,7 +31,7 @@ message RevocationRecord {
 }
 
 // The first record of every log: the version of this record format. A kernel opens only logs
-// of the format it reads; `kernable migrate` upgrades older ones.
+// of the format it reads.
 message FormatRecord {
   uint32 version = 1;
 }

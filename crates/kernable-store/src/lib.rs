@@ -39,9 +39,10 @@ use kernable_core::proto::{
 };
 
 /// The version of the stored data format this build reads and writes. A store of another
-/// format is refused; `kernable migrate` upgrades older ones.
+/// format is refused: there are no migrations before the first release, so a format change
+/// bumps this.
 ///
-/// - 1: the first release format.
+/// - 1: the first format.
 /// - 2: adds the newest grant per key ([`Store::grants`]).
 /// - 3: adds the unique keys and facts per aggregate ([`Store::index`]).
 pub const FORMAT: u32 = 3;
@@ -90,7 +91,7 @@ impl fmt::Display for Error {
             ),
             Error::Format(found) => write!(
                 f,
-                "store format {found}, this kernable reads format {FORMAT}: upgrade it with `kernable migrate`"
+                "store format {found}, this kernable reads only format {FORMAT}: the store comes from an earlier development build"
             ),
             Error::Vault(what) => write!(f, "vault: {what}"),
             Error::Io(e) => write!(f, "io: {e}"),
@@ -391,16 +392,6 @@ pub fn open_read_only(url: &str) -> Result<Box<dyn Store>> {
         }
         (_, path) => Box::new(SqliteStore::open_unlocked(path)?),
     })
-}
-
-/// Upgrades the store at `url` to [`FORMAT`] (kernel stopped; back it up first) and returns
-/// the format it had.
-pub fn migrate(url: &str) -> Result<u32> {
-    match backend(url) {
-        ("memory", _) => Ok(FORMAT),
-        ("file", path) => file::migrate(std::path::Path::new(path)),
-        (_, path) => sqlite::migrate(std::path::Path::new(path)),
-    }
 }
 
 /// Splits a store URL into backend and path; a bare path means SQLite.

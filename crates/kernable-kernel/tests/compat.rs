@@ -1,9 +1,10 @@
-//! Compatibility: stores of every data format keep working, and requests of a protocol version
-//! the kernel does not speak are refused with a clear message.
+//! Compatibility: a frozen store of the current data format keeps working, and requests of a
+//! protocol version the kernel does not speak are refused with a clear message.
 //!
-//! `tests/fixtures/format-<n>` are frozen stores: never regenerate them. A new data format adds
-//! a new directory (written with `KERNABLE_WRITE_FIXTURES=1` and `--test-threads=1`, which only
-//! fills directories that do not exist yet) and a migration from the ones before.
+//! `tests/fixtures/format-<n>` is a frozen store of the current format. There are no migrations
+//! before the first release: a new data format bumps `kernable_store::FORMAT` and writes a new
+//! directory (with `KERNABLE_WRITE_FIXTURES=1` and `--test-threads=1`, which only fills
+//! directories that do not exist yet).
 
 mod common;
 
@@ -77,7 +78,7 @@ fn stream(order: &str) -> StreamId {
     }
 }
 
-/// The keys of `o1` in the format-3 fixture: its number, and its customer's email (personal,
+/// The keys of `o1` in the fixture: its number, and its customer's email (personal,
 /// subject `k-1`).
 fn keys() -> [UniqueKey; 2] {
     let key = |name: &str, value: &str, subject: &str| UniqueKey {
@@ -92,11 +93,11 @@ fn keys() -> [UniqueKey; 2] {
     ]
 }
 
-/// What the fixtures hold: the customer's email in `c1` and its event (subject `k-1`), an item
+/// What the fixture holds: the customer's email in `c1` and its event (subject `k-1`), an item
 /// added by `c2`, a rejected `c3`, a secret coupon code with the pending `c4`, an order `o3`
 /// whose customer `k-2` was erased (by `c7`), two listeners, and `c11` signed by a key revoked
-/// since. From format 2 on: key 8's grant, which replaced a broader one. From format 3 on: the
-/// [`keys`] and the fact `open` that `c2` gave `o1`.
+/// since; key 8's grant, which replaced a broader one; and the [`keys`] and the fact `open` that
+/// `c2` gave `o1`.
 fn fill(store: &dyn Store, vault: &Vault) {
     let cmd = |id: &str, command_type: &str, aggregate: &str, values: &[&VaultValue]| {
         let mut cmd = command(id, command_type, aggregate);
@@ -303,7 +304,7 @@ fn fill(store: &dyn Store, vault: &Vault) {
     store.save_grant(&narrow_grant()).unwrap();
 }
 
-/// Key 8's grant in the format-2 fixture: query only, issued after one that let it submit.
+/// Key 8's grant in the fixture: query only, issued after one that let it submit.
 fn narrow_grant() -> kernable_core::proto::Grant {
     signing::grant(
         &root(),
@@ -384,13 +385,10 @@ fn check_common(store: &dyn Store, backend: &str) {
     assert_eq!(shop.metadata[0].value, "1.0.0", "{backend}");
 }
 
-/// Each format, and each backend.
-/// Format 2 is left out: no release wrote it, and it has no migration.
-const STORES: [(u32, &str, &str); 4] = [
-    (1, "sqlite", "k.db"),
-    (1, "file", "k.log"),
-    (3, "sqlite", "k.db"),
-    (3, "file", "k.log"),
+/// The current format, on each backend.
+const STORES: [(u32, &str, &str); 2] = [
+    (kernable_store::FORMAT, "sqlite", "k.db"),
+    (kernable_store::FORMAT, "file", "k.log"),
 ];
 
 #[tokio::test(flavor = "multi_thread")]
@@ -401,12 +399,6 @@ async fn stores_of_every_format_verify_and_run_with_their_vault() {
         let name = format!("compat-vault-{format}-{backend}");
         let env = start_custom(&name, |config, dir| {
             url = copy(format, backend, file, dir);
-            assert_eq!(kernable_store::migrate(&url).unwrap(), format);
-            assert_eq!(
-                kernable_store::migrate(&url).unwrap(),
-                kernable_store::FORMAT,
-                "nothing left to migrate"
-            );
             vault_url = format!(
                 "sqlite:{}",
                 dir.join(format!("vault-{backend}.db")).display()
@@ -433,21 +425,12 @@ async fn stores_of_every_format_verify_and_run_with_their_vault() {
             .into_iter()
             .filter(|g| g.key_id == id(&key(8)))
             .collect();
-        let expected = if format >= 2 {
-            vec![narrow_grant()]
-        } else {
-            vec![]
-        };
-        assert_eq!(kept, expected, "format {format}, {backend}");
+        assert_eq!(kept, [narrow_grant()], "{backend}");
         let index = store.index().unwrap();
-        if format >= 3 {
-            assert_eq!(index.len(), 1, "{backend}");
-            assert_eq!(index[0].0, stream("o1"));
-            assert_eq!(index[0].1.facts, ["open"]);
-            assert_eq!(index[0].1.keys.len(), 2);
-        } else {
-            assert!(index.is_empty(), "format {format}, {backend}: {index:?}");
-        }
+        assert_eq!(index.len(), 1, "{backend}");
+        assert_eq!(index[0].0, stream("o1"));
+        assert_eq!(index[0].1.facts, ["open"]);
+        assert_eq!(index[0].1.keys.len(), 2);
         let events = store.read_all(0, 10).unwrap();
         let (placed, erased_order, erasure) = (&events[0], &events[2], &events[3]);
         assert_eq!(placed.vault_refs.len(), 1);
@@ -461,7 +444,7 @@ async fn stores_of_every_format_verify_and_run_with_their_vault() {
             TestWorker {
                 schemas: vec![("orders.OrderPlaced".into(), 2)],
                 vaults: Some(tx),
-                // `c9` and `c10` take the keys o1 holds from format 3 on.
+                // `c9` and `c10` take the keys o1 holds.
                 index: Some(Arc::new(|cmd: &Command| {
                     let [number, email] = keys();
                     match cmd.command_id.as_str() {
@@ -488,7 +471,7 @@ async fn stores_of_every_format_verify_and_run_with_their_vault() {
                 .unwrap();
             let rejected =
                 matches!(outcome(&taken), Outcome::Rejected(r) if r.code == "unique_taken");
-            assert_eq!(rejected, format >= 3, "format {format}, {backend}: {id}");
+            assert!(rejected, "{backend}: {id}");
             vaults.recv().await.unwrap();
         }
 
@@ -519,7 +502,6 @@ async fn stores_of_every_format_report_what_revoked_keys_signed() {
         let name = format!("compat-revoked-{format}-{backend}");
         let env = start_custom(&name, |config, dir| {
             url = copy(format, backend, file, dir);
-            kernable_store::migrate(&url).unwrap();
             config.store = url.clone();
             config.vault = Some(VaultConfig {
                 store: format!(

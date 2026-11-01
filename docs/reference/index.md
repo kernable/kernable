@@ -5,7 +5,7 @@ Look things up here; the [concepts](../concepts/) explain why they are so. Most 
 | Page | What it covers |
 |---|---|
 | [kernable start](./configuration) | Every flag and environment variable of the kernel, with defaults, by topic: trust, stores, network, timeouts; `--dev` |
-| [CLI](./cli) | The `kernable` command: run the kernel; keys, grants, revocation and certificates; apply a membership and list services, workers, listeners and schemas; verify and checkpoint a store; remove registrations, migrate a store, rekey the vault; submit a command |
+| [CLI](./cli) | The `kernable` command: run the kernel; keys, grants, revocation and certificates; apply a membership and list services, workers, listeners and schemas; verify and checkpoint a store; remove registrations, rekey the vault; submit a command |
 | [TypeScript SDK](./sdk-typescript) | `@kernable/sdk` |
 | [Python SDK](./sdk-python) | `kernable` for Python |
 | [Rust SDK](./sdk-rust) | `kernable` for Rust |

@@ -7,7 +7,7 @@ use kernable_store::{SqliteStore, Store, StreamId, invariants::Log, vault::Vault
 use libfuzzer_sys::fuzz_target;
 
 /// The key of the vault fixtures, so seeds from them decrypt.
-const VAULT_KEY: &str = include_str!("../../crates/kernable-kernel/tests/fixtures/format-1/vault.key");
+const VAULT_KEY: &str = include_str!("../../crates/kernable-kernel/tests/fixtures/format-3/vault.key");
 
 fn path() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("kernable-fuzz-store-{}.db", std::process::id()))
@@ -40,7 +40,6 @@ fuzz_target!(|data: &[u8]| {
             let _ = log.check();
         }
     }
-    let _ = kernable_store::migrate(&url);
 
     reset(&path, data);
     let mut key = [0u8; 32];

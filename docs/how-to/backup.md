@@ -59,7 +59,7 @@ Keep keys apart from the data, as you would keep any secret, and the vault key a
 2. **Put back** the event store, the vault, the data directory, the keys and the `.grant` files.
 3. **Delete the snapshot store** if it is a SQLite file (`--snapshots sqlite:…`). Snapshots newer than the restored log would not match it; workers rebuild them.
 4. **Check the store:** `kernable verify <store> <kernel.pub>...` must say `OK`.
-5. **Start the kernel.** If it refuses the store's data format (a backup from an older kernable), run `kernable migrate <store>` first, on a copy.
+5. **Start the kernel.** It refuses a store of another data format: a backup from an earlier development build of kernable does not carry over, as there are no migrations before the first release.
 6. **Rebuild the read models that have a store** ([Rebuild a read model](./rebuild-read-model)): their stores may be ahead of the restored log. Read models in memory read every event again on start anyway.
 
 Everything written after the backup was taken is lost: commands, events, erasures, files.

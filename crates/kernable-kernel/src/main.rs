@@ -114,11 +114,6 @@ Maintenance, with the kernel stopped:
                                           Unregisters an aggregate type: its commands are refused
                                           (NOT_FOUND) unless a membership lists it. Exit 1 if there
                                           is no such aggregate.
-  kernable migrate <store>                Upgrades a store to this build's data format; back the
-                                          store up first. A file: log keeps the old one as
-                                          <path>.format-<n>. Does nothing if the store is current;
-                                          exit 1 for a store of a development build, which has no
-                                          migration.
   kernable vault rekey <vault> <old.key> <new.key>
                                           Re-encrypts every vault value with a new key; then start
                                           the kernel with --vault-key <new.key>. <vault> is the
@@ -221,7 +216,6 @@ async fn main() -> ExitCode {
         }
         ["listeners", store] => listeners(store),
         ["schemas", store] => schemas(store),
-        ["migrate", store] => migrate(store),
         ["listeners", "remove", store, name] => remove_listener(store, name),
         ["workers", store] => workers(store),
         ["services", store] => services(store),
@@ -882,30 +876,6 @@ fn remove_worker(store: &str, aggregate: &str) -> Result<bool> {
 fn schemas(store: &str) -> Result<bool> {
     for (event_type, schema) in kernable_store::open_read_only(store)?.event_schemas()? {
         println!("{event_type} schema {schema}");
-    }
-    Ok(true)
-}
-
-fn migrate(store: &str) -> Result<bool> {
-    let (backend, path) = kernable_store::backend(store);
-    if backend != "memory" && !std::path::Path::new(path).exists() {
-        return Err(format!("no store at {path}").into());
-    }
-    let format = kernable_store::FORMAT;
-    match kernable_store::migrate(store) {
-        Ok(from) if from == format => println!("store is at format {format}; nothing to migrate"),
-        Ok(from) if backend == "file" => println!(
-            "migrated from format {from} to {format}; the old log is kept as {path}.format-{from}"
-        ),
-        Ok(from) => println!("migrated from format {from} to {format}"),
-        Err(kernable_store::Error::Format(found)) if found < format => {
-            println!(
-                "no migration from format {found}: it comes from a development build; \
-                 create a new store"
-            );
-            return Ok(false);
-        }
-        Err(e) => return Err(e.into()),
     }
     Ok(true)
 }

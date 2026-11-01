@@ -43,8 +43,7 @@ What the new membership no longer lists stops counting: the kernel stops waiting
 1. **Back up** the store and the vault ([Back up and restore](./backup)).
 2. **Stop the kernel with SIGTERM** (or SIGINT). It refuses new submits and queries, lets running ones finish for `--drain-timeout-ms` (default 10 s), then signs a checkpoint, saves listener positions and exits. Commands that did not finish stay queued and run again after the restart.
 3. **Install the new `kernable` binary.**
-4. **Migrate the store if needed.** `kernable migrate <store>` answers `store is at format N; nothing to migrate` when the format is current, and otherwise upgrades the store. A kernel refuses to start on a store of another format, so you cannot forget this step.
-5. **Start the kernel** with the same flags, and wait until `GET /ready` answers 200.
+4. **Start the kernel** with the same flags, and wait until `GET /ready` answers 200. A kernel refuses to start on a store of another data format; there are no migrations before the first release, so a store of an earlier development build does not carry over.
 
 While the kernel is away, workers and listeners reconnect on their own (their console shows `connection lost (…), reconnecting`, then `connected again`), waiting a little longer after each failed attempt, up to 30 s. A client's requests wait for the kernel up to their timeout (60 s by default); a request that gives up gets `DEADLINE_EXCEEDED`, and should be resubmitted with the same command ID: a command ID runs once.
 

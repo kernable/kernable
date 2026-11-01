@@ -135,7 +135,7 @@ function cliReference(): string {
   });
   return `${HEADER}# kernable (CLI)
 
-The \`kernable\` command runs the kernel and does everything around it: it creates keys, grants and development certificates, revokes keys, applies a service's membership, lists what is registered, checks and migrates stores, and submits single commands for scripting. \`kernable\` without arguments prints this page as text. The flags of \`kernable start\` are in [kernable start](./configuration).
+The \`kernable\` command runs the kernel and does everything around it: it creates keys, grants and development certificates, revokes keys, applies a service's membership, lists what is registered, checks stores, and submits single commands for scripting. \`kernable\` without arguments prints this page as text. The flags of \`kernable start\` are in [kernable start](./configuration).
 
 Commands that take an \`<addr>\` talk to a running kernel. Commands that take a \`<store>\` open the store file directly: the ones that only read it work while the kernel runs, the ones that change it need the kernel stopped.
 
