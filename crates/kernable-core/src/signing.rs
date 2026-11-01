@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 
 use crate::proto::{
     CacheRequest, Command, DataRequest, Event, Grant, Membership, NewEvent, Permission,
-    QueryRequest, Rejected, RequestContext, Signature,
+    QueryRequest, Rejected, RequestContext, Requirement, Signature, UniqueKey,
 };
 
 /// Hash that precedes the first event of the chain.
@@ -169,6 +169,61 @@ pub fn result_message(cmd: &Command, expected_version: u64, events: &[NewEvent])
         }
     }
     m.0
+}
+
+/// What a worker signs for the unique keys, facts and requirements of its result for `cmd`
+/// based on `expected_version` (protocol 2). A message of its own, not part of
+/// [`result_message`]: every event stores the result signature, and `kernable verify` checks it
+/// against the stored events alone, which never hold value hashes or requirements.
+pub fn index_message(
+    cmd: &Command,
+    expected_version: u64,
+    keys: &[UniqueKey],
+    facts: &[String],
+    requires: &[Requirement],
+) -> Vec<u8> {
+    let mut m = Msg::new("kernable.v1.index")
+        .str(&cmd.command_id)
+        .str(&cmd.tenant_id)
+        .str(&cmd.domain)
+        .str(&cmd.aggregate_type)
+        .str(&cmd.aggregate_id)
+        .u64(expected_version)
+        .u64(keys.len() as u64);
+    for k in keys {
+        m = m
+            .str(&k.name)
+            .u64(k.global as u64)
+            .bytes(&k.value_hash)
+            .str(&k.subject);
+    }
+    m = m.u64(facts.len() as u64);
+    for f in facts {
+        m = m.str(f);
+    }
+    m = m.u64(requires.len() as u64);
+    for r in requires {
+        m = m
+            .str(&r.domain)
+            .str(&r.aggregate_type)
+            .str(&r.aggregate_id)
+            .str(&r.fact);
+    }
+    m.0
+}
+
+/// The identity of a unique key in the kernel's index. The kernel computes it from the
+/// command's own tenant (none for a global key), domain and aggregate type, so a worker cannot
+/// place a key in another domain's namespace.
+pub fn unique_key_id(cmd: &Command, key: &UniqueKey) -> [u8; 32] {
+    let tenant = if key.global { "" } else { &cmd.tenant_id };
+    let msg = Msg::new("kernable.v1.key")
+        .str(tenant)
+        .str(&cmd.domain)
+        .str(&cmd.aggregate_type)
+        .str(&key.name)
+        .bytes(&key.value_hash);
+    Sha256::digest(msg.0).into()
 }
 
 /// What a worker signs for a snapshot of `stream`'s aggregate (the stream fields of a command:

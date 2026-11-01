@@ -351,6 +351,70 @@
     "message": "000000126b65726e61626c652e76312e726573756c7400000003632d3100000003742d31000000066f7264657273000000054f72646572000000036f2d31000000000000000000000000000000020000000b4f72646572506c616365640000000000000002000000147b22637573746f6d65724964223a226b2d31227d000000094974656d416464656400000000000000010000000b7b22736b75223a2278227d",
     "signature": "8b393bf74fd7a05ffacd36406a835dd1175ac55c591f8b4ff70f87da689607fb0ae8b64b4d147b4efc27b8703fd934054d3c32633d00d3fff3ff86db364e2706"
   },
+  "result_index": {
+    "input": {
+      "command": {
+        "aggregate_id": "o-1",
+        "aggregate_type": "Order",
+        "command_id": "c-1",
+        "command_type": "PlaceOrder",
+        "context": {
+          "attributes": [
+            {
+              "key": "channel",
+              "value": "web"
+            },
+            {
+              "key": "locale",
+              "value": "de-AT"
+            }
+          ],
+          "bypass_authorization": true,
+          "causation_id": "c-0",
+          "correlation_id": "r-1",
+          "expected_version": 3,
+          "on_behalf_of": "i-2",
+          "sender_account": "a-1",
+          "sender_identity": "i-1",
+          "sender_session": "s-1",
+          "sender_tenant": "t-0",
+          "trace_id": "tr-1"
+        },
+        "domain": "orders",
+        "payload_hex": "7b22637573746f6d65724964223a226b2d31227d",
+        "tenant_id": "t-1"
+      },
+      "expected_version": 0,
+      "facts": [
+        "open",
+        "paid"
+      ],
+      "keys": [
+        {
+          "global": false,
+          "name": "number",
+          "subject": "",
+          "value_hash_hex": "0b1336d9f2ad29afcd0881fd83fde44b04a65f25aa248496e74f6fcce9d30e8d"
+        },
+        {
+          "global": true,
+          "name": "email",
+          "subject": "k-1",
+          "value_hash_hex": "6098afcd295ac0b9a5938a959f9d256f5e6cc4de6885a9bfe9e54a431d485a7a"
+        }
+      ],
+      "requires": [
+        {
+          "aggregate_id": "k-1",
+          "aggregate_type": "Customer",
+          "domain": "identity",
+          "fact": "active"
+        }
+      ]
+    },
+    "message": "000000116b65726e61626c652e76312e696e64657800000003632d3100000003742d31000000066f7264657273000000054f72646572000000036f2d3100000000000000000000000000000002000000066e756d6265720000000000000000000000200b1336d9f2ad29afcd0881fd83fde44b04a65f25aa248496e74f6fcce9d30e8d0000000000000005656d61696c0000000000000001000000206098afcd295ac0b9a5938a959f9d256f5e6cc4de6885a9bfe9e54a431d485a7a000000036b2d310000000000000002000000046f70656e00000004706169640000000000000001000000086964656e7469747900000008437573746f6d6572000000036b2d3100000006616374697665",
+    "signature": "aec2b13a7d6e321a871a9b4a6819ef8c60f7e45d5a5a569cb6b78489f0efd6ceba5f33e6648dc02496d6044c97b0584dc4a2c52ef96a04e0e1c7b6db9a56bf0e"
+  },
   "result_vault": {
     "input": {
       "erases": [
@@ -409,6 +473,31 @@
     },
     "message": "000000156b65726e61626c652e76312e73756273637269626500000000000000070000018bcfe5680000000000000000020000000b4f72646572506c61636564000000094974656d4164646564",
     "signature": "9c0863329260c4214aed475be95f5500a0b2ff1cbe10e9187d418a3e84ba6aa64c8ce3e0304616b964f6daba90e92590e08a563069b050f9ee9e4dcd7ce8140a"
+  },
+  "unique_key_id": {
+    "ids": [
+      "5b773c2fe65ddce911be4e42dfba1e98e4625b7a1b8c3ee43b9ed5837333c99e",
+      "1d778294c298e6464ab7616f8ffc618e1aaa209eb878189347b13743ec8c9f05"
+    ],
+    "input": {
+      "aggregate_type": "Order",
+      "domain": "orders",
+      "keys": [
+        {
+          "global": false,
+          "name": "number",
+          "subject": "",
+          "value_hash_hex": "0b1336d9f2ad29afcd0881fd83fde44b04a65f25aa248496e74f6fcce9d30e8d"
+        },
+        {
+          "global": true,
+          "name": "email",
+          "subject": "k-1",
+          "value_hash_hex": "6098afcd295ac0b9a5938a959f9d256f5e6cc4de6885a9bfe9e54a431d485a7a"
+        }
+      ],
+      "tenant_id": "t-1"
+    }
   },
   "vault_ref": {
     "input": [

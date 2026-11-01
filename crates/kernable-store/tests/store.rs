@@ -3,11 +3,11 @@
 use std::{collections::HashSet, path::PathBuf, sync::Arc, thread};
 
 use kernable_core::proto::{
-    Attribute, Command, Grant, ListenerRecord, Membership, MembershipRecord, Middleware, NewEvent,
-    Permission, Rejected, RequestContext, RevocationRecord, Signature, When, WorkerRecord,
-    command_result::Outcome,
+    AggregateIndex, Attribute, Command, Grant, ListenerRecord, Membership, MembershipRecord,
+    Middleware, NewEvent, Permission, Rejected, RequestContext, RevocationRecord, Signature,
+    StoredKey, When, WorkerRecord, command_result::Outcome,
 };
-use kernable_store::{Enqueued, Error, FileStore, SqliteStore, Store};
+use kernable_store::{Enqueued, Error, FileStore, SqliteStore, Store, StreamId};
 
 fn cmd(id: &str, command_type: &str) -> Command {
     Command {
@@ -51,7 +51,14 @@ fn commit_appends_events_and_completes_command(store: &dyn Store) {
     );
 
     let stored = store
-        .commit("c1", 0, &[ev("OrderPlaced"), ev("ItemAdded")], &sig(), 1)
+        .commit(
+            "c1",
+            0,
+            &[ev("OrderPlaced"), ev("ItemAdded")],
+            &sig(),
+            None,
+            1,
+        )
         .unwrap();
 
     assert_eq!(stored.iter().map(|e| e.version).collect::<Vec<_>>(), [1, 2]);
@@ -71,7 +78,7 @@ fn stale_version_conflicts_and_command_stays_pending(store: &dyn Store) {
     store.enqueue(&cmd("c1", "PlaceOrder"), 0).unwrap();
 
     let err = store
-        .commit("c1", 3, &[ev("OrderPlaced")], &sig(), 1)
+        .commit("c1", 3, &[ev("OrderPlaced")], &sig(), None, 1)
         .unwrap_err();
     assert!(matches!(
         err,
@@ -81,7 +88,7 @@ fn stale_version_conflicts_and_command_stays_pending(store: &dyn Store) {
         }
     ));
     store
-        .commit("c1", 0, &[ev("OrderPlaced")], &sig(), 1)
+        .commit("c1", 0, &[ev("OrderPlaced")], &sig(), None, 1)
         .unwrap();
     assert_eq!(versions(store), [1]);
 }
@@ -89,10 +96,10 @@ fn stale_version_conflicts_and_command_stays_pending(store: &dyn Store) {
 fn a_command_completes_at_most_once(store: &dyn Store) {
     store.enqueue(&cmd("c1", "PlaceOrder"), 0).unwrap();
     store
-        .commit("c1", 0, &[ev("OrderPlaced")], &sig(), 1)
+        .commit("c1", 0, &[ev("OrderPlaced")], &sig(), None, 1)
         .unwrap();
     assert!(matches!(
-        store.commit("c1", 1, &[ev("OrderPlaced")], &sig(), 2),
+        store.commit("c1", 1, &[ev("OrderPlaced")], &sig(), None, 2),
         Err(Error::NotPending)
     ));
     let reason = Rejected::default();
@@ -112,7 +119,7 @@ fn pending_lists_open_commands_in_submission_order(store: &dyn Store) {
         store.enqueue(&cmd(id, "AddItem"), i as i64).unwrap();
     }
     store
-        .commit("c2", 0, &[ev("ItemAdded")], &sig(), 3)
+        .commit("c2", 0, &[ev("ItemAdded")], &sig(), None, 3)
         .unwrap();
     let pending: Vec<(String, i64)> = store
         .pending()
@@ -131,7 +138,7 @@ fn enqueue_is_idempotent(store: &dyn Store) {
     );
 
     store
-        .commit("c1", 0, &[ev("OrderPlaced")], &sig(), 1)
+        .commit("c1", 0, &[ev("OrderPlaced")], &sig(), None, 1)
         .unwrap();
     assert!(matches!(
         store.enqueue(&cmd("c1", "PlaceOrder"), 2).unwrap(),
@@ -305,7 +312,7 @@ fn reading_after_a_version_returns_only_later_events(store: &dyn Store) {
     for (i, id) in ["c1", "c2", "c3"].into_iter().enumerate() {
         store.enqueue(&cmd(id, "AddItem"), i as i64).unwrap();
         store
-            .commit(id, i as u64, &[ev("ItemAdded")], &sig(), 0)
+            .commit(id, i as u64, &[ev("ItemAdded")], &sig(), None, 0)
             .unwrap();
     }
     let after = |v| -> Vec<u64> {
@@ -403,8 +410,14 @@ fn sqlite_concurrent_connections_lose_no_updates() {
                             .read_stream("t1", "orders", "Order", "o1")
                             .unwrap()
                             .len() as u64;
-                        match store.commit(&format!("c{i}"), current, &[ev("ItemAdded")], &sig(), 0)
-                        {
+                        match store.commit(
+                            &format!("c{i}"),
+                            current,
+                            &[ev("ItemAdded")],
+                            &sig(),
+                            None,
+                            0,
+                        ) {
                             Ok(_) => break,
                             Err(Error::VersionConflict { .. }) => continue,
                             Err(e) => panic!("{e}"),
@@ -447,8 +460,14 @@ fn concurrent_threads_lose_no_updates(store: &dyn Store) {
                             .read_stream("t1", "orders", "Order", "o1")
                             .unwrap()
                             .len() as u64;
-                        match store.commit(&format!("c{i}"), current, &[ev("ItemAdded")], &sig(), 0)
-                        {
+                        match store.commit(
+                            &format!("c{i}"),
+                            current,
+                            &[ev("ItemAdded")],
+                            &sig(),
+                            None,
+                            0,
+                        ) {
                             Ok(_) => break,
                             Err(Error::VersionConflict { .. }) => continue,
                             Err(e) => panic!("{e}"),
@@ -500,7 +519,7 @@ fn contexts_come_back_as_stored(store: &dyn Store) {
         let stored = pending.iter().find(|p| p.command.command_id == id).unwrap();
         assert_eq!(stored.command.context, context, "{id}");
         let events = store
-            .commit(id, 0, &[ev("OrderPlaced")], &sig(), 1)
+            .commit(id, 0, &[ev("OrderPlaced")], &sig(), None, 1)
             .unwrap();
         assert_eq!(events[0].context, context, "{id}");
         let read = store.read_stream("t1", "orders", "Order", id).unwrap();
@@ -530,16 +549,17 @@ fn overviews_of_the_stored_events(store: &dyn Store) {
             0,
             &[schema("OrderPlaced", 2), ev("ItemAdded")],
             &sig(),
+            None,
             10,
         )
         .unwrap();
     store.enqueue(&on("c2", "Invoice", "i1"), 0).unwrap();
     store
-        .commit("c2", 0, &[schema("InvoiceSent", 3)], &sig(), 20)
+        .commit("c2", 0, &[schema("InvoiceSent", 3)], &sig(), None, 20)
         .unwrap();
     store.enqueue(&on("c3", "Order", "o1"), 0).unwrap();
     store
-        .commit("c3", 2, &[schema("OrderPlaced", 1)], &sig(), 30)
+        .commit("c3", 2, &[schema("OrderPlaced", 1)], &sig(), None, 30)
         .unwrap();
 
     let stream = |aggregate_type: &str, aggregate_id: &str| kernable_store::StreamId {
@@ -609,6 +629,107 @@ fn a_key_is_revoked_once_as_it_was_first(store: &dyn Store) {
     );
 }
 
+fn index(key: u8, facts: &[&str]) -> AggregateIndex {
+    AggregateIndex {
+        keys: vec![StoredKey {
+            name: "number".into(),
+            global: false,
+            id: vec![key; 32],
+            vault_ref: String::new(),
+        }],
+        facts: facts.iter().map(|f| f.to_string()).collect(),
+    }
+}
+
+fn o1() -> StreamId {
+    StreamId {
+        tenant_id: "t1".into(),
+        domain: "orders".into(),
+        aggregate_type: "Order".into(),
+        aggregate_id: "o1".into(),
+    }
+}
+
+fn an_index_is_replaced_with_its_commit_and_dropped_when_empty(store: &dyn Store) {
+    assert!(store.index().unwrap().is_empty());
+    store.enqueue(&cmd("c1", "PlaceOrder"), 0).unwrap();
+    store
+        .commit(
+            "c1",
+            0,
+            &[ev("OrderPlaced")],
+            &sig(),
+            Some(&index(1, &["open"])),
+            1,
+        )
+        .unwrap();
+    assert_eq!(store.index().unwrap(), [(o1(), index(1, &["open"]))]);
+
+    // None leaves it as it is; a commit without events replaces it all the same.
+    store.enqueue(&cmd("c2", "AddItem"), 2).unwrap();
+    store
+        .commit("c2", 1, &[ev("ItemAdded")], &sig(), None, 2)
+        .unwrap();
+    store.enqueue(&cmd("c3", "Reindex"), 3).unwrap();
+    store
+        .commit("c3", 2, &[], &sig(), Some(&index(2, &[])), 3)
+        .unwrap();
+    assert_eq!(store.index().unwrap(), [(o1(), index(2, &[]))]);
+
+    // A commit that conflicts changes nothing.
+    store.enqueue(&cmd("c4", "AddItem"), 4).unwrap();
+    let conflict = store.commit("c4", 0, &[ev("ItemAdded")], &sig(), Some(&index(3, &[])), 4);
+    assert!(matches!(conflict, Err(Error::VersionConflict { .. })));
+    assert_eq!(store.index().unwrap(), [(o1(), index(2, &[]))]);
+
+    store
+        .commit(
+            "c4",
+            2,
+            &[ev("ItemAdded")],
+            &sig(),
+            Some(&AggregateIndex::default()),
+            5,
+        )
+        .unwrap();
+    assert!(store.index().unwrap().is_empty(), "holds nothing");
+}
+
+#[test]
+fn an_index_survives_reopening_the_store() {
+    for backend in ["sqlite", "file"] {
+        let db = TempDb::new(&format!("index-reopened.{backend}"));
+        let open = || -> Box<dyn Store> {
+            match backend {
+                "sqlite" => Box::new(SqliteStore::open(&db.0).unwrap()),
+                _ => Box::new(FileStore::open(&db.0).unwrap()),
+            }
+        };
+        let store = open();
+        store.enqueue(&cmd("c1", "PlaceOrder"), 0).unwrap();
+        store
+            .commit(
+                "c1",
+                0,
+                &[ev("OrderPlaced")],
+                &sig(),
+                Some(&index(1, &["open"])),
+                1,
+            )
+            .unwrap();
+        store.enqueue(&cmd("c2", "Reindex"), 2).unwrap();
+        store
+            .commit("c2", 1, &[], &sig(), Some(&index(2, &["open"])), 2)
+            .unwrap();
+        drop(store);
+        assert_eq!(
+            open().index().unwrap(),
+            [(o1(), index(2, &["open"]))],
+            "{backend}"
+        );
+    }
+}
+
 fn file_store(name: &str) -> (TempDb, Box<dyn Store>) {
     let db = TempDb::new(&format!("{name}.log"));
     let store = FileStore::open(&db.0).unwrap();
@@ -655,6 +776,7 @@ for_each_backend!(
     contexts_come_back_as_stored,
     overviews_of_the_stored_events,
     a_key_is_revoked_once_as_it_was_first,
+    an_index_is_replaced_with_its_commit_and_dropped_when_empty,
 );
 
 #[test]

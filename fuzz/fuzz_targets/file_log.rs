@@ -1,5 +1,5 @@
 //! Any bytes as a file log: the store refuses them or reads them, and never crashes; neither do
-//! the invariant checks on what it read.
+//! the invariant checks on what it read (S9 on the keys and facts of its commits, too).
 #![no_main]
 
 use kernable_store::{FileStore, Store, invariants::Log};
@@ -13,6 +13,7 @@ fuzz_target!(|data: &[u8]| {
         let _ = store.event_schemas();
         let _ = store.verify(&["00".to_string()]);
         let _ = store.command_ids();
+        let _ = store.index();
         // The invariant checks read whatever a damaged log holds, and never crash on it.
         if let Ok(log) = Log::read(&store, &["00".to_string()]) {
             let _ = log.check();

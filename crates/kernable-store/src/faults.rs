@@ -14,11 +14,11 @@ use std::sync::{
 
 use ed25519_dalek::SigningKey;
 use kernable_core::proto::{
-    Command, CommandResult, Event, Grant, ListenerRecord, MembershipRecord, NewEvent, Rejected,
-    RevocationRecord, Signature, WorkerRecord,
+    AggregateIndex, Command, CommandResult, Event, Grant, ListenerRecord, MembershipRecord,
+    NewEvent, Rejected, RevocationRecord, Signature, WorkerRecord,
 };
 
-use crate::{Checkpoint, Enqueued, Error, Pending, Report, Result, Store, StreamSummary};
+use crate::{Checkpoint, Enqueued, Error, Pending, Report, Result, Store, StreamId, StreamSummary};
 
 /// What fails, and how often.
 pub struct Faults {
@@ -187,6 +187,7 @@ impl Store for FaultyStore {
         expected_version: u64,
         events: &[NewEvent],
         producer_sig: &Signature,
+        index: Option<&AggregateIndex>,
         now_ms: i64,
     ) -> Result<Vec<Event>> {
         let conflicts = &self.faults.conflicts;
@@ -204,8 +205,14 @@ impl Store for FaultyStore {
             return Err(injected("disk full"));
         }
         self.faults.write(|| {
-            self.inner
-                .commit(command_id, expected_version, events, producer_sig, now_ms)
+            self.inner.commit(
+                command_id,
+                expected_version,
+                events,
+                producer_sig,
+                index,
+                now_ms,
+            )
         })
     }
 
@@ -286,6 +293,11 @@ impl Store for FaultyStore {
     fn revocations(&self) -> Result<Vec<RevocationRecord>> {
         self.faults.read()?;
         self.inner.revocations()
+    }
+
+    fn index(&self) -> Result<Vec<(StreamId, AggregateIndex)>> {
+        self.faults.read()?;
+        self.inner.index()
     }
 
     fn grants(&self) -> Result<Vec<Grant>> {

@@ -198,7 +198,7 @@ fn store(url: &str, count: usize) -> Result<(), BoxError> {
         }];
         let sig = signing::sign(&worker, &signing::result_message(&cmd, version, &events));
         signing::verify(&sig, &signing::result_message(&cmd, version, &events))?;
-        let stored = store.commit(&cmd.command_id, version, &events, &sig, 0)?;
+        let stored = store.commit(&cmd.command_id, version, &events, &sig, None, 0)?;
         let outcome = Outcome::Committed(kernable_core::proto::Committed {
             events: stored,
             settled: false,
@@ -261,6 +261,10 @@ async fn worker(addr: &str, key: &str, concurrency: u32) -> Result<(), BoxError>
                     events,
                     worker_sig: Some(sig),
                     snapshot: None,
+                    keys: Vec::new(),
+                    facts: Vec::new(),
+                    requires: Vec::new(),
+                    index_sig: None,
                 })
             }
             _ => continue,

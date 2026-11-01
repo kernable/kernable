@@ -1,4 +1,5 @@
-//! The vault: its key can change, and an erasure stays within its tenant.
+//! The vault: its key can change, an erasure stays within its tenant, and values can be removed
+//! by reference.
 
 use kernable_core::{proto::VaultValue, signing};
 use kernable_store::vault::{Owner, Vault};
@@ -134,4 +135,39 @@ fn describe_tells_what_the_vault_holds_without_the_values() {
         [(secret.r#ref.clone(), String::new(), true)],
         "an erased value is no longer held"
     );
+}
+
+#[test]
+fn removing_values_deletes_those_named_only() {
+    let vault = Vault::open("memory:", &[3u8; 32]).unwrap();
+    let values: Vec<VaultValue> = [1u8, 2]
+        .into_iter()
+        .map(|n| {
+            let salt = vec![n; 16];
+            let value = format!("\"{n}\"").into_bytes();
+            VaultValue {
+                r#ref: signing::vault_ref(&salt, "k-1", false, &value),
+                subject: "k-1".into(),
+                secret: false,
+                salt,
+                value,
+            }
+        })
+        .collect();
+    let refs: Vec<String> = values.iter().map(|v| v.r#ref.clone()).collect();
+    let owner = Owner {
+        command_id: "c1",
+        tenant: "t1",
+        stream: None,
+    };
+    vault.put(&values, &refs, &owner, 0).unwrap();
+    vault.remove(&refs[..1]).unwrap();
+    vault.remove(&[]).unwrap();
+    let held: Vec<String> = vault
+        .get(&refs)
+        .unwrap()
+        .into_iter()
+        .map(|v| v.r#ref)
+        .collect();
+    assert_eq!(held, refs[1..]);
 }

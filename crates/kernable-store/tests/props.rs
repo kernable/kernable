@@ -65,7 +65,7 @@ fn valid_log() -> &'static (Vec<u8>, Vec<Event>) {
                 let new = events(1 + i % 2);
                 let sig = signing::sign(&kernel, &signing::result_message(&cmd, version, &new));
                 store
-                    .commit(&cmd.command_id, version, &new, &sig, 2)
+                    .commit(&cmd.command_id, version, &new, &sig, None, 2)
                     .unwrap();
                 if i == 3 {
                     store.checkpoint(&kernel, 3).unwrap();
@@ -182,7 +182,14 @@ fn apply(store: &dyn Store, ops: &[Op]) -> Vec<String> {
                 id,
                 expected,
                 events: n,
-            } => outcome(store.commit(&format!("c{id}"), *expected, &events(*n), &sig, t as i64)),
+            } => outcome(store.commit(
+                &format!("c{id}"),
+                *expected,
+                &events(*n),
+                &sig,
+                None,
+                t as i64,
+            )),
             Op::Reject { id } => outcome(store.reject(&format!("c{id}"), Rejected::default())),
             Op::Checkpoint => outcome(store.checkpoint(&kernel, t as i64)),
         })

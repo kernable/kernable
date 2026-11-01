@@ -3,10 +3,14 @@
 
 use ed25519_dalek::SigningKey;
 use kernable_core::{
-    proto::{Attribute, Command, Event, NewEvent, Permission, Rejected, RequestContext},
+    proto::{
+        Attribute, Command, Event, NewEvent, Permission, Rejected, RequestContext, Requirement,
+        UniqueKey,
+    },
     signing::{self, GENESIS},
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 const PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -117,6 +121,37 @@ fn vectors() -> Value {
         ..event.clone()
     };
 
+    // Unique keys (one personal, one global), facts and requirements of a result.
+    let keys = [
+        UniqueKey {
+            name: "number".into(),
+            global: false,
+            value_hash: Sha256::digest(b"A-1001").to_vec(),
+            subject: String::new(),
+        },
+        UniqueKey {
+            name: "email".into(),
+            global: true,
+            value_hash: Sha256::digest(b"max@firma.de").to_vec(),
+            subject: "k-1".into(),
+        },
+    ];
+    let facts = ["open".to_owned(), "paid".to_owned()];
+    let requires = [Requirement {
+        domain: "identity".into(),
+        aggregate_type: "Customer".into(),
+        aggregate_id: "k-1".into(),
+        fact: "active".into(),
+    }];
+    let keys_json: Vec<Value> = keys
+        .iter()
+        .map(|k| json!({"name": k.name, "global": k.global, "value_hash_hex": hex::encode(&k.value_hash), "subject": k.subject}))
+        .collect();
+    let requires_json: Vec<Value> = requires
+        .iter()
+        .map(|r| json!({"domain": r.domain, "aggregate_type": r.aggregate_type, "aggregate_id": r.aggregate_id, "fact": r.fact}))
+        .collect();
+
     let context_json = json!({
         "sender_tenant": context.sender_tenant, "sender_identity": context.sender_identity,
         "sender_account": context.sender_account, "sender_session": context.sender_session,
@@ -145,6 +180,14 @@ fn vectors() -> Value {
             json!({"command": cmd_json, "expected_version": 0, "events": events_json}),
             signing::result_message(&cmd, 0, &events),
         ),
+        "result_index": entry(
+            json!({"command": cmd_json, "expected_version": 0, "keys": keys_json, "facts": facts, "requires": requires_json}),
+            signing::index_message(&cmd, 0, &keys, &facts, &requires),
+        ),
+        "unique_key_id": {
+            "input": {"tenant_id": cmd.tenant_id, "domain": cmd.domain, "aggregate_type": cmd.aggregate_type, "keys": keys_json},
+            "ids": keys.iter().map(|k| hex::encode(signing::unique_key_id(&cmd, k))).collect::<Vec<_>>(),
+        },
         "rejection": entry(
             json!({"command_id": cmd.command_id, "code": reason.code, "message": reason.message}),
             signing::rejection_message(&cmd.command_id, &reason),

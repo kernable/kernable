@@ -6,6 +6,7 @@
 use kernable_core::{
     proto::{
         Attribute, Command, Grant, Membership, NewEvent, Permission, QueryRequest, RequestContext,
+        Requirement, UniqueKey,
     },
     signing,
 };
@@ -98,6 +99,28 @@ fn event() -> impl Strategy<Value = NewEvent> {
     )
 }
 
+fn unique_key() -> impl Strategy<Value = UniqueKey> {
+    (text(), any::<bool>(), text(), text()).prop_map(|(name, global, value_hash, subject)| {
+        UniqueKey {
+            name,
+            global,
+            value_hash: value_hash.into_bytes(),
+            subject,
+        }
+    })
+}
+
+fn requirement() -> impl Strategy<Value = Requirement> {
+    (text(), text(), text(), text()).prop_map(|(domain, aggregate_type, aggregate_id, fact)| {
+        Requirement {
+            domain,
+            aggregate_type,
+            aggregate_id,
+            fact,
+        }
+    })
+}
+
 fn grant() -> impl Strategy<Value = Grant> {
     let permission = (text(), texts()).prop_map(|(action, types)| Permission { action, types });
     (
@@ -188,6 +211,25 @@ proptest! {
             c.aggregate_type.clone(), c.aggregate_id.clone(),
         );
         prop_assert_eq!(same, (stream(&a), va, &ea) == (stream(&b), vb, &eb));
+    }
+
+    #[test]
+    fn indexes(
+        a in command(), b in command(),
+        va in 0u64..2, vb in 0u64..2,
+        ka in prop::collection::vec(unique_key(), 0..3),
+        kb in prop::collection::vec(unique_key(), 0..3),
+        fa in texts(), fb in texts(),
+        ra in prop::collection::vec(requirement(), 0..2),
+        rb in prop::collection::vec(requirement(), 0..2),
+    ) {
+        let same = signing::index_message(&a, va, &ka, &fa, &ra)
+            == signing::index_message(&b, vb, &kb, &fb, &rb);
+        let stream = |c: &Command| (
+            c.command_id.clone(), c.tenant_id.clone(), c.domain.clone(),
+            c.aggregate_type.clone(), c.aggregate_id.clone(),
+        );
+        prop_assert_eq!(same, (stream(&a), va, &ka, &fa, &ra) == (stream(&b), vb, &kb, &fb, &rb));
     }
 
     #[test]

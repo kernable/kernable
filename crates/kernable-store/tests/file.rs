@@ -83,7 +83,7 @@ fn run(store: &dyn Store, id: &str, agg: &str) {
     let worker = SigningKey::from_bytes(&[2; 32]);
     let sig = signing::sign(&worker, &signing::result_message(&cmd, version, &events));
     store
-        .commit(&cmd.command_id, version, &events, &sig, 0)
+        .commit(&cmd.command_id, version, &events, &sig, None, 0)
         .unwrap();
 }
 

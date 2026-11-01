@@ -1,4 +1,4 @@
-// kernable protocol, version 1. Payloads (of commands, events, queries, answers and snapshots)
+// kernable protocol, version 2. Payloads (of commands, events, queries, answers and snapshots)
 // are opaque bytes to the kernel. Signatures cover the byte layouts in SIGNING.md, never the
 // protobuf encoding.
 //
@@ -6,7 +6,8 @@
 // SubscribeRequest, DataRequest, CacheRequest, RevokeRequest, ApplyRequest, Register, Hello)
 // carries `protocol`, the version its sender speaks. It is never signed. The kernel accepts a
 // range of versions and refuses others with FAILED_PRECONDITION, naming the range and whether
-// the SDK or the kernel needs an update. 0 (unset) is never accepted. Version 1 is this file.
+// the SDK or the kernel needs an update. 0 (unset) is never accepted. Version 1 is the first
+// release; version 2 adds unique keys, facts and requirements to Result.
 //
 // Names: a domain is an identifier of letters, digits, `-` and `_` that starts with a letter;
 // by convention it is lowercase (`orders`), like aggregate types, while command, event and query
@@ -722,6 +723,42 @@ message Result {
   // ends the stream like an invalid result signature. Not stored after an erasure.
   Snapshot snapshot = 4;
   repeated VaultValue vault = 5; // the values of the events' `vault_refs`
+  // Protocol 2: the full set of unique keys and facts the aggregate holds after these events
+  // (empty: none), and the facts other aggregates must hold for the command to commit. The
+  // kernel checks them atomically with the commit: a key another aggregate holds rejects the
+  // command with `unique_taken`, a missing fact with `requirement_missing`. At most 64 keys,
+  // 64 facts and 64 requirements; key and fact names are valid type names (no dots) of at most
+  // 128 bytes; no key twice (name, scope and value hash), no fact twice. Otherwise
+  // `invalid_index`. A command that leaves its aggregate without events holds nothing. An
+  // aggregate whose key another one holds (a duplicate from before the key was declared) is
+  // rejected with `unique_taken` until its key changes or becomes null.
+  // Workers of protocol 1 send none of them; their results leave the aggregate's keys and
+  // facts as they are.
+  repeated UniqueKey keys = 6;
+  repeated string facts = 7;
+  repeated Requirement requires = 8;
+  // Over kernable.v1.index by Register.key_id; required when keys, facts or requires are set.
+  // Apart from worker_sig, which every event stores and `kernable verify` checks against the
+  // events alone.
+  Signature index_sig = 9;
+}
+
+// A unique key of an aggregate: no other aggregate holds the same key at the same time.
+message UniqueKey {
+  string name = 1;      // declared by the aggregate; a valid type name (no dots), at most 128 bytes
+  bool global = 2;      // unique across tenants; otherwise within the command's tenant
+  bytes value_hash = 3; // SHA-256 of the value's UTF-8 bytes (the domain normalises the value)
+  // Personal: the person the value belongs to. The kernel keeps the key in the vault, and
+  // erasing the subject frees it. Empty: not personal.
+  string subject = 4;
+}
+
+// A fact another aggregate of the command's tenant must hold when the command commits.
+message Requirement {
+  string domain = 1;
+  string aggregate_type = 2; // unqualified
+  string aggregate_id = 3;
+  string fact = 4;
 }
 
 // The worker refuses the command: it is stored as rejected and nothing is written. Signed by

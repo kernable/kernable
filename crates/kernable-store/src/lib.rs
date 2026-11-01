@@ -9,8 +9,9 @@
 //! completes at most once, a commit appends all events of a command atomically and only on the
 //! expected stream version, and events form a hash chain (see `proto/SIGNING.md`). Which
 //! command runs when (one per aggregate, in submission order) is up to the kernel's queue.
-//! They also keep the registered event listeners with their acknowledged positions, and the
-//! aggregates workers registered.
+//! They also keep the registered event listeners with their acknowledged positions, the
+//! aggregates workers registered, and the unique keys and facts each aggregate holds
+//! ([`Store::index`]), written with the commit that changed them.
 //!
 //! Two more stores live apart from the log, because what they hold must be deletable:
 //! [`snapshots`] (the latest snapshot per aggregate, a cache) and the [`vault`] (personal and
@@ -33,8 +34,8 @@ use std::fmt;
 
 use ed25519_dalek::SigningKey;
 use kernable_core::proto::{
-    Command, CommandResult, Event, Grant, ListenerRecord, MembershipRecord, NewEvent, Rejected,
-    RevocationRecord, Signature, WorkerRecord,
+    AggregateIndex, Command, CommandResult, Event, Grant, ListenerRecord, MembershipRecord,
+    NewEvent, Rejected, RevocationRecord, Signature, WorkerRecord,
 };
 
 /// The version of the stored data format this build reads and writes. A store of another
@@ -42,7 +43,8 @@ use kernable_core::proto::{
 ///
 /// - 1: the first release format.
 /// - 2: adds the newest grant per key ([`Store::grants`]).
-pub const FORMAT: u32 = 2;
+/// - 3: adds the unique keys and facts per aggregate ([`Store::index`]).
+pub const FORMAT: u32 = 3;
 
 pub use file::FileStore;
 pub use sqlite::SqliteStore;
@@ -200,7 +202,9 @@ pub trait Store: Send + Sync {
 
     /// Appends `events` to the pending command's stream, extends the hash chain and
     /// completes the command, atomically. `producer_sig` is the worker's result signature;
-    /// verifying it is up to the caller.
+    /// verifying it is up to the caller. `index`, if set, replaces the keys and facts the
+    /// stream holds, in the same write (also for a commit without events); checking it is up
+    /// to the caller too.
     ///
     /// On `VersionConflict` the command stays pending, so the caller can retry with fresh history.
     fn commit(
@@ -209,8 +213,12 @@ pub trait Store: Send + Sync {
         expected_version: u64,
         events: &[NewEvent],
         producer_sig: &Signature,
+        index: Option<&AggregateIndex>,
         now_ms: i64,
     ) -> Result<Vec<Event>>;
+
+    /// The unique keys and facts every stream holds now; streams that hold nothing are left out.
+    fn index(&self) -> Result<Vec<(StreamId, AggregateIndex)>>;
 
     /// Every aggregate with events, the most recently changed first, at most `limit`.
     fn streams(&self, limit: usize) -> Result<Vec<StreamSummary>> {

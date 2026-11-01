@@ -7,19 +7,23 @@
 
 mod common;
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use common::*;
 use kernable_core::{
     PROTOCOL,
     proto::{
-        Attribute, Command, Hello, ListenerMessage, ListenerRecord, Membership, MembershipRecord,
-        Middleware, NewEvent, QueryRequest, Register, Rejected, RequestContext, RevocationRecord,
-        SubmitRequest, SubscribeRequest, VaultValue, Wait, When, WorkerMessage, WorkerRecord,
-        command_result::Outcome, command_service_client::CommandServiceClient,
-        event_service_client::EventServiceClient, listener_message,
-        listener_service_client::ListenerServiceClient, query_service_client::QueryServiceClient,
-        worker_gateway_client::WorkerGatewayClient, worker_message,
+        AggregateIndex, Attribute, Command, Hello, ListenerMessage, ListenerRecord, Membership,
+        MembershipRecord, Middleware, NewEvent, QueryRequest, Register, Rejected, RequestContext,
+        RevocationRecord, StoredKey, SubmitRequest, SubscribeRequest, UniqueKey, VaultValue, Wait,
+        When, WorkerMessage, WorkerRecord, command_result::Outcome,
+        command_service_client::CommandServiceClient, event_service_client::EventServiceClient,
+        listener_message, listener_service_client::ListenerServiceClient,
+        query_service_client::QueryServiceClient, worker_gateway_client::WorkerGatewayClient,
+        worker_message,
     },
     signing, transport,
 };
@@ -73,10 +77,26 @@ fn stream(order: &str) -> StreamId {
     }
 }
 
+/// The keys of `o1` in the format-3 fixture: its number, and its customer's email (personal,
+/// subject `k-1`).
+fn keys() -> [UniqueKey; 2] {
+    let key = |name: &str, value: &str, subject: &str| UniqueKey {
+        name: name.into(),
+        global: false,
+        value_hash: <sha2::Sha256 as sha2::Digest>::digest(value).to_vec(),
+        subject: subject.into(),
+    };
+    [
+        key("number", "A-1001", ""),
+        key("email", "max@firma.de", "k-1"),
+    ]
+}
+
 /// What the fixtures hold: the customer's email in `c1` and its event (subject `k-1`), an item
 /// added by `c2`, a rejected `c3`, a secret coupon code with the pending `c4`, an order `o3`
 /// whose customer `k-2` was erased (by `c7`), two listeners, and `c11` signed by a key revoked
-/// since. From format 2 on: key 8's grant, which replaced a broader one.
+/// since. From format 2 on: key 8's grant, which replaced a broader one. From format 3 on: the
+/// [`keys`] and the fact `open` that `c2` gave `o1`.
 fn fill(store: &dyn Store, vault: &Vault) {
     let cmd = |id: &str, command_type: &str, aggregate: &str, values: &[&VaultValue]| {
         let mut cmd = command(id, command_type, aggregate);
@@ -91,7 +111,11 @@ fn fill(store: &dyn Store, vault: &Vault) {
         vault.put(&values, &cmd.vault_refs, &owner, AT).unwrap();
         signed(cmd, &key(1))
     };
-    let commit = |cmd: &Command, version: u64, event: NewEvent, values: &[&VaultValue]| {
+    let commit_indexed = |cmd: &Command,
+                          version: u64,
+                          event: NewEvent,
+                          values: &[&VaultValue],
+                          index: Option<&AggregateIndex>| {
         store.enqueue(cmd, AT).unwrap();
         let events = [event];
         let msg = signing::result_message(cmd, version, &events);
@@ -116,9 +140,13 @@ fn fill(store: &dyn Store, vault: &Vault) {
                 version,
                 &events,
                 &signing::sign(&key(2), &msg),
+                index,
                 AT,
             )
             .unwrap();
+    };
+    let commit = |cmd: &Command, version: u64, event: NewEvent, values: &[&VaultValue]| {
+        commit_indexed(cmd, version, event, values, None)
     };
     let event = |event_type: &str, schema: u32, payload: String, values: &[&VaultValue]| NewEvent {
         event_type: event_type.into(),
@@ -141,11 +169,45 @@ fn fill(store: &dyn Store, vault: &Vault) {
         &[&placed_email],
     );
     let c2 = cmd("c2", "AddItem", "o1", &[]);
-    commit(
+    let [number, email_key] = keys();
+    let email_id = value(5, "k-1", &hex(&signing::unique_key_id(&c2, &email_key)));
+    let s = stream("o1");
+    let owner = Owner {
+        command_id: "c2",
+        tenant: "t1",
+        stream: Some(&s),
+    };
+    vault
+        .put(
+            std::slice::from_ref(&email_id),
+            std::slice::from_ref(&email_id.r#ref),
+            &owner,
+            AT,
+        )
+        .unwrap();
+    let index = AggregateIndex {
+        keys: vec![
+            StoredKey {
+                name: number.name.clone(),
+                global: false,
+                id: signing::unique_key_id(&c2, &number).to_vec(),
+                vault_ref: String::new(),
+            },
+            StoredKey {
+                name: email_key.name.clone(),
+                global: false,
+                id: Vec::new(),
+                vault_ref: email_id.r#ref.clone(),
+            },
+        ],
+        facts: vec!["open".into()],
+    };
+    commit_indexed(
         &c2,
         1,
         event("ItemAdded", 1, r#"{"sku":"apple"}"#.into(), &[]),
         &[],
+        Some(&index),
     );
     let c3 = cmd("c3", "AddItem", "o9", &[]);
     store.enqueue(&c3, AT).unwrap();
@@ -323,11 +385,12 @@ fn check_common(store: &dyn Store, backend: &str) {
 }
 
 /// Each format, and each backend.
+/// Format 2 is left out: no release wrote it, and it has no migration.
 const STORES: [(u32, &str, &str); 4] = [
     (1, "sqlite", "k.db"),
     (1, "file", "k.log"),
-    (2, "sqlite", "k.db"),
-    (2, "file", "k.log"),
+    (3, "sqlite", "k.db"),
+    (3, "file", "k.log"),
 ];
 
 #[tokio::test(flavor = "multi_thread")]
@@ -376,6 +439,15 @@ async fn stores_of_every_format_verify_and_run_with_their_vault() {
             vec![]
         };
         assert_eq!(kept, expected, "format {format}, {backend}");
+        let index = store.index().unwrap();
+        if format >= 3 {
+            assert_eq!(index.len(), 1, "{backend}");
+            assert_eq!(index[0].0, stream("o1"));
+            assert_eq!(index[0].1.facts, ["open"]);
+            assert_eq!(index[0].1.keys.len(), 2);
+        } else {
+            assert!(index.is_empty(), "format {format}, {backend}: {index:?}");
+        }
         let events = store.read_all(0, 10).unwrap();
         let (placed, erased_order, erasure) = (&events[0], &events[2], &events[3]);
         assert_eq!(placed.vault_refs.len(), 1);
@@ -389,6 +461,15 @@ async fn stores_of_every_format_verify_and_run_with_their_vault() {
             TestWorker {
                 schemas: vec![("orders.OrderPlaced".into(), 2)],
                 vaults: Some(tx),
+                // `c9` and `c10` take the keys o1 holds from format 3 on.
+                index: Some(Arc::new(|cmd: &Command| {
+                    let [number, email] = keys();
+                    match cmd.command_id.as_str() {
+                        "c9" => (vec![number], Vec::new(), Vec::new()),
+                        "c10" => (vec![email], Vec::new(), Vec::new()),
+                        _ => Default::default(),
+                    }
+                })),
                 ..TestWorker::honest()
             },
         )
@@ -400,6 +481,16 @@ async fn stores_of_every_format_verify_and_run_with_their_vault() {
         let c4 = submit_with(&env.addr, signed(pending, &key(1)), Wait::Committed).await;
         assert_eq!(committed_versions(&c4.unwrap()), [1], "{backend}");
         assert_eq!(vaults.recv().await.unwrap()[0].value, coupon.value);
+        for (id, order) in [("c9", "o5"), ("c10", "o6")] {
+            let taking = signed(command(id, "PlaceOrder", order), &key(1));
+            let taken = submit_with(&env.addr, taking, Wait::Committed)
+                .await
+                .unwrap();
+            let rejected =
+                matches!(outcome(&taken), Outcome::Rejected(r) if r.code == "unique_taken");
+            assert_eq!(rejected, format >= 3, "format {format}, {backend}: {id}");
+            vaults.recv().await.unwrap();
+        }
 
         // The history of o1 comes with the customer's email; the erased one stays away.
         let c5 = signed(command("c5", "AddItem", "o1"), &key(1));

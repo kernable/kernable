@@ -364,6 +364,19 @@ impl Vault {
         Ok(())
     }
 
+    /// Deletes the values of `refs`: what the kernel put for a commit that did not happen.
+    pub fn remove(&self, refs: &[String]) -> Result<()> {
+        if refs.is_empty() {
+            return Ok(());
+        }
+        let marks = vec!["?"; refs.len()].join(",");
+        self.conn().execute(
+            &format!("DELETE FROM vault WHERE ref IN ({marks})"),
+            params_from_iter(refs),
+        )?;
+        Ok(())
+    }
+
     /// The commands that still have secrets in the vault.
     pub fn secret_commands(&self) -> Result<Vec<String>> {
         let conn = self.conn();

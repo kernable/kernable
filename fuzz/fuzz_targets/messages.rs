@@ -38,6 +38,13 @@ fuzz_target!(|data: &[u8]| {
                 if let Some(sig) = &r.worker_sig {
                     let _ = signing::verify(sig, &msg);
                 }
+                let index = signing::index_message(&stream, 0, &r.keys, &r.facts, &r.requires);
+                if let Some(sig) = &r.index_sig {
+                    let _ = signing::verify(sig, &index);
+                }
+                for k in &r.keys {
+                    let _ = signing::unique_key_id(&stream, k);
+                }
                 if let Some(s) = &r.snapshot {
                     let _ = signing::snapshot_message(&stream, s.version, &s.schema, &s.state);
                 }

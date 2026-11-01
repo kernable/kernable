@@ -56,7 +56,14 @@ pub fn kernel() -> &'static Arc<Kernel> {
                 ..NewEvent::default()
             };
             store
-                .commit(&cmd.command_id, version, &[event], &Signature::default(), 0)
+                .commit(
+                    &cmd.command_id,
+                    version,
+                    &[event],
+                    &Signature::default(),
+                    None,
+                    0,
+                )
                 .expect("committed");
         }
         Kernel::open_on(config, store).expect("a kernel")

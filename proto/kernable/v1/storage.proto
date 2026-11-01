@@ -45,6 +45,21 @@ message EnqueuedRecord {
 message CommittedRecord {
   string command_id = 1;
   repeated LoggedEvent events = 2;
+  AggregateIndex index = 3; // since format 3; set: replaces what the command's stream holds
+}
+
+// The unique keys and facts an aggregate holds, stored with the commit that changed them; the
+// latest per stream wins, and an empty one means it holds nothing.
+message AggregateIndex {
+  repeated StoredKey keys = 1;
+  repeated string facts = 2;
+}
+
+message StoredKey {
+  string name = 1;
+  bool global = 2;
+  bytes id = 3;         // kernable.v1.key; empty for a personal key
+  string vault_ref = 4; // personal: the vault value holding the id (hex); erased with its subject
 }
 
 message LoggedEvent {

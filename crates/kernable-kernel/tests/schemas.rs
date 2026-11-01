@@ -84,7 +84,7 @@ async fn the_kernel_remembers_stored_schemas_across_restarts() {
             schema: 3,
         }];
         let sig = signing::sign(&key(2), &signing::result_message(&cmd, 0, &events));
-        store.commit("c0", 0, &events, &sig, 0).unwrap();
+        store.commit("c0", 0, &events, &sig, None, 0).unwrap();
     })
     .await;
     let refused = run_worker(env.addr.clone(), worker(&[("orders.OrderPlaced", 2)], None)).await;

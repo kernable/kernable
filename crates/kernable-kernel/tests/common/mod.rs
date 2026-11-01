@@ -250,7 +250,8 @@ pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Order domain as a plain function of whether the order exists and the command.
+/// Order domain as a plain function of whether the order exists and the command. `Reindex`
+/// produces no events.
 pub fn order(exists: bool, cmd: &Command) -> Result<Vec<NewEvent>, Rejected> {
     let reject = |message: &str| Rejected {
         code: "invalid_state".into(),
@@ -259,6 +260,7 @@ pub fn order(exists: bool, cmd: &Command) -> Result<Vec<NewEvent>, Rejected> {
     let (event_type, ok) = match cmd.command_type.as_str() {
         "PlaceOrder" => ("OrderPlaced", !exists),
         "AddItem" => ("ItemAdded", exists),
+        "Reindex" => return Ok(Vec::new()),
         _ => return Err(reject("unknown command")),
     };
     if !ok {
@@ -290,10 +292,24 @@ pub enum Behavior {
     ForgeSnapshot,
     /// Cannot read snapshots: rejects with `snapshot_stale` when it gets one.
     StaleSnapshots,
+    /// Signs keys, facts and requirements with a key other than its registered one.
+    ForgeIndex,
 }
 
 pub type VaultWriter = std::sync::Arc<
     dyn Fn(&Command) -> (Vec<kernable_core::proto::VaultValue>, String) + Send + Sync,
+>;
+
+/// The unique keys, facts and requirements a worker sends with its result for a command.
+pub type IndexWriter = std::sync::Arc<
+    dyn Fn(
+            &Command,
+        ) -> (
+            Vec<kernable_core::proto::UniqueKey>,
+            Vec<String>,
+            Vec<kernable_core::proto::Requirement>,
+        ) + Send
+        + Sync,
 >;
 
 pub struct TestWorker {
@@ -327,6 +343,10 @@ pub struct TestWorker {
     pub grant: Option<Grant>,
     /// Shared by workers that must never execute one aggregate at the same time.
     pub held: Option<std::sync::Arc<Held>>,
+    /// The keys, facts and requirements it sends with its results (protocol 2).
+    pub index: Option<IndexWriter>,
+    /// The protocol it registers with.
+    pub protocol: u32,
 }
 
 /// The aggregates some workers are executing: one lease per aggregate at a time (O7).
@@ -356,6 +376,8 @@ impl TestWorker {
             registered: None,
             grant: None,
             held: None,
+            index: None,
+            protocol: kernable_core::PROTOCOL,
         }
     }
 
@@ -392,7 +414,7 @@ pub async fn run_worker(addr: String, mut w: TestWorker) -> tonic::Status {
     let (tx, rx) = mpsc::channel(16);
     let send = |msg: In| WorkerMessage { msg: Some(msg) };
     tx.send(send(In::Register(Register {
-        protocol: kernable_core::PROTOCOL,
+        protocol: w.protocol,
         worker_id: "test-worker".into(),
         key_id: id(&w.claimed),
         aggregates: if w.aggregates.is_empty() {
@@ -497,9 +519,32 @@ pub async fn run_worker(addr: String, mut w: TestWorker) -> tonic::Status {
                             .writes_vault
                             .as_ref()
                             .map_or_else(|| (Vec::new(), String::new()), |write| write(&cmd));
-                        events[0].vault_refs = vault.iter().map(|v| v.r#ref.clone()).collect();
-                        events[0].erases = erases;
+                        if let Some(first) = events.first_mut() {
+                            first.vault_refs = vault.iter().map(|v| v.r#ref.clone()).collect();
+                            first.erases = erases;
+                        }
                         let msg = signing::result_message(&cmd, x.expected_version, &events);
+                        let (keys, facts, requires) = w
+                            .index
+                            .as_ref()
+                            .map_or_else(Default::default, |index| index(&cmd));
+                        let index_sig = (!keys.is_empty()
+                            || !facts.is_empty()
+                            || !requires.is_empty())
+                        .then(|| {
+                            let signer = match w.behavior {
+                                Behavior::ForgeIndex => key(9),
+                                _ => result_key.clone(),
+                            };
+                            let msg = signing::index_message(
+                                &cmd,
+                                x.expected_version,
+                                &keys,
+                                &facts,
+                                &requires,
+                            );
+                            signing::sign(&signer, &msg)
+                        });
                         let version = x.expected_version + events.len() as u64;
                         let snapshot_key = match w.behavior {
                             Behavior::Snapshots | Behavior::StaleSnapshots => {
@@ -524,6 +569,10 @@ pub async fn run_worker(addr: String, mut w: TestWorker) -> tonic::Status {
                             events,
                             worker_sig: Some(signing::sign(&result_key, &msg)),
                             snapshot,
+                            keys,
+                            facts,
+                            requires,
+                            index_sig,
                         })
                     }
                     Err(reason) => {

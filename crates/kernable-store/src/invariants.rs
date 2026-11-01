@@ -2,7 +2,7 @@
 //! property tests, fuzzing and soak runs (`design/invariants.md` has the catalogue).
 //!
 //! - [`Log`] holds a store's log and the commands it refers to; [`Log::check`] checks the
-//!   store invariants (S1–S8) on it.
+//!   store invariants (S1–S9) on it.
 //! - [`Observed`] records what clients and listeners were told; [`Observed::check`] checks the
 //!   observation invariants (O1–O4) against a [`Log`].
 //!
@@ -15,10 +15,10 @@ use std::{
 };
 
 use kernable_core::proto::{
-    Batch, Command, CommandResult, Event, ListenerRecord, command_result::Outcome,
+    AggregateIndex, Batch, Command, CommandResult, Event, ListenerRecord, command_result::Outcome,
 };
 
-use crate::{Result, Store};
+use crate::{Result, Store, StreamId};
 
 /// A broken invariant.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +42,7 @@ pub const S5: &str = "S5 events follow their command";
 pub const S6: &str = "S6 one outcome";
 pub const S7: &str = "S7 schemas only grow";
 pub const S8: &str = "S8 listener positions";
+pub const S9: &str = "S9 unique keys";
 pub const O1: &str = "O1 stable outcomes";
 pub const O2: &str = "O2 acknowledged means delivered";
 pub const O3: &str = "O3 delivery in order";
@@ -60,6 +61,8 @@ pub struct Log {
     /// IDs of the commands the store holds as pending.
     pub pending: BTreeSet<String>,
     pub listeners: Vec<ListenerRecord>,
+    /// The keys and facts every stream holds ([`Store::index`]).
+    pub index: Vec<(StreamId, AggregateIndex)>,
     /// The store's own head position.
     pub head: u64,
     /// Problems `Store::verify` found (S1).
@@ -78,6 +81,7 @@ impl Log {
         let mut log = Log {
             head: store.head_position()?,
             listeners: store.listeners()?,
+            index: store.index()?,
             integrity: store.verify(kernel_key_ids)?.problems,
             ..Log::default()
         };
@@ -100,7 +104,7 @@ impl Log {
         Ok(log)
     }
 
-    /// Checks S1–S8.
+    /// Checks S1–S9.
     pub fn check(&self) -> Vec<Violation> {
         let mut v = Vec::new();
         for problem in &self.integrity {
@@ -121,6 +125,7 @@ impl Log {
                 ));
             }
         }
+        self.keys(&mut v);
         v
     }
 
@@ -287,6 +292,72 @@ impl Log {
                 ));
             }
             *schema = (*schema).max(e.schema);
+        }
+    }
+
+    /// S9: no key ID is held by two streams, a key is held either by its ID or by a vault
+    /// value, and only streams with events hold anything. Personal keys live in the vault, so
+    /// their uniqueness is the kernel's to keep.
+    fn keys(&self, v: &mut Vec<Violation>) {
+        let written: BTreeSet<(&str, &str, &str, &str)> = self
+            .events
+            .iter()
+            .map(|e| {
+                (
+                    e.tenant_id.as_str(),
+                    e.domain.as_str(),
+                    e.aggregate_type.as_str(),
+                    e.aggregate_id.as_str(),
+                )
+            })
+            .collect();
+        let mut holders: BTreeMap<&[u8], &StreamId> = BTreeMap::new();
+        for (stream, index) in &self.index {
+            let name = format!(
+                "{}/{}.{}/{}",
+                stream.tenant_id, stream.domain, stream.aggregate_type, stream.aggregate_id
+            );
+            let key = (
+                stream.tenant_id.as_str(),
+                stream.domain.as_str(),
+                stream.aggregate_type.as_str(),
+                stream.aggregate_id.as_str(),
+            );
+            if !written.contains(&key) {
+                v.push(violation(
+                    S9,
+                    format!("{name} holds keys or facts but has no events"),
+                ));
+            }
+            for k in &index.keys {
+                if k.id.is_empty() == k.vault_ref.is_empty() {
+                    v.push(violation(
+                        S9,
+                        format!(
+                            "{name}: key {} needs either an ID or a vault reference",
+                            k.name
+                        ),
+                    ));
+                }
+                if k.id.is_empty() {
+                    continue;
+                }
+                if let Some(other) = holders.insert(&k.id, stream)
+                    && other != stream
+                {
+                    v.push(violation(
+                        S9,
+                        format!(
+                            "{name}: key {} is held by {}/{}.{}/{} too",
+                            k.name,
+                            other.tenant_id,
+                            other.domain,
+                            other.aggregate_type,
+                            other.aggregate_id
+                        ),
+                    ));
+                }
+            }
         }
     }
 

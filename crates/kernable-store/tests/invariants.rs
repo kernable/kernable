@@ -4,13 +4,13 @@
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
-        Batch, Command, CommandResult, Committed, ListenerRecord, NewEvent, Rejected,
-        command_result::Outcome,
+        AggregateIndex, Batch, Command, CommandResult, Committed, ListenerRecord, NewEvent,
+        Rejected, StoredKey, command_result::Outcome,
     },
     signing,
 };
 use kernable_store::{
-    FileStore, SqliteStore, Store,
+    FileStore, SqliteStore, Store, StreamId,
     invariants::{self, Log, Observed, Violation},
 };
 
@@ -48,6 +48,16 @@ fn kernel_ids() -> Vec<String> {
 }
 
 fn run(store: &dyn Store, id: &str, aggregate_id: &str, events: &[NewEvent]) {
+    run_indexed(store, id, aggregate_id, events, None);
+}
+
+fn run_indexed(
+    store: &dyn Store,
+    id: &str,
+    aggregate_id: &str,
+    events: &[NewEvent],
+    index: Option<&AggregateIndex>,
+) {
     let cmd = cmd(id, aggregate_id);
     store.enqueue(&cmd, 0).unwrap();
     let version = store
@@ -56,7 +66,29 @@ fn run(store: &dyn Store, id: &str, aggregate_id: &str, events: &[NewEvent]) {
         .len() as u64;
     let worker = SigningKey::from_bytes(&[2; 32]);
     let sig = signing::sign(&worker, &signing::result_message(&cmd, version, events));
-    store.commit(id, version, events, &sig, 0).unwrap();
+    store.commit(id, version, events, &sig, index, 0).unwrap();
+}
+
+/// A non-personal key `number` of the ID `[n; 32]`, and the fact `open`.
+fn index(n: u8) -> AggregateIndex {
+    AggregateIndex {
+        keys: vec![StoredKey {
+            name: "number".into(),
+            global: false,
+            id: vec![n; 32],
+            vault_ref: String::new(),
+        }],
+        facts: vec!["open".into()],
+    }
+}
+
+fn stream(aggregate_id: &str) -> StreamId {
+    StreamId {
+        tenant_id: "t1".into(),
+        domain: "orders".into(),
+        aggregate_type: "Order".into(),
+        aggregate_id: aggregate_id.into(),
+    }
 }
 
 /// | pos | command | aggregate | event                   |
@@ -66,7 +98,7 @@ fn run(store: &dyn Store, id: &str, aggregate_id: &str, events: &[NewEvent]) {
 /// | 3   | c2      | o2 v1     | OrderPlaced             |
 /// | 4   | c4      | o1 v3     | ItemAdded (schema 2)    |
 ///
-/// c3 is rejected, c5 pending, listener `audit` at 3.
+/// c3 is rejected, c5 pending, listener `audit` at 3; o1 holds the key [`index`]`(1)`.
 fn workload(store: &dyn Store) {
     run(
         store,
@@ -81,7 +113,7 @@ fn workload(store: &dyn Store) {
         message: "no".into(),
     };
     store.reject("c3", rejected).unwrap();
-    run(store, "c4", "o1", &[ev("ItemAdded", 2)]);
+    run_indexed(store, "c4", "o1", &[ev("ItemAdded", 2)], Some(&index(1)));
     store.enqueue(&cmd("c5", "o3"), 0).unwrap();
     store
         .save_listeners(&[ListenerRecord {
@@ -124,6 +156,7 @@ fn a_healthy_store_holds_every_invariant() {
             "every command, the rejected one too, in the order stored"
         );
         assert_eq!(log.commands.len(), 5);
+        assert_eq!(log.index, [(stream("o1"), index(1))]);
         assert_eq!(log.check(), []);
     }
     drop(sqlite);
@@ -243,6 +276,31 @@ fn s8_listeners_are_not_beyond_the_head() {
     let mut log = healthy();
     log.listeners[0].position = 5;
     fires(log.check(), invariants::S8);
+}
+
+#[test]
+fn s9_a_key_is_held_once_and_only_by_streams_with_events() {
+    let mut log = healthy();
+    log.index.push((stream("o2"), index(1)));
+    fires(log.check(), invariants::S9);
+
+    // A personal key: its ID is in the vault, so another stream's equal one is not seen.
+    let mut log = healthy();
+    let mut personal = index(1);
+    personal.keys[0].id.clear();
+    personal.keys[0].vault_ref = "ab".into();
+    log.index.push((stream("o2"), personal.clone()));
+    assert_eq!(log.check(), []);
+
+    let mut log = healthy();
+    personal.keys[0].vault_ref.clear();
+    log.index.push((stream("o2"), personal));
+    fires(log.check(), invariants::S9);
+
+    // A reindex of an ID never written holds nothing.
+    let mut log = healthy();
+    log.index.push((stream("o3"), index(2)));
+    fires(log.check(), invariants::S9);
 }
 
 fn committed(log: &Log, id: &str, positions: &[u64]) -> CommandResult {

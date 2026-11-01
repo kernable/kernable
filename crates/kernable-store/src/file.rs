@@ -2,7 +2,8 @@
 //!
 //! The whole store is one log of records (`proto/kernable/v1/storage.proto`). The first holds
 //! the data format (see [`crate::FORMAT`]); then come enqueued
-//! commands, commits (all events of one command in a single record, hence atomic),
+//! commands, commits (all events of one command in a single record, hence atomic, with the
+//! keys and facts the command's stream holds from then on if they changed),
 //! rejections, checkpoints and listener positions. Each record is framed as `u32 BE length || first 4 bytes of
 //! SHA-256(body) || body`. Opening replays the log into memory. A torn last record from a
 //! crash is moved to `<path>.torn-<offset>` and cut off; damage anywhere else refuses to open.
@@ -29,10 +30,10 @@ use std::{
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
-        CheckpointRecord, Command, CommandResult, Committed, CommittedRecord, EnqueuedRecord,
-        Event, FormatRecord, Grant, ListenerRecord, LogRecord, LoggedEvent, MembershipRecord,
-        NewEvent, Rejected, RejectedRecord, RevocationRecord, Signature, WorkerRecord,
-        command_result::Outcome, log_record::Record,
+        AggregateIndex, CheckpointRecord, Command, CommandResult, Committed, CommittedRecord,
+        EnqueuedRecord, Event, FormatRecord, Grant, ListenerRecord, LogRecord, LoggedEvent,
+        MembershipRecord, NewEvent, Rejected, RejectedRecord, RevocationRecord, Signature,
+        WorkerRecord, command_result::Outcome, log_record::Record,
     },
     signing::{self, GENESIS},
 };
@@ -40,7 +41,7 @@ use prost::Message;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    Checkpoint, Durability, Enqueued, Error, FORMAT, Pending, Result, Store,
+    Checkpoint, Durability, Enqueued, Error, FORMAT, Pending, Result, Store, StreamId,
     sync::Syncer,
     verify::{Report, Verifier},
 };
@@ -84,6 +85,8 @@ struct State {
     memberships: BTreeMap<String, MembershipRecord>,
     revocations: Vec<RevocationRecord>,
     grants: BTreeMap<String, Grant>,
+    /// What each stream holds, from its latest commit with an index; none if it holds nothing.
+    index: BTreeMap<StreamKey, AggregateIndex>,
 }
 
 impl State {
@@ -111,7 +114,24 @@ impl State {
                 };
                 self.commands.insert(id, cmd);
             }
-            Record::Committed(CommittedRecord { command_id, events }) => {
+            Record::Committed(CommittedRecord {
+                command_id,
+                events,
+                index,
+            }) => {
+                if let Some(index) = index {
+                    let cmd = self.pending(&command_id).map_err(|_| {
+                        corrupt(&format!(
+                            "completion of unknown or done command {command_id}"
+                        ))
+                    })?;
+                    let stream = stream_key(&cmd.command);
+                    if index.keys.is_empty() && index.facts.is_empty() {
+                        self.index.remove(&stream);
+                    } else {
+                        self.index.insert(stream, index);
+                    }
+                }
                 let mut stored = Vec::with_capacity(events.len());
                 for logged in events {
                     let event = logged
@@ -490,6 +510,7 @@ impl Store for FileStore {
         expected_version: u64,
         events: &[NewEvent],
         producer_sig: &Signature,
+        index: Option<&AggregateIndex>,
         now_ms: i64,
     ) -> Result<Vec<Event>> {
         let mut inner = self.inner();
@@ -541,9 +562,30 @@ impl Store for FileStore {
         let record = CommittedRecord {
             command_id: cmd.command_id,
             events: logged,
+            index: index.cloned(),
         };
         append(&mut inner, Record::Committed(record))?;
         Ok(stored)
+    }
+
+    fn index(&self) -> Result<Vec<(StreamId, AggregateIndex)>> {
+        let inner = self.inner();
+        Ok(inner
+            .state
+            .index
+            .iter()
+            .map(
+                |((tenant_id, domain, aggregate_type, aggregate_id), index)| {
+                    let stream = StreamId {
+                        tenant_id: tenant_id.clone(),
+                        domain: domain.clone(),
+                        aggregate_type: aggregate_type.clone(),
+                        aggregate_id: aggregate_id.clone(),
+                    };
+                    (stream, index.clone())
+                },
+            )
+            .collect())
     }
 
     fn reject(&self, command_id: &str, reason: Rejected) -> Result<()> {
@@ -717,7 +759,8 @@ pub(crate) fn migrate(path: &Path) -> Result<u32> {
         .ok_or_else(|| corrupt("first record: open the store once to repair it"))?;
     match LogRecord::decode(body)?.record {
         Some(Record::Format(f)) if f.version == FORMAT => Ok(FORMAT),
-        // Format 2 only adds a record type: the first record changes, nothing else.
+        // Formats 2 and 3 only add a record type and a field of commits: the first record
+        // changes, nothing else. No release wrote format 2, so it has no migration.
         Some(Record::Format(f)) if f.version == 1 => {
             let first = LogRecord {
                 record: Some(Record::Format(FormatRecord { version: FORMAT })),

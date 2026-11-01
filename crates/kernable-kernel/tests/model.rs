@@ -11,7 +11,7 @@
 //! - O5: a settled submit was processed by every listener it waited for;
 //! - O6: an event reaches order 1 only after order 0 acknowledged it;
 //! - O7: one execution per aggregate at a time;
-//! - S1–S8 and O1–O4 over the whole run.
+//! - S1–S9 and O1–O4 over the whole run.
 //!
 //! `KERNABLE_MODEL_SEEDS=<n>` runs n seeds (default 3), `KERNABLE_MODEL_STEPS=<n>` steps each
 //! (default 150).
@@ -659,7 +659,7 @@ async fn run(seed: u64, steps: u64) {
             "seed {seed}: X1: refused {id} is stored"
         );
     }
-    // S1–S8, O1–O4.
+    // S1–S9, O1–O4.
     let log = Log::read(read.as_ref(), &[id(&key(3))]).unwrap();
     let mut violations = log.check();
     violations.extend(seen.observed.check(&log));

@@ -25,6 +25,7 @@ pub mod crash;
 pub mod fuzzing;
 pub mod grants;
 mod http;
+mod index;
 mod listeners;
 mod memberships;
 mod metrics;
@@ -206,8 +207,12 @@ pub struct Kernel {
     memberships: memberships::Memberships,
     queue: queue::Queue,
     metrics: metrics::Metrics,
-    /// The highest payload version stored per qualified event type; never goes down.
+    /// The highest payload version stored per qualified event type; never goes down. Held
+    /// through every commit.
     schemas: Mutex<HashMap<String, u32>>,
+    /// The unique keys and facts every aggregate holds. Locked after `schemas`, never without
+    /// it, so the two serialise commits in one order.
+    index: Mutex<index::Index>,
     /// The latest snapshot per aggregate, apart from the log.
     snapshots: Box<dyn SnapshotStore>,
     /// Personal and secret values; `None` without `[vault]`.
@@ -280,6 +285,7 @@ impl Kernel {
             }
             None => None,
         };
+        let index = index::Index::load(store.index()?, vault.as_ref())?;
         let data = kernable_store::data::open(&config.data)?;
         let cache = cache::Cache::open(&config.cache, config.limits.cache_bytes)?;
         let durable = AtomicU64::new(store.head_position()?);
@@ -305,6 +311,7 @@ impl Kernel {
             queue,
             metrics: metrics::Metrics::default(),
             schemas: Mutex::new(schemas),
+            index: Mutex::new(index),
             snapshots,
             vault,
             data,
@@ -517,14 +524,15 @@ impl Kernel {
     }
 
     /// Keeps a result's vault values and carries out its erasures, before the events are
-    /// committed: an erasure is repeated if the command runs again. Returns whether it erased.
+    /// committed: an erasure is repeated if the command runs again. Returns the streams whose
+    /// values it erased, with the command's own; none if it erased nothing.
     fn vault_result(
         &self,
         worker_key: &str,
         cmd: &Command,
         events: &[NewEvent],
         values: &[VaultValue],
-    ) -> Result<bool, Rejected> {
+    ) -> Result<Vec<StreamId>, Rejected> {
         let refused = |code: &str, message: String| Rejected {
             code: code.into(),
             message,
@@ -532,7 +540,7 @@ impl Kernel {
         let refs: Vec<String> = events.iter().flat_map(|e| e.vault_refs.clone()).collect();
         let erasing: Vec<&NewEvent> = events.iter().filter(|e| !e.erases.is_empty()).collect();
         if refs.is_empty() && erasing.is_empty() && values.is_empty() {
-            return Ok(false);
+            return Ok(Vec::new());
         }
         let Some(vault) = &self.vault else {
             return Err(refused("no_vault", "this kernel has no vault".into()));
@@ -561,14 +569,18 @@ impl Kernel {
         vault
             .put(values, &refs, &owner, now_ms())
             .map_err(|e| refused("invalid_vault_values", e.to_string()))?;
+        let mut erased = Vec::new();
         for e in &erasing {
             let streams = vault
                 .erase(&cmd.tenant_id, &e.erases, &cmd.command_id, now_ms())
                 .map_err(|e| refused("vault_error", e.to_string()))?;
             // Snapshots of every stream that used the subject's values may hold them too.
-            for s in streams.iter().chain([&stream]) {
-                if let Err(e) = self.snapshots.remove(s) {
+            for s in streams.into_iter().chain([stream.clone()]) {
+                if let Err(e) = self.snapshots.remove(&s) {
                     tracing::error!(error = %e, "dropping a snapshot failed");
+                }
+                if !erased.contains(&s) {
+                    erased.push(s);
                 }
             }
             tracing::info!(command = %cmd.command_id, "erased a subject's vault values");
@@ -576,7 +588,7 @@ impl Kernel {
         if !erasing.is_empty() {
             crash::point("erasure.done");
         }
-        Ok(!erasing.is_empty())
+        Ok(erased)
     }
 
     /// Deletes a completed command's secrets.
@@ -720,6 +732,11 @@ impl Kernel {
 
     fn schemas(&self) -> MutexGuard<'_, HashMap<String, u32>> {
         self.schemas.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The index of keys and facts; lock [`Kernel::schemas`] first.
+    fn index(&self) -> MutexGuard<'_, index::Index> {
+        self.index.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn waiters(&self) -> MutexGuard<'_, HashMap<String, Vec<oneshot::Sender<CommandResult>>>> {
@@ -1867,6 +1884,15 @@ impl WorkerGateway for Api {
 
 type Outbox = mpsc::Sender<Result<KernelMessage, Status>>;
 
+/// What a commit changes in the index: what the aggregate holds from then on, the vault
+/// values of its personal keys (those `added` are new), and the record the store keeps.
+struct IndexChange {
+    held: index::Held,
+    refs: HashMap<[u8; 32], String>,
+    added: Vec<String>,
+    stored: kernable_core::proto::AggregateIndex,
+}
+
 /// A command currently executed by the session's worker.
 struct InFlight {
     command: Command,
@@ -1882,6 +1908,8 @@ struct InFlight {
 struct Session {
     kernel: Arc<Kernel>,
     key_id: String,
+    /// `Register.protocol`: from 2 on, results carry keys, facts and requirements.
+    protocol: u32,
     /// The payload version the worker writes per qualified event type; others at 1.
     schemas: HashMap<String, u32>,
     out: Outbox,
@@ -2018,6 +2046,7 @@ async fn run_session(
     let session = Arc::new(Session {
         kernel,
         key_id: reg.key_id,
+        protocol: reg.protocol,
         schemas,
         out: out.clone(),
         in_flight: Mutex::default(),
@@ -2248,17 +2277,25 @@ impl Session {
         let Some(f) = self.in_flight().remove(&r.lease_id) else {
             return Ok(()); // unknown or already handled lease
         };
-        let sig = r.worker_sig.unwrap_or_default();
+        let sig = r.worker_sig.clone().unwrap_or_default();
         let msg = signing::result_message(&f.command, f.expected_version, &r.events);
         let snapshot_ok = r
             .snapshot
             .as_ref()
             .is_none_or(|s| self.valid_snapshot(s, &f, r.events.len()));
-        if sig.key_id != self.key_id || signing::verify(&sig, &msg).is_err() || !snapshot_ok {
+        // Workers of protocol 1 know nothing of keys and facts: their results leave the index
+        // as it is.
+        let indexed = self.protocol >= 2;
+        let index_ok = !indexed || self.valid_index(&r, &f);
+        if sig.key_id != self.key_id
+            || signing::verify(&sig, &msg).is_err()
+            || !snapshot_ok
+            || !index_ok
+        {
             // Put it back, so it is released when the session ends.
             self.in_flight().insert(r.lease_id, f);
             return Err(Status::unauthenticated(
-                "invalid result or snapshot signature",
+                "invalid result, index or snapshot signature",
             ));
         }
         if !self.kernel.queue.holds(&r.lease_id) {
@@ -2292,6 +2329,46 @@ impl Session {
             return Ok(());
         }
 
+        let stream = StreamId {
+            tenant_id: f.command.tenant_id.clone(),
+            domain: f.command.domain.clone(),
+            aggregate_type: f.command.aggregate_type.clone(),
+            aggregate_id: f.command.aggregate_id.clone(),
+        };
+        let wanted = if indexed {
+            if let Err(reason) = index::validate(&r) {
+                self.reject(&r.lease_id, f.command, reason);
+                return Ok(());
+            }
+            if r.keys.iter().any(|k| !k.subject.is_empty()) && self.kernel.vault.is_none() {
+                let reason = Rejected {
+                    code: "no_vault".into(),
+                    message: "this kernel has no vault".into(),
+                };
+                self.reject(&r.lease_id, f.command, reason);
+                return Ok(());
+            }
+            // An aggregate without events does not exist: whatever its initial state would
+            // hold, it holds nothing (a reindex of an ID never written).
+            let exists = f.expected_version > 0 || !r.events.is_empty();
+            Some(index::Held {
+                keys: r
+                    .keys
+                    .iter()
+                    .filter(|_| exists)
+                    .map(|k| index::Key {
+                        name: k.name.clone(),
+                        global: k.global,
+                        id: signing::unique_key_id(&f.command, k),
+                        subject: k.subject.clone(),
+                    })
+                    .collect(),
+                facts: r.facts.iter().filter(|_| exists).cloned().collect(),
+            })
+        } else {
+            None
+        };
+
         let erased = match self
             .kernel
             .vault_result(&self.key_id, &f.command, &r.events, &r.vault)
@@ -2304,8 +2381,16 @@ impl Session {
         };
 
         let committed = {
-            // Held through the commit, so an outdated worker cannot write next to a newer one.
+            // Held through the commit, so an outdated worker cannot write next to a newer one,
+            // and with the index, so that two commits never take one key and a requirement
+            // never sees a fact that a commit is removing.
             let mut stored = self.kernel.schemas();
+            let mut index = self.kernel.index();
+            if let Some(vault) = &self.kernel.vault
+                && !erased.is_empty()
+            {
+                index.erased(&erased, vault);
+            }
             let outdated = r.events.iter().find_map(|e| {
                 let newer = stored.get(&name(e)).filter(|v| **v > e.schema)?;
                 Some(format!(
@@ -2320,17 +2405,51 @@ impl Session {
                 self.in_flight().insert(r.lease_id, f);
                 return Err(Status::failed_precondition(message));
             }
+            let change = match &wanted {
+                Some(wanted) => match self.index_change(&index, &f.command, &stream, wanted, &r) {
+                    Ok(change) => change,
+                    Err(reason) => {
+                        drop((index, stored));
+                        self.reject(&r.lease_id, f.command, reason);
+                        return Ok(());
+                    }
+                },
+                None => None,
+            };
             let committed = self.kernel.store.commit(
                 &f.command.command_id,
                 f.expected_version,
                 &r.events,
                 &sig,
+                change.as_ref().map(|c| &c.stored),
                 now_ms(),
             );
             if committed.is_ok() {
                 for e in &r.events {
                     let max = stored.entry(name(e)).or_default();
                     *max = (*max).max(e.schema);
+                }
+            }
+            if let Some(change) = change {
+                // A write that failed may have taken effect all the same (see
+                // `completed_earlier`).
+                let took_effect = match &committed {
+                    Ok(_) => true,
+                    Err(StoreError::VersionConflict { .. } | StoreError::NotPending) => false,
+                    Err(_) => matches!(
+                        self.kernel.store.result(&f.command.command_id),
+                        Ok(Some(CommandResult {
+                            outcome: Some(Outcome::Committed(_)),
+                            ..
+                        }))
+                    ),
+                };
+                if took_effect {
+                    index.set(&stream, change.held, &change.refs);
+                } else if let Some(vault) = &self.kernel.vault
+                    && let Err(e) = vault.remove(&change.added)
+                {
+                    tracing::error!(error = %e, "dropping the vault values of a failed commit failed");
                 }
             }
             committed
@@ -2344,7 +2463,7 @@ impl Session {
                 // worker's permit are held until then: the aggregate's next command waits for
                 // its history to be on the disk.
                 let kernel = Arc::clone(&self.kernel);
-                let snapshot = r.snapshot.filter(|_| !erased);
+                let snapshot = r.snapshot.filter(|_| erased.is_empty());
                 let lease_id = r.lease_id;
                 tokio::spawn(async move {
                     let last = events.last().map_or(0, |e| e.global_position);
@@ -2470,6 +2589,114 @@ impl Session {
             && s.worker_sig
                 .as_ref()
                 .is_some_and(|sig| sig.key_id == self.key_id && signing::verify(sig, &msg).is_ok())
+    }
+
+    /// A result's keys, facts and requirements must be signed by this session's worker, if it
+    /// has any.
+    fn valid_index(&self, r: &kernable_core::proto::Result, f: &InFlight) -> bool {
+        if r.keys.is_empty() && r.facts.is_empty() && r.requires.is_empty() {
+            return true;
+        }
+        let msg = signing::index_message(
+            &f.command,
+            f.expected_version,
+            &r.keys,
+            &r.facts,
+            &r.requires,
+        );
+        r.index_sig
+            .as_ref()
+            .is_some_and(|sig| sig.key_id == self.key_id && signing::verify(sig, &msg).is_ok())
+    }
+
+    /// Checks `wanted`, what the command's aggregate is to hold, and the result's requirements
+    /// against the index before the command; `None` if the aggregate holds `wanted` already.
+    /// New personal keys get their vault values here, before the commit.
+    fn index_change(
+        &self,
+        index: &index::Index,
+        cmd: &Command,
+        stream: &StreamId,
+        wanted: &index::Held,
+        r: &kernable_core::proto::Result,
+    ) -> Result<Option<IndexChange>, Rejected> {
+        for q in &r.requires {
+            let other = StreamId {
+                tenant_id: cmd.tenant_id.clone(),
+                domain: q.domain.clone(),
+                aggregate_type: q.aggregate_type.clone(),
+                aggregate_id: q.aggregate_id.clone(),
+            };
+            if !index.holds(&other, &q.fact) {
+                return Err(Rejected {
+                    code: "requirement_missing".into(),
+                    message: format!(
+                        "{}.{} {} does not hold {}",
+                        q.domain, q.aggregate_type, q.aggregate_id, q.fact
+                    ),
+                });
+            }
+        }
+        // Never the value: the message tells the client which key, not whose.
+        if let Some(k) = wanted
+            .keys
+            .iter()
+            .find(|k| index.holder(&k.id).is_some_and(|holder| holder != stream))
+        {
+            return Err(Rejected {
+                code: "unique_taken".into(),
+                message: format!(
+                    "{}.{} key {} is taken",
+                    cmd.domain, cmd.aggregate_type, k.name
+                ),
+            });
+        }
+        let current = index.held(stream);
+        if current == *wanted {
+            return Ok(None);
+        }
+        let mut change = IndexChange {
+            held: wanted.clone(),
+            refs: HashMap::new(),
+            added: Vec::new(),
+            stored: Default::default(),
+        };
+        for k in wanted.keys.iter().filter(|k| !k.subject.is_empty()) {
+            let kept = current
+                .keys
+                .contains(k)
+                .then(|| index.vault_ref(&k.id))
+                .flatten();
+            let r = match (kept, &self.kernel.vault) {
+                (Some(r), _) => r.clone(),
+                (None, Some(vault)) => {
+                    match index::put_personal(vault, cmd, stream, &k.id, &k.subject, now_ms()) {
+                        Ok(r) => {
+                            change.added.push(r.clone());
+                            r
+                        }
+                        Err(e) => {
+                            if let Err(e) = vault.remove(&change.added) {
+                                tracing::error!(error = %e, "dropping vault values failed");
+                            }
+                            return Err(Rejected {
+                                code: "vault_error".into(),
+                                message: e.to_string(),
+                            });
+                        }
+                    }
+                }
+                (None, None) => {
+                    return Err(Rejected {
+                        code: "no_vault".into(),
+                        message: "this kernel has no vault".into(),
+                    });
+                }
+            };
+            change.refs.insert(k.id, r);
+        }
+        change.stored = index::stored(&change.held, &change.refs);
+        Ok(Some(change))
     }
 
     fn reject(&self, lease_id: &str, command: Command, reason: Rejected) {

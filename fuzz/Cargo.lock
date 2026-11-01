@@ -21,6 +21,7 @@ dependencies = [
  "cfg-if",
  "cipher",
  "cpufeatures",
+ "zeroize",
 ]
 
 [[package]]
@@ -35,6 +36,7 @@ dependencies = [
  "ctr",
  "ghash",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -548,6 +550,7 @@ checksum = "f0d8a4362ccb29cb0b265253fb0a2728f592895ee6854fd9bc13f2ffda266ff1"
 dependencies = [
  "opaque-debug",
  "polyval",
+ "zeroize",
 ]
 
 [[package]]
@@ -769,6 +772,7 @@ dependencies = [
  "tonic-prost",
  "tonic-prost-build",
  "tower",
+ "zeroize",
 ]
 
 [[package]]
@@ -794,20 +798,24 @@ dependencies = [
  "kernable-store",
  "prost",
  "serde_json",
+ "sha2",
  "tokio",
  "tokio-stream",
  "tonic",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]
 name = "kernable-store"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "aes-gcm",
  "ed25519-dalek",
  "getrandom 0.3.4",
+ "ghash",
  "hex",
  "kernable-core",
  "prost",

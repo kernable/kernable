@@ -314,6 +314,10 @@ fn reply(
                 worker_sig: Some(worker_sig),
                 snapshot,
                 vault: done.vault,
+                keys: Vec::new(),
+                facts: Vec::new(),
+                requires: Vec::new(),
+                index_sig: None,
             }));
         }
         Err(Failure::Schema(reason)) => return Err(reason),

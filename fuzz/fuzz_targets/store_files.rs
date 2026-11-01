@@ -35,6 +35,7 @@ fuzz_target!(|data: &[u8]| {
         let _ = store.revocations();
         let _ = store.event_schemas();
         let _ = store.streams(100);
+        let _ = store.index();
         if let Ok(log) = Log::read(&store, &["00".repeat(32)]) {
             let _ = log.check();
         }

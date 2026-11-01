@@ -14,9 +14,9 @@ use std::{
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
-        Attribute, Command, CommandResult, Committed, Event, Grant, ListenerRecord, Membership,
-        MembershipRecord, Middleware, NewEvent, Rejected, RequestContext, RevocationRecord,
-        Signature, When, WorkerRecord, command_result::Outcome,
+        AggregateIndex, Attribute, Command, CommandResult, Committed, Event, Grant, ListenerRecord,
+        Membership, MembershipRecord, Middleware, NewEvent, Rejected, RequestContext,
+        RevocationRecord, Signature, When, WorkerRecord, command_result::Outcome,
     },
     signing::{self, GENESIS},
 };
@@ -131,6 +131,18 @@ CREATE TABLE IF NOT EXISTS grants (
 ) STRICT;
 ";
 
+/// Added in format 3, with no migration from format 2: no release wrote format 2.
+const AGGREGATE_INDEX: &str = "
+CREATE TABLE IF NOT EXISTS aggregate_index (
+    tenant_id      TEXT NOT NULL,
+    domain         TEXT NOT NULL,
+    aggregate_type TEXT NOT NULL,
+    aggregate_id   TEXT NOT NULL,
+    record         BLOB NOT NULL, -- the AggregateIndex message; a stream holding nothing has no row
+    PRIMARY KEY (tenant_id, domain, aggregate_type, aggregate_id)
+) STRICT;
+";
+
 const EVENT_COLUMNS: &str = "global_position, tenant_id, aggregate_type, aggregate_id, version, \
                              event_type, payload, command_id, created_at, \
                              producer_key_id, producer_sig, hash, context, domain, schema, \
@@ -223,6 +235,7 @@ impl SqliteStore {
             (0, 0) => {
                 conn.execute_batch(SCHEMA)?;
                 conn.execute_batch(GRANTS)?;
+                conn.execute_batch(AGGREGATE_INDEX)?;
                 conn.pragma_update(None, "user_version", FORMAT)?;
             }
             (FORMAT, _) => {}
@@ -336,7 +349,7 @@ impl Store for SqliteStore {
 
     /// Appends `events` to the pending command's stream, extends the hash chain and
     /// completes the command, atomically. `producer_sig` is the worker's result signature;
-    /// verifying it is up to the caller.
+    /// verifying it is up to the caller. `index`, if set, replaces what the stream holds.
     ///
     /// On `VersionConflict` the command stays pending, so the caller can retry with fresh history.
     fn commit(
@@ -345,6 +358,7 @@ impl Store for SqliteStore {
         expected_version: u64,
         events: &[NewEvent],
         producer_sig: &Signature,
+        index: Option<&AggregateIndex>,
         now_ms: i64,
     ) -> Result<Vec<Event>> {
         let mut conn = self.conn();
@@ -432,6 +446,40 @@ impl Store for SqliteStore {
             stored.push(event);
         }
 
+        let stream = params![
+            cmd.tenant_id,
+            cmd.domain,
+            cmd.aggregate_type,
+            cmd.aggregate_id
+        ];
+        match index {
+            None => {}
+            Some(index) if index.keys.is_empty() && index.facts.is_empty() => {
+                tx.execute(
+                    "DELETE FROM aggregate_index
+                     WHERE tenant_id = ?1 AND domain = ?2 AND aggregate_type = ?3
+                       AND aggregate_id = ?4",
+                    stream,
+                )?;
+            }
+            Some(index) => {
+                tx.execute(
+                    "INSERT INTO aggregate_index
+                         (tenant_id, domain, aggregate_type, aggregate_id, record)
+                     VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT (tenant_id, domain, aggregate_type, aggregate_id)
+                     DO UPDATE SET record = excluded.record",
+                    params![
+                        cmd.tenant_id,
+                        cmd.domain,
+                        cmd.aggregate_type,
+                        cmd.aggregate_id,
+                        index.encode_to_vec()
+                    ],
+                )?;
+            }
+        }
+
         tx.execute(
             "UPDATE commands SET status = 'committed', positions = ?2 WHERE command_id = ?1",
             params![
@@ -447,7 +495,29 @@ impl Store for SqliteStore {
         Ok(stored)
     }
 
-    /// Completes the pending command as rejected by the business logic.
+    fn index(&self) -> Result<Vec<(StreamId, AggregateIndex)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT tenant_id, domain, aggregate_type, aggregate_id, record FROM aggregate_index
+             ORDER BY tenant_id, domain, aggregate_type, aggregate_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let stream = StreamId {
+                tenant_id: r.get(0)?,
+                domain: r.get(1)?,
+                aggregate_type: r.get(2)?,
+                aggregate_id: r.get(3)?,
+            };
+            Ok((stream, r.get::<_, Vec<u8>>(4)?))
+        })?;
+        let mut index = Vec::new();
+        for row in rows {
+            let (stream, record) = row?;
+            index.push((stream, AggregateIndex::decode(record.as_slice())?));
+        }
+        Ok(index)
+    }
+
     fn streams(&self, limit: usize) -> Result<Vec<StreamSummary>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
@@ -1170,9 +1240,10 @@ pub(crate) fn migrate(path: &Path) -> Result<u32> {
     match conn.pragma_query_value(None, "user_version", |r| r.get(0))? {
         FORMAT => Ok(FORMAT),
         1 => {
-            // One transaction: the table and the format change together.
+            // One transaction: the tables and the format change together.
             let tx = conn.transaction()?;
             tx.execute_batch(GRANTS)?;
+            tx.execute_batch(AGGREGATE_INDEX)?;
             tx.pragma_update(None, "user_version", FORMAT)?;
             tx.commit()?;
             Ok(1)

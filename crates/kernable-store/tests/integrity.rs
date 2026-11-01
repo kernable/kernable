@@ -93,7 +93,7 @@ impl Fixture {
         let msg = signing::result_message(&cmd, version, events);
         let sig = signing::sign(&self.worker, &msg);
         self.store
-            .commit(&cmd.command_id, version, events, &sig, 0)
+            .commit(&cmd.command_id, version, events, &sig, None, 0)
             .unwrap();
     }
 

@@ -21,6 +21,7 @@ fuzz_target!(|data: &[u8]| {
         let _ = store.read_all(0, 10_000);
         let _ = store.pending();
         let _ = store.event_schemas();
+        let _ = store.index();
         let _ = store.verify(&["00".to_string()]);
     }
 });
