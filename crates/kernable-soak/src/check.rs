@@ -1,23 +1,34 @@
 //! A check round, while the load and the faults pause: wait until every listener has caught
-//! up, then check every invariant of the store (S1–S8) and of what clients and the audit
+//! up, then check every invariant of the store (S1–S9) and of what clients and the audit
 //! listener were told (O1–O4), and the apps' own rules against the log:
 //!
 //! - B1: no account is ever below zero;
 //! - B2: every withdrawal of 50 or more is flagged exactly once, and nothing else is;
-//! - B3: each app's read model holds the balance and flags the log says.
+//! - B3: each app's read model holds the balance and flags the log says;
+//! - B4: no two accounts of an app hold the same number at once, replaying the log, and the
+//!   kernel's index holds exactly the number and the fact `open` each account's last event
+//!   leaves it with;
+//! - B5: no withdrawal sent `to` an account committed while that account was closed;
+//! - B6: every `unique_taken` the load saw was for a number another account held, and every
+//!   `requirement_missing` for an account that was closed, at some position between the
+//!   client's commands before and after it (and no other command saw either).
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     time::{Duration, Instant},
 };
 
 use kernable::{Kernable, Query};
-use kernable_core::proto::Event;
+use kernable_core::{
+    proto::{Command, Event, UniqueKey},
+    signing,
+};
 use kernable_store::invariants::Log;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
-use crate::load::{ACCOUNTS, DOMAINS, Load};
+use crate::load::{ACCOUNTS, DOMAINS, Load, Refusal, TENANT};
 
 pub struct Report {
     pub head: u64,
@@ -109,6 +120,7 @@ pub async fn round(store: &str, kernel_key_id: &str, load: &Load, client: &Kerna
             .map(ToString::to_string),
     );
     let expected = bank_rules(&log.events, &mut violations);
+    index_rules(&log, &load.refusals.lock().unwrap(), &mut violations);
 
     // B3: every account of every app, as its read model answers.
     for domain in DOMAINS {
@@ -175,6 +187,7 @@ fn bank_rules(
                 let at = data["position"].as_u64().unwrap_or(0);
                 flagged.entry(at).or_default().push(key);
             }
+            "Opened" | "Closed" | "Numbered" => {}
             other => violations.push(format!("unexpected event {other} at {}", e.global_position)),
         }
     }
@@ -197,4 +210,184 @@ fn bank_rules(
         }
     }
     accounts
+}
+
+/// What held a number or whether an account was open, from a log position on: in order.
+type History<T> = Vec<(u64, T)>;
+
+/// Whether `holds` is true of the value at some position from `after` to before `before`.
+fn ever<T>(
+    history: &[(u64, T)],
+    after: u64,
+    before: u64,
+    holds: impl Fn(Option<&T>) -> bool,
+) -> bool {
+    let at = history
+        .iter()
+        .rev()
+        .find(|(p, _)| *p <= after)
+        .map(|(_, v)| v);
+    holds(at)
+        || history
+            .iter()
+            .any(|(p, v)| *p > after && *p < before && holds(Some(v)))
+}
+
+/// B4, B5 and B6 over the log, the kernel's index and the refusals the load saw.
+fn index_rules(log: &Log, refusals: &[Refusal], violations: &mut Vec<String>) {
+    // Per account: its number and whether it is open; per number, who held it; per account,
+    // when it opened and closed.
+    let mut accounts: BTreeMap<(&str, &str), (Option<&str>, bool)> = BTreeMap::new();
+    let mut holders: BTreeMap<(&str, &str), History<Option<&str>>> = BTreeMap::new();
+    let mut opens: BTreeMap<(&str, &str), History<bool>> = BTreeMap::new();
+    let payloads: Vec<Value> = log
+        .events
+        .iter()
+        .map(|e| serde_json::from_slice(&e.payload).unwrap_or(Value::Null))
+        .collect();
+    for (e, data) in log.events.iter().zip(&payloads) {
+        let Some(domain) = DOMAINS.iter().find(|d| **d == e.domain) else {
+            continue;
+        };
+        let (id, at) = (e.aggregate_id.as_str(), e.global_position);
+        let account = accounts.entry((domain, id)).or_default();
+        match e.event_type.as_str() {
+            "Numbered" => {
+                let number = data["number"].as_str();
+                if let Some(n) = number
+                    && let Some((_, Some(other))) =
+                        holders.get(&(*domain, n)).and_then(|h| h.last())
+                    && *other != id
+                {
+                    violations.push(format!(
+                        "B4 one holder: {domain} {id} took number {n} at {at}, held by {other}"
+                    ));
+                }
+                if account.0 != number {
+                    if let Some(old) = account.0 {
+                        holders.entry((domain, old)).or_default().push((at, None));
+                    }
+                    if let Some(n) = number {
+                        holders.entry((domain, n)).or_default().push((at, Some(id)));
+                    }
+                }
+                account.0 = number;
+            }
+            "Opened" | "Closed" => {
+                account.1 = e.event_type == "Opened";
+                opens.entry((domain, id)).or_default().push((at, account.1));
+            }
+            "Withdrawn" => {
+                if let Some(to) = data["to"].as_str()
+                    && !accounts.get(&(*domain, to)).is_some_and(|a| a.1)
+                {
+                    violations.push(format!(
+                        "B5 requirement: the withdrawal at {at} from {domain} {id} was sent to \
+                         {to}, which was closed"
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // B4: the index holds what the log leaves every account with.
+    type Held = (Vec<(String, Vec<u8>)>, Vec<String>);
+    let mut want: BTreeMap<(String, String), Held> = BTreeMap::new();
+    for (&(domain, id), &(number, open)) in &accounts {
+        let keys = number.map_or(Vec::new(), |n| {
+            let stream = Command {
+                tenant_id: TENANT.into(),
+                domain: domain.into(),
+                aggregate_type: "account".into(),
+                ..Default::default()
+            };
+            let key = UniqueKey {
+                name: "number".into(),
+                value_hash: Sha256::digest(n.as_bytes()).to_vec(),
+                ..Default::default()
+            };
+            vec![(
+                "number".to_owned(),
+                signing::unique_key_id(&stream, &key).to_vec(),
+            )]
+        });
+        let facts = if open {
+            vec!["open".to_owned()]
+        } else {
+            Vec::new()
+        };
+        want.insert((domain.to_owned(), id.to_owned()), (keys, facts));
+    }
+    let mut got: BTreeMap<(String, String), Held> = BTreeMap::new();
+    for (stream, index) in &log.index {
+        if !DOMAINS.contains(&stream.domain.as_str()) {
+            continue;
+        }
+        let mut keys: Vec<_> = index
+            .keys
+            .iter()
+            .map(|k| (k.name.clone(), k.id.clone()))
+            .collect();
+        keys.sort();
+        let held = (keys, index.facts.clone());
+        got.insert((stream.domain.clone(), stream.aggregate_id.clone()), held);
+    }
+    for key in want.keys().chain(got.keys()).collect::<BTreeSet<_>>() {
+        let (w, g) = (
+            want.get(key).cloned().unwrap_or_default(),
+            got.get(key).cloned().unwrap_or_default(),
+        );
+        if w != g {
+            violations.push(format!(
+                "B4 index: {} {} holds {} key(s) and facts {:?}, the log says {} key(s) and facts {:?}{}",
+                key.0,
+                key.1,
+                g.0.len(),
+                g.1,
+                w.0.len(),
+                w.1,
+                if g.0.len() == w.0.len() { " (another number)" } else { "" }
+            ));
+        }
+    }
+
+    // B6: every refusal was justified at some position the kernel may have decided at.
+    for r in refusals {
+        let c = &r.command;
+        let Some(domain) = DOMAINS.iter().find(|d| **d == c.domain) else {
+            continue;
+        };
+        let data: Value = serde_json::from_slice(&c.payload).unwrap_or(Value::Null);
+        let before = r.before.unwrap_or(u64::MAX);
+        let id = c.aggregate_id.as_str();
+        let justified = match (r.code.as_str(), c.command_type.as_str()) {
+            ("unique_taken", "Number") => data["number"].as_str().is_some_and(|n| {
+                holders.get(&(*domain, n)).is_some_and(|h| {
+                    ever(
+                        h,
+                        r.after,
+                        before,
+                        |v| matches!(v, Some(Some(other)) if *other != id),
+                    )
+                })
+            }),
+            ("requirement_missing", "Withdraw") => data["to"].as_str().is_some_and(|to| {
+                let h = opens.get(&(*domain, to)).map_or(&[][..], Vec::as_slice);
+                ever(h, r.after, before, |v| v != Some(&true))
+            }),
+            _ => false,
+        };
+        if !justified {
+            violations.push(format!(
+                "B6 justified refusal: {} {} {domain} {id} {} was rejected with {} between \
+                 positions {} and {before}",
+                c.command_id,
+                c.command_type,
+                String::from_utf8_lossy(&c.payload),
+                r.code,
+                r.after
+            ));
+        }
+    }
 }

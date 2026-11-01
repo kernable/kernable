@@ -1,6 +1,9 @@
-//! The load: clients that keep submitting deposits and withdrawals to the three apps, each
-//! command until it has an answer (a resubmit with the same ID returns the stored outcome), and
-//! an audit listener on the raw protocol. Both record what they were told in an [`Observed`].
+//! The load: clients that keep submitting deposits, withdrawals (some sent `to` another account,
+//! which must be open), opens, closes and new account numbers (a unique key; drawn from a small
+//! pool, so they often collide) to the three apps, each command until it has an answer (a
+//! resubmit with the same ID returns the stored outcome), and an audit listener on the raw
+//! protocol. Both record what they were told in an [`Observed`]; the clients also record every
+//! `unique_taken` and `requirement_missing` rejection as a [`Refusal`].
 
 use std::{
     collections::BTreeMap,
@@ -29,6 +32,8 @@ use crate::Rng;
 
 pub const DOMAINS: [&str; 3] = ["bank_ts", "bank_py", "bank_rs"];
 pub const ACCOUNTS: u64 = 30;
+/// Account numbers are drawn from `n0` to `n{NUMBERS - 1}`.
+pub const NUMBERS: u64 = 40;
 pub const TENANT: &str = "default";
 /// After this long without an answer, a command is given up on (and counted).
 const GIVE_UP: Duration = Duration::from_secs(300);
@@ -61,11 +66,22 @@ pub struct Stats {
     pub in_flight: AtomicU64,
 }
 
+/// A command rejected with `unique_taken` or `requirement_missing`, and when the kernel decided:
+/// at a log position from `after` (the client's last committed event) to before `before` (the
+/// first event of its next committed command; `None`: none yet).
+pub struct Refusal {
+    pub code: String,
+    pub command: Command,
+    pub after: u64,
+    pub before: Option<u64>,
+}
+
 /// The shared state of the load: whether new commands may start, and what was observed.
 #[derive(Clone)]
 pub struct Load {
     pub running: Arc<AtomicBool>,
     pub observed: Arc<Mutex<Observed>>,
+    pub refusals: Arc<Mutex<Vec<Refusal>>>,
     pub stats: Arc<Stats>,
     pub run: String,
 }
@@ -75,6 +91,7 @@ impl Load {
         Load {
             running: Arc::new(AtomicBool::new(true)),
             observed: Arc::default(),
+            refusals: Arc::default(),
             stats: Arc::default(),
             run: run.into(),
         }
@@ -87,6 +104,9 @@ impl Load {
         tokio::spawn(async move {
             let mut rng = Rng::new(seed);
             let mut channel = None;
+            // The newest event of this client's commands, and its refusals still without
+            // `before`.
+            let (mut last, mut open) = (0, Vec::<usize>::new());
             for i in 0.. {
                 while !load.running.load(Ordering::SeqCst) {
                     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -94,8 +114,33 @@ impl Load {
                 let started = Instant::now();
                 load.stats.in_flight.fetch_add(1, Ordering::SeqCst);
                 let cmd = command(&load.run, n, i, &mut rng, &me.key);
-                load.submit_until_answered(&addr, &me, cmd, &mut channel)
+                let result = load
+                    .submit_until_answered(&addr, &me, cmd.clone(), &mut channel)
                     .await;
+                match result.and_then(|r| r.outcome) {
+                    Some(Outcome::Committed(c)) if !c.events.is_empty() => {
+                        let positions = c.events.iter().map(|e| e.global_position);
+                        let (first, newest) = (positions.clone().min(), positions.max());
+                        let mut refusals = load.refusals.lock().unwrap();
+                        for at in open.drain(..) {
+                            refusals[at].before = first;
+                        }
+                        last = last.max(newest.unwrap_or(0));
+                    }
+                    Some(Outcome::Rejected(r))
+                        if r.code == "unique_taken" || r.code == "requirement_missing" =>
+                    {
+                        let mut refusals = load.refusals.lock().unwrap();
+                        open.push(refusals.len());
+                        refusals.push(Refusal {
+                            code: r.code,
+                            command: cmd,
+                            after: last,
+                            before: None,
+                        });
+                    }
+                    _ => {}
+                }
                 load.stats.in_flight.fetch_sub(1, Ordering::SeqCst);
                 tokio::time::sleep(every.saturating_sub(started.elapsed())).await;
             }
@@ -108,7 +153,7 @@ impl Load {
         me: &Identity,
         cmd: Command,
         channel: &mut Option<tonic::transport::Channel>,
-    ) {
+    ) -> Option<CommandResult> {
         let stats = &self.stats;
         stats.submitted.fetch_add(1, Ordering::SeqCst);
         let started = Instant::now();
@@ -125,7 +170,7 @@ impl Load {
                     .lock()
                     .unwrap()
                     .push(cmd.command_id.clone());
-                return;
+                return None;
             }
             if channel.is_none() {
                 *channel = transport::connect(addr).await.ok();
@@ -164,8 +209,9 @@ impl Load {
                 }
             };
             self.answered(&result);
-            return;
+            return Some(result);
         }
+        None
     }
 
     fn answered(&self, result: &CommandResult) {
@@ -208,14 +254,33 @@ impl Load {
     }
 }
 
-/// The `i`th command of client `n`: a deposit (60%) or a withdrawal, of 1 to 120.
+/// The `i`th command of client `n`: a deposit (45%) of 1 to 100, a withdrawal (25%) of 1 to 120,
+/// half of them sent `to` another account, a new number (12%: one of `NUMBERS`, or none one time
+/// in ten), an open (9%) or a close (9%).
 fn command(run: &str, n: u32, i: u64, rng: &mut Rng, key: &SigningKey) -> Command {
     let domain = DOMAINS[rng.below(3) as usize];
-    let account = format!("a{}", rng.below(ACCOUNTS));
-    let (command_type, amount) = if rng.below(10) < 6 {
-        ("Deposit", 1 + rng.below(100))
-    } else {
-        ("Withdraw", 1 + rng.below(120))
+    let a = rng.below(ACCOUNTS);
+    let account = format!("a{a}");
+    let (command_type, payload) = match rng.below(100) {
+        0..45 => ("Deposit", format!(r#"{{"amount":{}}}"#, 1 + rng.below(100))),
+        45..70 => {
+            let amount = 1 + rng.below(120);
+            if rng.below(2) == 0 {
+                ("Withdraw", format!(r#"{{"amount":{amount}}}"#))
+            } else {
+                let to = (a + 1 + rng.below(ACCOUNTS - 1)) % ACCOUNTS;
+                ("Withdraw", format!(r#"{{"amount":{amount},"to":"a{to}"}}"#))
+            }
+        }
+        70..82 => match rng.below(10) {
+            0 => ("Number", r#"{"number":null}"#.to_owned()),
+            _ => (
+                "Number",
+                format!(r#"{{"number":"n{}"}}"#, rng.below(NUMBERS)),
+            ),
+        },
+        82..91 => ("Open", "{}".to_owned()),
+        _ => ("Close", "{}".to_owned()),
     };
     let mut cmd = Command {
         command_id: format!("{run}-{n}-{i}"),
@@ -224,7 +289,7 @@ fn command(run: &str, n: u32, i: u64, rng: &mut Rng, key: &SigningKey) -> Comman
         aggregate_type: "account".into(),
         aggregate_id: account,
         command_type: command_type.into(),
-        payload: format!(r#"{{"amount":{amount}}}"#).into_bytes(),
+        payload: payload.into_bytes(),
         ..Default::default()
     };
     cmd.client_sig = Some(signing::sign(key, &signing::command_message(&cmd)));

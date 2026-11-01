@@ -1,13 +1,17 @@
 """The soak's Python app: domain bank_py, the same as bank.ts and the Rust app. Accounts take
 deposits and withdrawals (never below zero); a read model keeps balances in a store; a reactor
-flags every withdrawal of 50 or more, once. The soak checks all three against the log."""
+flags every withdrawal of 50 or more, once. An account holds its number as a unique key and,
+while open, the fact open, which a withdrawal sent to an account requires of that account. The
+soak checks all three against the log."""
 
 import os
 
-from kernable import Kernable, Rejected, domain
+from kernable import Kernable, Rejected, Requirement, domain
 
 bank = domain("bank_py")
-account = bank.aggregate("account", {"balance": 0}, snapshot_every=5)
+account = bank.aggregate("account", {"balance": 0, "open": False, "number": None}, snapshot_every=5)
+account.unique("number", lambda s: s["number"])
+account.fact("open", lambda s: s["open"])
 
 
 @account.apply("Deposited")
@@ -20,6 +24,21 @@ def _(s, d):
     s["balance"] -= d["amount"]
 
 
+@account.apply("Opened")
+def _(s, d):
+    s["open"] = True
+
+
+@account.apply("Closed")
+def _(s, d):
+    s["open"] = False
+
+
+@account.apply("Numbered")
+def _(s, d):
+    s["number"] = d["number"]
+
+
 @account.command("Deposit")
 def _(s, d):
     if not d.get("amount", 0) > 0:
@@ -27,11 +46,27 @@ def _(s, d):
     return [{"type": "Deposited", "data": {"amount": d["amount"]}}]
 
 
-@account.command("Withdraw")
+@account.command("Withdraw", requires=lambda d, s: [Requirement("bank_py", "account", d["to"], "open")]
+                 if d.get("to") else [])
 def _(s, d):
     if s["balance"] < d["amount"]:
         raise Rejected("insufficient funds", "insufficient")
-    return [{"type": "Withdrawn", "data": {"amount": d["amount"]}}]
+    return [{"type": "Withdrawn", "data": {"amount": d["amount"], "to": d.get("to")}}]
+
+
+@account.command("Open")
+def _(s, d):
+    return [{"type": "Opened", "data": {}}]
+
+
+@account.command("Close")
+def _(s, d):
+    return [{"type": "Closed", "data": {}}]
+
+
+@account.command("Number")
+def _(s, d):
+    return [{"type": "Numbered", "data": {"number": d["number"]}}]
 
 
 @account.command("Flag")

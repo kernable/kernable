@@ -1,19 +1,37 @@
 //! The soak's Rust app: domain `bank_rs`, the same as `apps/bank.ts` and `apps/bank.py`.
 //! Accounts take deposits and withdrawals (never below zero); a read model keeps balances in a
-//! store; a reactor flags every withdrawal of 50 or more, once.
+//! store; a reactor flags every withdrawal of 50 or more, once. An account holds its `number` as
+//! a unique key and, while open, the fact `open`, which a withdrawal sent `to` an account
+//! requires of that account.
 
-use kernable::{App, BoxError, Kernable, NewEvent, Options, Rejected, Store, Submit, Wait, domain};
+use kernable::{
+    App, BoxError, Kernable, NewEvent, Options, Rejected, Requirement, Store, Submit, Unique, Wait,
+    domain,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct Account {
     balance: i64,
+    open: bool,
+    number: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct Amount {
     amount: i64,
+}
+
+#[derive(Deserialize)]
+struct Withdrawal {
+    amount: i64,
+    to: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Number {
+    number: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -46,6 +64,15 @@ pub async fn run() -> Result<(), BoxError> {
     account.apply("Withdrawn", |s, d: Amount, _evt, _ctx| {
         s.balance -= d.amount
     });
+    account.apply("Opened", |s, _: serde_json::Value, _evt, _ctx| {
+        s.open = true
+    });
+    account.apply("Closed", |s, _: serde_json::Value, _evt, _ctx| {
+        s.open = false
+    });
+    account.apply("Numbered", |s, d: Number, _evt, _ctx| s.number = d.number);
+    account.unique("number", |s| s.number.clone(), Unique::tenant());
+    account.fact("open", |s| s.open);
     account.command("Deposit", |_, d: Amount, _cmd, _ctx| {
         if d.amount <= 0 {
             return Err(Rejected::new("amount must be positive").code("invalid"));
@@ -55,13 +82,28 @@ pub async fn run() -> Result<(), BoxError> {
             json!({ "amount": d.amount }),
         )])
     });
-    account.command("Withdraw", |s, d: Amount, _cmd, _ctx| {
+    account.command("Withdraw", |s, d: Withdrawal, _cmd, _ctx| {
         if s.balance < d.amount {
             return Err(Rejected::new("insufficient funds").code("insufficient"));
         }
         Ok(vec![NewEvent::new(
             "Withdrawn",
-            json!({ "amount": d.amount }),
+            json!({ "amount": d.amount, "to": d.to }),
+        )])
+    });
+    account.requires("Withdraw", |_, d: Withdrawal| {
+        d.to.map(|to| Requirement::new("bank_rs", "account", &to, "open"))
+    });
+    account.command("Open", |_, _: serde_json::Value, _cmd, _ctx| {
+        Ok(vec![NewEvent::new("Opened", json!({}))])
+    });
+    account.command("Close", |_, _: serde_json::Value, _cmd, _ctx| {
+        Ok(vec![NewEvent::new("Closed", json!({}))])
+    });
+    account.command("Number", |_, d: Number, _cmd, _ctx| {
+        Ok(vec![NewEvent::new(
+            "Numbered",
+            json!({ "number": d.number }),
         )])
     });
     account.command("Flag", |_, d: serde_json::Value, _cmd, _ctx| {

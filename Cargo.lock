@@ -298,6 +298,7 @@ name = "concepts"
 version = "0.1.0"
 dependencies = [
  "kernable",
+ "serde",
  "serde_json",
 ]
 
@@ -928,6 +929,7 @@ dependencies = [
  "kernable-store",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tokio-stream",
  "tonic",
