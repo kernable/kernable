@@ -457,12 +457,12 @@ mod tests {
         // Found by the store_files fuzz target.
         let vault = Vault::open("memory:", &[1; 32]).unwrap();
         let v = value(1);
-        put(&vault, &[v.clone()]).unwrap();
+        put(&vault, std::slice::from_ref(&v)).unwrap();
         vault
             .conn()
             .execute("UPDATE vault SET nonce = ?1", [vec![0u8; 10]])
             .unwrap();
-        let got = vault.get(&[v.r#ref.clone()]).err().unwrap();
+        let got = vault.get(std::slice::from_ref(&v.r#ref)).err().unwrap();
         assert!(got.to_string().contains("nonce of 10 bytes"), "{got}");
         let rekeyed = vault.rekey(&[2; 32]).err().unwrap();
         assert!(
