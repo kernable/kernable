@@ -15,6 +15,7 @@ ed25519-dalek.workspace = true
 getrandom.workspace = true
 kernable-core = { path = "../kernable-core" }
 kernable-store = { path = "../kernable-store" }
+sha2.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tonic.workspace = true
