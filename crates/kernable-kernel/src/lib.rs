@@ -1611,8 +1611,11 @@ impl DataService for Api {
             content_type: r.content_type.clone(),
             data: r.data.clone(),
         };
-        self.0.data.put(&data_key(&r), &data).map_err(store_error)?;
+        let stored = self.0.data.put(&data_key(&r), &data);
+        // Tried: it may have taken effect even if it failed, so its signature stays used and a
+        // captured copy can never undo a newer write. A resend is signed anew.
         claim.done();
+        stored.map_err(store_error)?;
         Ok(Response::new(DataResult {
             found: true,
             ..Default::default()
@@ -1641,8 +1644,10 @@ impl DataService for Api {
     ) -> Result<Response<DataResult>, Status> {
         let (r, _slot) = self.data_request(request, "delete").await?;
         let claim = self.0.claim(r.client_sig.as_ref(), r.issued_at)?;
-        let found = self.0.data.delete(&data_key(&r)).map_err(store_error)?;
+        let deleted = self.0.data.delete(&data_key(&r));
+        // Tried: as for a put, its signature stays used even if it failed.
         claim.done();
+        let found = deleted.map_err(store_error)?;
         Ok(Response::new(DataResult {
             found,
             ..Default::default()

@@ -239,3 +239,29 @@ async fn a_write_signed_before_the_kernel_started_is_refused() {
         .await
         .unwrap();
 }
+
+/// A write the kernel tried keeps its signature used even if it failed: it may have taken
+/// effect, and a captured copy must not undo a newer write. A resend is signed anew.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_data_write_cannot_be_sent_again_under_the_same_signature() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = start_with_writer("replay-failed-write").await;
+    let mut files = DataServiceClient::new(transport::connect(&env.addr).await.unwrap());
+    let files_dir = env.dir.join("data");
+    std::fs::create_dir_all(&files_dir).unwrap();
+    let mode = |m: u32| {
+        std::fs::set_permissions(&files_dir, std::fs::Permissions::from_mode(m)).unwrap();
+    };
+    mode(0o500); // the disk refuses the write
+    let first = data("put", b"terms", issued_now());
+    let failed = files.put_data(first.clone()).await.unwrap_err();
+    assert_eq!(failed.code(), Code::Internal, "{failed:?}");
+    mode(0o700);
+    let again = files.put_data(first).await.unwrap_err();
+    assert_eq!(again.code(), Code::AlreadyExists, "{again:?}");
+    files
+        .put_data(data("put", b"terms", issued_now()))
+        .await
+        .unwrap();
+}

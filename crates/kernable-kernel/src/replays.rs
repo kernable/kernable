@@ -1,7 +1,8 @@
 //! Writes that run at most once. Data and cache writes are signed over their content and
 //! `issued_at` and valid for 60 s, so a captured one could be sent again within that window and
-//! undo a newer write. The kernel remembers each signature until its request expires, and
-//! refuses writes signed before it started: it cannot know whether they ran.
+//! undo a newer write. The kernel remembers each signature until its request expires, also of a
+//! write it tried that failed (it may have taken effect), and refuses writes signed before it
+//! started: it cannot know whether they ran.
 
 use std::{
     collections::HashMap,
@@ -43,8 +44,8 @@ impl Replays {
     }
 
     /// Claims the write signed with `sig` at `issued_at` (checked against the time window
-    /// already). Dropping the claim without [`Claim::done`] gives it back, so a write that
-    /// failed can be sent again.
+    /// already). Dropping the claim without [`Claim::done`] gives it back, so a write refused
+    /// before it was tried can be sent again.
     pub(crate) fn claim(&self, sig: &[u8], issued_at: i64, now: i64) -> Result<Claim<'_>, Status> {
         if issued_at < self.started_at {
             return Err(Status::failed_precondition(
@@ -80,7 +81,8 @@ pub(crate) struct Claim<'a> {
 }
 
 impl Claim<'_> {
-    /// The write took effect: its signature stays refused until the request expires.
+    /// The write was carried out, or tried: its signature stays refused until the request
+    /// expires.
     pub(crate) fn done(mut self) {
         self.done = true;
     }

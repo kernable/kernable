@@ -421,7 +421,8 @@ Files of a domain, kept by the kernel under (tenant, domain, key), apart from th
 they are neither signed into it nor erased with the vault. Every request is signed by a key
 granted data_read (get) or data_write (put, delete) for the domain, over
 `kernable.v1.data.<op>`, and valid 60 s around issued_at. A put replaces the file under its
-key. A put or delete runs at most once: the same signed request again is a replay. Errors:
+key. A put or delete runs at most once: the same signed request again is a replay, also after
+it failed (it may have taken effect); send it signed anew. Errors:
 UNAUTHENTICATED (invalid signature, outside the time window), PERMISSION_DENIED,
 INVALID_ARGUMENT (domain, key or size), ALREADY_EXISTS (a replay), FAILED_PRECONDITION (a
 put or delete signed before the kernel started: sign it again).
