@@ -872,3 +872,48 @@ async fn a_narrowed_grant_narrows_a_listener_of_every_type() {
     audit.ack(batch.up_to).await;
     other.await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn memberships_and_retries_outside_their_time_window_are_refused() {
+    let env = start("listener-windows").await;
+    let mailer = listen(&env, "mailer", opts(10)).await.unwrap();
+    drop(mailer);
+    let channel = transport::connect(&env.addr).await.unwrap();
+    let mut client = ListenerServiceClient::new(channel);
+    for skew in [-120_000, 120_000] {
+        let issued_at = issued_now() + skew;
+        let mut m = membership("shop", &[], &["mailer"], &[]);
+        m.issued_at = issued_at;
+        let applied = apply_issued(&env.addr, m, &key(1)).await;
+        assert_eq!(
+            applied.unwrap_err().code(),
+            Code::Unauthenticated,
+            "membership at {skew}"
+        );
+
+        let sig = signing::sign(
+            &key(1),
+            &signing::retry_message("mailer", &[], false, issued_at),
+        );
+        let request = RetryRequest {
+            listener: "mailer".into(),
+            issued_at,
+            sig: Some(sig),
+            protocol: kernable_core::PROTOCOL,
+            ..Default::default()
+        };
+        let retried = client.retry(with_grant(request, &key(1))).await;
+        assert_eq!(
+            retried.unwrap_err().code(),
+            Code::Unauthenticated,
+            "retry at {skew}"
+        );
+    }
+    // Within the window both go through.
+    assert!(
+        retry(&env, &key(1), "mailer", &[], false)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

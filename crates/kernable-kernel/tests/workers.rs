@@ -7,7 +7,7 @@ mod common;
 use std::time::Duration;
 
 use common::*;
-use kernable_core::proto::{Command, Wait, WorkerAggregate, command_result::Outcome};
+use kernable_core::proto::{Command, Grant, Wait, WorkerAggregate, command_result::Outcome};
 use tonic::Code;
 
 fn aggregate(aggregate_type: &str, command_types: &[&str]) -> WorkerAggregate {
@@ -209,4 +209,47 @@ async fn aggregates_registered_before_a_restart_queue_their_commands_until_a_wor
     .await
     .unwrap();
     assert_eq!(committed_versions(&placed), [1]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_aggregate_moves_to_another_key_only_as_its_successor() {
+    let env = start("worker-other-key").await;
+    spawn_worker(&env).await; // key 2 registers orders.Order
+    let other = key(7);
+    let as_other = |grant: Grant| TestWorker {
+        claimed: other.clone(),
+        signer: other.clone(),
+        grant: Some(grant),
+        ..TestWorker::honest()
+    };
+    // Key 7 may run the commands, but orders.Order is key 2's.
+    let may_run = grant(&other, &[("run", &["orders.*"])]);
+    env.kernel.grant(may_run.clone()).unwrap();
+    let refused = start_worker(env.addr.clone(), as_other(may_run)).await;
+    let status = refused.await.unwrap();
+    assert_eq!(status.code(), Code::PermissionDenied);
+    assert!(
+        status.message().contains("registered with another key"),
+        "{status:?}"
+    );
+
+    // As key 2's successor it takes the aggregate over, and the store says so.
+    let successor = successor_grant(&other, &[("run", &["orders.*"])], &id(&key(2)));
+    env.kernel.grant(successor.clone()).unwrap();
+    let _taken = start_worker(env.addr.clone(), as_other(successor)).await;
+    let store = kernable_store::open_read_only(&env.store).unwrap();
+    let order = store
+        .workers()
+        .unwrap()
+        .into_iter()
+        .find(|w| w.aggregate_type == "orders.Order")
+        .unwrap();
+    assert_eq!(order.key_id, id(&other));
+    let placed = submit(
+        &env.addr,
+        signed(command("c1", "PlaceOrder", "o1"), &key(1)),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(placed.outcome, Some(Outcome::Committed(_))));
 }

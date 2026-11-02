@@ -60,6 +60,38 @@ async fn tcp_with_mutual_tls_admits_only_clients_of_the_ca() {
         Err(_) => true,
     };
     assert!(plain, "a client without TLS was accepted");
+    // TLS that trusts the kernel, but shows no certificate of its own: refused; the same with
+    // the app's certificate gets through, so it is the missing certificate that counts.
+    let raw = |identity: Option<&str>| {
+        let mut tls = tonic::transport::ClientTlsConfig::new().ca_certificate(
+            tonic::transport::Certificate::from_pem(
+                std::fs::read(env.dir.join("ca.tls.crt")).unwrap(),
+            ),
+        );
+        if let Some(name) = identity {
+            let read =
+                |ext: &str| std::fs::read(env.dir.join(format!("{name}.tls.{ext}"))).unwrap();
+            tls = tls.identity(tonic::transport::Identity::from_pem(
+                read("crt"),
+                read("key"),
+            ));
+        }
+        tonic::transport::Endpoint::from_shared(format!("https://{}", env.addr))
+            .unwrap()
+            .tls_config(tls)
+            .unwrap()
+    };
+    let with = raw(Some("app")).connect().await.unwrap();
+    let again = signed(command("c2", "AddItem", "o1"), &key(1));
+    assert_eq!(
+        committed_versions(&submit_on(with, again, Wait::Settled).await.unwrap()),
+        [2]
+    );
+    let anonymous = match raw(None).connect().await {
+        Ok(channel) => submit_on(channel, cmd(), Wait::Settled).await.is_err(),
+        Err(_) => true,
+    };
+    assert!(anonymous, "a client without a certificate was accepted");
 }
 
 #[tokio::test(flavor = "multi_thread")]
