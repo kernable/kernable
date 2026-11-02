@@ -35,7 +35,7 @@ mod ui;
 mod workers;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex, MutexGuard, PoisonError, RwLock,
         atomic::{
@@ -49,10 +49,11 @@ use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
         Accepted, CacheRequest, CacheResult, Challenge, Command, CommandResult, Committed,
-        DataRequest, DataResult, Event, Execute, Grant, KernelMessage, ListenerDelivery,
-        ListenerMessage, MiddlewareCall, NewEvent, QueryRequest, QueryResult, Register, Registered,
-        Rejected, RevocationRecord, RevokeRequest, RevokeResponse, Signature, Snapshot,
-        SnapshotRecord, SubmitRequest, SubscribeRequest, VaultValue, Wait, When, WorkerMessage,
+        DataRequest, DataResult, Event, Execute, ExecuteMore, Grant, KernelMessage,
+        ListenerDelivery, ListenerMessage, MiddlewareCall, NewEvent, QueryRequest, QueryResult,
+        Register, Registered, Rejected, RevocationRecord, RevokeRequest, RevokeResponse, Signature,
+        Snapshot, SnapshotRecord, SubmitRequest, SubscribeRequest, VaultValue, Wait, When,
+        WorkerMessage,
         cache_service_server::{CacheService, CacheServiceServer},
         command_result::Outcome,
         command_service_server::{CommandService, CommandServiceServer},
@@ -1981,6 +1982,91 @@ async fn send(out: &Outbox, msg: Out) -> Result<(), Status> {
         .map_err(|_| Status::cancelled("worker disconnected"))
 }
 
+/// `execute` as an Execute and the ExecuteMore parts after it (protocol 3), each at most `max`
+/// bytes on the wire, with the vault values of its events in each part and those of the command
+/// (`command_refs`) in the first. `None` if the command with its snapshot, or an event with its
+/// values, does not fit one message.
+fn in_parts(
+    mut execute: Execute,
+    command_refs: &[String],
+    max: usize,
+) -> Option<(Execute, Vec<ExecuteMore>)> {
+    // A length-delimited field: its tag, its length and itself.
+    fn field(len: usize) -> usize {
+        1 + prost::encoding::encoded_len_varint(len as u64) + len
+    }
+    let history = std::mem::take(&mut execute.history);
+    let values: HashMap<String, VaultValue> = std::mem::take(&mut execute.vault)
+        .into_iter()
+        .map(|v| (v.r#ref.clone(), v))
+        .collect();
+    execute.vault = command_refs
+        .iter()
+        .filter_map(|r| values.get(r).cloned())
+        .collect();
+    execute.more = true;
+    let first_size = execute.encoded_len() + ENVELOPE_BYTES;
+    if first_size > max {
+        return None;
+    }
+    let empty = ExecuteMore {
+        lease_id: execute.lease_id.clone(),
+        more: true,
+        ..Default::default()
+    };
+    let part_size = empty.encoded_len() + ENVELOPE_BYTES;
+    // Each part: its events, its values, its size, and which values it holds.
+    let mut parts = vec![(Vec::new(), Vec::new(), first_size, HashSet::new())];
+    for event in history {
+        let fresh = |held: &HashSet<String>| -> Vec<&VaultValue> {
+            let mut seen = HashSet::new();
+            event
+                .vault_refs
+                .iter()
+                .filter(|r| !held.contains(*r) && seen.insert(*r))
+                .filter_map(|r| values.get(r))
+                .collect()
+        };
+        let cost = |held: &HashSet<String>| {
+            field(event.encoded_len())
+                + fresh(held)
+                    .iter()
+                    .map(|v| field(v.encoded_len()))
+                    .sum::<usize>()
+        };
+        let last = parts.last().expect("one part at least");
+        if last.2 + cost(&last.3) > max {
+            if part_size + cost(&HashSet::new()) > max {
+                return None;
+            }
+            parts.push((Vec::new(), Vec::new(), part_size, HashSet::new()));
+        }
+        let part = parts.last_mut().expect("one part at least");
+        let added: Vec<VaultValue> = fresh(&part.3).into_iter().cloned().collect();
+        part.2 += cost(&part.3);
+        for v in added {
+            part.3.insert(v.r#ref.clone());
+            part.1.push(v);
+        }
+        part.0.push(event);
+    }
+    let count = parts.len();
+    let mut parts = parts.into_iter().enumerate();
+    let (_, (history, vault, _, _)) = parts.next().expect("one part at least");
+    execute.history = history;
+    execute.vault.extend(vault);
+    execute.more = count > 1;
+    let rest = parts
+        .map(|(i, (history, vault, _, _))| ExecuteMore {
+            lease_id: execute.lease_id.clone(),
+            history,
+            vault,
+            more: i + 1 < count,
+        })
+        .collect();
+    Some((execute, rest))
+}
+
 async fn run_session(
     kernel: Arc<Kernel>,
     metadata: &MetadataMap,
@@ -2238,7 +2324,7 @@ impl Session {
             .cloned()
             .collect();
         let vault = self.kernel.values_of(&refs);
-        let mut execute = Execute {
+        let execute = Execute {
             vault,
             lease_id,
             command: Some(command),
@@ -2247,28 +2333,51 @@ impl Session {
             snapshot,
             received_at,
             deadline: now_ms() + self.kernel.config().lease_ttl_ms,
+            more: false,
         };
         let size = execute.encoded_len() + ENVELOPE_BYTES;
         let max = self.kernel.config.limits.message_bytes;
-        if size > max {
+        if size <= max {
+            let sent = send(&self.out, Out::Execute(execute)).await.is_ok();
+            crash::point("execute.sent");
+            return sent;
+        }
+        // Too long for one message: in parts, to a worker that reads them.
+        let events = execute.history.len();
+        let lease_id = execute.lease_id.clone();
+        let command = execute.command.clone().unwrap_or_default();
+        let parts = (self.protocol >= 3)
+            .then(|| in_parts(execute, &command.vault_refs, max))
+            .flatten();
+        let Some((first, rest)) = parts else {
             // No worker could receive it: a final rejection instead of a retry forever.
-            let in_flight = self.in_flight().remove(&execute.lease_id);
+            let in_flight = self.in_flight().remove(&lease_id);
             drop(in_flight);
             self.kernel.metrics.limited("too_large");
+            let message = if self.protocol >= 3 {
+                format!(
+                    "the command with its snapshot, or one of the {events} events after it, is \
+                     more than --max-message-bytes {max}: raise the limit in the kernel and the SDKs"
+                )
+            } else {
+                format!(
+                    "the command with its snapshot and the {events} events after it is {size} \
+                     bytes, more than --max-message-bytes {max}, and this worker speaks protocol \
+                     {}, which cannot receive it in parts: update its SDK",
+                    self.protocol
+                )
+            };
             let reason = Rejected {
                 code: "too_large".into(),
-                message: format!(
-                    "the command with its snapshot and the {} events after it is {size} bytes, \
-                     more than --max-message-bytes {max}: snapshot the aggregate more often, or \
-                     raise the limit in the kernel and the SDKs",
-                    execute.history.len()
-                ),
+                message,
             };
-            let command = execute.command.take().unwrap_or_default();
-            self.reject(&execute.lease_id, command, reason);
+            self.reject(&lease_id, command, reason);
             return true;
+        };
+        let mut sent = send(&self.out, Out::Execute(first)).await.is_ok();
+        for part in rest {
+            sent = sent && send(&self.out, Out::ExecuteMore(part)).await.is_ok();
         }
-        let sent = send(&self.out, Out::Execute(execute)).await.is_ok();
         crash::point("execute.sent");
         sent
     }
@@ -2787,6 +2896,99 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn a_long_history_is_split_into_parts_that_each_fit() {
+        let value = |r: &str| VaultValue {
+            r#ref: r.into(),
+            value: vec![b'v'; 300],
+            ..Default::default()
+        };
+        // 40 events of about 1 KiB; every fifth refers to a vault value, the third to v0 again.
+        let history: Vec<Event> = (0..40u64)
+            .map(|n| Event {
+                version: n + 1,
+                payload: vec![b'x'; 1000],
+                vault_refs: match n {
+                    _ if n % 5 == 0 => vec![format!("v{n}")],
+                    3 => vec!["v0".into()],
+                    _ => vec![],
+                },
+                ..Default::default()
+            })
+            .collect();
+        let mut vault: Vec<VaultValue> = (0..40)
+            .step_by(5)
+            .map(|n| value(&format!("v{n}")))
+            .collect();
+        vault.push(value("c"));
+        let execute = Execute {
+            lease_id: "c1#1".into(),
+            command: Some(Command {
+                payload: vec![b'c'; 2000],
+                vault_refs: vec!["c".into()],
+                ..Default::default()
+            }),
+            history: history.clone(),
+            vault,
+            ..Default::default()
+        };
+        let max = 8 << 10;
+        let (first, rest) = in_parts(execute, &["c".into()], max).unwrap();
+
+        assert!(first.more && rest.len() >= 4, "{} parts", rest.len() + 1);
+        assert!(first.encoded_len() + ENVELOPE_BYTES <= max);
+        assert!(
+            first.vault.iter().any(|v| v.r#ref == "c"),
+            "the command's value comes first"
+        );
+        for (i, part) in rest.iter().enumerate() {
+            assert!(part.encoded_len() + ENVELOPE_BYTES <= max, "part {i}");
+            assert_eq!(part.more, i + 1 < rest.len(), "part {i}");
+            assert_eq!(part.lease_id, "c1#1");
+        }
+        // Together: the whole history in order, each event with its values in its own part.
+        let parts = std::iter::once((&first.history, &first.vault))
+            .chain(rest.iter().map(|p| (&p.history, &p.vault)));
+        let mut events = Vec::new();
+        for (history, vault) in parts {
+            for e in history {
+                for r in &e.vault_refs {
+                    assert!(
+                        vault.iter().any(|v| &v.r#ref == r),
+                        "{r} in the part of {}",
+                        e.version
+                    );
+                }
+            }
+            events.extend(history.iter().cloned());
+        }
+        assert_eq!(events, history);
+    }
+
+    #[test]
+    fn a_command_that_does_not_fit_alone_cannot_be_split() {
+        let execute = Execute {
+            command: Some(Command {
+                payload: vec![b'c'; 9000],
+                ..Default::default()
+            }),
+            history: vec![Event::default()],
+            ..Default::default()
+        };
+        assert!(in_parts(execute, &[], 8 << 10).is_none());
+        // Nor can an event that does not fit a part of its own.
+        let execute = Execute {
+            history: vec![Event {
+                payload: vec![b'x'; 9000],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(in_parts(execute, &[], 8 << 10).is_none());
+    }
+
     #[test]
     fn plain_tcp_is_for_loopback_addresses_only() {
         for local in [

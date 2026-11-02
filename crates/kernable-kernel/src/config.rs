@@ -153,7 +153,7 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "--max-message-bytes",
         "KERNABLE_MAX_MESSAGE_BYTES",
         "4194304",
-        "The largest gRPC message the kernel receives or sends, in bytes; the SDKs' default is the same 4 MiB. The data service takes files up to 16 MiB regardless. A command whose `Execute` (the command, its snapshot and the events after it) would be larger is rejected with `too_large`: snapshot such aggregates more often, or raise the limit in the kernel and every SDK. Listener batches are cut to fit.",
+        "The largest gRPC message the kernel receives or sends, in bytes; the SDKs' default is the same 4 MiB. The data service takes files up to 16 MiB regardless. A command whose snapshot and the events after it do not fit one message reaches the worker in parts; only a command with its snapshot, or a single event, that does not fit one message is rejected with `too_large` (and any longer history, for a worker of an SDK older than protocol 3). Listener batches are cut to fit.",
     ),
     (
         "--handshake-timeout-ms",

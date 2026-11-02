@@ -1,4 +1,4 @@
-// kernable protocol, version 2. Payloads (of commands, events, queries, answers and snapshots)
+// kernable protocol, version 3. Payloads (of commands, events, queries, answers and snapshots)
 // are opaque bytes to the kernel. Signatures cover the byte layouts in SIGNING.md, never the
 // protobuf encoding.
 //
@@ -7,7 +7,8 @@
 // carries `protocol`, the version its sender speaks. It is never signed. The kernel accepts a
 // range of versions and refuses others with FAILED_PRECONDITION, naming the range and whether
 // the SDK or the kernel needs an update. 0 (unset) is never accepted. Version 1 is the first
-// release; version 2 adds unique keys, facts and requirements to Result.
+// release; version 2 adds unique keys, facts and requirements to Result; version 3 lets the
+// kernel send a long history in parts (Execute.more, ExecuteMore).
 //
 // Names: a domain is an identifier of letters, digits, `-` and `_` that starts with a letter;
 // by convention it is lowercase (`orders`), like aggregate types, while command, event and query
@@ -650,6 +651,7 @@ message KernelMessage {
     Challenge challenge = 1;   // after Register
     Registered registered = 2; // after a valid ChallengeResponse
     Execute execute = 3;
+    ExecuteMore execute_more = 4; // protocol 3: the rest of an Execute's history
   }
 }
 
@@ -708,6 +710,18 @@ message Execute {
   int64 received_at = 6;      // ms since epoch when the kernel accepted the command; stable across retries
   int64 deadline = 7;         // ms since epoch when the lease expires and the command goes to another worker
   repeated VaultValue vault = 8; // the values the command and the history refer to, unless erased
+  // Protocol 3: the history does not fit one message; ExecuteMore messages of the same
+  // `lease_id` follow, in order, with the rest of it (other leases' messages may come between).
+  // Run the command once the last one (`more` false) has arrived.
+  bool more = 9;
+}
+
+// Protocol 3: the next part of an Execute's history, with the vault values it refers to.
+message ExecuteMore {
+  string lease_id = 1;
+  repeated Event history = 2;
+  repeated VaultValue vault = 3;
+  bool more = 4; // another ExecuteMore of this lease follows
 }
 
 // The events a command produced (possibly none). Signed by the worker over kernable.v1.result,

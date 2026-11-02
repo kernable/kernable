@@ -19,7 +19,7 @@ Every call carries the caller's grant in the metadata entry `kernable-grant`, an
 
 ## Conventions
 
-kernable protocol, version 2. Payloads (of commands, events, queries, answers and snapshots)
+kernable protocol, version 3. Payloads (of commands, events, queries, answers and snapshots)
 are opaque bytes to the kernel. Signatures cover the byte layouts in SIGNING.md, never the
 protobuf encoding.
 
@@ -28,7 +28,8 @@ SubscribeRequest, DataRequest, CacheRequest, RevokeRequest, ApplyRequest, Regist
 carries `protocol`, the version its sender speaks. It is never signed. The kernel accepts a
 range of versions and refuses others with FAILED_PRECONDITION, naming the range and whether
 the SDK or the kernel needs an update. 0 (unset) is never accepted. Version 1 is the first
-release; version 2 adds unique keys, facts and requirements to Result.
+release; version 2 adds unique keys, facts and requirements to Result; version 3 lets the
+kernel send a long history in parts (Execute.more, ExecuteMore).
 
 Names: a domain is an identifier of letters, digits, `-` and `_` that starts with a letter;
 by convention it is lowercase (`orders`), like aggregate types, while command, event and query
@@ -668,6 +669,7 @@ From the kernel; exactly one field is set.
 | `challenge` |  `Challenge` | 1 | after Register |
 | `registered` |  `Registered` | 2 | after a valid ChallengeResponse |
 | `execute` |  `Execute` | 3 |  |
+| `execute_more` |  `ExecuteMore` | 4 | protocol 3: the rest of an Execute's history |
 
 ### Register
 
@@ -736,6 +738,18 @@ before `deadline`; after it, the command goes to another worker and a late answe
 | `received_at` |  `int64` | 6 | ms since epoch when the kernel accepted the command; stable across retries |
 | `deadline` |  `int64` | 7 | ms since epoch when the lease expires and the command goes to another worker |
 | `vault` | repeated `VaultValue` | 8 | the values the command and the history refer to, unless erased |
+| `more` |  `bool` | 9 | Protocol 3: the history does not fit one message; ExecuteMore messages of the same `lease_id` follow, in order, with the rest of it (other leases' messages may come between). Run the command once the last one (`more` false) has arrived. |
+
+### ExecuteMore
+
+Protocol 3: the next part of an Execute's history, with the vault values it refers to.
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `lease_id` |  `string` | 1 |  |
+| `history` | repeated `Event` | 2 |  |
+| `vault` | repeated `VaultValue` | 3 |  |
+| `more` |  `bool` | 4 | another ExecuteMore of this lease follows |
 
 ### Result
 

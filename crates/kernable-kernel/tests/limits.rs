@@ -11,11 +11,11 @@ use std::{
 use common::*;
 use kernable_core::{
     proto::{
-        Ack, ChallengeResponse, Command, Event, Hello, ListenerMessage, Register, SubscribeRequest,
-        Wait, WorkerMessage, command_result::Outcome, event_service_client::EventServiceClient,
-        listener_delivery::Msg as Out, listener_message::Msg as In,
-        listener_service_client::ListenerServiceClient, worker_gateway_client::WorkerGatewayClient,
-        worker_message::Msg as WorkerIn,
+        Ack, ChallengeResponse, Command, CommandResult, Event, Hello, ListenerMessage, Register,
+        SubscribeRequest, Wait, WorkerMessage, command_result::Outcome,
+        event_service_client::EventServiceClient, listener_delivery::Msg as Out,
+        listener_message::Msg as In, listener_service_client::ListenerServiceClient,
+        worker_gateway_client::WorkerGatewayClient, worker_message::Msg as WorkerIn,
     },
     signing, transport,
 };
@@ -424,21 +424,71 @@ async fn connections_beyond_the_limit_are_closed() {
     }
 }
 
-#[tokio::test]
-async fn a_command_whose_execute_exceeds_the_message_limit_is_rejected_too_large() {
+/// A kernel whose messages hold at most 64 KiB, and a worker of `protocol` that reports the
+/// snapshot version and history length of every command it runs.
+async fn small_messages(
+    name: &str,
+    protocol: u32,
+) -> (Env, String, mpsc::UnboundedReceiver<(Option<u64>, usize)>) {
     let (env, metrics) = start_limited(
-        "limit-too-large",
+        name,
         Limits {
             message_bytes: 64 << 10,
             ..Limits::default()
         },
     )
     .await;
-    spawn_worker(&env).await;
+    let (tx, executions) = mpsc::unbounded_channel();
+    start_worker(
+        env.addr.clone(),
+        TestWorker {
+            protocol,
+            executions: Some(tx),
+            ..TestWorker::honest()
+        },
+    )
+    .await;
+    (env, metrics, executions)
+}
+
+fn committed(result: &CommandResult) -> bool {
+    matches!(result.outcome, Some(Outcome::Committed(_)))
+}
+
+#[tokio::test]
+async fn a_history_longer_than_one_message_reaches_the_worker_in_parts() {
+    let (env, metrics, mut executions) =
+        small_messages("limit-parts", kernable_core::PROTOCOL).await;
+    // Twelve events of 20 KiB: about 240 KiB of history, four times the limit.
+    for n in 0..12 {
+        let kind = if n == 0 { "PlaceOrder" } else { "AddItem" };
+        let cmd = with_payload(&format!("c{n}"), kind, "o1", 20 << 10);
+        let result = submit(&env.addr, cmd).await.unwrap();
+        assert!(committed(&result), "c{n}: {result:?}");
+    }
+    let last = submit(&env.addr, with_payload("c12", "AddItem", "o1", 10))
+        .await
+        .unwrap();
+    assert!(committed(&last), "{last:?}");
+    let mut seen = Vec::new();
+    while let Ok(execution) = executions.try_recv() {
+        seen.push(execution);
+    }
+    assert_eq!(
+        seen.last(),
+        Some(&(None, 12)),
+        "the whole history: {seen:?}"
+    );
+    assert_eq!(refused(&metrics, "too_large").await, 0);
+}
+
+#[tokio::test]
+async fn a_worker_of_protocol_2_gets_too_large_for_a_history_longer_than_one_message() {
+    let (env, metrics, _) = small_messages("limit-too-large", 2).await;
     let first = submit(&env.addr, with_payload("c1", "PlaceOrder", "o1", 40 << 10))
         .await
         .unwrap();
-    assert!(matches!(first.outcome, Some(Outcome::Committed(_))));
+    assert!(committed(&first), "{first:?}");
     // The second command and the first event no longer fit one message.
     let second = submit(&env.addr, with_payload("c2", "AddItem", "o1", 40 << 10))
         .await
@@ -447,16 +497,13 @@ async fn a_command_whose_execute_exceeds_the_message_limit_is_rejected_too_large
         panic!("{second:?}");
     };
     assert_eq!(r.code, "too_large");
-    assert!(r.message.contains("--max-message-bytes"));
+    assert!(r.message.contains("update its SDK"), "{}", r.message);
     assert_eq!(refused(&metrics, "too_large").await, 1);
     // The aggregate is not blocked: a smaller command still fits and runs.
     let third = submit(&env.addr, with_payload("c3", "AddItem", "o1", 10))
         .await
         .unwrap();
-    assert!(
-        matches!(third.outcome, Some(Outcome::Committed(_))),
-        "{third:?}"
-    );
+    assert!(committed(&third), "{third:?}");
 }
 
 #[tokio::test]

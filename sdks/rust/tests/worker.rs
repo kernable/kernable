@@ -751,3 +751,42 @@ async fn commands_need_a_registered_aggregate_and_a_membership_drops_those_it_no
     worker.stop();
     running.await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_history_longer_than_one_message_arrives_in_parts() {
+    // Messages of at most 64 KiB, no snapshots: the history of twelve 20 KiB events comes in
+    // parts, and the state folds all of it.
+    let kernel = TestKernel::new(&["shop.*"], &["--max-message-bytes", "65536"]);
+    kernel.start().await;
+    let kernable = kernel.client();
+    let shop = domain("shop");
+    let order = shop.aggregate("Order", 0usize).snapshot_every(0);
+    order.command("Add", |state: &usize, d: serde_json::Value, _cmd, _ctx| {
+        Ok(vec![NewEvent::new(
+            "Added",
+            json!({ "note": d["note"], "seen": *state }),
+        )])
+    });
+    order.apply(
+        "Added",
+        |state: &mut usize, _: serde_json::Value, _evt, _ctx| *state += 1,
+    );
+    let worker = kernable.worker(&order);
+    spawn(&worker);
+    worker.ready().await;
+    let note = "x".repeat(20 << 10);
+    for n in 0..13 {
+        let placed = kernable
+            .submit(
+                Submit::new("shop", "Order", "o1", "Add")
+                    .data(json!({ "note": if n < 12 { note.as_str() } else { "" } }))
+                    .wait(Wait::Committed),
+            )
+            .await;
+        let Ok(Outcome::Committed(events)) = placed else {
+            panic!("{n}: {placed:?}");
+        };
+        assert_eq!(events[0].data["seen"], n, "the state before command {n}");
+    }
+    worker.stop();
+}

@@ -168,6 +168,8 @@ impl Worker {
         // A command this worker cannot read ends the session: it reconnects and is refused
         // until it is updated.
         let (fail, mut failed) = mpsc::channel::<String>(1);
+        // Executes whose history is still coming, by lease.
+        let mut partial: HashMap<String, proto::Execute> = HashMap::new();
         loop {
             let m = tokio::select! {
                 m = inbound.message() => m?,
@@ -176,11 +178,12 @@ impl Worker {
             let Some(m) = m else {
                 return Ok(());
             };
-            match m.msg {
+            let x = match m.msg {
                 Some(Out::Challenge(c)) => {
                     let sig = client.sign(&signing::challenge_message(&c.nonce)).sig;
                     tx.send(msg(In::ChallengeResponse(ChallengeResponse { sig })))
                         .await?;
+                    continue;
                 }
                 Some(Out::Registered(_)) => {
                     if self.inner.connects.fetch_add(1, Ordering::SeqCst) > 0 {
@@ -192,95 +195,106 @@ impl Worker {
                         });
                     }
                     self.inner.ready.send_replace(true);
+                    continue;
                 }
-                Some(Out::Execute(x)) => {
-                    let command = x.command.clone().unwrap_or_default();
-                    let aggregate = by_command
-                        .get(&format!("{}.{}", command.domain, command.command_type))
-                        .filter(|a| a.name() == command.aggregate_type)
-                        .cloned();
-                    let (client, tx, fail) = (client.clone(), tx.clone(), fail.clone());
-                    tokio::spawn(async move {
-                        let outcome = match aggregate {
-                            Some(aggregate) => {
-                                let execute = x.clone();
-                                let running = tokio::task::spawn_blocking(move || {
-                                    aggregate.execute(&execute)
-                                });
-                                // A handler cannot be stopped from outside; one that runs past
-                                // its lease at least shows.
-                                let lease = u64::try_from(x.deadline - crate::context::now_ms())
-                                    .unwrap_or(0);
-                                let stream = format!(
-                                    "{}.{} {}/{}",
-                                    command.domain,
-                                    command.command_type,
-                                    command.aggregate_type,
-                                    command.aggregate_id
-                                );
-                                let line = || {
-                                    format!(
-                                        "{stream} still running after its lease ended: the kernel \
-                                         gives it to another worker; is the handler stuck?"
-                                    )
-                                };
-                                let finished = log::watched(
-                                    &client.log,
-                                    "worker",
-                                    Duration::from_millis(lease),
-                                    line,
-                                    running,
-                                );
-                                match finished.await {
-                                    Ok(outcome) => (x, outcome),
-                                    // A panic outside the handlers' own guard (an eraser, say)
-                                    // still answers the command.
-                                    Err(e) => {
-                                        let text = match e.try_into_panic() {
-                                            Ok(panic) => crate::domain::panic_text(panic.as_ref()),
-                                            Err(e) => e.to_string(),
-                                        };
-                                        (x, Err(Failure::Error(text)))
-                                    }
-                                }
-                            }
-                            None => {
-                                let reason = Rejected::new(format!(
-                                    "no handler for {} on {}.{}",
-                                    command.command_type, command.domain, command.aggregate_type
-                                ))
-                                .code("unknown_command");
-                                (x, Err(Failure::Rejected(reason)))
-                            }
-                        };
-                        let reply = match reply(&client, outcome) {
-                            Ok(reply) => reply,
-                            Err(reason) => {
-                                client.log.error("worker", || reason.clone());
-                                let _ = fail.send(reason).await;
-                                return;
-                            }
-                        };
-                        client.log.debug("worker", || {
-                            let outcome = match &reply {
-                                In::Result(r) => Ok(r.events.len()),
-                                In::Rejection(r) => {
-                                    Err(r.reason.as_ref().map_or("", |r| r.code.as_str()))
-                                }
-                                _ => Err(""),
-                            };
-                            log::command_done(
-                                &format!("{}.{}", command.domain, command.command_type),
-                                &command.aggregate_type,
-                                &command.aggregate_id,
-                                outcome,
-                            )
-                        });
-                        let _ = tx.send(msg(reply)).await;
-                    });
+                Some(Out::Execute(x)) => x,
+                // Protocol 3: a long history comes in parts.
+                Some(Out::ExecuteMore(rest)) => {
+                    let Some(mut x) = partial.remove(&rest.lease_id) else {
+                        continue;
+                    };
+                    x.history.extend(rest.history);
+                    x.vault.extend(rest.vault);
+                    x.more = rest.more;
+                    x
                 }
-                None => {}
+                None => continue,
+            };
+            if x.more {
+                partial.insert(x.lease_id.clone(), x);
+                continue;
             }
+            let command = x.command.clone().unwrap_or_default();
+            let aggregate = by_command
+                .get(&format!("{}.{}", command.domain, command.command_type))
+                .filter(|a| a.name() == command.aggregate_type)
+                .cloned();
+            let (client, tx, fail) = (client.clone(), tx.clone(), fail.clone());
+            tokio::spawn(async move {
+                let outcome = match aggregate {
+                    Some(aggregate) => {
+                        let execute = x.clone();
+                        let running =
+                            tokio::task::spawn_blocking(move || aggregate.execute(&execute));
+                        // A handler cannot be stopped from outside; one that runs past
+                        // its lease at least shows.
+                        let lease =
+                            u64::try_from(x.deadline - crate::context::now_ms()).unwrap_or(0);
+                        let stream = format!(
+                            "{}.{} {}/{}",
+                            command.domain,
+                            command.command_type,
+                            command.aggregate_type,
+                            command.aggregate_id
+                        );
+                        let line = || {
+                            format!(
+                                "{stream} still running after its lease ended: the kernel \
+                                     gives it to another worker; is the handler stuck?"
+                            )
+                        };
+                        let finished = log::watched(
+                            &client.log,
+                            "worker",
+                            Duration::from_millis(lease),
+                            line,
+                            running,
+                        );
+                        match finished.await {
+                            Ok(outcome) => (x, outcome),
+                            // A panic outside the handlers' own guard (an eraser, say)
+                            // still answers the command.
+                            Err(e) => {
+                                let text = match e.try_into_panic() {
+                                    Ok(panic) => crate::domain::panic_text(panic.as_ref()),
+                                    Err(e) => e.to_string(),
+                                };
+                                (x, Err(Failure::Error(text)))
+                            }
+                        }
+                    }
+                    None => {
+                        let reason = Rejected::new(format!(
+                            "no handler for {} on {}.{}",
+                            command.command_type, command.domain, command.aggregate_type
+                        ))
+                        .code("unknown_command");
+                        (x, Err(Failure::Rejected(reason)))
+                    }
+                };
+                let reply = match reply(&client, outcome) {
+                    Ok(reply) => reply,
+                    Err(reason) => {
+                        client.log.error("worker", || reason.clone());
+                        let _ = fail.send(reason).await;
+                        return;
+                    }
+                };
+                client.log.debug("worker", || {
+                    let outcome = match &reply {
+                        In::Result(r) => Ok(r.events.len()),
+                        In::Rejection(r) => Err(r.reason.as_ref().map_or("", |r| r.code.as_str())),
+                        _ => Err(""),
+                    };
+                    log::command_done(
+                        &format!("{}.{}", command.domain, command.command_type),
+                        &command.aggregate_type,
+                        &command.aggregate_id,
+                        outcome,
+                    )
+                });
+                let _ = tx.send(msg(reply)).await;
+            });
         }
     }
 }

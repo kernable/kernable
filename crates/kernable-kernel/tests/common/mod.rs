@@ -2,7 +2,7 @@
 #![allow(dead_code)] // each test file uses a different subset
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         Mutex,
@@ -14,9 +14,9 @@ use std::{
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
-        ApplyRequest, ChallengeResponse, Command, CommandResult, EventSchema, Grant, Membership,
-        NewEvent, Permission, Register, Rejected, Rejection, Result as WorkResult, Snapshot,
-        SubmitRequest, Wait, WorkerAggregate, WorkerMessage, command_result::Outcome,
+        ApplyRequest, ChallengeResponse, Command, CommandResult, EventSchema, Execute, Grant,
+        Membership, NewEvent, Permission, Register, Rejected, Rejection, Result as WorkResult,
+        Snapshot, SubmitRequest, Wait, WorkerAggregate, WorkerMessage, command_result::Outcome,
         command_service_client::CommandServiceClient, kernel_message::Msg as Out,
         membership_service_client::MembershipServiceClient,
         worker_gateway_client::WorkerGatewayClient, worker_message::Msg as In,
@@ -450,11 +450,33 @@ pub async fn run_worker(addr: String, mut w: TestWorker) -> tonic::Status {
         Ok(r) => r.into_inner(),
         Err(status) => return status,
     };
+    // Executes whose history is still coming in parts (protocol 3), by lease.
+    let mut partial: HashMap<String, Execute> = HashMap::new();
     loop {
         let msg = match inbound.message().await {
             Ok(Some(m)) => m.msg.unwrap(),
             Ok(None) => return tonic::Status::ok("closed"),
             Err(status) => return status,
+        };
+        let msg = match msg {
+            Out::Execute(x) if x.more => {
+                partial.insert(x.lease_id.clone(), x);
+                continue;
+            }
+            Out::ExecuteMore(rest) => {
+                let Some(mut x) = partial.remove(&rest.lease_id) else {
+                    continue;
+                };
+                x.history.extend(rest.history);
+                x.vault.extend(rest.vault);
+                x.more = rest.more;
+                if x.more {
+                    partial.insert(x.lease_id.clone(), x);
+                    continue;
+                }
+                Out::Execute(x)
+            }
+            other => other,
         };
         let mut executing = None;
         let reply = match msg {
@@ -467,6 +489,7 @@ pub async fn run_worker(addr: String, mut w: TestWorker) -> tonic::Status {
                 }
                 continue;
             }
+            Out::ExecuteMore(_) => unreachable!("assembled above"),
             Out::Execute(x) => {
                 let cmd = x.command.unwrap();
                 if let Some(held) = &w.held {
