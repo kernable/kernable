@@ -13,11 +13,11 @@ Read this before you run a kernel with data you cannot lose. The event store is 
 | the kernel key | `--kernel-key` (`kernel.key`) | signs checkpoints and revocations | change it ([Keys](./keys#the-kernel-s-key)); keep every old public key for `kernable verify` |
 | the root key | `--root` takes its `.pub` | signs grants and revocations | start with a new root and grant every key again ([Keys](./keys#the-root-key)) |
 | process keys and `.grant` files | — | sign requests; say what each key may do | create new keys and grant them with the root key |
-| snapshots | `--snapshots` (`memory:`) | a cache | nothing: workers rebuild them |
+| snapshots | `--snapshots` (`sqlite:kernable-snapshots.db`, next to the event store) | a cache | nothing: workers rebuild them, the first command per aggregate reads all its events |
 | the cache | `--cache-store` (`memory:`) | values that expire | nothing: it is in memory and empty after every restart |
 | read model stores | in your processes | caches of your views | nothing: read models rebuild from the events |
 
-With `kernable start --dev`, all of these are in the working directory: `kernable.db`, `vault.db`, `data/`, and the keys `root`, `kernel`, `vault` and `app` (`.key` and `.pub`), with `app.grant`. Where each kind of data lives and how long it is kept: [Data over time](../concepts/data#where-kernable-keeps-what).
+With `kernable start --dev`, all of these are in the working directory: `kernable.db`, `kernable-snapshots.db`, `vault.db`, `data/`, and the keys `root`, `kernel`, `vault` and `app` (`.key` and `.pub`), with `app.grant`. Where each kind of data lives and how long it is kept: [Data over time](../concepts/data#where-kernable-keeps-what).
 
 ## Back up
 

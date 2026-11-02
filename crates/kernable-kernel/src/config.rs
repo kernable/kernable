@@ -32,8 +32,8 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
     (
         "--snapshots",
         "KERNABLE_SNAPSHOTS",
-        "memory:",
-        "The snapshot store, a cache of aggregate states that workers rebuild from the events. `sqlite:<path>` or a bare path: SQLite, kept across restarts. `memory:`: lost on a restart, so the first command per aggregate reads all its events again. Not `file:`.",
+        "",
+        "The snapshot store, a cache of aggregate states that workers rebuild from the events. `sqlite:<path>` or a bare path: SQLite, kept across restarts. `memory:`: lost on a restart, so the first command per aggregate reads all its events again. Not `file:`. Default: SQLite next to the event store, `<its name>-snapshots.db` (`kernable-snapshots.db` for `kernable.db`), or `memory:` for a `memory:` store.",
     ),
     (
         "--data-store",
@@ -377,7 +377,8 @@ impl Config {
             middleware_timeout_ms: number("--middleware-timeout-ms")?,
             drain_timeout_ms: number("--drain-timeout-ms")?,
             tls,
-            snapshots: get("--snapshots").expect("has a default"),
+            snapshots: get("--snapshots")
+                .unwrap_or_else(|| snapshots_next_to(&get("--store").expect("has a default"))),
             data: get("--data-store").expect("has a default"),
             cache: get("--cache-store").expect("has a default"),
             vault: get("--vault-key").map(|key| VaultConfig {
@@ -552,6 +553,23 @@ pub fn valid_pattern(pattern: &str) -> bool {
         || valid_qualified(pattern)
 }
 
+/// The default snapshot store: SQLite next to the event store `store`, or memory for a memory
+/// store.
+pub fn snapshots_next_to(store: &str) -> String {
+    let path = match kernable_store::backend(store) {
+        ("memory", _) => return "memory:".into(),
+        (_, path) => std::path::Path::new(path),
+    };
+    let stem = path
+        .file_stem()
+        .map_or("kernable".into(), |s| s.to_string_lossy());
+    format!(
+        "sqlite:{}",
+        path.with_file_name(format!("{stem}-snapshots.db"))
+            .display()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -572,6 +590,29 @@ mod tests {
         assert!(!valid_qualified("orders.Place.Order"));
         assert!(valid_pattern("*") && valid_pattern("orders.*") && valid_pattern("orders.Get"));
         assert!(!valid_pattern("orders") && valid_pattern("Orders.*") && !valid_pattern("o.*.*"));
+    }
+
+    #[test]
+    fn snapshots_default_to_sqlite_next_to_the_event_store() {
+        for (store, snapshots) in [
+            ("sqlite:kernable.db", "sqlite:kernable-snapshots.db"),
+            ("data/k.db", "sqlite:data/k-snapshots.db"),
+            (
+                "file:/var/lib/kernable/k.log",
+                "sqlite:/var/lib/kernable/k-snapshots.db",
+            ),
+            ("memory:", "memory:"),
+        ] {
+            assert_eq!(snapshots_next_to(store), snapshots, "{store}");
+        }
+        let root =
+            kernable_core::signing::key_id(&kernable_core::signing::generate_key().verifying_key());
+        let config =
+            Config::from_args(&["--root", &root, "--store", "file:k.log"], |_| None).unwrap();
+        assert_eq!(config.snapshots, "sqlite:k-snapshots.db");
+        let config =
+            Config::from_args(&["--root", &root, "--snapshots", "memory:"], |_| None).unwrap();
+        assert_eq!(config.snapshots, "memory:");
     }
 
     #[test]

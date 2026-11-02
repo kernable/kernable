@@ -64,7 +64,7 @@ The rest of this page is generated from the docstrings in `sdks/python/kernable`
 
 ### PROTOCOL
 
-`PROTOCOL = 2`: The protocol version this SDK speaks; see "Protocol versions" in `kernable.proto`.
+`PROTOCOL = 3`: The protocol version this SDK speaks; see "Protocol versions" in `kernable.proto`.
 
 ### Aggregate
 
