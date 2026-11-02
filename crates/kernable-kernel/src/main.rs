@@ -969,7 +969,7 @@ mod tests {
             " » Working Directory..... /tmp/demo",
             " » Listen................ 127.0.0.1:7233 (plain TCP, this machine only)",
             " » Event Store........... sqlite - kernable.db",
-            " » Snapshot Store........ memory",
+            " » Snapshot Store........ sqlite - kernable-snapshots.db",
             " » Data Store............ file - data",
             " » Cache Store........... memory",
             " » Keys.................. root ",
