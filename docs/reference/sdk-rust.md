@@ -732,7 +732,7 @@ or middleware handler returns it as a `BoxError` (`.into()` or `?`). Callers see
 - `code: String`
 - `message: String`
 - `key: Option<String>`: Set by the kernel for `unique_taken`: the name of the key another aggregate holds.
-- `requirement: Option<crate::Requirement>`: Set by the kernel for `requirement_missing`: the first requirement that does not hold.
+- `requirement: Option<Box<crate::Requirement>>`: Set by the kernel for `requirement_missing`: the first requirement that does not hold. Boxed: it keeps every `Result` with an `Error` small.
 - `fn new(message: impl Into<String>) -> Rejected`: A rejection with `message` and the code `rejected`.
 - `fn code(self, code: impl Into<String>) -> Rejected`: This rejection with another code, e.g. `Rejected::new("no such cart").code("not_found")`.
 
