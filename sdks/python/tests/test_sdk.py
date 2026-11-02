@@ -227,6 +227,30 @@ class Stopping(unittest.TestCase):
         self.assertEqual(errors, [])
 
 
+class LongHistories(unittest.TestCase):
+    def test_a_history_longer_than_one_message_arrives_in_parts(self):
+        # Messages of at most 64 KiB, no snapshots: the history of twelve 20 KiB events comes in
+        # parts, and the state folds all of it.
+        kernel = TestKernel(["shop.*"], ["--max-message-bytes", "65536"])
+        self.addCleanup(kernel.dispose)
+        kernel.start()
+        with mock.patch.dict(os.environ, {"KERNABLE_LOG": "off"}):
+            k = Kernable(kernel.url, kernel.app_key)
+        self.addCleanup(k.close)
+        order = domain("shop").aggregate("Order", 0, snapshot_every=0)
+        order.apply("Added", lambda n, data: n + 1)
+        order.command("Add", lambda n, data: [{"type": "Added", "data": {"note": data["note"], "seen": n}}])
+        worker = k.worker(order)
+        self.addCleanup(worker.stop)
+        background(worker.run)
+        self.assertTrue(worker.ready.wait(5), "worker did not connect")
+        note = "x" * (20 << 10)
+        for n in range(13):
+            outcome = k.submit("shop", "Order", "o1", "Add", {"note": note if n < 12 else ""}, wait="committed")
+            self.assertTrue(outcome.committed, f"{n}: {outcome}")
+            self.assertEqual(outcome.events[0].data["seen"], n, f"the state before command {n}")
+
+
 def _record(errors, run):
     try:
         run()

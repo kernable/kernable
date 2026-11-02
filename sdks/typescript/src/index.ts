@@ -2537,6 +2537,9 @@ export class Worker {
     return [...schemas].map(([event_type, schema]) => ({ event_type, schema }));
   }
 
+  /** Executes whose history is still coming in parts, by session and lease. */
+  private partial = new WeakMap<SessionCall, Map<string, NonNullable<KernelMessage["execute"]>>>();
+
   private onMessage(call: SessionCall, m: KernelMessage): void {
     if (m.challenge) {
       call.write({ challenge_response: { sig: this.key.sign(challengeMessage(m.challenge.nonce)).sig } });
@@ -2544,10 +2547,28 @@ export class Worker {
       if (this.connects++ > 0) this.log.print("info", "worker", "connected again");
       else if (this.announce) this.log.print("info", "worker", `connected to ${this.log.peer} · runs ${[...this.byCommand.keys()].sort().join(", ")}`);
       this.markReady();
-    } else if (m.execute) {
+    } else if (m.execute || m.execute_more) {
+      // Protocol 3: a long history comes in parts; run the command once the last one is here.
+      const partial = this.partial.get(call) ?? new Map<string, NonNullable<KernelMessage["execute"]>>();
+      this.partial.set(call, partial);
+      let x = m.execute;
+      if (m.execute_more) {
+        const rest = m.execute_more;
+        x = partial.get(rest.lease_id);
+        partial.delete(rest.lease_id);
+        if (!x) return;
+        x.history.push(...rest.history);
+        x.vault.push(...rest.vault);
+        x.more = rest.more;
+      }
+      if (!x) return;
+      if (x.more) {
+        partial.set(x.lease_id, x);
+        return;
+      }
       // Whatever goes wrong outside the handler (a malformed message) ends the session, not
       // the process.
-      this.execute(call, m.execute).catch((err) => {
+      this.execute(call, x).catch((err) => {
         this.log.print("error", "worker", `cannot execute: ${describe(err)}`);
         call.cancel();
       });

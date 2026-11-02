@@ -133,6 +133,15 @@ export interface KernelMessage {
     snapshot?: WireSnapshot | null;
     received_at: number;
     deadline: number;
+    /** Protocol 3: `execute_more` messages of this lease follow with the rest of the history. */
+    more?: boolean;
+  } | null;
+  /** Protocol 3: the next part of an Execute's history. */
+  execute_more?: {
+    lease_id: string;
+    history: WireEvent[];
+    vault: WireVaultValue[];
+    more?: boolean;
   } | null;
 }
 
@@ -312,7 +321,7 @@ const BUNDLED = fileURLToPath(new URL("../proto/kernable/v1/kernable.proto", imp
 const PROTO = existsSync(BUNDLED) ? BUNDLED : fileURLToPath(new URL("../../../proto/kernable/v1/kernable.proto", import.meta.url));
 
 /** The protocol version this SDK speaks; see "Protocol versions" in `kernable.proto`. */
-export const PROTOCOL = 2;
+export const PROTOCOL = 3;
 
 /** Room for a file of 16 MiB, the kernel's limit, plus the rest of the message (grpc-js receives 4 MiB by default). */
 const MAX_DATA_MESSAGE = 17 << 20;

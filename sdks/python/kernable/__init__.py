@@ -428,7 +428,7 @@ class NotSettled(Exception):
 
 
 #: The protocol version this SDK speaks; see "Protocol versions" in `kernable.proto`.
-PROTOCOL = 2
+PROTOCOL = 3
 
 #: The name of the listener whose handler is running, for requests sent from it.
 _HANDLING: contextvars.ContextVar[str] = contextvars.ContextVar("kernable_listener", default="")
@@ -1750,11 +1750,14 @@ class Worker(_Stream):
         self._by_stream = {(a.domain, a.name): a for a in aggregates}
         # The service this worker belongs to; its membership decides whether the kernel waits for it.
         self._service = service
+        # Executes whose history is still coming in parts (protocol 3), by lease; per session.
+        self._partial = {}
 
     def _open(self, requests):
         return self._stub.Session(requests)
 
     def _hello(self):
+        self._partial = {}
         # Every event type the aggregates know: the kernel refuses an outdated worker.
         schemas = {f"{a.domain}.{t}": a.schema_of(t) for a in self._by_command.values()
                    for t in [*a.appliers, *a.events]}
@@ -1779,22 +1782,42 @@ class Worker(_Stream):
                 self._log.print("info", self._what, f"connected to {self._log.peer} · runs {', '.join(sorted(self._by_command))}")
             self._connects += 1
             self.ready.set()
-        elif kind == "execute":
-            cmd = msg.execute.command
+        elif kind in ("execute", "execute_more"):
+            x = self._assembled(msg)
+            if x is None:
+                return None
+            cmd = x.command
             stream = f"{cmd.domain}.{cmd.command_type} {cmd.aggregate_type}/{cmd.aggregate_id}"
             # A handler cannot be stopped from outside; one that runs past its lease at least shows.
-            with _Watch(self._log, self._what, max(0.0, msg.execute.deadline / 1000 - time.time()),
+            with _Watch(self._log, self._what, max(0.0, x.deadline / 1000 - time.time()),
                         f"{stream} still running after its lease ended: the kernel gives it to another worker; "
                         "is the handler stuck?"):
-                reply = self._execute(msg.execute)
+                reply = self._execute(x)
             if self._log.enabled("debug"):
-                cmd = msg.execute.command
                 done = (f"rejected {reply.rejection.reason.code}" if reply.HasField("rejection")
                         else f"committed {len(reply.result.events)} events")
                 self._log.print("debug", self._what,
                                 f"{cmd.domain}.{cmd.command_type} {cmd.aggregate_type}/{cmd.aggregate_id} {done}")
             return reply
         return None
+
+    def _assembled(self, msg):
+        """The Execute to run once its last part is here (protocol 3: a long history comes in parts), else
+        None."""
+        if msg.WhichOneof("msg") == "execute":
+            x = msg.execute
+        else:
+            rest = msg.execute_more
+            x = self._partial.pop(rest.lease_id, None)
+            if x is None:
+                return None
+            x.history.extend(rest.history)
+            x.vault.extend(rest.vault)
+            x.more = rest.more
+        if x.more:
+            self._partial[x.lease_id] = x
+            return None
+        return x
 
     def _execute(self, x):
         cmd = x.command

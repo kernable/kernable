@@ -57,3 +57,32 @@ test("snapshots shorten replays and a new schema rebuilds from the events", asyn
     await kernel.dispose();
   }
 });
+
+test("a history longer than one message arrives in parts", async () => {
+  // Messages of at most 64 KiB, no snapshots: the history of twelve 20 KiB events comes in
+  // parts, and the state folds all of it.
+  const kernel = new TestKernel(["shop.*"], ["--max-message-bytes", "65536"]);
+  await kernel.start();
+  const kernable = new Kernable({ url: kernel.url, key: kernel.appKey });
+  const order = domain("shop").aggregate("Order", 0, { snapshotEvery: 0 })
+    .apply("Added", (n) => n + 1)
+    .command("Add", (n, data: { note: string }) => [{ type: "Added", data: { note: data.note, seen: n } }]);
+  const worker = kernable.worker(order);
+  const running = worker.run({ reconnectMs: 100 });
+  try {
+    await worker.ready;
+    const note = "x".repeat(20 << 10);
+    for (let n = 0; n < 13; n++) {
+      const outcome = await kernable.submit({
+        domain: "shop", aggregateType: "Order", aggregateId: "o1", type: "Add", data: { note: n < 12 ? note : "" }, wait: "committed",
+      });
+      assert.ok(outcome.committed, `${n}: ${JSON.stringify(outcome)}`);
+      assert.equal((outcome.events[0].data as { seen: number }).seen, n, `the state before command ${n}`);
+    }
+  } finally {
+    worker.stop();
+    await running;
+    kernable.close();
+    await kernel.dispose();
+  }
+});
