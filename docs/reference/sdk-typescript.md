@@ -328,19 +328,26 @@ An event to fold: type, payload version and data, plus as much of `EventMeta` an
 
 ### Requirement
 
-A fact another aggregate of the command's tenant must hold when the command commits: what
-`CommandOptions.requires` returns. The kernel checks it atomically with the commit; if the
-aggregate does not hold the fact (see `Aggregate.fact`), the command is rejected with
-`requirement_missing`.
+A fact another aggregate of the command's tenant must hold (or, `absent`, must not hold) when
+the command commits: what `CommandOptions.requires` returns. The kernel checks it atomically
+with the commit; if it does not hold, the command is rejected with `requirement_missing`. The
+aggregate is named by its ID, or by a unique key of its type (`key` and `value`, not a
+personal key), which the kernel resolves at commit: no aggregate holds the key, none holds the
+fact. An aggregate without events holds no fact either.
 
 ```ts
-{ domain: "funds", aggregateType: "Vehicle", aggregateId: data.vehicleId, fact: "open" }
+{ aggregateType: "Vehicle", aggregateId: data.vehicleId, fact: "open" }
+{ domain: "funds", aggregateType: "Vehicle", key: "pmdxId", value: normalize(data.vehicle), fact: "open" }
+{ aggregateType: "Vehicle", aggregateId: data.vehicleId, fact: "woundUp", absent: true }
 ```
 
-- `domain: string`: The domain of the aggregate: `funds`.
+- `domain?: string`: The domain of the aggregate: `funds`; default: the command's own.
 - `aggregateType: string`: The aggregate type within the domain, unqualified: `Vehicle`.
-- `aggregateId: string`
+- `aggregateId?: string`: The aggregate's ID; omitted when it is named by `key`.
+- `key?: string`: A unique key of the aggregate type that names the aggregate instead of its ID.
+- `value?: string`: The key's value, normalised as the aggregate type's key function does: the kernel gets only its SHA-256. Absent in a rejection, which never carries the value.
 - `fact: string`: The fact it must hold, as declared with `Aggregate.fact`: `open`.
+- `absent?: boolean`: The aggregate must not hold the fact.
 
 ### CommandOptions
 

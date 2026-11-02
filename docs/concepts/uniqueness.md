@@ -104,6 +104,42 @@ def _(state, data):
 - **At commit.** The kernel checks what the named aggregate holds at the moment the command commits. If the fund was wound up a moment before, the account is rejected with `requirement_missing`.
 - **No lock.** A requirement does not hold the fund open afterwards: winding it up later still commits. Blocking a change while other aggregates refer to it is not covered.
 
+### By a key, or absent
+
+A requirement can name its aggregate by a **unique key** of its type instead of its ID: the fund whose `pmdxId` is `FND-lyra`. The kernel finds the aggregate that holds the key when the command commits, in the command's tenant or, for a global key, in any. No aggregate holds it: then none holds the fact either. So a command needs no lookup of the ID first, and the check stays atomic. A requirement can also be **absent**: the aggregate must not hold the fact. An aggregate without events, or a key nobody holds, holds no fact, so "the vehicle is gone or wound up" is the fact `open` absent. Without a domain, a requirement is of the command's own domain.
+
+::: code-group
+
+```ts [TypeScript]
+requires: (data) => [
+  // By the fund's PMDX ID, normalised as its key function does.
+  { domain: "funds", aggregateType: "fund", key: "pmdxId", value: data.fundPmdxId.toLowerCase(), fact: "open" },
+  // Only while the vehicle (own domain) is not wound up, or does not exist.
+  { aggregateType: "vehicle", aggregateId: data.vehicleId, fact: "woundUp", absent: true },
+],
+```
+
+```python [Python]
+requires=lambda data, state: [
+    Requirement.by_key("fund", "pmdxId", data["fundPmdxId"].lower(), "open", domain="funds"),
+    Requirement.of("vehicle", data["vehicleId"], "woundUp", absent=True),
+]
+```
+
+```rust [Rust]
+.requires("OpenAccount", |_, d: Open| [
+    Requirement::by_key("funds", "fund", "pmdxId", &d.fund_pmdx_id.to_lowercase(), "open"),
+    Requirement::of("vehicle", &d.vehicle_id, "woundUp").absent(),
+])
+```
+
+:::
+
+- **The value as the key has it.** The kernel compares the SHA-256 of the value: normalise it exactly as the aggregate type's key function does (`toLowerCase` above), or nobody holds it.
+- **Not personal keys.** A personal key lives in the vault and cannot name an aggregate.
+- **Never the value.** A rejection names the key (`funds.fund with key pmdxId does not hold open`), never its value; `requirement.key` says which, and `requirement.value` is empty.
+- **From protocol 5 on.** Workers of older SDKs send requirements by ID only.
+
 ## Personal keys
 
 A key built from personal data, such as an email, names its subject:
@@ -156,7 +192,7 @@ The kernel checks keys and requirements while it commits, under the lock that or
 | Code | Message | Means |
 |---|---|---|
 | `unique_taken` | `funds.fund key pmdxId is taken` | Another aggregate holds a key the command would leave its aggregate with. |
-| `requirement_missing` | `funds.fund f1 does not hold open` | An aggregate the command requires does not hold the fact. |
+| `requirement_missing` | `funds.fund f1 does not hold open`, `funds.fund with key pmdxId does not hold open`, `funds.vehicle v1 holds woundUp` | An aggregate the command requires does not hold the fact, or holds one it must not. |
 | `invalid_index` | says which limit | Too many keys, facts or requirements, or a malformed name: a bug in the aggregate's definition. |
 
 A rejection also names what failed as data, so you need not parse the message: `key` is the name of the taken key (`pmdxId`), `requirement` the requirement that does not hold (domain, aggregate type, ID, fact). In TypeScript and Python they are `outcome.key` and `outcome.requirement`, in Rust `Rejected::key` and `Rejected::requirement`. Only the kernel sets them, and they are stored with the rejection, so the same command ID gets them back.

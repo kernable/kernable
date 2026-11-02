@@ -64,7 +64,7 @@ The rest of this page is generated from the docstrings in `sdks/python/kernable`
 
 ### PROTOCOL
 
-`PROTOCOL = 4`: The protocol version this SDK speaks; see "Protocol versions" in `kernable.proto`.
+`PROTOCOL = 5`: The protocol version this SDK speaks; see "Protocol versions" in `kernable.proto`.
 
 ### Aggregate
 
@@ -364,12 +364,17 @@ Who sends a request and in which context: signed with the command and stored wit
 
 ### Requirement
 
-A fact another aggregate of the command's tenant must hold when the command commits, as `requires=` of `Aggregate.command` returns them: `Requirement("funds", "vehicle", data["vehicleId"], "open")`. The kernel checks it atomically with the commit; if the aggregate does not hold the fact (see `Aggregate.fact`), the command is rejected with `requirement_missing`.
+A fact another aggregate of the command's tenant must hold (or, `absent`, must not hold) when the command commits, as `requires=` of `Aggregate.command` returns them: `Requirement("funds", "vehicle", data["vehicleId"], "open")`. The kernel checks it atomically with the commit; if it does not hold, the command is rejected with `requirement_missing`. The aggregate is named by its ID, or by a unique key of its type (`Requirement.by_key`, not a personal key), which the kernel resolves at commit: no aggregate holds the key, none holds the fact; an aggregate without events holds none either. An empty `domain` is the command's own (`Requirement.of`).
 
-- `domain: str`
+- `domain: str`: Empty: the domain of the command's aggregate.
 - `aggregate_type: str`: Unqualified, e.g. `vehicle`.
-- `aggregate_id: str`
+- `aggregate_id: str`: Empty when the aggregate is named by `key`.
 - `fact: str`: A fact the aggregate declares with `Aggregate.fact`.
+- `key: str`: A unique key of the aggregate type that names the aggregate instead of its ID.
+- `value: str`: The key's value, normalised as the aggregate type's key function does: the kernel gets only its SHA-256. Empty in a rejection, which never carries the value.
+- `absent: bool`: The aggregate must not hold the fact.
+- `of(cls, aggregate_type: str, aggregate_id: str, fact: str, *, absent: bool=False) -> 'Requirement'`: A requirement of an aggregate type of the command's own domain: `Requirement.of("vehicle", data["vehicleId"], "woundUp", absent=True)`.
+- `by_key(cls, aggregate_type: str, key: str, value: str, fact: str, *, domain: str='', absent: bool=False) -> 'Requirement'`: The fact of the aggregate that holds the unique key `key` with `value`, normalised as its key function does: `Requirement.by_key("vehicle", "pmdxId", data["vehicle"], "open")`.
 
 ### Store
 

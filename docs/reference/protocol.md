@@ -31,7 +31,9 @@ range of versions and refuses others with FAILED_PRECONDITION, naming the range 
 the SDK or the kernel needs an update. 0 (unset) is never accepted. Version 1 is the first
 release; version 2 adds unique keys, facts and requirements to Result; version 3 lets the
 kernel send a long history in parts (Execute.more, ExecuteMore); version 4 lets a listener
-park events (Ack.parked) and get them again (Batch.retries).
+park events (Ack.parked) and get them again (Batch.retries); version 5 lets a requirement
+name its aggregate by a unique key, and require a fact to be absent (Requirement.key,
+value_hash, absent).
 
 Names: a domain is an identifier of letters, digits, `-` and `_` that starts with a letter;
 by convention it is lowercase (`orders`), like aggregate types, while command, event and query
@@ -821,14 +823,21 @@ A unique key of an aggregate: no other aggregate holds the same key at the same 
 
 ### Requirement
 
-A fact another aggregate of the command's tenant must hold when the command commits.
+A fact another aggregate of the command's tenant must hold (or, `absent`, must not hold) when
+the command commits. The aggregate is named by its ID, or (protocol 5) by a unique key of its
+type that it holds: the key's name and the SHA-256 of its value, as in UniqueKey, in the
+command's tenant or global. No aggregate holding the key, like an aggregate without events,
+holds no fact. Personal keys cannot name an aggregate.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
 | `domain` |  `string` | 1 |  |
 | `aggregate_type` |  `string` | 2 | unqualified |
-| `aggregate_id` |  `string` | 3 |  |
+| `aggregate_id` |  `string` | 3 | empty when named by a key |
 | `fact` |  `string` | 4 |  |
+| `key` |  `string` | 5 | protocol 5: the key's name, instead of aggregate_id |
+| `value_hash` |  `bytes` | 6 | protocol 5: with `key`; never returned in a rejection |
+| `absent` |  `bool` | 7 | protocol 5: the aggregate must not hold the fact |
 
 ### Rejection
 

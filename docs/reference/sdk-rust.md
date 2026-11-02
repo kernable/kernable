@@ -793,15 +793,24 @@ same domain and aggregate type, in the same tenant unless global) at the same ti
 
 ### Requirement
 
-A fact that another aggregate of the command's tenant must hold when a command commits,
-returned by the function given to `crate::Aggregate::requires`:
-`Requirement::new("shop", "vehicle", &data.vehicle_id, "open")`.
+A fact that another aggregate of the command's tenant must hold (or, `Requirement::absent`,
+must not hold) when a command commits, returned by the function given to
+`crate::Aggregate::requires`: `Requirement::new("shop", "vehicle", &data.vehicle_id, "open")`.
+The aggregate is named by its ID, or by a unique key of its type and the key's value
+(`Requirement::by_key`), which the kernel resolves at commit: no aggregate holds the key,
+none holds the fact. An empty domain is the command's own (`Requirement::of`).
 
-- `domain: String`
+- `domain: String`: Empty: the domain of the command's aggregate.
 - `aggregate_type: String`: Unqualified, e.g. `vehicle`.
-- `aggregate_id: String`
+- `aggregate_id: String`: Empty when the aggregate is named by a key.
+- `key: Option<String>`: The unique key that names the aggregate instead of its ID, as the aggregate type declares it.
+- `value: Option<String>`: The key's value, normalised as the aggregate type's key function does: the kernel gets only its SHA-256. `None` in a rejection, which never carries the value.
 - `fact: String`: The name of a fact that aggregate declares.
+- `absent: bool`: The aggregate must not hold the fact.
 - `fn new(domain: &str, aggregate_type: &str, aggregate_id: &str, fact: &str) -> Requirement`: The fact `fact` of the `domain.aggregate_type` aggregate with ID `aggregate_id`.
+- `fn of(aggregate_type: &str, aggregate_id: &str, fact: &str) -> Requirement`: As `Requirement::new`, of an aggregate type of the command's own domain: `Requirement::of("vehicle", &data.vehicle_id, "open")`.
+- `fn by_key(domain: &str, aggregate_type: &str, key: &str, value: &str, fact: &str) -> Requirement`: The fact `fact` of the `domain.aggregate_type` aggregate that holds the unique key `key` with `value` (not a personal key): `Requirement::by_key("funds", "vehicle", "pmdxId", &data.vehicle, "open")`. Normalise `value` as the aggregate type's key does.
+- `fn absent(self) -> Requirement`: This requirement turned around: the aggregate must not hold the fact. One without events, or no holder of the key, holds none: `Requirement::of("vehicle", id, "woundUp").absent()`.
 
 ### Reindex
 
