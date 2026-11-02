@@ -14,7 +14,7 @@ use std::{
 use kernable_core::{
     PROTOCOL,
     proto::{
-        self, Ack, ChallengeResponse, Hello, ListenerMessage, Middleware, QueryAnswer,
+        self, Ack, ChallengeResponse, Hello, ListenerMessage, Middleware, Parked, QueryAnswer,
         SubscribeRequest, Verdict, event_service_client::EventServiceClient,
         listener_delivery::Msg as Delivery, listener_message::Msg as Reply,
         listener_service_client::ListenerServiceClient, middleware_call, query_answer,
@@ -28,8 +28,8 @@ use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::{
-    BoxError, Client, Domain, HANDLING, Outcome, QueryOutcome, Rejected, RequestContext, Store,
-    StoredEvent, Timestamp,
+    BoxError, Client, Domain, Error, HANDLING, Kernable, Outcome, Query, QueryOutcome, Rejected,
+    RequestContext, Store, StoredEvent, Submit, Timestamp,
     context::now_ms,
     domain::{decode, upcast},
     log, vault,
@@ -102,14 +102,56 @@ pub struct ListenerContext {
     /// The request context of the command that caused the event.
     pub request: RequestContext,
     command_id: String,
+    /// The event's tenant: the default for follow-up commands and queries.
+    tenant: String,
+    kernable: Kernable,
 }
 
 impl ListenerContext {
     /// A request context for commands caused by this event: same sender and correlation, this
     /// event's command as the cause, without an expected version or privileges. Pass it with
-    /// [`crate::Submit::context`].
+    /// [`crate::Submit::context`]; [`ListenerContext::submit`] does.
     pub fn follow(&self) -> RequestContext {
         self.request.follow(&self.command_id)
+    }
+
+    /// Submits a command this event causes, on the listener's connection, and returns its
+    /// events. It needs a fixed ID ([`Submit::id`], e.g. `confirm-<order>`), so a redelivered
+    /// event runs it once; without one it is [`Error::Config`]. Unless the submit sets them,
+    /// the context is [`ListenerContext::follow`] and the tenant the event's.
+    ///
+    /// A rejection is [`Error::Rejected`]: returned from the handler (`?`), it parks the event
+    /// at once in a reactor (see [`Listener::park_after`]). Match it to accept one: `match
+    /// ctx.submit(s).await { Err(Error::Rejected(r)) if r.code == "unique_taken" => {} r => {
+    /// r?; } }`. Other errors as for [`Kernable::submit`].
+    pub async fn submit(&self, submit: Submit) -> Result<Vec<StoredEvent>, Error> {
+        if submit.id.is_none() {
+            return Err(Error::Config(format!(
+                "{}.{}: a follow-up command needs a fixed ID (Submit::id), so a redelivered \
+                 event runs it once",
+                submit.domain, submit.command_type
+            )));
+        }
+        let submit = Submit {
+            tenant: submit.tenant.or_else(|| Some(self.tenant.clone())),
+            context: submit.context.or_else(|| Some(self.follow())),
+            ..submit
+        };
+        match self.kernable.submit(submit).await? {
+            Outcome::Committed(events) => Ok(events),
+            Outcome::Rejected(r) => Err(Error::Rejected(r)),
+        }
+    }
+
+    /// Asks a query on the listener's connection, like [`Kernable::query`]; unless the query
+    /// sets them, with the context [`ListenerContext::follow`] and the event's tenant.
+    pub async fn query<T: DeserializeOwned>(&self, query: Query) -> Result<T, Error> {
+        let query = Query {
+            tenant: query.tenant.or_else(|| Some(self.tenant.clone())),
+            context: query.context.or_else(|| Some(self.follow())),
+            ..query
+        };
+        self.kernable.query(query).await
     }
 }
 
@@ -265,6 +307,8 @@ struct Settings {
     reconnect: Duration,
     store: Option<String>,
     schema: String,
+    /// Attempts before an event whose handler fails is parked; 0: never.
+    park_after: u32,
 }
 
 struct ListenerInner {
@@ -287,7 +331,8 @@ struct ListenerInner {
 /// reactor ([`Domain::reactor`]). It defines what to handle; [`crate::Kernable::listener`] runs
 /// it. Events arrive in order, one at a time, after every listener with a lower order has
 /// processed them. Delivery is at least once: if a handler fails, the listener reconnects and
-/// the event is delivered again.
+/// the event is delivered again, until a reactor gives up on it and parks it
+/// ([`Listener::park_after`]).
 ///
 /// Types without a domain (`ItemAdded`) are the listener's own domain's; other domains' are
 /// qualified (`identity.AccountRegistered`). Handlers get event payloads upcast to the versions
@@ -332,7 +377,13 @@ fn qualified(t: &str, wildcard: bool) -> bool {
 }
 
 impl Listener {
-    pub(crate) fn new(domain: &Domain, name: &str, order: i32, start: Option<u64>) -> Listener {
+    pub(crate) fn new(
+        domain: &Domain,
+        name: &str,
+        order: i32,
+        start: Option<u64>,
+        park_after: u32,
+    ) -> Listener {
         let domains = HashMap::from([(domain.name().to_owned(), domain.clone())]);
         Listener {
             inner: Arc::new(ListenerInner {
@@ -345,6 +396,7 @@ impl Listener {
                     reconnect: Duration::from_secs(1),
                     store: None,
                     schema: "1".into(),
+                    park_after,
                 }),
                 handlers: RwLock::default(),
                 event_types: RwLock::default(),
@@ -455,6 +507,22 @@ impl Listener {
     /// as long after each further failed attempt, at most 30 s.
     pub fn reconnect(&self, delay: Duration) -> Listener {
         self.inner.settings.lock().unwrap().reconnect = delay;
+        self.clone()
+    }
+
+    /// How often a handler may fail on one event before the listener parks it and moves on
+    /// (default 5 for reactors, 0 for read models; 0: never, the listener keeps getting the
+    /// event and everything behind it waits). A [`Rejected`] (also a rejected
+    /// [`ListenerContext::submit`]) parks at once; the kernel being unreachable or busy
+    /// (`UNAVAILABLE`, `DEADLINE_EXCEEDED`, `RESOURCE_EXHAUSTED`, [`Error::NotSettled`]) or the
+    /// store failing never does: the listener waits and tries again. The kernel keeps parked
+    /// events with the rejection's code and message (for other errors `handler_error` and
+    /// `handler failed`; the log has the whole error) until an operator retries or dismisses
+    /// them (`kernable listeners retry`). A read model should not park: it would miss the
+    /// event's change. With a store, a parked event's writes are dropped, the rest of its
+    /// batch kept. Live listeners never park.
+    pub fn park_after(&self, attempts: u32) -> Listener {
+        self.inner.settings.lock().unwrap().park_after = attempts;
         self.clone()
     }
 
@@ -645,6 +713,10 @@ impl Listener {
 
 struct HandleInner {
     client: Client,
+    /// For handlers' follow-up commands and queries.
+    kernable: Kernable,
+    /// How often the handler failed on an event, by position, until it gets past it.
+    attempts: Mutex<HashMap<u64, u32>>,
     listener: Listener,
     /// The service it belongs to (`Options::service`); empty if none.
     service: String,
@@ -672,10 +744,12 @@ pub struct ListenerHandle {
 }
 
 impl ListenerHandle {
-    pub(crate) fn new(client: Client, listener: &Listener, service: String) -> ListenerHandle {
+    pub(crate) fn new(kernable: &Kernable, listener: &Listener, service: String) -> ListenerHandle {
         ListenerHandle {
             inner: Arc::new(HandleInner {
-                client,
+                client: kernable.client.clone(),
+                kernable: kernable.clone(),
+                attempts: Mutex::default(),
                 listener: listener.clone(),
                 service,
                 position: AtomicU64::new(0),
@@ -880,7 +954,11 @@ impl ListenerHandle {
                 }
                 Some(Delivery::Batch(batch)) => {
                     let up_to = batch.up_to;
-                    let erased = batch.events.iter().any(|e| !e.erases.is_empty());
+                    let erased = batch
+                        .events
+                        .iter()
+                        .chain(&batch.retries)
+                        .any(|e| !e.erases.is_empty());
                     // A kernel that goes back (a bug, or not the kernel) must not make a store
                     // apply events twice: the session ends, and the next resumes after what
                     // was handled.
@@ -909,21 +987,24 @@ impl ListenerHandle {
                     )
                     .await
                     .unwrap_or_else(|panic| Err(panic.into()))
-                    .and_then(|()| match &store {
-                        Some(s) => Ok(s.commit(up_to, erased)?),
-                        None => Ok(()),
+                    .and_then(|parked| match &store {
+                        Some(s) => Ok(s.commit(up_to, erased).map(|()| parked)?),
+                        None => Ok(parked),
                     });
-                    if let Err(e) = handled {
-                        if let Some(s) = &store {
-                            s.rollback();
-                            inner.position.store(s.committed(), Ordering::SeqCst);
+                    let parked = match handled {
+                        Ok(parked) => parked,
+                        Err(e) => {
+                            if let Some(s) = &store {
+                                s.rollback();
+                                inner.position.store(s.committed(), Ordering::SeqCst);
+                            }
+                            return Err(e);
                         }
-                        return Err(e);
-                    }
+                    };
                     inner.position.store(up_to, Ordering::SeqCst);
                     Reply::Ack(Ack {
                         position: up_to,
-                        ..Default::default()
+                        parked,
                     })
                 }
                 Some(Delivery::Query(q)) => {
@@ -976,16 +1057,25 @@ impl ListenerHandle {
         Ok(())
     }
 
+    /// Handles a batch: first the retries, then the events after the position. Returns the
+    /// events it parked; an error if a handler failed on one it does not park.
     async fn handle_batch(
         &self,
         batch: proto::Batch,
         replay_up_to: u64,
         store: Option<Store>,
-    ) -> Result<(), BoxError> {
+    ) -> Result<Vec<Parked>, BoxError> {
         let def = self.def();
-        for e in batch.events {
+        let (park_after, live) = {
+            let s = def.settings.lock().unwrap();
+            (s.park_after, s.live)
+        };
+        let parking = park_after > 0 && !live;
+        let mut parked = Vec::new();
+        let retries = batch.retries.into_iter().map(|e| (e, true));
+        for (e, retry) in retries.chain(batch.events.into_iter().map(|e| (e, false))) {
             let position = e.global_position;
-            if position <= self.position() {
+            if !retry && position <= self.position() {
                 continue; // handled already
             }
             let entry = {
@@ -1012,19 +1102,96 @@ impl ListenerHandle {
                     store: store.clone(),
                     request: event.request.clone(),
                     command_id: event.command_id.clone(),
+                    tenant: event.tenant.clone(),
+                    kernable: self.inner.kernable.clone(),
                 };
                 let event_type = format!("{}.{}", event.domain, event.event_type);
-                handler(event, ctx).await?;
-                self.inner
-                    .client
-                    .log
-                    .debug(&format!("listener {}", def.name), || {
-                        log::event_processed(&event_type, position)
-                    });
+                let saved = match &store {
+                    Some(s) if parking => {
+                        s.savepoint()?;
+                        true
+                    }
+                    _ => false,
+                };
+                let result = unwinding(handler(event, ctx))
+                    .await
+                    .unwrap_or_else(|panic| Err(panic.into()));
+                match result {
+                    Ok(()) => {
+                        if let (true, Some(s)) = (saved, &store) {
+                            s.release()?;
+                        }
+                        self.inner.attempts.lock().unwrap().remove(&position);
+                        self.inner
+                            .client
+                            .log
+                            .debug(&format!("listener {}", def.name), || {
+                                log::event_processed(&event_type, position)
+                            });
+                    }
+                    Err(err) => {
+                        let p = self.give_up(&event_type, position, err, park_after, parking)?;
+                        if let (true, Some(s)) = (saved, &store) {
+                            s.rollback_event()?;
+                        }
+                        parked.push(p);
+                    }
+                }
             }
-            self.inner.position.store(position, Ordering::SeqCst);
+            if !retry {
+                self.inner.position.store(position, Ordering::SeqCst);
+            }
         }
-        Ok(())
+        Ok(parked)
+    }
+
+    /// What to do after the handler failed on the event at `position`: park it (a rejection at
+    /// once, another error after `park_after` attempts), or fail the batch with `err`, so the
+    /// listener gets the event again (the kernel or the store away, or attempts left).
+    fn give_up(
+        &self,
+        event_type: &str,
+        position: u64,
+        err: BoxError,
+        park_after: u32,
+        parking: bool,
+    ) -> Result<Parked, BoxError> {
+        if !parking || transient(&err) {
+            return Err(err);
+        }
+        let attempts = {
+            let mut counts = self.inner.attempts.lock().unwrap();
+            let n = counts.entry(position).or_default();
+            *n += 1;
+            *n
+        };
+        let rejected = rejection(&err);
+        if rejected.is_none() && attempts < park_after {
+            return Err(err);
+        }
+        self.inner.attempts.lock().unwrap().remove(&position);
+        let what = format!("listener {}", self.def().name);
+        let (code, message) = match rejected {
+            Some(r) => {
+                let (code, message) = (r.code.clone(), r.message.clone());
+                self.inner.client.log.warn(&what, || {
+                    format!("{event_type} at {position} rejected ({code}), parked: {message}")
+                });
+                (code, message)
+            }
+            None => {
+                self.inner.client.log.error(&what, || {
+                    format!("{event_type} at {position} failed {attempts} times, parked: {err}")
+                });
+                ("handler_error".to_owned(), "handler failed".to_owned())
+            }
+        };
+        Ok(Parked {
+            position,
+            code,
+            message,
+            attempts,
+        })
     }
 
     async fn answer(&self, q: proto::QueryRequest) -> query_answer::Outcome {
@@ -1340,6 +1507,39 @@ async fn unwinding<T>(f: impl Future<Output = T>) -> Result<T, String> {
         }
     })
     .await
+}
+
+/// Attempts before a reactor parks an event its handler keeps failing on.
+pub(crate) const PARK_AFTER: u32 = 5;
+
+/// The rejection a failed handler returned, also one a submit or query inside it got.
+fn rejection(err: &BoxError) -> Option<&Rejected> {
+    err.downcast_ref::<Rejected>()
+        .or_else(|| match err.downcast_ref::<Error>() {
+            Some(Error::Rejected(r)) => Some(r),
+            _ => None,
+        })
+}
+
+/// Whether a failed handler should simply try again: the kernel was unreachable or busy, a
+/// submit did not settle in time, or the store failed. Never parks.
+fn transient(err: &BoxError) -> bool {
+    let busy = |s: &tonic::Status| {
+        matches!(
+            s.code(),
+            tonic::Code::Unavailable
+                | tonic::Code::DeadlineExceeded
+                | tonic::Code::ResourceExhausted
+                | tonic::Code::Cancelled
+                | tonic::Code::Aborted
+                | tonic::Code::Internal
+        )
+    };
+    match err.downcast_ref::<Error>() {
+        Some(Error::Status(s)) => busy(s),
+        Some(Error::NotSettled(_) | Error::Store(_)) => true,
+        _ => err.downcast_ref::<tonic::Status>().is_some_and(busy),
+    }
 }
 
 /// What a listener logs when it still handles `what` after `seconds`: a query or check after 5 s

@@ -24,12 +24,14 @@ are opaque bytes to the kernel. Signatures cover the byte layouts in SIGNING.md,
 protobuf encoding.
 
 Protocol versions: every request and stream opening (SubmitRequest, QueryRequest,
-SubscribeRequest, DataRequest, CacheRequest, RevokeRequest, ApplyRequest, Register, Hello)
+SubscribeRequest, DataRequest, CacheRequest, RevokeRequest, ApplyRequest, RetryRequest,
+Register, Hello)
 carries `protocol`, the version its sender speaks. It is never signed. The kernel accepts a
 range of versions and refuses others with FAILED_PRECONDITION, naming the range and whether
 the SDK or the kernel needs an update. 0 (unset) is never accepted. Version 1 is the first
 release; version 2 adds unique keys, facts and requirements to Result; version 3 lets the
-kernel send a long history in parts (Execute.more, ExecuteMore).
+kernel send a long history in parts (Execute.more, ExecuteMore); version 4 lets a listener
+park events (Ack.parked) and get them again (Batch.retries).
 
 Names: a domain is an identifier of letters, digits, `-` and `_` that starts with a letter;
 by convention it is lowercase (`orders`), like aggregate types, while command, event and query
@@ -505,7 +507,27 @@ every request it covers (UNAVAILABLE): the chain fails closed.
 
 | RPC | Request | Response | Description |
 |---|---|---|---|
-| `Listen` | stream `ListenerMessage` | stream `ListenerDelivery` | A listener's stream. The listener sends Hello, the kernel a Challenge, the listener a ChallengeResponse, the kernel Ready; then the kernel sends batches, queries and checks, and the listener acks, answers and verdicts. Needs `listen` for the event types, `answer` for the query types and `check` for the middleware types. Errors: INVALID_ARGUMENT (malformed Hello, or an ack beyond the delivered events), PERMISSION_DENIED (missing permission, a name registered with another key, a middleware its membership does not list), ALREADY_EXISTS (a listener of that name is connected, or a live one uses a registered name), UNAUTHENTICATED (challenge failed). |
+| `Listen` | stream `ListenerMessage` | stream `ListenerDelivery` | A listener's stream. The listener sends Hello, the kernel a Challenge, the listener a ChallengeResponse, the kernel Ready; then the kernel sends batches, queries and checks, and the listener acks, answers and verdicts. Needs `listen` for the event types, `answer` for the query types and `check` for the middleware types. Errors: INVALID_ARGUMENT (malformed Hello, or an ack beyond the delivered events), PERMISSION_DENIED (missing permission, a name registered with another key, a middleware its membership does not list), ALREADY_EXISTS (a listener of that name is connected, or a live one uses a registered name), UNAUTHENTICATED (challenge failed), RESOURCE_EXHAUSTED (an ack would park more than 10,000 events). |
+| `Retry` | `RetryRequest` | `RetryResult` | Delivers parked events of a registered listener again (see Ack.parked), or dismisses them. Signed over kernable.v1.retry by a key granted `manage` for the listener's service (`*` for a listener without one), and valid 60 s around issued_at. Errors: UNAUTHENTICATED (invalid signature, outside the time window), PERMISSION_DENIED, NOT_FOUND (no such listener). |
+
+### RetryRequest
+
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `listener` |  `string` | 1 |  |
+| `positions` | repeated `uint64` | 2 | the parked events; empty: all of them |
+| `dismiss` |  `bool` | 3 | remove them instead of delivering them again |
+| `issued_at` |  `int64` | 4 | ms since epoch |
+| `sig` |  `Signature` | 5 | over kernable.v1.retry |
+| `protocol` |  `uint32` | 6 | not signed |
+
+### RetryResult
+
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `positions` | repeated `uint64` | 1 | the parked events it applied to; requested ones not parked are left out |
 
 ### ListenerMessage
 
@@ -631,6 +653,7 @@ Events for the listener, in order of global position.
 | `events` | repeated `Event` | 1 | only the listener's event types; may be empty |
 | `up_to` |  `uint64` | 2 | last position the batch covers; acknowledge it once processed |
 | `vault` | repeated `VaultValue` | 3 | The values the events refer to, if the key may read them (granted vault_read) and they are not erased; a missing value reads as null. |
+| `retries` | repeated `Event` | 4 | Parked events an operator asked to deliver again (RetryRequest), to handle before `events` and regardless of the listener's position. Sent alone, with `up_to` the last position delivered, and only to listeners of protocol 4 or later. Their vault values are in `vault`. |
 
 ### Ack
 
@@ -640,6 +663,18 @@ only waiting and ordering. An ack beyond the delivered batches ends the stream.
 | Field | Type | Number | Description |
 |---|---|---|---|
 | `position` |  `uint64` | 1 |  |
+| `parked` | repeated `Parked` | 2 | Events of the acknowledged batches (or their retries) the listener gave up on: it moves on, and the kernel keeps them, with the reason, until an operator retries or dismisses them (ListenerService.Retry). Each is above the previously acknowledged position or one of the retries, and at most `position`. Not for live listeners. |
+
+### Parked
+
+An event a listener gave up on.
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `position` |  `uint64` | 1 |  |
+| `code` |  `string` | 2 | Why: a Rejected code (`not_found`), or `handler_error` for any other error. At most 128 bytes. |
+| `message` |  `string` | 3 | The rejection's message; for another error only its type (it can hold personal data, and the kernel keeps it): the listener logs the whole error. At most 1,024 bytes. |
+| `attempts` |  `uint32` | 4 | how often it was handled |
 
 ## Workers
 

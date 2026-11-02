@@ -204,6 +204,27 @@ impl TestKernel {
         Options::new(&self.app_key).url(&self.url)
     }
 
+    /// Runs `kernable <args>` in the kernel's directory, where `{store}` and `{url}` stand for
+    /// the store and the kernel's address; whether it succeeded, and its stdout.
+    pub fn cli(&self, args: &[&str]) -> (bool, String) {
+        let args: Vec<String> = args
+            .iter()
+            .map(|a| {
+                a.replace("{store}", &self.store)
+                    .replace("{url}", &self.url)
+            })
+            .collect();
+        let out = Command::new(binary())
+            .args(&args)
+            .current_dir(&self.dir)
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    }
+
     /// Output of `kernable verify` on the event log.
     pub fn verify(&self) -> String {
         let out = Command::new(binary())

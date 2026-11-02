@@ -177,21 +177,28 @@ impl Domain {
     ///
     /// If the domain has a read model or reactor named `name` already.
     pub fn read_model(&self, name: &str) -> Listener {
-        self.remember(Listener::new(self, name, 0, Some(0)))
+        self.remember(Listener::new(self, name, 0, Some(0), 0))
     }
 
     /// A reactor of this domain named `name`: triggers side effects and follow-up commands; see
     /// [`Listener`]. It starts at the newest event when it is new, then resumes after the last
     /// acknowledged event (order 10). A settling submit from its handler waits for the
     /// listeners before it (the read models), not for the reactor itself, which handles one
-    /// event at a time. Submit with a fixed ID and `ctx.follow()`, so a redelivered event does
-    /// not run the command twice. Run it with [`crate::Kernable::listener`] or in an app.
+    /// event at a time. Submit follow-ups with `ctx.submit` and a fixed ID, so a redelivered
+    /// event does not run the command twice; a rejected one parks the event (see
+    /// [`Listener::park_after`]). Run it with [`crate::Kernable::listener`] or in an app.
     ///
     /// # Panics
     ///
     /// If the domain has a read model or reactor named `name` already.
     pub fn reactor(&self, name: &str) -> Listener {
-        self.remember(Listener::new(self, name, 10, None))
+        self.remember(Listener::new(
+            self,
+            name,
+            10,
+            None,
+            crate::listener::PARK_AFTER,
+        ))
     }
 
     fn remember(&self, listener: Listener) -> Listener {

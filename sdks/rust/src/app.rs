@@ -120,7 +120,7 @@ impl AppHandle {
         });
         let listeners = listeners
             .iter()
-            .map(|l| ListenerHandle::new(kernable.client.clone(), l, service.clone()))
+            .map(|l| ListenerHandle::new(kernable, l, service.clone()))
             .collect();
         let mut domains: Vec<String> = Vec::new();
         for domain in &app.domains {

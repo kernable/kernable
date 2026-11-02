@@ -26,4 +26,5 @@ Counters and durations count since the kernel started and begin at 0 again after
 | `kernable_listener_position` | gauge | `listener` | Global position of the last event the listener acknowledged. |
 | `kernable_listener_lag` | gauge | `listener` | Global positions between the newest stored event and the listener's position: how far it is behind. |
 | `kernable_listener_connected` | gauge | `listener` | 1 while the listener is connected, 0 while it is registered but away. |
+| `kernable_listener_parked` | gauge |  | Events the listener gave up on and parked, waiting for an operator to retry or dismiss them. |
 | `kernable_ready` | gauge |  | 1 while the kernel is ready: every aggregate that counts has a worker, every listener that counts is connected and caught up, and it is not shutting down. |

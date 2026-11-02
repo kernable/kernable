@@ -159,6 +159,21 @@ impl Store {
         Ok(())
     }
 
+    /// Marks where an event's writes begin within a batch, so they can be dropped alone.
+    pub(crate) fn savepoint(&self) -> Result<(), Error> {
+        self.with(|db| db.execute_batch("SAVEPOINT event"))
+    }
+
+    /// Keeps the event's writes (see [`Store::savepoint`]).
+    pub(crate) fn release(&self) -> Result<(), Error> {
+        self.with(|db| db.execute_batch("RELEASE event"))
+    }
+
+    /// Drops the event's writes, keeping the rest of the batch (see [`Store::savepoint`]).
+    pub(crate) fn rollback_event(&self) -> Result<(), Error> {
+        self.with(|db| db.execute_batch("ROLLBACK TO event; RELEASE event"))
+    }
+
     /// Drops a failed batch.
     pub(crate) fn rollback(&self) {
         let _ = self.with(|db| {

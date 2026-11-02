@@ -85,6 +85,14 @@ kernable listeners <store>
 
 Lists the registered listeners with order, position, event types, key, service, middleware and when they were last seen. A listener its service's membership does not list is marked: it counts for nobody.
 
+### `kernable listeners parked`
+
+```text
+kernable listeners parked <store>
+```
+
+Lists the events listeners parked: the listener, position, event type, code, attempts, when, whether a retry is asked for, and the message (for a handler error only the error's type; the listener's log has the rest).
+
 ### `kernable schemas`
 
 ```text
@@ -92,6 +100,24 @@ kernable schemas <store>
 ```
 
 Lists the highest stored schema version per event type.
+
+## Parked events, with the kernel running
+
+### `kernable listeners retry`
+
+```text
+kernable listeners retry <addr> <key> <listener> <position|--all>
+```
+
+Delivers the listener's parked event at `<position>` again, or all of them, the next time it is connected; if it fails again, it is parked again. Signed with `<key>`, whose grant needs `manage=<service>` of the listener (`manage=*` for one without a service); the grant file next to the key is sent along. Exit 1 if none of them is parked.
+
+### `kernable listeners dismiss`
+
+```text
+kernable listeners dismiss <addr> <key> <listener> <position|--all>
+```
+
+Removes the parked event at `<position>`, or all of them, without delivering them again. Like retry otherwise.
 
 ## Check the store
 

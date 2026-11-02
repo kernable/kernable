@@ -432,7 +432,7 @@ impl Kernable {
     /// this connection's service (see [`Options::service`]). Example:
     /// `kernable.listener(&carts_readmodel).run().await`.
     pub fn listener(&self, listener: &Listener) -> ListenerHandle {
-        ListenerHandle::new(self.client.clone(), listener, self.service.clone())
+        ListenerHandle::new(self, listener, self.service.clone())
     }
 
     /// Files of the default tenant: bytes up to 16 MiB per key, kept by the kernel outside the

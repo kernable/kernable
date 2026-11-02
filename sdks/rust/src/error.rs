@@ -9,7 +9,8 @@ use crate::StoredEvent;
 /// A query or middleware handler that returns a [`Rejected`] (also one wrapped in
 /// [`Error::Rejected`], e.g. by a query it asked) refuses with its code; any other error
 /// refuses with `handler_error` (`middleware_error` from a middleware). An event handler's
-/// error makes the listener reconnect and get the event again.
+/// error makes the listener reconnect and get the event again; a reactor parks it at once if
+/// it is a [`Rejected`], else after a few attempts (see [`crate::Listener::park_after`]).
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// A business reason to refuse a command or query: return it from a handler. `code` (default
