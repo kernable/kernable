@@ -1128,3 +1128,94 @@ fn still_allowed(permissions: &crate::Permissions, hello: &Hello) -> bool {
                 .all(|t| config::allowed(&permissions.check, key, t))
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use kernable_core::proto::Parked;
+
+    use super::*;
+
+    fn parked(position: u64, retry: bool) -> ParkedEvent {
+        ParkedEvent {
+            position,
+            event_type: "orders.ItemAdded".into(),
+            code: "not_found".into(),
+            retry,
+            ..Default::default()
+        }
+    }
+
+    fn registry(position: u64, events: Vec<ParkedEvent>) -> Registry {
+        let record = ListenerRecord {
+            name: "mailer".into(),
+            position,
+            parked: events,
+            ..Default::default()
+        };
+        Registry::load(vec![record], &Memberships::load(Vec::new()))
+    }
+
+    fn ack(position: u64, parking: &[u64]) -> Ack {
+        let parked = parking
+            .iter()
+            .map(|&position| Parked {
+                position,
+                code: "not_found".into(),
+                ..Default::default()
+            })
+            .collect();
+        Ack { position, parked }
+    }
+
+    fn stored(r: &Registry) -> Vec<(u64, bool)> {
+        let entries = r.entries();
+        let e = &entries["mailer"];
+        e.record
+            .parked
+            .iter()
+            .map(|p| (p.position, p.retry))
+            .collect()
+    }
+
+    #[test]
+    fn an_ack_that_would_park_beyond_the_cap_is_refused_and_changes_nothing() {
+        let full = (1..=MAX_PARKED as u64).map(|p| parked(p, false)).collect();
+        let r = registry(MAX_PARKED as u64, full);
+        let n = MAX_PARKED as u64;
+        let refused = r.acked(
+            "mailer",
+            &ack(n + 1, &[n + 1]),
+            vec!["orders.ItemAdded".into()],
+        );
+        assert_eq!(refused.unwrap_err().code(), tonic::Code::ResourceExhausted);
+        assert_eq!(r.position("mailer"), n, "the position stays");
+        assert_eq!(stored(&r).len(), MAX_PARKED);
+        // Without parking, it moves on.
+        r.acked("mailer", &ack(n + 1, &[]), Vec::new()).unwrap();
+        assert_eq!(r.position("mailer"), n + 1);
+    }
+
+    #[test]
+    fn a_retry_dismissed_on_its_way_stays_gone_when_it_is_acknowledged() {
+        let r = registry(5, vec![parked(2, true), parked(4, true)]);
+        // Both went out in a batch up to 5; then 2 is dismissed.
+        r.retrying("mailer", 5, &[2, 4]);
+        assert_eq!(r.retry("mailer", &[2], true), Some(vec![2]));
+        assert_eq!(stored(&r), [(4, true)]);
+        // The listener parks 4 again; 2 is no longer its to park.
+        let late = r.acked("mailer", &ack(5, &[2]), vec!["orders.ItemAdded".into()]);
+        assert_eq!(late.unwrap_err().code(), tonic::Code::InvalidArgument);
+        r.acked("mailer", &ack(5, &[4]), vec!["orders.ItemAdded".into()])
+            .unwrap();
+        assert_eq!(
+            stored(&r),
+            [(4, false)],
+            "parked again, no longer asked for"
+        );
+        // Handled on the next retry: gone.
+        r.retry("mailer", &[], false);
+        r.retrying("mailer", 5, &[4]);
+        r.acked("mailer", &ack(5, &[]), Vec::new()).unwrap();
+        assert!(stored(&r).is_empty());
+    }
+}

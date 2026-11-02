@@ -19,8 +19,8 @@ use common::*;
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
-        Ack, ChallengeResponse, Command, CommandResult, Hello, ListenerMessage, RevokeRequest,
-        SubmitRequest, SubscribeRequest, VaultValue, Wait, command_result::Outcome,
+        Ack, ChallengeResponse, Command, CommandResult, Hello, ListenerMessage, Parked,
+        RevokeRequest, SubmitRequest, SubscribeRequest, VaultValue, Wait, command_result::Outcome,
         command_service_client::CommandServiceClient, event_service_client::EventServiceClient,
         listener_delivery::Msg as Out, listener_message::Msg as In,
         listener_service_client::ListenerServiceClient, trust_service_client::TrustServiceClient,
@@ -137,9 +137,21 @@ async fn listen_once(
                 let mut seen = seen.lock().unwrap();
                 seen.delivered("audit", &b);
                 seen.acked("audit", b.up_to);
+                // It gives up on every ItemAdded: the parked set is stored with the position.
+                let parked = b
+                    .events
+                    .iter()
+                    .filter(|e| e.event_type == "ItemAdded")
+                    .map(|e| Parked {
+                        position: e.global_position,
+                        code: "not_found".into(),
+                        message: "no such item".into(),
+                        attempts: 1,
+                    })
+                    .collect();
                 In::Ack(Ack {
                     position: b.up_to,
-                    ..Default::default()
+                    parked,
                 })
             }
             _ => continue,
@@ -263,19 +275,30 @@ async fn crash_and_recover(point: &str, round: u32) {
     loop {
         let unique = seen.lock().unwrap().delivered_positions("audit");
         // Opened again each time: a read-only file store is a snapshot of the log.
-        let stored = kernable_store::open_read_only(&store)
-            .unwrap()
+        let read = kernable_store::open_read_only(&store).unwrap();
+        let audit = read
             .listeners()
             .unwrap()
+            .into_iter()
+            .find(|l| l.name == "audit");
+        let stored = audit.as_ref().map_or(0, |l| l.position);
+        let parked: Vec<u64> = audit.map_or(Vec::new(), |l| {
+            l.parked.iter().map(|p| p.position).collect()
+        });
+        // Every ItemAdded, once: no parked event lost with a crash, none kept twice.
+        let added: Vec<u64> = read
+            .read_all(0, 100)
+            .unwrap()
             .iter()
-            .find(|l| l.name == "audit")
-            .map_or(0, |l| l.position);
-        if unique == (1..=head).collect() && stored == head {
+            .filter(|e| e.event_type == "ItemAdded")
+            .map(|e| e.global_position)
+            .collect();
+        if unique == (1..=head).collect() && stored == head && parked == added {
             break;
         }
         assert!(
             started.elapsed() < Duration::from_secs(5),
-            "{point}: listener saw {unique:?}, stored position {stored}"
+            "{point}: listener saw {unique:?}, stored position {stored}, parked {parked:?} of {added:?}"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
