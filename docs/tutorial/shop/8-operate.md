@@ -113,5 +113,6 @@ When you change how the handlers store data, raise `schema`: the store is cleare
 - **Deploy readers before writers.** When an event's format changes (a new event version), a process that does not know the new version stops at it instead of misreading it.
 - On SIGTERM the kernel **drains**: it refuses new requests, lets running ones finish for up to `--drain-timeout-ms`, then stores its state and exits. Commands that did not finish run right after the restart.
 - Restarting a worker or a listener loses nothing: commands go to another worker, and listeners continue after their last acknowledged event.
+- **Watch for parked events.** A reactor that gives up on an event (a rejected follow-up, or a handler that keeps failing) parks it and moves on; `kernable listeners parked` lists them, `kernable_listener_parked` counts them, and `kernable listeners retry` delivers them again once the cause is fixed ([Parked events](../../how-to/monitor#parked-events)).
 
 The [reference](../../reference/) lists every flag, metric and error.

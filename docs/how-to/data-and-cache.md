@@ -56,6 +56,7 @@ kernable.data().delete("shop", "invoices/o-1.pdf").await?;         // whether it
 - Text is stored as UTF-8. Without a content type, a string is stored as `text/plain; charset=utf-8`, bytes as `application/octet-stream`.
 - The tenant is the client's; TypeScript (`{ tenant }`) and Python (`tenant=`) can name another per call.
 - There is no listing: choose keys you can compute again, such as `invoices/<order ID>.pdf`.
+- A put or delete runs at most once per signed request. One that failed may still have taken effect, so the same request is refused as a replay (`ALREADY_EXISTS`); send it again as a new call, which the SDKs sign anew.
 
 ## 3. Set and get cache values
 

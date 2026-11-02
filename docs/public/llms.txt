@@ -20,6 +20,7 @@ For building on kernable with an agent, start with the guide: [kernable.AGENTS.m
 - [Trust](https://kernable.com/docs/concepts/trust): keys, grants, signatures, the hash chain, what if something is compromised
 - [Compliance](https://kernable.com/docs/concepts/compliance): the technical controls kernable covers for ISO 27001, SOC 2, PCI DSS, HIPAA, GoBD, the GDPR, NIS2 and DORA, and where it stops
 - [Queries and middleware](https://kernable.com/docs/concepts/queries-and-middleware): every read through the kernel, middleware before and after, the request context
+- [Unique keys and conditions](https://kernable.com/docs/concepts/uniqueness): unique keys and facts an aggregate holds, requirements by ID or by key (also absent), checked by the kernel at commit
 - [Data over time](https://kernable.com/docs/concepts/data): where kernable keeps what, event versions, the vault, snapshots
 - [Failures and recovery](https://kernable.com/docs/concepts/failures): what happens when something fails, guarantees, finding the cause
 
