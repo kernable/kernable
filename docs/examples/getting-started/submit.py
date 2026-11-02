@@ -16,4 +16,4 @@ print(cart)
 
 outcome = k.submit(**cart_c1, type="AddItem", data={"sku": "pear", "qty": 1})
 print(outcome)
-# Outcome(committed=False, events=[], code='rejected', message='Cart is checked out')
+# Outcome(committed=False, events=[], code='rejected', message='Cart is checked out', key='', requirement=None)

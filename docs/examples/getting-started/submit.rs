@@ -25,7 +25,7 @@ async fn main() -> Result<(), BoxError> {
         Submit::new("shop", "cart", "c1", "AddItem").data(json!({ "sku": "pear", "qty": 1 }));
     let outcome = kernable.submit(add_pears).await?;
     println!("{outcome:?}");
-    // Rejected(Rejected { code: "rejected", message: "Cart is checked out" })
+    // Rejected(Rejected { code: "rejected", message: "Cart is checked out", key: None, requirement: None })
 
     Ok(())
 }
