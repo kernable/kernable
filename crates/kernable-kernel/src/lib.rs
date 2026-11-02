@@ -2819,7 +2819,13 @@ impl Session {
         if r.keys.is_empty() && r.facts.is_empty() && r.requires.is_empty() {
             return true;
         }
-        let msg = signing::index_message(
+        // Requirements by key and absent ones came with protocol 5, and its layout with them.
+        let sign = if self.protocol >= 5 {
+            signing::index_message
+        } else {
+            signing::index_message_v2
+        };
+        let msg = sign(
             &f.command,
             f.expected_version,
             &r.keys,
@@ -2843,20 +2849,49 @@ impl Session {
         r: &kernable_core::proto::Result,
     ) -> Result<Option<IndexChange>, Rejected> {
         for q in &r.requires {
-            let other = StreamId {
-                tenant_id: cmd.tenant_id.clone(),
-                domain: q.domain.clone(),
-                aggregate_type: q.aggregate_type.clone(),
-                aggregate_id: q.aggregate_id.clone(),
+            // By key: whichever aggregate of the type holds it, in the tenant or globally (a
+            // key name has one scope per type); none holds it, none holds the fact.
+            let other = if q.key.is_empty() {
+                Some(StreamId {
+                    tenant_id: cmd.tenant_id.clone(),
+                    domain: q.domain.clone(),
+                    aggregate_type: q.aggregate_type.clone(),
+                    aggregate_id: q.aggregate_id.clone(),
+                })
+            } else {
+                let id = |tenant: &str| {
+                    signing::unique_key_id_of(
+                        tenant,
+                        &q.domain,
+                        &q.aggregate_type,
+                        &q.key,
+                        &q.value_hash,
+                    )
+                };
+                index
+                    .holder(&id(&cmd.tenant_id))
+                    .or_else(|| index.holder(&id("")))
+                    .cloned()
             };
-            if !index.holds(&other, &q.fact) {
+            let holds = other.is_some_and(|o| index.holds(&o, &q.fact));
+            if holds == q.absent {
+                // Never the value, nor its hash: the key's name says which.
+                let which = if q.key.is_empty() {
+                    q.aggregate_id.clone()
+                } else {
+                    format!("with key {}", q.key)
+                };
+                let verb = if q.absent { "holds" } else { "does not hold" };
                 return Err(Rejected {
                     code: "requirement_missing".into(),
                     message: format!(
-                        "{}.{} {} does not hold {}",
-                        q.domain, q.aggregate_type, q.aggregate_id, q.fact
+                        "{}.{} {which} {verb} {}",
+                        q.domain, q.aggregate_type, q.fact
                     ),
-                    requirement: Some(Box::new(q.clone())),
+                    requirement: Some(Box::new(kernable_core::proto::Requirement {
+                        value_hash: Vec::new(),
+                        ..q.clone()
+                    })),
                     ..Default::default()
                 });
             }

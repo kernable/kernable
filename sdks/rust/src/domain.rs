@@ -1258,7 +1258,7 @@ impl<S: State> Runnable for Aggregate<S> {
             snapshot,
             keys: index.keys.iter().map(UniqueKey::to_wire).collect(),
             facts: index.facts,
-            requires: requires.iter().map(Requirement::to_wire).collect(),
+            requires: requires.iter().map(|q| q.to_wire(&cmd.domain)).collect(),
         })
     }
 }

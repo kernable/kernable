@@ -571,13 +571,13 @@ pub async fn run_worker(addr: String, mut w: TestWorker) -> tonic::Status {
                                 Behavior::ForgeIndex => key(9),
                                 _ => result_key.clone(),
                             };
-                            let msg = signing::index_message(
-                                &cmd,
-                                x.expected_version,
-                                &keys,
-                                &facts,
-                                &requires,
-                            );
+                            // Workers before protocol 5 sign requirements without key and absent.
+                            let sign = if w.protocol >= 5 {
+                                signing::index_message
+                            } else {
+                                signing::index_message_v2
+                            };
+                            let msg = sign(&cmd, x.expected_version, &keys, &facts, &requires);
                             signing::sign(&signer, &msg)
                         });
                         let version = x.expected_version + events.len() as u64;

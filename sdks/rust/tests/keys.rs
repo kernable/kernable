@@ -539,3 +539,110 @@ fn key_and_fact_names_are_type_names_of_at_most_128_bytes() {
 fn requirements_are_declared_for_a_command_of_the_aggregate() {
     members(false).requires("Leave", |_, _: Value| None);
 }
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct Fund {
+    pmdx_id: String,
+    open: bool,
+    wound_up: bool,
+}
+
+/// The rejection of an outcome: its message and the requirement it names.
+fn missing(outcome: &Outcome) -> (String, Requirement) {
+    match outcome {
+        Outcome::Rejected(r) if r.code == "requirement_missing" => {
+            (r.message.clone(), *r.requirement.clone().unwrap())
+        }
+        other => panic!("expected requirement_missing, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_requirement_names_its_aggregate_by_a_key_or_wants_a_fact_absent() {
+    let kernel = TestKernel::new(&["funds.*"], &[]);
+    kernel.start().await;
+    let funds = domain("funds");
+    let vehicle = funds.aggregate("Vehicle", Fund::default());
+    vehicle
+        .apply("Launched", |s, d: Value, _evt, _ctx| {
+            s.pmdx_id = field(&d, "pmdxId");
+            s.open = true;
+        })
+        .apply("WoundUp", |s, _: Value, _evt, _ctx| {
+            s.open = false;
+            s.wound_up = true;
+        })
+        .command("Launch", |_, d: Value, _cmd, _ctx| {
+            Ok(vec![NewEvent::new("Launched", d)])
+        })
+        .command("WindUp", |_, _: Value, _cmd, _ctx| {
+            Ok(vec![NewEvent::new("WoundUp", ())])
+        })
+        .unique(
+            "pmdxId",
+            |s| (!s.pmdx_id.is_empty()).then(|| s.pmdx_id.to_lowercase()),
+            Unique::tenant(),
+        )
+        .fact("open", |s| s.open)
+        .fact("woundUp", |s| s.wound_up);
+    let account = funds.aggregate("Account", false);
+    account
+        .apply("Opened", |s, _: Value, _evt, _ctx| *s = true)
+        .command("Open", |_, _: Value, _cmd, _ctx| {
+            Ok(vec![NewEvent::new("Opened", ())])
+        })
+        .command("Note", |_, _: Value, _cmd, _ctx| {
+            Ok(vec![NewEvent::new("Noted", ())])
+        })
+        // By the vehicle's PMDX ID, normalised as its key is.
+        .requires("Open", |_, d: Value| {
+            let pmdx = field(&d, "vehicle").to_lowercase();
+            Some(Requirement::by_key(
+                "funds", "Vehicle", "pmdxId", &pmdx, "open",
+            ))
+        })
+        // Of the own domain, and absent.
+        .requires("Note", |_, d: Value| {
+            Some(Requirement::of("Vehicle", &field(&d, "vehicle"), "woundUp").absent())
+        });
+    let kernable = kernel.client();
+    let worker = kernable.worker(&vehicle).aggregate(&account);
+    spawn(&worker);
+    worker.ready().await;
+    let on = |aggregate: &str, id: &str, command: &str, data: Value| {
+        send(
+            &kernable,
+            Submit::new("funds", aggregate, id, command).data(data),
+        )
+    };
+
+    let open = || on("Account", "a1", "Open", json!({ "vehicle": "VEH-Lyra" }));
+    let (message, named) = missing(&open().await);
+    assert_eq!(message, "funds.Vehicle with key pmdxId does not hold open");
+    assert_eq!(
+        (
+            named.key.as_deref(),
+            named.value,
+            named.aggregate_id.as_str()
+        ),
+        (Some("pmdxId"), None, ""),
+        "the key, never its value"
+    );
+    let launch = json!({ "pmdxId": "VEH-lyra" });
+    assert!(on("Vehicle", "v1", "Launch", launch).await.is_committed());
+    assert!(open().await.is_committed());
+
+    let note = || on("Account", "a1", "Note", json!({ "vehicle": "v1" }));
+    assert!(note().await.is_committed());
+    assert!(
+        on("Vehicle", "v1", "WindUp", json!({}))
+            .await
+            .is_committed()
+    );
+    let (message, named) = missing(&note().await);
+    assert_eq!(message, "funds.Vehicle v1 holds woundUp");
+    assert_eq!((named.domain.as_str(), named.absent), ("funds", true));
+    // A vehicle without events holds nothing.
+    let unknown = on("Account", "a2", "Note", json!({ "vehicle": "v9" })).await;
+    assert!(unknown.is_committed());
+}

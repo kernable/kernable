@@ -52,15 +52,9 @@ impl Rejected {
             code: r.code,
             message: r.message,
             key: Some(r.key).filter(|k| !k.is_empty()),
-            requirement: r.requirement.map(|q| {
-                let q = *q;
-                Box::new(crate::Requirement {
-                    domain: q.domain,
-                    aggregate_type: q.aggregate_type,
-                    aggregate_id: q.aggregate_id,
-                    fact: q.fact,
-                })
-            }),
+            requirement: r
+                .requirement
+                .map(|q| Box::new(crate::Requirement::from_wire(*q))),
         }
     }
 

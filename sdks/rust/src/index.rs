@@ -98,17 +98,30 @@ impl UniqueKey {
     }
 }
 
-/// A fact that another aggregate of the command's tenant must hold when a command commits,
-/// returned by the function given to [`crate::Aggregate::requires`]:
-/// `Requirement::new("shop", "vehicle", &data.vehicle_id, "open")`.
+/// A fact that another aggregate of the command's tenant must hold (or, [`Requirement::absent`],
+/// must not hold) when a command commits, returned by the function given to
+/// [`crate::Aggregate::requires`]: `Requirement::new("shop", "vehicle", &data.vehicle_id, "open")`.
+/// The aggregate is named by its ID, or by a unique key of its type and the key's value
+/// ([`Requirement::by_key`]), which the kernel resolves at commit: no aggregate holds the key,
+/// none holds the fact. An empty domain is the command's own ([`Requirement::of`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Requirement {
+    /// Empty: the domain of the command's aggregate.
     pub domain: String,
     /// Unqualified, e.g. `vehicle`.
     pub aggregate_type: String,
+    /// Empty when the aggregate is named by a key.
     pub aggregate_id: String,
+    /// The unique key that names the aggregate instead of its ID, as the aggregate type
+    /// declares it.
+    pub key: Option<String>,
+    /// The key's value, normalised as the aggregate type's key function does: the kernel
+    /// gets only its SHA-256. `None` in a rejection, which never carries the value.
+    pub value: Option<String>,
     /// The name of a fact that aggregate declares.
     pub fact: String,
+    /// The aggregate must not hold the fact.
+    pub absent: bool,
 }
 
 impl Requirement {
@@ -118,16 +131,76 @@ impl Requirement {
             domain: domain.to_owned(),
             aggregate_type: aggregate_type.to_owned(),
             aggregate_id: aggregate_id.to_owned(),
+            key: None,
+            value: None,
             fact: fact.to_owned(),
+            absent: false,
         }
     }
 
-    pub(crate) fn to_wire(&self) -> proto::Requirement {
+    /// As [`Requirement::new`], of an aggregate type of the command's own domain:
+    /// `Requirement::of("vehicle", &data.vehicle_id, "open")`.
+    pub fn of(aggregate_type: &str, aggregate_id: &str, fact: &str) -> Requirement {
+        Requirement::new("", aggregate_type, aggregate_id, fact)
+    }
+
+    /// The fact `fact` of the `domain.aggregate_type` aggregate that holds the unique key `key`
+    /// with `value` (not a personal key): `Requirement::by_key("funds", "vehicle", "pmdxId",
+    /// &data.vehicle, "open")`. Normalise `value` as the aggregate type's key does.
+    pub fn by_key(
+        domain: &str,
+        aggregate_type: &str,
+        key: &str,
+        value: &str,
+        fact: &str,
+    ) -> Requirement {
+        Requirement {
+            key: Some(key.to_owned()),
+            value: Some(value.to_owned()),
+            ..Requirement::new(domain, aggregate_type, "", fact)
+        }
+    }
+
+    /// This requirement turned around: the aggregate must not hold the fact. One without
+    /// events, or no holder of the key, holds none: `Requirement::of("vehicle", id,
+    /// "woundUp").absent()`.
+    #[must_use]
+    pub fn absent(mut self) -> Requirement {
+        self.absent = true;
+        self
+    }
+
+    /// On the wire, with an empty domain filled in with `own`.
+    pub(crate) fn to_wire(&self, own: &str) -> proto::Requirement {
         proto::Requirement {
-            domain: self.domain.clone(),
+            domain: if self.domain.is_empty() {
+                own.to_owned()
+            } else {
+                self.domain.clone()
+            },
             aggregate_type: self.aggregate_type.clone(),
             aggregate_id: self.aggregate_id.clone(),
             fact: self.fact.clone(),
+            key: self.key.clone().unwrap_or_default(),
+            value_hash: self
+                .value
+                .as_ref()
+                .map(|v| Sha256::digest(v.as_bytes()).to_vec())
+                .unwrap_or_default(),
+            absent: self.absent,
+        }
+    }
+
+    /// As the kernel names it in a rejection: without the key's value.
+    pub(crate) fn from_wire(q: proto::Requirement) -> Requirement {
+        Requirement {
+            domain: q.domain,
+            aggregate_type: q.aggregate_type,
+            aggregate_id: q.aggregate_id,
+            key: Some(q.key).filter(|k| !k.is_empty()),
+            value: None,
+            fact: q.fact,
+            absent: q.absent,
         }
     }
 }

@@ -21,7 +21,8 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 /// The keys (name, value, global, subject), facts and requirements (aggregate ID, fact; of
-/// `orders.Order` in the command's tenant) a test command asks the worker to send.
+/// `orders.Order` in the command's tenant) a test command asks the worker to send. A requirement
+/// names its aggregate by ID or as `key:<name>=<value>`, and is `absent` with a third element.
 fn payload(keys: &[(&str, &str, bool, &str)], facts: &[&str], requires: &[(&str, &str)]) -> String {
     json!({ "keys": keys, "facts": facts, "requires": requires }).to_string()
 }
@@ -52,11 +53,24 @@ fn from_payload(cmd: &Command) -> (Vec<UniqueKey>, Vec<String>, Vec<Requirement>
         .collect();
     let requires = list("requires")
         .iter()
-        .map(|r| Requirement {
-            domain: "orders".into(),
-            aggregate_type: "Order".into(),
-            aggregate_id: r[0].as_str().unwrap().into(),
-            fact: r[1].as_str().unwrap().into(),
+        .map(|r| {
+            let target = r[0].as_str().unwrap();
+            let (aggregate_id, key, value_hash) = match target.strip_prefix("key:") {
+                Some(k) => {
+                    let (name, value) = k.split_once('=').unwrap();
+                    (String::new(), name.into(), Sha256::digest(value).to_vec())
+                }
+                None => (target.into(), String::new(), Vec::new()),
+            };
+            Requirement {
+                domain: "orders".into(),
+                aggregate_type: "Order".into(),
+                aggregate_id,
+                fact: r[1].as_str().unwrap().into(),
+                key,
+                value_hash,
+                absent: r.get(2).and_then(Value::as_bool).unwrap_or(false),
+            }
         })
         .collect();
     (keys, facts, requires)
@@ -287,6 +301,7 @@ async fn a_command_commits_only_while_the_facts_it_requires_are_held() {
         aggregate_type: "Order".into(),
         aggregate_id: "v1".into(),
         fact: "open".into(),
+        ..Default::default()
     };
     assert_eq!(
         (reason.key.as_str(), &reason.requirement),
@@ -624,6 +639,7 @@ async fn keys_facts_and_requirements_over_a_limit_are_an_invalid_index() {
         aggregate_type: aggregate_type.into(),
         aggregate_id: id.into(),
         fact: fact.into(),
+        ..Default::default()
     };
     let hash = |n: u32| Sha256::digest(n.to_be_bytes()).to_vec();
     let fine = requirement("orders", "Order", "o1", "open");
@@ -803,4 +819,131 @@ async fn only_the_kernel_names_a_key_or_requirement_in_a_rejection() {
     let reason = rejection(&result);
     assert_eq!(reason.code, "invalid_state");
     assert_eq!((reason.key.as_str(), &reason.requirement), ("", &None));
+}
+
+/// Requirements with a third element: `absent`.
+fn payload_absent(requires: &[(&str, &str, bool)]) -> String {
+    json!({ "keys": [], "facts": [], "requires": requires }).to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_requirement_names_its_aggregate_by_a_unique_key() {
+    let env = start("unique-require-by-key").await;
+    start_worker(env.addr.clone(), indexing_worker()).await;
+    // o1 holds the number N-1, and is open.
+    let open = payload(&[("number", "N-1", false, "")], &["open"], &[]);
+    assert_eq!(
+        outcome(&env, order("c1", "PlaceOrder", "o1", "t1", open)).await,
+        "committed"
+    );
+
+    // The order with number N-1 is open: by its key, without knowing its ID.
+    let by_key = payload(&[], &[], &[("key:number=N-1", "open")]);
+    assert_eq!(
+        outcome(&env, order("c2", "PlaceOrder", "o2", "t1", by_key)).await,
+        "committed"
+    );
+
+    // No order holds N-2: nobody holds the fact. The rejection names the key, not the value.
+    let nobody = payload(&[], &[], &[("key:number=N-2", "open")]);
+    let refused = submit(&env.addr, order("c3", "PlaceOrder", "o3", "t1", nobody))
+        .await
+        .unwrap();
+    let r = rejection(&refused);
+    assert_eq!(r.code, "requirement_missing");
+    assert_eq!(r.message, "orders.Order with key number does not hold open");
+    let q = r.requirement.as_ref().unwrap();
+    assert_eq!((q.key.as_str(), q.value_hash.is_empty()), ("number", true));
+    assert!(!r.message.contains("N-2"));
+
+    // A tenant key is the command's tenant's: in t2 nobody holds N-1.
+    let elsewhere = payload(&[], &[], &[("key:number=N-1", "open")]);
+    assert_eq!(
+        outcome(&env, order("c4", "PlaceOrder", "o4", "t2", elsewhere)).await,
+        "requirement_missing"
+    );
+
+    // A global key is found from any tenant.
+    let global = payload(&[("code", "G-1", true, "")], &["open"], &[]);
+    assert_eq!(
+        outcome(&env, order("c5", "PlaceOrder", "o5", "t1", global)).await,
+        "committed"
+    );
+    let from_t2 = payload(&[], &[], &[("key:code=G-1", "open")]);
+    assert_eq!(
+        outcome(&env, order("c6", "PlaceOrder", "o6", "t2", from_t2)).await,
+        "committed"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_absent_requirement_commits_only_while_the_fact_is_not_held() {
+    let env = start("unique-require-absent").await;
+    start_worker(env.addr.clone(), indexing_worker()).await;
+    let open = payload(&[("number", "N-1", false, "")], &["open"], &[]);
+    assert_eq!(
+        outcome(&env, order("c1", "PlaceOrder", "o1", "t1", open)).await,
+        "committed"
+    );
+
+    // o1 holds open: a command that requires it not to is refused, and says so.
+    let refused = submit(
+        &env.addr,
+        order(
+            "c2",
+            "PlaceOrder",
+            "o2",
+            "t1",
+            payload_absent(&[("o1", "open", true)]),
+        ),
+    )
+    .await
+    .unwrap();
+    let r = rejection(&refused);
+    assert_eq!(r.message, "orders.Order o1 holds open");
+    assert!(r.requirement.as_ref().unwrap().absent);
+    let by_key = payload_absent(&[("key:number=N-1", "open", true)]);
+    assert_eq!(
+        outcome(&env, order("c3", "PlaceOrder", "o3", "t1", by_key)).await,
+        "requirement_missing"
+    );
+
+    // An aggregate without events, or no holder of a key, holds nothing.
+    let missing = payload_absent(&[("o9", "open", true), ("key:number=N-9", "open", true)]);
+    assert_eq!(
+        outcome(&env, order("c4", "PlaceOrder", "o4", "t1", missing)).await,
+        "committed"
+    );
+
+    // Once o1 no longer holds open, the requirement holds.
+    let closed = payload(&[("number", "N-1", false, "")], &[], &[]);
+    assert_eq!(
+        outcome(&env, order("c5", "AddItem", "o1", "t1", closed)).await,
+        "committed"
+    );
+    let again = payload_absent(&[("o1", "open", true)]);
+    assert_eq!(
+        outcome(&env, order("c6", "PlaceOrder", "o6", "t1", again)).await,
+        "committed"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_worker_of_protocol_4_signs_requirements_as_before() {
+    let env = start("unique-require-protocol-4").await;
+    let older = TestWorker {
+        protocol: 4,
+        ..indexing_worker()
+    };
+    start_worker(env.addr.clone(), older).await;
+    let open = payload(&[], &["open"], &[]);
+    assert_eq!(
+        outcome(&env, order("c1", "PlaceOrder", "o1", "t1", open)).await,
+        "committed"
+    );
+    let requiring = payload(&[], &[], &[("o1", "open")]);
+    assert_eq!(
+        outcome(&env, order("c2", "PlaceOrder", "o2", "t1", requiring)).await,
+        "committed"
+    );
 }

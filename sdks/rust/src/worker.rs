@@ -484,12 +484,16 @@ mod tests {
             .fact("closed", |s| !s.open)
             .fact("paid", |s| s.paid)
             .requires("PlaceOrder", |_, d: Value| {
-                [Requirement::new(
-                    "identity",
-                    "Customer",
-                    d["customerId"].as_str().unwrap(),
-                    "active",
-                )]
+                [
+                    Requirement::new(
+                        "identity",
+                        "Customer",
+                        d["customerId"].as_str().unwrap(),
+                        "active",
+                    ),
+                    Requirement::by_key("funds", "Vehicle", "pmdxId", "VEH-lyra", "woundUp")
+                        .absent(),
+                ]
             });
 
         let cmd = proto::Command {

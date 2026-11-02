@@ -172,9 +172,10 @@ pub fn result_message(cmd: &Command, expected_version: u64, events: &[NewEvent])
 }
 
 /// What a worker signs for the unique keys, facts and requirements of its result for `cmd`
-/// based on `expected_version` (protocol 2). A message of its own, not part of
-/// [`result_message`]: every event stores the result signature, and `kernable verify` checks it
-/// against the stored events alone, which never hold value hashes or requirements.
+/// based on `expected_version` (protocol 5; [`index_message_v2`] for protocols 2 to 4). A
+/// message of its own, not part of [`result_message`]: every event stores the result signature,
+/// and `kernable verify` checks it against the stored events alone, which never hold value
+/// hashes or requirements.
 pub fn index_message(
     cmd: &Command,
     expected_version: u64,
@@ -182,6 +183,41 @@ pub fn index_message(
     facts: &[String],
     requires: &[Requirement],
 ) -> Vec<u8> {
+    let mut m = index_head(cmd, expected_version, keys, facts).u64(requires.len() as u64);
+    for r in requires {
+        m = m
+            .str(&r.domain)
+            .str(&r.aggregate_type)
+            .str(&r.aggregate_id)
+            .str(&r.fact)
+            .str(&r.key)
+            .bytes(&r.value_hash)
+            .u64(u64::from(r.absent));
+    }
+    m.0
+}
+
+/// [`index_message`] as workers of protocols 2 to 4 sign it: requirements by aggregate ID only.
+pub fn index_message_v2(
+    cmd: &Command,
+    expected_version: u64,
+    keys: &[UniqueKey],
+    facts: &[String],
+    requires: &[Requirement],
+) -> Vec<u8> {
+    let mut m = index_head(cmd, expected_version, keys, facts).u64(requires.len() as u64);
+    for r in requires {
+        m = m
+            .str(&r.domain)
+            .str(&r.aggregate_type)
+            .str(&r.aggregate_id)
+            .str(&r.fact);
+    }
+    m.0
+}
+
+/// The index message up to the requirements: the command, the keys and the facts.
+fn index_head(cmd: &Command, expected_version: u64, keys: &[UniqueKey], facts: &[String]) -> Msg {
     let mut m = Msg::new("kernable.v1.index")
         .str(&cmd.command_id)
         .str(&cmd.tenant_id)
@@ -201,15 +237,7 @@ pub fn index_message(
     for f in facts {
         m = m.str(f);
     }
-    m = m.u64(requires.len() as u64);
-    for r in requires {
-        m = m
-            .str(&r.domain)
-            .str(&r.aggregate_type)
-            .str(&r.aggregate_id)
-            .str(&r.fact);
-    }
-    m.0
+    m
 }
 
 /// The identity of a unique key in the kernel's index. The kernel computes it from the
@@ -217,12 +245,30 @@ pub fn index_message(
 /// place a key in another domain's namespace.
 pub fn unique_key_id(cmd: &Command, key: &UniqueKey) -> [u8; 32] {
     let tenant = if key.global { "" } else { &cmd.tenant_id };
+    unique_key_id_of(
+        tenant,
+        &cmd.domain,
+        &cmd.aggregate_type,
+        &key.name,
+        &key.value_hash,
+    )
+}
+
+/// The identity of the unique key `name` with the value hash `value_hash` of aggregates of
+/// `domain` and `aggregate_type`, in `tenant` (empty for a global key); see [`unique_key_id`].
+pub fn unique_key_id_of(
+    tenant: &str,
+    domain: &str,
+    aggregate_type: &str,
+    name: &str,
+    value_hash: &[u8],
+) -> [u8; 32] {
     let msg = Msg::new("kernable.v1.key")
         .str(tenant)
-        .str(&cmd.domain)
-        .str(&cmd.aggregate_type)
-        .str(&key.name)
-        .bytes(&key.value_hash);
+        .str(domain)
+        .str(aggregate_type)
+        .str(name)
+        .bytes(value_hash);
     Sha256::digest(msg.0).into()
 }
 

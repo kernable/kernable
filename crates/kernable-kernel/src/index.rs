@@ -327,14 +327,20 @@ pub(crate) fn validate(r: &kernable_core::proto::Result) -> Result<(), Rejected>
         }
     }
     for q in &r.requires {
+        // Its aggregate by ID, or by a key and the value's 32-byte hash: one of them.
+        let named = if q.key.is_empty() {
+            !q.aggregate_id.is_empty() && q.value_hash.is_empty()
+        } else {
+            q.aggregate_id.is_empty() && name_ok(&q.key) && q.value_hash.len() == 32
+        };
         let valid = config::valid_domain(&q.domain)
             && config::valid_type(&q.aggregate_type)
-            && !q.aggregate_id.is_empty()
+            && named
             && name_ok(&q.fact);
         if !valid {
             return Err(invalid(
                 "a requirement names a domain, an unqualified aggregate type, an aggregate ID \
-                 and a fact"
+                 or a key with its 32-byte value hash, and a fact"
                     .into(),
             ));
         }

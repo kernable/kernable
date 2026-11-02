@@ -111,14 +111,27 @@ fn unique_key() -> impl Strategy<Value = UniqueKey> {
 }
 
 fn requirement() -> impl Strategy<Value = Requirement> {
-    (text(), text(), text(), text()).prop_map(|(domain, aggregate_type, aggregate_id, fact)| {
-        Requirement {
-            domain,
-            aggregate_type,
-            aggregate_id,
-            fact,
-        }
-    })
+    (
+        (text(), text(), text(), text()),
+        (
+            text(),
+            prop::collection::vec(any::<u8>(), 0..3),
+            any::<bool>(),
+        ),
+    )
+        .prop_map(
+            |((domain, aggregate_type, aggregate_id, fact), (key, value_hash, absent))| {
+                Requirement {
+                    domain,
+                    aggregate_type,
+                    aggregate_id,
+                    fact,
+                    key,
+                    value_hash,
+                    absent,
+                }
+            },
+        )
 }
 
 fn grant() -> impl Strategy<Value = Grant> {

@@ -138,19 +138,32 @@ fn vectors() -> Value {
         },
     ];
     let facts = ["open".to_owned(), "paid".to_owned()];
-    let requires = [Requirement {
-        domain: "identity".into(),
-        aggregate_type: "Customer".into(),
-        aggregate_id: "k-1".into(),
-        fact: "active".into(),
-    }];
+    let requires = [
+        Requirement {
+            domain: "identity".into(),
+            aggregate_type: "Customer".into(),
+            aggregate_id: "k-1".into(),
+            fact: "active".into(),
+            ..Default::default()
+        },
+        // By a unique key, and absent.
+        Requirement {
+            domain: "funds".into(),
+            aggregate_type: "Vehicle".into(),
+            fact: "woundUp".into(),
+            key: "pmdxId".into(),
+            value_hash: Sha256::digest(b"VEH-lyra").to_vec(),
+            absent: true,
+            ..Default::default()
+        },
+    ];
     let keys_json: Vec<Value> = keys
         .iter()
         .map(|k| json!({"name": k.name, "global": k.global, "value_hash_hex": hex::encode(&k.value_hash), "subject": k.subject}))
         .collect();
     let requires_json: Vec<Value> = requires
         .iter()
-        .map(|r| json!({"domain": r.domain, "aggregate_type": r.aggregate_type, "aggregate_id": r.aggregate_id, "fact": r.fact}))
+        .map(|r| json!({"domain": r.domain, "aggregate_type": r.aggregate_type, "aggregate_id": r.aggregate_id, "fact": r.fact, "key": r.key, "value_hash_hex": hex::encode(&r.value_hash), "absent": r.absent}))
         .collect();
 
     let context_json = json!({
