@@ -20,8 +20,8 @@ One cart, step by step:
 
 | | Command | State before | Decision | Event stored | Version | State after |
 |---|---|---|---|---|---|---|
-| 1 | `AddItem` apple × 2 | empty | accept | `ItemAdded` {qty 2} | 1 | 2 items |
-| 2 | `AddItem` pear × 1 | 2 items | accept | `ItemAdded` {qty 1} | 2 | 3 items |
+| 1 | `AddItem` apple × 2 | empty | accept | `ItemAdded {qty: 2}` | 1 | 2 items |
+| 2 | `AddItem` pear × 1 | 2 items | accept | `ItemAdded {qty: 1}` | 2 | 3 items |
 | 3 | `CheckOut` | 3 items | accept | `CheckedOut` {orderId} | 3 | 3 items, checked out |
 | 4 | `AddItem` fig × 1 | checked out | reject: "Cart is checked out" | none | 3 | unchanged |
 

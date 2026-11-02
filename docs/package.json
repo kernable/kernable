@@ -6,7 +6,7 @@
     "dev": "vitepress dev .",
     "build": "vitepress build .",
     "reference": "node scripts/reference.ts",
-    "check": "node scripts/reference.ts --check && vitepress build . && node --test --conditions=source examples/*.test.ts examples/how-to/*.test.ts"
+    "check": "node scripts/reference.ts --check && vitepress build . && node scripts/attributes.ts && node --test --conditions=source examples/*.test.ts examples/how-to/*.test.ts"
   },
   "devDependencies": {
     "@kernable/sdk": "file:../sdks/typescript",
