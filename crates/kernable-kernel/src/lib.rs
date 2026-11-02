@@ -2849,8 +2849,9 @@ impl Session {
         r: &kernable_core::proto::Result,
     ) -> Result<Option<IndexChange>, Rejected> {
         for q in &r.requires {
-            // By key: whichever aggregate of the type holds it, in the tenant or globally (a
-            // key name has one scope per type); none holds it, none holds the fact.
+            // By key: the aggregate of the type that holds it, tenant or global (a key name has
+            // one scope per type), and only in the command's tenant, like one named by ID: a
+            // global key held in another tenant names no aggregate here. None holds no fact.
             let other = if q.key.is_empty() {
                 Some(StreamId {
                     tenant_id: cmd.tenant_id.clone(),
@@ -2871,6 +2872,7 @@ impl Session {
                 index
                     .holder(&id(&cmd.tenant_id))
                     .or_else(|| index.holder(&id("")))
+                    .filter(|holder| holder.tenant_id == cmd.tenant_id)
                     .cloned()
             };
             let holds = other.is_some_and(|o| index.holds(&o, &q.fact));

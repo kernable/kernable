@@ -106,7 +106,7 @@ def _(state, data):
 
 ### By a key, or absent
 
-A requirement can name its aggregate by a **unique key** of its type instead of its ID: the fund whose `pmdxId` is `FND-lyra`. The kernel finds the aggregate that holds the key when the command commits, in the command's tenant or, for a global key, in any. No aggregate holds it: then none holds the fact either. So a command needs no lookup of the ID first, and the check stays atomic. A requirement can also be **absent**: the aggregate must not hold the fact. An aggregate without events, or a key nobody holds, holds no fact, so "the vehicle is gone or wound up" is the fact `open` absent. Without a domain, a requirement is of the command's own domain.
+A requirement can name its aggregate by a **unique key** of its type instead of its ID: the fund whose `pmdxId` is `FND-lyra`. The kernel finds the aggregate that holds the key when the command commits, always in the command's tenant: a global key held in another tenant names no aggregate here, so a requirement never sees another tenant's facts. No aggregate holds it: then none holds the fact either. So a command needs no lookup of the ID first, and the check stays atomic. A requirement can also be **absent**: the aggregate must not hold the fact. An aggregate without events, or a key nobody holds, holds no fact, so "the vehicle is gone or wound up" is the fact `open` absent. Without a domain, a requirement is of the command's own domain.
 
 ::: code-group
 

@@ -863,16 +863,21 @@ async fn a_requirement_names_its_aggregate_by_a_unique_key() {
         "requirement_missing"
     );
 
-    // A global key is found from any tenant.
+    // A global key names its holder in the holder's tenant only: never another tenant's facts.
     let global = payload(&[("code", "G-1", true, "")], &["open"], &[]);
     assert_eq!(
         outcome(&env, order("c5", "PlaceOrder", "o5", "t1", global)).await,
         "committed"
     );
+    let in_t1 = payload(&[], &[], &[("key:code=G-1", "open")]);
+    assert_eq!(
+        outcome(&env, order("c6", "PlaceOrder", "o6", "t1", in_t1)).await,
+        "committed"
+    );
     let from_t2 = payload(&[], &[], &[("key:code=G-1", "open")]);
     assert_eq!(
-        outcome(&env, order("c6", "PlaceOrder", "o6", "t2", from_t2)).await,
-        "committed"
+        outcome(&env, order("c7", "PlaceOrder", "o7", "t2", from_t2)).await,
+        "requirement_missing"
     );
 }
 

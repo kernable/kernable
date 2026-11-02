@@ -826,8 +826,8 @@ A unique key of an aggregate: no other aggregate holds the same key at the same 
 A fact another aggregate of the command's tenant must hold (or, `absent`, must not hold) when
 the command commits. The aggregate is named by its ID, or (protocol 5) by a unique key of its
 type that it holds: the key's name and the SHA-256 of its value, as in UniqueKey, in the
-command's tenant or global. No aggregate holding the key, like an aggregate without events,
-holds no fact. Personal keys cannot name an aggregate.
+command's tenant (a global key held in another tenant names none). No aggregate holding the
+key, like an aggregate without events, holds no fact. Personal keys cannot name an aggregate.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
