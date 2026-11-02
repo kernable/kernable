@@ -257,3 +257,35 @@ async fn sigterm_checkpoints_and_in_flight_commands_run_right_after_a_restart() 
     drop(kernel);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_late_result_that_arrives_before_the_new_holders_never_commits() {
+    // A holds the command past its 500 ms lease and answers at 700 ms; B gets it at 500 ms and
+    // answers at 900 ms, within its own lease: A's result comes first, under a lease that is no
+    // longer its.
+    let env = start_with("lease-reversed", 500).await;
+    let (seen_a, mut by_a) = mpsc::unbounded_channel();
+    let a = TestWorker::with(Behavior::Slow(Duration::from_millis(700)), seen_a);
+    start_worker(env.addr.clone(), a).await;
+    let addr = env.addr.clone();
+    let submitted = tokio::spawn(async move {
+        let place = signed(command("c1", "PlaceOrder", "o1"), &key(1));
+        submit(&addr, place).await.unwrap()
+    });
+    assert_eq!(by_a.recv().await.unwrap(), "c1", "A holds it");
+    let (seen_b, mut by_b) = mpsc::unbounded_channel();
+    let b = TestWorker::with(Behavior::Slow(Duration::from_millis(400)), seen_b);
+    start_worker(env.addr.clone(), b).await;
+    assert_eq!(
+        by_b.recv().await.unwrap(),
+        "c1",
+        "B gets it once A's lease ends"
+    );
+
+    let result = submitted.await.unwrap();
+    assert_eq!(committed_versions(&result), [1]);
+    let read = kernable_store::open_read_only(&env.store).unwrap();
+    assert_eq!(read.head_position().unwrap(), 1, "committed once");
+    let report = read.verify(&[id(&env.kernel_key).to_string()]).unwrap();
+    assert!(report.is_ok(), "{:?}", report.problems);
+}

@@ -917,3 +917,32 @@ async fn memberships_and_retries_outside_their_time_window_are_refused() {
             .is_empty()
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_settling_submit_stops_waiting_for_a_listener_its_membership_drops() {
+    let env = start_custom("listener-unlisted-while-waiting", |config, _| {
+        config.settle_timeout_ms = 10_000;
+    })
+    .await;
+    spawn_worker(&env).await;
+    apply(&env.addr, membership("shop", &[], &["carts"], &[]))
+        .await
+        .unwrap();
+    // It gets the event but never acknowledges it: the submit waits for it.
+    let mut carts = listen(&env, "carts", of("shop")).await.unwrap();
+    let started = std::time::Instant::now();
+    let placed = spawn_submit(&env, "c1", "PlaceOrder");
+    assert_eq!(positions(&carts.next().await), [1]);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!placed.is_finished(), "it waits for carts");
+    // The next version of the service has no carts: nobody waits for it any more.
+    apply(&env.addr, membership("shop", &[], &[], &[]))
+        .await
+        .unwrap();
+    let placed = placed.await.unwrap();
+    assert!(settled(&placed));
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "woken, not timed out"
+    );
+}

@@ -350,6 +350,8 @@ pub struct TestWorker {
     pub index: Option<IndexWriter>,
     /// The protocol it registers with.
     pub protocol: u32,
+    /// Commands it runs at once.
+    pub max_concurrency: u32,
 }
 
 /// The aggregates some workers are executing: one lease per aggregate at a time (O7).
@@ -381,6 +383,7 @@ impl TestWorker {
             held: None,
             index: None,
             protocol: kernable_core::PROTOCOL,
+            max_concurrency: 4,
         }
     }
 
@@ -425,7 +428,7 @@ pub async fn run_worker(addr: String, mut w: TestWorker) -> tonic::Status {
         } else {
             w.aggregates.clone()
         },
-        max_concurrency: 4,
+        max_concurrency: w.max_concurrency,
         service: w.service.clone(),
         event_schemas: w
             .schemas

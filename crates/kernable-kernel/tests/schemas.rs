@@ -3,6 +3,8 @@
 
 mod common;
 
+use std::time::Duration;
+
 use common::*;
 use kernable_core::{
     proto::{NewEvent, Rejected, command_result::Outcome},
@@ -125,4 +127,40 @@ async fn a_worker_writes_exactly_what_it_declared() {
     }
     let store = kernable_store::open_read_only(&env.store).unwrap();
     assert_eq!(store.head_position().unwrap(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn in_a_rolling_deploy_the_old_worker_cannot_write_next_to_the_new_one() {
+    let env = start("schema-rolling").await;
+    // v1 registers while nothing newer is stored, and runs one command at a time, slowly.
+    let v1 = TestWorker {
+        behavior: Behavior::Slow(Duration::from_millis(600)),
+        max_concurrency: 1,
+        ..worker(&[("orders.OrderPlaced", 1)], None)
+    };
+    let v1 = start_worker(env.addr.clone(), v1).await;
+    let addr = env.addr.clone();
+    let first = tokio::spawn(async move { submit(&addr, place("c1", "o1")).await });
+    tokio::time::sleep(Duration::from_millis(100)).await; // v1 holds c1
+    // v2 comes up next to it and writes schema 2 first.
+    start_worker(env.addr.clone(), worker(&[("orders.OrderPlaced", 2)], None)).await;
+    let second = submit(&env.addr, place("c2", "o2")).await.unwrap();
+    assert_eq!(schemas(&second), [2]);
+
+    // v1's late result at schema 1 is refused and its session ends; c1 runs again on v2.
+    let ended = v1.await.unwrap();
+    assert_eq!(ended.code(), tonic::Code::FailedPrecondition, "{ended:?}");
+    assert_eq!(schemas(&first.await.unwrap().unwrap()), [2]);
+    let store = kernable_store::open_read_only(&env.store).unwrap();
+    let stored: Vec<u32> = store
+        .read_all(0, 10)
+        .unwrap()
+        .iter()
+        .map(|e| e.schema)
+        .collect();
+    assert_eq!(
+        stored,
+        [2, 2],
+        "no event at schema 1 next to one at schema 2"
+    );
 }

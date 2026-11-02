@@ -1037,3 +1037,35 @@ async fn a_middleware_gets_vault_values_only_if_its_key_may_read_them() {
         ["reader with 1 vault values", "blind"]
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_middleware_that_goes_away_mid_check_refuses_at_once() {
+    let env = start_custom("middleware-gone-mid-check", |config, _| {
+        config.middleware_timeout_ms = 10_000;
+    })
+    .await;
+    spawn_worker(&env).await;
+    let log = Log::default();
+    let slow = Spec {
+        deliberates: Duration::from_secs(30),
+        ..spec("guard", 0, pass)
+    };
+    let (guard, _stop) = middleware(&env, slow, &log);
+    settle_in().await;
+    let started = std::time::Instant::now();
+    let submitted = tokio::spawn({
+        let addr = env.addr.clone();
+        let place = signed(command("c1", "PlaceOrder", "o1"), &key(1));
+        async move { submit(&addr, place).await }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    guard.abort(); // the process dies while it decides
+    let refused = submitted.await.unwrap();
+    assert_eq!(refused.unwrap_err().code(), Code::Unavailable);
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "refused at once, not after the middleware timeout"
+    );
+    let store = kernable_store::open_read_only(&env.store).unwrap();
+    assert_eq!(store.head_position().unwrap(), 0, "nothing stored");
+}
