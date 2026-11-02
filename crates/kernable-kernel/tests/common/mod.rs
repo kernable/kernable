@@ -346,10 +346,8 @@ pub struct TestWorker {
     pub grant: Option<Grant>,
     /// Shared by workers that must never execute one aggregate at the same time.
     pub held: Option<std::sync::Arc<Held>>,
-    /// The keys, facts and requirements it sends with its results (protocol 2).
+    /// The keys, facts and requirements it sends with its results.
     pub index: Option<IndexWriter>,
-    /// The protocol it registers with.
-    pub protocol: u32,
     /// Commands it runs at once.
     pub max_concurrency: u32,
 }
@@ -382,7 +380,6 @@ impl TestWorker {
             grant: None,
             held: None,
             index: None,
-            protocol: kernable_core::PROTOCOL,
             max_concurrency: 4,
         }
     }
@@ -420,7 +417,7 @@ pub async fn run_worker(addr: String, mut w: TestWorker) -> tonic::Status {
     let (tx, rx) = mpsc::channel(16);
     let send = |msg: In| WorkerMessage { msg: Some(msg) };
     tx.send(send(In::Register(Register {
-        protocol: w.protocol,
+        protocol: kernable_core::PROTOCOL,
         worker_id: "test-worker".into(),
         key_id: id(&w.claimed),
         aggregates: if w.aggregates.is_empty() {
@@ -456,7 +453,7 @@ pub async fn run_worker(addr: String, mut w: TestWorker) -> tonic::Status {
         Ok(r) => r.into_inner(),
         Err(status) => return status,
     };
-    // Executes whose history is still coming in parts (protocol 3), by lease.
+    // Executes whose history is still coming in parts, by lease.
     let mut partial: HashMap<String, Execute> = HashMap::new();
     loop {
         let msg = match inbound.message().await {
@@ -571,13 +568,13 @@ pub async fn run_worker(addr: String, mut w: TestWorker) -> tonic::Status {
                                 Behavior::ForgeIndex => key(9),
                                 _ => result_key.clone(),
                             };
-                            // Workers before protocol 5 sign requirements without key and absent.
-                            let sign = if w.protocol >= 5 {
-                                signing::index_message
-                            } else {
-                                signing::index_message_v2
-                            };
-                            let msg = sign(&cmd, x.expected_version, &keys, &facts, &requires);
+                            let msg = signing::index_message(
+                                &cmd,
+                                x.expected_version,
+                                &keys,
+                                &facts,
+                                &requires,
+                            );
                             signing::sign(&signer, &msg)
                         });
                         let version = x.expected_version + events.len() as u64;

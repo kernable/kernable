@@ -19,7 +19,7 @@ Every call carries the caller's grant in the metadata entry `kernable-grant`, an
 
 ## Conventions
 
-kernable protocol, version 3. Payloads (of commands, events, queries, answers and snapshots)
+kernable protocol, version 1. Payloads (of commands, events, queries, answers and snapshots)
 are opaque bytes to the kernel. Signatures cover the byte layouts in SIGNING.md, never the
 protobuf encoding.
 
@@ -28,12 +28,8 @@ SubscribeRequest, DataRequest, CacheRequest, RevokeRequest, ApplyRequest, RetryR
 Register, Hello)
 carries `protocol`, the version its sender speaks. It is never signed. The kernel accepts a
 range of versions and refuses others with FAILED_PRECONDITION, naming the range and whether
-the SDK or the kernel needs an update. 0 (unset) is never accepted. Version 1 is the first
-release; version 2 adds unique keys, facts and requirements to Result; version 3 lets the
-kernel send a long history in parts (Execute.more, ExecuteMore); version 4 lets a listener
-park events (Ack.parked) and get them again (Batch.retries); version 5 lets a requirement
-name its aggregate by a unique key, and require a fact to be absent (Requirement.key,
-value_hash, absent).
+the SDK or the kernel needs an update. 0 (unset) is never accepted. Until the first release
+the version stays 1 and changes in place: SDKs and kernel must come from the same build.
 
 Names: a domain is an identifier of letters, digits, `-` and `_` that starts with a letter;
 by convention it is lowercase (`orders`), like aggregate types, while command, event and query
@@ -656,7 +652,7 @@ Events for the listener, in order of global position.
 | `events` | repeated `Event` | 1 | only the listener's event types; may be empty |
 | `up_to` |  `uint64` | 2 | last position the batch covers; acknowledge it once processed |
 | `vault` | repeated `VaultValue` | 3 | The values the events refer to, if the key may read them (granted vault_read) and they are not erased; a missing value reads as null. |
-| `retries` | repeated `Event` | 4 | Parked events an operator asked to deliver again (RetryRequest), to handle before `events` and regardless of the listener's position. Sent alone, with `up_to` the last position delivered, and only to listeners of protocol 4 or later. Their vault values are in `vault`. |
+| `retries` | repeated `Event` | 4 | Parked events an operator asked to deliver again (RetryRequest), to handle before `events` and regardless of the listener's position. Sent alone, with `up_to` the last position delivered. Their vault values are in `vault`. |
 
 ### Ack
 
@@ -709,7 +705,7 @@ From the kernel; exactly one field is set.
 | `challenge` |  `Challenge` | 1 | after Register |
 | `registered` |  `Registered` | 2 | after a valid ChallengeResponse |
 | `execute` |  `Execute` | 3 |  |
-| `execute_more` |  `ExecuteMore` | 4 | protocol 3: the rest of an Execute's history |
+| `execute_more` |  `ExecuteMore` | 4 | the rest of an Execute's history |
 
 ### Register
 
@@ -778,11 +774,11 @@ before `deadline`; after it, the command goes to another worker and a late answe
 | `received_at` |  `int64` | 6 | ms since epoch when the kernel accepted the command; stable across retries |
 | `deadline` |  `int64` | 7 | ms since epoch when the lease expires and the command goes to another worker |
 | `vault` | repeated `VaultValue` | 8 | the values the command and the history refer to, unless erased |
-| `more` |  `bool` | 9 | Protocol 3: the history does not fit one message; ExecuteMore messages of the same `lease_id` follow, in order, with the rest of it (other leases' messages may come between). Run the command once the last one (`more` false) has arrived. |
+| `more` |  `bool` | 9 | The history does not fit one message; ExecuteMore messages of the same `lease_id` follow, in order, with the rest of it (other leases' messages may come between). Run the command once the last one (`more` false) has arrived. |
 
 ### ExecuteMore
 
-Protocol 3: the next part of an Execute's history, with the vault values it refers to.
+The next part of an Execute's history, with the vault values it refers to.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
@@ -805,7 +801,7 @@ few times before it rejects it with `concurrency_conflict`.
 | `worker_sig` |  `Signature` | 3 | by Register.key_id |
 | `snapshot` |  `Snapshot` | 4 | Optional: the state after these events, at expected_version + len(events), signed over kernable.v1.snapshot by the same key. Only with at least one event; an invalid snapshot ends the stream like an invalid result signature. Not stored after an erasure. |
 | `vault` | repeated `VaultValue` | 5 | the values of the events' `vault_refs` |
-| `keys` | repeated `UniqueKey` | 6 | Protocol 2: the full set of unique keys and facts the aggregate holds after these events (empty: none), and the facts other aggregates must hold for the command to commit. The kernel checks them atomically with the commit: a key another aggregate holds rejects the command with `unique_taken`, a missing fact with `requirement_missing`. At most 64 keys, 64 facts and 64 requirements; key and fact names are valid type names (no dots) of at most 128 bytes; no key twice (name, scope and value hash), no fact twice. Otherwise `invalid_index`. A command that leaves its aggregate without events holds nothing. An aggregate whose key another one holds (a duplicate from before the key was declared) is rejected with `unique_taken` until its key changes or becomes null. Workers of protocol 1 send none of them; their results leave the aggregate's keys and facts as they are. |
+| `keys` | repeated `UniqueKey` | 6 | The full set of unique keys and facts the aggregate holds after these events (empty: none), and the facts other aggregates must hold for the command to commit. The kernel checks them atomically with the commit: a key another aggregate holds rejects the command with `unique_taken`, a missing fact with `requirement_missing`. At most 64 keys, 64 facts and 64 requirements; key and fact names are valid type names (no dots) of at most 128 bytes; no key twice (name, scope and value hash), no fact twice. Otherwise `invalid_index`. A command that leaves its aggregate without events holds nothing. An aggregate whose key another one holds (a duplicate from before the key was declared) is rejected with `unique_taken` until its key changes or becomes null. |
 | `facts` | repeated `string` | 7 |  |
 | `requires` | repeated `Requirement` | 8 |  |
 | `index_sig` |  `Signature` | 9 | Over kernable.v1.index by Register.key_id; required when keys, facts or requires are set. Apart from worker_sig, which every event stores and `kernable verify` checks against the events alone. |
@@ -824,7 +820,7 @@ A unique key of an aggregate: no other aggregate holds the same key at the same 
 ### Requirement
 
 A fact another aggregate of the command's tenant must hold (or, `absent`, must not hold) when
-the command commits. The aggregate is named by its ID, or (protocol 5) by a unique key of its
+the command commits. The aggregate is named by its ID, or by a unique key of its
 type that it holds: the key's name and the SHA-256 of its value, as in UniqueKey, in the
 command's tenant (a global key held in another tenant names none). No aggregate holding the
 key, like an aggregate without events, holds no fact. Personal keys cannot name an aggregate.
@@ -835,9 +831,9 @@ key, like an aggregate without events, holds no fact. Personal keys cannot name 
 | `aggregate_type` |  `string` | 2 | unqualified |
 | `aggregate_id` |  `string` | 3 | empty when named by a key |
 | `fact` |  `string` | 4 |  |
-| `key` |  `string` | 5 | protocol 5: the key's name, instead of aggregate_id |
-| `value_hash` |  `bytes` | 6 | protocol 5: with `key`; never returned in a rejection |
-| `absent` |  `bool` | 7 | protocol 5: the aggregate must not hold the fact |
+| `key` |  `string` | 5 | the key's name, instead of aggregate_id |
+| `value_hash` |  `bytes` | 6 | with `key`; never returned in a rejection |
+| `absent` |  `bool` | 7 | the aggregate must not hold the fact |
 
 ### Rejection
 

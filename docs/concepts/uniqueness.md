@@ -138,7 +138,6 @@ requires=lambda data, state: [
 - **The value as the key has it.** The kernel compares the SHA-256 of the value: normalise it exactly as the aggregate type's key function does (`toLowerCase` above), or nobody holds it.
 - **Not personal keys.** A personal key lives in the vault and cannot name an aggregate.
 - **Never the value.** A rejection names the key (`funds.fund with key pmdxId does not hold open`), never its value; `requirement.key` says which, and `requirement.value` is empty.
-- **From protocol 5 on.** Workers of older SDKs send requirements by ID only.
 
 ## Personal keys
 
@@ -199,7 +198,7 @@ A rejection also names what failed as data, so you need not parse the message: `
 
 - **One reason at a time.** The kernel checks the requirements first, in the order `requires` returns them, then the keys. The rejection names the first requirement that does not hold, or else one taken key. Fix that one and submit again: another requirement or key may fail next.
 
-Workers send keys and facts from protocol 2 on, signed over `kernable.v1.index` ([Signatures](../reference/signing#unique-keys-and-facts)). A worker of protocol 1 leaves what its aggregates hold as it is.
+Workers send keys and facts signed over `kernable.v1.index` ([Signatures](../reference/signing#unique-keys-and-facts)).
 
 ## Aggregates from before a key
 

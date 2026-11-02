@@ -198,7 +198,7 @@ impl Worker {
                     continue;
                 }
                 Some(Out::Execute(x)) => x,
-                // Protocol 3: a long history comes in parts.
+                // A long history comes in parts.
                 Some(Out::ExecuteMore(rest)) => {
                     let Some(mut x) = partial.remove(&rest.lease_id) else {
                         continue;

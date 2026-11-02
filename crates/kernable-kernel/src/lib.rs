@@ -164,7 +164,8 @@ impl Drop for Running<'_> {
 }
 
 /// The protocol versions this kernel accepts; see "Protocol versions" in `kernable.proto`.
-pub const PROTOCOLS: std::ops::RangeInclusive<u32> = 1..=kernable_core::PROTOCOL;
+pub const PROTOCOLS: std::ops::RangeInclusive<u32> =
+    kernable_core::PROTOCOL..=kernable_core::PROTOCOL;
 
 /// Refuses a request or stream of a protocol version this kernel does not speak.
 pub(crate) fn protocol(version: u32) -> Result<(), Status> {
@@ -1985,8 +1986,6 @@ struct InFlight {
 struct Session {
     kernel: Arc<Kernel>,
     key_id: String,
-    /// `Register.protocol`: from 2 on, results carry keys, facts and requirements.
-    protocol: u32,
     /// The payload version the worker writes per qualified event type; others at 1.
     schemas: HashMap<String, u32>,
     out: Outbox,
@@ -2058,7 +2057,7 @@ async fn send(out: &Outbox, msg: Out) -> Result<(), Status> {
         .map_err(|_| Status::cancelled("worker disconnected"))
 }
 
-/// `execute` as an Execute and the ExecuteMore parts after it (protocol 3), each at most `max`
+/// `execute` as an Execute and the ExecuteMore parts after it, each at most `max`
 /// bytes on the wire, with the vault values of its events in each part and those of the command
 /// (`command_refs`) in the first. `None` if the command with its snapshot, or an event with its
 /// values, does not fit one message.
@@ -2208,7 +2207,6 @@ async fn run_session(
     let session = Arc::new(Session {
         kernel,
         key_id: reg.key_id,
-        protocol: reg.protocol,
         schemas,
         out: out.clone(),
         in_flight: Mutex::default(),
@@ -2424,30 +2422,17 @@ impl Session {
         let events = execute.history.len();
         let lease_id = execute.lease_id.clone();
         let command = execute.command.clone().unwrap_or_default();
-        let parts = (self.protocol >= 3)
-            .then(|| in_parts(execute, &command.vault_refs, max))
-            .flatten();
-        let Some((first, rest)) = parts else {
+        let Some((first, rest)) = in_parts(execute, &command.vault_refs, max) else {
             // No worker could receive it: a final rejection instead of a retry forever.
             let in_flight = self.in_flight().remove(&lease_id);
             drop(in_flight);
             self.kernel.metrics.limited("too_large");
-            let message = if self.protocol >= 3 {
-                format!(
-                    "the command with its snapshot, or one of the {events} events after it, is \
-                     more than --max-message-bytes {max}: raise the limit in the kernel and the SDKs"
-                )
-            } else {
-                format!(
-                    "the command with its snapshot and the {events} events after it is {size} \
-                     bytes, more than --max-message-bytes {max}, and this worker speaks protocol \
-                     {}, which cannot receive it in parts: update its SDK",
-                    self.protocol
-                )
-            };
             let reason = Rejected {
                 code: "too_large".into(),
-                message,
+                message: format!(
+                    "the command with its snapshot, or one of the {events} events after it, is \
+                     more than --max-message-bytes {max}: raise the limit in the kernel and the SDKs"
+                ),
                 ..Default::default()
             };
             self.reject(&lease_id, command, reason);
@@ -2471,10 +2456,7 @@ impl Session {
             .snapshot
             .as_ref()
             .is_none_or(|s| self.valid_snapshot(s, &f, r.events.len()));
-        // Workers of protocol 1 know nothing of keys and facts: their results leave the index
-        // as it is.
-        let indexed = self.protocol >= 2;
-        let index_ok = !indexed || self.valid_index(&r, &f);
+        let index_ok = self.valid_index(&r, &f);
         if sig.key_id != self.key_id
             || signing::verify(&sig, &msg).is_err()
             || !snapshot_ok
@@ -2525,39 +2507,35 @@ impl Session {
             aggregate_type: f.command.aggregate_type.clone(),
             aggregate_id: f.command.aggregate_id.clone(),
         };
-        let wanted = if indexed {
-            if let Err(reason) = index::validate(&r) {
-                self.reject(&r.lease_id, f.command, reason);
-                return Ok(());
-            }
-            if r.keys.iter().any(|k| !k.subject.is_empty()) && self.kernel.vault.is_none() {
-                let reason = Rejected {
-                    code: "no_vault".into(),
-                    message: "this kernel has no vault".into(),
-                    ..Default::default()
-                };
-                self.reject(&r.lease_id, f.command, reason);
-                return Ok(());
-            }
-            // An aggregate without events does not exist: whatever its initial state would
-            // hold, it holds nothing (a reindex of an ID never written).
-            let exists = f.expected_version > 0 || !r.events.is_empty();
-            Some(index::Held {
-                keys: r
-                    .keys
-                    .iter()
-                    .filter(|_| exists)
-                    .map(|k| index::Key {
-                        name: k.name.clone(),
-                        global: k.global,
-                        id: signing::unique_key_id(&f.command, k),
-                        subject: k.subject.clone(),
-                    })
-                    .collect(),
-                facts: r.facts.iter().filter(|_| exists).cloned().collect(),
-            })
-        } else {
-            None
+        if let Err(reason) = index::validate(&r) {
+            self.reject(&r.lease_id, f.command, reason);
+            return Ok(());
+        }
+        if r.keys.iter().any(|k| !k.subject.is_empty()) && self.kernel.vault.is_none() {
+            let reason = Rejected {
+                code: "no_vault".into(),
+                message: "this kernel has no vault".into(),
+                ..Default::default()
+            };
+            self.reject(&r.lease_id, f.command, reason);
+            return Ok(());
+        }
+        // An aggregate without events does not exist: whatever its initial state would
+        // hold, it holds nothing (a reindex of an ID never written).
+        let exists = f.expected_version > 0 || !r.events.is_empty();
+        let wanted = index::Held {
+            keys: r
+                .keys
+                .iter()
+                .filter(|_| exists)
+                .map(|k| index::Key {
+                    name: k.name.clone(),
+                    global: k.global,
+                    id: signing::unique_key_id(&f.command, k),
+                    subject: k.subject.clone(),
+                })
+                .collect(),
+            facts: r.facts.iter().filter(|_| exists).cloned().collect(),
         };
 
         let erasing = match self
@@ -2591,16 +2569,13 @@ impl Session {
                 self.in_flight().insert(r.lease_id, f);
                 return Err(Status::failed_precondition(message));
             }
-            let change = match &wanted {
-                Some(wanted) => match self.index_change(&index, &f.command, &stream, wanted, &r) {
-                    Ok(change) => change,
-                    Err(reason) => {
-                        drop((index, stored));
-                        self.reject(&r.lease_id, f.command, reason);
-                        return Ok(());
-                    }
-                },
-                None => None,
+            let change = match self.index_change(&index, &f.command, &stream, &wanted, &r) {
+                Ok(change) => change,
+                Err(reason) => {
+                    drop((index, stored));
+                    self.reject(&r.lease_id, f.command, reason);
+                    return Ok(());
+                }
             };
             // The erasures are noted first: a crash after the commit still carries them out.
             if let Some(vault) = &self.kernel.vault {
@@ -2819,13 +2794,7 @@ impl Session {
         if r.keys.is_empty() && r.facts.is_empty() && r.requires.is_empty() {
             return true;
         }
-        // Requirements by key and absent ones came with protocol 5, and its layout with them.
-        let sign = if self.protocol >= 5 {
-            signing::index_message
-        } else {
-            signing::index_message_v2
-        };
-        let msg = sign(
+        let msg = signing::index_message(
             &f.command,
             f.expected_version,
             &r.keys,

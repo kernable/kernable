@@ -510,7 +510,7 @@ class NotSettled(Exception):
 
 
 #: The protocol version this SDK speaks; see "Protocol versions" in `kernable.proto`.
-PROTOCOL = 5
+PROTOCOL = 1
 
 #: Attempts before a reactor parks an event its handler keeps failing on.
 _PARK_AFTER = 5
@@ -1855,7 +1855,7 @@ class Worker(_Stream):
         self._by_stream = {(a.domain, a.name): a for a in aggregates}
         # The service this worker belongs to; its membership decides whether the kernel waits for it.
         self._service = service
-        # Executes whose history is still coming in parts (protocol 3), by lease; per session.
+        # Executes whose history is still coming in parts, by lease; per session.
         self._partial = {}
 
     def _open(self, requests):
@@ -1907,8 +1907,7 @@ class Worker(_Stream):
         return None
 
     def _assembled(self, msg):
-        """The Execute to run once its last part is here (protocol 3: a long history comes in parts), else
-        None."""
+        """The Execute to run once its last part is here (a long history comes in parts), else None."""
         if msg.WhichOneof("msg") == "execute":
             x = msg.execute
         else:

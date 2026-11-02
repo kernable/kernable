@@ -68,7 +68,7 @@ fn both_backends_keep_replace_and_remove_snapshots() {
         Some(record("o-2", 1))
     );
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.pragma_update(None, "user_version", 1).unwrap();
+    conn.pragma_update(None, "user_version", 2).unwrap();
     drop(conn);
     assert_eq!(
         snapshots::open(&url).unwrap().get(&stream("o-2")).unwrap(),

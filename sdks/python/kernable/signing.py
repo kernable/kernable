@@ -83,8 +83,8 @@ def result_message(c, expected_version: int, events) -> bytes:
 
 
 def index_message(c, expected_version: int, keys, facts, requires) -> bytes:
-    """What a worker signs for the unique keys, facts and requirements of its result (protocol 5,
-    `Result.index_sig`): a message of its own, apart from `result_message`, which every event
+    """What a worker signs for the unique keys, facts and requirements of its result
+    (`Result.index_sig`): a message of its own, apart from `result_message`, which every event
     stores and `kernable verify` checks against the events alone."""
     m = _stream(Msg("kernable.v1.index"), c).u64(expected_version).u64(len(keys))
     for k in keys:

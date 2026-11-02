@@ -427,11 +427,10 @@ async fn connections_beyond_the_limit_are_closed() {
     }
 }
 
-/// A kernel whose messages hold at most 64 KiB, and a worker of `protocol` that reports the
+/// A kernel whose messages hold at most 64 KiB, and a worker that reports the
 /// snapshot version and history length of every command it runs.
 async fn small_messages(
     name: &str,
-    protocol: u32,
 ) -> (Env, String, mpsc::UnboundedReceiver<(Option<u64>, usize)>) {
     let (env, metrics) = start_limited(
         name,
@@ -445,7 +444,6 @@ async fn small_messages(
     start_worker(
         env.addr.clone(),
         TestWorker {
-            protocol,
             executions: Some(tx),
             ..TestWorker::honest()
         },
@@ -460,8 +458,7 @@ fn committed(result: &CommandResult) -> bool {
 
 #[tokio::test]
 async fn a_history_longer_than_one_message_reaches_the_worker_in_parts() {
-    let (env, metrics, mut executions) =
-        small_messages("limit-parts", kernable_core::PROTOCOL).await;
+    let (env, metrics, mut executions) = small_messages("limit-parts").await;
     // Twelve events of 20 KiB: about 240 KiB of history, four times the limit.
     for n in 0..12 {
         let kind = if n == 0 { "PlaceOrder" } else { "AddItem" };
@@ -483,30 +480,6 @@ async fn a_history_longer_than_one_message_reaches_the_worker_in_parts() {
         "the whole history: {seen:?}"
     );
     assert_eq!(refused(&metrics, "too_large").await, 0);
-}
-
-#[tokio::test]
-async fn a_worker_of_protocol_2_gets_too_large_for_a_history_longer_than_one_message() {
-    let (env, metrics, _) = small_messages("limit-too-large", 2).await;
-    let first = submit(&env.addr, with_payload("c1", "PlaceOrder", "o1", 40 << 10))
-        .await
-        .unwrap();
-    assert!(committed(&first), "{first:?}");
-    // The second command and the first event no longer fit one message.
-    let second = submit(&env.addr, with_payload("c2", "AddItem", "o1", 40 << 10))
-        .await
-        .unwrap();
-    let Some(Outcome::Rejected(r)) = second.outcome else {
-        panic!("{second:?}");
-    };
-    assert_eq!(r.code, "too_large");
-    assert!(r.message.contains("update its SDK"), "{}", r.message);
-    assert_eq!(refused(&metrics, "too_large").await, 1);
-    // The aggregate is not blocked: a smaller command still fits and runs.
-    let third = submit(&env.addr, with_payload("c3", "AddItem", "o1", 10))
-        .await
-        .unwrap();
-    assert!(committed(&third), "{third:?}");
 }
 
 #[tokio::test]

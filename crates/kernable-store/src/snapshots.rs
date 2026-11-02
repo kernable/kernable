@@ -21,7 +21,7 @@ use crate::{
 };
 
 /// The version of the SQLite snapshot table; a file of another version is emptied.
-const FORMAT: u32 = 2;
+const FORMAT: u32 = 1;
 
 pub trait SnapshotStore: Send + Sync {
     /// The latest snapshot of one aggregate.

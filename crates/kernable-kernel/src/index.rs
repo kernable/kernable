@@ -1,7 +1,7 @@
 //! Unique keys and facts: what every aggregate holds, in memory, rebuilt from the store
 //! at startup ([`kernable_store::Store::index`]).
 //!
-//! A worker of protocol 2 sends with each result the full set of keys and facts its aggregate
+//! A worker sends with each result the full set of keys and facts its aggregate
 //! holds after the events, and the facts other aggregates must hold. The kernel checks them
 //! against this index while it commits, under the same lock, so two commands never take one key
 //! and a requirement never sees a fact another commit is removing. Only a changed set is

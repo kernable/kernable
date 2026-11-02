@@ -16,4 +16,4 @@ pub mod signing;
 pub mod transport;
 
 /// The protocol version this build speaks; see "Protocol versions" in `kernable.proto`.
-pub const PROTOCOL: u32 = 5;
+pub const PROTOCOL: u32 = 1;

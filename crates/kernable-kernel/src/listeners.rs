@@ -59,9 +59,6 @@ pub(crate) const FLUSH: Duration = Duration::from_millis(100);
 /// stops instead of parking everything.
 pub(crate) const MAX_PARKED: usize = 10_000;
 
-/// The first protocol whose listeners can park and get retries.
-const PARKING: u32 = 4;
-
 struct Entry {
     record: ListenerRecord,
     connected: bool,
@@ -80,8 +77,6 @@ struct Entry {
     listed: bool,
     /// When it connected (ms since epoch); 0 while disconnected.
     since: i64,
-    /// The connected listener's protocol: retries only go to those that know them.
-    protocol: u32,
     /// Parked events sent to the connected listener again: (the batch's `up_to`, position).
     retrying: Vec<(u64, u64)>,
 }
@@ -154,7 +149,6 @@ impl Registry {
                     out: None,
                     caught_up_at: 0,
                     live: false,
-                    protocol: 0,
                     retrying: Vec::new(),
                 };
                 (entry.record.name.clone(), entry)
@@ -391,10 +385,10 @@ impl Registry {
     }
 
     /// Parked events of `name` to deliver again now: asked for, of `types` its key may still
-    /// read, and not on their way already. None for a listener whose protocol has no retries.
+    /// read, and not on their way already.
     fn due(&self, name: &str, types: Option<&[String]>) -> Vec<u64> {
         let entries = self.entries();
-        let Some(e) = entries.get(name).filter(|e| e.protocol >= PARKING) else {
+        let Some(e) = entries.get(name) else {
             return Vec::new();
         };
         e.record
@@ -862,7 +856,6 @@ pub(crate) async fn run(
                     .memberships
                     .counts_listener(&hello.service, &hello.name),
                 since: crate::now_ms(),
-                protocol: hello.protocol,
                 retrying: Vec::new(),
             },
         );

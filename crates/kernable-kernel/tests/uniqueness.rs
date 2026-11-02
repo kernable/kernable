@@ -2,7 +2,7 @@
 //! the keys and facts each aggregate holds. A key is held by one aggregate at a time, within its
 //! tenant or across tenants; a command commits only while the facts it requires are held; a
 //! personal key lives in the vault and its subject's erasure frees it. The index survives a
-//! restart, and workers of protocol 1 leave it alone.
+//! restart.
 
 mod common;
 
@@ -593,39 +593,6 @@ async fn a_kernel_needs_a_vault_for_personal_keys() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_worker_of_protocol_1_leaves_the_index_alone() {
-    let env = start("unique-protocol-1").await;
-    let current = start_worker(env.addr.clone(), indexing_worker()).await;
-    let number = payload(&[("number", "A-1", false, "")], &["open"], &[]);
-    let placed = order("c1", "PlaceOrder", "o1", "t1", number.clone());
-    assert_eq!(outcome(&env, placed).await, "committed");
-    current.abort();
-    let _ = current.await;
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-    start_worker(
-        env.addr.clone(),
-        TestWorker {
-            protocol: 1,
-            ..indexing_worker()
-        },
-    )
-    .await;
-    let store = kernable_store::open_read_only(&env.store).unwrap();
-    let before = store.index().unwrap();
-    // It sends no index: what o1 holds stays, and so does the key.
-    let other = order("c2", "AddItem", "o1", "t1", payload(&[], &[], &[]));
-    assert_eq!(outcome(&env, other).await, "committed");
-    assert_eq!(store.index().unwrap(), before);
-    assert_eq!(
-        outcome(&env, order("c3", "PlaceOrder", "o2", "t1", number)).await,
-        "committed",
-        "a protocol-1 result is not checked against the index either"
-    );
-    assert_eq!(store.index().unwrap(), before);
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn keys_facts_and_requirements_over_a_limit_are_an_invalid_index() {
     let env = start("unique-limits").await;
     let key_ = |name: &str, hash: Vec<u8>| UniqueKey {
@@ -929,26 +896,6 @@ async fn an_absent_requirement_commits_only_while_the_fact_is_not_held() {
     let again = payload_absent(&[("o1", "open", true)]);
     assert_eq!(
         outcome(&env, order("c6", "PlaceOrder", "o6", "t1", again)).await,
-        "committed"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_worker_of_protocol_4_signs_requirements_as_before() {
-    let env = start("unique-require-protocol-4").await;
-    let older = TestWorker {
-        protocol: 4,
-        ..indexing_worker()
-    };
-    start_worker(env.addr.clone(), older).await;
-    let open = payload(&[], &["open"], &[]);
-    assert_eq!(
-        outcome(&env, order("c1", "PlaceOrder", "o1", "t1", open)).await,
-        "committed"
-    );
-    let requiring = payload(&[], &[], &[("o1", "open")]);
-    assert_eq!(
-        outcome(&env, order("c2", "PlaceOrder", "o2", "t1", requiring)).await,
         "committed"
     );
 }

@@ -38,19 +38,10 @@ use kernable_core::proto::{
     NewEvent, Rejected, RevocationRecord, Signature, WorkerRecord,
 };
 
-/// The version of the stored data format this build reads and writes. A store of another
-/// format is refused: there are no migrations before the first release, so a format change
-/// bumps this.
-///
-/// - 1: the first format.
-/// - 2: adds the newest grant per key ([`Store::grants`]).
-/// - 3: adds the unique keys and facts per aggregate ([`Store::index`]).
-/// - 4: keeps the key or requirement a rejection names ([`Rejected::key`],
-///   [`Rejected::requirement`]).
-/// - 5: keeps the events each listener parked ([`ListenerRecord::parked`]).
-/// - 6: the fields of `Command`, `Event` and `SnapshotRecord` numbered in order (the file log
-///   stores them as protobuf).
-pub const FORMAT: u32 = 6;
+/// The version of the stored data format this build reads and writes; a store of another
+/// format is refused. Until the first release it stays 1 and changes in place: a store of an
+/// earlier development build may not open, or may not read correctly.
+pub const FORMAT: u32 = 1;
 
 pub use file::FileStore;
 pub use sqlite::SqliteStore;

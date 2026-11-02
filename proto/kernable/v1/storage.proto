@@ -17,7 +17,7 @@ message LogRecord {
     RevocationRecord revocation = 7;
     WorkerRecord worker = 8;
     MembershipRecord membership = 9;
-    Grant grant = 10; // since format 2
+    Grant grant = 10;
   }
 }
 
@@ -45,7 +45,7 @@ message EnqueuedRecord {
 message CommittedRecord {
   string command_id = 1;
   repeated LoggedEvent events = 2;
-  AggregateIndex index = 3; // since format 3; set: replaces what the command's stream holds
+  AggregateIndex index = 3; // set: replaces what the command's stream holds
 }
 
 // The unique keys and facts an aggregate holds, stored with the commit that changed them; the

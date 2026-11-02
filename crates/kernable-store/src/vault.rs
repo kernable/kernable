@@ -22,11 +22,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{Error, Result, StreamId};
 
-/// The version of the vault's data format.
-///
-/// - 1: the first format.
-/// - 2: keeps the erasures that are about to happen ([`Vault::intents`]).
-pub const FORMAT: u32 = 2;
+/// The version of the vault's data format; 1 until the first release (see [`crate::FORMAT`]).
+pub const FORMAT: u32 = 1;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS vault (
@@ -64,9 +61,8 @@ CREATE TABLE IF NOT EXISTS intents (
 /// 800-38D allows 2^32 of them per key, which keeps the chance of a repeated nonce below 2^-32.
 pub const MAX_SEALED: u64 = 1 << 32;
 
-/// The number of values encrypted with the current key, created on open so that a vault of
-/// format 1 counts too: it starts at the number of values held, as earlier ones were not
-/// counted.
+/// The number of values encrypted with the current key, created on open; it starts at the
+/// number of values held.
 const SEALED: &str = "
 CREATE TABLE IF NOT EXISTS sealed (count INTEGER NOT NULL) STRICT;
 INSERT INTO sealed SELECT COUNT(*) FROM vault WHERE NOT EXISTS (SELECT 1 FROM sealed);

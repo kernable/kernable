@@ -32,7 +32,7 @@ Each message starts with a `str` **tag** for domain separation. Payloads are sig
 | Client | `kernable.v1.command` | `command_id`, `tenant_id`, `domain`, `aggregate_type`, `aggregate_id`, `command_type`, `payload`, `context`, then the vault fields (see [Vault references](#vault-references)) |
 | Client | `kernable.v1.query` | `query_id`, `tenant_id`, `domain`, `query_type`, `payload`, `context`, `min_position: u64`, `issued_at: i64` |
 | Worker | `kernable.v1.result` | `command_id`, `tenant_id`, `domain`, `aggregate_type`, `aggregate_id` (all from the command), `expected_version: u64` (from `Execute`), `event_count: u64`, then per event `event_type`, `schema: u64`, `payload`, then the vault fields |
-| Worker | `kernable.v1.index` | `command_id`, `tenant_id`, `domain`, `aggregate_type`, `aggregate_id` (all from the command), `expected_version: u64` (from `Execute`), `key_count: u64`, then per key `name`, `global: bool`, `value_hash` (`bytes`), `subject`, then `fact_count: u64` and every fact, then `requirement_count: u64` and per requirement `domain`, `aggregate_type`, `aggregate_id`, `fact`, `key`, `value_hash` (`bytes`), `absent: bool` (protocol 5; protocols 2 to 4 end each requirement after `fact`; see [Unique keys and facts](#unique-keys-and-facts)) |
+| Worker | `kernable.v1.index` | `command_id`, `tenant_id`, `domain`, `aggregate_type`, `aggregate_id` (all from the command), `expected_version: u64` (from `Execute`), `key_count: u64`, then per key `name`, `global: bool`, `value_hash` (`bytes`), `subject`, then `fact_count: u64` and every fact, then `requirement_count: u64` and per requirement `domain`, `aggregate_type`, `aggregate_id`, `fact`, `key`, `value_hash` (`bytes`), `absent: bool` (see [Unique keys and facts](#unique-keys-and-facts)) |
 | Worker | `kernable.v1.rejection` | `command_id`, `code`, `message` |
 | Worker | `kernable.v1.snapshot` | `tenant_id`, `domain`, `aggregate_type`, `aggregate_id` (from the command), `version: u64`, `schema` (a `str`), `state` |
 | Worker, listener | `kernable.v1.challenge` | `nonce` (the 32 bytes of `Challenge.nonce`) |
@@ -101,7 +101,7 @@ The salt makes a reference reveal nothing about its value, also once the value i
 
 ## Unique keys and facts
 
-From protocol 2 on, a result carries the unique keys and facts its aggregate holds after the events, and the facts other aggregates must hold (`Result.keys`, `facts`, `requires`). They are signed in `kernable.v1.index`, as `Result.index_sig`, only when the result has any of them; a result without them has no index signature. They are a message of their own rather than part of `kernable.v1.result`: every event stores the result signature, and `kernable verify` checks it against the stored events alone, which never hold value hashes or requirements.
+A result carries the unique keys and facts its aggregate holds after the events, and the facts other aggregates must hold (`Result.keys`, `facts`, `requires`). They are signed in `kernable.v1.index`, as `Result.index_sig`, only when the result has any of them; a result without them has no index signature. They are a message of their own rather than part of `kernable.v1.result`: every event stores the result signature, and `kernable verify` checks it against the stored events alone, which never hold value hashes or requirements.
 
 A key's `value_hash` is the SHA-256 of the value's UTF-8 bytes. The kernel files the key under its identity, the SHA-256 of the message with tag `kernable.v1.key`, followed by these fields:
 
@@ -159,7 +159,7 @@ An SDK must reproduce these entries byte for byte:
 | `data_put`, `cache_set` | `message` and `signature` for the `op` in `input` |
 | `command_vault` | as `command`, with the `vault_refs` in `input` |
 | `result_vault` | as `result`, with the input of `result` plus `vault_refs[i]` and `erases[i]` for event `i` |
-| `result_index` | `message` and `signature` of `kernable.v1.index` (`result` is the same command's result without keys, facts and requirements: its layout is the one of protocol 1) |
+| `result_index` | `message` and `signature` of `kernable.v1.index` (`result` is the same command's result without keys, facts and requirements) |
 | `unique_key_id` | `ids[i]` (hex) for `keys[i]` of the command's tenant, domain and aggregate type |
 | `vault_ref` | `refs[i]` from `input[i]` |
 | `event_hash` | `hash` from the input, with `prev_hex` as `prev_hash` |

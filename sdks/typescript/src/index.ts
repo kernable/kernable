@@ -2688,7 +2688,7 @@ export class Worker {
       else if (this.announce) this.log.print("info", "worker", `connected to ${this.log.peer} · runs ${[...this.byCommand.keys()].sort().join(", ")}`);
       this.markReady();
     } else if (m.execute || m.execute_more) {
-      // Protocol 3: a long history comes in parts; run the command once the last one is here.
+      // A long history comes in parts; run the command once the last one is here.
       const partial = this.partial.get(call) ?? new Map<string, NonNullable<KernelMessage["execute"]>>();
       this.partial.set(call, partial);
       let x = m.execute;

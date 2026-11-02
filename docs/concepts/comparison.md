@@ -33,7 +33,7 @@ kernable is an **application kernel**: storage, ordering, trust and delivery in 
 - **No compaction.** The log only grows; that is what keeps it verifiable. Expiring data belongs in the cache.
 - **SQLite sets the limits of one store**: a single writer on one machine. Commands of different aggregates run in parallel on the workers, but every commit goes through that one writer.
 - **Three SDKs.** Other languages speak the gRPC protocol directly ([Write an SDK](../how-to/new-sdk)).
-- **A young project.** The data format and the protocol are versioned, without migrations before the first release, and the API may still change before 1.0.
+- **A young project.** The data format and the protocol stay at version 1 and change in place until the first release, without migrations, and the API may still change before 1.0.
 
 ## Moving an existing application
 

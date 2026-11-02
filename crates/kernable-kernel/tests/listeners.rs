@@ -121,7 +121,6 @@ struct Opts {
     service: &'static str,
     live: bool,
     middlewares: Vec<Middleware>,
-    protocol: u32,
 }
 
 fn opts(order: i32) -> Opts {
@@ -134,7 +133,6 @@ fn opts(order: i32) -> Opts {
         service: "",
         live: false,
         middlewares: Vec::new(),
-        protocol: kernable_core::PROTOCOL,
     }
 }
 
@@ -146,7 +144,7 @@ fn of(service: &'static str) -> Opts {
 async fn listen(env: &Env, name: &str, o: Opts) -> Result<Listener, Status> {
     let (tx, rx) = mpsc::channel(16);
     let hello = In::Hello(Hello {
-        protocol: o.protocol,
+        protocol: kernable_core::PROTOCOL,
         name: name.into(),
         key_id: id(&o.key),
         order: o.order,
@@ -816,32 +814,6 @@ async fn a_retry_waits_for_the_listener_and_survives_a_restart() {
     assert_eq!(again.retries[0].global_position, 1);
     mailer.ack(again.up_to).await;
     assert_eq!(stored_parked(&after, "mailer").await, []);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_listener_of_protocol_3_gets_no_retries() {
-    let env = start("listener-parked-old").await;
-    spawn_worker(&env).await;
-    let mut mailer = listen(&env, "mailer", opts(10)).await.unwrap();
-    let placed = spawn_submit(&env, "c1", "PlaceOrder");
-    assert_eq!(positions(&mailer.next().await), [1]);
-    mailer.ack_parking(1, &[1]).await;
-    placed.await.unwrap();
-    drop(mailer);
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    let old = Opts {
-        protocol: 3,
-        ..opts(10)
-    };
-    let mut mailer = listen(&env, "mailer", old).await.unwrap();
-    assert_eq!(
-        retry(&env, &key(1), "mailer", &[], false).await.unwrap(),
-        [1]
-    );
-    // It would acknowledge the retry without handling it: it never gets one.
-    mailer.nothing_for(300).await;
-    assert_eq!(stored_parked(&env, "mailer").await, [(1, true)]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

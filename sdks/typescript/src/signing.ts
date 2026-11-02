@@ -162,7 +162,7 @@ export function resultMessage(c: Stream, expectedVersion: number, events: WireNe
 }
 
 /**
- * What a worker signs for the unique keys, facts and requirements of its result (protocol 2):
+ * What a worker signs for the unique keys, facts and requirements of its result:
  * a message of its own, not part of `resultMessage`, because every event stores the result
  * signature and `kernable verify` checks it against the stored events alone.
  */
