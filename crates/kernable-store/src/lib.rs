@@ -48,7 +48,9 @@ use kernable_core::proto::{
 /// - 4: keeps the key or requirement a rejection names ([`Rejected::key`],
 ///   [`Rejected::requirement`]).
 /// - 5: keeps the events each listener parked ([`ListenerRecord::parked`]).
-pub const FORMAT: u32 = 5;
+/// - 6: the fields of `Command`, `Event` and `SnapshotRecord` numbered in order (the file log
+///   stores them as protobuf).
+pub const FORMAT: u32 = 6;
 
 pub use file::FileStore;
 pub use sqlite::SqliteStore;

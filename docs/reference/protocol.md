@@ -72,13 +72,13 @@ queues it and hands it to a worker that registered its aggregate and command typ
 |---|---|---|---|
 | `command_id` |  `string` | 1 | Chosen by the client (the SDKs use a random UUID). The kernel runs a command ID once: submitting it again returns the stored result, or waits for it. |
 | `tenant_id` |  `string` | 2 |  |
-| `domain` |  `string` | 9 | of the aggregate and the command type |
-| `aggregate_type` |  `string` | 3 | unqualified: `Order` |
-| `aggregate_id` |  `string` | 4 | chosen by the client |
-| `command_type` |  `string` | 5 | unqualified: `PlaceOrder` |
-| `payload` |  `bytes` | 6 |  |
-| `client_sig` |  `Signature` | 7 | Over kernable.v1.command, by a key granted `submit` for `domain.command_type`. |
-| `context` |  `RequestContext` | 8 | signed with the command, stored with its events |
+| `domain` |  `string` | 3 | of the aggregate and the command type |
+| `aggregate_type` |  `string` | 4 | unqualified: `Order` |
+| `aggregate_id` |  `string` | 5 | chosen by the client |
+| `command_type` |  `string` | 6 | unqualified: `PlaceOrder` |
+| `payload` |  `bytes` | 7 |  |
+| `client_sig` |  `Signature` | 8 | Over kernable.v1.command, by a key granted `submit` for `domain.command_type`. |
+| `context` |  `RequestContext` | 9 | signed with the command, stored with its events |
 | `vault_refs` | repeated `string` | 10 | References to the values the payload keeps in the vault (see VaultValue), in payload order. |
 
 ### RequestContext
@@ -118,17 +118,17 @@ A stored event: a NewEvent of a worker, completed by the kernel when it committe
 |---|---|---|---|
 | `global_position` |  `uint64` | 1 | position in the whole log, from 1 |
 | `tenant_id` |  `string` | 2 |  |
-| `domain` |  `string` | 13 | always the domain of the command that caused it |
-| `aggregate_type` |  `string` | 3 | unqualified |
-| `aggregate_id` |  `string` | 4 |  |
-| `version` |  `uint64` | 5 | the aggregate's version after this event, from 1 |
-| `event_type` |  `string` | 6 | unqualified: `OrderPlaced` |
-| `payload` |  `bytes` | 7 |  |
-| `command_id` |  `string` | 8 | the command that caused it |
-| `created_at` |  `int64` | 9 | ms since epoch, when the kernel committed it |
-| `hash` |  `bytes` | 10 | SHA-256 link of the hash chain, see SIGNING.md |
-| `producer_sig` |  `Signature` | 11 | The worker's signature over its result (kernable.v1.result); the same on every event of a command. |
-| `context` |  `RequestContext` | 12 | of the command that caused the event |
+| `domain` |  `string` | 3 | always the domain of the command that caused it |
+| `aggregate_type` |  `string` | 4 | unqualified |
+| `aggregate_id` |  `string` | 5 |  |
+| `version` |  `uint64` | 6 | the aggregate's version after this event, from 1 |
+| `event_type` |  `string` | 7 | unqualified: `OrderPlaced` |
+| `payload` |  `bytes` | 8 |  |
+| `command_id` |  `string` | 9 | the command that caused it |
+| `created_at` |  `int64` | 10 | ms since epoch, when the kernel committed it |
+| `hash` |  `bytes` | 11 | SHA-256 link of the hash chain, see SIGNING.md |
+| `producer_sig` |  `Signature` | 12 | The worker's signature over its result (kernable.v1.result); the same on every event of a command. |
+| `context` |  `RequestContext` | 13 | of the command that caused the event |
 | `schema` |  `uint32` | 14 | version of the payload format of `event_type`, from 1 |
 | `vault_refs` | repeated `string` | 15 | see NewEvent |
 | `erases` |  `string` | 16 | see NewEvent |
@@ -310,8 +310,8 @@ Commands, sent by clients and by handlers of listeners.
 | `command` |  `Command` | 1 |  |
 | `wait` |  `Wait` | 2 |  |
 | `protocol` |  `uint32` | 3 | not signed |
-| `vault` | repeated `VaultValue` | 5 | the values of `command.vault_refs` |
-| `listener` |  `string` | 4 | Set by SDKs when a listener's handler submits (not signed): the listener's name. A listener handles its events one after another, so it cannot wait for itself: a settling submit then waits only for listeners of a lower order, and a command the listener itself checks as a middleware before is refused (FAILED_PRECONDITION). |
+| `vault` | repeated `VaultValue` | 4 | the values of `command.vault_refs` |
+| `listener` |  `string` | 5 | Set by SDKs when a listener's handler submits (not signed): the listener's name. A listener handles its events one after another, so it cannot wait for itself: a settling submit then waits only for listeners of a lower order, and a command the listener itself checks as a middleware before is refused (FAILED_PRECONDITION). |
 
 ### Wait
 
@@ -584,12 +584,12 @@ a Verdict of the same `call_id`, also after (where it may only count for a query
 | `call_id` |  `string` | 1 |  |
 | `command` |  `Command` | 2 | as the client sent it, with its signature |
 | `query` |  `QueryRequest` | 3 | as the client sent it, with its signature |
-| `data` |  `DataRequest` | 8 | A file or cache request, before it runs; without the file or value itself. |
-| `cache` |  `CacheRequest` | 9 |  |
-| `vault` | repeated `VaultValue` | 4 | Before a command only: its vault values, if the key may read them (granted vault_read). |
-| `when` |  `When` | 5 |  |
-| `command_result` |  `CommandResult` | 6 | After only: the command's result. The middleware only observes it; its verdict is ignored. |
-| `query_result` |  `QueryResult` | 7 | After only: the query's result. A verdict that rejects a response replaces it. |
+| `data` |  `DataRequest` | 4 | A file or cache request, before it runs; without the file or value itself. |
+| `cache` |  `CacheRequest` | 5 |  |
+| `vault` | repeated `VaultValue` | 6 | Before a command only: its vault values, if the key may read them (granted vault_read). |
+| `when` |  `When` | 7 |  |
+| `command_result` |  `CommandResult` | 8 | After only: the command's result. The middleware only observes it; its verdict is ignored. |
+| `query_result` |  `QueryResult` | 9 | After only: the query's result. A verdict that rejects a response replaces it. |
 | `type` |  `string` | 10 | The qualified type being checked: `shop.AddItem`, `shop.GetCart`, or for files and the cache `shop.PutData`, `shop.GetData`, `shop.DeleteData`, `shop.SetCache`, `shop.GetCache`, `shop.DeleteCache`. |
 
 ### Verdict

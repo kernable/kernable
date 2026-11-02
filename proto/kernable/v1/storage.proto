@@ -127,9 +127,9 @@ message WorkerRecord {
 // The latest snapshot of a stream, in the snapshot store; the latest record per stream wins.
 message SnapshotRecord {
   string tenant_id = 1;
-  string domain = 7;
-  string aggregate_type = 2;
-  string aggregate_id = 3;
-  Snapshot snapshot = 4;
-  bytes event_hash = 5; // hash of the stream's event at snapshot.version
+  string domain = 2;
+  string aggregate_type = 3;
+  string aggregate_id = 4;
+  Snapshot snapshot = 5;
+  bytes event_hash = 6; // hash of the stream's event at snapshot.version
 }
