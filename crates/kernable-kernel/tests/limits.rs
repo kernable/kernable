@@ -591,3 +591,72 @@ async fn http_on_loopback_answers_loopback_hosts_only() {
     let ok = get_as(&ui, "/api/state", &ui).await;
     assert!(ok.starts_with("HTTP/1.1 200"), "{ok}");
 }
+
+#[tokio::test]
+async fn after_the_snapshots_are_lost_a_long_history_comes_in_parts_with_every_vault_value() {
+    let setup = |config: &mut kernable_kernel::config::Config, dir: &std::path::Path| {
+        config.limits = Limits {
+            message_bytes: 64 << 10,
+            ..Limits::default()
+        };
+        with_vault(config, dir);
+    };
+    let env = start_custom("limit-parts-vault", setup).await;
+    // Each event refers to a personal value; snapshots after every command.
+    let writes: VaultWriter = std::sync::Arc::new(|cmd: &Command| {
+        let value = vault_value(&cmd.aggregate_id, &format!("value of {}", cmd.command_id));
+        (vec![value], String::new())
+    });
+    let writer = TestWorker {
+        behavior: Behavior::Snapshots,
+        writes_vault: Some(std::sync::Arc::clone(&writes)),
+        ..TestWorker::honest()
+    };
+    start_worker(env.addr.clone(), writer).await;
+    for n in 0..12 {
+        let kind = if n == 0 { "PlaceOrder" } else { "AddItem" };
+        let cmd = with_payload(&format!("c{n}"), kind, "o1", 20 << 10);
+        let result = submit(&env.addr, cmd).await.unwrap();
+        assert!(committed(&result), "c{n}: {result:?}");
+    }
+
+    // A restart without the snapshot store: the whole history, in parts, with its values.
+    let from = env.dir.clone();
+    let after = start_custom("limit-parts-vault-restarted", move |config, dir| {
+        for file in ["k.db", "k.db-wal", "k.log", "vault.db", "vault.db-wal"] {
+            if from.join(file).exists() {
+                std::fs::copy(from.join(file), dir.join(file)).unwrap();
+            }
+        }
+        setup(config, dir);
+    })
+    .await;
+    let (executions, mut executed) = mpsc::unbounded_channel();
+    let (vaults, mut values) = mpsc::unbounded_channel();
+    let reader = TestWorker {
+        executions: Some(executions),
+        vaults: Some(vaults),
+        writes_vault: Some(writes),
+        ..TestWorker::honest()
+    };
+    start_worker(after.addr.clone(), reader).await;
+    let last = submit(&after.addr, with_payload("c12", "AddItem", "o1", 10))
+        .await
+        .unwrap();
+    assert!(committed(&last), "{last:?}");
+    assert_eq!(
+        executed.recv().await.unwrap(),
+        (None, 12),
+        "no snapshot, every event"
+    );
+    let got = values.recv().await.unwrap();
+    let mut seen: Vec<String> = got
+        .iter()
+        .map(|v| String::from_utf8_lossy(&v.value).into_owned())
+        .collect();
+    seen.sort();
+    // One per event of the history (c12's own is written with its result).
+    let mut want: Vec<String> = (0..12).map(|n| format!("\"value of c{n}\"")).collect();
+    want.sort();
+    assert_eq!(seen, want);
+}
