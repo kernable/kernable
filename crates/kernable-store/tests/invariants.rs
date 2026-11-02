@@ -345,6 +345,7 @@ fn batch(log: &Log, positions: &[u64], up_to: u64) -> Batch {
             .collect(),
         up_to,
         vault: Vec::new(),
+        retries: Vec::new(),
     }
 }
 

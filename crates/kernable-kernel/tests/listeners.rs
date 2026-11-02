@@ -9,9 +9,9 @@ use common::*;
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
-        Ack, Batch, ChallengeResponse, CommandResult, Hello, ListenerMessage, Middleware, Wait,
-        When, command_result::Outcome, listener_delivery::Msg as Out, listener_message::Msg as In,
-        listener_service_client::ListenerServiceClient,
+        Ack, Batch, ChallengeResponse, CommandResult, Hello, ListenerMessage, Middleware, Parked,
+        RetryRequest, Wait, When, command_result::Outcome, listener_delivery::Msg as Out,
+        listener_message::Msg as In, listener_service_client::ListenerServiceClient,
     },
     signing, transport,
 };
@@ -43,12 +43,72 @@ impl Listener {
     }
 
     async fn ack(&self, position: u64) {
-        let msg = In::Ack(Ack { position });
+        self.ack_parking(position, &[]).await;
+    }
+
+    /// Acknowledges `position`, giving up on the events at `parked`.
+    async fn ack_parking(&self, position: u64, parked: &[u64]) {
+        let parked = parked
+            .iter()
+            .map(|&position| Parked {
+                position,
+                code: "not_found".into(),
+                message: "no such customer".into(),
+                attempts: 5,
+            })
+            .collect();
+        let msg = In::Ack(Ack { position, parked });
         self.acks
             .send(ListenerMessage { msg: Some(msg) })
             .await
             .unwrap();
     }
+
+    /// The error that ends the session, within 2 s.
+    async fn ended(&mut self) -> Status {
+        let ended = tokio::time::timeout(Duration::from_secs(2), self.inbound.message())
+            .await
+            .unwrap();
+        ended.unwrap_err()
+    }
+}
+
+/// Asks the kernel to deliver the parked events of `listener` at `positions` again (all, if
+/// empty), or to dismiss them, signed by `key`.
+async fn retry(
+    env: &Env,
+    key: &SigningKey,
+    listener: &str,
+    positions: &[u64],
+    dismiss: bool,
+) -> Result<Vec<u64>, Status> {
+    let issued_at = issued_now();
+    let sig = signing::sign(
+        key,
+        &signing::retry_message(listener, positions, dismiss, issued_at),
+    );
+    let request = RetryRequest {
+        listener: listener.into(),
+        positions: positions.to_vec(),
+        dismiss,
+        issued_at,
+        sig: Some(sig),
+        protocol: kernable_core::PROTOCOL,
+    };
+    let channel = transport::connect(&env.addr).await.unwrap();
+    let result = ListenerServiceClient::new(channel)
+        .retry(with_grant(request, key))
+        .await?;
+    Ok(result.into_inner().positions)
+}
+
+/// The positions of the events `name` has parked, as stored (after a flush).
+async fn stored_parked(env: &Env, name: &str) -> Vec<(u64, bool)> {
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let store = kernable_store::open_read_only(&env.store).unwrap();
+    let listeners = store.listeners().unwrap();
+    let l = listeners.iter().find(|l| l.name == name).unwrap();
+    l.parked.iter().map(|p| (p.position, p.retry)).collect()
 }
 
 struct Opts {
@@ -61,6 +121,7 @@ struct Opts {
     service: &'static str,
     live: bool,
     middlewares: Vec<Middleware>,
+    protocol: u32,
 }
 
 fn opts(order: i32) -> Opts {
@@ -73,6 +134,7 @@ fn opts(order: i32) -> Opts {
         service: "",
         live: false,
         middlewares: Vec::new(),
+        protocol: kernable_core::PROTOCOL,
     }
 }
 
@@ -84,7 +146,7 @@ fn of(service: &'static str) -> Opts {
 async fn listen(env: &Env, name: &str, o: Opts) -> Result<Listener, Status> {
     let (tx, rx) = mpsc::channel(16);
     let hello = In::Hello(Hello {
-        protocol: kernable_core::PROTOCOL,
+        protocol: o.protocol,
         name: name.into(),
         key_id: id(&o.key),
         order: o.order,
@@ -585,4 +647,199 @@ async fn a_listener_whose_grant_no_longer_covers_it_is_disconnected() {
         .await
         .unwrap();
     assert_eq!(ended.unwrap_err().code(), Code::PermissionDenied);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_parked_event_stays_parked_until_a_retry_gets_past_it() {
+    let metrics = free_addr();
+    let env = start_custom("listener-parked", |config, _| {
+        config.metrics_listen = Some(metrics.clone());
+    })
+    .await;
+    spawn_worker(&env).await;
+    let mut mailer = listen(&env, "mailer", opts(10)).await.unwrap();
+    let placed = spawn_submit(&env, "c1", "PlaceOrder");
+    assert_eq!(positions(&mailer.next().await), [1]);
+    // Giving up on an event processes it: the submit settles, the listener moves on.
+    mailer.ack_parking(1, &[1]).await;
+    assert!(settled(&placed.await.unwrap()));
+    assert_eq!(stored_parked(&env, "mailer").await, [(1, false)]);
+    let store = kernable_store::open_read_only(&env.store).unwrap();
+    let parked = store.listeners().unwrap()[0].parked[0].clone();
+    assert_eq!(
+        (
+            parked.event_type.as_str(),
+            parked.code.as_str(),
+            parked.attempts
+        ),
+        ("orders.OrderPlaced", "not_found", 5)
+    );
+    drop(store);
+    let scraped = get(&metrics, "/metrics").await;
+    assert!(
+        scraped.contains("kernable_listener_parked{listener=\"mailer\"} 1"),
+        "{scraped}"
+    );
+    let added = spawn_submit(&env, "c2", "AddItem");
+    assert_eq!(positions(&mailer.next().await), [2]);
+    mailer.ack(2).await;
+    added.await.unwrap();
+
+    // A retry comes alone, up to the last delivered position; parked again, it stays.
+    assert_eq!(
+        retry(&env, &key(1), "mailer", &[1], false).await.unwrap(),
+        [1]
+    );
+    let again = mailer.next().await;
+    assert_eq!((again.events.len(), again.up_to), (0, 2));
+    assert_eq!(again.retries[0].global_position, 1);
+    mailer.ack_parking(2, &[1]).await;
+    assert_eq!(stored_parked(&env, "mailer").await, [(1, false)]);
+    mailer.nothing_for(200).await;
+
+    // Handled: it is gone.
+    assert_eq!(
+        retry(&env, &key(1), "mailer", &[], false).await.unwrap(),
+        [1]
+    );
+    assert_eq!(mailer.next().await.retries.len(), 1);
+    mailer.ack(2).await;
+    assert_eq!(stored_parked(&env, "mailer").await, []);
+    assert!(
+        retry(&env, &key(1), "mailer", &[], false)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn parked_events_are_checked() {
+    let env = start("listener-parked-checked").await;
+    spawn_worker(&env).await;
+    let mut mailer = listen(&env, "mailer", opts(10)).await.unwrap();
+    let _placed = spawn_submit(&env, "c1", "PlaceOrder");
+    assert_eq!(positions(&mailer.next().await), [1]);
+    mailer.ack(1).await;
+    let _added = spawn_submit(&env, "c2", "AddItem");
+    assert_eq!(positions(&mailer.next().await), [2]);
+    // Only events of the acknowledged batches: not one acknowledged before.
+    mailer.ack_parking(2, &[1]).await;
+    assert_eq!(mailer.ended().await.code(), Code::InvalidArgument);
+
+    // Only a key that manages the listener's service retries; only registered listeners.
+    let refused = retry(&env, &key(5), "mailer", &[], false).await;
+    assert_eq!(refused.unwrap_err().code(), Code::PermissionDenied);
+    let unknown = retry(&env, &key(1), "nobody", &[], false).await;
+    assert_eq!(unknown.unwrap_err().code(), Code::NotFound);
+    let mut forged = RetryRequest {
+        listener: "mailer".into(),
+        issued_at: issued_now(),
+        protocol: kernable_core::PROTOCOL,
+        ..Default::default()
+    };
+    let channel = transport::connect(&env.addr).await.unwrap();
+    let mut client = ListenerServiceClient::new(channel);
+    let unsigned = client.retry(with_grant(forged.clone(), &key(1))).await;
+    assert_eq!(unsigned.unwrap_err().code(), Code::Unauthenticated);
+    let msg = signing::retry_message("mailer", &[], false, forged.issued_at);
+    forged.sig = Some(signing::sign(&key(1), &msg));
+    forged.dismiss = true;
+    let changed = client.retry(with_grant(forged, &key(1))).await;
+    assert_eq!(changed.unwrap_err().code(), Code::Unauthenticated);
+
+    // A live listener has nothing to park into.
+    let live = Opts {
+        live: true,
+        ..opts(10)
+    };
+    let mut push = listen(&env, "push", live).await.unwrap();
+    let _shipped = spawn_submit(&env, "c3", "AddItem");
+    assert_eq!(positions(&push.next().await), [3]);
+    push.ack_parking(3, &[3]).await;
+    assert_eq!(push.ended().await.code(), Code::InvalidArgument);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_waits_for_the_listener_and_survives_a_restart() {
+    let env = start("listener-parked-restart").await;
+    spawn_worker(&env).await;
+    let mut mailer = listen(&env, "mailer", opts(10)).await.unwrap();
+    let placed = spawn_submit(&env, "c1", "PlaceOrder");
+    assert_eq!(positions(&mailer.next().await), [1]);
+    mailer.ack_parking(1, &[1]).await;
+    placed.await.unwrap();
+    let added = spawn_submit(&env, "c2", "AddItem");
+    assert_eq!(positions(&mailer.next().await), [2]);
+    mailer.ack_parking(2, &[2]).await;
+    added.await.unwrap();
+    drop(mailer);
+
+    // Asked for while it is away; dismissed ones are gone. Both are stored at once.
+    assert_eq!(
+        retry(&env, &key(1), "mailer", &[1], false).await.unwrap(),
+        [1]
+    );
+    assert_eq!(
+        retry(&env, &key(1), "mailer", &[2], true).await.unwrap(),
+        [2]
+    );
+    assert!(
+        retry(&env, &key(1), "mailer", &[2], true)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let store = kernable_store::open_read_only(&env.store).unwrap();
+    let parked = store.listeners().unwrap()[0].parked.clone();
+    assert_eq!(
+        parked
+            .iter()
+            .map(|p| (p.position, p.retry))
+            .collect::<Vec<_>>(),
+        [(1, true)]
+    );
+    drop(store);
+
+    let from = env.dir.clone();
+    let after = start_custom("listener-parked-restarted", move |_, dir| {
+        for file in ["k.db", "k.db-wal", "k.log"] {
+            if from.join(file).exists() {
+                std::fs::copy(from.join(file), dir.join(file)).unwrap();
+            }
+        }
+    })
+    .await;
+    let mut mailer = listen(&after, "mailer", opts(10)).await.unwrap();
+    let again = mailer.next().await;
+    assert_eq!(again.up_to, mailer.start);
+    assert_eq!(again.retries[0].global_position, 1);
+    mailer.ack(again.up_to).await;
+    assert_eq!(stored_parked(&after, "mailer").await, []);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_listener_of_protocol_3_gets_no_retries() {
+    let env = start("listener-parked-old").await;
+    spawn_worker(&env).await;
+    let mut mailer = listen(&env, "mailer", opts(10)).await.unwrap();
+    let placed = spawn_submit(&env, "c1", "PlaceOrder");
+    assert_eq!(positions(&mailer.next().await), [1]);
+    mailer.ack_parking(1, &[1]).await;
+    placed.await.unwrap();
+    drop(mailer);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let old = Opts {
+        protocol: 3,
+        ..opts(10)
+    };
+    let mut mailer = listen(&env, "mailer", old).await.unwrap();
+    assert_eq!(
+        retry(&env, &key(1), "mailer", &[], false).await.unwrap(),
+        [1]
+    );
+    // It would acknowledge the retry without handling it: it never gets one.
+    mailer.nothing_for(300).await;
+    assert_eq!(stored_parked(&env, "mailer").await, [(1, true)]);
 }

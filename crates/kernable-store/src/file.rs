@@ -179,7 +179,13 @@ impl State {
             Record::Listener(l) if l.removed => {
                 self.listeners.remove(&l.name);
             }
-            Record::Listener(l) => {
+            Record::Listener(mut l) => {
+                if !l.parked_changed
+                    && let Some(old) = self.listeners.get_mut(&l.name)
+                {
+                    l.parked = std::mem::take(&mut old.parked);
+                }
+                l.parked_changed = false;
                 self.listeners.insert(l.name.clone(), l);
             }
             Record::Worker(w) if w.removed => {

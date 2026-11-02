@@ -180,7 +180,8 @@ function model(s) {
     const behind = l.connected && l.position < head;
     const status = l.live ? "live" : !l.counts ? (l.connected ? "dynamic" : "away") : !l.connected ? "missing" : behind ? "behind" : "connected";
     const what = l.live ? "live" : l.middlewares.length ? "middleware" : "listener";
-    const sub = `${what} · order ${l.order} · ${l.connected ? (behind ? `${head - l.position} behind` : "up to date") : "away"}`;
+    const parked = l.parked ? ` · ${l.parked} parked` : "";
+    const sub = `${what} · order ${l.order} · ${l.connected ? (behind ? `${head - l.position} behind` : "up to date") : "away"}${parked}`;
     const node = add(`l:${l.name}`, 3, l.name, sub, status, { kind: what, ...l });
     const owner = serviceNode(l.service);
     if (owner) edges.push({ from: owner.id, to: node.id, kind: "own" });
@@ -311,6 +312,11 @@ function details(n) {
     row("connected", i.connected ? `since ${ago(i.since)}` : i.lastSeen ? `no, last seen ${ago(i.lastSeen)}` : "no");
     row("counts", i.counts === undefined ? undefined : i.counts ? "yes: others wait for it" : "no");
     row("key", short(i.key));
+    if (i.parked) {
+      const shown = i.parkedEvents.map((p) => `${p.position} ${p.type}: ${p.code}${p.message ? ` (${p.message})` : ""}, ${p.attempts}×, ${ago(p.parkedAt)}${p.retry ? ", retrying" : ""}`);
+      if (i.parked > shown.length) shown.push(`… ${i.parked - shown.length} more: kernable listeners parked`);
+      row(`parked · ${i.parked}`, shown.join("\n"));
+    }
   }
   box.replaceChildren(el("div", { class: "kind" }, i.kind), el("h3", {}, n.label), el("dl", {}, rows));
 }
@@ -326,7 +332,7 @@ function drawConnections() {
       el("td", {}, el("i", { class: "dot", style: `background:${color(l.live ? "live" : !l.counts ? "dynamic" : !l.connected ? "missing" : l.position < head ? "behind" : "connected")};margin-right:8px` }), l.name),
       el("td", {}, l.service || "–"),
       el("td", {}, l.live ? "live" : l.middlewares.length ? `middleware (${l.middlewares.map((m) => m.when).join(", ")})` : "listener"),
-      el("td", {}, `${l.position} / ${head}${l.connected && l.position < head ? ` · ${head - l.position} behind` : ""}`),
+      el("td", {}, `${l.position} / ${head}${l.connected && l.position < head ? ` · ${head - l.position} behind` : ""}${l.parked ? ` · ${l.parked} parked` : ""}`),
       el("td", { class: "mono" }, short(l.key)),
       el("td", {}, l.connected ? ago(l.since) : `no · last seen ${ago(l.lastSeen)}`))));
   $("connections").replaceChildren(el("h2", {}, `Workers · ${s.instances.length}`), workers, el("h2", {}, `Listeners · ${s.listeners.length}`), listeners);

@@ -334,7 +334,10 @@ async fn listen_once(
                 let mut seen = observed.lock().unwrap();
                 seen.delivered("audit", &b);
                 seen.acked("audit", b.up_to);
-                In::Ack(Ack { position: b.up_to })
+                In::Ack(Ack {
+                    position: b.up_to,
+                    ..Default::default()
+                })
             }
             _ => continue,
         };

@@ -186,7 +186,10 @@ fn middleware(env: &Env, spec: Spec, log: &Log) -> (JoinHandle<tonic::Status>, m
                     if !spec.acks {
                         continue;
                     }
-                    In::Ack(Ack { position: b.up_to })
+                    In::Ack(Ack {
+                        position: b.up_to,
+                        ..Default::default()
+                    })
                 }
                 Out::Check(call) => {
                     tokio::time::sleep(spec.deliberates).await;

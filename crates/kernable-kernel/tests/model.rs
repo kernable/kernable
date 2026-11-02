@@ -149,7 +149,10 @@ fn listener(addr: &str, name: &'static str, order: i32, all: Arc<Listeners>) {
                         .push((b.up_to, tick));
                     let acked = seen.acked.entry(name.into()).or_default();
                     *acked = (*acked).max(b.up_to);
-                    In::Ack(Ack { position: b.up_to })
+                    In::Ack(Ack {
+                        position: b.up_to,
+                        ..Default::default()
+                    })
                 }
                 _ => continue,
             };

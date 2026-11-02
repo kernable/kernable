@@ -15,8 +15,8 @@ use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
         AggregateIndex, Attribute, Command, CommandResult, Committed, Event, Grant, ListenerRecord,
-        Membership, MembershipRecord, Middleware, NewEvent, Rejected, RequestContext, Requirement,
-        RevocationRecord, Signature, When, WorkerRecord, command_result::Outcome,
+        Membership, MembershipRecord, Middleware, NewEvent, ParkedEvent, Rejected, RequestContext,
+        Requirement, RevocationRecord, Signature, When, WorkerRecord, command_result::Outcome,
     },
     signing::{self, GENESIS},
 };
@@ -102,6 +102,17 @@ CREATE TABLE IF NOT EXISTS middlewares (
     ordering INTEGER NOT NULL, -- position in the chain: lower first
     types    TEXT    NOT NULL, -- comma-separated patterns of command and query types
     PRIMARY KEY (listener, phase)
+) STRICT;
+CREATE TABLE IF NOT EXISTS parked (
+    listener   TEXT    NOT NULL REFERENCES listeners (name) ON DELETE CASCADE,
+    position   INTEGER NOT NULL, -- global position of the event it gave up on
+    event_type TEXT    NOT NULL, -- qualified
+    code       TEXT    NOT NULL, -- a rejection code, or handler_error
+    message    TEXT    NOT NULL, -- the rejection's message, or only the error's type
+    attempts   INTEGER NOT NULL,
+    parked_at  INTEGER NOT NULL, -- ms since epoch
+    retry      INTEGER NOT NULL, -- 1: to be delivered again
+    PRIMARY KEY (listener, position)
 ) STRICT;
 CREATE TABLE IF NOT EXISTS workers (
     aggregate_type TEXT PRIMARY KEY, -- qualified: shop.Cart
@@ -638,9 +649,30 @@ impl Store for SqliteStore {
                     middlewares: Vec::new(),
                     service: r.get(5)?,
                     last_seen: r.get(6)?,
+                    parked: Vec::new(),
+                    parked_changed: false,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut parked = conn.prepare(
+            "SELECT position, event_type, code, message, attempts, parked_at, retry FROM parked
+             WHERE listener = ?1 ORDER BY position",
+        )?;
+        for l in &mut listeners {
+            l.parked = parked
+                .query_map([&l.name], |r| {
+                    Ok(ParkedEvent {
+                        position: r.get(0)?,
+                        event_type: r.get(1)?,
+                        code: r.get(2)?,
+                        message: r.get(3)?,
+                        attempts: r.get(4)?,
+                        parked_at: r.get(5)?,
+                        retry: r.get(6)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+        }
         let mut stmt = conn.prepare(
             "SELECT phase, ordering, types FROM middlewares WHERE listener = ?1 ORDER BY phase DESC",
         )?;
@@ -703,6 +735,27 @@ impl Store for SqliteStore {
                      VALUES (?1, ?2, ?3, ?4)",
                     params![l.name, phase, m.order, m.types.join(",")],
                 )?;
+            }
+            if l.parked_changed {
+                tx.execute("DELETE FROM parked WHERE listener = ?1", [&l.name])?;
+                for p in &l.parked {
+                    tx.execute(
+                        "INSERT INTO parked
+                             (listener, position, event_type, code, message, attempts, parked_at,
+                              retry)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                        params![
+                            l.name,
+                            p.position,
+                            p.event_type,
+                            p.code,
+                            p.message,
+                            p.attempts,
+                            p.parked_at,
+                            p.retry
+                        ],
+                    )?;
+                }
             }
         }
         tx.commit()?;

@@ -921,7 +921,10 @@ impl ListenerHandle {
                         return Err(e);
                     }
                     inner.position.store(up_to, Ordering::SeqCst);
-                    Reply::Ack(Ack { position: up_to })
+                    Reply::Ack(Ack {
+                        position: up_to,
+                        ..Default::default()
+                    })
                 }
                 Some(Delivery::Query(q)) => {
                     let query = q.query.unwrap_or_default();

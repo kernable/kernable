@@ -300,7 +300,10 @@ async fn listener(addr: &str, key: &str, name: &str, order: i32) -> Result<(), B
             Some(Delivery::Challenge(c)) => Listen::ChallengeResponse(ChallengeResponse {
                 sig: signing::sign(&key, &signing::challenge_message(&c.nonce)).sig,
             }),
-            Some(Delivery::Batch(b)) => Listen::Ack(Ack { position: b.up_to }),
+            Some(Delivery::Batch(b)) => Listen::Ack(Ack {
+                position: b.up_to,
+                ..Default::default()
+            }),
             _ => continue,
         };
         tx.send(msg(reply)).await?;

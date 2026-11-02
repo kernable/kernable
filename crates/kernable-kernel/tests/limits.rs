@@ -268,7 +268,10 @@ async fn listen(
                     seen.delivered(&name, &b);
                     seen.acked(&name, b.up_to);
                 }
-                let ack = In::Ack(Ack { position: b.up_to });
+                let ack = In::Ack(Ack {
+                    position: b.up_to,
+                    ..Default::default()
+                });
                 if tx.send(send(ack)).await.is_err() {
                     return;
                 }

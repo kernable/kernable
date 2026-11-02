@@ -392,6 +392,13 @@ impl kernable_core::proto::listener_service_server::ListenerService for FakeKern
         Result<kernable_core::proto::ListenerDelivery, tonic::Status>,
     >;
 
+    async fn retry(
+        &self,
+        _: tonic::Request<kernable_core::proto::RetryRequest>,
+    ) -> Result<tonic::Response<kernable_core::proto::RetryResult>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not in the fake"))
+    }
+
     async fn listen(
         &self,
         request: tonic::Request<tonic::Streaming<kernable_core::proto::ListenerMessage>>,
@@ -440,6 +447,7 @@ impl kernable_core::proto::listener_service_server::ListenerService for FakeKern
                     events: events.into_iter().map(event).collect(),
                     up_to,
                     vault: Vec::new(),
+                    retries: Vec::new(),
                 };
                 let _ = send(Out::Batch(batch)).await;
                 match inbound.message().await {

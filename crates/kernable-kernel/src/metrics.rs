@@ -209,6 +209,11 @@ pub(crate) fn render(kernel: &Kernel) -> String {
         per(&|l| l.connected as u64),
     );
     metric(
+        "kernable_listener_parked",
+        "Events the listener gave up on and parked, waiting for an operator to retry or dismiss them.",
+        per(&|l| l.parked as u64),
+    );
+    metric(
         "kernable_ready",
         "1 while the kernel is ready: every aggregate that counts has a worker, every listener that counts is connected and caught up, and it is not shutting down.",
         vec![(String::new(), kernel.readiness().is_ok() as u64)],

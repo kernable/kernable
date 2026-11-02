@@ -47,7 +47,8 @@ use kernable_core::proto::{
 /// - 3: adds the unique keys and facts per aggregate ([`Store::index`]).
 /// - 4: keeps the key or requirement a rejection names ([`Rejected::key`],
 ///   [`Rejected::requirement`]).
-pub const FORMAT: u32 = 4;
+/// - 5: keeps the events each listener parked ([`ListenerRecord::parked`]).
+pub const FORMAT: u32 = 5;
 
 pub use file::FileStore;
 pub use sqlite::SqliteStore;
@@ -318,7 +319,8 @@ pub trait Store: Send + Sync {
     fn listeners(&self) -> Result<Vec<ListenerRecord>>;
 
     /// Stores listener registrations and positions by name; a record with `removed` set
-    /// deletes the listener.
+    /// deletes the listener (with its parked events). Parked events are replaced only by a
+    /// record with `parked_changed`; [`Store::listeners`] returns them without the flag.
     fn save_listeners(&self, listeners: &[ListenerRecord]) -> Result<()>;
 
     /// Registered aggregates (see `Register.aggregates`), ordered by aggregate type.

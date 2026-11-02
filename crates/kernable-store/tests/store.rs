@@ -4,8 +4,8 @@ use std::{collections::HashSet, path::PathBuf, sync::Arc, thread};
 
 use kernable_core::proto::{
     AggregateIndex, Attribute, Command, Grant, ListenerRecord, Membership, MembershipRecord,
-    Middleware, NewEvent, Permission, Rejected, RequestContext, RevocationRecord, Signature,
-    StoredKey, When, WorkerRecord, command_result::Outcome,
+    Middleware, NewEvent, ParkedEvent, Permission, Rejected, RequestContext, RevocationRecord,
+    Signature, StoredKey, When, WorkerRecord, command_result::Outcome,
 };
 use kernable_store::{Enqueued, Error, FileStore, SqliteStore, Store, StreamId};
 
@@ -172,6 +172,8 @@ fn listener(name: &str, order: i32, position: u64) -> ListenerRecord {
         middlewares: Vec::new(),
         service: String::new(),
         last_seen: 1_000 + position as i64,
+        parked: Vec::new(),
+        parked_changed: false,
     }
 }
 
@@ -307,6 +309,53 @@ fn listeners_are_saved_replaced_and_removed(store: &dyn Store) {
     };
     store.save_listeners(&[removed]).unwrap();
     assert_eq!(store.listeners().unwrap(), [listener("orders", 10, 7)]);
+}
+
+fn parked_events_change_only_with_their_flag(store: &dyn Store) {
+    let parked = |position: u64, retry: bool| ParkedEvent {
+        position,
+        event_type: "orders.OrderPlaced".into(),
+        code: "not_found".into(),
+        message: "no such order".into(),
+        attempts: 5,
+        parked_at: 2_000,
+        retry,
+    };
+    let with = |position: u64, events: Vec<ParkedEvent>, changed: bool| ListenerRecord {
+        parked: events,
+        parked_changed: changed,
+        ..listener("mailer", 10, position)
+    };
+    store
+        .save_listeners(&[with(3, vec![parked(2, false), parked(3, true)], true)])
+        .unwrap();
+    // A position flush carries none and keeps them.
+    store.save_listeners(&[with(9, Vec::new(), false)]).unwrap();
+    assert_eq!(
+        store.listeners().unwrap(),
+        [with(9, vec![parked(2, false), parked(3, true)], false)]
+    );
+    store
+        .save_listeners(&[with(9, vec![parked(3, false)], true)])
+        .unwrap();
+    assert_eq!(
+        store.listeners().unwrap(),
+        [with(9, vec![parked(3, false)], false)]
+    );
+    store.save_listeners(&[with(9, Vec::new(), true)]).unwrap();
+    assert_eq!(store.listeners().unwrap(), [with(9, Vec::new(), false)]);
+
+    // Removing the listener removes them.
+    store
+        .save_listeners(&[with(9, vec![parked(4, false)], true)])
+        .unwrap();
+    let removed = ListenerRecord {
+        removed: true,
+        ..listener("mailer", 0, 0)
+    };
+    store.save_listeners(&[removed]).unwrap();
+    store.save_listeners(&[with(1, Vec::new(), false)]).unwrap();
+    assert_eq!(store.listeners().unwrap(), [with(1, Vec::new(), false)]);
 }
 
 fn reading_after_a_version_returns_only_later_events(store: &dyn Store) {
@@ -770,6 +819,7 @@ for_each_backend!(
     reject_completes_command_without_events,
     concurrent_threads_lose_no_updates,
     listeners_are_saved_replaced_and_removed,
+    parked_events_change_only_with_their_flag,
     workers_are_saved_replaced_and_removed,
     memberships_are_replaced_per_service,
     the_newest_grant_per_key_is_kept,

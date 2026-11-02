@@ -162,7 +162,10 @@ fn listen(env: &Env, name: &str, listener_key: u8, counts: mpsc::UnboundedSender
                 }),
                 Out::Batch(b) => {
                     let _ = counts.send(b.vault.len());
-                    In::Ack(Ack { position: b.up_to })
+                    In::Ack(Ack {
+                        position: b.up_to,
+                        ..Default::default()
+                    })
                 }
                 _ => continue,
             };

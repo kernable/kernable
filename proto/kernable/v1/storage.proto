@@ -90,6 +90,21 @@ message ListenerRecord {
   repeated Middleware middlewares = 7; // kept while disconnected, so the chain fails closed
   string service = 8; // see Hello.service
   int64 last_seen = 9; // ms since epoch when it last connected, disconnected or was running at a flush
+  repeated ParkedEvent parked = 10; // by position; stored only with `parked_changed`
+  // `parked` is the whole new set of parked events. Otherwise saving the record keeps the stored
+  // ones, so a position flush does not write them again.
+  bool parked_changed = 11;
+}
+
+// An event a listener parked (Ack.parked).
+message ParkedEvent {
+  uint64 position = 1;
+  string event_type = 2; // qualified
+  string code = 3;
+  string message = 4;
+  uint32 attempts = 5;
+  int64 parked_at = 6;   // ms since epoch
+  bool retry = 7;        // an operator asked to deliver it again; it stays parked until handled
 }
 
 // The membership of a service as applied (see `Membership`); the latest record per service wins.

@@ -43,6 +43,7 @@ Each message starts with a `str` **tag** for domain separation. Payloads are sig
 | Kernel | `kernable.v1.checkpoint` | `global_position: u64`, `chain_hash`, `created_at: i64` |
 | Kernel | `kernable.v1.revocation` | `key_id`, `since: i64`, `created_at: i64` |
 | Root key | `kernable.v1.grant` | `key_id`, `succeeds`, `issued_at: i64`, `permission_count: u64`, then per permission `action`, `type_count: u64`, every type |
+| Operator tooling | `kernable.v1.retry` | `listener`, `positions_count: u64` and every `position: u64`, `dismiss: u64` (1 or 0), `issued_at: i64` |
 | Root key | `kernable.v1.revoke` | `key_id`, `since: i64`, `issued_at: i64` |
 
 Four more tagged messages are hashed, not signed: `kernable.v1.vault` ([Vault references](#vault-references)), `kernable.v1.id` ([Derived IDs](#derived-ids)), `kernable.v1.key` ([Unique keys and facts](#unique-keys-and-facts)) and `kernable.v1.event` ([Event hash chain](#event-hash-chain)).
@@ -59,7 +60,7 @@ The kernel checks that a result, index, rejection or snapshot is signed by the k
 
 ## Time windows
 
-Queries, subscribe requests, data and cache requests, memberships and revoke requests are valid for 60 s around `issued_at` (ms since epoch), measured on the kernel's clock. Commands have no time window: a command ID runs once, so a replayed command only returns its stored result.
+Queries, subscribe requests, data and cache requests, memberships, retry requests and revoke requests are valid for 60 s around `issued_at` (ms since epoch), measured on the kernel's clock. Commands have no time window: a command ID runs once, so a replayed command only returns its stored result.
 
 Within the window a captured subscribe or query request could be replayed, but it only grants the read access the key already has. Transport encryption (mutual TLS over TCP) closes this gap. For data and cache requests the operation is part of the tag, so a signed get cannot be replayed as a delete.
 
@@ -70,6 +71,8 @@ A grant says what a key may do. A root key signs it; the process of the grantee 
 A revoke request is signed by a root key; the kernel then stores the revocation signed with its own key (`kernable.v1.revocation`, with `created_at` the time it stored it). Only root-key tooling produces grants and revoke requests.
 
 A membership is signed by a key granted `manage` for its service. Metadata is signed in the order it is sent.
+
+A retry request (`kernable listeners retry` and `dismiss`) is signed by a key granted `manage` for the listener's service; for a listener without a service, `manage` for `*`. Replaying one within its window only repeats what it asked for: delivering the same parked events again, or removing what is already removed. Only operator tooling produces it, so an SDK need not reproduce it.
 
 ## Derived IDs
 

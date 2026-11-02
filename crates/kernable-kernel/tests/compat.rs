@@ -18,9 +18,9 @@ use kernable_core::{
     PROTOCOL,
     proto::{
         AggregateIndex, Attribute, Command, Hello, ListenerMessage, ListenerRecord, Membership,
-        MembershipRecord, Middleware, NewEvent, QueryRequest, Register, Rejected, RequestContext,
-        RevocationRecord, StoredKey, SubmitRequest, SubscribeRequest, UniqueKey, VaultValue, Wait,
-        When, WorkerMessage, WorkerRecord, command_result::Outcome,
+        MembershipRecord, Middleware, NewEvent, ParkedEvent, QueryRequest, Register, Rejected,
+        RequestContext, RevocationRecord, StoredKey, SubmitRequest, SubscribeRequest, UniqueKey,
+        VaultValue, Wait, When, WorkerMessage, WorkerRecord, command_result::Outcome,
         command_service_client::CommandServiceClient, event_service_client::EventServiceClient,
         listener_message, listener_service_client::ListenerServiceClient,
         query_service_client::QueryServiceClient, worker_gateway_client::WorkerGatewayClient,
@@ -247,6 +247,8 @@ fn fill(store: &dyn Store, vault: &Vault) {
         middlewares,
         service: String::new(),
         last_seen: AT,
+        parked: Vec::new(),
+        parked_changed: false,
     };
     let guard = Middleware {
         order: 0,
@@ -255,7 +257,19 @@ fn fill(store: &dyn Store, vault: &Vault) {
     };
     store
         .save_listeners(&[
-            listener("orders", "orders.*", Vec::new()),
+            ListenerRecord {
+                parked: vec![ParkedEvent {
+                    position: 1,
+                    event_type: "orders.OrderPlaced".into(),
+                    code: "not_found".into(),
+                    message: "no such customer".into(),
+                    attempts: 5,
+                    parked_at: AT,
+                    retry: true,
+                }],
+                parked_changed: true,
+                ..listener("orders", "orders.*", Vec::new())
+            },
             listener("guard", "identity.*", vec![guard]),
         ])
         .unwrap();
@@ -378,6 +392,13 @@ fn check_common(store: &dyn Store, backend: &str) {
         "{backend}: guard is a middleware"
     );
     assert_eq!(listeners[0].last_seen, AT);
+    assert_eq!(
+        listeners[1].parked.len(),
+        1,
+        "{backend}: orders parked an event"
+    );
+    assert_eq!(listeners[1].parked[0].message, "no such customer");
+    assert!(listeners[1].parked[0].retry, "{backend}");
     let workers = store.workers().unwrap();
     assert_eq!(workers[0].command_types.len(), 2, "{backend}");
     let memberships = store.memberships().unwrap();

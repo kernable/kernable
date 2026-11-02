@@ -51,9 +51,9 @@ use kernable_core::{
         Accepted, CacheRequest, CacheResult, Challenge, Command, CommandResult, Committed,
         DataRequest, DataResult, Event, Execute, ExecuteMore, Grant, KernelMessage,
         ListenerDelivery, ListenerMessage, MiddlewareCall, NewEvent, QueryRequest, QueryResult,
-        Register, Registered, Rejected, RevocationRecord, RevokeRequest, RevokeResponse, Signature,
-        Snapshot, SnapshotRecord, SubmitRequest, SubscribeRequest, VaultValue, Wait, When,
-        WorkerMessage,
+        Register, Registered, Rejected, RetryRequest, RetryResult, RevocationRecord, RevokeRequest,
+        RevokeResponse, Signature, Snapshot, SnapshotRecord, SubmitRequest, SubscribeRequest,
+        VaultValue, Wait, When, WorkerMessage,
         cache_service_server::{CacheService, CacheServiceServer},
         command_result::Outcome,
         command_service_server::{CommandService, CommandServiceServer},
@@ -1863,6 +1863,45 @@ impl ListenerService for Api {
             }
         });
         Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    async fn retry(&self, request: Request<RetryRequest>) -> Result<Response<RetryResult>, Status> {
+        let kernel = &self.0;
+        let metadata = request.metadata().clone();
+        let req = request.into_inner();
+        protocol(req.protocol)?;
+        let sig = req
+            .sig
+            .ok_or_else(|| Status::unauthenticated("retry request is not signed"))?;
+        let message =
+            signing::retry_message(&req.listener, &req.positions, req.dismiss, req.issued_at);
+        signing::verify(&sig, &message)
+            .map_err(|_| Status::unauthenticated("invalid retry request signature"))?;
+        kernel.present(&metadata, &sig.key_id)?;
+        if (now_ms() - req.issued_at).abs() > MAX_REQUEST_AGE_MS {
+            return Err(Status::unauthenticated(
+                "retry request expired; check the clock",
+            ));
+        }
+        let service = kernel
+            .listeners
+            .service(&req.listener)
+            .ok_or_else(|| Status::not_found(format!("no listener {}", req.listener)))?;
+        let manages = if service.is_empty() { "*" } else { &service };
+        if !config::allowed(&kernel.permissions().manage, &sig.key_id, manages) {
+            return Err(Status::permission_denied(format!(
+                "key may not manage {manages}"
+            )));
+        }
+        let positions = kernel
+            .listeners
+            .retry(&req.listener, &req.positions, req.dismiss)
+            .ok_or_else(|| Status::not_found(format!("no listener {}", req.listener)))?;
+        // Stored before the answer, so a retry or dismissal that was confirmed holds.
+        listeners::flush(kernel).map_err(|e| Status::internal(e.to_string()))?;
+        let what = if req.dismiss { "dismissed" } else { "retrying" };
+        tracing::info!(listener = %req.listener, key = %sig.key_id, events = positions.len(), "{what} parked events");
+        Ok(Response::new(RetryResult { positions }))
     }
 }
 

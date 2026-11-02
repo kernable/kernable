@@ -64,7 +64,10 @@ fn read_model(env: &Env, name: &str, key: SigningKey, ack: bool) -> JoinHandle<t
                     if !ack {
                         continue;
                     }
-                    In::Ack(Ack { position: b.up_to })
+                    In::Ack(Ack {
+                        position: b.up_to,
+                        ..Default::default()
+                    })
                 }
                 Out::Query(call) => {
                     let query = call.query.unwrap();

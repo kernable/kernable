@@ -19,6 +19,11 @@
 //! no longer lists it as one, or it is removed. Checks are
 //! sent in order with the batches, and only once the listener has caught up with the events
 //! committed before it connected.
+//!
+//! A listener may give up on an event and park it (`Ack.parked`): it moves on, and the kernel
+//! keeps the event's position with the reason until an operator delivers it again or dismisses
+//! it (`ListenerService.Retry`). A retry goes out in a batch of its own (`Batch.retries`); the
+//! event stays parked until the listener acknowledges that batch without parking it again.
 
 use std::{
     collections::HashMap,
@@ -31,9 +36,9 @@ use std::{
 
 use kernable_core::{
     proto::{
-        Batch, Challenge, Event, Hello, ListenerDelivery, ListenerMessage, ListenerRecord,
-        Membership, MiddlewareCall, QueryAnswer, QueryCall, QueryRequest, Ready, Signature,
-        Verdict, When, listener_delivery::Msg as Out, listener_message::Msg as In,
+        Ack, Batch, Challenge, Event, Hello, ListenerDelivery, ListenerMessage, ListenerRecord,
+        Membership, MiddlewareCall, ParkedEvent, QueryAnswer, QueryCall, QueryRequest, Ready,
+        Signature, Verdict, When, listener_delivery::Msg as Out, listener_message::Msg as In,
     },
     signing,
 };
@@ -44,8 +49,18 @@ use prost::Message;
 
 use crate::{BoxError, Kernel, SUBSCRIBE_BATCH, config, internal, memberships::Memberships};
 
+/// Parked events per listener the UI shows.
+const PARKED_SHOWN: usize = 20;
+
 /// How often acknowledged positions are written to the store.
 pub(crate) const FLUSH: Duration = Duration::from_millis(100);
+
+/// Most events one listener may have parked; an ack beyond it is refused, so the listener
+/// stops instead of parking everything.
+pub(crate) const MAX_PARKED: usize = 10_000;
+
+/// The first protocol whose listeners can park and get retries.
+const PARKING: u32 = 4;
 
 struct Entry {
     record: ListenerRecord,
@@ -65,6 +80,10 @@ struct Entry {
     listed: bool,
     /// When it connected (ms since epoch); 0 while disconnected.
     since: i64,
+    /// The connected listener's protocol: retries only go to those that know them.
+    protocol: u32,
+    /// Parked events sent to the connected listener again: (the batch's `up_to`, position).
+    retrying: Vec<(u64, u64)>,
 }
 
 impl Entry {
@@ -105,6 +124,7 @@ pub(crate) struct ListenerStatus {
     pub(crate) name: String,
     pub(crate) position: u64,
     pub(crate) connected: bool,
+    pub(crate) parked: usize,
 }
 
 #[derive(Default)]
@@ -134,6 +154,8 @@ impl Registry {
                     out: None,
                     caught_up_at: 0,
                     live: false,
+                    protocol: 0,
+                    retrying: Vec::new(),
                 };
                 (entry.record.name.clone(), entry)
             })
@@ -169,6 +191,7 @@ impl Registry {
                 name: e.record.name.clone(),
                 position: e.record.position,
                 connected: e.connected,
+                parked: e.record.parked.len(),
             })
             .collect();
         all.sort_by(|a, b| a.name.cmp(&b.name));
@@ -224,6 +247,17 @@ impl Registry {
                     "live": e.live,
                     "counts": e.counts(),
                     "lastSeen": e.record.last_seen,
+                    "parked": e.record.parked.len(),
+                    // The first ones, enough to see what goes wrong; the CLI lists all.
+                    "parkedEvents": e.record.parked.iter().take(PARKED_SHOWN).map(|p| serde_json::json!({
+                        "position": p.position,
+                        "type": p.event_type,
+                        "code": p.code,
+                        "message": p.message,
+                        "attempts": p.attempts,
+                        "parkedAt": p.parked_at,
+                        "retry": p.retry,
+                    })).collect::<Vec<_>>(),
                 })
             })
             .collect();
@@ -273,6 +307,151 @@ impl Registry {
         self.entries().get(name).map_or(0, |e| e.record.position)
     }
 
+    /// The listener's ack of `ack.position`, with the events it parked (their types looked up
+    /// already, in `types`). Retries in batches up to the position are done: those not parked
+    /// again leave the parked set. Refuses parked events outside what the ack covers.
+    fn acked(&self, name: &str, ack: &Ack, types: Vec<String>) -> Result<(), Status> {
+        let mut entries = self.entries();
+        let Some(e) = entries.get_mut(name) else {
+            return Ok(());
+        };
+        if !ack.parked.is_empty() && e.live {
+            return Err(Status::invalid_argument(
+                "a live listener cannot park events",
+            ));
+        }
+        for (i, p) in ack.parked.iter().enumerate() {
+            let covered = p.position <= ack.position
+                && (p.position > e.record.position
+                    || e.retrying.iter().any(|&(_, r)| r == p.position));
+            if !covered || ack.parked[..i].iter().any(|o| o.position == p.position) {
+                return Err(Status::invalid_argument(format!(
+                    "parked event {} is not in the acknowledged batches",
+                    p.position
+                )));
+            }
+        }
+        let added = ack
+            .parked
+            .iter()
+            .filter(|p| {
+                e.record
+                    .parked
+                    .binary_search_by_key(&p.position, |q| q.position)
+                    .is_err()
+            })
+            .count();
+        if e.record.parked.len() + added > MAX_PARKED {
+            return Err(Status::resource_exhausted(format!(
+                "listener {name} would have more than {MAX_PARKED} parked events: retry or \
+                 dismiss them (`kernable listeners parked`)"
+            )));
+        }
+        let done: Vec<u64> = e
+            .retrying
+            .iter()
+            .filter(|&&(up_to, _)| up_to <= ack.position)
+            .map(|&(_, position)| position)
+            .collect();
+        let parked_again = |position: u64| ack.parked.iter().any(|p| p.position == position);
+        let before = e.record.parked.len();
+        e.record
+            .parked
+            .retain(|p| !done.contains(&p.position) || parked_again(p.position));
+        e.retrying.retain(|&(up_to, _)| up_to > ack.position);
+        let mut changed = e.record.parked.len() != before;
+        let now = crate::now_ms();
+        for (p, event_type) in ack.parked.iter().zip(types) {
+            let parked = ParkedEvent {
+                position: p.position,
+                event_type,
+                code: truncated(&p.code, 128),
+                message: truncated(&p.message, 1024),
+                attempts: p.attempts,
+                parked_at: now,
+                retry: false,
+            };
+            match e
+                .record
+                .parked
+                .binary_search_by_key(&p.position, |q| q.position)
+            {
+                Ok(i) => e.record.parked[i] = parked,
+                Err(i) => e.record.parked.insert(i, parked),
+            }
+            changed = true;
+        }
+        if changed {
+            e.record.parked_changed = true;
+            e.dirty = true;
+        }
+        drop(entries);
+        self.ack(name, ack.position);
+        Ok(())
+    }
+
+    /// Parked events of `name` to deliver again now: asked for, and not on their way already.
+    /// None for a listener whose protocol has no retries.
+    fn due(&self, name: &str) -> Vec<u64> {
+        let entries = self.entries();
+        let Some(e) = entries.get(name).filter(|e| e.protocol >= PARKING) else {
+            return Vec::new();
+        };
+        e.record
+            .parked
+            .iter()
+            .filter(|p| p.retry && !e.retrying.iter().any(|&(_, r)| r == p.position))
+            .map(|p| p.position)
+            .collect()
+    }
+
+    /// Notes that the parked events at `positions` went out in a batch up to `up_to`.
+    fn retrying(&self, name: &str, up_to: u64, positions: &[u64]) {
+        if let Some(e) = self.entries().get_mut(name) {
+            e.retrying.extend(positions.iter().map(|&p| (up_to, p)));
+        }
+    }
+
+    /// Marks parked events of the registered listener `name` for delivery (or removes them,
+    /// `dismiss`); all of them if `positions` is empty. Returns the positions it applied to, or
+    /// None if there is no such listener. The change is stored with the next flush.
+    pub(crate) fn retry(&self, name: &str, positions: &[u64], dismiss: bool) -> Option<Vec<u64>> {
+        let mut entries = self.entries();
+        let e = entries.get_mut(name).filter(|e| !e.live)?;
+        let chosen = |p: &ParkedEvent| positions.is_empty() || positions.contains(&p.position);
+        let applied: Vec<u64> = e
+            .record
+            .parked
+            .iter()
+            .filter(|p| chosen(p))
+            .map(|p| p.position)
+            .collect();
+        if dismiss {
+            e.record.parked.retain(|p| !chosen(p));
+            // A retry on its way is no longer parked: its ack changes nothing.
+            e.retrying.retain(|(_, r)| !applied.contains(r));
+        } else {
+            for p in e.record.parked.iter_mut().filter(|p| chosen(p)) {
+                p.retry = true;
+            }
+        }
+        if !applied.is_empty() {
+            e.record.parked_changed = true;
+            e.dirty = true;
+        }
+        drop(entries);
+        self.progress.notify_waiters();
+        Some(applied)
+    }
+
+    /// The service of the registered listener `name`, for authorizing a retry.
+    pub(crate) fn service(&self, name: &str) -> Option<String> {
+        self.entries()
+            .get(name)
+            .filter(|e| !e.live)
+            .map(|e| e.record.service.clone())
+    }
+
     fn ack(&self, name: &str, position: u64) {
         if let Some(e) = self.entries().get_mut(name)
             && position > e.record.position
@@ -292,6 +471,7 @@ impl Registry {
             e.since = 0;
             e.out = None;
             e.query_types.clear();
+            e.retrying.clear();
             e.record.last_seen = crate::now_ms();
             e.dirty = true;
         }
@@ -429,7 +609,15 @@ impl Registry {
                 if e.connected {
                     e.record.last_seen = now;
                 }
-                e.record.clone()
+                // Parked events only when they changed: a position flush leaves them stored.
+                let parked = std::mem::take(&mut e.record.parked);
+                let mut record = e.record.clone();
+                if record.parked_changed {
+                    record.parked = parked.clone();
+                }
+                e.record.parked = parked;
+                e.record.parked_changed = false;
+                record
             })
             .collect()
     }
@@ -440,6 +628,7 @@ impl Registry {
         for r in records {
             if let Some(e) = entries.get_mut(&r.name) {
                 e.dirty = true;
+                e.record.parked_changed |= r.parked_changed;
             }
         }
     }
@@ -641,6 +830,10 @@ pub(crate) async fn run(
             middlewares: hello.middlewares.clone(),
             service: hello.service.clone(),
             last_seen: crate::now_ms(),
+            parked: previous
+                .map(|e| e.record.parked.clone())
+                .unwrap_or_default(),
+            parked_changed: false,
         };
         // Registration is stored right away; positions follow with the periodic flush.
         if !hello.live {
@@ -663,6 +856,8 @@ pub(crate) async fn run(
                     .memberships
                     .counts_listener(&hello.service, &hello.name),
                 since: crate::now_ms(),
+                protocol: hello.protocol,
+                retrying: Vec::new(),
             },
         );
         position
@@ -707,7 +902,12 @@ pub(crate) async fn run(
         match message {
             None => return Ok(()),
             Some(In::Ack(ack)) if ack.position <= sent.load(Ordering::SeqCst) => {
-                kernel.listeners.ack(&hello.name, ack.position);
+                let types = ack
+                    .parked
+                    .iter()
+                    .map(|p| event_type_at(&kernel, p.position))
+                    .collect::<Result<_, _>>()?;
+                kernel.listeners.acked(&hello.name, &ack, types)?;
                 crate::crash::point("listeners.acked");
             }
             Some(In::Ack(_)) => {
@@ -761,6 +961,22 @@ async fn deliver(
         let progressed = kernel.listeners.progress.notified();
         let appended = kernel.appended.notified();
         let after = sent.load(Ordering::SeqCst);
+        let due = kernel.listeners.due(&name);
+        if !due.is_empty() {
+            let retries = match retries(&kernel, &key_id, &due, after) {
+                Ok(batch) => batch,
+                Err(e) => {
+                    let _ = out.send(Err(e)).await;
+                    return;
+                }
+            };
+            let positions: Vec<u64> = retries.retries.iter().map(|e| e.global_position).collect();
+            kernel.listeners.retrying(&name, after, &positions);
+            if send(&out, Out::Batch(retries)).await.is_err() {
+                return;
+            }
+            continue;
+        }
         // Never beyond the order gate, nor beyond what is on the disk.
         let gate = kernel
             .listeners
@@ -831,7 +1047,55 @@ fn batch_of(kernel: &Kernel, key_id: &str, events: Vec<Event>, up_to: u64) -> Ba
         vault: kernel.values_of(&refs),
         events,
         up_to,
+        retries: Vec::new(),
     }
+}
+
+/// A batch of the parked events at `due` to deliver again, as many as fit `--max-message-bytes`
+/// (at least one), with `up_to` the last position delivered.
+fn retries(kernel: &Kernel, key_id: &str, due: &[u64], up_to: u64) -> Result<Batch, Status> {
+    let mut events = Vec::new();
+    for &position in due.iter().take(SUBSCRIBE_BATCH as usize) {
+        events.extend(
+            kernel
+                .store
+                .read_all(position - 1, 1)
+                .map_err(internal)?
+                .into_iter()
+                .filter(|e| e.global_position == position),
+        );
+    }
+    let max = kernel.config().limits.message_bytes;
+    loop {
+        let mut batch = batch_of(kernel, key_id, events.clone(), up_to);
+        batch.retries = std::mem::take(&mut batch.events);
+        if events.len() <= 1 || batch.encoded_len() + crate::ENVELOPE_BYTES <= max {
+            return Ok(batch);
+        }
+        events.truncate(events.len() / 2);
+    }
+}
+
+/// The qualified type of the event at `position`, which a listener parks; an error if there is
+/// none.
+fn event_type_at(kernel: &Kernel, position: u64) -> Result<String, Status> {
+    let event = kernel
+        .store
+        .read_all(position.saturating_sub(1), 1)
+        .map_err(internal)?
+        .into_iter()
+        .find(|e| e.global_position == position && position > 0)
+        .ok_or_else(|| Status::invalid_argument(format!("no event at position {position}")))?;
+    Ok(config::qualified(&event.domain, &event.event_type))
+}
+
+/// `s`, cut to at most `max` bytes at a character boundary.
+fn truncated(s: &str, max: usize) -> String {
+    let mut end = s.len().min(max);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_owned()
 }
 
 /// Whether the listener's key may still read, answer and check what it registered for.

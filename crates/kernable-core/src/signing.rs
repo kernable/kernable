@@ -354,6 +354,18 @@ pub fn membership_message(m: &Membership) -> Vec<u8> {
     msg.i64(m.issued_at).0
 }
 
+/// What a key granted `manage` signs to deliver a listener's parked events again, or dismiss
+/// them; no `positions` means all of them.
+pub fn retry_message(listener: &str, positions: &[u64], dismiss: bool, issued_at: i64) -> Vec<u8> {
+    let mut msg = Msg::new("kernable.v1.retry")
+        .str(listener)
+        .u64(positions.len() as u64);
+    for p in positions {
+        msg = msg.u64(*p);
+    }
+    msg.u64(u64::from(dismiss)).i64(issued_at).0
+}
+
 /// What a root key signs to revoke `key_id` from `since` on (both ms since epoch).
 pub fn revoke_message(key_id: &str, since: i64, issued_at: i64) -> Vec<u8> {
     Msg::new("kernable.v1.revoke")

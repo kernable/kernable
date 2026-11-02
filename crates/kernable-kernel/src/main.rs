@@ -12,9 +12,10 @@ use std::{
 
 use kernable_core::{
     proto::{
-        ApplyRequest, Attribute, Command, ListenerRecord, Membership, Permission, RevokeRequest,
-        SubmitRequest, When, WorkerRecord, command_result::Outcome,
+        ApplyRequest, Attribute, Command, ListenerRecord, Membership, Permission, RetryRequest,
+        RevokeRequest, SubmitRequest, When, WorkerRecord, command_result::Outcome,
         command_service_client::CommandServiceClient,
+        listener_service_client::ListenerServiceClient,
         membership_service_client::MembershipServiceClient,
         trust_service_client::TrustServiceClient,
     },
@@ -86,7 +87,23 @@ Deploy and inspect:
                                           types, key, service, middleware and when they were last
                                           seen. A listener its service's membership does not list is
                                           marked: it counts for nobody.
+  kernable listeners parked <store>       Lists the events listeners parked: the listener, position,
+                                          event type, code, attempts, when, whether a retry is
+                                          asked for, and the message (for a handler error only the
+                                          error's type; the listener's log has the rest).
   kernable schemas <store>                Lists the highest stored schema version per event type.
+
+Parked events, with the kernel running:
+  kernable listeners retry <addr> <key> <listener> <position|--all>
+                                          Delivers the listener's parked event at <position> again,
+                                          or all of them, the next time it is connected; if it
+                                          fails again, it is parked again. Signed with <key>, whose
+                                          grant needs manage=<service> of the listener (manage=*
+                                          for one without a service); the grant file next to the
+                                          key is sent along. Exit 1 if none of them is parked.
+  kernable listeners dismiss <addr> <key> <listener> <position|--all>
+                                          Removes the parked event at <position>, or all of them,
+                                          without delivering them again. Like retry otherwise.
 
 Check the store:
   kernable verify <store> <kernel.pub>...
@@ -217,6 +234,15 @@ async fn main() -> ExitCode {
         ["listeners", store] => listeners(store),
         ["schemas", store] => schemas(store),
         ["listeners", "remove", store, name] => remove_listener(store, name),
+        ["listeners", "parked", store] => parked(store),
+        [
+            "listeners",
+            op @ ("retry" | "dismiss"),
+            addr,
+            key,
+            name,
+            which,
+        ] => retry(addr, key, name, which, *op == "dismiss").await,
         ["workers", store] => workers(store),
         ["services", store] => services(store),
         ["apply", addr, key, manifest] => apply(addr, key, manifest).await,
@@ -701,8 +727,12 @@ fn listeners(store: &str) -> Result<bool> {
             (service, false) => format!(" service {service}"),
             (service, true) => format!(" service {service} (not listed: counts for nobody)"),
         };
+        let parked = match l.parked.len() {
+            0 => String::new(),
+            n => format!(" parked {n}"),
+        };
         println!(
-            "{} order {} position {} types {types} key {}{service}{middleware} last seen {}",
+            "{} order {} position {} types {types} key {}{service}{middleware}{parked} last seen {}",
             l.name,
             l.order,
             l.position,
@@ -710,6 +740,70 @@ fn listeners(store: &str) -> Result<bool> {
             config::utc(l.last_seen)
         );
     }
+    Ok(true)
+}
+
+fn parked(store: &str) -> Result<bool> {
+    for l in kernable_store::open_read_only(store)?.listeners()? {
+        for p in &l.parked {
+            let retry = if p.retry { " retrying" } else { "" };
+            println!(
+                "{} position {} {} {} attempts {} parked {}{retry}: {}",
+                l.name,
+                p.position,
+                p.event_type,
+                p.code,
+                p.attempts,
+                config::utc(p.parked_at),
+                p.message
+            );
+        }
+    }
+    Ok(true)
+}
+
+/// Delivers a listener's parked events again, or dismisses them: `which` is a position or
+/// `--all`. Exit 1 if none of them is parked.
+async fn retry(addr: &str, key_path: &str, name: &str, which: &str, dismiss: bool) -> Result<bool> {
+    let positions = match which {
+        "--all" => Vec::new(),
+        p => vec![
+            p.parse::<u64>()
+                .ok()
+                .filter(|p| *p > 0)
+                .ok_or_else(|| format!("{p} is not a position; give one, or --all"))?,
+        ],
+    };
+    let key = signing::read_signing_key(key_path)?;
+    let issued_at = now_ms();
+    let mut request = tonic::Request::new(RetryRequest {
+        sig: Some(signing::sign(
+            &key,
+            &signing::retry_message(name, &positions, dismiss, issued_at),
+        )),
+        listener: name.to_owned(),
+        positions,
+        dismiss,
+        issued_at,
+        protocol: kernable_core::PROTOCOL,
+    });
+    with_key_grant(&mut request, key_path)?;
+    let applied = ListenerServiceClient::new(connect(addr).await?)
+        .retry(request)
+        .await?
+        .into_inner()
+        .positions;
+    if applied.is_empty() {
+        println!("no parked event {which} of {name}");
+        return Ok(false);
+    }
+    let what = if dismiss { "dismissed" } else { "retrying" };
+    let list: Vec<String> = applied.iter().map(u64::to_string).collect();
+    println!(
+        "{what} {} parked events of {name}: {}",
+        applied.len(),
+        list.join(" ")
+    );
     Ok(true)
 }
 
