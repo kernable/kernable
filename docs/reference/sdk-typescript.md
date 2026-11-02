@@ -83,6 +83,8 @@ if (!state.open) throw new Rejected("Cart was never opened", reason); // reason:
 ```
 
 - `readonly code: string`: The reason as a code, e.g. `not_found`; `"rejected"` unless given.
+- `key?: string`: For a rejected follow-up command (`ListenerContext.submit`): the key the kernel named (`unique_taken`).
+- `requirement?: Requirement`: For a rejected follow-up command: the requirement the kernel named (`requirement_missing`).
 
 ### NotSettled
 
@@ -229,6 +231,16 @@ What a listener handler gets besides the event's data and `StoredEventMeta` (its
 - `follow(): RequestContext`: A request context for commands caused by this event: same sender and correlation, the event's command as `causationId`, without `expectedVersion` and `bypassAuthorization`. Pass it as `SubmitOptions.context`.
 - `request: RequestContext`: The request context of the command that caused the event.
 - `store?: Store`: The listener's store, if it has one (`ListenerOptions.store`).
+- `submit(command: FollowUp): Promise<StoredEvent[]>`: Submits a command this event causes, on the listener's connection, and returns its events. It needs a fixed `id` (`confirm-<order>`), so a redelivered event runs it once. The domain defaults to the listener's, the context to `follow()`, the tenant to the event's. Throws `Rejected` (with the kernel's `key` or `requirement`, if any) if the command is rejected: a reactor then parks the event at once (see `ListenerOptions.parkAfter`); catch it to accept a rejection. Throws like `Kernable.submit` otherwise. ```ts await ctx.submit({ aggregateType: "order", aggregateId: evt.aggregateId, type: "Confirm", id: `confirm-${evt.aggregateId}` }); ```
+- `query<T = unknown>(type: string, data?: unknown, options?: Omit<QueryOptions, "domain" | "type" | "data">): Promise<T>`: Asks a query on the listener's connection, like `Kernable.query`: `type` is of the listener's domain (`GetOrder`) or qualified (`crm.GetCustomer`). The tenant defaults to the event's. It is the listener's own read: it keeps the client's context, not the event's sender.
+
+### FollowUp
+
+```ts
+export type FollowUp = Omit<SubmitOptions, "domain" | "id"> & { domain?: string; id: string };
+```
+
+A command a listener's handler submits (`ListenerContext.submit`): `SubmitOptions` with a required `id`, and the domain optional.
 
 ### EventMeta
 
@@ -449,7 +461,7 @@ const mailer = shopDomain.reactor("mailer");
 - `command(type: string): CommandSchema`: Declares which fields of `type` commands (unqualified) the vault keeps: returns the `CommandSchema` to chain `personal` and `secret` on. Only needed for commands with such fields. Clients that submit them need the domain: `kernable.use(domain)`.
 - `aggregate<S>(name: string, initial: S, options?: AggregateOptions): Aggregate<S>`: Defines an aggregate type `name` (`cart`) of this domain, with the state `initial` every aggregate of it starts from: `shopDomain.aggregate("cart", { items: 0 })`. Add its event appliers and command handlers with `apply` and `command`; run it with `kernable.worker(cart)` or `kernable.app`. `options`: snapshots, see `AggregateOptions`. Throws if the domain has an aggregate `name` already.
 - `readModel(name: string, options: ListenerOptions = {}): Listener`: Defines a read model named `name`: a listener that builds a view from events (`on`) and answers queries from it (`query`). Without a store it is kept in memory and rebuilt from the first event on every start (defaults: order 0, start 0); with `options.store` it continues where it left off. `options` override the defaults, see `ListenerOptions`. Run it with `kernable.listener(definition)` or `kernable.app`. Throws if the domain has a listener `name` already.
-- `reactor(name: string, options: ListenerOptions = {}): Listener`: Defines a reactor named `name`: a listener that triggers side effects and follow-up commands. It starts at the newest event when it is new, then resumes after the last acknowledged event (defaults: order 10, no start), so it never reacts to what happened before it existed. Submit follow-ups with a fixed command `id` and `ctx.follow()`, so a redelivered event is harmless. A settling submit from its handler waits for the listeners before it (the read models), not for the reactor itself, which handles one event at a time. Run it with `kernable.listener(definition)` or `kernable.app`. Throws if the domain has a listener `name` already.
+- `reactor(name: string, options: ListenerOptions = {}): Listener`: Defines a reactor named `name`: a listener that triggers side effects and follow-up commands. It starts at the newest event when it is new, then resumes after the last acknowledged event (defaults: order 10, no start), so it never reacts to what happened before it existed. Submit follow-ups with `ctx.submit` and a fixed command `id`, so a redelivered event is harmless; a rejected one parks the event (see `ListenerOptions.parkAfter`). A settling submit from its handler waits for the listeners before it (the read models), not for the reactor itself, which handles one event at a time. Run it with `kernable.listener(definition)` or `kernable.app`. Throws if the domain has a listener `name` already.
 
 ### domain()
 
@@ -737,6 +749,7 @@ const push = shopDomain.reactor("push", { live: true });
 - `reconnectMs?: number`: Milliseconds to wait before reconnecting after the stream ends (default 1000); twice as long after each further failed attempt, at most 30 s.
 - `store?: string`: Keeps the listener's state in a store (`sqlite:<path>` or `memory:`) instead of memory: its data and position are written together per batch, and a restart continues after the stored position (`start` is then ignored). See `ListenerHandle.store`.
 - `schema?: string`: Version of the stored data's format (default "1"). Change it when the handlers store data differently: the store is cleared and the listener rebuilds from the first event.
+- `parkAfter?: number`: How often a handler may fail on one event before the listener parks it and moves on (default 5 for reactors, 0 for read models; 0: never, the listener keeps getting the event and everything behind it waits). A `Rejected` (also from `ctx.submit`) parks at once; the kernel being unreachable or busy (`UNAVAILABLE`, `DEADLINE_EXCEEDED`, `RESOURCE_EXHAUSTED`), `NotSettled` or the store failing never does: the listener waits and tries again. The kernel keeps parked events with the rejection's code and message (for other errors `handler_error` and the error's type; the log has the whole error) until an operator retries or dismisses them (`kernable listeners retry`). A read model should not park: it would miss the event's change. With a store, a parked event's writes are dropped, the rest of its batch kept. Live listeners never park.
 
 ### HandlerOptions
 
@@ -792,7 +805,8 @@ carts
 
 A listener running over a connection: `kernable.listener(definition)`. Events arrive in order,
 one at a time, after every listener with a lower order has processed them. Delivery is at
-least once: if a handler throws, the listener reconnects and the event is delivered again.
+least once: if a handler throws, the listener reconnects and the event is delivered again,
+until a reactor gives up on it and parks it (`ListenerOptions.parkAfter`).
 With a store, a batch's data and position are written together, so it takes effect once.
 
 ```ts

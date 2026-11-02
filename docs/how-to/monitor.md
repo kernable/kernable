@@ -55,6 +55,9 @@ groups:
       - alert: KernableListenerDown
         expr: kernable_listener_connected == 0
         for: 2m
+      - alert: KernableEventsParked      # a reactor gave up on events: retry or dismiss them
+        expr: kernable_listener_parked > 0
+        for: 1m
       - alert: KernableNoWorkers         # commands queue up with nobody to run them
         expr: kernable_worker_sessions == 0 and kernable_queued_commands > 0
         for: 1m
@@ -93,10 +96,30 @@ These read the store, whether the kernel runs or not; the UI shows the live stat
 ```sh
 kernable services sqlite:shop.db    # each membership: who applied it, what it lists, (never registered), dynamic listeners
 kernable workers sqlite:shop.db     # aggregate, command types, key, service, last seen
-kernable listeners sqlite:shop.db   # name, order, position, types, key, service, middleware, last seen
+kernable listeners sqlite:shop.db   # name, order, position, types, key, service, middleware, parked, last seen
+kernable listeners parked sqlite:shop.db   # each parked event: listener, position, type, code, attempts, when, message
 ```
 
 `last seen` tells you when a worker or listener was last connected. See the [CLI reference](../reference/cli).
+
+## Parked events
+
+A reactor that gives up on an event parks it and moves on ([Failures](../concepts/failures)): its follow-up was rejected, or its handler failed five times. The kernel keeps the event's position with the reason until you act on it; the UI shows the count on the listener and the first ones in its details, and `kernable_listener_parked` counts them.
+
+```sh
+kernable listeners parked sqlite:shop.db
+# confirmations position 18204 shop.OrderSubmitted not_found attempts 1 parked 2026-11-02T14:03:00Z: no such customer
+# mailer position 18517 shop.OrderSubmitted handler_error attempts 5 parked 2026-11-02T14:21:07Z: TypeError
+```
+
+For a handler error the message is only the error's type; the reactor's log has the whole error, at the time it parked the event. Fix the cause, deploy, then deliver the events again, or drop those that no longer matter:
+
+```sh
+kernable listeners retry 127.0.0.1:7233 ops.key mailer 18517     # or --all
+kernable listeners dismiss 127.0.0.1:7233 ops.key confirmations --all
+```
+
+The key needs `manage` for the listener's service. A retried event goes to the reactor on its own, before anything new, the next time it is connected; if it fails again, it is parked again. A follow-up command keeps its fixed ID, so retrying a rejected one returns the same rejection: retry once the handler deals with it differently, or dismiss it.
 
 ## Logs
 

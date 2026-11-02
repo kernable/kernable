@@ -34,7 +34,7 @@ Start the guard (`node guard.ts`, `.venv/bin/python guard.py` or `cargo run -q -
 <<< @/examples/shop/rs/part6.out{text} [Rust]
 :::
 
-The reactor still confirms orders: its follow-up commands carry the customer's identity (`follow()`), and its own queries come from `svc-confirmations`, a service the guard lets read.
+The reactor still confirms orders: its follow-up commands carry the customer's identity (`ctx.submit` follows the event), and its own queries (`ctx.query`) come from `svc-confirmations`, a service the guard lets read.
 
 The kernel checks that the request was signed by a key with a grant to send it, not who `senderIdentity` names: any process that may submit can claim any identity. So in a real application the identity comes from your authentication, for example a verified token at your API, and only processes that verify it get a grant to submit. Part 8 gives each service its own key, so the reactor's key may submit nothing but `shop.Confirm`.
 

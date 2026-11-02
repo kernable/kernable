@@ -97,21 +97,19 @@ shopDomain.readModel("carts")
 ### Reactor with a follow-up command
 
 ```ts
-import type { Kernable } from "@kernable/sdk";
-export function invoicing(kernable: Kernable) {
-  billingDomain.reactor("invoicing").on("shop.CheckedOut", async (d: { orderId: string; total: number }, _evt, ctx) => {
-    await kernable.submit({
-      domain: "billing", aggregateType: "invoice", aggregateId: d.orderId, type: "CreateInvoice",
-      data: { orderId: d.orderId, total: d.total },
-      id: `invoice-${d.orderId}`,   // fixed ID: a redelivered event changes nothing
-      context: ctx.follow(),        // keeps the sender and the correlation
-    });
+billingDomain.reactor("invoicing").on("shop.CheckedOut", async (d: { orderId: string; total: number }, _evt, ctx) => {
+  // Keeps the sender and the correlation; a rejection parks the event.
+  await ctx.submit({
+    aggregateType: "invoice", aggregateId: d.orderId, type: "CreateInvoice",
+    data: { orderId: d.orderId, total: d.total },
+    id: `invoice-${d.orderId}`,   // fixed ID: a redelivered event changes nothing
   });
-}
+});
 ```
 
 - Reactors start at the newest event when they are new (they never react to history) and resume after their last acknowledgement.
-- Always a **fixed command ID** derived from the event, always `ctx.follow()`.
+- Submit follow-ups with `ctx.submit` (it needs a **fixed command ID** derived from the event, and follows the event's sender), query with `ctx.query`.
+- A rejected follow-up throws: the reactor **parks** the event (after 5 failed attempts for other errors) and moves on; operators see it in `kernable listeners parked` and retry it. Catch the `Rejected` when a rejection is fine (`unique_taken` of an earlier attempt). A read model never parks.
 - Side effects outside kernable (mail, HTTP) happen at least once: make them idempotent.
 
 ### Middleware
@@ -193,7 +191,7 @@ Always:
 - Name events in the past tense (`ItemAdded`), commands in the imperative (`AddItem`), queries as questions (`GetCart`); domains and aggregates lowercase.
 - Keep aggregates small: one is the unit of consistency; rules across aggregates go through a reactor and follow-up commands.
 - Declare values that must be unique across aggregates as `unique` keys, and conditions on another aggregate as a `fact` it holds and a command `requires`: the kernel checks both at commit. Never build a registry of claims or check a read model before a submit for this.
-- Give follow-up and retried commands a fixed ID; pass `ctx.follow()` from reactors.
+- Give follow-up and retried commands a fixed ID; submit them from reactors with `ctx.submit`.
 - Mark personal data `personal` and passwords or tokens `secret`.
 - Run everything through `app()` (or apply the membership once per deploy) so the kernel knows what to wait for.
 

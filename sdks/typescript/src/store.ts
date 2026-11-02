@@ -99,6 +99,21 @@ export class Store {
     if (erased) this.checkpoint();
   }
 
+  /** @internal Marks where an event's writes begin within a batch, so they can be dropped alone. */
+  savepoint(): void {
+    this.db.exec("SAVEPOINT event");
+  }
+
+  /** @internal Keeps the event's writes (see `savepoint`). */
+  release(): void {
+    this.db.exec("RELEASE event");
+  }
+
+  /** @internal Drops the event's writes, keeping the rest of the batch (see `savepoint`). */
+  rollbackEvent(): void {
+    this.db.exec("ROLLBACK TO event; RELEASE event");
+  }
+
   /** @internal Drops a failed batch. */
   rollback(): void {
     if (this.db.isTransaction) this.db.exec("ROLLBACK");

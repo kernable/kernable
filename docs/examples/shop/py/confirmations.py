@@ -12,12 +12,11 @@ confirmations_reactor = shop_domain.reactor("confirmations")
 @confirmations_reactor.on("OrderSubmitted")
 def _(data, evt, ctx):
     # The read models (order 0) have processed this event before the reactor (order 10) gets it.
-    order = k.query("shop", "GetOrder", {"id": evt.aggregate_id})
-    customer = k.query("shop", "GetCustomer", {"id": order["customerId"]})
-    k.submit("shop", "order", evt.aggregate_id, "Confirm", {"customerId": order["customerId"], "email": customer["email"]},
-             id=f"confirm-{evt.aggregate_id}",  # a redelivered event confirms once
-             context=ctx.follow())  # same sender and correlation as the submit that caused it
-
+    order = ctx.query("GetOrder", {"id": evt.aggregate_id})
+    customer = ctx.query("GetCustomer", {"id": order["customerId"]})
+    # Same sender and correlation as the submit that caused the event; a rejection parks the event.
+    ctx.submit("order", evt.aggregate_id, "Confirm", {"customerId": order["customerId"], "email": customer["email"]},
+               id=f"confirm-{evt.aggregate_id}")  # a redelivered event confirms once
 
 k.listener(confirmations_reactor).run()
 # endregion reactor

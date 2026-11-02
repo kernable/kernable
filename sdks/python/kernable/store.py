@@ -99,6 +99,19 @@ class Store:
         with self._lock:
             self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
+    def _savepoint(self) -> None:
+        """Marks where an event's writes begin within the batch, so they can be dropped alone."""
+        self._db.execute("SAVEPOINT event")
+
+    def _release(self) -> None:
+        """Keeps the event's writes (see `_savepoint`)."""
+        self._db.execute("RELEASE event")
+
+    def _rollback_event(self) -> None:
+        """Drops the event's writes, keeping the rest of the batch (see `_savepoint`)."""
+        self._db.execute("ROLLBACK TO event")
+        self._db.execute("RELEASE event")
+
     def _rollback(self) -> None:
         try:
             if self._db.in_transaction:

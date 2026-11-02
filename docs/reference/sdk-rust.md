@@ -474,7 +474,7 @@ What a listener handler gets besides the event's payload and meta (the `ctx` of
 - `request: RequestContext`: The request context of the command that caused the event.
 - `fn follow(&self) -> RequestContext`: A request context for commands caused by this event: same sender and correlation, this event's command as the cause, without an expected version or privileges. Pass it with `crate::Submit::context`; `ListenerContext::submit` does.
 - `async fn submit(&self, submit: Submit) -> Result<Vec<StoredEvent>, Error>`: Submits a command this event causes, on the listener's connection, and returns its events. It needs a fixed ID (`Submit::id`, e.g. `confirm-<order>`), so a redelivered event runs it once; without one it is `Error::Config`. Unless the submit sets them, the context is `ListenerContext::follow` and the tenant the event's. A rejection is `Error::Rejected`: returned from the handler (`?`), it parks the event at once in a reactor (see `Listener::park_after`). Match it to accept one: `match ctx.submit(s).await { Err(Error::Rejected(r)) if r.code == "unique_taken" => {} r => { r?; } }`. Other errors as for `Kernable::submit`.
-- `async fn query<T: DeserializeOwned>(&self, query: Query) -> Result<T, Error>`: Asks a query on the listener's connection, like `Kernable::query`; unless the query sets them, with the context `ListenerContext::follow` and the event's tenant.
+- `async fn query<T: DeserializeOwned>(&self, query: Query) -> Result<T, Error>`: Asks a query on the listener's connection, like `Kernable::query`; unless the query sets it, for the event's tenant. It is the listener's own read: it keeps the connection's context, not the event's sender.
 
 ### QueryMeta
 

@@ -31,8 +31,10 @@ and the orders read model learns about it, in `read-models.ts`:
 Three things make it safe:
 
 - **Order.** Read models have order 0, reactors order 10. A listener gets an event only after every listener with a lower order has processed it, so the reactor's queries always find the order and the customer.
-- **A fixed command ID.** Delivery is at least once: after a crash the reactor may get the event again. With `confirm-<order>` as the ID, the second confirmation returns the first one's outcome.
-- **`follow()`** gives the follow-up command the sender and correlation of the command that caused the event, so you can trace a confirmation back to the submit.
+- **A fixed command ID.** Delivery is at least once: after a crash the reactor may get the event again. With `confirm-<order>` as the ID, the second confirmation returns the first one's outcome. `ctx.submit` refuses a follow-up without one.
+- **`ctx.submit`** gives the follow-up command the sender and correlation of the command that caused the event (`ctx.follow()`), so you can trace a confirmation back to the submit. Its queries (`ctx.query`) stay the reactor's own.
+
+If the confirmation is rejected, `ctx.submit` throws, and the reactor **parks** the event: it moves on to the next order, and the kernel keeps the event with the rejection until someone looks at it (`kernable listeners parked`, the [UI](../../how-to/monitor#the-ui)) and retries or dismisses it. A handler that fails for another reason (a bug, a mail server that is down) gets the event again a few times first; while the kernel is unreachable it simply waits. See [Failures](../../concepts/failures).
 
 Its own submit settles too, but only on the listeners before it: a listener handles one event at a time, so the kernel never makes it wait for itself.
 

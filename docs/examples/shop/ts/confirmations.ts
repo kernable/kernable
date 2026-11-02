@@ -7,21 +7,18 @@ import { shopDomain } from "./domain.ts";
 // Who this service is (part 6), and the domain's declarations, e.g. which fields are personal (part 7).
 const kernable = new Kernable({ context: { senderIdentity: "svc-confirmations" } }).use(shopDomain);
 
-const query = <T>(type: string, id: string) => kernable.query<T>({ domain: "shop", type, data: { id } });
-
 const confirmationsReactor = shopDomain.reactor("confirmations")
   .on("OrderSubmitted", async (_data, evt, ctx) => {
     // The read models (order 0) have processed this event before the reactor (order 10) gets it.
-    const order = await query<{ customerId: string }>("GetOrder", evt.aggregateId);
-    const customer = await query<{ email: string }>("GetCustomer", order.customerId);
-    await kernable.submit({
-      domain: "shop",
+    const order = await ctx.query<{ customerId: string }>("GetOrder", { id: evt.aggregateId });
+    const customer = await ctx.query<{ email: string }>("GetCustomer", { id: order.customerId });
+    // Same sender and correlation as the submit that caused the event; a rejection parks the event.
+    await ctx.submit({
       aggregateType: "order",
       aggregateId: evt.aggregateId,
       type: "Confirm",
       data: { customerId: order.customerId, email: customer.email },
       id: `confirm-${evt.aggregateId}`, // a redelivered event confirms once
-      context: ctx.follow(), // same sender and correlation as the submit that caused it
     });
   });
 

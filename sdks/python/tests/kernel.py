@@ -65,6 +65,10 @@ class TestKernel:
                 self._watchdog.stdin.close()
             self._watchdog = None
 
+    def cli(self, *args: str) -> subprocess.CompletedProcess:
+        """Runs `kernable <args>` in the kernel's directory."""
+        return subprocess.run([f"{BIN}/kernable", *args], cwd=self.dir, capture_output=True, text=True)
+
     def verify(self) -> subprocess.CompletedProcess:
         return subprocess.run([f"{BIN}/kernable", "verify", self.store, f"{self.dir}/kernel.pub"],
                               capture_output=True, text=True)

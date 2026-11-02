@@ -206,7 +206,7 @@ export interface WireQueryResult {
 export interface ListenerDelivery {
   challenge?: { nonce: Buffer } | null;
   ready?: { after_position: number; head_position: number } | null;
-  batch?: { events: WireEvent[]; up_to: number; vault: WireVaultValue[] } | null;
+  batch?: { events: WireEvent[]; up_to: number; vault: WireVaultValue[]; retries?: WireEvent[] } | null;
   query?: { call_id: string; query: WireQueryRequest } | null;
   check?: {
     call_id: string;
@@ -244,11 +244,19 @@ export type ListenerMessage =
       };
     }
   | { challenge_response: { sig: Buffer } }
-  | { ack: { position: number } }
+  | { ack: { position: number; parked?: WireParked[] } }
   | { answer: { call_id: string; response?: Buffer; rejected?: WireRejected } }
   | { verdict: { call_id: string; rejected?: WireRejected } };
 
 export type ListenCall = grpc.ClientDuplexStream<ListenerMessage, ListenerDelivery>;
+
+/** An event a listener gave up on; see `Parked` in kernable.proto. */
+export interface WireParked {
+  position: number;
+  code: string;
+  message: string;
+  attempts: number;
+}
 
 /** A file of a domain; see `DataService` in kernable.proto. */
 export interface WireDataRequest {
@@ -325,7 +333,7 @@ const BUNDLED = fileURLToPath(new URL("../proto/kernable/v1/kernable.proto", imp
 const PROTO = existsSync(BUNDLED) ? BUNDLED : fileURLToPath(new URL("../../../proto/kernable/v1/kernable.proto", import.meta.url));
 
 /** The protocol version this SDK speaks; see "Protocol versions" in `kernable.proto`. */
-export const PROTOCOL = 3;
+export const PROTOCOL = 4;
 
 /** Room for a file of 16 MiB, the kernel's limit, plus the rest of the message (grpc-js receives 4 MiB by default). */
 const MAX_DATA_MESSAGE = 17 << 20;

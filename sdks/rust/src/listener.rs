@@ -144,11 +144,11 @@ impl ListenerContext {
     }
 
     /// Asks a query on the listener's connection, like [`Kernable::query`]; unless the query
-    /// sets them, with the context [`ListenerContext::follow`] and the event's tenant.
+    /// sets it, for the event's tenant. It is the listener's own read: it keeps the
+    /// connection's context, not the event's sender.
     pub async fn query<T: DeserializeOwned>(&self, query: Query) -> Result<T, Error> {
         let query = Query {
             tenant: query.tenant.or_else(|| Some(self.tenant.clone())),
-            context: query.context.or_else(|| Some(self.follow())),
             ..query
         };
         self.kernable.query(query).await

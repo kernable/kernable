@@ -34,6 +34,7 @@ import os
 import queue
 import random
 import re
+import sqlite3
 import sys
 import threading
 import time
@@ -76,6 +77,11 @@ class Rejected(Exception):
     def __init__(self, message: str, code: str = "rejected"):
         super().__init__(message)
         self.code = code
+        #: For a rejected follow-up command (`ListenerContext.submit`): the key the kernel named
+        #: (`unique_taken`).
+        self.key = ""
+        #: For a rejected follow-up command: the requirement the kernel named (`requirement_missing`).
+        self.requirement: "Requirement | None" = None
 
 
 @dataclass
@@ -304,6 +310,50 @@ class ListenerContext:
     store: "Store | None" = None
     #: The command that caused the event, for `follow()`.
     _command_id: str = field(default="", repr=False)
+    #: The event's tenant: the default for follow-up commands and queries.
+    _tenant: str = field(default="", repr=False)
+    #: The listener's domain: the default for follow-up commands and queries.
+    _domain: str = field(default="", repr=False)
+    #: The listener's client, for follow-up commands and queries.
+    _kernable: "Kernable | None" = field(default=None, repr=False)
+
+    def submit(self, aggregate_type: str, aggregate_id: str, type: str, data: Any = None, *, id: str,
+               domain: str | None = None, tenant: str | None = None, context: "RequestContext | None" = None,
+               wait: str = "settled", timeout_s: float | None = None) -> "list[Event]":
+        """Submits a command this event causes, on the listener's client, and returns its events.
+        It needs a fixed `id` (`f"confirm-{evt.aggregate_id}"`), so a redelivered event runs it
+        once. `domain` defaults to the listener's, `context` to `follow()`, `tenant` to the
+        event's; the rest as for `Kernable.submit`.
+
+        Raises `Rejected` (with the kernel's `key` or `requirement`, if any) if the command is
+        rejected: a reactor then parks the event at once (see `park_after` of
+        `Domain.reactor`); catch it to accept a rejection. Raises like `Kernable.submit` otherwise.
+        Example: `ctx.submit("order", evt.aggregate_id, "Confirm", id=f"confirm-{evt.aggregate_id}")`."""
+        if not id:
+            raise ValueError(f"{type}: a follow-up command needs a fixed id, so a redelivered event runs it once")
+        assert self._kernable is not None, "only a running listener's handlers submit follow-ups"
+        outcome = self._kernable.submit(domain or self._domain, aggregate_type, aggregate_id, type, data,
+                                        tenant=tenant or self._tenant, id=id, wait=wait,
+                                        context=context or self.follow(), timeout_s=timeout_s)
+        if outcome.committed:
+            return outcome.events
+        rejected = Rejected(outcome.message, outcome.code)
+        rejected.key = outcome.key
+        rejected.requirement = outcome.requirement
+        raise rejected
+
+    def query(self, type: str, data: Any = None, *, tenant: str | None = None,
+              context: "RequestContext | None" = None, min_position: int = 0,
+              timeout_s: float | None = None) -> Any:
+        """Asks a query on the listener's client, like `Kernable.query`: `type` is of the
+        listener's domain (`GetOrder`) or qualified (`crm.GetCustomer`). `tenant` defaults to the
+        event's. It is the listener's own read: it keeps the client's context, not the event's
+        sender."""
+        assert self._kernable is not None, "only a running listener's handlers ask queries"
+        domain, _, name = type.rpartition(".")
+        return self._kernable.query(domain or self._domain, name, data, tenant=tenant or self._tenant,
+                                    context=context, min_position=min_position,
+                                    timeout_s=timeout_s)
 
     def follow(self) -> RequestContext:
         """A request context for commands caused by this event: same sender and correlation."""
@@ -433,7 +483,14 @@ class NotSettled(Exception):
 
 
 #: The protocol version this SDK speaks; see "Protocol versions" in `kernable.proto`.
-PROTOCOL = 3
+PROTOCOL = 4
+
+#: Attempts before a reactor parks an event its handler keeps failing on.
+_PARK_AFTER = 5
+
+#: gRPC codes of a kernel that is away or busy.
+_BUSY = frozenset({grpc.StatusCode.CANCELLED, grpc.StatusCode.DEADLINE_EXCEEDED, grpc.StatusCode.RESOURCE_EXHAUSTED,
+                   grpc.StatusCode.ABORTED, grpc.StatusCode.INTERNAL, grpc.StatusCode.UNAVAILABLE})
 
 #: The name of the listener whose handler is running, for requests sent from it.
 _HANDLING: contextvars.ContextVar[str] = contextvars.ContextVar("kernable_listener", default="")
@@ -670,7 +727,8 @@ class Domain:
         return aggregate
 
     def read_model(self, name: str, *, order: int = 0, start: int | None = 0, reconnect_s: float = 1.0,
-                   store: str | None = None, schema: str = "1", live: bool = False) -> "Listener":
+                   store: str | None = None, schema: str = "1", live: bool = False,
+                   park_after: int = 0) -> "Listener":
         """A read model of this domain named `name`: builds a view from events and answers
         queries from it (`on`, `query`; see `Listener`). Kept in memory and rebuilt from the
         first event on every start (default). Run it with `kernable.listener(read_model)` or in
@@ -685,27 +743,41 @@ class Domain:
         With `store` (`sqlite:<path>` or `memory:`), its state lives in the running listener's
         `store`: data and position are written together per batch, and a restart continues after
         the stored position. Change `schema` when the handlers store data differently: the store is
-        cleared and the read model rebuilds from the first event. `live`: see `reactor`. Raises
+        cleared and the read model rebuilds from the first event. `live` and `park_after` (default
+        0: never; a read model that parks misses the event's change): see `reactor`. Raises
         `ValueError` if the domain has a listener (read model or reactor) of that name already."""
-        return self._listener(Listener(self, name, order, start, reconnect_s, store, schema, live=live))
+        return self._listener(Listener(self, name, order, start, reconnect_s, store, schema, live=live,
+                                       park_after=park_after))
 
     def reactor(self, name: str, *, order: int = 10, start: int | None = None, reconnect_s: float = 1.0,
-                store: str | None = None, schema: str = "1", live: bool = False) -> "Listener":
+                store: str | None = None, schema: str = "1", live: bool = False,
+                park_after: int = _PARK_AFTER) -> "Listener":
         """A reactor of this domain named `name`: triggers side effects and follow-up commands
         (`on`; see `Listener`). It starts at the newest event when it is new, then resumes after
         the last acknowledged event (`start=None`, default), so it never reacts to what happened
         before it existed. Run it with `kernable.listener(reactor)` or in an app.
 
         A settling submit from its handler waits for the listeners before it (the read models),
-        not for the reactor itself, which handles one event at a time. Submit with a fixed `id`
-        and `context=ctx.follow()`, so a redelivered event does not run the command twice.
+        not for the reactor itself, which handles one event at a time. Submit follow-ups with
+        `ctx.submit` and a fixed `id`, so a redelivered event does not run the command twice.
         `order` (default 10), `start`, `reconnect_s`, `store` and `schema`: see `read_model`.
+
+        `park_after` (default 5): how often a handler may fail on one event before the reactor
+        parks it and moves on (0: never, it keeps getting the event and everything behind it
+        waits). A `Rejected` (also from `ctx.submit`) parks at once; the kernel being unreachable
+        or busy (`UNAVAILABLE`, `DEADLINE_EXCEEDED`, `RESOURCE_EXHAUSTED`), `NotSettled` or the
+        store failing never does: the reactor waits and tries again. The kernel keeps parked
+        events with the rejection's code and message (for other errors `handler_error` and the
+        exception's type; the log has the whole error) until an operator retries or dismisses
+        them (`kernable listeners retry`). With a store, a parked event's writes are dropped, the
+        rest of its batch kept. Live listeners never park.
 
         `live`: not registered with the kernel: no stored position, always starts at the newest
         event, nobody waits for it, and it is forgotten when it disconnects. For reactions that
         only matter while the process runs, e.g. pushing to connected browsers. Cannot be a
         middleware. Raises `ValueError` if the domain has a listener of that name already."""
-        return self._listener(Listener(self, name, order, start, reconnect_s, store, schema, live=live))
+        return self._listener(Listener(self, name, order, start, reconnect_s, store, schema, live=live,
+                                       park_after=park_after))
 
     def _listener(self, listener: "Listener") -> "Listener":
         if any(l.name == listener.name for l in self.listeners):
@@ -1168,7 +1240,7 @@ class Kernable:
                             middlewares=[l for l in durable if l._middlewares],
                             metadata={**meta, **(metadata or {})})
         worker = Worker(self._channel, self._key, aggregates, self._log, service) if aggregates else None
-        handles = [ListenerHandle(self._channel, self._key, l, self._log, service) for l in listeners]
+        handles = [ListenerHandle(self._channel, self._key, l, self._log, service, self) for l in listeners]
         return App(self, manifest, worker, handles, [d.name for d in domains])
 
     def apply(self, *, service: str | None = None, workers: Iterable[Aggregate] = (),
@@ -1276,7 +1348,7 @@ class Kernable:
         """A handle that runs a listener defined with `Domain.read_model` or `Domain.reactor`, in
         this client's service; see `ListenerHandle`. `run()` on it blocks until `stop()`:
         `k.listener(carts_readmodel).run()`. Each call gives a new handle."""
-        return ListenerHandle(self._channel, self._key, listener, self._log, self._service)
+        return ListenerHandle(self._channel, self._key, listener, self._log, self._service, self)
 
     def close(self) -> None:
         """Closes the connection now; only needed in a long-running process that discards the
@@ -1931,7 +2003,8 @@ class Listener:
     `Domain.read_model` or `Domain.reactor` and run with `kernable.listener(listener)`, which
     returns a `ListenerHandle`. Events arrive in order, one at a time, after every listener with a
     lower order has processed them. Delivery is at least once: if a handler raises, the listener
-    reconnects and the event is delivered again.
+    reconnects and the event is delivered again, until a reactor gives up on it and parks it
+    (`park_after` of `Domain.reactor`).
 
     Type names without a domain (`ItemAdded`, `GetCart`) are the listener's own domain's; types of
     other domains are qualified (`identity.AccountRegistered`, `identity.*`).
@@ -1946,8 +2019,10 @@ class Listener:
     safe to use as state there; guard state that other threads also touch."""
 
     def __init__(self, domain: Domain, name: str, order: int, start: int | None, reconnect_s: float,
-                 store: str | None = None, schema: str = "1", *, live: bool = False):
+                 store: str | None = None, schema: str = "1", *, live: bool = False, park_after: int = 0):
         """Use `Domain.read_model` or `Domain.reactor`."""
+        #: Attempts before an event its handler keeps failing on is parked; 0: never.
+        self.park_after = park_after
         #: The domain the listener belongs to: unqualified type names are its types.
         self.domain = domain
         self.name = name
@@ -2069,8 +2144,12 @@ class ListenerHandle(_Stream):
     `run()` has it open)."""
 
     def __init__(self, channel: grpc.Channel, key: Key, listener: Listener, log: _Log,
-                 service: str = ""):
+                 service: str = "", kernable: "Kernable | None" = None):
         """Use `Kernable.listener`."""
+        # For handlers' follow-up commands and queries.
+        self._kernable = kernable
+        # How often the handler failed on an event, by position, until it gets past it.
+        self._attempts: dict[int, int] = {}
         super().__init__(f"listener {listener.name}", listener.reconnect_s, log)
         # The service this listener belongs to; its membership decides whether it counts.
         self._service = service
@@ -2164,7 +2243,7 @@ class ListenerHandle(_Stream):
             if self.store:
                 self.store._begin()
             try:
-                self._handle_batch(msg.batch)
+                parked = self._handle_batch(msg.batch)
                 if self.store:
                     self.store._commit(msg.batch.up_to)
             except BaseException:
@@ -2174,9 +2253,9 @@ class ListenerHandle(_Stream):
                 raise
             self.position = msg.batch.up_to
             # Values removed after an erasure must not stay behind in the WAL, outside the batch.
-            if self.store and any(e.erases for e in msg.batch.events):
+            if self.store and any(e.erases for e in [*msg.batch.events, *msg.batch.retries]):
                 self.store._checkpoint()
-            return pb.ListenerMessage(ack=pb.Ack(position=msg.batch.up_to))
+            return pb.ListenerMessage(ack=pb.Ack(position=msg.batch.up_to, parked=parked))
         elif kind == "query":
             answer = self._answer(msg.query.call_id, msg.query.query)
             if self._log.enabled("debug"):
@@ -2202,10 +2281,14 @@ class ListenerHandle(_Stream):
             self._log.print("info", self._what, f"connected again at position {position}")
         self._connects += 1
 
-    def _handle_batch(self, batch) -> None:
+    def _handle_batch(self, batch) -> "list[pb.Parked]":
+        """Handles a batch: first the retries, then the events after the position. Returns the
+        events it parked; raises if a handler failed on one it does not park."""
         d = self.listener
-        for e in batch.events:
-            if e.global_position <= self.position:
+        park_after = 0 if d.live else d.park_after
+        parked = []
+        for e, retry in [*((e, True) for e in batch.retries), *((e, False) for e in batch.events)]:
+            if not retry and e.global_position <= self.position:
                 continue  # handled already
             name = f"{e.domain}.{e.event_type}"
             if name not in d._handlers:
@@ -2219,10 +2302,41 @@ class ListenerHandle(_Stream):
                 evt = StoredEventMeta(e.event_type, e.version, e.tenant_id, e.domain, e.aggregate_type, e.aggregate_id,
                                       e.command_id, e.global_position, schema, redacted, _time(e.created_at))
                 ctx = ListenerContext(e.global_position <= self._replay_up_to, _from_wire_context(e.context),
-                                      self.store, e.command_id)
-                _call(handler, data, evt, ctx)
-                self._log.print("debug", self._what, f"{e.domain}.{e.event_type} at {e.global_position}")
-            self.position = e.global_position
+                                      self.store, e.command_id, e.tenant_id, d.domain.name, self._kernable)
+                saved = self.store is not None and park_after > 0
+                if saved:
+                    self.store._savepoint()
+                try:
+                    _call(handler, data, evt, ctx)
+                except Exception as err:
+                    parked.append(self._give_up(f"{e.domain}.{e.event_type}", e.global_position, err, park_after))
+                    if saved:
+                        self.store._rollback_event()
+                else:
+                    if saved:
+                        self.store._release()
+                    self._attempts.pop(e.global_position, None)
+                    self._log.print("debug", self._what, f"{e.domain}.{e.event_type} at {e.global_position}")
+            if not retry:
+                self.position = e.global_position
+        return parked
+
+    def _give_up(self, type: str, position: int, err: Exception, park_after: int) -> "pb.Parked":
+        """What to do after the handler failed on the event at `position`: park it (a rejection
+        at once, another error after `park_after` attempts), or raise `err`, so the listener gets
+        the event again (the kernel or the store away, or attempts left)."""
+        if park_after <= 0 or _transient(err):
+            raise err
+        attempts = self._attempts.get(position, 0) + 1
+        self._attempts[position] = attempts
+        if not isinstance(err, Rejected) and attempts < park_after:
+            raise err
+        del self._attempts[position]
+        if isinstance(err, Rejected):
+            self._log.print("warn", self._what, f"{type} at {position} rejected ({err.code}), parked: {err}")
+            return pb.Parked(position=position, code=err.code, message=str(err), attempts=attempts)
+        self._log.print("error", self._what, f"{type} at {position} failed {attempts} times, parked: {err!r}")
+        return pb.Parked(position=position, code="handler_error", message=_type_name(err), attempts=attempts)
 
     def _verdict(self, call) -> pb.Verdict:
         try:
@@ -2275,6 +2389,19 @@ def _meta(event_type: str, version: int, cmd, command_id: str) -> EventMeta:
     """What `apply` gets about an event of `cmd`'s aggregate, caused by command `command_id`."""
     return EventMeta(event_type, version, cmd.tenant_id, cmd.domain, cmd.aggregate_type, cmd.aggregate_id,
                      command_id)
+
+
+def _transient(err: Exception) -> bool:
+    """Whether a failed handler should simply try again: the kernel was unreachable or busy, a
+    submit did not settle in time, or the store failed. Never parks."""
+    if isinstance(err, (NotSettled, sqlite3.Error)):
+        return True
+    return isinstance(err, grpc.RpcError) and callable(getattr(err, "code", None)) and err.code() in _BUSY
+
+
+def _type_name(err: BaseException) -> str:
+    """The error's type, all a parked event keeps of a handler error."""
+    return type(err).__name__
 
 
 def _call(fn: Callable, *args):

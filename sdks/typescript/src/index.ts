@@ -21,6 +21,7 @@ import {
   type WireDataRequest,
   type WireEvent,
   type WireNewEvent,
+  type WireParked,
   type WireQueryRequest,
   type WireRejected,
   type WireRequestContext,
@@ -73,6 +74,10 @@ export { Store } from "./store.ts";
 export class Rejected extends Error {
   /** The reason as a code, e.g. `not_found`; `"rejected"` unless given. */
   readonly code: string;
+  /** For a rejected follow-up command (`ListenerContext.submit`): the key the kernel named (`unique_taken`). */
+  key?: string;
+  /** For a rejected follow-up command: the requirement the kernel named (`requirement_missing`). */
+  requirement?: Requirement;
 
   constructor(message: string, code = "rejected") {
     super(message);
@@ -334,7 +339,29 @@ export interface ListenerContext {
   request: RequestContext;
   /** The listener's store, if it has one (`ListenerOptions.store`). */
   store?: Store;
+  /**
+   * Submits a command this event causes, on the listener's connection, and returns its events.
+   * It needs a fixed `id` (`confirm-<order>`), so a redelivered event runs it once. The domain
+   * defaults to the listener's, the context to `follow()`, the tenant to the event's. Throws
+   * `Rejected` (with the kernel's `key` or `requirement`, if any) if the command is rejected: a
+   * reactor then parks the event at once (see `ListenerOptions.parkAfter`); catch it to accept
+   * a rejection. Throws like `Kernable.submit` otherwise.
+   *
+   * ```ts
+   * await ctx.submit({ aggregateType: "order", aggregateId: evt.aggregateId, type: "Confirm", id: `confirm-${evt.aggregateId}` });
+   * ```
+   */
+  submit(command: FollowUp): Promise<StoredEvent[]>;
+  /**
+   * Asks a query on the listener's connection, like `Kernable.query`: `type` is of the
+   * listener's domain (`GetOrder`) or qualified (`crm.GetCustomer`). The tenant defaults to the
+   * event's. It is the listener's own read: it keeps the client's context, not the event's sender.
+   */
+  query<T = unknown>(type: string, data?: unknown, options?: Omit<QueryOptions, "domain" | "type" | "data">): Promise<T>;
 }
+
+/** A command a listener's handler submits (`ListenerContext.submit`): `SubmitOptions` with a required `id`, and the domain optional. */
+export type FollowUp = Omit<SubmitOptions, "domain" | "id"> & { domain?: string; id: string };
 
 /**
  * What `apply` gets about an event besides its data. Only fields known before the kernel stores
@@ -827,14 +854,14 @@ export class Domain {
    * Defines a reactor named `name`: a listener that triggers side effects and follow-up
    * commands. It starts at the newest event when it is new, then resumes after the last
    * acknowledged event (defaults: order 10, no start), so it never reacts to what happened before
-   * it existed. Submit follow-ups with a fixed command `id` and `ctx.follow()`, so a redelivered
-   * event is harmless. A settling submit from its handler waits for the listeners before it (the
+   * it existed. Submit follow-ups with `ctx.submit` and a fixed command `id`, so a redelivered
+   * event is harmless; a rejected one parks the event (see `ListenerOptions.parkAfter`). A settling submit from its handler waits for the listeners before it (the
    * read models), not for the reactor itself, which handles one event at a time. Run it with
    * `kernable.listener(definition)` or `kernable.app`. Throws if the domain has a listener `name`
    * already.
    */
   reactor(name: string, options: ListenerOptions = {}): Listener {
-    return this.listen(new Listener(this, name, { order: 10, ...options }));
+    return this.listen(new Listener(this, name, { order: 10, parkAfter: PARK_AFTER, ...options }));
   }
 
   /** Adds `listener`, unless the domain has one of its name: a read model or a reactor. */
@@ -1587,7 +1614,7 @@ export class Kernable {
       },
     };
     const worker = aggregates.length ? new Worker(this.clients, this.key, aggregates, this.log, service) : undefined;
-    const handles = listeners.map((l) => new ListenerHandle(this.clients, this.key, l, this.log, service));
+    const handles = listeners.map((l) => new ListenerHandle(this, this.clients, this.key, l, this.log, service));
     return new App(this, this.log, options.domains, manifest, worker, handles);
   }
 
@@ -1707,7 +1734,7 @@ export class Kernable {
    * until `run()` connects.
    */
   listener(listener: Listener): ListenerHandle {
-    return new ListenerHandle(this.clients, this.key, listener, this.log, this.service);
+    return new ListenerHandle(this, this.clients, this.key, listener, this.log, this.service);
   }
 
   private send(options: SubmitOptions, wait: WireWait) {
@@ -2007,6 +2034,19 @@ export interface ListenerOptions {
    * differently: the store is cleared and the listener rebuilds from the first event.
    */
   schema?: string;
+  /**
+   * How often a handler may fail on one event before the listener parks it and moves on
+   * (default 5 for reactors, 0 for read models; 0: never, the listener keeps getting the event
+   * and everything behind it waits). A `Rejected` (also from `ctx.submit`) parks at once; the
+   * kernel being unreachable or busy (`UNAVAILABLE`, `DEADLINE_EXCEEDED`,
+   * `RESOURCE_EXHAUSTED`), `NotSettled` or the store failing never does: the listener waits and
+   * tries again. The kernel keeps parked events with the rejection's code and message (for
+   * other errors `handler_error` and the error's type; the log has the whole error) until an
+   * operator retries or dismisses them (`kernable listeners retry`). A read model should not
+   * park: it would miss the event's change. With a store, a parked event's writes are dropped,
+   * the rest of its batch kept. Live listeners never park.
+   */
+  parkAfter?: number;
 }
 
 type EventHandler = (data: unknown, evt: StoredEventMeta, ctx: ListenerContext) => void | Promise<void>;
@@ -2165,7 +2205,8 @@ export class Listener {
 /**
  * A listener running over a connection: `kernable.listener(definition)`. Events arrive in order,
  * one at a time, after every listener with a lower order has processed them. Delivery is at
- * least once: if a handler throws, the listener reconnects and the event is delivered again.
+ * least once: if a handler throws, the listener reconnects and the event is delivered again,
+ * until a reactor gives up on it and parks it (`ListenerOptions.parkAfter`).
  * With a store, a batch's data and position are written together, so it takes effect once.
  *
  * ```ts
@@ -2198,8 +2239,13 @@ export class ListenerHandle {
   private readonly service: string;
   /** The definition it runs. */
   readonly listener: Listener;
+  /** For handlers' follow-up commands and queries. */
+  private readonly kernable: Kernable;
+  /** How often the handler failed on an event, by position, until it gets past it. */
+  private readonly attempts = new Map<number, number>();
 
-  constructor(clients: Clients, key: Key, listener: Listener, log: Log, service: string) {
+  constructor(kernable: Kernable, clients: Clients, key: Key, listener: Listener, log: Log, service: string) {
+    this.kernable = kernable;
     this.clients = clients;
     this.key = key;
     this.log = log;
@@ -2347,17 +2393,18 @@ export class ListenerHandle {
       }
       // With a store, the batch's data and position are committed together, before the ack.
       this.stored?.begin();
+      let parked: WireParked[];
       try {
-        await this.handleBatch(m.batch);
+        parked = await this.handleBatch(m.batch);
         // After an erasure, nothing the handlers removed may stay in the store's files.
-        this.stored?.commit(m.batch.up_to, m.batch.events.some((e) => e.erases));
+        this.stored?.commit(m.batch.up_to, [...m.batch.events, ...(m.batch.retries ?? [])].some((e) => e.erases));
       } catch (err) {
         this.stored?.rollback();
         if (this.stored) this.position = this.stored.committed;
         throw err;
       }
       this.position = m.batch.up_to;
-      call.write({ ack: { position: m.batch.up_to } });
+      call.write({ ack: { position: m.batch.up_to, parked } });
     } else if (m.query) {
       call.write({ answer: { call_id: m.query.call_id, ...(await this.answer(m.query.query)) } });
     } else if (m.check) {
@@ -2374,22 +2421,82 @@ export class ListenerHandle {
     }
   }
 
-  private async handleBatch(batch: NonNullable<ListenerDelivery["batch"]>): Promise<void> {
-    const { handlers, domains } = this.listener;
-    for (const e of batch.events) {
-      if (e.global_position <= this.position) continue; // handled already
+  /**
+   * Handles a batch: first the retries, then the events after the position. Returns the events
+   * it parked; throws if a handler failed on one it does not park.
+   */
+  private async handleBatch(batch: NonNullable<ListenerDelivery["batch"]>): Promise<WireParked[]> {
+    const { handlers, domains, options } = this.listener;
+    const parkAfter = options.live ? 0 : (options.parkAfter ?? 0);
+    const parked: WireParked[] = [];
+    const retries = (batch.retries ?? []).map((e) => ({ e, retry: true }));
+    for (const { e, retry } of [...retries, ...batch.events.map((e) => ({ e, retry: false }))]) {
+      if (!retry && e.global_position <= this.position) continue; // handled already
       const entry = handlers.get(`${e.domain}.${e.event_type}`) ?? handlers.get(`${e.domain}.*`);
       if (entry) {
         const stored = toStored(e, batch.vault);
         const { data, request, ...evt } = entry.raw
           ? stored
           : { ...stored, ...upcast(domains.get(e.domain)?.events, e.domain, e.event_type, e.schema, stored.data) };
-        const ctx = { replaying: e.global_position <= this.replayUpTo, follow: () => follow(stored), request, store: this.stored };
-        await entry.handler(data, evt, ctx);
-        this.log.print("debug", this.what, `${e.domain}.${e.event_type} at ${e.global_position}`);
+        const ctx: ListenerContext = {
+          replaying: e.global_position <= this.replayUpTo,
+          follow: () => follow(stored),
+          request,
+          store: this.stored,
+          submit: (command) => this.followUp(command, stored),
+          query: (type, data, options) => this.kernable.query({ ...options, ...qualifiedType(type, this.listener.domain.name), data, tenant: options?.tenant ?? stored.tenant }),
+        };
+        const type = `${e.domain}.${e.event_type}`;
+        const saved = this.stored !== undefined && parkAfter > 0;
+        if (saved) this.stored!.savepoint();
+        try {
+          await entry.handler(data, evt, ctx);
+          if (saved) this.stored!.release();
+          this.attempts.delete(e.global_position);
+          this.log.print("debug", this.what, `${type} at ${e.global_position}`);
+        } catch (err) {
+          parked.push(this.giveUp(type, e.global_position, err, parkAfter));
+          if (saved) this.stored!.rollbackEvent();
+        }
       }
-      this.position = e.global_position;
+      if (!retry) this.position = e.global_position;
     }
+    return parked;
+  }
+
+  /** `ListenerContext.submit`: a follow-up of `event`, its rejection thrown. */
+  private async followUp(command: FollowUp, event: StoredEvent): Promise<StoredEvent[]> {
+    if (!command.id) throw new Error(`${command.type}: a follow-up command needs a fixed id, so a redelivered event runs it once`);
+    const outcome = await this.kernable.submit({
+      ...command,
+      domain: command.domain ?? this.listener.domain.name,
+      tenant: command.tenant ?? event.tenant,
+      context: command.context ?? follow(event),
+    });
+    if (outcome.committed) return outcome.events;
+    const rejected = new Rejected(outcome.message, outcome.code);
+    if (outcome.key) rejected.key = outcome.key;
+    if (outcome.requirement) rejected.requirement = outcome.requirement;
+    throw rejected;
+  }
+
+  /**
+   * What to do after the handler failed on the event at `position`: park it (a rejection at
+   * once, another error after `parkAfter` attempts), or throw `err`, so the listener gets the
+   * event again (the kernel or the store away, or attempts left).
+   */
+  private giveUp(type: string, position: number, err: unknown, parkAfter: number): WireParked {
+    if (parkAfter <= 0 || transient(err)) throw err;
+    const attempts = (this.attempts.get(position) ?? 0) + 1;
+    this.attempts.set(position, attempts);
+    if (!(err instanceof Rejected) && attempts < parkAfter) throw err;
+    this.attempts.delete(position);
+    if (err instanceof Rejected) {
+      this.log.print("warn", this.what, `${type} at ${position} rejected (${err.code}), parked: ${err.message}`);
+      return { position, code: err.code, message: err.message, attempts };
+    }
+    this.log.print("error", this.what, `${type} at ${position} failed ${attempts} times, parked: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
+    return { position, code: "handler_error", message: errorType(err), attempts };
   }
 
   private async verdict(c: NonNullable<ListenerDelivery["check"]>): Promise<{ rejected?: WireRejected }> {
@@ -2765,6 +2872,28 @@ function metaOf(
 }
 
 /** A request context for a command caused by `event`. */
+/** Attempts before a reactor parks an event its handler keeps failing on. */
+const PARK_AFTER = 5;
+
+/** gRPC codes of a kernel that is away or busy: CANCELLED, DEADLINE_EXCEEDED, RESOURCE_EXHAUSTED, ABORTED, INTERNAL, UNAVAILABLE. */
+const BUSY = new Set([1, 4, 8, 10, 13, 14]);
+
+/**
+ * Whether a failed handler should simply try again: the kernel was unreachable or busy, a
+ * submit did not settle in time, or the store failed. Never parks.
+ */
+function transient(err: unknown): boolean {
+  if (err instanceof NotSettled) return true;
+  const code = (err as { code?: unknown } | null)?.code;
+  return (typeof code === "number" && BUSY.has(code)) || code === "ERR_SQLITE_ERROR";
+}
+
+/** `{ domain, type }` of a query type of `domain` (`GetOrder`) or qualified (`crm.GetCustomer`). */
+function qualifiedType(type: string, domain: string): { domain: string; type: string } {
+  const dot = type.indexOf(".");
+  return dot < 0 ? { domain, type } : { domain: type.slice(0, dot), type: type.slice(dot + 1) };
+}
+
 function follow(event: StoredEvent): RequestContext {
   const { expectedVersion, bypassAuthorization, ...rest } = event.request;
   return { ...rest, correlationId: rest.correlationId || event.commandId, causationId: event.commandId };

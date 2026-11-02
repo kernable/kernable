@@ -78,7 +78,7 @@ Every handler gets the same kinds of arguments, in the same order: the **data** 
 | `apply(type, …)` | `state, data, evt, ctx` | `evt`: type, version, domain, aggregate type and ID, tenant, command ID | `ctx`: the request context of the command that caused the event |
 | `command(type, …)` | `state, data, cmd, ctx` | `cmd`: command ID, type, domain, aggregate type and ID, tenant | `ctx`: the request context, `now()`, `id()`, the deadline |
 | `query(type, …)` | `data, qry, ctx` | `qry`: query ID, type, domain, tenant | `ctx`: the request context of who asks, the listener's store |
-| `on(type, …)` | `data, evt, ctx` | `evt`: as for `apply`, plus position, payload version, redacted fields and when the kernel committed it | `ctx`: the request context, `replaying` (committed before this connection: a rebuild, or a reactor's backlog after a restart, so never a reason to skip a reactor's side effects), `follow()`, the store |
+| `on(type, …)` | `data, evt, ctx` | `evt`: as for `apply`, plus position, payload version, redacted fields and when the kernel committed it | `ctx`: the request context, `replaying` (committed before this connection: a rebuild, or a reactor's backlog after a restart, so never a reason to skip a reactor's side effects), `follow()`, `submit()` and `query()` for follow-ups, the store |
 
 `apply` gets no `now()` and no `id()`: replaying the events must give the same state every time, so a time or an ID the state needs goes into the event's data.
 
@@ -112,7 +112,7 @@ An aggregate decides alone, on its own history. A rule that spans two aggregates
 
 <FlowDiagram name="saga" loop bare silent />
 
-- **The reactor submits follow-up commands** with `ctx.follow()`, so the sender and the correlation of the original request carry over, and with a fixed command ID (`reserve-o-7`), so a redelivered event changes nothing.
+- **The reactor submits follow-up commands** with `ctx.submit`, so the sender and the correlation of the original request carry over, and with a fixed command ID (`reserve-o-7`), so a redelivered event changes nothing. If a follow-up is rejected, the reactor parks the event and moves on; an operator sees it and retries or dismisses it ([Failures](./failures)). A step whose rejection is part of the conversation (stock ran out) catches it and submits the compensating command instead.
 - **Each step is a decision of one aggregate**, with its own rejection. Until the last step, the order is in an intermediate state (`placed`, not yet `confirmed`): model it explicitly.
 - **Uniqueness and conditions are checked by the kernel.** "Every email only once" or "open an account only while its fund is open" need no reactor: an aggregate declares unique keys and facts from its state, a command the facts it requires, and the kernel checks them when the command commits ([Unique keys and conditions](./uniqueness)).
 

@@ -117,6 +117,15 @@ export class TestKernel {
     this.watchdog = undefined;
   }
 
+  /** Runs `kernable <args>` in the kernel's directory: whether it succeeded, and its stdout. */
+  cli(...args: string[]): { ok: boolean; out: string } {
+    try {
+      return { ok: true, out: execFileSync(join(BIN, "kernable"), args, { cwd: this.dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }) };
+    } catch (err) {
+      return { ok: false, out: String((err as { stdout?: string }).stdout ?? "") };
+    }
+  }
+
   /** Output of `kernable verify` on the event log. */
   verify(): string {
     return execFileSync(join(BIN, "kernable"), ["verify", this.store, join(this.dir, "kernel.pub")], {
