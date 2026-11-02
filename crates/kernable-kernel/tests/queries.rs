@@ -73,6 +73,7 @@ fn read_model(env: &Env, name: &str, key: SigningKey, ack: bool) -> JoinHandle<t
                         _ => query_answer::Outcome::Rejected(Rejected {
                             code: "nope".into(),
                             message: "always fails".into(),
+                            ..Default::default()
                         }),
                     };
                     In::Answer(QueryAnswer {

@@ -135,7 +135,7 @@ fn arguments_a_command_does_not_take_are_refused_with_the_usage() {
 #[test]
 fn the_inspection_commands_show_what_the_store_holds() {
     let dir = temp_dir("inspect");
-    let store = fixture(3, &dir, "store");
+    let store = fixture(4, &dir, "store");
     {
         // A listener of the orders service that its membership does not list, and a
         // membership whose worker, listener and middleware never registered.
@@ -240,7 +240,7 @@ orders version=1.0.0 (applied 2023-11-14T22:13:20Z by {})
 #[test]
 fn listeners_and_workers_are_removed_by_name() {
     let dir = temp_dir("remove");
-    let store = fixture(3, &dir, "store");
+    let store = fixture(4, &dir, "store");
 
     let (code, printed) = kernable(&dir, &["listeners", "remove", &store, "guard"]);
     assert_eq!((code, printed.trim()), (0, "removed guard"));
@@ -268,7 +268,7 @@ fn listeners_and_workers_are_removed_by_name() {
 fn verify_tells_intact_suspect_and_tampered_stores_apart() {
     let dir = temp_dir("verify");
     write_key(&dir, "kernel", 3);
-    let store = fixture(3, &dir, "store");
+    let store = fixture(4, &dir, "store");
 
     // The fixture holds c11, signed by key 7 after its revocation: intact, one suspect.
     let (code, printed) = kernable(&dir, &["verify", &store, "kernel.pub"]);
@@ -289,7 +289,7 @@ fn verify_tells_intact_suspect_and_tampered_stores_apart() {
 
     if backend().0 == "sqlite" {
         let path = dir.join("changed");
-        let changed = fixture(3, &dir, "changed");
+        let changed = fixture(4, &dir, "changed");
         let conn = rusqlite::Connection::open(&path).unwrap();
         conn.execute(
             "UPDATE events SET payload = '{\"sku\":\"pear\"}' WHERE global_position = 2",
@@ -313,7 +313,7 @@ fn a_checkpoint_signs_the_newest_event() {
     let (code, printed) = kernable(&dir, &["checkpoint", &empty, "kernel.key"]);
     assert_eq!((code, printed.trim()), (0, "no events yet"));
 
-    let store = fixture(3, &dir, "store");
+    let store = fixture(4, &dir, "store");
     let (code, printed) = kernable(&dir, &["checkpoint", &store, "kernel.key"]);
     assert_eq!((code, printed.trim()), (0, "checkpoint at position 5"));
     let _ = std::fs::remove_dir_all(&dir);
@@ -322,7 +322,7 @@ fn a_checkpoint_signs_the_newest_event() {
 #[test]
 fn vault_rekey_moves_every_value_to_the_new_key() {
     let dir = temp_dir("rekey");
-    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/format-3");
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/format-4");
     std::fs::copy(fixtures.join("vault-sqlite.db"), dir.join("vault.db")).unwrap();
     std::fs::copy(fixtures.join("vault.key"), dir.join("old.key")).unwrap();
     std::fs::write(dir.join("new.key"), hex(&[7; 32])).unwrap();

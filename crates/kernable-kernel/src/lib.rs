@@ -537,6 +537,7 @@ impl Kernel {
         let refused = |code: &str, message: String| Rejected {
             code: code.into(),
             message,
+            ..Default::default()
         };
         let refs: Vec<String> = events.iter().flat_map(|e| e.vault_refs.clone()).collect();
         let erasing: Vec<&NewEvent> = events.iter().filter(|e| !e.erases.is_empty()).collect();
@@ -842,8 +843,11 @@ impl Kernel {
                     "middleware {middleware} sent no verdict"
                 )));
             };
-            if let Some(reason) = verdict.rejected {
+            if let Some(mut reason) = verdict.rejected {
                 tracing::info!(%middleware, code = %reason.code, "middleware rejected a request");
+                // Only the kernel names a key or requirement.
+                reason.key.clear();
+                reason.requirement = None;
                 return Ok(Some(reason));
             }
         }
@@ -2287,6 +2291,7 @@ impl Session {
             let reason = Rejected {
                 code: "key_revoked".into(),
                 message: "the command was signed with a key revoked since then".into(),
+                ..Default::default()
             };
             drop(permit);
             self.reject(&lease_id, command, reason);
@@ -2300,6 +2305,7 @@ impl Session {
                 message: format!(
                     "expected version {required}, the aggregate is at {expected_version}"
                 ),
+                ..Default::default()
             };
             drop(permit);
             self.reject(&lease_id, command, reason);
@@ -2370,6 +2376,7 @@ impl Session {
             let reason = Rejected {
                 code: "too_large".into(),
                 message,
+                ..Default::default()
             };
             self.reject(&lease_id, command, reason);
             return true;
@@ -2415,6 +2422,7 @@ impl Session {
             let reason = Rejected {
                 code: "invalid_event_type".into(),
                 message: "event types must be non-empty and without dots".into(),
+                ..Default::default()
             };
             self.reject(&r.lease_id, f.command, reason);
             return Ok(());
@@ -2433,6 +2441,7 @@ impl Session {
                     name(e),
                     e.schema
                 ),
+                ..Default::default()
             };
             self.reject(&r.lease_id, f.command, reason);
             return Ok(());
@@ -2453,6 +2462,7 @@ impl Session {
                 let reason = Rejected {
                     code: "no_vault".into(),
                     message: "this kernel has no vault".into(),
+                    ..Default::default()
                 };
                 self.reject(&r.lease_id, f.command, reason);
                 return Ok(());
@@ -2624,6 +2634,7 @@ impl Session {
                 let reason = Rejected {
                     code: "concurrency_conflict".into(),
                     message: "aggregate kept changing; retry the command".into(),
+                    ..Default::default()
                 };
                 self.reject(&r.lease_id, f.command, reason);
             }
@@ -2654,13 +2665,16 @@ impl Session {
         let Some(f) = self.in_flight().remove(&r.lease_id) else {
             return Ok(());
         };
-        let reason = r.reason.unwrap_or_default();
+        let mut reason = r.reason.unwrap_or_default();
         let sig = r.worker_sig.unwrap_or_default();
         let msg = signing::rejection_message(&f.command.command_id, &reason);
         if sig.key_id != self.key_id || signing::verify(&sig, &msg).is_err() {
             self.in_flight().insert(r.lease_id, f);
             return Err(Status::unauthenticated("invalid rejection signature"));
         }
+        // Only the kernel names a key or requirement: its index decides those.
+        reason.key.clear();
+        reason.requirement = None;
         if reason.code == SNAPSHOT_STALE && f.with_snapshot {
             // The worker cannot read the snapshot: drop it and send all events instead.
             let c = &f.command;
@@ -2743,6 +2757,8 @@ impl Session {
                         "{}.{} {} does not hold {}",
                         q.domain, q.aggregate_type, q.aggregate_id, q.fact
                     ),
+                    requirement: Some(Box::new(q.clone())),
+                    ..Default::default()
                 });
             }
         }
@@ -2758,6 +2774,8 @@ impl Session {
                     "{}.{} key {} is taken",
                     cmd.domain, cmd.aggregate_type, k.name
                 ),
+                key: k.name.clone(),
+                ..Default::default()
             });
         }
         let current = index.held(stream);
@@ -2791,6 +2809,7 @@ impl Session {
                             return Err(Rejected {
                                 code: "vault_error".into(),
                                 message: e.to_string(),
+                                ..Default::default()
                             });
                         }
                     }
@@ -2799,6 +2818,7 @@ impl Session {
                     return Err(Rejected {
                         code: "no_vault".into(),
                         message: "this kernel has no vault".into(),
+                        ..Default::default()
                     });
                 }
             };

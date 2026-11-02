@@ -215,6 +215,7 @@ fn fill(store: &dyn Store, vault: &Vault) {
     let reason = Rejected {
         code: "invalid_state".into(),
         message: "AddItem not allowed now".into(),
+        ..Default::default()
     };
     store.reject("c3", reason).unwrap();
     let coupon = value(3, "", "SAVE10");

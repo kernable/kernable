@@ -81,6 +81,7 @@ fn vectors() -> Value {
     let reason = Rejected {
         code: "invalid_state".into(),
         message: "Order already exists".into(),
+        ..Default::default()
     };
     let nonce = [1u8; 16];
     let chain_hash = [2u8; 32];

@@ -111,6 +111,7 @@ fn workload(store: &dyn Store) {
     let rejected = Rejected {
         code: "invalid_state".into(),
         message: "no".into(),
+        ..Default::default()
     };
     store.reject("c3", rejected).unwrap();
     run_indexed(store, "c4", "o1", &[ev("ItemAdded", 2)], Some(&index(1)));

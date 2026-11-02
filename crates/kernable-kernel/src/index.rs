@@ -284,6 +284,7 @@ pub(crate) fn validate(r: &kernable_core::proto::Result) -> Result<(), Rejected>
     let invalid = |message: String| Rejected {
         code: "invalid_index".into(),
         message,
+        ..Default::default()
     };
     let name_ok = |name: &str| config::valid_type(name) && name.len() <= MAX_NAME_BYTES;
     if r.keys.len() > MAX_KEYS {

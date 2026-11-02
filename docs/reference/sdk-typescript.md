@@ -275,7 +275,7 @@ are `null` here and listed in `redacted`.
 ```ts
 export type Outcome =
   | { committed: true; events: StoredEvent[] }
-  | { committed: false; code: string; message: string };
+  | { committed: false; code: string; message: string; key?: string; requirement?: Requirement };
 ```
 
 What came of a command (`Kernable.submit`): committed with the events it stored, or rejected
@@ -291,6 +291,10 @@ aggregate's definition). A rejection is a result, not an exception; check `commi
 const outcome = await kernable.submit({ domain: "shop", aggregateType: "cart", aggregateId: "c1", type: "CheckOut" });
 if (!outcome.committed) console.log(outcome.code, outcome.message);
 ```
+
+For `unique_taken`, `key` names the key (`number`); for `requirement_missing`, `requirement` is
+the first requirement that does not hold. Both are set by the kernel only, and stored with the
+rejection.
 
 ### QueryOutcome
 

@@ -102,6 +102,10 @@ export interface WireRequirement {
 export interface WireRejected {
   code: string;
   message: string;
+  /** Set by the kernel only: the key of `unique_taken`. */
+  key?: string;
+  /** Set by the kernel only: the requirement of `requirement_missing`. */
+  requirement?: WireRequirement | null;
 }
 
 export type WireWait = "WAIT_SETTLED" | "WAIT_COMMITTED" | "WAIT_ACCEPTED";

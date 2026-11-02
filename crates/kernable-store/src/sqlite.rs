@@ -15,7 +15,7 @@ use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
         AggregateIndex, Attribute, Command, CommandResult, Committed, Event, Grant, ListenerRecord,
-        Membership, MembershipRecord, Middleware, NewEvent, Rejected, RequestContext,
+        Membership, MembershipRecord, Middleware, NewEvent, Rejected, RequestContext, Requirement,
         RevocationRecord, Signature, When, WorkerRecord, command_result::Outcome,
     },
     signing::{self, GENESIS},
@@ -68,6 +68,8 @@ CREATE TABLE IF NOT EXISTS commands (
     positions        TEXT    NOT NULL DEFAULT '', -- committed: its events' global positions, comma-separated
     rejected_code    TEXT,             -- rejected: why
     rejected_message TEXT,
+    rejected_key     TEXT,             -- unique_taken: the key's name
+    rejected_requirement BLOB,         -- requirement_missing: the Requirement, protobuf
     created_at       INTEGER NOT NULL
 ) STRICT;
 CREATE INDEX IF NOT EXISTS commands_pending ON commands (status, created_at);
@@ -595,9 +597,16 @@ impl Store for SqliteStore {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let cmd = pending_command(&tx, command_id)?;
         tx.execute(
-            "UPDATE commands SET status = 'rejected', rejected_code = ?2, rejected_message = ?3
+            "UPDATE commands SET status = 'rejected', rejected_code = ?2, rejected_message = ?3,
+                    rejected_key = ?4, rejected_requirement = ?5
              WHERE command_id = ?1",
-            params![cmd.command_id, reason.code, reason.message],
+            params![
+                cmd.command_id,
+                reason.code,
+                reason.message,
+                Some(&reason.key).filter(|k| !k.is_empty()),
+                reason.requirement.as_ref().map(Message::encode_to_vec),
+            ],
         )?;
         tx.commit()?;
         Ok(())
@@ -1195,18 +1204,35 @@ fn events_at(conn: &Connection, command_id: &str, positions: &str) -> Result<Vec
 
 /// The result of a completed command: its events are read back from the log.
 fn stored_result(conn: &Connection, command_id: &str) -> Result<Option<CommandResult>> {
-    type Row = (String, String, Option<String>, Option<String>);
+    type Row = (
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<Vec<u8>>,
+    );
     let row: Option<Row> = conn
         .query_row(
-            "SELECT status, positions, rejected_code, rejected_message
+            "SELECT status, positions, rejected_code, rejected_message, rejected_key,
+                    rejected_requirement
              FROM commands WHERE command_id = ?1",
             [command_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
         )
         .optional()?;
     let outcome = match row {
         None => return Ok(None),
-        Some((status, positions, code, message)) => match status.as_str() {
+        Some((status, positions, code, message, key, requirement)) => match status.as_str() {
             "committed" => Outcome::Committed(Committed {
                 events: events_at(conn, command_id, &positions)?,
                 settled: false,
@@ -1214,6 +1240,11 @@ fn stored_result(conn: &Connection, command_id: &str) -> Result<Option<CommandRe
             "rejected" => Outcome::Rejected(Rejected {
                 code: code.unwrap_or_default(),
                 message: message.unwrap_or_default(),
+                key: key.unwrap_or_default(),
+                requirement: requirement
+                    .map(|bytes| Requirement::decode(bytes.as_slice()).map(Box::new))
+                    .transpose()
+                    .map_err(|e| Error::Corrupt(format!("a stored requirement: {e}")))?,
             }),
             _ => return Ok(None),
         },

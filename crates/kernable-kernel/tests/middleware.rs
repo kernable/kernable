@@ -120,6 +120,7 @@ fn refuse(code: &str) -> Option<Rejected> {
     Some(Rejected {
         code: code.into(),
         message: "refused by a test middleware".into(),
+        ..Default::default()
     })
 }
 

@@ -45,7 +45,9 @@ use kernable_core::proto::{
 /// - 1: the first format.
 /// - 2: adds the newest grant per key ([`Store::grants`]).
 /// - 3: adds the unique keys and facts per aggregate ([`Store::index`]).
-pub const FORMAT: u32 = 3;
+/// - 4: keeps the key or requirement a rejection names ([`Rejected::key`],
+///   [`Rejected::requirement`]).
+pub const FORMAT: u32 = 4;
 
 pub use file::FileStore;
 pub use sqlite::SqliteStore;

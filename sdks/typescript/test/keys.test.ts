@@ -67,9 +67,12 @@ async function withKernel(f: (kernable: Kernable, run: (...aggs: Aggregate<any>[
   }
 }
 
-/** `committed` or the rejection's code and message. */
+/** `committed` or the rejection's code and message, with the key or requirement it names. */
 function result(o: Outcome): string {
-  return o.committed ? "committed" : `${o.code}: ${o.message}`;
+  if (o.committed) return "committed";
+  const q = o.requirement;
+  const named = o.key ? ` [${o.key}]` : q ? ` [${q.domain}.${q.aggregateType} ${q.aggregateId} ${q.fact}]` : "";
+  return `${o.code}: ${o.message}${named}`;
 }
 
 test("a unique key is held by one aggregate within its tenant, a global one across tenants", async () => {
@@ -80,14 +83,14 @@ test("a unique key is held by one aggregate within its tenant, a global one acro
       result(await kernable.submit({ domain: "crm", aggregateType: "Customer", aggregateId: id, type, data, tenant, wait: "committed" }));
 
     assert.equal(await send("k1", "Register", { number: "A-1", handle: "ann" }), "committed");
-    assert.equal(await send("k2", "Register", { number: "A-1" }), "unique_taken: crm.Customer key number is taken");
+    assert.equal(await send("k2", "Register", { number: "A-1" }), "unique_taken: crm.Customer key number is taken [number]");
     assert.equal(await send("k2", "Register", { number: "A-1" }, "t2"), "committed", "another tenant");
-    assert.equal(await send("k3", "Register", { number: "A-3", handle: "ann" }, "t2"), "unique_taken: crm.Customer key handle is taken");
+    assert.equal(await send("k3", "Register", { number: "A-3", handle: "ann" }, "t2"), "unique_taken: crm.Customer key handle is taken [handle]");
 
     // A changed value frees the old one in the same commit.
     assert.equal(await send("k1", "Renumber", { number: "A-2" }), "committed");
     assert.equal(await send("k4", "Register", { number: "A-1" }), "committed");
-    assert.equal(await send("k5", "Register", { number: "A-2" }), "unique_taken: crm.Customer key number is taken");
+    assert.equal(await send("k5", "Register", { number: "A-2" }), "unique_taken: crm.Customer key number is taken [number]");
   });
 });
 
@@ -98,11 +101,11 @@ test("a command commits only while the aggregates it requires hold the fact", as
     const send = async (aggregateType: string, id: string, type: string, data: object = {}) =>
       result(await kernable.submit({ domain: "crm", aggregateType, aggregateId: id, type, data, wait: "committed" }));
 
-    assert.equal(await send("Order", "o1", "Place", { customer: "k1" }), "requirement_missing: crm.Customer k1 does not hold active");
+    assert.equal(await send("Order", "o1", "Place", { customer: "k1" }), "requirement_missing: crm.Customer k1 does not hold active [crm.Customer k1 active]");
     assert.equal(await send("Customer", "k1", "Register", { number: "A-1" }), "committed");
     assert.equal(await send("Order", "o1", "Place", { customer: "k1" }), "committed");
     assert.equal(await send("Customer", "k1", "Deactivate"), "committed");
-    assert.equal(await send("Order", "o2", "Place", { customer: "k1" }), "requirement_missing: crm.Customer k1 does not hold active");
+    assert.equal(await send("Order", "o2", "Place", { customer: "k1" }), "requirement_missing: crm.Customer k1 does not hold active [crm.Customer k1 active]");
   });
 });
 
@@ -114,7 +117,7 @@ test("erasing its subject frees a personal key", async () => {
       result(await kernable.submit({ domain: "crm", aggregateType, aggregateId: id, type, data, wait: "committed" }));
 
     assert.equal(await send("Customer", "k1", "Register", { number: "A-1", email: "Ann@example.com" }), "committed");
-    assert.equal(await send("Customer", "k2", "Register", { number: "A-2", email: "ann@example.com" }), "unique_taken: crm.Customer key email is taken");
+    assert.equal(await send("Customer", "k2", "Register", { number: "A-2", email: "ann@example.com" }), "unique_taken: crm.Customer key email is taken [email]");
     assert.equal(await send("Privacy", "p1", "Forget", { subject: "person-A-1" }), "committed");
     assert.equal(await send("Customer", "k2", "Register", { number: "A-2", email: "ann@example.com" }), "committed");
   });
@@ -132,7 +135,7 @@ test("a reindex gives aggregates from before a key was declared the key", async 
     const outcomes = await kernable.reindex({ domain: "crm", aggregateType: "Customer", aggregateIds: ["k1", "k9"] });
     // No events: k9 never existed, so it holds nothing.
     assert.deepEqual([...outcomes], [["k1", { committed: true, events: [] }], ["k9", { committed: true, events: [] }]]);
-    assert.equal(await send("k2", "A-1"), "unique_taken: crm.Customer key number is taken");
+    assert.equal(await send("k2", "A-1"), "unique_taken: crm.Customer key number is taken [number]");
   });
 });
 
@@ -171,7 +174,7 @@ test("two aggregate types of one domain, each in its own worker, are reindexed e
       ]);
       assert.deepEqual([...customers, ...suppliers], [["k1", { committed: true, events: [] }], ["s1", { committed: true, events: [] }]]);
     }
-    assert.equal(await send("Customer", "k2", "N-1"), "unique_taken: crm.Customer key number is taken");
-    assert.equal(await send("Supplier", "s2", "N-1"), "unique_taken: crm.Supplier key number is taken");
+    assert.equal(await send("Customer", "k2", "N-1"), "unique_taken: crm.Customer key number is taken [number]");
+    assert.equal(await send("Supplier", "s2", "N-1"), "unique_taken: crm.Supplier key number is taken [number]");
   });
 });

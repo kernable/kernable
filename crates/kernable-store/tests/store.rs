@@ -152,6 +152,7 @@ fn reject_completes_command_without_events(store: &dyn Store) {
     let reason = Rejected {
         code: "invalid_state".into(),
         message: "no order".into(),
+        ..Default::default()
     };
     store.reject("c1", reason.clone()).unwrap();
 

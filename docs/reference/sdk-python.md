@@ -310,6 +310,8 @@ What became of a command, returned by `Kernable.submit`: committed with its even
 - `events: list[Event]`: The committed events, in order; empty if the command was rejected. Vault fields in them are `None` (see `Event.redacted`).
 - `code: str`: The rejection code (see `Rejected`), if rejected.
 - `message: str`: The rejection message, if rejected.
+- `key: str`: For `unique_taken`: the name of the key another aggregate holds (never its value). Set by the kernel only, and stored with the rejection.
+- `requirement: 'Requirement | None'`: For `requirement_missing`: the first requirement that does not hold. Set by the kernel only.
 
 ### QueryContext
 

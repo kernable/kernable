@@ -20,11 +20,28 @@ async fn send(kernable: &Kernable, submit: Submit) -> Outcome {
     kernable.submit(submit.wait(Wait::Committed)).await.unwrap()
 }
 
-/// The code and message of a rejected outcome, or `committed`.
+/// The code and message of a rejected outcome, with the key or requirement it names, or
+/// `committed`.
 fn result(outcome: &Outcome) -> (String, String) {
     match outcome {
         Outcome::Committed(_) => ("committed".into(), String::new()),
-        Outcome::Rejected(Rejected { code, message }) => (code.clone(), message.clone()),
+        Outcome::Rejected(Rejected {
+            code,
+            message,
+            key,
+            requirement,
+        }) => {
+            let named = match (key, requirement) {
+                (Some(key), None) => format!(" [{key}]"),
+                (None, Some(q)) => format!(
+                    " [{}.{} {} {}]",
+                    q.domain, q.aggregate_type, q.aggregate_id, q.fact
+                ),
+                (None, None) => String::new(),
+                both => panic!("a key and a requirement: {both:?}"),
+            };
+            (code.clone(), format!("{message}{named}"))
+        }
     }
 }
 
@@ -32,8 +49,17 @@ fn committed() -> (String, String) {
     ("committed".into(), String::new())
 }
 
+/// A rejection with `code` and `message`, and the key or requirement the message names.
 fn rejected(code: &str, message: &str) -> (String, String) {
-    (code.into(), message.into())
+    let words: Vec<&str> = message.split(' ').collect();
+    let named = match (code, words.as_slice()) {
+        ("unique_taken", [_, "key", key, "is", "taken"]) => format!(" [{key}]"),
+        ("requirement_missing", [aggregate, id, "does", "not", "hold", fact]) => {
+            format!(" [{aggregate} {id} {fact}]")
+        }
+        _ => String::new(),
+    };
+    (code.into(), format!("{message}{named}"))
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

@@ -22,6 +22,11 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub struct Rejected {
     pub code: String,
     pub message: String,
+    /// Set by the kernel for `unique_taken`: the name of the key another aggregate holds.
+    pub key: Option<String>,
+    /// Set by the kernel for `requirement_missing`: the first requirement that does not hold.
+    /// Boxed: it keeps every `Result` with an [`Error`] small.
+    pub requirement: Option<Box<crate::Requirement>>,
 }
 
 impl Rejected {
@@ -30,6 +35,8 @@ impl Rejected {
         Rejected {
             code: "rejected".into(),
             message: message.into(),
+            key: None,
+            requirement: None,
         }
     }
 
@@ -43,13 +50,25 @@ impl Rejected {
         Rejected {
             code: r.code,
             message: r.message,
+            key: Some(r.key).filter(|k| !k.is_empty()),
+            requirement: r.requirement.map(|q| {
+                let q = *q;
+                Box::new(crate::Requirement {
+                    domain: q.domain,
+                    aggregate_type: q.aggregate_type,
+                    aggregate_id: q.aggregate_id,
+                    fact: q.fact,
+                })
+            }),
         }
     }
 
     pub(crate) fn to_wire(&self) -> kernable_core::proto::Rejected {
+        // The key and requirement are the kernel's to set.
         kernable_core::proto::Rejected {
             code: self.code.clone(),
             message: self.message.clone(),
+            ..Default::default()
         }
     }
 

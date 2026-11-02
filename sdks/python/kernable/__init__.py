@@ -328,6 +328,11 @@ class Outcome:
     code: str = ""
     #: The rejection message, if rejected.
     message: str = ""
+    #: For `unique_taken`: the name of the key another aggregate holds (never its value). Set by
+    #: the kernel only, and stored with the rejection.
+    key: str = ""
+    #: For `requirement_missing`: the first requirement that does not hold. Set by the kernel only.
+    requirement: "Requirement | None" = None
 
 
 @dataclass
@@ -1216,7 +1221,7 @@ class Kernable:
         mode = pb.WAIT_COMMITTED if wait == "committed" else pb.WAIT_SETTLED
         res = self._send(domain, aggregate_type, aggregate_id, type, data, tenant, id, mode, context, timeout_s)
         if res.WhichOneof("outcome") == "rejected":
-            return Outcome(committed=False, code=res.rejected.code, message=res.rejected.message)
+            return _rejected_outcome(res.rejected)
         outcome = Outcome(committed=True, events=[_to_event(e) for e in res.committed.events])
         if mode == pb.WAIT_SETTLED and not res.committed.settled:
             raise NotSettled(outcome)
@@ -2326,13 +2331,20 @@ def _to_check(call) -> Check:
                  _from_wire_context(q.context))
 
 
+def _rejected_outcome(r) -> Outcome:
+    """The outcome of a rejected command, with the key or requirement the kernel named."""
+    q = r.requirement if r.HasField("requirement") else None
+    return Outcome(committed=False, code=r.code, message=r.message, key=r.key,
+                   requirement=Requirement(q.domain, q.aggregate_type, q.aggregate_id, q.fact) if q else None)
+
+
 def _to_outcome(call) -> Outcome | QueryOutcome:
     """What came of the request a middleware after it checks."""
     if call.WhichOneof("outcome") == "command_result":
         r = call.command_result
         if r.WhichOneof("outcome") == "committed":
             return Outcome(committed=True, events=[_to_event(e) for e in r.committed.events])
-        return Outcome(committed=False, code=r.rejected.code, message=r.rejected.message)
+        return _rejected_outcome(r.rejected)
     r = call.query_result
     if r.WhichOneof("outcome") == "response":
         return QueryOutcome(answered=True, data=_decode(r.response))

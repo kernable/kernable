@@ -159,6 +159,10 @@ The kernel checks keys and requirements while it commits, under the lock that or
 | `requirement_missing` | `funds.fund f1 does not hold open` | An aggregate the command requires does not hold the fact. |
 | `invalid_index` | says which limit | Too many keys, facts or requirements, or a malformed name: a bug in the aggregate's definition. |
 
+A rejection also names what failed as data, so you need not parse the message: `key` is the name of the taken key (`pmdxId`), `requirement` the requirement that does not hold (domain, aggregate type, ID, fact). In TypeScript and Python they are `outcome.key` and `outcome.requirement`, in Rust `Rejected::key` and `Rejected::requirement`. Only the kernel sets them, and they are stored with the rejection, so the same command ID gets them back.
+
+- **One reason at a time.** The kernel checks the requirements first, in the order `requires` returns them, then the keys. The rejection names the first requirement that does not hold, or else one taken key. Fix that one and submit again: another requirement or key may fail next.
+
 Workers send keys and facts from protocol 2 on, signed over `kernable.v1.index` ([Signatures](../reference/signing#unique-keys-and-facts)). A worker of protocol 1 leaves what its aggregates hold as it is.
 
 ## Aggregates from before a key

@@ -322,6 +322,11 @@ message Accepted {}
 message Rejected {
   string code = 1;    // machine-readable, e.g. `version_mismatch`
   string message = 2; // for people
+  // Set by the kernel only, never by a worker: for `unique_taken`, the name of the key another
+  // aggregate holds (never its value); for `requirement_missing`, the first requirement of the
+  // result that does not hold. Stored with the rejection.
+  string key = 3;
+  Requirement requirement = 4;
 }
 
 // Plain event streams, for clients that read the log without registering as a listener.

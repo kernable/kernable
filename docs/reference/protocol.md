@@ -350,6 +350,8 @@ reference; workers, middlewares and read models choose their own.
 |---|---|---|---|
 | `code` |  `string` | 1 | machine-readable, e.g. `version_mismatch` |
 | `message` |  `string` | 2 | for people |
+| `key` |  `string` | 3 | Set by the kernel only, never by a worker: for `unique_taken`, the name of the key another aggregate holds (never its value); for `requirement_missing`, the first requirement of the result that does not hold. Stored with the rejection. |
+| `requirement` |  `Requirement` | 4 |  |
 
 ### EventService
 

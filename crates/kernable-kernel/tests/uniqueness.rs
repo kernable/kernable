@@ -141,6 +141,18 @@ async fn a_key_taken_by_one_aggregate_rejects_another_of_its_scope() {
     let reason = rejection(&taken);
     assert_eq!(reason.code, "unique_taken");
     assert_eq!(reason.message, "orders.Order key number is taken");
+    assert_eq!(
+        (reason.key.as_str(), &reason.requirement),
+        ("number", &None)
+    );
+    // Stored with the rejection: the same command again gets it back.
+    let again = submit(
+        &env.addr,
+        order("c2", "PlaceOrder", "o2", "t1", number("A-1", false)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(rejection(&again), reason);
     // Nothing of the rejected command was written.
     let store = kernable_store::open_read_only(&env.store).unwrap();
     assert!(
@@ -270,6 +282,20 @@ async fn a_command_commits_only_while_the_facts_it_requires_are_held() {
     let reason = rejection(&missing);
     assert_eq!(reason.code, "requirement_missing");
     assert_eq!(reason.message, "orders.Order v1 does not hold open");
+    let wanted = Requirement {
+        domain: "orders".into(),
+        aggregate_type: "Order".into(),
+        aggregate_id: "v1".into(),
+        fact: "open".into(),
+    };
+    assert_eq!(
+        (reason.key.as_str(), &reason.requirement),
+        ("", &Some(Box::new(wanted)))
+    );
+    let again = submit(&env.addr, requiring("c1", "PlaceOrder"))
+        .await
+        .unwrap();
+    assert_eq!(rejection(&again), reason);
     // Held in another tenant only: still missing.
     assert_eq!(
         outcome(&env, open("c2", "PlaceOrder", "t2")).await,
@@ -757,4 +783,24 @@ async fn an_index_signed_by_another_key_ends_the_session() {
     let store = kernable_store::open_read_only(&env.store).unwrap();
     assert!(store.index().unwrap().is_empty());
     assert!(store.read_all(0, 10).unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_the_kernel_names_a_key_or_requirement_in_a_rejection() {
+    let env = start("unique-named-by-kernel").await;
+    start_worker(
+        env.addr.clone(),
+        TestWorker {
+            behavior: Behavior::NameKeyInRejections,
+            ..TestWorker::honest()
+        },
+    )
+    .await;
+    // AddItem before PlaceOrder: the worker rejects it, and names a key it has no say over.
+    let result = submit(&env.addr, signed(command("c1", "AddItem", "o1"), &key(1)))
+        .await
+        .unwrap();
+    let reason = rejection(&result);
+    assert_eq!(reason.code, "invalid_state");
+    assert_eq!((reason.key.as_str(), &reason.requirement), ("", &None));
 }

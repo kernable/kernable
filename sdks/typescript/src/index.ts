@@ -412,10 +412,23 @@ export interface StoredEvent extends StoredEventMeta {
  * const outcome = await kernable.submit({ domain: "shop", aggregateType: "cart", aggregateId: "c1", type: "CheckOut" });
  * if (!outcome.committed) console.log(outcome.code, outcome.message);
  * ```
+ *
+ * For `unique_taken`, `key` names the key (`number`); for `requirement_missing`, `requirement` is
+ * the first requirement that does not hold. Both are set by the kernel only, and stored with the
+ * rejection.
  */
 export type Outcome =
   | { committed: true; events: StoredEvent[] }
-  | { committed: false; code: string; message: string };
+  | { committed: false; code: string; message: string; key?: string; requirement?: Requirement };
+
+/** The outcome of a rejected command, with the key or requirement the kernel named. */
+function rejectedOutcome(r: WireRejected): Outcome {
+  const outcome: Extract<Outcome, { committed: false }> = { committed: false, code: r.code, message: r.message };
+  if (r.key) outcome.key = r.key;
+  const q = r.requirement;
+  if (q) outcome.requirement = { domain: q.domain, aggregateType: q.aggregate_type, aggregateId: q.aggregate_id, fact: q.fact };
+  return outcome;
+}
 
 /** What came of a query: its response data or why it was rejected. */
 export type QueryOutcome =
@@ -1612,7 +1625,7 @@ export class Kernable {
     const wait = options.wait === "committed" ? "WAIT_COMMITTED" : "WAIT_SETTLED";
     const res = await this.send(options, wait);
     if (res.outcome === "rejected") {
-      return { committed: false, code: res.rejected!.code, message: res.rejected!.message };
+      return rejectedOutcome(res.rejected!);
     }
     // Events come back with references only: the submitter is no vault reader.
     const outcome = { committed: true as const, events: res.committed!.events.map((e) => toStored(e)) };

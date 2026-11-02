@@ -256,6 +256,7 @@ pub fn order(exists: bool, cmd: &Command) -> Result<Vec<NewEvent>, Rejected> {
     let reject = |message: &str| Rejected {
         code: "invalid_state".into(),
         message: message.into(),
+        ..Default::default()
     };
     let (event_type, ok) = match cmd.command_type.as_str() {
         "PlaceOrder" => ("OrderPlaced", !exists),
@@ -294,6 +295,8 @@ pub enum Behavior {
     StaleSnapshots,
     /// Signs keys, facts and requirements with a key other than its registered one.
     ForgeIndex,
+    /// Names a key and a requirement in its own rejections, which only the kernel may.
+    NameKeyInRejections,
 }
 
 pub type VaultWriter = std::sync::Arc<
@@ -528,6 +531,12 @@ pub async fn run_worker(addr: String, mut w: TestWorker) -> tonic::Status {
                     Behavior::StaleSnapshots if x.snapshot.is_some() => Err(Rejected {
                         code: "snapshot_stale".into(),
                         message: "unknown snapshot schema".into(),
+                        ..Default::default()
+                    }),
+                    Behavior::NameKeyInRejections => order(exists, &cmd).map_err(|r| Rejected {
+                        key: "number".into(),
+                        requirement: Some(Default::default()),
+                        ..r
                     }),
                     _ => order(exists, &cmd),
                 };

@@ -72,11 +72,12 @@ class Keys(unittest.TestCase):
         self.run_worker(*shop_domain().aggregates)
         self.assertTrue(self.register("c1", "max@firma.de", "max").committed)
         taken = self.register("c2", "max@firma.de", "moritz")
-        self.assertEqual((taken.committed, taken.code, taken.message),
-                         (False, "unique_taken", "shop.Customer key email is taken"))
+        self.assertEqual((taken.committed, taken.code, taken.message, taken.key, taken.requirement),
+                         (False, "unique_taken", "shop.Customer key email is taken", "email", None))
         self.assertTrue(self.register("c2", "max@firma.de", "moritz", tenant="t2").committed, "another tenant")
         global_ = self.register("c3", "erika@firma.de", "max", tenant="t2")
-        self.assertEqual((global_.code, global_.message), ("unique_taken", "shop.Customer key handle is taken"))
+        self.assertEqual((global_.code, global_.message, global_.key),
+                         ("unique_taken", "shop.Customer key handle is taken", "handle"))
 
     def test_a_new_value_frees_the_old_one(self):
         self.run_worker(*shop_domain().aggregates)
@@ -93,8 +94,9 @@ class Keys(unittest.TestCase):
             return self.k.submit("shop", "Order", order, "Place", {"store": store}, wait="committed")
 
         missing = place("o1", "s1")
-        self.assertEqual((missing.committed, missing.code, missing.message),
-                         (False, "requirement_missing", "shop.Store s1 does not hold open"))
+        self.assertEqual((missing.committed, missing.code, missing.message, missing.key, missing.requirement),
+                         (False, "requirement_missing", "shop.Store s1 does not hold open", "",
+                          Requirement("shop", "Store", "s1", "open")))
         self.assertTrue(self.k.submit("shop", "Store", "s1", "Open").committed)
         self.assertTrue(place("o1", "s1").committed)
         self.assertTrue(place("o2", "s1").committed)
