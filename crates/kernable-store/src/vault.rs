@@ -23,7 +23,10 @@ use sha2::{Digest, Sha256};
 use crate::{Error, Result, StreamId};
 
 /// The version of the vault's data format.
-pub const FORMAT: u32 = 1;
+///
+/// - 1: the first format.
+/// - 2: keeps the erasures that are about to happen ([`Vault::intents`]).
+pub const FORMAT: u32 = 2;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS vault (
@@ -48,6 +51,12 @@ CREATE TABLE IF NOT EXISTS erasures (
     command_id   TEXT    NOT NULL,
     erased       INTEGER NOT NULL, -- number of values
     at           INTEGER NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS intents (
+    tenant     TEXT NOT NULL,
+    subject    TEXT NOT NULL,
+    command_id TEXT NOT NULL, -- the command whose erasing event is about to be committed
+    PRIMARY KEY (tenant, subject, command_id)
 ) STRICT;
 ";
 
@@ -318,6 +327,10 @@ impl Vault {
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![subject_hash, tenant, command_id, erased as i64, now_ms],
         )?;
+        tx.execute(
+            "DELETE FROM intents WHERE tenant = ?1 AND subject = ?2 AND command_id = ?3",
+            [tenant, subject, command_id],
+        )?;
         tx.commit()?;
         Ok(streams)
     }
@@ -361,6 +374,34 @@ impl Vault {
             "DELETE FROM vault WHERE command_id = ?1 AND secret = 1",
             [command_id],
         )?;
+        Ok(())
+    }
+
+    /// Notes that `command_id` is about to commit an event that erases `subject`: once it is
+    /// committed, the kernel erases the subject ([`Vault::erase`], which drops the intent),
+    /// also after a crash ([`Vault::intents`]).
+    pub fn intend_erase(&self, tenant: &str, subject: &str, command_id: &str) -> Result<()> {
+        self.conn().execute(
+            "INSERT OR IGNORE INTO intents (tenant, subject, command_id) VALUES (?1, ?2, ?3)",
+            [tenant, subject, command_id],
+        )?;
+        Ok(())
+    }
+
+    /// Erasures not carried out yet: (tenant, subject, command ID).
+    pub fn intents(&self) -> Result<Vec<(String, String, String)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT tenant, subject, command_id FROM intents")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    /// Drops the intents of `command_id`: its commit did not happen.
+    pub fn drop_intents(&self, command_id: &str) -> Result<()> {
+        self.conn()
+            .execute("DELETE FROM intents WHERE command_id = ?1", [command_id])?;
         Ok(())
     }
 

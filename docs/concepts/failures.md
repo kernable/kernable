@@ -53,7 +53,9 @@ The tests prove it, with both stores, in three ways, and check the same invarian
 | `settle.done` | every listener processed the events | the client's answer |
 | `checkpoint.stored` | a signed checkpoint | — |
 | `vault.stored` | a client's vault values | the command in the queue |
-| `erasure.done` | a subject's values erased | the erasing event |
+| `erasure.intended` | the subject's erasure, noted | the erasing event |
+| `erasure.pending` | the erasing event | the subject's values erased (done at the next start, before anything is served) |
+| `erasure.done` | the erasing event, the subject's values erased | anyone was told |
 | `membership.stored` | a service's membership | the membership in effect |
 | `revocation.stored` | a revocation | the key refused |
 

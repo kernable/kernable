@@ -282,6 +282,35 @@ impl Kernel {
                         vault.drop_secrets(&command_id)?;
                     }
                 }
+                // Erasures whose events were committed before a crash, carried out before
+                // anything is served (and before the index reads the values); those of commands
+                // that did not commit are dropped: the command runs again and notes them anew.
+                for (tenant, subject, command_id) in vault.intents()? {
+                    match store.result(&command_id)?.and_then(|r| r.outcome) {
+                        Some(Outcome::Committed(c)) => {
+                            let own = c.events.first().map(|e| StreamId {
+                                tenant_id: e.tenant_id.clone(),
+                                domain: e.domain.clone(),
+                                aggregate_type: e.aggregate_type.clone(),
+                                aggregate_id: e.aggregate_id.clone(),
+                            });
+                            let subjects = [subject];
+                            if let Some(own) = own {
+                                erase_subjects(
+                                    &vault,
+                                    snapshots.as_ref(),
+                                    &tenant,
+                                    &command_id,
+                                    &subjects,
+                                    &own,
+                                );
+                            }
+                            vault.drop_intents(&command_id)?;
+                            tracing::info!(command = %command_id, "carried out an erasure committed before a crash");
+                        }
+                        _ => vault.drop_intents(&command_id)?,
+                    }
+                }
                 Some(vault)
             }
             None => None,
@@ -524,16 +553,16 @@ impl Kernel {
         self.vault.is_some() && config::allowed(&self.permissions().vault_read, key_id, name)
     }
 
-    /// Keeps a result's vault values and carries out its erasures, before the events are
-    /// committed: an erasure is repeated if the command runs again. Returns the streams whose
-    /// values it erased, with the command's own; none if it erased nothing.
+    /// Keeps a result's vault values, before the events are committed, and returns the subjects
+    /// its events erase: the kernel erases them once the events are committed, so the log
+    /// always records an erasure that happened.
     fn vault_result(
         &self,
         worker_key: &str,
         cmd: &Command,
         events: &[NewEvent],
         values: &[VaultValue],
-    ) -> Result<Vec<StreamId>, Rejected> {
+    ) -> Result<Vec<String>, Rejected> {
         let refused = |code: &str, message: String| Rejected {
             code: code.into(),
             message,
@@ -571,26 +600,22 @@ impl Kernel {
         vault
             .put(values, &refs, &owner, now_ms())
             .map_err(|e| refused("invalid_vault_values", e.to_string()))?;
-        let mut erased = Vec::new();
-        for e in &erasing {
-            let streams = vault
-                .erase(&cmd.tenant_id, &e.erases, &cmd.command_id, now_ms())
-                .map_err(|e| refused("vault_error", e.to_string()))?;
-            // Snapshots of every stream that used the subject's values may hold them too.
-            for s in streams.into_iter().chain([stream.clone()]) {
-                if let Err(e) = self.snapshots.remove(&s) {
-                    tracing::error!(error = %e, "dropping a snapshot failed");
-                }
-                if !erased.contains(&s) {
-                    erased.push(s);
-                }
-            }
-            tracing::info!(command = %cmd.command_id, "erased a subject's vault values");
+        Ok(erasing.iter().map(|e| e.erases.clone()).collect())
+    }
+
+    /// Erases the subjects of a committed command's erasing events; see [`erase_subjects`].
+    fn erase(&self, cmd: &Command, subjects: &[String], own: &StreamId) -> Vec<StreamId> {
+        match &self.vault {
+            Some(vault) => erase_subjects(
+                vault,
+                self.snapshots.as_ref(),
+                &cmd.tenant_id,
+                &cmd.command_id,
+                subjects,
+                own,
+            ),
+            None => Vec::new(),
         }
-        if !erasing.is_empty() {
-            crash::point("erasure.done");
-        }
-        Ok(erased)
     }
 
     /// Deletes a completed command's secrets.
@@ -2535,11 +2560,11 @@ impl Session {
             None
         };
 
-        let erased = match self
+        let erasing = match self
             .kernel
             .vault_result(&self.key_id, &f.command, &r.events, &r.vault)
         {
-            Ok(erased) => erased,
+            Ok(erasing) => erasing,
             Err(reason) => {
                 self.reject(&r.lease_id, f.command, reason);
                 return Ok(());
@@ -2552,11 +2577,6 @@ impl Session {
             // never sees a fact that a commit is removing.
             let mut stored = self.kernel.schemas();
             let mut index = self.kernel.index();
-            if let Some(vault) = &self.kernel.vault
-                && !erased.is_empty()
-            {
-                index.erased(&erased, vault);
-            }
             let outdated = r.events.iter().find_map(|e| {
                 let newer = stored.get(&name(e)).filter(|v| **v > e.schema)?;
                 Some(format!(
@@ -2582,6 +2602,25 @@ impl Session {
                 },
                 None => None,
             };
+            // The erasures are noted first: a crash after the commit still carries them out.
+            if let Some(vault) = &self.kernel.vault {
+                let noted = erasing.iter().try_for_each(|subject| {
+                    vault.intend_erase(&f.command.tenant_id, subject, &f.command.command_id)
+                });
+                if let Err(e) = noted {
+                    drop((index, stored));
+                    let reason = Rejected {
+                        code: "vault_error".into(),
+                        message: e.to_string(),
+                        ..Default::default()
+                    };
+                    self.reject(&r.lease_id, f.command, reason);
+                    return Ok(());
+                }
+                if !erasing.is_empty() {
+                    crash::point("erasure.intended");
+                }
+            }
             let committed = self.kernel.store.commit(
                 &f.command.command_id,
                 f.expected_version,
@@ -2596,26 +2635,39 @@ impl Session {
                     *max = (*max).max(e.schema);
                 }
             }
+            // A write that failed may have taken effect all the same (see `completed_earlier`).
+            let took_effect = match &committed {
+                Ok(_) => true,
+                Err(StoreError::VersionConflict { .. } | StoreError::NotPending) => false,
+                Err(_) => matches!(
+                    self.kernel.store.result(&f.command.command_id),
+                    Ok(Some(CommandResult {
+                        outcome: Some(Outcome::Committed(_)),
+                        ..
+                    }))
+                ),
+            };
             if let Some(change) = change {
-                // A write that failed may have taken effect all the same (see
-                // `completed_earlier`).
-                let took_effect = match &committed {
-                    Ok(_) => true,
-                    Err(StoreError::VersionConflict { .. } | StoreError::NotPending) => false,
-                    Err(_) => matches!(
-                        self.kernel.store.result(&f.command.command_id),
-                        Ok(Some(CommandResult {
-                            outcome: Some(Outcome::Committed(_)),
-                            ..
-                        }))
-                    ),
-                };
                 if took_effect {
                     index.set(&stream, change.held, &change.refs);
                 } else if let Some(vault) = &self.kernel.vault
                     && let Err(e) = vault.remove(&change.added)
                 {
                     tracing::error!(error = %e, "dropping the vault values of a failed commit failed");
+                }
+            }
+            if let Some(vault) = &self.kernel.vault
+                && !erasing.is_empty()
+            {
+                if took_effect {
+                    crash::point("erasure.pending");
+                    let erased = self.kernel.erase(&f.command, &erasing, &stream);
+                    // Personal keys whose values are gone are free.
+                    index.erased(&erased, vault);
+                    crash::point("erasure.done");
+                } else if let Err(e) = vault.drop_intents(&f.command.command_id) {
+                    // Harmless: the next start sees the command uncommitted and drops them.
+                    tracing::error!(error = %e, "dropping the erasures of a failed commit failed");
                 }
             }
             committed
@@ -2629,7 +2681,7 @@ impl Session {
                 // worker's permit are held until then: the aggregate's next command waits for
                 // its history to be on the disk.
                 let kernel = Arc::clone(&self.kernel);
-                let snapshot = r.snapshot.filter(|_| erased.is_empty());
+                let snapshot = r.snapshot.filter(|_| erasing.is_empty());
                 let lease_id = r.lease_id;
                 tokio::spawn(async move {
                     let last = events.last().map_or(0, |e| e.global_position);
@@ -2936,6 +2988,40 @@ impl Session {
 }
 
 /// Whether `event` matches the type patterns of a subscription (`None`: all events).
+/// Erases `subjects` of `tenant` for the committed command `command_id`: their vault values,
+/// and the snapshots of every stream that used them and of `own`, the command's stream, whose
+/// worker state may hold them. Returns those streams. A failure is logged and leaves the
+/// intent in the vault: the next start carries it out.
+fn erase_subjects(
+    vault: &Vault,
+    snapshots: &dyn SnapshotStore,
+    tenant: &str,
+    command_id: &str,
+    subjects: &[String],
+    own: &StreamId,
+) -> Vec<StreamId> {
+    let mut erased = Vec::new();
+    for subject in subjects {
+        let streams = match vault.erase(tenant, subject, command_id, now_ms()) {
+            Ok(streams) => streams,
+            Err(e) => {
+                tracing::error!(error = %e, command = %command_id, "erasing a subject failed; the next start tries again");
+                continue;
+            }
+        };
+        for s in streams.into_iter().chain([own.clone()]) {
+            if let Err(e) = snapshots.remove(&s) {
+                tracing::error!(error = %e, "dropping a snapshot failed");
+            }
+            if !erased.contains(&s) {
+                erased.push(s);
+            }
+        }
+        tracing::info!(command = %command_id, "erased a subject's vault values");
+    }
+    erased
+}
+
 fn wanted(types: Option<&[String]>, event: &Event) -> bool {
     types.is_none_or(|patterns| {
         let name = config::qualified(&event.domain, &event.event_type);

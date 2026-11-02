@@ -650,7 +650,7 @@ async fn state_crash_and_recover(point: &str, round: u32) {
                 .unwrap();
             assert_eq!(held.len(), 1, "{point}: the client's value is kept once");
         }
-        "erasure.done" => {
+        "erasure.intended" | "erasure.pending" | "erasure.done" => {
             let place = order_with("c1", "PlaceOrder", "o1", r#"{"customer":"k-1"}"#);
             let placed = submit_until_answered(&addr, place.clone()).await;
             assert_eq!(committed_versions(&placed), [1]);
@@ -660,6 +660,14 @@ async fn state_crash_and_recover(point: &str, round: u32) {
             crashed(&mut kernel, point).await;
             kernel = restart(kernel);
             wait_for(&addr).await;
+            if point != "erasure.intended" {
+                // Committed before the crash: erased on start, before anything is served.
+                assert_eq!(
+                    vault_values_of(&store, &vault, "c1"),
+                    0,
+                    "{point}: erased at start"
+                );
+            }
             let erased = submit_until_answered(&addr, erase).await;
             assert_eq!(committed_versions(&erased), [2], "{point}: {erased:?}");
             assert_eq!(

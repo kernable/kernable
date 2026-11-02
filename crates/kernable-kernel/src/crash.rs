@@ -18,7 +18,9 @@ pub const POINTS: &[&str] = &[
 /// The crash points of the kernel's other state: vault, memberships, revocations.
 pub const STATE_POINTS: &[&str] = &[
     "vault.stored", // a client's vault values are stored, the command is not queued yet
-    "erasure.done", // a subject's values are erased, the erasing event is not committed
+    "erasure.intended", // a subject's erasure is noted, its event is not committed
+    "erasure.pending", // the erasing event is committed, the subject's values are not erased
+    "erasure.done", // the subject's values are erased, nobody was told
     "membership.stored", // a membership is stored, not yet in effect
     "revocation.stored", // a revocation is stored, the key is not refused yet
 ];
