@@ -1396,7 +1396,7 @@ impl EventService for Api {
         }
 
         kernel.present(&metadata, &sig.key_id)?;
-        let types = config::readable(
+        config::readable(
             &kernel.permissions().subscribe,
             &sig.key_id,
             &req.event_types,
@@ -1417,7 +1417,7 @@ impl EventService for Api {
         let reader = (sig.key_id.clone(), req.event_types.clone());
         tokio::spawn(async move {
             let _slot = slot;
-            stream_events(kernel, req.after_position, types, reader, tx).await;
+            stream_events(kernel, req.after_position, reader, tx).await;
         });
         Ok(Response::new(ReceiverStream::new(rx)))
     }
@@ -1428,17 +1428,20 @@ impl EventService for Api {
 async fn stream_events(
     kernel: Arc<Kernel>,
     mut after: u64,
-    types: Option<Vec<String>>,
     (key_id, requested): (String, Vec<String>),
     tx: mpsc::Sender<Result<Event, Status>>,
 ) {
     loop {
-        // The subscriber's key may have been revoked or lost its rights to a newer grant.
-        if config::readable(&kernel.permissions().subscribe, &key_id, &requested).is_err() {
-            let status = Status::permission_denied("subscriber key is no longer allowed");
-            let _ = tx.send(Err(status)).await;
-            return;
-        }
+        // The subscriber's key may have been revoked or lost its rights to a newer grant; a
+        // subscription to every type gets what the grant allows now.
+        let types = match config::readable(&kernel.permissions().subscribe, &key_id, &requested) {
+            Ok(types) => types,
+            Err(_) => {
+                let status = Status::permission_denied("subscriber key is no longer allowed");
+                let _ = tx.send(Err(status)).await;
+                return;
+            }
+        };
         let appended = kernel.appended.notified();
         let durable = kernel.durable.load(SeqCst);
         let batch = if after < durable {

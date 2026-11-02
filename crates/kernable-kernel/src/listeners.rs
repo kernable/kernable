@@ -390,9 +390,9 @@ impl Registry {
         Ok(())
     }
 
-    /// Parked events of `name` to deliver again now: asked for, and not on their way already.
-    /// None for a listener whose protocol has no retries.
-    fn due(&self, name: &str) -> Vec<u64> {
+    /// Parked events of `name` to deliver again now: asked for, of `types` its key may still
+    /// read, and not on their way already. None for a listener whose protocol has no retries.
+    fn due(&self, name: &str, types: Option<&[String]>) -> Vec<u64> {
         let entries = self.entries();
         let Some(e) = entries.get(name).filter(|e| e.protocol >= PARKING) else {
             return Vec::new();
@@ -401,6 +401,12 @@ impl Registry {
             .parked
             .iter()
             .filter(|p| p.retry && !e.retrying.iter().any(|&(_, r)| r == p.position))
+            .filter(|p| {
+                types.is_none_or(|t| {
+                    t.iter()
+                        .any(|pattern| config::covers(pattern, &p.event_type))
+                })
+            })
             .map(|p| p.position)
             .collect()
     }
@@ -875,12 +881,14 @@ pub(crate) async fn run(
     .await?;
 
     let sent = Arc::new(AtomicU64::new(start));
+    // A listener of every type gets what the key's grant allows now, also after it changed.
+    let filter = Arc::new(Mutex::new(types));
     let deliver = tokio::spawn(deliver(
         Arc::clone(&kernel),
         hello.name.clone(),
         hello.key_id.clone(),
         hello.order,
-        types,
+        Arc::clone(&filter),
         Arc::clone(&sent),
         out.clone(),
     ));
@@ -893,8 +901,12 @@ pub(crate) async fn run(
             Ok(()) = changes.changed() => {
                 // Permissions changed: end the stream if the key may no longer do what it
                 // registered for.
-                if !still_allowed(&kernel.permissions(), &hello) {
+                let permissions = kernel.permissions();
+                if !still_allowed(&permissions, &hello) {
                     return Err(Status::permission_denied("listener key is no longer allowed or was revoked"));
+                }
+                if let Ok(types) = config::readable(&permissions.listen, &hello.key_id, &hello.event_types) {
+                    *filter.lock().unwrap_or_else(PoisonError::into_inner) = types;
                 }
                 continue;
             }
@@ -953,7 +965,7 @@ async fn deliver(
     name: String,
     key_id: String,
     order: i32,
-    types: Option<Vec<String>>,
+    filter: Arc<Mutex<Option<Vec<String>>>>,
     sent: Arc<AtomicU64>,
     out: Outbox,
 ) {
@@ -961,7 +973,11 @@ async fn deliver(
         let progressed = kernel.listeners.progress.notified();
         let appended = kernel.appended.notified();
         let after = sent.load(Ordering::SeqCst);
-        let due = kernel.listeners.due(&name);
+        let types = filter
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let due = kernel.listeners.due(&name, types.as_deref());
         if !due.is_empty() {
             let retries = match retries(&kernel, &key_id, &due, after) {
                 Ok(batch) => batch,

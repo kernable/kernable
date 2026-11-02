@@ -150,3 +150,34 @@ async fn unsigned_stale_and_unknown_subscribers_are_refused() {
         Code::PermissionDenied
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_narrowed_grant_narrows_an_open_subscription_to_every_type() {
+    let env = start("subscribe-narrowed").await;
+    spawn_worker(&env).await;
+    let client = key(1);
+    // No types: everything the key may read, as its grant says now, not when it subscribed.
+    let mut all = subscribe(&env, request(&client, 0, &[], now_ms()))
+        .await
+        .unwrap();
+    let placed = signed(command("c1", "PlaceOrder", "o1"), &client);
+    submit(&env.addr, placed).await.unwrap();
+    assert_eq!(next(&mut all).await.event_type, "OrderPlaced");
+
+    env.kernel
+        .grant(grant(
+            &client,
+            &[("submit", &["*"]), ("subscribe", &["orders.OrderPlaced"])],
+        ))
+        .unwrap();
+    let added = signed(command("c2", "AddItem", "o1"), &client);
+    submit(&env.addr, added).await.unwrap();
+    let other = signed(command("c3", "PlaceOrder", "o2"), &client);
+    submit(&env.addr, other).await.unwrap();
+    let e = next(&mut all).await;
+    assert_eq!(
+        (e.event_type.as_str(), e.global_position),
+        ("OrderPlaced", 3),
+        "ItemAdded is no longer the key's to read"
+    );
+}

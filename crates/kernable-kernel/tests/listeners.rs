@@ -843,3 +843,32 @@ async fn a_listener_of_protocol_3_gets_no_retries() {
     mailer.nothing_for(300).await;
     assert_eq!(stored_parked(&env, "mailer").await, [(1, true)]);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_narrowed_grant_narrows_a_listener_of_every_type() {
+    let env = start("listener-narrowed-types").await;
+    spawn_worker(&env).await;
+    // No types: everything the key may read, as its grant says now, not when it connected.
+    let mut audit = listen(&env, "audit", opts(0)).await.unwrap();
+    let placed = spawn_submit(&env, "c1", "PlaceOrder");
+    assert_eq!(positions(&audit.next().await), [1]);
+    audit.ack(1).await;
+    placed.await.unwrap();
+
+    env.kernel
+        .grant(grant(&key(5), &[("listen", &["orders.OrderPlaced"])]))
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let added = spawn_submit(&env, "c2", "AddItem");
+    added.await.unwrap();
+    let other = signed(command("c3", "PlaceOrder", "o2"), &key(1));
+    let other = tokio::spawn({
+        let addr = env.addr.clone();
+        async move { submit(&addr, other).await.unwrap() }
+    });
+    // ItemAdded is no longer the key's to read: skipped, the next batch has only o2's order.
+    let batch = audit.next().await;
+    assert_eq!(positions(&batch), [3], "{batch:?}");
+    audit.ack(batch.up_to).await;
+    other.await.unwrap();
+}
