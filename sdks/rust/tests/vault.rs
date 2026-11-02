@@ -6,7 +6,10 @@ mod common;
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -355,4 +358,82 @@ async fn a_personal_command_field_in_an_event_that_does_not_declare_it_is_reject
 #[should_panic(expected = "unqualified")]
 fn command_definitions_take_unqualified_types() {
     identity_domain().0.command("shop.Register");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_erasing_event_is_never_parked() {
+    let kernel = TestKernel::new(&["identity.*"], &[]);
+    kernel.start().await;
+    let (identity, account) = identity_domain();
+    let kernable = kernel.client().with_domain(&identity);
+    let failures = Arc::new(AtomicUsize::new(0));
+    let f = Arc::clone(&failures);
+    // Parks at the first failure, but not an erasure: that must get through, or the email
+    // would stay in the store.
+    let emails = identity
+        .reactor("emails")
+        .park_after(1)
+        .reconnect(Duration::from_millis(20))
+        .store("memory:", "1")
+        .on("AccountRegistered", |data: Value, evt, ctx| async move {
+            let store = ctx.store.expect("a store");
+            Ok(store.set("emails", &evt.aggregate_id, &field(&data, "email"))?)
+        })
+        .on("AccountErased", move |_: Value, evt, ctx| {
+            let f = Arc::clone(&f);
+            async move {
+                if f.fetch_add(1, Ordering::SeqCst) < 2 {
+                    return Err(Rejected::new("not yet").into());
+                }
+                Ok(ctx
+                    .store
+                    .expect("a store")
+                    .remove("emails", &evt.aggregate_id)?)
+            }
+        });
+    let worker = kernable.worker(&account);
+    let emails = kernable.listener(&emails);
+    let running = [
+        {
+            let w = worker.clone();
+            tokio::spawn(async move { w.run().await })
+        },
+        {
+            let e = emails.clone();
+            tokio::spawn(async move { e.run().await })
+        },
+    ];
+    worker.ready().await;
+    emails.ready().await;
+    let send = |command_type: &str, data: Value| {
+        kernable.submit(Submit::new("identity", "Account", "a1", command_type).data(data))
+    };
+    let registered = json!({ "id": "a1", "email": "max@firma.de", "password": "pw" });
+    assert!(
+        send("RegisterAccount", registered)
+            .await
+            .unwrap()
+            .is_committed()
+    );
+    assert!(
+        send("EraseAccount", json!({ "id": "a1" }))
+            .await
+            .unwrap()
+            .is_committed()
+    );
+    assert_eq!(
+        failures.load(Ordering::SeqCst),
+        3,
+        "tried until it got through"
+    );
+    let store = emails.opened_store().unwrap();
+    assert_eq!(store.get::<String>("emails", "a1").unwrap(), None);
+    let (ok, parked) = kernel.cli(&["listeners", "parked", "{store}"]);
+    assert!(ok);
+    assert_eq!(parked, "", "nothing parked");
+    worker.stop();
+    emails.stop();
+    for r in running {
+        r.await.unwrap();
+    }
 }

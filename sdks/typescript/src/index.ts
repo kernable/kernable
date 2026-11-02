@@ -2044,7 +2044,8 @@ export interface ListenerOptions {
    * other errors `handler_error` and the error's type; the log has the whole error) until an
    * operator retries or dismisses them (`kernable listeners retry`). A read model should not
    * park: it would miss the event's change. With a store, a parked event's writes are dropped,
-   * the rest of its batch kept. Live listeners never park.
+   * the rest of its batch kept. Live listeners never park, and no listener parks an event that
+   * erases a subject: its handler must get past it, so no personal data stays behind.
    */
   parkAfter?: number;
 }
@@ -2455,7 +2456,8 @@ export class ListenerHandle {
           this.attempts.delete(e.global_position);
           this.log.print("debug", this.what, `${type} at ${e.global_position}`);
         } catch (err) {
-          parked.push(this.giveUp(type, e.global_position, err, parkAfter));
+          // An erasing event is never parked: its handler must get past it, or what it removes would stay behind.
+          parked.push(this.giveUp(type, e.global_position, err, e.erases ? 0 : parkAfter));
           if (saved) this.stored!.rollbackEvent();
         }
       }

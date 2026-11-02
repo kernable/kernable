@@ -1192,6 +1192,38 @@ class EndToEnd(unittest.TestCase):
         self.assertIsNone(handle.store.get("accounts", "a1"))
         self.assertEqual(on_disk(), [], "no file of the store keeps the erased value")
 
+    def test_an_erasing_event_is_never_parked(self):
+        identity = domain("identity")
+        identity.command("RegisterAccount").personal(["email"], lambda d: d["id"])
+        identity.event("AccountRegistered", 1).personal(["email"], lambda d: d["id"])
+        identity.event("AccountErased", 1).erases(lambda d: d["id"])
+        account = identity.aggregate("Account", {})
+        account.command("RegisterAccount", lambda s, data: [{"type": "AccountRegistered", "data": data}])
+        account.command("EraseAccount", lambda s, data: [{"type": "AccountErased", "data": data}])
+        self.identity_kernel(identity)
+        self.run_stream(self.k.worker(account))
+        # Parks at the first failure, but not an erasure: that must get through, or the email
+        # would stay in the store.
+        model = identity.reactor("accounts", store="memory:", park_after=1, reconnect_s=0.02)
+        failures = [0]
+        model.on("AccountRegistered", lambda data, evt, ctx: ctx.store.set("accounts", data["id"], data))
+
+        @model.on("AccountErased")
+        def _(data, evt, ctx):
+            failures[0] += 1
+            if failures[0] <= 2:
+                raise Rejected("not yet")
+            ctx.store.remove("accounts", data["id"])
+
+        handle = self.run_stream(self.k.listener(model))
+        send = lambda type, data: self.k.submit("identity", "Account", "a1", type, data)  # noqa: E731
+        self.assertTrue(send("RegisterAccount", {"id": "a1", "email": "max@firma.de"}).committed)
+        self.assertTrue(send("EraseAccount", {"id": "a1"}).committed)
+        self.assertEqual(failures[0], 3, "tried until it got through")
+        self.assertIsNone(handle.store.get("accounts", "a1"))
+        parked = self.kernel.cli("listeners", "parked", self.kernel.store)
+        self.assertEqual(parked.stdout, "", "nothing parked")
+
     def test_a_personal_field_an_event_does_not_declare_is_refused(self):
         identity = domain("identity")
         identity.command("RegisterAccount").personal(["email"], lambda d: d["id"])

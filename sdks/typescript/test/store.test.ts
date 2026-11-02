@@ -166,3 +166,41 @@ test("an erased value is in no file of a read model's store once the erasure is 
     await kernel.dispose();
   }
 });
+
+test("an erasing event is never parked: the reactor tries until it gets through", async () => {
+  const kernel = new TestKernel(["people.*"]);
+  await kernel.start();
+  const people = domain("people");
+  people.command("Register").personal(["email"], (_d, id) => id);
+  people.event("Registered", 1).personal(["email"], (_d, id) => id);
+  people.event("Erased", 1).erases((_d, id) => id);
+  const person = people.aggregate("Person", {})
+    .command("Register", (_s, data: { email: string }) => [{ type: "Registered", data: { email: data.email } }])
+    .command("Erase", () => [{ type: "Erased" }]);
+  const kernable = new Kernable({ url: kernel.url, key: kernel.appKey }).use(people);
+  let failures = 0;
+  // Parks at the first failure, but not an erasure: that must get through, or the email would stay.
+  const emails = kernable.listener(people.reactor("emails", { parkAfter: 1, reconnectMs: 20, store: "memory:" })
+    .on("Registered", (data: { email: Personal<string> }, evt, ctx) => ctx.store!.set("emails", evt.aggregateId, { email: data.email }))
+    .on("Erased", (_data, evt, ctx) => {
+      if (failures++ < 2) throw new Rejected("not yet");
+      ctx.store!.remove("emails", evt.aggregateId);
+    }));
+  const worker = kernable.worker(person);
+  const running = [worker.run(), emails.run()];
+  const send = (type: string, data?: object) => kernable.submit({ domain: "people", aggregateType: "Person", aggregateId: "p1", type, data });
+  try {
+    await Promise.all([worker.ready, emails.ready]);
+    assert.ok((await send("Register", { email: "ann@example.com" })).committed);
+    assert.ok((await send("Erase")).committed);
+    assert.equal(failures, 3, "tried until it got through");
+    assert.equal(emails.store.get("emails", "p1"), undefined);
+    assert.equal(kernel.cli("listeners", "parked", kernel.store).out, "", "nothing parked");
+  } finally {
+    worker.stop();
+    emails.stop();
+    await Promise.allSettled(running);
+    kernable.close();
+    await kernel.dispose();
+  }
+});

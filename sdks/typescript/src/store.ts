@@ -51,7 +51,11 @@ export class Store {
       db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema', ?), ('position', '0')").run(schema);
       db.exec("COMMIT");
     }
-    return new Store(db, Number(meta("position") ?? 0));
+    const store = new Store(db, Number(meta("position") ?? 0));
+    // A crash after a batch that erased a subject, before the log was emptied, left the removed
+    // values' old pages in it: empty it before anything else.
+    store.checkpoint();
+    return store;
   }
 
   /** The value under `key` in namespace `ns`, or `undefined` if there is none. */

@@ -520,7 +520,8 @@ impl Listener {
     /// `handler failed`; the log has the whole error) until an operator retries or dismisses
     /// them (`kernable listeners retry`). A read model should not park: it would miss the
     /// event's change. With a store, a parked event's writes are dropped, the rest of its
-    /// batch kept. Live listeners never park.
+    /// batch kept. Live listeners never park, and no listener parks an event that erases a
+    /// subject: its handler must get past it, so no personal data stays behind.
     pub fn park_after(&self, attempts: u32) -> Listener {
         self.inner.settings.lock().unwrap().park_after = attempts;
         self.clone()
@@ -1086,6 +1087,7 @@ impl ListenerHandle {
                     .cloned()
             };
             if let Some((handler, raw)) = entry {
+                let erasing = !e.erases.is_empty();
                 let mut event = StoredEvent::from_wire(e, &batch.vault);
                 if !raw {
                     let known = def.domains.read().unwrap().get(&event.domain).cloned();
@@ -1130,7 +1132,15 @@ impl ListenerHandle {
                             });
                     }
                     Err(err) => {
-                        let p = self.give_up(&event_type, position, err, park_after, parking)?;
+                        // An erasing event is never parked: its handler must get past it, or
+                        // what it removes would stay behind.
+                        let p = self.give_up(
+                            &event_type,
+                            position,
+                            err,
+                            park_after,
+                            parking && !erasing,
+                        )?;
                         if let (true, Some(s)) = (saved, &store) {
                             s.rollback_event()?;
                         }

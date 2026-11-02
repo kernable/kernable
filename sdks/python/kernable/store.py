@@ -39,6 +39,9 @@ class Store:
                 self._db.execute("COMMIT")
         #: The position up to which the stored data is complete.
         self.committed = int(self._meta("position") or 0)
+        # A crash after a batch that erased a subject, before the WAL was emptied, left the
+        # removed values' old pages in it: empty it before anything else.
+        self._checkpoint()
 
     def _meta(self, key: str) -> str | None:
         row = self._db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()

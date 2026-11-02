@@ -40,6 +40,9 @@ impl Store {
              CREATE TABLE IF NOT EXISTS data (ns TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (ns, key));
              CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
         )?;
+        // A crash after a batch that erased a subject, before the log was emptied, left the
+        // removed values' old pages in it: empty it before anything else.
+        truncate(&db)?;
         let meta = |key: &str| -> Result<Option<String>, rusqlite::Error> {
             db.query_row("SELECT value FROM meta WHERE key = ?", [key], |r| r.get(0))
                 .optional()

@@ -770,7 +770,8 @@ class Domain:
         events with the rejection's code and message (for other errors `handler_error` and the
         exception's type; the log has the whole error) until an operator retries or dismisses
         them (`kernable listeners retry`). With a store, a parked event's writes are dropped, the
-        rest of its batch kept. Live listeners never park.
+        rest of its batch kept. Live listeners never park, and no listener parks an event that
+        erases a subject: its handler must get past it, so no personal data stays behind.
 
         `live`: not registered with the kernel: no stored position, always starts at the newest
         event, nobody waits for it, and it is forgotten when it disconnects. For reactions that
@@ -2309,7 +2310,10 @@ class ListenerHandle(_Stream):
                 try:
                     _call(handler, data, evt, ctx)
                 except Exception as err:
-                    parked.append(self._give_up(f"{e.domain}.{e.event_type}", e.global_position, err, park_after))
+                    # An erasing event is never parked: its handler must get past it, or what it
+                    # removes would stay behind.
+                    parked.append(self._give_up(f"{e.domain}.{e.event_type}", e.global_position, err,
+                                                0 if e.erases else park_after))
                     if saved:
                         self.store._rollback_event()
                 else:
