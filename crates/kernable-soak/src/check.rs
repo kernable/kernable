@@ -11,7 +11,11 @@
 //! - B5: no withdrawal sent `to` an account committed while that account was closed;
 //! - B6: every `unique_taken` the load saw was for a number another account held, and every
 //!   `requirement_missing` for an account that was closed, at some position between the
-//!   client's commands before and after it (and no other command saw either).
+//!   client's commands before and after it (and no other command saw either);
+//! - B7: the flaggers park only what they must: every event a flagger parked is a withdrawal of
+//!   50 or more whose `Flag` was rejected, with that rejection's code (kills, restarts and a
+//!   failing network never park), and a withdrawal that was never flagged was parked, so
+//!   nothing is lost silently.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -212,7 +216,57 @@ fn bank_rules(
             ));
         }
     }
+    parking_rules(log, &big, &flagged, violations);
     accounts
+}
+
+/// B7: what the flaggers parked, against the withdrawals and their `Flag` commands.
+fn parking_rules(
+    log: &Log,
+    big: &BTreeMap<u64, (&'static str, String)>,
+    flagged: &BTreeMap<u64, Vec<(&'static str, String)>>,
+    violations: &mut Vec<String>,
+) {
+    let mut parked: BTreeMap<u64, (&str, &str, &str)> = BTreeMap::new();
+    for l in log
+        .listeners
+        .iter()
+        .filter(|l| l.name.starts_with("flagger-"))
+    {
+        for p in &l.parked {
+            parked.insert(
+                p.position,
+                (l.name.as_str(), p.code.as_str(), p.message.as_str()),
+            );
+        }
+    }
+    for (position, (listener, code, message)) in &parked {
+        let id = format!("flag-{position}");
+        let rejected = match log.results.get(&id) {
+            Some(Some(result)) => match &result.outcome {
+                Some(Outcome::Rejected(r)) => Some(r.code.as_str()),
+                _ => None,
+            },
+            _ => None,
+        };
+        if !big.contains_key(position) || flagged.contains_key(position) || rejected != Some(*code)
+        {
+            violations.push(format!(
+                "B7 justified parking: {listener} parked the event at {position} ({code}: \
+                 {message}); its Flag command: {}",
+                flag_command(log, *position)
+            ));
+        }
+    }
+    for (position, key) in big {
+        if !flagged.contains_key(position) && !parked.contains_key(position) {
+            violations.push(format!(
+                "B7 nothing lost silently: the withdrawal at {position} ({key:?}) was neither \
+                 flagged nor parked; its Flag command: {}",
+                flag_command(log, *position)
+            ));
+        }
+    }
 }
 
 /// What became of the reactor's Flag command for the withdrawal at `position`.

@@ -143,27 +143,18 @@ pub async fn run() -> Result<(), BoxError> {
         .query("GetAccount", |d: Id, _qry, ctx| async move {
             Ok(row(&ctx.store, &d.id)?.1)
         });
-    let k = kernable.clone();
     bank.reactor("flagger-rs")
-        .on("Withdrawn", move |d: Amount, evt, ctx| {
-            let k = k.clone();
-            async move {
-                if d.amount >= 50 {
-                    let flag = Submit::new("bank_rs", "account", &evt.aggregate_id, "Flag")
-                        .data(json!({ "position": evt.position }))
-                        .id(format!("flag-{}", evt.position))
-                        .wait(Wait::Committed)
-                        .context(ctx.follow());
-                    // A rejection is stored for good under this ID: say so, B2 names it too.
-                    if let kernable::Outcome::Rejected(r) = k.submit(flag).await? {
-                        eprintln!(
-                            "flagger-rs: flag-{} rejected ({}: {})",
-                            evt.position, r.code, r.message
-                        );
-                    }
-                }
-                Ok(())
+        .on("Withdrawn", |d: Amount, evt, ctx| async move {
+            if d.amount >= 50 {
+                // A rejection is stored for good under this ID: the reactor parks the event,
+                // and B7 checks that only such events are parked.
+                let flag = Submit::new("bank_rs", "account", &evt.aggregate_id, "Flag")
+                    .data(json!({ "position": evt.position }))
+                    .id(format!("flag-{}", evt.position))
+                    .wait(Wait::Committed);
+                ctx.submit(flag).await?;
             }
+            Ok(())
         });
     kernable
         .app(App::new().service("bank-rs").domain(&bank))?
