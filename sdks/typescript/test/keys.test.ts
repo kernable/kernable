@@ -35,6 +35,14 @@ function crm(keys = true) {
   const order = crm.aggregate("Order", {})
     .command("Place", () => [{ type: "Placed" }], {
       requires: (data: { customer: string }) => [{ domain: "crm", aggregateType: "Customer", aggregateId: data.customer, fact: "active" }],
+    })
+    // By the customer's number (its key), in the own domain.
+    .command("PlaceFor", () => [{ type: "Placed" }], {
+      requires: (data: { number: string }) => [{ aggregateType: "Customer", key: "number", value: data.number, fact: "active" }],
+    })
+    // Only while the customer is not active (or does not exist).
+    .command("Archive", () => [{ type: "Archived" }], {
+      requires: (data: { customer: string }) => [{ aggregateType: "Customer", aggregateId: data.customer, fact: "active", absent: true }],
     });
   // Erases a person from another aggregate: the customer itself runs no command.
   const privacy = crm.aggregate("Privacy", {})
@@ -106,6 +114,30 @@ test("a command commits only while the aggregates it requires hold the fact", as
     assert.equal(await send("Order", "o1", "Place", { customer: "k1" }), "committed");
     assert.equal(await send("Customer", "k1", "Deactivate"), "committed");
     assert.equal(await send("Order", "o2", "Place", { customer: "k1" }), "requirement_missing: crm.Customer k1 does not hold active [crm.Customer k1 active]");
+  });
+});
+
+test("a requirement names its aggregate by a unique key, or wants the fact absent", async () => {
+  const { customer, order } = crm();
+  await withKernel(async (kernable, run) => {
+    await run(customer, order);
+    const submit = (aggregateType: string, id: string, type: string, data: object = {}) =>
+      kernable.submit({ domain: "crm", aggregateType, aggregateId: id, type, data, wait: "committed" });
+
+    const missing = await submit("Order", "o1", "PlaceFor", { number: "A-1" });
+    assert.ok(!missing.committed);
+    assert.equal(missing.message, "crm.Customer with key number does not hold active");
+    assert.deepEqual(missing.requirement, { domain: "crm", aggregateType: "Customer", key: "number", fact: "active" }, "the key, never its value");
+    assert.ok((await submit("Customer", "k1", "Register", { number: "A-1" })).committed);
+    assert.ok((await submit("Order", "o1", "PlaceFor", { number: "A-1" })).committed);
+
+    const archived = await submit("Order", "o2", "Archive", { customer: "k1" });
+    assert.ok(!archived.committed);
+    assert.equal(archived.message, "crm.Customer k1 holds active");
+    assert.equal(archived.requirement?.absent, true);
+    assert.ok((await submit("Order", "o3", "Archive", { customer: "k9" })).committed, "k9 holds nothing");
+    assert.ok((await submit("Customer", "k1", "Deactivate")).committed);
+    assert.ok((await submit("Order", "o4", "Archive", { customer: "k1" })).committed);
   });
 });
 

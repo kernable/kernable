@@ -38,6 +38,18 @@ def shop_domain():
     def _(state, data):
         return [{"type": "Placed", "data": data}]
 
+    # By the customer's email (its key), in the own domain.
+    @order.command("PlaceFor", requires=lambda data, state: [Requirement.by_key("Customer", "email", data["email"],
+                                                                                 "registered")])
+    def _(state, data):
+        return [{"type": "Placed", "data": data}]
+
+    # Only while the store is not open (or does not exist).
+    @order.command("Plan", requires=lambda data, state: [Requirement.of("Store", data["store"], "open", absent=True)])
+    def _(state, data):
+        return [{"type": "Planned", "data": data}]
+
+    customer.fact("registered", lambda s: "email" in s)
     return shop
 
 
@@ -104,6 +116,25 @@ class Keys(unittest.TestCase):
         self.assertEqual(place("o3", "s1").code, "requirement_missing")
         other_tenant = self.k.submit("shop", "Order", "o4", "Place", {"store": "s1"}, tenant="t2")
         self.assertEqual(other_tenant.code, "requirement_missing", "facts are required in the command's tenant")
+
+    def test_a_requirement_names_its_aggregate_by_a_key_or_wants_the_fact_absent(self):
+        self.run_worker(*shop_domain().aggregates)
+
+        def order(order: str, type: str, data: dict):
+            return self.k.submit("shop", "Order", order, type, data, wait="committed")
+
+        missing = order("o1", "PlaceFor", {"email": "max@firma.de"})
+        self.assertEqual((missing.code, missing.message), ("requirement_missing",
+                                                          "shop.Customer with key email does not hold registered"))
+        self.assertEqual(missing.requirement, Requirement("shop", "Customer", "", "registered", key="email"),
+                         "the key, never its value")
+        self.assertTrue(self.register("c1", "max@firma.de", "max").committed)
+        self.assertTrue(order("o1", "PlaceFor", {"email": "max@firma.de"}).committed)
+
+        self.assertTrue(order("o2", "Plan", {"store": "s1"}).committed, "s1 holds nothing")
+        self.assertTrue(self.k.submit("shop", "Store", "s1", "Open").committed)
+        planned = order("o3", "Plan", {"store": "s1"})
+        self.assertEqual((planned.message, planned.requirement.absent), ("shop.Store s1 holds open", True))
 
     def test_erasing_its_subject_frees_a_personal_key(self):
         identity = domain("identity")

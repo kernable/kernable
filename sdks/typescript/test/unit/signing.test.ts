@@ -113,7 +113,7 @@ test("event hash matches the test vector", () => {
 test("index messages and unique key IDs match the test vectors", () => {
   const i = v.result_index.input;
   const keys = i.keys.map((k: any) => ({ ...k, value_hash: hex(k.value_hash_hex) }));
-  const requires = i.requires;
+  const requires = i.requires.map((r: any) => ({ ...r, value_hash: hex(r.value_hash_hex) }));
   check("result_index", indexMessage(command(i.command), i.expected_version, keys, i.facts, requires));
   // The values behind the vectors' hashes.
   assert.deepEqual([valueHash("A-1001"), valueHash("max@firma.de")].map((h) => h.toString("hex")), i.keys.map((k: any) => k.value_hash_hex));

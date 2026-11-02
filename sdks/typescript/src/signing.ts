@@ -172,7 +172,9 @@ export function indexMessage(c: Stream, expectedVersion: number, keys: WireUniqu
   m.u64(facts.length);
   for (const f of facts) m.str(f);
   m.u64(requires.length);
-  for (const r of requires) m.str(r.domain).str(r.aggregate_type).str(r.aggregate_id).str(r.fact);
+  for (const r of requires) {
+    m.str(r.domain).str(r.aggregate_type).str(r.aggregate_id).str(r.fact).str(r.key).bytes(r.value_hash).u64(r.absent ? 1 : 0);
+  }
   return m.done();
 }
 

@@ -453,7 +453,11 @@ function rejectedOutcome(r: WireRejected): Outcome {
   const outcome: Extract<Outcome, { committed: false }> = { committed: false, code: r.code, message: r.message };
   if (r.key) outcome.key = r.key;
   const q = r.requirement;
-  if (q) outcome.requirement = { domain: q.domain, aggregateType: q.aggregate_type, aggregateId: q.aggregate_id, fact: q.fact };
+  if (q) {
+    // Named by a key: its name only, never the value.
+    const named = q.key ? { key: q.key } : { aggregateId: q.aggregate_id };
+    outcome.requirement = { domain: q.domain, aggregateType: q.aggregate_type, ...named, fact: q.fact, ...(q.absent ? { absent: true } : {}) };
+  }
   return outcome;
 }
 
@@ -469,23 +473,37 @@ type Apply<S> = (state: S, data: any, evt: EventMeta, ctx: ApplyContext) => S | 
 type Handle<S> = (state: S, data: any, cmd: CommandMeta, ctx: CommandContext) => NewEvent[] | Promise<NewEvent[]>;
 
 /**
- * A fact another aggregate of the command's tenant must hold when the command commits: what
- * `CommandOptions.requires` returns. The kernel checks it atomically with the commit; if the
- * aggregate does not hold the fact (see `Aggregate.fact`), the command is rejected with
- * `requirement_missing`.
+ * A fact another aggregate of the command's tenant must hold (or, `absent`, must not hold) when
+ * the command commits: what `CommandOptions.requires` returns. The kernel checks it atomically
+ * with the commit; if it does not hold, the command is rejected with `requirement_missing`. The
+ * aggregate is named by its ID, or by a unique key of its type (`key` and `value`, not a
+ * personal key), which the kernel resolves at commit: no aggregate holds the key, none holds the
+ * fact. An aggregate without events holds no fact either.
  *
  * ```ts
- * { domain: "funds", aggregateType: "Vehicle", aggregateId: data.vehicleId, fact: "open" }
+ * { aggregateType: "Vehicle", aggregateId: data.vehicleId, fact: "open" }
+ * { domain: "funds", aggregateType: "Vehicle", key: "pmdxId", value: normalize(data.vehicle), fact: "open" }
+ * { aggregateType: "Vehicle", aggregateId: data.vehicleId, fact: "woundUp", absent: true }
  * ```
  */
 export interface Requirement {
-  /** The domain of the aggregate: `funds`. */
-  domain: string;
+  /** The domain of the aggregate: `funds`; default: the command's own. */
+  domain?: string;
   /** The aggregate type within the domain, unqualified: `Vehicle`. */
   aggregateType: string;
-  aggregateId: string;
+  /** The aggregate's ID; omitted when it is named by `key`. */
+  aggregateId?: string;
+  /** A unique key of the aggregate type that names the aggregate instead of its ID. */
+  key?: string;
+  /**
+   * The key's value, normalised as the aggregate type's key function does: the kernel gets only
+   * its SHA-256. Absent in a rejection, which never carries the value.
+   */
+  value?: string;
   /** The fact it must hold, as declared with `Aggregate.fact`: `open`. */
   fact: string;
+  /** The aggregate must not hold the fact. */
+  absent?: boolean;
 }
 
 /** Options of one command handler: the third argument of `Aggregate.command`. */
@@ -2767,7 +2785,15 @@ export class Worker {
             subject: k.subject ?? "",
           })),
           facts: held.facts,
-          requires: requires.map((r) => ({ domain: r.domain, aggregate_type: r.aggregateType, aggregate_id: r.aggregateId, fact: r.fact })),
+          requires: requires.map((r) => ({
+            domain: r.domain ?? cmd.domain,
+            aggregate_type: r.aggregateType,
+            aggregate_id: r.aggregateId ?? "",
+            fact: r.fact,
+            key: r.key ?? "",
+            value_hash: r.key === undefined ? Buffer.alloc(0) : valueHash(r.value ?? ""),
+            absent: r.absent ?? false,
+          })),
         };
       }
     } catch (err) {

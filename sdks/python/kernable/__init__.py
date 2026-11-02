@@ -387,17 +387,44 @@ class Outcome:
 
 @dataclass
 class Requirement:
-    """A fact another aggregate of the command's tenant must hold when the command commits, as
-    `requires=` of `Aggregate.command` returns them: `Requirement("funds", "vehicle", data["vehicleId"],
-    "open")`. The kernel checks it atomically with the commit; if the aggregate does not hold the
-    fact (see `Aggregate.fact`), the command is rejected with `requirement_missing`."""
+    """A fact another aggregate of the command's tenant must hold (or, `absent`, must not hold)
+    when the command commits, as `requires=` of `Aggregate.command` returns them:
+    `Requirement("funds", "vehicle", data["vehicleId"], "open")`. The kernel checks it atomically
+    with the commit; if it does not hold, the command is rejected with `requirement_missing`.
 
+    The aggregate is named by its ID, or by a unique key of its type (`Requirement.by_key`, not a
+    personal key), which the kernel resolves at commit: no aggregate holds the key, none holds
+    the fact; an aggregate without events holds none either. An empty `domain` is the command's
+    own (`Requirement.of`)."""
+
+    #: Empty: the domain of the command's aggregate.
     domain: str
     #: Unqualified, e.g. `vehicle`.
     aggregate_type: str
+    #: Empty when the aggregate is named by `key`.
     aggregate_id: str
     #: A fact the aggregate declares with `Aggregate.fact`.
     fact: str
+    #: A unique key of the aggregate type that names the aggregate instead of its ID.
+    key: str = ""
+    #: The key's value, normalised as the aggregate type's key function does: the kernel gets only
+    #: its SHA-256. Empty in a rejection, which never carries the value.
+    value: str = ""
+    #: The aggregate must not hold the fact.
+    absent: bool = False
+
+    @classmethod
+    def of(cls, aggregate_type: str, aggregate_id: str, fact: str, *, absent: bool = False) -> "Requirement":
+        """A requirement of an aggregate type of the command's own domain:
+        `Requirement.of("vehicle", data["vehicleId"], "woundUp", absent=True)`."""
+        return cls("", aggregate_type, aggregate_id, fact, absent=absent)
+
+    @classmethod
+    def by_key(cls, aggregate_type: str, key: str, value: str, fact: str, *, domain: str = "",
+               absent: bool = False) -> "Requirement":
+        """The fact of the aggregate that holds the unique key `key` with `value`, normalised as
+        its key function does: `Requirement.by_key("vehicle", "pmdxId", data["vehicle"], "open")`."""
+        return cls(domain, aggregate_type, "", fact, key=key, value=value, absent=absent)
 
 
 @dataclass
@@ -483,7 +510,7 @@ class NotSettled(Exception):
 
 
 #: The protocol version this SDK speaks; see "Protocol versions" in `kernable.proto`.
-PROTOCOL = 4
+PROTOCOL = 5
 
 #: Attempts before a reactor parks an event its handler keeps failing on.
 _PARK_AFTER = 5
@@ -1967,8 +1994,10 @@ class Worker(_Stream):
         for r in _call(fn, data, copy.deepcopy(state)) or []:
             if not isinstance(r, Requirement):
                 raise TypeError(f"requires of {cmd.domain}.{cmd.command_type} returns Requirement, not {type(r).__name__}")
-            wire.append(pb.Requirement(domain=r.domain, aggregate_type=r.aggregate_type, aggregate_id=r.aggregate_id,
-                                       fact=r.fact))
+            wire.append(pb.Requirement(domain=r.domain or cmd.domain, aggregate_type=r.aggregate_type,
+                                       aggregate_id=r.aggregate_id, fact=r.fact, key=r.key,
+                                       value_hash=hashlib.sha256(r.value.encode()).digest() if r.key else b"",
+                                       absent=r.absent))
         return wire
 
     @staticmethod
@@ -2466,7 +2495,8 @@ def _rejected_outcome(r) -> Outcome:
     """The outcome of a rejected command, with the key or requirement the kernel named."""
     q = r.requirement if r.HasField("requirement") else None
     return Outcome(committed=False, code=r.code, message=r.message, key=r.key,
-                   requirement=Requirement(q.domain, q.aggregate_type, q.aggregate_id, q.fact) if q else None)
+                   requirement=Requirement(q.domain, q.aggregate_type, q.aggregate_id, q.fact, key=q.key,
+                                           absent=q.absent) if q else None)
 
 
 def _to_outcome(call) -> Outcome | QueryOutcome:

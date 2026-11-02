@@ -97,6 +97,9 @@ export interface WireRequirement {
   aggregate_type: string;
   aggregate_id: string;
   fact: string;
+  key: string;
+  value_hash: Buffer;
+  absent: boolean;
 }
 
 export interface WireRejected {
@@ -333,7 +336,7 @@ const BUNDLED = fileURLToPath(new URL("../proto/kernable/v1/kernable.proto", imp
 const PROTO = existsSync(BUNDLED) ? BUNDLED : fileURLToPath(new URL("../../../proto/kernable/v1/kernable.proto", import.meta.url));
 
 /** The protocol version this SDK speaks; see "Protocol versions" in `kernable.proto`. */
-export const PROTOCOL = 4;
+export const PROTOCOL = 5;
 
 /** Room for a file of 16 MiB, the kernel's limit, plus the rest of the message (grpc-js receives 4 MiB by default). */
 const MAX_DATA_MESSAGE = 17 << 20;

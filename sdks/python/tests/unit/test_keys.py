@@ -27,7 +27,10 @@ def order_aggregate():
     order.fact("closed", lambda s: s.get("closed", False))
 
     @order.command("PlaceOrder",
-                   requires=lambda data, state: [Requirement("identity", "Customer", data["customerId"], "active")])
+                   requires=lambda data, state: [
+                       Requirement("identity", "Customer", data["customerId"], "active"),
+                       Requirement.by_key("Vehicle", "pmdxId", "VEH-lyra", "woundUp", domain="funds", absent=True),
+                   ])
     def _(state, data):
         return [{"type": "OrderPlaced", "data": {"number": "A-1001", "email": "max@firma.de",
                                                  "customerId": data["customerId"]}}]
@@ -45,7 +48,8 @@ class IndexSigning(unittest.TestCase):
         v = VECTORS["result_index"]["input"]
         keys = [pb.UniqueKey(name=k["name"], value_hash=bytes.fromhex(k["value_hash_hex"]), subject=k["subject"],
                              **{"global": k["global"]}) for k in v["keys"]]
-        requires = [pb.Requirement(**r) for r in v["requires"]]
+        requires = [pb.Requirement(**{k: x for k, x in r.items() if k != "value_hash_hex"},
+                                   value_hash=bytes.fromhex(r["value_hash_hex"])) for r in v["requires"]]
         message = index_message(vector_command(v["command"]), v["expected_version"], keys, v["facts"], requires)
         self.assertEqual(message.hex(), VECTORS["result_index"]["message"])
         self.assertEqual(Key(VECTORS["key"]["seed"]).sign(message).sig.hex(), VECTORS["result_index"]["signature"])
