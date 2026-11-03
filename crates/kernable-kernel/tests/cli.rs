@@ -686,6 +686,11 @@ fn the_demo_runs_its_scene_resets_on_a_new_store_and_leaves_nothing_behind() {
         last["events"][0]["position"], 3,
         "the rejection stored nothing"
     );
+    assert_eq!(
+        last["state"],
+        serde_json::json!({ "owner": "Ada", "balance": 100, "open": true }),
+        "the state the worker rebuilt before the last command"
+    );
 
     // The kernel's own UI answers through the demo, from the store the steps wrote.
     let (status, body) = demo_http(

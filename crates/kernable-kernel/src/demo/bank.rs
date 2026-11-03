@@ -1,6 +1,6 @@
 //! The demo's bank, written with the Rust SDK as any application would be. The Stage shows the
-//! `#region`s of this file as the code that runs; lines ending in `// stopwatch` only time the
-//! steps for the Stage, and it shows them dimmed.
+//! `#region`s of this file as the code that runs; lines ending in `// stage` only record for the
+//! Stage what happened when (and what state a handler saw), and it shows them dimmed.
 
 use std::{
     collections::BTreeMap,
@@ -12,7 +12,7 @@ use kernable::{Domain, Kernable, NewEvent, Outcome, Query, Rejected, Submit, dom
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{Lap, Stopwatch};
+use super::Recorder;
 
 /// The read model's rows, by account ID; the Stage shows them as they are.
 pub(super) type Rows = Arc<Mutex<BTreeMap<String, Row>>>;
@@ -50,7 +50,7 @@ pub(super) struct Row {
 // #endregion row
 
 /// The `bank` domain: the `account` aggregate and the `accounts` read model.
-pub(super) fn bank(clock: &Stopwatch, rows: &Rows) -> Domain {
+pub(super) fn bank(stage: &Recorder, rows: &Rows) -> Domain {
     let bank_domain = domain("bank");
     let account = bank_domain.aggregate("account", Account::default());
 
@@ -67,10 +67,10 @@ pub(super) fn bank(clock: &Stopwatch, rows: &Rows) -> Domain {
     });
     // #endregion events
 
-    let c = clock.clone(); // stopwatch
+    let c = stage.clone(); // stage
     // #region open
     account.command("OpenAccount", move |state, data: Opened, cmd, _ctx| {
-        c.lap(&cmd.command_id, Lap::Worker); // stopwatch
+        c.worker(&cmd.command_id, state); // stage
         if state.open {
             return Err(Rejected::new("the account is already open"));
         }
@@ -78,10 +78,10 @@ pub(super) fn bank(clock: &Stopwatch, rows: &Rows) -> Domain {
     });
     // #endregion open
 
-    let c = clock.clone(); // stopwatch
+    let c = stage.clone(); // stage
     // #region deposit
     account.command("Deposit", move |state, data: Amount, cmd, _ctx| {
-        c.lap(&cmd.command_id, Lap::Worker); // stopwatch
+        c.worker(&cmd.command_id, state); // stage
         if !state.open {
             return Err(Rejected::new("no such account").code("not_found"));
         }
@@ -92,10 +92,10 @@ pub(super) fn bank(clock: &Stopwatch, rows: &Rows) -> Domain {
     });
     // #endregion deposit
 
-    let c = clock.clone(); // stopwatch
+    let c = stage.clone(); // stage
     // #region withdraw
     account.command("Withdraw", move |state, data: Amount, cmd, _ctx| {
-        c.lap(&cmd.command_id, Lap::Worker); // stopwatch
+        c.worker(&cmd.command_id, state); // stage
         if data.amount > state.balance {
             let message = format!("insufficient funds: the balance is {}", state.balance);
             return Err(Rejected::new(message).code("insufficient_funds"));
@@ -106,10 +106,10 @@ pub(super) fn bank(clock: &Stopwatch, rows: &Rows) -> Domain {
 
     let accounts_readmodel = bank_domain.read_model("accounts");
 
-    let (r, c) = (Arc::clone(rows), clock.clone());
+    let (r, c) = (Arc::clone(rows), stage.clone());
     // #region project-opened
     accounts_readmodel.on("AccountOpened", move |data: Opened, evt, _ctx| {
-        c.lap(&evt.command_id, Lap::ReadModel); // stopwatch
+        c.read_model(&evt.command_id); // stage
         let row = Row {
             owner: data.owner,
             balance: 0,
@@ -119,10 +119,10 @@ pub(super) fn bank(clock: &Stopwatch, rows: &Rows) -> Domain {
     });
     // #endregion project-opened
 
-    let (r, c) = (Arc::clone(rows), clock.clone());
+    let (r, c) = (Arc::clone(rows), stage.clone());
     // #region project-deposited
     accounts_readmodel.on("Deposited", move |data: Amount, evt, _ctx| {
-        c.lap(&evt.command_id, Lap::ReadModel); // stopwatch
+        c.read_model(&evt.command_id); // stage
         if let Some(row) = lock(&r).get_mut(&evt.aggregate_id) {
             row.balance += data.amount;
         }
@@ -130,10 +130,10 @@ pub(super) fn bank(clock: &Stopwatch, rows: &Rows) -> Domain {
     });
     // #endregion project-deposited
 
-    let (r, c) = (Arc::clone(rows), clock.clone());
+    let (r, c) = (Arc::clone(rows), stage.clone());
     // #region project-withdrawn
     accounts_readmodel.on("Withdrawn", move |data: Amount, evt, _ctx| {
-        c.lap(&evt.command_id, Lap::ReadModel); // stopwatch
+        c.read_model(&evt.command_id); // stage
         if let Some(row) = lock(&r).get_mut(&evt.aggregate_id) {
             row.balance -= data.amount;
         }
@@ -179,7 +179,7 @@ pub(super) async fn send(
         .data(data);
     // Returns once every listener has the events: the query below already sees them.
     let outcome = kernable.submit(submit).await;
-    let returned = Instant::now(); // stopwatch
+    let returned = Instant::now(); // stage
     let get_account = Query::new("bank", "GetAccount").data(json!({ "id": id }));
     let answer: Result<Value, _> = kernable.query(get_account).await;
     // #endregion client

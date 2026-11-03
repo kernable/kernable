@@ -87,26 +87,36 @@ const SCENE: &[Step] = &[
     },
 ];
 
-/// Which point of a command's way a handler marks.
-#[derive(Clone, Copy)]
-pub(crate) enum Lap {
-    Worker,
-    ReadModel,
+/// What the bank's handlers saw of each command, by command ID: when it reached the worker
+/// (and the state the handler got) and when the read model, the first time only, as a command
+/// may run again.
+#[derive(Clone, Default)]
+pub(crate) struct Recorder(Arc<Mutex<HashMap<String, Seen>>>);
+
+#[derive(Default)]
+struct Seen {
+    worker: Option<Instant>,
+    state: Option<Value>,
+    read_model: Option<Instant>,
 }
 
-/// When each command reached the worker and the read model, by command ID: the first time
-/// only, as a command may run again.
-#[derive(Clone, Default)]
-pub(crate) struct Stopwatch(Arc<Mutex<HashMap<String, [Option<Instant>; 2]>>>);
+impl Recorder {
+    pub(crate) fn worker(&self, command_id: &str, state: &impl serde::Serialize) {
+        let mut seen = lock(&self.0);
+        let seen = seen.entry(command_id.to_owned()).or_default();
+        if seen.worker.is_none() {
+            seen.worker = Some(Instant::now());
+            seen.state = serde_json::to_value(state).ok();
+        }
+    }
 
-impl Stopwatch {
-    pub(crate) fn lap(&self, command_id: &str, lap: Lap) {
-        let mut laps = lock(&self.0);
-        let at = &mut laps.entry(command_id.to_owned()).or_default()[lap as usize];
+    pub(crate) fn read_model(&self, command_id: &str) {
+        let mut seen = lock(&self.0);
+        let at = &mut seen.entry(command_id.to_owned()).or_default().read_model;
         at.get_or_insert_with(Instant::now);
     }
 
-    fn take(&self, command_id: &str) -> [Option<Instant>; 2] {
+    fn take(&self, command_id: &str) -> Seen {
         lock(&self.0).remove(command_id).unwrap_or_default()
     }
 }
@@ -119,7 +129,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 struct Run {
     app: AppHandle,
     client: Kernable,
-    clock: Stopwatch,
+    stage: Recorder,
     rows: bank::Rows,
     /// Where the kernel serves its own UI.
     ui: String,
@@ -398,7 +408,7 @@ async fn start(demo: &Demo, generation: u64) -> Result<Run, BoxError> {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let (clock, rows) = (Stopwatch::default(), bank::Rows::default());
+    let (stage, rows) = (Recorder::default(), bank::Rows::default());
     let client = Kernable::new(
         Options::new(dir.0.join("app.key"))
             .url(format!("http://{grpc}"))
@@ -408,7 +418,7 @@ async fn start(demo: &Demo, generation: u64) -> Result<Run, BoxError> {
         App::new()
             .service("demo")
             .description("the bank of kernable demo")
-            .domain(&bank::bank(&clock, &rows)),
+            .domain(&bank::bank(&stage, &rows)),
     )?;
     let running = {
         let app = app.clone();
@@ -424,7 +434,7 @@ async fn start(demo: &Demo, generation: u64) -> Result<Run, BoxError> {
     Ok(Run {
         app,
         client,
-        clock,
+        stage,
         rows,
         ui,
         _kernel: kernel,
@@ -440,7 +450,7 @@ async fn step(run: &Run, generation: u64, index: usize) -> Value {
     let data: Value = serde_json::from_str(s.data).unwrap_or(Value::Null);
     let sent_at = Instant::now();
     let sent = bank::send(&run.client, &command_id, s.command, s.account, data.clone()).await;
-    let [worker, read_model] = run.clock.take(&command_id);
+    let seen = run.stage.take(&command_id);
     let micros = |at: Option<Instant>| at.map(|at| at.duration_since(sent_at).as_micros() as u64);
     let (outcome, events, rejection, error) = match &sent.outcome {
         Ok(Outcome::Committed(events)) => {
@@ -480,17 +490,19 @@ async fn step(run: &Run, generation: u64, index: usize) -> Value {
         "rejection": rejection,
         "error": error,
         "answer": answer,
+        // The aggregate as the worker rebuilt it from its events, before this command.
+        "state": seen.state,
         "micros": {
-            "worker": micros(worker),
-            "readModel": micros(read_model),
+            "worker": micros(seen.worker),
+            "readModel": micros(seen.read_model),
             "returned": micros(Some(sent.returned)),
             "answered": micros(Some(sent.answered)),
         },
     })
 }
 
-/// The regions of `bank.rs` by name, each a list of lines; lines that only time the steps are
-/// marked, so the Stage can dim them. Regions of the same name follow each other.
+/// The regions of `bank.rs` by name, each a list of lines; lines that only record for the Stage
+/// are marked, so it can dim them. Regions of the same name follow each other.
 fn code() -> Value {
     let mut regions: Vec<(String, Vec<Value>)> = Vec::new();
     let mut open: Option<String> = None;
@@ -499,7 +511,7 @@ fn code() -> Value {
         if let Some(name) = trimmed.strip_prefix("// #region ") {
             open = Some(name.to_owned());
             match regions.iter_mut().find(|(n, _)| n == name) {
-                Some((_, lines)) => lines.push(json!({ "text": "", "stopwatch": false })),
+                Some((_, lines)) => lines.push(json!({ "text": "", "stage": false })),
                 None => regions.push((name.to_owned(), Vec::new())),
             }
         } else if trimmed.starts_with("// #endregion") {
@@ -507,9 +519,9 @@ fn code() -> Value {
         } else if let Some(name) = &open
             && let Some((_, lines)) = regions.iter_mut().find(|(n, _)| n == name)
         {
-            let stopwatch = trimmed.ends_with("// stopwatch");
-            let text = line.trim_end_matches("// stopwatch").trim_end();
-            lines.push(json!({ "text": text, "stopwatch": stopwatch }));
+            let stage = trimmed.ends_with("// stage");
+            let text = line.trim_end_matches("// stage").trim_end();
+            lines.push(json!({ "text": text, "stage": stage }));
         }
     }
     let regions: serde_json::Map<String, Value> = regions
@@ -570,10 +582,10 @@ mod tests {
             }
         }
         let open: Vec<&Value> = regions["open"].as_array().unwrap().iter().collect();
-        assert!(open.iter().any(|l| l["stopwatch"] == true));
+        assert!(open.iter().any(|l| l["stage"] == true));
         assert!(
             open.iter()
-                .all(|l| !l["text"].as_str().unwrap().contains("// stopwatch")),
+                .all(|l| !l["text"].as_str().unwrap().contains("// stage")),
             "the marker itself is not shown"
         );
     }

@@ -10,6 +10,7 @@
     --accent: #3b5bdb; --accent-soft: #e7ecff; --ok: #2f9e44; --bad: #e03131; --bad-soft: #ffe9e9;
     --event: #c2410c; --event-soft: #fff1e6; --live: #1c9bb8; --code: #f4f4f0; --dim: #b4b4ad;
     --kw: #8b3fd1; --str: #2b8a3e; --com: #8f8f88; --num: #c2410c;
+    --write-soft: #fdf4ec; --read-soft: #eaf6f9;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -17,6 +18,7 @@
       --accent: #7b93ff; --accent-soft: #232a45; --ok: #51cf66; --bad: #ff6b6b; --bad-soft: #3a1f1f;
       --event: #ff9a5c; --event-soft: #3a2618; --live: #3bc9db; --code: #222220; --dim: #55554f;
       --kw: #c79bff; --str: #8ce99a; --com: #77776f; --num: #ffa94d;
+      --write-soft: #241c16; --read-soft: #142326;
     }
   }
   * { box-sizing: border-box; }
@@ -73,23 +75,42 @@
   .region pre .sw { color: var(--dim); }
   .region pre .sw * { color: var(--dim) !important; }
   .k { color: var(--kw); } .s { color: var(--str); } .c { color: var(--com); font-style: italic; } .n { color: var(--num); }
-  .bars { display: flex; flex-direction: column; gap: 8px; overflow: auto; }
-  .bar { display: grid; grid-template-columns: minmax(7em, 11em) minmax(0, 1fr) 5.5em; gap: 10px; align-items: center; font-size: 13px; }
-  .bar .what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .bar .track { display: flex; height: 18px; border-radius: 4px; overflow: hidden; background: var(--bg); }
-  .bar .track span { display: block; height: 100%; }
-  .bar .total { text-align: right; font-variant-numeric: tabular-nums; font-family: ui-monospace, Menlo, monospace; }
-  .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--muted); margin-top: 8px; }
-  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
-  .state { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 12px; flex: 1; min-height: 0; }
-  .state > div { min-width: 0; overflow: auto; }
-  .state h3 { font-size: 12px; color: var(--muted); font-weight: 600; margin: 0 0 6px; }
-  .ev { border-left: 3px solid var(--event); background: var(--event-soft); border-radius: 6px; padding: 5px 9px; margin-bottom: 6px; font-size: 13px; animation: in .5s ease; }
+  #flow .band.write { fill: var(--write-soft); } #flow .band.read { fill: var(--read-soft); }
+  #flow .band-label { font: 600 13px system-ui, sans-serif; letter-spacing: .12em; }
+  #flow .band-label.write { fill: var(--event); } #flow .band-label.read { fill: var(--live); }
+  .sides { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 1.7fr) auto minmax(0, 1fr); gap: 0; padding: 0; }
+  .side { padding: 12px 14px; min-width: 0; min-height: 0; overflow: auto; }
+  .side.write { background: var(--write-soft); }
+  .side.read { background: var(--read-soft); }
+  .side h2 .tag { color: var(--event); }
+  .side.read h2 .tag { color: var(--live); }
+  .cols { display: grid; gap: 14px; }
+  .write .cols { grid-template-columns: minmax(0, .9fr) minmax(0, .9fr) minmax(0, 1.3fr); }
+  .read .cols { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .cols > div { min-width: 0; }
+  .side h3 { font-size: 12px; color: var(--text); font-weight: 600; margin: 0 0 6px; }
+  .side h3 span { color: var(--muted); font-weight: 400; }
+  .divider { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; padding: 0 8px; border-left: 1px dashed var(--line); border-right: 1px dashed var(--line); color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .1em; }
+  .divider b { font-size: 22px; color: var(--muted); transition: color .2s, transform .3s; }
+  .divider.pulse b { color: var(--event); transform: translateX(4px) scale(1.3); }
+  .cmds { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+  .cmds li { display: flex; gap: 6px; align-items: baseline; animation: in .4s ease; }
+  .cmds .n { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .cmds .data { font: 11.5px ui-monospace, Menlo, monospace; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .mark { font-weight: 700; } .mark.ok { color: var(--ok); } .mark.bad { color: var(--bad); } .mark.wait { color: var(--muted); }
+  .why { color: var(--bad); font-size: 12px; margin: -2px 0 2px 20px; }
+  .agg { font-size: 13px; }
+  .agg dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 10px; margin: 0; }
+  .agg dt { color: var(--muted); } .agg dd { margin: 0; font-variant-numeric: tabular-nums; }
+  .agg .from { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .pos-line { font-size: 13px; margin-bottom: 8px; }
+  .pos-line b { font-family: ui-monospace, Menlo, monospace; }
+  .ev { border-left: 3px solid var(--event); background: var(--panel); border-radius: 6px; padding: 4px 8px; margin-bottom: 4px; font-size: 13px; animation: in .5s ease; }
   .ev .top { display: flex; gap: 8px; align-items: baseline; }
   .ev .pos { font-weight: 700; color: var(--event); font-family: ui-monospace, Menlo, monospace; }
   .ev .data, .ev .hash { font: 11.5px ui-monospace, Menlo, monospace; color: var(--muted); word-break: break-all; }
-  .chain { color: var(--muted); font-size: 11px; margin: -3px 0 3px 12px; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .chain { color: var(--muted); font-size: 11px; margin: -2px 0 2px 12px; }
+  table { width: 100%; background: var(--panel); border-collapse: collapse; font-size: 13px; }
   th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); }
   th { color: var(--muted); font-weight: 500; font-size: 12px; }
   td.num { font-variant-numeric: tabular-nums; text-align: right; }
@@ -105,7 +126,9 @@
   @media (max-width: 900px) {
     main { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; }
     .panel { min-height: 320px; }
-    .state { grid-template-columns: minmax(0, 1fr); }
+    .sides { grid-template-columns: minmax(0, 1fr); }
+    .divider { flex-direction: row; border: none; border-top: 1px dashed var(--line); border-bottom: 1px dashed var(--line); padding: 6px; }
+    .write .cols, .read .cols { grid-template-columns: minmax(0, 1fr); }
   }
 </style>
 </head>
@@ -141,16 +164,22 @@
     <h2>The code that runs <span class="note" id="file"></span></h2>
     <div class="code" id="code"></div>
   </section>
-  <section class="panel">
-    <h2>How long each step took <span class="note">measured, not slowed down</span></h2>
-    <div class="bars" id="bars"><div class="empty">No step yet.</div></div>
-    <div class="legend" id="legend"></div>
-  </section>
-  <section class="panel">
-    <h2>State</h2>
-    <div class="state">
-      <div><h3>Event store (bank.account a1)</h3><div id="events"><div class="empty">No events.</div></div></div>
-      <div><h3>Read model <code>accounts</code></h3><div id="rows"><div class="empty">No rows.</div></div><div class="answer" id="answer"></div></div>
+  <section class="panel sides">
+    <div class="side write">
+      <h2><span class="tag">Write side</span> <span class="note">keeps the facts: what was decided, never changed</span></h2>
+      <div class="cols">
+        <div><h3>Commands <span>sent by the client</span></h3><ol class="cmds" id="commands"></ol></div>
+        <div><h3>Aggregate a1 <span>as the worker rebuilt it</span></h3><div class="agg" id="aggregate"></div></div>
+        <div><h3>Event store <span>append only</span></h3><div id="events"></div></div>
+      </div>
+    </div>
+    <div class="divider" id="divider"><span>events</span><b>→</b></div>
+    <div class="side read">
+      <h2><span class="tag">Read side</span> <span class="note">a view built from the events</span></h2>
+      <div class="cols">
+        <div><h3>Read model <code>accounts</code></h3><div class="pos-line" id="listener"></div><div id="rows"></div></div>
+        <div><h3>Last query <span>by the client</span></h3><div class="answer" id="answer"></div></div>
+      </div>
     </div>
   </section>
 </main>
@@ -160,7 +189,7 @@
 const $ = (id) => document.getElementById(id);
 const NS = "http://www.w3.org/2000/svg";
 const HOP_MS = 950;
-let demo = null, code = null, shown = 0, generation = null, animating = false, lastRows = {};
+let demo = null, code = null, shown = 0, generation = null, animating = false;
 
 function el(tag, attrs = {}, ...children) {
   const e = tag.startsWith("svg:") ? document.createElementNS(NS, tag.slice(4)) : document.createElement(tag);
@@ -207,28 +236,34 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&
 
 // ---- the flow diagram ----
 const NODES = {
-  client: { x: 10, y: 150, w: 170, h: 84, name: "Client", sub: "Rust SDK, signs" },
-  kernel: { x: 330, y: 135, w: 240, h: 114, name: "Kernel", sub: "checks · queues · stores" },
-  worker: { x: 700, y: 20, w: 190, h: 84, name: "Worker", sub: "bank.account" },
+  client: { x: 10, y: 208, w: 170, h: 84, name: "Client", sub: "Rust SDK, signs" },
+  kernel: { x: 330, y: 190, w: 240, h: 114, name: "Kernel", sub: "checks · stores · routes" },
+  worker: { x: 700, y: 30, w: 190, h: 84, name: "Worker", sub: "bank.account" },
   model: { x: 700, y: 296, w: 190, h: 84, name: "Read model", sub: "accounts" },
-  store: { x: 330, y: 300, w: 240, h: 80, name: "", sub: "" },
+  store: { x: 700, y: 142, w: 190, h: 96, name: "", sub: "" },
 };
-const center = (n, dx = 0, dy = 0) => [NODES[n].x + NODES[n].w / 2 + dx, NODES[n].y + NODES[n].h / 2 + dy];
+// The line between the write side (above) and the read side (below).
+const SPLIT = 262;
 const WIRES = {
-  "client-kernel": `M180 178 L330 178`,
-  "kernel-client": `M330 208 L180 208`,
-  "kernel-worker": `M570 160 C 650 160, 640 52, 700 52`,
-  "worker-kernel": `M700 78 C 630 78, 630 185, 570 185`,
-  "kernel-store": `M450 249 L450 300`,
-  "kernel-model": `M570 222 C 650 222, 640 324, 700 324`,
-  "model-kernel": `M700 350 C 620 350, 620 238, 570 238`,
+  "client-kernel": `M180 236 L330 236`,
+  "kernel-client": `M330 266 L180 266`,
+  "kernel-worker": `M570 205 C 640 205, 640 62, 700 62`,
+  "worker-kernel": `M700 88 C 622 88, 622 220, 570 220`,
+  "kernel-store": `M570 235 C 640 235, 640 190, 700 190`,
+  "store-model": `M795 238 L795 296`,
+  "model-kernel": `M700 350 C 625 350, 625 288, 570 288`,
+  "kernel-model": `M570 272 C 640 272, 640 322, 700 322`,
 };
 const wires = {}, nodes = {};
 let logGroup = null;
 
 function drawFlow() {
   const svg = $("flow");
-  svg.replaceChildren();
+  svg.replaceChildren(
+    el("svg:rect", { x: 0, y: 0, width: 900, height: SPLIT, class: "band write" }),
+    el("svg:rect", { x: 0, y: SPLIT, width: 900, height: 400 - SPLIT, class: "band read" }),
+    el("svg:text", { x: 14, y: 24, class: "band-label write" }, "WRITE SIDE"),
+    el("svg:text", { x: 14, y: 390, class: "band-label read" }, "READ SIDE"));
   for (const [id, d] of Object.entries(WIRES)) svg.append(wires[id] = el("svg:path", { d, class: "wire" }));
   for (const [id, n] of Object.entries(NODES)) {
     if (id === "store") continue;
@@ -245,14 +280,13 @@ function drawFlow() {
   svg.append(nodes.store);
   logGroup = el("svg:g", { class: "log" });
   svg.append(logGroup);
-  svg.append(el("svg:text", { x: 20, y: 390, class: "stamp", id: "stamp" }, ""));
 }
 
 function drawLog(events) {
   logGroup.replaceChildren();
-  const s = NODES.store, w = 40, gap = 6, max = Math.floor((s.w - 24 + gap) / (w + gap));
+  const s = NODES.store, w = 34, gap = 6, max = Math.floor((s.w - 24 + gap) / (w + gap));
   events.slice(-max).forEach((e, i) => {
-    const x = s.x + 12 + i * (w + gap), y = s.y + 30;
+    const x = s.x + 12 + i * (w + gap), y = s.y + 36;
     logGroup.append(el("svg:rect", { x, y, width: w, height: 30, rx: 4, class: "slot" }),
       el("svg:text", { x: x + w / 2, y: y + 20, "text-anchor": "middle" }, `#${e.position}`));
   });
@@ -326,7 +360,7 @@ function drawCode(step) {
     const lines = dedent(code.regions[name] || []);
     const pre = el("pre");
     lines.forEach((l, i) => {
-      const line = el("span", { class: l.stopwatch ? "sw" : "", title: l.stopwatch ? "Times the step for this page; not part of the bank" : null }, highlight(l.text));
+      const line = el("span", { class: l.stage ? "sw" : "", title: l.stage ? "Records the step for this page; not part of the bank" : null }, highlight(l.text));
       pre.append(line, i < lines.length - 1 ? "\n" : "");
     });
     box.append(el("div", { class: "region", "data-region": name },
@@ -334,75 +368,86 @@ function drawCode(step) {
   }
 }
 
-// ---- timings ----
-const SEGMENTS = [
-  { key: "toWorker", label: "client → kernel → worker", color: "var(--accent)" },
-  { key: "decide", label: "worker decides, kernel stores, read model gets it", color: "var(--event)" },
-  { key: "settle", label: "read model done → submit returns", color: "var(--live)" },
-  { key: "query", label: "query through the kernel", color: "var(--ok)" },
-];
+// ---- the write side and the read side ----
+// What the bottom panel shows; the animation moves it on hop by hop.
+let side = null;
 
-const REJECTED = { label: "worker rejects → kernel answers, stores nothing", color: "var(--bad)" };
-
-function segments(t) {
-  const m = t.micros, worker = m.worker ?? 0;
-  const model = m.readModel ?? m.returned;
-  return { toWorker: worker, decide: Math.max(0, model - worker), settle: Math.max(0, m.returned - model), query: Math.max(0, m.answered - m.returned) };
+function fresh() {
+  return { commands: [], state: null, rebuiltFrom: 0, events: [], position: 0, head: 0, rows: {}, answer: null, rowsFresh: false };
 }
 
-function drawBars(traces) {
-  const bars = $("bars");
-  if (!traces.length) { bars.replaceChildren(el("div", { class: "empty" }, "No step yet.")); return; }
-  const totals = traces.map((t) => t.micros.answered);
-  const max = Math.max(...totals);
-  bars.replaceChildren(...traces.map((t, i) => {
-    const s = segments(t);
-    const rejected = t.outcome !== "committed";
-    const track = el("div", { class: "track" }, SEGMENTS.map((g) => {
-      const [label, color] = rejected && g.key === "decide" ? [REJECTED.label, REJECTED.color] : [g.label, g.color];
-      return el("span", { style: `width:${(s[g.key] / max) * 100}%;background:${color}`, title: `${label}: ${ms(s[g.key])}` });
-    }));
-    const what = `${i + 1}. ${t.command} ${t.outcome === "rejected" ? "(rejected)" : ""}`;
-    return el("div", { class: "bar" }, el("div", { class: "what", title: what }, what), track, el("div", { class: "total" }, ms(totals[i])));
-  }));
-  const shownSegments = traces.some((t) => t.outcome !== "committed") ? [...SEGMENTS, REJECTED] : SEGMENTS;
-  $("legend").replaceChildren(...shownSegments.map((g) => el("span", {}, el("i", { style: `background:${g.color}` }), g.label)));
+// The panel as it stands after the first `n` steps.
+function after(n) {
+  const view = fresh(), traces = demo.traces.slice(0, n);
+  view.commands = traces.map((t) => ({ t, outcome: t.outcome }));
+  const last = traces[traces.length - 1];
+  if (last) {
+    view.state = last.state;
+    view.rebuiltFrom = committedBefore(last.step);
+    view.answer = last;
+  }
+  view.head = view.position = traces.filter((t) => t.outcome === "committed").length;
+  view.rows = n === demo.traces.length ? demo.rows : {};
+  return view;
 }
 
-// ---- state ----
-async function drawEvents() {
-  let events = [];
+const committedBefore = (step) => demo.traces.slice(0, step).filter((t) => t.outcome === "committed").length;
+
+async function loadEvents() {
   try {
     const r = await fetch("/api/history?tenant=default&domain=bank&type=account&id=a1");
-    if (r.ok) events = (await r.json()).events || [];
+    if (r.ok) return (await r.json()).events || [];
   } catch (_) { /* the kernel is resetting */ }
+  return [];
+}
+
+function drawSides() {
+  const v = side;
+  // Commands, the last one maybe still on its way.
+  $("commands").replaceChildren(...(v.commands.length ? v.commands.map(({ t, outcome }, i) => {
+    const mark = outcome === "committed" ? el("span", { class: "mark ok", title: "committed" }, "✓")
+      : outcome === "rejected" ? el("span", { class: "mark bad", title: "rejected" }, "✗")
+      : el("span", { class: "mark wait", title: "on its way" }, "…");
+    const items = [el("li", {}, el("span", { class: "n" }, `${i + 1}`), mark, el("b", {}, t.command), el("span", { class: "data" }, JSON.stringify(t.data)))];
+    if (outcome === "rejected" && t.rejection) items.push(el("div", { class: "why" }, `${t.rejection.code}: no event`));
+    return items;
+  }).flat() : [el("li", { class: "empty" }, "None yet.")]));
+  // The aggregate as the handler saw it.
+  const agg = $("aggregate");
+  if (!v.state) agg.replaceChildren(el("div", { class: "empty" }, "Not loaded yet."));
+  else agg.replaceChildren(
+    el("dl", {}, Object.entries(v.state).flatMap(([k, val]) => [el("dt", {}, k), el("dd", {}, JSON.stringify(val))])),
+    el("div", { class: "from" }, v.rebuiltFrom ? `rebuilt from ${v.rebuiltFrom} event${v.rebuiltFrom > 1 ? "s" : ""}, before the command` : "no events yet: the initial state"));
+  // The store.
+  drawLog(v.events);
   const box = $("events");
-  drawLog(events);
-  if (!events.length) { box.replaceChildren(el("div", { class: "empty" }, "No events.")); return; }
-  const out = [];
-  events.forEach((e, i) => {
-    if (i > 0) out.push(el("div", { class: "chain" }, "↓ chained: its hash covers the one before"));
-    out.push(el("div", { class: "ev" },
-      el("div", { class: "top" }, el("span", { class: "pos" }, `#${e.position}`), el("b", {}, e.type), el("span", { class: "data" }, `v${e.version}`)),
-      el("div", { class: "data" }, e.payload),
-      el("div", { class: "hash" }, `hash ${e.hash.slice(0, 24)}…`)));
-  });
-  box.replaceChildren(...out);
-}
-
-function drawRows(rows, fresh) {
-  const ids = Object.keys(rows);
-  if (!ids.length) { $("rows").replaceChildren(el("div", { class: "empty" }, "No rows.")); return; }
-  $("rows").replaceChildren(el("table", {},
+  if (!v.events.length) box.replaceChildren(el("div", { class: "empty" }, "No events."));
+  else box.replaceChildren(...v.events.flatMap((e, i) => [
+    i > 0 ? el("div", { class: "chain" }, "↓ chained to the one before") : null,
+    el("div", { class: "ev" },
+      el("div", { class: "top" }, el("span", { class: "pos" }, `#${e.position}`), el("b", {}, e.type), el("span", { class: "data" }, e.payload)),
+      el("div", { class: "hash" }, `hash ${e.hash.slice(0, 20)}…`)),
+  ].filter(Boolean)));
+  // The read side.
+  const behind = v.head - v.position;
+  $("listener").replaceChildren("at ", el("b", {}, `#${v.position}`), ` of #${v.head} `,
+    el("span", { class: behind ? "mark wait" : "mark ok" }, behind ? `· ${behind} behind` : "· caught up"));
+  const ids = Object.keys(v.rows);
+  if (!ids.length) $("rows").replaceChildren(el("div", { class: "empty" }, "No rows."));
+  else $("rows").replaceChildren(el("table", {},
     el("tr", {}, el("th", {}, "id"), el("th", {}, "owner"), el("th", {}, "balance")),
-    ids.map((id) => el("tr", { class: fresh ? "fresh" : "" }, el("td", {}, id), el("td", {}, rows[id].owner), el("td", { class: "num" }, rows[id].balance)))));
+    ids.map((id) => el("tr", { class: v.rowsFresh ? "fresh" : "" }, el("td", {}, id), el("td", {}, v.rows[id].owner), el("td", { class: "num" }, v.rows[id].balance)))));
+  v.rowsFresh = false;
+  const t = v.answer;
+  if (!t) $("answer").replaceChildren(el("div", { class: "empty" }, "None yet."));
+  else $("answer").replaceChildren(el("div", {}, el("code", {}, "GetAccount a1"), " right after the submit:"),
+    el("pre", {}, t.answer.row !== undefined ? JSON.stringify(t.answer.row) : t.answer.error));
 }
 
-function drawAnswer(t) {
-  const box = $("answer");
-  if (!t) { box.replaceChildren(); return; }
-  const answer = t.answer.row !== undefined ? JSON.stringify(t.answer.row) : t.answer.error;
-  box.replaceChildren(el("div", {}, "The client's query ", el("code", {}, "GetAccount a1"), " after the submit:"), el("pre", {}, answer));
+async function pulse() {
+  $("divider").classList.add("pulse");
+  await sleep(500);
+  $("divider").classList.remove("pulse");
 }
 
 // ---- one step, animated ----
@@ -411,59 +456,90 @@ async function animate(t) {
   syncButtons();
   const step = demo.scene.steps[t.step];
   drawCode(step);
+  // Start from the state before this step, so a replay shows it again.
+  side = after(t.step);
+  side.events = (await loadEvents()).filter((e) => e.position <= side.head);
+  side.rows = t.step === 0 ? {} : rowsBefore(t);
+  drawSides();
   const rejected = t.outcome !== "committed";
   const data = JSON.stringify(t.data);
-  const s = segments(t);
+  const toWorker = t.micros.worker ?? 0;
   $("speed").textContent = `slowed down: the real way took ${ms(t.micros.returned)}`;
   light(["client"]);
+  side.commands.push({ t, outcome: "pending" });
+  drawSides();
   caption(`The client signs <b>${esc(t.command)}</b> and submits it. The kernel checks the signature and the key's grant, then queues the command for its aggregate.`, "client");
   await move("client-kernel", `${t.command} ${data}`);
   light(["kernel"]);
   await move("kernel-worker", t.command);
   light(["worker"]);
+  side.state = t.state;
+  side.rebuiltFrom = committedBefore(t.step);
+  drawSides();
+  const loaded = side.rebuiltFrom ? `from its ${side.rebuiltFrom} event${side.rebuiltFrom > 1 ? "s" : ""}` : "(no events yet)";
   if (rejected) {
-    caption(`The worker loads <b>a1</b> from its events and runs the handler: it <b>rejects</b> the command. Took ${ms(s.toWorker)} to reach the worker.`, step.code[0]);
+    caption(`The worker rebuilds <b>a1</b> ${loaded} and runs the handler: it <b>rejects</b> the command. Took ${ms(toWorker)} to reach the worker.`, step.code[0]);
     await sleep(700);
     const why = t.rejection && t.rejection.code ? t.rejection.code : "rejected";
     await move("worker-kernel", `Rejected: ${why}`, "bad");
     light(["kernel", "store"]);
-    caption(`The kernel stores <b>no event</b>. A rejection changes nothing: the store and the read model stay as they were.`, step.code[0]);
+    caption(`The kernel stores <b>no event</b>. Nothing crosses to the read side: it stays as it was.`, step.code[0]);
     await sleep(900);
     light(["client"]);
     await move("kernel-client", "rejected", "bad");
+    side.commands[side.commands.length - 1].outcome = "rejected";
+    drawSides();
     const message = t.rejection ? t.rejection.message : t.error;
     caption(`The client gets the reason: <b class="rejected" id="why"></b>`, "client");
     $("why").textContent = message;
   } else {
-    caption(`The worker loads <b>a1</b> from its events and runs the handler. It returns an event; it never writes to the store itself.`, step.code[0]);
+    caption(`The worker rebuilds <b>a1</b> ${loaded} and runs the handler. It returns an event; it never writes to the store itself.`, step.code[0]);
     await sleep(600);
     const ev = t.events[0];
     await move("worker-kernel", ev.type, "event");
     light(["kernel", "store"]);
-    caption(`The kernel checks the worker's signature, then stores <b>${esc(ev.type)}</b> at position <b>#${esc(ev.position)}</b>, signed and chained to the event before.`, step.code[0]);
+    caption(`The kernel checks the worker's signature, then appends <b>${esc(ev.type)}</b> at position <b>#${esc(ev.position)}</b>, signed and chained to the event before. The write side is done.`, step.code[0]);
     await move("kernel-store", `#${ev.position}`, "event");
-    await drawEvents();
+    side.events = await loadEvents();
+    side.head = ev.position;
+    drawSides();
+    await sleep(500);
     light(["model"]);
-    caption(`The read model gets the event in order and updates its row.`, step.code[1]);
-    await move("kernel-model", ev.type, "event");
-    drawRows(demo.rows, true);
+    caption(`The event crosses to the read side: the kernel delivers it from the store, in order, and the read model updates its row.`, step.code[1]);
+    pulse();
+    await move("store-model", ev.type, "event");
+    side.position = ev.position;
+    side.rows = demo.rows;
+    side.rowsFresh = true;
+    drawSides();
     await move("model-kernel", "done", "ok");
     light(["client"]);
-    caption(`Only now does the submit return: every listener has the event. Took ${ms(t.micros.returned)} in all.`, "client");
+    caption(`Only now does the submit return: the read side has the event. Took ${ms(t.micros.returned)} in all.`, "client");
     await move("kernel-client", "committed", "ok");
+    side.commands[side.commands.length - 1].outcome = "committed";
+    drawSides();
   }
   light(["client", "model"]);
+  caption(`The client asks the read side, through the kernel.`, "client");
   await move("client-kernel", "GetAccount a1");
   await move("kernel-model", "query");
   await move("model-kernel", "answer", "ok");
   await move("kernel-client", "answer", "ok");
-  drawAnswer(t);
+  side.answer = t;
+  drawSides();
+  const next = demo.scene.steps.length > t.step + 1 ? "Next step →" : "End of the scene.";
   caption(rejected
-    ? `The query shows the account unchanged. ${demo.scene.steps.length > t.step + 1 ? "Next step →" : "End of the scene."}`
-    : `The query right after the submit already sees the change: no polling, no waiting. ${demo.scene.steps.length > t.step + 1 ? "Next step →" : "End of the scene."}`, "client");
+    ? `The query shows the account unchanged. ${next}`
+    : `The query right after the submit already sees the change: no polling, no waiting. ${next}`, "client");
   light([]);
   animating = false;
   syncButtons();
+}
+
+// The read model's rows before step `t`: the answer of the step before it, which read them.
+function rowsBefore(t) {
+  const before = demo.traces[t.step - 1];
+  return before && before.answer.row ? { [before.account]: before.answer.row } : {};
 }
 
 // ---- sync with the demo ----
@@ -503,19 +579,16 @@ async function poll() {
     shown = firstLoad ? demo.traces.length : 0;
     drawFlow();
     drawCode(demo.scene.steps[0]);
-    drawBars([]);
-    drawRows({}, false);
-    drawAnswer(null);
-    $("events").replaceChildren(el("div", { class: "empty" }, "No events."));
+    side = fresh();
+    drawSides();
     $("caption").textContent = demo.ready ? "A new kernel on an empty store. Press Next step." : "Starting a new kernel on an empty store…";
     $("speed").textContent = "";
     if (shown) {
       const t = demo.traces[shown - 1];
       drawCode(demo.scene.steps[t.step]);
-      drawBars(demo.traces);
-      drawRows(demo.rows, false);
-      drawAnswer(t);
-      await drawEvents();
+      side = after(shown);
+      side.events = await loadEvents();
+      drawSides();
       $("caption").textContent = "Press Replay to see the last step again.";
     }
   }
@@ -524,7 +597,6 @@ async function poll() {
     drawHeader();
     const t = demo.traces[shown - 1];
     await animate(t);
-    drawBars(demo.traces.slice(0, shown));
   }
   drawHeader();
   syncButtons();
@@ -540,7 +612,7 @@ $("speed-slider").addEventListener("input", (e) => setSpeed(Number(e.target.valu
 try { const saved = localStorage.getItem("kernable-demo-speed"); if (saved !== null) setSpeed(Number(saved)); } catch (_) { /* private window */ }
 $("next").addEventListener("click", () => post("/api/demo/next"));
 $("reset").addEventListener("click", () => post("/api/demo/reset"));
-$("replay").addEventListener("click", () => { if (!animating && shown) animate(demo.traces[shown - 1]).then(() => drawBars(demo.traces.slice(0, shown))); });
+$("replay").addEventListener("click", () => { if (!animating && shown) animate(demo.traces[shown - 1]); });
 $("full").addEventListener("click", () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen().catch(() => {}));
 document.addEventListener("keydown", (e) => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
