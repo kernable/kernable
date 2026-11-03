@@ -200,6 +200,11 @@ async fn keep_lease(
         .clone()
         .expect("a kernel of a pair runs with --replication sync");
     let (mut last_acked, mut progress) = (primary.acked_seq(), Instant::now());
+    let head_now = || kernel.store.record_head().map_or(0, |h| h.seq);
+    // Writes up to this record may have been told without the standby (alone, or before this
+    // kernel restarted): the witness hears of a standby in sync only once it holds them.
+    let mut must_reach = head_now();
+    let mut last_head = must_reach;
     loop {
         tokio::time::sleep(link.lease() / 3).await;
         let sent = Instant::now();
@@ -218,33 +223,36 @@ async fn keep_lease(
             // The lease runs out by itself: writes committed alone wait from then on.
             Err(e) => tracing::warn!(error = %e, "renewing the lease failed"),
         }
-        let head = kernel.store.record_head().map_or(0, |h| h.seq);
+        let head = head_now();
         let (acked, standby) = (primary.acked_seq(), primary.standby());
         if standby.is_some() && (acked > last_acked || acked >= head) {
             progress = Instant::now();
         }
         last_acked = acked;
-        let caught_up = standby.is_some() && acked >= head;
         if primary.alone() {
-            if caught_up {
-                // First the writes wait for the standby again, then the witness hears of it:
-                // nothing told alone is missing on the standby the witness names.
+            // Under load the standby is always a little behind the head: it has caught up once
+            // it holds what existed at the last look.
+            if standby.is_some() && acked >= last_head {
+                // First the writes wait for the standby again, then the witness hears of it,
+                // once the standby holds everything told alone.
                 primary.set_alone(false);
+                must_reach = head_now();
+                progress = Instant::now();
                 tracing::info!("the standby caught up: writes wait for it again");
             }
-        } else if caught_up {
-            let standby = standby.expect("caught up");
-            if reported != standby {
-                match link.ask(WitnessOp::InSync, term, &standby).await {
-                    Ok(a) if a.granted => {
-                        reported = standby;
-                        tracing::info!(standby = %reported, "the witness knows the standby is in sync");
-                    }
-                    Ok(a) => tracing::warn!(why = %a.message, "the witness refused in sync"),
-                    Err(e) => tracing::warn!(error = %e, "telling the witness failed"),
+        } else if let Some(standby) = standby.filter(|_| acked >= must_reach)
+            && reported != standby
+        {
+            match link.ask(WitnessOp::InSync, term, &standby).await {
+                Ok(a) if a.granted => {
+                    reported = standby;
+                    tracing::info!(standby = %reported, "the witness knows the standby is in sync");
                 }
+                Ok(a) => tracing::warn!(why = %a.message, "the witness refused in sync"),
+                Err(e) => tracing::warn!(error = %e, "telling the witness failed"),
             }
-        } else if progress.elapsed() >= timeout {
+        }
+        if !primary.alone() && progress.elapsed() >= timeout {
             match link.ask(WitnessOp::Alone, term, "").await {
                 Ok(a) if a.granted => {
                     reported = String::new();
@@ -258,5 +266,6 @@ async fn keep_lease(
                 Err(e) => tracing::warn!(error = %e, "telling the witness failed"),
             }
         }
+        last_head = head;
     }
 }

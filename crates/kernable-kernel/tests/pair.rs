@@ -124,16 +124,17 @@ fn node_config(dir: &Path, name: &str, kernel_seed: u8, node_seed: u8) -> Config
     }
 }
 
-/// Runs a kernel of the pair; sends its kernel once it is the primary. Aborting the task stops
-/// it, server and lease alike: as if its machine was gone.
-fn run_node(config: Config) -> (JoinHandle<()>, oneshot::Receiver<Arc<Kernel>>) {
+/// Runs a kernel of the pair; sends its kernel once it is the primary, and ends with why once
+/// the witness deposes it. Aborting the task stops it, server and lease alike: as if its
+/// machine was gone.
+fn run_node(config: Config) -> (JoinHandle<String>, oneshot::Receiver<Arc<Kernel>>) {
     let (tx, rx) = oneshot::channel();
     let task = tokio::spawn(async move {
         let primary = node::become_primary(config).await.unwrap();
         let _ = tx.send(Arc::clone(&primary.kernel));
         tokio::select! {
-            result = serve(primary.kernel) => result.unwrap(),
-            why = primary.lease => panic!("deposed: {why}"),
+            result = serve(primary.kernel) => panic!("the server stopped: {result:?}"),
+            why = primary.lease => why.to_string(),
         }
     });
     (task, rx)
@@ -346,4 +347,55 @@ async fn a_primary_alone_tells_nothing_once_its_lease_runs_out() {
         .unwrap()
         .unwrap();
     assert_eq!(committed_versions(&told), [1]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_primary_the_witness_replaced_stops() {
+    let dir = std::env::temp_dir().join(format!("kn-pair-deposed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = Dir(dir);
+    let state = dir.0.join("witness.state");
+    tokio::spawn(witness::run(WitnessConfig {
+        listen: format!("unix:{}", dir.0.join("witness.sock").display()),
+        roots: vec![id(&root())],
+        state: state.clone(),
+        lease_ms: LEASE_MS,
+        tls: None,
+    }));
+    wait_for(&format!("unix:{}", dir.0.join("witness.sock").display())).await;
+    // A reaches the witness through a plug of its own, and B reaches A through A's plug.
+    let mut a_config = node_config(&dir.0, "a", 3, 11);
+    a_config.replication.pair.as_mut().unwrap().witness =
+        format!("unix:{}", dir.0.join("a-witness.sock").display());
+    let b_config = node_config(&dir.0, "b", 8, 12);
+    let a_witness = |dir: &Path| Plug::new(&dir.join("a-witness.sock"), &dir.join("witness.sock"));
+    let cut_witness = a_witness(&dir.0);
+    let a_plug = Plug::new(&dir.0.join("a-plug.sock"), &dir.0.join("a.sock"));
+    let (a_task, a_primary) = run_node(a_config);
+    let _a = a_primary.await.unwrap();
+    let (_b_task, b_primary) = run_node(b_config);
+    let witnessed = || {
+        Witness::open(&state, Duration::from_millis(LEASE_MS))
+            .unwrap()
+            .state()
+    };
+    until("B is in sync", || witnessed().in_sync == id(&key(12))).await;
+
+    // A still runs, but neither B nor the witness reach it: B takes its place.
+    cut_witness.cut();
+    a_plug.cut();
+    tokio::time::timeout(Duration::from_secs(10), b_primary)
+        .await
+        .expect("B takes over")
+        .unwrap();
+    assert!(!a_task.is_finished(), "A runs on, cut off");
+
+    // A reaches the witness again, learns it was replaced, and stops.
+    let _back = a_witness(&dir.0);
+    let why = tokio::time::timeout(Duration::from_secs(10), a_task)
+        .await
+        .expect("A stops")
+        .unwrap();
+    assert!(why.contains("deposed"), "{why}");
 }

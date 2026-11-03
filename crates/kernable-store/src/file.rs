@@ -364,6 +364,9 @@ struct RecordLog {
     /// `(seq, offset, hash)`: record `seq + 1` starts at byte `offset` and record `seq` has
     /// `hash`; one every [`STRIDE`] records from `base`.
     marks: Vec<(u64, u64, Vec<u8>)>,
+    /// The same for each of the newest records: a standby close behind the head is found
+    /// without reading forward from a mark.
+    recent: std::collections::VecDeque<(u64, u64, Vec<u8>)>,
 }
 
 impl RecordLog {
@@ -378,12 +381,17 @@ impl RecordLog {
                 };
                 self.base = h.seq;
                 self.marks.clear();
+                self.recent.clear();
             }
             _ => {
+                let mark = (self.head.seq, offset, self.head.hash.clone());
                 if (self.head.seq - self.base).is_multiple_of(STRIDE) {
-                    self.marks
-                        .push((self.head.seq, offset, self.head.hash.clone()));
+                    self.marks.push(mark.clone());
                 }
+                if self.recent.len() == STRIDE as usize {
+                    self.recent.pop_front();
+                }
+                self.recent.push_back(mark);
                 let seq = self.head.seq + 1;
                 let hash = replication::record_hash(&self.head.hash, seq, digest);
                 self.head = Head {
@@ -401,6 +409,11 @@ impl RecordLog {
 
     /// The newest mark at or before record `seq`, for `base <= seq < head`.
     fn mark(&self, seq: u64) -> (u64, u64, Vec<u8>) {
+        if let Some(first) = self.recent.front()
+            && first.0 <= seq
+        {
+            return self.recent[(seq - first.0) as usize].clone();
+        }
         let i = self.marks.partition_point(|m| m.0 <= seq);
         self.marks[i.checked_sub(1).expect("a mark at base")].clone()
     }

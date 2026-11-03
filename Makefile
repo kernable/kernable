@@ -51,6 +51,8 @@ CASES ?= 10000
 torture:
 	CARGO_TARGET_DIR=target/crash KERNABLE_CRASH_ROUNDS=$(ROUNDS) KERNABLE_KILLS=$(KILLS) cargo test -p kernable-kernel --features crash-points --test crashes
 	CARGO_TARGET_DIR=target/crash KERNABLE_CRASH_ROUNDS=$(ROUNDS) KERNABLE_KILLS=$(KILLS) KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --features crash-points --test crashes
+	KERNABLE_KILLS=$(KILLS) cargo test -p kernable-kernel --test replication_kills
+	KERNABLE_KILLS=$(KILLS) KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --test replication_kills
 	KERNABLE_FAULT_SEEDS=$(SEEDS) cargo test -p kernable-kernel --test storage
 	KERNABLE_FAULT_SEEDS=$(SEEDS) KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --test storage
 	PROPTEST_CASES=$(CASES) cargo test -p kernable-store --test props

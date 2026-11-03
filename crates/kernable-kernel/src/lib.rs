@@ -440,26 +440,36 @@ impl Kernel {
     /// Like [`Kernel::keep`]; `standby`: a stored grant also waits for the standby. The
     /// standby's own grant cannot: it arrives before the standby follows.
     fn keep_with(&self, grant: Grant, store: bool, standby: bool) -> Result<(), Status> {
+        let held = |grants: &HashMap<String, Grant>| {
+            grants
+                .get(&grant.key_id)
+                .is_some_and(|held| held.issued_at >= grant.issued_at)
+        };
+        if held(&self.grants.lock().unwrap_or_else(PoisonError::into_inner)) {
+            return Ok(());
+        }
+        // Stored and on the disk (and on the standby) before it takes effect, without the lock:
+        // waiting for the standby under it would stall every request that presents a grant,
+        // and the stream to the standby with them. Requests presenting the same grant meanwhile
+        // store it too (a no-op) and wait as well.
+        if store {
+            self.store.save_grant(&grant).map_err(internal)?;
+            match standby {
+                true => self.sync(0),
+                false => self.sync_disk(0),
+            }
+        }
         let replaced = {
             let mut grants = self.grants.lock().unwrap_or_else(PoisonError::into_inner);
-            match grants.get(&grant.key_id) {
-                Some(held) if held.issued_at >= grant.issued_at => return Ok(()),
-                held => {
-                    let replaced = held.is_some();
-                    if store {
-                        self.store.save_grant(&grant).map_err(internal)?;
-                        match standby {
-                            true => self.sync(0),
-                            false => self.sync_disk(0),
-                        }
-                    }
-                    grants.insert(grant.key_id.clone(), grant);
-                    // Before the lock is released: a request presenting the same grant meanwhile
-                    // finds it held and goes on, so the permissions must already include it.
-                    self.set_permissions(&grants);
-                    replaced
-                }
+            if held(&grants) {
+                return Ok(());
             }
+            let replaced = grants.contains_key(&grant.key_id);
+            grants.insert(grant.key_id.clone(), grant);
+            // Before the lock is released: a request presenting the same grant meanwhile finds
+            // it held and goes on, so the permissions must already include it.
+            self.set_permissions(&grants);
+            replaced
         };
         if replaced {
             self.changes.send_modify(|n| *n += 1);

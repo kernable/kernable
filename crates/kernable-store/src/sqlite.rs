@@ -893,7 +893,7 @@ impl Store for SqliteStore {
             if !log.on {
                 return Err(Error::NoRecordLog);
             }
-            if !(log.base..=log.head.seq).contains(&seq) {
+            if seq < log.base {
                 return Ok(None);
             }
             if seq == log.head.seq {
@@ -903,6 +903,7 @@ impl Store for SqliteStore {
                 return Ok(Some(replication::ZERO.to_vec()));
             }
         }
+        // Also beyond the head in memory: a record may be committed a moment before it moves.
         self.read(|conn| {
             Ok(conn
                 .query_row("SELECT hash FROM replication WHERE seq = ?1", [seq], |r| {
@@ -913,18 +914,18 @@ impl Store for SqliteStore {
     }
 
     fn records_after(&self, seq: u64, limit: usize) -> Result<Option<Vec<ReplicatedRecord>>> {
-        {
+        // The rows decide, not the head in memory: a reader may see a record committed a moment
+        // before the head moves past it, and ask for the records after it.
+        let head = {
             let log = self.log();
             if !log.on {
                 return Err(Error::NoRecordLog);
             }
-            if !(log.base..=log.head.seq).contains(&seq) {
+            if seq < log.base {
                 return Ok(None);
             }
-            if seq == log.head.seq {
-                return Ok(Some(Vec::new()));
-            }
-        }
+            log.head.seq
+        };
         let rows = self.read(|conn| {
             let mut stmt = conn.prepare_cached(
                 "SELECT seq, hash, record FROM replication WHERE seq > ?1 ORDER BY seq LIMIT ?2",
@@ -934,9 +935,23 @@ impl Store for SqliteStore {
             })?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })?;
-        // Pruned meanwhile: the record after `seq` is gone.
-        if rows.first().is_none_or(|(first, _, _)| *first != seq + 1) {
-            return Ok(None);
+        match rows.first() {
+            None if seq > head && seq > 0 => {
+                // Beyond everything written: not this log's record.
+                let held: bool = self.read(|conn| {
+                    Ok(conn.query_row(
+                        "SELECT EXISTS (SELECT 1 FROM replication WHERE seq = ?1)",
+                        [seq],
+                        |r| r.get(0),
+                    )?)
+                })?;
+                if !held {
+                    return Ok(None);
+                }
+            }
+            // Pruned meanwhile: the record after `seq` is gone.
+            Some((first, _, _)) if *first != seq + 1 => return Ok(None),
+            _ => {}
         }
         let mut out = Vec::with_capacity(rows.len());
         for (seq, hash, body) in rows {

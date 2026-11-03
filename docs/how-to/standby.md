@@ -140,6 +140,19 @@ Never start the old primary as a primary again. Start it as a standby of the new
 
 A primary that still ran when you promoted its standby tells nobody of anything it writes from then on: no standby acknowledges it any more.
 
+## What it costs
+
+Every write waits for one more round trip: to the standby, its own flush, and back. Measured on one Apple M2 Max with both kernels on the same machine and disk, a Rust worker, 1 KB payloads, `wait: committed` (`bench/replication.sh`, results in `bench/`):
+
+| Store, durability | Alone, 1 client | With a standby, 1 client | Alone, 64 clients | With a standby, 64 clients |
+|---|---|---|---|---|
+| SQLite, `full` | 167/s | 84/s | 3,094/s | 659/s |
+| SQLite, `full`, standby `normal` | 161/s | 153/s | 3,042/s | 2,018/s |
+| SQLite, `normal` | 2,823/s | 1,702/s | 7,154/s | 4,090/s |
+| file log, `normal` | 3,711/s | 2,535/s | 12,833/s | 7,253/s |
+
+With `full` durability on one disk, the two kernels' flushes queue behind each other; the row with a `normal` standby shows the cost without that, which is closer to two machines with their own disks. Measure on your own machines before you size them.
+
 ## A standby is not a backup
 
 A standby copies every write, mistakes included, within milliseconds. Keep your [backups](./backup).

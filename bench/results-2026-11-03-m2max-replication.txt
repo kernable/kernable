@@ -1,0 +1,25 @@
+== Apple M2 Max, 2026-11-03, store=sqlite:k.db, durability=full, standby durability=full
+alone, concurrency=1         load concurrency=1: n=1668 throughput=167/s p50=5.89ms p95=7.07ms p99=11.54ms p99.9=22.21ms max=23.18ms rejected=0 errors=0
+alone, concurrency=64        load concurrency=64: n=31013 throughput=3094/s p50=22.08ms p95=31.09ms p99=38.24ms p99.9=202.50ms max=234.96ms rejected=0 errors=0
+standby, concurrency=1       load concurrency=1: n=836 throughput=84/s p50=11.59ms p95=15.88ms p99=23.58ms p99.9=39.06ms max=39.06ms rejected=0 errors=0
+standby, concurrency=64      load concurrency=64: n=6624 throughput=659/s p50=88.70ms p95=154.49ms p99=318.36ms p99.9=640.53ms max=652.21ms rejected=0 errors=0
+== Apple M2 Max, 2026-11-03, store=sqlite:k.db, durability=normal, standby durability=normal
+alone, concurrency=1         load concurrency=1: n=28229 throughput=2823/s p50=0.31ms p95=0.38ms p99=1.44ms p99.9=2.00ms max=4.30ms rejected=0 errors=0
+alone, concurrency=64        load concurrency=64: n=71601 throughput=7154/s p50=9.13ms p95=10.42ms p99=11.62ms p99.9=15.28ms max=21.38ms rejected=0 errors=0
+standby, concurrency=1       load concurrency=1: n=17020 throughput=1702/s p50=0.52ms p95=0.60ms p99=2.28ms p99.9=3.77ms max=5.11ms rejected=0 errors=0
+standby, concurrency=64      load concurrency=64: n=40941 throughput=4090/s p50=15.65ms p95=17.56ms p99=19.29ms p99.9=22.04ms max=27.91ms rejected=0 errors=0
+== Apple M2 Max, 2026-11-03, store=file:k.log, durability=full, standby durability=full
+alone, concurrency=1         load concurrency=1: n=1828 throughput=183/s p50=5.09ms p95=6.64ms p99=7.10ms p99.9=12.15ms max=29.82ms rejected=0 errors=0
+alone, concurrency=64        load concurrency=64: n=4555 throughput=452/s p50=143.88ms p95=202.65ms p99=227.63ms p99.9=243.68ms max=248.24ms rejected=0 errors=0
+standby, concurrency=1       load concurrency=1: n=917 throughput=92/s p50=10.85ms p95=13.20ms p99=15.23ms p99.9=21.96ms max=21.96ms rejected=0 errors=0
+standby, concurrency=64      load concurrency=64: n=1090 throughput=104/s p50=653.07ms p95=717.39ms p99=757.54ms p99.9=765.85ms max=769.83ms rejected=0 errors=0
+== Apple M2 Max, 2026-11-03, store=file:k.log, durability=normal, standby durability=normal
+alone, concurrency=1         load concurrency=1: n=37107 throughput=3711/s p50=0.24ms p95=0.28ms p99=0.32ms p99.9=0.62ms max=7.17ms rejected=0 errors=0
+alone, concurrency=64        load concurrency=64: n=128390 throughput=12833/s p50=4.91ms p95=5.21ms p99=6.00ms p99.9=13.16ms max=30.93ms rejected=0 errors=0
+standby, concurrency=1       load concurrency=1: n=25349 throughput=2535/s p50=0.37ms p95=0.40ms p99=0.47ms p99.9=1.00ms max=7.35ms rejected=0 errors=0
+standby, concurrency=64      load concurrency=64: n=72546 throughput=7253/s p50=9.02ms p95=12.32ms p99=13.92ms p99.9=21.88ms max=37.53ms rejected=0 errors=0
+== Apple M2 Max, 2026-11-03, store=sqlite:k.db, durability=full, standby durability=normal
+alone, concurrency=1         load concurrency=1: n=1606 throughput=161/s p50=5.97ms p95=7.13ms p99=11.73ms p99.9=25.19ms max=25.69ms rejected=0 errors=0
+alone, concurrency=64        load concurrency=64: n=30476 throughput=3042/s p50=22.55ms p95=31.90ms p99=37.92ms p99.9=219.23ms max=247.52ms rejected=0 errors=0
+standby, concurrency=1       load concurrency=1: n=1535 throughput=153/s p50=6.14ms p95=7.75ms p99=12.96ms p99.9=21.96ms max=22.58ms rejected=0 errors=0
+standby, concurrency=64      load concurrency=64: n=20221 throughput=2018/s p50=31.57ms p95=45.31ms p99=54.13ms p99.9=221.82ms max=271.41ms rejected=0 errors=0

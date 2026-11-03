@@ -100,6 +100,23 @@ A restarted witness grants no claim for a lease and the margin.
 
 **Tested** in `crates/kernable-kernel/tests/pair.rs`, with plugs in front of the sockets that cut every connection as a lost machine does: failover in about a second at a 600 ms lease, the new primary alone, the old primary back as its standby and in sync; a primary alone that tells nothing while it cannot renew its lease. The witness's decisions have unit tests.
 
+## Tests under kill -9, and what they found
+
+`crates/kernable-kernel/tests/replication_kills.rs` runs real kernel processes: a primary and a standby killed at random under load, then the primary lost for good: everything a client was told is on the standby, which is promoted and serves every order exactly once; and a pair with a witness whose primary is killed at random (30 kills: 14 to 15 failovers) with clients that try both kernels: every order exactly once, every answer the one a client was told, every store invariant. `make torture` runs them with more kills. `tests/pair.rs` also checks that a primary the witness replaced stops.
+
+Found and fixed on the way:
+
+- **A deadlock under load.** A grant was stored and waited for the standby under the grant lock; under load, every runtime thread blocked on that lock, and with them the stream to the standby. The lock is now taken only to look and to insert.
+- **Streams ended by a race in SQLite.** A reader could see a record committed a moment before the head in memory moved past it; the next request then looked like one beyond the log, and the stream ended (with a reconnecting standby it could even be judged diverged). The rows decide now.
+- **No failover under load.** The primary reported its standby in sync only when it had acknowledged the very head, which under steady load never happens: the witness never named it, and a claim was always refused. It now reports it once the standby holds everything that may have been told without it (the head when the primary stopped committing alone, or when it started); a primary alone waits for its standby again once it holds what existed at the last look.
+- **Slow lookups in the file log.** Each read of the records after a standby's head read forward from the last mark, up to 1,023 records; the newest records' places are now kept as well.
+
+Not built: crash points inside the replication code, and replication in the model-based test and the soak.
+
+## Cost
+
+Measured in `bench/results-2026-11-03-m2max-replication.txt` (both kernels on one machine and disk); the summary is in [Run a standby](../docs/how-to/standby.md#what-it-costs). Overlapping the primary's flush with the standby's was tried and dropped: on one disk it halved throughput, and it would send a standby to an image after an unlucky crash.
+
 ## Building it
 
 | Increment | Content |
