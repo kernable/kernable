@@ -63,7 +63,7 @@ use tonic::{metadata::MetadataValue, transport::Channel};
 
 pub use app::{App, AppHandle};
 pub use context::{RequestContext, Timestamp};
-pub use data::{Cache, Data, Files};
+pub use data::{Cache, Data, Files, Listed, Listing};
 pub use domain::{
     Aggregate, ApplyContext, CommandContext, CommandMeta, CommandSchema, Domain, EventMeta,
     EventSchema, FoldEvent, NewEvent, State, domain,

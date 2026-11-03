@@ -37,7 +37,7 @@ Each message starts with a `str` **tag** for domain separation. Payloads are sig
 | Worker | `kernable.v1.snapshot` | `tenant_id`, `domain`, `aggregate_type`, `aggregate_id` (from the command), `version: u64`, `schema` (a `str`), `state` |
 | Worker, listener | `kernable.v1.challenge` | `nonce` (the 32 bytes of `Challenge.nonce`) |
 | Subscriber | `kernable.v1.subscribe` | `after_position: u64`, `issued_at: i64`, `type_count: u64`, then every event type |
-| Data client | `kernable.v1.data.<op>` (`put`, `get`, `delete`) | `tenant_id`, `domain`, `key`, `content_type`, `sha256(data)` (the 32-byte digest as a `bytes` field), `issued_at: i64`, `context`; get and delete sign an empty `content_type` and the hash of empty data |
+| Data client | `kernable.v1.data.<op>` (`put`, `get`, `delete`, `list`) | `tenant_id`, `domain`, `key` (for list: the prefix), `content_type`, `sha256(data)` (the 32-byte digest as a `bytes` field), `issued_at: i64`, `context`, and for list only `after`; get, delete and list sign an empty `content_type` and the hash of empty data |
 | Cache client | `kernable.v1.cache.<op>` (`set`, `get`, `delete`) | `tenant_id`, `domain`, `key`, `sha256(value)` (as a `bytes` field), `ttl_ms: u64`, `issued_at: i64`, `context`; get and delete sign the hash of an empty value and `ttl_ms` 0 |
 | Deploy tooling | `kernable.v1.membership` | `service`, then for `workers`, `listeners` and `middlewares` each `count: u64` and every entry, then `metadata_count: u64` and per attribute `key`, `value`, then `issued_at: i64` |
 | Kernel | `kernable.v1.checkpoint` | `global_position: u64`, `chain_hash`, `created_at: i64` |

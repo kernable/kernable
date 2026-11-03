@@ -263,7 +263,16 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "268435456",
         "Bytes the cache service keeps (values and keys). When a value would exceed it, the oldest values are dropped first, as a cache may; a single value larger than the limit is refused with `RESOURCE_EXHAUSTED`.",
     ),
+    (
+        "--max-data-bytes",
+        "KERNABLE_MAX_DATA_BYTES",
+        "16777216",
+        "Bytes of one file of the data service, at most 134217728 (128 MiB). A larger put is refused with `INVALID_ARGUMENT`. A file travels whole in one message, so the kernel and the SDK hold it in memory while it is put or read.",
+    ),
 ];
+
+/// The largest `--max-data-bytes`: a file travels whole in one message, also to a standby.
+pub const MAX_DATA_BYTES: usize = 128 << 20;
 
 /// Kernel configuration, from the flags of `kernable start` (see [`FLAGS`]).
 #[derive(Debug, Clone)]
@@ -358,6 +367,7 @@ pub struct Limits {
     pub subscriptions_per_key: usize,
     pub listeners_per_key: usize,
     pub cache_bytes: usize,
+    pub data_bytes: usize,
 }
 
 /// The defaults of the `--max-*` flags and `--handshake-timeout-ms`.
@@ -375,6 +385,7 @@ impl Default for Limits {
             subscriptions_per_key: 16,
             listeners_per_key: 64,
             cache_bytes: 256 << 20,
+            data_bytes: 16 << 20,
         }
     }
 }
@@ -564,6 +575,15 @@ impl Config {
                 subscriptions_per_key: positive("--max-subscriptions-per-key")? as usize,
                 listeners_per_key: positive("--max-listeners-per-key")? as usize,
                 cache_bytes: positive("--max-cache-bytes")? as usize,
+                data_bytes: match positive("--max-data-bytes")? {
+                    n if n > MAX_DATA_BYTES as u64 => {
+                        return Err(format!(
+                            "--max-data-bytes: at most {MAX_DATA_BYTES} (128 MiB)"
+                        )
+                        .into());
+                    }
+                    n => n as usize,
+                },
             },
             replication,
             partition: match get("--partition") {

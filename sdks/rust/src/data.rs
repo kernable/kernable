@@ -19,8 +19,9 @@ use kernable_core::{
 
 use crate::{Client, Error, RequestContext, now_ms};
 
-/// Room for the kernel's largest file (16 MiB) and the rest of the message.
-const MAX_MESSAGE_BYTES: usize = 17 << 20;
+/// Room for the largest file a kernel takes (`--max-data-bytes`, at most 128 MiB) and the rest
+/// of the message.
+const MAX_MESSAGE_BYTES: usize = 129 << 20;
 
 /// A file as stored by the kernel, returned by [`Files::get`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,9 +30,28 @@ pub struct Data {
     pub data: Vec<u8>,
     /// The media type given when the file was put, e.g. `image/png`.
     pub content_type: String,
+    /// The SHA-256 of `data`, hex, as the kernel computed it.
+    pub sha256: String,
 }
 
-/// Files of up to 16 MiB under keys of 1 to 512 bytes, per tenant and domain; see
+/// A file as [`Files::list`] names it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listed {
+    pub key: String,
+    pub content_type: String,
+    /// The file's length in bytes.
+    pub size: u64,
+}
+
+/// One page of [`Files::list`]: up to 1,000 files, and `next` (to pass as `after`) if there
+/// may be more.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listing {
+    pub files: Vec<Listed>,
+    pub next: Option<String>,
+}
+
+/// Files of up to 16 MiB (the kernel's `--max-data-bytes`) under keys of 1 to 512 bytes, per tenant and domain; see
 /// [`crate::Kernable::data`]. Files are not part of the signed event log, and erasing a vault
 /// subject does not delete them, so keep personal data in vault fields instead. A refused or
 /// invalid request is [`Error::Status`]; a middleware that refuses it (checking `PutData`,
@@ -65,15 +85,17 @@ impl Files {
     }
 
     /// Stores `data` as `key` of `domain` (granted `data_write`), replacing any file there.
+    /// Returns the SHA-256 of `data` (hex) as the kernel computed it: for an event to name.
     pub async fn put(
         &self,
         domain: &str,
         key: &str,
         data: impl Into<Vec<u8>>,
         content_type: &str,
-    ) -> Result<(), Error> {
-        let request = self.request("put", domain, key, data.into(), content_type);
-        self.client
+    ) -> Result<String, Error> {
+        let request = self.request("put", domain, key, data.into(), content_type, "");
+        let res = self
+            .client
             .routed(&request.tenant_id.clone(), |client| {
                 let request = request.clone();
                 async move {
@@ -86,12 +108,12 @@ impl Files {
                 }
             })
             .await?;
-        Ok(())
+        Ok(hex::encode(res.sha256))
     }
 
     /// The file `key` of `domain` (granted `data_read`); `None` if there is none.
     pub async fn get(&self, domain: &str, key: &str) -> Result<Option<Data>, Error> {
-        let request = self.request("get", domain, key, Vec::new(), "");
+        let request = self.request("get", domain, key, Vec::new(), "", "");
         let res = self
             .client
             .routed(&request.tenant_id.clone(), |client| {
@@ -109,12 +131,48 @@ impl Files {
         Ok(res.found.then_some(Data {
             data: res.data,
             content_type: res.content_type,
+            sha256: hex::encode(res.sha256),
         }))
+    }
+
+    /// The files of `domain` whose keys start with `prefix` (granted `data_read`), in the order
+    /// of their keys' bytes, up to 1,000 after the key `after` (`""` for the first page). To
+    /// find files no event names, or what a tenant stores. Example: `let mut after =
+    /// String::new(); loop { let page = files.list("shop", "invoices/", &after).await?; …;
+    /// match page.next { Some(n) => after = n, None => break } }`.
+    pub async fn list(&self, domain: &str, prefix: &str, after: &str) -> Result<Listing, Error> {
+        let request = self.request("list", domain, prefix, Vec::new(), "", after);
+        let res = self
+            .client
+            .routed(&request.tenant_id.clone(), |client| {
+                let request = request.clone();
+                async move {
+                    client
+                        .call(None, request, |channel, r| {
+                            let mut service = Self::service(channel);
+                            async move { service.list_data(r).await }
+                        })
+                        .await
+                }
+            })
+            .await?;
+        Ok(Listing {
+            files: res
+                .files
+                .into_iter()
+                .map(|f| Listed {
+                    key: f.key,
+                    content_type: f.content_type,
+                    size: f.size,
+                })
+                .collect(),
+            next: (!res.next.is_empty()).then_some(res.next),
+        })
     }
 
     /// Deletes the file `key` of `domain` (granted `data_write`); whether there was one.
     pub async fn delete(&self, domain: &str, key: &str) -> Result<bool, Error> {
-        let request = self.request("delete", domain, key, Vec::new(), "");
+        let request = self.request("delete", domain, key, Vec::new(), "", "");
         let res = self
             .client
             .routed(&request.tenant_id.clone(), |client| {
@@ -145,6 +203,7 @@ impl Files {
         key: &str,
         data: Vec<u8>,
         content_type: &str,
+        after: &str,
     ) -> DataRequest {
         let mut r = DataRequest {
             tenant_id: self.tenant.clone(),
@@ -156,6 +215,7 @@ impl Files {
             client_sig: None,
             protocol: PROTOCOL,
             context: Some(self.context.to_wire()),
+            after: after.to_owned(),
         };
         r.client_sig = Some(self.client.sign(&signing::data_message(op, &r)));
         r

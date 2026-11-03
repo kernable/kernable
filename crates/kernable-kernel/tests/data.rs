@@ -41,6 +41,7 @@ fn data(key: &SigningKey, op: &str, domain: &str, name: &str, bytes: &[u8]) -> D
         client_sig: None,
         protocol: kernable_core::PROTOCOL,
         context: None,
+        after: String::new(),
     };
     r.client_sig = Some(signing::sign(key, &signing::data_message(op, &r)));
     r
@@ -304,4 +305,71 @@ async fn requests_are_held_to_their_window_key_length_and_size() {
         code(cache_client.set_cache(c).await),
         Err(Code::InvalidArgument)
     );
+}
+
+#[tokio::test]
+async fn files_are_listed_by_a_reading_key_with_their_hashes_within_the_size_limit() {
+    let env = start_custom("data-list", |config, _| config.limits.data_bytes = 1024).await;
+    let channel = transport::connect(&env.addr).await.unwrap();
+    let mut client = DataServiceClient::new(channel);
+    let (writer, reader) = (key(7), key(8));
+
+    let put = client
+        .put_data(data(&writer, "put", "shop", "docs/a", b"hello"))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        hex(&put.sha256),
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    );
+    client
+        .put_data(data(&writer, "put", "shop", "docs/b", b"bb"))
+        .await
+        .unwrap();
+    client
+        .put_data(data(&writer, "put", "shop", "other", b"o"))
+        .await
+        .unwrap();
+    let got = client
+        .get_data(data(&reader, "get", "shop", "docs/a", b""))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(got.sha256, put.sha256);
+
+    // Larger than --max-data-bytes.
+    let big = client
+        .put_data(data(&writer, "put", "shop", "big", &[0; 1025]))
+        .await
+        .unwrap_err();
+    assert_eq!(big.code(), Code::InvalidArgument, "{big:?}");
+
+    // A reading key lists by prefix, page by page; `after` is signed.
+    let mut list = data(&reader, "list", "shop", "docs/", b"");
+    let page = client.list_data(list.clone()).await.unwrap().into_inner();
+    let keys: Vec<_> = page
+        .files
+        .iter()
+        .map(|f| (f.key.as_str(), f.size))
+        .collect();
+    assert_eq!(keys, [("docs/a", 5), ("docs/b", 2)]);
+    assert_eq!(page.next, "");
+    list.after = "docs/a".into();
+    let forged = client.list_data(list.clone()).await.unwrap_err();
+    assert_eq!(forged.code(), Code::Unauthenticated, "{forged:?}");
+    list.client_sig = Some(signing::sign(
+        &reader,
+        &signing::data_message("list", &list),
+    ));
+    let page = client.list_data(list).await.unwrap().into_inner();
+    assert_eq!(page.files.len(), 1);
+    assert_eq!(page.files[0].key, "docs/b");
+    // All of the domain: the prefix may be empty.
+    let all = client
+        .list_data(data(&reader, "list", "shop", "", b""))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(all.files.len(), 3);
 }

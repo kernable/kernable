@@ -206,19 +206,19 @@ export function snapshotMessage(c: Omit<Stream, "command_id">, version: number, 
 }
 
 /**
- * What a client signs to put, get or delete a file (`op`: `put`, `get`, `delete`): the data's
- * SHA-256 hash, not the data, and the request context.
+ * What a client signs to put, get, delete or list files (`op`: `put`, `get`, `delete`, `list`):
+ * the data's SHA-256 hash, not the data, the request context, and for a listing its page.
  */
-export function dataMessage(op: "put" | "get" | "delete", r: WireDataRequest): Buffer {
-  return new Msg(`kernable.v1.data.${op}`)
+export function dataMessage(op: "put" | "get" | "delete" | "list", r: WireDataRequest): Buffer {
+  const msg = new Msg(`kernable.v1.data.${op}`)
     .str(r.tenant_id)
     .str(r.domain)
     .str(r.key)
     .str(r.content_type)
     .bytes(createHash("sha256").update(r.data).digest())
     .i64(r.issued_at)
-    .context(r.context)
-    .done();
+    .context(r.context);
+  return (op === "list" ? msg.str(r.after ?? "") : msg).done();
 }
 
 /**

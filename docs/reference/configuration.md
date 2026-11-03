@@ -81,6 +81,7 @@ What the kernel takes on at most, so that no client, service or connection can e
 | `--max-subscriptions-per-key` | `KERNABLE_MAX_SUBSCRIPTIONS_PER_KEY` | `16` | Open event subscriptions (`EventService.Subscribe`) of one key at once. One beyond it is refused with `RESOURCE_EXHAUSTED`. |
 | `--max-listeners-per-key` | `KERNABLE_MAX_LISTENERS_PER_KEY` | `64` | Listeners one key may register (connected or not) or run live at once. A new name beyond it is refused with `RESOURCE_EXHAUSTED`; registered ones always reconnect. A registered listener counts for settling and readiness, so this bounds how many a key can make everyone wait for. |
 | `--max-cache-bytes` | `KERNABLE_MAX_CACHE_BYTES` | `268435456` | Bytes the cache service keeps (values and keys). When a value would exceed it, the oldest values are dropped first, as a cache may; a single value larger than the limit is refused with `RESOURCE_EXHAUSTED`. |
+| `--max-data-bytes` | `KERNABLE_MAX_DATA_BYTES` | `16777216` | Bytes of one file of the data service, at most 134217728 (128 MiB). A larger put is refused with `INVALID_ARGUMENT`. A file travels whole in one message, so the kernel and the SDK hold it in memory while it is put or read. |
 
 ## Other
 

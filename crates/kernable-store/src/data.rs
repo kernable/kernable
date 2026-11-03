@@ -3,7 +3,7 @@
 //!
 //! Backends, selected by URL: `file:<directory>` and `memory:`. A file backend keeps each file
 //! as `<directory>/<tenant>/<domain>/<key>`, every part hex-encoded, so no key reaches outside
-//! the directory; the file holds the content type, then the data.
+//! the directory; the file holds its tenant, domain and key, the content type, then the data.
 
 use std::{
     collections::HashMap,
@@ -51,6 +51,31 @@ pub trait DataStore: Send + Sync {
     /// Deletes every file of `tenant`, for a tenant that moved to another partition (S4);
     /// returns how many.
     fn drop_tenant(&self, tenant: &str) -> Result<usize>;
+
+    /// Up to `limit` files of `tenant` and `domain` whose keys start with `prefix`, after the
+    /// key `after`, in the order of their keys' bytes.
+    fn list(
+        &self,
+        tenant: &str,
+        domain: &str,
+        prefix: &str,
+        after: &str,
+        limit: usize,
+    ) -> Result<Vec<Listed>>;
+}
+
+/// A file as [`DataStore::list`] names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listed {
+    pub key: String,
+    pub content_type: String,
+    /// The file's length in bytes.
+    pub size: u64,
+}
+
+/// Whether `key` belongs in a listing of `prefix` after `after`.
+fn listed(key: &str, prefix: &str, after: &str) -> bool {
+    key.starts_with(prefix) && key > after
 }
 
 /// The beginning of every place of `tenant`'s files in a [`DataStore::dump`].
@@ -58,20 +83,9 @@ pub fn tenant_place(tenant: &str) -> String {
     format!("{}/", file_name(tenant))
 }
 
-/// The key of a file at `place`, unless a part is too long to be spelled out (then only its
-/// hash is known).
-pub fn key_of(place: &str) -> Option<DataKey> {
-    let name = |part: &str| {
-        hex::decode(part)
-            .ok()
-            .and_then(|b| String::from_utf8(b).ok())
-    };
-    let [tenant, domain, key] = parts(place).ok()?;
-    Some(DataKey {
-        tenant_id: name(tenant)?,
-        domain: name(domain)?,
-        key: name(key)?,
-    })
+/// The key of a file as a [`DataStore::dump`] gives it: stored with it.
+pub fn key_of(stored: &[u8]) -> Result<DataKey> {
+    Ok(unstored("a dumped file", stored)?.0)
 }
 
 /// The three parts of a place from [`DataStore::dump`]; refused unless each is a name
@@ -93,30 +107,78 @@ fn parts(place: &str) -> Result<[&str; 3]> {
     }
 }
 
-/// A file as a file data store keeps it: the content type's length, the type, the data.
-fn stored(data: &Data) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(4 + data.content_type.len() + data.data.len());
-    bytes.extend((data.content_type.len() as u32).to_be_bytes());
-    bytes.extend(data.content_type.as_bytes());
+/// A file as a data store keeps it: its tenant, domain, key and content type, each as its
+/// length (`u32`, big-endian) and its bytes, then the data. The names travel with the file, so
+/// a name too long to be spelled out as a file name is known all the same.
+fn stored(key: &DataKey, data: &Data) -> Vec<u8> {
+    let parts = [&key.tenant_id, &key.domain, &key.key, &data.content_type];
+    let mut bytes =
+        Vec::with_capacity(16 + parts.iter().map(|p| p.len()).sum::<usize>() + data.data.len());
+    for part in parts {
+        bytes.extend((part.len() as u32).to_be_bytes());
+        bytes.extend(part.as_bytes());
+    }
     bytes.extend(&data.data);
     bytes
 }
 
-fn unstored(name: &str, bytes: &[u8]) -> Result<Data> {
+/// The names and the content type of a stored file, and where its data begins.
+fn header(name: &str, bytes: &[u8]) -> Result<(DataKey, String, usize)> {
     let corrupt = || Error::Corrupt(format!("data file {name} is cut short"));
-    let len = u32::from_be_bytes(
-        bytes
-            .get(..4)
-            .ok_or_else(corrupt)?
-            .try_into()
-            .expect("4 bytes"),
-    );
-    let end = 4 + len as usize;
-    let content_type = bytes.get(4..end).ok_or_else(corrupt)?;
-    Ok(Data {
-        content_type: String::from_utf8_lossy(content_type).into_owned(),
-        data: bytes[end..].to_vec(),
-    })
+    let mut at = 0;
+    let mut part = || -> Result<String> {
+        let len = u32::from_be_bytes(
+            bytes
+                .get(at..at + 4)
+                .ok_or_else(corrupt)?
+                .try_into()
+                .expect("4 bytes"),
+        ) as usize;
+        let text = bytes.get(at + 4..at + 4 + len).ok_or_else(corrupt)?;
+        at += 4 + len;
+        String::from_utf8(text.to_vec()).map_err(|_| corrupt())
+    };
+    let key = DataKey {
+        tenant_id: part()?,
+        domain: part()?,
+        key: part()?,
+    };
+    let content_type = part()?;
+    Ok((key, content_type, at))
+}
+
+fn unstored(name: &str, bytes: &[u8]) -> Result<(DataKey, Data)> {
+    let (key, content_type, at) = header(name, bytes)?;
+    Ok((
+        key,
+        Data {
+            content_type,
+            data: bytes[at..].to_vec(),
+        },
+    ))
+}
+
+/// The header of the stored file at `path`, read alone, and the file's length.
+fn read_header(path: &std::path::Path) -> Result<Option<(DataKey, String, u64)>> {
+    use std::io::Read;
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let len = file.metadata()?.len();
+    // Four length-prefixed names of up to 2,068 bytes in all (a key of 512, a tenant, domain
+    // and content type of their limits) fit the first 4 KiB; a longer header is read whole.
+    let mut head = vec![0; len.min(4096) as usize];
+    file.read_exact(&mut head)?;
+    let name = path.display().to_string();
+    let parsed = match header(&name, &head) {
+        Ok(parsed) => parsed,
+        Err(_) if (head.len() as u64) < len => header(&name, &fs::read(path)?)?,
+        Err(e) => return Err(e),
+    };
+    let (key, content_type, at) = parsed;
+    Ok(Some((key, content_type, len - at as u64)))
 }
 
 /// Opens a data store: `file:<directory>` or `memory:`.
@@ -168,31 +230,41 @@ impl DataStore for MemoryData {
                 file_name(&k.domain),
                 file_name(&k.key)
             );
-            f(&place, &stored(&data))?;
+            f(&place, &stored(&k, &data))?;
         }
         Ok(())
     }
 
     fn restore(&self, place: &str, bytes: &[u8]) -> Result<()> {
-        let name = |part: &str| -> Result<String> {
-            hex::decode(part)
-                .ok()
-                .and_then(|b| String::from_utf8(b).ok())
-                .ok_or_else(|| {
-                    Error::Corrupt(format!(
-                        "{place}: a memory data store keeps names of up to 123 bytes only"
-                    ))
-                })
-        };
-        let [tenant, domain, key] = parts(place)?;
-        let key = DataKey {
-            tenant_id: name(tenant)?,
-            domain: name(domain)?,
-            key: name(key)?,
-        };
-        let data = unstored(&key.key, bytes)?;
+        parts(place)?;
+        let (key, data) = unstored(place, bytes)?;
         self.map().insert(key, data);
         Ok(())
+    }
+
+    fn list(
+        &self,
+        tenant: &str,
+        domain: &str,
+        prefix: &str,
+        after: &str,
+        limit: usize,
+    ) -> Result<Vec<Listed>> {
+        let mut files: Vec<Listed> = self
+            .map()
+            .iter()
+            .filter(|(k, _)| {
+                k.tenant_id == tenant && k.domain == domain && listed(&k.key, prefix, after)
+            })
+            .map(|(k, d)| Listed {
+                key: k.key.clone(),
+                content_type: d.content_type.clone(),
+                size: d.data.len() as u64,
+            })
+            .collect();
+        files.sort_by(|a, b| a.key.cmp(&b.key));
+        files.truncate(limit);
+        Ok(files)
     }
 
     fn drop_tenant(&self, tenant: &str) -> Result<usize> {
@@ -254,11 +326,13 @@ impl DataStore for FileData {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.into()),
         };
-        unstored(&key.key, &bytes).map(Some)
+        let (held, data) = unstored(&key.key, &bytes)?;
+        // A hashed name another key shares would need a SHA-256 collision; refused anyway.
+        Ok((held == *key).then_some(data))
     }
 
     fn put(&self, key: &DataKey, data: &Data) -> Result<()> {
-        self.write(&self.path(key), &stored(data))
+        self.write(&self.path(key), &stored(key, data))
     }
 
     fn dump(&self, f: &mut dyn FnMut(&str, &[u8]) -> Result<()>) -> Result<()> {
@@ -327,5 +401,63 @@ impl DataStore for FileData {
         fs::remove_dir_all(&dir)?;
         crate::file::sync_directory(&dir)?;
         Ok(count)
+    }
+
+    fn list(
+        &self,
+        tenant: &str,
+        domain: &str,
+        prefix: &str,
+        after: &str,
+        limit: usize,
+    ) -> Result<Vec<Listed>> {
+        let dir = self.0.join(file_name(tenant)).join(file_name(domain));
+        let read = match fs::read_dir(&dir) {
+            Ok(read) => read,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        // A spelled-out name is its key; a hashed one is known from its file.
+        let mut found: Vec<(String, PathBuf)> = Vec::new();
+        for entry in read {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.contains('.') {
+                continue; // half-written (`.partial`) or foreign
+            }
+            let key = if name.starts_with("h-") {
+                match read_header(&entry.path())? {
+                    Some((k, _, _)) => k.key,
+                    None => continue,
+                }
+            } else {
+                match hex::decode(&name)
+                    .ok()
+                    .and_then(|b| String::from_utf8(b).ok())
+                {
+                    Some(key) => key,
+                    None => continue,
+                }
+            };
+            if listed(&key, prefix, after) {
+                found.push((key, entry.path()));
+            }
+        }
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut files = Vec::with_capacity(found.len().min(limit));
+        for (key, path) in found {
+            if files.len() == limit {
+                break;
+            }
+            // Deleted meanwhile: left out.
+            if let Some((_, content_type, size)) = read_header(&path)? {
+                files.push(Listed {
+                    key,
+                    content_type,
+                    size,
+                });
+            }
+        }
+        Ok(files)
     }
 }

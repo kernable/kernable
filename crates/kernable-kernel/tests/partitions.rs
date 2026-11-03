@@ -77,6 +77,7 @@ fn file(
         client_sig: None,
         protocol: kernable_core::PROTOCOL,
         context: None,
+        after: String::new(),
     };
     r.client_sig = Some(signing::sign(key, &signing::data_message(op, &r)));
     r

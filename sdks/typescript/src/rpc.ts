@@ -274,12 +274,22 @@ export interface WireDataRequest {
   client_sig?: WireSignature | null;
   /** Who asks; signed. */
   context?: WireRequestContext | null;
+  /** List only: the `next` of the page before; signed. */
+  after?: string;
 }
 
 export interface WireDataResult {
   found: boolean;
   data: Buffer;
   content_type: string;
+  /** Put and get: the SHA-256 of the file's data. */
+  sha256: Buffer;
+}
+
+/** A page of `DataService.ListData`. */
+export interface WireDataList {
+  files: { key: string; content_type: string; size: number }[];
+  next: string;
 }
 
 /** A value of a domain's cache; see `CacheService` in kernable.proto. */
@@ -326,6 +336,7 @@ export interface Clients {
   query(req: WireQueryRequest, timeoutMs?: number): Promise<WireQueryResult>;
   subscribe(req: WireSubscribeRequest): grpc.ClientReadableStream<WireEvent>;
   data(op: DataOp, req: WireDataRequest): Promise<WireDataResult>;
+  listData(req: WireDataRequest): Promise<WireDataList>;
   cache(op: CacheOp, req: WireCacheRequest): Promise<WireCacheResult>;
   apply(membership: WireMembership, sig: WireSignature): Promise<void>;
   /** The partition map the kernel holds; `null` if it serves every tenant (no `--partition`). */
@@ -475,7 +486,8 @@ const PROTO = existsSync(BUNDLED) ? BUNDLED : fileURLToPath(new URL("../../../pr
 export const PROTOCOL = 1;
 
 /** Room for a file of 16 MiB, the kernel's limit, plus the rest of the message (grpc-js receives 4 MiB by default). */
-const MAX_DATA_MESSAGE = 17 << 20;
+/** Room for the largest file a kernel takes (`--max-data-bytes`, at most 128 MiB). */
+const MAX_DATA_MESSAGE = 129 << 20;
 
 let v1: any; // generated client constructors, untyped
 
@@ -597,6 +609,7 @@ export function connect(url: string, tls?: TlsFiles, grant?: string, timeoutMs =
     query: (req, ms) => unary<WireQueryResult>("queries", "Query", req, ms),
     subscribe: (req) => stream((t) => t.events.Subscribe({ ...req, protocol: PROTOCOL }, metadata)),
     data: (op, req) => unary("data", op, req),
+    listData: (req) => unary("data", "ListData", req),
     cache: (op, req) => unary("cache", op, req),
     apply: async (membership, sig) => {
       await unary("memberships", "Apply", { membership, sig });

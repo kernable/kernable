@@ -290,15 +290,20 @@ pub fn subscribe_message(after_position: u64, event_types: &[String], issued_at:
 /// What a client signs to put, get or delete a file (`op`: `put`, `get`, `delete`). The data is
 /// signed by its SHA-256 hash; get and delete sign the hash of nothing.
 pub fn data_message(op: &str, r: &DataRequest) -> Vec<u8> {
-    Msg::new(&format!("kernable.v1.data.{op}"))
+    let msg = Msg::new(&format!("kernable.v1.data.{op}"))
         .str(&r.tenant_id)
         .str(&r.domain)
         .str(&r.key)
         .str(&r.content_type)
         .bytes(&Sha256::digest(&r.data))
         .i64(r.issued_at)
-        .context(r.context.as_ref())
-        .0
+        .context(r.context.as_ref());
+    // A listing's page, after the context.
+    if op == "list" {
+        msg.str(&r.after).0
+    } else {
+        msg.0
+    }
 }
 
 /// What a client signs to set, get or delete a cache value (`op`: `set`, `get`, `delete`), with

@@ -160,14 +160,16 @@ A file as stored by the kernel, returned by `k.data.get`.
 
 - `data: bytes`
 - `content_type: str`: The media type given when the file was put, e.g. `image/png`.
+- `sha256: str`: The SHA-256 of `data`, hex, as the kernel computed it.
 
 ### DataClient
 
-Files of a domain, kept by the kernel under (tenant, domain, key): invoices, uploads, exports. They are not part of the signed event log and not erased with the vault; keep personal data in vault fields instead. Needs a grant of `data_read` (get) or `data_write` (put, delete) for the domain; a refused or invalid request raises `grpc.RpcError`. Each request runs the middleware chain first, as `<domain>.PutData`, `.GetData` or `.DeleteData` (the middleware sees the key and the request context, never the file); a middleware's refusal raises `grpc.RpcError` with code `PERMISSION_DENIED` and details `"<code>: <message>"`. Keys are 1 to 512 bytes, files at most 16 MiB. Use it as `k.data`: `k.data.put("shop", "invoices/c1.pdf", pdf_bytes, "application/pdf")`. `tenant=` replaces the client's tenant, `context=` the client's default request context.
+Files of a domain, kept by the kernel under (tenant, domain, key): invoices, uploads, exports. They are not part of the signed event log and not erased with the vault; keep personal data in vault fields instead. Needs a grant of `data_read` (get) or `data_write` (put, delete) for the domain; a refused or invalid request raises `grpc.RpcError`. Each request runs the middleware chain first, as `<domain>.PutData`, `.GetData` or `.DeleteData` (the middleware sees the key and the request context, never the file); a middleware's refusal raises `grpc.RpcError` with code `PERMISSION_DENIED` and details `"<code>: <message>"`. Keys are 1 to 512 bytes, files at most 16 MiB (the kernel's `--max-data-bytes`). Use it as `k.data`: `k.data.put("shop", "invoices/c1.pdf", pdf_bytes, "application/pdf")`. `tenant=` replaces the client's tenant, `context=` the client's default request context.
 
 - `DataClient(k: Kernable)`: Use `k.data` of a `Kernable`.
-- `put(domain: str, key: str, data: bytes | str, content_type: str | None=None, *, tenant: str | None=None, context: RequestContext | None=None) -> None`: Stores `data` under `key`, replacing a file stored there. A `str` is stored as UTF-8; `content_type` defaults to `text/plain; charset=utf-8` for a `str` and `application/octet-stream` for `bytes`.
+- `put(domain: str, key: str, data: bytes | str, content_type: str | None=None, *, tenant: str | None=None, context: RequestContext | None=None) -> str`: Stores `data` under `key`, replacing a file stored there. A `str` is stored as UTF-8; `content_type` defaults to `text/plain; charset=utf-8` for a `str` and `application/octet-stream` for `bytes`. Returns the SHA-256 of the data (hex) as the kernel computed it: for an event to name.
 - `get(domain: str, key: str, *, tenant: str | None=None, context: RequestContext | None=None) -> Data | None`: The file stored under `key`, or `None` if there is none.
+- `list(domain: str, prefix: str='', *, after: str='', tenant: str | None=None, context: RequestContext | None=None) -> Listing`: The files whose keys start with `prefix` (granted `data_read`), in the order of their keys' bytes, up to 1,000 after the key `after`; `next` of the result, if set, is the `after` of the next page. To find files no event names, or what a tenant stores.
 - `delete(domain: str, key: str, *, tenant: str | None=None, context: RequestContext | None=None) -> bool`: Deletes the file stored under `key`; returns whether there was one.
 
 ### Domain
@@ -180,6 +182,21 @@ A domain: a name that scopes its aggregates, commands and events, lowercase by c
 - `aggregate(name: str, initial: Any, snapshot_every: int=100, schema: str='1') -> 'Aggregate'`: An aggregate of this domain named `name` (lowercase by convention, like `cart`), whose state starts as `initial` (a JSON-like value, usually a dict); see `Aggregate` for `snapshot_every` and `schema`. Run it with `kernable.worker(aggregate)` or in an app. Example: `cart_aggregate = shop_domain.aggregate("cart", {"items": 0})`. Raises `ValueError` if the domain has an aggregate of that name already.
 - `read_model(name: str, *, order: int=0, start: int | None=0, reconnect_s: float=1.0, store: str | None=None, schema: str='1', live: bool=False, park_after: int=0) -> 'Listener'`: A read model of this domain named `name`: builds a view from events and answers queries from it (`on`, `query`; see `Listener`). Kept in memory and rebuilt from the first event on every start (default). Run it with `kernable.listener(read_model)` or in an app. Example: `carts_readmodel = shop_domain.read_model("carts")`. `order` (default 0): listeners with a lower order process each event first. `start`: the position to start after on the first connect (default 0, from the beginning; `None`: the kernel's stored position, or the newest event for a new listener). `reconnect_s`: seconds to wait before reconnecting after the stream drops (default 1), twice as long after each further failed attempt, at most 30. With `store` (`sqlite:<path>` or `memory:`), its state lives in the running listener's `store`: data and position are written together per batch, and a restart continues after the stored position. Change `schema` when the handlers store data differently: the store is cleared and the read model rebuilds from the first event. `live` and `park_after` (default 0: never; a read model that parks misses the event's change): see `reactor`. Raises `ValueError` if the domain has a listener (read model or reactor) of that name already.
 - `reactor(name: str, *, order: int=10, start: int | None=None, reconnect_s: float=1.0, store: str | None=None, schema: str='1', live: bool=False, park_after: int=_PARK_AFTER) -> 'Listener'`: A reactor of this domain named `name`: triggers side effects and follow-up commands (`on`; see `Listener`). It starts at the newest event when it is new, then resumes after the last acknowledged event (`start=None`, default), so it never reacts to what happened before it existed. Run it with `kernable.listener(reactor)` or in an app. A settling submit from its handler waits for the listeners before it (the read models), not for the reactor itself, which handles one event at a time. Submit follow-ups with `ctx.submit` and a fixed `id`, so a redelivered event does not run the command twice. `order` (default 10), `start`, `reconnect_s`, `store` and `schema`: see `read_model`. `park_after` (default 5): how often a handler may fail on one event before the reactor parks it and moves on (0: never, it keeps getting the event and everything behind it waits). A `Rejected` (also from `ctx.submit`) parks at once; the kernel being unreachable or busy (`UNAVAILABLE`, `DEADLINE_EXCEEDED`, `RESOURCE_EXHAUSTED`), `NotSettled` or the store failing never does: the reactor waits and tries again. The kernel keeps parked events with the rejection's code and message (for other errors `handler_error` and the exception's type; the log has the whole error) until an operator retries or dismisses them (`kernable listeners retry`). With a store, a parked event's writes are dropped, the rest of its batch kept. Live listeners never park, and no listener parks an event that erases a subject: its handler must get past it, so no personal data stays behind. `live`: not registered with the kernel: no stored position, always starts at the newest event, nobody waits for it, and it is forgotten when it disconnects. For reactions that only matter while the process runs, e.g. pushing to connected browsers. Cannot be a middleware. Raises `ValueError` if the domain has a listener of that name already.
+
+### Listed
+
+A file as `k.data.list` names it.
+
+- `key: str`
+- `content_type: str`
+- `size: int`: The file's length in bytes.
+
+### Listing
+
+One page of `k.data.list`: up to 1,000 files, and `next` (to pass as `after=`) if there may be more.
+
+- `files: list[Listed]`
+- `next: str | None`
 
 ### Event
 

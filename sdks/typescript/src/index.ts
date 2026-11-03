@@ -1847,7 +1847,8 @@ export interface PutDataOptions extends DataOptions {
 }
 
 /**
- * Files of a domain kept by the kernel under `(tenant, domain, key)`, at most 16 MiB each: PDFs,
+ * Files of a domain kept by the kernel under `(tenant, domain, key)`, at most 16 MiB each (the
+ * kernel's `--max-data-bytes`): PDFs,
  * images, exports. Reading needs a grant of `data_read` for the domain (`shop.*`), putting and
  * deleting one of `data_write`. Files are not part of the signed event log and are not erased
  * with the vault: delete a person's files yourself when erasing them. Use it as `kernable.data`.
@@ -1859,7 +1860,8 @@ export interface PutDataOptions extends DataOptions {
  *
  * ```ts
  * await kernable.data.put("shop", "invoices/o1.pdf", pdfBytes, { contentType: "application/pdf" });
- * const file = await kernable.data.get("shop", "invoices/o1.pdf"); // { data, contentType } or undefined
+ * const file = await kernable.data.get("shop", "invoices/o1.pdf"); // { data, contentType, sha256 } or undefined
+ * const { files, next } = await kernable.data.list("shop", "invoices/"); // up to 1,000; then { after: next }
  * ```
  *
  * See [Store files and cache values](../how-to/data-and-cache).
@@ -1877,16 +1879,44 @@ export class Data {
     this.context = context;
   }
 
-  /** Stores `data` under `key`, replacing a file there; a string is stored as UTF-8. */
-  async put(domain: string, key: string, data: Uint8Array | string, options: PutDataOptions = {}): Promise<void> {
+  /**
+   * Stores `data` under `key`, replacing a file there; a string is stored as UTF-8. Resolves to
+   * the SHA-256 of the data (hex) as the kernel computed it: for an event to name.
+   */
+  async put(domain: string, key: string, data: Uint8Array | string, options: PutDataOptions = {}): Promise<string> {
     const contentType = options.contentType ?? (typeof data === "string" ? "text/plain; charset=utf-8" : "application/octet-stream");
-    await this.call("put", domain, key, options, toBuffer(data), contentType);
+    const res = await this.call("put", domain, key, options, toBuffer(data), contentType);
+    return Buffer.from(res.sha256 ?? []).toString("hex");
   }
 
-  /** The file under `key`, or `undefined` if there is none. */
-  async get(domain: string, key: string, options: DataOptions = {}): Promise<{ data: Uint8Array; contentType: string } | undefined> {
+  /** The file under `key` with its SHA-256 (hex), or `undefined` if there is none. */
+  async get(domain: string, key: string, options: DataOptions = {}): Promise<{ data: Uint8Array; contentType: string; sha256: string } | undefined> {
     const res = await this.call("get", domain, key, options);
-    return res.found ? { data: res.data, contentType: res.content_type } : undefined;
+    return res.found ? { data: res.data, contentType: res.content_type, sha256: Buffer.from(res.sha256 ?? []).toString("hex") } : undefined;
+  }
+
+  /**
+   * The files whose keys start with `prefix` (needs `data_read`), in the order of their keys'
+   * bytes, up to 1,000 after `options.after`; `next`, if set, is the `after` of the next page.
+   * To find files no event names, or what a tenant stores.
+   */
+  async list(domain: string, prefix = "", options: ListDataOptions = {}): Promise<{ files: { key: string; contentType: string; size: number }[]; next?: string }> {
+    const request: WireDataRequest = {
+      tenant_id: options.tenant ?? this.tenant,
+      domain,
+      key: prefix,
+      data: Buffer.alloc(0),
+      content_type: "",
+      issued_at: Date.now(),
+      context: toWireContext(options.context ?? this.context),
+      after: options.after ?? "",
+    };
+    const signed = { ...request, client_sig: this.key.sign(dataMessage("list", request)) };
+    const res = await this.clients.route(request.tenant_id, (c) => c.listData(signed));
+    return {
+      files: (res.files ?? []).map((f) => ({ key: f.key, contentType: f.content_type, size: Number(f.size) })),
+      ...(res.next ? { next: res.next } : {}),
+    };
   }
 
   /** Deletes the file under `key`; returns whether there was one. */
@@ -1908,6 +1938,12 @@ export class Data {
     const signed = { ...request, client_sig: this.key.sign(dataMessage(op, request)) };
     return this.clients.route(request.tenant_id, (c) => c.data(rpc, signed));
   }
+}
+
+/** Options of `Data.list`: the tenant, and where the page starts. */
+export interface ListDataOptions extends DataOptions {
+  /** The `next` of the page before; default: the first page. */
+  after?: string;
 }
 
 /** Options of `Cache.set`: the tenant, and when the value expires. */

@@ -360,12 +360,8 @@ fn apply(
     for f in &batch.files {
         kernel.data.restore(&f.path, &f.data)?;
         // Its record carries the file to this partition's standby.
-        match kernable_store::data::key_of(&f.path) {
-            Some(k) => kernel.store.data_changed(&k.tenant_id, &k.domain, &k.key)?,
-            None => {
-                tracing::warn!(place = %f.path, "a moved file with a long name reaches the standby with its next image")
-            }
-        }
+        let k = kernable_store::data::key_of(&f.data)?;
+        kernel.store.data_changed(&k.tenant_id, &k.domain, &k.key)?;
     }
     let store = kernel.store.as_ref();
     for record in batch.records.into_iter().filter_map(|r| r.record) {

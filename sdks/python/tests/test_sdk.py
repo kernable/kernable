@@ -60,14 +60,26 @@ class DataAndCache(unittest.TestCase):
         self.kernel.dispose()
 
     def test_files_are_put_read_and_deleted(self):
-        self.k.data.put("shop", "notes/n-1.txt", "Grüße")
-        self.assertEqual(self.k.data.get("shop", "notes/n-1.txt"), Data("Grüße".encode(), "text/plain; charset=utf-8"))
+        sha = lambda b: hashlib.sha256(b).hexdigest()
+        self.assertEqual(self.k.data.put("shop", "notes/n-1.txt", "Grüße"), sha("Grüße".encode()))
+        self.assertEqual(self.k.data.get("shop", "notes/n-1.txt"),
+                         Data("Grüße".encode(), "text/plain; charset=utf-8", sha("Grüße".encode())))
         self.k.data.put("shop", "invoices/o-1.pdf", b"%PDF-1.7", "application/pdf")
-        self.assertEqual(self.k.data.get("shop", "invoices/o-1.pdf"), Data(b"%PDF-1.7", "application/pdf"))
+        self.assertEqual(self.k.data.get("shop", "invoices/o-1.pdf"), Data(b"%PDF-1.7", "application/pdf", sha(b"%PDF-1.7")))
         self.assertIsNone(self.k.data.get("shop", "invoices/o-1.pdf", tenant="t2"))
         large = os.urandom(5 * 1024 * 1024)
         self.k.data.put("shop", "exports/large.bin", large)
-        self.assertEqual(self.k.data.get("shop", "exports/large.bin"), Data(large, "application/octet-stream"))
+        self.assertEqual(self.k.data.get("shop", "exports/large.bin"), Data(large, "application/octet-stream", sha(large)))
+
+        # Listed by prefix, in key order, page after page.
+        self.k.data.put("shop", "invoices/o-2.pdf", b"%PDF", "application/pdf")
+        page = self.k.data.list("shop", "invoices/")
+        self.assertEqual([(f.key, f.size) for f in page.files], [("invoices/o-1.pdf", 8), ("invoices/o-2.pdf", 4)])
+        self.assertIsNone(page.next)
+        self.assertEqual([f.key for f in self.k.data.list("shop", "invoices/", after="invoices/o-1.pdf").files],
+                         ["invoices/o-2.pdf"])
+        self.assertEqual(len(self.k.data.list("shop").files), 4)
+        self.k.data.delete("shop", "invoices/o-2.pdf")
 
         self.assertTrue(self.k.data.delete("shop", "invoices/o-1.pdf"))
         self.assertIsNone(self.k.data.get("shop", "invoices/o-1.pdf"))

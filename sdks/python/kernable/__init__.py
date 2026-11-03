@@ -55,7 +55,7 @@ from kernable.v1 import kernable_pb2_grpc as rpc
 
 __all__ = ["PROTOCOL", "Aggregate", "App", "ApplyContext", "CacheClient", "Check", "ClientClosed", "CommandContext", "CommandMeta",
            "CommandSchema",
-           "Data", "DataClient", "Domain",
+           "Data", "DataClient", "Domain", "Listed", "Listing",
            "Event", "EventMeta", "EventSchema", "HeldKey", "Index", "Kernable", "Key", "Listener", "ListenerContext", "ListenerHandle", "Manifest", "NotSettled", "Outcome",
            "QueryContext", "QueryMeta", "QueryOutcome", "Rejected", "RequestContext", "Requirement", "Store", "StoredEventMeta", "Tls", "Worker",
            "domain", "reindex_type"]
@@ -484,6 +484,27 @@ class Data:
     data: bytes
     #: The media type given when the file was put, e.g. `image/png`.
     content_type: str
+    #: The SHA-256 of `data`, hex, as the kernel computed it.
+    sha256: str = ""
+
+
+@dataclass
+class Listed:
+    """A file as `k.data.list` names it."""
+
+    key: str
+    content_type: str
+    #: The file's length in bytes.
+    size: int
+
+
+@dataclass
+class Listing:
+    """One page of `k.data.list`: up to 1,000 files, and `next` (to pass as `after=`) if there
+    may be more."""
+
+    files: list[Listed]
+    next: str | None
 
 
 class ClientClosed(RuntimeError):
@@ -523,8 +544,9 @@ _BUSY = frozenset({grpc.StatusCode.CANCELLED, grpc.StatusCode.DEADLINE_EXCEEDED,
 _HANDLING: contextvars.ContextVar[str] = contextvars.ContextVar("kernable_listener", default="")
 
 _INITIAL = object()
-#: Room for the largest file (16 MiB) and the rest of its message; grpcio receives 4 MiB by default.
-_MAX_MESSAGE = 17 * 1024 * 1024
+#: Room for the largest file a kernel takes (`--max-data-bytes`, at most 128 MiB) and the rest of
+#: its message; grpcio receives 4 MiB by default.
+_MAX_MESSAGE = 129 * 1024 * 1024
 #: Pings on every connection, also idle ones: a connection the network dropped without a word (a
 #: dead host, a NAT that forgot it) ends within 40 s, and the workers and listeners on it reconnect.
 _CHANNEL_OPTIONS = [("grpc.max_send_message_length", _MAX_MESSAGE),
@@ -1643,7 +1665,8 @@ class DataClient:
     request runs the middleware chain first, as `<domain>.PutData`, `.GetData` or `.DeleteData`
     (the middleware sees the key and the request context, never the file); a middleware's
     refusal raises `grpc.RpcError` with code `PERMISSION_DENIED` and details `"<code>:
-    <message>"`. Keys are 1 to 512 bytes, files at most 16 MiB. Use it as `k.data`:
+    <message>"`. Keys are 1 to 512 bytes, files at most 16 MiB (the kernel's `--max-data-bytes`).
+    Use it as `k.data`:
     `k.data.put("shop", "invoices/c1.pdf", pdf_bytes, "application/pdf")`. `tenant=` replaces the
     client's tenant, `context=` the client's default request context."""
 
@@ -1653,20 +1676,29 @@ class DataClient:
         self._stub = rpc.DataServiceStub
 
     def put(self, domain: str, key: str, data: bytes | str, content_type: str | None = None, *,
-            tenant: str | None = None, context: RequestContext | None = None) -> None:
+            tenant: str | None = None, context: RequestContext | None = None) -> str:
         """Stores `data` under `key`, replacing a file stored there. A `str` is stored as UTF-8;
         `content_type` defaults to `text/plain; charset=utf-8` for a `str` and
-        `application/octet-stream` for `bytes`."""
+        `application/octet-stream` for `bytes`. Returns the SHA-256 of the data (hex) as the
+        kernel computed it: for an event to name."""
         if isinstance(data, str):
             data, content_type = data.encode(), content_type or "text/plain; charset=utf-8"
-        self._call("put", "PutData", tenant, context, domain, key, data=data,
-                   content_type=content_type or "application/octet-stream")
+        return self._call("put", "PutData", tenant, context, domain, key, data=data,
+                          content_type=content_type or "application/octet-stream").sha256.hex()
 
     def get(self, domain: str, key: str, *, tenant: str | None = None,
             context: RequestContext | None = None) -> Data | None:
         """The file stored under `key`, or `None` if there is none."""
         res = self._call("get", "GetData", tenant, context, domain, key)
-        return Data(res.data, res.content_type) if res.found else None
+        return Data(res.data, res.content_type, res.sha256.hex()) if res.found else None
+
+    def list(self, domain: str, prefix: str = "", *, after: str = "", tenant: str | None = None,
+             context: RequestContext | None = None) -> Listing:
+        """The files whose keys start with `prefix` (granted `data_read`), in the order of their
+        keys' bytes, up to 1,000 after the key `after`; `next` of the result, if set, is the
+        `after` of the next page. To find files no event names, or what a tenant stores."""
+        res = self._call("list", "ListData", tenant, context, domain, prefix, after=after)
+        return Listing([Listed(f.key, f.content_type, f.size) for f in res.files], res.next or None)
 
     def delete(self, domain: str, key: str, *, tenant: str | None = None,
                context: RequestContext | None = None) -> bool:

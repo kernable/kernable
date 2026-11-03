@@ -157,6 +157,7 @@ async fn file(addr: &str, name: &str, bytes: Option<&[u8]>) {
         client_sig: None,
         protocol: kernable_core::PROTOCOL,
         context: None,
+        after: String::new(),
     };
     r.client_sig = Some(signing::sign(&key(9), &signing::data_message(op, &r)));
     let mut client = DataServiceClient::new(transport::connect(addr).await.unwrap());

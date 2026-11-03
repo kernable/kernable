@@ -497,13 +497,17 @@ service DataService {
   rpc PutData(DataRequest) returns (DataResult);
   rpc GetData(DataRequest) returns (DataResult);
   rpc DeleteData(DataRequest) returns (DataResult);
+  // The files whose keys start with `key` (a prefix, may be empty), up to 1,000 per page, in
+  // the order of their keys' bytes, after `after`; granted data_read, checked as
+  // `<domain>.ListData`. To find files no event names, or what a tenant stores.
+  rpc ListData(DataRequest) returns (DataList);
 }
 
 message DataRequest {
   string tenant_id = 1;
   string domain = 2;
   string key = 3;          // any string of 1 to 512 bytes
-  bytes data = 4;          // put only; at most 16 MiB
+  bytes data = 4;          // put only; at most --max-data-bytes (16 MiB by default)
   string content_type = 5; // put only, e.g. `application/pdf`
   int64 issued_at = 6;     // ms since epoch
   Signature client_sig = 7;
@@ -511,12 +515,25 @@ message DataRequest {
   // Who asks and in which context, as for a command; signed. Middlewares checking
   // `<domain>.PutData`, `.GetData` or `.DeleteData` decide on it.
   RequestContext context = 9;
+  string after = 10;       // list only: the `next` of the page before; signed
 }
 
 message DataResult {
   bool found = 1;          // get and delete: whether the file existed; put: true
   bytes data = 2;          // get only
   string content_type = 3; // get only
+  bytes sha256 = 4;        // put and get: the SHA-256 of the file's data, for an event to name
+}
+
+message DataList {
+  repeated DataEntry files = 1;
+  string next = 2; // the last key of this page if there may be more: send it as `after`
+}
+
+message DataEntry {
+  string key = 1;
+  string content_type = 2;
+  uint64 size = 3; // bytes
 }
 
 // A shared cache of a domain: values under (tenant, domain, key) that may expire. Not durable;

@@ -58,11 +58,11 @@ use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
         Accepted, CacheRequest, CacheResult, Challenge, Command, CommandResult, Committed,
-        DataRequest, DataResult, Event, Execute, ExecuteMore, Grant, KernelMessage,
-        ListenerDelivery, ListenerMessage, MiddlewareCall, NewEvent, QueryRequest, QueryResult,
-        Register, Registered, Rejected, RetryRequest, RetryResult, RevocationRecord, RevokeRequest,
-        RevokeResponse, Signature, Snapshot, SnapshotRecord, SubmitRequest, SubscribeRequest,
-        VaultValue, Wait, When, WorkerMessage,
+        DataEntry, DataList, DataRequest, DataResult, Event, Execute, ExecuteMore, Grant,
+        KernelMessage, ListenerDelivery, ListenerMessage, MiddlewareCall, NewEvent, QueryRequest,
+        QueryResult, Register, Registered, Rejected, RetryRequest, RetryResult, RevocationRecord,
+        RevokeRequest, RevokeResponse, Signature, Snapshot, SnapshotRecord, SubmitRequest,
+        SubscribeRequest, VaultValue, Wait, When, WorkerMessage,
         cache_service_server::{CacheService, CacheServiceServer},
         command_result::Outcome,
         command_service_server::{CommandService, CommandServiceServer},
@@ -92,6 +92,7 @@ use kernable_store::{
     vault::{self, Owner, Vault},
 };
 use prost::Message;
+use sha2::{Digest, Sha256};
 use tokio::{
     net::TcpListener,
     sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch},
@@ -121,8 +122,10 @@ const COMMIT_BACKOFF_MAX: Duration = Duration::from_secs(5);
 const MAX_REQUEST_AGE_MS: i64 = 60_000;
 
 /// The largest file of the data service, cache value and key.
-const MAX_DATA_BYTES: usize = 16 << 20;
 const MAX_CACHE_BYTES: usize = 1 << 20;
+
+/// Files in one page of `DataService.ListData`.
+const DATA_PAGE: usize = 1000;
 const MAX_KEY_BYTES: usize = 512;
 /// Events read from the store per subscription round trip.
 const SUBSCRIBE_BATCH: u32 = 500;
@@ -817,7 +820,7 @@ impl Kernel {
         msg: &[u8],
         issued_at: i64,
         domain: &str,
-        key: &str,
+        key: Option<&str>,
         action: &str,
         rules: fn(&Permissions) -> &grants::Rules,
     ) -> Result<Slot, Status> {
@@ -832,7 +835,8 @@ impl Kernel {
         if !config::valid_domain(domain) {
             return Err(Status::invalid_argument("a domain name is needed"));
         }
-        if key.is_empty() || key.len() > MAX_KEY_BYTES {
+        // `None`: a listing's prefix, which may be empty.
+        if key.is_some_and(str::is_empty) || key.unwrap_or_default().len() > MAX_KEY_BYTES {
             return Err(Status::invalid_argument(format!(
                 "a key has 1 to {MAX_KEY_BYTES} bytes"
             )));
@@ -1133,7 +1137,7 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
     }
     let limits = kernel.config().limits.clone();
     let max = limits.message_bytes;
-    let data_max = max.max(MAX_DATA_BYTES + (64 << 10));
+    let data_max = max.max(kernel.config.limits.data_bytes + (64 << 10));
     let cache_max = max.max(MAX_CACHE_BYTES + (64 << 10));
     let router = builder
         .max_concurrent_streams(Some(limits.streams_per_connection))
@@ -1681,7 +1685,7 @@ impl Api {
         protocol(r.protocol)?;
         self.0.owns(&r.tenant_id)?;
         let (action, rules): (_, fn(&Permissions) -> &grants::Rules) = match op {
-            "get" => ("read files", |p| &p.data_read),
+            "get" | "list" => ("read files", |p| &p.data_read),
             _ => ("write files", |p| &p.data_write),
         };
         let msg = signing::data_message(op, &r);
@@ -1691,13 +1695,14 @@ impl Api {
             &msg,
             r.issued_at,
             &r.domain,
-            &r.key,
+            (op != "list").then_some(r.key.as_str()),
             action,
             rules,
         )?;
         let type_name = match op {
             "put" => "PutData",
             "get" => "GetData",
+            "list" => "ListData",
             _ => "DeleteData",
         };
         // The middleware decides on who asks for which file, not on its content.
@@ -1731,7 +1736,7 @@ impl Api {
             &msg,
             r.issued_at,
             &r.domain,
-            &r.key,
+            Some(&r.key),
             "use the cache",
             |p| &p.cache,
         )?;
@@ -1761,10 +1766,10 @@ impl DataService for Api {
         request: Request<DataRequest>,
     ) -> Result<Response<DataResult>, Status> {
         let (r, _slot) = self.data_request(request, "put").await?;
-        if r.data.len() > MAX_DATA_BYTES {
+        let max = self.0.config.limits.data_bytes;
+        if r.data.len() > max {
             return Err(Status::invalid_argument(format!(
-                "a file has at most {} MiB",
-                MAX_DATA_BYTES >> 20
+                "a file has at most {max} bytes (--max-data-bytes)"
             )));
         }
         let claim = self.0.claim(r.client_sig.as_ref(), r.issued_at)?;
@@ -1780,6 +1785,7 @@ impl DataService for Api {
         self.0.data_changed(&r)?;
         Ok(Response::new(DataResult {
             found: true,
+            sha256: Sha256::digest(&r.data).to_vec(),
             ..Default::default()
         }))
     }
@@ -1792,12 +1798,41 @@ impl DataService for Api {
         let result = match self.0.data.get(&data_key(&r)).map_err(store_error)? {
             Some(d) => DataResult {
                 found: true,
+                sha256: Sha256::digest(&d.data).to_vec(),
                 data: d.data,
                 content_type: d.content_type,
             },
             None => DataResult::default(),
         };
         Ok(Response::new(result))
+    }
+
+    async fn list_data(&self, request: Request<DataRequest>) -> Result<Response<DataList>, Status> {
+        let (r, _slot) = self.data_request(request, "list").await?;
+        let k = Arc::clone(&self.0);
+        let files = tokio::task::spawn_blocking(move || {
+            k.data
+                .list(&r.tenant_id, &r.domain, &r.key, &r.after, DATA_PAGE + 1)
+        })
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .map_err(store_error)?;
+        let more = files.len() > DATA_PAGE;
+        let files: Vec<DataEntry> = files
+            .into_iter()
+            .take(DATA_PAGE)
+            .map(|f| DataEntry {
+                key: f.key,
+                content_type: f.content_type,
+                size: f.size,
+            })
+            .collect();
+        let next = if more {
+            files.last().map(|f| f.key.clone()).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        Ok(Response::new(DataList { files, next }))
     }
 
     async fn delete_data(

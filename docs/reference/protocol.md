@@ -529,6 +529,7 @@ put or delete signed before the kernel started: sign it again).
 | `PutData` | `DataRequest` | `DataResult` |  |
 | `GetData` | `DataRequest` | `DataResult` |  |
 | `DeleteData` | `DataRequest` | `DataResult` |  |
+| `ListData` | `DataRequest` | `DataList` | The files whose keys start with `key` (a prefix, may be empty), up to 1,000 per page, in the order of their keys' bytes, after `after`; granted data_read, checked as `<domain>.ListData`. To find files no event names, or what a tenant stores. |
 
 ### DataRequest
 
@@ -538,12 +539,13 @@ put or delete signed before the kernel started: sign it again).
 | `tenant_id` |  `string` | 1 |  |
 | `domain` |  `string` | 2 |  |
 | `key` |  `string` | 3 | any string of 1 to 512 bytes |
-| `data` |  `bytes` | 4 | put only; at most 16 MiB |
+| `data` |  `bytes` | 4 | put only; at most --max-data-bytes (16 MiB by default) |
 | `content_type` |  `string` | 5 | put only, e.g. `application/pdf` |
 | `issued_at` |  `int64` | 6 | ms since epoch |
 | `client_sig` |  `Signature` | 7 |  |
 | `protocol` |  `uint32` | 8 | not signed |
 | `context` |  `RequestContext` | 9 | Who asks and in which context, as for a command; signed. Middlewares checking `<domain>.PutData`, `.GetData` or `.DeleteData` decide on it. |
+| `after` |  `string` | 10 | list only: the `next` of the page before; signed |
 
 ### DataResult
 
@@ -553,6 +555,24 @@ put or delete signed before the kernel started: sign it again).
 | `found` |  `bool` | 1 | get and delete: whether the file existed; put: true |
 | `data` |  `bytes` | 2 | get only |
 | `content_type` |  `string` | 3 | get only |
+| `sha256` |  `bytes` | 4 | put and get: the SHA-256 of the file's data, for an event to name |
+
+### DataList
+
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `files` | repeated `DataEntry` | 1 |  |
+| `next` |  `string` | 2 | the last key of this page if there may be more: send it as `after` |
+
+### DataEntry
+
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `key` |  `string` | 1 |  |
+| `content_type` |  `string` | 2 |  |
+| `size` |  `uint64` | 3 | bytes |
 
 ### CacheService
 

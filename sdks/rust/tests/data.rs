@@ -28,15 +28,19 @@ async fn files_are_put_read_and_deleted() {
     let files = kernel.client().data();
 
     assert_eq!(files.get("shop", "a.txt").await.unwrap(), None);
-    files
+    // The SHA-256 of "hello", for an event to name.
+    let hello = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+    let put = files
         .put("shop", "a.txt", "hello", "text/plain")
         .await
         .unwrap();
+    assert_eq!(put, hello);
     assert_eq!(
         files.get("shop", "a.txt").await.unwrap(),
         Some(Data {
             data: b"hello".to_vec(),
             content_type: "text/plain".into(),
+            sha256: hello.into(),
         })
     );
 
@@ -50,6 +54,23 @@ async fn files_are_put_read_and_deleted() {
         files.get("shop", "big.bin").await.unwrap().unwrap().data,
         big
     );
+
+    // Listed by prefix, in key order, with their sizes; a key too long for a file name too.
+    let long = format!("docs/{}", "x".repeat(300));
+    files.put("shop", &long, "l", "text/plain").await.unwrap();
+    files
+        .put("shop", "docs/b", "bb", "text/plain")
+        .await
+        .unwrap();
+    let all = files.list("shop", "", "").await.unwrap();
+    let keys: Vec<&str> = all.files.iter().map(|f| f.key.as_str()).collect();
+    assert_eq!(keys, ["a.txt", "big.bin", "docs/b", long.as_str()]);
+    assert_eq!(all.files[1].size, 5 << 20);
+    assert_eq!(all.next, None);
+    let docs = files.list("shop", "docs/", "docs/b").await.unwrap();
+    assert_eq!(docs.files.len(), 1);
+    assert_eq!(docs.files[0].key, long);
+    assert_eq!(docs.files[0].content_type, "text/plain");
 
     assert!(files.delete("shop", "a.txt").await.unwrap());
     assert!(!files.delete("shop", "a.txt").await.unwrap());
@@ -128,13 +149,15 @@ async fn a_middleware_checks_file_and_cache_requests_on_their_context() {
     };
     guard.ready().await;
 
-    let refused = |result: Result<(), Error>| match result {
-        Err(Error::Status(s)) => {
-            assert_eq!(s.code(), Code::PermissionDenied, "{s:?}");
-            assert_eq!(s.message(), "forbidden: who are you");
+    fn refused<T: std::fmt::Debug>(result: Result<T, Error>) {
+        match result {
+            Err(Error::Status(s)) => {
+                assert_eq!(s.code(), Code::PermissionDenied, "{s:?}");
+                assert_eq!(s.message(), "forbidden: who are you");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
         }
-        other => panic!("expected a refusal, got {other:?}"),
-    };
+    }
     refused(
         anonymous
             .data()

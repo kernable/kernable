@@ -92,3 +92,75 @@ fn keys_of_any_allowed_length_are_stored_apart() {
     assert!(store.delete(&long).unwrap());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn both_backends_list_by_prefix_and_copy_long_names() {
+    let dir = std::env::temp_dir().join(format!("kn-data-list-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let long = format!("docs/{}", "é".repeat(200));
+    let tenant = "t".repeat(300);
+    for url in ["memory:".to_owned(), format!("file:{}", dir.display())] {
+        let store = data::open(&url).unwrap();
+        let file = |bytes: &[u8]| Data {
+            content_type: "text/plain".into(),
+            data: bytes.to_vec(),
+        };
+        for (k, bytes) in [
+            ("docs/b", &b"bb"[..]),
+            ("a", b"a"),
+            (long.as_str(), b"long"),
+        ] {
+            store.put(&key(k), &file(bytes)).unwrap();
+        }
+        // Another tenant (with a name too long to be spelled out) and another domain.
+        let elsewhere = DataKey {
+            tenant_id: tenant.clone(),
+            domain: "shop".into(),
+            key: "docs/x".into(),
+        };
+        store.put(&elsewhere, &file(b"x")).unwrap();
+        store
+            .put(
+                &DataKey {
+                    domain: "other".into(),
+                    ..key("docs/y")
+                },
+                &file(b"y"),
+            )
+            .unwrap();
+
+        let keys = |prefix: &str, after: &str, limit: usize| -> Vec<(String, u64)> {
+            store
+                .list("t", "shop", prefix, after, limit)
+                .unwrap()
+                .into_iter()
+                .map(|f| (f.key, f.size))
+                .collect()
+        };
+        assert_eq!(
+            keys("", "", 10),
+            [("a".into(), 1), ("docs/b".into(), 2), (long.clone(), 4)],
+            "{url}"
+        );
+        assert_eq!(keys("docs/", "", 1), [("docs/b".into(), 2)], "{url}");
+        assert_eq!(keys("docs/", "docs/b", 10), [(long.clone(), 4)], "{url}");
+        assert_eq!(keys("nothing", "", 10), [], "{url}");
+        assert_eq!(
+            store.list(&tenant, "shop", "", "", 10).unwrap().len(),
+            1,
+            "{url}"
+        );
+
+        // A copy (a standby's image, a move) knows every name, also the hashed ones.
+        let copy = data::open("memory:").unwrap();
+        store
+            .dump(&mut |place, stored| {
+                assert!(data::key_of(stored).is_ok(), "{url}");
+                copy.restore(place, stored)
+            })
+            .unwrap();
+        assert_eq!(copy.get(&key(&long)).unwrap(), Some(file(b"long")), "{url}");
+        assert_eq!(copy.get(&elsewhere).unwrap(), Some(file(b"x")), "{url}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

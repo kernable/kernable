@@ -2,7 +2,7 @@
 // grants.
 
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { test } from "node:test";
 
 import { status } from "@grpc/grpc-js";
@@ -30,8 +30,10 @@ test("files are put, read and deleted", () =>
     assert.equal(text!.contentType, "text/plain; charset=utf-8");
 
     const pdf = new Uint8Array([0x25, 0x50, 0x44, 0x46]);
-    await kernable.data.put("shop", "invoices/o-1.pdf", pdf, { contentType: "application/pdf" });
-    assert.deepEqual(await kernable.data.get("shop", "invoices/o-1.pdf"), { data: Buffer.from(pdf), contentType: "application/pdf" });
+    // The put answers the data's SHA-256, for an event to name; a get answers it too.
+    const sha256 = createHash("sha256").update(pdf).digest("hex");
+    assert.equal(await kernable.data.put("shop", "invoices/o-1.pdf", pdf, { contentType: "application/pdf" }), sha256);
+    assert.deepEqual(await kernable.data.get("shop", "invoices/o-1.pdf"), { data: Buffer.from(pdf), contentType: "application/pdf", sha256 });
     await kernable.data.put("shop", "raw", pdf);
     assert.equal((await kernable.data.get("shop", "raw"))!.contentType, "application/octet-stream");
 
@@ -42,6 +44,21 @@ test("files are put, read and deleted", () =>
     assert.equal(await kernable.data.delete("shop", "invoices/o-1.pdf"), false);
     assert.equal(await kernable.data.get("shop", "invoices/o-1.pdf"), undefined);
     assert.equal(await kernable.data.get("shop", "missing"), undefined);
+  }));
+
+test("files are listed by prefix, page after page", () =>
+  withKernel(async (kernable) => {
+    for (const key of ["docs/b", "docs/a", "other", `docs/${"x".repeat(300)}`]) await kernable.data.put("shop", key, key);
+    const docs = await kernable.data.list("shop", "docs/");
+    assert.deepEqual(
+      docs.files.map((f) => [f.key, f.size]),
+      [["docs/a", 6], ["docs/b", 6], [`docs/${"x".repeat(300)}`, 305]],
+    );
+    assert.equal(docs.next, undefined);
+    const after = await kernable.data.list("shop", "docs/", { after: "docs/a" });
+    assert.deepEqual(after.files.map((f) => f.key).slice(0, 1), ["docs/b"]);
+    assert.equal((await kernable.data.list("shop")).files.length, 4);
+    assert.equal((await kernable.data.list("shop", "", { tenant: "other" })).files.length, 0);
   }));
 
 test("a file of 5 MiB goes both ways", () =>

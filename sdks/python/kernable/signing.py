@@ -111,11 +111,14 @@ def query_message(q) -> bytes:
 
 
 def data_message(op: str, r) -> bytes:
-    """What a client signs to put, get or delete a file (`op`: `put`, `get`, `delete`); the data
-    is signed as its SHA-256 hash, followed by the request context (an unset one encodes like an
-    empty one)."""
-    return bytes(Msg(f"kernable.v1.data.{op}").str(r.tenant_id).str(r.domain).str(r.key).str(r.content_type)
-                 .bytes(hashlib.sha256(r.data).digest()).i64(r.issued_at).context(r.context).buf)
+    """What a client signs to put, get, delete or list files (`op`: `put`, `get`, `delete`,
+    `list`); the data is signed as its SHA-256 hash, followed by the request context (an unset
+    one encodes like an empty one), and for a listing its page (`after`)."""
+    msg = (Msg(f"kernable.v1.data.{op}").str(r.tenant_id).str(r.domain).str(r.key).str(r.content_type)
+           .bytes(hashlib.sha256(r.data).digest()).i64(r.issued_at).context(r.context))
+    if op == "list":
+        msg = msg.str(r.after)
+    return bytes(msg.buf)
 
 
 def cache_message(op: str, r) -> bytes:

@@ -647,10 +647,27 @@ A file as stored by the kernel, returned by `Files::get`.
 
 - `data: Vec<u8>`: The file's bytes.
 - `content_type: String`: The media type given when the file was put, e.g. `image/png`.
+- `sha256: String`: The SHA-256 of `data`, hex, as the kernel computed it.
+
+### Listed
+
+A file as `Files::list` names it.
+
+- `key: String`
+- `content_type: String`
+- `size: u64`: The file's length in bytes.
+
+### Listing
+
+One page of `Files::list`: up to 1,000 files, and `next` (to pass as `after`) if there
+may be more.
+
+- `files: Vec<Listed>`
+- `next: Option<String>`
 
 ### Files
 
-Files of up to 16 MiB under keys of 1 to 512 bytes, per tenant and domain; see
+Files of up to 16 MiB (the kernel's `--max-data-bytes`) under keys of 1 to 512 bytes, per tenant and domain; see
 `crate::Kernable::data`. Files are not part of the signed event log, and erasing a vault
 subject does not delete them, so keep personal data in vault fields instead. A refused or
 invalid request is `Error::Status`; a middleware that refuses it (checking `PutData`,
@@ -660,8 +677,9 @@ invalid request is `Error::Status`; a middleware that refuses it (checking `PutD
 `kernable.data().get("shop", "invoices/c1.pdf").await?` returns `Some(Data { .. })`.
 
 - `fn context(self, context: RequestContext) -> Files`: Replaces the client's default context for the requests of this handle (signed with each; middlewares decide on it); inside a listener, pass `ctx.follow()`. Example: `kernable.data().context(alice).get("shop", "k").await?`.
-- `async fn put(&self, domain: &str, key: &str, data: impl Into<Vec<u8>>, content_type: &str) -> Result<(), Error>`: Stores `data` as `key` of `domain` (granted `data_write`), replacing any file there.
+- `async fn put(&self, domain: &str, key: &str, data: impl Into<Vec<u8>>, content_type: &str) -> Result<String, Error>`: Stores `data` as `key` of `domain` (granted `data_write`), replacing any file there. Returns the SHA-256 of `data` (hex) as the kernel computed it: for an event to name.
 - `async fn get(&self, domain: &str, key: &str) -> Result<Option<Data>, Error>`: The file `key` of `domain` (granted `data_read`); `None` if there is none.
+- `async fn list(&self, domain: &str, prefix: &str, after: &str) -> Result<Listing, Error>`: The files of `domain` whose keys start with `prefix` (granted `data_read`), in the order of their keys' bytes, up to 1,000 after the key `after` (`""` for the first page). To find files no event names, or what a tenant stores. Example: `let mut after = String::new(); loop { let page = files.list("shop", "invoices/", &after).await?; …; match page.next { Some(n) => after = n, None => break } }`.
 - `async fn delete(&self, domain: &str, key: &str) -> Result<bool, Error>`: Deletes the file `key` of `domain` (granted `data_write`); whether there was one.
 
 ### Cache

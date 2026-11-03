@@ -671,7 +671,8 @@ Options of `Data.put`: the tenant, and the content type stored with the file.
 
 ### Data
 
-Files of a domain kept by the kernel under `(tenant, domain, key)`, at most 16 MiB each: PDFs,
+Files of a domain kept by the kernel under `(tenant, domain, key)`, at most 16 MiB each (the
+kernel's `--max-data-bytes`): PDFs,
 images, exports. Reading needs a grant of `data_read` for the domain (`shop.*`), putting and
 deleting one of `data_write`. Files are not part of the signed event log and are not erased
 with the vault: delete a person's files yourself when erasing them. Use it as `kernable.data`.
@@ -683,14 +684,22 @@ passes the middleware chain first, as `<domain>.PutData`, `.GetData` or `.Delete
 
 ```ts
 await kernable.data.put("shop", "invoices/o1.pdf", pdfBytes, { contentType: "application/pdf" });
-const file = await kernable.data.get("shop", "invoices/o1.pdf"); // { data, contentType } or undefined
+const file = await kernable.data.get("shop", "invoices/o1.pdf"); // { data, contentType, sha256 } or undefined
+const { files, next } = await kernable.data.list("shop", "invoices/"); // up to 1,000; then { after: next }
 ```
 
 See [Store files and cache values](../how-to/data-and-cache).
 
-- `async put(domain: string, key: string, data: Uint8Array | string, options: PutDataOptions = {}): Promise<void>`: Stores `data` under `key`, replacing a file there; a string is stored as UTF-8.
-- `async get(domain: string, key: string, options: DataOptions = {}): Promise<{ data: Uint8Array; contentType: string } | undefined>`: The file under `key`, or `undefined` if there is none.
+- `async put(domain: string, key: string, data: Uint8Array | string, options: PutDataOptions = {}): Promise<string>`: Stores `data` under `key`, replacing a file there; a string is stored as UTF-8. Resolves to the SHA-256 of the data (hex) as the kernel computed it: for an event to name.
+- `async get(domain: string, key: string, options: DataOptions = {}): Promise<{ data: Uint8Array; contentType: string; sha256: string } | undefined>`: The file under `key` with its SHA-256 (hex), or `undefined` if there is none.
+- `async list(domain: string, prefix = "", options: ListDataOptions = {}): Promise<{ files: { key: string; contentType: string; size: number }[]; next?: string }>`: The files whose keys start with `prefix` (needs `data_read`), in the order of their keys' bytes, up to 1,000 after `options.after`; `next`, if set, is the `after` of the next page. To find files no event names, or what a tenant stores.
 - `async delete(domain: string, key: string, options: DataOptions = {}): Promise<boolean>`: Deletes the file under `key`; returns whether there was one.
+
+### ListDataOptions
+
+Options of `Data.list`: the tenant, and where the page starts.
+
+- `after?: string`: The `next` of the page before; default: the first page.
 
 ### SetCacheOptions
 

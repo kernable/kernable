@@ -257,6 +257,7 @@ fn vectors() -> Value {
                 client_sig: None,
                 protocol: kernable_core::PROTOCOL,
                 context: Some(context.clone()),
+                after: String::new(),
             }),
         ),
         // Without a context: encoded like an empty one.
