@@ -13,6 +13,9 @@
 //! aggregates workers registered, and the unique keys and facts each aggregate holds
 //! ([`Store::index`]), written with the commit that changed them.
 //!
+//! Every write is also a record of the [`replication`] record log, which a primary sends its
+//! standby: the file log is one by itself, SQLite keeps one in a table while replication is on.
+//!
 //! Two more stores live apart from the log, because what they hold must be deletable:
 //! [`snapshots`] (the latest snapshot per aggregate, a cache) and the [`vault`] (personal and
 //! secret values that commands and events refer to).
@@ -24,6 +27,7 @@ pub mod data;
 pub mod faults;
 mod file;
 pub mod invariants;
+pub mod replication;
 pub mod snapshots;
 mod sqlite;
 mod sync;
@@ -35,7 +39,8 @@ use std::fmt;
 use ed25519_dalek::SigningKey;
 use kernable_core::proto::{
     AggregateIndex, Command, CommandResult, Event, Grant, ListenerRecord, MembershipRecord,
-    NewEvent, Rejected, RevocationRecord, Signature, WorkerRecord,
+    NewEvent, Rejected, ReplicatedRecord, RevocationRecord, Signature, WorkerRecord,
+    log_record::Record,
 };
 
 /// The version of the stored data format this build reads and writes; a store of another
@@ -44,6 +49,7 @@ use kernable_core::proto::{
 pub const FORMAT: u32 = 1;
 
 pub use file::FileStore;
+pub use replication::Head;
 pub use sqlite::SqliteStore;
 pub use verify::Report;
 
@@ -67,6 +73,11 @@ pub enum Error {
     Format(u32),
     /// Vault values that do not match their references, or a vault that cannot be used.
     Vault(String),
+    /// Records to apply that do not continue this store's record log, or that say something
+    /// the store does not hold (see [`replication`]); nothing of them was written.
+    Diverged(String),
+    /// The store keeps no record log: SQLite with replication off, or `memory:`.
+    NoRecordLog,
     Io(std::io::Error),
     Sqlite(rusqlite::Error),
     Decode(prost::DecodeError),
@@ -94,6 +105,8 @@ impl fmt::Display for Error {
                 "store format {found}, this kernable reads only format {FORMAT}: the store comes from an earlier development build"
             ),
             Error::Vault(what) => write!(f, "vault: {what}"),
+            Error::Diverged(what) => write!(f, "the record log diverged: {what}"),
+            Error::NoRecordLog => write!(f, "the store keeps no record log"),
             Error::Io(e) => write!(f, "io: {e}"),
             Error::Sqlite(e) => write!(f, "sqlite: {e}"),
             Error::Decode(e) => write!(f, "decode: {e}"),
@@ -363,6 +376,79 @@ pub trait Store: Send + Sync {
     /// Recomputes the hash chain and checks all signatures against the kernel's keys (the
     /// current one and any it had before); see [`Report`].
     fn verify(&self, kernel_key_ids: &[String]) -> Result<Report>;
+
+    // ---- the record log (see [`replication`]) ----
+
+    /// Where the record log stands.
+    fn record_head(&self) -> Result<Head> {
+        Err(Error::NoRecordLog)
+    }
+
+    /// The hash of record `seq`, if the log holds it: from where the log starts (0 for a log
+    /// that starts with the store) to its head.
+    fn record_hash_at(&self, seq: u64) -> Result<Option<Vec<u8>>> {
+        let _ = seq;
+        Err(Error::NoRecordLog)
+    }
+
+    /// Up to `limit` records after record `seq`, in order; `None` unless the log holds record
+    /// `seq` and the ones after it (it was pruned, started later, or is behind `seq`).
+    fn records_after(&self, seq: u64, limit: usize) -> Result<Option<Vec<ReplicatedRecord>>> {
+        let _ = (seq, limit);
+        Err(Error::NoRecordLog)
+    }
+
+    /// Turns SQLite's record log on or off; the file log always is one. Turned on in a store
+    /// that already holds data, a new log starts that no standby continues: each needs an
+    /// image first. Turned off, the log is dropped.
+    fn keep_record_log(&self, on: bool) -> Result<()> {
+        let _ = on;
+        Ok(())
+    }
+
+    /// Drops the records before `seq` from a log kept in a table (SQLite); record `seq` and
+    /// the newest record stay. The file log keeps every record.
+    fn prune_records(&self, seq: u64) -> Result<()> {
+        let _ = seq;
+        Ok(())
+    }
+
+    /// Applies records of another store's log that follow this store's head, in order. Each
+    /// must chain to the one before and say something this store can take: a command
+    /// enqueued once, events that continue the hash chain on their command's stream, a
+    /// completion of a pending command, a checkpoint of an event it holds. The first that
+    /// does not is [`Error::Diverged`] and is not written; records before it may stay applied
+    /// (SQLite applies all or none), each a valid continuation.
+    fn apply(&self, records: &[ReplicatedRecord]) -> Result<()> {
+        let _ = records;
+        Err(Error::NoRecordLog)
+    }
+
+    /// Calls `f` with the whole state as records, read in one consistent view, and returns
+    /// the head of the record log at that view: a full image for a standby.
+    fn image(&self, f: &mut dyn FnMut(Record) -> Result<()>) -> Result<Head> {
+        let _ = f;
+        Err(Error::NoRecordLog)
+    }
+
+    /// Applies records of an image ([`Store::image`]) to an empty store, unnumbered, with the
+    /// checks of [`Store::apply`]. Then [`Store::start_record_log`] at the image's head.
+    fn apply_image(&self, records: &[Record]) -> Result<()> {
+        let _ = records;
+        Err(Error::NoRecordLog)
+    }
+
+    /// Starts the record log at `head`: where an applied image stands.
+    fn start_record_log(&self, head: &Head) -> Result<()> {
+        let _ = head;
+        Err(Error::NoRecordLog)
+    }
+
+    /// Notes in the record log that a file of the data store was put or deleted.
+    fn data_changed(&self, tenant_id: &str, domain: &str, key: &str) -> Result<()> {
+        let _ = (tenant_id, domain, key);
+        Ok(())
+    }
 }
 
 /// How far a write has come when a store call returns.

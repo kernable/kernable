@@ -4,8 +4,11 @@
 //! file (threads or processes) stay consistent; SQLite serializes them as a single writer.
 //! Tables are `STRICT`, so stored values always have the declared types.
 //! Events form a hash chain anchored by kernel-signed checkpoints (see `proto/SIGNING.md`).
+//! While replication is on ([`Store::keep_record_log`]), every write also files its record in
+//! the table `replication`, in the same transaction (see [`crate::replication`]).
 
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard, PoisonError},
     time::Duration,
@@ -14,9 +17,12 @@ use std::{
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
-        AggregateIndex, Attribute, Command, CommandResult, Committed, Event, Grant, ListenerRecord,
-        Membership, MembershipRecord, Middleware, NewEvent, ParkedEvent, Rejected, RequestContext,
+        AggregateIndex, Attribute, CheckpointRecord, Command, CommandResult, Committed,
+        CommittedRecord, DataChangedRecord, EnqueuedRecord, Event, Grant, ListenerRecord,
+        LogRecord, LoggedEvent, Membership, MembershipRecord, Middleware, NewEvent, ParkedEvent,
+        Rejected, RejectedRecord, ReplicatedRecord, ReplicationHeadRecord, RequestContext,
         Requirement, RevocationRecord, Signature, When, WorkerRecord, command_result::Outcome,
+        log_record::Record,
     },
     signing::{self, GENESIS},
 };
@@ -26,11 +32,35 @@ use rusqlite::{
 };
 
 use crate::{
-    Checkpoint, Durability, Enqueued, Error, FORMAT, Pending, Result, Store, StreamId,
+    Checkpoint, Durability, Enqueued, Error, FORMAT, Head, Pending, Result, Store, StreamId,
     StreamSummary,
+    replication::{self, diverged},
     sync::Syncer,
     verify::{Report, Verifier},
 };
+
+/// The record log, created when replication is turned on and dropped when it is turned off.
+/// `replication_state` holds where the log starts: 0 for a log that starts with the store, or
+/// the record that started it (a `ReplicationHead` row) or that pruning kept.
+const LOG_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS replication (
+    seq    INTEGER PRIMARY KEY,
+    hash   BLOB NOT NULL,
+    record BLOB NOT NULL -- the LogRecord
+) STRICT;
+CREATE TABLE IF NOT EXISTS replication_state (
+    id   INTEGER PRIMARY KEY CHECK (id = 1),
+    base INTEGER NOT NULL
+) STRICT;
+";
+
+/// Where the record log stands; `on` false while replication is off.
+#[derive(Default)]
+struct RecordLog {
+    on: bool,
+    head: Head,
+    base: u64,
+}
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS events (
@@ -190,6 +220,8 @@ pub struct SqliteStore {
     /// The write-ahead log to flush in [`Store::sync`]; `None` unless [`Durability::Full`].
     wal: Option<std::path::PathBuf>,
     syncer: Syncer,
+    /// Locked only while `conn` is, so writes number their records in commit order.
+    log: Mutex<RecordLog>,
 }
 
 impl SqliteStore {
@@ -273,17 +305,58 @@ impl SqliteStore {
             (FORMAT, _) => {}
             (found, _) => return Err(Error::Format(found)),
         }
+        let log = load_log(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
             readers: None,
             _lock: None,
             wal: None,
             syncer: Syncer::default(),
+            log: Mutex::new(log),
         })
     }
 
     fn conn(&self) -> MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn log(&self) -> MutexGuard<'_, RecordLog> {
+        self.log.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Files `records` in the record log within `tx`, if it is on; returns the head to take
+    /// once `tx` commits ([`SqliteStore::advance`]). Call with `conn` locked.
+    fn file(&self, tx: &Connection, records: impl FnOnce() -> Vec<Record>) -> Result<Option<Head>> {
+        let mut head = {
+            let log = self.log();
+            if !log.on {
+                return Ok(None);
+            }
+            log.head.clone()
+        };
+        let mut insert =
+            tx.prepare_cached("INSERT INTO replication (seq, hash, record) VALUES (?1, ?2, ?3)")?;
+        for record in records() {
+            let body = LogRecord {
+                record: Some(record),
+            }
+            .encode_to_vec();
+            let seq = head.seq + 1;
+            let hash = replication::record_hash(&head.hash, seq, &replication::digest(&body));
+            insert.execute(params![seq, hash.to_vec(), body])?;
+            head = Head {
+                seq,
+                hash: hash.to_vec(),
+            };
+        }
+        Ok(Some(head))
+    }
+
+    /// Takes the head [`SqliteStore::file`] returned, after its transaction committed.
+    fn advance(&self, head: Option<Head>) {
+        if let Some(head) = head {
+            self.log().head = head;
+        }
     }
 
     /// Runs `read` on a reader, or on the writer's connection without readers.
@@ -389,34 +462,21 @@ impl Store for SqliteStore {
 
     /// Persists a command as pending. Idempotent on `command_id`.
     fn enqueue(&self, cmd: &Command, now_ms: i64) -> Result<Enqueued> {
-        let conn = self.conn();
-        let (key_id, sig) = split_sig(cmd.client_sig.as_ref());
-        let inserted = conn.execute(
-            "INSERT INTO commands (command_id, tenant_id, aggregate_type, aggregate_id, command_type,
-                                   payload, client_key_id, client_sig, context, domain, status,
-                                   created_at, vault_refs)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'pending', ?11, ?12)
-             ON CONFLICT (command_id) DO NOTHING",
-            params![
-                cmd.command_id,
-                cmd.tenant_id,
-                cmd.aggregate_type,
-                cmd.aggregate_id,
-                cmd.command_type,
-                readable(&cmd.payload),
-                key_id,
-                sig,
-                cmd.context.as_ref().map(context_json),
-                cmd.domain,
-                now_ms,
-                cmd.vault_refs.join(",")
-            ],
-        )?;
-        if inserted == 1 {
-            return Ok(Enqueued::New);
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if !enqueue_tx(&tx, cmd, now_ms)? {
+            let result = stored_result(&tx, &cmd.command_id)?;
+            return Ok(Enqueued::Duplicate { result });
         }
-        let result = stored_result(&conn, &cmd.command_id)?;
-        Ok(Enqueued::Duplicate { result })
+        let head = self.file(&tx, || {
+            vec![Record::Enqueued(EnqueuedRecord {
+                command: Some(cmd.clone()),
+                created_at: now_ms,
+            })]
+        })?;
+        tx.commit()?;
+        self.advance(head);
+        Ok(Enqueued::New)
     }
 
     /// All commands not completed yet, in submission order.
@@ -451,175 +511,24 @@ impl Store for SqliteStore {
     ) -> Result<Vec<Event>> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let cmd = pending_command(&tx, command_id)?;
-
-        let actual: u64 = tx.query_row(
-            "SELECT COALESCE(MAX(version), 0) FROM events
-             WHERE tenant_id = ?1 AND domain = ?2 AND aggregate_type = ?3 AND aggregate_id = ?4",
-            params![
-                cmd.tenant_id,
-                cmd.domain,
-                cmd.aggregate_type,
-                cmd.aggregate_id
-            ],
-            |r| r.get(0),
+        let (stored, logged) = commit_tx(
+            &tx,
+            command_id,
+            expected_version,
+            events,
+            producer_sig,
+            index,
+            now_ms,
         )?;
-        if actual != expected_version {
-            return Err(Error::VersionConflict {
-                expected: expected_version,
-                actual,
-            });
-        }
-
-        let (mut position, mut prev) = tx
-            .query_row(
-                "SELECT global_position, hash FROM events ORDER BY global_position DESC LIMIT 1",
-                [],
-                |r| Ok((r.get::<_, u64>(0)?, r.get::<_, Vec<u8>>(1)?)),
-            )
-            .optional()?
-            .unwrap_or((0, GENESIS.to_vec()));
-
-        let mut stored = Vec::with_capacity(events.len());
-        for (version, e) in (expected_version + 1..).zip(events) {
-            position += 1;
-            let mut event = Event {
-                global_position: position,
-                tenant_id: cmd.tenant_id.clone(),
-                domain: cmd.domain.clone(),
-                aggregate_type: cmd.aggregate_type.clone(),
-                aggregate_id: cmd.aggregate_id.clone(),
-                version,
-                event_type: e.event_type.clone(),
-                schema: e.schema,
-                vault_refs: e.vault_refs.clone(),
-                erases: e.erases.clone(),
-                payload: e.payload.clone(),
-                command_id: cmd.command_id.clone(),
-                created_at: now_ms,
-                hash: vec![],
-                producer_sig: Some(producer_sig.clone()),
-                context: cmd.context.clone(),
-            };
-            event.hash = signing::event_hash(&prev, &event).to_vec();
-            tx.execute(
-                "INSERT INTO events (global_position, tenant_id, aggregate_type, aggregate_id, version,
-                                     event_type, payload, command_id, created_at,
-                                     producer_key_id, producer_sig, prev_hash, hash, context, domain,
-                                     schema, vault_refs, erases)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                         ?18)",
-                params![
-                    event.global_position,
-                    event.tenant_id,
-                    event.aggregate_type,
-                    event.aggregate_id,
-                    event.version,
-                    event.event_type,
-                    readable(&event.payload),
-                    event.command_id,
-                    event.created_at,
-                    producer_sig.key_id,
-                    producer_sig.sig,
-                    prev,
-                    event.hash,
-                    event.context.as_ref().map(context_json),
-                    event.domain,
-                    event.schema,
-                    event.vault_refs.join(","),
-                    event.erases
-                ],
-            )?;
-            tx.execute(
-                "INSERT INTO event_types (domain, aggregate_type, event_type, schema)
-                 VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT (domain, aggregate_type, event_type) DO UPDATE SET schema = excluded.schema
-                 WHERE excluded.schema > schema",
-                params![
-                    event.domain,
-                    event.aggregate_type,
-                    event.event_type,
-                    event.schema
-                ],
-            )?;
-            prev = event.hash.clone();
-            stored.push(event);
-        }
-
-        let stream = params![
-            cmd.tenant_id,
-            cmd.domain,
-            cmd.aggregate_type,
-            cmd.aggregate_id
-        ];
-        if let Some(index) = index {
-            // The keys it held before are free, then its new ones are filed: a key another
-            // stream holds fails the commit (the kernel checks first, so that is a bug).
-            if let Some(old) = stream_index(&tx, stream)? {
-                for k in old.keys.iter().filter(|k| !k.id.is_empty()) {
-                    tx.execute("DELETE FROM unique_keys WHERE id = ?1", [&k.id])?;
-                }
-            }
-            if index.keys.is_empty() && index.facts.is_empty() {
-                tx.execute(
-                    "DELETE FROM aggregate_index
-                     WHERE tenant_id = ?1 AND domain = ?2 AND aggregate_type = ?3
-                       AND aggregate_id = ?4",
-                    stream,
-                )?;
-            } else {
-                let personal = index.keys.iter().any(|k| !k.vault_ref.is_empty());
-                tx.execute(
-                    "INSERT INTO aggregate_index
-                         (tenant_id, domain, aggregate_type, aggregate_id, record, personal)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                     ON CONFLICT (tenant_id, domain, aggregate_type, aggregate_id)
-                     DO UPDATE SET record = excluded.record, personal = excluded.personal",
-                    params![
-                        cmd.tenant_id,
-                        cmd.domain,
-                        cmd.aggregate_type,
-                        cmd.aggregate_id,
-                        index.encode_to_vec(),
-                        personal
-                    ],
-                )?;
-            }
-            for k in index.keys.iter().filter(|k| !k.id.is_empty()) {
-                tx.execute(
-                    "INSERT INTO unique_keys (id, tenant_id, domain, aggregate_type, aggregate_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![
-                        k.id,
-                        cmd.tenant_id,
-                        cmd.domain,
-                        cmd.aggregate_type,
-                        cmd.aggregate_id
-                    ],
-                )
-                .map_err(|e| match e {
-                    rusqlite::Error::SqliteFailure(f, _)
-                        if f.code == rusqlite::ErrorCode::ConstraintViolation =>
-                    {
-                        Error::KeyTaken
-                    }
-                    e => e.into(),
-                })?;
-            }
-        }
-
-        tx.execute(
-            "UPDATE commands SET status = 'committed', positions = ?2 WHERE command_id = ?1",
-            params![
-                cmd.command_id,
-                stored
-                    .iter()
-                    .map(|e| e.global_position.to_string())
-                    .collect::<Vec<_>>()
-                    .join(","),
-            ],
-        )?;
+        let head = self.file(&tx, || {
+            vec![Record::Committed(CommittedRecord {
+                command_id: command_id.to_owned(),
+                events: logged,
+                index: index.cloned(),
+            })]
+        })?;
         tx.commit()?;
+        self.advance(head);
         Ok(stored)
     }
 
@@ -813,20 +722,15 @@ impl Store for SqliteStore {
     fn reject(&self, command_id: &str, reason: Rejected) -> Result<()> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let cmd = pending_command(&tx, command_id)?;
-        tx.execute(
-            "UPDATE commands SET status = 'rejected', rejected_code = ?2, rejected_message = ?3,
-                    rejected_key = ?4, rejected_requirement = ?5
-             WHERE command_id = ?1",
-            params![
-                cmd.command_id,
-                reason.code,
-                reason.message,
-                Some(&reason.key).filter(|k| !k.is_empty()),
-                reason.requirement.as_ref().map(Message::encode_to_vec),
-            ],
-        )?;
+        reject_tx(&tx, command_id, &reason)?;
+        let head = self.file(&tx, || {
+            vec![Record::Rejected(RejectedRecord {
+                command_id: command_id.to_owned(),
+                reason: Some(reason.clone()),
+            })]
+        })?;
         tx.commit()?;
+        self.advance(head);
         Ok(())
     }
 
@@ -838,252 +742,56 @@ impl Store for SqliteStore {
     // ---- listeners ----
 
     fn listeners(&self) -> Result<Vec<ListenerRecord>> {
-        let conn = self.conn();
-        let mut stmt = conn.prepare(
-            "SELECT name, key_id, ordering, event_types, position, service, last_seen
-             FROM listeners
-             ORDER BY name",
-        )?;
-        let mut listeners = stmt
-            .query_map([], |r| {
-                Ok(ListenerRecord {
-                    name: r.get(0)?,
-                    key_id: r.get(1)?,
-                    order: r.get(2)?,
-                    event_types: split_list(r.get(3)?),
-                    position: r.get(4)?,
-                    removed: false,
-                    middlewares: Vec::new(),
-                    service: r.get(5)?,
-                    last_seen: r.get(6)?,
-                    parked: Vec::new(),
-                    parked_changed: false,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let mut parked = conn.prepare(
-            "SELECT position, event_type, code, message, attempts, parked_at, retry FROM parked
-             WHERE listener = ?1 ORDER BY position",
-        )?;
-        for l in &mut listeners {
-            l.parked = parked
-                .query_map([&l.name], |r| {
-                    Ok(ParkedEvent {
-                        position: r.get(0)?,
-                        event_type: r.get(1)?,
-                        code: r.get(2)?,
-                        message: r.get(3)?,
-                        attempts: r.get(4)?,
-                        parked_at: r.get(5)?,
-                        retry: r.get(6)?,
-                    })
-                })?
-                .collect::<rusqlite::Result<_>>()?;
-        }
-        let mut stmt = conn.prepare(
-            "SELECT phase, ordering, types FROM middlewares WHERE listener = ?1 ORDER BY phase DESC",
-        )?;
-        for l in &mut listeners {
-            l.middlewares = stmt
-                .query_map([&l.name], |r| {
-                    let phase: String = r.get(0)?;
-                    let when = if phase == "after" {
-                        When::After
-                    } else {
-                        When::Before
-                    };
-                    Ok(Middleware {
-                        order: r.get(1)?,
-                        types: split_list(r.get(2)?),
-                        when: when.into(),
-                    })
-                })?
-                .collect::<rusqlite::Result<_>>()?;
-        }
-        Ok(listeners)
+        read_listeners(&self.conn())
     }
 
     fn save_listeners(&self, listeners: &[ListenerRecord]) -> Result<()> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for l in listeners {
-            // Removing a listener removes its middlewares too (ON DELETE CASCADE).
-            tx.execute("DELETE FROM middlewares WHERE listener = ?1", [&l.name])?;
-            if l.removed {
-                tx.execute("DELETE FROM listeners WHERE name = ?1", [&l.name])?;
-                continue;
-            }
-            tx.execute(
-                "INSERT INTO listeners
-                     (name, key_id, ordering, event_types, position, service, last_seen)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                 ON CONFLICT (name) DO UPDATE SET key_id = excluded.key_id,
-                     ordering = excluded.ordering, event_types = excluded.event_types,
-                     position = excluded.position, service = excluded.service,
-                     last_seen = excluded.last_seen",
-                params![
-                    l.name,
-                    l.key_id,
-                    l.order,
-                    l.event_types.join(","),
-                    l.position,
-                    l.service,
-                    l.last_seen
-                ],
-            )?;
-            for m in &l.middlewares {
-                let phase = if m.when() == When::After {
-                    "after"
-                } else {
-                    "before"
-                };
-                tx.execute(
-                    "INSERT INTO middlewares (listener, phase, ordering, types)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    params![l.name, phase, m.order, m.types.join(",")],
-                )?;
-            }
-            if l.parked_changed {
-                tx.execute("DELETE FROM parked WHERE listener = ?1", [&l.name])?;
-                for p in &l.parked {
-                    tx.execute(
-                        "INSERT INTO parked
-                             (listener, position, event_type, code, message, attempts, parked_at,
-                              retry)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                        params![
-                            l.name,
-                            p.position,
-                            p.event_type,
-                            p.code,
-                            p.message,
-                            p.attempts,
-                            p.parked_at,
-                            p.retry
-                        ],
-                    )?;
-                }
-            }
+            save_listener_tx(&tx, l)?;
         }
+        let head = self.file(&tx, || {
+            listeners.iter().cloned().map(Record::Listener).collect()
+        })?;
         tx.commit()?;
+        self.advance(head);
         Ok(())
     }
 
     // ---- workers ----
 
     fn workers(&self) -> Result<Vec<WorkerRecord>> {
-        let conn = self.conn();
-        let mut stmt = conn.prepare(
-            "SELECT aggregate_type, key_id, command_types, service, last_seen FROM workers
-             ORDER BY aggregate_type",
-        )?;
-        let workers = stmt
-            .query_map([], |r| {
-                Ok(WorkerRecord {
-                    aggregate_type: r.get(0)?,
-                    key_id: r.get(1)?,
-                    command_types: split_list(r.get(2)?),
-                    service: r.get(3)?,
-                    last_seen: r.get(4)?,
-                    removed: false,
-                })
-            })?
-            .collect::<rusqlite::Result<_>>()?;
-        Ok(workers)
+        read_workers(&self.conn())
     }
 
     fn save_workers(&self, workers: &[WorkerRecord]) -> Result<()> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for w in workers {
-            if w.removed {
-                tx.execute(
-                    "DELETE FROM workers WHERE aggregate_type = ?1",
-                    [&w.aggregate_type],
-                )?;
-                continue;
-            }
-            tx.execute(
-                "INSERT INTO workers (aggregate_type, key_id, command_types, service, last_seen)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT (aggregate_type) DO UPDATE SET key_id = excluded.key_id,
-                     command_types = excluded.command_types, service = excluded.service,
-                     last_seen = excluded.last_seen",
-                params![
-                    w.aggregate_type,
-                    w.key_id,
-                    w.command_types.join(","),
-                    w.service,
-                    w.last_seen
-                ],
-            )?;
+            save_worker_tx(&tx, w)?;
         }
+        let head = self.file(&tx, || {
+            workers.iter().cloned().map(Record::Worker).collect()
+        })?;
         tx.commit()?;
+        self.advance(head);
         Ok(())
     }
 
     // ---- memberships ----
 
     fn memberships(&self) -> Result<Vec<MembershipRecord>> {
-        let conn = self.conn();
-        let mut stmt = conn.prepare(
-            "SELECT service, workers, listeners, middlewares, metadata, issued_at, key_id, sig,
-                    applied_at
-             FROM memberships ORDER BY service",
-        )?;
-        let memberships = stmt
-            .query_map([], |r| {
-                let metadata: String = r.get(4)?;
-                let metadata: Vec<(String, String)> =
-                    serde_json::from_str(&metadata).unwrap_or_default();
-                Ok(MembershipRecord {
-                    membership: Some(Membership {
-                        service: r.get(0)?,
-                        workers: split_list(r.get(1)?),
-                        listeners: split_list(r.get(2)?),
-                        middlewares: split_list(r.get(3)?),
-                        metadata: metadata
-                            .into_iter()
-                            .map(|(key, value)| Attribute { key, value })
-                            .collect(),
-                        issued_at: r.get(5)?,
-                    }),
-                    sig: Some(Signature {
-                        key_id: r.get(6)?,
-                        sig: r.get(7)?,
-                    }),
-                    applied_at: r.get(8)?,
-                })
-            })?
-            .collect::<rusqlite::Result<_>>()?;
-        Ok(memberships)
+        read_memberships(&self.conn())
     }
 
     fn save_membership(&self, record: &MembershipRecord) -> Result<()> {
-        let m = record.membership.clone().unwrap_or_default();
-        let sig = record.sig.clone().unwrap_or_default();
-        let metadata: Vec<(&str, &str)> = m
-            .metadata
-            .iter()
-            .map(|a| (a.key.as_str(), a.value.as_str()))
-            .collect();
-        self.conn().execute(
-            "INSERT OR REPLACE INTO memberships
-                 (service, workers, listeners, middlewares, metadata, issued_at, key_id, sig,
-                  applied_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                m.service,
-                m.workers.join(","),
-                m.listeners.join(","),
-                m.middlewares.join(","),
-                serde_json::to_string(&metadata).expect("strings serialize"),
-                m.issued_at,
-                sig.key_id,
-                sig.sig,
-                record.applied_at
-            ],
-        )?;
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        save_membership_tx(&tx, record)?;
+        let head = self.file(&tx, || vec![Record::Membership(record.clone())])?;
+        tx.commit()?;
+        self.advance(head);
         Ok(())
     }
 
@@ -1091,8 +799,9 @@ impl Store for SqliteStore {
 
     /// Signs the current head of the hash chain. Returns `None` while there are no events.
     fn checkpoint(&self, kernel: &SigningKey, now_ms: i64) -> Result<Option<Checkpoint>> {
-        let conn = self.conn();
-        let head = conn
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let head = tx
             .query_row(
                 "SELECT global_position, hash FROM events ORDER BY global_position DESC LIMIT 1",
                 [],
@@ -1102,43 +811,37 @@ impl Store for SqliteStore {
         let Some((global_position, chain_hash)) = head else {
             return Ok(None);
         };
-        if let Some(existing) = read_checkpoints(&conn, Some(global_position))?.pop() {
+        if let Some(existing) = read_checkpoints(&tx, Some(global_position))?.pop() {
             return Ok(Some(existing));
         }
         let msg = signing::checkpoint_message(global_position, &chain_hash, now_ms);
-        let kernel_sig = signing::sign(kernel, &msg);
-        conn.execute(
-            "INSERT OR IGNORE INTO checkpoints (global_position, chain_hash, kernel_key_id, kernel_sig, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                global_position,
-                chain_hash,
-                kernel_sig.key_id,
-                kernel_sig.sig,
-                now_ms
-            ],
-        )?;
-        Ok(Some(Checkpoint {
+        let record = CheckpointRecord {
             global_position,
             chain_hash,
-            kernel_sig,
+            kernel_sig: Some(signing::sign(kernel, &msg)),
             created_at: now_ms,
+        };
+        insert_checkpoint(&tx, &record)?;
+        let filed = self.file(&tx, || vec![Record::Checkpoint(record.clone())])?;
+        tx.commit()?;
+        self.advance(filed);
+        Ok(Some(Checkpoint {
+            global_position: record.global_position,
+            chain_hash: record.chain_hash,
+            kernel_sig: record.kernel_sig.unwrap_or_default(),
+            created_at: record.created_at,
         }))
     }
 
     fn revoke(&self, revocation: &RevocationRecord) -> Result<()> {
-        let sig = revocation.kernel_sig.as_ref();
-        self.conn().execute(
-            "INSERT OR IGNORE INTO revocations (key_id, since, created_at, kernel_key_id, kernel_sig)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                revocation.key_id,
-                revocation.since,
-                revocation.created_at,
-                sig.map(|s| &s.key_id),
-                sig.map(|s| &s.sig),
-            ],
-        )?;
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if !revoke_tx(&tx, revocation)? {
+            return Ok(());
+        }
+        let head = self.file(&tx, || vec![Record::Revocation(revocation.clone())])?;
+        tx.commit()?;
+        self.advance(head);
         Ok(())
     }
 
@@ -1158,28 +861,261 @@ impl Store for SqliteStore {
     }
 
     fn save_grant(&self, grant: &Grant) -> Result<()> {
-        self.conn().execute(
-            "INSERT INTO grants (key_id, issued_at, root_id, grant) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT (key_id) DO UPDATE
-             SET issued_at = excluded.issued_at, root_id = excluded.root_id, grant = excluded.grant
-             WHERE excluded.issued_at > grants.issued_at",
-            params![
-                grant.key_id,
-                grant.issued_at,
-                grant
-                    .root_sig
-                    .as_ref()
-                    .map(|s| s.key_id.as_str())
-                    .unwrap_or_default(),
-                grant.encode_to_vec(),
-            ],
-        )?;
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if !save_grant_tx(&tx, grant)? {
+            return Ok(());
+        }
+        let head = self.file(&tx, || vec![Record::Grant(grant.clone())])?;
+        tx.commit()?;
+        self.advance(head);
         Ok(())
     }
 
     /// Recomputes the hash chain and checks all signatures; see [`Report`].
     fn verify(&self, kernel_key_ids: &[String]) -> Result<Report> {
         verify_tables(&self.conn(), kernel_key_ids)
+    }
+
+    // ---- the record log ----
+
+    fn record_head(&self) -> Result<Head> {
+        let log = self.log();
+        if !log.on {
+            return Err(Error::NoRecordLog);
+        }
+        Ok(log.head.clone())
+    }
+
+    fn record_hash_at(&self, seq: u64) -> Result<Option<Vec<u8>>> {
+        {
+            let log = self.log();
+            if !log.on {
+                return Err(Error::NoRecordLog);
+            }
+            if !(log.base..=log.head.seq).contains(&seq) {
+                return Ok(None);
+            }
+            if seq == log.head.seq {
+                return Ok(Some(log.head.hash.clone()));
+            }
+            if seq == 0 {
+                return Ok(Some(replication::ZERO.to_vec()));
+            }
+        }
+        self.read(|conn| {
+            Ok(conn
+                .query_row("SELECT hash FROM replication WHERE seq = ?1", [seq], |r| {
+                    r.get(0)
+                })
+                .optional()?)
+        })
+    }
+
+    fn records_after(&self, seq: u64, limit: usize) -> Result<Option<Vec<ReplicatedRecord>>> {
+        {
+            let log = self.log();
+            if !log.on {
+                return Err(Error::NoRecordLog);
+            }
+            if !(log.base..=log.head.seq).contains(&seq) {
+                return Ok(None);
+            }
+            if seq == log.head.seq {
+                return Ok(Some(Vec::new()));
+            }
+        }
+        let rows = self.read(|conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT seq, hash, record FROM replication WHERE seq > ?1 ORDER BY seq LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![seq, limit.max(1) as u64], |r| {
+                Ok((r.get::<_, u64>(0)?, r.get(1)?, r.get::<_, Vec<u8>>(2)?))
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })?;
+        // Pruned meanwhile: the record after `seq` is gone.
+        if rows.first().is_none_or(|(first, _, _)| *first != seq + 1) {
+            return Ok(None);
+        }
+        let mut out = Vec::with_capacity(rows.len());
+        for (seq, hash, body) in rows {
+            out.push(ReplicatedRecord {
+                seq,
+                hash,
+                record: Some(LogRecord::decode(body.as_slice())?),
+            });
+        }
+        Ok(Some(out))
+    }
+
+    fn keep_record_log(&self, on: bool) -> Result<()> {
+        let mut conn = self.conn();
+        let mut log = self.log();
+        if log.on == on {
+            return Ok(());
+        }
+        if !on {
+            conn.execute_batch(
+                "DROP TABLE IF EXISTS replication; DROP TABLE IF EXISTS replication_state;",
+            )?;
+            *log = RecordLog::default();
+            return Ok(());
+        }
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute_batch(LOG_SCHEMA)?;
+        let empty: bool = tx.query_row(
+            "SELECT NOT EXISTS (SELECT 1 FROM commands) AND NOT EXISTS (SELECT 1 FROM listeners)
+                AND NOT EXISTS (SELECT 1 FROM workers) AND NOT EXISTS (SELECT 1 FROM memberships)
+                AND NOT EXISTS (SELECT 1 FROM grants) AND NOT EXISTS (SELECT 1 FROM revocations)",
+            [],
+            |r| r.get(0),
+        )?;
+        // An empty store's log starts with the store, so an empty standby continues it. One
+        // with data starts a log whose first hash nobody else has: every standby needs an
+        // image first.
+        let head = if empty {
+            Head::default()
+        } else {
+            let mut hash = [0u8; 32];
+            getrandom::fill(&mut hash).map_err(|_| Error::Corrupt("no randomness".into()))?;
+            let head = Head {
+                seq: 1,
+                hash: hash.to_vec(),
+            };
+            insert_head(&tx, &head)?;
+            head
+        };
+        tx.execute(
+            "INSERT OR REPLACE INTO replication_state (id, base) VALUES (1, ?1)",
+            [head.seq],
+        )?;
+        tx.commit()?;
+        *log = RecordLog {
+            on: true,
+            base: head.seq,
+            head,
+        };
+        Ok(())
+    }
+
+    fn prune_records(&self, seq: u64) -> Result<()> {
+        let mut conn = self.conn();
+        let mut log = self.log();
+        if !log.on {
+            return Ok(());
+        }
+        let keep = seq.min(log.head.seq);
+        if keep <= log.base {
+            return Ok(());
+        }
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute("DELETE FROM replication WHERE seq < ?1", [keep])?;
+        tx.execute("UPDATE replication_state SET base = ?1", [keep])?;
+        tx.commit()?;
+        log.base = keep;
+        Ok(())
+    }
+
+    fn apply(&self, records: &[ReplicatedRecord]) -> Result<()> {
+        let mut conn = self.conn();
+        let from = {
+            let log = self.log();
+            if !log.on {
+                return Err(Error::NoRecordLog);
+            }
+            log.head.clone()
+        };
+        let (inner, head) = replication::chained(&from, records)?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        {
+            let mut insert = tx.prepare_cached(
+                "INSERT INTO replication (seq, hash, record) VALUES (?1, ?2, ?3)",
+            )?;
+            for (r, record) in records.iter().zip(inner) {
+                apply_record(&tx, record)?;
+                insert.execute(params![r.seq, r.hash, replication::body(record)])?;
+            }
+        }
+        tx.commit()?;
+        self.log().head = head;
+        Ok(())
+    }
+
+    fn image(&self, f: &mut dyn FnMut(Record) -> Result<()>) -> Result<Head> {
+        if !self.log().on {
+            return Err(Error::NoRecordLog);
+        }
+        self.read(|conn| {
+            // One read transaction: every read below sees the store as of its first read.
+            let tx = conn.unchecked_transaction()?;
+            let head = tx
+                .query_row(
+                    "SELECT seq, hash FROM replication ORDER BY seq DESC LIMIT 1",
+                    [],
+                    |r| {
+                        Ok(Head {
+                            seq: r.get(0)?,
+                            hash: r.get(1)?,
+                        })
+                    },
+                )
+                .optional()?
+                .unwrap_or_default();
+            image_records(&tx, f)?;
+            Ok(head)
+        })
+    }
+
+    fn apply_image(&self, records: &[Record]) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for record in records {
+            match record {
+                Record::ReplicationHead(_) | Record::DataChanged(_) => {}
+                record => apply_record(&tx, record)?,
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn start_record_log(&self, head: &Head) -> Result<()> {
+        let mut conn = self.conn();
+        let mut log = self.log();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute_batch(LOG_SCHEMA)?;
+        tx.execute("DELETE FROM replication", [])?;
+        insert_head(&tx, head)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO replication_state (id, base) VALUES (1, ?1)",
+            [head.seq],
+        )?;
+        tx.commit()?;
+        *log = RecordLog {
+            on: true,
+            head: head.clone(),
+            base: head.seq,
+        };
+        Ok(())
+    }
+
+    fn data_changed(&self, tenant_id: &str, domain: &str, key: &str) -> Result<()> {
+        let mut conn = self.conn();
+        if !self.log().on {
+            return Ok(());
+        }
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let head = self.file(&tx, || {
+            vec![Record::DataChanged(DataChangedRecord {
+                tenant_id: tenant_id.to_owned(),
+                domain: domain.to_owned(),
+                key: key.to_owned(),
+            })]
+        })?;
+        tx.commit()?;
+        self.advance(head);
+        Ok(())
     }
 }
 
@@ -1531,4 +1467,842 @@ fn stored_result(conn: &Connection, command_id: &str) -> Result<Option<CommandRe
         command_id: command_id.to_owned(),
         outcome: Some(outcome),
     }))
+}
+
+/// Inserts `cmd` as pending; false if a command with its ID is stored already.
+fn enqueue_tx(tx: &Connection, cmd: &Command, now_ms: i64) -> Result<bool> {
+    let (key_id, sig) = split_sig(cmd.client_sig.as_ref());
+    let inserted = tx.execute(
+        "INSERT INTO commands (command_id, tenant_id, aggregate_type, aggregate_id, command_type,
+                               payload, client_key_id, client_sig, context, domain, status,
+                               created_at, vault_refs)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'pending', ?11, ?12)
+         ON CONFLICT (command_id) DO NOTHING",
+        params![
+            cmd.command_id,
+            cmd.tenant_id,
+            cmd.aggregate_type,
+            cmd.aggregate_id,
+            cmd.command_type,
+            readable(&cmd.payload),
+            key_id,
+            sig,
+            cmd.context.as_ref().map(context_json),
+            cmd.domain,
+            now_ms,
+            cmd.vault_refs.join(",")
+        ],
+    )?;
+    Ok(inserted == 1)
+}
+
+/// Appends `events` to the pending command's stream, extends the hash chain and
+/// completes the command, within `tx`; returns the events, and them with their predecessors'
+/// hashes for the record log. `producer_sig` is the worker's result signature;
+/// verifying it is up to the caller. `index`, if set, replaces what the stream holds.
+///
+/// On `VersionConflict` the command stays pending, so the caller can retry with fresh history.
+fn commit_tx(
+    tx: &Transaction<'_>,
+    command_id: &str,
+    expected_version: u64,
+    events: &[NewEvent],
+    producer_sig: &Signature,
+    index: Option<&AggregateIndex>,
+    now_ms: i64,
+) -> Result<(Vec<Event>, Vec<LoggedEvent>)> {
+    let cmd = pending_command(tx, command_id)?;
+
+    let actual: u64 = tx.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM events
+         WHERE tenant_id = ?1 AND domain = ?2 AND aggregate_type = ?3 AND aggregate_id = ?4",
+        params![
+            cmd.tenant_id,
+            cmd.domain,
+            cmd.aggregate_type,
+            cmd.aggregate_id
+        ],
+        |r| r.get(0),
+    )?;
+    if actual != expected_version {
+        return Err(Error::VersionConflict {
+            expected: expected_version,
+            actual,
+        });
+    }
+
+    let (mut position, mut prev) = tx
+        .query_row(
+            "SELECT global_position, hash FROM events ORDER BY global_position DESC LIMIT 1",
+            [],
+            |r| Ok((r.get::<_, u64>(0)?, r.get::<_, Vec<u8>>(1)?)),
+        )
+        .optional()?
+        .unwrap_or((0, GENESIS.to_vec()));
+
+    let mut stored = Vec::with_capacity(events.len());
+    let mut logged = Vec::with_capacity(events.len());
+    for (version, e) in (expected_version + 1..).zip(events) {
+        position += 1;
+        let mut event = Event {
+            global_position: position,
+            tenant_id: cmd.tenant_id.clone(),
+            domain: cmd.domain.clone(),
+            aggregate_type: cmd.aggregate_type.clone(),
+            aggregate_id: cmd.aggregate_id.clone(),
+            version,
+            event_type: e.event_type.clone(),
+            schema: e.schema,
+            vault_refs: e.vault_refs.clone(),
+            erases: e.erases.clone(),
+            payload: e.payload.clone(),
+            command_id: cmd.command_id.clone(),
+            created_at: now_ms,
+            hash: vec![],
+            producer_sig: Some(producer_sig.clone()),
+            context: cmd.context.clone(),
+        };
+        event.hash = signing::event_hash(&prev, &event).to_vec();
+        tx.execute(
+            "INSERT INTO events (global_position, tenant_id, aggregate_type, aggregate_id, version,
+                                 event_type, payload, command_id, created_at,
+                                 producer_key_id, producer_sig, prev_hash, hash, context, domain,
+                                 schema, vault_refs, erases)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+                     ?18)",
+            params![
+                event.global_position,
+                event.tenant_id,
+                event.aggregate_type,
+                event.aggregate_id,
+                event.version,
+                event.event_type,
+                readable(&event.payload),
+                event.command_id,
+                event.created_at,
+                producer_sig.key_id,
+                producer_sig.sig,
+                prev,
+                event.hash,
+                event.context.as_ref().map(context_json),
+                event.domain,
+                event.schema,
+                event.vault_refs.join(","),
+                event.erases
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO event_types (domain, aggregate_type, event_type, schema)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (domain, aggregate_type, event_type) DO UPDATE SET schema = excluded.schema
+             WHERE excluded.schema > schema",
+            params![
+                event.domain,
+                event.aggregate_type,
+                event.event_type,
+                event.schema
+            ],
+        )?;
+        logged.push(LoggedEvent {
+            event: Some(event.clone()),
+            prev_hash: std::mem::replace(&mut prev, event.hash.clone()),
+        });
+        stored.push(event);
+    }
+
+    let stream = params![
+        cmd.tenant_id,
+        cmd.domain,
+        cmd.aggregate_type,
+        cmd.aggregate_id
+    ];
+    if let Some(index) = index {
+        // The keys it held before are free, then its new ones are filed: a key another
+        // stream holds fails the commit (the kernel checks first, so that is a bug).
+        if let Some(old) = stream_index(tx, stream)? {
+            for k in old.keys.iter().filter(|k| !k.id.is_empty()) {
+                tx.execute("DELETE FROM unique_keys WHERE id = ?1", [&k.id])?;
+            }
+        }
+        if index.keys.is_empty() && index.facts.is_empty() {
+            tx.execute(
+                "DELETE FROM aggregate_index
+                 WHERE tenant_id = ?1 AND domain = ?2 AND aggregate_type = ?3
+                   AND aggregate_id = ?4",
+                stream,
+            )?;
+        } else {
+            let personal = index.keys.iter().any(|k| !k.vault_ref.is_empty());
+            tx.execute(
+                "INSERT INTO aggregate_index
+                     (tenant_id, domain, aggregate_type, aggregate_id, record, personal)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT (tenant_id, domain, aggregate_type, aggregate_id)
+                 DO UPDATE SET record = excluded.record, personal = excluded.personal",
+                params![
+                    cmd.tenant_id,
+                    cmd.domain,
+                    cmd.aggregate_type,
+                    cmd.aggregate_id,
+                    index.encode_to_vec(),
+                    personal
+                ],
+            )?;
+        }
+        for k in index.keys.iter().filter(|k| !k.id.is_empty()) {
+            tx.execute(
+                "INSERT INTO unique_keys (id, tenant_id, domain, aggregate_type, aggregate_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    k.id,
+                    cmd.tenant_id,
+                    cmd.domain,
+                    cmd.aggregate_type,
+                    cmd.aggregate_id
+                ],
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::SqliteFailure(f, _)
+                    if f.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    Error::KeyTaken
+                }
+                e => e.into(),
+            })?;
+        }
+    }
+
+    tx.execute(
+        "UPDATE commands SET status = 'committed', positions = ?2 WHERE command_id = ?1",
+        params![
+            cmd.command_id,
+            stored
+                .iter()
+                .map(|e| e.global_position.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+        ],
+    )?;
+    Ok((stored, logged))
+}
+
+/// Where the record log stands, from its tables; off without them.
+fn load_log(conn: &Connection) -> Result<RecordLog> {
+    let on: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE name = 'replication_state')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !on {
+        return Ok(RecordLog::default());
+    }
+    let base: u64 = conn
+        .query_row("SELECT base FROM replication_state", [], |r| r.get(0))
+        .optional()?
+        .unwrap_or(0);
+    let head = conn
+        .query_row(
+            "SELECT seq, hash FROM replication ORDER BY seq DESC LIMIT 1",
+            [],
+            |r| {
+                Ok(Head {
+                    seq: r.get(0)?,
+                    hash: r.get(1)?,
+                })
+            },
+        )
+        .optional()?
+        .unwrap_or_default();
+    Ok(RecordLog {
+        on: true,
+        head,
+        base,
+    })
+}
+
+/// Completes the pending command as rejected.
+fn reject_tx(tx: &Transaction<'_>, command_id: &str, reason: &Rejected) -> Result<()> {
+    let cmd = pending_command(tx, command_id)?;
+    tx.execute(
+        "UPDATE commands SET status = 'rejected', rejected_code = ?2, rejected_message = ?3,
+                rejected_key = ?4, rejected_requirement = ?5
+         WHERE command_id = ?1",
+        params![
+            cmd.command_id,
+            reason.code,
+            reason.message,
+            Some(&reason.key).filter(|k| !k.is_empty()),
+            reason.requirement.as_ref().map(Message::encode_to_vec),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Stores a listener's registration and position, or removes it.
+fn save_listener_tx(tx: &Connection, l: &ListenerRecord) -> Result<()> {
+    // Removing a listener removes its middlewares too (ON DELETE CASCADE).
+    tx.execute("DELETE FROM middlewares WHERE listener = ?1", [&l.name])?;
+    if l.removed {
+        tx.execute("DELETE FROM listeners WHERE name = ?1", [&l.name])?;
+        return Ok(());
+    }
+    tx.execute(
+        "INSERT INTO listeners
+             (name, key_id, ordering, event_types, position, service, last_seen)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT (name) DO UPDATE SET key_id = excluded.key_id,
+             ordering = excluded.ordering, event_types = excluded.event_types,
+             position = excluded.position, service = excluded.service,
+             last_seen = excluded.last_seen",
+        params![
+            l.name,
+            l.key_id,
+            l.order,
+            l.event_types.join(","),
+            l.position,
+            l.service,
+            l.last_seen
+        ],
+    )?;
+    for m in &l.middlewares {
+        let phase = if m.when() == When::After {
+            "after"
+        } else {
+            "before"
+        };
+        tx.execute(
+            "INSERT INTO middlewares (listener, phase, ordering, types)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![l.name, phase, m.order, m.types.join(",")],
+        )?;
+    }
+    if l.parked_changed {
+        tx.execute("DELETE FROM parked WHERE listener = ?1", [&l.name])?;
+        for p in &l.parked {
+            tx.execute(
+                "INSERT INTO parked
+                     (listener, position, event_type, code, message, attempts, parked_at, retry)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    l.name,
+                    p.position,
+                    p.event_type,
+                    p.code,
+                    p.message,
+                    p.attempts,
+                    p.parked_at,
+                    p.retry
+                ],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Stores an aggregate's registration, or removes it.
+fn save_worker_tx(tx: &Connection, w: &WorkerRecord) -> Result<()> {
+    if w.removed {
+        tx.execute(
+            "DELETE FROM workers WHERE aggregate_type = ?1",
+            [&w.aggregate_type],
+        )?;
+        return Ok(());
+    }
+    tx.execute(
+        "INSERT INTO workers (aggregate_type, key_id, command_types, service, last_seen)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT (aggregate_type) DO UPDATE SET key_id = excluded.key_id,
+             command_types = excluded.command_types, service = excluded.service,
+             last_seen = excluded.last_seen",
+        params![
+            w.aggregate_type,
+            w.key_id,
+            w.command_types.join(","),
+            w.service,
+            w.last_seen
+        ],
+    )?;
+    Ok(())
+}
+
+/// Replaces the membership of the record's service.
+fn save_membership_tx(tx: &Connection, record: &MembershipRecord) -> Result<()> {
+    let m = record.membership.clone().unwrap_or_default();
+    let sig = record.sig.clone().unwrap_or_default();
+    let metadata: Vec<(&str, &str)> = m
+        .metadata
+        .iter()
+        .map(|a| (a.key.as_str(), a.value.as_str()))
+        .collect();
+    tx.execute(
+        "INSERT OR REPLACE INTO memberships
+             (service, workers, listeners, middlewares, metadata, issued_at, key_id, sig,
+              applied_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            m.service,
+            m.workers.join(","),
+            m.listeners.join(","),
+            m.middlewares.join(","),
+            serde_json::to_string(&metadata).expect("strings serialize"),
+            m.issued_at,
+            sig.key_id,
+            sig.sig,
+            record.applied_at
+        ],
+    )?;
+    Ok(())
+}
+
+/// Keeps a signed checkpoint; false if one at its position is kept already.
+fn insert_checkpoint(tx: &Connection, cp: &CheckpointRecord) -> Result<bool> {
+    let sig = cp.kernel_sig.clone().unwrap_or_default();
+    let inserted = tx.execute(
+        "INSERT OR IGNORE INTO checkpoints
+             (global_position, chain_hash, kernel_key_id, kernel_sig, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            cp.global_position,
+            cp.chain_hash,
+            sig.key_id,
+            sig.sig,
+            cp.created_at
+        ],
+    )?;
+    Ok(inserted == 1)
+}
+
+/// Keeps a revocation; false if its key is revoked already.
+fn revoke_tx(tx: &Connection, revocation: &RevocationRecord) -> Result<bool> {
+    let sig = revocation.kernel_sig.as_ref();
+    let inserted = tx.execute(
+        "INSERT OR IGNORE INTO revocations (key_id, since, created_at, kernel_key_id, kernel_sig)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            revocation.key_id,
+            revocation.since,
+            revocation.created_at,
+            sig.map(|s| &s.key_id),
+            sig.map(|s| &s.sig),
+        ],
+    )?;
+    Ok(inserted == 1)
+}
+
+/// Keeps `grant` unless a grant of its key issued at the same time or later is kept; whether
+/// it was kept.
+fn save_grant_tx(tx: &Connection, grant: &Grant) -> Result<bool> {
+    let changed = tx.execute(
+        "INSERT INTO grants (key_id, issued_at, root_id, grant) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (key_id) DO UPDATE
+         SET issued_at = excluded.issued_at, root_id = excluded.root_id, grant = excluded.grant
+         WHERE excluded.issued_at > grants.issued_at",
+        params![
+            grant.key_id,
+            grant.issued_at,
+            grant
+                .root_sig
+                .as_ref()
+                .map(|s| s.key_id.as_str())
+                .unwrap_or_default(),
+            grant.encode_to_vec(),
+        ],
+    )?;
+    Ok(changed == 1)
+}
+
+fn read_listeners(conn: &Connection) -> Result<Vec<ListenerRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT name, key_id, ordering, event_types, position, service, last_seen
+         FROM listeners
+         ORDER BY name",
+    )?;
+    let mut listeners = stmt
+        .query_map([], |r| {
+            Ok(ListenerRecord {
+                name: r.get(0)?,
+                key_id: r.get(1)?,
+                order: r.get(2)?,
+                event_types: split_list(r.get(3)?),
+                position: r.get(4)?,
+                removed: false,
+                middlewares: Vec::new(),
+                service: r.get(5)?,
+                last_seen: r.get(6)?,
+                parked: Vec::new(),
+                parked_changed: false,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut parked = conn.prepare(
+        "SELECT position, event_type, code, message, attempts, parked_at, retry FROM parked
+         WHERE listener = ?1 ORDER BY position",
+    )?;
+    for l in &mut listeners {
+        l.parked = parked
+            .query_map([&l.name], |r| {
+                Ok(ParkedEvent {
+                    position: r.get(0)?,
+                    event_type: r.get(1)?,
+                    code: r.get(2)?,
+                    message: r.get(3)?,
+                    attempts: r.get(4)?,
+                    parked_at: r.get(5)?,
+                    retry: r.get(6)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+    }
+    let mut stmt = conn.prepare(
+        "SELECT phase, ordering, types FROM middlewares WHERE listener = ?1 ORDER BY phase DESC",
+    )?;
+    for l in &mut listeners {
+        l.middlewares = stmt
+            .query_map([&l.name], |r| {
+                let phase: String = r.get(0)?;
+                let when = if phase == "after" {
+                    When::After
+                } else {
+                    When::Before
+                };
+                Ok(Middleware {
+                    order: r.get(1)?,
+                    types: split_list(r.get(2)?),
+                    when: when.into(),
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+    }
+    Ok(listeners)
+}
+
+fn read_workers(conn: &Connection) -> Result<Vec<WorkerRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT aggregate_type, key_id, command_types, service, last_seen FROM workers
+         ORDER BY aggregate_type",
+    )?;
+    let workers = stmt
+        .query_map([], |r| {
+            Ok(WorkerRecord {
+                aggregate_type: r.get(0)?,
+                key_id: r.get(1)?,
+                command_types: split_list(r.get(2)?),
+                service: r.get(3)?,
+                last_seen: r.get(4)?,
+                removed: false,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(workers)
+}
+
+fn read_memberships(conn: &Connection) -> Result<Vec<MembershipRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT service, workers, listeners, middlewares, metadata, issued_at, key_id, sig,
+                applied_at
+         FROM memberships ORDER BY service",
+    )?;
+    let memberships = stmt
+        .query_map([], |r| {
+            let metadata: String = r.get(4)?;
+            let metadata: Vec<(String, String)> =
+                serde_json::from_str(&metadata).unwrap_or_default();
+            Ok(MembershipRecord {
+                membership: Some(Membership {
+                    service: r.get(0)?,
+                    workers: split_list(r.get(1)?),
+                    listeners: split_list(r.get(2)?),
+                    middlewares: split_list(r.get(3)?),
+                    metadata: metadata
+                        .into_iter()
+                        .map(|(key, value)| Attribute { key, value })
+                        .collect(),
+                    issued_at: r.get(5)?,
+                }),
+                sig: Some(Signature {
+                    key_id: r.get(6)?,
+                    sig: r.get(7)?,
+                }),
+                applied_at: r.get(8)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(memberships)
+}
+
+/// Files the record that starts a log at `head`: an image's head, or a new log's random start.
+fn insert_head(tx: &Connection, head: &Head) -> Result<()> {
+    if head.seq == 0 {
+        return Ok(());
+    }
+    let record = Record::ReplicationHead(ReplicationHeadRecord {
+        seq: head.seq,
+        hash: head.hash.clone(),
+    });
+    tx.execute(
+        "INSERT INTO replication (seq, hash, record) VALUES (?1, ?2, ?3)",
+        params![head.seq, head.hash, replication::body(&record)],
+    )?;
+    Ok(())
+}
+
+/// Applies one record of another store's log within `tx`, with the checks [`Store::apply`]
+/// names.
+fn apply_record(tx: &Transaction<'_>, record: &Record) -> Result<()> {
+    let not_pending = |id: &str| {
+        let id = id.to_owned();
+        move |e: Error| match e {
+            Error::NotPending => diverged(format!("command {id} is not pending")),
+            e => e,
+        }
+    };
+    match record {
+        Record::Enqueued(e) => {
+            let cmd = e
+                .command
+                .as_ref()
+                .ok_or_else(|| diverged("an enqueued record without its command".into()))?;
+            if !enqueue_tx(tx, cmd, e.created_at)? {
+                return Err(diverged(format!(
+                    "command {} is enqueued already",
+                    cmd.command_id
+                )));
+            }
+        }
+        Record::Committed(c) => apply_commit(tx, c)?,
+        Record::Rejected(r) => {
+            let reason = r.reason.clone().unwrap_or_default();
+            reject_tx(tx, &r.command_id, &reason).map_err(not_pending(&r.command_id))?;
+        }
+        Record::Checkpoint(cp) => {
+            let hash: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT hash FROM events WHERE global_position = ?1",
+                    [cp.global_position],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if hash.as_ref() != Some(&cp.chain_hash) || !insert_checkpoint(tx, cp)? {
+                return Err(diverged(format!(
+                    "a checkpoint of event {} this store does not hold",
+                    cp.global_position
+                )));
+            }
+        }
+        Record::Listener(l) => save_listener_tx(tx, l)?,
+        Record::Worker(w) => save_worker_tx(tx, w)?,
+        Record::Membership(m) => save_membership_tx(tx, m)?,
+        Record::Revocation(r) => {
+            revoke_tx(tx, r)?;
+        }
+        Record::Grant(g) => {
+            save_grant_tx(tx, g)?;
+        }
+        Record::DataChanged(_) => {}
+        Record::Format(_) | Record::ReplicationHead(_) => {
+            return Err(diverged("a record that starts a log".into()));
+        }
+    }
+    Ok(())
+}
+
+/// Commits another store's commit here, through the same path as a worker's result: the
+/// events must continue the chain, and committing them must give exactly them.
+fn apply_commit(tx: &Transaction<'_>, c: &CommittedRecord) -> Result<()> {
+    let (position, prev) = tx
+        .query_row(
+            "SELECT global_position, hash FROM events ORDER BY global_position DESC LIMIT 1",
+            [],
+            |r| Ok((r.get::<_, u64>(0)?, r.get::<_, Vec<u8>>(1)?)),
+        )
+        .optional()?
+        .unwrap_or((0, GENESIS.to_vec()));
+    replication::check_events(prev, position, &c.events)?;
+    let theirs: Vec<&Event> = c.events.iter().filter_map(|l| l.event.as_ref()).collect();
+    let cmd = pending_command(tx, &c.command_id).map_err(|e| match e {
+        Error::NotPending => diverged(format!("command {} is not pending", c.command_id)),
+        e => e,
+    })?;
+    let expected = match theirs.first() {
+        Some(e) => e
+            .version
+            .checked_sub(1)
+            .ok_or_else(|| diverged(format!("event {} has version 0", e.global_position)))?,
+        None => tx.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM events
+             WHERE tenant_id = ?1 AND domain = ?2 AND aggregate_type = ?3 AND aggregate_id = ?4",
+            params![
+                cmd.tenant_id,
+                cmd.domain,
+                cmd.aggregate_type,
+                cmd.aggregate_id
+            ],
+            |r| r.get(0),
+        )?,
+    };
+    let events: Vec<NewEvent> = theirs
+        .iter()
+        .map(|e| NewEvent {
+            event_type: e.event_type.clone(),
+            payload: e.payload.clone(),
+            schema: e.schema,
+            vault_refs: e.vault_refs.clone(),
+            erases: e.erases.clone(),
+        })
+        .collect();
+    let first = theirs.first();
+    let sig = first
+        .and_then(|e| e.producer_sig.clone())
+        .unwrap_or_default();
+    let now_ms = first.map_or(0, |e| e.created_at);
+    let (stored, _) = commit_tx(
+        tx,
+        &c.command_id,
+        expected,
+        &events,
+        &sig,
+        c.index.as_ref(),
+        now_ms,
+    )
+    .map_err(|e| match e {
+        Error::VersionConflict { .. } | Error::KeyTaken | Error::NotPending => diverged(format!(
+            "command {} does not commit here: {e}",
+            c.command_id
+        )),
+        e => e,
+    })?;
+    if !stored.iter().eq(theirs.iter().copied()) {
+        return Err(diverged(format!(
+            "command {} commits other events here",
+            c.command_id
+        )));
+    }
+    Ok(())
+}
+
+/// Calls `f` with the whole store as records, in an order that applies: what is registered,
+/// every command as enqueued, every commit in log order (each stream's newest keys and facts
+/// with the commit of its last event), commits without events, rejections, listeners with
+/// their parked events, checkpoints.
+fn image_records(conn: &Connection, f: &mut dyn FnMut(Record) -> Result<()>) -> Result<()> {
+    let grants: Vec<Vec<u8>> = conn
+        .prepare("SELECT grant FROM grants ORDER BY key_id")?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for g in grants {
+        f(Record::Grant(Grant::decode(g.as_slice())?))?;
+    }
+    for r in read_revocations(conn)? {
+        f(Record::Revocation(r))?;
+    }
+    for m in read_memberships(conn)? {
+        f(Record::Membership(m))?;
+    }
+    for w in read_workers(conn)? {
+        f(Record::Worker(w))?;
+    }
+    {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {COMMAND_COLUMNS}, created_at FROM commands ORDER BY rowid"
+        ))?;
+        let mut rows = stmt.query([])?;
+        while let Some(r) = rows.next()? {
+            f(Record::Enqueued(EnqueuedRecord {
+                command: Some(command_from_row(r)?),
+                created_at: r.get(11)?,
+            }))?;
+        }
+    }
+    let mut indexes: HashMap<u64, AggregateIndex> = HashMap::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT a.record, (SELECT MAX(e.global_position) FROM events e
+                               WHERE e.tenant_id = a.tenant_id AND e.domain = a.domain
+                                 AND e.aggregate_type = a.aggregate_type
+                                 AND e.aggregate_id = a.aggregate_id)
+             FROM aggregate_index a",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Option<u64>>(1)?))
+        })?;
+        for row in rows {
+            let (record, last) = row?;
+            let last = last.ok_or_else(|| {
+                Error::Corrupt("a stream holds keys or facts but has no events".into())
+            })?;
+            indexes.insert(last, AggregateIndex::decode(record.as_slice())?);
+        }
+    }
+    {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {EVENT_COLUMNS}, prev_hash FROM events ORDER BY global_position"
+        ))?;
+        let mut rows = stmt.query([])?;
+        let mut commit: Option<CommittedRecord> = None;
+        while let Some(r) = rows.next()? {
+            let event = event_from_row(r)?;
+            let prev_hash: Vec<u8> = r.get(17)?;
+            if let Some(done) = commit.take_if(|c| c.command_id != event.command_id) {
+                f(Record::Committed(done))?;
+            }
+            let c = commit.get_or_insert_with(|| CommittedRecord {
+                command_id: event.command_id.clone(),
+                events: Vec::new(),
+                index: None,
+            });
+            if let Some(index) = indexes.remove(&event.global_position) {
+                c.index = Some(index);
+            }
+            c.events.push(LoggedEvent {
+                event: Some(event),
+                prev_hash,
+            });
+        }
+        if let Some(done) = commit {
+            f(Record::Committed(done))?;
+        }
+    }
+    let ids = |status: &str| -> Result<Vec<String>> {
+        let positions = if status == "committed" {
+            " AND positions = ''"
+        } else {
+            ""
+        };
+        Ok(conn
+            .prepare(&format!(
+                "SELECT command_id FROM commands WHERE status = ?1{positions} ORDER BY rowid"
+            ))?
+            .query_map([status], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    };
+    for command_id in ids("committed")? {
+        f(Record::Committed(CommittedRecord {
+            command_id,
+            events: Vec::new(),
+            index: None,
+        }))?;
+    }
+    for command_id in ids("rejected")? {
+        let reason = match stored_result(conn, &command_id)?.and_then(|r| r.outcome) {
+            Some(Outcome::Rejected(reason)) => reason,
+            _ => return Err(Error::Corrupt(format!("rejected command {command_id}"))),
+        };
+        f(Record::Rejected(RejectedRecord {
+            command_id,
+            reason: Some(reason),
+        }))?;
+    }
+    for mut l in read_listeners(conn)? {
+        l.parked_changed = true;
+        f(Record::Listener(l))?;
+    }
+    for cp in read_checkpoints(conn, None)? {
+        f(Record::Checkpoint(CheckpointRecord {
+            global_position: cp.global_position,
+            chain_hash: cp.chain_hash,
+            kernel_sig: Some(cp.kernel_sig),
+            created_at: cp.created_at,
+        }))?;
+    }
+    Ok(())
 }

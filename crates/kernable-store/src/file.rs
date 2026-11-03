@@ -16,35 +16,40 @@
 //! every further write: what the OS still buffers can no longer be trusted, and only a restart,
 //! which replays the log from the disk, knows what was kept.
 //!
+//! The log is also the record log a primary sends its standby (see [`crate::replication`]):
+//! record `n` is the `n`-th record after the format record, or after the newest
+//! `ReplicationHead` record where an image started the log. Every [`STRIDE`]-th record's offset
+//! and hash are kept in memory, so records are found without reading the log from its start.
+//!
 //! `memory:` keeps the state only in memory: nothing survives the process. For tests and
-//! benchmarks.
+//! benchmarks; it keeps no record log.
 
 use std::{
     collections::{BTreeMap, HashMap},
     fs::{self, File, OpenOptions},
-    io::Write,
+    io::{BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 
+use crate::{
+    Checkpoint, Durability, Enqueued, Error, FORMAT, Head, Pending, Result, Store, StreamId,
+    replication::{self, diverged},
+    sync::Syncer,
+    verify::{Report, Verifier},
+};
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
         AggregateIndex, CheckpointRecord, Command, CommandResult, Committed, CommittedRecord,
-        EnqueuedRecord, Event, FormatRecord, Grant, ListenerRecord, LogRecord, LoggedEvent,
-        MembershipRecord, NewEvent, Rejected, RejectedRecord, RevocationRecord, Signature,
-        WorkerRecord, command_result::Outcome, log_record::Record,
+        DataChangedRecord, EnqueuedRecord, Event, FormatRecord, Grant, ListenerRecord, LogRecord,
+        LoggedEvent, MembershipRecord, NewEvent, Rejected, RejectedRecord, ReplicatedRecord,
+        ReplicationHeadRecord, RevocationRecord, Signature, WorkerRecord, command_result::Outcome,
+        log_record::Record,
     },
     signing::{self, GENESIS},
 };
 use prost::Message;
-use sha2::{Digest, Sha256};
-
-use crate::{
-    Checkpoint, Durability, Enqueued, Error, FORMAT, Pending, Result, Store, StreamId,
-    sync::Syncer,
-    verify::{Report, Verifier},
-};
 
 const HEADER: usize = 8;
 
@@ -226,6 +231,90 @@ impl State {
                     self.grants.insert(g.key_id.clone(), g);
                 }
             }
+            // Only the record log counts them.
+            Record::DataChanged(_) | Record::ReplicationHead(_) => {}
+        }
+        Ok(())
+    }
+
+    /// Whether `record`, from another store's record log, continues this state: what
+    /// [`Store::apply`] checks before it writes. A record that passes applies.
+    fn admissible(&self, record: &Record) -> Result<()> {
+        match record {
+            Record::Enqueued(e) => {
+                let c = e
+                    .command
+                    .as_ref()
+                    .ok_or_else(|| diverged("an enqueued record without its command".into()))?;
+                if self.commands.contains_key(&c.command_id) {
+                    return Err(diverged(format!(
+                        "command {} is enqueued already",
+                        c.command_id
+                    )));
+                }
+            }
+            Record::Committed(c) => {
+                let cmd = &self
+                    .pending(&c.command_id)
+                    .map_err(|_| diverged(format!("command {} is not pending", c.command_id)))?
+                    .command;
+                let own = stream_key(cmd);
+                let prev = self
+                    .events
+                    .last()
+                    .map_or(GENESIS.to_vec(), |e| e.hash.clone());
+                replication::check_events(prev, self.events.len() as u64, &c.events)?;
+                let version = self.streams.get(&own).map_or(0, |s| s.len() as u64);
+                for (v, logged) in (version + 1..).zip(&c.events) {
+                    let e = logged.event.as_ref().expect("checked by check_events");
+                    let stream = (
+                        e.tenant_id.clone(),
+                        e.domain.clone(),
+                        e.aggregate_type.clone(),
+                        e.aggregate_id.clone(),
+                    );
+                    if e.command_id != c.command_id || stream != own || e.version != v {
+                        return Err(diverged(format!(
+                            "event {} is not version {v} of command {}'s stream",
+                            e.global_position, c.command_id
+                        )));
+                    }
+                }
+                let taken = c.index.iter().flat_map(|i| &i.keys).any(|k| {
+                    !k.id.is_empty() && self.holders.get(&k.id).is_some_and(|h| *h != own)
+                });
+                if taken {
+                    return Err(diverged(format!(
+                        "a unique key of command {} is held by another stream",
+                        c.command_id
+                    )));
+                }
+            }
+            Record::Rejected(r) => {
+                self.pending(&r.command_id)
+                    .map_err(|_| diverged(format!("command {} is not pending", r.command_id)))?;
+            }
+            Record::Checkpoint(cp) => {
+                let held = (cp.global_position as usize)
+                    .checked_sub(1)
+                    .and_then(|i| self.events.get(i))
+                    .is_some_and(|e| e.hash == cp.chain_hash);
+                if !held {
+                    return Err(diverged(format!(
+                        "a checkpoint of event {} this store does not hold",
+                        cp.global_position
+                    )));
+                }
+            }
+            Record::Format(_) | Record::ReplicationHead(_) => {
+                return Err(diverged("a record that starts a log".into()));
+            }
+            Record::Listener(_)
+            | Record::Revocation(_)
+            | Record::Worker(_)
+            | Record::Membership(_)
+            | Record::Grant(_)
+            | Record::DataChanged(_) => {}
         }
         Ok(())
     }
@@ -263,11 +352,66 @@ enum Sink {
     ReadOnly,
 }
 
+/// Every this many records, the record log notes where one starts and the hash before it.
+const STRIDE: u64 = 1024;
+
+/// Where the record log stands, and how to find its records in the file.
+#[derive(Default)]
+struct RecordLog {
+    head: Head,
+    /// The log holds the records after this one: 0, or where a `ReplicationHead` started it.
+    base: u64,
+    /// `(seq, offset, hash)`: record `seq + 1` starts at byte `offset` and record `seq` has
+    /// `hash`; one every [`STRIDE`] records from `base`.
+    marks: Vec<(u64, u64, Vec<u8>)>,
+}
+
+impl RecordLog {
+    /// Counts `record`, which starts at byte `offset` and whose body has SHA-256 `digest`.
+    fn advance(&mut self, record: &Record, offset: u64, digest: &[u8]) {
+        match record {
+            Record::Format(_) => {}
+            Record::ReplicationHead(h) => {
+                self.head = Head {
+                    seq: h.seq,
+                    hash: h.hash.clone(),
+                };
+                self.base = h.seq;
+                self.marks.clear();
+            }
+            _ => {
+                if (self.head.seq - self.base).is_multiple_of(STRIDE) {
+                    self.marks
+                        .push((self.head.seq, offset, self.head.hash.clone()));
+                }
+                let seq = self.head.seq + 1;
+                let hash = replication::record_hash(&self.head.hash, seq, digest);
+                self.head = Head {
+                    seq,
+                    hash: hash.to_vec(),
+                };
+            }
+        }
+    }
+
+    /// Whether the log holds record `seq` (`base` counts: its hash is known).
+    fn holds(&self, seq: u64) -> bool {
+        (self.base..=self.head.seq).contains(&seq)
+    }
+
+    /// The newest mark at or before record `seq`, for `base <= seq < head`.
+    fn mark(&self, seq: u64) -> (u64, u64, Vec<u8>) {
+        let i = self.marks.partition_point(|m| m.0 <= seq);
+        self.marks[i.checked_sub(1).expect("a mark at base")].clone()
+    }
+}
+
 struct Inner {
     state: State,
     sink: Sink,
     /// Length of the log; a failed write is cut back to it.
     len: u64,
+    log: RecordLog,
     syncer: Arc<Syncer>,
 }
 
@@ -277,6 +421,8 @@ pub struct FileStore {
     /// The log's file, to flush it without holding the store's lock; `None` unless
     /// [`Durability::Full`].
     flush: Option<File>,
+    /// Where the log is, to read records back; `None` without a file.
+    path: Option<PathBuf>,
 }
 
 impl FileStore {
@@ -295,13 +441,14 @@ impl FileStore {
         file.try_lock()
             .map_err(|_| Error::Io(std::io::Error::other("store is in use by another process")))?;
         let bytes = fs::read(path)?;
-        let (state, valid) = replay(&bytes)?;
+        let (state, log, valid) = replay(&bytes)?;
         if valid == 0 {
             // A new log (or one torn before its first record ended) starts with its format.
             file.set_len(0)?;
             let flush = flush_handle(&file, durability)?;
-            let mut store = Self::new(state, Sink::File(file), 0);
+            let mut store = Self::new(state, log, Sink::File(file), 0);
             store.flush = flush;
+            store.path = Some(path.to_owned());
             append(
                 &mut store.inner(),
                 Record::Format(FormatRecord { version: FORMAT }),
@@ -326,40 +473,53 @@ impl FileStore {
             );
         }
         let flush = flush_handle(&file, durability)?;
-        let mut store = Self::new(state, Sink::File(file), valid as u64);
+        let mut store = Self::new(state, log, Sink::File(file), valid as u64);
         store.flush = flush;
+        store.path = Some(path.to_owned());
         Ok(store)
     }
 
     /// Replays the log without locking or repairing it; all writes fail with `ReadOnly`.
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
-        let bytes = fs::read(path)?;
-        let (state, valid) = replay(&bytes)?;
-        Ok(Self::new(state, Sink::ReadOnly, valid as u64))
+        let bytes = fs::read(path.as_ref())?;
+        let (state, log, valid) = replay(&bytes)?;
+        let mut store = Self::new(state, log, Sink::ReadOnly, valid as u64);
+        store.path = Some(path.as_ref().to_owned());
+        Ok(store)
     }
 
     /// Replays a log held in memory, read-only: for tools, property tests and fuzzing.
     pub fn open_bytes(bytes: &[u8]) -> Result<Self> {
-        let (state, valid) = replay(bytes)?;
-        Ok(Self::new(state, Sink::ReadOnly, valid as u64))
+        let (state, log, valid) = replay(bytes)?;
+        Ok(Self::new(state, log, Sink::ReadOnly, valid as u64))
     }
 
     /// A store that lives only in this process.
     pub fn in_memory() -> Self {
-        Self::new(State::default(), Sink::Memory, 0)
+        Self::new(State::default(), RecordLog::default(), Sink::Memory, 0)
     }
 
-    fn new(state: State, sink: Sink, len: u64) -> Self {
+    fn new(state: State, log: RecordLog, sink: Sink, len: u64) -> Self {
         let syncer = Arc::new(Syncer::default());
         FileStore {
             inner: Mutex::new(Inner {
                 state,
                 sink,
                 len,
+                log,
                 syncer: Arc::clone(&syncer),
             }),
             syncer,
             flush: None,
+            path: None,
+        }
+    }
+
+    /// The log's path and length, for reading records back; refused without a file.
+    fn readable(&self, inner: &Inner) -> Result<(PathBuf, u64)> {
+        match (&inner.sink, &self.path) {
+            (Sink::Memory, _) | (_, None) => Err(Error::NoRecordLog),
+            (_, Some(path)) => Ok((path.clone(), inner.len)),
         }
     }
 
@@ -380,9 +540,10 @@ fn append(inner: &mut Inner, record: Record) -> Result<()> {
         record: Some(record),
     }
     .encode_to_vec();
+    let digest = replication::digest(&body);
     let mut buf = Vec::with_capacity(HEADER + body.len());
     buf.extend((body.len() as u32).to_be_bytes());
-    buf.extend(checksum(&body));
+    buf.extend(&digest[..4]);
     buf.extend(&body);
     if let Err(e) = file.write_all(&buf) {
         // Never leave a partial record in front of the next one.
@@ -390,14 +551,50 @@ fn append(inner: &mut Inner, record: Record) -> Result<()> {
         return Err(e.into());
     }
     inner.syncer.wrote();
+    let offset = inner.len;
     inner.len += buf.len() as u64;
-    let record = LogRecord::decode(body.as_slice())?.record;
-    inner.state.apply(record.expect("just encoded"))
+    let record = LogRecord::decode(body.as_slice())?
+        .record
+        .expect("just encoded");
+    inner.log.advance(&record, offset, &digest);
+    inner.state.apply(record)
 }
 
-/// Rebuilds the state; returns it with the length of the intact prefix.
-fn replay(bytes: &[u8]) -> Result<(State, usize)> {
+/// Calls `f` with the offset and body of each record from byte `from` up to byte `to` of the
+/// log at `path`, until it returns false. The bytes up to `to` were checked when the log was
+/// opened or written.
+fn scan(
+    path: &Path,
+    from: u64,
+    to: u64,
+    f: &mut dyn FnMut(u64, &[u8]) -> Result<bool>,
+) -> Result<()> {
+    let mut file = BufReader::new(File::open(path)?);
+    file.seek(SeekFrom::Start(from))?;
+    let (mut at, mut header, mut body) = (from, [0u8; HEADER], Vec::new());
+    while at < to {
+        file.read_exact(&mut header)?;
+        let len = u32::from_be_bytes(header[..4].try_into().expect("4 bytes")) as usize;
+        body.resize(len, 0);
+        file.read_exact(&mut body)?;
+        if !f(at, &body)? {
+            break;
+        }
+        at += (HEADER + len) as u64;
+    }
+    Ok(())
+}
+
+fn decode(body: &[u8]) -> Result<Record> {
+    LogRecord::decode(body)?
+        .record
+        .ok_or_else(|| corrupt("an empty record"))
+}
+
+/// Rebuilds the state and the record log; returns them with the length of the intact prefix.
+fn replay(bytes: &[u8]) -> Result<(State, RecordLog, usize)> {
     let mut state = State::default();
+    let mut log = RecordLog::default();
     let mut at = 0;
     while at < bytes.len() {
         let Some(header) = bytes.get(at..at + HEADER) else {
@@ -407,7 +604,8 @@ fn replay(bytes: &[u8]) -> Result<(State, usize)> {
         let Some(body) = bytes.get(at + HEADER..at + HEADER + len) else {
             break; // torn body
         };
-        if checksum(body) != header[4..] {
+        let digest = replication::digest(body);
+        if digest[..4] != header[4..] {
             if at + HEADER + len == bytes.len() {
                 break; // torn last record
             }
@@ -424,10 +622,11 @@ fn replay(bytes: &[u8]) -> Result<(State, usize)> {
             (Record::Format(_), _) => return Err(corrupt(&format!("format record at byte {at}"))),
             _ => {}
         }
+        log.advance(&record, at as u64, &digest);
         state.apply(record)?;
         at += HEADER + len;
     }
-    Ok((state, at))
+    Ok((state, log, at))
 }
 
 /// A second handle on the log to flush it with, for [`Durability::Full`].
@@ -451,10 +650,6 @@ pub(crate) fn sync_directory(path: &Path) -> Result<()> {
     #[cfg(not(unix))]
     let _ = path;
     Ok(())
-}
-
-fn checksum(body: &[u8]) -> [u8; 4] {
-    Sha256::digest(body)[..4].try_into().expect("4 bytes")
 }
 
 fn corrupt(what: &str) -> Error {
@@ -846,5 +1041,144 @@ impl Store for FileStore {
             v.command(&c.command, c.received_at);
         }
         Ok(v.finish())
+    }
+
+    fn record_head(&self) -> Result<Head> {
+        let inner = self.inner();
+        match inner.sink {
+            Sink::Memory => Err(Error::NoRecordLog),
+            _ => Ok(inner.log.head.clone()),
+        }
+    }
+
+    fn record_hash_at(&self, seq: u64) -> Result<Option<Vec<u8>>> {
+        let (path, to, (mut at, from, mut hash)) = {
+            let inner = self.inner();
+            let (path, to) = self.readable(&inner)?;
+            if !inner.log.holds(seq) {
+                return Ok(None);
+            }
+            if seq == inner.log.head.seq {
+                return Ok(Some(inner.log.head.hash.clone()));
+            }
+            (path, to, inner.log.mark(seq))
+        };
+        scan(&path, from, to, &mut |_, body| {
+            if at == seq {
+                return Ok(false);
+            }
+            at += 1;
+            hash = replication::record_hash(&hash, at, &replication::digest(body)).to_vec();
+            Ok(at < seq)
+        })?;
+        Ok(Some(hash))
+    }
+
+    fn records_after(&self, seq: u64, limit: usize) -> Result<Option<Vec<ReplicatedRecord>>> {
+        let (path, to, (mut at, from, mut hash)) = {
+            let inner = self.inner();
+            let (path, to) = self.readable(&inner)?;
+            if !inner.log.holds(seq) {
+                return Ok(None);
+            }
+            if seq == inner.log.head.seq {
+                return Ok(Some(Vec::new()));
+            }
+            (path, to, inner.log.mark(seq))
+        };
+        let mut out = Vec::new();
+        scan(&path, from, to, &mut |_, body| {
+            at += 1;
+            hash = replication::record_hash(&hash, at, &replication::digest(body)).to_vec();
+            if at > seq {
+                out.push(ReplicatedRecord {
+                    seq: at,
+                    hash: hash.clone(),
+                    record: Some(LogRecord {
+                        record: Some(decode(body)?),
+                    }),
+                });
+            }
+            Ok(out.len() < limit.max(1))
+        })?;
+        Ok(Some(out))
+    }
+
+    fn apply(&self, records: &[ReplicatedRecord]) -> Result<()> {
+        let mut inner = self.inner();
+        if matches!(inner.sink, Sink::Memory) {
+            return Err(Error::NoRecordLog);
+        }
+        let (records, head) = replication::chained(&inner.log.head, records)?;
+        for record in records {
+            inner.state.admissible(record)?;
+            append(&mut inner, record.clone())?;
+        }
+        if inner.log.head != head {
+            return Err(diverged(format!(
+                "record {} hashes differently here",
+                inner.log.head.seq
+            )));
+        }
+        Ok(())
+    }
+
+    fn image(&self, f: &mut dyn FnMut(Record) -> Result<()>) -> Result<Head> {
+        let (path, to, head) = {
+            let inner = self.inner();
+            let (path, to) = self.readable(&inner)?;
+            (path, to, inner.log.head.clone())
+        };
+        // The log only grows, so its first `to` bytes are the state at `head`.
+        scan(&path, 0, to, &mut |_, body| {
+            match decode(body)? {
+                Record::Format(_) | Record::ReplicationHead(_) | Record::DataChanged(_) => {}
+                record => f(record)?,
+            }
+            Ok(true)
+        })?;
+        Ok(head)
+    }
+
+    fn apply_image(&self, records: &[Record]) -> Result<()> {
+        let mut inner = self.inner();
+        if matches!(inner.sink, Sink::Memory) {
+            return Err(Error::NoRecordLog);
+        }
+        for record in records {
+            match record {
+                Record::ReplicationHead(_) | Record::DataChanged(_) => {}
+                record => {
+                    inner.state.admissible(record)?;
+                    append(&mut inner, record.clone())?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn start_record_log(&self, head: &Head) -> Result<()> {
+        let mut inner = self.inner();
+        if matches!(inner.sink, Sink::Memory) {
+            return Err(Error::NoRecordLog);
+        }
+        let record = Record::ReplicationHead(ReplicationHeadRecord {
+            seq: head.seq,
+            hash: head.hash.clone(),
+        });
+        append(&mut inner, record)
+    }
+
+    fn data_changed(&self, tenant_id: &str, domain: &str, key: &str) -> Result<()> {
+        let mut inner = self.inner();
+        if matches!(inner.sink, Sink::Memory) {
+            return Ok(());
+        }
+        let record = Record::DataChanged(DataChangedRecord {
+            tenant_id: tenant_id.to_owned(),
+            domain: domain.to_owned(),
+            key: key.to_owned(),
+        });
+        append(&mut inner, record)
     }
 }

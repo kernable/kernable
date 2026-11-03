@@ -1,6 +1,6 @@
 # Invariants
 
-Status: H0 of the hardening plan; O5–O7 and X1–X8 made executable in H4; the soak's bank rules B1–B7 added in H7 and after; updated 2026-11-02 for parked events, erasure after the commit, file writes once tried and requirements by key.
+Status: H0 of the hardening plan; O5–O7 and X1–X8 made executable in H4; the soak's bank rules B1–B7 added in H7 and after; updated 2026-11-02 for parked events, erasure after the commit, file writes once tried and requirements by key; 2026-11-03: replication and failover P1–P4 planned.
 
 What must hold whatever happens: any input, any crash, any fault, any interleaving. Every robustness test checks these invariants rather than its own ad-hoc assertions, so a failure names the guarantee that broke. The threat model is in [threat-model.md](threat-model.md).
 
@@ -70,6 +70,17 @@ Checked by overload and soak runs.
 | R3 | A stored command completes once a worker for its aggregate is connected, also when the aggregate's history is longer than one message (it is sent in parts) |
 | R4 | A failed write (ENOSPC, EIO, fsync) stops the kernel or the request; it never leaves the store inconsistent (fail stop, never fail corrupt). Checked by `tests/storage.rs` with S1–S9 and O1–O4 |
 | R5 | After any crash and restart, S1–S9 hold and processing resumes without help. Checked at 15 crash points and by random `kill -9` under load (H2, erasure points in A46) and by the soak's kernel kills |
+
+## P: replication and failover
+
+Planned with A50, not built yet. To be checked by crash points during replication, the model-based test and the soak's failover faults.
+
+| # | Invariant | Guarantee |
+|---|---|---|
+| P1 | **Replicated before seen.** No result reaches a client and no event reaches a listener before the in-sync set has stored it | nothing anyone saw is lost on failover |
+| P2 | **One primary per term.** At most one kernel commits per term; a replication record of an older term is refused | no split brain |
+| P3 | **Promoted means complete.** A promoted standby holds every acknowledged record | RPO 0 |
+| P4 | **The unacknowledged tail is cut.** A former primary that rejoins cuts the records after the point where the terms diverge, keeps them aside (like `<path>.torn-<offset>`) and catches up from the new primary; by P1, nobody saw them | the log converges |
 
 ## B: the soak's bank rules
 

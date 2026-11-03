@@ -1,5 +1,6 @@
-// Records of the append-only file store (`file:` backend); one record per state change.
-// Not part of the wire protocol.
+// Records of the append-only file store (`file:` backend); one record per state change. They
+// are also the record log a primary sends its standby (SQLite keeps them in a table while
+// replication is on; design/replication.md). Not part of the client protocol.
 syntax = "proto3";
 
 package kernable.v1;
@@ -18,7 +19,33 @@ message LogRecord {
     WorkerRecord worker = 8;
     MembershipRecord membership = 9;
     Grant grant = 10;
+    DataChangedRecord data_changed = 11;
+    ReplicationHeadRecord replication_head = 12;
   }
+}
+
+// A file of the data store was put or deleted. The file is not in the log: a primary reads it
+// when it sends the record to its standby (see design/replication.md).
+message DataChangedRecord {
+  string tenant_id = 1;
+  string domain = 2;
+  string key = 3;
+}
+
+// Where a record log starts that does not start with the store: after a full image, or where
+// a SQLite store turned its record log on while it already held data. The records after it
+// are numbered from `seq` + 1, chained from `hash`.
+message ReplicationHeadRecord {
+  uint64 seq = 1;
+  bytes hash = 2;
+}
+
+// A record of a store's record log, as a standby receives it: `hash` chains it to the record
+// before (design/replication.md).
+message ReplicatedRecord {
+  uint64 seq = 1;
+  bytes hash = 2;
+  LogRecord record = 3;
 }
 
 // A key that must no longer be trusted: the kernel refuses it from now on, and `kernable

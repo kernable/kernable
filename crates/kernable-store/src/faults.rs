@@ -15,10 +15,13 @@ use std::sync::{
 use ed25519_dalek::SigningKey;
 use kernable_core::proto::{
     AggregateIndex, Command, CommandResult, Event, Grant, ListenerRecord, MembershipRecord,
-    NewEvent, Rejected, RevocationRecord, Signature, WorkerRecord,
+    NewEvent, Rejected, ReplicatedRecord, RevocationRecord, Signature, WorkerRecord,
+    log_record::Record,
 };
 
-use crate::{Checkpoint, Enqueued, Error, Pending, Report, Result, Store, StreamId, StreamSummary};
+use crate::{
+    Checkpoint, Enqueued, Error, Head, Pending, Report, Result, Store, StreamId, StreamSummary,
+};
 
 /// What fails, and how often.
 pub struct Faults {
@@ -337,5 +340,50 @@ impl Store for FaultyStore {
 
     fn verify(&self, kernel_key_ids: &[String]) -> Result<Report> {
         self.inner.verify(kernel_key_ids)
+    }
+
+    fn record_head(&self) -> Result<Head> {
+        self.faults.read()?;
+        self.inner.record_head()
+    }
+
+    fn record_hash_at(&self, seq: u64) -> Result<Option<Vec<u8>>> {
+        self.faults.read()?;
+        self.inner.record_hash_at(seq)
+    }
+
+    fn records_after(&self, seq: u64, limit: usize) -> Result<Option<Vec<ReplicatedRecord>>> {
+        self.faults.read()?;
+        self.inner.records_after(seq, limit)
+    }
+
+    fn keep_record_log(&self, on: bool) -> Result<()> {
+        self.inner.keep_record_log(on)
+    }
+
+    fn prune_records(&self, seq: u64) -> Result<()> {
+        self.faults.write(|| self.inner.prune_records(seq))
+    }
+
+    fn apply(&self, records: &[ReplicatedRecord]) -> Result<()> {
+        self.faults.write(|| self.inner.apply(records))
+    }
+
+    fn image(&self, f: &mut dyn FnMut(Record) -> Result<()>) -> Result<Head> {
+        self.faults.read()?;
+        self.inner.image(f)
+    }
+
+    fn apply_image(&self, records: &[Record]) -> Result<()> {
+        self.faults.write(|| self.inner.apply_image(records))
+    }
+
+    fn start_record_log(&self, head: &Head) -> Result<()> {
+        self.faults.write(|| self.inner.start_record_log(head))
+    }
+
+    fn data_changed(&self, tenant_id: &str, domain: &str, key: &str) -> Result<()> {
+        self.faults
+            .write(|| self.inner.data_changed(tenant_id, domain, key))
     }
 }
