@@ -34,6 +34,7 @@ class Store:
             with self._lock:
                 self._db.execute("BEGIN")
                 self._db.execute("DELETE FROM data")
+                self._db.execute("DELETE FROM meta WHERE key LIKE 'position:%'")
                 self._db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema', ?), ('position', '0')",
                                  (schema,))
                 self._db.execute("COMMIT")
@@ -88,11 +89,25 @@ class Store:
             self._lock.release()
             raise
 
-    def _commit(self, position: int) -> None:
-        """Ends the batch; if this raises, the batch is still open and `_rollback` ends it."""
-        self._db.execute("UPDATE meta SET value = ? WHERE key = 'position'", (str(position),))
+    def committed_for(self, part: str) -> int:
+        """The position up to which the data is complete for the events of partition `part`
+       : every partition has its own positions. `""`: a kernel without partitions."""
+        if part == "":
+            return self.committed
+        with self._lock:
+            return int(self._meta(f"position:{part}") or 0)
+
+    def _commit(self, position: int, part: str = "") -> None:
+        """Ends the batch (of partition `part`, see `committed_for`); if this raises, the batch
+        is still open and `_rollback` ends it."""
+        if part == "":
+            self._db.execute("UPDATE meta SET value = ? WHERE key = 'position'", (str(position),))
+        else:
+            self._db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                             (f"position:{part}", str(position)))
         self._db.execute("COMMIT")
-        self.committed = position
+        if part == "":
+            self.committed = position
         self._lock.release()
 
     def _checkpoint(self) -> None:

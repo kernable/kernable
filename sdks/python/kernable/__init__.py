@@ -1257,6 +1257,88 @@ def _local(url: str) -> bool:
     return host in ("localhost", "::1") or re.fullmatch(r"127\.\d+\.\d+\.\d+", host) is not None
 
 
+def _wrong_partition(err: grpc.RpcError) -> bool:
+    """Whether a kernel refused a request as one for a tenant of another partition."""
+    return err.code() == grpc.StatusCode.FAILED_PRECONDITION and (err.details() or "").startswith("wrong_partition")
+
+
+class _Partitioned:
+    """The channels of every partition, found by the map the first kernel holds: a request
+    goes to its tenant's partition; refused there as `wrong_partition` (the map changed), the
+    map is read again and the request sent anew. A kernel without partitions holds no map:
+    everything goes to the first kernel, as before."""
+
+    _UNREAD = object()
+
+    def __init__(self, entry: grpc.Channel, channel_for: Callable[[str], grpc.Channel]):
+        self.entry = entry
+        self._channel_for = channel_for
+        self._map: Any = self._UNREAD
+        self._parts: dict[str, grpc.Channel] = {}
+        self._lock = threading.Lock()
+
+    def current(self, refresh: bool = False, timeout_s: float | None = None):
+        """The map (a `PartitionMap`), read once and again after `refresh`; `None` without
+        partitions. `timeout_s`: how long to wait for the kernel (default: the client's)."""
+        with self._lock:
+            if refresh:
+                self._map = self._UNREAD
+            if self._map is self._UNREAD:
+                try:
+                    self._map = rpc.PartitionServiceStub(self.entry).Map(pb.MapRequest(protocol=PROTOCOL),
+                                                                         timeout=timeout_s)
+                except grpc.RpcError as e:
+                    if e.code() not in (grpc.StatusCode.NOT_FOUND, grpc.StatusCode.UNIMPLEMENTED):
+                        raise
+                    self._map = None
+            return self._map
+
+    def _channel(self, m, name: str) -> grpc.Channel:
+        partition = next((p for p in m.partitions if p.name == name), None)
+        if partition is None:
+            raise ValueError(f"the partition map names no partition {name}")
+        addresses = ",".join(partition.addresses)
+        with self._lock:
+            if addresses not in self._parts:
+                self._parts[addresses] = self._channel_for(addresses)
+            return self._parts[addresses]
+
+    def for_tenant(self, tenant: str) -> grpc.Channel:
+        m = self.current()
+        if m is None:
+            return self.entry
+        name = next((t.partition for t in m.tenants if t.tenant == tenant), m.default)
+        return self._channel(m, name)
+
+    def control(self) -> grpc.Channel:
+        """The control partition's channel, which takes memberships."""
+        m = self.current()
+        return self.entry if m is None else self._channel(m, m.control)
+
+    def all(self, timeout_s: float | None = None) -> "list[tuple[str, grpc.Channel]]":
+        """Every partition with its channel; one, named `""`, without partitions."""
+        m = self.current(timeout_s=timeout_s)
+        if m is None:
+            return [("", self.entry)]
+        return [(p.name, self._channel(m, p.name)) for p in m.partitions]
+
+    def route(self, tenant: str, call: Callable[[grpc.Channel], Any]) -> Any:
+        """`call` on `tenant`'s partition, sent anew after reading the map again on
+        `wrong_partition`."""
+        for attempt in range(4):
+            try:
+                return call(self.for_tenant(tenant))
+            except grpc.RpcError as e:
+                if attempt == 3 or not _wrong_partition(e):
+                    raise
+                self.current(refresh=True)
+
+    def close(self) -> None:
+        self.entry.close()
+        for c in self._parts.values():
+            c.close()
+
+
 class Kernable:
     """A connection to the kernel: submits commands (`submit`, `enqueue`), asks queries
     (`query`), runs workers, listeners and apps, and applies memberships. All calls block the
@@ -1330,18 +1412,24 @@ class Kernable:
         if grant is not None:
             with open(grant) as f:
                 granted = f.read().strip()
-        # A pair of kernels: several addresses, comma-separated.
-        urls = [re.sub(r"^https?://", "", u.strip()).rstrip("/") for u in url.split(",") if u.strip()]
-        raw = [open_channel(u) for u in urls]
-        channels = []
-        for c in raw:
-            if granted is not None:
-                c = grpc.intercept_channel(c, _WithGrant(granted))
-            channels.append(grpc.intercept_channel(c, _Deadline(timeout_s)))
-        self._channel = channels[0] if len(channels) == 1 else _Failover(channels, raw, timeout_s)
-        # The outermost interceptor: checked before anything touches the channel.
+        # The outermost interceptor of every channel: checked before anything touches it.
         self._open = _Open()
-        self._channel = grpc.intercept_channel(self._channel, self._open)
+
+        def channel_for(addresses: str) -> grpc.Channel:
+            """A channel to the kernels at `addresses`, comma-separated (a pair: see `_Failover`)."""
+            urls = [re.sub(r"^https?://", "", u.strip()).rstrip("/") for u in addresses.split(",") if u.strip()]
+            raw = [open_channel(u) for u in urls]
+            channels = []
+            for c in raw:
+                if granted is not None:
+                    c = grpc.intercept_channel(c, _WithGrant(granted))
+                channels.append(grpc.intercept_channel(c, _Deadline(timeout_s)))
+            channel = channels[0] if len(channels) == 1 else _Failover(channels, raw, timeout_s)
+            return grpc.intercept_channel(channel, self._open)
+
+        self._channel = channel_for(url)
+        # With partitions, each tenant's requests go to its partition.
+        self._parts = _Partitioned(self._channel, channel_for)
         self._key = Key.from_file(key)
         self._log = _Log(given_url, key, self._key.id)
         # Whoever can read the key file can sign as this process.
@@ -1366,7 +1454,7 @@ class Kernable:
     def worker(self, *aggregates: Aggregate) -> "Worker":
         """A worker that runs these aggregates' commands, in this client's service; see
         `Worker`. `run()` on it blocks until `stop()`: `k.worker(cart_aggregate).run()`."""
-        return Worker(self._channel, self._key, aggregates, self._log, self._service)
+        return Worker(self._parts, self._key, aggregates, self._log, self._service)
 
     def app(self, *, domains: Iterable[Domain], service: str | None = None, version: str | None = None,
             description: str | None = None, metadata: dict[str, str] | None = None) -> "App":
@@ -1392,8 +1480,8 @@ class Kernable:
                             listeners=[l for l in durable if not l._middlewares],
                             middlewares=[l for l in durable if l._middlewares],
                             metadata={**meta, **(metadata or {})})
-        worker = Worker(self._channel, self._key, aggregates, self._log, service) if aggregates else None
-        handles = [ListenerHandle(self._channel, self._key, l, self._log, service, self) for l in listeners]
+        worker = Worker(self._parts, self._key, aggregates, self._log, service) if aggregates else None
+        handles = [ListenerHandle(self._parts, self._key, l, self._log, service, self) for l in listeners]
         return App(self, manifest, worker, handles, [d.name for d in domains])
 
     def apply(self, *, service: str | None = None, workers: Iterable[Aggregate] = (),
@@ -1419,7 +1507,7 @@ class Kernable:
                                    middlewares=[l.name for l in middlewares],
                                    metadata=[pb.Attribute(key=k, value=v) for k, v in (metadata or {}).items()],
                                    issued_at=int(time.time() * 1000))
-        rpc.MembershipServiceStub(self._channel).Apply(
+        rpc.MembershipServiceStub(self._parts.control()).Apply(
             pb.ApplyRequest(membership=membership, sig=self._key.sign(membership_message(membership)),
                             protocol=PROTOCOL))
 
@@ -1478,7 +1566,7 @@ class Kernable:
                             min_position=min_position, issued_at=int(time.time() * 1000), protocol=PROTOCOL,
                             listener=_HANDLING.get())
         q.client_sig.CopyFrom(self._key.sign(query_message(q)))
-        res = rpc.QueryServiceStub(self._channel).Query(q, timeout=timeout_s)
+        res = self._parts.route(q.tenant_id, lambda ch: rpc.QueryServiceStub(ch).Query(q, timeout=timeout_s))
         if res.WhichOneof("outcome") == "rejected":
             raise Rejected(res.rejected.message, res.rejected.code)
         return _decode(res.response)
@@ -1501,13 +1589,13 @@ class Kernable:
         """A handle that runs a listener defined with `Domain.read_model` or `Domain.reactor`, in
         this client's service; see `ListenerHandle`. `run()` on it blocks until `stop()`:
         `k.listener(carts_readmodel).run()`. Each call gives a new handle."""
-        return ListenerHandle(self._channel, self._key, listener, self._log, self._service, self)
+        return ListenerHandle(self._parts, self._key, listener, self._log, self._service, self)
 
     def close(self) -> None:
         """Closes the connection now; only needed in a long-running process that discards the
         client. Requests afterwards raise `ClientClosed`, and its workers and listeners end."""
         self._open.closed = True
-        self._channel.close()
+        self._parts.close()
 
     def _send(self, domain, aggregate_type, aggregate_id, command_type, data, tenant, id, wait, context, timeout_s):
         command_id = id or str(uuid.uuid4())
@@ -1521,7 +1609,8 @@ class Kernable:
         cmd.client_sig.CopyFrom(self._key.sign(command_message(cmd)))
         request = pb.SubmitRequest(command=cmd, wait=wait, protocol=PROTOCOL, listener=_HANDLING.get(),
                                    vault=values)
-        return rpc.CommandServiceStub(self._channel).Submit(request, timeout=timeout_s)
+        return self._parts.route(cmd.tenant_id,
+                                 lambda ch: rpc.CommandServiceStub(ch).Submit(request, timeout=timeout_s))
 
 
 class DataClient:
@@ -1539,7 +1628,7 @@ class DataClient:
     def __init__(self, k: Kernable):
         """Use `k.data` of a `Kernable`."""
         self._k = k
-        self._stub = rpc.DataServiceStub(k._channel)
+        self._stub = rpc.DataServiceStub
 
     def put(self, domain: str, key: str, data: bytes | str, content_type: str | None = None, *,
             tenant: str | None = None, context: RequestContext | None = None) -> None:
@@ -1548,26 +1637,26 @@ class DataClient:
         `application/octet-stream` for `bytes`."""
         if isinstance(data, str):
             data, content_type = data.encode(), content_type or "text/plain; charset=utf-8"
-        self._call("put", self._stub.PutData, tenant, context, domain, key, data=data,
+        self._call("put", "PutData", tenant, context, domain, key, data=data,
                    content_type=content_type or "application/octet-stream")
 
     def get(self, domain: str, key: str, *, tenant: str | None = None,
             context: RequestContext | None = None) -> Data | None:
         """The file stored under `key`, or `None` if there is none."""
-        res = self._call("get", self._stub.GetData, tenant, context, domain, key)
+        res = self._call("get", "GetData", tenant, context, domain, key)
         return Data(res.data, res.content_type) if res.found else None
 
     def delete(self, domain: str, key: str, *, tenant: str | None = None,
                context: RequestContext | None = None) -> bool:
         """Deletes the file stored under `key`; returns whether there was one."""
-        return self._call("delete", self._stub.DeleteData, tenant, context, domain, key).found
+        return self._call("delete", "DeleteData", tenant, context, domain, key).found
 
     def _call(self, op, method, tenant, context, domain, key, **fields):
         r = pb.DataRequest(tenant_id=tenant or self._k._tenant, domain=domain, key=key,
                            issued_at=int(time.time() * 1000), protocol=PROTOCOL,
                            context=_to_wire_context(context or self._k._context, ""), **fields)
         r.client_sig.CopyFrom(self._k._key.sign(data_message(op, r)))
-        return method(r)
+        return self._k._parts.route(r.tenant_id, lambda ch: getattr(self._stub(ch), method)(r))
 
 
 class CacheClient:
@@ -1585,33 +1674,33 @@ class CacheClient:
     def __init__(self, k: Kernable):
         """Use `k.cache` of a `Kernable`."""
         self._k = k
-        self._stub = rpc.CacheServiceStub(k._channel)
+        self._stub = rpc.CacheServiceStub
 
     def set(self, domain: str, key: str, value: bytes | str, ttl_ms: int = 0, *,
             tenant: str | None = None, context: RequestContext | None = None) -> None:
         """Stores `value` under `key` for `ttl_ms` milliseconds; `0` keeps it until it is deleted
         or the kernel restarts. A `str` is stored as UTF-8."""
         value = value.encode() if isinstance(value, str) else value
-        self._call("set", self._stub.SetCache, tenant, context, domain, key, value=value, ttl_ms=ttl_ms)
+        self._call("set", "SetCache", tenant, context, domain, key, value=value, ttl_ms=ttl_ms)
 
     def get(self, domain: str, key: str, *, tenant: str | None = None,
             context: RequestContext | None = None) -> bytes | None:
         """The live value under `key` as `bytes` (decode a `str` with `.decode()`), or `None` if
         there is none or it expired."""
-        res = self._call("get", self._stub.GetCache, tenant, context, domain, key)
+        res = self._call("get", "GetCache", tenant, context, domain, key)
         return res.value if res.found else None
 
     def delete(self, domain: str, key: str, *, tenant: str | None = None,
                context: RequestContext | None = None) -> bool:
         """Deletes the value under `key`; returns whether it had a live one."""
-        return self._call("delete", self._stub.DeleteCache, tenant, context, domain, key).found
+        return self._call("delete", "DeleteCache", tenant, context, domain, key).found
 
     def _call(self, op, method, tenant, context, domain, key, **fields):
         r = pb.CacheRequest(tenant_id=tenant or self._k._tenant, domain=domain, key=key,
                             issued_at=int(time.time() * 1000), protocol=PROTOCOL,
                             context=_to_wire_context(context or self._k._context, ""), **fields)
         r.client_sig.CopyFrom(self._k._key.sign(cache_message(op, r)))
-        return method(r)
+        return self._k._parts.route(r.tenant_id, lambda ch: getattr(self._stub(ch), method)(r))
 
 
 #: Levels of `KERNABLE_LOG`; a line is printed if its level is at most the configured one.
@@ -1945,6 +2034,75 @@ class _Stream:
         self._wake.set()
         if self._call is not None:
             self._call.cancel()
+        for child in getattr(self, "_children", ()):
+            child.stop()
+
+    def _partitions(self, source) -> "list[tuple[str, grpc.Channel]] | None":
+        """The partitions of `source`, read again, backing off like a reconnect, while no
+        kernel answers; `None` once stopped."""
+        if not isinstance(source, _Partitioned):
+            return [("", source)]
+        attempt = 0
+        while not self._stopped:
+            # Read in a thread of its own: `stop()` ends the wait for it at once.
+            box: dict = {}
+
+            def read() -> None:
+                try:
+                    box["parts"] = source.all()
+                except BaseException as err:
+                    box["error"] = err
+
+            reader = threading.Thread(target=read, name=f"kernable {self._what} map", daemon=True)
+            reader.start()
+            while reader.is_alive():
+                reader.join(0.05)
+                if self._stopped:
+                    return None
+            try:
+                if "error" in box:
+                    raise box["error"]
+                return box["parts"]
+            except ClientClosed:
+                return None
+            except grpc.RpcError as err:
+                attempt += 1
+                self._log.reconnect(self._what, err.details(), self._reconnect_s, attempt,
+                                    err.code() in _REFUSALS, self._wake)
+        return None
+
+    def _run_children(self, children: "list[_Stream]") -> None:
+        """Runs a stream per partition, each in a thread, until `stop()`; `ready` once all are."""
+        self._children = children
+        for child in children:
+            child.announce = self.announce
+        errors: list[BaseException] = []
+
+        def run(child: "_Stream") -> None:
+            try:
+                child.run()
+            except BaseException as err:
+                errors.append(err)
+                self.stop()
+
+        def ready() -> None:
+            for child in children:
+                while not child.ready.wait(0.1):
+                    if self._stopped:
+                        return
+            self.ready.set()
+
+        threads = [threading.Thread(target=run, args=(c,), name=f"kernable {c._what}", daemon=True)
+                   for c in children]
+        threading.Thread(target=ready, name=f"kernable {self._what} ready", daemon=True).start()
+        if self._stopped:
+            return
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        if errors:
+            raise errors[0]
 
     def _open(self, requests):
         raise NotImplementedError
@@ -1968,11 +2126,13 @@ class Worker(_Stream):
     `threading.Thread(target=worker.run, daemon=True).start()`. `stop()` ends `run()`, also
     from another thread."""
 
-    def __init__(self, channel: grpc.Channel, key: Key, aggregates, log: _Log,
+    def __init__(self, channel: "grpc.Channel | _Partitioned", key: Key, aggregates, log: _Log,
                  service: str = ""):
         """Use `Kernable.worker`."""
         super().__init__("worker", 1.0, log)
-        self._stub = rpc.WorkerGatewayStub(channel)
+        # A channel, or the partitions: then a session per partition.
+        self._source = channel
+        self._stub = None
         self._key = key
         self._aggregates = list(aggregates)
         self._by_command = {f"{a.domain}.{t}": a for a in aggregates for t in a.handlers}
@@ -1982,6 +2142,19 @@ class Worker(_Stream):
         self._service = service
         # Executes whose history is still coming in parts, by lease; per session.
         self._partial = {}
+
+    def run(self) -> None:
+        """Processes commands until `stop()`, reconnecting when the session drops; with
+        partitions, a session per partition."""
+        parts = self._partitions(self._source)
+        if parts is None:
+            return
+        if len(parts) > 1 or parts[0][0] != "":
+            self._run_children([Worker(channel, self._key, self._aggregates, self._log, self._service)
+                                for _, channel in parts])
+            return
+        self._stub = rpc.WorkerGatewayStub(parts[0][1])
+        super().run()
 
     def _open(self, requests):
         return self._stub.Session(requests)
@@ -2297,9 +2470,11 @@ class ListenerHandle(_Stream):
     handled event, or skipped, for other event types) and `store` (the listener's `Store`, while
     `run()` has it open)."""
 
-    def __init__(self, channel: grpc.Channel, key: Key, listener: Listener, log: _Log,
-                 service: str = "", kernable: "Kernable | None" = None):
-        """Use `Kernable.listener`."""
+    def __init__(self, channel: "grpc.Channel | _Partitioned", key: Key, listener: Listener, log: _Log,
+                 service: str = "", kernable: "Kernable | None" = None, part: str = "",
+                 store: "Store | None" = None):
+        """Use `Kernable.listener`. `part` and `store`: a partition's stream, sharing the
+        store of the handle that runs it."""
         # For handlers' follow-up commands and queries.
         self._kernable = kernable
         # How often the handler failed on an event, by position, until it gets past it.
@@ -2310,8 +2485,12 @@ class ListenerHandle(_Stream):
         #: The listener definition this runs.
         self.listener = listener
         #: The listener's store, while `run()` has it open (with `store=`).
-        self.store: Store | None = None
-        self._stub = rpc.ListenerServiceStub(channel)
+        self.store: Store | None = store
+        # A channel, or the partitions: then a stream per partition, sharing the store.
+        self._source = channel
+        self._part = part
+        self._shared = store is not None
+        self._stub = None
         self._key = key
         self._start = listener.start
         #: Global position of the last handled event (or skipped, for other event types).
@@ -2327,7 +2506,12 @@ class ListenerHandle(_Stream):
         """Processes events, queries and checks until `stop()`, reconnecting when the stream
         drops; with a store, opens it first and continues after its position, and closes it when
         `run()` ends. A store that cannot be opened (a full disk) is tried again, backing off like
-        a reconnect."""
+        a reconnect. With partitions, a stream per partition, each from its own position in the
+        shared store."""
+        parts = self._partitions(self._source)
+        if parts is None:
+            return
+        partitioned = len(parts) > 1 or parts[0][0] != ""
         if self.listener.store_url and self.store is None:
             attempt = 0
             while self.store is None:
@@ -2338,16 +2522,28 @@ class ListenerHandle(_Stream):
                     self._log.store_failed(self._what, err, self._reconnect_s, attempt, self._wake)
                     if self._stopped:
                         return
-            self.position = self.store.committed
-            # A new (or cleared) store says nothing: the listener's own start applies (a reactor
-            # starts at the newest event).
-            if self.store.committed > 0:
-                self._start = self.store.committed
+            if not partitioned:
+                self.position = self.store.committed
+                # A new (or cleared) store says nothing: the listener's own start applies (a
+                # reactor starts at the newest event).
+                if self.store.committed > 0:
+                    self._start = self.store.committed
+        if self._shared:
+            self.position = self.store.committed_for(self._part)
+            if self.position > 0:
+                self._start = self.position
         try:
+            if partitioned:
+                self._run_children([ListenerHandle(channel, self._key, self.listener, self._log, self._service,
+                                                   self._kernable, part=name, store=self.store)
+                                    for name, channel in parts])
+                return
+            self._stub = rpc.ListenerServiceStub(parts[0][1])
             super().run()
         finally:
-            # Stopping releases the store; a later run opens it again.
-            if self.store is not None:
+            # Stopping releases the store; a later run opens it again. A partition's stream
+            # leaves it to the handle that owns it.
+            if self.store is not None and not self._shared:
                 self.store.close()
                 self.store = None
 
@@ -2399,11 +2595,11 @@ class ListenerHandle(_Stream):
             try:
                 parked = self._handle_batch(msg.batch)
                 if self.store:
-                    self.store._commit(msg.batch.up_to)
+                    self.store._commit(msg.batch.up_to, self._part)
             except BaseException:
                 if self.store:
                     self.store._rollback()
-                    self.position = self.store.committed
+                    self.position = self.store.committed_for(self._part)
                 raise
             self.position = msg.batch.up_to
             # Values removed after an erasure must not stay behind in the WAL, outside the batch.
