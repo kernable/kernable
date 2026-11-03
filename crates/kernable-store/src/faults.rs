@@ -15,8 +15,8 @@ use std::sync::{
 use ed25519_dalek::SigningKey;
 use kernable_core::proto::{
     AggregateIndex, Command, CommandResult, Event, Grant, ListenerRecord, MembershipRecord,
-    NewEvent, PartitionMap, Rejected, ReplicatedRecord, RevocationRecord, Signature, WorkerRecord,
-    log_record::Record,
+    NewEvent, PartitionMap, Rejected, ReplicatedRecord, RevocationRecord, Signature,
+    TenantImportedRecord, WorkerRecord, log_record::Record,
 };
 
 use crate::{
@@ -340,6 +340,25 @@ impl Store for FaultyStore {
 
     fn verify(&self, kernel_key_ids: &[String]) -> Result<Report> {
         self.inner.verify(kernel_key_ids)
+    }
+
+    fn tenant_imported(&self, tenant: &str) -> Result<Option<TenantImportedRecord>> {
+        self.faults.read()?;
+        self.inner.tenant_imported(tenant)
+    }
+
+    fn tenant_records(&self, tenant: &str, f: &mut dyn FnMut(Record) -> Result<()>) -> Result<()> {
+        self.faults.read()?;
+        self.inner.tenant_records(tenant, f)
+    }
+
+    fn drop_tenant_index(&self, tenant: &str) -> Result<usize> {
+        self.faults.write(|| self.inner.drop_tenant_index(tenant))
+    }
+
+    fn save_tenant_imported(&self, record: &TenantImportedRecord) -> Result<()> {
+        self.faults
+            .write(|| self.inner.save_tenant_imported(record))
     }
 
     fn global_key(&self, id: &[u8]) -> Result<Option<String>> {

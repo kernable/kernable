@@ -30,9 +30,9 @@ use tonic::{Request, Response, Status, Streaming, metadata::MetadataMap};
 use crate::{Api, Kernel, config, protocol};
 
 /// Records in one batch at most; a batch also ends after [`BATCH_BYTES`].
-const BATCH: usize = 512;
+pub(crate) const BATCH: usize = 512;
 /// Bytes of records after which a batch ends (its vault values and files come on top).
-const BATCH_BYTES: usize = 1 << 20;
+pub(crate) const BATCH_BYTES: usize = 1 << 20;
 /// Records sent ahead of the standby's acknowledgements at most.
 const AHEAD: u64 = 8_192;
 /// Records SQLite keeps beyond what the standby acknowledged, for a standby that reconnects.
@@ -409,7 +409,7 @@ fn within_bytes(mut records: Vec<ReplicatedRecord>) -> Vec<ReplicatedRecord> {
 
 /// The vault rows and files `records` refer to, as they are now: a value erased or a file
 /// deleted meanwhile travels as absent, and the records after converge the standby.
-fn attachments<'a>(
+pub(crate) fn attachments<'a>(
     kernel: &Kernel,
     records: impl Iterator<Item = &'a Record>,
 ) -> Result<(Vec<VaultRow>, Vec<DataFile>), Status> {

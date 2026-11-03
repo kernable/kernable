@@ -95,6 +95,8 @@ fn event() -> impl Strategy<Value = NewEvent> {
             payload: payload.into_bytes(),
             vault_refs,
             erases,
+            origin_partition: String::new(),
+            origin_position: 0,
         },
     )
 }

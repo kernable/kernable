@@ -275,6 +275,7 @@ pub fn order(exists: bool, cmd: &Command) -> Result<Vec<NewEvent>, Rejected> {
         event_type: event_type.into(),
         payload: cmd.payload.clone(),
         schema: 1,
+        ..Default::default()
     }])
 }
 

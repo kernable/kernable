@@ -188,6 +188,8 @@ impl Verifier {
                 schema: e.schema,
                 vault_refs: e.vault_refs.clone(),
                 erases: e.erases.clone(),
+                origin_partition: e.origin_partition.clone(),
+                origin_position: e.origin_position,
             })
             .collect();
         let msg = signing::result_message(&cmd, first.version.saturating_sub(1), &events);

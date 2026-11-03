@@ -411,7 +411,34 @@ pub fn partitions_message(map: &crate::proto::PartitionMap) -> Vec<u8> {
     for t in &map.tenants {
         msg = msg.str(&t.tenant).str(&t.partition);
     }
-    msg.str(&map.default).str(&map.control).i64(map.issued_at).0
+    msg = msg.str(&map.default).str(&map.control).i64(map.issued_at);
+    // Moves (S4), appended only when there are any: a map without them signs as before.
+    if !map.moving.is_empty() || !map.moved.is_empty() {
+        for list in [&map.moving, &map.moved] {
+            msg = msg.u64(list.len() as u64);
+            for m in list {
+                msg = msg
+                    .str(&m.tenant)
+                    .str(&m.from)
+                    .str(&m.to)
+                    .u64(m.source_head)
+                    .u64(m.target_after)
+                    .u64(m.epoch);
+            }
+        }
+    }
+    msg.0
+}
+
+/// What a partition's node key signs to export a moving tenant, or to report it moved.
+pub fn move_message(op: &str, tenant: &str, from: &str, to: &str, issued_at: i64) -> Vec<u8> {
+    Msg::new("kernable.v1.move")
+        .str(op)
+        .str(tenant)
+        .str(from)
+        .str(to)
+        .i64(issued_at)
+        .0
 }
 
 /// What a partition's node key signs to reserve global keys, or to ask whether it holds them.
@@ -508,6 +535,12 @@ pub fn event_hash(prev: &[u8], event: &Event) -> [u8; 32] {
             m = m.str(r);
         }
         m.str(&event.erases)
+    };
+    // Where a moved event was first committed (S4), appended only when set.
+    let msg = if event.origin_partition.is_empty() {
+        msg
+    } else {
+        msg.str(&event.origin_partition).u64(event.origin_position)
     };
     Sha256::digest(msg.0).into()
 }

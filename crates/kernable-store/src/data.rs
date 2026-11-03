@@ -47,6 +47,31 @@ pub trait DataStore: Send + Sync {
 
     /// Keeps a file of another store's [`DataStore::dump`] at its place.
     fn restore(&self, place: &str, stored: &[u8]) -> Result<()>;
+
+    /// Deletes every file of `tenant`, for a tenant that moved to another partition (S4);
+    /// returns how many.
+    fn drop_tenant(&self, tenant: &str) -> Result<usize>;
+}
+
+/// The beginning of every place of `tenant`'s files in a [`DataStore::dump`].
+pub fn tenant_place(tenant: &str) -> String {
+    format!("{}/", file_name(tenant))
+}
+
+/// The key of a file at `place`, unless a part is too long to be spelled out (then only its
+/// hash is known).
+pub fn key_of(place: &str) -> Option<DataKey> {
+    let name = |part: &str| {
+        hex::decode(part)
+            .ok()
+            .and_then(|b| String::from_utf8(b).ok())
+    };
+    let [tenant, domain, key] = parts(place).ok()?;
+    Some(DataKey {
+        tenant_id: name(tenant)?,
+        domain: name(domain)?,
+        key: name(key)?,
+    })
 }
 
 /// The three parts of a place from [`DataStore::dump`]; refused unless each is a name
@@ -169,6 +194,13 @@ impl DataStore for MemoryData {
         self.map().insert(key, data);
         Ok(())
     }
+
+    fn drop_tenant(&self, tenant: &str) -> Result<usize> {
+        let mut map = self.map();
+        let before = map.len();
+        map.retain(|k, _| k.tenant_id != tenant);
+        Ok(before - map.len())
+    }
 }
 
 /// Files in a directory, created on the first put.
@@ -278,5 +310,22 @@ impl DataStore for FileData {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
             Err(e) => Err(e.into()),
         }
+    }
+
+    fn drop_tenant(&self, tenant: &str) -> Result<usize> {
+        let dir = self.0.join(file_name(tenant));
+        let mut count = 0;
+        match fs::read_dir(&dir) {
+            Ok(domains) => {
+                for domain in domains {
+                    count += fs::read_dir(domain?.path())?.count();
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(e.into()),
+        }
+        fs::remove_dir_all(&dir)?;
+        crate::file::sync_directory(&dir)?;
+        Ok(count)
     }
 }

@@ -84,6 +84,7 @@ async fn the_kernel_remembers_stored_schemas_across_restarts() {
             event_type: "OrderPlaced".into(),
             payload: b"{}".to_vec(),
             schema: 3,
+            ..Default::default()
         }];
         let sig = signing::sign(&key(2), &signing::result_message(&cmd, 0, &events));
         store.commit("c0", 0, &events, &sig, None, 0).unwrap();

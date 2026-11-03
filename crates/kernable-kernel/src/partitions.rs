@@ -19,8 +19,8 @@ use std::{
 
 use kernable_core::{
     proto::{
-        Grant, MapRequest, MapResult, PartitionMap, TrustSync, TrustSyncRequest,
-        partition_service_server::PartitionService,
+        Grant, MapRequest, MapResult, MoveStatus, MoveStatusRequest, PartitionMap, TrustSync,
+        TrustSyncRequest, partition_service_server::PartitionService,
         trust_sync_service_client::TrustSyncServiceClient,
         trust_sync_service_server::TrustSyncService,
     },
@@ -78,6 +78,12 @@ impl Kernel {
                 "wrong_partition: this partition has no partition map yet; apply one on the control partition (kernable partitions apply)",
             ));
         };
+        if let Some(m) = map.moving.iter().find(|m| m.tenant == tenant) {
+            return Err(Status::unavailable(format!(
+                "moving: tenant {tenant} moves from partition {} to {}; try again in a moment",
+                m.from, m.to
+            )));
+        }
         match partition_of(&map, tenant) {
             p if p == partition.name => Ok(()),
             p => Err(Status::failed_precondition(format!(
@@ -85,6 +91,23 @@ impl Kernel {
                 map.epoch
             ))),
         }
+    }
+
+    /// Whether this kernel holds `tenant`'s data: the map assigns the tenant to it, or the tenant
+    /// is moving here. A stream of any other tenant is history of a tenant that moved away, and
+    /// holds no key here any more.
+    pub(crate) fn serves(&self, tenant: &str) -> bool {
+        let Some(partition) = &self.config.partition else {
+            return true;
+        };
+        let Some(map) = self.maps.get() else {
+            return true;
+        };
+        partition_of(&map, tenant) == partition.name
+            || map
+                .moving
+                .iter()
+                .any(|m| m.tenant == tenant && m.to == partition.name)
     }
 
     /// Takes `map` into effect if it is valid, signed by a key granted `manage` for `*`, and
@@ -160,6 +183,34 @@ fn validate(map: &PartitionMap) -> Result<(), Status> {
             return bad(format!("tenant {} is listed twice", t.tenant));
         }
     }
+    let mut moving = HashSet::new();
+    for m in &map.moving {
+        if !moving.insert(m.tenant.as_str()) {
+            return bad(format!("tenant {} moves twice", m.tenant));
+        }
+        if !names.contains(m.to.as_str()) || m.from == m.to {
+            return bad(format!(
+                "tenant {} moves to {}, not another listed partition",
+                m.tenant, m.to
+            ));
+        }
+        if partition_of(map, &m.tenant) != m.from {
+            return bad(format!(
+                "tenant {} moves from {}, but the map has it on {}",
+                m.tenant,
+                m.from,
+                partition_of(map, &m.tenant)
+            ));
+        }
+    }
+    for m in &map.moved {
+        if m.from == m.to {
+            return bad(format!(
+                "tenant {} moved from {} to itself",
+                m.tenant, m.from
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -213,6 +264,27 @@ impl PartitionService for Api {
             )));
         }
         Ok(Response::new(MapResult {}))
+    }
+
+    async fn moving(
+        &self,
+        request: Request<MoveStatusRequest>,
+    ) -> Result<Response<MoveStatus>, Status> {
+        let kernel = &self.0;
+        protocol(request.get_ref().protocol)?;
+        kernel.checked_grant(request.metadata())?;
+        let tenant = &request.get_ref().tenant;
+        Ok(Response::new(
+            match kernel.store.tenant_imported(tenant).map_err(internal)? {
+                Some(r) => MoveStatus {
+                    done: true,
+                    source_head: r.source_head,
+                    target_after: r.target_after,
+                    epoch: r.epoch,
+                },
+                None => MoveStatus::default(),
+            },
+        ))
     }
 }
 

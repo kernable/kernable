@@ -39,8 +39,8 @@ use std::fmt;
 use ed25519_dalek::SigningKey;
 use kernable_core::proto::{
     AggregateIndex, Command, CommandResult, Event, Grant, ListenerRecord, MembershipRecord,
-    NewEvent, PartitionMap, Rejected, ReplicatedRecord, RevocationRecord, Signature, WorkerRecord,
-    log_record::Record,
+    NewEvent, PartitionMap, Rejected, ReplicatedRecord, RevocationRecord, Signature,
+    TenantImportedRecord, WorkerRecord, log_record::Record,
 };
 
 /// The version of the stored data format this build reads and writes; a store of another
@@ -382,6 +382,25 @@ pub trait Store: Send + Sync {
         Ok(None)
     }
 
+    /// On the target of a move (S4): that `tenant` was copied here, if it was.
+    fn tenant_imported(&self, tenant: &str) -> Result<Option<TenantImportedRecord>> {
+        let _ = tenant;
+        Ok(None)
+    }
+
+    /// On the source of a move (S4): `tenant`'s streams hold no unique keys or facts here any
+    /// more; returns how many streams held some.
+    fn drop_tenant_index(&self, tenant: &str) -> Result<usize> {
+        let _ = tenant;
+        Err(Error::ReadOnly)
+    }
+
+    /// Notes that a tenant was copied here.
+    fn save_tenant_imported(&self, record: &TenantImportedRecord) -> Result<()> {
+        let _ = record;
+        Err(Error::ReadOnly)
+    }
+
     /// On the key owner (S3): the partition that may hold global key `id`, if any.
     fn global_key(&self, id: &[u8]) -> Result<Option<String>> {
         let _ = id;
@@ -452,6 +471,29 @@ pub trait Store: Send + Sync {
     fn image(&self, f: &mut dyn FnMut(Record) -> Result<()>) -> Result<Head> {
         let _ = f;
         Err(Error::NoRecordLog)
+    }
+
+    /// Calls `f` with the records of `tenant` (S4, moving a tenant): its commands as enqueued,
+    /// then its commits in log order (the index with each stream's last), then its rejections,
+    /// in one consistent view.
+    fn tenant_records(&self, tenant: &str, f: &mut dyn FnMut(Record) -> Result<()>) -> Result<()> {
+        let mut commands = std::collections::HashSet::new();
+        self.image(&mut |record| {
+            let ours = match &record {
+                Record::Enqueued(e) => {
+                    let ours = e.command.as_ref().is_some_and(|c| c.tenant_id == tenant);
+                    if ours {
+                        commands.extend(e.command.iter().map(|c| c.command_id.clone()));
+                    }
+                    ours
+                }
+                Record::Committed(c) => commands.contains(&c.command_id),
+                Record::Rejected(r) => commands.contains(&r.command_id),
+                _ => false,
+            };
+            if ours { f(record) } else { Ok(()) }
+        })?;
+        Ok(())
     }
 
     /// Applies records of an image ([`Store::image`]) to an empty store, unnumbered, with the

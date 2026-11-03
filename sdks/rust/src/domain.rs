@@ -1219,6 +1219,8 @@ impl<S: State> Runnable for Aggregate<S> {
                 payload: sealed.payload,
                 vault_refs: sealed.refs,
                 erases,
+                origin_partition: String::new(),
+                origin_position: 0,
             });
         }
 

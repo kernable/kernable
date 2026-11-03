@@ -144,7 +144,7 @@ impl Kernel {
                     || index
                         .holder(store, vault, k)
                         .map_err(|e| Status::internal(e.to_string()))?
-                        .is_some())
+                        .is_some_and(|holder| self.serves(&holder.tenant_id)))
             })
             .collect()
     }

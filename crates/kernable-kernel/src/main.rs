@@ -12,10 +12,10 @@ use std::{
 
 use kernable_core::{
     proto::{
-        ApplyRequest, Attribute, Command, ListenerRecord, MapRequest, Membership, Partition,
-        PartitionMap, Permission, PromoteRequest, RetryRequest, RevokeRequest, SubmitRequest,
-        TenantPartition, When, WorkerRecord, command_result::Outcome,
-        command_service_client::CommandServiceClient,
+        ApplyRequest, Attribute, Command, ListenerRecord, MapRequest, Membership,
+        MoveStatusRequest, Partition, PartitionMap, Permission, PromoteRequest, RetryRequest,
+        RevokeRequest, SubmitRequest, TenantMove, TenantPartition, When, WorkerRecord,
+        command_result::Outcome, command_service_client::CommandServiceClient,
         listener_service_client::ListenerServiceClient,
         membership_service_client::MembershipServiceClient,
         partition_service_client::PartitionServiceClient,
@@ -25,7 +25,8 @@ use kernable_core::{
     signing, transport,
 };
 use kernable_kernel::{
-    BoxError, Config, GRANT_HEADER, Kernel, config, grants, node, serve, standby, witness,
+    BoxError, Config, GRANT_HEADER, Kernel, config, grants, node, partitions::partition_of, serve,
+    standby, witness,
 };
 use prost::Message;
 use tracing_subscriber::EnvFilter;
@@ -91,6 +92,13 @@ Keys and trust:
                                           map. <key> needs a grant for manage on *. The other
                                           partitions take it from the control partition.
   kernable partitions show <addr> <key>   Prints the partition map the kernel at <addr> holds.
+  kernable partitions move <addr> <key> <tenant> <to>
+                                          Moves <tenant> with its data to partition <to>: applies
+                                          a map that marks it moving on the control partition at
+                                          <addr>, waits until <to> has copied it, then applies the
+                                          map with the tenant on <to>. Meanwhile the tenant's
+                                          requests are answered UNAVAILABLE. Run it again to finish
+                                          a move it did not. <key> needs manage on *.
   kernable promote <addr> <key>           Makes the standby at <addr> (started with --follow) the
                                           primary: it stops following and serves. <key> needs a
                                           grant for manage on *. Promote only a standby whose
@@ -251,6 +259,9 @@ async fn main() -> ExitCode {
         ["promote", addr, key] => promote(addr, key).await,
         ["partitions", "apply", addr, key, map] => partitions_apply(addr, key, map).await,
         ["partitions", "show", addr, key] => partitions_show(addr, key).await,
+        ["partitions", "move", addr, key, tenant, to] => {
+            partitions_move(addr, key, tenant, to).await
+        }
         ["witness", flags @ ..] => return run_witness(flags).await,
         ["keys", "new", name] => keys_new(name),
         ["checkpoint", store, key] => checkpoint(store, key),
@@ -795,13 +806,21 @@ async fn partitions_apply(addr: &str, key_path: &str, path: &str) -> Result<bool
         issued_at: now_ms(),
         sig: None,
         protocol: kernable_core::PROTOCOL,
+        moving: Vec::new(),
+        moved: Vec::new(),
     };
-    map.sig = Some(signing::sign(&key, &signing::partitions_message(&map)));
-    let mut request = tonic::Request::new(map.clone());
-    with_key_grant(&mut request, key_path)?;
-    PartitionServiceClient::new(connect(addr).await?)
-        .apply(request)
-        .await?;
+    // Moves stay as the held map has them: one in progress is finished with `partitions move`.
+    if let Some(held) = held_map(addr, key_path).await? {
+        if let Some(m) = held.moving.first() {
+            return Err(format!(
+                "tenant {} is moving from {} to {}; finish it first: kernable partitions move {addr} {key_path} {} {}",
+                m.tenant, m.from, m.to, m.tenant, m.to
+            )
+            .into());
+        }
+        map.moved = held.moved;
+    }
+    apply_map(addr, key_path, &key, &mut map).await?;
     println!(
         "applied partition map epoch {} ({} partitions, {} tenants listed, default {})",
         map.epoch,
@@ -812,15 +831,154 @@ async fn partitions_apply(addr: &str, key_path: &str, path: &str) -> Result<bool
     Ok(true)
 }
 
-async fn partitions_show(addr: &str, key_path: &str) -> Result<bool> {
+/// Signs `map` and applies it on the control partition at `addr`.
+async fn apply_map(
+    addr: &str,
+    key_path: &str,
+    key: &ed25519_dalek::SigningKey,
+    map: &mut PartitionMap,
+) -> Result<()> {
+    map.issued_at = now_ms();
+    map.protocol = kernable_core::PROTOCOL;
+    map.sig = Some(signing::sign(key, &signing::partitions_message(map)));
+    let mut request = tonic::Request::new(map.clone());
+    with_key_grant(&mut request, key_path)?;
+    PartitionServiceClient::new(connect(addr).await?)
+        .apply(request)
+        .await?;
+    Ok(())
+}
+
+/// The map the kernel at `addr` holds, if any.
+async fn held_map(addr: &str, key_path: &str) -> Result<Option<PartitionMap>> {
     let mut request = tonic::Request::new(MapRequest {
         protocol: kernable_core::PROTOCOL,
     });
     with_key_grant(&mut request, key_path)?;
-    let map = PartitionServiceClient::new(connect(addr).await?)
+    match PartitionServiceClient::new(connect(addr).await?)
         .map(request)
+        .await
+    {
+        Ok(map) => Ok(Some(map.into_inner())),
+        Err(s) if s.code() == tonic::Code::NotFound => Ok(None),
+        Err(s) => Err(s.into()),
+    }
+}
+
+async fn partitions_move(addr: &str, key_path: &str, tenant: &str, to: &str) -> Result<bool> {
+    let key = signing::read_signing_key(key_path)?;
+    let held = held_map(addr, key_path)
         .await?
-        .into_inner();
+        .ok_or("the control partition holds no partition map; apply one first")?;
+    // 1. The map that marks the tenant moving, unless it is moving there already.
+    let m = match held.moving.iter().find(|m| m.tenant == tenant) {
+        Some(m) if m.to == to => {
+            println!(
+                "tenant {tenant} is moving from {} to {to} already; waiting for the copy",
+                m.from
+            );
+            m.clone()
+        }
+        Some(m) => {
+            return Err(format!(
+                "tenant {tenant} is moving to {} already; finish that first",
+                m.to
+            )
+            .into());
+        }
+        None => {
+            let from = partition_of(&held, tenant).to_owned();
+            if from == to {
+                return Err(format!("tenant {tenant} is on partition {to} already").into());
+            }
+            let mut map = held.clone();
+            map.epoch += 1;
+            let m = TenantMove {
+                tenant: tenant.to_owned(),
+                from,
+                to: to.to_owned(),
+                epoch: map.epoch,
+                ..Default::default()
+            };
+            map.moving.push(m.clone());
+            apply_map(addr, key_path, &key, &mut map).await?;
+            println!(
+                "map epoch {}: tenant {tenant} moves from {} to {to}; its requests wait meanwhile",
+                map.epoch, m.from
+            );
+            m
+        }
+    };
+    // 2. Wait until the target has copied it.
+    let addresses = held
+        .partitions
+        .iter()
+        .find(|p| p.name == to)
+        .map(|p| p.addresses.clone())
+        .ok_or_else(|| format!("the map lists no partition {to}"))?;
+    let started = std::time::Instant::now();
+    let mut said = std::time::Instant::now();
+    let status = 'copied: loop {
+        for address in &addresses {
+            let mut request = tonic::Request::new(MoveStatusRequest {
+                tenant: tenant.to_owned(),
+                protocol: kernable_core::PROTOCOL,
+            });
+            with_key_grant(&mut request, key_path)?;
+            let Ok(channel) = connect(address).await else {
+                continue;
+            };
+            match PartitionServiceClient::new(channel).moving(request).await {
+                Ok(s) if s.get_ref().done && s.get_ref().epoch == m.epoch => {
+                    break 'copied s.into_inner();
+                }
+                Ok(_) => break,
+                Err(_) => continue,
+            }
+        }
+        if said.elapsed() > std::time::Duration::from_secs(10) {
+            said = std::time::Instant::now();
+            println!(
+                "still copying ({}s); partition {to}'s log says why if it takes long",
+                started.elapsed().as_secs()
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    };
+    // 3. The map with the tenant on the target, from the map held now.
+    let mut map = held_map(addr, key_path)
+        .await?
+        .ok_or("the control partition lost its partition map")?;
+    map.epoch += 1;
+    map.moving.retain(|x| x.tenant != tenant);
+    map.tenants.retain(|t| t.tenant != tenant);
+    if map.default != to {
+        map.tenants.push(TenantPartition {
+            tenant: tenant.to_owned(),
+            partition: to.to_owned(),
+        });
+    }
+    map.moved.push(TenantMove {
+        source_head: status.source_head,
+        target_after: status.target_after,
+        ..m.clone()
+    });
+    apply_map(addr, key_path, &key, &mut map).await?;
+    println!(
+        "map epoch {}: tenant {tenant} moved from {} to {to} in {}s (source head {}, target after {})",
+        map.epoch,
+        m.from,
+        started.elapsed().as_secs(),
+        status.source_head,
+        status.target_after
+    );
+    Ok(true)
+}
+
+async fn partitions_show(addr: &str, key_path: &str) -> Result<bool> {
+    let map = held_map(addr, key_path)
+        .await?
+        .ok_or("this kernel holds no partition map")?;
     println!(
         "epoch {}, default {}, control {}",
         map.epoch, map.default, map.control
@@ -830,6 +988,15 @@ async fn partitions_show(addr: &str, key_path: &str) -> Result<bool> {
     }
     for t in &map.tenants {
         println!("tenant {} -> {}", t.tenant, t.partition);
+    }
+    for m in &map.moving {
+        println!("tenant {} moving {} -> {}", m.tenant, m.from, m.to);
+    }
+    for m in &map.moved {
+        println!(
+            "tenant {} moved {} -> {} (source head {}, target after {})",
+            m.tenant, m.from, m.to, m.source_head, m.target_after
+        );
     }
     Ok(true)
 }

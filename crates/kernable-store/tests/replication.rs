@@ -119,6 +119,8 @@ fn ev(event_type: &str) -> NewEvent {
         schema: 1,
         vault_refs: Vec::new(),
         erases: String::new(),
+        origin_partition: String::new(),
+        origin_position: 0,
     }
 }
 

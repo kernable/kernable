@@ -155,6 +155,7 @@ fn fill(store: &dyn Store, vault: &Vault) {
         payload: payload.into_bytes(),
         vault_refs: values.iter().map(|v| v.r#ref.clone()).collect(),
         erases: String::new(),
+        ..Default::default()
     };
     let email = value(1, "k-1", "max@firma.de");
     let placed_email = value(2, "k-1", "max@firma.de");

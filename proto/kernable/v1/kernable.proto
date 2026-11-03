@@ -106,6 +106,10 @@ message Event {
   uint32 schema = 14;              // version of the payload format of `event_type`, from 1
   repeated string vault_refs = 15; // see NewEvent
   string erases = 16;              // see NewEvent
+  // An event its tenant brought along when it moved here from another partition (S4): where it
+  // was first committed. Listeners do not get these; the original is delivered where it is.
+  string origin_partition = 17;
+  uint64 origin_position = 18;
 }
 
 // An aggregate's state after `version`, made by a worker: a cache, the events stay the truth.
@@ -131,6 +135,10 @@ message NewEvent {
   // A subject (a person) whose vault values this event erases, everywhere; empty for none.
   // The worker's key needs `vault_erase` for the event type (otherwise `erase_not_allowed`).
   string erases = 5;
+  // Set by the kernel only, on events a tenant brought from another partition when it moved
+  // there: where the event was first committed. A worker's result with them is refused.
+  string origin_partition = 6;
+  uint64 origin_position = 7;
 }
 
 // ---- vault ----
@@ -275,6 +283,8 @@ service PartitionService {
   // Errors: UNAUTHENTICATED, PERMISSION_DENIED, INVALID_ARGUMENT (unknown partitions, a tenant
   // twice), FAILED_PRECONDITION (not the control partition; an epoch not above the one held).
   rpc Apply(PartitionMap) returns (MapResult);
+  // Asked of the target of a move (needs a grant of any key): whether it copied the tenant.
+  rpc Moving(MoveStatusRequest) returns (MoveStatus);
 }
 
 message MapRequest {
@@ -294,6 +304,20 @@ message TenantPartition {
   string partition = 2;
 }
 
+// A tenant moving between partitions, or moved (S4). While it moves, both partitions answer its
+// requests with UNAVAILABLE. Once moved, `source_head` is the source's head when it was copied
+// (every original event of the tenant is at or before it) and `target_after` the target's head
+// after the copies: an SDK delivers the target's events after it only once the source's stream
+// has passed `source_head`, so a tenant's events keep their order across the move.
+message TenantMove {
+  string tenant = 1;
+  string from = 2;
+  string to = 3;
+  uint64 source_head = 4;
+  uint64 target_after = 5;
+  uint64 epoch = 6;      // of the map that started the move: tells this move from earlier ones
+}
+
 // Tenants listed in `tenants` live on their partition; every other tenant on `default`.
 message PartitionMap {
   uint64 epoch = 1;                  // the newest epoch wins; each new map has a higher one
@@ -304,6 +328,21 @@ message PartitionMap {
   int64 issued_at = 6;               // ms since epoch
   Signature sig = 7;                 // over kernable.v1.partitions
   uint32 protocol = 8;               // not signed
+  repeated TenantMove moving = 9;    // being copied to `to`
+  repeated TenantMove moved = 10;    // done, with their heads
+}
+
+// What a target partition knows of a tenant moving to it.
+message MoveStatus {
+  bool done = 1;
+  uint64 source_head = 2;
+  uint64 target_after = 3;
+  uint64 epoch = 4; // of the move it copied (TenantMove.epoch)
+}
+
+message MoveStatusRequest {
+  string tenant = 1;
+  uint32 protocol = 2;
 }
 
 // ---- clients ----

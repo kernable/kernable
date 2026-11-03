@@ -75,6 +75,14 @@ kernable partitions show <addr> <key>
 
 Prints the partition map the kernel at `<addr>` holds.
 
+### `kernable partitions move`
+
+```text
+kernable partitions move <addr> <key> <tenant> <to>
+```
+
+Moves `<tenant>` with its data to partition `<to>`: applies a map that marks it moving on the control partition at `<addr>`, waits until `<to>` has copied it, then applies the map with the tenant on `<to>`. Meanwhile the tenant's requests are answered UNAVAILABLE. Run it again to finish a move it did not. `<key>` needs manage on `*`.
+
 ### `kernable promote`
 
 ```text

@@ -479,6 +479,14 @@ impl Vault {
         Ok(())
     }
 
+    /// Deletes every value of `tenant`, for a tenant that moved to another partition (S4);
+    /// returns how many.
+    pub fn drop_tenant(&self, tenant: &str) -> Result<usize> {
+        Ok(self
+            .conn()
+            .execute("DELETE FROM vault WHERE tenant = ?1", [tenant])?)
+    }
+
     /// Which of `refs` the vault still holds, with their subject and whether they are secret,
     /// without decrypting them: what a view may show about vault fields.
     pub fn describe(&self, refs: &[String]) -> Result<Vec<(String, String, bool)>> {

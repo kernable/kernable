@@ -9,8 +9,8 @@ use std::time::Duration;
 use common::*;
 use kernable_core::{
     proto::{
-        Command, MapRequest, Partition, PartitionMap, TenantPartition,
-        partition_service_client::PartitionServiceClient,
+        Command, MapRequest, Partition, PartitionMap, TenantMove, TenantPartition,
+        data_service_client::DataServiceClient, partition_service_client::PartitionServiceClient,
     },
     signing, transport,
 };
@@ -50,9 +50,57 @@ fn map(epoch: u64, p1: &str, p2: &str) -> PartitionMap {
         issued_at: issued_now(),
         sig: None,
         protocol: kernable_core::PROTOCOL,
+        moving: Vec::new(),
+        moved: Vec::new(),
     };
     map.sig = Some(signing::sign(&key(1), &signing::partitions_message(&map)));
     map
+}
+
+fn file(
+    key: &ed25519_dalek::SigningKey,
+    op: &str,
+    tenant: &str,
+    bytes: &[u8],
+) -> kernable_core::proto::DataRequest {
+    let mut r = kernable_core::proto::DataRequest {
+        tenant_id: tenant.into(),
+        domain: "shop".into(),
+        key: "invoice.txt".into(),
+        data: bytes.to_vec(),
+        content_type: if op == "put" {
+            "text/plain".into()
+        } else {
+            String::new()
+        },
+        issued_at: issued_now(),
+        client_sig: None,
+        protocol: kernable_core::PROTOCOL,
+        context: None,
+    };
+    r.client_sig = Some(signing::sign(key, &signing::data_message(op, &r)));
+    r
+}
+
+fn resign(mut map: PartitionMap) -> PartitionMap {
+    map.issued_at = issued_now();
+    map.protocol = kernable_core::PROTOCOL;
+    map.sig = Some(signing::sign(&key(1), &signing::partitions_message(&map)));
+    map
+}
+
+async fn move_status(addr: &str, tenant: &str) -> kernable_core::proto::MoveStatus {
+    PartitionServiceClient::new(transport::connect(addr).await.unwrap())
+        .moving(with_grant(
+            kernable_core::proto::MoveStatusRequest {
+                tenant: tenant.into(),
+                protocol: kernable_core::PROTOCOL,
+            },
+            &key(1),
+        ))
+        .await
+        .unwrap()
+        .into_inner()
 }
 
 async fn apply_map(addr: &str, map: PartitionMap) -> Result<(), tonic::Status> {
@@ -379,5 +427,233 @@ async fn a_global_key_is_unique_across_partitions() {
             .filter(|r| !taken(r))
             .count();
         assert_eq!(won, 1, "{email}: exactly one partition holds it");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tenant_moves_with_its_events_and_global_keys_and_back() {
+    let p1 = start_custom("mv-p1", |config, dir| {
+        config.partition = Some(PartitionConfig {
+            name: "p1".into(),
+            control: None,
+            node_key: node_key(dir),
+        });
+    })
+    .await;
+    let p1_addr = p1.addr.clone();
+    let p2 = start_custom("mv-p2", |config, dir| {
+        config.partition = Some(PartitionConfig {
+            name: "p2".into(),
+            control: Some(p1_addr.clone()),
+            node_key: node_key(dir),
+        });
+    })
+    .await;
+    for env in [&p1, &p2] {
+        env.kernel
+            .grant(grant(&key(13), &[("replicate", &["*"])]))
+            .unwrap();
+    }
+    apply_map(&p1.addr, map(1, &p1.addr, &p2.addr))
+        .await
+        .unwrap();
+    until("p2 holds the map", async || {
+        map_of(&p2.addr).await.is_some()
+    })
+    .await;
+    for env in [&p1, &p2] {
+        let worker = TestWorker {
+            index: Some(std::sync::Arc::new(by_email)),
+            ..TestWorker::honest()
+        };
+        start_worker(env.addr.clone(), worker).await;
+    }
+    let taken = |r: &kernable_core::proto::CommandResult| matches!(&r.outcome, Some(kernable_core::proto::command_result::Outcome::Rejected(x)) if x.code == "unique_taken");
+
+    // t1 lives on p1: an order with a global key, and an item.
+    let placed = submit(&p1.addr, with_email("m1", "PlaceOrder", "o1", "t1", "a@x"))
+        .await
+        .unwrap();
+    assert_eq!(committed_versions(&placed), [1]);
+    let added = submit(&p1.addr, with_email("m2", "AddItem", "o1", "t1", "a@x"))
+        .await
+        .unwrap();
+    assert_eq!(committed_versions(&added), [2]);
+    // And a file.
+    for env in [&p1, &p2] {
+        env.kernel
+            .grant(grant(
+                &key(7),
+                &[("data_read", &["shop.*"]), ("data_write", &["shop.*"])],
+            ))
+            .unwrap();
+    }
+    DataServiceClient::new(transport::connect(&p1.addr).await.unwrap())
+        .put_data(file(&key(7), "put", "t1", b"invoice"))
+        .await
+        .unwrap();
+
+    // The map that moves t1 to p2: both partitions hold its requests meanwhile.
+    let mut moving = map_of(&p1.addr).await.unwrap();
+    moving.epoch = 2;
+    moving.moving.push(TenantMove {
+        tenant: "t1".into(),
+        from: "p1".into(),
+        to: "p2".into(),
+        epoch: 2,
+        ..Default::default()
+    });
+    apply_map(&p1.addr, resign(moving)).await.unwrap();
+    let held = submit(&p1.addr, with_email("m3", "AddItem", "o1", "t1", "a@x"))
+        .await
+        .unwrap_err();
+    assert_eq!(held.code(), Code::Unavailable, "{held:?}");
+    assert!(held.message().starts_with("moving"), "{held:?}");
+    until("p2 copied t1", async || {
+        let s = move_status(&p2.addr, "t1").await;
+        s.done && s.epoch == 2
+    })
+    .await;
+    let status = move_status(&p2.addr, "t1").await;
+
+    // The copies: same commands and versions, with where they were first committed.
+    let p2_store = kernable_store::open_read_only(&p2.store).unwrap();
+    let copies: Vec<_> = p2_store
+        .read_all(0, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.tenant_id == "t1")
+        .collect();
+    assert_eq!(copies.len(), 2);
+    assert!(copies.iter().all(|e| e.origin_partition == "p1"));
+    assert_eq!(copies.iter().map(|e| e.version).collect::<Vec<_>>(), [1, 2]);
+    assert!(status.source_head >= copies[1].origin_position);
+    assert!(status.target_after >= copies[1].global_position);
+    drop(p2_store);
+
+    // The final map: t1 on p2.
+    let mut moved = map_of(&p1.addr).await.unwrap();
+    moved.epoch = 3;
+    let m = moved.moving.remove(0);
+    moved.tenants.push(TenantPartition {
+        tenant: "t1".into(),
+        partition: "p2".into(),
+    });
+    moved.moved.push(TenantMove {
+        source_head: status.source_head,
+        target_after: status.target_after,
+        ..m
+    });
+    apply_map(&p1.addr, resign(moved)).await.unwrap();
+    until("p2 holds the final map", async || {
+        map_of(&p2.addr).await.is_some_and(|m| m.epoch == 3)
+    })
+    .await;
+
+    // t1 goes on where it was, on p2, with its file; p1 points there.
+    let got = DataServiceClient::new(transport::connect(&p2.addr).await.unwrap())
+        .get_data(file(&key(7), "get", "t1", b""))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(got.found);
+    assert_eq!(got.data, b"invoice");
+    let next = submit(&p2.addr, with_email("m4", "AddItem", "o1", "t1", "a@x"))
+        .await
+        .unwrap();
+    assert_eq!(committed_versions(&next), [3]);
+    let elsewhere = submit(&p1.addr, with_email("m5", "AddItem", "o1", "t1", "a@x"))
+        .await
+        .unwrap_err();
+    assert!(
+        elsewhere.message().contains("is on partition p2"),
+        "{elsewhere:?}"
+    );
+    // The global key moved with it: p1 asks p2, which holds it; p1's own copy holds nothing.
+    let a9 = submit(&p1.addr, with_email("m6", "PlaceOrder", "o9", "t9", "a@x"))
+        .await
+        .unwrap();
+    assert!(taken(&a9), "a@x is held on p2: {a9:?}");
+    let freed = submit(&p2.addr, with_email("m7", "AddItem", "o1", "t1", "z@x"))
+        .await
+        .unwrap();
+    assert_eq!(committed_versions(&freed), [4]);
+    let a9 = submit(&p1.addr, with_email("m8", "PlaceOrder", "o9", "t9", "a@x"))
+        .await
+        .unwrap();
+    assert_eq!(committed_versions(&a9), [1], "a@x was released on p2");
+
+    // Back to p1 with `kernable partitions move`: only what happened on p2 is copied.
+    let ops = p1.dir.join("ops.key");
+    std::fs::write(&ops, hex(key(1).as_bytes())).unwrap();
+    std::fs::write(
+        p1.dir.join("ops.grant"),
+        hex(&default_grant(&key(1)).unwrap().encode_to_vec()),
+    )
+    .unwrap();
+    let args = [
+        "partitions".to_owned(),
+        "move".into(),
+        p1.addr.clone(),
+        ops.display().to_string(),
+        "t1".into(),
+        "p1".into(),
+    ];
+    let out = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(env!("CARGO_BIN_EXE_kernable"))
+            .args(&args)
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    until("p2 holds the map with t1 back", async || {
+        map_of(&p2.addr).await.is_some_and(|m| m.epoch == 5)
+    })
+    .await;
+    let back = submit(&p1.addr, with_email("m9", "AddItem", "o1", "t1", "z@x"))
+        .await
+        .unwrap();
+    assert_eq!(committed_versions(&back), [5]);
+    let p1_store = kernable_store::open_read_only(&p1.store).unwrap();
+    let t1: Vec<_> = p1_store
+        .read_all(0, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.tenant_id == "t1")
+        .map(|e| (e.version, e.origin_partition))
+        .collect();
+    assert_eq!(
+        t1,
+        [
+            (1, String::new()),
+            (2, String::new()),
+            (3, "p2".into()),
+            (4, "p2".into()),
+            (5, String::new())
+        ]
+    );
+    let map = map_of(&p1.addr).await.unwrap();
+    assert!(map.moving.is_empty());
+    assert_eq!(map.moved.len(), 2);
+    assert!(
+        !map.tenants.iter().any(|t| t.tenant == "t1"),
+        "t1 is on the default again"
+    );
+
+    // Both logs keep every store invariant: the copies chain and verify like any event.
+    drop(p1_store);
+    for env in [&p1, &p2] {
+        let store = kernable_store::open_read_only(&env.store).unwrap();
+        let log =
+            kernable_store::invariants::Log::read(store.as_ref(), &[id(&env.kernel_key)]).unwrap();
+        let violations = log.check();
+        assert!(violations.is_empty(), "{}: {violations:?}", env.store);
     }
 }

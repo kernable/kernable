@@ -49,7 +49,7 @@ kernable partitions show 10.0.2.1:7233 ops.key             # p2 has it within se
 
 Tenants the map lists live on their partition; every other tenant on the default partition, so new tenants need no change to the map. Every new map needs a higher `epoch`. Keep the map file in version control: it is the answer to "where is tenant X?".
 
-Placing a tenant on another partition moves no data yet. Change a tenant's partition only before it has data there (moving tenants with their events comes later).
+Change a tenant's partition in the map only before it has data. A tenant with data moves with `kernable partitions move` (step 5); while a move runs, `partitions apply` refuses until it is finished.
 
 ## 4. Point your processes at it
 
@@ -61,6 +61,26 @@ Give every process the address of one partition (or of all, comma-separated): th
 - reads the map again when a partition answers `wrong_partition` (the map changed), and sends the request anew.
 
 A subscription reads every partition too, from their beginnings, with events in order within a partition but not across them.
+
+## 5. Move a tenant
+
+```sh
+kernable partitions move 10.0.1.1:7233 ops.key acme p3
+```
+
+The command applies a map that marks `acme` as moving from p2 to p3, waits until p3 has copied it, and applies the map with `acme` on p3. Meanwhile:
+
+1. Both partitions answer `acme`'s requests with `UNAVAILABLE` (`moving: …`); the SDKs wait and send them again, for up to 30 seconds.
+2. p3 asks p2 for the tenant. Once p2's queue holds none of `acme`'s commands, p2 sends every command, event and rejection of the tenant, with the vault values and files they need.
+3. p3 commits the events again under the same commands and worker signatures: new positions in p3's log, the same aggregate versions, and on each copy where it was first committed (`origin_partition`, `origin_position`). Listeners and subscriptions do not get the copies; the originals were delivered on p2.
+4. p3 tells the control partition, which hands it `acme`'s global unique keys.
+5. The final map puts `acme` on p3. p2 drops `acme`'s unique keys, vault values and files; its events stay in p2's log as history.
+
+A listener (with the SDK) keeps a tenant's order across the move: it handles `acme`'s new events on p3 only after its stream of p2 has passed `acme`'s last event there. A subscription sees each partition in order, not across them.
+
+If the command stops (or a partition does), run it again: it continues the move, and p3 keeps what it copied already. Moving a tenant back works the same way; only what happened since it left is copied.
+
+The tenant is unavailable for as long as the copy takes, which grows with its data: move tenants at a quiet time, and give a tenant that grows big a partition of its own early.
 
 ## What it gains
 
@@ -82,6 +102,8 @@ On one machine, two partitions give about 1.5 times one; beyond that the shared 
 | A key is revoked on the control partition | Every partition refuses it within about a second |
 | The control partition is down | The others serve on with the map and trust records they hold; new maps, grants and memberships wait, and so do commits that file a new global key |
 | A partition that was down starts again | It takes what it missed from the control partition first thing |
+| A tenant moves | Its requests wait (`UNAVAILABLE`, `moving: …`) until the copy is done; the SDKs send them again |
+| The target of a move stops during the copy | It copies again when it is back; what it holds already it keeps |
 
 ## Limits
 
@@ -89,3 +111,4 @@ On one machine, two partitions give about 1.5 times one; beyond that the shared 
 - **Across tenants, there is no order and no atomicity**: a command changes one aggregate of one tenant, as always; a read model across partitions sees each partition's events in order, not one global order.
 - **Unique keys with `scope: global`** are unique across all partitions: before a partition commits one its aggregate did not hold, it reserves the key on the control partition, which asks the partition that had it whether it still does (a moment of extra latency for those commits, and none while the control partition is down: they wait). Personal global keys are unique within each partition only.
 - New partitions in the map reach running workers and listeners when they start again.
+- A move copies the tenant's vault values only to a target with a vault. The source's standby drops the tenant's vault values and files only once it serves as the primary.

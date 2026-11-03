@@ -46,8 +46,9 @@ Each message starts with a `str` **tag** for domain separation. Payloads are sig
 | Operator tooling | `kernable.v1.retry` | `listener`, `positions_count: u64` and every `position: u64`, `dismiss: u64` (1 or 0), `issued_at: i64` |
 | Root key | `kernable.v1.revoke` | `key_id`, `since: i64`, `issued_at: i64` |
 | Kernel of a pair | `kernable.v1.witness` | `op: u64`, `term: u64`, `address`, `standby`, `issued_at: i64` (see `WitnessRequest` in `replication.proto`) |
-| Deploy tooling | `kernable.v1.partitions` | `epoch: u64`, `partition_count: u64`, then per partition `name`, `address_count: u64` and every address, then `tenant_count: u64` and per tenant `tenant`, `partition`, then `default`, `control`, `issued_at: i64` (a key granted `manage` for `*`) |
+| Deploy tooling | `kernable.v1.partitions` | `epoch: u64`, `partition_count: u64`, then per partition `name`, `address_count: u64` and every address, then `tenant_count: u64` and per tenant `tenant`, `partition`, then `default`, `control`, `issued_at: i64`; with moves, then for `moving` and `moved` each `count: u64` and per move `tenant`, `from`, `to`, `source_head: u64`, `target_after: u64`, `epoch: u64` (a key granted `manage` for `*`) |
 | Kernel of a partition | `kernable.v1.trust-sync` | `issued_at: i64` |
+| Kernel of a partition | `kernable.v1.move` | `op` (`export` or `done`), `tenant`, `from`, `to`, `issued_at: i64` |
 | Kernel of a partition | `kernable.v1.global-keys` | `op` (`reserve` or `holds`), `key_count: u64` and every key, `partition`, `issued_at: i64` |
 | Operator tooling | `kernable.v1.promote` | `issued_at: i64` (a key granted `manage` for `*`; asked of a standby, see `replication.proto`) |
 
@@ -138,6 +139,7 @@ Each stored event has `hash = SHA-256(message)`, where `message` has the tag `ke
 14. `producer_sig` (`producer_sig.sig`, `bytes`)
 15. `context` (of the command that caused the event)
 16. the vault fields, only when set (see above)
+17. only for an event a tenant brought along when it moved to another partition: `origin_partition` and `origin_position: u64`, where the event was first committed
 
 `prev_hash` is the hash of the event at the previous global position. For the first event it is 32 zero bytes. Every event of a command stores that command's worker result signature as `producer_sig`.
 
@@ -169,6 +171,7 @@ An SDK must reproduce these entries byte for byte:
 | `vault_ref` | `refs[i]` from `input[i]` |
 | `event_hash` | `hash` from the input, with `prev_hex` as `prev_hash` |
 | `event_hash_vault` | `hash` from the input of `event_hash` plus `vault_refs` and `erases` |
+| `event_hash_origin` | `hash` from the input of `event_hash` plus `origin_partition` and `origin_position` |
 | `derived_id` | `ids[i]` for `command_id` and `n[i]` |
 
 `grant` and `revoke` are only produced by root-key tooling, so an SDK need not reproduce them. The context in the vectors sets every field, including `expected_version` and two attributes; the empty and absent cases follow from the [encoding](#encoding).

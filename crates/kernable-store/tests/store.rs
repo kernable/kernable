@@ -31,6 +31,8 @@ fn ev(event_type: &str) -> NewEvent {
         event_type: event_type.into(),
         payload: b"{}".to_vec(),
         schema: 1,
+        origin_partition: String::new(),
+        origin_position: 0,
     }
 }
 

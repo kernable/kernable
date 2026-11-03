@@ -41,6 +41,8 @@ fn events(n: usize) -> Vec<NewEvent> {
             event_type: format!("Done{i}"),
             payload: format!(r#"{{"i":{i}}}"#).into_bytes(),
             schema: 1,
+            origin_partition: String::new(),
+            origin_position: 0,
         })
         .collect()
 }

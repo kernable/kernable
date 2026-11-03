@@ -45,7 +45,8 @@ use kernable_core::{
         DataChangedRecord, EnqueuedRecord, Event, FormatRecord, GlobalKeyRecord, Grant,
         ListenerRecord, LogRecord, LoggedEvent, MembershipRecord, NewEvent, PartitionMap, Rejected,
         RejectedRecord, ReplicatedRecord, ReplicationHeadRecord, RevocationRecord, Signature,
-        WorkerRecord, command_result::Outcome, log_record::Record,
+        TenantImportedRecord, TenantMovedAwayRecord, WorkerRecord, command_result::Outcome,
+        log_record::Record,
     },
     signing::{self, GENESIS},
 };
@@ -100,9 +101,28 @@ struct State {
     partition_map: Option<PartitionMap>,
     /// On the key owner: which partition may hold each global key.
     global_keys: HashMap<Vec<u8>, String>,
+    /// Tenants copied here from another partition.
+    imported: HashMap<String, TenantImportedRecord>,
 }
 
 impl State {
+    /// Forgets the keys and facts `tenant`'s streams hold.
+    fn drop_index(&mut self, tenant: &str) {
+        let gone: Vec<StreamKey> = self
+            .index
+            .keys()
+            .filter(|s| s.0 == tenant)
+            .cloned()
+            .collect();
+        for stream in gone {
+            if let Some(old) = self.index.remove(&stream) {
+                for k in old.keys.iter().filter(|k| !k.id.is_empty()) {
+                    self.holders.remove(&k.id);
+                }
+            }
+        }
+    }
+
     fn apply(&mut self, record: Record) -> Result<()> {
         match record {
             // Checked by `replay`, which only accepts it first.
@@ -238,6 +258,12 @@ impl State {
             Record::GlobalKey(g) => {
                 self.global_keys.insert(g.id, g.partition);
             }
+            Record::TenantImported(t) => {
+                self.imported.insert(t.tenant.clone(), t);
+            }
+            Record::TenantMovedAway(t) => {
+                self.drop_index(&t.tenant);
+            }
             Record::PartitionMap(m) => {
                 if self
                     .partition_map
@@ -332,6 +358,8 @@ impl State {
             | Record::Grant(_)
             | Record::PartitionMap(_)
             | Record::GlobalKey(_)
+            | Record::TenantImported(_)
+            | Record::TenantMovedAway(_)
             | Record::DataChanged(_) => {}
         }
         Ok(())
@@ -814,6 +842,8 @@ impl Store for FileStore {
                 hash: vec![],
                 producer_sig: Some(producer_sig.clone()),
                 context: cmd.context.clone(),
+                origin_partition: e.origin_partition.clone(),
+                origin_position: e.origin_position,
             };
             event.hash = signing::event_hash(&prev, &event).to_vec();
             let prev_hash = std::mem::replace(&mut prev, event.hash.clone());
@@ -1080,6 +1110,26 @@ impl Store for FileStore {
 
     fn global_key(&self, id: &[u8]) -> Result<Option<String>> {
         Ok(self.inner().state.global_keys.get(id).cloned())
+    }
+
+    fn tenant_imported(&self, tenant: &str) -> Result<Option<TenantImportedRecord>> {
+        Ok(self.inner().state.imported.get(tenant).cloned())
+    }
+
+    fn drop_tenant_index(&self, tenant: &str) -> Result<usize> {
+        let mut inner = self.inner();
+        let held = inner.state.index.keys().filter(|s| s.0 == tenant).count();
+        if held > 0 {
+            let record = Record::TenantMovedAway(TenantMovedAwayRecord {
+                tenant: tenant.to_owned(),
+            });
+            append(&mut inner, record)?;
+        }
+        Ok(held)
+    }
+
+    fn save_tenant_imported(&self, record: &TenantImportedRecord) -> Result<()> {
+        append(&mut self.inner(), Record::TenantImported(record.clone()))
     }
 
     fn save_global_key(&self, id: &[u8], partition: &str) -> Result<()> {

@@ -21,8 +21,9 @@ use kernable_core::{
         CommittedRecord, DataChangedRecord, EnqueuedRecord, Event, GlobalKeyRecord, Grant,
         ListenerRecord, LogRecord, LoggedEvent, Membership, MembershipRecord, Middleware, NewEvent,
         ParkedEvent, PartitionMap, Rejected, RejectedRecord, ReplicatedRecord,
-        ReplicationHeadRecord, RequestContext, Requirement, RevocationRecord, Signature, When,
-        WorkerRecord, command_result::Outcome, log_record::Record,
+        ReplicationHeadRecord, RequestContext, Requirement, RevocationRecord, Signature,
+        TenantImportedRecord, TenantMovedAwayRecord, When, WorkerRecord, command_result::Outcome,
+        log_record::Record,
     },
     signing::{self, GENESIS},
 };
@@ -203,7 +204,7 @@ CREATE TABLE IF NOT EXISTS unique_keys (
 const EVENT_COLUMNS: &str = "global_position, tenant_id, aggregate_type, aggregate_id, version, \
                              event_type, payload, command_id, created_at, \
                              producer_key_id, producer_sig, hash, context, domain, schema, \
-                             vault_refs, erases";
+                             vault_refs, erases, origin_partition, origin_position";
 
 const COMMAND_COLUMNS: &str = "command_id, tenant_id, aggregate_type, aggregate_id, command_type, \
                                payload, client_key_id, client_sig, context, domain, vault_refs";
@@ -304,6 +305,18 @@ impl SqliteStore {
             }
             (FORMAT, _) => {}
             (found, _) => return Err(Error::Format(found)),
+        }
+        // Where moved events came from (S4); added to a store of an earlier build in place.
+        let origins: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('events') WHERE name = 'origin_partition'",
+            [],
+            |r| r.get(0),
+        )?;
+        if origins == 0 {
+            conn.execute_batch(
+                "ALTER TABLE events ADD COLUMN origin_partition TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE events ADD COLUMN origin_position INTEGER NOT NULL DEFAULT 0;",
+            )?;
         }
         let log = load_log(&conn)?;
         Ok(Self {
@@ -885,6 +898,37 @@ impl Store for SqliteStore {
         read_global_key(&self.conn(), id)
     }
 
+    fn tenant_imported(&self, tenant: &str) -> Result<Option<TenantImportedRecord>> {
+        Ok(read_imported(&self.conn(), Some(tenant))?.pop())
+    }
+
+    fn drop_tenant_index(&self, tenant: &str) -> Result<usize> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let held = drop_index_tx(&tx, tenant)?;
+        if held == 0 {
+            return Ok(0);
+        }
+        let head = self.file(&tx, || {
+            vec![Record::TenantMovedAway(TenantMovedAwayRecord {
+                tenant: tenant.to_owned(),
+            })]
+        })?;
+        tx.commit()?;
+        self.advance(head);
+        Ok(held)
+    }
+
+    fn save_tenant_imported(&self, record: &TenantImportedRecord) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        save_imported_tx(&tx, record)?;
+        let head = self.file(&tx, || vec![Record::TenantImported(record.clone())])?;
+        tx.commit()?;
+        self.advance(head);
+        Ok(())
+    }
+
     fn save_global_key(&self, id: &[u8], partition: &str) -> Result<()> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1095,6 +1139,13 @@ impl Store for SqliteStore {
         Ok(())
     }
 
+    fn tenant_records(&self, tenant: &str, f: &mut dyn FnMut(Record) -> Result<()>) -> Result<()> {
+        self.read(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            records_of(&tx, Some(tenant), f)
+        })
+    }
+
     fn image(&self, f: &mut dyn FnMut(Record) -> Result<()>) -> Result<Head> {
         if !self.log().on {
             return Err(Error::NoRecordLog);
@@ -1222,7 +1273,7 @@ fn verify_tables(conn: &Connection, kernel_key_ids: &[String]) -> Result<Report>
     ))?;
     let mut rows = stmt.query([])?;
     while let Some(r) = rows.next()? {
-        let prev_hash: Vec<u8> = r.get(17)?;
+        let prev_hash: Vec<u8> = r.get(19)?;
         v.event(event_from_row(r)?, &prev_hash);
     }
 
@@ -1276,6 +1327,8 @@ fn event_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
         schema: r.get(14)?,
         vault_refs: split_list(r.get(15)?),
         erases: r.get(16)?,
+        origin_partition: r.get(17)?,
+        origin_position: r.get(18)?,
     })
 }
 
@@ -1614,15 +1667,17 @@ fn commit_tx(
             hash: vec![],
             producer_sig: Some(producer_sig.clone()),
             context: cmd.context.clone(),
+            origin_partition: e.origin_partition.clone(),
+            origin_position: e.origin_position,
         };
         event.hash = signing::event_hash(&prev, &event).to_vec();
         tx.execute(
             "INSERT INTO events (global_position, tenant_id, aggregate_type, aggregate_id, version,
                                  event_type, payload, command_id, created_at,
                                  producer_key_id, producer_sig, prev_hash, hash, context, domain,
-                                 schema, vault_refs, erases)
+                                 schema, vault_refs, erases, origin_partition, origin_position)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                     ?18)",
+                     ?18, ?19, ?20)",
             params![
                 event.global_position,
                 event.tenant_id,
@@ -1641,7 +1696,9 @@ fn commit_tx(
                 event.domain,
                 event.schema,
                 event.vault_refs.join(","),
-                event.erases
+                event.erases,
+                event.origin_partition,
+                event.origin_position
             ],
         )?;
         tx.execute(
@@ -2155,6 +2212,10 @@ fn apply_record(tx: &Transaction<'_>, record: &Record) -> Result<()> {
             save_partition_map_tx(tx, m)?;
         }
         Record::GlobalKey(g) => save_global_key_tx(tx, &g.id, &g.partition)?,
+        Record::TenantImported(t) => save_imported_tx(tx, t)?,
+        Record::TenantMovedAway(t) => {
+            drop_index_tx(tx, &t.tenant)?;
+        }
         Record::DataChanged(_) => {}
         Record::Format(_) | Record::ReplicationHead(_) => {
             return Err(diverged("a record that starts a log".into()));
@@ -2171,6 +2232,50 @@ CREATE TABLE IF NOT EXISTS partition_map (
     map   BLOB    NOT NULL -- the PartitionMap message, with its signature
 ) STRICT;
 ";
+
+/// On the target of a move, created with the first tenant copied here (S4).
+const IMPORTED_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS tenants_imported (
+    tenant TEXT PRIMARY KEY,
+    record BLOB NOT NULL -- the TenantImportedRecord
+) STRICT, WITHOUT ROWID;
+";
+
+fn read_imported(conn: &Connection, tenant: Option<&str>) -> Result<Vec<TenantImportedRecord>> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE name = 'tenants_imported')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        return Ok(Vec::new());
+    }
+    let blobs: Vec<Vec<u8>> = conn
+        .prepare(
+            "SELECT record FROM tenants_imported WHERE ?1 IS NULL OR tenant = ?1 ORDER BY tenant",
+        )?
+        .query_map([tenant], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    blobs
+        .iter()
+        .map(|b| Ok(TenantImportedRecord::decode(b.as_slice())?))
+        .collect()
+}
+
+/// Forgets the keys and facts `tenant`'s streams hold; how many streams held some.
+fn drop_index_tx(tx: &Connection, tenant: &str) -> Result<usize> {
+    tx.execute("DELETE FROM unique_keys WHERE tenant_id = ?1", [tenant])?;
+    Ok(tx.execute("DELETE FROM aggregate_index WHERE tenant_id = ?1", [tenant])?)
+}
+
+fn save_imported_tx(tx: &Connection, record: &TenantImportedRecord) -> Result<()> {
+    tx.execute_batch(IMPORTED_SCHEMA)?;
+    tx.execute(
+        "INSERT OR REPLACE INTO tenants_imported (tenant, record) VALUES (?1, ?2)",
+        params![record.tenant, record.encode_to_vec()],
+    )?;
+    Ok(())
+}
 
 /// On the key owner, created with the first global key it keeps (S3).
 const GLOBAL_KEYS_SCHEMA: &str = "
@@ -2282,6 +2387,8 @@ fn apply_commit(tx: &Transaction<'_>, c: &CommittedRecord) -> Result<()> {
             schema: e.schema,
             vault_refs: e.vault_refs.clone(),
             erases: e.erases.clone(),
+            origin_partition: e.origin_partition.clone(),
+            origin_position: e.origin_position,
         })
         .collect();
     let first = theirs.first();
@@ -2318,28 +2425,19 @@ fn apply_commit(tx: &Transaction<'_>, c: &CommittedRecord) -> Result<()> {
 /// every command as enqueued, every commit in log order (each stream's newest keys and facts
 /// with the commit of its last event), commits without events, rejections, listeners with
 /// their parked events, checkpoints.
-fn image_records(conn: &Connection, f: &mut dyn FnMut(Record) -> Result<()>) -> Result<()> {
-    let grants: Vec<Vec<u8>> = conn
-        .prepare("SELECT grant FROM grants ORDER BY key_id")?
-        .query_map([], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    for g in grants {
-        f(Record::Grant(Grant::decode(g.as_slice())?))?;
-    }
-    for r in read_revocations(conn)? {
-        f(Record::Revocation(r))?;
-    }
-    for m in read_memberships(conn)? {
-        f(Record::Membership(m))?;
-    }
-    for w in read_workers(conn)? {
-        f(Record::Worker(w))?;
-    }
+/// The commands as enqueued, the commits in log order (each stream's index with its last
+/// commit), then the rejections: of every tenant, or of `tenant` only.
+fn records_of(
+    conn: &Connection,
+    tenant: Option<&str>,
+    f: &mut dyn FnMut(Record) -> Result<()>,
+) -> Result<()> {
     {
         let mut stmt = conn.prepare(&format!(
-            "SELECT {COMMAND_COLUMNS}, created_at FROM commands ORDER BY rowid"
+            "SELECT {COMMAND_COLUMNS}, created_at FROM commands
+             WHERE ?1 IS NULL OR tenant_id = ?1 ORDER BY rowid"
         ))?;
-        let mut rows = stmt.query([])?;
+        let mut rows = stmt.query([tenant])?;
         while let Some(r) = rows.next()? {
             f(Record::Enqueued(EnqueuedRecord {
                 command: Some(command_from_row(r)?),
@@ -2354,9 +2452,9 @@ fn image_records(conn: &Connection, f: &mut dyn FnMut(Record) -> Result<()>) -> 
                                WHERE e.tenant_id = a.tenant_id AND e.domain = a.domain
                                  AND e.aggregate_type = a.aggregate_type
                                  AND e.aggregate_id = a.aggregate_id)
-             FROM aggregate_index a",
+             FROM aggregate_index a WHERE ?1 IS NULL OR a.tenant_id = ?1",
         )?;
-        let rows = stmt.query_map([], |r| {
+        let rows = stmt.query_map([tenant], |r| {
             Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Option<u64>>(1)?))
         })?;
         for row in rows {
@@ -2369,13 +2467,14 @@ fn image_records(conn: &Connection, f: &mut dyn FnMut(Record) -> Result<()>) -> 
     }
     {
         let mut stmt = conn.prepare(&format!(
-            "SELECT {EVENT_COLUMNS}, prev_hash FROM events ORDER BY global_position"
+            "SELECT {EVENT_COLUMNS}, prev_hash FROM events
+             WHERE ?1 IS NULL OR tenant_id = ?1 ORDER BY global_position"
         ))?;
-        let mut rows = stmt.query([])?;
+        let mut rows = stmt.query([tenant])?;
         let mut commit: Option<CommittedRecord> = None;
         while let Some(r) = rows.next()? {
             let event = event_from_row(r)?;
-            let prev_hash: Vec<u8> = r.get(17)?;
+            let prev_hash: Vec<u8> = r.get(19)?;
             if let Some(done) = commit.take_if(|c| c.command_id != event.command_id) {
                 f(Record::Committed(done))?;
             }
@@ -2404,9 +2503,10 @@ fn image_records(conn: &Connection, f: &mut dyn FnMut(Record) -> Result<()>) -> 
         };
         Ok(conn
             .prepare(&format!(
-                "SELECT command_id FROM commands WHERE status = ?1{positions} ORDER BY rowid"
+                "SELECT command_id FROM commands
+                 WHERE status = ?1{positions} AND (?2 IS NULL OR tenant_id = ?2) ORDER BY rowid"
             ))?
-            .query_map([status], |r| r.get(0))?
+            .query_map(params![status, tenant], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?)
     };
     for command_id in ids("committed")? {
@@ -2426,12 +2526,36 @@ fn image_records(conn: &Connection, f: &mut dyn FnMut(Record) -> Result<()>) -> 
             reason: Some(reason),
         }))?;
     }
+    Ok(())
+}
+
+fn image_records(conn: &Connection, f: &mut dyn FnMut(Record) -> Result<()>) -> Result<()> {
+    let grants: Vec<Vec<u8>> = conn
+        .prepare("SELECT grant FROM grants ORDER BY key_id")?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for g in grants {
+        f(Record::Grant(Grant::decode(g.as_slice())?))?;
+    }
+    for r in read_revocations(conn)? {
+        f(Record::Revocation(r))?;
+    }
+    for m in read_memberships(conn)? {
+        f(Record::Membership(m))?;
+    }
+    for w in read_workers(conn)? {
+        f(Record::Worker(w))?;
+    }
+    records_of(conn, None, f)?;
     for mut l in read_listeners(conn)? {
         l.parked_changed = true;
         f(Record::Listener(l))?;
     }
     if let Some(map) = read_partition_map(conn)? {
         f(Record::PartitionMap(map))?;
+    }
+    for record in read_imported(conn, None)? {
+        f(Record::TenantImported(record))?;
     }
     let held: bool = conn.query_row(
         "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE name = 'global_keys')",

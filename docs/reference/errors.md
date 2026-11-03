@@ -30,6 +30,7 @@ Handlers choose their own codes: `Rejected(message, code)` in TypeScript and Pyt
 | `concurrency_conflict` | kernel | The aggregate kept changing while the command ran, also after five retries. | Submit again with a new command ID. |
 | `invalid_event_type` | kernel | A worker returned an event type that is empty or contains a dot. | A bug in the worker or its SDK: fix it. |
 | `invalid_event_schema` | kernel | A worker wrote an event at another schema version than it declared when it registered. | A bug in the worker or its SDK: fix it. |
+| `invalid_event_origin` | kernel | A worker's event names where it came from (`origin_partition`, `origin_position`); only the kernel sets that, when a tenant moves to another partition. | A bug in the worker or its SDK: fix it. |
 | `no_vault` | kernel | A worker's events refer to the vault, but the kernel has none. | Start the kernel with `--vault-key`. |
 | `invalid_vault_values` | kernel | A worker's vault values do not match the references in its signed events, or could not be stored. | A bug in the worker or its SDK; check the kernel log. |
 | `vault_error` | kernel | The vault could not erase a subject. | Check the kernel log and the vault store, then submit again with a new command ID. |

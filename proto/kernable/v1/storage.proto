@@ -23,7 +23,24 @@ message LogRecord {
     ReplicationHeadRecord replication_head = 12;
     PartitionMap partition_map = 13;
     GlobalKeyRecord global_key = 14;
+    TenantImportedRecord tenant_imported = 15;
+    TenantMovedAwayRecord tenant_moved_away = 16;
   }
+}
+
+// On the source of a move, once the tenant lives on another partition (S4): its streams hold
+// no unique keys or facts here any more. Its events stay, history like any other.
+message TenantMovedAwayRecord {
+  string tenant = 1;
+}
+
+// On the target of a move (S4): the tenant was copied, so a restart does not copy it again.
+message TenantImportedRecord {
+  string tenant = 1;
+  string from = 2;
+  uint64 source_head = 3;
+  uint64 target_after = 4;
+  uint64 epoch = 5; // the move's (TenantMove.epoch)
 }
 
 // On the control partition, the key owner: the partition that may hold a unique key

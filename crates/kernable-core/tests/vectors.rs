@@ -69,6 +69,8 @@ fn vectors() -> Value {
             event_type: "OrderPlaced".into(),
             payload: br#"{"customerId":"k-1"}"#.to_vec(),
             schema: 2,
+            origin_partition: String::new(),
+            origin_position: 0,
         },
         NewEvent {
             erases: String::new(),
@@ -76,6 +78,8 @@ fn vectors() -> Value {
             event_type: "ItemAdded".into(),
             payload: br#"{"sku":"x"}"#.to_vec(),
             schema: 1,
+            origin_partition: String::new(),
+            origin_position: 0,
         },
     ];
     let reason = Rejected {
@@ -103,6 +107,8 @@ fn vectors() -> Value {
         hash: vec![],
         producer_sig: Some(signing::sign(&key, &producer_msg)),
         context: Some(context.clone()),
+        origin_partition: String::new(),
+        origin_position: 0,
     };
     // The same command and events with vault references, and an event that erases a subject.
     let salt = [9u8; 16];

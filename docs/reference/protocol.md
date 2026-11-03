@@ -128,6 +128,8 @@ A stored event: a NewEvent of a worker, completed by the kernel when it committe
 | `schema` |  `uint32` | 14 | version of the payload format of `event_type`, from 1 |
 | `vault_refs` | repeated `string` | 15 | see NewEvent |
 | `erases` |  `string` | 16 | see NewEvent |
+| `origin_partition` |  `string` | 17 | An event its tenant brought along when it moved here from another partition (S4): where it was first committed. Listeners do not get these; the original is delivered where it is. |
+| `origin_position` |  `uint64` | 18 |  |
 
 ### Snapshot
 
@@ -152,6 +154,8 @@ An event proposed by a worker; the kernel assigns position, version, time and ha
 | `schema` |  `uint32` | 3 | Version of the payload format, from 1. Must be the one declared in Register.event_schemas (1 if not declared), otherwise `invalid_event_schema`. |
 | `vault_refs` | repeated `string` | 4 | References to the values the payload keeps in the vault, in payload order. |
 | `erases` |  `string` | 5 | A subject (a person) whose vault values this event erases, everywhere; empty for none. The worker's key needs `vault_erase` for the event type (otherwise `erase_not_allowed`). |
+| `origin_partition` |  `string` | 6 | Set by the kernel only, on events a tenant brought from another partition when it moved there: where the event was first committed. A worker's result with them is refused. |
+| `origin_position` |  `uint64` | 7 |  |
 
 ## Vault
 
@@ -301,6 +305,7 @@ request to its tenant's partition.
 |---|---|---|---|
 | `Map` | `MapRequest` | `PartitionMap` | The newest map this kernel holds. NOT_FOUND without one (a kernel without --partition serves every tenant); with one, the call needs a grant of any key (kernable-grant): the map names tenants and addresses. |
 | `Apply` | `PartitionMap` | `MapResult` | Applies a new map on the control partition (the kernel started with --partition but without --control); the other partitions take it from there within seconds. Signed over kernable.v1.partitions by a key granted `manage` for `*`, valid 60 s around issued_at. Errors: UNAUTHENTICATED, PERMISSION_DENIED, INVALID_ARGUMENT (unknown partitions, a tenant twice), FAILED_PRECONDITION (not the control partition; an epoch not above the one held). |
+| `Moving` | `MoveStatusRequest` | `MoveStatus` | Asked of the target of a move (needs a grant of any key): whether it copied the tenant. |
 
 ### MapRequest
 
@@ -329,6 +334,23 @@ A partition: its name and the addresses of its kernels (two for a pair with a st
 | `tenant` |  `string` | 1 |  |
 | `partition` |  `string` | 2 |  |
 
+### TenantMove
+
+A tenant moving between partitions, or moved (S4). While it moves, both partitions answer its
+requests with UNAVAILABLE. Once moved, `source_head` is the source's head when it was copied
+(every original event of the tenant is at or before it) and `target_after` the target's head
+after the copies: an SDK delivers the target's events after it only once the source's stream
+has passed `source_head`, so a tenant's events keep their order across the move.
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `tenant` |  `string` | 1 |  |
+| `from` |  `string` | 2 |  |
+| `to` |  `string` | 3 |  |
+| `source_head` |  `uint64` | 4 |  |
+| `target_after` |  `uint64` | 5 |  |
+| `epoch` |  `uint64` | 6 | of the map that started the move: tells this move from earlier ones |
+
 ### PartitionMap
 
 Tenants listed in `tenants` live on their partition; every other tenant on `default`.
@@ -343,6 +365,27 @@ Tenants listed in `tenants` live on their partition; every other tenant on `defa
 | `issued_at` |  `int64` | 6 | ms since epoch |
 | `sig` |  `Signature` | 7 | over kernable.v1.partitions |
 | `protocol` |  `uint32` | 8 | not signed |
+| `moving` | repeated `TenantMove` | 9 | being copied to `to` |
+| `moved` | repeated `TenantMove` | 10 | done, with their heads |
+
+### MoveStatus
+
+What a target partition knows of a tenant moving to it.
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `done` |  `bool` | 1 |  |
+| `source_head` |  `uint64` | 2 |  |
+| `target_after` |  `uint64` | 3 |  |
+| `epoch` |  `uint64` | 4 | of the move it copied (TenantMove.epoch) |
+
+### MoveStatusRequest
+
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `tenant` |  `string` | 1 |  |
+| `protocol` |  `uint32` | 2 |  |
 
 ## Clients
 

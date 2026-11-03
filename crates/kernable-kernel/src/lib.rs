@@ -31,6 +31,7 @@ mod index;
 mod listeners;
 mod memberships;
 mod metrics;
+pub mod moves;
 pub mod node;
 pub mod partitions;
 mod queue;
@@ -72,6 +73,7 @@ use kernable_core::{
         listener_service_server::{ListenerService, ListenerServiceServer},
         membership_service_server::MembershipServiceServer,
         middleware_call,
+        move_service_server::MoveServiceServer,
         partition_service_server::PartitionServiceServer,
         query_answer, query_result,
         query_service_server::{QueryService, QueryServiceServer},
@@ -321,8 +323,21 @@ impl Kernel {
             .then(|| Arc::new(replication::Primary::new()));
         let maps = partitions::Maps::new(store.partition_map()?);
         let queue = queue::Queue::default();
+        // Commands of a tenant moving here are copies a stopped copy left pending: the next
+        // copy completes them, no worker runs them (S4).
+        let arriving: Vec<String> = match (&config.partition, maps.get()) {
+            (Some(p), Some(map)) => map
+                .moving
+                .iter()
+                .filter(|m| m.to == p.name)
+                .map(|m| m.tenant.clone())
+                .collect(),
+            _ => Vec::new(),
+        };
         for pending in store.pending()? {
-            queue.push(pending.command, pending.received_at);
+            if !arriving.contains(&pending.command.tenant_id) {
+                queue.push(pending.command, pending.received_at);
+            }
         }
         let kernel = Arc::new(Kernel {
             config: Arc::new(config),
@@ -1166,6 +1181,10 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
         )
         .add_service(PartitionServiceServer::new(api.clone()))
         .add_service(GlobalKeyServiceServer::new(api.clone()))
+        .add_service(
+            MoveServiceServer::new(api.clone())
+                .max_encoding_message_size(replication::MAX_MESSAGE_BYTES),
+        )
         .add_service(TrustSyncServiceServer::new(api.clone()))
         .add_service(
             ReplicationServiceServer::new(api.clone())
@@ -1207,6 +1226,7 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
         _ = flush_listeners(&kernel) => unreachable!(),
         _ = sample_trend(&kernel) => unreachable!(),
         () = partitions::follow_control(&kernel) => unreachable!(),
+        () = moves::follow_moves(&kernel) => unreachable!(),
         result = serve_metrics(&kernel) => result,
         result = serve_ui(&kernel) => result,
     }
@@ -2621,6 +2641,20 @@ impl Session {
             return Ok(());
         }
 
+        if r.events
+            .iter()
+            .any(|e| !e.origin_partition.is_empty() || e.origin_position != 0)
+        {
+            // Only the kernel sets where an event came from, when its tenant moves (S4).
+            let reason = Rejected {
+                code: "invalid_event_origin".into(),
+                message: "a worker's events have no origin; the kernel sets it on a move".into(),
+                ..Default::default()
+            };
+            self.reject(&r.lease_id, f.command, reason);
+            return Ok(());
+        }
+
         let name = |e: &NewEvent| config::qualified(&f.command.domain, &e.event_type);
         if let Some(e) = r
             .events
@@ -3067,9 +3101,10 @@ impl Session {
             .iter()
             .filter(|k| !current.held.keys.contains(k))
         {
+            // A stream of a tenant that moved away holds nothing here any more (S4).
             if index
                 .holder(store, vault, &k.id)?
-                .is_some_and(|holder| holder != *stream)
+                .is_some_and(|holder| holder != *stream && self.kernel.serves(&holder.tenant_id))
             {
                 return Err(Rejected {
                     code: "unique_taken".into(),
@@ -3278,11 +3313,14 @@ fn erase_subjects(
     erased
 }
 
+/// Whether a listener or subscription gets `event`: one of its types, and not a copy its tenant
+/// brought along when it moved here (S4): the original is delivered where it was committed.
 fn wanted(types: Option<&[String]>, event: &Event) -> bool {
-    types.is_none_or(|patterns| {
-        let name = config::qualified(&event.domain, &event.event_type);
-        patterns.iter().any(|p| config::covers(p, &name))
-    })
+    event.origin_partition.is_empty()
+        && types.is_none_or(|patterns| {
+            let name = config::qualified(&event.domain, &event.event_type);
+            patterns.iter().any(|p| config::covers(p, &name))
+        })
 }
 
 /// The global position of a result's last event; 0 for none.
