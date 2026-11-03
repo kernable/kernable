@@ -133,6 +133,27 @@ message PromoteResult {
 // lease with it, and a standby claims the primary's place through it once the lease expired.
 // The witness also records whether the primary has a standby in sync or commits alone, so a
 // standby that lacks writes is never made the primary.
+// The trust records a partition takes from the control partition (S2): every grant,
+// revocation and membership, and the partition map. Asked every second by every other
+// partition's primary, signed by its node key (granted `replicate`).
+service TrustSyncService {
+  rpc Sync(TrustSyncRequest) returns (TrustSync);
+}
+
+// Signed over kernable.v1.trust-sync (issued_at), valid 60 s around it.
+message TrustSyncRequest {
+  int64 issued_at = 1;
+  Signature sig = 2;
+  uint32 protocol = 3;
+}
+
+message TrustSync {
+  repeated Grant grants = 1;
+  repeated RevocationRecord revocations = 2;  // signed by the control partition's kernel
+  repeated MembershipRecord memberships = 3;
+  PartitionMap map = 4;
+}
+
 service WitnessService {
   rpc Ask(WitnessRequest) returns (WitnessAnswer);
 }

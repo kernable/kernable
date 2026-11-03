@@ -59,6 +59,22 @@ kernable witness --listen <addr> --root <root.pub> --state <file> [--lease-ms <m
 
 Runs the witness of a pair of kernels started with `--witness`: it decides which one is the primary, renews the primary's lease (3000 ms by default) and lets the standby in sync take its place when the lease runs out. It keeps the term and the roles in `<file>` (default witness.state); listens on `127.0.0.1:7300` by default, elsewhere only with mutual TLS (`--tls-cert`, `--tls-key`, `--tls-client-ca`).
 
+### `kernable partitions apply`
+
+```text
+kernable partitions apply <addr> <key> <map.json>
+```
+
+Applies a partition map on the control partition at `<addr>`: {'epoch': 2, 'partitions': {'p1': ['host:7233'], 'p2': [...]}, 'default': 'p1', 'control': 'p1', 'tenants': {'acme': 'p2'}} (JSON, with double quotes). Tenants not listed live on the default partition; the epoch must grow with every map. `<key>` needs a grant for manage on `*`. The other partitions take it from the control partition.
+
+### `kernable partitions show`
+
+```text
+kernable partitions show <addr> <key>
+```
+
+Prints the partition map the kernel at `<addr>` holds.
+
 ### `kernable promote`
 
 ```text

@@ -15,7 +15,7 @@ use std::sync::{
 use ed25519_dalek::SigningKey;
 use kernable_core::proto::{
     AggregateIndex, Command, CommandResult, Event, Grant, ListenerRecord, MembershipRecord,
-    NewEvent, Rejected, ReplicatedRecord, RevocationRecord, Signature, WorkerRecord,
+    NewEvent, PartitionMap, Rejected, ReplicatedRecord, RevocationRecord, Signature, WorkerRecord,
     log_record::Record,
 };
 
@@ -340,6 +340,15 @@ impl Store for FaultyStore {
 
     fn verify(&self, kernel_key_ids: &[String]) -> Result<Report> {
         self.inner.verify(kernel_key_ids)
+    }
+
+    fn partition_map(&self) -> Result<Option<PartitionMap>> {
+        self.faults.read()?;
+        self.inner.partition_map()
+    }
+
+    fn save_partition_map(&self, map: &PartitionMap) -> Result<()> {
+        self.faults.write(|| self.inner.save_partition_map(map))
     }
 
     fn record_head(&self) -> Result<Head> {

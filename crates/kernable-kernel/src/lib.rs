@@ -31,6 +31,7 @@ mod listeners;
 mod memberships;
 mod metrics;
 pub mod node;
+pub mod partitions;
 mod queue;
 mod replays;
 mod replication;
@@ -68,10 +69,13 @@ use kernable_core::{
         kernel_message::Msg as Out,
         listener_service_server::{ListenerService, ListenerServiceServer},
         membership_service_server::MembershipServiceServer,
-        middleware_call, query_answer, query_result,
+        middleware_call,
+        partition_service_server::PartitionServiceServer,
+        query_answer, query_result,
         query_service_server::{QueryService, QueryServiceServer},
         replication_service_server::ReplicationServiceServer,
         trust_service_server::{TrustService, TrustServiceServer},
+        trust_sync_service_server::TrustSyncServiceServer,
         worker_gateway_server::{WorkerGateway, WorkerGatewayServer},
         worker_message::Msg as In,
     },
@@ -248,6 +252,8 @@ pub struct Kernel {
     replays: replays::Replays,
     /// The standby, with `--replication sync`: writes count once it holds them.
     replication: Option<Arc<replication::Primary>>,
+    /// The partition map, with `--partition` (S2).
+    maps: partitions::Maps,
 }
 
 impl Kernel {
@@ -307,6 +313,7 @@ impl Kernel {
             .replication
             .sync
             .then(|| Arc::new(replication::Primary::new()));
+        let maps = partitions::Maps::new(store.partition_map()?);
         let queue = queue::Queue::default();
         for pending in store.pending()? {
             queue.push(pending.command, pending.received_at);
@@ -343,6 +350,7 @@ impl Kernel {
             durable,
             replays: replays::Replays::new(now_ms()),
             replication,
+            maps,
         });
         // The newest grants it had, checked again: a root key may be gone or revoked since.
         for grant in kernel.store.grants()? {
@@ -1143,6 +1151,8 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
                 .max_decoding_message_size(cache_max)
                 .max_encoding_message_size(cache_max),
         )
+        .add_service(PartitionServiceServer::new(api.clone()))
+        .add_service(TrustSyncServiceServer::new(api.clone()))
         .add_service(
             ReplicationServiceServer::new(api.clone())
                 .max_decoding_message_size(max)
@@ -1182,6 +1192,7 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
         _ = checkpoints(&kernel) => unreachable!(),
         _ = flush_listeners(&kernel) => unreachable!(),
         _ = sample_trend(&kernel) => unreachable!(),
+        () = partitions::follow_control(&kernel) => unreachable!(),
         result = serve_metrics(&kernel) => result,
         result = serve_ui(&kernel) => result,
     }
@@ -1299,6 +1310,7 @@ impl CommandService for Api {
         let cmd = request
             .command
             .ok_or_else(|| Status::invalid_argument("no command"))?;
+        kernel.owns(&cmd.tenant_id)?;
         let sig = cmd
             .client_sig
             .as_ref()
@@ -1633,6 +1645,7 @@ impl Api {
         let metadata = request.metadata().clone();
         let r = request.into_inner();
         protocol(r.protocol)?;
+        self.0.owns(&r.tenant_id)?;
         let (action, rules): (_, fn(&Permissions) -> &grants::Rules) = match op {
             "get" => ("read files", |p| &p.data_read),
             _ => ("write files", |p| &p.data_write),
@@ -1676,6 +1689,7 @@ impl Api {
         let metadata = request.metadata().clone();
         let r = request.into_inner();
         protocol(r.protocol)?;
+        self.0.owns(&r.tenant_id)?;
         let msg = signing::cache_message(op, &r);
         let slot = self.0.authorize_store(
             &metadata,
@@ -1835,6 +1849,7 @@ impl QueryService for Api {
         let metadata = request.metadata().clone();
         let query = request.into_inner();
         protocol(query.protocol)?;
+        kernel.owns(&query.tenant_id)?;
         let _running = kernel.request()?;
         let sig = query
             .client_sig

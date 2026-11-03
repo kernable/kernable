@@ -396,6 +396,29 @@ pub fn revoke_message(key_id: &str, since: i64, issued_at: i64) -> Vec<u8> {
         .0
 }
 
+/// What a key granted `manage` for `*` signs to apply a partition map.
+pub fn partitions_message(map: &crate::proto::PartitionMap) -> Vec<u8> {
+    let mut msg = Msg::new("kernable.v1.partitions")
+        .u64(map.epoch)
+        .u64(map.partitions.len() as u64);
+    for p in &map.partitions {
+        msg = msg.str(&p.name).u64(p.addresses.len() as u64);
+        for a in &p.addresses {
+            msg = msg.str(a);
+        }
+    }
+    msg = msg.u64(map.tenants.len() as u64);
+    for t in &map.tenants {
+        msg = msg.str(&t.tenant).str(&t.partition);
+    }
+    msg.str(&map.default).str(&map.control).i64(map.issued_at).0
+}
+
+/// What a partition's node key signs to take the trust records from the control partition.
+pub fn trust_sync_message(issued_at: i64) -> Vec<u8> {
+    Msg::new("kernable.v1.trust-sync").i64(issued_at).0
+}
+
 /// What an operator's key signs to promote a standby to the primary (`kernable promote`).
 pub fn promote_message(issued_at: i64) -> Vec<u8> {
     Msg::new("kernable.v1.promote").i64(issued_at).0

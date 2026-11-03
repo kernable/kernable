@@ -8,19 +8,19 @@
 
 use std::{
     collections::HashMap,
-    sync::{Mutex, MutexGuard, PoisonError, RwLock},
+    sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock},
 };
 
 use kernable_core::{
     proto::{
-        ApplyRequest, ApplyResult, Membership, MembershipRecord,
+        ApplyRequest, ApplyResult, Membership, MembershipRecord, Signature,
         membership_service_server::MembershipService,
     },
     signing,
 };
 use tonic::{Request, Response, Status};
 
-use crate::{Api, MAX_REQUEST_AGE_MS, config, internal, now_ms, protocol};
+use crate::{Api, Kernel, MAX_REQUEST_AGE_MS, config, internal, now_ms, protocol};
 
 #[derive(Default)]
 pub(crate) struct Memberships {
@@ -156,30 +156,39 @@ impl MembershipService for Api {
                 "membership expired; check the clock",
             ));
         }
-        validate(&m)?;
-        if !config::allowed(&kernel.permissions().manage, &sig.key_id, &m.service) {
-            return Err(Status::permission_denied(format!(
-                "key may not manage {}",
-                m.service
-            )));
-        }
-
-        let _applying = kernel.memberships.applying();
-        kernel.memberships.admit(&m)?;
-        let record = MembershipRecord {
-            membership: Some(m.clone()),
-            sig: Some(sig),
-            applied_at: now_ms(),
-        };
-        kernel.store.save_membership(&record).map_err(internal)?;
-        kernel.sync(0);
-        crate::crash::point("membership.stored");
-        kernel.memberships.set(m.clone());
-        let changed = kernel.listeners.apply(&m);
-        kernel.store.save_listeners(&changed).map_err(internal)?;
-        kernel.workers.apply(kernel, &m)?;
-        kernel.listeners.progress.notify_waiters();
-        tracing::info!(service = %m.service, workers = m.workers.len(), listeners = m.listeners.len(), middlewares = m.middlewares.len(), "membership applied");
+        take(kernel, m, sig)?;
         Ok(Response::new(ApplyResult {}))
     }
+}
+
+/// Takes a signed membership into effect: its signer must be granted `manage` for the service,
+/// and it must be newer than the applied one (an equal one changes nothing). For `Apply` after
+/// its age was checked, and for the memberships a partition takes from the control partition
+/// (S2), which are older.
+pub(crate) fn take(kernel: &Arc<Kernel>, m: Membership, sig: Signature) -> Result<(), Status> {
+    validate(&m)?;
+    if !config::allowed(&kernel.permissions().manage, &sig.key_id, &m.service) {
+        return Err(Status::permission_denied(format!(
+            "key may not manage {}",
+            m.service
+        )));
+    }
+
+    let _applying = kernel.memberships.applying();
+    kernel.memberships.admit(&m)?;
+    let record = MembershipRecord {
+        membership: Some(m.clone()),
+        sig: Some(sig),
+        applied_at: now_ms(),
+    };
+    kernel.store.save_membership(&record).map_err(internal)?;
+    kernel.sync(0);
+    crate::crash::point("membership.stored");
+    kernel.memberships.set(m.clone());
+    let changed = kernel.listeners.apply(&m);
+    kernel.store.save_listeners(&changed).map_err(internal)?;
+    kernel.workers.apply(kernel, &m)?;
+    kernel.listeners.progress.notify_waiters();
+    tracing::info!(service = %m.service, workers = m.workers.len(), listeners = m.listeners.len(), middlewares = m.middlewares.len(), "membership applied");
+    Ok(())
 }

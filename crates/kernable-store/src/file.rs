@@ -43,9 +43,9 @@ use kernable_core::{
     proto::{
         AggregateIndex, CheckpointRecord, Command, CommandResult, Committed, CommittedRecord,
         DataChangedRecord, EnqueuedRecord, Event, FormatRecord, Grant, ListenerRecord, LogRecord,
-        LoggedEvent, MembershipRecord, NewEvent, Rejected, RejectedRecord, ReplicatedRecord,
-        ReplicationHeadRecord, RevocationRecord, Signature, WorkerRecord, command_result::Outcome,
-        log_record::Record,
+        LoggedEvent, MembershipRecord, NewEvent, PartitionMap, Rejected, RejectedRecord,
+        ReplicatedRecord, ReplicationHeadRecord, RevocationRecord, Signature, WorkerRecord,
+        command_result::Outcome, log_record::Record,
     },
     signing::{self, GENESIS},
 };
@@ -96,6 +96,8 @@ struct State {
     schemas: BTreeMap<String, u32>,
     /// The holder of every unique key that is not personal, by identity.
     holders: HashMap<Vec<u8>, StreamKey>,
+    /// The newest partition map.
+    partition_map: Option<PartitionMap>,
 }
 
 impl State {
@@ -231,6 +233,15 @@ impl State {
                     self.grants.insert(g.key_id.clone(), g);
                 }
             }
+            Record::PartitionMap(m) => {
+                if self
+                    .partition_map
+                    .as_ref()
+                    .is_none_or(|held| held.epoch < m.epoch)
+                {
+                    self.partition_map = Some(m);
+                }
+            }
             // Only the record log counts them.
             Record::DataChanged(_) | Record::ReplicationHead(_) => {}
         }
@@ -314,6 +325,7 @@ impl State {
             | Record::Worker(_)
             | Record::Membership(_)
             | Record::Grant(_)
+            | Record::PartitionMap(_)
             | Record::DataChanged(_) => {}
         }
         Ok(())
@@ -1054,6 +1066,23 @@ impl Store for FileStore {
             v.command(&c.command, c.received_at);
         }
         Ok(v.finish())
+    }
+
+    fn partition_map(&self) -> Result<Option<PartitionMap>> {
+        Ok(self.inner().state.partition_map.clone())
+    }
+
+    fn save_partition_map(&self, map: &PartitionMap) -> Result<()> {
+        let mut inner = self.inner();
+        if inner
+            .state
+            .partition_map
+            .as_ref()
+            .is_some_and(|held| held.epoch >= map.epoch)
+        {
+            return Ok(());
+        }
+        append(&mut inner, Record::PartitionMap(map.clone()))
     }
 
     fn record_head(&self) -> Result<Head> {

@@ -20,9 +20,9 @@ use kernable_core::{
         AggregateIndex, Attribute, CheckpointRecord, Command, CommandResult, Committed,
         CommittedRecord, DataChangedRecord, EnqueuedRecord, Event, Grant, ListenerRecord,
         LogRecord, LoggedEvent, Membership, MembershipRecord, Middleware, NewEvent, ParkedEvent,
-        Rejected, RejectedRecord, ReplicatedRecord, ReplicationHeadRecord, RequestContext,
-        Requirement, RevocationRecord, Signature, When, WorkerRecord, command_result::Outcome,
-        log_record::Record,
+        PartitionMap, Rejected, RejectedRecord, ReplicatedRecord, ReplicationHeadRecord,
+        RequestContext, Requirement, RevocationRecord, Signature, When, WorkerRecord,
+        command_result::Outcome, log_record::Record,
     },
     signing::{self, GENESIS},
 };
@@ -875,6 +875,22 @@ impl Store for SqliteStore {
     /// Recomputes the hash chain and checks all signatures; see [`Report`].
     fn verify(&self, kernel_key_ids: &[String]) -> Result<Report> {
         verify_tables(&self.conn(), kernel_key_ids)
+    }
+
+    fn partition_map(&self) -> Result<Option<PartitionMap>> {
+        read_partition_map(&self.conn())
+    }
+
+    fn save_partition_map(&self, map: &PartitionMap) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if !save_partition_map_tx(&tx, map)? {
+            return Ok(());
+        }
+        let head = self.file(&tx, || vec![Record::PartitionMap(map.clone())])?;
+        tx.commit()?;
+        self.advance(head);
+        Ok(())
     }
 
     // ---- the record log ----
@@ -2113,12 +2129,56 @@ fn apply_record(tx: &Transaction<'_>, record: &Record) -> Result<()> {
         Record::Grant(g) => {
             save_grant_tx(tx, g)?;
         }
+        Record::PartitionMap(m) => {
+            save_partition_map_tx(tx, m)?;
+        }
         Record::DataChanged(_) => {}
         Record::Format(_) | Record::ReplicationHead(_) => {
             return Err(diverged("a record that starts a log".into()));
         }
     }
     Ok(())
+}
+
+/// Where SQLite keeps the newest partition map; created with the first one.
+const MAP_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS partition_map (
+    id    INTEGER PRIMARY KEY CHECK (id = 1),
+    epoch INTEGER NOT NULL,
+    map   BLOB    NOT NULL -- the PartitionMap message, with its signature
+) STRICT;
+";
+
+/// The newest partition map, if one was ever kept.
+fn read_partition_map(conn: &Connection) -> Result<Option<PartitionMap>> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE name = 'partition_map')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        return Ok(None);
+    }
+    let blob: Option<Vec<u8>> = conn
+        .query_row("SELECT map FROM partition_map WHERE id = 1", [], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    Ok(blob
+        .map(|b| PartitionMap::decode(b.as_slice()))
+        .transpose()?)
+}
+
+/// Keeps `map` unless one of the same or a higher epoch is kept; whether it was kept.
+fn save_partition_map_tx(tx: &Connection, map: &PartitionMap) -> Result<bool> {
+    tx.execute_batch(MAP_SCHEMA)?;
+    let changed = tx.execute(
+        "INSERT INTO partition_map (id, epoch, map) VALUES (1, ?1, ?2)
+         ON CONFLICT (id) DO UPDATE SET epoch = excluded.epoch, map = excluded.map
+         WHERE excluded.epoch > partition_map.epoch",
+        params![map.epoch, map.encode_to_vec()],
+    )?;
+    Ok(changed == 1)
 }
 
 /// Commits another store's commit here, through the same path as a worker's result: the
@@ -2310,6 +2370,9 @@ fn image_records(conn: &Connection, f: &mut dyn FnMut(Record) -> Result<()>) -> 
     for mut l in read_listeners(conn)? {
         l.parked_changed = true;
         f(Record::Listener(l))?;
+    }
+    if let Some(map) = read_partition_map(conn)? {
+        f(Record::PartitionMap(map))?;
     }
     for cp in read_checkpoints(conn, None)? {
         f(Record::Checkpoint(CheckpointRecord {

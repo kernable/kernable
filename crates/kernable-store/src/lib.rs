@@ -39,7 +39,7 @@ use std::fmt;
 use ed25519_dalek::SigningKey;
 use kernable_core::proto::{
     AggregateIndex, Command, CommandResult, Event, Grant, ListenerRecord, MembershipRecord,
-    NewEvent, Rejected, ReplicatedRecord, RevocationRecord, Signature, WorkerRecord,
+    NewEvent, PartitionMap, Rejected, ReplicatedRecord, RevocationRecord, Signature, WorkerRecord,
     log_record::Record,
 };
 
@@ -376,6 +376,17 @@ pub trait Store: Send + Sync {
     /// Recomputes the hash chain and checks all signatures against the kernel's keys (the
     /// current one and any it had before); see [`Report`].
     fn verify(&self, kernel_key_ids: &[String]) -> Result<Report>;
+
+    /// The newest partition map kept, if any.
+    fn partition_map(&self) -> Result<Option<PartitionMap>> {
+        Ok(None)
+    }
+
+    /// Keeps `map` unless a map of the same or a higher epoch is kept.
+    fn save_partition_map(&self, map: &PartitionMap) -> Result<()> {
+        let _ = map;
+        Err(Error::ReadOnly)
+    }
 
     // ---- the record log (see [`replication`]) ----
 

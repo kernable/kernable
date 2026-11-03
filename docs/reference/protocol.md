@@ -288,6 +288,62 @@ without a membership, and a process without a service, count as listed.
 ### ApplyResult
 
 
+## Partitions
+
+### PartitionService
+
+Where each tenant's data lives when several kernels (partitions) share the tenants.
+Every kernel started with `--partition` serves the tenants the map assigns to it and refuses
+the others with FAILED_PRECONDITION `wrong_partition: …`; the SDKs read the map and send each
+request to its tenant's partition.
+
+| RPC | Request | Response | Description |
+|---|---|---|---|
+| `Map` | `MapRequest` | `PartitionMap` | The newest map this kernel holds. The call needs a grant of any key (kernable-grant); the map names tenants and addresses. NOT_FOUND without one: a kernel without --partition serves every tenant. |
+| `Apply` | `PartitionMap` | `MapResult` | Applies a new map on the control partition (the kernel started with --partition but without --control); the other partitions take it from there within seconds. Signed over kernable.v1.partitions by a key granted `manage` for `*`, valid 60 s around issued_at. Errors: UNAUTHENTICATED, PERMISSION_DENIED, INVALID_ARGUMENT (unknown partitions, a tenant twice), FAILED_PRECONDITION (not the control partition; an epoch not above the one held). |
+
+### MapRequest
+
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `protocol` |  `uint32` | 1 |  |
+
+### MapResult
+
+
+### Partition
+
+A partition: its name and the addresses of its kernels (two for a pair with a standby).
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `name` |  `string` | 1 |  |
+| `addresses` | repeated `string` | 2 |  |
+
+### TenantPartition
+
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `tenant` |  `string` | 1 |  |
+| `partition` |  `string` | 2 |  |
+
+### PartitionMap
+
+Tenants listed in `tenants` live on their partition; every other tenant on `default`.
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `epoch` |  `uint64` | 1 | the newest epoch wins; each new map has a higher one |
+| `partitions` | repeated `Partition` | 2 |  |
+| `tenants` | repeated `TenantPartition` | 3 |  |
+| `default` |  `string` | 4 | a partition's name |
+| `control` |  `string` | 5 | the partition that holds the map and the trust records |
+| `issued_at` |  `int64` | 6 | ms since epoch |
+| `sig` |  `Signature` | 7 | over kernable.v1.partitions |
+| `protocol` |  `uint32` | 8 | not signed |
+
 ## Clients
 
 ### CommandService

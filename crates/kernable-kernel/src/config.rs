@@ -96,6 +96,18 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "`sync`: a standby (`--follow`) holds every write before anyone is told of it. Commits, revocations, grants and memberships wait until the standby has stored them; without a standby in sync they wait, and `/ready` answers 503. `off`: no standby.",
     ),
     (
+        "--partition",
+        "KERNABLE_PARTITION",
+        "",
+        "This kernel's partition, a name in the partition map: it serves the tenants the map assigns to it and refuses the others with `FAILED_PRECONDITION` `wrong_partition`, and none before it has a map. Without it, the kernel serves every tenant.",
+    ),
+    (
+        "--control",
+        "KERNABLE_CONTROL",
+        "",
+        "With `--partition`: the control partition's addresses, comma-separated (both kernels of a pair). This kernel takes the partition map, grants, revocations and memberships from there every second, with `--node-key` (granted `replicate`). Without it, this kernel is the control partition: maps are applied here (`kernable partitions apply`).",
+    ),
+    (
         "--witness",
         "KERNABLE_WITNESS",
         "",
@@ -105,7 +117,7 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "--node-key",
         "KERNABLE_NODE_KEY",
         "node.key",
-        "With `--witness`: this kernel's key towards the witness and the other kernel, whose grant (`<name>.grant` next to it) allows `replicate`.",
+        "With `--witness` or `--control`: this kernel's key towards the witness, the other kernel and the control partition, whose grant (`<name>.grant` next to it) allows `replicate`.",
     ),
     (
         "--advertise",
@@ -281,6 +293,19 @@ pub struct Config {
     pub durability: Durability,
     pub limits: Limits,
     pub replication: Replication,
+    /// `--partition`: one partition of several (S2).
+    pub partition: Option<PartitionConfig>,
+}
+
+/// A kernel of one partition (S2).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PartitionConfig {
+    /// Its name in the partition map.
+    pub name: String,
+    /// The control partition's addresses; `None`: this kernel is the control partition.
+    pub control: Option<String>,
+    /// The key it takes the trust records with; its grant is `<name>.grant` next to it.
+    pub node_key: PathBuf,
 }
 
 /// Replication (design/replication.md).
@@ -541,6 +566,17 @@ impl Config {
                 cache_bytes: positive("--max-cache-bytes")? as usize,
             },
             replication,
+            partition: match get("--partition") {
+                None => None,
+                Some(name) if !valid_domain(&name) => {
+                    return Err(format!("--partition: {name} is not a valid name").into());
+                }
+                Some(name) => Some(PartitionConfig {
+                    name,
+                    control: get("--control"),
+                    node_key: get("--node-key").expect("has a default").into(),
+                }),
+            },
         })
     }
 }

@@ -21,6 +21,7 @@ message LogRecord {
     Grant grant = 10;
     DataChangedRecord data_changed = 11;
     ReplicationHeadRecord replication_head = 12;
+    PartitionMap partition_map = 13;
   }
 }
 

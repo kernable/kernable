@@ -258,6 +258,54 @@ message ApplyRequest {
 
 message ApplyResult {}
 
+// ---- partitions ----
+
+// Where each tenant's data lives when several kernels (partitions) share the tenants.
+// Every kernel started with `--partition` serves the tenants the map assigns to it and refuses
+// the others with FAILED_PRECONDITION `wrong_partition: …`; the SDKs read the map and send each
+// request to its tenant's partition.
+service PartitionService {
+  // The newest map this kernel holds. The call needs a grant of any key (kernable-grant); the
+  // map names tenants and addresses. NOT_FOUND without one: a kernel without --partition
+  // serves every tenant.
+  rpc Map(MapRequest) returns (PartitionMap);
+  // Applies a new map on the control partition (the kernel started with --partition but
+  // without --control); the other partitions take it from there within seconds. Signed over
+  // kernable.v1.partitions by a key granted `manage` for `*`, valid 60 s around issued_at.
+  // Errors: UNAUTHENTICATED, PERMISSION_DENIED, INVALID_ARGUMENT (unknown partitions, a tenant
+  // twice), FAILED_PRECONDITION (not the control partition; an epoch not above the one held).
+  rpc Apply(PartitionMap) returns (MapResult);
+}
+
+message MapRequest {
+  uint32 protocol = 1;
+}
+
+message MapResult {}
+
+// A partition: its name and the addresses of its kernels (two for a pair with a standby).
+message Partition {
+  string name = 1;
+  repeated string addresses = 2;
+}
+
+message TenantPartition {
+  string tenant = 1;
+  string partition = 2;
+}
+
+// Tenants listed in `tenants` live on their partition; every other tenant on `default`.
+message PartitionMap {
+  uint64 epoch = 1;                  // the newest epoch wins; each new map has a higher one
+  repeated Partition partitions = 2;
+  repeated TenantPartition tenants = 3;
+  string default = 4;                // a partition's name
+  string control = 5;                // the partition that holds the map and the trust records
+  int64 issued_at = 6;               // ms since epoch
+  Signature sig = 7;                 // over kernable.v1.partitions
+  uint32 protocol = 8;               // not signed
+}
+
 // ---- clients ----
 
 // Commands, sent by clients and by handlers of listeners.

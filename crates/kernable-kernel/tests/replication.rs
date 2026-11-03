@@ -78,6 +78,7 @@ fn config(dir: &Path, name: &str, kernel_seed: u8) -> Config {
         durability: kernable_kernel::config::Durability::Normal,
         limits: Default::default(),
         replication: Replication::default(),
+        partition: None,
     }
 }
 

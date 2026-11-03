@@ -12,11 +12,13 @@ use std::{
 
 use kernable_core::{
     proto::{
-        ApplyRequest, Attribute, Command, ListenerRecord, Membership, Permission, PromoteRequest,
-        RetryRequest, RevokeRequest, SubmitRequest, When, WorkerRecord, command_result::Outcome,
+        ApplyRequest, Attribute, Command, ListenerRecord, MapRequest, Membership, Partition,
+        PartitionMap, Permission, PromoteRequest, RetryRequest, RevokeRequest, SubmitRequest,
+        TenantPartition, When, WorkerRecord, command_result::Outcome,
         command_service_client::CommandServiceClient,
         listener_service_client::ListenerServiceClient,
         membership_service_client::MembershipServiceClient,
+        partition_service_client::PartitionServiceClient,
         replication_service_client::ReplicationServiceClient,
         trust_service_client::TrustServiceClient,
     },
@@ -79,6 +81,16 @@ Keys and trust:
                                           witness.state); listens on 127.0.0.1:7300 by default,
                                           elsewhere only with mutual TLS (--tls-cert, --tls-key,
                                           --tls-client-ca).
+  kernable partitions apply <addr> <key> <map.json>
+                                          Applies a partition map on the control partition at
+                                          <addr>: {'epoch': 2, 'partitions': {'p1': ['host:7233'],
+                                          'p2': [...]}, 'default': 'p1', 'control': 'p1',
+                                          'tenants': {'acme': 'p2'}} (JSON, with double quotes).
+                                          Tenants not listed live on
+                                          the default partition; the epoch must grow with every
+                                          map. <key> needs a grant for manage on *. The other
+                                          partitions take it from the control partition.
+  kernable partitions show <addr> <key>   Prints the partition map the kernel at <addr> holds.
   kernable promote <addr> <key>           Makes the standby at <addr> (started with --follow) the
                                           primary: it stops following and serves. <key> needs a
                                           grant for manage on *. Promote only a standby whose
@@ -237,6 +249,8 @@ async fn main() -> ExitCode {
         }
         ["revoke", addr, root, key, since] => revoke(addr, root, key, since).await,
         ["promote", addr, key] => promote(addr, key).await,
+        ["partitions", "apply", addr, key, map] => partitions_apply(addr, key, map).await,
+        ["partitions", "show", addr, key] => partitions_show(addr, key).await,
         ["witness", flags @ ..] => return run_witness(flags).await,
         ["keys", "new", name] => keys_new(name),
         ["checkpoint", store, key] => checkpoint(store, key),
@@ -726,6 +740,98 @@ async fn run_witness(flags: &[&str]) -> ExitCode {
         },
         _ = shutdown_signal() => ExitCode::SUCCESS,
     }
+}
+
+async fn partitions_apply(addr: &str, key_path: &str, path: &str) -> Result<bool> {
+    let key = signing::read_signing_key(key_path)?;
+    let json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(path)?).map_err(|e| format!("{path}: {e}"))?;
+    let text = |field: &str| -> Result<String> {
+        Ok(json
+            .get(field)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("{path}: {field} is a partition's name"))?
+            .to_owned())
+    };
+    let partitions = json
+        .get("partitions")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| format!("{path}: partitions maps names to address lists"))?
+        .iter()
+        .map(|(name, addresses)| {
+            let addresses: Vec<String> = serde_json::from_value(addresses.clone())
+                .map_err(|_| format!("{path}: partition {name} needs a list of addresses"))?;
+            Ok(Partition {
+                name: name.clone(),
+                addresses,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let tenants = match json.get("tenants") {
+        None => Vec::new(),
+        Some(serde_json::Value::Object(map)) => map
+            .iter()
+            .map(|(tenant, partition)| {
+                Ok(TenantPartition {
+                    tenant: tenant.clone(),
+                    partition: partition
+                        .as_str()
+                        .ok_or_else(|| format!("{path}: tenant {tenant} names a partition"))?
+                        .to_owned(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+        Some(_) => return Err(format!("{path}: tenants maps tenants to partitions").into()),
+    };
+    let mut map = PartitionMap {
+        epoch: json
+            .get("epoch")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| format!("{path}: epoch is a number"))?,
+        partitions,
+        tenants,
+        default: text("default")?,
+        control: text("control")?,
+        issued_at: now_ms(),
+        sig: None,
+        protocol: kernable_core::PROTOCOL,
+    };
+    map.sig = Some(signing::sign(&key, &signing::partitions_message(&map)));
+    let mut request = tonic::Request::new(map.clone());
+    with_key_grant(&mut request, key_path)?;
+    PartitionServiceClient::new(connect(addr).await?)
+        .apply(request)
+        .await?;
+    println!(
+        "applied partition map epoch {} ({} partitions, {} tenants listed, default {})",
+        map.epoch,
+        map.partitions.len(),
+        map.tenants.len(),
+        map.default
+    );
+    Ok(true)
+}
+
+async fn partitions_show(addr: &str, key_path: &str) -> Result<bool> {
+    let mut request = tonic::Request::new(MapRequest {
+        protocol: kernable_core::PROTOCOL,
+    });
+    with_key_grant(&mut request, key_path)?;
+    let map = PartitionServiceClient::new(connect(addr).await?)
+        .map(request)
+        .await?
+        .into_inner();
+    println!(
+        "epoch {}, default {}, control {}",
+        map.epoch, map.default, map.control
+    );
+    for p in &map.partitions {
+        println!("partition {}: {}", p.name, p.addresses.join(", "));
+    }
+    for t in &map.tenants {
+        println!("tenant {} -> {}", t.tenant, t.partition);
+    }
+    Ok(true)
 }
 
 async fn promote(addr: &str, key_path: &str) -> Result<bool> {

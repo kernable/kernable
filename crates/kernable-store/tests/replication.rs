@@ -8,8 +8,9 @@ use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
         AggregateIndex, Attribute, Command, Grant, ListenerRecord, Membership, MembershipRecord,
-        Middleware, NewEvent, ParkedEvent, Permission, Rejected, ReplicatedRecord, RequestContext,
-        RevocationRecord, Signature, StoredKey, When, WorkerRecord, log_record::Record,
+        Middleware, NewEvent, ParkedEvent, Partition, PartitionMap, Permission, Rejected,
+        ReplicatedRecord, RequestContext, RevocationRecord, Signature, StoredKey, TenantPartition,
+        When, WorkerRecord, log_record::Record,
     },
     signing,
 };
@@ -271,6 +272,23 @@ fn writes(s: &dyn Store, round: u8) {
     s.revoke(&revocation).unwrap(); // revoked already
     s.checkpoint(&kernel(), at + 11).unwrap();
     s.data_changed("t1", "orders", &id("invoice")).unwrap();
+    let map = |epoch: u64| PartitionMap {
+        epoch,
+        partitions: vec![Partition {
+            name: "p1".into(),
+            addresses: vec!["unix:/p1.sock".into()],
+        }],
+        tenants: vec![TenantPartition {
+            tenant: id("t"),
+            partition: "p1".into(),
+        }],
+        default: "p1".into(),
+        control: "p1".into(),
+        issued_at: at,
+        ..Default::default()
+    };
+    s.save_partition_map(&map(u64::from(round) + 1)).unwrap();
+    s.save_partition_map(&map(0)).unwrap(); // older: kept out
 }
 
 /// Applies the primary's records to the standby, `batch` at a time, until it has them all.
@@ -360,6 +378,11 @@ fn same(primary: &dyn Store, standby: &dyn Store, what: &str) {
         primary.revocations().unwrap(),
         standby.revocations().unwrap(),
         "{what}"
+    );
+    assert_eq!(
+        primary.partition_map().unwrap(),
+        standby.partition_map().unwrap(),
+        "{what}: partition map"
     );
     assert_eq!(
         primary.event_schemas().unwrap(),
