@@ -396,6 +396,11 @@ pub fn revoke_message(key_id: &str, since: i64, issued_at: i64) -> Vec<u8> {
         .0
 }
 
+/// What an operator's key signs to promote a standby to the primary (`kernable promote`).
+pub fn promote_message(issued_at: i64) -> Vec<u8> {
+    Msg::new("kernable.v1.promote").i64(issued_at).0
+}
+
 /// What the kernel signs to anchor the chain at `global_position`.
 pub fn checkpoint_message(global_position: u64, chain_hash: &[u8], created_at: i64) -> Vec<u8> {
     Msg::new("kernable.v1.checkpoint")

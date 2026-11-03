@@ -10,7 +10,7 @@ use kernable_core::proto::Grant;
 use crate::config;
 
 /// The actions a grant names; `*` stands for all of them.
-pub const ACTIONS: [&str; 14] = [
+pub const ACTIONS: [&str; 15] = [
     "submit",
     "run",
     "subscribe",
@@ -25,6 +25,7 @@ pub const ACTIONS: [&str; 14] = [
     "data_write",
     "cache",
     "manage",
+    "replicate",
 ];
 
 /// Key ID -> the type patterns it may use for one action.
@@ -61,6 +62,9 @@ pub struct Permissions {
     pub cache: Rules,
     /// Services whose membership a key may apply (service names, or `*`).
     pub manage: Rules,
+    /// Keys a standby may follow the kernel with (`*`): it gets every record, vault value and
+    /// file (design/replication.md).
+    pub replicate: Rules,
     /// Old key ID -> new key ID: a listener registered with the old key may connect with the
     /// new one and keeps its position, order and middleware registration.
     pub successors: HashMap<String, String>,
@@ -118,6 +122,7 @@ impl Permissions {
             "data_write" => &mut self.data_write,
             "cache" => &mut self.cache,
             "manage" => &mut self.manage,
+            "replicate" => &mut self.replicate,
             _ => unreachable!("not an action: {action}"),
         }
     }

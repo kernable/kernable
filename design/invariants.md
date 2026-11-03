@@ -73,7 +73,7 @@ Checked by overload and soak runs.
 
 ## P: replication and failover
 
-Planned with A50, not built yet. To be checked by crash points during replication, the model-based test and the soak's failover faults.
+Built 2026-11-03. Checked so far by `crates/kernable-kernel/tests/replication.rs` (P1 after every answer, P3 after a promotion, P4 with a standby that holds a tail of its own) and `crates/kernable-store/tests/replication.rs` (records that do not continue a log are refused). Still to come: crash points during replication, the model-based test and the soak's failover faults.
 
 | # | Invariant | Guarantee |
 |---|---|---|

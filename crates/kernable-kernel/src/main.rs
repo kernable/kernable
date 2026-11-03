@@ -12,16 +12,17 @@ use std::{
 
 use kernable_core::{
     proto::{
-        ApplyRequest, Attribute, Command, ListenerRecord, Membership, Permission, RetryRequest,
-        RevokeRequest, SubmitRequest, When, WorkerRecord, command_result::Outcome,
+        ApplyRequest, Attribute, Command, ListenerRecord, Membership, Permission, PromoteRequest,
+        RetryRequest, RevokeRequest, SubmitRequest, When, WorkerRecord, command_result::Outcome,
         command_service_client::CommandServiceClient,
         listener_service_client::ListenerServiceClient,
         membership_service_client::MembershipServiceClient,
+        replication_service_client::ReplicationServiceClient,
         trust_service_client::TrustServiceClient,
     },
     signing, transport,
 };
-use kernable_kernel::{BoxError, Config, GRANT_HEADER, Kernel, config, grants, serve};
+use kernable_kernel::{BoxError, Config, GRANT_HEADER, Kernel, config, grants, serve, standby};
 use prost::Message;
 use tracing_subscriber::EnvFilter;
 use zeroize::Zeroizing;
@@ -67,6 +68,12 @@ Keys and trust:
                                           2026-10-27T09:00:00Z): the kernel refuses it, ends its
                                           connections and rejects its queued commands accepted since
                                           then (key_revoked). The kernel must be running.
+  kernable promote <addr> <key>           Makes the standby at <addr> (started with --follow) the
+                                          primary: it stops following and serves. <key> needs a
+                                          grant for manage on *. Promote only a standby whose
+                                          primary is gone: a primary that still runs is fenced (it
+                                          tells nobody of a write from then on), and rejoins as a
+                                          standby of the new one.
   kernable certs new <dir> <client>...    Writes a development CA (ca.tls.crt), a kernel certificate
                                           (kernel.tls.crt, kernel.tls.key) and a certificate per
                                           <client> (<client>.tls.crt, <client>.tls.key) to <dir>,
@@ -218,6 +225,7 @@ async fn main() -> ExitCode {
             grant(root, key, permissions)
         }
         ["revoke", addr, root, key, since] => revoke(addr, root, key, since).await,
+        ["promote", addr, key] => promote(addr, key).await,
         ["keys", "new", name] => keys_new(name),
         ["checkpoint", store, key] => checkpoint(store, key),
         ["verify", store, keys @ ..] if !keys.is_empty() => {
@@ -372,7 +380,15 @@ async fn start(config: Config, dev_notes: Option<Vec<String>>) -> ExitCode {
     for note in dev_notes.iter().flatten() {
         eprintln!("{note}");
     }
-    match run_kernel(config).await {
+    // A standby follows until it is promoted, then runs as the kernel on what it holds.
+    let ran = match config.replication.follow {
+        Some(_) => match standby::run(config.clone()).await {
+            Ok(()) => run_kernel(config).await,
+            Err(e) => Err(e),
+        },
+        None => run_kernel(config).await,
+    };
+    match ran {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             tracing::error!(error = %e, "kernel stopped");
@@ -600,6 +616,26 @@ async fn revoke(addr: &str, root: &str, key: &str, since: &str) -> Result<bool> 
         .revoke(request)
         .await?;
     println!("revoked {key_id}");
+    Ok(true)
+}
+
+async fn promote(addr: &str, key_path: &str) -> Result<bool> {
+    let key = signing::read_signing_key(key_path)?;
+    let issued_at = now_ms();
+    let mut request = tonic::Request::new(PromoteRequest {
+        issued_at,
+        sig: Some(signing::sign(&key, &signing::promote_message(issued_at))),
+        protocol: kernable_core::PROTOCOL,
+    });
+    with_key_grant(&mut request, key_path)?;
+    let result = ReplicationServiceClient::new(connect(addr).await?)
+        .promote(request)
+        .await?
+        .into_inner();
+    println!(
+        "promoted {addr}: it serves as the primary from record {}",
+        result.seq
+    );
     Ok(true)
 }
 

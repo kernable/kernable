@@ -24,6 +24,8 @@ kernable is built so that a crash anywhere loses nothing and does nothing twice.
 | The **machine** loses power or its OS crashes | With `--durability full` (the default) every committed command was on the disk before anyone was told: nothing acknowledged is lost. With `normal` (the default of `--dev`) the last moments of commands may be lost. | keep `full` in production |
 | The **disk** is full or fails a write | The request fails with `INTERNAL` and nothing half-written stays behind; a write that failed after it took effect is found and answered with its stored result. A command whose events cannot be stored waits in the queue and runs again after a pause that doubles each time, up to 5 s, until the disk takes it. If the file log cannot sync, it refuses every further write until a restart. | free space or fix the disk; resubmit with the same command ID. A file write that failed is signed anew (the same signature counts as tried: it may have taken effect) |
 | A **second kernel** opens the same store | It is refused: the file log and SQLite (`<store>.lock`) admit one writer. `kernable verify` and the inspection commands still read a running kernel's store. | run one kernel per store |
+| The **primary's machine** is lost (with a [standby](../how-to/standby)) | The standby holds every write anyone was told of: commits, listener acknowledgements, files. Writes the primary had not confirmed yet are gone, and nobody heard of them. | `kernable promote` the standby, point your processes at it |
+| The **standby** is away (`--replication sync`) | The primary's writes wait: commands stay queued, submits time out, `/ready` answers 503. Back, the standby catches up and the commands run. | bring it back, or restart the primary without `--replication sync` (see [Run a standby](../how-to/standby)) |
 | A file is **damaged or changed** | Damage in the middle refuses to open; a consistent rewrite shows in `kernable verify`. | restore from a backup |
 | A process speaks an **old protocol** or meets a **newer event version** | It is refused with a message, or stops at that event. | update it |
 
@@ -62,7 +64,7 @@ The tests prove it, with both stores, in three ways, and check the same invarian
 
 ## What it does not
 
-- **One kernel per store.** There is no failover to a second kernel yet; a restarted kernel picks up where it stopped.
+- **No automatic failover yet.** A [standby](../how-to/standby) holds every acknowledged write, but an operator promotes it; a restarted kernel picks up where it stopped.
 - Side effects of reactors (emails, calls to other systems) happen at least once. Make them idempotent, or record them as commands first.
 
 ## Finding the cause

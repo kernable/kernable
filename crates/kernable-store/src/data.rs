@@ -40,6 +40,58 @@ pub trait DataStore: Send + Sync {
 
     /// Deletes the file; whether there was one.
     fn delete(&self, key: &DataKey) -> Result<bool>;
+
+    /// Calls `f` with every file, by its place in the store (`tenant/domain/key`, each part
+    /// as [`file_name`] spells it) and its bytes as stored: a full copy for a standby.
+    fn dump(&self, f: &mut dyn FnMut(&str, &[u8]) -> Result<()>) -> Result<()>;
+
+    /// Keeps a file of another store's [`DataStore::dump`] at its place.
+    fn restore(&self, place: &str, stored: &[u8]) -> Result<()>;
+}
+
+/// The three parts of a place from [`DataStore::dump`]; refused unless each is a name
+/// [`file_name`] makes, so a place never reaches outside the store.
+fn parts(place: &str) -> Result<[&str; 3]> {
+    let valid = |p: &&str| {
+        let hex = p.strip_prefix("h-").unwrap_or(p);
+        !hex.is_empty()
+            && hex
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    };
+    let parts: Vec<&str> = place.split('/').collect();
+    match <[&str; 3]>::try_from(parts) {
+        Ok(parts) if parts.iter().all(valid) => Ok(parts),
+        _ => Err(Error::Corrupt(format!(
+            "{place} is not a place in a data store"
+        ))),
+    }
+}
+
+/// A file as a file data store keeps it: the content type's length, the type, the data.
+fn stored(data: &Data) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(4 + data.content_type.len() + data.data.len());
+    bytes.extend((data.content_type.len() as u32).to_be_bytes());
+    bytes.extend(data.content_type.as_bytes());
+    bytes.extend(&data.data);
+    bytes
+}
+
+fn unstored(name: &str, bytes: &[u8]) -> Result<Data> {
+    let corrupt = || Error::Corrupt(format!("data file {name} is cut short"));
+    let len = u32::from_be_bytes(
+        bytes
+            .get(..4)
+            .ok_or_else(corrupt)?
+            .try_into()
+            .expect("4 bytes"),
+    );
+    let end = 4 + len as usize;
+    let content_type = bytes.get(4..end).ok_or_else(corrupt)?;
+    Ok(Data {
+        content_type: String::from_utf8_lossy(content_type).into_owned(),
+        data: bytes[end..].to_vec(),
+    })
 }
 
 /// Opens a data store: `file:<directory>` or `memory:`.
@@ -77,12 +129,72 @@ impl DataStore for MemoryData {
     fn delete(&self, key: &DataKey) -> Result<bool> {
         Ok(self.map().remove(key).is_some())
     }
+
+    fn dump(&self, f: &mut dyn FnMut(&str, &[u8]) -> Result<()>) -> Result<()> {
+        let files: Vec<(DataKey, Data)> = self
+            .map()
+            .iter()
+            .map(|(k, d)| (k.clone(), d.clone()))
+            .collect();
+        for (k, data) in files {
+            let place = format!(
+                "{}/{}/{}",
+                file_name(&k.tenant_id),
+                file_name(&k.domain),
+                file_name(&k.key)
+            );
+            f(&place, &stored(&data))?;
+        }
+        Ok(())
+    }
+
+    fn restore(&self, place: &str, bytes: &[u8]) -> Result<()> {
+        let name = |part: &str| -> Result<String> {
+            hex::decode(part)
+                .ok()
+                .and_then(|b| String::from_utf8(b).ok())
+                .ok_or_else(|| {
+                    Error::Corrupt(format!(
+                        "{place}: a memory data store keeps names of up to 123 bytes only"
+                    ))
+                })
+        };
+        let [tenant, domain, key] = parts(place)?;
+        let key = DataKey {
+            tenant_id: name(tenant)?,
+            domain: name(domain)?,
+            key: name(key)?,
+        };
+        let data = unstored(&key.key, bytes)?;
+        self.map().insert(key, data);
+        Ok(())
+    }
 }
 
 /// Files in a directory, created on the first put.
 pub struct FileData(PathBuf);
 
 impl FileData {
+    /// Writes `bytes` as the file at `path`, durably: a reader sees the old file or the new
+    /// one, never half.
+    fn write(&self, path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+        let dir = path.parent().expect("has a directory");
+        let created = !dir.exists();
+        fs::create_dir_all(dir)?;
+        let partial = path.with_extension("partial");
+        let mut file = fs::File::create(&partial)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&partial, path)?;
+        // The rename, and the directories created for it, survive a power loss.
+        crate::file::sync_directory(path)?;
+        if created {
+            crate::file::sync_directory(dir)?;
+            crate::file::sync_directory(dir.parent().expect("has a directory"))?;
+        }
+        Ok(())
+    }
+
     fn path(&self, k: &DataKey) -> PathBuf {
         self.0
             .join(file_name(&k.tenant_id))
@@ -110,42 +222,54 @@ impl DataStore for FileData {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.into()),
         };
-        let corrupt = || Error::Corrupt(format!("data file {} is cut short", key.key));
-        let len = u32::from_be_bytes(
-            bytes
-                .get(..4)
-                .ok_or_else(corrupt)?
-                .try_into()
-                .expect("4 bytes"),
-        );
-        let end = 4 + len as usize;
-        let content_type = bytes.get(4..end).ok_or_else(corrupt)?;
-        Ok(Some(Data {
-            content_type: String::from_utf8_lossy(content_type).into_owned(),
-            data: bytes[end..].to_vec(),
-        }))
+        unstored(&key.key, &bytes).map(Some)
     }
 
     fn put(&self, key: &DataKey, data: &Data) -> Result<()> {
-        let path = self.path(key);
-        let dir = path.parent().expect("has a directory");
-        let created = !dir.exists();
-        fs::create_dir_all(dir)?;
-        // Write next to it and rename: a reader sees the old file or the new one, never half.
-        let partial = path.with_extension("partial");
-        let mut file = fs::File::create(&partial)?;
-        file.write_all(&(data.content_type.len() as u32).to_be_bytes())?;
-        file.write_all(data.content_type.as_bytes())?;
-        file.write_all(&data.data)?;
-        file.sync_all()?;
-        fs::rename(&partial, &path)?;
-        // The rename, and the directories created for it, survive a power loss.
-        crate::file::sync_directory(&path)?;
-        if created {
-            crate::file::sync_directory(dir)?;
-            crate::file::sync_directory(dir.parent().expect("has a directory"))?;
+        self.write(&self.path(key), &stored(data))
+    }
+
+    fn dump(&self, f: &mut dyn FnMut(&str, &[u8]) -> Result<()>) -> Result<()> {
+        let entries = |dir: &std::path::Path| -> Result<Vec<String>> {
+            let mut names = Vec::new();
+            match fs::read_dir(dir) {
+                Ok(read) => {
+                    for entry in read {
+                        let name = entry?.file_name().to_string_lossy().into_owned();
+                        // Half-written files (`.partial`) and anything foreign stay out.
+                        if !name.contains('.') {
+                            names.push(name);
+                        }
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+            names.sort();
+            Ok(names)
+        };
+        for tenant in entries(&self.0)? {
+            for domain in entries(&self.0.join(&tenant))? {
+                for key in entries(&self.0.join(&tenant).join(&domain))? {
+                    let place = format!("{tenant}/{domain}/{key}");
+                    if parts(&place).is_err() {
+                        continue;
+                    }
+                    match fs::read(self.0.join(&tenant).join(&domain).join(&key)) {
+                        Ok(bytes) => f(&place, &bytes)?,
+                        // Deleted meanwhile: its record follows.
+                        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                        Err(e) => return Err(e.into()),
+                    }
+                }
+            }
         }
         Ok(())
+    }
+
+    fn restore(&self, place: &str, bytes: &[u8]) -> Result<()> {
+        let [tenant, domain, key] = parts(place)?;
+        self.write(&self.0.join(tenant).join(domain).join(key), bytes)
     }
 
     fn delete(&self, key: &DataKey) -> Result<bool> {

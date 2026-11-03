@@ -1,0 +1,129 @@
+// Replication between a primary kernel and its standby (design/replication.md). Not part
+// of the client protocol: only kernels speak it.
+syntax = "proto3";
+
+package kernable.v1;
+
+import "kernable/v1/kernable.proto";
+import "kernable/v1/storage.proto";
+
+// A standby follows its primary. The standby's key needs a grant for `replicate` (`*`): the
+// stream carries every record of the primary's store, with the vault values and files they
+// refer to, in plaintext, so run it over mutual TLS only.
+service ReplicationService {
+  // FollowRequest.hello -> FollowResponse.challenge -> FollowRequest.challenge_response ->
+  // FollowResponse.start, then either an image (image..., image_end) or straight records;
+  // the standby acknowledges what it applied and synced.
+  rpc Follow(stream FollowRequest) returns (stream FollowResponse);
+  // Asked of a standby: stop following and serve as the primary. Signed by a key granted
+  // `manage` for `*`, over kernable.v1.promote, valid 60 s around issued_at.
+  rpc Promote(PromoteRequest) returns (PromoteResult);
+}
+
+message FollowRequest {
+  oneof msg {
+    FollowHello hello = 1;
+    ChallengeResponse challenge_response = 2;
+    FollowAck ack = 3;
+  }
+}
+
+// Where the standby's record log stands; seq 0 with the zero hash for an empty standby.
+message FollowHello {
+  string key_id = 1;
+  uint64 seq = 2;
+  bytes hash = 3;
+  uint32 protocol = 4;
+}
+
+// Every record up to `seq` is applied and on the standby's disk.
+message FollowAck {
+  uint64 seq = 1;
+}
+
+message FollowResponse {
+  oneof msg {
+    Challenge challenge = 1;
+    FollowStart start = 2;
+    ImageBatch image = 3;
+    ImageEnd image_end = 4;
+    RecordBatch records = 5;
+  }
+}
+
+enum FollowMode {
+  FOLLOW_MODE_UNSPECIFIED = 0;
+  FOLLOW = 1;   // records after the standby's head follow
+  IMAGE = 2;    // the standby is empty or too far behind: a full image comes first
+  DIVERGED = 3; // the standby holds records the primary does not: it moves its stores aside
+}
+
+message FollowStart {
+  FollowMode mode = 1;
+  string message = 2;
+}
+
+// Part of a full image: records in an order that applies (see Store::image), and the vault
+// rows and files they refer to.
+message ImageBatch {
+  repeated LogRecord records = 1;
+  repeated VaultRow vault = 2;
+  repeated DataFile files = 3;
+}
+
+// The image stands at this record: the standby's record log starts here.
+message ImageEnd {
+  uint64 seq = 1;
+  bytes hash = 2;
+}
+
+// Records of the primary's log, with the vault rows and files they refer to. `head` is the
+// primary's head when it sent them: a standby that applied up to it is caught up.
+message RecordBatch {
+  repeated ReplicatedRecord records = 1;
+  repeated VaultRow vault = 2;
+  repeated DataFile files = 3;
+  uint64 head = 4;
+}
+
+// A vault value with what the vault keeps about it, decrypted: the standby encrypts it with
+// its own vault key.
+message VaultRow {
+  string ref = 1;
+  string subject = 2;
+  bool secret = 3;
+  string command_id = 4;
+  string tenant = 5;
+  // The stream whose event refers to it; unset for a command's values.
+  optional string stream_tenant_id = 6;
+  string domain = 7;
+  string aggregate_type = 8;
+  string aggregate_id = 9;
+  bytes value = 10;
+  int64 created_at = 11;
+  // A personal unique key's value: filed under its identity (see Vault::put_key).
+  bool key = 12;
+}
+
+// A file of the data store as it is now; `absent` if it was deleted. In an image, files go by
+// `path`, their place in the store (see DataStore::dump), with `data` as stored.
+message DataFile {
+  string tenant_id = 1;
+  string domain = 2;
+  string key = 3;
+  bool absent = 4;
+  string content_type = 5;
+  bytes data = 6;
+  string path = 7;
+}
+
+message PromoteRequest {
+  int64 issued_at = 1;
+  Signature sig = 2;
+  uint32 protocol = 3;
+}
+
+message PromoteResult {
+  // The head of the record log the new primary starts from.
+  uint64 seq = 1;
+}

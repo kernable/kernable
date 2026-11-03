@@ -183,6 +183,7 @@ pub async fn start_wrapped(
         // The logic under test does not depend on it; Full is covered on its own.
         durability: kernable_kernel::config::Durability::Normal,
         limits: Default::default(),
+        replication: Default::default(),
     };
     customize(&mut config, &dir);
     let addr = config.listen.clone();

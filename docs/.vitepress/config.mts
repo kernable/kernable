@@ -51,6 +51,7 @@ const SIDEBAR = [
       { text: "Overview", link: "/how-to/" },
       { text: "Deploy and upgrade", link: "/how-to/deploy" },
       { text: "Back up and restore", link: "/how-to/backup" },
+      { text: "Run a standby", link: "/how-to/standby" },
       { text: "Monitor kernable", link: "/how-to/monitor" },
       { text: "Mutual TLS with your own PKI", link: "/how-to/tls" },
       { text: "Keys per service", link: "/how-to/keys" },

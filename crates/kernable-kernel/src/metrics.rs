@@ -213,6 +213,24 @@ pub(crate) fn render(kernel: &Kernel) -> String {
         "Events the listener gave up on and parked, waiting for an operator to retry or dismiss them.",
         per(&|l| l.parked as u64),
     );
+    if let Some(primary) = &kernel.replication {
+        let head = kernel.store.record_head().map_or(0, |h| h.seq);
+        metric(
+            "kernable_record_head",
+            "The newest record of the record log a standby follows (--replication sync).",
+            vec![(String::new(), head)],
+        );
+        metric(
+            "kernable_standby_acknowledged",
+            "The newest record the standby holds on its disk; writes after it wait.",
+            vec![(String::new(), primary.acked_seq())],
+        );
+        metric(
+            "kernable_standby_in_sync",
+            "1 while a standby is connected and has caught up; without it, writes wait.",
+            vec![(String::new(), primary.in_sync() as u64)],
+        );
+    }
     metric(
         "kernable_ready",
         "1 while the kernel is ready: every aggregate that counts has a worker, every listener that counts is connected and caught up, and it is not shutting down.",

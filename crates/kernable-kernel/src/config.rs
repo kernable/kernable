@@ -90,6 +90,30 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "A TCP `host:port` for the kernel's UI in a browser: the map of services, aggregates and listeners, the live connections, and every aggregate's history. It has no login, so the address must be loopback, or the kernel does not start. If the address is taken, the kernel runs on without the UI and logs `the UI is off`. Off when empty; `--dev` sets `127.0.0.1:7234` unless it is given.",
     ),
     (
+        "--replication",
+        "KERNABLE_REPLICATION",
+        "off",
+        "`sync`: a standby (`--follow`) holds every write before anyone is told of it. Commits, revocations, grants and memberships wait until the standby has stored them; without a standby in sync they wait, and `/ready` answers 503. `off`: no standby.",
+    ),
+    (
+        "--follow",
+        "KERNABLE_FOLLOW",
+        "",
+        "Run as the standby of the primary at this address: apply its records, serve nothing else (every request is refused with `UNAVAILABLE`, `not_primary`) until `kernable promote` makes this kernel the primary. The connection uses `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`, as the SDKs do.",
+    ),
+    (
+        "--follow-key",
+        "KERNABLE_FOLLOW_KEY",
+        "standby.key",
+        "With `--follow`: the standby's key, whose grant (`<name>.grant` next to it) allows `replicate`.",
+    ),
+    (
+        "--primary-kernel-key",
+        "KERNABLE_PRIMARY_KERNEL_KEY",
+        "",
+        "With `--follow`: the primary's kernel key, as a key ID or a `.pub` file; the standby checks the primary's checkpoints with it. Repeat the flag for a key the primary had before; the variable takes them comma-separated.",
+    ),
+    (
         "--lease-ttl-ms",
         "KERNABLE_LEASE_TTL_MS",
         "10000",
@@ -232,6 +256,27 @@ pub struct Config {
     /// `--durability` of the event store.
     pub durability: Durability,
     pub limits: Limits,
+    pub replication: Replication,
+}
+
+/// Replication (design/replication.md).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Replication {
+    /// `--replication sync`: writes count once the standby holds them.
+    pub sync: bool,
+    /// `--follow`: run as a standby.
+    pub follow: Option<Follow>,
+}
+
+/// What a standby follows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Follow {
+    /// The primary's address.
+    pub primary: String,
+    /// The standby's signing key; its grant is `<name>.grant` next to it.
+    pub key: PathBuf,
+    /// Key IDs of the primary's kernel keys.
+    pub primary_kernel_keys: Vec<String>,
 }
 
 /// What the kernel takes on at most. Beyond a limit, a request is refused with
@@ -355,6 +400,39 @@ impl Config {
             .iter()
             .map(|r| root_key_id(r))
             .collect::<Result<_, _>>()?;
+        let follow = match get("--follow") {
+            None => None,
+            Some(primary) => {
+                let keys: Vec<String> = match given.get("--primary-kernel-key") {
+                    Some(keys) => keys.clone(),
+                    None => env("KERNABLE_PRIMARY_KERNEL_KEY")
+                        .map(|k| k.split(',').map(|s| s.trim().to_owned()).collect())
+                        .unwrap_or_default(),
+                };
+                let keys: Vec<String> = keys.into_iter().filter(|k| !k.is_empty()).collect();
+                if keys.is_empty() {
+                    return Err("--follow needs --primary-kernel-key: the primary's kernel key, to check its checkpoints".into());
+                }
+                Some(Follow {
+                    primary,
+                    key: get("--follow-key").expect("has a default").into(),
+                    primary_kernel_keys: keys
+                        .iter()
+                        .map(|k| key_id("--primary-kernel-key", k))
+                        .collect::<Result<_, _>>()?,
+                })
+            }
+        };
+        let replication = Replication {
+            sync: match get("--replication").expect("has a default").as_str() {
+                "sync" => true,
+                "off" => false,
+                other => {
+                    return Err(format!("--replication: {other} is neither sync nor off").into());
+                }
+            },
+            follow,
+        };
         let tls = match (get("--tls-cert"), get("--tls-key"), get("--tls-client-ca")) {
             (Some(cert), Some(key), Some(client_ca)) => Some(Tls {
                 cert: cert.into(),
@@ -408,22 +486,28 @@ impl Config {
                 listeners_per_key: positive("--max-listeners-per-key")? as usize,
                 cache_bytes: positive("--max-cache-bytes")? as usize,
             },
+            replication,
         })
     }
 }
 
 /// A root key given as a key ID or as the path of a `.pub` file.
 fn root_key_id(root: &str) -> Result<String, Error> {
-    let id = if kernable_core::signing::verifying_key_from_hex(root).is_ok() {
-        root.to_owned()
+    key_id("--root", root)
+}
+
+/// A key given to `flag` as a key ID or as the path of a `.pub` file.
+fn key_id(flag: &str, key: &str) -> Result<String, Error> {
+    let id = if kernable_core::signing::verifying_key_from_hex(key).is_ok() {
+        key.to_owned()
     } else {
-        std::fs::read_to_string(root)
-            .map_err(|e| format!("--root {root}: neither a key ID nor a readable .pub file ({e})"))?
+        std::fs::read_to_string(key)
+            .map_err(|e| format!("{flag} {key}: neither a key ID nor a readable .pub file ({e})"))?
             .trim()
             .to_owned()
     };
     kernable_core::signing::verifying_key_from_hex(&id)
-        .map_err(|_| format!("--root {root}: not an Ed25519 key ID"))?;
+        .map_err(|_| format!("{flag} {key}: not an Ed25519 key ID"))?;
     Ok(id)
 }
 

@@ -1,0 +1,842 @@
+//! The standby (design/replication.md): it follows a primary, applies its records, serves
+//! nothing else, and becomes the primary when `kernable promote` asks it to.
+//!
+//! [`run`] returns once the standby was promoted, with its stores closed: the caller then
+//! opens them as a kernel does after a restart. Every request but `ReplicationService` is
+//! refused with `UNAVAILABLE` and `not_primary`, which the SDKs retry.
+
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    pin::Pin,
+    sync::{
+        Arc, Mutex, MutexGuard, PoisonError,
+        atomic::{AtomicU64, Ordering::SeqCst},
+    },
+    task::{Context, Poll},
+    time::Duration,
+};
+
+use ed25519_dalek::SigningKey;
+use kernable_core::{
+    proto::{
+        ChallengeResponse, CheckpointRecord, FollowAck, FollowHello, FollowMode, FollowRequest,
+        FollowResponse, Grant, ImageBatch, ImageEnd, PromoteRequest, PromoteResult, RecordBatch,
+        StoredKey, follow_request, follow_response,
+        log_record::Record,
+        replication_service_client::ReplicationServiceClient,
+        replication_service_server::{ReplicationService, ReplicationServiceServer},
+    },
+    signing, transport,
+};
+use kernable_store::{
+    Head, Store, StreamId,
+    data::{Data, DataKey, DataStore},
+    snapshots::SnapshotStore,
+    vault::Vault,
+};
+use prost::Message;
+use tokio::sync::{mpsc, oneshot};
+use tokio_stream::wrappers::ReceiverStream;
+use tonic::{
+    Request, Response, Status, Streaming,
+    codegen::http,
+    transport::{Certificate, Identity, Server, ServerTlsConfig},
+};
+
+use crate::{
+    BoxError, GRANT_HEADER, MAX_REQUEST_AGE_MS, Permissions, config, config::Config,
+    config::Follow, erase_subjects, now_ms, protocol, recover_vault, replication,
+};
+
+/// What a standby keeps.
+struct Stores {
+    store: Box<dyn Store>,
+    vault: Option<Vault>,
+    data: Box<dyn DataStore>,
+    snapshots: Box<dyn SnapshotStore>,
+}
+
+impl Stores {
+    fn open(config: &Config) -> Result<Self, BoxError> {
+        let store = kernable_store::open_with(&config.store, config.durability)?;
+        store.keep_record_log(true)?;
+        let vault = match &config.vault {
+            Some(v) => Some(Vault::open(&v.store, &*signing::read_secret(&v.key)?)?),
+            None => None,
+        };
+        let data = kernable_store::data::open(&config.data)?;
+        let snapshots = kernable_store::snapshots::open(&config.snapshots)?;
+        if let Some(vault) = &vault {
+            recover_vault(store.as_ref(), vault, snapshots.as_ref())?;
+        }
+        Ok(Stores {
+            store,
+            vault,
+            data,
+            snapshots,
+        })
+    }
+
+    /// Whether nothing was ever written to the store.
+    fn empty(&self) -> Result<bool, BoxError> {
+        let s = &self.store;
+        Ok(s.head_position()? == 0
+            && s.command_ids()?.is_empty()
+            && s.listeners()?.is_empty()
+            && s.grants()?.is_empty()
+            && s.workers()?.is_empty())
+    }
+}
+
+/// The standby, shared by its stream to the primary and its own service.
+struct Standby {
+    config: Config,
+    follow: Follow,
+    stores: Mutex<Option<Arc<Stores>>>,
+    /// Set by a promotion: the stream to the primary ends, the stores close.
+    promote: Mutex<Option<oneshot::Sender<()>>>,
+    /// The newest record applied, and the primary's head when it was sent.
+    applied: AtomicU64,
+    primary_head: AtomicU64,
+}
+
+impl Standby {
+    fn stores(&self) -> Arc<Stores> {
+        Arc::clone(
+            self.lock_stores()
+                .as_ref()
+                .expect("open while the standby runs"),
+        )
+    }
+
+    fn lock_stores(&self) -> MutexGuard<'_, Option<Arc<Stores>>> {
+        self.stores.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Closes the stores, moves them aside (`<path>.diverged-<ms>`) and opens new, empty ones:
+    /// for a standby whose log diverged, or that needs an image while it holds data (P4).
+    async fn start_over(&self, why: &str) -> Result<(), BoxError> {
+        let old = self.lock_stores().take();
+        if let Some(mut old) = old {
+            // Every handle closes before the files move: SQLite's lock goes with the last one.
+            loop {
+                match Arc::try_unwrap(old) {
+                    Ok(stores) => {
+                        drop(stores);
+                        break;
+                    }
+                    Err(shared) => {
+                        old = shared;
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }
+            }
+        }
+        let at = now_ms();
+        let mut moved = Vec::new();
+        for url in self.urls() {
+            moved.extend(move_aside(&url, at)?);
+        }
+        tracing::warn!(why, moved = ?moved, "the standby starts over, empty; its stores were moved aside");
+        *self.lock_stores() = Some(Arc::new(Stores::open(&self.config)?));
+        Ok(())
+    }
+
+    /// The stores a standby fills from its primary, as URLs.
+    fn urls(&self) -> Vec<String> {
+        let c = &self.config;
+        let mut urls = vec![c.store.clone(), c.snapshots.clone(), c.data.clone()];
+        urls.extend(c.vault.as_ref().map(|v| v.store.clone()));
+        urls
+    }
+
+    /// Why this standby may not become the primary, if it may not.
+    fn unpromotable(&self) -> Option<String> {
+        if image_marker(&self.config.store).is_some_and(|m| m.exists()) {
+            return Some("its image from the primary is not complete".into());
+        }
+        let stores = self.stores();
+        match stores.store.record_head() {
+            Ok(head) if head.seq == 0 => Some("it has not followed a primary yet".into()),
+            Ok(_) => None,
+            Err(e) => Some(format!("its record log cannot be read: {e}")),
+        }
+    }
+}
+
+/// Runs the standby until it is promoted; returns with its stores closed.
+pub async fn run(config: Config) -> Result<(), BoxError> {
+    let follow = config
+        .replication
+        .follow
+        .clone()
+        .ok_or("run the standby with --follow")?;
+    if kernable_store::backend(&config.store).0 == "memory" {
+        return Err("a standby keeps what it follows: --store cannot be memory:".into());
+    }
+    let key = signing::read_signing_key(&follow.key)
+        .map_err(|e| format!("--follow-key {}: {e}", follow.key.display()))?;
+    let grant_path = follow.key.with_extension("grant");
+    let grant = std::fs::read_to_string(&grant_path)
+        .map_err(|e| format!("the standby's grant {}: {e}", grant_path.display()))?
+        .trim()
+        .to_owned();
+    // Snapshots are a cache the primary does not send: they start empty.
+    for path in move_aside(&config.snapshots, 0)? {
+        std::fs::remove_file(path)?;
+    }
+    let (promoted, promoted_rx) = oneshot::channel();
+    let standby = Arc::new(Standby {
+        follow: follow.clone(),
+        stores: Mutex::new(Some(Arc::new(Stores::open(&config)?))),
+        promote: Mutex::new(Some(promoted)),
+        applied: AtomicU64::new(0),
+        primary_head: AtomicU64::new(0),
+        config,
+    });
+    // A store an image was left half-filled in starts over.
+    if image_marker(&standby.config.store).is_some_and(|m| m.exists()) {
+        standby
+            .start_over("an image from the primary was not complete")
+            .await?;
+        if let Some(marker) = image_marker(&standby.config.store) {
+            let _ = std::fs::remove_file(marker);
+        }
+    }
+    tracing::info!(primary = %follow.primary, listen = %standby.config.listen, "standby starting");
+    let (stop_serving, stopped) = oneshot::channel::<()>();
+    let server = tokio::spawn(serve(Arc::clone(&standby), stopped));
+    let metrics = match standby.config.metrics_listen.clone() {
+        Some(addr) => {
+            let standby = Arc::clone(&standby);
+            Some(crate::AbortOnDrop(tokio::spawn(async move {
+                if let Err(e) = serve_metrics(standby, &addr).await {
+                    tracing::error!(error = %e, "the standby's metrics stopped");
+                }
+            })))
+        }
+        None => None,
+    };
+    let following = async {
+        let mut delay = Duration::from_secs(1);
+        loop {
+            match follow_once(&standby, &key, &grant).await {
+                Ok(()) => tracing::warn!("the primary ended the stream; connecting again"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "following the primary failed; connecting again in {delay:?}")
+                }
+            }
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(Duration::from_secs(30));
+        }
+    };
+    tokio::select! {
+        () = following => unreachable!("follows until promoted"),
+        result = server => {
+            result??;
+            return Err("the standby's server stopped".into());
+        }
+        _ = promoted_rx => {}
+    }
+    let _ = stop_serving.send(());
+    drop(metrics);
+    // Every handle on the stores closes before the kernel opens them.
+    let stores = standby.lock_stores().take();
+    drop(stores);
+    tracing::warn!(
+        record = standby.applied.load(SeqCst),
+        "promoted: this kernel is the primary now"
+    );
+    Ok(())
+}
+
+/// One connection to the primary: catch up, then apply its records as they come.
+async fn follow_once(
+    standby: &Arc<Standby>,
+    key: &SigningKey,
+    grant: &str,
+) -> Result<(), BoxError> {
+    let follow = &standby.follow;
+    let mut client = ReplicationServiceClient::new(connect(&follow.primary).await?)
+        .max_decoding_message_size(replication::MAX_MESSAGE_BYTES)
+        .max_encoding_message_size(replication::MAX_MESSAGE_BYTES);
+    let head = standby.stores().store.record_head()?;
+    let (tx, rx) = mpsc::channel(16);
+    let say = |msg| FollowRequest { msg: Some(msg) };
+    tx.send(say(follow_request::Msg::Hello(FollowHello {
+        key_id: signing::key_id(&key.verifying_key()),
+        seq: head.seq,
+        hash: head.hash.clone(),
+        protocol: kernable_core::PROTOCOL,
+    })))
+    .await?;
+    let mut request = Request::new(ReceiverStream::new(rx));
+    request.metadata_mut().insert(GRANT_HEADER, grant.parse()?);
+    let mut inbound = client.follow(request).await?.into_inner();
+    let Some(follow_response::Msg::Challenge(challenge)) = next(&mut inbound).await? else {
+        return Err("the primary sent no challenge".into());
+    };
+    let proof = signing::sign(key, &signing::challenge_message(&challenge.nonce));
+    tx.send(say(follow_request::Msg::ChallengeResponse(
+        ChallengeResponse { sig: proof.sig },
+    )))
+    .await?;
+    let Some(follow_response::Msg::Start(start)) = next(&mut inbound).await? else {
+        return Err("the primary did not start the stream".into());
+    };
+    match start.mode() {
+        FollowMode::Follow => {
+            tracing::info!(from = head.seq, "following the primary");
+        }
+        FollowMode::Image => {
+            if !standby.stores().empty()? {
+                standby
+                    .start_over("the primary no longer keeps the records after this standby's")
+                    .await?;
+                return Ok(());
+            }
+            let seq = take_image(standby, &mut inbound).await?;
+            tx.send(say(follow_request::Msg::Ack(FollowAck { seq })))
+                .await?;
+        }
+        FollowMode::Diverged | FollowMode::Unspecified => {
+            standby
+                .start_over(&format!("the record log diverged: {}", start.message))
+                .await?;
+            return Ok(());
+        }
+    }
+    loop {
+        match next(&mut inbound).await? {
+            Some(follow_response::Msg::Records(batch)) => {
+                standby.primary_head.store(batch.head, SeqCst);
+                let stores = standby.stores();
+                let keys = follow.primary_kernel_keys.clone();
+                let seq =
+                    tokio::task::spawn_blocking(move || apply(&stores, batch, &keys)).await??;
+                standby.applied.store(seq, SeqCst);
+                tx.send(say(follow_request::Msg::Ack(FollowAck { seq })))
+                    .await?;
+            }
+            None => return Ok(()),
+            Some(_) => return Err("the primary sent something other than records".into()),
+        }
+    }
+}
+
+async fn next(
+    inbound: &mut Streaming<FollowResponse>,
+) -> Result<Option<follow_response::Msg>, Status> {
+    Ok(inbound.message().await?.and_then(|m| m.msg))
+}
+
+/// Receives a full image into the empty stores; returns the record it stands at.
+async fn take_image(
+    standby: &Arc<Standby>,
+    inbound: &mut Streaming<FollowResponse>,
+) -> Result<u64, BoxError> {
+    let marker = image_marker(&standby.config.store).ok_or("no place for the image marker")?;
+    std::fs::write(&marker, b"an image from the primary is being applied\n")?;
+    let mut records = 0;
+    loop {
+        match next(inbound).await? {
+            Some(follow_response::Msg::Image(batch)) => {
+                records += batch.records.len();
+                let stores = standby.stores();
+                let keys = standby.follow.primary_kernel_keys.clone();
+                tokio::task::spawn_blocking(move || apply_image(&stores, batch, &keys)).await??;
+            }
+            Some(follow_response::Msg::ImageEnd(ImageEnd { seq, hash })) => {
+                let stores = standby.stores();
+                tokio::task::spawn_blocking(move || -> Result<(), BoxError> {
+                    stores.store.start_record_log(&Head { seq, hash })?;
+                    stores.store.sync()?;
+                    Ok(())
+                })
+                .await??;
+                std::fs::remove_file(&marker)?;
+                standby.applied.store(seq, SeqCst);
+                tracing::info!(records, record = seq, "took a full image from the primary");
+                return Ok(seq);
+            }
+            None => return Err("the primary ended the stream during the image".into()),
+            Some(_) => return Err("the primary sent something else during the image".into()),
+        }
+    }
+}
+
+fn apply_image(stores: &Stores, batch: ImageBatch, keys: &[String]) -> Result<(), BoxError> {
+    let records: Vec<Record> = batch.records.into_iter().filter_map(|l| l.record).collect();
+    check_checkpoints(records.iter(), keys)?;
+    for file in &batch.files {
+        stores.data.restore(&file.path, &file.data)?;
+    }
+    import(stores, &batch.vault)?;
+    stores.store.apply_image(&records)?;
+    Ok(())
+}
+
+fn import(stores: &Stores, rows: &[kernable_core::proto::VaultRow]) -> Result<(), BoxError> {
+    match &stores.vault {
+        Some(vault) => Ok(vault.import(rows)?),
+        None if rows.is_empty() => Ok(()),
+        None => Err("the primary sends vault values: start the standby with --vault-key".into()),
+    }
+}
+
+/// The primary's checkpoints carry its kernel key's signature.
+fn check_checkpoints<'a>(
+    records: impl Iterator<Item = &'a Record>,
+    keys: &[String],
+) -> Result<(), BoxError> {
+    for record in records {
+        if let Record::Checkpoint(CheckpointRecord {
+            global_position,
+            chain_hash,
+            kernel_sig,
+            created_at,
+        }) = record
+        {
+            let sig = kernel_sig.as_ref().ok_or("an unsigned checkpoint")?;
+            let msg = signing::checkpoint_message(*global_position, chain_hash, *created_at);
+            if !keys.contains(&sig.key_id) || signing::verify(sig, &msg).is_err() {
+                return Err(format!(
+                    "the checkpoint of event {global_position} is not signed by the primary's kernel key (--primary-kernel-key)"
+                )
+                .into());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A commit's command, its stream, and what the vault does around it, as on the primary.
+struct Around {
+    command_id: String,
+    tenant: String,
+    stream: StreamId,
+    erasing: Vec<String>,
+    /// Personal keys the stream held before the commit.
+    held: Vec<StoredKey>,
+    /// The keys and facts the commit files, if it files them.
+    files: Option<Vec<StoredKey>>,
+}
+
+/// Applies a batch of the primary's records: files and vault values first (the records refer
+/// to them), erasures noted, the records, then what the vault drops after a commit. Returns the
+/// last record applied.
+fn apply(stores: &Stores, batch: RecordBatch, keys: &[String]) -> Result<u64, BoxError> {
+    let last = batch.records.last().map_or(0, |r| r.seq);
+    let records: Vec<&Record> = batch
+        .records
+        .iter()
+        .filter_map(|r| r.record.as_ref().and_then(|l| l.record.as_ref()))
+        .collect();
+    check_checkpoints(records.iter().copied(), keys)?;
+    for f in &batch.files {
+        let key = DataKey {
+            tenant_id: f.tenant_id.clone(),
+            domain: f.domain.clone(),
+            key: f.key.clone(),
+        };
+        if f.absent {
+            stores.data.delete(&key)?;
+        } else {
+            stores.data.put(
+                &key,
+                &Data {
+                    content_type: f.content_type.clone(),
+                    data: f.data.clone(),
+                },
+            )?;
+        }
+    }
+    import(stores, &batch.vault)?;
+    let store = &stores.store;
+    let mut around = Vec::new();
+    let mut completed = Vec::new();
+    for record in &records {
+        match record {
+            Record::Committed(c) => {
+                let Some(command) = store.command(&c.command_id)?.map(|p| p.command) else {
+                    continue; // refused by the store below
+                };
+                let stream = StreamId {
+                    tenant_id: command.tenant_id.clone(),
+                    domain: command.domain.clone(),
+                    aggregate_type: command.aggregate_type.clone(),
+                    aggregate_id: command.aggregate_id.clone(),
+                };
+                let held = store
+                    .stream_index(&stream)?
+                    .map(|i| i.keys)
+                    .unwrap_or_default();
+                let erasing: Vec<String> = c
+                    .events
+                    .iter()
+                    .filter_map(|l| l.event.as_ref())
+                    .filter(|e| !e.erases.is_empty())
+                    .map(|e| e.erases.clone())
+                    .collect();
+                if let Some(vault) = &stores.vault {
+                    for subject in &erasing {
+                        vault.intend_erase(&command.tenant_id, subject, &c.command_id)?;
+                    }
+                }
+                around.push(Around {
+                    command_id: c.command_id.clone(),
+                    tenant: command.tenant_id,
+                    stream,
+                    erasing,
+                    held,
+                    files: c.index.as_ref().map(|i| i.keys.clone()),
+                });
+                completed.push(c.command_id.clone());
+            }
+            Record::Rejected(r) => completed.push(r.command_id.clone()),
+            _ => {}
+        }
+    }
+    store.apply(&batch.records)?;
+    store.sync()?;
+    let Some(vault) = &stores.vault else {
+        return Ok(last);
+    };
+    for command_id in &completed {
+        vault.drop_secrets(command_id)?;
+    }
+    for a in around {
+        // A personal key the commit released frees its value.
+        if let Some(files) = &a.files {
+            let released: Vec<String> = a
+                .held
+                .iter()
+                .filter(|k| !k.vault_ref.is_empty())
+                .filter(|k| !files.iter().any(|f| f.vault_ref == k.vault_ref))
+                .map(|k| k.vault_ref.clone())
+                .collect();
+            vault.remove(&released)?;
+        }
+        if !a.erasing.is_empty() {
+            erase_subjects(
+                vault,
+                stores.snapshots.as_ref(),
+                &a.tenant,
+                &a.command_id,
+                &a.erasing,
+                &a.stream,
+            );
+            vault.drop_intents(&a.command_id)?;
+        }
+    }
+    Ok(last)
+}
+
+/// Where a store marks an image in progress: `<path>.image`.
+fn image_marker(url: &str) -> Option<PathBuf> {
+    match kernable_store::backend(url) {
+        ("memory", _) => None,
+        (_, path) => Some(PathBuf::from(format!("{path}.image"))),
+    }
+}
+
+/// Moves the files of the store at `url` to `<path>.diverged-<at>`; returns where they went.
+fn move_aside(url: &str, at: i64) -> Result<Vec<PathBuf>, BoxError> {
+    let path = match url.split_once(':') {
+        Some(("memory", _)) => return Ok(Vec::new()),
+        Some((_, path)) => path,
+        None => url,
+    };
+    let mut moved = Vec::new();
+    for suffix in ["", "-wal", "-shm", ".lock", ".image"] {
+        let from = PathBuf::from(format!("{path}{suffix}"));
+        if from.exists() {
+            let to = PathBuf::from(format!("{path}{suffix}.diverged-{at}"));
+            std::fs::rename(&from, &to)?;
+            moved.push(to);
+        }
+    }
+    Ok(moved)
+}
+
+/// A channel to the primary, over mutual TLS when `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and
+/// `KERNABLE_TLS_KEY` name the files, as for the SDKs.
+async fn connect(addr: &str) -> Result<tonic::transport::Channel, BoxError> {
+    let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+    match (
+        var("KERNABLE_TLS_CA"),
+        var("KERNABLE_TLS_CERT"),
+        var("KERNABLE_TLS_KEY"),
+    ) {
+        (Some(ca), Some(cert), Some(key)) => {
+            let tls = transport::Tls {
+                ca: ca.into(),
+                cert: cert.into(),
+                key: key.into(),
+            };
+            transport::connect_tls(addr, &tls).await
+        }
+        _ => Ok(transport::connect(addr).await?),
+    }
+}
+
+// ---- the standby's own service ----
+
+#[derive(Clone)]
+struct Api(Arc<Standby>);
+
+#[tonic::async_trait]
+impl ReplicationService for Api {
+    type FollowStream = ReceiverStream<Result<FollowResponse, Status>>;
+
+    async fn follow(
+        &self,
+        _request: Request<Streaming<FollowRequest>>,
+    ) -> Result<Response<Self::FollowStream>, Status> {
+        Err(not_primary(&self.0.follow.primary))
+    }
+
+    async fn promote(
+        &self,
+        request: Request<PromoteRequest>,
+    ) -> Result<Response<PromoteResult>, Status> {
+        let standby = &self.0;
+        let metadata = request.metadata().clone();
+        let req = request.into_inner();
+        protocol(req.protocol)?;
+        let sig = req
+            .sig
+            .ok_or_else(|| Status::unauthenticated("the promote request is not signed"))?;
+        signing::verify(&sig, &signing::promote_message(req.issued_at))
+            .map_err(|_| Status::unauthenticated("invalid promote request signature"))?;
+        if (now_ms() - req.issued_at).abs() > MAX_REQUEST_AGE_MS {
+            return Err(Status::unauthenticated(
+                "promote request expired; check the clock",
+            ));
+        }
+        may_manage(standby, &metadata, &sig.key_id)?;
+        if let Some(why) = standby.unpromotable() {
+            return Err(Status::failed_precondition(format!(
+                "this standby cannot become the primary: {why}"
+            )));
+        }
+        let seq = standby.applied.load(SeqCst).max(
+            standby
+                .stores()
+                .store
+                .record_head()
+                .map(|h| h.seq)
+                .unwrap_or(0),
+        );
+        let promote = standby
+            .promote
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        match promote {
+            Some(promote) => {
+                tracing::warn!(key = %sig.key_id, record = seq, "promoted by an operator");
+                let _ = promote.send(());
+                Ok(Response::new(PromoteResult { seq }))
+            }
+            None => Err(Status::failed_precondition("promoted already")),
+        }
+    }
+}
+
+/// Whether `key_id` may promote: its grant (presented or stored, signed by a root the kernel
+/// trusts, not revoked) allows `manage` for `*`.
+fn may_manage(
+    standby: &Standby,
+    metadata: &tonic::metadata::MetadataMap,
+    key_id: &str,
+) -> Result<(), Status> {
+    let stores = standby.stores();
+    let internal = |e: kernable_store::Error| Status::internal(e.to_string());
+    let presented = metadata
+        .get(GRANT_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| hex::decode(v.trim()).ok())
+        .and_then(|b| Grant::decode(b.as_slice()).ok());
+    let stored = stores.store.grants().map_err(internal)?;
+    let roots = &standby.config.roots;
+    let signed = |g: &Grant| {
+        g.root_sig.as_ref().is_some_and(|s| {
+            roots.contains(&s.key_id) && signing::verify(s, &signing::grant_message(g)).is_ok()
+        })
+    };
+    let newest = presented
+        .into_iter()
+        .chain(stored)
+        .filter(|g| g.key_id == key_id && signed(g))
+        .max_by_key(|g| g.issued_at);
+    let revoked: HashMap<String, i64> = stores
+        .store
+        .revocations()
+        .map_err(internal)?
+        .into_iter()
+        .map(|r| (r.key_id, r.since))
+        .collect();
+    let grants: HashMap<String, Grant> =
+        newest.into_iter().map(|g| (g.key_id.clone(), g)).collect();
+    let permissions = Permissions::new(&grants, &revoked);
+    if !config::allowed(&permissions.manage, key_id, "*") {
+        return Err(Status::permission_denied(
+            "the key may not promote: its grant needs manage for *",
+        ));
+    }
+    Ok(())
+}
+
+fn not_primary(primary: &str) -> Status {
+    Status::unavailable(format!(
+        "not_primary: this kernel is a standby of {primary}; connect to the primary"
+    ))
+}
+
+/// Serves the standby's own service on `--listen`; every other request is refused as
+/// `not_primary`. Stops when `stop` fires.
+async fn serve(standby: Arc<Standby>, stop: oneshot::Receiver<()>) -> Result<(), BoxError> {
+    let config = &standby.config;
+    let listen = config.listen.clone();
+    let mut builder = Server::builder();
+    if let Some(tls) = &config.tls {
+        let identity = Identity::from_pem(std::fs::read(&tls.cert)?, std::fs::read(&tls.key)?);
+        let client_ca = Certificate::from_pem(std::fs::read(&tls.client_ca)?);
+        builder = builder.tls_config(
+            ServerTlsConfig::new()
+                .identity(identity)
+                .client_ca_root(client_ca),
+        )?;
+    }
+    let primary: Arc<str> = standby.follow.primary.as_str().into();
+    let router = builder
+        .layer(tower::layer::layer_fn(move |inner| NotPrimary {
+            inner,
+            primary: Arc::clone(&primary),
+        }))
+        .add_service(ReplicationServiceServer::new(Api(Arc::clone(&standby))));
+    let stopped = async {
+        let _ = stop.await;
+    };
+    match transport::unix_path(&listen) {
+        #[cfg(unix)]
+        Some(path) => {
+            use std::os::unix::fs::FileTypeExt;
+            if std::fs::metadata(path).is_ok_and(|m| m.file_type().is_socket()) {
+                std::fs::remove_file(path)?;
+            }
+            let listener = tokio::net::UnixListener::bind(path)?;
+            let incoming = tokio_stream::wrappers::UnixListenerStream::new(listener);
+            router
+                .serve_with_incoming_shutdown(incoming, stopped)
+                .await?;
+            let _ = std::fs::remove_file(path);
+        }
+        #[cfg(not(unix))]
+        Some(_) => return Err("unix: sockets need Unix; listen on host:port".into()),
+        None => {
+            let addr = tokio::net::lookup_host(&listen)
+                .await?
+                .next()
+                .ok_or_else(|| format!("{listen}: no address"))?;
+            router.serve_with_shutdown(addr, stopped).await?;
+        }
+    }
+    Ok(())
+}
+
+/// The standby's `GET /metrics`, `/health` and `/ready` (always 503: a standby serves nothing).
+async fn serve_metrics(standby: Arc<Standby>, addr: &str) -> Result<(), BoxError> {
+    crate::http::serve_with(
+        addr,
+        |_| {},
+        move |request: Vec<u8>| {
+            let standby = Arc::clone(&standby);
+            async move {
+                use crate::http::reply;
+                if request.starts_with(b"GET /health ") {
+                    reply("200 OK", "text/plain", b"ok\n")
+                } else if request.starts_with(b"GET /ready ") {
+                    let why = format!("a standby of {}\n", standby.follow.primary);
+                    reply("503 Service Unavailable", "text/plain", why.as_bytes())
+                } else if request.starts_with(b"GET /metrics ") {
+                    let applied = standby.applied.load(SeqCst);
+                    let head = standby.primary_head.load(SeqCst);
+                    let body = format!(
+                        "# HELP kernable_standby_applied The newest record of the primary's log this standby holds.\n\
+                         # TYPE kernable_standby_applied gauge\nkernable_standby_applied {applied}\n\
+                         # HELP kernable_standby_lag Records the standby is behind the primary's head as last seen.\n\
+                         # TYPE kernable_standby_lag gauge\nkernable_standby_lag {}\n\
+                         # HELP kernable_ready 0: a standby is never ready.\n\
+                         # TYPE kernable_ready gauge\nkernable_ready 0\n",
+                        head.saturating_sub(applied)
+                    );
+                    reply("200 OK", "text/plain; version=0.0.4", body.as_bytes())
+                } else {
+                    reply("404 Not Found", "text/plain", b"")
+                }
+            }
+        },
+    )
+    .await
+}
+
+/// Answers every request but the replication service's with `UNAVAILABLE`, `not_primary`.
+#[derive(Clone)]
+struct NotPrimary<S> {
+    inner: S,
+    primary: Arc<str>,
+}
+
+type Answer<R, E> = Pin<Box<dyn std::future::Future<Output = Result<R, E>> + Send>>;
+
+impl<S, B> tower::Service<http::Request<B>> for NotPrimary<S>
+where
+    S: tower::Service<http::Request<B>, Response = http::Response<tonic::body::Body>>,
+    S::Future: Send + 'static,
+{
+    type Response = http::Response<tonic::body::Body>;
+    type Error = S::Error;
+    type Future = Answer<Self::Response, Self::Error>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, request: http::Request<B>) -> Self::Future {
+        if request
+            .uri()
+            .path()
+            .starts_with("/kernable.v1.ReplicationService/")
+        {
+            return Box::pin(self.inner.call(request));
+        }
+        let answer = not_primary(&self.primary).into_http();
+        Box::pin(async move { Ok(answer) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+
+    #[test]
+    fn a_store_is_moved_aside_with_its_files() {
+        let dir = std::env::temp_dir().join(format!("kn-aside-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("k.db");
+        for suffix in ["", "-wal", ".lock"] {
+            std::fs::write(format!("{}{suffix}", db.display()), b"x").unwrap();
+        }
+        let moved = move_aside(&format!("sqlite:{}", db.display()), 7).unwrap();
+        assert_eq!(moved.len(), 3);
+        assert!(!db.exists());
+        assert!(Path::new(&format!("{}.diverged-7", db.display())).exists());
+        assert_eq!(move_aside("memory:", 7).unwrap(), Vec::<PathBuf>::new());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

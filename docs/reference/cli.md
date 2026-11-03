@@ -51,6 +51,14 @@ kernable revoke <addr> <root.key> <key.pub> <since>
 
 Revokes a key for good from `<since>` on (UTC, like `2026-10-27T09:00:00Z`): the kernel refuses it, ends its connections and rejects its queued commands accepted since then (`key_revoked`). The kernel must be running.
 
+### `kernable promote`
+
+```text
+kernable promote <addr> <key>
+```
+
+Makes the standby at `<addr>` (started with `--follow`) the primary: it stops following and serves. `<key>` needs a grant for manage on `*`. Promote only a standby whose primary is gone: a primary that still runs is fenced (it tells nobody of a write from then on), and rejoins as a standby of the new one.
+
 ### `kernable certs new`
 
 ```text

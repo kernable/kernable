@@ -81,3 +81,12 @@ What the kernel takes on at most, so that no client, service or connection can e
 | `--max-subscriptions-per-key` | `KERNABLE_MAX_SUBSCRIPTIONS_PER_KEY` | `16` | Open event subscriptions (`EventService.Subscribe`) of one key at once. One beyond it is refused with `RESOURCE_EXHAUSTED`. |
 | `--max-listeners-per-key` | `KERNABLE_MAX_LISTENERS_PER_KEY` | `64` | Listeners one key may register (connected or not) or run live at once. A new name beyond it is refused with `RESOURCE_EXHAUSTED`; registered ones always reconnect. A registered listener counts for settling and readiness, so this bounds how many a key can make everyone wait for. |
 | `--max-cache-bytes` | `KERNABLE_MAX_CACHE_BYTES` | `268435456` | Bytes the cache service keeps (values and keys). When a value would exceed it, the oldest values are dropped first, as a cache may; a single value larger than the limit is refused with `RESOURCE_EXHAUSTED`. |
+
+## Other
+
+| Flag | Variable | Default | Description |
+|---|---|---|---|
+| `--replication` | `KERNABLE_REPLICATION` | `off` | `sync`: a standby (`--follow`) holds every write before anyone is told of it. Commits, revocations, grants and memberships wait until the standby has stored them; without a standby in sync they wait, and `/ready` answers 503. `off`: no standby. |
+| `--follow` | `KERNABLE_FOLLOW` | — | Run as the standby of the primary at this address: apply its records, serve nothing else (every request is refused with `UNAVAILABLE`, `not_primary`) until `kernable promote` makes this kernel the primary. The connection uses `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`, as the SDKs do. |
+| `--follow-key` | `KERNABLE_FOLLOW_KEY` | `standby.key` | With `--follow`: the standby's key, whose grant (`<name>.grant` next to it) allows `replicate`. |
+| `--primary-kernel-key` | `KERNABLE_PRIMARY_KERNEL_KEY` | — | With `--follow`: the primary's kernel key, as a key ID or a `.pub` file; the standby checks the primary's checkpoints with it. Repeat the flag for a key the primary had before; the variable takes them comma-separated. |

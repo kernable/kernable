@@ -222,3 +222,71 @@ fn a_personal_key_is_found_by_its_identity_until_its_subject_is_erased() {
     assert_eq!(vault.key_holders(&id).unwrap(), []);
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn a_standby_imports_what_its_primary_exports_under_its_own_key() {
+    let (primary, standby) = (
+        Vault::open("memory:", &[1u8; 32]).unwrap(),
+        Vault::open("memory:", &[2u8; 32]).unwrap(),
+    );
+    let personal = |subject: &str, value: &[u8]| {
+        let salt = vec![9u8; 16];
+        VaultValue {
+            r#ref: signing::vault_ref(&salt, subject, false, value),
+            subject: subject.into(),
+            secret: false,
+            salt,
+            value: value.to_vec(),
+        }
+    };
+    let email = personal("k-1", b"\"max@example.com\"");
+    let stream = kernable_store::StreamId {
+        tenant_id: "t1".into(),
+        domain: "shop".into(),
+        aggregate_type: "Customer".into(),
+        aggregate_id: "c-1".into(),
+    };
+    let on_stream = Owner {
+        command_id: "c1",
+        tenant: "t1",
+        stream: Some(&stream),
+    };
+    primary
+        .put(
+            std::slice::from_ref(&email),
+            std::slice::from_ref(&email.r#ref),
+            &on_stream,
+            5,
+        )
+        .unwrap();
+    // A personal unique key's value: its identity, as hex in JSON.
+    let id = [4u8; 32];
+    let key_value = personal("k-1", format!("\"{}\"", hex::encode(id)).as_bytes());
+    primary.put_key(&key_value, &id, &on_stream, 6).unwrap();
+
+    let refs = vec![email.r#ref.clone(), key_value.r#ref.clone(), "gone".into()];
+    let rows = primary.export(&refs).unwrap();
+    assert_eq!(rows.len(), 2, "a value not held is not exported");
+    standby.import(&rows).unwrap();
+    standby.import(&rows).unwrap(); // a resend changes nothing
+
+    let read = |v: &Vault| {
+        let mut values = v.get(&refs).unwrap();
+        values.sort_by(|a, b| a.r#ref.cmp(&b.r#ref));
+        values
+    };
+    assert_eq!(read(&standby), read(&primary));
+    assert_eq!(
+        standby.export(&refs).unwrap(),
+        rows,
+        "owners and times kept"
+    );
+    assert_eq!(
+        standby.key_holders(&id).unwrap(),
+        vec![(key_value.r#ref.clone(), stream.clone())],
+        "the key is filed under the standby's own key"
+    );
+    // The subject's erasure reaches the imported values too.
+    standby.erase("t1", "k-1", "c2", 7).unwrap();
+    assert!(standby.get(&refs).unwrap().is_empty());
+}

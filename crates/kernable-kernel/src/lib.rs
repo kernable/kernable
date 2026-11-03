@@ -32,6 +32,8 @@ mod memberships;
 mod metrics;
 mod queue;
 mod replays;
+mod replication;
+pub mod standby;
 mod trend;
 mod ui;
 mod workers;
@@ -66,6 +68,7 @@ use kernable_core::{
         membership_service_server::MembershipServiceServer,
         middleware_call, query_answer, query_result,
         query_service_server::{QueryService, QueryServiceServer},
+        replication_service_server::ReplicationServiceServer,
         trust_service_server::{TrustService, TrustServiceServer},
         worker_gateway_server::{WorkerGateway, WorkerGatewayServer},
         worker_message::Msg as In,
@@ -241,6 +244,8 @@ pub struct Kernel {
     durable: AtomicU64,
     /// Data and cache writes seen within their time window.
     replays: replays::Replays,
+    /// The standby, with `--replication sync`: writes count once it holds them.
+    replication: Option<Arc<replication::Primary>>,
 }
 
 impl Kernel {
@@ -281,41 +286,7 @@ impl Kernel {
                          plan a `kernable vault rekey`"
                     );
                 }
-                // Secrets of commands that completed while the kernel was down.
-                for command_id in vault.secret_commands()? {
-                    if store.result(&command_id)?.is_some() {
-                        vault.drop_secrets(&command_id)?;
-                    }
-                }
-                // Erasures whose events were committed before a crash, carried out before
-                // anything is served (and before the index reads the values); those of commands
-                // that did not commit are dropped: the command runs again and notes them anew.
-                for (tenant, subject, command_id) in vault.intents()? {
-                    match store.result(&command_id)?.and_then(|r| r.outcome) {
-                        Some(Outcome::Committed(c)) => {
-                            let own = c.events.first().map(|e| StreamId {
-                                tenant_id: e.tenant_id.clone(),
-                                domain: e.domain.clone(),
-                                aggregate_type: e.aggregate_type.clone(),
-                                aggregate_id: e.aggregate_id.clone(),
-                            });
-                            let subjects = [subject];
-                            if let Some(own) = own {
-                                erase_subjects(
-                                    &vault,
-                                    snapshots.as_ref(),
-                                    &tenant,
-                                    &command_id,
-                                    &subjects,
-                                    &own,
-                                );
-                            }
-                            vault.drop_intents(&command_id)?;
-                            tracing::info!(command = %command_id, "carried out an erasure committed before a crash");
-                        }
-                        _ => vault.drop_intents(&command_id)?,
-                    }
-                }
+                recover_vault(store.as_ref(), &vault, snapshots.as_ref())?;
                 Some(vault)
             }
             None => None,
@@ -328,6 +299,12 @@ impl Kernel {
         let data = kernable_store::data::open(&config.data)?;
         let cache = cache::Cache::open(&config.cache, config.limits.cache_bytes)?;
         let durable = AtomicU64::new(store.head_position()?);
+        // A standby continues the record log (design/replication.md); without one it is not kept.
+        store.keep_record_log(config.replication.sync)?;
+        let replication = config
+            .replication
+            .sync
+            .then(|| Arc::new(replication::Primary::new()));
         let queue = queue::Queue::default();
         for pending in store.pending()? {
             queue.push(pending.command, pending.received_at);
@@ -363,6 +340,7 @@ impl Kernel {
             subscriptions_by_key: PerKey::default(),
             durable,
             replays: replays::Replays::new(now_ms()),
+            replication,
         });
         // The newest grants it had, checked again: a root key may be gone or revoked since.
         for grant in kernel.store.grants()? {
@@ -454,6 +432,12 @@ impl Kernel {
     /// Keeps a checked grant unless one of its key issued at the same time or later is held;
     /// `store`: also in the store, before it takes effect.
     fn keep(&self, grant: Grant, store: bool) -> Result<(), Status> {
+        self.keep_with(grant, store, true)
+    }
+
+    /// Like [`Kernel::keep`]; `standby`: a stored grant also waits for the standby. The
+    /// standby's own grant cannot: it arrives before the standby follows.
+    fn keep_with(&self, grant: Grant, store: bool, standby: bool) -> Result<(), Status> {
         let replaced = {
             let mut grants = self.grants.lock().unwrap_or_else(PoisonError::into_inner);
             match grants.get(&grant.key_id) {
@@ -462,7 +446,10 @@ impl Kernel {
                     let replaced = held.is_some();
                     if store {
                         self.store.save_grant(&grant).map_err(internal)?;
-                        self.sync(0);
+                        match standby {
+                            true => self.sync(0),
+                            false => self.sync_disk(0),
+                        }
                     }
                     grants.insert(grant.key_id.clone(), grant);
                     // Before the lock is released: a request presenting the same grant meanwhile
@@ -481,8 +468,32 @@ impl Kernel {
     /// Takes the grant a request carries into effect, if it carries one; it must be for the key
     /// that signed the request.
     pub(crate) fn present(&self, metadata: &MetadataMap, key_id: &str) -> Result<(), Status> {
+        match self.presented(metadata, key_id)? {
+            Some(grant) => self.grant(grant),
+            None => Ok(()),
+        }
+    }
+
+    /// Like [`Kernel::present`], for the standby's own stream: its grant is kept without
+    /// waiting for a standby (it is the standby), and reaches it with the records.
+    pub(crate) fn present_standby(
+        &self,
+        metadata: &MetadataMap,
+        key_id: &str,
+    ) -> Result<(), Status> {
+        match self.presented(metadata, key_id)? {
+            Some(grant) => {
+                self.check_grant(&grant)?;
+                self.keep_with(grant, true, false)
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// The grant a request carries, for `key_id`, if it carries one.
+    fn presented(&self, metadata: &MetadataMap, key_id: &str) -> Result<Option<Grant>, Status> {
         let Some(value) = metadata.get(GRANT_HEADER) else {
-            return Ok(());
+            return Ok(None);
         };
         let grant = value
             .to_str()
@@ -493,7 +504,7 @@ impl Kernel {
         if grant.key_id != key_id {
             return Err(Status::permission_denied("the grant is for another key"));
         }
-        self.grant(grant)
+        Ok(Some(grant))
     }
 
     /// Revokes `key_id` from `since` on: stores the revocation signed by the kernel, refuses the
@@ -629,6 +640,18 @@ impl Kernel {
     }
 
     /// Deletes a completed command's secrets.
+    /// Notes a changed file in the record log; with a standby, it holds the note before the
+    /// client is told.
+    fn data_changed(&self, r: &DataRequest) -> Result<(), Status> {
+        self.store
+            .data_changed(&r.tenant_id, &r.domain, &r.key)
+            .map_err(store_error)?;
+        if self.replication.is_some() {
+            self.sync(0);
+        }
+        Ok(())
+    }
+
     fn drop_secrets(&self, command_id: &str) {
         if let Some(vault) = &self.vault
             && let Err(e) = vault.drop_secrets(command_id)
@@ -642,6 +665,11 @@ impl Kernel {
     pub fn readiness(&self) -> Result<(), String> {
         if self.draining.load(SeqCst) {
             return Err("shutting down".into());
+        }
+        if let Some(primary) = &self.replication
+            && !primary.in_sync()
+        {
+            return Err("waiting for a standby in sync (--replication sync)".into());
         }
         let (workers, listeners) = self.memberships.listed();
         let missing = self.workers.missing(&workers);
@@ -677,12 +705,31 @@ impl Kernel {
     /// write. If the disk fails, the kernel stops: only a restart, reading what is on the disk,
     /// knows what was kept, and answering on would promise what may be lost.
     fn sync(&self, position: u64) {
+        self.sync_disk(0);
+        if let Some(primary) = &self.replication {
+            match self.store.record_head() {
+                Ok(head) => primary.wait(head.seq),
+                Err(e) => {
+                    tracing::error!(error = %e, "the record log cannot be read: stopping");
+                    eprintln!("kernable: the record log cannot be read ({e}); stopping");
+                    std::process::exit(70);
+                }
+            }
+        }
+        self.durable.fetch_max(position, SeqCst);
+    }
+
+    /// Like [`Kernel::sync`], without waiting for the standby: for what the standby itself needs
+    /// before it can follow.
+    fn sync_disk(&self, position: u64) {
         if let Err(e) = self.store.sync() {
             tracing::error!(error = %e, "the store could not put a write on the disk: stopping");
             eprintln!("kernable: the store could not put a write on the disk ({e}); stopping");
             std::process::exit(70);
         }
-        self.durable.fetch_max(position, SeqCst);
+        if self.replication.is_none() {
+            self.durable.fetch_max(position, SeqCst);
+        }
     }
 
     /// A slot for one more request of `key_id`, or RESOURCE_EXHAUSTED at `--max-requests-per-key`.
@@ -1083,6 +1130,11 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
             CacheServiceServer::new(api.clone())
                 .max_decoding_message_size(cache_max)
                 .max_encoding_message_size(cache_max),
+        )
+        .add_service(
+            ReplicationServiceServer::new(api.clone())
+                .max_decoding_message_size(max)
+                .max_encoding_message_size(replication::MAX_MESSAGE_BYTES),
         )
         .add_service(
             WorkerGatewayServer::new(api)
@@ -1665,6 +1717,7 @@ impl DataService for Api {
         // captured copy can never undo a newer write. A resend is signed anew.
         claim.done();
         stored.map_err(store_error)?;
+        self.0.data_changed(&r)?;
         Ok(Response::new(DataResult {
             found: true,
             ..Default::default()
@@ -1697,6 +1750,7 @@ impl DataService for Api {
         // Tried: as for a put, its signature stays used even if it failed.
         claim.done();
         let found = deleted.map_err(store_error)?;
+        self.0.data_changed(&r)?;
         Ok(Response::new(DataResult {
             found,
             ..Default::default()
@@ -3079,6 +3133,45 @@ impl Session {
 /// and the snapshots of every stream that used them and of `own`, the command's stream, whose
 /// worker state may hold them. Returns those streams. A failure is logged and leaves the
 /// intent in the vault: the next start carries it out.
+/// Finishes what the vault was left with by a crash, before anything is served: drops the
+/// secrets of commands that completed, carries out erasures whose events were committed and
+/// drops those of commands that did not commit (they run again and note them anew).
+pub(crate) fn recover_vault(
+    store: &dyn Store,
+    vault: &Vault,
+    snapshots: &dyn SnapshotStore,
+) -> Result<(), BoxError> {
+    // Secrets of commands that completed while the kernel was down.
+    for command_id in vault.secret_commands()? {
+        if store.result(&command_id)?.is_some() {
+            vault.drop_secrets(&command_id)?;
+        }
+    }
+    // Erasures whose events were committed before a crash, carried out before
+    // anything is served (and before the index reads the values); those of commands
+    // that did not commit are dropped: the command runs again and notes them anew.
+    for (tenant, subject, command_id) in vault.intents()? {
+        match store.result(&command_id)?.and_then(|r| r.outcome) {
+            Some(Outcome::Committed(c)) => {
+                let own = c.events.first().map(|e| StreamId {
+                    tenant_id: e.tenant_id.clone(),
+                    domain: e.domain.clone(),
+                    aggregate_type: e.aggregate_type.clone(),
+                    aggregate_id: e.aggregate_id.clone(),
+                });
+                let subjects = [subject];
+                if let Some(own) = own {
+                    erase_subjects(vault, snapshots, &tenant, &command_id, &subjects, &own);
+                }
+                vault.drop_intents(&command_id)?;
+                tracing::info!(command = %command_id, "carried out an erasure committed before a crash");
+            }
+            _ => vault.drop_intents(&command_id)?,
+        }
+    }
+    Ok(())
+}
+
 fn erase_subjects(
     vault: &Vault,
     snapshots: &dyn SnapshotStore,

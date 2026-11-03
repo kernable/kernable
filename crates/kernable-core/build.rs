@@ -7,6 +7,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &[
                 "../../proto/kernable/v1/kernable.proto",
                 "../../proto/kernable/v1/storage.proto",
+                "../../proto/kernable/v1/replication.proto",
             ],
             &["../../proto"],
         )?;

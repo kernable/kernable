@@ -1,10 +1,10 @@
 # Replication and the standby
 
-Status: designed 2026-11-03. Increment 1 (the store layer) built 2026-11-03; increments 2–4 not yet. Invariants P1–P4 are in [invariants.md](invariants.md).
+Status: S1a built 2026-11-03: the store's record log (increment 1), the primary and the standby (2, 3), `kernable promote` and the docs (4, [Run a standby](../docs/how-to/standby.md)). Tests: `crates/kernable-store/tests/replication.rs`, `crates/kernable-kernel/tests/replication.rs`. Not yet: crash points during replication, model tests for P1–P4, soak runs with failover faults; the witness; address lists in the SDKs. Invariants P1–P4 are in [invariants.md](invariants.md).
 
 ## Goal
 
-A second kernel, the **standby**, holds every write the primary acknowledged. If the primary dies, an operator promotes the standby (`kernable promote`); it starts like a restarted kernel and loses nothing. Automatic failover through a witness is S1b, the SDKs' address lists are S1c.
+A second kernel, the **standby**, holds every write the primary acknowledged. If the primary dies, an operator promotes the standby (`kernable promote <address> <key>`); it starts like a restarted kernel and loses nothing. Automatic failover through a witness is S1b, the SDKs' address lists are S1c.
 
 ## Decisions (2026-11-03)
 
@@ -38,7 +38,7 @@ A standby's record log is a copy of its primary's: it files each record it appli
 
 ## What is not in the record log
 
-- **Vault values.** No personal or secret value is ever written to a record log: an erasure could not reach it there. The primary attaches the values to the records that refer to them (an enqueued command's `vault_refs`, a commit's events and personal keys), read from its vault when it sends them. A value erased or dropped in the meantime travels as absent. The standby checks every value against its reference, encrypts it with its own key, and derives every deletion from the records, as the kernel does: a completed command drops its secrets, a committed erasing event erases its subject in its tenant, a commit that changes a personal key frees the old value.
+- **Vault values.** No personal or secret value is ever written to a record log: an erasure could not reach it there. The primary attaches the values to the records that refer to them (an enqueued command's `vault_refs`, a commit's events and personal keys), read from its vault when it sends them, as vault rows with what the vault keeps about them (owner, stream, time; `Vault::export`). A value erased or dropped in the meantime is not sent. The standby encrypts each with its own key (`Vault::import`). It cannot check a value against its reference, because the vault keeps no salts: it takes them from its authenticated primary. It derives every deletion from the records, as the kernel does: an erasing event's subject is noted as an intent before the commit and erased after it (so a crash between still erases), a completed command drops its secrets, a commit that releases a personal key frees its value.
 - **File contents.** `DataChanged` names the file; the primary reads it when it sends the record. A file overwritten in the meantime travels in its newer version, a deleted one as absent; the following records converge the standby.
 - **Snapshots, the cache, leases, `live` listeners and the replay window.** A promoted standby rebuilds or refuses them as after a restart. A standby clears its snapshot store when it starts following.
 
@@ -51,7 +51,9 @@ A new kernel service, `Replication.Follow`, a bidirectional stream from the stan
    - **follow:** the standby's record exists in the primary's record log with the same hash; the records after it follow;
    - **image:** the standby is empty, or so far behind that the record is pruned; a full image follows (below), then the records after it;
    - **diverged:** the standby holds a record the primary does not have, or the hash differs. The standby moves its stores aside (`<path>.diverged-<ms>`, kept like `<path>.torn-<offset>`) and starts again, empty (P4).
-3. Records follow in order, in batches within `--max-message-bytes`, with the vault values and files they need. The standby applies each batch, syncs its store with its own `--durability`, and acknowledges the last sequence number.
+3. Records follow in order, in batches of up to 512 records or 1 MiB, with the vault values and files they need, at most 8,192 records ahead of the standby's acknowledgements. The standby applies each batch, syncs its store with its own `--durability`, and acknowledges the last sequence number.
+
+The standby's own grant, presented on this stream, is stored without waiting for a standby: it arrives before the standby follows, and reaches it with the records.
 
 **Full image.** From one consistent view of the store. From SQLite, one read transaction gives the records in an order that applies: grants, revocations, memberships, workers, every command as enqueued, every commit in log order (each stream's newest keys and facts filed with the commit of its last event), commits without events, rejections, listeners with their parked events, checkpoints. The file log only grows, so its records up to an offset are its image. Either way it ends with the sequence number and hash it stands for, which the standby takes as the start of its own record log. The files of the data store follow from the kernel (increment 2). The primary keeps records from that point until the standby has acknowledged them.
 
@@ -63,15 +65,15 @@ A new kernel service, `Replication.Follow`, a bidirectional stream from the stan
 
 `Kernel::sync` already runs before anyone is told of a write, and the `durable` position keeps listeners, subscribers and workers from getting an event before it is on the disk. With `--sync-standby`, `sync` also waits until the standby has acknowledged every record written so far; `durable` advances only then. So no client, listener or worker hears of a write the standby does not hold.
 
-Without a standby in sync, the primary waits: commits stay queued, submits time out (`--submit-timeout-ms`, the command still runs later), `/ready` answers 503, and the log says why. In S1a the primary never commits alone; restarting it without `--sync-standby` is the operator's explicit choice, after which that standby must not be promoted. S1b replaces this with the witness's in-sync set.
+Without a standby in sync, the primary waits: commits stay queued, submits time out (`--submit-timeout-ms`, the command still runs later), `/ready` answers 503, and the log says why every 10 s. The wait blocks its thread (`block_in_place` on the multi-threaded runtime, so other tasks go on). In S1a the primary never commits alone; restarting it without `--replication sync` is the operator's explicit choice, after which that standby must not be promoted. This also means a standby that takes an image holds up the primary's writes for as long as the image takes. S1b replaces both with the witness's in-sync set: a primary registered alone commits alone, and a standby catches up outside it.
 
 ## The standby while it follows
 
-`kernable standby --primary <address> --primary-kernel-pub <file>` with the usual store, vault, data, key and TLS flags. It serves no requests: every RPC answers `UNAVAILABLE` with `not_primary` and the primary's address; `/ready` answers 503; `/metrics` shows how far it is behind (records and milliseconds).
+`kernable start --follow <address> --follow-key <key> --primary-kernel-key <pub>` with the usual store, vault, data, key and TLS flags (the connection to the primary uses `KERNABLE_TLS_*`, as the SDKs do). It serves no requests: every RPC but `ReplicationService` answers `UNAVAILABLE` with `not_primary` and the primary's address (a tower layer in front of the server); `/ready` answers 503; `/metrics` shows the record it applied and how far it is behind. It clears its snapshot store when it starts. While it applies an image, a marker file `<store>.image` exists; a standby that finds one starts over, empty.
 
 ## Promotion
 
-`kernable promote --kernel <standby address>`, signed by a key with `manage`. The standby refuses unless it is in sync: it completed a catch-up, applied every record it received, and was not following a diverged log. Then it stops following, opens its stores as a kernel does after a restart (the queue from `pending()`, listener positions, a new replay window), writes a checkpoint signed with its own kernel key (`verify` needs both public keys from then on), and starts serving.
+`kernable promote <standby address> <key>`, signed over `kernable.v1.promote` by a key whose grant (presented, or replicated from the primary) allows `manage` for `*`. The standby refuses if it never followed a primary or its image is not complete. A standby that lost its primary can be promoted: the primary told nobody of a write the standby did not acknowledge. Then it stops following, closes its stores and opens them as a kernel does after a restart (the queue from `pending()`, listener positions, a new replay window, the vault's intents carried out); its checkpoints from then on are signed with its own kernel key (`verify` needs both public keys).
 
 The old primary, if it still runs, gets no more acknowledgements, so it tells nobody of anything it writes from then on: it is fenced by P1. It rejoins only as a standby of the new primary; its unacknowledged tail makes its log diverge, so it is moved aside and filled from an image.
 

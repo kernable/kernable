@@ -16,7 +16,10 @@ use aes_gcm::{
     Aes256Gcm, Key, KeyInit, Nonce,
     aead::{Aead, Payload},
 };
-use kernable_core::{proto::VaultValue, signing};
+use kernable_core::{
+    proto::{VaultRow, VaultValue},
+    signing,
+};
 use rusqlite::{Connection, params, params_from_iter};
 use sha2::{Digest, Sha256};
 
@@ -349,6 +352,131 @@ impl Vault {
             });
         }
         Ok(values)
+    }
+
+    /// The values of `refs` that are still held, decrypted, with what the vault keeps about
+    /// them: what a primary sends its standby (design/replication.md).
+    pub fn export(&self, refs: &[String]) -> Result<Vec<VaultRow>> {
+        if refs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn();
+        let marks = vec!["?"; refs.len()].join(",");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT ref, subject, secret, command_id, tenant, tenant_id, domain, aggregate_type,
+                    aggregate_id, nonce, value, created_at, key_lookup IS NOT NULL
+             FROM vault WHERE ref IN ({marks})"
+        ))?;
+        let rows = stmt.query_map(params_from_iter(refs), |r| {
+            Ok((
+                VaultRow {
+                    r#ref: r.get(0)?,
+                    subject: r.get(1)?,
+                    secret: r.get(2)?,
+                    command_id: r.get(3)?,
+                    tenant: r.get(4)?,
+                    stream_tenant_id: r.get(5)?,
+                    domain: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                    aggregate_type: r.get::<_, Option<String>>(7)?.unwrap_or_default(),
+                    aggregate_id: r.get::<_, Option<String>>(8)?.unwrap_or_default(),
+                    value: Vec::new(),
+                    created_at: r.get(11)?,
+                    key: r.get(12)?,
+                },
+                r.get::<_, Vec<u8>>(9)?,
+                r.get::<_, Vec<u8>>(10)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (mut row, nonce, sealed) = row?;
+            row.value = self
+                .cipher
+                .decrypt(
+                    stored_nonce(&row.r#ref, &nonce)?,
+                    Payload {
+                        msg: &sealed,
+                        aad: row.r#ref.as_bytes(),
+                    },
+                )
+                .map_err(|_| {
+                    Error::Vault(format!(
+                        "value {} cannot be decrypted with this key",
+                        row.r#ref
+                    ))
+                })?;
+            out.push(row);
+        }
+        Ok(out)
+    }
+
+    /// Keeps rows another vault exported ([`Vault::export`]), encrypted with this vault's key;
+    /// a value held already stays as it is. The rows cannot be checked against their
+    /// references (the vault keeps no salts): a standby takes them from its authenticated
+    /// primary.
+    pub fn import(&self, rows: &[VaultRow]) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let sealed: u64 = tx.query_row("SELECT count FROM sealed", [], |r| r.get(0))?;
+        let sealed = sealed + rows.len() as u64;
+        if sealed > MAX_SEALED {
+            return Err(Error::Vault(format!(
+                "the vault key has encrypted its limit of {MAX_SEALED} values; \
+                 encrypt the vault with a new key (kernable vault rekey)"
+            )));
+        }
+        tx.execute("UPDATE sealed SET count = ?1", [sealed])?;
+        for row in rows {
+            let lookup = match row.key {
+                false => None,
+                true => Some(key_lookup(
+                    &self.lookup,
+                    &key_id_of(&row.value).ok_or_else(|| {
+                        Error::Vault(format!("value {} is not a key's identity", row.r#ref))
+                    })?,
+                )),
+            };
+            let mut nonce = [0u8; 12];
+            getrandom::fill(&mut nonce).map_err(|_| Error::Vault("no randomness".into()))?;
+            let value = self
+                .cipher
+                .encrypt(
+                    Nonce::from_slice(&nonce),
+                    Payload {
+                        msg: &row.value,
+                        aad: row.r#ref.as_bytes(),
+                    },
+                )
+                .map_err(|_| Error::Vault("encryption failed".into()))?;
+            let stream = row.stream_tenant_id.as_ref();
+            let part = |p: &String| stream.map(|_| p.clone());
+            tx.execute(
+                "INSERT OR IGNORE INTO vault (ref, subject, secret, command_id, tenant, tenant_id,
+                                              domain, aggregate_type, aggregate_id, nonce, value,
+                                              created_at, key_lookup)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    row.r#ref,
+                    row.subject,
+                    row.secret,
+                    row.command_id,
+                    row.tenant,
+                    stream,
+                    part(&row.domain),
+                    part(&row.aggregate_type),
+                    part(&row.aggregate_id),
+                    nonce.to_vec(),
+                    value,
+                    row.created_at,
+                    lookup
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// Which of `refs` the vault still holds, with their subject and whether they are secret,

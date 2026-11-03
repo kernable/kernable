@@ -27,4 +27,7 @@ Counters and durations count since the kernel started and begin at 0 again after
 | `kernable_listener_lag` | gauge | `listener` | Global positions between the newest stored event and the listener's position: how far it is behind. |
 | `kernable_listener_connected` | gauge | `listener` | 1 while the listener is connected, 0 while it is registered but away. |
 | `kernable_listener_parked` | gauge |  | Events the listener gave up on and parked, waiting for an operator to retry or dismiss them. |
+| `kernable_record_head` | gauge |  | The newest record of the record log a standby follows (--replication sync). |
+| `kernable_standby_acknowledged` | gauge |  | The newest record the standby holds on its disk; writes after it wait. |
+| `kernable_standby_in_sync` | gauge |  | 1 while a standby is connected and has caught up; without it, writes wait. |
 | `kernable_ready` | gauge |  | 1 while the kernel is ready: every aggregate that counts has a worker, every listener that counts is connected and caught up, and it is not shutting down. |

@@ -20,7 +20,7 @@ The control numbers refer to ISO/IEC 27001:2022 (Annex A), the SOC 2 Trust Servi
 These are yours to cover, with other tools or in your application:
 
 - **Reads are not recorded.** The log holds changes. Queries are checked by middleware but not stored; if you must log who read what, do it in an [after-middleware](./queries-and-middleware), or in your API.
-- **No failover yet.** One kernel serves a store; availability requirements (SOC 2 availability, DORA, NIS2) need your own standby and restore plan.
+- **Manual failover.** A [standby](../how-to/standby) holds every acknowledged write (no data loss on failover), but an operator promotes it; availability requirements (SOC 2 availability, DORA, NIS2) still need your runbook for that, and backups.
 - **The event store is not encrypted as a whole.** Only vault values are. Encrypt the disk or volume the store lives on.
 - **The request context is stored in clear** and is not erased with a person. Use IDs that do not identify a person by themselves ([What stays](../how-to/erasure#what-stays)).
 - **Backups keep erased data.** Restoring an older vault brings erased values back until you delete them again ([Backups and erasure](../how-to/backup#backups-and-erasure)).
