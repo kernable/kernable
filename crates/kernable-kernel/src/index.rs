@@ -12,7 +12,10 @@
 //! vault only, as a value of its subject: erasing the subject frees the key, and the log keeps
 //! no trace of it.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::{
+    collections::{BTreeSet, HashMap, HashSet},
+    sync::Arc,
+};
 
 use kernable_core::{
     proto::{AggregateIndex, Command, Rejected, StoredKey, VaultValue},
@@ -54,13 +57,29 @@ impl Held {
     }
 }
 
+/// [`Held`] as the index keeps it, for millions of aggregates: boxed slices instead of sets,
+/// and key names shared, a few hundred bytes per aggregate.
+struct Compact {
+    keys: Box<[CompactKey]>,
+    facts: Box<[Box<str>]>,
+}
+
+struct CompactKey {
+    name: Arc<str>,
+    global: bool,
+    id: [u8; 32],
+    subject: Box<str>,
+}
+
 #[derive(Default)]
 pub(crate) struct Index {
-    /// Key identity -> the stream that holds it.
-    ids: HashMap<[u8; 32], StreamId>,
-    held: HashMap<StreamId, Held>,
+    /// Key identity -> the stream that holds it; the stream shared with `held`.
+    ids: HashMap<[u8; 32], Arc<StreamId>>,
+    held: HashMap<Arc<StreamId>, Compact>,
     /// The vault value of every personal key held, by identity.
     refs: HashMap<[u8; 32], String>,
+    /// Key names, one copy each: an aggregate type declares a few.
+    names: HashSet<Arc<str>>,
 }
 
 impl Index {
@@ -113,7 +132,6 @@ impl Index {
                     tracing::error!(key = %k.name, holder = ?other, stream = ?stream, "a key is held twice");
                     continue;
                 }
-                index.ids.insert(id, stream.clone());
                 if !subject.is_empty() {
                     index.refs.insert(id, k.vault_ref.clone());
                 }
@@ -124,28 +142,84 @@ impl Index {
                     subject,
                 });
             }
-            if !held.is_empty() {
-                index.held.insert(stream, held);
-            }
+            index.put(stream, &held);
         }
         Ok(index)
+    }
+
+    /// Files `held` under `stream`, which holds nothing in the index yet.
+    fn put(&mut self, stream: StreamId, held: &Held) {
+        if held.is_empty() {
+            return;
+        }
+        let stream = Arc::new(stream);
+        let keys = held
+            .keys
+            .iter()
+            .map(|k| {
+                self.ids.insert(k.id, stream.clone());
+                CompactKey {
+                    name: self.name(&k.name),
+                    global: k.global,
+                    id: k.id,
+                    subject: k.subject.as_str().into(),
+                }
+            })
+            .collect();
+        let facts = held.facts.iter().map(|f| f.as_str().into()).collect();
+        self.held.insert(stream, Compact { keys, facts });
+    }
+
+    /// Removes what `stream` holds from the index, with its keys.
+    fn take(&mut self, stream: &StreamId) -> Held {
+        let held = self.held(stream);
+        if self.held.remove(stream).is_some() {
+            for k in &held.keys {
+                self.ids.remove(&k.id);
+            }
+        }
+        held
+    }
+
+    fn name(&mut self, name: &str) -> Arc<str> {
+        if let Some(n) = self.names.get(name) {
+            return n.clone();
+        }
+        let n: Arc<str> = name.into();
+        self.names.insert(n.clone());
+        n
     }
 
     /// Whether `stream` holds `fact`.
     pub(crate) fn holds(&self, stream: &StreamId, fact: &str) -> bool {
         self.held
             .get(stream)
-            .is_some_and(|h| h.facts.contains(fact))
+            .is_some_and(|h| h.facts.iter().any(|f| &**f == fact))
     }
 
     /// The stream that holds the key `id`, if any.
     pub(crate) fn holder(&self, id: &[u8; 32]) -> Option<&StreamId> {
-        self.ids.get(id)
+        self.ids.get(id).map(|s| &**s)
     }
 
     /// What `stream` holds now.
     pub(crate) fn held(&self, stream: &StreamId) -> Held {
-        self.held.get(stream).cloned().unwrap_or_default()
+        let Some(c) = self.held.get(stream) else {
+            return Held::default();
+        };
+        Held {
+            keys: c
+                .keys
+                .iter()
+                .map(|k| Key {
+                    name: k.name.to_string(),
+                    global: k.global,
+                    id: k.id,
+                    subject: k.subject.to_string(),
+                })
+                .collect(),
+            facts: c.facts.iter().map(|f| f.to_string()).collect(),
+        }
     }
 
     /// The vault value of the personal key `id`.
@@ -155,27 +229,24 @@ impl Index {
 
     /// `stream` holds `held` from now on; `refs` are the vault values of its personal keys.
     pub(crate) fn set(&mut self, stream: &StreamId, held: Held, refs: &HashMap<[u8; 32], String>) {
-        for k in self.held.remove(stream).unwrap_or_default().keys {
-            self.ids.remove(&k.id);
+        for k in self.take(stream).keys {
             self.refs.remove(&k.id);
         }
         for k in &held.keys {
-            self.ids.insert(k.id, stream.clone());
             if let Some(r) = refs.get(&k.id) {
                 self.refs.insert(k.id, r.clone());
             }
         }
-        if !held.is_empty() {
-            self.held.insert(stream.clone(), held);
-        }
+        self.put(stream.clone(), &held);
     }
 
     /// Frees the personal keys of `streams` whose vault values an erasure deleted.
     pub(crate) fn erased(&mut self, streams: &[StreamId], vault: &Vault) {
         for stream in streams {
-            let Some(held) = self.held.get(stream) else {
+            let held = self.held(stream);
+            if held.is_empty() {
                 continue;
-            };
+            }
             let refs: Vec<String> = held
                 .keys
                 .iter()
@@ -197,17 +268,12 @@ impl Index {
             if gone.is_empty() {
                 continue;
             }
-            let mut held = held.clone();
+            let mut held = self.take(stream);
             for k in gone {
                 held.keys.remove(&k);
-                self.ids.remove(&k.id);
                 self.refs.remove(&k.id);
             }
-            if held.is_empty() {
-                self.held.remove(stream);
-            } else {
-                self.held.insert(stream.clone(), held);
-            }
+            self.put(stream.clone(), &held);
         }
     }
 }

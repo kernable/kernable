@@ -87,6 +87,8 @@ struct State {
     grants: BTreeMap<String, Grant>,
     /// What each stream holds, from its latest commit with an index; none if it holds nothing.
     index: BTreeMap<StreamKey, AggregateIndex>,
+    /// The highest schema per qualified event type.
+    schemas: BTreeMap<String, u32>,
 }
 
 impl State {
@@ -150,6 +152,11 @@ impl State {
                         event.aggregate_id.clone(),
                     );
                     self.streams.entry(key).or_default().push(self.events.len());
+                    let schema = self
+                        .schemas
+                        .entry(format!("{}.{}", event.domain, event.event_type))
+                        .or_default();
+                    *schema = (*schema).max(event.schema);
                     self.prev_hashes.push(logged.prev_hash);
                     self.events.push(event.clone());
                     stored.push(event);
@@ -572,6 +579,16 @@ impl Store for FileStore {
         };
         append(&mut inner, Record::Committed(record))?;
         Ok(stored)
+    }
+
+    fn event_schemas(&self) -> Result<Vec<(String, u32)>> {
+        Ok(self
+            .inner()
+            .state
+            .schemas
+            .iter()
+            .map(|(t, v)| (t.clone(), *v))
+            .collect())
     }
 
     fn index(&self) -> Result<Vec<(StreamId, AggregateIndex)>> {

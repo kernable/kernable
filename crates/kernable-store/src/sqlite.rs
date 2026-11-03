@@ -6,7 +6,7 @@
 //! Events form a hash chain anchored by kernel-signed checkpoints (see `proto/SIGNING.md`).
 
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Mutex, MutexGuard, PoisonError},
     time::Duration,
 };
@@ -21,7 +21,9 @@ use kernable_core::{
     signing::{self, GENESIS},
 };
 use prost::Message;
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 
 use crate::{
     Checkpoint, Durability, Enqueued, Error, FORMAT, Pending, Result, Store, StreamId,
@@ -73,6 +75,15 @@ CREATE TABLE IF NOT EXISTS commands (
     created_at       INTEGER NOT NULL
 ) STRICT;
 CREATE INDEX IF NOT EXISTS commands_pending ON commands (status, created_at);
+-- Every event type stored per aggregate type, with its highest schema, kept by commit: startup
+-- and the overviews need not read every event.
+CREATE TABLE IF NOT EXISTS event_types (
+    domain         TEXT    NOT NULL,
+    aggregate_type TEXT    NOT NULL,
+    event_type     TEXT    NOT NULL,
+    schema         INTEGER NOT NULL,
+    PRIMARY KEY (domain, aggregate_type, event_type)
+) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS checkpoints (
     global_position INTEGER PRIMARY KEY,
     chain_hash      BLOB    NOT NULL,
@@ -158,6 +169,10 @@ const COMMAND_COLUMNS: &str = "command_id, tenant_id, aggregate_type, aggregate_
 
 pub struct SqliteStore {
     conn: Mutex<Connection>,
+    /// Connections that only read events, so a history read never waits for a commit nor
+    /// holds one up (in WAL mode readers and the writer do not block each other). `None` for a
+    /// database in memory, which has no second connection.
+    readers: Option<Readers>,
     /// `<path>.lock`, held exclusively while a writer has the store open: the queue lives in
     /// one kernel's memory, so a second kernel on the same store would run commands twice.
     _lock: Option<std::fs::File>,
@@ -194,6 +209,9 @@ impl SqliteStore {
         let mut store = Self::configure(path, durability)?;
         let on_disk = lock.is_some();
         store._lock = lock;
+        if on_disk {
+            store.readers = Some(Readers::new(path));
+        }
         if durability == Durability::Full && on_disk {
             store.wal = Some(std::path::PathBuf::from(format!("{}-wal", path.display())));
         }
@@ -246,6 +264,7 @@ impl SqliteStore {
         }
         Ok(Self {
             conn: Mutex::new(conn),
+            readers: None,
             _lock: None,
             wal: None,
             syncer: Syncer::default(),
@@ -254,6 +273,57 @@ impl SqliteStore {
 
     fn conn(&self) -> MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Runs `read` on a reader, or on the writer's connection without readers.
+    fn read<T>(&self, read: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        match &self.readers {
+            Some(readers) => readers.with(read),
+            None => read(&self.conn()),
+        }
+    }
+}
+
+/// Read-only connections to one database, opened as needed and kept for reuse.
+struct Readers {
+    path: PathBuf,
+    idle: Mutex<Vec<Connection>>,
+}
+
+impl Readers {
+    /// Idle connections kept; more are opened while more reads run at once, and closed after.
+    const KEEP: usize = 8;
+
+    fn new(path: &Path) -> Self {
+        Readers {
+            path: path.to_owned(),
+            idle: Mutex::default(),
+        }
+    }
+
+    fn with<T>(&self, read: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        let idle = self
+            .idle
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pop();
+        let conn = match idle {
+            Some(conn) => conn,
+            None => {
+                let conn = Connection::open_with_flags(
+                    &self.path,
+                    OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                )?;
+                conn.busy_timeout(Duration::from_secs(5))?;
+                conn
+            }
+        };
+        let result = read(&conn);
+        let mut idle = self.idle.lock().unwrap_or_else(PoisonError::into_inner);
+        if idle.len() < Self::KEEP {
+            idle.push(conn);
+        }
+        result
     }
 }
 
@@ -268,28 +338,32 @@ impl Store for SqliteStore {
         aggregate_id: &str,
         after_version: u64,
     ) -> Result<Vec<Event>> {
-        read_events(
-            &self.conn(),
-            "WHERE tenant_id = ?1 AND domain = ?2 AND aggregate_type = ?3 AND aggregate_id = ?4
-               AND version > ?5
-             ORDER BY version",
-            params![
-                tenant_id,
-                domain,
-                aggregate_type,
-                aggregate_id,
-                after_version
-            ],
-        )
+        self.read(|conn| {
+            read_events(
+                conn,
+                "WHERE tenant_id = ?1 AND domain = ?2 AND aggregate_type = ?3 AND aggregate_id = ?4
+                   AND version > ?5
+                 ORDER BY version",
+                params![
+                    tenant_id,
+                    domain,
+                    aggregate_type,
+                    aggregate_id,
+                    after_version
+                ],
+            )
+        })
     }
 
     /// Up to `limit` events with a global position greater than `after`, in order.
     fn read_all(&self, after: u64, limit: u32) -> Result<Vec<Event>> {
-        read_events(
-            &self.conn(),
-            "WHERE global_position > ?1 ORDER BY global_position LIMIT ?2",
-            params![after, limit],
-        )
+        self.read(|conn| {
+            read_events(
+                conn,
+                "WHERE global_position > ?1 ORDER BY global_position LIMIT ?2",
+                params![after, limit],
+            )
+        })
     }
 
     fn head_position(&self) -> Result<u64> {
@@ -445,6 +519,18 @@ impl Store for SqliteStore {
                     event.erases
                 ],
             )?;
+            tx.execute(
+                "INSERT INTO event_types (domain, aggregate_type, event_type, schema)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (domain, aggregate_type, event_type) DO UPDATE SET schema = excluded.schema
+                 WHERE excluded.schema > schema",
+                params![
+                    event.domain,
+                    event.aggregate_type,
+                    event.event_type,
+                    event.schema
+                ],
+            )?;
             prev = event.hash.clone();
             stored.push(event);
         }
@@ -546,7 +632,7 @@ impl Store for SqliteStore {
     fn event_sources(&self) -> Result<Vec<(String, String, String)>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT DISTINCT domain, aggregate_type, event_type FROM events ORDER BY 1, 2, 3",
+            "SELECT domain, aggregate_type, event_type FROM event_types ORDER BY 1, 2, 3",
         )?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -597,7 +683,8 @@ impl Store for SqliteStore {
     fn event_schemas(&self) -> Result<Vec<(String, u32)>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT domain || '.' || event_type, MAX(schema) FROM events GROUP BY domain, event_type",
+            "SELECT domain || '.' || event_type, MAX(schema) FROM event_types
+             GROUP BY domain, event_type ORDER BY 1",
         )?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)

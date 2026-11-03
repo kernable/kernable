@@ -1,10 +1,10 @@
 //! Compatibility: a frozen store of the current data format keeps working, and requests of a
 //! protocol version the kernel does not speak are refused with a clear message.
 //!
-//! `tests/fixtures/format-<n>` is a frozen store of the current format. There are no migrations
-//! before the first release: a new data format bumps `kernable_store::FORMAT` and writes a new
-//! directory (with `KERNABLE_WRITE_FIXTURES=1` and `--test-threads=1`, which only fills
-//! directories that do not exist yet).
+//! `tests/fixtures/format-<n>` is a frozen store of the current format. Until the first release
+//! the format stays 1 and changes in place: after a change, delete the directory and write it
+//! again (with `KERNABLE_WRITE_FIXTURES=1` and `--test-threads=1`, which only fills directories
+//! that do not exist yet).
 
 mod common;
 
