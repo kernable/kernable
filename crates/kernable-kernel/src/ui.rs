@@ -1,5 +1,5 @@
-//! The kernel's UI in a browser, on `ui_listen` (loopback only): one page (`ui.html`) and the
-//! JSON it reads.
+//! The kernel's UI in a browser, on `ui_listen` (loopback only): one page (`ui.html`), its logo
+//! (`/logo.png`, `/logo-dark.png`) and the JSON it reads.
 //!
 //! - `GET /api/state`: the kernel, the services' memberships, the registered aggregates and the
 //!   connected workers, the listeners, and which aggregate writes which event type;
@@ -25,6 +25,9 @@ use serde_json::{Value, json};
 use crate::{BoxError, Kernel, http::reply, now_ms};
 
 const PAGE: &str = include_str!("ui.html");
+/// The logo, for light and for dark backgrounds.
+const LOGO: &[u8] = include_bytes!("logo.png");
+const LOGO_DARK: &[u8] = include_bytes!("logo-dark.png");
 
 /// How many aggregates `/api/streams` lists.
 const STREAMS: usize = 500;
@@ -64,6 +67,8 @@ pub(crate) fn respond(kernel: &Kernel, request: &[u8]) -> Vec<u8> {
     let params = parse_query(query);
     let result = match path {
         "/" => return reply("200 OK", "text/html; charset=utf-8", PAGE.as_bytes()),
+        "/logo.png" => return reply("200 OK", "image/png", LOGO),
+        "/logo-dark.png" => return reply("200 OK", "image/png", LOGO_DARK),
         "/api/state" => state(kernel),
         "/api/streams" => streams(kernel),
         "/api/history" => history(kernel, &params),

@@ -23,6 +23,9 @@
   header { border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
   header .bar { display: flex; align-items: center; gap: 16px; padding: 10px 20px; flex-wrap: wrap; max-width: var(--max); margin: 0 auto; }
   header h1 { font-size: 16px; margin: 0; letter-spacing: .02em; }
+  .logo { display: block; height: 26px; width: auto; }
+  .logo.dark { display: none; }
+  @media (prefers-color-scheme: dark) { .logo.light { display: none; } .logo.dark { display: block; } }
   header .meta { color: var(--muted); font-size: 13px; }
   nav { display: flex; gap: 4px; margin-left: auto; }
   nav button { background: none; border: 1px solid transparent; color: var(--muted); padding: 5px 12px; border-radius: 6px; cursor: pointer; font: inherit; }
@@ -106,7 +109,7 @@
 <body>
 <header>
  <div class="bar">
-  <h1>kernable</h1>
+  <h1><img class="logo light" src="/logo.png" alt="kernable" width="103" height="26"><img class="logo dark" src="/logo-dark.png" alt="kernable" width="103" height="26"></h1>
   <span class="meta" id="meta"></span>
   <span class="pill" id="ready"><span class="dot"></span><span></span></span>
   <nav>
