@@ -282,6 +282,11 @@ function sleep(t) {
 
 // Calls `step(fraction)` every frame until `t` ms at the current speed have passed.
 function progress(t, step) {
+  // Passing through hops on the way to another: no frames, nothing to see.
+  if (aborting || skipping()) {
+    step(1);
+    return Promise.resolve();
+  }
   return new Promise((done) => {
     let fraction = 0, last = performance.now();
     const frame = (now) => {
@@ -468,7 +473,7 @@ function intend(ids) {
 async function move(wire, label, kind = "", gated = true) {
   if (gated) await gate();
   const path = wires[wire];
-  if (!path) return;
+  if (!path || skipping()) return;
   path.classList.add("on");
   const width = Math.max(70, label.length * 9.2 + 20);
   const packet = el("svg:g", { class: `packet ${kind}` },
@@ -651,7 +656,7 @@ function drawSides() {
     const SHOWN_ROWS = 4;
     $("rows").replaceChildren(el("table", {},
       el("tr", {}, el("th", {}, "id"), columns.map((c) => el("th", {}, c))),
-      ids.slice(0, SHOWN_ROWS).map((id) => el("tr", { class: v.rowsFresh ? "fresh" : "" }, el("td", {}, id),
+      ids.slice(0, SHOWN_ROWS).map((id) => el("tr", { class: v.rowsFresh && !skipping() ? "fresh" : "" }, el("td", {}, id),
         columns.map((c) => el("td", { class: typeof v.rows[id][c] === "number" ? "num" : "" }, String(v.rows[id][c] ?? "")))))),
       ids.length > SHOWN_ROWS ? el("div", { class: "from" }, `and ${ids.length - SHOWN_ROWS} more rows`) : "");
   }
@@ -679,6 +684,7 @@ const rebuilt = (s, step) => {
 };
 
 async function pulse() {
+  if (skipping()) return;
   $("divider").classList.add("pulse");
   await sleep(500);
   $("divider").classList.remove("pulse");
@@ -1068,8 +1074,10 @@ function finish() {
 
 // Step `k` replayed up to hop `n`, waiting there; its last hop if `n` is not given.
 async function toHop(k, n) {
-  if (hopsOf[k] === undefined) await goTo(k, { card: false, hopAt: Infinity });
-  return goTo(k, { card: false, hopAt: Math.max(1, Math.min(n ?? hopsOf[k], hopsOf[k])) });
+  // Only the last hop needs the count; a step that ran here has it already.
+  if (n === undefined && hopsOf[k] === undefined) await goTo(k, { card: false, hopAt: Infinity });
+  const last = hopsOf[k] ?? Infinity;
+  return goTo(k, { card: false, hopAt: Math.max(1, Math.min(n ?? last, last)) });
 }
 
 // Step `k` as it ended, without motion.
