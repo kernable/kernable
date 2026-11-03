@@ -136,6 +136,27 @@ impl From<prost::DecodeError> for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// A write of a moving tenant's copy on the target (S4), for [`Store::import`].
+#[derive(Debug, Clone)]
+pub enum Copy {
+    /// A command, as the source stored it.
+    Enqueue { command: Command, created_at: i64 },
+    /// Its commit: the events with their origin, at the stream's version before them.
+    Commit {
+        command_id: String,
+        expected_version: u64,
+        events: Vec<NewEvent>,
+        producer_sig: Signature,
+        index: Option<AggregateIndex>,
+        at: i64,
+    },
+    /// Its rejection.
+    Reject {
+        command_id: String,
+        reason: Rejected,
+    },
+}
+
 /// Outcome of submitting a command.
 #[derive(Debug, PartialEq)]
 pub enum Enqueued {
@@ -380,6 +401,67 @@ pub trait Store: Send + Sync {
     /// The newest partition map kept, if any.
     fn partition_map(&self) -> Result<Option<PartitionMap>> {
         Ok(None)
+    }
+
+    /// On the target of a move (S4): writes `copies` in order, as few writes as the backend
+    /// allows; a command stored already is left as it is (one of another tenant under the same
+    /// ID is refused, `Corrupt`), a commit or rejection of a command
+    /// with a result is skipped, and a commit without events stands at its stream's version.
+    fn import(&self, copies: &[Copy]) -> Result<()> {
+        for copy in copies {
+            match copy {
+                Copy::Enqueue {
+                    command,
+                    created_at,
+                } => {
+                    if let Enqueued::Duplicate { .. } = self.enqueue(command, *created_at)? {
+                        let held = self.command(&command.command_id)?;
+                        if held.is_some_and(|h| h.command.tenant_id != command.tenant_id) {
+                            return Err(Error::Corrupt(format!(
+                                "command {} has the ID of a command of another tenant here",
+                                command.command_id
+                            )));
+                        }
+                    }
+                }
+                Copy::Commit {
+                    command_id,
+                    expected_version,
+                    events,
+                    producer_sig,
+                    index,
+                    at,
+                } => {
+                    if self.result(command_id)?.is_some() {
+                        continue;
+                    }
+                    let commit = |version| {
+                        self.commit(
+                            command_id,
+                            version,
+                            events,
+                            producer_sig,
+                            index.as_ref(),
+                            *at,
+                        )
+                    };
+                    match commit(*expected_version) {
+                        Err(Error::VersionConflict { actual, .. }) if events.is_empty() => {
+                            commit(actual)?;
+                        }
+                        other => {
+                            other?;
+                        }
+                    }
+                }
+                Copy::Reject { command_id, reason } => {
+                    if self.result(command_id)?.is_none() {
+                        self.reject(command_id, reason.clone())?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// On the target of a move (S4): that `tenant` was copied here, if it was.

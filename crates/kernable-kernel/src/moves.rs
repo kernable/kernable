@@ -34,7 +34,7 @@ use kernable_core::{
     },
     signing,
 };
-use kernable_store::{Error as StoreError, StreamId};
+use kernable_store::{Copy, Error as StoreError, StreamId};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
@@ -366,6 +366,7 @@ fn apply(
         kernel.store.data_changed(&k.tenant_id, &k.domain, &k.key)?;
     }
     let store = kernel.store.as_ref();
+    let mut copies = Vec::with_capacity(batch.records.len());
     for record in batch.records.into_iter().filter_map(|r| r.record) {
         match record {
             Record::Enqueued(e) => {
@@ -374,15 +375,6 @@ fn apply(
                     return Err(
                         format!("command {} is not of tenant {tenant}", cmd.command_id).into(),
                     );
-                }
-                if let Some(held) = store.command(&cmd.command_id)?
-                    && held.command.tenant_id != tenant
-                {
-                    return Err(format!(
-                        "command {} of tenant {tenant} has the ID of a command of tenant {} here",
-                        cmd.command_id, held.command.tenant_id
-                    )
-                    .into());
                 }
                 imported.streams.insert(
                     cmd.command_id.clone(),
@@ -393,8 +385,10 @@ fn apply(
                         aggregate_id: cmd.aggregate_id.clone(),
                     },
                 );
-                store.enqueue(&cmd, e.created_at)?;
-                crate::crash::point("move.enqueued");
+                copies.push(Copy::Enqueue {
+                    command: cmd,
+                    created_at: e.created_at,
+                });
             }
             Record::Committed(c) => {
                 // What each stream holds, also of commits copied before: the global keys move
@@ -402,9 +396,6 @@ fn apply(
                 if let (Some(index), Some(stream)) = (&c.index, imported.streams.get(&c.command_id))
                 {
                     imported.indexes.insert(stream.clone(), index.clone());
-                }
-                if store.result(&c.command_id)?.is_some() {
-                    continue; // copied before, or committed here before the tenant moved away
                 }
                 let events: Vec<_> = c.events.iter().filter_map(|l| l.event.as_ref()).collect();
                 let new: Vec<NewEvent> = events
@@ -435,24 +426,26 @@ fn apply(
                     ),
                     None => (0, Signature::default(), now_ms()),
                 };
-                match store.commit(&c.command_id, expected, &new, &sig, c.index.as_ref(), at) {
-                    // A commit without events stands at whatever version its stream has.
-                    Err(StoreError::VersionConflict { actual, .. }) if new.is_empty() => {
-                        store.commit(&c.command_id, actual, &new, &sig, c.index.as_ref(), at)?;
-                    }
-                    other => {
-                        other?;
-                    }
-                }
+                // Skipped if copied before, or committed here before the tenant moved away.
+                copies.push(Copy::Commit {
+                    command_id: c.command_id,
+                    expected_version: expected,
+                    events: new,
+                    producer_sig: sig,
+                    index: c.index,
+                    at,
+                });
             }
-            Record::Rejected(r) => {
-                if store.result(&r.command_id)?.is_none() {
-                    store.reject(&r.command_id, r.reason.unwrap_or_default())?;
-                }
-            }
+            Record::Rejected(r) => copies.push(Copy::Reject {
+                command_id: r.command_id,
+                reason: r.reason.unwrap_or_default(),
+            }),
             _ => return Err("a record a move does not carry".into()),
         }
     }
+    // One write per batch where the store allows it.
+    store.import(&copies)?;
+    crate::crash::point("move.batch");
     Ok(())
 }
 

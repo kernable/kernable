@@ -1,0 +1,14 @@
+== Apple M2 Max, 12 CPUs, 2026-11-04, store=sqlite, durability=normal (bench/move.sh)
+events=27956 move=3.62s (7723 events/s)
+events=102770 move=7.26s (14160 events/s)
+events=292551 move=17.49s (16730 events/s)
+== Apple M2 Max, 12 CPUs, 2026-11-04, store=file, durability=normal
+events=64602 move=3.83s (16863 events/s)
+events=187824 move=6.90s (27225 events/s)
+events=440945 move=13.65s (32308 events/s)
+
+# The time `kernable partitions move` takes, during which the tenant's requests wait. The
+# tenant is the only one on p1 here; every event is its own command with 1 KB of payload.
+# About 2 s of each move is fixed: the partitions take each map from the control partition
+# within a second. Before batching the target's writes (Store::import), SQLite moved
+# 286,689 events in 32.6 s (8,802 events/s).

@@ -732,6 +732,87 @@ impl Store for SqliteStore {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    fn import(&self, copies: &[crate::Copy]) -> Result<()> {
+        use crate::Copy;
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut records = Vec::with_capacity(copies.len());
+        for copy in copies {
+            match copy {
+                Copy::Enqueue {
+                    command,
+                    created_at,
+                } => {
+                    if enqueue_tx(&tx, command, *created_at)? {
+                        records.push(Record::Enqueued(EnqueuedRecord {
+                            command: Some(command.clone()),
+                            created_at: *created_at,
+                        }));
+                    } else {
+                        let tenant: String = tx.query_row(
+                            "SELECT tenant_id FROM commands WHERE command_id = ?1",
+                            [&command.command_id],
+                            |r| r.get(0),
+                        )?;
+                        if tenant != command.tenant_id {
+                            return Err(Error::Corrupt(format!(
+                                "command {} has the ID of a command of another tenant here",
+                                command.command_id
+                            )));
+                        }
+                    }
+                }
+                Copy::Commit {
+                    command_id,
+                    expected_version,
+                    events,
+                    producer_sig,
+                    index,
+                    at,
+                } => {
+                    if stored_result(&tx, command_id)?.is_some() {
+                        continue;
+                    }
+                    let commit = |version| {
+                        commit_tx(
+                            &tx,
+                            command_id,
+                            version,
+                            events,
+                            producer_sig,
+                            index.as_ref(),
+                            *at,
+                        )
+                    };
+                    let (_, logged) = match commit(*expected_version) {
+                        Err(Error::VersionConflict { actual, .. }) if events.is_empty() => {
+                            commit(actual)?
+                        }
+                        other => other?,
+                    };
+                    records.push(Record::Committed(CommittedRecord {
+                        command_id: command_id.clone(),
+                        events: logged,
+                        index: index.clone(),
+                    }));
+                }
+                Copy::Reject { command_id, reason } => {
+                    if stored_result(&tx, command_id)?.is_none() {
+                        reject_tx(&tx, command_id, reason)?;
+                        records.push(Record::Rejected(RejectedRecord {
+                            command_id: command_id.clone(),
+                            reason: Some(reason.clone()),
+                        }));
+                    }
+                }
+            }
+        }
+        let head = self.file(&tx, || records)?;
+        tx.commit()?;
+        self.advance(head);
+        Ok(())
+    }
+
     fn reject(&self, command_id: &str, reason: Rejected) -> Result<()> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;

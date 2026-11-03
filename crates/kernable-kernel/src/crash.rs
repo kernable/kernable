@@ -34,8 +34,8 @@ pub const REPLICATION_POINTS: &[&str] = &[
 
 /// The crash points of moving a tenant: on the target, and on the source.
 pub const MOVE_POINTS: &[&str] = &[
-    "move.enqueued", // the target stored a copied command, not its events
-    "move.copied",   // the target copied everything, the control partition does not know
+    "move.batch",   // the target stored a part of the copy, not all of it
+    "move.copied",  // the target copied everything, the control partition does not know
     "move.handed", // the control partition handed over the global keys, the target has not noted the move
     "move.dropped", // the source dropped the tenant's keys, not its vault values and files
 ];

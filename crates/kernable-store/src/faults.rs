@@ -356,6 +356,10 @@ impl Store for FaultyStore {
         self.faults.write(|| self.inner.drop_tenant_index(tenant))
     }
 
+    fn import(&self, copies: &[crate::Copy]) -> Result<()> {
+        self.faults.write(|| self.inner.import(copies))
+    }
+
     fn save_tenant_imported(&self, record: &TenantImportedRecord) -> Result<()> {
         self.faults
             .write(|| self.inner.save_tenant_imported(record))
