@@ -66,6 +66,30 @@ test("one client serves the tenants of two partitions", async () => {
     await until("the read model saw both partitions", () => listener.store.get("totals", "acme") === 5 && listener.store.get("totals", "t1") === 2);
     await until("the subscription saw both partitions", () => seen.includes("acme") && seen.includes("t1"));
     assert.ok(listener.store.committedFor("p1") > 0 && listener.store.committedFor("p2") > 0, "a position per partition");
+
+    // t1 moves to p2 with its events (S4); the client finds it there.
+    await kernable.submit({ domain: "counters", aggregateType: "Counter", aggregateId: "c1", type: "Increment", data: { by: 3 }, id: "t1-2" });
+    const moved = p1.cli("partitions", "move", p1.url, "app.key", "t1", "p2");
+    assert.ok(moved.ok, `moved: ${moved.out}`);
+    await kernable.submit({ domain: "counters", aggregateType: "Counter", aggregateId: "c1", type: "Increment", data: { by: 4 }, id: "t1-3" });
+    await until("the running read model saw t1's event on p2", () => listener.store.get("totals", "t1") === 9);
+
+    // A new read model replays both partitions: t1's events once each, in their order, though
+    // p2's stream is the shorter one.
+    const order: number[] = [];
+    const replay = counters.readModel("replay", { reconnectMs: 50 }).on("Incremented", (_data: unknown, evt) => {
+      if (evt.tenant === "t1") order.push(evt.version);
+    });
+    const replaying = kernable.listener(replay);
+    const replayed = replaying.run();
+    try {
+      await until("the new read model saw t1's events", () => order.length >= 3);
+      await sleep(200);
+      assert.deepEqual(order, [1, 2, 3]);
+    } finally {
+      replaying.stop();
+      await replayed;
+    }
   } finally {
     worker.stop();
     listener.stop();

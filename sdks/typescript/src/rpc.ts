@@ -340,7 +340,32 @@ export interface WirePartitionMap {
   tenants: { tenant: string; partition: string }[];
   default: string;
   control: string;
+  /** Tenants that moved between partitions (S4), with the heads that keep their order. */
+  moved?: WireTenantMove[];
 }
+
+/** A tenant moved from one partition to another; see `TenantMove` in kernable.proto. */
+export interface WireTenantMove {
+  tenant: string;
+  from: string;
+  to: string;
+  source_head: number;
+  target_after: number;
+}
+
+/** The partition `map` assigns `tenant` to. */
+export function partitionOf(map: WirePartitionMap, tenant: string): string {
+  return map.tenants.find((t) => t.tenant === tenant)?.partition ?? map.default;
+}
+
+/** Whether a kernel refused a request because its tenant is moving to another partition. */
+export function moving(err: unknown): boolean {
+  const e = err as grpc.ServiceError;
+  return e?.code === grpc.status.UNAVAILABLE && typeof e.details === "string" && e.details.startsWith("moving");
+}
+
+/** How long a request waits for its tenant's move to end. */
+const MOVE_WAIT_MS = 30_000;
 
 /** Whether a kernel refused a request as one for a tenant of another partition. */
 export function wrongPartition(err: unknown): boolean {
@@ -397,8 +422,7 @@ export class Partitioned {
   async forTenant(tenant: string): Promise<Clients> {
     const map = await this.current();
     if (!map) return this.entry;
-    const name = map.tenants.find((t) => t.tenant === tenant)?.partition ?? map.default;
-    return this.clientsOf(map, name);
+    return this.clientsOf(map, partitionOf(map, tenant));
   }
 
   /** The clients of the control partition, which takes memberships. */
@@ -414,14 +438,24 @@ export class Partitioned {
     return map.partitions.map((p) => ({ name: p.name, clients: this.clientsOf(map, p.name) }));
   }
 
-  /** `call` on `tenant`'s partition, sent anew after reading the map again on `wrong_partition`. */
+  /**
+   * `call` on `tenant`'s partition, sent anew after reading the map again on `wrong_partition`,
+   * and while the tenant moves (`moving`, refused before it took effect) for up to 30 s.
+   */
   async route<R>(tenant: string, call: (clients: Clients) => Promise<R>): Promise<R> {
-    for (let attempt = 0; ; attempt++) {
+    const deadline = Date.now() + MOVE_WAIT_MS;
+    let pause = 50;
+    for (let attempt = 0; ; ) {
       const clients = await this.forTenant(tenant);
       try {
         return await call(clients);
       } catch (err) {
-        if (attempt >= 3 || !wrongPartition(err)) throw err;
+        if (moving(err) && Date.now() + pause < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, pause));
+          pause = Math.min(pause * 2, 1000);
+          continue;
+        }
+        if (attempt++ >= 3 || !wrongPartition(err)) throw err;
         await this.current(true);
       }
     }

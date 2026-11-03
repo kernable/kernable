@@ -11,6 +11,7 @@ import {
   PROTOCOL,
   Partitioned,
   connect,
+  partitionOf,
   type Clients,
   type KernelMessage,
   type ListenCall,
@@ -23,6 +24,7 @@ import {
   type WireEvent,
   type WireNewEvent,
   type WireParked,
+  type WirePartitionMap,
   type WireQueryRequest,
   type WireRejected,
   type WireRequestContext,
@@ -2338,6 +2340,11 @@ export class ListenerHandle {
   private parent?: ListenerHandle;
   /** Batches of all partitions take turns on the shared store: one at a time. */
   private turns: Promise<void> = Promise.resolve();
+  /** With partitions: how far each partition's stream has handled, for the order across moves. */
+  private progress = new Map<string, number>();
+  private waiting: { part: string; at: number; resume: () => void }[] = [];
+  /** As a partition's stream: tenants it read the map again for. */
+  private checked = new Set<string>();
 
   constructor(
     kernable: Kernable,
@@ -2533,6 +2540,7 @@ export class ListenerHandle {
       call.write({ challenge_response: { sig: this.key.sign(challengeMessage(m.challenge.nonce)).sig } });
     } else if (m.ready) {
       this.position = m.ready.after_position;
+      this.parent?.advanced(this.part, Number(m.ready.after_position));
       this.replayUpTo = m.ready.head_position;
       this.logConnected();
       this.markReady();
@@ -2545,6 +2553,7 @@ export class ListenerHandle {
       // With a store, the batch's data and position are committed together, before the ack;
       // the partitions' batches take turns on a shared store.
       const batch = m.batch;
+      await this.inOrder(batch.events);
       const parked = await this.inTurn(async () => {
         this.stored?.begin();
         try {
@@ -2559,11 +2568,72 @@ export class ListenerHandle {
         }
       });
       this.position = m.batch.up_to;
+      this.parent?.advanced(this.part, Number(m.batch.up_to));
       call.write({ ack: { position: m.batch.up_to, parked } });
     } else if (m.query) {
       call.write({ answer: { call_id: m.query.call_id, ...(await this.answer(m.query.query)) } });
     } else if (m.check) {
       call.write({ verdict: { call_id: m.check.call_id, ...(await this.verdict(m.check)) } });
+    }
+  }
+
+  /** On the parent: partition `part`'s stream has handled everything up to `position`. */
+  private advanced(part: string, position: number): void {
+    if ((this.progress.get(part) ?? -1) >= position) return;
+    this.progress.set(part, position);
+    this.waiting = this.waiting.filter((w) => {
+      if (w.part !== part || position < w.at) return true;
+      w.resume();
+      return false;
+    });
+  }
+
+  /**
+   * Before a batch of a partition's stream: the events of a tenant that moved here
+   * after its move wait until the stream of the partition it came from has passed the tenant's
+   * last event there, so a tenant's events keep their order across the move. Waits at most
+   * 30 s (a partition that is down), then goes on with a warning.
+   */
+  private async inOrder(events: WireEvent[]): Promise<void> {
+    const parent = this.parent;
+    if (!parent || !(parent.clients instanceof Partitioned) || events.length === 0) return;
+    const clients = parent.clients;
+    let map = await clients.current();
+    if (!map) return;
+    const known = (m: WirePartitionMap, tenant: string) =>
+      partitionOf(m, tenant) === this.part || (m.moved ?? []).some((x) => x.tenant === tenant && (x.to === this.part || x.from === this.part));
+    for (const e of events) {
+      if (!known(map, e.tenant_id) && !this.checked.has(e.tenant_id)) {
+        // The tenant came here after the map was read; another kernel may take a moment to hold the new one.
+        this.checked.add(e.tenant_id);
+        for (let i = 0; i < 3 && !known(map, e.tenant_id); i++) {
+          if (i > 0) await this.wake.sleep(500);
+          map = (await clients.current(true)) ?? map;
+        }
+      }
+      for (const m of map.moved ?? []) {
+        if (m.tenant !== e.tenant_id || m.to !== this.part || Number(e.global_position) <= Number(m.target_after)) continue;
+        if (!map.partitions.some((p) => p.name === m.from)) continue;
+        await this.reached(parent, m.from, Number(m.source_head), e.tenant_id);
+      }
+    }
+  }
+
+  /** Resolves once partition `part`'s stream (of `parent`) has handled up to `position`, or after 30 s. */
+  private async reached(parent: ListenerHandle, part: string, position: number, tenant: string): Promise<void> {
+    if ((parent.progress.get(part) ?? -1) >= position) return;
+    let resume!: () => void;
+    const passed = new Promise<boolean>((resolve) => (resume = () => resolve(true)));
+    const waiter = { part, at: position, resume };
+    parent.waiting.push(waiter);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<boolean>((resolve) => (timer = setTimeout(() => resolve(false), 30_000)));
+    const ok = await Promise.race([passed, late, this.wake.stopped.then(() => true)]);
+    clearTimeout(timer);
+    parent.waiting = parent.waiting.filter((w) => w !== waiter);
+    if (this.stopped) throw new Error("stopped");
+    if (!ok) {
+      this.log.print("warn", this.what, `tenant ${tenant} moved here from partition ${part}, whose stream has not passed position ${position} in 30 s; going on without its order`);
     }
   }
 
