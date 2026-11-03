@@ -202,7 +202,7 @@
     <button id="reset" title="Start the day again on a new, empty store">Reset<kbd>R</kbd></button>
     <button id="full" title="Full screen">Full screen<kbd>F</kbd></button>
     <a href="/" title="The kernel's own UI: map, connections, history">Kernel UI</a>
-    <button id="back" title="Back one step, shown again from what was recorded">Back<kbd>←</kbd></button>
+    <button id="back" title="Back one hop, shown again from what was recorded">Back<kbd>←</kbd></button>
     <button id="play" title="Run on by itself, or stop at every hop">Play<kbd>Space</kbd></button>
     <button id="next" class="primary" title="The next hop; Shift → finishes the step">Next step<kbd>→</kbd></button>
   </div>
@@ -285,7 +285,7 @@ function progress(t, step) {
   return new Promise((done) => {
     let fraction = 0, last = performance.now();
     const frame = (now) => {
-      fraction = aborting ? 1 : Math.min(1, fraction + ((now - last) * speed * boost) / t);
+      fraction = aborting || skipping() ? 1 : Math.min(1, fraction + ((now - last) * speed * boost) / t);
       last = now;
       step(fraction);
       fraction < 1 ? requestAnimationFrame(frame) : done();
@@ -463,8 +463,10 @@ function intend(ids) {
     ...quoted.map((line, i) => el("svg:text", { x: X + 20, y: Y + 46 + i * 23, class: "what" }, line)));
 }
 
-async function move(wire, label, kind = "") {
-  await gate();
+// One hop: a packet along a wire. It waits for → first, unless `gated` is false (a packet that
+// moves together with others, behind one gate).
+async function move(wire, label, kind = "", gated = true) {
+  if (gated) await gate();
   const path = wires[wire];
   if (!path) return;
   path.classList.add("on");
@@ -683,8 +685,9 @@ async function pulse() {
 }
 
 // Two packets on one wire, the second a little behind.
-function both(wire, first, second, kind = "") {
-  return Promise.all([move(wire, first, kind), sleep(HOP_MS * 0.3).then(() => move(wire, second, kind))]);
+async function both(wire, first, second, kind = "") {
+  await gate();
+  return Promise.all([move(wire, first, kind, false), sleep(HOP_MS * 0.3).then(() => move(wire, second, kind, false))]);
 }
 
 // The store after step `t`: read now and kept for replays, or in a replay the one kept then.
@@ -873,12 +876,19 @@ function hideSlide() {
 let playing = false, finishing = false, quiet = false, aborting = false, replaying = false;
 let gateWaiting = null, gateRelease = null;
 const STOP = new Error("stopped");
+// Hops are counted per step: `hop` is the gate reached last, `waitingAt` the one waited at.
+// A step replayed to hop n runs through the gates before n at once, without motion.
+let hop = 0, skipUntil = 0, waitingAt = 0;
+const hopsOf = [];
+const skipping = () => hop < skipUntil;
 
 // Resolves when the presenter moves on; throws STOP once the step is abandoned.
 function gate() {
   if (aborting) throw STOP;
-  if (playing || finishing || quiet || boost > 1) return Promise.resolve();
+  hop += 1;
+  if (skipping() || playing || finishing || quiet) return Promise.resolve();
   if (!gateWaiting) {
+    waitingAt = hop;
     gateWaiting = new Promise((ok, no) => { gateRelease = { ok, no }; });
     syncButtons();
   }
@@ -903,10 +913,12 @@ async function abandon() {
 }
 
 // ---- one step, animated ----
-async function animate(t, replay) {
+async function animate(t, replay, hopAt = 0) {
   animating = true;
   replaying = replay;
   finishing = false;
+  hop = 0;
+  skipUntil = hopAt;
   syncButtons();
   const step = demo.scene.steps[t.step];
   currentStep = { ...step, intents: { ...demo.scene.chapters[step.chapter].intents, ...step.intents } };
@@ -942,10 +954,12 @@ async function animate(t, replay) {
     await storeAfter(t);
     side.commands = commandsAfter(t.step + 1);
     drawSides();
+    hopsOf[t.step] = hop;
   } catch (e) {
     boost = 1;
     if (e !== STOP) throw e;
   } finally {
+    skipUntil = 0;
     light([]);
     animating = false;
     finishing = false;
@@ -984,7 +998,7 @@ async function runNext() {
 
 // Shows step `k`: a replay if it ran already; else it runs, after fast-forwarding through the
 // steps before it.
-async function goTo(k, { card = true } = {}) {
+async function goTo(k, { card = true, hopAt = 0 } = {}) {
   await abandon();
   hideSlide();
   k = Math.max(0, Math.min(k, demo.scene.steps.length - 1));
@@ -1012,8 +1026,8 @@ async function goTo(k, { card = true } = {}) {
   // A step that ran already is replayed from its trace; the next one runs now.
   const ran = k < demo.traces.length;
   const t = ran ? demo.traces[k] : await runNext();
-  await animate(t, ran);
-  afterStep(k);
+  await animate(t, ran, hopAt);
+  if (hopAt !== Infinity || k === lastOfChapter(chapterOf(k))) afterStep(k);
 }
 
 // What follows a step: its chapter's takeaway if it was the chapter's last, and in play mode,
@@ -1052,25 +1066,51 @@ function finish() {
   releaseGate(false);
 }
 
-// ← : back one step, shown again from what was recorded.
+// Step `k` replayed up to hop `n`, waiting there; its last hop if `n` is not given.
+async function toHop(k, n) {
+  if (hopsOf[k] === undefined) await goTo(k, { card: false, hopAt: Infinity });
+  return goTo(k, { card: false, hopAt: Math.max(1, Math.min(n ?? hopsOf[k], hopsOf[k])) });
+}
+
+// Step `k` as it ended, without motion.
+const toEnd = (k) => goTo(k, { card: false, hopAt: Infinity });
+
+// The story before its first step.
+async function toStart() {
+  await abandon();
+  settle(0);
+  showSlide("question", 0);
+}
+
+// ← : back one hop, shown again from what was recorded: within the step, or to the end of the
+// step before, past the chapter's cards.
 async function backward() {
   const current = shown - 1;
   if (slide === "takeaway") {
     hideSlide();
-    return goTo(current, { card: false });
+    return toHop(current);
   }
   if (slide === "question") {
     const from = demo.scene.chapters[slideChapter].from;
     hideSlide();
-    if (from > 0) return goTo(from - 1, { card: false });
+    return from > 0 ? toEnd(from - 1) : toStart();
   }
-  if (current <= 0) {
-    await abandon();
-    settle(0);
-    showSlide("question", 0);
-    return;
+  if (animating) {
+    const at = gateWaiting ? waitingAt : hop;
+    if (at > 1) return toHop(current, at - 1);
+    // The step's first hop: before it, the chapter's question, or the step before.
+    if (current <= 0) return toStart();
+    const c = chapterOf(current);
+    if (demo.scene.chapters[c].from === current) {
+      await abandon();
+      settle(current);
+      return showSlide("question", c);
+    }
+    return toEnd(current - 1);
   }
-  return goTo(current - 1, { card: false });
+  // A step that has ended: its last hop.
+  if (current >= 0) return toHop(current);
+  return toStart();
 }
 
 function togglePlay() {
@@ -1131,7 +1171,7 @@ async function play(t, step) {
     badge(b.badges);
     // A chart or a chain covers the diagram: no packets under it.
     const packets = b.chart || b.chain || visual ? [] : b.packets || [];
-    await Promise.all(packets.map((p, i) => sleep(HOP_MS * 0.3 * i).then(() => move(p.wire, p.label, p.kind))));
+    await Promise.all(packets.map((p, i) => sleep(HOP_MS * 0.3 * i).then(() => move(p.wire, p.label, p.kind, false))));
     if (b.refresh) {
       await refresh(t);
       side.commands = commandsAfter(t.step + 1);
@@ -1384,7 +1424,7 @@ async function poll() {
       const store = await loadStore();
       stores[demo.traces.length - 1] = store;
       settle(demo.traces.length);
-      $("caption").textContent = "← goes back a step, → goes on.";
+      $("caption").textContent = "← and → move hop by hop, also across steps and chapters.";
     } else {
       settle(0);
       $("caption").textContent = demo.ready ? "A new kernel on an empty store." : "Starting a new kernel on an empty store…";
