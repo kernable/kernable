@@ -25,7 +25,7 @@ Checked after the fact, on any store, for every backend.
 | S6 | **One outcome.** A command with events is stored, committed with exactly those positions, and not pending; a committed command's events are in the log; no command is both completed and pending | at most once | `Log::check` |
 | S7 | **Schemas only grow.** Per event type, the payload version never goes down in log order | schemas evolve | `Log::check` |
 | S8 | **Listener positions** are at most the head | | `Log::check` |
-| S9 | **Unique keys.** No key ID is held by two streams; every key has either an ID or a vault reference (a personal key); only streams with events hold keys or facts (a command that leaves its aggregate without events holds nothing). Personal keys are unique by the kernel's index; the store cannot see their IDs | unique keys | `Log::check` |
+| S9 | **Unique keys.** No key ID is held by two streams; every key has either an ID or a vault reference (a personal key); only streams with events hold keys or facts (a command that leaves its aggregate without events holds nothing). Personal keys are unique through the vault, which files each by a hash of its ID keyed with the vault key; the store cannot see their IDs | unique keys | `Log::check` |
 
 ## O: what processes were told
 

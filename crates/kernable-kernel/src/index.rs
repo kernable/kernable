@@ -1,5 +1,6 @@
-//! Unique keys and facts: what every aggregate holds, in memory, rebuilt from the store
-//! at startup ([`kernable_store::Store::index`]).
+//! Unique keys and facts: what every aggregate holds. The store keeps it, filed by stream
+//! and by key ([`kernable_store::Store::stream_index`], [`kernable_store::Store::key_holder`]);
+//! the kernel reads it as commits need it and keeps the recently used part in memory.
 //!
 //! A worker sends with each result the full set of keys and facts its aggregate
 //! holds after the events, and the facts other aggregates must hold. The kernel checks them
@@ -9,20 +10,17 @@
 //!
 //! A key is filed under its identity (`kernable.v1.key`), which the kernel computes from the
 //! command's tenant, domain and aggregate type. The identity of a personal key lives in the
-//! vault only, as a value of its subject: erasing the subject frees the key, and the log keeps
-//! no trace of it.
+//! vault only, as a value of its subject, filed by a hash keyed with the vault key: erasing the
+//! subject frees the key, and the log keeps no trace of it.
 
-use std::{
-    collections::{BTreeSet, HashMap, HashSet},
-    sync::Arc,
-};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use kernable_core::{
     proto::{AggregateIndex, Command, Rejected, StoredKey, VaultValue},
     signing,
 };
 use kernable_store::{
-    StreamId,
+    Store, StreamId,
     vault::{Owner, Vault},
 };
 
@@ -51,232 +49,188 @@ pub(crate) struct Held {
     pub facts: BTreeSet<String>,
 }
 
-impl Held {
-    fn is_empty(&self) -> bool {
-        self.keys.is_empty() && self.facts.is_empty()
-    }
+/// What one aggregate holds, as read for a commit: with the vault values of its personal keys.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Entry {
+    pub held: Held,
+    /// The vault value of each personal key held, by identity.
+    pub refs: HashMap<[u8; 32], String>,
 }
 
-/// [`Held`] as the index keeps it, for millions of aggregates: boxed slices instead of sets,
-/// and key names shared, a few hundred bytes per aggregate.
-struct Compact {
-    keys: Box<[CompactKey]>,
-    facts: Box<[Box<str>]>,
-}
-
-struct CompactKey {
-    name: Arc<str>,
-    global: bool,
-    id: [u8; 32],
-    subject: Box<str>,
-}
-
-#[derive(Default)]
+/// The index of unique keys and facts. The store holds it, and the vault the identities of
+/// personal keys; the kernel keeps only what recently used aggregates hold, so startup and
+/// memory do not grow with the store. Only the kernel writes the index, under the lock this
+/// sits behind, so the cache is never stale.
 pub(crate) struct Index {
-    /// Key identity -> the stream that holds it; the stream shared with `held`.
-    ids: HashMap<[u8; 32], Arc<StreamId>>,
-    held: HashMap<Arc<StreamId>, Compact>,
-    /// The vault value of every personal key held, by identity.
-    refs: HashMap<[u8; 32], String>,
-    /// Key names, one copy each: an aggregate type declares a few.
-    names: HashSet<Arc<str>>,
+    /// Aggregates whose index the kernel keeps in memory.
+    capacity: usize,
+    cache: HashMap<StreamId, (Entry, u64)>,
+    /// Use order: the oldest first.
+    order: BTreeMap<u64, StreamId>,
+    next: u64,
+}
+
+impl Default for Index {
+    fn default() -> Self {
+        Index::with_capacity(100_000)
+    }
 }
 
 impl Index {
-    /// The index as the store holds it, with the identities of personal keys read from the
-    /// vault; a key whose vault value is gone was erased and is free.
-    pub(crate) fn load(
-        stored: Vec<(StreamId, AggregateIndex)>,
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        Index {
+            capacity: capacity.max(1),
+            cache: HashMap::new(),
+            order: BTreeMap::new(),
+            next: 0,
+        }
+    }
+
+    /// What `stream` holds now: personal keys whose vault values are gone were erased and are
+    /// free.
+    pub(crate) fn held(
+        &mut self,
+        store: &dyn Store,
         vault: Option<&Vault>,
-    ) -> Result<Index, BoxError> {
-        let refs: Vec<String> = stored
-            .iter()
-            .flat_map(|(_, index)| &index.keys)
-            .filter(|k| !k.vault_ref.is_empty())
-            .map(|k| k.vault_ref.clone())
-            .collect();
-        let values: HashMap<String, VaultValue> = match vault {
-            _ if refs.is_empty() => HashMap::new(),
-            Some(vault) => vault
-                .get(&refs)?
-                .into_iter()
-                .map(|v| (v.r#ref.clone(), v))
-                .collect(),
-            None => {
-                return Err(
-                    "the store holds personal unique keys, which live in the vault: \
-                            start the kernel with its vault (kernable start --vault-key)"
-                        .into(),
-                );
-            }
+        stream: &StreamId,
+    ) -> Result<Entry, BoxError> {
+        if let Some((entry, used)) = self.cache.get_mut(stream) {
+            self.order.remove(used);
+            *used = self.next;
+            self.order.insert(self.next, stream.clone());
+            self.next += 1;
+            return Ok(entry.clone());
+        }
+        let entry = match store.stream_index(stream)? {
+            Some(stored) => read(stream, stored, vault)?,
+            None => Entry::default(),
         };
-        let mut index = Index::default();
-        for (stream, stored) in stored {
-            let mut held = Held {
-                facts: stored.facts.into_iter().collect(),
-                ..Held::default()
-            };
-            for k in stored.keys {
-                let (id, subject) = if k.vault_ref.is_empty() {
-                    let id = k.id.as_slice().try_into().map_err(|_| {
-                        format!("stored key {} of {stream:?} is not a key id", k.name)
-                    })?;
-                    (id, String::new())
-                } else {
-                    let Some(value) = values.get(&k.vault_ref) else {
-                        continue; // erased
-                    };
-                    (key_id_from(value)?, value.subject.clone())
-                };
-                if let Some(other) = index.ids.get(&id) {
-                    tracing::error!(key = %k.name, holder = ?other, stream = ?stream, "a key is held twice");
-                    continue;
-                }
-                if !subject.is_empty() {
-                    index.refs.insert(id, k.vault_ref.clone());
-                }
-                held.keys.insert(Key {
-                    name: k.name,
-                    global: k.global,
-                    id,
-                    subject,
-                });
-            }
-            index.put(stream, &held);
-        }
-        Ok(index)
-    }
-
-    /// Files `held` under `stream`, which holds nothing in the index yet.
-    fn put(&mut self, stream: StreamId, held: &Held) {
-        if held.is_empty() {
-            return;
-        }
-        let stream = Arc::new(stream);
-        let keys = held
-            .keys
-            .iter()
-            .map(|k| {
-                self.ids.insert(k.id, stream.clone());
-                CompactKey {
-                    name: self.name(&k.name),
-                    global: k.global,
-                    id: k.id,
-                    subject: k.subject.as_str().into(),
-                }
-            })
-            .collect();
-        let facts = held.facts.iter().map(|f| f.as_str().into()).collect();
-        self.held.insert(stream, Compact { keys, facts });
-    }
-
-    /// Removes what `stream` holds from the index, with its keys.
-    fn take(&mut self, stream: &StreamId) -> Held {
-        let held = self.held(stream);
-        if self.held.remove(stream).is_some() {
-            for k in &held.keys {
-                self.ids.remove(&k.id);
-            }
-        }
-        held
-    }
-
-    fn name(&mut self, name: &str) -> Arc<str> {
-        if let Some(n) = self.names.get(name) {
-            return n.clone();
-        }
-        let n: Arc<str> = name.into();
-        self.names.insert(n.clone());
-        n
+        self.keep(stream, entry.clone());
+        Ok(entry)
     }
 
     /// Whether `stream` holds `fact`.
-    pub(crate) fn holds(&self, stream: &StreamId, fact: &str) -> bool {
-        self.held
-            .get(stream)
-            .is_some_and(|h| h.facts.iter().any(|f| &**f == fact))
+    pub(crate) fn holds(
+        &mut self,
+        store: &dyn Store,
+        vault: Option<&Vault>,
+        stream: &StreamId,
+        fact: &str,
+    ) -> Result<bool, BoxError> {
+        Ok(self.held(store, vault, stream)?.held.facts.contains(fact))
     }
 
-    /// The stream that holds the key `id`, if any.
-    pub(crate) fn holder(&self, id: &[u8; 32]) -> Option<&StreamId> {
-        self.ids.get(id).map(|s| &**s)
-    }
-
-    /// What `stream` holds now.
-    pub(crate) fn held(&self, stream: &StreamId) -> Held {
-        let Some(c) = self.held.get(stream) else {
-            return Held::default();
+    /// The stream that holds the key `id`, if any. A personal key is held by the stream that
+    /// filed it in the vault, as long as that stream still refers to the value: a value of a
+    /// commit that failed, or of a key the stream dropped before a crash, holds nothing.
+    pub(crate) fn holder(
+        &mut self,
+        store: &dyn Store,
+        vault: Option<&Vault>,
+        id: &[u8; 32],
+    ) -> Result<Option<StreamId>, BoxError> {
+        if let Some(stream) = store.key_holder(id)? {
+            return Ok(Some(stream));
+        }
+        let Some(vault) = vault else {
+            return Ok(None);
         };
-        Held {
-            keys: c
-                .keys
-                .iter()
-                .map(|k| Key {
-                    name: k.name.to_string(),
-                    global: k.global,
-                    id: k.id,
-                    subject: k.subject.to_string(),
-                })
-                .collect(),
-            facts: c.facts.iter().map(|f| f.to_string()).collect(),
-        }
-    }
-
-    /// The vault value of the personal key `id`.
-    pub(crate) fn vault_ref(&self, id: &[u8; 32]) -> Option<&String> {
-        self.refs.get(id)
-    }
-
-    /// `stream` holds `held` from now on; `refs` are the vault values of its personal keys.
-    pub(crate) fn set(&mut self, stream: &StreamId, held: Held, refs: &HashMap<[u8; 32], String>) {
-        for k in self.take(stream).keys {
-            self.refs.remove(&k.id);
-        }
-        for k in &held.keys {
-            if let Some(r) = refs.get(&k.id) {
-                self.refs.insert(k.id, r.clone());
+        for (r, stream) in vault.key_holders(id)? {
+            if self.held(store, Some(vault), &stream)?.refs.get(id) == Some(&r) {
+                return Ok(Some(stream));
             }
         }
-        self.put(stream.clone(), &held);
+        Ok(None)
     }
 
-    /// Frees the personal keys of `streams` whose vault values an erasure deleted.
-    pub(crate) fn erased(&mut self, streams: &[StreamId], vault: &Vault) {
+    /// `stream` holds `entry` from now on (committed).
+    pub(crate) fn set(&mut self, stream: &StreamId, entry: Entry) {
+        self.keep(stream, entry);
+    }
+
+    /// Forgets what `streams` hold, read again when needed: an erasure freed their personal
+    /// keys.
+    pub(crate) fn erased(&mut self, streams: &[StreamId]) {
         for stream in streams {
-            let held = self.held(stream);
-            if held.is_empty() {
-                continue;
+            if let Some((_, used)) = self.cache.remove(stream) {
+                self.order.remove(&used);
             }
-            let refs: Vec<String> = held
-                .keys
-                .iter()
-                .filter_map(|k| self.refs.get(&k.id).cloned())
-                .collect();
-            let kept: HashSet<String> = match vault.get(&refs) {
-                Ok(values) => values.into_iter().map(|v| v.r#ref).collect(),
-                Err(e) => {
-                    tracing::error!(error = %e, "reading the vault failed");
-                    continue;
-                }
-            };
-            let gone: Vec<Key> = held
-                .keys
-                .iter()
-                .filter(|k| self.refs.get(&k.id).is_some_and(|r| !kept.contains(r)))
-                .cloned()
-                .collect();
-            if gone.is_empty() {
-                continue;
-            }
-            let mut held = self.take(stream);
-            for k in gone {
-                held.keys.remove(&k);
-                self.refs.remove(&k.id);
-            }
-            self.put(stream.clone(), &held);
         }
+    }
+
+    fn keep(&mut self, stream: &StreamId, entry: Entry) {
+        if let Some((_, used)) = self.cache.remove(stream) {
+            self.order.remove(&used);
+        }
+        while self.cache.len() >= self.capacity {
+            let Some((_, oldest)) = self.order.pop_first() else {
+                break;
+            };
+            self.cache.remove(&oldest);
+        }
+        self.cache.insert(stream.clone(), (entry, self.next));
+        self.order.insert(self.next, stream.clone());
+        self.next += 1;
     }
 }
+
+/// What the store says `stream` holds, with the identities of its personal keys read from the
+/// vault; a key whose vault value is gone was erased.
+fn read(
+    stream: &StreamId,
+    stored: AggregateIndex,
+    vault: Option<&Vault>,
+) -> Result<Entry, BoxError> {
+    let refs: Vec<String> = stored
+        .keys
+        .iter()
+        .filter(|k| !k.vault_ref.is_empty())
+        .map(|k| k.vault_ref.clone())
+        .collect();
+    let values: HashMap<String, VaultValue> = match vault {
+        _ if refs.is_empty() => HashMap::new(),
+        Some(vault) => vault
+            .get(&refs)?
+            .into_iter()
+            .map(|v| (v.r#ref.clone(), v))
+            .collect(),
+        None => return Err(NO_VAULT.into()),
+    };
+    let mut entry = Entry {
+        held: Held {
+            facts: stored.facts.into_iter().collect(),
+            ..Held::default()
+        },
+        ..Entry::default()
+    };
+    for k in stored.keys {
+        let (id, subject) = if k.vault_ref.is_empty() {
+            let id =
+                k.id.as_slice()
+                    .try_into()
+                    .map_err(|_| format!("stored key {} of {stream:?} is not a key id", k.name))?;
+            (id, String::new())
+        } else {
+            let Some(value) = values.get(&k.vault_ref) else {
+                continue; // erased
+            };
+            let id = key_id_from(value)?;
+            entry.refs.insert(id, k.vault_ref.clone());
+            (id, value.subject.clone())
+        };
+        entry.held.keys.insert(Key {
+            name: k.name,
+            global: k.global,
+            id,
+            subject,
+        });
+    }
+    Ok(entry)
+}
+
+/// Why a kernel without its vault cannot run on a store with personal keys.
+pub(crate) const NO_VAULT: &str = "the store holds personal unique keys, which live in the vault: \
+                                   start the kernel with its vault (kernable start --vault-key)";
 
 /// The identity a personal key's vault value holds: its hex as a JSON string.
 fn key_id_from(value: &VaultValue) -> Result<[u8; 32], BoxError> {
@@ -314,7 +268,7 @@ pub(crate) fn put_personal(
         tenant: &cmd.tenant_id,
         stream: Some(stream),
     };
-    vault.put(&[v], std::slice::from_ref(&r), &owner, now_ms)?;
+    vault.put_key(&v, id, &owner, now_ms)?;
     Ok(r)
 }
 
@@ -412,4 +366,98 @@ pub(crate) fn validate(r: &kernable_core::proto::Result) -> Result<(), Rejected>
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use kernable_core::proto::{Command, NewEvent, Signature};
+    use kernable_store::FileStore;
+
+    use super::*;
+
+    fn stream(id: &str) -> StreamId {
+        StreamId {
+            tenant_id: "t1".into(),
+            domain: "shop".into(),
+            aggregate_type: "Customer".into(),
+            aggregate_id: id.into(),
+        }
+    }
+
+    /// Commits `index` as the first event of `id`'s stream.
+    fn commit(store: &FileStore, id: &str, key: u8, fact: &str) {
+        let cmd = Command {
+            command_id: format!("c-{id}"),
+            tenant_id: "t1".into(),
+            domain: "shop".into(),
+            aggregate_type: "Customer".into(),
+            aggregate_id: id.into(),
+            command_type: "Register".into(),
+            payload: b"{}".to_vec(),
+            ..Default::default()
+        };
+        let index = AggregateIndex {
+            keys: vec![StoredKey {
+                name: "email".into(),
+                global: false,
+                id: vec![key; 32],
+                vault_ref: String::new(),
+            }],
+            facts: vec![fact.into()],
+        };
+        let event = NewEvent {
+            event_type: "Registered".into(),
+            payload: b"{}".to_vec(),
+            schema: 1,
+            ..Default::default()
+        };
+        store.enqueue(&cmd, 0).unwrap();
+        store
+            .commit(
+                &cmd.command_id,
+                0,
+                &[event],
+                &Signature::default(),
+                Some(&index),
+                0,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn an_evicted_aggregate_is_read_again_as_the_store_holds_it() {
+        let store = FileStore::in_memory();
+        for (n, id) in ["a", "b", "c"].into_iter().enumerate() {
+            commit(&store, id, n as u8 + 1, "active");
+        }
+        let mut index = Index::with_capacity(2);
+        for (n, id) in ["a", "b", "c"].into_iter().enumerate() {
+            let holder = index.holder(&store, None, &[n as u8 + 1; 32]).unwrap();
+            assert_eq!(holder, Some(stream(id)));
+            assert!(index.holds(&store, None, &stream(id), "active").unwrap());
+        }
+        assert_eq!(index.cache.len(), 2, "a was evicted");
+        assert!(!index.cache.contains_key(&stream("a")));
+        let a = index.held(&store, None, &stream("a")).unwrap();
+        assert_eq!(
+            a.held.keys.iter().map(|k| k.id).collect::<Vec<_>>(),
+            [[1; 32]]
+        );
+        assert!(
+            !index.cache.contains_key(&stream("b")),
+            "b was the oldest then"
+        );
+
+        // What a commit sets is what the index answers, until it is evicted.
+        let mut changed = a.clone();
+        changed.held.facts = ["closed".to_owned()].into();
+        index.set(&stream("a"), changed);
+        assert!(index.holds(&store, None, &stream("a"), "closed").unwrap());
+        index.erased(&[stream("a")]);
+        assert!(
+            index.holds(&store, None, &stream("a"), "active").unwrap(),
+            "read again"
+        );
+        assert_eq!(index.holder(&store, None, &[9; 32]).unwrap(), None);
+    }
 }

@@ -89,6 +89,8 @@ struct State {
     index: BTreeMap<StreamKey, AggregateIndex>,
     /// The highest schema per qualified event type.
     schemas: BTreeMap<String, u32>,
+    /// The holder of every unique key that is not personal, by identity.
+    holders: HashMap<Vec<u8>, StreamKey>,
 }
 
 impl State {
@@ -128,9 +130,19 @@ impl State {
                         ))
                     })?;
                     let stream = stream_key(&cmd.command);
-                    if index.keys.is_empty() && index.facts.is_empty() {
-                        self.index.remove(&stream);
-                    } else {
+                    if let Some(old) = self.index.remove(&stream) {
+                        for k in old.keys.iter().filter(|k| !k.id.is_empty()) {
+                            self.holders.remove(&k.id);
+                        }
+                    }
+                    for k in index.keys.iter().filter(|k| !k.id.is_empty()) {
+                        if self.holders.insert(k.id.clone(), stream.clone()).is_some() {
+                            return Err(corrupt(&format!(
+                                "a unique key of {command_id} is held twice"
+                            )));
+                        }
+                    }
+                    if !index.keys.is_empty() || !index.facts.is_empty() {
                         self.index.insert(stream, index);
                     }
                 }
@@ -536,6 +548,19 @@ impl Store for FileStore {
                 actual,
             });
         }
+        // Refused before it is logged: a log that files one key twice would not replay.
+        let own = stream_key(&cmd);
+        let taken = index.iter().flat_map(|i| &i.keys).any(|k| {
+            !k.id.is_empty()
+                && inner
+                    .state
+                    .holders
+                    .get(&k.id)
+                    .is_some_and(|holder| *holder != own)
+        });
+        if taken {
+            return Err(Error::KeyTaken);
+        }
 
         let mut prev = inner
             .state
@@ -589,6 +614,36 @@ impl Store for FileStore {
             .iter()
             .map(|(t, v)| (t.clone(), *v))
             .collect())
+    }
+
+    fn stream_index(&self, stream: &StreamId) -> Result<Option<AggregateIndex>> {
+        let key = (
+            stream.tenant_id.clone(),
+            stream.domain.clone(),
+            stream.aggregate_type.clone(),
+            stream.aggregate_id.clone(),
+        );
+        Ok(self.inner().state.index.get(&key).cloned())
+    }
+
+    fn key_holder(&self, id: &[u8]) -> Result<Option<StreamId>> {
+        Ok(self.inner().state.holders.get(id).map(
+            |(tenant_id, domain, aggregate_type, aggregate_id)| StreamId {
+                tenant_id: tenant_id.clone(),
+                domain: domain.clone(),
+                aggregate_type: aggregate_type.clone(),
+                aggregate_id: aggregate_id.clone(),
+            },
+        ))
+    }
+
+    fn holds_personal_keys(&self) -> Result<bool> {
+        Ok(self
+            .inner()
+            .state
+            .index
+            .values()
+            .any(|i| i.keys.iter().any(|k| !k.vault_ref.is_empty())))
     }
 
     fn index(&self) -> Result<Vec<(StreamId, AggregateIndex)>> {

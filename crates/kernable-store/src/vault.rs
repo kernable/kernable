@@ -38,9 +38,13 @@ CREATE TABLE IF NOT EXISTS vault (
     aggregate_id   TEXT,
     nonce          BLOB    NOT NULL,
     value          BLOB    NOT NULL, -- encrypted
-    created_at     INTEGER NOT NULL
+    created_at     INTEGER NOT NULL,
+    -- A personal unique key's value (its identity): a hash of the identity keyed by the vault
+    -- key, by which a commit finds the holder. NULL for every other value.
+    key_lookup     BLOB
 ) STRICT;
 CREATE INDEX IF NOT EXISTS vault_subject ON vault (tenant, subject);
+CREATE INDEX IF NOT EXISTS vault_key ON vault (key_lookup) WHERE key_lookup IS NOT NULL;
 CREATE INDEX IF NOT EXISTS vault_command ON vault (command_id);
 CREATE TABLE IF NOT EXISTS erasures (
     subject_hash TEXT    NOT NULL, -- SHA-256 of the subject: proves an erasure without keeping it
@@ -104,6 +108,36 @@ pub struct Owner<'a> {
 pub struct Vault {
     conn: Mutex<Connection>,
     cipher: Aes256Gcm,
+    /// Keys the hashes of personal key identities ([`Vault::put_key`]).
+    lookup: [u8; 32],
+}
+
+/// The key that hashes personal key identities, derived from the vault key: without the vault
+/// key, a hash does not tell whose value it is.
+fn lookup_key(key: &[u8; 32]) -> [u8; 32] {
+    Sha256::new()
+        .chain_update(b"kernable.v1.vault-key-lookup")
+        .chain_update(key)
+        .finalize()
+        .into()
+}
+
+/// The hash under which the vault files the personal key `id` (a fixed-length input, so a
+/// prefixed key is a sound keyed hash).
+fn key_lookup(lookup: &[u8; 32], id: &[u8; 32]) -> Vec<u8> {
+    Sha256::new()
+        .chain_update(lookup)
+        .chain_update(id)
+        .finalize()
+        .to_vec()
+}
+
+/// The identity a personal key's value holds: its hex as a JSON string.
+fn key_id_of(value: &[u8]) -> Option<[u8; 32]> {
+    let hex = value.strip_prefix(b"\"")?.strip_suffix(b"\"")?;
+    let mut id = [0u8; 32];
+    hex::decode_to_slice(hex, &mut id).ok()?;
+    Some(id)
 }
 
 impl Vault {
@@ -139,6 +173,7 @@ impl Vault {
         Ok(Vault {
             conn: Mutex::new(conn),
             cipher: Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key)),
+            lookup: lookup_key(key),
         })
     }
 
@@ -162,6 +197,52 @@ impl Vault {
         refs: &[String],
         owner: &Owner,
         now_ms: i64,
+    ) -> Result<()> {
+        self.insert(values, refs, owner, now_ms, None)
+    }
+
+    /// Keeps the value of a personal unique key, filed under its identity `id` so that
+    /// [`Vault::key_holders`] finds it, until its subject is erased.
+    pub fn put_key(
+        &self,
+        value: &VaultValue,
+        id: &[u8; 32],
+        owner: &Owner,
+        now_ms: i64,
+    ) -> Result<()> {
+        let refs = std::slice::from_ref(&value.r#ref);
+        self.insert(std::slice::from_ref(value), refs, owner, now_ms, Some(id))
+    }
+
+    /// The values filed under the personal key `id`, with the streams that wrote them: the
+    /// holder, unless that stream has dropped the key since.
+    pub fn key_holders(&self, id: &[u8; 32]) -> Result<Vec<(String, StreamId)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT ref, tenant_id, domain, aggregate_type, aggregate_id FROM vault
+             WHERE key_lookup = ?1 AND tenant_id IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([key_lookup(&self.lookup, id)], |r| {
+            Ok((
+                r.get(0)?,
+                StreamId {
+                    tenant_id: r.get(1)?,
+                    domain: r.get(2)?,
+                    aggregate_type: r.get(3)?,
+                    aggregate_id: r.get(4)?,
+                },
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    fn insert(
+        &self,
+        values: &[VaultValue],
+        refs: &[String],
+        owner: &Owner,
+        now_ms: i64,
+        key: Option<&[u8; 32]>,
     ) -> Result<()> {
         check(values, refs)?;
         let mut conn = self.conn();
@@ -192,8 +273,8 @@ impl Vault {
             tx.execute(
                 "INSERT OR IGNORE INTO vault (ref, subject, secret, command_id, tenant, tenant_id,
                                               domain, aggregate_type, aggregate_id, nonce, value,
-                                              created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                                              created_at, key_lookup)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     v.r#ref,
                     v.subject,
@@ -206,7 +287,8 @@ impl Vault {
                     s.map(|s| &s.aggregate_id),
                     nonce.to_vec(),
                     sealed,
-                    now_ms
+                    now_ms,
+                    key.map(|id| key_lookup(&self.lookup, id))
                 ],
             )?;
         }
@@ -334,14 +416,16 @@ impl Vault {
     /// Encrypts every value again with `new_key`, in one transaction; returns how many.
     pub fn rekey(&self, new_key: &[u8; 32]) -> Result<usize> {
         let next = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(new_key));
+        let next_lookup = lookup_key(new_key);
         let mut conn = self.conn();
         let tx = conn.transaction()?;
-        let rows: Vec<(String, Vec<u8>, Vec<u8>)> = {
-            let mut stmt = tx.prepare("SELECT ref, nonce, value FROM vault")?;
-            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        let rows: Vec<(String, Vec<u8>, Vec<u8>, bool)> = {
+            let mut stmt =
+                tx.prepare("SELECT ref, nonce, value, key_lookup IS NOT NULL FROM vault")?;
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
                 .collect::<rusqlite::Result<_>>()?
         };
-        for (r, nonce, sealed) in &rows {
+        for (r, nonce, sealed, is_key) in &rows {
             let aad = r.as_bytes();
             let value = self
                 .cipher
@@ -354,9 +438,18 @@ impl Vault {
             let resealed = next
                 .encrypt(Nonce::from_slice(&fresh), Payload { msg: &value, aad })
                 .map_err(|_| Error::Vault("encryption failed".into()))?;
+            // The hash of a key's identity is keyed by the vault key too.
+            let lookup = match is_key {
+                true => Some(key_lookup(
+                    &next_lookup,
+                    &key_id_of(&value)
+                        .ok_or_else(|| Error::Vault(format!("value {r} is not a key id")))?,
+                )),
+                false => None,
+            };
             tx.execute(
-                "UPDATE vault SET nonce = ?1, value = ?2 WHERE ref = ?3",
-                params![fresh.to_vec(), resealed, r],
+                "UPDATE vault SET nonce = ?1, value = ?2, key_lookup = ?3 WHERE ref = ?4",
+                params![fresh.to_vec(), resealed, lookup, r],
             )?;
         }
         tx.execute("UPDATE sealed SET count = ?1", [rows.len() as u64])?;

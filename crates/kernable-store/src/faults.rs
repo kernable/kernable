@@ -246,6 +246,21 @@ impl Store for FaultyStore {
         self.inner.event_schemas()
     }
 
+    fn stream_index(&self, stream: &StreamId) -> Result<Option<AggregateIndex>> {
+        self.faults.read()?;
+        self.inner.stream_index(stream)
+    }
+
+    fn key_holder(&self, id: &[u8]) -> Result<Option<StreamId>> {
+        self.faults.read()?;
+        self.inner.key_holder(id)
+    }
+
+    fn holds_personal_keys(&self) -> Result<bool> {
+        self.faults.read()?;
+        self.inner.holds_personal_keys()
+    }
+
     fn reject(&self, command_id: &str, reason: Rejected) -> Result<()> {
         self.faults.write(|| self.inner.reject(command_id, reason))
     }

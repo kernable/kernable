@@ -186,7 +186,7 @@ The kernel checks keys and requirements while it commits, under the lock that or
 - **Never two holders.** Two aggregates never hold the same key at the same time. Of two commands racing for one value, exactly one commits; the other is rejected with `unique_taken`.
 - **Atomic.** The keys and facts an aggregate holds change with its events, in the same commit. A rejected command writes nothing, and is stored as rejected like any other ([Errors](../reference/errors)).
 - **Never the value.** A rejection names the key or the fact, not the value, and not the aggregate that holds it.
-- **Rebuilt from the store.** The kernel loads what every aggregate holds when it starts; it never runs your fold code.
+- **Read from the store.** The store files every key by its identity and every aggregate's keys and facts with its stream; a commit looks up what it needs there and the kernel keeps what recently used aggregates hold in memory. So startup and memory do not grow with the number of aggregates, and the kernel never runs your fold code.
 
 | Code | Message | Means |
 |---|---|---|

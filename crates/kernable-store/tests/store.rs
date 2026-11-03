@@ -745,6 +745,97 @@ fn an_index_is_replaced_with_its_commit_and_dropped_when_empty(store: &dyn Store
     assert!(store.index().unwrap().is_empty(), "holds nothing");
 }
 
+/// The kernel reads the index per stream and per key as commits need it.
+fn keys_are_found_by_identity_and_freed_with_their_stream(store: &dyn Store) {
+    let o2 = || Command {
+        aggregate_id: "o2".into(),
+        ..cmd("c2", "PlaceOrder")
+    };
+    assert_eq!(store.key_holder(&[1; 32]).unwrap(), None);
+    assert_eq!(store.stream_index(&o1()).unwrap(), None);
+    store.enqueue(&cmd("c1", "PlaceOrder"), 0).unwrap();
+    store
+        .commit(
+            "c1",
+            0,
+            &[ev("OrderPlaced")],
+            &sig(),
+            Some(&index(1, &["open"])),
+            1,
+        )
+        .unwrap();
+    assert_eq!(store.key_holder(&[1; 32]).unwrap(), Some(o1()));
+    assert_eq!(
+        store.stream_index(&o1()).unwrap(),
+        Some(index(1, &["open"]))
+    );
+
+    // Another stream filing the same key writes nothing.
+    store.enqueue(&o2(), 2).unwrap();
+    let taken = store.commit(
+        "c2",
+        0,
+        &[ev("OrderPlaced")],
+        &sig(),
+        Some(&index(1, &[])),
+        2,
+    );
+    assert!(matches!(taken, Err(Error::KeyTaken)), "{taken:?}");
+    assert_eq!(store.head_position().unwrap(), 1);
+
+    // A new value frees the old one, which another stream may then take.
+    store.enqueue(&cmd("c3", "Renumber"), 3).unwrap();
+    store
+        .commit(
+            "c3",
+            1,
+            &[ev("Renumbered")],
+            &sig(),
+            Some(&index(2, &["open"])),
+            3,
+        )
+        .unwrap();
+    assert_eq!(store.key_holder(&[1; 32]).unwrap(), None);
+    assert_eq!(store.key_holder(&[2; 32]).unwrap(), Some(o1()));
+    store
+        .commit(
+            "c2",
+            0,
+            &[ev("OrderPlaced")],
+            &sig(),
+            Some(&index(1, &[])),
+            4,
+        )
+        .unwrap();
+    let o2_stream = StreamId {
+        aggregate_id: "o2".into(),
+        ..o1()
+    };
+    assert_eq!(store.key_holder(&[1; 32]).unwrap(), Some(o2_stream));
+
+    // A personal key is filed by its vault value only; the store just knows there is one.
+    assert!(!store.holds_personal_keys().unwrap());
+    let personal = AggregateIndex {
+        keys: vec![StoredKey {
+            name: "email".into(),
+            global: false,
+            id: Vec::new(),
+            vault_ref: "ref-1".into(),
+        }],
+        facts: Vec::new(),
+    };
+    store.enqueue(&cmd("c4", "SetEmail"), 5).unwrap();
+    store
+        .commit("c4", 2, &[ev("EmailSet")], &sig(), Some(&personal), 5)
+        .unwrap();
+    assert!(store.holds_personal_keys().unwrap());
+    assert_eq!(
+        store.key_holder(&[2; 32]).unwrap(),
+        None,
+        "o1 dropped its number"
+    );
+}
+
 #[test]
 fn an_index_survives_reopening_the_store() {
     for backend in ["sqlite", "file"] {
@@ -771,7 +862,19 @@ fn an_index_survives_reopening_the_store() {
         store
             .commit("c2", 1, &[], &sig(), Some(&index(2, &["open"])), 2)
             .unwrap();
+        // Read back over the readers of the open store, and after reopening it.
+        let check = |store: &dyn Store| {
+            assert_eq!(store.key_holder(&[2; 32]).unwrap(), Some(o1()), "{backend}");
+            assert_eq!(store.key_holder(&[1; 32]).unwrap(), None, "{backend}");
+            assert_eq!(
+                store.stream_index(&o1()).unwrap(),
+                Some(index(2, &["open"])),
+                "{backend}"
+            );
+        };
+        check(&*store);
         drop(store);
+        check(&*open());
         assert_eq!(
             open().index().unwrap(),
             [(o1(), index(2, &["open"]))],
@@ -828,6 +931,7 @@ for_each_backend!(
     overviews_of_the_stored_events,
     a_key_is_revoked_once_as_it_was_first,
     an_index_is_replaced_with_its_commit_and_dropped_when_empty,
+    keys_are_found_by_identity_and_freed_with_their_stream,
 );
 
 #[test]

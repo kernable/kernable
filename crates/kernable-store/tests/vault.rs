@@ -171,3 +171,54 @@ fn removing_values_deletes_those_named_only() {
         .collect();
     assert_eq!(held, refs[1..]);
 }
+
+#[test]
+fn a_personal_key_is_found_by_its_identity_until_its_subject_is_erased() {
+    let path = std::env::temp_dir().join(format!("kernable-vault-keys-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let url = format!("sqlite:{}", path.display());
+    let (old, new) = ([1u8; 32], [2u8; 32]);
+    let id = [9u8; 32];
+    let value = format!("\"{}\"", hex::encode(id)).into_bytes();
+    let salt = vec![7u8; 16];
+    let key_value = VaultValue {
+        r#ref: signing::vault_ref(&salt, "k-1", false, &value),
+        subject: "k-1".into(),
+        secret: false,
+        salt,
+        value,
+    };
+    let stream = kernable_store::StreamId {
+        tenant_id: "t1".into(),
+        domain: "shop".into(),
+        aggregate_type: "Customer".into(),
+        aggregate_id: "c-1".into(),
+    };
+    let owner = Owner {
+        command_id: "c1",
+        tenant: "t1",
+        stream: Some(&stream),
+    };
+    let vault = Vault::open(&url, &old).unwrap();
+    vault.put_key(&key_value, &id, &owner, 0).unwrap();
+    let held = vec![(key_value.r#ref.clone(), stream.clone())];
+    assert_eq!(vault.key_holders(&id).unwrap(), held);
+    assert_eq!(vault.key_holders(&[8; 32]).unwrap(), []);
+    drop(vault);
+
+    // The hash is keyed by the vault key: a rekey files the key anew.
+    assert_eq!(Vault::open(&url, &old).unwrap().rekey(&new).unwrap(), 1);
+    let vault = Vault::open(&url, &new).unwrap();
+    assert_eq!(vault.key_holders(&id).unwrap(), held);
+    assert!(
+        !std::fs::read(&path)
+            .unwrap()
+            .windows(32)
+            .any(|w| w == id.as_slice()),
+        "the identity itself is not stored"
+    );
+
+    vault.erase("t1", "k-1", "c2", 1).unwrap();
+    assert_eq!(vault.key_holders(&id).unwrap(), []);
+    let _ = std::fs::remove_file(&path);
+}

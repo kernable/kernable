@@ -316,7 +316,11 @@ impl Kernel {
             }
             None => None,
         };
-        let index = index::Index::load(store.index()?, vault.as_ref())?;
+        // The index is read as commits need it; personal keys need the vault for that.
+        if vault.is_none() && store.holds_personal_keys()? {
+            return Err(index::NO_VAULT.into());
+        }
+        let index = index::Index::default();
         let data = kernable_store::data::open(&config.data)?;
         let cache = cache::Cache::open(&config.cache, config.limits.cache_bytes)?;
         let durable = AtomicU64::new(store.head_position()?);
@@ -1965,10 +1969,31 @@ type Outbox = mpsc::Sender<Result<KernelMessage, Status>>;
 /// What a commit changes in the index: what the aggregate holds from then on, the vault
 /// values of its personal keys (those `added` are new), and the record the store keeps.
 struct IndexChange {
-    held: index::Held,
-    refs: HashMap<[u8; 32], String>,
+    entry: index::Entry,
+    /// Vault values put for this commit; removed if it does not happen.
     added: Vec<String>,
+    /// Vault values of personal keys the aggregate no longer holds; removed once it committed.
+    dropped: Vec<String>,
     stored: kernable_core::proto::AggregateIndex,
+}
+
+/// Why the index refuses a result: the command's fault, or reading the index failed (the
+/// command goes back to the queue).
+enum Refusal {
+    Rejected(Rejected),
+    Failed(BoxError),
+}
+
+impl From<Rejected> for Refusal {
+    fn from(r: Rejected) -> Self {
+        Refusal::Rejected(r)
+    }
+}
+
+impl From<BoxError> for Refusal {
+    fn from(e: BoxError) -> Self {
+        Refusal::Failed(e)
+    }
 }
 
 /// A command currently executed by the session's worker.
@@ -2569,12 +2594,18 @@ impl Session {
                 self.in_flight().insert(r.lease_id, f);
                 return Err(Status::failed_precondition(message));
             }
-            let change = match self.index_change(&index, &f.command, &stream, &wanted, &r) {
+            let change = match self.index_change(&mut index, &f.command, &stream, &wanted, &r) {
                 Ok(change) => change,
-                Err(reason) => {
+                Err(Refusal::Rejected(reason)) => {
                     drop((index, stored));
                     self.reject(&r.lease_id, f.command, reason);
                     return Ok(());
+                }
+                Err(Refusal::Failed(e)) => {
+                    // Ends the session; the command goes back to the queue.
+                    tracing::error!(error = %e, "reading the index failed");
+                    self.in_flight().insert(r.lease_id, f);
+                    return Err(Status::unavailable("reading the index failed"));
                 }
             };
             // The erasures are noted first: a crash after the commit still carries them out.
@@ -2624,7 +2655,13 @@ impl Session {
             };
             if let Some(change) = change {
                 if took_effect {
-                    index.set(&stream, change.held, &change.refs);
+                    index.set(&stream, change.entry);
+                    if let Some(vault) = &self.kernel.vault
+                        && let Err(e) = vault.remove(&change.dropped)
+                    {
+                        // Harmless: a value the stream no longer refers to holds no key.
+                        tracing::error!(error = %e, "dropping the values of released keys failed");
+                    }
                 } else if let Some(vault) = &self.kernel.vault
                     && let Err(e) = vault.remove(&change.added)
                 {
@@ -2638,7 +2675,7 @@ impl Session {
                     crash::point("erasure.pending");
                     let erased = self.kernel.erase(&f.command, &erasing, &stream);
                     // Personal keys whose values are gone are free.
-                    index.erased(&erased, vault);
+                    index.erased(&erased);
                     crash::point("erasure.done");
                 } else if let Err(e) = vault.drop_intents(&f.command.command_id) {
                     // Harmless: the next start sees the command uncommitted and drops them.
@@ -2811,12 +2848,14 @@ impl Session {
     /// New personal keys get their vault values here, before the commit.
     fn index_change(
         &self,
-        index: &index::Index,
+        index: &mut index::Index,
         cmd: &Command,
         stream: &StreamId,
         wanted: &index::Held,
         r: &kernable_core::proto::Result,
-    ) -> Result<Option<IndexChange>, Rejected> {
+    ) -> Result<Option<IndexChange>, Refusal> {
+        let store = self.kernel.store.as_ref();
+        let vault = self.kernel.vault.as_ref();
         for q in &r.requires {
             // By key: the aggregate of the type that holds it, tenant or global (a key name has
             // one scope per type), and only in the command's tenant, like one named by ID: a
@@ -2838,13 +2877,16 @@ impl Session {
                         &q.value_hash,
                     )
                 };
-                index
-                    .holder(&id(&cmd.tenant_id))
-                    .or_else(|| index.holder(&id("")))
-                    .filter(|holder| holder.tenant_id == cmd.tenant_id)
-                    .cloned()
+                let holder = match index.holder(store, vault, &id(&cmd.tenant_id))? {
+                    Some(holder) => Some(holder),
+                    None => index.holder(store, vault, &id(""))?,
+                };
+                holder.filter(|holder| holder.tenant_id == cmd.tenant_id)
             };
-            let holds = other.is_some_and(|o| index.holds(&o, &q.fact));
+            let holds = match other {
+                Some(o) => index.holds(store, vault, &o, &q.fact)?,
+                None => false,
+            };
             if holds == q.absent {
                 // Never the value, nor its hash: the key's name says which.
                 let which = if q.key.is_empty() {
@@ -2864,42 +2906,60 @@ impl Session {
                         ..q.clone()
                     })),
                     ..Default::default()
-                });
+                }
+                .into());
             }
         }
-        // Never the value: the message tells the client which key, not whose.
-        if let Some(k) = wanted
+        let current = index.held(store, vault, stream)?;
+        // Never the value: the message tells the client which key, not whose. A key the
+        // aggregate holds already needs no lookup.
+        for k in wanted
             .keys
             .iter()
-            .find(|k| index.holder(&k.id).is_some_and(|holder| holder != stream))
+            .filter(|k| !current.held.keys.contains(k))
         {
-            return Err(Rejected {
-                code: "unique_taken".into(),
-                message: format!(
-                    "{}.{} key {} is taken",
-                    cmd.domain, cmd.aggregate_type, k.name
-                ),
-                key: k.name.clone(),
-                ..Default::default()
-            });
+            if index
+                .holder(store, vault, &k.id)?
+                .is_some_and(|holder| holder != *stream)
+            {
+                return Err(Rejected {
+                    code: "unique_taken".into(),
+                    message: format!(
+                        "{}.{} key {} is taken",
+                        cmd.domain, cmd.aggregate_type, k.name
+                    ),
+                    key: k.name.clone(),
+                    ..Default::default()
+                }
+                .into());
+            }
         }
-        let current = index.held(stream);
-        if current == *wanted {
+        if current.held == *wanted {
             return Ok(None);
         }
         let mut change = IndexChange {
-            held: wanted.clone(),
-            refs: HashMap::new(),
+            entry: index::Entry {
+                held: wanted.clone(),
+                refs: HashMap::new(),
+            },
             added: Vec::new(),
+            dropped: current
+                .held
+                .keys
+                .iter()
+                .filter(|k| !wanted.keys.contains(*k))
+                .filter_map(|k| current.refs.get(&k.id).cloned())
+                .collect(),
             stored: Default::default(),
         };
         for k in wanted.keys.iter().filter(|k| !k.subject.is_empty()) {
             let kept = current
+                .held
                 .keys
                 .contains(k)
-                .then(|| index.vault_ref(&k.id))
+                .then(|| current.refs.get(&k.id))
                 .flatten();
-            let r = match (kept, &self.kernel.vault) {
+            let r = match (kept, vault) {
                 (Some(r), _) => r.clone(),
                 (None, Some(vault)) => {
                     match index::put_personal(vault, cmd, stream, &k.id, &k.subject, now_ms()) {
@@ -2915,7 +2975,8 @@ impl Session {
                                 code: "vault_error".into(),
                                 message: e.to_string(),
                                 ..Default::default()
-                            });
+                            }
+                            .into());
                         }
                     }
                 }
@@ -2924,12 +2985,13 @@ impl Session {
                         code: "no_vault".into(),
                         message: "this kernel has no vault".into(),
                         ..Default::default()
-                    });
+                    }
+                    .into());
                 }
             };
-            change.refs.insert(k.id, r);
+            change.entry.refs.insert(k.id, r);
         }
-        change.stored = index::stored(&change.held, &change.refs);
+        change.stored = index::stored(&change.entry.held, &change.entry.refs);
         Ok(Some(change))
     }
 

@@ -178,14 +178,8 @@ fn fill(store: &dyn Store, vault: &Vault) {
         tenant: "t1",
         stream: Some(&s),
     };
-    vault
-        .put(
-            std::slice::from_ref(&email_id),
-            std::slice::from_ref(&email_id.r#ref),
-            &owner,
-            AT,
-        )
-        .unwrap();
+    let email_key_id = signing::unique_key_id(&c2, &email_key);
+    vault.put_key(&email_id, &email_key_id, &owner, AT).unwrap();
     let index = AggregateIndex {
         keys: vec![
             StoredKey {

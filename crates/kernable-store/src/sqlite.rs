@@ -150,13 +150,24 @@ CREATE TABLE IF NOT EXISTS grants (
     grant     BLOB    NOT NULL  -- the Grant message as presented, with its root signature
 ) STRICT;
 CREATE TABLE IF NOT EXISTS aggregate_index (
+    tenant_id      TEXT    NOT NULL,
+    domain         TEXT    NOT NULL,
+    aggregate_type TEXT    NOT NULL,
+    aggregate_id   TEXT    NOT NULL,
+    record         BLOB    NOT NULL, -- the AggregateIndex message; a stream holding nothing has no row
+    personal       INTEGER NOT NULL, -- 1: it holds a personal key
+    PRIMARY KEY (tenant_id, domain, aggregate_type, aggregate_id)
+) STRICT;
+CREATE INDEX IF NOT EXISTS aggregate_index_personal ON aggregate_index (personal) WHERE personal = 1;
+-- The holder of every unique key that is not personal, by the key's identity, kept with
+-- aggregate_index: a commit looks keys up here instead of keeping them all in memory.
+CREATE TABLE IF NOT EXISTS unique_keys (
+    id             BLOB PRIMARY KEY,
     tenant_id      TEXT NOT NULL,
     domain         TEXT NOT NULL,
     aggregate_type TEXT NOT NULL,
-    aggregate_id   TEXT NOT NULL,
-    record         BLOB NOT NULL, -- the AggregateIndex message; a stream holding nothing has no row
-    PRIMARY KEY (tenant_id, domain, aggregate_type, aggregate_id)
-) STRICT;
+    aggregate_id   TEXT NOT NULL
+) STRICT, WITHOUT ROWID;
 ";
 
 const EVENT_COLUMNS: &str = "global_position, tenant_id, aggregate_type, aggregate_id, version, \
@@ -541,31 +552,59 @@ impl Store for SqliteStore {
             cmd.aggregate_type,
             cmd.aggregate_id
         ];
-        match index {
-            None => {}
-            Some(index) if index.keys.is_empty() && index.facts.is_empty() => {
+        if let Some(index) = index {
+            // The keys it held before are free, then its new ones are filed: a key another
+            // stream holds fails the commit (the kernel checks first, so that is a bug).
+            if let Some(old) = stream_index(&tx, stream)? {
+                for k in old.keys.iter().filter(|k| !k.id.is_empty()) {
+                    tx.execute("DELETE FROM unique_keys WHERE id = ?1", [&k.id])?;
+                }
+            }
+            if index.keys.is_empty() && index.facts.is_empty() {
                 tx.execute(
                     "DELETE FROM aggregate_index
                      WHERE tenant_id = ?1 AND domain = ?2 AND aggregate_type = ?3
                        AND aggregate_id = ?4",
                     stream,
                 )?;
-            }
-            Some(index) => {
+            } else {
+                let personal = index.keys.iter().any(|k| !k.vault_ref.is_empty());
                 tx.execute(
                     "INSERT INTO aggregate_index
-                         (tenant_id, domain, aggregate_type, aggregate_id, record)
-                     VALUES (?1, ?2, ?3, ?4, ?5)
+                         (tenant_id, domain, aggregate_type, aggregate_id, record, personal)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                      ON CONFLICT (tenant_id, domain, aggregate_type, aggregate_id)
-                     DO UPDATE SET record = excluded.record",
+                     DO UPDATE SET record = excluded.record, personal = excluded.personal",
                     params![
                         cmd.tenant_id,
                         cmd.domain,
                         cmd.aggregate_type,
                         cmd.aggregate_id,
-                        index.encode_to_vec()
+                        index.encode_to_vec(),
+                        personal
                     ],
                 )?;
+            }
+            for k in index.keys.iter().filter(|k| !k.id.is_empty()) {
+                tx.execute(
+                    "INSERT INTO unique_keys (id, tenant_id, domain, aggregate_type, aggregate_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        k.id,
+                        cmd.tenant_id,
+                        cmd.domain,
+                        cmd.aggregate_type,
+                        cmd.aggregate_id
+                    ],
+                )
+                .map_err(|e| match e {
+                    rusqlite::Error::SqliteFailure(f, _)
+                        if f.code == rusqlite::ErrorCode::ConstraintViolation =>
+                    {
+                        Error::KeyTaken
+                    }
+                    e => e.into(),
+                })?;
             }
         }
 
@@ -582,6 +621,50 @@ impl Store for SqliteStore {
         )?;
         tx.commit()?;
         Ok(stored)
+    }
+
+    fn stream_index(&self, stream: &StreamId) -> Result<Option<AggregateIndex>> {
+        self.read(|conn| {
+            stream_index(
+                conn,
+                params![
+                    stream.tenant_id,
+                    stream.domain,
+                    stream.aggregate_type,
+                    stream.aggregate_id
+                ],
+            )
+        })
+    }
+
+    fn key_holder(&self, id: &[u8]) -> Result<Option<StreamId>> {
+        self.read(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT tenant_id, domain, aggregate_type, aggregate_id FROM unique_keys
+                     WHERE id = ?1",
+                    [id],
+                    |r| {
+                        Ok(StreamId {
+                            tenant_id: r.get(0)?,
+                            domain: r.get(1)?,
+                            aggregate_type: r.get(2)?,
+                            aggregate_id: r.get(3)?,
+                        })
+                    },
+                )
+                .optional()?)
+        })
+    }
+
+    fn holds_personal_keys(&self) -> Result<bool> {
+        self.read(|conn| {
+            Ok(conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM aggregate_index WHERE personal = 1)",
+                [],
+                |r| r.get(0),
+            )?)
+        })
     }
 
     fn index(&self) -> Result<Vec<(StreamId, AggregateIndex)>> {
@@ -1281,6 +1364,24 @@ fn parse_context(json: &str) -> std::result::Result<RequestContext, String> {
             .unwrap_or(false),
         attributes,
     })
+}
+
+/// What the stream of `stream` (tenant, domain, type, ID) holds; `None` if nothing.
+fn stream_index(
+    conn: &Connection,
+    stream: impl rusqlite::Params,
+) -> Result<Option<AggregateIndex>> {
+    let record: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT record FROM aggregate_index
+             WHERE tenant_id = ?1 AND domain = ?2 AND aggregate_type = ?3 AND aggregate_id = ?4",
+            stream,
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(record
+        .map(|r| AggregateIndex::decode(r.as_slice()))
+        .transpose()?)
 }
 
 fn read_events(

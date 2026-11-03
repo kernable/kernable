@@ -56,6 +56,9 @@ pub enum Error {
     },
     /// The command is not pending: it is unknown or already completed.
     NotPending,
+    /// The commit files a unique key another stream holds; nothing was written. The kernel
+    /// checks keys before it commits, so this is a bug.
+    KeyTaken,
     /// A write on a store opened read-only.
     ReadOnly,
     /// The stored data cannot be read back (other than a torn last record).
@@ -79,6 +82,7 @@ impl fmt::Display for Error {
                 )
             }
             Error::NotPending => write!(f, "command is not pending"),
+            Error::KeyTaken => write!(f, "a unique key of the commit is held by another stream"),
             Error::ReadOnly => write!(f, "store is open read-only"),
             Error::Corrupt(what) => write!(f, "corrupt store: {what}"),
             Error::Format(found) if *found > FORMAT => write!(
@@ -216,6 +220,16 @@ pub trait Store: Send + Sync {
 
     /// The unique keys and facts every stream holds now; streams that hold nothing are left out.
     fn index(&self) -> Result<Vec<(StreamId, AggregateIndex)>>;
+
+    /// What `stream` holds now; `None` if it holds nothing.
+    fn stream_index(&self, stream: &StreamId) -> Result<Option<AggregateIndex>>;
+
+    /// The stream that holds the unique key with identity `id`, if any. Personal keys are not
+    /// filed here: their identities live in the vault.
+    fn key_holder(&self, id: &[u8]) -> Result<Option<StreamId>>;
+
+    /// Whether any stream holds a personal key, which only the vault can resolve.
+    fn holds_personal_keys(&self) -> Result<bool>;
 
     /// Every aggregate with events, the most recently changed first, at most `limit`.
     fn streams(&self, limit: usize) -> Result<Vec<StreamSummary>> {
