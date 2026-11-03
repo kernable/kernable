@@ -1257,6 +1257,20 @@ def _local(url: str) -> bool:
     return host in ("localhost", "::1") or re.fullmatch(r"127\.\d+\.\d+\.\d+", host) is not None
 
 
+def _moving(err: grpc.RpcError) -> bool:
+    """Whether a kernel refused a request because its tenant is moving to another partition."""
+    return err.code() == grpc.StatusCode.UNAVAILABLE and (err.details() or "").startswith("moving")
+
+
+# How long a request waits for its tenant's move to end.
+_MOVE_WAIT_S = 30.0
+
+
+def _partition_of(m, tenant: str) -> str:
+    """The partition map `m` assigns `tenant` to."""
+    return next((t.partition for t in m.tenants if t.tenant == tenant), m.default)
+
+
 def _wrong_partition(err: grpc.RpcError) -> bool:
     """Whether a kernel refused a request as one for a tenant of another partition."""
     return err.code() == grpc.StatusCode.FAILED_PRECONDITION and (err.details() or "").startswith("wrong_partition")
@@ -1307,8 +1321,7 @@ class _Partitioned:
         m = self.current()
         if m is None:
             return self.entry
-        name = next((t.partition for t in m.tenants if t.tenant == tenant), m.default)
-        return self._channel(m, name)
+        return self._channel(m, _partition_of(m, tenant))
 
     def control(self) -> grpc.Channel:
         """The control partition's channel, which takes memberships."""
@@ -1324,13 +1337,22 @@ class _Partitioned:
 
     def route(self, tenant: str, call: Callable[[grpc.Channel], Any]) -> Any:
         """`call` on `tenant`'s partition, sent anew after reading the map again on
-        `wrong_partition`."""
-        for attempt in range(4):
+        `wrong_partition`, and while the tenant moves (`moving`, refused before it took effect)
+        for up to 30 s."""
+        deadline = time.monotonic() + _MOVE_WAIT_S
+        pause = 0.05
+        attempt = 0
+        while True:
             try:
                 return call(self.for_tenant(tenant))
             except grpc.RpcError as e:
+                if _moving(e) and time.monotonic() + pause < deadline:
+                    time.sleep(pause)
+                    pause = min(pause * 2, 1.0)
+                    continue
                 if attempt == 3 or not _wrong_partition(e):
                     raise
+                attempt += 1
                 self.current(refresh=True)
 
     def close(self) -> None:
@@ -2472,7 +2494,7 @@ class ListenerHandle(_Stream):
 
     def __init__(self, channel: "grpc.Channel | _Partitioned", key: Key, listener: Listener, log: _Log,
                  service: str = "", kernable: "Kernable | None" = None, part: str = "",
-                 store: "Store | None" = None):
+                 store: "Store | None" = None, parent: "ListenerHandle | None" = None):
         """Use `Kernable.listener`. `part` and `store`: a partition's stream, sharing the
         store of the handle that runs it."""
         # For handlers' follow-up commands and queries.
@@ -2490,6 +2512,13 @@ class ListenerHandle(_Stream):
         self._source = channel
         self._part = part
         self._shared = store is not None
+        # As a partition's stream: the handle that runs it. As that handle: how far each
+        # partition's stream has handled, for the order across moves (S4).
+        self._parent = parent
+        self._progress: dict[str, int] = {}
+        self._moves = threading.Condition()
+        # Tenants this stream read the map again for.
+        self._checked: set[str] = set()
         self._stub = None
         self._key = key
         self._start = listener.start
@@ -2535,7 +2564,8 @@ class ListenerHandle(_Stream):
         try:
             if partitioned:
                 self._run_children([ListenerHandle(channel, self._key, self.listener, self._log, self._service,
-                                                   self._kernable, part=name, store=self.store)
+                                                   self._kernable, part=name, store=self.store,
+                                                   parent=self)
                                     for name, channel in parts])
                 return
             self._stub = rpc.ListenerServiceStub(parts[0][1])
@@ -2581,6 +2611,8 @@ class ListenerHandle(_Stream):
             return pb.ListenerMessage(challenge_response=pb.ChallengeResponse(sig=sig))
         if kind == "ready":
             self.position = msg.ready.after_position
+            if self._parent is not None:
+                self._parent._advanced(self._part, msg.ready.after_position)
             self._replay_up_to = msg.ready.head_position
             self._log_connected(msg.ready.after_position)
             self.ready.set()
@@ -2589,6 +2621,7 @@ class ListenerHandle(_Stream):
             # events twice: the session ends, and the next resumes after what was handled.
             if msg.batch.up_to < self.position:
                 raise RuntimeError(f"the kernel sent a batch up to {msg.batch.up_to}, behind position {self.position}")
+            self._in_order(msg.batch.events)
             # With a store, the batch's data and position are committed together, before the ack.
             if self.store:
                 self.store._begin()
@@ -2602,6 +2635,8 @@ class ListenerHandle(_Stream):
                     self.position = self.store.committed_for(self._part)
                 raise
             self.position = msg.batch.up_to
+            if self._parent is not None:
+                self._parent._advanced(self._part, msg.batch.up_to)
             # Values removed after an erasure must not stay behind in the WAL, outside the batch.
             if self.store and any(e.erases for e in [*msg.batch.events, *msg.batch.retries]):
                 self.store._checkpoint()
@@ -2617,6 +2652,65 @@ class ListenerHandle(_Stream):
         elif kind == "check":
             return pb.ListenerMessage(verdict=self._verdict(msg.check))
         return None
+
+    def _advanced(self, part: str, position: int) -> None:
+        """On the parent: partition `part`'s stream has handled everything up to `position`."""
+        with self._moves:
+            if self._progress.get(part, -1) < position:
+                self._progress[part] = position
+                self._moves.notify_all()
+
+    def _in_order(self, events) -> None:
+        """Before a batch of a partition's stream: the events of a tenant that moved here
+        (S4) after its move wait until the stream of the partition it came from has passed the
+        tenant's last event there, so a tenant's events keep their order across the move. Waits
+        at most 30 s (a partition that is down), then goes on with a warning."""
+        parent = self._parent
+        if parent is None or not isinstance(parent._source, _Partitioned) or not events:
+            return
+        source = parent._source
+        m = source.current()
+        if m is None:
+            return
+
+        def known(m, tenant: str) -> bool:
+            return _partition_of(m, tenant) == self._part or any(
+                x.tenant == tenant and self._part in (x.to, getattr(x, "from")) for x in m.moved)
+
+        for e in events:
+            if not known(m, e.tenant_id) and e.tenant_id not in self._checked:
+                # The tenant came here after the map was read; another kernel may take a moment
+                # to hold the new one.
+                self._checked.add(e.tenant_id)
+                for i in range(3):
+                    if known(m, e.tenant_id):
+                        break
+                    if i > 0:
+                        time.sleep(0.5)
+                    m = source.current(refresh=True) or m
+            for x in m.moved:
+                origin = getattr(x, "from")
+                if x.tenant != e.tenant_id or x.to != self._part or e.global_position <= x.target_after:
+                    continue
+                if not any(p.name == origin for p in m.partitions):
+                    continue
+                parent._reached(self, origin, x.source_head, e.tenant_id)
+
+    def _reached(self, child: "ListenerHandle", part: str, position: int, tenant: str) -> None:
+        """On the parent: returns once partition `part`'s stream has handled up to `position`, or
+        after 30 s."""
+        deadline = time.monotonic() + 30
+        with self._moves:
+            while self._progress.get(part, -1) < position:
+                if child._stopped:
+                    raise RuntimeError("stopped")
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    self._log.print("warn", child._what,
+                                    f"tenant {tenant} moved here from partition {part}, whose stream has not "
+                                    f"passed position {position} in 30 s; going on without its order")
+                    return
+                self._moves.wait(min(left, 0.1))
 
     def _log_connected(self, after_position: int) -> None:
         """Logs that the kernel accepted the listener; the position is the start sent (the

@@ -75,6 +75,38 @@ class Partitions(unittest.TestCase):
         self.assertGreater(listener.store.committed_for("p1"), 0)
         self.assertGreater(listener.store.committed_for("p2"), 0)
 
+        # t1 moves to p2 with its events (S4); the client finds it there.
+        k.submit("counters", "Counter", "c1", "Increment", {"by": 3}, id="t1-2")
+        moved = p1.cli("partitions", "move", p1.url, "app.key", "t1", "p2")
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        k.submit("counters", "Counter", "c1", "Increment", {"by": 4}, id="t1-3")
+        for _ in range(250):
+            if listener.store.get("totals", "t1") == 9:
+                break
+            time.sleep(0.02)
+        else:
+            self.fail("the running read model did not see t1's event on p2")
+
+        # A new read model replays both partitions: t1's events once each, in their order,
+        # though p2's stream is the shorter one.
+        order: list[int] = []
+        replay = counters_domain.read_model("replay", reconnect_s=0.05)
+
+        @replay.on("Incremented")
+        def _(data, evt, ctx):
+            if evt.tenant == "t1":
+                order.append(evt.version)
+
+        replaying = k.listener(replay)
+        threading.Thread(target=replaying.run, daemon=True).start()
+        self.addCleanup(replaying.stop)
+        for _ in range(250):
+            if len(order) >= 3:
+                break
+            time.sleep(0.02)
+        time.sleep(0.2)
+        self.assertEqual(order, [1, 2, 3])
+
 
 if __name__ == "__main__":
     unittest.main()
