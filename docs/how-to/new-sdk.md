@@ -96,6 +96,8 @@ Submits and queries sent from inside a handler must set `listener` to the listen
 
 ## 6. Reconnect
 
+**Several addresses.** Accept a comma-separated list of kernel addresses: the two kernels of a pair ([Run a standby](./standby)). Keep one current address for all calls. When a call or stream on it ends with `UNAVAILABLE` (a standby refuses everything with `not_primary`) or cannot connect, make the next address current. A unary request tries the next address within its timeout, waiting at most about a second for each to connect; a stream reconnects to the next one. Do not parse the address in `not_primary`: the kernels may know each other by other names than your clients.
+
 Workers, listeners and subscriptions run until stopped. When a stream ends or fails for any reason, log it and reconnect after a delay (TypeScript: 1 s, option `reconnectMs`), twice as long after each further failed attempt, up to 30 s, give or take a fifth so processes do not reconnect in lockstep; start over once a session is accepted. Log refusals a retry cannot change (`INVALID_ARGUMENT`, `PERMISSION_DENIED`, `FAILED_PRECONDITION`, `UNIMPLEMENTED`, `UNAUTHENTICATED`) as errors. A listener resumes from its last handled position, a subscription from its last handled event. Commands in flight when a worker drops go to another worker once their lease expires.
 
 ## 7. Vault fields

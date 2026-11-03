@@ -580,7 +580,7 @@ Every option has a default, most from an environment variable, so `new Kernable(
 the files `kernable start --dev` creates. The constructor reads the key, grant and TLS files:
 a missing key file, an explicitly named grant file or a missing TLS file throws.
 
-- `url?: string`: Kernel address: `http://host:port` (`host:port` works too) or, on Unix, `unix:/path/to.sock`. Default: `KERNABLE_URL`, else `http://127.0.0.1:7233`, where `kernable start` listens.
+- `url?: string`: Kernel address: `http://host:port` (`host:port` works too) or, on Unix, `unix:/path/to.sock`. For a pair of kernels with a standby, both, comma-separated (`http://a:7233,http://b:7233`): the client turns to the other one when a kernel answers `UNAVAILABLE` (a standby says `not_primary`) or cannot be reached. Default: `KERNABLE_URL`, else `http://127.0.0.1:7233`, where `kernable start` listens.
 - `key?: string`: Path to this process's `.key` file; it signs every request, worker result and listener handshake. Default: `KERNABLE_KEY`, else `app.key` in the current directory.
 - `grant?: string`: Path to the key's grant (`kernable grant`), sent with every call. Default: `KERNABLE_GRANT`, else the key file's path with `.grant` for `.key` (`app.grant` for `app.key`), if it exists.
 - `tenant?: string`: Default tenant for `submit`, `enqueue`, `query`, `data` and `cache`. Default: `default`.

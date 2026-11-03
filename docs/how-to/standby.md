@@ -6,7 +6,7 @@ What you get:
 
 - **Nothing told is lost.** The primary answers a client, delivers an event, or confirms a file only once the standby holds it on its disk.
 - **Automatic failover with a witness**, a small third process: the standby takes the primary's place within seconds, and the old primary comes back as its standby by itself. Without a witness, `kernable promote` does it by hand.
-- SDKs that find the new primary by themselves come later: until then, point your processes at the primary through DNS or a load balancer that checks `/ready`.
+- **Clients find the primary themselves.** Give every process both kernels' addresses, comma-separated (`KERNABLE_URL=https://10.0.0.1:7233,https://10.0.0.2:7233`): a request or stream that meets the standby (`not_primary`) or a kernel that is gone goes to the other one. Commands are idempotent by ID, so a resubmit after a failover gets the original outcome.
 
 Two ways to run it: [a pair with a witness](#a-pair-with-a-witness) (recommended), or [a fixed primary and standby](#a-fixed-primary-and-standby) that you promote by hand.
 
@@ -130,7 +130,7 @@ kernable promote 10.0.0.2:7233 ops.key    # ops.key: granted manage for *
 
 The standby stops following, opens its stores as a kernel does after a restart, and serves: queued commands run, listeners resume after their stored positions, and a client that resubmits a command gets the original outcome. Snapshots start empty: the first command per aggregate reads its whole history.
 
-Then point your processes at it: change the address they use (DNS, a load balancer that checks `/ready`), and restart them if they do not pick up the change.
+Processes given both addresses turn to it by themselves. Others: change the address they use (DNS, a load balancer that checks `/ready`), and restart them if they do not pick up the change.
 
 The standby refuses promotion if it never followed a primary, or if it is in the middle of an image.
 

@@ -73,10 +73,9 @@ impl Files {
         content_type: &str,
     ) -> Result<(), Error> {
         let request = self.request("put", domain, key, data.into(), content_type);
-        let service = self.service();
         self.client
-            .call(None, request, |r| {
-                let mut service = service.clone();
+            .call(None, request, |channel, r| {
+                let mut service = Self::service(channel);
                 async move { service.put_data(r).await }
             })
             .await?;
@@ -86,11 +85,10 @@ impl Files {
     /// The file `key` of `domain` (granted `data_read`); `None` if there is none.
     pub async fn get(&self, domain: &str, key: &str) -> Result<Option<Data>, Error> {
         let request = self.request("get", domain, key, Vec::new(), "");
-        let service = self.service();
         let res = self
             .client
-            .call(None, request, |r| {
-                let mut service = service.clone();
+            .call(None, request, |channel, r| {
+                let mut service = Self::service(channel);
                 async move { service.get_data(r).await }
             })
             .await?;
@@ -103,19 +101,18 @@ impl Files {
     /// Deletes the file `key` of `domain` (granted `data_write`); whether there was one.
     pub async fn delete(&self, domain: &str, key: &str) -> Result<bool, Error> {
         let request = self.request("delete", domain, key, Vec::new(), "");
-        let service = self.service();
         let res = self
             .client
-            .call(None, request, |r| {
-                let mut service = service.clone();
+            .call(None, request, |channel, r| {
+                let mut service = Self::service(channel);
                 async move { service.delete_data(r).await }
             })
             .await?;
         Ok(res.found)
     }
 
-    fn service(&self) -> DataServiceClient<tonic::transport::Channel> {
-        DataServiceClient::new(self.client.channel.clone())
+    fn service(channel: tonic::transport::Channel) -> DataServiceClient<tonic::transport::Channel> {
+        DataServiceClient::new(channel)
             .max_encoding_message_size(MAX_MESSAGE_BYTES)
             .max_decoding_message_size(MAX_MESSAGE_BYTES)
     }
@@ -191,10 +188,9 @@ impl Cache {
         // A TTL under a millisecond would mean none on the wire.
         let ttl_ms = ttl.map_or(0, |t| (t.as_millis() as u64).max(1));
         let request = self.request("set", domain, key, value.into(), ttl_ms);
-        let service = self.service();
         self.client
-            .call(None, request, |r| {
-                let mut service = service.clone();
+            .call(None, request, |channel, r| {
+                let mut service = Self::service(channel);
                 async move { service.set_cache(r).await }
             })
             .await?;
@@ -204,11 +200,10 @@ impl Cache {
     /// The value `key` of `domain`; `None` if there is none or it expired.
     pub async fn get(&self, domain: &str, key: &str) -> Result<Option<Vec<u8>>, Error> {
         let request = self.request("get", domain, key, Vec::new(), 0);
-        let service = self.service();
         let res = self
             .client
-            .call(None, request, |r| {
-                let mut service = service.clone();
+            .call(None, request, |channel, r| {
+                let mut service = Self::service(channel);
                 async move { service.get_cache(r).await }
             })
             .await?;
@@ -218,19 +213,20 @@ impl Cache {
     /// Deletes the value `key` of `domain`; whether there was one.
     pub async fn delete(&self, domain: &str, key: &str) -> Result<bool, Error> {
         let request = self.request("delete", domain, key, Vec::new(), 0);
-        let service = self.service();
         let res = self
             .client
-            .call(None, request, |r| {
-                let mut service = service.clone();
+            .call(None, request, |channel, r| {
+                let mut service = Self::service(channel);
                 async move { service.delete_cache(r).await }
             })
             .await?;
         Ok(res.found)
     }
 
-    fn service(&self) -> CacheServiceClient<tonic::transport::Channel> {
-        CacheServiceClient::new(self.client.channel.clone())
+    fn service(
+        channel: tonic::transport::Channel,
+    ) -> CacheServiceClient<tonic::transport::Channel> {
+        CacheServiceClient::new(channel)
     }
 
     fn request(

@@ -1327,7 +1327,10 @@ export interface AppOptions {
 export interface Options {
   /**
    * Kernel address: `http://host:port` (`host:port` works too) or, on Unix, `unix:/path/to.sock`.
-   * Default: `KERNABLE_URL`, else `http://127.0.0.1:7233`, where `kernable start` listens.
+   * For a pair of kernels with a standby, both, comma-separated (`http://a:7233,http://b:7233`):
+   * the client turns to the other one when a kernel answers `UNAVAILABLE` (a standby says
+   * `not_primary`) or cannot be reached. Default: `KERNABLE_URL`, else `http://127.0.0.1:7233`,
+   * where `kernable start` listens.
    */
   url?: string;
   /**
@@ -2934,8 +2937,12 @@ function warnIfShared(log: Log, key: string): void {
   if (mode & 0o077) log.print("warn", "key", `${key} can be read by other users (mode ${mode.toString(8)}): chmod 600 ${key}`);
 }
 
-/** Whether `url` is a Unix socket or a loopback address: plain text never leaves the machine. */
+/**
+ * Whether `url` (or every address of a comma-separated list) is a Unix socket or a loopback
+ * address: plain text never leaves the machine.
+ */
 function local(url: string): boolean {
+  if (url.includes(",")) return url.split(",").every((u) => local(u.trim()));
   if (url.startsWith("unix:")) return true;
   const host = url.replace(/^https?:\/\//, "").replace(/:\d+\/?$/, "").replace(/^\[|\]$/g, "");
   return host === "localhost" || host === "::1" || /^127\.\d+\.\d+\.\d+$/.test(host);

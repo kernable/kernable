@@ -160,10 +160,15 @@ impl Worker {
             service: self.inner.service.clone(),
         })))
         .await?;
-        let mut gateway = WorkerGatewayClient::new(client.channel.clone());
-        let mut inbound = gateway
+        let (at, channel) = client.channel();
+        let ended = |status: tonic::Status| {
+            client.ended(at, &status);
+            status
+        };
+        let mut inbound = WorkerGatewayClient::new(channel)
             .session(client.request(ReceiverStream::new(rx)))
-            .await?
+            .await
+            .map_err(ended)?
             .into_inner();
         // A command this worker cannot read ends the session: it reconnects and is refused
         // until it is updated.
@@ -172,7 +177,7 @@ impl Worker {
         let mut partial: HashMap<String, proto::Execute> = HashMap::new();
         loop {
             let m = tokio::select! {
-                m = inbound.message() => m?,
+                m = inbound.message() => m.map_err(ended)?,
                 Some(reason) = failed.recv() => return Err(reason.into()),
             };
             let Some(m) = m else {

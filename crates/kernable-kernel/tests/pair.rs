@@ -209,6 +209,28 @@ async fn a_pair_fails_over_on_its_own_and_the_old_primary_comes_back_as_its_stan
     })
     .await;
     start_worker(a_addr.clone(), TestWorker::honest()).await;
+    // An SDK client given both kernels, the standby first: it answers not_primary, and the
+    // client turns to the primary by itself.
+    let sdk_key = dir.0.join("sdk.key");
+    std::fs::write(&sdk_key, hex(key(1).as_bytes())).unwrap();
+    std::fs::write(
+        dir.0.join("sdk.grant"),
+        hex(&default_grant(&key(1)).unwrap().encode_to_vec()),
+    )
+    .unwrap();
+    let sdk =
+        kernable::Kernable::new(kernable::Options::new(&sdk_key).url(format!("{b_addr},{a_addr}")))
+            .unwrap();
+    let sdk_submit = |command: &str| {
+        kernable::Submit::new("orders", "Order", "sdk-1", command)
+            .data(serde_json::json!({}))
+            .wait(kernable::Wait::Committed)
+    };
+    let placed = sdk.submit(sdk_submit("PlaceOrder")).await.unwrap();
+    assert!(
+        matches!(placed, kernable::Outcome::Committed(ref e) if e.len() == 1),
+        "{placed:?}"
+    );
     let mut told = Vec::new();
     for i in 0..10 {
         let result = submit(&a_addr, place(i)).await.unwrap();
@@ -245,6 +267,12 @@ async fn a_pair_fails_over_on_its_own_and_the_old_primary_comes_back_as_its_stan
         .unwrap();
     assert_eq!(committed_versions(&added), [2]);
     assert_eq!(witnessed().in_sync, "", "the witness knows B commits alone");
+    // The SDK client finds the new primary on its own: A cannot be reached.
+    let added = sdk.submit(sdk_submit("AddItem")).await.unwrap();
+    assert!(
+        matches!(added, kernable::Outcome::Committed(ref e) if e[0].version == 2),
+        "{added:?}"
+    );
 
     // A comes back: the witness names B, so A follows it, catches up, and B waits for it again.
     until("A's stores are closed", || weak_a.strong_count() == 0).await;

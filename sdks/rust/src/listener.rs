@@ -920,13 +920,18 @@ impl ListenerHandle {
             live,
         };
         tx.send(msg(Reply::Hello(hello))).await?;
-        let mut service = ListenerServiceClient::new(client.channel.clone());
-        let mut inbound = service
+        let (at, channel) = client.channel();
+        let ended = |status: tonic::Status| {
+            client.ended(at, &status);
+            status
+        };
+        let mut inbound = ListenerServiceClient::new(channel)
             .listen(client.request(ReceiverStream::new(rx)))
-            .await?
+            .await
+            .map_err(ended)?
             .into_inner();
         let mut replay_up_to = 0;
-        while let Some(m) = inbound.message().await? {
+        while let Some(m) = inbound.message().await.map_err(ended)? {
             // Requests sent from the handlers name this listener, so the kernel never makes
             // them wait for it (it handles one message at a time).
             let reply = match m.msg {
@@ -1467,12 +1472,17 @@ async fn subscription<F, Fut>(
             client_sig: Some(sig),
             protocol: PROTOCOL,
         };
-        let mut events = EventServiceClient::new(client.channel.clone());
-        let mut stream = events
+        let (at, channel) = client.channel();
+        let ended = |status: tonic::Status| {
+            client.ended(at, &status);
+            status
+        };
+        let mut stream = EventServiceClient::new(channel)
             .subscribe(client.request(request))
-            .await?
+            .await
+            .map_err(ended)?
             .into_inner();
-        while let Some(e) = stream.message().await? {
+        while let Some(e) = stream.message().await.map_err(ended)? {
             let at = e.global_position;
             handler(StoredEvent::from_wire(e, &[])).await?;
             position.store(at, Ordering::SeqCst);

@@ -64,7 +64,7 @@ The tests prove it, with both stores, in three ways, and check the same invarian
 
 ## What it does not
 
-- **One standby.** A pair has one primary and one standby; a second standby, and SDKs that find the new primary by themselves, come later.
+- **One standby.** A pair has one primary and one standby; a second standby comes later.
 - Side effects of reactors (emails, calls to other systems) happen at least once. Make them idempotent, or record them as commands first.
 
 ## Finding the cause

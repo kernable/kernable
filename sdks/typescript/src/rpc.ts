@@ -364,14 +364,26 @@ const KEEPALIVE = {
   "grpc.keepalive_permit_without_calls": 1,
 };
 
+/** How long a request waits for one address of several before it tries the next. */
+const PER_ADDRESS_MS = 1_000;
+
 /**
  * Clients for a kernel at `unix:/path` or `host:port` (with `tls`: over mutual TLS). `grant`,
  * the hex-encoded grant of this process's key, goes with every call (see `Grant` in kernable.proto).
  * A request waits for the connection (after a kernel restart, say) and gives up after
  * `timeoutMs` in all.
+ *
+ * `url` may name several kernels, comma-separated: the two kernels of a pair (see Run a
+ * standby). Requests go to one of them; on `UNAVAILABLE` (a standby answers `not_primary`, a
+ * kernel is gone or shutting down) the clients turn to the next, and a request tries the next
+ * address within its timeout. Streams that end with `UNAVAILABLE` reconnect to the next one.
  */
 export function connect(url: string, tls?: TlsFiles, grant?: string, timeoutMs = DEFAULT_TIMEOUT_MS): Clients {
-  url = url.replace(/^https?:\/\//, "").replace(/\/$/, "");
+  const urls = url
+    .split(",")
+    .map((u) => u.trim().replace(/^https?:\/\//, "").replace(/\/$/, ""))
+    .filter((u) => u !== "");
+  if (urls.length === 0) throw new Error("no kernel address");
   v1 ??= (
     grpc.loadPackageDefinition(
       protoLoader.loadSync(PROTO, { keepCase: true, longs: Number, defaults: true, oneofs: true }),
@@ -380,54 +392,79 @@ export function connect(url: string, tls?: TlsFiles, grant?: string, timeoutMs =
   const creds = tls
     ? grpc.credentials.createSsl(readFileSync(tls.ca), readFileSync(tls.key), readFileSync(tls.cert))
     : grpc.credentials.createInsecure();
-  const commands = new v1.CommandService(url, creds, KEEPALIVE);
-  const workers = new v1.WorkerGateway(url, creds, KEEPALIVE);
-  const events = new v1.EventService(url, creds, KEEPALIVE);
-  const listeners = new v1.ListenerService(url, creds, KEEPALIVE);
-  const queries = new v1.QueryService(url, creds, KEEPALIVE);
-  const data = new v1.DataService(url, creds, {
-    ...KEEPALIVE,
-    "grpc.max_send_message_length": MAX_DATA_MESSAGE,
-    "grpc.max_receive_message_length": MAX_DATA_MESSAGE,
-  });
-  const cache = new v1.CacheService(url, creds, KEEPALIVE);
-  const memberships = new v1.MembershipService(url, creds, KEEPALIVE);
+  const targets = urls.map((u) => ({
+    commands: new v1.CommandService(u, creds, KEEPALIVE),
+    workers: new v1.WorkerGateway(u, creds, KEEPALIVE),
+    events: new v1.EventService(u, creds, KEEPALIVE),
+    listeners: new v1.ListenerService(u, creds, KEEPALIVE),
+    queries: new v1.QueryService(u, creds, KEEPALIVE),
+    data: new v1.DataService(u, creds, {
+      ...KEEPALIVE,
+      "grpc.max_send_message_length": MAX_DATA_MESSAGE,
+      "grpc.max_receive_message_length": MAX_DATA_MESSAGE,
+    }),
+    cache: new v1.CacheService(u, creds, KEEPALIVE),
+    memberships: new v1.MembershipService(u, creds, KEEPALIVE),
+  }));
+  type Target = (typeof targets)[number];
+  let current = 0;
+  // Turns to the next address, unless another call did so since `from`.
+  const next = (from: number) => {
+    if (targets.length > 1 && current === from) current = (from + 1) % targets.length;
+  };
   const metadata = new grpc.Metadata();
   if (grant) metadata.set("kernable-grant", grant);
   // A unary call with the grant and the protocol version: it waits for the connection, then
-  // for the answer, until the deadline.
-  const unary = async <R>(client: any, rpc: string, req: object, ms = timeoutMs): Promise<R> => {
+  // for the answer, until the deadline; with several addresses, it turns to the next one when
+  // one does not connect within a second or answers UNAVAILABLE.
+  const unary = async <R>(service: keyof Target, rpc: string, req: object, ms = timeoutMs): Promise<R> => {
     const deadline = Date.now() + ms;
-    await new Promise<void>((resolve, reject) =>
-      client.waitForReady(deadline, (err?: Error) =>
-        err ? reject(Object.assign(new Error(`no connection to the kernel within ${ms} ms`), { code: grpc.status.DEADLINE_EXCEEDED })) : resolve(),
-      ),
-    );
-    return new Promise<R>((resolve, reject) =>
-      client[rpc]({ ...req, protocol: PROTOCOL }, metadata, { deadline }, (err: grpc.ServiceError | null, res: R) => (err ? reject(err) : resolve(res))),
-    );
+    for (;;) {
+      const at = current;
+      const client = targets[at][service];
+      const several = targets.length > 1;
+      const wait = several ? Math.min(deadline, Date.now() + PER_ADDRESS_MS) : deadline;
+      const ready = await new Promise<boolean>((resolve) => client.waitForReady(wait, (err?: Error) => resolve(!err)));
+      if (!ready) {
+        if (Date.now() >= deadline) {
+          throw Object.assign(new Error(`no connection to the kernel within ${ms} ms`), { code: grpc.status.DEADLINE_EXCEEDED });
+        }
+        next(at);
+        continue;
+      }
+      try {
+        return await new Promise<R>((resolve, reject) =>
+          client[rpc]({ ...req, protocol: PROTOCOL }, metadata, { deadline }, (err: grpc.ServiceError | null, res: R) => (err ? reject(err) : resolve(res))),
+        );
+      } catch (err) {
+        if (!several || (err as grpc.ServiceError).code !== grpc.status.UNAVAILABLE || Date.now() >= deadline) throw err;
+        next(at);
+      }
+    }
+  };
+  // A stream on the current address; one that ends with UNAVAILABLE turns to the next.
+  const stream = <S extends { on(event: "error", f: (e: grpc.ServiceError) => void): unknown }>(open: (t: Target) => S): S => {
+    const at = current;
+    const call = open(targets[at]);
+    call.on("error", (e) => {
+      if (e.code === grpc.status.UNAVAILABLE) next(at);
+    });
+    return call;
   };
   return {
     submit: (command, wait, listener = "", vault = [], ms) =>
-      unary<WireCommandResult>(commands, "Submit", { command, wait, listener, vault }, ms),
-    session: () => workers.Session(metadata),
-    listen: () => listeners.Listen(metadata),
-    query: (req, ms) => unary<WireQueryResult>(queries, "Query", req, ms),
-    subscribe: (req) => events.Subscribe({ ...req, protocol: PROTOCOL }, metadata),
-    data: (op, req) => unary(data, op, req),
-    cache: (op, req) => unary(cache, op, req),
+      unary<WireCommandResult>("commands", "Submit", { command, wait, listener, vault }, ms),
+    session: () => stream((t) => t.workers.Session(metadata)),
+    listen: () => stream((t) => t.listeners.Listen(metadata)),
+    query: (req, ms) => unary<WireQueryResult>("queries", "Query", req, ms),
+    subscribe: (req) => stream((t) => t.events.Subscribe({ ...req, protocol: PROTOCOL }, metadata)),
+    data: (op, req) => unary("data", op, req),
+    cache: (op, req) => unary("cache", op, req),
     apply: async (membership, sig) => {
-      await unary(memberships, "Apply", { membership, sig });
+      await unary("memberships", "Apply", { membership, sig });
     },
     close: () => {
-      commands.close();
-      workers.close();
-      events.close();
-      listeners.close();
-      queries.close();
-      data.close();
-      cache.close();
-      memberships.close();
+      for (const t of targets) for (const client of Object.values(t)) client.close();
     },
   };
 }

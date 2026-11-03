@@ -1137,8 +1137,120 @@ class _Deadline(grpc.UnaryUnaryClientInterceptor):
         return continuation(details._replace(timeout=timeout, wait_for_ready=True), request)
 
 
+class _Failover(grpc.Channel):
+    """The channels to the kernels of a pair (`url` with several addresses): every call goes to
+    the current one; on `UNAVAILABLE` (a standby answers `not_primary`, a kernel is gone or
+    shutting down) the next one becomes current. A request tries the next address within its
+    timeout, waiting at most a second for each to connect; a stream that ends with
+    `UNAVAILABLE` reconnects to the next."""
+
+    _PER_ADDRESS_S = 1.0
+
+    def __init__(self, channels: list, raw: list, timeout_s: float):
+        self._channels, self._raw, self._timeout_s = channels, raw, timeout_s
+        self._current = 0
+        self._lock = threading.Lock()
+
+    def current(self) -> int:
+        return self._current
+
+    def next(self, from_: int) -> None:
+        with self._lock:
+            if self._current == from_:
+                self._current = (from_ + 1) % len(self._channels)
+
+    def _unary(self, kind: str, method: str, *args, **kwargs):
+        calls = [getattr(c, kind)(method, *args, **kwargs) for c in self._channels]
+        failover = self
+
+        def attempt(how: str, request, timeout, kw):
+            deadline = time.monotonic() + (failover._timeout_s if timeout is None else timeout)
+            while True:
+                at = failover._current
+                left = deadline - time.monotonic()
+                try:
+                    grpc.channel_ready_future(failover._raw[at]).result(
+                        timeout=max(0.0, min(left, failover._PER_ADDRESS_S)))
+                except grpc.FutureTimeoutError:
+                    if time.monotonic() < deadline:
+                        failover.next(at)
+                        continue
+                try:
+                    return getattr(calls[at], how)(request, timeout=max(0.001, deadline - time.monotonic()), **kw)
+                except grpc.RpcError as e:
+                    if e.code() != grpc.StatusCode.UNAVAILABLE or time.monotonic() >= deadline:
+                        raise
+                    failover.next(at)
+
+        class _Call:
+            def __call__(self, request, timeout=None, **kw):
+                return attempt("__call__", request, timeout, kw)
+
+            def with_call(self, request, timeout=None, **kw):
+                return attempt("with_call", request, timeout, kw)
+
+            def future(self, request, timeout=None, **kw):
+                return calls[failover._current].future(request, timeout=timeout, **kw)
+
+        return _Call()
+
+    def _stream(self, kind: str, method: str, *args, **kwargs):
+        calls = [getattr(c, kind)(method, *args, **kwargs) for c in self._channels]
+        failover = self
+
+        class _Call:
+            def __init__(self, at, inner):
+                self._at, self._inner = at, inner
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                try:
+                    return next(self._inner)
+                except grpc.RpcError as e:
+                    if e.code() == grpc.StatusCode.UNAVAILABLE:
+                        failover.next(self._at)
+                    raise
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+        def call(request, *a, **kw):
+            at = failover._current
+            return _Call(at, calls[at](request, *a, **kw))
+
+        return call
+
+    def unary_unary(self, method, *args, **kwargs):
+        return self._unary("unary_unary", method, *args, **kwargs)
+
+    def stream_unary(self, method, *args, **kwargs):
+        return self._unary("stream_unary", method, *args, **kwargs)
+
+    def unary_stream(self, method, *args, **kwargs):
+        return self._stream("unary_stream", method, *args, **kwargs)
+
+    def stream_stream(self, method, *args, **kwargs):
+        return self._stream("stream_stream", method, *args, **kwargs)
+
+    def subscribe(self, callback, try_to_connect=False):
+        self._raw[self._current].subscribe(callback, try_to_connect)
+
+    def unsubscribe(self, callback):
+        for c in self._raw:
+            c.unsubscribe(callback)
+
+    def close(self):
+        for c in self._channels:
+            c.close()
+
+
 def _local(url: str) -> bool:
-    """Whether `url` is a Unix socket or a loopback address: plain text never leaves the machine."""
+    """Whether `url` (every address of a comma-separated list) is a Unix socket or a loopback
+    address: plain text never leaves the machine."""
+    if "," in url:
+        return all(_local(u.strip()) for u in url.split(","))
     if url.startswith("unix:"):
         return True
     host = re.sub(r":\d+/?$", "", re.sub(r"^https?://", "", url)).strip("[]")
@@ -1162,7 +1274,10 @@ class Kernable:
         connects on first use and again after the connection drops.
 
         `url`: `http://host:port` (`host:port` works too) or, on Unix, `unix:/path/to.sock`;
-        default `KERNABLE_URL`, else `http://127.0.0.1:7233`, where `kernable start` listens.
+        for a pair of kernels with a standby both, comma-separated (`http://a:7233,http://b:7233`):
+        the client turns to the other one when a kernel answers `UNAVAILABLE` (a standby says
+        `not_primary`) or cannot be reached. Default `KERNABLE_URL`, else
+        `http://127.0.0.1:7233`, where `kernable start` listens.
         `key`: path to this process's `.key` file; default `KERNABLE_KEY`, else `app.key` in the
         current directory. `tenant`: default tenant of submits, queries, files and the cache
         (default `default`). `tls`: mutual TLS for `host:port`; default `KERNABLE_TLS_CA`,
@@ -1195,25 +1310,35 @@ class Kernable:
         if not tls and not insecure and not _local(url):
             raise ValueError(f"{given_url} is not on this machine: connect with TLS (tls=...), or pass "
                              "insecure=True to send in plain text")
-        if tls:
-            def read(path: str) -> bytes:
-                with open(path, "rb") as f:
-                    return f.read()
+        def open_channel(url: str):
+            if tls:
+                def read(path: str) -> bytes:
+                    with open(path, "rb") as f:
+                        return f.read()
 
-            creds = grpc.ssl_channel_credentials(read(tls.ca), read(tls.key), read(tls.cert))
-            self._channel = grpc.secure_channel(url, creds, options=_CHANNEL_OPTIONS)
-        else:
+                creds = grpc.ssl_channel_credentials(read(tls.ca), read(tls.key), read(tls.cert))
+                return grpc.secure_channel(url, creds, options=_CHANNEL_OPTIONS)
             # grpcio sends the socket path as :authority for unix: URLs, which the kernel's
             # HTTP/2 server rejects; any valid authority works.
-            self._channel = grpc.insecure_channel(url, options=[("grpc.default_authority", "localhost"),
-                                                                *_CHANNEL_OPTIONS])
+            return grpc.insecure_channel(url, options=[("grpc.default_authority", "localhost"),
+                                                       *_CHANNEL_OPTIONS])
+
         grant = grant or os.environ.get("KERNABLE_GRANT")
         if grant is None and os.path.exists(default := key.removesuffix(".key") + ".grant"):
             grant = default
+        granted = None
         if grant is not None:
             with open(grant) as f:
-                self._channel = grpc.intercept_channel(self._channel, _WithGrant(f.read().strip()))
-        self._channel = grpc.intercept_channel(self._channel, _Deadline(timeout_s))
+                granted = f.read().strip()
+        # A pair of kernels: several addresses, comma-separated.
+        urls = [re.sub(r"^https?://", "", u.strip()).rstrip("/") for u in url.split(",") if u.strip()]
+        raw = [open_channel(u) for u in urls]
+        channels = []
+        for c in raw:
+            if granted is not None:
+                c = grpc.intercept_channel(c, _WithGrant(granted))
+            channels.append(grpc.intercept_channel(c, _Deadline(timeout_s)))
+        self._channel = channels[0] if len(channels) == 1 else _Failover(channels, raw, timeout_s)
         # The outermost interceptor: checked before anything touches the channel.
         self._open = _Open()
         self._channel = grpc.intercept_channel(self._channel, self._open)

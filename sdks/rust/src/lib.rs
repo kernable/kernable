@@ -147,8 +147,10 @@ impl Options {
     }
 
     /// Kernel address: `http://host:port` (`host:port` works too) or, on Unix,
-    /// `unix:/path/to.sock`. Default: `KERNABLE_URL`, else `http://127.0.0.1:7233`, where
-    /// `kernable start` listens.
+    /// `unix:/path/to.sock`. For a pair of kernels with a standby, both, comma-separated
+    /// (`http://a:7233,http://b:7233`): the client turns to the other one when a kernel answers
+    /// `UNAVAILABLE` (a standby says `not_primary`) or cannot be reached. Default:
+    /// `KERNABLE_URL`, else `http://127.0.0.1:7233`, where `kernable start` listens.
     pub fn url(mut self, url: impl Into<String>) -> Options {
         self.url = Some(url.into());
         self
@@ -234,10 +236,18 @@ impl From<PathBuf> for Options {
     }
 }
 
+/// The channels to the kernels at the URL: one, or the two kernels of a pair. Calls go to the
+/// current one; one that answers `UNAVAILABLE` (a standby says `not_primary`) or cannot be
+/// reached hands over to the next.
+pub(crate) struct Channels {
+    all: Vec<Channel>,
+    current: std::sync::atomic::AtomicUsize,
+}
+
 /// Channels to the kernel, this process's key and its grant: what every part needs to call.
 #[derive(Clone)]
 pub(crate) struct Client {
-    channel: Channel,
+    channels: Arc<Channels>,
     key: Arc<SigningKey>,
     key_id: String,
     grant: Option<MetadataValue<tonic::metadata::Ascii>>,
@@ -246,15 +256,41 @@ pub(crate) struct Client {
 }
 
 impl Client {
+    /// The current channel, with its index for [`Client::ended`].
+    pub(crate) fn channel(&self) -> (usize, Channel) {
+        let at = self
+            .channels
+            .current
+            .load(std::sync::atomic::Ordering::SeqCst);
+        (at, self.channels.all[at].clone())
+    }
+
+    /// A call or stream on channel `at` ended with `status`: a kernel that is not the primary,
+    /// or cannot be reached, hands over to the next address.
+    pub(crate) fn ended(&self, at: usize, status: &tonic::Status) -> bool {
+        let n = self.channels.all.len();
+        let away = status.code() == tonic::Code::Unavailable || not_connected(status);
+        if n > 1 && away {
+            let _ = self.channels.current.compare_exchange(
+                at,
+                (at + 1) % n,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            );
+        }
+        n > 1 && away
+    }
+
     /// A unary call of `message` (sent with the grant) through `call`. While the kernel cannot
     /// be reached it waits and tries again, but only after failures to connect: the request
-    /// never left, so a write cannot run twice. Gives up after `timeout` (default: the
-    /// client's) in all.
+    /// never left, so a write cannot run twice. With several addresses, it also tries the next
+    /// after `UNAVAILABLE` (a standby's `not_primary`; a resubmit is safe, as commands are
+    /// idempotent by ID). Gives up after `timeout` (default: the client's) in all.
     async fn call<T: Clone, R, Fut>(
         &self,
         timeout: Option<Duration>,
         message: T,
-        mut call: impl FnMut(tonic::Request<T>) -> Fut,
+        mut call: impl FnMut(Channel, tonic::Request<T>) -> Fut,
     ) -> Result<R, tonic::Status>
     where
         Fut: Future<Output = Result<tonic::Response<R>, tonic::Status>>,
@@ -266,7 +302,8 @@ impl Client {
             let left = deadline.saturating_duration_since(Instant::now());
             let mut request = self.request(message.clone());
             request.set_timeout(left);
-            let result = match tokio::time::timeout(left, call(request)).await {
+            let (at, channel) = self.channel();
+            let result = match tokio::time::timeout(left, call(channel, request)).await {
                 Ok(result) => result,
                 Err(_) => Err(tonic::Status::deadline_exceeded(format!(
                     "no answer from the kernel within {} ms",
@@ -275,6 +312,10 @@ impl Client {
             };
             match result {
                 Ok(response) => return Ok(response.into_inner()),
+                Err(status) if Instant::now() + pause < deadline && self.ended(at, &status) => {
+                    tokio::time::sleep(pause).await;
+                    pause = (pause * 2).min(Duration::from_secs(1));
+                }
                 Err(status) if not_connected(&status) && Instant::now() + pause < deadline => {
                     tokio::time::sleep(pause).await;
                     pause = (pause * 2).min(Duration::from_secs(1));
@@ -374,8 +415,23 @@ impl Kernable {
                  text with Options::insecure"
             )));
         }
-        let channel = transport::connect_lazy(&url, tls.as_ref())
-            .map_err(|e| Error::Config(format!("kernel {url}: {e}")))?;
+        // A pair of kernels: several addresses, comma-separated.
+        let all = url
+            .split(',')
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+            .map(|u| {
+                transport::connect_lazy(u, tls.as_ref())
+                    .map_err(|e| Error::Config(format!("kernel {u}: {e}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if all.is_empty() {
+            return Err(Error::Config("no kernel address".into()));
+        }
+        let channels = Arc::new(Channels {
+            all,
+            current: Default::default(),
+        });
         let service = options
             .service
             .or_else(|| std::env::var("KERNABLE_SERVICE").ok())
@@ -395,7 +451,7 @@ impl Kernable {
         }
         Ok(Kernable {
             client: Client {
-                channel,
+                channels,
                 key_id,
                 key: Arc::new(key),
                 grant,
@@ -490,11 +546,9 @@ impl Kernable {
             sig: Some(sig),
             protocol: PROTOCOL,
         };
-        let memberships = MembershipServiceClient::new(self.client.channel.clone());
         self.client
-            .call(None, request, |r| {
-                let mut memberships = memberships.clone();
-                async move { memberships.apply(r).await }
+            .call(None, request, |channel, r| async move {
+                MembershipServiceClient::new(channel).apply(r).await
             })
             .await?;
         Ok(())
@@ -585,12 +639,10 @@ impl Kernable {
             vault: sealed.values,
             listener: handling(),
         };
-        let commands = CommandServiceClient::new(self.client.channel.clone());
         Ok(self
             .client
-            .call(s.timeout, request, |r| {
-                let mut commands = commands.clone();
-                async move { commands.submit(r).await }
+            .call(s.timeout, request, |channel, r| async move {
+                CommandServiceClient::new(channel).submit(r).await
             })
             .await?)
     }
@@ -622,12 +674,10 @@ impl Kernable {
         };
         request.client_sig = Some(self.client.sign(&signing::query_message(&request)));
         request.listener = handling();
-        let queries = QueryServiceClient::new(self.client.channel.clone());
         let res = self
             .client
-            .call(query.timeout, request, |r| {
-                let mut queries = queries.clone();
-                async move { queries.query(r).await }
+            .call(query.timeout, request, |channel, r| async move {
+                QueryServiceClient::new(channel).query(r).await
             })
             .await?;
         match res.outcome {
@@ -1013,8 +1063,12 @@ fn not_connected(status: &tonic::Status) -> bool {
     false
 }
 
-/// Whether `url` is a Unix socket or a loopback address: plain text never leaves the machine.
+/// Whether `url` (every address of a comma-separated list) is a Unix socket or a loopback
+/// address: plain text never leaves the machine.
 fn local(url: &str) -> bool {
+    if url.contains(',') {
+        return url.split(',').all(|u| local(u.trim()));
+    }
     if url.starts_with("unix:") {
         return true;
     }
