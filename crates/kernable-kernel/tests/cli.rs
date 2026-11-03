@@ -670,14 +670,14 @@ fn the_demo_runs_its_scene_resets_on_a_new_store_and_leaves_nothing_behind() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|t| t["outcome"].as_str().unwrap())
+        .map(|t| t["sends"][0]["outcome"].as_str().unwrap())
         .collect();
     assert_eq!(
         outcomes,
         ["committed", "committed", "rejected", "committed"]
     );
     assert_eq!(state["rows"]["a1"]["balance"], 70);
-    let last = &state["traces"][steps - 1];
+    let last = &state["traces"][steps - 1]["sends"][0];
     assert_eq!(
         last["answer"]["row"]["balance"], 70,
         "the client reads its write"
@@ -706,15 +706,71 @@ fn the_demo_runs_its_scene_resets_on_a_new_store_and_leaves_nothing_behind() {
         serde_json::from_str(&demo_http(&addr, "GET", "/api/demo/code", false).1).unwrap();
     assert!(code["regions"]["withdraw"].is_array());
 
+    // Scene 2: a unique username, also when two commands race for it.
+    let (status, _) = demo_http(&addr, "POST", "/api/demo/scene?n=2", true);
+    assert_eq!(status, 200);
+    let state = demo_idle(&addr);
+    assert_eq!(state["scene"]["index"], 1);
+    assert_eq!(state["traces"].as_array().unwrap().len(), 0, "a new store");
+    let steps = state["scene"]["steps"].as_array().unwrap().len();
+    for _ in 0..steps {
+        let (status, body) = demo_http(&addr, "POST", "/api/demo/next", true);
+        assert_eq!(status, 200, "{body}");
+        demo_idle(&addr);
+    }
+    let state = demo_state(&addr);
+    let outcomes: Vec<Vec<(&str, &str)>> = state["traces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| {
+            t["sends"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|s| {
+                    let code = s["rejection"]["code"].as_str().unwrap_or("");
+                    (s["outcome"].as_str().unwrap(), code)
+                })
+                .collect()
+        })
+        .collect();
+    let committed = ("committed", "");
+    let taken = ("rejected", "unique_taken");
+    assert_eq!(outcomes[0], [committed]);
+    assert_eq!(outcomes[1], [taken], "ADA is ada");
+    let mut race = outcomes[2].clone();
+    race.sort();
+    assert_eq!(race, [committed, taken], "exactly one wins the race");
+    assert_eq!(outcomes[3], [committed]);
+    assert_eq!(outcomes[4], [committed], "the rename freed ada");
+    assert_eq!(state["rows"]["c2"]["username"], "ada");
+    // The kernel's UI shows the key c2 holds by name and identity, never the value.
+    let (_, body) = demo_http(
+        &addr,
+        "GET",
+        "/api/history?tenant=default&domain=bank&type=customer&id=c2",
+        false,
+    );
+    let history: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(history["index"]["keys"][0]["name"], "username");
+    assert_eq!(
+        history["index"]["keys"][0]["id"].as_str().unwrap().len(),
+        64
+    );
+    assert!(!history["index"].to_string().contains("ada"));
+
     // Reset: a new kernel on a new, empty store; the old one is gone.
     let (status, _) = demo_http(&addr, "POST", "/api/demo/reset", true);
     assert_eq!(status, 200);
     let state = demo_idle(&addr);
-    assert_eq!(state["generation"], 2);
+    assert_eq!(state["generation"], 3, "the scene switch was a reset too");
+    assert_eq!(state["scene"]["index"], 1, "a reset keeps the scene");
     assert_eq!(state["traces"].as_array().unwrap().len(), 0);
     assert_eq!(state["rows"], serde_json::json!({}));
     assert!(!base.join("run-1").exists());
-    assert!(base.join("run-2").join("kernable.db").exists());
+    assert!(!base.join("run-2").exists());
+    assert!(base.join("run-3").join("kernable.db").exists());
 
     // Ctrl-C ends it and removes everything.
     let mut demo = demo;

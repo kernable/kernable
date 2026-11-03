@@ -8,17 +8,21 @@ use std::{
     time::Instant,
 };
 
-use kernable::{Domain, Kernable, NewEvent, Outcome, Query, Rejected, Submit, domain};
+use kernable::{Domain, Kernable, NewEvent, Outcome, Query, Rejected, Submit, Unique, domain};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::Recorder;
 
-/// The read model's rows, by account ID; the Stage shows them as they are.
-pub(super) type Rows = Arc<Mutex<BTreeMap<String, Row>>>;
+/// The read models' rows, by aggregate ID; the Stage shows them as they are.
+#[derive(Clone, Default)]
+pub(super) struct Rows {
+    pub accounts: Arc<Mutex<BTreeMap<String, Row>>>,
+    pub customers: Arc<Mutex<BTreeMap<String, CustomerRow>>>,
+}
 
 /// The rows, also after a handler panicked while holding them.
-fn lock(rows: &Rows) -> MutexGuard<'_, BTreeMap<String, Row>> {
+fn lock<T>(rows: &Mutex<T>) -> MutexGuard<'_, T> {
     rows.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -49,7 +53,7 @@ pub(super) struct Row {
 }
 // #endregion row
 
-/// The `bank` domain: the `account` aggregate and the `accounts` read model.
+/// The `bank` domain: the `account` and `customer` aggregates and their read models.
 pub(super) fn bank(stage: &Recorder, rows: &Rows) -> Domain {
     let bank_domain = domain("bank");
     let account = bank_domain.aggregate("account", Account::default());
@@ -106,7 +110,7 @@ pub(super) fn bank(stage: &Recorder, rows: &Rows) -> Domain {
 
     let accounts_readmodel = bank_domain.read_model("accounts");
 
-    let (r, c) = (Arc::clone(rows), stage.clone());
+    let (r, c) = (Arc::clone(&rows.accounts), stage.clone());
     // #region project-opened
     accounts_readmodel.on("AccountOpened", move |data: Opened, evt, _ctx| {
         c.read_model(&evt.command_id); // stage
@@ -119,7 +123,7 @@ pub(super) fn bank(stage: &Recorder, rows: &Rows) -> Domain {
     });
     // #endregion project-opened
 
-    let (r, c) = (Arc::clone(rows), stage.clone());
+    let (r, c) = (Arc::clone(&rows.accounts), stage.clone());
     // #region project-deposited
     accounts_readmodel.on("Deposited", move |data: Amount, evt, _ctx| {
         c.read_model(&evt.command_id); // stage
@@ -130,7 +134,7 @@ pub(super) fn bank(stage: &Recorder, rows: &Rows) -> Domain {
     });
     // #endregion project-deposited
 
-    let (r, c) = (Arc::clone(rows), stage.clone());
+    let (r, c) = (Arc::clone(&rows.accounts), stage.clone());
     // #region project-withdrawn
     accounts_readmodel.on("Withdrawn", move |data: Amount, evt, _ctx| {
         c.read_model(&evt.command_id); // stage
@@ -146,7 +150,7 @@ pub(super) fn bank(stage: &Recorder, rows: &Rows) -> Domain {
         id: String,
     }
 
-    let r = Arc::clone(rows);
+    let r = Arc::clone(&rows.accounts);
     // #region query
     accounts_readmodel.query("GetAccount", move |data: GetAccount, _qry, _ctx| {
         let row = lock(&r).get(&data.id).cloned();
@@ -154,7 +158,124 @@ pub(super) fn bank(stage: &Recorder, rows: &Rows) -> Domain {
     });
     // #endregion query
 
+    customers(&bank_domain, stage, rows);
     bank_domain
+}
+
+// #region customer-state
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct Customer {
+    name: String,
+    username: Option<String>,
+    registered: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Registered {
+    name: String,
+    username: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Username {
+    username: String,
+}
+// #endregion customer-state
+
+#[derive(Clone, Serialize)]
+pub(super) struct CustomerRow {
+    name: String,
+    username: String,
+}
+
+/// The `customer` aggregate, whose username is unique, and the `customers` read model.
+fn customers(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
+    let customer = bank_domain.aggregate("customer", Customer::default());
+
+    // #region customer-key
+    // One customer per username in the tenant, whatever its case. The kernel checks it when it
+    // commits; it gets a hash of the value, never the value.
+    customer.unique(
+        "username",
+        |state| state.username.as_ref().map(|u| u.trim().to_lowercase()),
+        Unique::tenant(),
+    );
+    // #endregion customer-key
+
+    // #region customer-events
+    customer.apply(
+        "CustomerRegistered",
+        |state, data: Registered, _evt, _ctx| {
+            state.name = data.name;
+            state.username = Some(data.username);
+            state.registered = true;
+        },
+    );
+    customer.apply("UsernameChanged", |state, data: Username, _evt, _ctx| {
+        state.username = Some(data.username)
+    });
+    // #endregion customer-events
+
+    let c = stage.clone(); // stage
+    // #region register
+    customer.command("Register", move |state, data: Registered, cmd, _ctx| {
+        c.worker(&cmd.command_id, state); // stage
+        if state.registered {
+            return Err(Rejected::new("this customer is registered already"));
+        }
+        // No lookup of the username here: the kernel refuses it at commit if it is taken.
+        Ok(vec![NewEvent::new("CustomerRegistered", data)])
+    });
+    // #endregion register
+
+    let c = stage.clone(); // stage
+    // #region rename
+    customer.command("ChangeUsername", move |state, data: Username, cmd, _ctx| {
+        c.worker(&cmd.command_id, state); // stage
+        if !state.registered {
+            return Err(Rejected::new("no such customer").code("not_found"));
+        }
+        // The old username is free once this commits.
+        Ok(vec![NewEvent::new("UsernameChanged", data)])
+    });
+    // #endregion rename
+
+    let customers_readmodel = bank_domain.read_model("customers");
+
+    let (r, c) = (Arc::clone(&rows.customers), stage.clone());
+    // #region project-registered
+    customers_readmodel.on("CustomerRegistered", move |data: Registered, evt, _ctx| {
+        c.read_model(&evt.command_id); // stage
+        let row = CustomerRow {
+            name: data.name,
+            username: data.username,
+        };
+        lock(&r).insert(evt.aggregate_id, row);
+        async { Ok(()) }
+    });
+    // #endregion project-registered
+
+    let (r, c) = (Arc::clone(&rows.customers), stage.clone());
+    // #region project-renamed
+    customers_readmodel.on("UsernameChanged", move |data: Username, evt, _ctx| {
+        c.read_model(&evt.command_id); // stage
+        if let Some(row) = lock(&r).get_mut(&evt.aggregate_id) {
+            row.username = data.username;
+        }
+        async { Ok(()) }
+    });
+    // #endregion project-renamed
+
+    #[derive(Deserialize)]
+    struct GetCustomer {
+        id: String,
+    }
+
+    let r = Arc::clone(&rows.customers);
+    customers_readmodel.query("GetCustomer", move |data: GetCustomer, _qry, _ctx| {
+        let row = lock(&r).get(&data.id).cloned();
+        async move { Ok(row.ok_or_else(|| Rejected::new("no such customer").code("not_found"))?) }
+    });
 }
 
 /// What a step of the Stage sends, and what came back.
@@ -165,23 +286,23 @@ pub(super) struct Sent {
     pub answered: Instant,
 }
 
-/// Sends one command as a client does, then asks the read model for the account.
+/// Sends one command as a client does, then asks the read model for its aggregate.
 pub(super) async fn send(
     kernable: &Kernable,
     command_id: &str,
-    command: &str,
-    id: &str,
+    (aggregate, id, command): (&str, &str, &str),
     data: Value,
+    query: &str,
 ) -> Sent {
     // #region client
-    let submit = Submit::new("bank", "account", id, command)
+    let submit = Submit::new("bank", aggregate, id, command)
         .id(command_id)
         .data(data);
     // Returns once every listener has the events: the query below already sees them.
     let outcome = kernable.submit(submit).await;
     let returned = Instant::now(); // stage
-    let get_account = Query::new("bank", "GetAccount").data(json!({ "id": id }));
-    let answer: Result<Value, _> = kernable.query(get_account).await;
+    let get = Query::new("bank", query).data(json!({ "id": id }));
+    let answer: Result<Value, _> = kernable.query(get).await;
     // #endregion client
     Sent {
         outcome,

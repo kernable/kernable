@@ -28,6 +28,10 @@
   header .brand { font-weight: 700; letter-spacing: .02em; }
   header .brand span { color: var(--muted); font-weight: 500; }
   header .scene { color: var(--muted); }
+  .scenes { display: flex; gap: 6px; align-items: center; color: var(--muted); }
+  .scenes button { padding: 3px 10px; }
+  .scenes button.on { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .scenes .title { margin-left: 4px; }
   .dots { display: flex; gap: 6px; align-items: center; }
   .dots i { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--muted); display: inline-block; }
   .dots i.done { background: var(--accent); border-color: var(--accent); }
@@ -86,6 +90,11 @@
   .side.read h2 .tag { color: var(--live); }
   .cols { display: grid; gap: 14px; }
   .write .cols { grid-template-columns: minmax(0, .9fr) minmax(0, .9fr) minmax(0, 1.3fr); }
+  .write .cols.keys { grid-template-columns: minmax(0, .9fr) minmax(0, .8fr) minmax(0, .9fr) minmax(0, 1.2fr); }
+  .keylist { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+  .new { animation: in .5s ease; }
+  .keylist code { color: var(--muted); }
+  .agg .who { font-weight: 600; margin: 4px 0 2px; }
   .read .cols { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   .cols > div { min-width: 0; }
   .side h3 { font-size: 12px; color: var(--text); font-weight: 600; margin: 0 0 6px; }
@@ -94,7 +103,7 @@
   .divider b { font-size: 22px; color: var(--muted); transition: color .2s, transform .3s; }
   .divider.pulse b { color: var(--event); transform: translateX(4px) scale(1.3); }
   .cmds { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
-  .cmds li { display: flex; gap: 6px; align-items: baseline; animation: in .4s ease; }
+  .cmds li { display: flex; gap: 6px; align-items: baseline; }
   .cmds .n { color: var(--muted); font-variant-numeric: tabular-nums; }
   .cmds .data { font: 11.5px ui-monospace, Menlo, monospace; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .mark { font-weight: 700; } .mark.ok { color: var(--ok); } .mark.bad { color: var(--bad); } .mark.wait { color: var(--muted); }
@@ -105,8 +114,9 @@
   .agg .from { color: var(--muted); font-size: 12px; margin-top: 6px; }
   .pos-line { font-size: 13px; margin-bottom: 8px; }
   .pos-line b { font-family: ui-monospace, Menlo, monospace; }
-  .ev { border-left: 3px solid var(--event); background: var(--panel); border-radius: 6px; padding: 4px 8px; margin-bottom: 4px; font-size: 13px; animation: in .5s ease; }
-  .ev .top { display: flex; gap: 8px; align-items: baseline; }
+  .ev { border-left: 3px solid var(--event); background: var(--panel); border-radius: 6px; padding: 4px 8px; margin-bottom: 4px; font-size: 13px; }
+  .ev .top { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+  .ev .top .data { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
   .ev .pos { font-weight: 700; color: var(--event); font-family: ui-monospace, Menlo, monospace; }
   .ev .data, .ev .hash { font: 11.5px ui-monospace, Menlo, monospace; color: var(--muted); word-break: break-all; }
   .chain { color: var(--muted); font-size: 11px; margin: -2px 0 2px 12px; }
@@ -135,7 +145,7 @@
 <body>
 <header>
   <div class="brand">kernable <span>demo</span></div>
-  <div class="scene" id="scene"></div>
+  <div class="scenes" id="scenes"></div>
   <div class="dots" id="dots"></div>
   <div class="controls">
     <label class="speed" title="How fast the animation runs; the timings stay real">
@@ -167,9 +177,10 @@
   <section class="panel sides">
     <div class="side write">
       <h2><span class="tag">Write side</span> <span class="note">keeps the facts: what was decided, never changed</span></h2>
-      <div class="cols">
+      <div class="cols" id="write-cols">
         <div><h3>Commands <span>sent by the client</span></h3><ol class="cmds" id="commands"></ol></div>
-        <div><h3>Aggregate a1 <span>as the worker rebuilt it</span></h3><div class="agg" id="aggregate"></div></div>
+        <div><h3>Aggregate <span>as the worker rebuilt it</span></h3><div class="agg" id="aggregate"></div></div>
+        <div id="keys-col" hidden><h3>Unique keys <span>as the kernel holds them</span></h3><div class="keylist" id="keys"></div></div>
         <div><h3>Event store <span>append only</span></h3><div id="events"></div></div>
       </div>
     </div>
@@ -177,7 +188,7 @@
     <div class="side read">
       <h2><span class="tag">Read side</span> <span class="note">a view built from the events</span></h2>
       <div class="cols">
-        <div><h3>Read model <code>accounts</code></h3><div class="pos-line" id="listener"></div><div id="rows"></div></div>
+        <div><h3>Read model <code id="rm-name"></code></h3><div class="pos-line" id="listener"></div><div id="rows"></div></div>
         <div><h3>Last query <span>by the client</span></h3><div class="answer" id="answer"></div></div>
       </div>
     </div>
@@ -265,12 +276,13 @@ function drawFlow() {
     el("svg:text", { x: 14, y: 24, class: "band-label write" }, "WRITE SIDE"),
     el("svg:text", { x: 14, y: 390, class: "band-label read" }, "READ SIDE"));
   for (const [id, d] of Object.entries(WIRES)) svg.append(wires[id] = el("svg:path", { d, class: "wire" }));
+  const subs = { worker: `bank.${demo.scene.aggregate}`, model: demo.scene.readModel };
   for (const [id, n] of Object.entries(NODES)) {
     if (id === "store") continue;
     const g = el("svg:g", { class: "node" },
       el("svg:rect", { x: n.x, y: n.y, width: n.w, height: n.h, rx: 12 }),
       el("svg:text", { x: n.x + n.w / 2, y: n.y + n.h / 2 - 3, "text-anchor": "middle", class: "name" }, n.name),
-      el("svg:text", { x: n.x + n.w / 2, y: n.y + n.h / 2 + 20, "text-anchor": "middle", class: "sub" }, n.sub));
+      el("svg:text", { x: n.x + n.w / 2, y: n.y + n.h / 2 + 20, "text-anchor": "middle", class: "sub" }, subs[id] || n.sub));
     svg.append(nodes[id] = g);
   }
   const s = NODES.store;
@@ -329,6 +341,9 @@ const LABELS = {
   open: "Worker · command handler", deposit: "Worker · command handler", withdraw: "Worker · command handler",
   "project-opened": "Read model · event handler", "project-deposited": "Read model · event handler", "project-withdrawn": "Read model · event handler", client: "Client", events: "Aggregate · how events change the state",
   query: "Read model · query handler",
+  register: "Worker · command handler", rename: "Worker · command handler",
+  "customer-key": "Aggregate · its unique key", "customer-events": "Aggregate · how events change the state",
+  "project-registered": "Read model · event handler", "project-renamed": "Read model · event handler",
 };
 const TOKENS = /(\/\/.*$)|("(?:[^"\\]|\\.)*")|\b(let|move|fn|if|return|async|await|struct|pub|match|else|mut|impl|use|Some|None|Ok|Err|vec|format)\b|\b(\d+)\b/g;
 
@@ -371,83 +386,145 @@ function drawCode(step) {
 // ---- the write side and the read side ----
 // What the bottom panel shows; the animation moves it on hop by hop.
 let side = null;
+// What the panel showed already: only what is new fades in.
+let rendered = new Set();
+const fade = (key) => (rendered.has(key) ? "" : (rendered.add(key), "new"));
+// The store as each step left it (events and keys), so a replay starts from the one before.
+let stores = [];
+// Rejections the kernel makes at the commit, after the worker accepted.
+const KERNEL_CODES = ["unique_taken", "requirement_missing", "invalid_index"];
 
 function fresh() {
-  return { commands: [], state: null, rebuiltFrom: 0, events: [], position: 0, head: 0, rows: {}, answer: null, rowsFresh: false };
+  return { commands: [], states: [], events: [], keys: [], position: 0, head: 0, rows: {}, answers: [], rowsFresh: false };
+}
+
+const withKeys = () => demo.scene.steps.some((s) => s.code.some((c) => c.endsWith("-key")));
+const keyRegion = (step) => step.code.find((c) => c.endsWith("-key")) || step.code[0];
+const projectRegion = (step) => step.code.find((c) => c.startsWith("project")) || step.code[1];
+// Every command of the first `n` steps, in order.
+const sendsOf = (n) => demo.traces.slice(0, n).flatMap((t) => t.sends);
+const eventCount = (sends) => sends.filter((s) => s.outcome === "committed").reduce((k, s) => k + s.events.length, 0);
+// How many events aggregate `id` had before step `n`.
+const eventsOf = (id, n) => eventCount(sendsOf(n).filter((s) => s.id === id));
+
+// The read model's rows after the first `n` steps: what each query right after a submit read.
+function rowsAfter(n) {
+  const rows = {};
+  for (const s of sendsOf(n)) if (s.answer && s.answer.row) rows[s.id] = s.answer.row;
+  return rows;
 }
 
 // The panel as it stands after the first `n` steps.
 function after(n) {
-  const view = fresh(), traces = demo.traces.slice(0, n);
-  view.commands = traces.map((t) => ({ t, outcome: t.outcome }));
-  const last = traces[traces.length - 1];
+  const view = fresh();
+  view.commands = sendsOf(n).map((s) => ({ s, outcome: s.outcome }));
+  const last = demo.traces[n - 1];
   if (last) {
-    view.state = last.state;
-    view.rebuiltFrom = committedBefore(last.step);
-    view.answer = last;
+    view.states = last.sends.map((s) => ({ id: s.id, state: s.state, from: eventsOf(s.id, last.step) }));
+    view.answers = last.sends;
   }
-  view.head = view.position = traces.filter((t) => t.outcome === "committed").length;
-  view.rows = n === demo.traces.length ? demo.rows : {};
+  view.head = view.position = eventCount(sendsOf(n));
+  view.rows = rowsAfter(n);
   return view;
 }
 
-const committedBefore = (step) => demo.traces.slice(0, step).filter((t) => t.outcome === "committed").length;
-
-async function loadEvents() {
-  try {
-    const r = await fetch("/api/history?tenant=default&domain=bank&type=account&id=a1");
-    if (r.ok) return (await r.json()).events || [];
-  } catch (_) { /* the kernel is resetting */ }
-  return [];
+// The events of every aggregate of the scene, in order, and the keys each holds.
+async function loadStore() {
+  const ids = [...new Set(demo.scene.steps.flatMap((s) => s.sends.map((c) => c.id)))];
+  const histories = await Promise.all(ids.map(async (id) => {
+    try {
+      const r = await fetch(`/api/history?tenant=default&domain=bank&type=${encodeURIComponent(demo.scene.aggregate)}&id=${encodeURIComponent(id)}`);
+      return r.ok ? { id, ...(await r.json()) } : { id };
+    } catch (_) { return { id }; /* the kernel is resetting */ }
+  }));
+  const events = histories.flatMap((h) => (h.events || []).map((e) => ({ ...e, id: h.id }))).sort((a, b) => a.position - b.position);
+  const keys = histories.flatMap((h) => ((h.index && h.index.keys) || []).map((k) => ({ ...k, holder: h.id })));
+  return { events, keys };
 }
 
 function drawSides() {
   const v = side;
-  // Commands, the last one maybe still on its way.
-  $("commands").replaceChildren(...(v.commands.length ? v.commands.map(({ t, outcome }, i) => {
+  // Commands, the last ones maybe still on their way.
+  $("commands").replaceChildren(...(v.commands.length ? v.commands.flatMap(({ s, outcome }, i) => {
     const mark = outcome === "committed" ? el("span", { class: "mark ok", title: "committed" }, "✓")
-      : outcome === "rejected" ? el("span", { class: "mark bad", title: "rejected" }, "✗")
-      : el("span", { class: "mark wait", title: "on its way" }, "…");
-    const items = [el("li", {}, el("span", { class: "n" }, `${i + 1}`), mark, el("b", {}, t.command), el("span", { class: "data" }, JSON.stringify(t.data)))];
-    if (outcome === "rejected" && t.rejection) items.push(el("div", { class: "why" }, `${t.rejection.code}: no event`));
+      : outcome === "pending" ? el("span", { class: "mark wait", title: "on its way" }, "…")
+      : el("span", { class: "mark bad", title: outcome }, "✗");
+    const items = [el("li", { class: fade(`c:${s.commandId}`) }, el("span", { class: "n" }, `${i + 1}`), mark, el("b", {}, s.command), el("span", { class: "n" }, s.id), el("span", { class: "data" }, JSON.stringify(s.data)))];
+    if (outcome === "rejected" && s.rejection) items.push(el("div", { class: "why" }, `${s.rejection.code}${s.rejection.key ? ` (${s.rejection.key})` : ""}: no event`));
     return items;
-  }).flat() : [el("li", { class: "empty" }, "None yet.")]));
-  // The aggregate as the handler saw it.
+  }) : [el("li", { class: "empty" }, "None yet.")]));
+  // The aggregates as their handlers saw them.
   const agg = $("aggregate");
-  if (!v.state) agg.replaceChildren(el("div", { class: "empty" }, "Not loaded yet."));
-  else agg.replaceChildren(
-    el("dl", {}, Object.entries(v.state).flatMap(([k, val]) => [el("dt", {}, k), el("dd", {}, JSON.stringify(val))])),
-    el("div", { class: "from" }, v.rebuiltFrom ? `rebuilt from ${v.rebuiltFrom} event${v.rebuiltFrom > 1 ? "s" : ""}, before the command` : "no events yet: the initial state"));
+  if (!v.states.length) agg.replaceChildren(el("div", { class: "empty" }, "The worker loads it when a command arrives."));
+  else agg.replaceChildren(...v.states.flatMap(({ id, state, from }) => [
+    el("div", { class: "who" }, id),
+    state ? el("dl", {}, Object.entries(state).flatMap(([k, val]) => [el("dt", {}, k), el("dd", {}, JSON.stringify(val))])) : el("div", { class: "empty" }, "–"),
+    el("div", { class: "from" }, from ? `rebuilt from ${from} event${from > 1 ? "s" : ""}, before the command` : "no events yet: the initial state"),
+  ]));
+  // The keys, as the kernel stores them: a name and an identity, never the value.
+  const keyed = withKeys();
+  $("keys-col").hidden = !keyed;
+  $("write-cols").classList.toggle("keys", keyed);
+  if (keyed) $("keys").replaceChildren(...(v.keys.length ? v.keys.map((k) => el("div", { class: fade(`k:${k.id}:${k.holder}`) },
+    el("b", {}, k.name), " ", el("code", { title: "The key's identity: a hash over tenant, type, name and the value's hash" }, `${k.id.slice(0, 12)}…`), " → ", el("b", {}, k.holder)))
+    : [el("div", { class: "empty" }, "No key held.")]),
+    el("div", { class: "from" }, "The kernel stores hashes only: it never sees a username."));
   // The store.
   drawLog(v.events);
   const box = $("events");
   if (!v.events.length) box.replaceChildren(el("div", { class: "empty" }, "No events."));
   else box.replaceChildren(...v.events.flatMap((e, i) => [
     i > 0 ? el("div", { class: "chain" }, "↓ chained to the one before") : null,
-    el("div", { class: "ev" },
-      el("div", { class: "top" }, el("span", { class: "pos" }, `#${e.position}`), el("b", {}, e.type), el("span", { class: "data" }, e.payload)),
+    el("div", { class: `ev ${fade(`e:${e.position}`)}`, title: e.payload },
+      el("div", { class: "top" }, el("span", { class: "pos" }, `#${e.position}`), el("b", {}, e.type), el("span", { class: "n" }, e.id), el("span", { class: "data" }, e.payload)),
       el("div", { class: "hash" }, `hash ${e.hash.slice(0, 20)}…`)),
   ].filter(Boolean)));
   // The read side.
+  $("rm-name").textContent = demo.scene.readModel;
   const behind = v.head - v.position;
   $("listener").replaceChildren("at ", el("b", {}, `#${v.position}`), ` of #${v.head} `,
     el("span", { class: behind ? "mark wait" : "mark ok" }, behind ? `· ${behind} behind` : "· caught up"));
   const ids = Object.keys(v.rows);
   if (!ids.length) $("rows").replaceChildren(el("div", { class: "empty" }, "No rows."));
-  else $("rows").replaceChildren(el("table", {},
-    el("tr", {}, el("th", {}, "id"), el("th", {}, "owner"), el("th", {}, "balance")),
-    ids.map((id) => el("tr", { class: v.rowsFresh ? "fresh" : "" }, el("td", {}, id), el("td", {}, v.rows[id].owner), el("td", { class: "num" }, v.rows[id].balance)))));
+  else {
+    const columns = [...new Set(ids.flatMap((id) => Object.keys(v.rows[id])))];
+    $("rows").replaceChildren(el("table", {},
+      el("tr", {}, el("th", {}, "id"), columns.map((c) => el("th", {}, c))),
+      ids.map((id) => el("tr", { class: v.rowsFresh ? "fresh" : "" }, el("td", {}, id),
+        columns.map((c) => el("td", { class: typeof v.rows[id][c] === "number" ? "num" : "" }, v.rows[id][c] ?? ""))))));
+  }
   v.rowsFresh = false;
-  const t = v.answer;
-  if (!t) $("answer").replaceChildren(el("div", { class: "empty" }, "None yet."));
-  else $("answer").replaceChildren(el("div", {}, el("code", {}, "GetAccount a1"), " right after the submit:"),
-    el("pre", {}, t.answer.row !== undefined ? JSON.stringify(t.answer.row) : t.answer.error));
+  $("answer").replaceChildren(...(v.answers.length ? v.answers.flatMap((s) => [
+    el("div", {}, el("code", {}, `${demo.scene.query} ${s.id}`), " right after the submit:"),
+    el("pre", {}, s.answer.row !== undefined ? JSON.stringify(s.answer.row) : s.answer.error),
+  ]) : [el("div", { class: "empty" }, "None yet.")]));
 }
+
+function mark(s, outcome) {
+  const entry = side.commands.find((c) => c.s.commandId === s.commandId);
+  if (entry) entry.outcome = outcome;
+  drawSides();
+}
+
+function showStates(sends, step) {
+  side.states = sends.map((s) => ({ id: s.id, state: s.state, from: eventsOf(s.id, step) }));
+  drawSides();
+}
+
+const rebuilt = (s, step) => {
+  const n = eventsOf(s.id, step);
+  return n ? `from its ${n} event${n > 1 ? "s" : ""}` : "(no events yet)";
+};
 
 async function pulse() {
   $("divider").classList.add("pulse");
   await sleep(500);
   $("divider").classList.remove("pulse");
+}
+
+// Two packets on one wire, the second a little behind.
+function both(wire, first, second, kind = "") {
+  return Promise.all([move(wire, first, kind), sleep(HOP_MS * 0.3).then(() => move(wire, second, kind))]);
 }
 
 // ---- one step, animated ----
@@ -458,88 +535,154 @@ async function animate(t) {
   drawCode(step);
   // Start from the state before this step, so a replay shows it again.
   side = after(t.step);
-  side.events = (await loadEvents()).filter((e) => e.position <= side.head);
-  side.rows = t.step === 0 ? {} : rowsBefore(t);
+  side.states = [];
+  side.answers = t.step > 0 ? demo.traces[t.step - 1].sends : [];
+  const before = t.step === 0 ? { events: [], keys: [] } : (stores[t.step - 1] || await loadStore());
+  side.events = before.events.filter((e) => e.position <= side.head);
+  side.keys = before.keys;
   drawSides();
-  const rejected = t.outcome !== "committed";
-  const data = JSON.stringify(t.data);
-  const toWorker = t.micros.worker ?? 0;
-  $("speed").textContent = `slowed down: the real way took ${ms(t.micros.returned)}`;
-  light(["client"]);
-  side.commands.push({ t, outcome: "pending" });
-  drawSides();
-  caption(`The client signs <b>${esc(t.command)}</b> and submits it. The kernel checks the signature and the key's grant, then queues the command for its aggregate.`, "client");
-  await move("client-kernel", `${t.command} ${data}`);
-  light(["kernel"]);
-  await move("kernel-worker", t.command);
-  light(["worker"]);
-  side.state = t.state;
-  side.rebuiltFrom = committedBefore(t.step);
-  drawSides();
-  const loaded = side.rebuiltFrom ? `from its ${side.rebuiltFrom} event${side.rebuiltFrom > 1 ? "s" : ""}` : "(no events yet)";
-  if (rejected) {
-    caption(`The worker rebuilds <b>a1</b> ${loaded} and runs the handler: it <b>rejects</b> the command. Took ${ms(toWorker)} to reach the worker.`, step.code[0]);
-    await sleep(700);
-    const why = t.rejection && t.rejection.code ? t.rejection.code : "rejected";
-    await move("worker-kernel", `Rejected: ${why}`, "bad");
-    light(["kernel", "store"]);
-    caption(`The kernel stores <b>no event</b>. Nothing crosses to the read side: it stays as it was.`, step.code[0]);
-    await sleep(900);
-    light(["client"]);
-    await move("kernel-client", "rejected", "bad");
-    side.commands[side.commands.length - 1].outcome = "rejected";
-    drawSides();
-    const message = t.rejection ? t.rejection.message : t.error;
-    caption(`The client gets the reason: <b class="rejected" id="why"></b>`, "client");
-    $("why").textContent = message;
-  } else {
-    caption(`The worker rebuilds <b>a1</b> ${loaded} and runs the handler. It returns an event; it never writes to the store itself.`, step.code[0]);
-    await sleep(600);
-    const ev = t.events[0];
-    await move("worker-kernel", ev.type, "event");
-    light(["kernel", "store"]);
-    caption(`The kernel checks the worker's signature, then appends <b>${esc(ev.type)}</b> at position <b>#${esc(ev.position)}</b>, signed and chained to the event before. The write side is done.`, step.code[0]);
-    await move("kernel-store", `#${ev.position}`, "event");
-    side.events = await loadEvents();
-    side.head = ev.position;
-    drawSides();
-    await sleep(500);
-    light(["model"]);
-    caption(`The event crosses to the read side: the kernel delivers it from the store, in order, and the read model updates its row.`, step.code[1]);
-    pulse();
-    await move("store-model", ev.type, "event");
-    side.position = ev.position;
-    side.rows = demo.rows;
-    side.rowsFresh = true;
-    drawSides();
-    await move("model-kernel", "done", "ok");
-    light(["client"]);
-    caption(`Only now does the submit return: the read side has the event. Took ${ms(t.micros.returned)} in all.`, "client");
-    await move("kernel-client", "committed", "ok");
-    side.commands[side.commands.length - 1].outcome = "committed";
-    drawSides();
-  }
+  $("speed").textContent = `slowed down: the real way took ${ms(Math.max(...t.sends.map((s) => s.micros.returned)))}`;
+  if (t.sends.length > 1) await race(t, step);
+  else await single(t.sends[0], t, step);
+  if (!stores[t.step]) stores[t.step] = await loadStore();
+  // The client reads its write from the read side.
   light(["client", "model"]);
   caption(`The client asks the read side, through the kernel.`, "client");
-  await move("client-kernel", "GetAccount a1");
-  await move("kernel-model", "query");
-  await move("model-kernel", "answer", "ok");
-  await move("kernel-client", "answer", "ok");
-  side.answer = t;
+  const [a, b] = t.sends;
+  const query = (s) => `${demo.scene.query} ${s.id}`;
+  if (b) {
+    await both("client-kernel", query(a), query(b));
+    await both("kernel-model", "query", "query");
+    await both("model-kernel", "answer", "answer", "ok");
+    await both("kernel-client", "answer", "answer", "ok");
+  } else {
+    await move("client-kernel", query(a));
+    await move("kernel-model", "query");
+    await move("model-kernel", "answer", "ok");
+    await move("kernel-client", "answer", "ok");
+  }
+  side.answers = t.sends;
   drawSides();
   const next = demo.scene.steps.length > t.step + 1 ? "Next step →" : "End of the scene.";
-  caption(rejected
-    ? `The query shows the account unchanged. ${next}`
-    : `The query right after the submit already sees the change: no polling, no waiting. ${next}`, "client");
+  const winner = t.sends.find((s) => s.outcome === "committed");
+  const losers = t.sends.filter((s) => s.outcome !== "committed");
+  caption(!losers.length
+    ? `The query right after the submit already sees the change: no polling, no waiting. ${next}`
+    : winner
+      ? `The read side has <b>${esc(winner.id)}</b>; <b>${esc(losers.map((s) => s.id).join(", "))}</b> does not exist: its command stored nothing. ${next}`
+      : `The query shows nothing changed. ${next}`, "client");
   light([]);
   animating = false;
   syncButtons();
 }
 
-// The read model's rows before step `t`: the answer of the step before it, which read them.
-function rowsBefore(t) {
-  const before = demo.traces[t.step - 1];
-  return before && before.answer.row ? { [before.account]: before.answer.row } : {};
+// One command: through the worker, then stored and delivered, or rejected by the worker or by
+// the kernel at the commit.
+async function single(s, t, step) {
+  const by = s.outcome === "committed" ? null : KERNEL_CODES.includes(s.rejection && s.rejection.code) ? "kernel" : "worker";
+  light(["client"]);
+  side.commands.push({ s, outcome: "pending" });
+  drawSides();
+  caption(`The client signs <b>${esc(s.command)}</b> for <b>${esc(s.id)}</b> and submits it. The kernel checks the signature and the key's grant, then queues the command for its aggregate.`, "client");
+  await move("client-kernel", `${s.command} ${JSON.stringify(s.data)}`);
+  light(["kernel"]);
+  await move("kernel-worker", s.command);
+  light(["worker"]);
+  showStates([s], t.step);
+  if (by === "worker") {
+    caption(`The worker rebuilds <b>${esc(s.id)}</b> ${rebuilt(s, t.step)} and runs the handler: it <b>rejects</b> the command.`, step.code[0]);
+    await sleep(700);
+    await move("worker-kernel", `Rejected: ${s.rejection ? s.rejection.code : "rejected"}`, "bad");
+    light(["kernel", "store"]);
+    caption(`The kernel stores <b>no event</b>. Nothing crosses to the read side: it stays as it was.`, step.code[0]);
+    await sleep(900);
+    light(["client"]);
+    await move("kernel-client", "rejected", "bad");
+    mark(s, "rejected");
+    caption(`The client gets the reason: <b class="rejected" id="why"></b>`, "client");
+    $("why").textContent = s.rejection ? s.rejection.message : s.error;
+    return;
+  }
+  const keys = withKeys();
+  caption(`The worker rebuilds <b>${esc(s.id)}</b> ${rebuilt(s, t.step)} and runs the handler. It returns ${keys ? "an event, and the keys the new state holds" : "an event"}; it never writes to the store itself.`, step.code[0]);
+  await sleep(600);
+  await move("worker-kernel", s.events.length ? (keys ? `${s.events[0].type} + keys` : s.events[0].type) : "event + keys", "event");
+  light(["kernel", "store"]);
+  if (by === "kernel") {
+    caption(`At the commit the kernel checks the keys: <b>${esc(s.rejection.key || "a key")}</b> is held by another ${esc(demo.scene.aggregate)}. Rejected <b class="rejected">${esc(s.rejection.code)}</b>: no event, nothing crosses to the read side.`, keyRegion(step));
+    await sleep(1400);
+    light(["client"]);
+    await move("kernel-client", s.rejection.code, "bad");
+    mark(s, "rejected");
+    caption(`The client gets the reason: <b class="rejected" id="why"></b>. It names the key, never the value or who holds it.`, "client");
+    $("why").textContent = s.rejection.message;
+    return;
+  }
+  await commit(s, t, step);
+}
+
+// A command the kernel commits: stored, delivered to the read side, answered.
+async function commit(s, t, step) {
+  const keys = withKeys(), ev = s.events[0];
+  caption(`The kernel checks the worker's signature${keys ? " and the keys" : ""}, then appends <b>${esc(ev.type)}</b> at position <b>#${esc(ev.position)}</b>, signed and chained to the event before.${keys ? ` In the same commit it stores the keys <b>${esc(s.id)}</b> holds now.` : ""} The write side is done.`, keys ? keyRegion(step) : step.code[0]);
+  await move("kernel-store", `#${ev.position}`, "event");
+  const store = await loadStore();
+  stores[t.step] = store;
+  side.events = store.events.filter((e) => e.position <= ev.position);
+  side.keys = store.keys;
+  side.head = ev.position;
+  drawSides();
+  await sleep(500);
+  light(["model"]);
+  caption(`The event crosses to the read side: the kernel delivers it from the store, in order, and the read model updates its row.`, projectRegion(step));
+  pulse();
+  await move("store-model", ev.type, "event");
+  side.position = ev.position;
+  side.rows = rowsAfter(t.step + 1);
+  side.rowsFresh = true;
+  drawSides();
+  await move("model-kernel", "done", "ok");
+  light(["client"]);
+  caption(`Only now does the submit return: the read side has the event. Took ${ms(s.micros.returned)} in all.`, "client");
+  await move("kernel-client", "committed", "ok");
+  mark(s, "committed");
+}
+
+// Two commands at the same moment, for one key: both workers accept, the kernel commits one at
+// a time, so exactly one wins.
+async function race(t, step) {
+  const [a, b] = t.sends;
+  const winner = t.sends.find((s) => s.outcome === "committed");
+  const loser = t.sends.find((s) => s !== winner);
+  light(["client"]);
+  side.commands.push({ s: a, outcome: "pending" }, { s: b, outcome: "pending" });
+  drawSides();
+  const claim = a.data && a.data.username ? ` both claim <b>${esc(a.data.username)}</b>` : "";
+  caption(`Two clients submit at the same moment: <b>${esc(a.id)}</b> and <b>${esc(b.id)}</b>${claim}.`, "client");
+  await both("client-kernel", `${a.command} ${a.id}`, `${b.command} ${b.id}`);
+  light(["kernel"]);
+  await both("kernel-worker", a.id, b.id);
+  light(["worker"]);
+  showStates(t.sends, t.step);
+  const apart = Math.abs((a.micros.worker ?? 0) - (b.micros.worker ?? 0));
+  caption(`Both handlers accept: neither aggregate knows the other. The two commands reached the worker ${ms(apart)} apart.`, step.code[0]);
+  await sleep(900);
+  await both("worker-kernel", `${a.id}: event + keys`, `${b.id}: event + keys`, "event");
+  light(["kernel"]);
+  if (!winner) {
+    caption(`Neither committed: <b class="rejected" id="why"></b>`, keyRegion(step));
+    $("why").textContent = t.sends.map((s) => (s.rejection ? s.rejection.message : s.error)).join("; ");
+    for (const s of t.sends) mark(s, "rejected");
+    return;
+  }
+  caption(`The kernel commits one at a time, under one lock. <b>${esc(winner.id)}</b> comes first and takes the key; for <b>${esc(loser.id)}</b> it is now taken.`, keyRegion(step));
+  await sleep(1400);
+  await commit(winner, t, step);
+  light(["kernel", "client"]);
+  const code = loser.rejection ? loser.rejection.code : loser.outcome;
+  caption(`<b>${esc(loser.id)}</b> is rejected <b class="rejected">${esc(code)}</b>: no event. Exactly one of the two holds the username.`, keyRegion(step));
+  await move("kernel-client", code, "bad");
+  mark(loser, "rejected");
 }
 
 // ---- sync with the demo ----
@@ -548,15 +691,18 @@ function syncButtons() {
   $("next").disabled = !demo || !demo.ready || !!demo.busy || animating || done >= total;
   $("replay").disabled = !demo || animating || !done;
   $("reset").disabled = !demo || demo.busy === "reset";
+  for (const b of document.querySelectorAll(".scenes button")) b.disabled = !demo || !!demo.busy || animating;
 }
 
 function drawHeader() {
-  const steps = demo.scene.steps, done = demo.traces.length;
-  $("scene").textContent = `Scene 1 · ${demo.scene.title}`;
+  const steps = demo.scene.steps;
+  $("scenes").replaceChildren("Scene",
+    ...demo.scenes.map((title, i) => el("button", { class: i === demo.scene.index ? "on" : "", title: `${i + 1}. ${title} (key ${i + 1})`, onclick: () => post(`/api/demo/scene?n=${i + 1}`) }, `${i + 1}`)),
+    el("span", { class: "title" }, demo.scene.title));
   $("dots").replaceChildren(...steps.map((s, i) => el("i", { class: i < shown ? "done" : i === shown ? "now" : "", title: `${i + 1}. ${s.title}` })));
   if (shown === 0) {
     $("title").textContent = demo.scene.title;
-    $("says").textContent = `A client sends a command, a worker decides, the kernel stores the event, a read model shows it. First: ${steps[0].title}.`;
+    $("says").textContent = `${demo.scene.intro} First: ${steps[0].title}.`;
     return;
   }
   const step = steps[shown - 1];
@@ -577,6 +723,8 @@ async function poll() {
     const firstLoad = generation === null;
     generation = demo.generation;
     shown = firstLoad ? demo.traces.length : 0;
+    stores = [];
+    rendered = new Set();
     drawFlow();
     drawCode(demo.scene.steps[0]);
     side = fresh();
@@ -587,7 +735,9 @@ async function poll() {
       const t = demo.traces[shown - 1];
       drawCode(demo.scene.steps[t.step]);
       side = after(shown);
-      side.events = await loadEvents();
+      const store = await loadStore();
+      side.events = store.events;
+      side.keys = store.keys;
       drawSides();
       $("caption").textContent = "Press Replay to see the last step again.";
     }
@@ -595,8 +745,7 @@ async function poll() {
   if (!animating && demo.traces.length > shown) {
     shown = demo.traces.length;
     drawHeader();
-    const t = demo.traces[shown - 1];
-    await animate(t);
+    await animate(demo.traces[shown - 1]);
   }
   drawHeader();
   syncButtons();
@@ -625,6 +774,7 @@ document.addEventListener("keydown", (e) => {
   else if (key === "f") $("full").click();
   else if (key === "-" || key === "_") setSpeed(SPEEDS.indexOf(speed) - 1);
   else if (key === "+" || key === "=") setSpeed(SPEEDS.indexOf(speed) + 1);
+  else if (/^[1-9]$/.test(key) && demo && Number(key) <= demo.scenes.length && !demo.busy && !animating) post(`/api/demo/scene?n=${key}`);
 });
 
 (async () => {

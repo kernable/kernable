@@ -39,51 +39,121 @@ const START_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long the kernel's UI may take to answer a request passed on to it.
 const PROXY_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// One step of a scene: a command the client sends, and what the Stage says about it.
+/// A scene of the Stage: steps on one aggregate type, shown with one read model.
+struct Scene {
+    title: &'static str,
+    /// What the Stage says before the first step.
+    intro: &'static str,
+    aggregate: &'static str,
+    read_model: &'static str,
+    /// The read model's query for one aggregate, `{ "id": … }`.
+    query: &'static str,
+    steps: &'static [Step],
+}
+
+/// One step of a scene: what the client sends, and what the Stage says about it. Several
+/// commands in one step are sent at the same moment.
 struct Step {
     title: &'static str,
     says: &'static str,
-    command: &'static str,
-    account: &'static str,
-    data: &'static str,
+    sends: &'static [Send],
     /// The regions of `bank.rs` the code panel shows, the handler first.
     code: &'static [&'static str],
 }
 
-/// Scene 1: a command becomes an event, the event a row in a read model, and the client reads
-/// its own write.
-const SCENE: &[Step] = &[
-    Step {
-        title: "Open an account",
-        says: "A client opens an account for Ada. The worker decides, the kernel stores the event, the read model shows it.",
-        command: "OpenAccount",
-        account: "a1",
-        data: r#"{"owner":"Ada"}"#,
-        code: &["open", "project-opened", "client"],
+/// One command of a step.
+struct Send {
+    id: &'static str,
+    command: &'static str,
+    data: &'static str,
+}
+
+const fn send(id: &'static str, command: &'static str, data: &'static str) -> Send {
+    Send { id, command, data }
+}
+
+const SCENES: &[Scene] = &[
+    // A command becomes an event, the event a row in a read model, and the client reads its own
+    // write.
+    Scene {
+        title: "Command → event → read model",
+        intro: "A client sends a command, a worker decides, the kernel stores the event, a read model shows it.",
+        aggregate: "account",
+        read_model: "accounts",
+        query: "GetAccount",
+        steps: &[
+            Step {
+                title: "Open an account",
+                says: "A client opens an account for Ada. The worker decides, the kernel stores the event, the read model shows it.",
+                sends: &[send("a1", "OpenAccount", r#"{"owner":"Ada"}"#)],
+                code: &["open", "project-opened", "client"],
+            },
+            Step {
+                title: "Deposit 100",
+                says: "The submit returns only once the read model has the event, so the query right after it already sees the new balance.",
+                sends: &[send("a1", "Deposit", r#"{"amount":100}"#)],
+                code: &["deposit", "project-deposited", "client"],
+            },
+            Step {
+                title: "Withdraw 500",
+                says: "The worker rejects the command. Nothing is stored: no event, no change in the read model.",
+                sends: &[send("a1", "Withdraw", r#"{"amount":500}"#)],
+                code: &["withdraw", "client"],
+            },
+            Step {
+                title: "Withdraw 30",
+                says: "The balance comes from the events alone: 100 deposited, 30 withdrawn. Every event is signed and chained to the one before.",
+                sends: &[send("a1", "Withdraw", r#"{"amount":30}"#)],
+                code: &["withdraw", "project-withdrawn", "events", "query"],
+            },
+        ],
     },
-    Step {
-        title: "Deposit 100",
-        says: "The submit returns only once the read model has the event, so the query right after it already sees the new balance.",
-        command: "Deposit",
-        account: "a1",
-        data: r#"{"amount":100}"#,
-        code: &["deposit", "project-deposited", "client"],
-    },
-    Step {
-        title: "Withdraw 500",
-        says: "The worker rejects the command. Nothing is stored: no event, no change in the read model.",
-        command: "Withdraw",
-        account: "a1",
-        data: r#"{"amount":500}"#,
-        code: &["withdraw", "client"],
-    },
-    Step {
-        title: "Withdraw 30",
-        says: "The balance comes from the events alone: 100 deposited, 30 withdrawn. Every event is signed and chained to the one before.",
-        command: "Withdraw",
-        account: "a1",
-        data: r#"{"amount":30}"#,
-        code: &["withdraw", "project-withdrawn", "events", "query"],
+    // A unique key: never two holders, also when two commands race for it.
+    Scene {
+        title: "Two customers, one username",
+        intro: "A username belongs to one customer only. The worker never checks it: the kernel does, when it commits, also when two commands race for it.",
+        aggregate: "customer",
+        read_model: "customers",
+        query: "GetCustomer",
+        steps: &[
+            Step {
+                title: "Ada registers as ada",
+                says: "The customer aggregate declares its username unique. With the event, the kernel stores that c1 now holds the key.",
+                sends: &[send("c1", "Register", r#"{"name":"Ada","username":"ada"}"#)],
+                code: &["register", "customer-key", "project-registered"],
+            },
+            Step {
+                title: "Bob wants ada too",
+                says: "The worker accepts: it never looks the username up. The kernel refuses the commit, because c1 holds the key.",
+                sends: &[send("c2", "Register", r#"{"name":"Bob","username":"ADA"}"#)],
+                code: &["register", "customer-key", "client"],
+            },
+            Step {
+                title: "The race: Cleo and Dan, one username",
+                says: "Two customers claim cleo at the same moment. Both workers accept; the kernel commits one at a time, so exactly one wins.",
+                sends: &[
+                    send("c3", "Register", r#"{"name":"Cleo","username":"cleo"}"#),
+                    send("c4", "Register", r#"{"name":"Dan","username":"cleo"}"#),
+                ],
+                code: &["register", "customer-key", "project-registered"],
+            },
+            Step {
+                title: "Ada changes her username",
+                says: "The key follows the state: once c1 is ada.lovelace, it no longer holds ada, in the same commit as the event.",
+                sends: &[send(
+                    "c1",
+                    "ChangeUsername",
+                    r#"{"username":"ada.lovelace"}"#,
+                )],
+                code: &["rename", "customer-key", "project-renamed"],
+            },
+            Step {
+                title: "Bob tries again",
+                says: "The same command as before now commits: ada is free. No cleanup job, no claims table, no compensation.",
+                sends: &[send("c2", "Register", r#"{"name":"Bob","username":"ada"}"#)],
+                code: &["register", "customer-key", "project-registered"],
+            },
+        ],
     },
 ];
 
@@ -197,6 +267,8 @@ struct State {
     run: Option<Arc<Run>>,
     /// What runs now (a step or a reset), if anything.
     busy: Option<&'static str>,
+    /// The scene shown, an index into [`SCENES`].
+    scene: usize,
     /// What each step did, in order: the next step is `traces.len()`.
     traces: Vec<Value>,
     error: Option<String>,
@@ -270,7 +342,16 @@ impl Demo {
                 b"the demo takes requests from its Stage only\n",
             ),
             ("POST", "/api/demo/next") => self.next(),
-            ("POST", "/api/demo/reset") => self.reset(),
+            ("POST", "/api/demo/reset") => self.reset(None),
+            ("POST", "/api/demo/scene") => {
+                let n = target
+                    .split_once("?n=")
+                    .and_then(|(_, n)| n.parse::<usize>().ok());
+                match n {
+                    Some(n) if n >= 1 => self.reset(Some(n - 1)),
+                    _ => conflict("name a scene: /api/demo/scene?n=1"),
+                }
+            }
             ("GET", _) => {
                 let ui = lock(&self.state).run.as_ref().map(|r| r.ui.clone());
                 match ui {
@@ -284,22 +365,22 @@ impl Demo {
 
     fn view(&self) -> Value {
         let state = lock(&self.state);
-        let rows = state
-            .run
-            .as_ref()
-            .map(|r| json!(*lock(&r.rows)))
-            .unwrap_or_else(|| json!({}));
-        let steps: Vec<Value> = SCENE
+        let scene = &SCENES[state.scene];
+        let rows = match &state.run {
+            Some(r) if scene.read_model == "customers" => json!(*lock(&r.rows.customers)),
+            Some(r) => json!(*lock(&r.rows.accounts)),
+            None => json!({}),
+        };
+        let steps: Vec<Value> = scene
+            .steps
             .iter()
             .map(|s| {
-                json!({
-                    "title": s.title,
-                    "says": s.says,
-                    "command": s.command,
-                    "account": s.account,
-                    "data": serde_json::from_str::<Value>(s.data).unwrap_or(Value::Null),
-                    "code": s.code,
-                })
+                let sends: Vec<Value> = s
+                    .sends
+                    .iter()
+                    .map(|c| json!({ "id": c.id, "command": c.command, "data": data(c) }))
+                    .collect();
+                json!({ "title": s.title, "says": s.says, "sends": sends, "code": s.code })
             })
             .collect();
         json!({
@@ -307,7 +388,16 @@ impl Demo {
             "ready": state.run.is_some(),
             "busy": state.busy,
             "error": state.error,
-            "scene": { "title": "Command → event → read model", "steps": steps },
+            "scenes": SCENES.iter().map(|s| s.title).collect::<Vec<_>>(),
+            "scene": {
+                "index": state.scene,
+                "title": scene.title,
+                "intro": scene.intro,
+                "aggregate": scene.aggregate,
+                "query": scene.query,
+                "readModel": scene.read_model,
+                "steps": steps,
+            },
             "traces": state.traces,
             "rows": rows,
         })
@@ -315,7 +405,7 @@ impl Demo {
 
     /// Starts the next step, unless one is running or the scene is over.
     fn next(self: &Arc<Self>) -> Vec<u8> {
-        let (run, index, generation) = {
+        let (run, scene, index, generation) = {
             let mut state = lock(&self.state);
             let index = state.traces.len();
             let Some(run) = state.run.clone() else {
@@ -324,15 +414,15 @@ impl Demo {
             if state.busy.is_some() {
                 return conflict("a step is running");
             }
-            if index >= SCENE.len() {
+            if index >= SCENES[state.scene].steps.len() {
                 return conflict("the scene is over: reset to start again");
             }
             state.busy = Some("step");
-            (run, index, state.generation)
+            (run, &SCENES[state.scene], index, state.generation)
         };
         let demo = Arc::clone(self);
         tokio::spawn(async move {
-            let trace = step(&run, generation, index).await;
+            let trace = step(&run, scene, generation, index).await;
             let mut state = lock(&demo.state);
             if state.generation == generation {
                 state.traces.push(trace);
@@ -342,12 +432,18 @@ impl Demo {
         json_reply(&json!({ "step": index }))
     }
 
-    /// Replaces the kernel and the bank with new ones on a new store.
-    fn reset(self: &Arc<Self>) -> Vec<u8> {
+    /// Replaces the kernel and the bank with new ones on a new store, for `scene` if given.
+    fn reset(self: &Arc<Self>, scene: Option<usize>) -> Vec<u8> {
         let generation = {
             let mut state = lock(&self.state);
             if state.busy == Some("reset") {
                 return conflict("already resetting");
+            }
+            if let Some(scene) = scene {
+                if scene >= SCENES.len() {
+                    return conflict("no such scene");
+                }
+                state.scene = scene;
             }
             state.generation += 1;
             state.busy = Some("reset");
@@ -442,14 +538,41 @@ async fn start(demo: &Demo, generation: u64) -> Result<Run, BoxError> {
     })
 }
 
-/// Runs step `index` of the scene and says what happened, with the time each point took from
-/// the submit, in microseconds.
-async fn step(run: &Run, generation: u64, index: usize) -> Value {
-    let s = &SCENE[index];
-    let command_id = format!("demo-{generation}-{}", index + 1);
-    let data: Value = serde_json::from_str(s.data).unwrap_or(Value::Null);
+/// Runs step `index` of `scene` and says what happened to each of its commands, sent at the
+/// same moment.
+async fn step(run: &Arc<Run>, scene: &'static Scene, generation: u64, index: usize) -> Value {
+    let s = &scene.steps[index];
+    let mut tasks = Vec::new();
+    for (n, c) in s.sends.iter().enumerate() {
+        let run = Arc::clone(run);
+        let command_id = format!("demo-{generation}-{}-{}", index + 1, n + 1);
+        tasks.push(tokio::spawn(async move {
+            sent(&run, scene, c, command_id).await
+        }));
+    }
+    let mut sends = Vec::new();
+    for task in tasks {
+        sends.push(
+            task.await
+                .unwrap_or_else(|e| json!({ "outcome": "failed", "error": e.to_string() })),
+        );
+    }
+    json!({ "step": index, "sends": sends })
+}
+
+/// Sends one command and says what happened, with the time each point took from the submit,
+/// in microseconds.
+async fn sent(run: &Run, scene: &Scene, c: &Send, command_id: String) -> Value {
+    let data = data(c);
     let sent_at = Instant::now();
-    let sent = bank::send(&run.client, &command_id, s.command, s.account, data.clone()).await;
+    let sent = bank::send(
+        &run.client,
+        &command_id,
+        (scene.aggregate, c.id, c.command),
+        data.clone(),
+        scene.query,
+    )
+    .await;
     let seen = run.stage.take(&command_id);
     let micros = |at: Option<Instant>| at.map(|at| at.duration_since(sent_at).as_micros() as u64);
     let (outcome, events, rejection, error) = match &sent.outcome {
@@ -470,7 +593,7 @@ async fn step(run: &Run, generation: u64, index: usize) -> Value {
         Ok(Outcome::Rejected(r)) => (
             "rejected",
             Vec::new(),
-            json!({ "code": r.code, "message": r.message }),
+            json!({ "code": r.code, "message": r.message, "key": r.key }),
             Value::Null,
         ),
         Err(e) => ("failed", Vec::new(), Value::Null, json!(e.to_string())),
@@ -480,10 +603,9 @@ async fn step(run: &Run, generation: u64, index: usize) -> Value {
         Err(e) => json!({ "error": e.to_string() }),
     };
     json!({
-        "step": index,
         "commandId": command_id,
-        "command": s.command,
-        "account": s.account,
+        "command": c.command,
+        "id": c.id,
         "data": data,
         "outcome": outcome,
         "events": events,
@@ -499,6 +621,10 @@ async fn step(run: &Run, generation: u64, index: usize) -> Value {
             "answered": micros(Some(sent.answered)),
         },
     })
+}
+
+fn data(c: &Send) -> Value {
+    serde_json::from_str(c.data).unwrap_or(Value::Null)
 }
 
 /// The regions of `bank.rs` by name, each a list of lines; lines that only record for the Stage
@@ -576,7 +702,7 @@ mod tests {
     fn the_code_panel_gets_every_region_a_step_names() {
         let code = code();
         let regions = code["regions"].as_object().unwrap();
-        for step in SCENE {
+        for step in SCENES.iter().flat_map(|s| s.steps) {
             for name in step.code {
                 assert!(regions.contains_key(*name), "{} shows {name}", step.title);
             }
@@ -592,8 +718,8 @@ mod tests {
 
     #[test]
     fn every_step_sends_json() {
-        for step in SCENE {
-            serde_json::from_str::<Value>(step.data).unwrap();
+        for c in SCENES.iter().flat_map(|s| s.steps).flat_map(|s| s.sends) {
+            serde_json::from_str::<Value>(c.data).unwrap();
         }
     }
 }

@@ -4,7 +4,8 @@
 //! - `GET /api/state`: the kernel, the services' memberships, the registered aggregates and the
 //!   connected workers, the listeners, and which aggregate writes which event type;
 //! - `GET /api/streams`: the aggregates with events, the most recently changed first;
-//! - `GET /api/history?tenant=&domain=&type=&id=`: one aggregate's events with their commands.
+//! - `GET /api/history?tenant=&domain=&type=&id=`: one aggregate's events with their commands,
+//!   and the unique keys (by name and identity, never the value) and facts it holds.
 //!
 //! It never decrypts the vault: a vault field shows its subject, whether it is secret, or that
 //! it was erased. Snapshot states are not shown either, as they may hold personal values.
@@ -209,7 +210,24 @@ fn history(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, B
         .get(&stream)?
         .and_then(|r| r.snapshot)
         .map(|s| json!({ "version": s.version, "schema": s.schema, "bytes": s.state.len() }));
+    let index = kernel.store.stream_index(&stream)?.map(|i| {
+        let keys: Vec<Value> = i
+            .keys
+            .iter()
+            .map(|k| {
+                json!({
+                    "name": k.name,
+                    "global": k.global,
+                    // A personal key's identity is in the vault, erased with its subject.
+                    "personal": !k.vault_ref.is_empty(),
+                    "id": hex::encode(&k.id),
+                })
+            })
+            .collect();
+        json!({ "keys": keys, "facts": i.facts })
+    });
     Ok(json!({
+        "index": index,
         "events": events.iter().map(event).collect::<Vec<_>>(),
         "commands": commands,
         "vault": vault,
