@@ -9,7 +9,7 @@
 //!
 //! The Stage asks with `POST /api/demo/next`, `POST /api/demo/reset` and
 //! `POST /api/demo/scene?n=<n>`, each with an `x-kernable-demo` header (a page elsewhere cannot
-//! send one without asking first), and reads `GET /api/demo` and `GET /api/demo/code`.
+//! send one without asking first), and reads `GET /api/demo`.
 
 mod act;
 mod bank;
@@ -36,7 +36,6 @@ use crate::{BoxError, http::reply};
 
 const STAGE: &str = include_str!("stage.html");
 const UI: &str = include_str!("../ui.html");
-const BANK: &str = include_str!("bank.rs");
 
 /// How long a new kernel and the bank may take to come up.
 const START_TIMEOUT: Duration = Duration::from_secs(30);
@@ -255,7 +254,6 @@ impl Demo {
             ("GET", "/") => reply("200 OK", "text/html; charset=utf-8", UI.as_bytes()),
             ("GET", "/demo") => reply("200 OK", "text/html; charset=utf-8", STAGE.as_bytes()),
             ("GET", "/api/demo") => json_reply(&self.view()),
-            ("GET", "/api/demo/code") => json_reply(&code()),
             ("POST", _) if !asked => reply(
                 "403 Forbidden",
                 "text/plain",
@@ -311,7 +309,7 @@ impl Demo {
                     "sends": sends,
                     "together": together,
                     "act": act,
-                    "code": s.code,
+                    "intents": intents(s.intents),
                 })
             })
             .collect();
@@ -332,6 +330,10 @@ impl Demo {
                 "query": scene.query,
                 "readModel": scene.read_model,
                 "nodes": scene.nodes,
+                "intents": intents(scene.intents),
+                // Whether its aggregates hold unique keys or facts the kernel checks.
+                "keys": scene.parts.customers,
+                "facts": scene.parts.payments,
                 // The command types a middleware checks before the kernel queues them.
                 "checks": if scene.parts.rbac { vec!["Withdraw"] } else { Vec::new() },
                 "steps": steps,
@@ -620,34 +622,14 @@ fn data(c: &Send) -> Value {
     serde_json::from_str(c.data).unwrap_or(Value::Null)
 }
 
-/// The regions of `bank.rs` by name, each a list of lines; lines that only record for the Stage
-/// are marked, so it can dim them. Regions of the same name follow each other.
-fn code() -> Value {
-    let mut regions: Vec<(String, Vec<Value>)> = Vec::new();
-    let mut open: Option<String> = None;
-    for line in BANK.lines() {
-        let trimmed = line.trim();
-        if let Some(name) = trimmed.strip_prefix("// #region ") {
-            open = Some(name.to_owned());
-            match regions.iter_mut().find(|(n, _)| n == name) {
-                Some((_, lines)) => lines.push(json!({ "text": "", "stage": false })),
-                None => regions.push((name.to_owned(), Vec::new())),
-            }
-        } else if trimmed.starts_with("// #endregion") {
-            open = None;
-        } else if let Some(name) = &open
-            && let Some((_, lines)) = regions.iter_mut().find(|(n, _)| n == name)
-        {
-            let stage = trimmed.ends_with("// stage");
-            let text = line.trim_end_matches("// stage").trim_end();
-            lines.push(json!({ "text": text, "stage": stage }));
-        }
-    }
-    let regions: serde_json::Map<String, Value> = regions
-        .into_iter()
-        .map(|(name, lines)| (name, Value::Array(lines)))
-        .collect();
-    json!({ "file": "crates/kernable-kernel/src/demo/bank.rs", "regions": regions })
+/// Intentions as the Stage reads them: `{ "worker": "Open an account only once." }`.
+fn intents(intents: scenes::Intents) -> Value {
+    Value::Object(
+        intents
+            .iter()
+            .map(|(node, text)| ((*node).to_owned(), json!(text)))
+            .collect(),
+    )
 }
 
 /// Passes a request on to the kernel's UI and returns its answer.
@@ -703,22 +685,26 @@ fn conflict(why: &str) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    /// The nodes the flow diagram draws in every scene; a scene adds its `nodes`.
+    const NODES: &[&str] = &["client", "kernel", "worker", "store", "model"];
+
     #[test]
-    fn the_code_panel_gets_every_region_a_step_names() {
-        let code = code();
-        let regions = code["regions"].as_object().unwrap();
-        for step in SCENES.iter().flat_map(|s| s.steps) {
-            for name in step.code {
-                assert!(regions.contains_key(*name), "{} shows {name}", step.title);
+    fn every_intention_belongs_to_a_node_the_scene_shows() {
+        for scene in SCENES {
+            let shown = |node: &str| NODES.contains(&node) || scene.nodes.contains(&node);
+            let all = scene
+                .intents
+                .iter()
+                .chain(scene.steps.iter().flat_map(|s| s.intents));
+            for (node, text) in all {
+                assert!(shown(node), "{}: {node}", scene.title);
+                assert!(
+                    text.ends_with('.') && text.len() < 90,
+                    "{}: {text}",
+                    scene.title
+                );
             }
         }
-        let open: Vec<&Value> = regions["open"].as_array().unwrap().iter().collect();
-        assert!(open.iter().any(|l| l["stage"] == true));
-        assert!(
-            open.iter()
-                .all(|l| !l["text"].as_str().unwrap().contains("// stage")),
-            "the marker itself is not shown"
-        );
     }
 
     #[test]

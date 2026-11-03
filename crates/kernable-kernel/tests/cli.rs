@@ -702,9 +702,10 @@ fn the_demo_runs_its_scene_resets_on_a_new_store_and_leaves_nothing_behind() {
     assert_eq!(status, 200, "{body}");
     let history: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(history["events"].as_array().unwrap().len(), 3);
-    let code: serde_json::Value =
-        serde_json::from_str(&demo_http(&addr, "GET", "/api/demo/code", false).1).unwrap();
-    assert!(code["regions"]["withdraw"].is_array());
+    // What each part wants, in words, for the Stage to show next to it.
+    let state = demo_state(&addr);
+    assert!(state["scene"]["intents"]["kernel"].is_string());
+    assert!(state["scene"]["steps"][2]["intents"]["worker"].is_string());
 
     // Scene 2: a unique username, also when two commands race for it.
     let (status, _) = demo_http(&addr, "POST", "/api/demo/scene?n=2", true);

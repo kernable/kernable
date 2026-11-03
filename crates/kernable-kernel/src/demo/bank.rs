@@ -1,6 +1,5 @@
-//! The demo's bank, written with the Rust SDK as any application would be. The Stage shows the
-//! `#region`s of this file as the code that runs; lines ending in `// stage` only record for the
-//! Stage what happened when (and what state a handler saw), and it shows them dimmed.
+//! The demo's bank, written with the Rust SDK as any application would be. Lines ending in
+//! `// stage` only record for the Stage what happened when, and what state a handler saw.
 
 use std::{
     collections::BTreeMap,
@@ -62,7 +61,6 @@ fn lock<T>(rows: &Mutex<T>) -> MutexGuard<'_, T> {
     rows.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-// #region state
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct Account {
     owner: String,
@@ -85,16 +83,13 @@ struct Opened {
 struct Amount {
     amount: i64,
 }
-// #endregion state
 
-// #region row
 #[derive(Clone, Serialize)]
 pub(super) struct Row {
     owner: String,
     balance: i64,
     open: bool,
 }
-// #endregion row
 
 /// The `bank` domain with the parts a scene needs.
 pub(super) fn bank(parts: Parts, stage: &Recorder, rows: &Rows, switches: &Switches) -> Domain {
@@ -121,7 +116,6 @@ pub(super) fn bank(parts: Parts, stage: &Recorder, rows: &Rows, switches: &Switc
 fn accounts(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
     let account = bank_domain.aggregate("account", Account::default());
 
-    // #region events
     account.apply("AccountOpened", |state, data: Opened, _evt, _ctx| {
         state.owner = data.owner;
         state.open = true;
@@ -141,15 +135,11 @@ fn accounts(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
     account.apply("AccountClosed", |state, _: Value, _evt, _ctx| {
         state.open = false
     });
-    // #endregion events
 
-    // #region fact
     // Other aggregates' commands can require it; the kernel checks it when they commit.
     account.fact("open", |state| state.open);
-    // #endregion fact
 
     let c = stage.clone(); // stage
-    // #region open
     account.command("OpenAccount", move |state, data: Opened, cmd, _ctx| {
         c.worker(&cmd.command_id, state); // stage
         if state.open {
@@ -157,10 +147,8 @@ fn accounts(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
         }
         Ok(vec![NewEvent::new("AccountOpened", data)])
     });
-    // #endregion open
 
     let c = stage.clone(); // stage
-    // #region deposit
     account.command("Deposit", move |state, data: Amount, cmd, _ctx| {
         c.worker(&cmd.command_id, state); // stage
         if !state.open {
@@ -171,10 +159,8 @@ fn accounts(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
         }
         Ok(vec![NewEvent::new("Deposited", data)])
     });
-    // #endregion deposit
 
     let c = stage.clone(); // stage
-    // #region withdraw
     account.command("Withdraw", move |state, data: Amount, cmd, _ctx| {
         c.worker(&cmd.command_id, state); // stage
         if data.amount > state.balance {
@@ -183,10 +169,8 @@ fn accounts(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
         }
         Ok(vec![NewEvent::new("Withdrawn", data)])
     });
-    // #endregion withdraw
 
     let c = stage.clone(); // stage
-    // #region close
     account.command("Close", move |state, _: Value, cmd, _ctx| {
         c.worker(&cmd.command_id, state); // stage
         if !state.open {
@@ -194,10 +178,8 @@ fn accounts(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
         }
         Ok(vec![NewEvent::new("AccountClosed", json!({}))])
     });
-    // #endregion close
 
     let c = stage.clone(); // stage
-    // #region pay
     account.command("Pay", move |state, data: Payment, cmd, _ctx| {
         c.worker(&cmd.command_id, state); // stage
         if data.amount > state.balance {
@@ -210,10 +192,8 @@ fn accounts(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
     account.requires("Pay", |_state, data: Payment| {
         [Requirement::new("bank", "account", &data.to, "open")]
     });
-    // #endregion pay
 
     let c = stage.clone(); // stage
-    // #region credit
     account.command("Credit", move |state, data: Amount, cmd, _ctx| {
         c.worker(&cmd.command_id, state); // stage
         if !state.open {
@@ -221,12 +201,10 @@ fn accounts(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
         }
         Ok(vec![NewEvent::new("Credited", data)])
     });
-    // #endregion credit
 
     let accounts_readmodel = bank_domain.read_model("accounts");
 
     let (r, c) = (Arc::clone(&rows.accounts), stage.clone());
-    // #region project-opened
     accounts_readmodel.on("AccountOpened", move |data: Opened, evt, _ctx| {
         c.read_model(&evt.command_id); // stage
         let row = Row {
@@ -237,10 +215,8 @@ fn accounts(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
         lock(&r).insert(evt.aggregate_id, row);
         async { Ok(()) }
     });
-    // #endregion project-opened
 
     let (r, c) = (Arc::clone(&rows.accounts), stage.clone());
-    // #region project-deposited
     accounts_readmodel.on("Deposited", move |data: Amount, evt, _ctx| {
         c.read_model(&evt.command_id); // stage
         if let Some(row) = lock(&r).get_mut(&evt.aggregate_id) {
@@ -248,10 +224,8 @@ fn accounts(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
         }
         async { Ok(()) }
     });
-    // #endregion project-deposited
 
     let (r, c) = (Arc::clone(&rows.accounts), stage.clone());
-    // #region project-withdrawn
     accounts_readmodel.on("Withdrawn", move |data: Amount, evt, _ctx| {
         c.read_model(&evt.command_id); // stage
         if let Some(row) = lock(&r).get_mut(&evt.aggregate_id) {
@@ -259,10 +233,8 @@ fn accounts(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
         }
         async { Ok(()) }
     });
-    // #endregion project-withdrawn
 
     let (r, c) = (Arc::clone(&rows.accounts), stage.clone());
-    // #region project-paid
     accounts_readmodel.on("Paid", move |data: Payment, evt, _ctx| {
         c.read_model(&evt.command_id); // stage
         if let Some(row) = lock(&r).get_mut(&evt.aggregate_id) {
@@ -270,10 +242,8 @@ fn accounts(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
         }
         async { Ok(()) }
     });
-    // #endregion project-paid
 
     let (r, c) = (Arc::clone(&rows.accounts), stage.clone());
-    // #region project-credited
     accounts_readmodel.on("Credited", move |data: Amount, evt, _ctx| {
         c.read_model(&evt.command_id); // stage
         if let Some(row) = lock(&r).get_mut(&evt.aggregate_id) {
@@ -281,10 +251,8 @@ fn accounts(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
         }
         async { Ok(()) }
     });
-    // #endregion project-credited
 
     let (r, c) = (Arc::clone(&rows.accounts), stage.clone());
-    // #region project-closed
     accounts_readmodel.on("AccountClosed", move |_: Value, evt, _ctx| {
         c.read_model(&evt.command_id); // stage
         if let Some(row) = lock(&r).get_mut(&evt.aggregate_id) {
@@ -292,7 +260,6 @@ fn accounts(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
         }
         async { Ok(()) }
     });
-    // #endregion project-closed
 
     #[derive(Deserialize)]
     struct GetAccount {
@@ -300,15 +267,12 @@ fn accounts(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
     }
 
     let r = Arc::clone(&rows.accounts);
-    // #region query
     accounts_readmodel.query("GetAccount", move |data: GetAccount, _qry, _ctx| {
         let row = lock(&r).get(&data.id).cloned();
         async move { Ok(row.ok_or_else(|| Rejected::new("no such account").code("not_found"))?) }
     });
-    // #endregion query
 }
 
-// #region customer-state
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct Customer {
     name: String,
@@ -326,7 +290,6 @@ struct Registered {
 struct Username {
     username: String,
 }
-// #endregion customer-state
 
 #[derive(Clone, Serialize)]
 pub(super) struct CustomerRow {
@@ -338,7 +301,6 @@ pub(super) struct CustomerRow {
 fn customers(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
     let customer = bank_domain.aggregate("customer", Customer::default());
 
-    // #region customer-key
     // One customer per username in the tenant, whatever its case. The kernel checks it when it
     // commits; it gets a hash of the value, never the value.
     customer.unique(
@@ -346,9 +308,7 @@ fn customers(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
         |state| state.username.as_ref().map(|u| u.trim().to_lowercase()),
         Unique::tenant(),
     );
-    // #endregion customer-key
 
-    // #region customer-events
     customer.apply(
         "CustomerRegistered",
         |state, data: Registered, _evt, _ctx| {
@@ -360,10 +320,8 @@ fn customers(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
     customer.apply("UsernameChanged", |state, data: Username, _evt, _ctx| {
         state.username = Some(data.username)
     });
-    // #endregion customer-events
 
     let c = stage.clone(); // stage
-    // #region register
     customer.command("Register", move |state, data: Registered, cmd, _ctx| {
         c.worker(&cmd.command_id, state); // stage
         if state.registered {
@@ -372,10 +330,8 @@ fn customers(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
         // No lookup of the username here: the kernel refuses it at commit if it is taken.
         Ok(vec![NewEvent::new("CustomerRegistered", data)])
     });
-    // #endregion register
 
     let c = stage.clone(); // stage
-    // #region rename
     customer.command("ChangeUsername", move |state, data: Username, cmd, _ctx| {
         c.worker(&cmd.command_id, state); // stage
         if !state.registered {
@@ -384,12 +340,10 @@ fn customers(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
         // The old username is free once this commits.
         Ok(vec![NewEvent::new("UsernameChanged", data)])
     });
-    // #endregion rename
 
     let customers_readmodel = bank_domain.read_model("customers");
 
     let (r, c) = (Arc::clone(&rows.customers), stage.clone());
-    // #region project-registered
     customers_readmodel.on("CustomerRegistered", move |data: Registered, evt, _ctx| {
         c.read_model(&evt.command_id); // stage
         let row = CustomerRow {
@@ -399,10 +353,8 @@ fn customers(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
         lock(&r).insert(evt.aggregate_id, row);
         async { Ok(()) }
     });
-    // #endregion project-registered
 
     let (r, c) = (Arc::clone(&rows.customers), stage.clone());
-    // #region project-renamed
     customers_readmodel.on("UsernameChanged", move |data: Username, evt, _ctx| {
         c.read_model(&evt.command_id); // stage
         if let Some(row) = lock(&r).get_mut(&evt.aggregate_id) {
@@ -410,7 +362,6 @@ fn customers(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
         }
         async { Ok(()) }
     });
-    // #endregion project-renamed
 
     #[derive(Deserialize)]
     struct GetCustomer {
@@ -424,7 +375,6 @@ fn customers(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
     });
 }
 
-// #region person-vault
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct Person {
     onboarded: bool,
@@ -436,7 +386,6 @@ struct Onboarded {
     name: Option<String>,
     email: Option<String>,
 }
-// #endregion person-vault
 
 #[derive(Clone, Serialize)]
 pub(super) struct PersonRow {
@@ -447,7 +396,6 @@ pub(super) struct PersonRow {
 /// The `person` aggregate, whose name and email are personal data in the vault, and the
 /// `people` read model.
 fn people(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
-    // #region personal
     // Name and email go to the vault, encrypted per person; commands and events keep only
     // references. Forgetting a person erases them everywhere at once.
     bank_domain
@@ -459,7 +407,6 @@ fn people(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
     bank_domain
         .event("PersonForgotten", 1)
         .erases(|_, id| id.to_owned());
-    // #endregion personal
 
     let person = bank_domain.aggregate("person", Person::default());
     person.apply("PersonOnboarded", |state, _: Value, _evt, _ctx| {
@@ -470,7 +417,6 @@ fn people(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
     });
 
     let c = stage.clone(); // stage
-    // #region onboard
     person.command("Onboard", move |state, data: Onboarded, cmd, _ctx| {
         c.worker(&cmd.command_id, state); // stage
         if state.onboarded {
@@ -479,10 +425,8 @@ fn people(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
         // The handler gets the values in clear; the kernel stores them in the vault.
         Ok(vec![NewEvent::new("PersonOnboarded", data)])
     });
-    // #endregion onboard
 
     let c = stage.clone(); // stage
-    // #region forget
     person.command("Forget", move |state, _: Value, cmd, _ctx| {
         c.worker(&cmd.command_id, state); // stage
         if !state.onboarded || state.forgotten {
@@ -490,12 +434,10 @@ fn people(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
         }
         Ok(vec![NewEvent::new("PersonForgotten", json!({}))])
     });
-    // #endregion forget
 
     let people_readmodel = bank_domain.read_model("people");
 
     let (r, c) = (Arc::clone(&rows.people), stage.clone());
-    // #region project-onboarded
     people_readmodel.on("PersonOnboarded", move |data: Onboarded, evt, _ctx| {
         c.read_model(&evt.command_id); // stage
         let row = PersonRow {
@@ -505,17 +447,14 @@ fn people(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
         lock(&r).insert(evt.aggregate_id, row);
         async { Ok(()) }
     });
-    // #endregion project-onboarded
 
     let (r, c) = (Arc::clone(&rows.people), stage.clone());
-    // #region project-forgotten
     people_readmodel.on("PersonForgotten", move |_: Value, evt, _ctx| {
         c.read_model(&evt.command_id); // stage
         // Drop what the read model holds of the person; the vault forgot the rest.
         lock(&r).remove(&evt.aggregate_id);
         async { Ok(()) }
     });
-    // #endregion project-forgotten
 
     #[derive(Deserialize)]
     struct GetPerson {
@@ -533,7 +472,6 @@ fn people(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
 /// break it, to show an event it cannot handle parked.
 fn payments(bank_domain: &Domain, switches: &Switches) {
     let broken = Arc::clone(&switches.payments_broken); // stage
-    // #region reactor
     let payments_reactor = bank_domain.reactor("payments").park_after(1);
     payments_reactor.on("Paid", move |data: Payment, evt, ctx| {
         let broken = broken.load(SeqCst); // stage
@@ -549,12 +487,10 @@ fn payments(bank_domain: &Domain, switches: &Switches) {
             Ok(())
         }
     });
-    // #endregion reactor
 }
 
 /// The `rbac` middleware: only tellers may withdraw.
 fn rbac(bank_domain: &Domain) {
-    // #region rbac
     let rbac = bank_domain.read_model("rbac");
     rbac.middleware(MiddlewareOptions::new(&["Withdraw"]), |check| async move {
         // Before the command is queued: a refused one is never stored.
@@ -564,7 +500,6 @@ fn rbac(bank_domain: &Domain) {
         }
         Ok(())
     });
-    // #endregion rbac
 }
 
 /// The accounts read model built again from every event, by a subscription from position 0,
@@ -574,7 +509,6 @@ pub(super) async fn rebuild(
     kernable: &Kernable,
     head: u64,
 ) -> Result<(BTreeMap<String, Row>, BTreeMap<String, i64>), BoxError> {
-    // #region rebuild
     let rows: Arc<Mutex<BTreeMap<String, Row>>> = Arc::default();
     let paid_in: Arc<Mutex<BTreeMap<String, i64>>> = Arc::default();
     let (r, p) = (Arc::clone(&rows), Arc::clone(&paid_in));
@@ -619,7 +553,6 @@ pub(super) async fn rebuild(
             Ok(())
         }
     });
-    // #endregion rebuild
     while subscription.position() < head {
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
     }
@@ -645,7 +578,6 @@ pub(super) async fn send(
     data: Value,
     (query, who): (&str, &str),
 ) -> Sent {
-    // #region client
     // Who sends it: the request context travels signed with the command.
     let who = RequestContext {
         sender_identity: who.to_owned(),
@@ -660,7 +592,6 @@ pub(super) async fn send(
     let returned = Instant::now(); // stage
     let get = Query::new("bank", query).data(json!({ "id": id }));
     let answer: Result<Value, _> = kernable.query(get).await;
-    // #endregion client
     Sent {
         outcome,
         returned,

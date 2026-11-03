@@ -2,6 +2,9 @@
 
 use super::bank::Parts;
 
+/// Intentions by node: `("worker", "Open an account only once.")`.
+pub(super) type Intents = &'static [(&'static str, &'static str)];
+
 /// A scene of the Stage: steps on the bank parts it runs, shown with one read model.
 pub(super) struct Scene {
     pub title: &'static str,
@@ -20,6 +23,9 @@ pub(super) struct Scene {
     pub parts: Parts,
     /// Nodes the flow diagram shows besides client, kernel, worker, store and read model.
     pub nodes: &'static [&'static str],
+    /// What each part of the system wants in this scene, in plain words, by node; a step's own
+    /// intentions come first.
+    pub intents: Intents,
     pub steps: &'static [Step],
 }
 
@@ -27,8 +33,8 @@ pub(super) struct Scene {
 pub(super) struct Step {
     pub title: &'static str,
     pub says: &'static str,
-    /// The regions of `bank.rs` the code panel shows, the handler first.
-    pub code: &'static [&'static str],
+    /// What a part wants in this step only, by node (the worker's rule for this command).
+    pub intents: Intents,
     pub does: Does,
 }
 
@@ -134,29 +140,41 @@ pub(super) const SCENES: &[Scene] = &[
         query: "GetAccount",
         parts: ACCOUNTS,
         nodes: &[],
+        intents: &[
+            ("client", "Send a signed command, then read right after it."),
+            (
+                "kernel",
+                "Run one command per aggregate at a time; store what the worker decides.",
+            ),
+            (
+                "store",
+                "Keep every event: append only, signed, chained to the one before.",
+            ),
+            ("model", "Show each account with its balance."),
+        ],
         steps: &[
             Step {
                 title: "Open an account",
                 says: "A client opens an account for Ada. The worker decides, the kernel stores the event, the read model shows it.",
-                code: &["open", "project-opened", "client"],
+                intents: &[("worker", "Open an account only once.")],
                 does: sends(&[send("a1", "OpenAccount", r#"{"owner":"Ada"}"#)]),
             },
             Step {
                 title: "Deposit 100",
                 says: "The submit returns only once the read model has the event, so the query right after it already sees the new balance.",
-                code: &["deposit", "project-deposited", "client"],
+                intents: &[("worker", "Deposit positive amounts into open accounts.")],
                 does: sends(&[send("a1", "Deposit", r#"{"amount":100}"#)]),
             },
             Step {
                 title: "Withdraw 500",
                 says: "The worker rejects the command. Nothing is stored: no event, no change in the read model.",
-                code: &["withdraw", "client"],
+                intents: &[("worker", "Never withdraw more than the balance.")],
                 does: sends(&[send("a1", "Withdraw", r#"{"amount":500}"#)]),
             },
             Step {
                 title: "Withdraw 30",
                 says: "The balance comes from the events alone: 100 deposited, 30 withdrawn. Every event is signed and chained to the one before.",
-                code: &["withdraw", "project-withdrawn", "events", "query"],
+                intents: &[("worker", "Never withdraw more than the balance.")],
                 does: sends(&[send("a1", "Withdraw", r#"{"amount":30}"#)]),
             },
         ],
@@ -176,23 +194,36 @@ pub(super) const SCENES: &[Scene] = &[
             ..NONE
         },
         nodes: &[],
+        intents: &[
+            ("client", "Send a signed command, then read right after it."),
+            ("kernel", "Never let two customers hold one username."),
+            (
+                "store",
+                "Keep every event: append only, signed, chained to the one before.",
+            ),
+            ("model", "Show each customer with their username."),
+            (
+                "worker",
+                "Register a customer once. The username is the kernel's job.",
+            ),
+        ],
         steps: &[
             Step {
                 title: "Ada registers as ada",
                 says: "The customer aggregate declares its username unique. With the event, the kernel stores that c1 now holds the key.",
-                code: &["register", "customer-key", "project-registered"],
+                intents: &[],
                 does: sends(&[send("c1", "Register", r#"{"name":"Ada","username":"ada"}"#)]),
             },
             Step {
                 title: "Bob wants ada too",
                 says: "The worker accepts: it never looks the username up. The kernel refuses the commit, because c1 holds the key.",
-                code: &["register", "customer-key", "client"],
+                intents: &[],
                 does: sends(&[send("c2", "Register", r#"{"name":"Bob","username":"ADA"}"#)]),
             },
             Step {
                 title: "The race: Cleo and Dan, one username",
                 says: "Two customers claim cleo at the same moment. Both workers accept; the kernel commits one at a time, so exactly one wins.",
-                code: &["register", "customer-key", "project-registered"],
+                intents: &[],
                 does: Does::Send {
                     sends: &[
                         send("c3", "Register", r#"{"name":"Cleo","username":"cleo"}"#),
@@ -204,7 +235,7 @@ pub(super) const SCENES: &[Scene] = &[
             Step {
                 title: "Ada changes her username",
                 says: "The key follows the state: once c1 is ada.lovelace, it no longer holds ada, in the same commit as the event.",
-                code: &["rename", "customer-key", "project-renamed"],
+                intents: &[("worker", "Let a registered customer change their username.")],
                 does: sends(&[send(
                     "c1",
                     "ChangeUsername",
@@ -214,7 +245,7 @@ pub(super) const SCENES: &[Scene] = &[
             Step {
                 title: "Bob tries again",
                 says: "The same command as before now commits: ada is free. No cleanup job, no claims table, no compensation.",
-                code: &["register", "customer-key", "project-registered"],
+                intents: &[],
                 does: sends(&[send("c2", "Register", r#"{"name":"Bob","username":"ada"}"#)]),
             },
         ],
@@ -234,11 +265,30 @@ pub(super) const SCENES: &[Scene] = &[
             ..ACCOUNTS
         },
         nodes: &["reactor"],
+        intents: &[
+            ("client", "Send a signed command, then read right after it."),
+            (
+                "kernel",
+                "Commit a payment only while the receiving account is open.",
+            ),
+            (
+                "store",
+                "Keep every event: append only, signed, chained to the one before.",
+            ),
+            (
+                "model",
+                "Show each account, its balance, and whether it is open.",
+            ),
+            (
+                "reactor",
+                "Credit every payment to its receiver, exactly once.",
+            ),
+        ],
         steps: &[
             Step {
                 title: "Two accounts",
                 says: "Ada opens a1 and deposits 100; Bob opens a2.",
-                code: &["open", "deposit", "fact"],
+                intents: &[("worker", "Open accounts and take deposits.")],
                 does: sends(&[
                     send("a1", "OpenAccount", r#"{"owner":"Ada"}"#),
                     send("a1", "Deposit", r#"{"amount":100}"#),
@@ -248,19 +298,19 @@ pub(super) const SCENES: &[Scene] = &[
             Step {
                 title: "Ada pays Bob 30",
                 says: "The payment requires a2 to hold the fact open; it does. A reactor then credits a2, with a command of its own.",
-                code: &["pay", "fact", "reactor"],
+                intents: &[("worker", "Pay only what the balance covers.")],
                 does: sends(&[send("a1", "Pay", r#"{"to":"a2","amount":30}"#)]),
             },
             Step {
                 title: "Bob closes a2",
                 says: "With AccountClosed, a2 no longer holds the fact open: the kernel stores that with the event.",
-                code: &["close", "fact", "project-closed"],
+                intents: &[("worker", "Close an account that is open.")],
                 does: sends(&[send("a2", "Close", "{}")]),
             },
             Step {
                 title: "Ada pays Bob again",
                 says: "The worker of a1 accepts: it knows nothing about a2. The kernel refuses the commit: a2 does not hold open.",
-                code: &["pay", "fact", "client"],
+                intents: &[("worker", "Pay only what the balance covers.")],
                 does: sends(&[send("a1", "Pay", r#"{"to":"a2","amount":30}"#)]),
             },
         ],
@@ -280,11 +330,24 @@ pub(super) const SCENES: &[Scene] = &[
         query: "GetAccount",
         parts: ACCOUNTS,
         nodes: &[],
+        intents: &[
+            ("client", "Send all deposits at once."),
+            (
+                "kernel",
+                "Queue commands per account: one at a time, in order; accounts in parallel.",
+            ),
+            ("worker", "Add each deposit to the balance it sees."),
+            (
+                "store",
+                "Keep every event: append only, signed, chained to the one before.",
+            ),
+            ("model", "Show each account with its balance."),
+        ],
         steps: &[
             Step {
                 title: "200 deposits into one account",
                 says: "All at the same moment, into h1. The kernel queues them per aggregate and hands h1 to the worker one command at a time.",
-                code: &["deposit", "project-deposited"],
+                intents: &[],
                 does: Does::Act(Act::Burst {
                     accounts: &["h1"],
                     n: 200,
@@ -293,7 +356,7 @@ pub(super) const SCENES: &[Scene] = &[
             Step {
                 title: "200 deposits into 20 accounts",
                 says: "Different aggregates run in parallel: the same 200 deposits, spread over s1 to s20.",
-                code: &["deposit", "project-deposited"],
+                intents: &[],
                 does: Does::Act(Act::Burst {
                     accounts: &[
                         "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "s12",
@@ -316,11 +379,21 @@ pub(super) const SCENES: &[Scene] = &[
         query: "GetAccount",
         parts: ACCOUNTS,
         nodes: &[],
+        intents: &[
+            ("client", "Resend what failed, with the same command ID."),
+            (
+                "kernel",
+                "Answer a command ID seen before with its stored result; run it only once.",
+            ),
+            ("worker", "Add each deposit to the balance it sees."),
+            ("store", "Keep what was committed through any crash."),
+            ("model", "Show each account with its balance."),
+        ],
         steps: &[
             Step {
                 title: "Three accounts",
                 says: "a1, a2 and a3 are opened.",
-                code: &["open", "project-opened"],
+                intents: &[("worker", "Open an account only once.")],
                 does: sends(&[
                     send("a1", "OpenAccount", r#"{"owner":"Ada"}"#),
                     send("a2", "OpenAccount", r#"{"owner":"Bob"}"#),
@@ -330,13 +403,13 @@ pub(super) const SCENES: &[Scene] = &[
             Step {
                 title: "kill -9 during 300 deposits",
                 says: "The kernel dies mid-way, with commands queued, leased to the worker, and half committed. Then it starts again on the same store.",
-                code: &["deposit", "client"],
+                intents: &[],
                 does: Does::Act(Act::Crash { n: 300 }),
             },
             Step {
                 title: "Verify the store",
                 says: "kernable verify recomputes the hash chain and checks every signature: the crash left no gap and no torn event.",
-                code: &["deposit"],
+                intents: &[],
                 does: Does::Act(Act::Verify),
             },
         ],
@@ -353,11 +426,23 @@ pub(super) const SCENES: &[Scene] = &[
         query: "GetAccount",
         parts: ACCOUNTS,
         nodes: &[],
+        intents: &[
+            ("client", "Send a signed command, then read right after it."),
+            (
+                "kernel",
+                "Run one command per aggregate at a time; store what the worker decides.",
+            ),
+            ("store", "Sign and chain every event, so any change shows."),
+            ("model", "Show each account with its balance."),
+        ],
         steps: &[
             Step {
                 title: "An account with history",
                 says: "a1 is opened, 100 deposited, 30 withdrawn.",
-                code: &["open", "deposit", "withdraw"],
+                intents: &[(
+                    "worker",
+                    "Open, deposit, withdraw: each checked against the balance.",
+                )],
                 does: sends(&[
                     send("a1", "OpenAccount", r#"{"owner":"Ada"}"#),
                     send("a1", "Deposit", r#"{"amount":100}"#),
@@ -367,13 +452,13 @@ pub(super) const SCENES: &[Scene] = &[
             Step {
                 title: "Change event #2 in the database",
                 says: "With SQL, straight in the file: the deposit of 100 becomes 1,000,000. SQLite accepts it; nothing else notices.",
-                code: &["deposit"],
+                intents: &[],
                 does: Does::Act(Act::Tamper { position: 2 }),
             },
             Step {
                 title: "Verify the store",
                 says: "kernable verify recomputes every hash and checks every signature, and names the event that was changed.",
-                code: &["deposit"],
+                intents: &[],
                 does: Does::Act(Act::Verify),
             },
         ],
@@ -393,11 +478,26 @@ pub(super) const SCENES: &[Scene] = &[
             ..NONE
         },
         nodes: &[],
+        intents: &[
+            (
+                "client",
+                "Send name and email; the SDK seals them for the vault.",
+            ),
+            (
+                "kernel",
+                "Keep personal fields in the vault, per person; erase them on request.",
+            ),
+            ("store", "Keep references to personal data, never the data."),
+            (
+                "model",
+                "Show each person while they exist; forget them when asked.",
+            ),
+        ],
         steps: &[
             Step {
                 title: "Ada is onboarded",
                 says: "The handler gets name and email in clear. The stored command and event hold references; the values are in the vault.",
-                code: &["onboard", "personal", "project-onboarded"],
+                intents: &[("worker", "Onboard a person once.")],
                 does: sends(&[send(
                     "p1",
                     "Onboard",
@@ -407,7 +507,7 @@ pub(super) const SCENES: &[Scene] = &[
             Step {
                 title: "Bob is onboarded",
                 says: "Each person's values are encrypted on their own, so one can be erased without touching the others.",
-                code: &["onboard", "personal", "project-onboarded"],
+                intents: &[("worker", "Onboard a person once.")],
                 does: sends(&[send(
                     "p2",
                     "Onboard",
@@ -417,7 +517,7 @@ pub(super) const SCENES: &[Scene] = &[
             Step {
                 title: "Forget Ada",
                 says: "PersonForgotten erases everything of p1 in the vault: in every event and command, at once. The events themselves stay.",
-                code: &["forget", "personal", "project-forgotten"],
+                intents: &[("worker", "Forget a person who exists.")],
                 does: sends(&[send("p1", "Forget", "{}")]),
             },
         ],
@@ -437,11 +537,27 @@ pub(super) const SCENES: &[Scene] = &[
             ..ACCOUNTS
         },
         nodes: &["middleware"],
+        intents: &[
+            (
+                "client",
+                "Say who sends the command: it travels signed with it.",
+            ),
+            ("middleware", "Only tellers may withdraw."),
+            (
+                "kernel",
+                "Ask the middleware before queuing; refuse while it is away.",
+            ),
+            (
+                "store",
+                "Keep every event: append only, signed, chained to the one before.",
+            ),
+            ("model", "Show each account with its balance."),
+        ],
         steps: &[
             Step {
                 title: "An account with 100",
                 says: "A teller opens a1 and deposits 100.",
-                code: &["open", "deposit"],
+                intents: &[("worker", "Open an account, take deposits.")],
                 does: sends(&[
                     send_as("teller", "a1", "OpenAccount", r#"{"owner":"Ada"}"#),
                     send_as("teller", "a1", "Deposit", r#"{"amount":100}"#),
@@ -450,19 +566,19 @@ pub(super) const SCENES: &[Scene] = &[
             Step {
                 title: "Ada withdraws herself",
                 says: "The middleware refuses: ada is not a teller. The kernel never queues the command; no worker sees it.",
-                code: &["rbac", "client"],
+                intents: &[("worker", "Never withdraw more than the balance.")],
                 does: sends(&[send_as("ada", "a1", "Withdraw", r#"{"amount":30}"#)]),
             },
             Step {
                 title: "A teller withdraws",
                 says: "The same command from a teller passes the middleware, then runs as usual.",
-                code: &["rbac", "withdraw"],
+                intents: &[("worker", "Never withdraw more than the balance.")],
                 does: sends(&[send_as("teller", "a1", "Withdraw", r#"{"amount":30}"#)]),
             },
             Step {
                 title: "The middleware goes away",
                 says: "With the middleware stopped, the kernel refuses everything it covers, also from a teller: it fails closed, never open.",
-                code: &["rbac"],
+                intents: &[],
                 does: Does::Act(Act::FailClosed),
             },
         ],
@@ -482,11 +598,27 @@ pub(super) const SCENES: &[Scene] = &[
             ..ACCOUNTS
         },
         nodes: &["reactor"],
+        intents: &[
+            ("client", "Send a signed command, then read right after it."),
+            (
+                "kernel",
+                "Park what a reactor cannot handle; keep everything else moving.",
+            ),
+            (
+                "reactor",
+                "Credit every payment to its receiver, exactly once.",
+            ),
+            (
+                "store",
+                "Keep every event: append only, signed, chained to the one before.",
+            ),
+            ("model", "Show each account with its balance."),
+        ],
         steps: &[
             Step {
                 title: "Two accounts",
                 says: "Ada opens a1 and deposits 100; Bob opens a2.",
-                code: &["open", "deposit"],
+                intents: &[("worker", "Open accounts and take deposits.")],
                 does: sends(&[
                     send("a1", "OpenAccount", r#"{"owner":"Ada"}"#),
                     send("a1", "Deposit", r#"{"amount":100}"#),
@@ -496,25 +628,25 @@ pub(super) const SCENES: &[Scene] = &[
             Step {
                 title: "Ada pays Bob 30",
                 says: "The payments reactor sees Paid and credits a2 with a command of its own, under a fixed ID.",
-                code: &["pay", "reactor", "credit"],
+                intents: &[("worker", "Pay only what the balance covers.")],
                 does: sends(&[send("a1", "Pay", r#"{"to":"a2","amount":30}"#)]),
             },
             Step {
                 title: "The payments service fails",
                 says: "From now on, the reactor's handler throws, like a service that is down.",
-                code: &["reactor"],
+                intents: &[],
                 does: Does::Act(Act::Break),
             },
             Step {
                 title: "Ada pays Bob 20",
                 says: "The payment commits. The reactor fails, so the kernel parks the event for it; the read model goes on.",
-                code: &["pay", "reactor"],
+                intents: &[("worker", "Pay only what the balance covers.")],
                 does: sends(&[send("a1", "Pay", r#"{"to":"a2","amount":20}"#)]),
             },
             Step {
                 title: "Fix it and retry",
                 says: "The service is back; an operator retries the parked event. The credit happens exactly once.",
-                code: &["reactor", "credit"],
+                intents: &[],
                 does: Does::Act(Act::FixAndRetry),
             },
         ],
@@ -531,23 +663,35 @@ pub(super) const SCENES: &[Scene] = &[
         query: "GetAccount",
         parts: ACCOUNTS,
         nodes: &[],
+        intents: &[
+            ("client", "Sign every command with this app's own key."),
+            (
+                "kernel",
+                "Accept only keys the root key granted and nobody revoked.",
+            ),
+            (
+                "store",
+                "Keep every event: append only, signed, chained to the one before.",
+            ),
+            ("model", "Show each account with its balance."),
+        ],
         steps: &[
             Step {
                 title: "An account",
                 says: "Ada opens a1.",
-                code: &["open"],
+                intents: &[("worker", "Open an account only once.")],
                 does: sends(&[send("a1", "OpenAccount", r#"{"owner":"Ada"}"#)]),
             },
             Step {
                 title: "A mobile app gets a key",
                 says: "kernable keys new mobile, then kernable grant: it may deposit and query in bank, nothing else. It deposits 10.",
-                code: &["deposit"],
+                intents: &[],
                 does: Does::Act(Act::NewKey),
             },
             Step {
                 title: "The key leaks: revoke it",
                 says: "kernable revoke, signed by the root key. The kernel refuses the mobile key at once; the other keys go on.",
-                code: &["deposit"],
+                intents: &[],
                 does: Does::Act(Act::Revoke),
             },
         ],
@@ -564,11 +708,23 @@ pub(super) const SCENES: &[Scene] = &[
         query: "GetAccount",
         parts: ACCOUNTS,
         nodes: &[],
+        intents: &[
+            ("client", "Send a signed command, then read right after it."),
+            (
+                "kernel",
+                "Run one command per aggregate at a time; store what the worker decides.",
+            ),
+            ("store", "Keep the whole history, in order."),
+            (
+                "model",
+                "Hold nothing the events do not: rebuild from them at any time.",
+            ),
+        ],
         steps: &[
             Step {
                 title: "Some history",
                 says: "Two accounts with deposits and withdrawals.",
-                code: &["deposit", "withdraw"],
+                intents: &[("worker", "Open accounts, take deposits and withdrawals.")],
                 does: sends(&[
                     send("a1", "OpenAccount", r#"{"owner":"Ada"}"#),
                     send("a1", "Deposit", r#"{"amount":100}"#),
@@ -581,7 +737,7 @@ pub(super) const SCENES: &[Scene] = &[
             Step {
                 title: "Rebuild it from the events",
                 says: "A new read model subscribes from position 0, replays the whole history and compares its rows with the live read model.",
-                code: &["rebuild"],
+                intents: &[],
                 does: Does::Act(Act::Rebuild),
             },
         ],
