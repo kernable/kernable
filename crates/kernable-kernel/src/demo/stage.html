@@ -768,7 +768,7 @@ async function drawChart(chart, until) {
   chartDrawn = until;
 }
 
-// Up to six events as linked blocks: `changed` drawn red, `scan` walks verify along them and
+// Up to five events as linked blocks: `changed` drawn red, `scan` walks verify along them and
 // marks each as it checks, `bad` are the ones verify named.
 async function drawChain(opts, events) {
   clearVisual();
@@ -776,9 +776,9 @@ async function drawChain(opts, events) {
   if (!events.length) return;
   const focus = (opts.bad && opts.bad[0]) || opts.changed || events[events.length - 1].position;
   const at = Math.max(0, events.findIndex((e) => e.position === focus));
-  const start = Math.max(0, Math.min(at - 2, events.length - 6));
-  const shown = events.slice(start, start + 6);
-  const W = 118, GAP = 32, total = shown.length * W + (shown.length - 1) * GAP, X = (900 - total) / 2, Y = 130;
+  const start = Math.max(0, Math.min(at - 2, events.length - 5));
+  const shown = events.slice(start, start + 5);
+  const W = 142, GAP = 34, total = shown.length * W + (shown.length - 1) * GAP, X = (900 - total) / 2, Y = 130;
   g.append(el("svg:text", { x: 450, y: 70, "text-anchor": "middle", class: "chart-title" },
     opts.scan || opts.done ? "kernable verify: recompute each hash, check each signature" : "The hash chain: each event's hash covers its content and the hash before"));
   const blocks = shown.map((e, i) => {
@@ -789,8 +789,8 @@ async function drawChain(opts, events) {
     const block = el("svg:g", { class: `block${changed ? " changed" : ""}` },
       el("svg:rect", { x: bx, y: Y, width: W, height: 130, rx: 10 }),
       el("svg:text", { x: bx + 12, y: Y + 26, class: "pos" }, `#${e.position}`),
-      el("svg:text", { x: bx + 12, y: Y + 50, class: "type" }, e.type.length > 14 ? `${e.type.slice(0, 13)}…` : e.type),
-      el("svg:text", { x: bx + 12, y: Y + 74, class: changed ? "data changed" : "data" }, amount.length > 16 ? `${amount.slice(0, 15)}…` : amount),
+      el("svg:text", { x: bx + 12, y: Y + 50, class: "type" }, e.type.length > 13 ? `${e.type.slice(0, 12)}…` : e.type),
+      el("svg:text", { x: bx + 12, y: Y + 74, class: changed ? "data changed" : "data" }, amount.length > 14 ? `${amount.slice(0, 13)}…` : amount),
       el("svg:text", { x: bx + 12, y: Y + 108, class: "hash" }, `${e.hash.slice(0, 10)}…`));
     if (i > 0) g.append(el("svg:path", { d: `M${bx - GAP + 2} ${Y + 65} L${bx - 4} ${Y + 65}`, class: "link" }),
       el("svg:text", { x: bx - GAP / 2, y: Y + 52, "text-anchor": "middle", class: "tick small" }, "prev"));
