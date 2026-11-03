@@ -25,12 +25,21 @@ pub const STATE_POINTS: &[&str] = &[
     "revocation.stored", // a revocation is stored, the key is not refused yet
 ];
 
+/// The crash points of replication: on the primary, and on the standby.
+pub const REPLICATION_POINTS: &[&str] = &[
+    "replication.sent", // the primary sent records to the standby, nobody was told of them
+    "standby.applied",  // the standby applied and synced records, not acknowledged, vault not swept
+    "standby.imaging",  // the standby applied part of an image
+];
+
 #[cfg(feature = "crash-points")]
 pub(crate) fn point(name: &str) {
     use std::sync::OnceLock;
     static AT: OnceLock<Option<String>> = OnceLock::new();
     debug_assert!(
-        POINTS.contains(&name) || STATE_POINTS.contains(&name),
+        POINTS.contains(&name)
+            || STATE_POINTS.contains(&name)
+            || REPLICATION_POINTS.contains(&name),
         "unknown crash point {name}"
     );
     if AT

@@ -71,7 +71,7 @@ kernable keys new standby-kernel   # signs the checkpoints it writes once promot
 kernable keys new standby-vault    # encrypts its vault
 ```
 
-`replicate` lets a key receive everything: every event, command and file, and every vault value in plaintext. Keep `standby.key` as carefully as the root key, and run replication over mutual TLS only (see [Mutual TLS](./tls)).
+`replicate` lets a key receive everything: every event, command and file, and every vault value in plaintext. Keep `standby.key` as carefully as the root key, and run replication over mutual TLS only (see [Mutual TLS](./tls)). Revoke it, and the standby's stream ends at once; in a pair, the primary commits alone, so the revoked key can never take its place.
 
 The standby encrypts its vault with its own key; no secret is copied between the machines.
 

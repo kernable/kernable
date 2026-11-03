@@ -379,3 +379,20 @@ async fn a_standby_whose_log_diverged_moves_its_stores_aside_and_starts_over() {
         "the diverged store is kept aside: {aside:?}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_standby_whose_key_is_revoked_follows_no_longer() {
+    let dir = Dir::new("revoked");
+    let mut primary_config = config(&dir.0, "primary", 3);
+    primary_config.replication.sync = true;
+    let primary = open(&primary_config).await;
+    let standby_config = standby_config(&dir.0, &primary_config);
+    let following = tokio::spawn(standby::run(standby_config.clone()));
+    until("the standby is in sync", || primary.readiness().is_ok()).await;
+    primary.revoke(&id(&key(7)), 0).unwrap();
+    until("the revoked standby is no longer in sync", || {
+        primary.readiness().is_err()
+    })
+    .await;
+    following.abort();
+}

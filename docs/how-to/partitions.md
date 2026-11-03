@@ -62,6 +62,18 @@ Give every process the address of one partition (or of all, comma-separated): th
 
 A subscription reads every partition too, from their beginnings, with events in order within a partition but not across them.
 
+## What it gains
+
+Every partition commits on its own, so throughput grows with partitions on machines of their own. Measured on one Apple M2 Max (12 CPUs, one SSD), where every partition also brings its worker and a load generator of 64 clients, so all of them share the same CPUs and disk (`bench/partitions.sh`, results in `bench/`):
+
+| Store, durability | 1 partition | 2 | 3 | 4 |
+|---|---|---|---|---|
+| SQLite, `normal` | 7,008/s | 10,279/s | 11,820/s | 12,287/s |
+| file log, `normal` | 12,670/s | 19,217/s | 20,909/s | 21,456/s |
+| SQLite, `full` | 3,052/s | 3,042/s | 3,675/s | 4,062/s |
+
+On one machine, two partitions give about 1.5 times one; beyond that the shared CPUs and disk are the limit, not kernable. Measure your own machines.
+
 ## What happens when
 
 | When | What happens |

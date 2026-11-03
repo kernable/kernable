@@ -46,3 +46,7 @@ getrandom.workspace = true
 [[test]]
 name = "crashes"
 required-features = ["crash-points"]
+
+[[test]]
+name = "replication_crashes"
+required-features = ["crash-points"]

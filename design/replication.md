@@ -111,7 +111,7 @@ Found and fixed on the way:
 - **No failover under load.** The primary reported its standby in sync only when it had acknowledged the very head, which under steady load never happens: the witness never named it, and a claim was always refused. It now reports it once the standby holds everything that may have been told without it (the head when the primary stopped committing alone, or when it started); a primary alone waits for its standby again once it holds what existed at the last look.
 - **Slow lookups in the file log.** Each read of the records after a standby's head read forward from the last mark, up to 1,023 records; the newest records' places are now kept as well.
 
-Not built: crash points inside the replication code, and replication in the model-based test and the soak.
+Crash points (`replication.sent` on the primary, `standby.applied` and `standby.imaging` on the standby; `tests/replication_crashes.rs`, 8 rounds each without a loss) built the same evening. Revocations: a standby whose key is revoked loses its stream, and a primary whose in-sync standby is revoked commits alone first, so the witness never lets a revoked key take over (the witness itself keeps no revocations). Not built: replication in the model-based test and the soak, a second standby.
 
 ## Cost
 

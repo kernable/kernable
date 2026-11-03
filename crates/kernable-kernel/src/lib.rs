@@ -388,6 +388,11 @@ impl Kernel {
     }
 
     /// Since when `key_id` is revoked (ms since epoch), if it is.
+    /// Whether `key_id` is revoked.
+    pub(crate) fn revoked(&self, key_id: &str) -> bool {
+        self.revoked_since(key_id).is_some()
+    }
+
     fn revoked_since(&self, key_id: &str) -> Option<i64> {
         let revoked = self.revoked.lock().unwrap_or_else(PoisonError::into_inner);
         revoked.get(key_id).copied()

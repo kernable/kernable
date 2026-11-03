@@ -380,6 +380,7 @@ async fn take_image(
                 let stores = standby.stores();
                 let keys = standby.follow.primary_kernel_keys.clone();
                 tokio::task::spawn_blocking(move || apply_image(&stores, batch, &keys)).await??;
+                crate::crash::point("standby.imaging");
             }
             Some(follow_response::Msg::ImageEnd(ImageEnd { seq, hash })) => {
                 let stores = standby.stores();
@@ -534,6 +535,7 @@ fn apply(stores: &Stores, batch: RecordBatch, keys: &[String]) -> Result<u64, Bo
     }
     store.apply(&batch.records)?;
     store.sync()?;
+    crate::crash::point("standby.applied");
     let Some(vault) = &stores.vault else {
         return Ok(last);
     };

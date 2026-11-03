@@ -252,7 +252,13 @@ async fn keep_lease(
                 Err(e) => tracing::warn!(error = %e, "telling the witness failed"),
             }
         }
-        if !primary.alone() && progress.elapsed() >= timeout {
+        // A standby the witness names in sync whose key was revoked must not take over: the
+        // primary commits alone, which the witness records first.
+        let revoked = !reported.is_empty() && kernel.revoked(&reported);
+        if revoked && primary.alone() {
+            reported = String::new();
+        }
+        if !primary.alone() && (progress.elapsed() >= timeout || revoked) {
             match link.ask(WitnessOp::Alone, term, "").await {
                 Ok(a) if a.granted => {
                     reported = String::new();

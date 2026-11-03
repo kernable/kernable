@@ -319,6 +319,7 @@ async fn run(
 
     let mut tick = tokio::time::interval(TICK);
     let mut pruned = 0;
+    let mut changes = kernel.changes();
     loop {
         if sent < primary.acked_seq() + AHEAD {
             let records = kernel
@@ -346,6 +347,7 @@ async fn run(
                     }),
                 )
                 .await?;
+                crate::crash::point("replication.sent");
                 continue;
             }
         }
@@ -374,6 +376,14 @@ async fn run(
                 Some(_) => return Err(Status::invalid_argument("unexpected message")),
             },
             () = primary.wrote.notified() => {}
+            Ok(()) = changes.changed() => {
+                // A revoked key, or a grant without replicate: the standby follows no longer.
+                if !config::allowed(&kernel.permissions().replicate, &hello.key_id, "*") {
+                    return Err(Status::permission_denied(
+                        "the standby's key may follow no longer: revoked, or its grant changed",
+                    ));
+                }
+            }
             _ = tick.tick() => {}
         }
     }

@@ -687,7 +687,7 @@ impl Requests {
             Target::Query => {
                 let mut q = QueryRequest {
                     query_id: format!("{}-{i}", self.run),
-                    tenant_id: "bench".into(),
+                    tenant_id: tenant(),
                     domain: "bench".into(),
                     query_type: "Get".into(),
                     payload: self.payload.clone(),
@@ -811,11 +811,20 @@ async fn history(addr: &str, key: &str, events: usize) -> Result<(), BoxError> {
 
 // ---- helpers ----
 
+/// The tenant of the load's commands and queries: `KERNABLE_BENCH_TENANT`, else `bench` (with
+/// partitions, each load generator writes its partition's tenant).
+fn tenant() -> String {
+    static TENANT: OnceLock<String> = OnceLock::new();
+    TENANT
+        .get_or_init(|| std::env::var("KERNABLE_BENCH_TENANT").unwrap_or_else(|_| "bench".into()))
+        .clone()
+}
+
 fn command(run: &str, i: usize, aggregates: usize, payload: &[u8]) -> Command {
     Command {
         vault_refs: Vec::new(),
         command_id: format!("{run}-{i}"),
-        tenant_id: "bench".into(),
+        tenant_id: tenant(),
         domain: "bench".into(),
         aggregate_type: "Bench".into(),
         aggregate_id: format!("a{}", i % aggregates.max(1)),

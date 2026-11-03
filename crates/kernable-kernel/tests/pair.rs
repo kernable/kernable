@@ -400,3 +400,42 @@ async fn a_primary_the_witness_replaced_stops() {
         .unwrap();
     assert!(why.contains("deposed"), "{why}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revoked_standby_is_not_named_in_sync() {
+    let dir = std::env::temp_dir().join(format!("kn-pair-revoked-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = Dir(dir);
+    let state = dir.0.join("witness.state");
+    tokio::spawn(witness::run(WitnessConfig {
+        listen: format!("unix:{}", dir.0.join("witness.sock").display()),
+        roots: vec![id(&root())],
+        state: state.clone(),
+        lease_ms: LEASE_MS,
+        tls: None,
+    }));
+    wait_for(&format!("unix:{}", dir.0.join("witness.sock").display())).await;
+    let (a_config, b_config) = (
+        node_config(&dir.0, "a", 3, 11),
+        node_config(&dir.0, "b", 8, 12),
+    );
+    let _plugs = (
+        Plug::new(&dir.0.join("a-plug.sock"), &dir.0.join("a.sock")),
+        Plug::new(&dir.0.join("b-plug.sock"), &dir.0.join("b.sock")),
+    );
+    let (_a_task, a_primary) = run_node(a_config);
+    let a = a_primary.await.unwrap();
+    let (_b_task, _b_primary) = run_node(b_config);
+    let witnessed = || {
+        Witness::open(&state, Duration::from_millis(LEASE_MS))
+            .unwrap()
+            .state()
+    };
+    until("B is in sync", || witnessed().in_sync == id(&key(12))).await;
+    a.revoke(&id(&key(12)), 0).unwrap();
+    until("the witness no longer names B", || {
+        witnessed().in_sync.is_empty()
+    })
+    .await;
+}

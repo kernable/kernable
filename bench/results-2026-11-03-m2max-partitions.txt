@@ -1,0 +1,19 @@
+== Apple M2 Max, 12 CPUs, 2026-11-03, store=sqlite, durability=full
+partitions=1 total=3052/s  ( p1=3052/s )  p99=40.14ms
+partitions=2 total=3042/s  ( p1=1526/s p2=1516/s )  p99=73.37ms
+partitions=3 total=3675/s  ( p1=1223/s p2=1231/s p3=1221/s )  p99=110.76ms
+partitions=4 total=4062/s  ( p1=1009/s p2=1021/s p3=1012/s p4=1020/s )  p99=177.71ms
+== Apple M2 Max, 12 CPUs, 2026-11-03, store=sqlite, durability=normal
+partitions=1 total=7008/s  ( p1=7008/s )  p99=11.89ms
+partitions=2 total=10279/s  ( p1=5139/s p2=5140/s )  p99=15.79ms
+partitions=3 total=11820/s  ( p1=3956/s p2=3927/s p3=3937/s )  p99=21.88ms
+partitions=4 total=12287/s  ( p1=3087/s p2=3080/s p3=3082/s p4=3038/s )  p99=27.48ms
+== Apple M2 Max, 12 CPUs, 2026-11-03, store=file, durability=normal
+partitions=1 total=12670/s  ( p1=12670/s )  p99=6.87ms
+partitions=2 total=19217/s  ( p1=9599/s p2=9618/s )  p99=10.33ms
+partitions=3 total=20909/s  ( p1=6984/s p2=6959/s p3=6966/s )  p99=14.27ms
+partitions=4 total=21456/s  ( p1=5343/s p2=5349/s p3=5379/s p4=5385/s )  p99=18.27ms
+
+# Every partition here brings a kernel, a Rust worker and a load generator of 64 clients, all on
+# one machine's 12 CPUs and one SSD: 1 -> 2 partitions gives about 1.5x, then the shared CPUs
+# (normal) and the shared disk (full) are the limit. On separate machines each partition has its own.
