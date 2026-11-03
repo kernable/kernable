@@ -92,6 +92,13 @@
   #rejections tr.row { cursor: pointer; } #rejections tr.row:hover td, #rejections tr.open td { background: var(--bg); }
   #rejections td.wide { padding-top: 0; }
   .code { color: var(--bad); font-weight: 600; }
+  .spark { display: flex; align-items: center; gap: 8px; }
+  .spark svg { display: block; overflow: visible; }
+  .spark .line { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .spark .base { stroke: var(--line); stroke-width: 1; }
+  .spark .mark { fill: var(--accent); stroke: var(--panel); stroke-width: 2; }
+  .spark .rule { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 2 2; }
+  .spark .say { color: var(--muted); font-size: 12px; white-space: nowrap; min-width: 150px; }
   .more { display: flex; gap: 12px; align-items: center; }
   .err { color: var(--bad); }
 </style>
@@ -357,7 +364,7 @@ function details(n) {
     row("key", short(i.key));
     if (i.parked) {
       const shown = i.parkedEvents.map((p) => `${p.position} ${p.type}: ${p.code}${p.message ? ` (${p.message})` : ""}, ${p.attempts}×, ${ago(p.parkedAt)}${p.retry ? ", retrying" : ""}`);
-      if (i.parked > shown.length) shown.push(`… ${i.parked - shown.length} more: kernable listeners parked`);
+      if (i.parked > shown.length) shown.push(`… ${i.parked - shown.length} more: Connections, Parked events`);
       row(`parked · ${i.parked}`, shown.join("\n"));
     }
   }
@@ -370,15 +377,97 @@ function drawConnections() {
   const workers = el("table", {}, el("tr", {}, ["Worker", "Service", "Aggregates", "Key", "Connected"].map((h) => el("th", {}, h))),
     s.instances.length ? s.instances.map((w) => el("tr", {}, el("td", { class: "mono" }, w.worker), el("td", {}, w.service || "–"), el("td", {}, w.aggregates.join(", ")), el("td", { class: "mono" }, short(w.key)), el("td", {}, ago(w.since))))
       : el("tr", {}, el("td", { colspan: 5, class: "meta" }, "No worker connected.")));
-  const listeners = el("table", {}, el("tr", {}, ["Listener", "Service", "Kind", "Position", "Key", "Connected"].map((h) => el("th", {}, h))),
+  const listeners = el("table", {}, el("tr", {}, ["Listener", "Service", "Kind", "Position", "Behind, last hour", "Key", "Connected"].map((h) => el("th", {}, h))),
     s.listeners.map((l) => el("tr", {},
       el("td", {}, el("i", { class: "dot", style: `background:${color(l.live ? "live" : !l.counts ? "dynamic" : !l.connected ? "missing" : l.position < head ? "behind" : "connected")};margin-right:8px` }), l.name),
       el("td", {}, l.service || "–"),
       el("td", {}, l.live ? "live" : l.middlewares.length ? `middleware (${l.middlewares.map((m) => m.when).join(", ")})` : "listener"),
       el("td", {}, `${l.position} / ${head}${l.connected && l.position < head ? ` · ${head - l.position} behind` : ""}${l.parked ? ` · ${l.parked} parked` : ""}`),
+      el("td", {}, spark(l.name)),
       el("td", { class: "mono" }, short(l.key)),
       el("td", {}, l.connected ? ago(l.since) : `no · last seen ${ago(l.lastSeen)}`))));
-  $("connections").replaceChildren(el("h2", {}, `Workers · ${s.instances.length}`), workers, el("h2", {}, `Listeners · ${s.listeners.length}`), listeners);
+  // Redrawn every second: the parked filter keeps its focus and caret.
+  const typing = document.activeElement?.id === "parked-filter" ? document.activeElement.selectionStart : null;
+  $("connections").replaceChildren(el("h2", {}, `Workers · ${s.instances.length}`), workers, el("h2", {}, `Listeners · ${s.listeners.length}`), listeners, parkedView());
+  if (typing !== null && $("parked-filter")) { $("parked-filter").focus(); $("parked-filter").setSelectionRange(typing, typing); }
+}
+
+// ---- lag over the last hour ----
+let trend = null, hover = null;
+const SPARK_W = 180, SPARK_H = 28;
+
+async function loadTrend() {
+  try { trend = await get("/api/trend"); } catch { return; }
+  if (document.querySelector("nav button.on").dataset.view === "connections") drawConnections();
+}
+
+/** Events processed per minute over the last minute of samples, or null with too few. */
+function rate(rows) {
+  const last = rows[rows.length - 1];
+  const from = rows.find((r) => r[0] >= last[0] - 60_000);
+  if (!from || from === last) return null;
+  return Math.round(((last[2] - from[2]) * 60_000) / (last[0] - from[0]));
+}
+
+/** How far a listener was behind (head − position), one line over the samples kept. */
+function spark(name) {
+  const rows = trend?.listeners?.[name];
+  if (!rows || rows.length < 2) return el("span", { class: "meta" }, "collecting…");
+  const lag = rows.map((r) => Math.max(0, r[1] - r[2]));
+  const max = Math.max(1, ...lag);
+  const t0 = rows[0][0], span = Math.max(1, rows[rows.length - 1][0] - t0);
+  const x = (i) => ((rows[i][0] - t0) / span) * SPARK_W;
+  const y = (v) => SPARK_H - 2 - (v / max) * (SPARK_H - 4);
+  const d = lag.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join("");
+  const at = hover && hover.name === name ? hover.index : lag.length - 1;
+  const svg = el("svg:svg", { width: SPARK_W, height: SPARK_H, viewBox: `0 0 ${SPARK_W} ${SPARK_H}`, role: "img", "aria-label": `${name}: behind by up to ${max} events in the last ${Math.round(span / 60_000)} min` },
+    el("svg:line", { class: "base", x1: 0, x2: SPARK_W, y1: SPARK_H - 2, y2: SPARK_H - 2 }),
+    el("svg:path", { class: "line", d }),
+    hover && hover.name === name ? el("svg:line", { class: "rule", x1: x(at), x2: x(at), y1: 0, y2: SPARK_H }) : null,
+    el("svg:circle", { class: "mark", cx: x(at), cy: y(lag[at]), r: 4 }),
+    // A hit area over the whole chart: the nearest sample to the pointer.
+    el("svg:rect", { x: -4, y: -4, width: SPARK_W + 8, height: SPARK_H + 8, fill: "transparent",
+      onmousemove: (ev) => {
+        const px = ((ev.clientX - ev.currentTarget.getBoundingClientRect().left - 4) / SPARK_W) * span + t0;
+        let best = 0;
+        rows.forEach((r, i) => { if (Math.abs(r[0] - px) < Math.abs(rows[best][0] - px)) best = i; });
+        if (!hover || hover.name !== name || hover.index !== best) { hover = { name, index: best }; drawConnections(); }
+      },
+      onmouseleave: () => { hover = null; drawConnections(); } }));
+  const r = rate(rows);
+  const say = hover && hover.name === name
+    ? `${lag[at]} behind · ${new Date(rows[at][0]).toLocaleTimeString()}`
+    : `max ${max === 1 && !lag.some((v) => v) ? 0 : max}${r === null ? "" : ` · ${r} events/min`}`;
+  return el("div", { class: "spark" }, svg, el("span", { class: "say" }, say));
+}
+
+// ---- parked events, all of them ----
+let parked = null;
+
+async function loadParked() {
+  try { parked = await get("/api/parked"); } catch { return; }
+  if (document.querySelector("nav button.on").dataset.view === "connections") drawConnections();
+}
+
+function parkedView() {
+  if (!parked) return null;
+  const input = $("parked-filter");
+  const typed = input ? input.value : "";
+  const f = typed.toLowerCase();
+  const text = (p) => `${p.listener} ${p.position} ${p.type} ${p.code} ${p.message}`.toLowerCase();
+  const shown = parked.parked.filter((p) => text(p).includes(f));
+  const capped = parked.total > parked.parked.length ? `, the first ${parked.parked.length}` : "";
+  const filter = el("input", { id: "parked-filter", placeholder: "Filter: listener, type, code, message…", value: typed, style: "width:340px" });
+  filter.addEventListener("input", drawConnections);
+  const rows = [el("tr", {}, ["Listener", "Position", "Event", "Code", "Message", "Attempts", "Parked", ""].map((h) => el("th", {}, h)))];
+  for (const p of shown) rows.push(el("tr", {},
+    el("td", {}, p.listener), el("td", { class: "mono" }, p.position), el("td", {}, p.type), el("td", {}, el("span", { class: "code" }, p.code)),
+    el("td", {}, p.message || "–"), el("td", {}, `${p.attempts}×`), el("td", {}, ago(p.parkedAt)), el("td", { class: "meta" }, p.retry ? "retrying" : "")));
+  if (!shown.length) rows.push(el("tr", {}, el("td", { colspan: 8, class: "meta" }, parked.total ? "None matches the filter." : "Nothing is parked.")));
+  return el("div", {},
+    el("h2", {}, `Parked events · ${parked.total}${capped}`),
+    el("div", { class: "search" }, filter, el("span", { class: "meta" }, "Deliver again or dismiss: kernable listeners parked")),
+    el("table", {}, rows));
 }
 
 // ---- history ----
@@ -595,6 +684,7 @@ document.querySelectorAll("nav button").forEach((b) => b.addEventListener("click
   if (b.dataset.view === "history") { loadStreams(); loadHistory(); }
   if (b.dataset.view === "events" && tail === null) search();
   if (b.dataset.view === "rejected") loadRejections();
+  if (b.dataset.view === "connections") { loadTrend(); loadParked(); }
   refresh();
 }));
 $("filter").addEventListener("input", drawStreams);
@@ -609,6 +699,7 @@ setInterval(refresh, 1000);
 fetch("/api/demo").then((r) => { if (r.ok) $("stage").hidden = false; }).catch(() => {});
 setInterval(() => document.querySelector("nav button.on").dataset.view === "history" && loadStreams(), 5000);
 setInterval(() => document.querySelector("nav button.on").dataset.view === "rejected" && loadRejections(), 5000);
+setInterval(() => { if (document.querySelector("nav button.on").dataset.view === "connections") { loadTrend(); loadParked(); } }, 5000);
 </script>
 </body>
 </html>

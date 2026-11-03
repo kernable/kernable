@@ -8,7 +8,10 @@
 //!   and the unique keys (by name and identity, never the value) and facts it holds;
 //! - `GET /api/events?…`: events of the whole log that match a filter, newest first, or the
 //!   ones after a position (the live tail); see [`events`];
-//! - `GET /api/rejections?limit=`: the most recently received rejected commands, with why.
+//! - `GET /api/rejections?limit=`: the most recently received rejected commands, with why;
+//! - `GET /api/parked?limit=`: every listener's parked events, not only the first few that
+//!   `/api/state` shows;
+//! - `GET /api/trend`: the head and every listener's position over the last hour.
 //!
 //! It never decrypts the vault: a vault field shows its subject, whether it is secret, or that
 //! it was erased. Snapshot states are not shown either, as they may hold personal values.
@@ -41,6 +44,10 @@ const CHUNK: u64 = 1_000;
 const REJECTIONS_MAX: usize = 1_000;
 const REJECTIONS_DEFAULT: usize = 200;
 
+/// How many parked events `/api/parked` returns at most, over all listeners, and by default.
+const PARKED_MAX: usize = 10_000;
+const PARKED_DEFAULT: usize = 1_000;
+
 /// Serves the UI until the listener fails.
 pub(crate) async fn serve(kernel: Arc<Kernel>, addr: &str) -> Result<(), BoxError> {
     tracing::info!(%addr, "serving the UI");
@@ -62,6 +69,8 @@ pub(crate) fn respond(kernel: &Kernel, request: &[u8]) -> Vec<u8> {
         "/api/history" => history(kernel, &params),
         "/api/events" => events(kernel, &params),
         "/api/rejections" => rejections(kernel, &params),
+        "/api/parked" => parked(kernel, &params),
+        "/api/trend" => Ok(kernel.trend.view()),
         _ => return reply("404 Not Found", "text/plain", b"not found\n"),
     };
     match result {
@@ -415,6 +424,35 @@ fn rejections(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value
         })
         .collect();
     Ok(json!({ "rejections": rejected, "limit": limit }))
+}
+
+/// Parked events of all listeners, by listener and position, up to `limit`; `total` counts
+/// them all.
+fn parked(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, BoxError> {
+    let limit = match params.get("limit").filter(|v| !v.is_empty()) {
+        Some(v) => v.parse().map_err(|_| "limit: not a number")?,
+        None => PARKED_DEFAULT,
+    }
+    .clamp(1, PARKED_MAX);
+    let mut total = 0;
+    let mut shown: Vec<Value> = Vec::new();
+    for (listener, mut events) in kernel.listeners.parked() {
+        total += events.len();
+        events.sort_by_key(|p| p.position);
+        for p in events.into_iter().take(limit - shown.len()) {
+            shown.push(json!({
+                "listener": listener,
+                "position": p.position,
+                "type": p.event_type,
+                "code": p.code,
+                "message": p.message,
+                "attempts": p.attempts,
+                "parkedAt": p.parked_at,
+                "retry": p.retry,
+            }));
+        }
+    }
+    Ok(json!({ "parked": shown, "total": total, "limit": limit }))
 }
 
 fn event(e: &Event) -> Value {

@@ -32,6 +32,7 @@ mod memberships;
 mod metrics;
 mod queue;
 mod replays;
+mod trend;
 mod ui;
 mod workers;
 
@@ -210,6 +211,8 @@ pub struct Kernel {
     memberships: memberships::Memberships,
     queue: queue::Queue,
     metrics: metrics::Metrics,
+    /// Listener positions over the last hour, for the UI.
+    trend: trend::Trend,
     /// The highest payload version stored per qualified event type; never goes down. Held
     /// through every commit.
     schemas: Mutex<HashMap<String, u32>>,
@@ -346,6 +349,7 @@ impl Kernel {
             memberships,
             queue,
             metrics: metrics::Metrics::default(),
+            trend: trend::Trend::default(),
             schemas: Mutex::new(schemas),
             index: Mutex::new(index),
             snapshots,
@@ -1113,6 +1117,7 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
         result = server => result,
         _ = checkpoints(&kernel) => unreachable!(),
         _ = flush_listeners(&kernel) => unreachable!(),
+        _ = sample_trend(&kernel) => unreachable!(),
         result = serve_metrics(&kernel) => result,
         result = serve_ui(&kernel) => result,
     }
@@ -1149,6 +1154,19 @@ async fn flush_listeners(kernel: &Kernel) {
         tick.tick().await;
         if let Err(e) = listeners::flush(kernel) {
             tracing::error!(error = %e, "saving listener positions failed");
+        }
+    }
+}
+
+async fn sample_trend(kernel: &Kernel) {
+    let mut tick = tokio::time::interval(trend::EVERY);
+    loop {
+        tick.tick().await;
+        match kernel.store.head_position() {
+            Ok(head) => kernel
+                .trend
+                .record(now_ms(), head, &kernel.listeners.snapshot()),
+            Err(e) => tracing::warn!(error = %e, "sampling listener positions failed"),
         }
     }
 }

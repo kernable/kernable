@@ -177,6 +177,18 @@ impl Registry {
             .unwrap_or(u64::MAX)
     }
 
+    /// The parked events of every listener that has some, by listener name.
+    pub(crate) fn parked(&self) -> Vec<(String, Vec<ParkedEvent>)> {
+        let mut all: Vec<(String, Vec<ParkedEvent>)> = self
+            .entries()
+            .values()
+            .filter(|e| !e.record.parked.is_empty())
+            .map(|e| (e.record.name.clone(), e.record.parked.clone()))
+            .collect();
+        all.sort_by(|a, b| a.0.cmp(&b.0));
+        all
+    }
+
     pub(crate) fn snapshot(&self) -> Vec<ListenerStatus> {
         let mut all: Vec<ListenerStatus> = self
             .entries()

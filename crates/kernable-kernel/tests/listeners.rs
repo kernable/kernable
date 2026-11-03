@@ -712,6 +712,65 @@ async fn a_parked_event_stays_parked_until_a_retry_gets_past_it() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_ui_lists_every_parked_event_and_samples_positions() {
+    let ui = free_addr();
+    let env = start_custom("listener-parked-ui", |config, _| {
+        config.ui_listen = Some(ui.clone());
+    })
+    .await;
+    spawn_worker(&env).await;
+    let mut mailer = listen(&env, "mailer", opts(10)).await.unwrap();
+    for (position, (id, command_type)) in [("c1", "PlaceOrder"), ("c2", "AddItem")]
+        .into_iter()
+        .enumerate()
+    {
+        let done = spawn_submit(&env, id, command_type);
+        let position = position as u64 + 1;
+        assert_eq!(positions(&mailer.next().await), [position]);
+        mailer.ack_parking(position, &[position]).await;
+        done.await.unwrap();
+    }
+    let json = |response: String| -> serde_json::Value {
+        let (head, body) = response.split_once("\r\n\r\n").unwrap();
+        assert!(head.starts_with("HTTP/1.1 200 OK"), "{head}");
+        serde_json::from_str(body).unwrap()
+    };
+
+    let all = json(get(&ui, "/api/parked").await);
+    assert_eq!(all["total"], 2);
+    let parked = all["parked"].as_array().unwrap();
+    let shown: Vec<(&str, u64, &str, &str)> = parked
+        .iter()
+        .map(|p| {
+            (
+                p["listener"].as_str().unwrap(),
+                p["position"].as_u64().unwrap(),
+                p["type"].as_str().unwrap(),
+                p["code"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            ("mailer", 1, "orders.OrderPlaced", "not_found"),
+            ("mailer", 2, "orders.ItemAdded", "not_found")
+        ]
+    );
+    assert_eq!(parked[0]["attempts"], 5);
+    let first = json(get(&ui, "/api/parked?limit=1").await);
+    assert_eq!(
+        (first["parked"].as_array().unwrap().len(), &first["total"]),
+        (1, &serde_json::json!(2))
+    );
+
+    // Sampled every 5 s from the start; the samples themselves are tested in the kernel.
+    let trend = json(get(&ui, "/api/trend").await);
+    assert_eq!(trend["everyMs"], 5_000);
+    assert!(trend["listeners"].is_object(), "{trend}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn parked_events_are_checked() {
     let env = start("listener-parked-checked").await;
     spawn_worker(&env).await;

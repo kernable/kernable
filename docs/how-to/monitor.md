@@ -14,7 +14,7 @@ Use this page to see what a running kernel is doing: in a browser while you deve
 With `--ui-listen` (on by default with `--dev`, at http://127.0.0.1:7234), the kernel shows itself in a browser. The start banner shows its address in the `UI` line, or `disabled`.
 
 - **Map:** services, aggregates, event types, listeners and queries, and what connects them: which service runs what, which aggregate writes which event, who reacts to it, who answers which query, and which middleware checks which commands. Each node shows its state: connected, behind, missing (the kernel waits for it), dynamic or away (counts for nobody), or live. Click one for its details.
-- **Connections:** every connected worker process and every listener, with its service, key, position and since when.
+- **Connections:** every connected worker process and every listener, with its service, key, position and since when. For each listener, a line shows how far it was behind the head over the last hour (sampled every 5 s, in memory: a restart starts over); point at it for a moment's value. Next to it are the events it processed per minute over the last minute. Below, **Parked events** lists every listener's parked events (the first 1,000) with code, message, attempts and age, to filter by any of them.
 - **Events:** the whole log, newest first, filtered by event type (any part, any case), tenant, aggregate id, command or correlation id, and text in the payload; **Older** goes on further back. With **live** on, new matching events appear at the top as they are committed. Click an event for its payload and context (vault fields show as `vault`), or its aggregate to open its history. One search reads at most 20,000 events, so on a large log it may stop early and say how far back it got.
 - **Rejected:** the 200 most recently received commands that were refused, newest first: the command, its aggregate, the code and the message, and for a kernel rejection the unique key that is taken or the requirement that did not hold. Filter them by any of these; click one for its payload and context. Commands the kernel refuses before it accepts them (a bad signature, a missing grant) are not stored and do not show here; the kernel's log has them.
 - **History:** any aggregate's events in order, each with the command that caused it, its sender and correlation. Vault fields show as `personal · <subject>`, `secret` or `erased`; the UI never decrypts the vault, and it does not show snapshot states, which may hold personal values.
@@ -106,7 +106,7 @@ kernable listeners parked sqlite:shop.db   # each parked event: listener, positi
 
 ## Parked events
 
-A reactor that gives up on an event parks it and moves on ([Failures](../concepts/failures)): its follow-up was rejected, or its handler failed five times. The kernel keeps the event's position with the reason until you act on it; the UI shows the count on the listener and the first ones in its details, and `kernable_listener_parked` counts them.
+A reactor that gives up on an event parks it and moves on ([Failures](../concepts/failures)): its follow-up was rejected, or its handler failed five times. The kernel keeps the event's position with the reason until you act on it; the UI shows the count on the listener, the first ones in its details and all of them under Connections, and `kernable_listener_parked` counts them.
 
 ```sh
 kernable listeners parked sqlite:shop.db
