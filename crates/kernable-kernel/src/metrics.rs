@@ -239,6 +239,34 @@ pub(crate) fn render(kernel: &Kernel) -> String {
     out
 }
 
+/// What a standby serves at `GET /metrics`: it has no kernel to render.
+pub(crate) fn render_standby(applied: u64, primary_head: u64) -> String {
+    let mut out = String::new();
+    let mut metric = |name: &str, kind: &str, help: &str, value: u64| {
+        let _ = writeln!(
+            out,
+            "# HELP {name} {help}\n# TYPE {name} {kind}\n{name} {value}"
+        );
+    };
+    metric(
+        "kernable_standby_applied",
+        "gauge",
+        "On a standby: the newest record of the primary's log it holds.",
+        applied,
+    );
+    metric(
+        "kernable_standby_lag",
+        "gauge",
+        "On a standby: records it is behind the primary's head as last seen.",
+        primary_head.saturating_sub(applied),
+    );
+    // As on a primary (documented there), always 0: a standby serves nothing.
+    out.push_str(
+        "# HELP kernable_ready 0 on a standby.\n# TYPE kernable_ready gauge\nkernable_ready 0\n",
+    );
+    out
+}
+
 /// Serves `GET /metrics`, `GET /health` (the process runs) and `GET /ready` (see
 /// `Kernel::readiness`) until the listener fails. Deliberately minimal HTTP/1, each connection
 /// on its own, so a slow one cannot hold up the health checks.

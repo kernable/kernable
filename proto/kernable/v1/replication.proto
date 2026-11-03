@@ -127,3 +127,56 @@ message PromoteResult {
   // The head of the record log the new primary starts from.
   uint64 seq = 1;
 }
+
+// The witness: a small third process that decides which kernel of a pair is the
+// primary. A kernel started with `--witness` asks it for its role, the primary renews its
+// lease with it, and a standby claims the primary's place through it once the lease expired.
+// The witness also records whether the primary has a standby in sync or commits alone, so a
+// standby that lacks writes is never made the primary.
+service WitnessService {
+  rpc Ask(WitnessRequest) returns (WitnessAnswer);
+}
+
+enum WitnessOp {
+  WITNESS_OP_UNSPECIFIED = 0;
+  // Renew the primary's lease, or learn who the primary is. On a witness without a primary,
+  // the first node to ask becomes the primary of term 1.
+  LEASE = 1;
+  // The primary commits without its standby: the standby may not be made the primary.
+  ALONE = 2;
+  // The primary's standby `standby` holds every write again.
+  IN_SYNC = 3;
+  // The in-sync standby takes the primary's place: granted once the primary's lease expired.
+  CLAIM = 4;
+}
+
+// Signed by the node's key over kernable.v1.witness (op, term, address, standby, issued_at);
+// valid 60 s around issued_at. The node's grant (kernable-grant) needs `replicate`.
+message WitnessRequest {
+  WitnessOp op = 1;
+  string node = 2;     // the node's key ID
+  uint64 term = 3;     // the term the node knows
+  string address = 4;  // where the other node reaches this one (--advertise)
+  string standby = 5;  // IN_SYNC: the standby's key ID
+  int64 issued_at = 6;
+  Signature sig = 7;
+  uint32 protocol = 8;
+}
+
+message WitnessAnswer {
+  bool granted = 1;
+  uint64 term = 2;
+  string primary = 3;          // key ID of the primary of `term`
+  string primary_address = 4;
+  string in_sync = 5;          // key ID of the standby in sync; empty while the primary is alone
+  uint64 lease_ms = 6;         // how long a granted lease lasts, from when the node asked
+  string message = 7;          // why not, if not granted
+}
+
+// What the witness keeps on its disk.
+message WitnessState {
+  uint64 term = 1;
+  string primary = 2;
+  string primary_address = 3;
+  string in_sync = 4;
+}

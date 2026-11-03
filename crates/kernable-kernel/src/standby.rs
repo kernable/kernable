@@ -14,7 +14,7 @@ use std::{
         atomic::{AtomicU64, Ordering::SeqCst},
     },
     task::{Context, Poll},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use ed25519_dalek::SigningKey;
@@ -22,7 +22,7 @@ use kernable_core::{
     proto::{
         ChallengeResponse, CheckpointRecord, FollowAck, FollowHello, FollowMode, FollowRequest,
         FollowResponse, Grant, ImageBatch, ImageEnd, PromoteRequest, PromoteResult, RecordBatch,
-        StoredKey, follow_request, follow_response,
+        StoredKey, WitnessOp, follow_request, follow_response,
         log_record::Record,
         replication_service_client::ReplicationServiceClient,
         replication_service_server::{ReplicationService, ReplicationServiceServer},
@@ -46,7 +46,7 @@ use tonic::{
 
 use crate::{
     BoxError, GRANT_HEADER, MAX_REQUEST_AGE_MS, Permissions, config, config::Config,
-    config::Follow, erase_subjects, now_ms, protocol, recover_vault, replication,
+    config::Follow, erase_subjects, node::Link, now_ms, protocol, recover_vault, replication,
 };
 
 /// What a standby keeps.
@@ -99,6 +99,11 @@ struct Standby {
     /// The newest record applied, and the primary's head when it was sent.
     applied: AtomicU64,
     primary_head: AtomicU64,
+    /// With `--witness`: this kernel towards the witness, through which it claims the
+    /// primary's place.
+    link: Option<Arc<Link>>,
+    /// Since when the stream to the primary is lost.
+    lost_since: Mutex<Option<Instant>>,
 }
 
 impl Standby {
@@ -167,6 +172,12 @@ impl Standby {
 
 /// Runs the standby until it is promoted; returns with its stores closed.
 pub async fn run(config: Config) -> Result<(), BoxError> {
+    run_with(config, None).await
+}
+
+/// Like [`run`]; with `link`, a kernel of a pair: it claims the primary's place through the
+/// witness once the stream to the primary was lost for a lease and the margin.
+pub(crate) async fn run_with(config: Config, link: Option<Arc<Link>>) -> Result<(), BoxError> {
     let follow = config
         .replication
         .follow
@@ -193,6 +204,8 @@ pub async fn run(config: Config) -> Result<(), BoxError> {
         promote: Mutex::new(Some(promoted)),
         applied: AtomicU64::new(0),
         primary_head: AtomicU64::new(0),
+        link,
+        lost_since: Mutex::default(),
         config,
     });
     // A store an image was left half-filled in starts over.
@@ -226,6 +239,23 @@ pub async fn run(config: Config) -> Result<(), BoxError> {
                 Err(e) => {
                     tracing::warn!(error = %e, "following the primary failed; connecting again in {delay:?}")
                 }
+            }
+            if let Some(link) = &standby.link {
+                let lost = *standby
+                    .lost_since
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get_or_insert_with(Instant::now);
+                if lost.elapsed() >= link.lease() + link.margin() {
+                    match claim(&standby, link).await {
+                        Ok(term) => {
+                            tracing::warn!(term, "claimed the primary's place: its lease ran out")
+                        }
+                        Err(why) => tracing::info!(%why, "cannot take the primary's place"),
+                    }
+                }
+                // A pair reconnects and claims promptly.
+                delay = delay.min(link.lease() / 3);
             }
             tokio::time::sleep(delay).await;
             delay = (delay * 2).min(Duration::from_secs(30));
@@ -285,6 +315,10 @@ async fn follow_once(
     let Some(follow_response::Msg::Start(start)) = next(&mut inbound).await? else {
         return Err("the primary did not start the stream".into());
     };
+    *standby
+        .lost_since
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = None;
     match start.mode() {
         FollowMode::Follow => {
             tracing::info!(from = head.seq, "following the primary");
@@ -562,7 +596,7 @@ fn move_aside(url: &str, at: i64) -> Result<Vec<PathBuf>, BoxError> {
 
 /// A channel to the primary, over mutual TLS when `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and
 /// `KERNABLE_TLS_KEY` name the files, as for the SDKs.
-async fn connect(addr: &str) -> Result<tonic::transport::Channel, BoxError> {
+pub(crate) async fn connect(addr: &str) -> Result<tonic::transport::Channel, BoxError> {
     let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
     match (
         var("KERNABLE_TLS_CA"),
@@ -629,6 +663,14 @@ impl ReplicationService for Api {
                 .map(|h| h.seq)
                 .unwrap_or(0),
         );
+        if let Some(link) = &standby.link {
+            // A pair: the witness decides, so the two never both serve.
+            let term = claim(standby, link)
+                .await
+                .map_err(Status::failed_precondition)?;
+            tracing::warn!(key = %sig.key_id, term, record = seq, "promoted by an operator, through the witness");
+            return Ok(Response::new(PromoteResult { seq }));
+        }
         let promote = standby
             .promote
             .lock()
@@ -643,6 +685,30 @@ impl ReplicationService for Api {
             None => Err(Status::failed_precondition("promoted already")),
         }
     }
+}
+
+/// Asks the witness for the primary's place; granted, the standby stops following. Returns
+/// the new term, or why not.
+async fn claim(standby: &Standby, link: &Link) -> Result<u64, String> {
+    if let Some(why) = standby.unpromotable() {
+        return Err(why);
+    }
+    let answer = link
+        .ask(WitnessOp::Claim, 0, "")
+        .await
+        .map_err(|e| format!("the witness does not answer: {e}"))?;
+    if !answer.granted || answer.primary != link.me {
+        return Err(answer.message);
+    }
+    if let Some(promote) = standby
+        .promote
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take()
+    {
+        let _ = promote.send(());
+    }
+    Ok(answer.term)
 }
 
 /// Whether `key_id` may promote: its grant (presented or stored, signed by a root the kernel
@@ -764,15 +830,7 @@ async fn serve_metrics(standby: Arc<Standby>, addr: &str) -> Result<(), BoxError
                 } else if request.starts_with(b"GET /metrics ") {
                     let applied = standby.applied.load(SeqCst);
                     let head = standby.primary_head.load(SeqCst);
-                    let body = format!(
-                        "# HELP kernable_standby_applied The newest record of the primary's log this standby holds.\n\
-                         # TYPE kernable_standby_applied gauge\nkernable_standby_applied {applied}\n\
-                         # HELP kernable_standby_lag Records the standby is behind the primary's head as last seen.\n\
-                         # TYPE kernable_standby_lag gauge\nkernable_standby_lag {}\n\
-                         # HELP kernable_ready 0: a standby is never ready.\n\
-                         # TYPE kernable_ready gauge\nkernable_ready 0\n",
-                        head.saturating_sub(applied)
-                    );
+                    let body = crate::metrics::render_standby(applied, head);
                     reply("200 OK", "text/plain; version=0.0.4", body.as_bytes())
                 } else {
                     reply("404 Not Found", "text/plain", b"")

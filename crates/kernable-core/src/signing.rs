@@ -401,6 +401,23 @@ pub fn promote_message(issued_at: i64) -> Vec<u8> {
     Msg::new("kernable.v1.promote").i64(issued_at).0
 }
 
+/// What a kernel of a pair signs to ask the witness (`WitnessRequest`).
+pub fn witness_message(
+    op: i32,
+    term: u64,
+    address: &str,
+    standby: &str,
+    issued_at: i64,
+) -> Vec<u8> {
+    Msg::new("kernable.v1.witness")
+        .u64(op as u64)
+        .u64(term)
+        .str(address)
+        .str(standby)
+        .i64(issued_at)
+        .0
+}
+
 /// What the kernel signs to anchor the chain at `global_position`.
 pub fn checkpoint_message(global_position: u64, chain_hash: &[u8], created_at: i64) -> Vec<u8> {
     Msg::new("kernable.v1.checkpoint")

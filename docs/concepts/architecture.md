@@ -95,4 +95,4 @@ sequenceDiagram
 
 The kernel never interprets payloads: commands, events and queries are JSON your processes write and read. That is what lets every process be in another language.
 
-**Limits.** One kernel serves one store; there is no clustering yet. A kernel restarts in seconds and loses nothing (see [Failures and recovery](./failures)), and a [standby](../how-to/standby) holds every write the primary told anyone of, ready to be promoted.
+**Limits.** One kernel serves one store; there is no clustering yet. A kernel restarts in seconds and loses nothing (see [Failures and recovery](./failures)), and a [standby](../how-to/standby) holds every write the primary told anyone of; with a witness, it takes over by itself.

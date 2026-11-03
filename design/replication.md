@@ -1,6 +1,6 @@
 # Replication and the standby
 
-Status: S1a built 2026-11-03: the store's record log (increment 1), the primary and the standby (2, 3), `kernable promote` and the docs (4, [Run a standby](../docs/how-to/standby.md)). Tests: `crates/kernable-store/tests/replication.rs`, `crates/kernable-kernel/tests/replication.rs`. Not yet: crash points during replication, model tests for P1–P4, soak runs with failover faults; the witness; address lists in the SDKs. Invariants P1–P4 are in [invariants.md](invariants.md).
+Status: S1a built 2026-11-03: the store's record log (increment 1), the primary and the standby (2, 3), `kernable promote` and the docs (4, [Run a standby](../docs/how-to/standby.md)). Tests: `crates/kernable-store/tests/replication.rs`, `crates/kernable-kernel/tests/replication.rs`. S1b built the same day: the witness and pairs (below). Not yet: crash points during replication, model tests for P1–P4, soak runs with failover faults; address lists in the SDKs. Invariants P1–P4 are in [invariants.md](invariants.md).
 
 ## Goal
 
@@ -76,6 +76,29 @@ Without a standby in sync, the primary waits: commits stay queued, submits time 
 `kernable promote <standby address> <key>`, signed over `kernable.v1.promote` by a key whose grant (presented, or replicated from the primary) allows `manage` for `*`. The standby refuses if it never followed a primary or its image is not complete. A standby that lost its primary can be promoted: the primary told nobody of a write the standby did not acknowledge. Then it stops following, closes its stores and opens them as a kernel does after a restart (the queue from `pending()`, listener positions, a new replay window, the vault's intents carried out); its checkpoints from then on are signed with its own kernel key (`verify` needs both public keys).
 
 The old primary, if it still runs, gets no more acknowledgements, so it tells nobody of anything it writes from then on: it is fenced by P1. It rejoins only as a standby of the new primary; its unacknowledged tail makes its log diverge, so it is moved aside and filled from an image.
+
+## The witness and pairs
+
+Decided (2026-11-03): the witness assigns the roles (both kernels start with the same flags), and a primary whose standby is away or behind goes alone after `--standby-timeout-ms`.
+
+**The witness** (`kernable witness`, `crates/kernable-kernel/src/witness.rs`) keeps `WitnessState { term, primary, primary_address, in_sync }` in one file, written atomically and flushed before it answers. It decides four requests (`WitnessService.Ask`), each signed by the node's key and presenting its grant (`replicate`); it keeps no grants, and does not see revocations.
+
+| Request | Granted when | Effect |
+|---|---|---|
+| `LEASE` | the node is the primary, or nobody is (term 0: the first node becomes the primary of term 1) | the lease runs `--lease-ms` (3,000) from now |
+| `ALONE` | the primary of the term asks, under its lease | `in_sync` empty: no standby may take over |
+| `IN_SYNC` | the same | `in_sync` names the standby |
+| `CLAIM` | the node is `in_sync`, and the lease expired a margin ago (a third of the lease) | term + 1, the node is the primary, `in_sync` empty |
+
+A restarted witness grants no claim for a lease and the margin.
+
+**A node** (`kernable start --witness`, `node.rs`) asks `LEASE` at start: granted, it opens as the primary; otherwise it follows `primary_address` as a standby, and claims once its stream to the primary has been lost for a lease and the margin; granted, it asks again and opens as the primary. The primary renews every third of the lease and counts its lease from when it asked, a margin short.
+
+**Committing alone.** The primary's lease keeper watches its standby. When the standby is away or its acknowledgements stand still behind the head for `--standby-timeout-ms`, the keeper asks `ALONE`; only once granted does `Primary::wait` let writes through without the standby, and only while the lease holds. When the standby has caught up, the primary first waits for it again, then asks `IN_SYNC`: nothing told alone is missing on the standby the witness names.
+
+**Fencing.** In sync, the standby's acknowledgements fence the primary: promoted, the standby no longer acknowledges, so the old primary tells nothing more, reachable by the witness or not. Alone, the lease fences it: it stops telling a margin before the witness could grant a claim. A primary whose renewal is refused was deposed: its lease future ends with an error and the process stops (exit code 1); a supervisor starts it again, and it follows the new primary.
+
+**Tested** in `crates/kernable-kernel/tests/pair.rs`, with plugs in front of the sockets that cut every connection as a lost machine does: failover in about a second at a 600 ms lease, the new primary alone, the old primary back as its standby and in sync; a primary alone that tells nothing while it cannot renew its lease. The witness's decisions have unit tests.
 
 ## Building it
 

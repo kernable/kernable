@@ -29,7 +29,7 @@ kernable is an **application kernel**: storage, ordering, trust and delivery in 
 
 ## Where kernable is young
 
-- **One kernel per store.** A kernel restarts in seconds and loses nothing, and a [standby](../how-to/standby) holds every acknowledged write; but promoting it is manual for now, and while no kernel serves, nothing runs.
+- **One kernel per store.** A kernel restarts in seconds and loses nothing, and a [pair with a witness](../how-to/standby) fails over by itself; but every write goes through the one primary.
 - **No compaction.** The log only grows; that is what keeps it verifiable. Expiring data belongs in the cache.
 - **SQLite sets the limits of one store**: a single writer on one machine. Commands of different aggregates run in parallel on the workers, but every commit goes through that one writer.
 - **Three SDKs.** Other languages speak the gRPC protocol directly ([Write an SDK](../how-to/new-sdk)).

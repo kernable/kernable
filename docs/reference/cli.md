@@ -51,6 +51,14 @@ kernable revoke <addr> <root.key> <key.pub> <since>
 
 Revokes a key for good from `<since>` on (UTC, like `2026-10-27T09:00:00Z`): the kernel refuses it, ends its connections and rejects its queued commands accepted since then (`key_revoked`). The kernel must be running.
 
+### `kernable witness`
+
+```text
+kernable witness --listen <addr> --root <root.pub> --state <file> [--lease-ms <ms>] [--tls-...]
+```
+
+Runs the witness of a pair of kernels started with `--witness`: it decides which one is the primary, renews the primary's lease (3000 ms by default) and lets the standby in sync take its place when the lease runs out. It keeps the term and the roles in `<file>` (default witness.state); listens on `127.0.0.1:7300` by default, elsewhere only with mutual TLS (`--tls-cert`, `--tls-key`, `--tls-client-ca`).
+
 ### `kernable promote`
 
 ```text

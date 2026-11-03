@@ -30,12 +30,14 @@ mod index;
 mod listeners;
 mod memberships;
 mod metrics;
+pub mod node;
 mod queue;
 mod replays;
 mod replication;
 pub mod standby;
 mod trend;
 mod ui;
+pub mod witness;
 mod workers;
 
 use std::{

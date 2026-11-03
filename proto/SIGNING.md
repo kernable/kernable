@@ -45,6 +45,7 @@ Each message starts with a `str` **tag** for domain separation. Payloads are sig
 | Root key | `kernable.v1.grant` | `key_id`, `succeeds`, `issued_at: i64`, `permission_count: u64`, then per permission `action`, `type_count: u64`, every type |
 | Operator tooling | `kernable.v1.retry` | `listener`, `positions_count: u64` and every `position: u64`, `dismiss: u64` (1 or 0), `issued_at: i64` |
 | Root key | `kernable.v1.revoke` | `key_id`, `since: i64`, `issued_at: i64` |
+| Kernel of a pair | `kernable.v1.witness` | `op: u64`, `term: u64`, `address`, `standby`, `issued_at: i64` (see `WitnessRequest` in `replication.proto`) |
 | Operator tooling | `kernable.v1.promote` | `issued_at: i64` (a key granted `manage` for `*`; asked of a standby, see `replication.proto`) |
 
 Four more tagged messages are hashed, not signed: `kernable.v1.vault` ([Vault references](#vault-references)), `kernable.v1.id` ([Derived IDs](#derived-ids)), `kernable.v1.key` ([Unique keys and facts](#unique-keys-and-facts)) and `kernable.v1.event` ([Event hash chain](#event-hash-chain)).

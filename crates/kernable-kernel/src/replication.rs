@@ -58,6 +58,18 @@ struct State {
     standby: Option<String>,
     /// The connected standby acknowledged the head at least once.
     in_sync: bool,
+    /// The witness recorded that the primary commits alone (`--witness`).
+    alone: bool,
+    /// Until when the primary's lease at the witness holds, measured from when it asked and a
+    /// margin short of the witness's own count.
+    lease_until: Option<Instant>,
+}
+
+impl State {
+    /// Whether a write may be told without the standby: alone, under a lease.
+    fn alone_now(&self) -> bool {
+        self.alone && self.lease_until.is_some_and(|until| Instant::now() < until)
+    }
 }
 
 impl Primary {
@@ -81,10 +93,10 @@ impl Primary {
         let wait = || {
             let (started, mut warned) = (Instant::now(), Instant::now());
             let mut state = self.state();
-            while state.acked < seq {
+            while state.acked < seq && !state.alone_now() {
                 state = self
                     .acked
-                    .wait_timeout(state, Duration::from_secs(1))
+                    .wait_timeout(state, Duration::from_millis(100))
                     .unwrap_or_else(PoisonError::into_inner)
                     .0;
                 if state.acked < seq && warned.elapsed() >= Duration::from_secs(10) {
@@ -106,10 +118,33 @@ impl Primary {
         }
     }
 
-    /// A standby is connected and has acknowledged the head at least once.
+    /// A standby is connected and has acknowledged the head at least once, or the primary
+    /// commits alone under a lease: writes are told.
     pub(crate) fn in_sync(&self) -> bool {
         let state = self.state();
-        state.standby.is_some() && state.in_sync
+        (state.standby.is_some() && state.in_sync) || state.alone_now()
+    }
+
+    /// The key of the connected standby.
+    pub(crate) fn standby(&self) -> Option<String> {
+        self.state().standby.clone()
+    }
+
+    /// Whether the primary commits alone.
+    pub(crate) fn alone(&self) -> bool {
+        self.state().alone
+    }
+
+    /// Commits alone (once the witness recorded it), or waits for the standby again.
+    pub(crate) fn set_alone(&self, alone: bool) {
+        self.state().alone = alone;
+        self.acked.notify_all();
+    }
+
+    /// The lease at the witness holds until `until`.
+    pub(crate) fn set_lease(&self, until: Instant) {
+        self.state().lease_until = Some(until);
+        self.acked.notify_all();
     }
 
     /// The record the standby acknowledged last.

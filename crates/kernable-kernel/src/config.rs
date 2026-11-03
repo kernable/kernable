@@ -96,6 +96,30 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "`sync`: a standby (`--follow`) holds every write before anyone is told of it. Commits, revocations, grants and memberships wait until the standby has stored them; without a standby in sync they wait, and `/ready` answers 503. `off`: no standby.",
     ),
     (
+        "--witness",
+        "KERNABLE_WITNESS",
+        "",
+        "Run as one kernel of a pair whose roles a witness (`kernable witness`) decides, at this address: the primary of the newest term serves with `--replication sync`, the other follows it, and takes its place on its own once the primary's lease runs out. Needs `--node-key` and `--primary-kernel-key`; not with `--follow`. The connection uses `KERNABLE_TLS_*`, as the SDKs do.",
+    ),
+    (
+        "--node-key",
+        "KERNABLE_NODE_KEY",
+        "node.key",
+        "With `--witness`: this kernel's key towards the witness and the other kernel, whose grant (`<name>.grant` next to it) allows `replicate`.",
+    ),
+    (
+        "--advertise",
+        "KERNABLE_ADVERTISE",
+        "",
+        "With `--witness`: the address the other kernel reaches this one at. Default: `--listen`.",
+    ),
+    (
+        "--standby-timeout-ms",
+        "KERNABLE_STANDBY_TIMEOUT_MS",
+        "5000",
+        "With `--witness`: how long the primary's writes wait for a standby that is away or behind before the primary tells the witness and commits alone. A standby that missed writes is never made the primary.",
+    ),
+    (
         "--follow",
         "KERNABLE_FOLLOW",
         "",
@@ -266,6 +290,21 @@ pub struct Replication {
     pub sync: bool,
     /// `--follow`: run as a standby.
     pub follow: Option<Follow>,
+    /// `--witness`: one kernel of a pair, its role decided by the witness.
+    pub pair: Option<Pair>,
+}
+
+/// A kernel of a pair.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pair {
+    pub witness: String,
+    /// This kernel's key; its grant is `<name>.grant` next to it.
+    pub node_key: PathBuf,
+    /// Where the other kernel reaches this one.
+    pub advertise: String,
+    pub standby_timeout_ms: u64,
+    /// The other kernel's kernel keys (and this one's): checkpoints of either are accepted.
+    pub kernel_keys: Vec<String>,
 }
 
 /// What a standby follows.
@@ -400,38 +439,53 @@ impl Config {
             .iter()
             .map(|r| root_key_id(r))
             .collect::<Result<_, _>>()?;
+        let kernel_keys = || -> Result<Vec<String>, Error> {
+            let keys: Vec<String> = match given.get("--primary-kernel-key") {
+                Some(keys) => keys.clone(),
+                None => env("KERNABLE_PRIMARY_KERNEL_KEY")
+                    .map(|k| k.split(',').map(|s| s.trim().to_owned()).collect())
+                    .unwrap_or_default(),
+            };
+            let keys: Vec<String> = keys.into_iter().filter(|k| !k.is_empty()).collect();
+            if keys.is_empty() {
+                return Err("--follow and --witness need --primary-kernel-key: the other kernel's kernel key, to check its checkpoints".into());
+            }
+            keys.iter()
+                .map(|k| key_id("--primary-kernel-key", k))
+                .collect()
+        };
         let follow = match get("--follow") {
             None => None,
-            Some(primary) => {
-                let keys: Vec<String> = match given.get("--primary-kernel-key") {
-                    Some(keys) => keys.clone(),
-                    None => env("KERNABLE_PRIMARY_KERNEL_KEY")
-                        .map(|k| k.split(',').map(|s| s.trim().to_owned()).collect())
-                        .unwrap_or_default(),
-                };
-                let keys: Vec<String> = keys.into_iter().filter(|k| !k.is_empty()).collect();
-                if keys.is_empty() {
-                    return Err("--follow needs --primary-kernel-key: the primary's kernel key, to check its checkpoints".into());
-                }
-                Some(Follow {
-                    primary,
-                    key: get("--follow-key").expect("has a default").into(),
-                    primary_kernel_keys: keys
-                        .iter()
-                        .map(|k| key_id("--primary-kernel-key", k))
-                        .collect::<Result<_, _>>()?,
-                })
+            Some(primary) => Some(Follow {
+                primary,
+                key: get("--follow-key").expect("has a default").into(),
+                primary_kernel_keys: kernel_keys()?,
+            }),
+        };
+        let pair = match get("--witness") {
+            None => None,
+            Some(_) if follow.is_some() => {
+                return Err("--witness decides the roles: drop --follow".into());
             }
+            Some(witness) => Some(Pair {
+                witness,
+                node_key: get("--node-key").expect("has a default").into(),
+                advertise: get("--advertise")
+                    .unwrap_or_else(|| get("--listen").expect("has a default")),
+                standby_timeout_ms: positive("--standby-timeout-ms")?,
+                kernel_keys: kernel_keys()?,
+            }),
         };
         let replication = Replication {
             sync: match get("--replication").expect("has a default").as_str() {
                 "sync" => true,
-                "off" => false,
+                "off" => pair.is_some(),
                 other => {
                     return Err(format!("--replication: {other} is neither sync nor off").into());
                 }
             },
             follow,
+            pair,
         };
         let tls = match (get("--tls-cert"), get("--tls-key"), get("--tls-client-ca")) {
             (Some(cert), Some(key), Some(client_ca)) => Some(Tls {

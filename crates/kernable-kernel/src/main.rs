@@ -22,7 +22,9 @@ use kernable_core::{
     },
     signing, transport,
 };
-use kernable_kernel::{BoxError, Config, GRANT_HEADER, Kernel, config, grants, serve, standby};
+use kernable_kernel::{
+    BoxError, Config, GRANT_HEADER, Kernel, config, grants, node, serve, standby, witness,
+};
 use prost::Message;
 use tracing_subscriber::EnvFilter;
 use zeroize::Zeroizing;
@@ -68,6 +70,15 @@ Keys and trust:
                                           2026-10-27T09:00:00Z): the kernel refuses it, ends its
                                           connections and rejects its queued commands accepted since
                                           then (key_revoked). The kernel must be running.
+  kernable witness --listen <addr> --root <root.pub> --state <file> [--lease-ms <ms>] [--tls-...]
+                                          Runs the witness of a pair of kernels started with
+                                          --witness: it decides which one is the primary, renews
+                                          the primary's lease (3000 ms by default) and lets the
+                                          standby in sync take its place when the lease runs out.
+                                          It keeps the term and the roles in <file> (default
+                                          witness.state); listens on 127.0.0.1:7300 by default,
+                                          elsewhere only with mutual TLS (--tls-cert, --tls-key,
+                                          --tls-client-ca).
   kernable promote <addr> <key>           Makes the standby at <addr> (started with --follow) the
                                           primary: it stops following and serves. <key> needs a
                                           grant for manage on *. Promote only a standby whose
@@ -226,6 +237,7 @@ async fn main() -> ExitCode {
         }
         ["revoke", addr, root, key, since] => revoke(addr, root, key, since).await,
         ["promote", addr, key] => promote(addr, key).await,
+        ["witness", flags @ ..] => return run_witness(flags).await,
         ["keys", "new", name] => keys_new(name),
         ["checkpoint", store, key] => checkpoint(store, key),
         ["verify", store, keys @ ..] if !keys.is_empty() => {
@@ -381,12 +393,18 @@ async fn start(config: Config, dev_notes: Option<Vec<String>>) -> ExitCode {
         eprintln!("{note}");
     }
     // A standby follows until it is promoted, then runs as the kernel on what it holds.
-    let ran = match config.replication.follow {
-        Some(_) => match standby::run(config.clone()).await {
+    let ran = if config.replication.pair.is_some() {
+        match node::become_primary(config).await {
+            Ok(primary) => run_kernel_on(primary.kernel, Some(primary.lease)).await,
+            Err(e) => Err(e),
+        }
+    } else if config.replication.follow.is_some() {
+        match standby::run(config.clone()).await {
             Ok(()) => run_kernel(config).await,
             Err(e) => Err(e),
-        },
-        None => run_kernel(config).await,
+        }
+    } else {
+        run_kernel(config).await
     };
     match ran {
         Ok(()) => ExitCode::SUCCESS,
@@ -494,12 +512,26 @@ async fn run_kernel(config: Config) -> std::result::Result<(), BoxError> {
         tls = config.tls.is_some(),
         "kernel starting"
     );
-    let kernel = Kernel::open(config)?;
+    run_kernel_on(Kernel::open(config)?, None).await
+}
+
+/// Serves `kernel` until a signal; with `lease` (a primary of a pair), also until the witness
+/// deposes it.
+async fn run_kernel_on(
+    kernel: Arc<Kernel>,
+    lease: Option<std::pin::Pin<Box<dyn Future<Output = BoxError> + Send>>>,
+) -> std::result::Result<(), BoxError> {
+    let mut lease = lease.unwrap_or_else(|| Box::pin(std::future::pending()));
     let mut server = tokio::spawn(serve(Arc::clone(&kernel)));
     let mut hangup = Hangup::new()?;
     loop {
         tokio::select! {
             result = &mut server => return result?.and_then(|()| kernel.shutdown()),
+            why = &mut lease => {
+                server.abort();
+                let _ = kernel.shutdown();
+                return Err(why);
+            }
             _ = hangup.recv() => match kernel.reload() {
                 Ok(()) => tracing::info!("kernel key read again"),
                 Err(e) => tracing::error!(error = %e, "reading the kernel key failed; the previous key stays"),
@@ -617,6 +649,83 @@ async fn revoke(addr: &str, root: &str, key: &str, since: &str) -> Result<bool> 
         .await?;
     println!("revoked {key_id}");
     Ok(true)
+}
+
+/// `kernable witness --listen <addr> --root <root.pub>... --state <file> [--lease-ms <ms>]
+/// [--tls-cert <pem> --tls-key <pem> --tls-client-ca <pem>]`.
+async fn run_witness(flags: &[&str]) -> ExitCode {
+    let parsed = (|| -> Result<witness::WitnessConfig> {
+        let mut given: std::collections::HashMap<&str, Vec<String>> = Default::default();
+        let mut rest = flags.iter();
+        while let Some(&flag) = rest.next() {
+            let known = [
+                "--listen",
+                "--root",
+                "--state",
+                "--lease-ms",
+                "--tls-cert",
+                "--tls-key",
+                "--tls-client-ca",
+            ];
+            if !known.contains(&flag) {
+                return Err(format!("unknown flag {flag}").into());
+            }
+            let value = rest.next().ok_or(format!("{flag} needs a value"))?;
+            given.entry(flag).or_default().push((*value).to_owned());
+        }
+        let one = |flag: &str| given.get(flag).and_then(|v| v.last().cloned());
+        let roots = given
+            .get("--root")
+            .ok_or("no root key: pass --root <key ID or .pub file>")?
+            .iter()
+            .map(|r| key_id_of(r))
+            .collect::<Result<Vec<_>>>()?;
+        let tls = match (one("--tls-cert"), one("--tls-key"), one("--tls-client-ca")) {
+            (Some(cert), Some(key), Some(client_ca)) => Some(config::Tls {
+                cert: cert.into(),
+                key: key.into(),
+                client_ca: client_ca.into(),
+            }),
+            (None, None, None) => None,
+            _ => return Err("TLS needs --tls-cert, --tls-key and --tls-client-ca".into()),
+        };
+        Ok(witness::WitnessConfig {
+            listen: one("--listen").unwrap_or_else(|| "127.0.0.1:7300".into()),
+            roots,
+            state: one("--state")
+                .unwrap_or_else(|| "witness.state".into())
+                .into(),
+            lease_ms: match one("--lease-ms") {
+                Some(ms) => ms
+                    .parse()
+                    .map_err(|_| format!("--lease-ms: {ms} is not a number"))?,
+                None => witness::LEASE_MS,
+            },
+            tls,
+        })
+    })();
+    let config = match parsed {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let filter = EnvFilter::try_from_env("KERNABLE_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
+    tokio::select! {
+        result = witness::run(config) => match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                tracing::error!(error = %e, "witness stopped");
+                ExitCode::FAILURE
+            }
+        },
+        _ = shutdown_signal() => ExitCode::SUCCESS,
+    }
 }
 
 async fn promote(addr: &str, key_path: &str) -> Result<bool> {
