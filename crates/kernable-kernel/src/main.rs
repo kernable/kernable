@@ -41,6 +41,11 @@ Run the kernel:
                                           everything) and defaults to --root root.pub, --vault-key
                                           vault.key and --ui-listen 127.0.0.1:7234. Exit 2 on
                                           invalid flags; exit 1 if the kernel stops on an error.
+  kernable demo [--ui-listen <addr>]      Runs kernable for presentations: a kernel on a new store
+                                          in a temporary directory, with a small bank built in,
+                                          shown step by step on the Stage at http://<addr>/demo
+                                          (default 127.0.0.1:7234). Reset starts again on a new
+                                          store; Ctrl-C ends it and removes everything.
 
 Keys and trust:
   kernable keys new <name>                Writes <name>.key (the secret key, readable by the owner
@@ -207,6 +212,8 @@ async fn main() -> ExitCode {
                 }
             };
         }
+        ["demo"] => demo("127.0.0.1:7234").await,
+        ["demo", "--ui-listen", addr] => demo(addr).await,
         ["grant", root, key, permissions @ ..] if !permissions.is_empty() => {
             grant(root, key, permissions)
         }
@@ -285,6 +292,13 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+async fn demo(ui: &str) -> Result<bool> {
+    kernable_kernel::demo::run(ui)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 /// `kernable start --dev`: creates what is missing of `root.key`, `kernel.key`, `vault.key`,

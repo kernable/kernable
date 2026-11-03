@@ -23,17 +23,41 @@ pub(crate) async fn serve(
     addr: &str,
     respond: impl Fn(&Kernel, &[u8]) -> Vec<u8> + Send + Sync + 'static,
 ) -> Result<(), BoxError> {
+    let respond = Arc::new(respond);
+    let metrics = Arc::clone(&kernel);
+    serve_with(
+        addr,
+        move |reason| metrics.metrics.limited(reason),
+        move |request| {
+            let (kernel, respond) = (Arc::clone(&kernel), Arc::clone(&respond));
+            async move { respond(&kernel, &request) }
+        },
+    )
+    .await
+}
+
+/// Like [`serve`], for a server without a kernel of its own (`kernable demo`): `limited` gets
+/// the reason whenever a connection is turned away.
+pub(crate) async fn serve_with<F, R>(
+    addr: &str,
+    limited: impl Fn(&'static str) + Send + Sync + 'static,
+    respond: F,
+) -> Result<(), BoxError>
+where
+    F: Fn(Vec<u8>) -> R + Send + Sync + 'static,
+    R: Future<Output = Vec<u8>> + Send + 'static,
+{
     let listener = TcpListener::bind(addr).await?;
     let check_host = crate::loopback(addr);
     let permits = Arc::new(Semaphore::new(CONNECTIONS));
-    let respond = Arc::new(respond);
+    let (limited, respond) = (Arc::new(limited), Arc::new(respond));
     loop {
         let (mut conn, _) = listener.accept().await?;
         let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
-            kernel.metrics.limited("http_connections");
+            limited("http_connections");
             continue;
         };
-        let (kernel, respond) = (Arc::clone(&kernel), Arc::clone(&respond));
+        let (limited, respond) = (Arc::clone(&limited), Arc::clone(&respond));
         tokio::spawn(async move {
             let _permit = permit;
             let mut request = [0u8; 4096];
@@ -43,14 +67,14 @@ pub(crate) async fn serve(
             };
             let request = &request[..n];
             let response = if check_host && !host(request).is_some_and(|h| loopback_host(&h)) {
-                kernel.metrics.limited("http_host");
+                limited("http_host");
                 reply(
                     "403 Forbidden",
                     "text/plain",
                     b"a loopback Host is required\n",
                 )
             } else {
-                respond(&kernel, request)
+                respond(request.to_vec()).await
             };
             let _ = conn.write_all(&response).await;
         });

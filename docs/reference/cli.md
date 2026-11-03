@@ -17,6 +17,14 @@ kernable start --dev [<flag> <value>]...
 
 Runs the kernel in the foreground, trusting grants signed by the root keys; the flags are listed by `kernable start --help`. On Unix, SIGHUP reads the kernel key again. SIGTERM or SIGINT refuses new requests, lets running ones finish and stops. `--dev` is for trying kernable out: it creates `root.key`, `kernel.key`, `vault.key`, `app.key` and `app.grant` in the working directory if missing (app may do everything) and defaults to `--root root.pub`, `--vault-key vault.key` and `--ui-listen 127.0.0.1:7234`. Exit 2 on invalid flags; exit 1 if the kernel stops on an error.
 
+### `kernable demo`
+
+```text
+kernable demo [--ui-listen <addr>]
+```
+
+Runs kernable for presentations: a kernel on a new store in a temporary directory, with a small bank built in, shown step by step on the Stage at `http://<addr>/demo` (default `127.0.0.1:7234`). Reset starts again on a new store; Ctrl-C ends it and removes everything.
+
 ## Keys and trust
 
 ### `kernable keys new`

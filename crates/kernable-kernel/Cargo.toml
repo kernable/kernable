@@ -15,6 +15,9 @@ getrandom.workspace = true
 hex.workspace = true
 kernable-core = { path = "../kernable-core", features = ["certs"] }
 kernable-store = { path = "../kernable-store" }
+# `kernable demo` runs its bank with the Rust SDK.
+kernable = { path = "../../sdks/rust" }
+serde.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 prost.workspace = true

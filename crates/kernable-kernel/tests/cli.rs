@@ -587,3 +587,137 @@ fn start_explains_its_flags_and_logs_json_if_asked() {
     drop(_kernel);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// One request to the demo's UI: the status code and the body.
+#[cfg(unix)]
+fn demo_http(addr: &str, method: &str, path: &str, from_stage: bool) -> (u16, String) {
+    use std::io::{Read, Write};
+    let mut conn = std::net::TcpStream::connect(addr).unwrap();
+    let header = if from_stage {
+        "x-kernable-demo: 1\r\n"
+    } else {
+        ""
+    };
+    // In one write: the server reads the request with one read.
+    let request =
+        format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\n{header}content-length: 0\r\n\r\n");
+    conn.write_all(request.as_bytes()).unwrap();
+    let mut response = String::new();
+    conn.read_to_string(&mut response).unwrap();
+    let status = response[9..12].parse().unwrap();
+    let body = response.split_once("\r\n\r\n").unwrap().1.to_owned();
+    (status, body)
+}
+
+#[cfg(unix)]
+fn demo_state(addr: &str) -> serde_json::Value {
+    let (status, body) = demo_http(addr, "GET", "/api/demo", false);
+    serde_json::from_str(&body).unwrap_or_else(|e| panic!("{status} {body:?}: {e}"))
+}
+
+/// Waits until the demo is ready and idle; returns its state.
+#[cfg(unix)]
+fn demo_idle(addr: &str) -> serde_json::Value {
+    let started = std::time::Instant::now();
+    loop {
+        if let Ok(conn) = std::net::TcpStream::connect(addr) {
+            drop(conn);
+            let state = demo_state(addr);
+            assert!(state["error"].is_null(), "{state}");
+            if state["ready"] == true && state["busy"].is_null() {
+                return state;
+            }
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(30),
+            "the demo did not become ready"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_demo_runs_its_scene_resets_on_a_new_store_and_leaves_nothing_behind() {
+    let dir = temp_dir("demo");
+    let addr = free_addr();
+    let demo = KillOnDrop::spawn(
+        Process::new(env!("CARGO_BIN_EXE_kernable"))
+            .current_dir(&dir)
+            .args(["demo", "--ui-listen", &addr])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    );
+    let base = std::env::temp_dir().join(format!("kernable-demo-{}", demo.child.id()));
+    let state = demo_idle(&addr);
+    assert_eq!(state["generation"], 1);
+    assert!(base.join("run-1").join("kernable.db").exists());
+
+    // A page elsewhere cannot drive it: no header, no step.
+    let (status, _) = demo_http(&addr, "POST", "/api/demo/next", false);
+    assert_eq!(status, 403);
+
+    let steps = state["scene"]["steps"].as_array().unwrap().len();
+    for _ in 0..steps {
+        let (status, body) = demo_http(&addr, "POST", "/api/demo/next", true);
+        assert_eq!(status, 200, "{body}");
+        demo_idle(&addr);
+    }
+    let (status, _) = demo_http(&addr, "POST", "/api/demo/next", true);
+    assert_eq!(status, 409, "the scene is over");
+    let state = demo_state(&addr);
+    let outcomes: Vec<&str> = state["traces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["outcome"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        outcomes,
+        ["committed", "committed", "rejected", "committed"]
+    );
+    assert_eq!(state["rows"]["a1"]["balance"], 70);
+    let last = &state["traces"][steps - 1];
+    assert_eq!(
+        last["answer"]["row"]["balance"], 70,
+        "the client reads its write"
+    );
+    assert_eq!(
+        last["events"][0]["position"], 3,
+        "the rejection stored nothing"
+    );
+
+    // The kernel's own UI answers through the demo, from the store the steps wrote.
+    let (status, body) = demo_http(
+        &addr,
+        "GET",
+        "/api/history?tenant=default&domain=bank&type=account&id=a1",
+        false,
+    );
+    assert_eq!(status, 200, "{body}");
+    let history: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(history["events"].as_array().unwrap().len(), 3);
+    let code: serde_json::Value =
+        serde_json::from_str(&demo_http(&addr, "GET", "/api/demo/code", false).1).unwrap();
+    assert!(code["regions"]["withdraw"].is_array());
+
+    // Reset: a new kernel on a new, empty store; the old one is gone.
+    let (status, _) = demo_http(&addr, "POST", "/api/demo/reset", true);
+    assert_eq!(status, 200);
+    let state = demo_idle(&addr);
+    assert_eq!(state["generation"], 2);
+    assert_eq!(state["traces"].as_array().unwrap().len(), 0);
+    assert_eq!(state["rows"], serde_json::json!({}));
+    assert!(!base.join("run-1").exists());
+    assert!(base.join("run-2").join("kernable.db").exists());
+
+    // Ctrl-C ends it and removes everything.
+    let mut demo = demo;
+    Process::new("kill")
+        .args(["-INT", &demo.child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(demo.child.wait().unwrap().success());
+    assert!(!base.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
