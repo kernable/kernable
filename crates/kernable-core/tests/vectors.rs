@@ -127,6 +127,11 @@ fn vectors() -> Value {
         erases: "k-2".into(),
         ..event.clone()
     };
+    let moved_event = Event {
+        origin_partition: "p1".into(),
+        origin_position: 42,
+        ..event.clone()
+    };
 
     // Unique keys (one personal, one global), facts and requirements of a result.
     let keys = [
@@ -332,6 +337,10 @@ fn vectors() -> Value {
         "event_hash_vault": {
             "input": {"vault_refs": [vault_ref], "erases": "k-2"},
             "hash": hex::encode(signing::event_hash(&GENESIS, &vault_event)),
+        },
+        "event_hash_origin": {
+            "input": {"origin_partition": "p1", "origin_position": 42},
+            "hash": hex::encode(signing::event_hash(&GENESIS, &moved_event)),
         },
         "event_hash": {
             "input": {

@@ -283,6 +283,22 @@ pub(crate) async fn partitions_of(
     }
 }
 
+/// The partition `map` assigns `tenant` to.
+pub(crate) fn partition_of<'a>(map: &'a proto::PartitionMap, tenant: &str) -> &'a str {
+    map.tenants
+        .iter()
+        .find(|t| t.tenant == tenant)
+        .map_or(map.default.as_str(), |t| t.partition.as_str())
+}
+
+/// Whether a kernel refused a call because its tenant is moving to another partition.
+pub(crate) fn moving(status: &tonic::Status) -> bool {
+    status.code() == tonic::Code::Unavailable && status.message().starts_with("moving")
+}
+
+/// How long a call waits for its tenant's move to end.
+const MOVE_WAIT: Duration = Duration::from_secs(30);
+
 /// Whether a kernel refused a call as one for a tenant of another partition.
 pub(crate) fn wrong_partition(status: &tonic::Status) -> bool {
     status.code() == tonic::Code::FailedPrecondition
@@ -374,12 +390,7 @@ impl Client {
         match self.partition_map(false).await? {
             None => Ok(self.clone()),
             Some(map) => {
-                let name = map
-                    .tenants
-                    .iter()
-                    .find(|t| t.tenant == tenant)
-                    .map_or(map.default.as_str(), |t| t.partition.as_str())
-                    .to_owned();
+                let name = partition_of(&map, tenant).to_owned();
                 self.on_partition(&map, &name)
             }
         }
@@ -406,7 +417,8 @@ impl Client {
     }
 
     /// `call` on `tenant`'s partition, sent anew after reading the map again on
-    /// `wrong_partition`.
+    /// `wrong_partition`, and while the tenant moves (`moving`, refused before it took effect)
+    /// for up to 30 s.
     pub(crate) async fn routed<R, Fut>(
         &self,
         tenant: &str,
@@ -416,9 +428,15 @@ impl Client {
         Fut: Future<Output = Result<R, tonic::Status>>,
     {
         let mut attempt = 0;
+        let deadline = Instant::now() + MOVE_WAIT;
+        let mut pause = Duration::from_millis(50);
         loop {
             let client = self.for_tenant(tenant).await?;
             match call(client).await {
+                Err(status) if moving(&status) && Instant::now() + pause < deadline => {
+                    tokio::time::sleep(pause).await;
+                    pause = (pause * 2).min(Duration::from_secs(1));
+                }
                 Err(status) if attempt < 3 && wrong_partition(&status) => {
                     attempt += 1;
                     self.partition_map(true).await?;

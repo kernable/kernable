@@ -578,6 +578,59 @@ async fn a_tenant_moves_with_its_events_and_global_keys_and_back() {
         .await
         .unwrap();
     assert_eq!(committed_versions(&freed), [4]);
+
+    // A new read model (with the Rust SDK) replays both partitions: t1's events once each, in
+    // their order, though p2's stream is the shorter one.
+    let sdk_key = p1.dir.join("sdk.key");
+    std::fs::write(&sdk_key, hex(key(1).as_bytes())).unwrap();
+    std::fs::write(
+        p1.dir.join("sdk.grant"),
+        hex(&default_grant(&key(1)).unwrap().encode_to_vec()),
+    )
+    .unwrap();
+    for env in [&p1, &p2] {
+        let all: &[&str] = &["*"];
+        env.kernel
+            .grant(grant(
+                &key(1),
+                &[
+                    ("submit", all),
+                    ("subscribe", all),
+                    ("query", all),
+                    ("listen", all),
+                    ("privileged", &["bypass_authorization"]),
+                    ("manage", all),
+                ],
+            ))
+            .unwrap();
+    }
+    let sdk = kernable::Kernable::new(kernable::Options::new(&sdk_key).url(&p1.addr)).unwrap();
+    let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u64>::new()));
+    let replay = {
+        let order = std::sync::Arc::clone(&order);
+        kernable::domain("orders").read_model("replay").on(
+            "orders.*",
+            move |_: serde_json::Value, evt: kernable::StoredEventMeta, _| {
+                if evt.tenant == "t1" {
+                    order.lock().unwrap().push(evt.version);
+                }
+                async { Ok(()) }
+            },
+        )
+    };
+    let replaying = sdk.listener(&replay);
+    let running = tokio::spawn({
+        let replaying = replaying.clone();
+        async move { replaying.run().await }
+    });
+    until("the new read model saw t1's events", async || {
+        order.lock().unwrap().len() >= 4
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(*order.lock().unwrap(), [1, 2, 3, 4]);
+    replaying.stop();
+    running.await.unwrap();
     let a9 = submit(&p1.addr, with_email("m8", "PlaceOrder", "o9", "t9", "a@x"))
         .await
         .unwrap();

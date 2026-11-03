@@ -1,7 +1,7 @@
 //! Listeners (read models and reactors), their queries and middleware, and subscriptions.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt,
     pin::Pin,
     sync::{
@@ -735,6 +735,34 @@ struct HandleInner {
     part: String,
     /// As a partition's stream: the store is the parent's, which closes it.
     shared: bool,
+    /// As a partition's stream: the handle that runs it.
+    parent: Option<Arc<HandleInner>>,
+    /// As that handle: how far each partition's stream has handled, for the order across
+    /// moves (S4); `moved` counts the changes.
+    progress: Mutex<HashMap<String, u64>>,
+    moved: watch::Sender<u64>,
+    /// As a partition's stream: tenants it read the map again for.
+    checked: Mutex<HashSet<String>>,
+}
+
+impl HandleInner {
+    /// On the parent: partition `part`'s stream has handled everything up to `position`.
+    fn advanced(&self, part: &str, position: u64) {
+        let mut progress = self.progress.lock().unwrap();
+        if progress.get(part).is_none_or(|at| *at < position) {
+            progress.insert(part.to_owned(), position);
+            self.moved.send_modify(|n| *n += 1);
+        }
+    }
+
+    /// On the parent: whether partition `part`'s stream has handled up to `position`.
+    fn passed(&self, part: &str, position: u64) -> bool {
+        self.progress
+            .lock()
+            .unwrap()
+            .get(part)
+            .is_some_and(|at| *at >= position)
+    }
 }
 
 /// A [`Listener`] running on a connection; see [`crate::Kernable::listener`]. Cloning gives
@@ -766,6 +794,10 @@ impl ListenerHandle {
                 started_at: AtomicU64::new(0),
                 part: String::new(),
                 shared: false,
+                parent: None,
+                progress: Mutex::default(),
+                moved: watch::Sender::new(0),
+                checked: Mutex::default(),
             }),
         }
     }
@@ -789,6 +821,10 @@ impl ListenerHandle {
                 started_at: AtomicU64::new(0),
                 part,
                 shared: true,
+                parent: Some(Arc::clone(inner)),
+                progress: Mutex::default(),
+                moved: watch::Sender::new(0),
+                checked: Mutex::default(),
             }),
         }
     }
@@ -1072,6 +1108,9 @@ impl ListenerHandle {
                 }),
                 Some(Delivery::Ready(r)) => {
                     inner.position.store(r.after_position, Ordering::SeqCst);
+                    if let Some(parent) = &inner.parent {
+                        parent.advanced(&inner.part, r.after_position);
+                    }
                     replay_up_to = r.head_position;
                     if inner.connects.fetch_add(1, Ordering::SeqCst) > 0 {
                         client.log.info(&what, || {
@@ -1107,6 +1146,7 @@ impl ListenerHandle {
                         )
                         .into());
                     }
+                    self.in_order(&batch.events, &what).await?;
                     let store = self.opened_store();
                     // With a store, the batch's data and position are committed together,
                     // before the ack.
@@ -1148,6 +1188,9 @@ impl ListenerHandle {
                         }
                     };
                     inner.position.store(up_to, Ordering::SeqCst);
+                    if let Some(parent) = &inner.parent {
+                        parent.advanced(&inner.part, up_to);
+                    }
                     Reply::Ack(Ack {
                         position: up_to,
                         parked,
@@ -1199,6 +1242,76 @@ impl ListenerHandle {
                 None => continue,
             };
             tx.send(msg(reply)).await?;
+        }
+        Ok(())
+    }
+
+    /// Before a batch of a partition's stream: the events of a tenant that moved here
+    /// after its move wait until the stream of the partition it came from has passed the
+    /// tenant's last event there, so a tenant's events keep their order across the move. Waits
+    /// at most 30 s (a partition that is down), then goes on with a warning.
+    async fn in_order(&self, events: &[proto::Event], what: &str) -> Result<(), BoxError> {
+        let inner = &self.inner;
+        let Some(parent) = &inner.parent else {
+            return Ok(());
+        };
+        if events.is_empty() {
+            return Ok(());
+        }
+        let client = &inner.client;
+        let Some(mut map) = client.partition_map(false).await? else {
+            return Ok(());
+        };
+        let part = inner.part.as_str();
+        let known = |m: &proto::PartitionMap, tenant: &str| {
+            crate::partition_of(m, tenant) == part
+                || m.moved
+                    .iter()
+                    .any(|x| x.tenant == tenant && (x.to == part || x.from == part))
+        };
+        for e in events {
+            if !known(&map, &e.tenant_id)
+                && inner.checked.lock().unwrap().insert(e.tenant_id.clone())
+            {
+                // The tenant came here after the map was read; another kernel may take a moment
+                // to hold the new one. This stream's partition holds it already.
+                for i in 0..3 {
+                    if known(&map, &e.tenant_id) {
+                        break;
+                    }
+                    if i > 0 {
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
+                    if let Some(m) = client.partition_map(true).await? {
+                        map = m;
+                    }
+                }
+            }
+            for m in &map.moved {
+                if m.tenant != e.tenant_id
+                    || m.to != part
+                    || e.global_position <= m.target_after
+                    || !map.partitions.iter().any(|p| p.name == m.from)
+                {
+                    continue;
+                }
+                let mut moved = parent.moved.subscribe();
+                let mut stopped = inner.stopped.subscribe();
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+                while !parent.passed(&m.from, m.source_head) {
+                    tokio::select! {
+                        _ = moved.changed() => {}
+                        _ = stopped.wait_for(|s| *s) => return Err("stopped".into()),
+                        () = tokio::time::sleep_until(deadline) => {
+                            client.log.warn(what, || format!(
+                                "tenant {} moved here from partition {}, whose stream has not passed position {} in 30 s; going on without its order",
+                                e.tenant_id, m.from, m.source_head
+                            ));
+                            break;
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }

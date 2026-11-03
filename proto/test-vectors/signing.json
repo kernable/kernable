@@ -196,6 +196,13 @@
       "version": 1
     }
   },
+  "event_hash_origin": {
+    "hash": "a49edb8174e452b84262815d84ee659abb3423217dc4d6db21e3c847d3a1290d",
+    "input": {
+      "origin_partition": "p1",
+      "origin_position": 42
+    }
+  },
   "event_hash_vault": {
     "hash": "cef40f057e41660e3da8b6b9c0a07fcd6cb3c222c7b2eeddc91ccf3863bddc6e",
     "input": {
