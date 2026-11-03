@@ -22,7 +22,16 @@ message LogRecord {
     DataChangedRecord data_changed = 11;
     ReplicationHeadRecord replication_head = 12;
     PartitionMap partition_map = 13;
+    GlobalKeyRecord global_key = 14;
   }
+}
+
+// On the control partition, the key owner: the partition that may hold a unique key
+// with scope global. Whether it still does, that partition's index says; the owner asks it when
+// another partition wants the key.
+message GlobalKeyRecord {
+  bytes id = 1;
+  string partition = 2;
 }
 
 // A file of the data store was put or deleted. The file is not in the log: a primary reads it

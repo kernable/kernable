@@ -382,6 +382,18 @@ pub trait Store: Send + Sync {
         Ok(None)
     }
 
+    /// On the key owner (S3): the partition that may hold global key `id`, if any.
+    fn global_key(&self, id: &[u8]) -> Result<Option<String>> {
+        let _ = id;
+        Ok(None)
+    }
+
+    /// On the key owner: global key `id` may be held by `partition` from now on.
+    fn save_global_key(&self, id: &[u8], partition: &str) -> Result<()> {
+        let _ = (id, partition);
+        Err(Error::ReadOnly)
+    }
+
     /// Keeps `map` unless a map of the same or a higher epoch is kept.
     fn save_partition_map(&self, map: &PartitionMap) -> Result<()> {
         let _ = map;

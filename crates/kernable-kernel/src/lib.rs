@@ -24,6 +24,7 @@ pub mod crash;
 pub mod demo;
 #[cfg(feature = "fuzzing")]
 pub mod fuzzing;
+pub mod global_keys;
 pub mod grants;
 mod http;
 mod index;
@@ -66,6 +67,7 @@ use kernable_core::{
         command_service_server::{CommandService, CommandServiceServer},
         data_service_server::{DataService, DataServiceServer},
         event_service_server::{EventService, EventServiceServer},
+        global_key_service_server::GlobalKeyServiceServer,
         kernel_message::Msg as Out,
         listener_service_server::{ListenerService, ListenerServiceServer},
         membership_service_server::MembershipServiceServer,
@@ -254,6 +256,10 @@ pub struct Kernel {
     replication: Option<Arc<replication::Primary>>,
     /// The partition map, with `--partition` (S2).
     maps: partitions::Maps,
+    /// Global keys of commits in flight on this partition (S3).
+    in_flight_keys: global_keys::InFlight,
+    /// On the key owner: one decision about global keys at a time.
+    global_owner: tokio::sync::Mutex<()>,
 }
 
 impl Kernel {
@@ -351,6 +357,8 @@ impl Kernel {
             replays: replays::Replays::new(now_ms()),
             replication,
             maps,
+            in_flight_keys: Default::default(),
+            global_owner: Default::default(),
         });
         // The newest grants it had, checked again: a root key may be gone or revoked since.
         for grant in kernel.store.grants()? {
@@ -1157,6 +1165,7 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
                 .max_encoding_message_size(cache_max),
         )
         .add_service(PartitionServiceServer::new(api.clone()))
+        .add_service(GlobalKeyServiceServer::new(api.clone()))
         .add_service(TrustSyncServiceServer::new(api.clone()))
         .add_service(
             ReplicationServiceServer::new(api.clone())
@@ -2667,6 +2676,41 @@ impl Session {
                 .collect(),
             facts: r.facts.iter().filter(|_| exists).cloned().collect(),
         };
+        // Global keys across partitions (S3): reserved with the key owner first, and held as
+        // in flight until this commit is done.
+        let global: Vec<(&str, [u8; 32])> = wanted
+            .keys
+            .iter()
+            .filter(|k| k.global && k.subject.is_empty())
+            .map(|k| (k.name.as_str(), k.id))
+            .collect();
+        let ids: Vec<[u8; 32]> = global.iter().map(|(_, id)| *id).collect();
+        let _flying = self.kernel.in_flight_keys.hold(&ids);
+        if !ids.is_empty() && self.kernel.config.partition.is_some() {
+            match self.kernel.reserve_global(&ids).await {
+                Ok(granted) => {
+                    if let Some(i) = granted.iter().position(|g| !g) {
+                        let reason = Rejected {
+                            code: "unique_taken".into(),
+                            message: format!(
+                                "{}.{} key {} is taken",
+                                f.command.domain, f.command.aggregate_type, global[i].0
+                            ),
+                            key: global[i].0.to_owned(),
+                            ..Default::default()
+                        };
+                        self.reject(&r.lease_id, f.command, reason);
+                        return Ok(());
+                    }
+                }
+                Err(status) => {
+                    // Ends the session; the command goes back to the queue.
+                    tracing::warn!(error = %status.message(), "reserving global keys failed");
+                    self.in_flight().insert(r.lease_id, f);
+                    return Err(Status::unavailable("reserving global keys failed"));
+                }
+            }
+        }
 
         let erasing = match self
             .kernel

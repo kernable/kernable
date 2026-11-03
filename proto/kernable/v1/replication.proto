@@ -154,6 +154,29 @@ message TrustSync {
   PartitionMap map = 4;
 }
 
+// Unique keys with scope global across partitions (S3). The control partition owns them:
+// before a partition commits a new global key, it reserves it there (Reserve); the owner grants
+// it unless another partition still holds it, or is about to commit it (Holds). Signed by the
+// partition's node key (granted `replicate`) over kernable.v1.global-keys.
+service GlobalKeyService {
+  rpc Reserve(GlobalKeyRequest) returns (GlobalKeyAnswer);
+  rpc Holds(GlobalKeyRequest) returns (GlobalKeyAnswer);
+}
+
+message GlobalKeyRequest {
+  string op = 1;          // reserve | holds: signed, so one cannot pass for the other
+  repeated bytes keys = 2;
+  string partition = 3;   // the asking partition
+  int64 issued_at = 4;
+  Signature sig = 5;
+  uint32 protocol = 6;
+}
+
+// One answer per key: reserved for the asking partition, or (Holds) held there.
+message GlobalKeyAnswer {
+  repeated bool granted = 1;
+}
+
 service WitnessService {
   rpc Ask(WitnessRequest) returns (WitnessAnswer);
 }

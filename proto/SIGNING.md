@@ -48,6 +48,7 @@ Each message starts with a `str` **tag** for domain separation. Payloads are sig
 | Kernel of a pair | `kernable.v1.witness` | `op: u64`, `term: u64`, `address`, `standby`, `issued_at: i64` (see `WitnessRequest` in `replication.proto`) |
 | Deploy tooling | `kernable.v1.partitions` | `epoch: u64`, `partition_count: u64`, then per partition `name`, `address_count: u64` and every address, then `tenant_count: u64` and per tenant `tenant`, `partition`, then `default`, `control`, `issued_at: i64` (a key granted `manage` for `*`) |
 | Kernel of a partition | `kernable.v1.trust-sync` | `issued_at: i64` |
+| Kernel of a partition | `kernable.v1.global-keys` | `op` (`reserve` or `holds`), `key_count: u64` and every key, `partition`, `issued_at: i64` |
 | Operator tooling | `kernable.v1.promote` | `issued_at: i64` (a key granted `manage` for `*`; asked of a standby, see `replication.proto`) |
 
 Four more tagged messages are hashed, not signed: `kernable.v1.vault` ([Vault references](#vault-references)), `kernable.v1.id` ([Derived IDs](#derived-ids)), `kernable.v1.key` ([Unique keys and facts](#unique-keys-and-facts)) and `kernable.v1.event` ([Event hash chain](#event-hash-chain)).

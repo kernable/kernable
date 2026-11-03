@@ -18,11 +18,11 @@ use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
         AggregateIndex, Attribute, CheckpointRecord, Command, CommandResult, Committed,
-        CommittedRecord, DataChangedRecord, EnqueuedRecord, Event, Grant, ListenerRecord,
-        LogRecord, LoggedEvent, Membership, MembershipRecord, Middleware, NewEvent, ParkedEvent,
-        PartitionMap, Rejected, RejectedRecord, ReplicatedRecord, ReplicationHeadRecord,
-        RequestContext, Requirement, RevocationRecord, Signature, When, WorkerRecord,
-        command_result::Outcome, log_record::Record,
+        CommittedRecord, DataChangedRecord, EnqueuedRecord, Event, GlobalKeyRecord, Grant,
+        ListenerRecord, LogRecord, LoggedEvent, Membership, MembershipRecord, Middleware, NewEvent,
+        ParkedEvent, PartitionMap, Rejected, RejectedRecord, ReplicatedRecord,
+        ReplicationHeadRecord, RequestContext, Requirement, RevocationRecord, Signature, When,
+        WorkerRecord, command_result::Outcome, log_record::Record,
     },
     signing::{self, GENESIS},
 };
@@ -879,6 +879,28 @@ impl Store for SqliteStore {
 
     fn partition_map(&self) -> Result<Option<PartitionMap>> {
         read_partition_map(&self.conn())
+    }
+
+    fn global_key(&self, id: &[u8]) -> Result<Option<String>> {
+        read_global_key(&self.conn(), id)
+    }
+
+    fn save_global_key(&self, id: &[u8], partition: &str) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if read_global_key(&tx, id)?.is_some_and(|p| p == partition) {
+            return Ok(());
+        }
+        save_global_key_tx(&tx, id, partition)?;
+        let head = self.file(&tx, || {
+            vec![Record::GlobalKey(GlobalKeyRecord {
+                id: id.to_vec(),
+                partition: partition.to_owned(),
+            })]
+        })?;
+        tx.commit()?;
+        self.advance(head);
+        Ok(())
     }
 
     fn save_partition_map(&self, map: &PartitionMap) -> Result<()> {
@@ -2132,6 +2154,7 @@ fn apply_record(tx: &Transaction<'_>, record: &Record) -> Result<()> {
         Record::PartitionMap(m) => {
             save_partition_map_tx(tx, m)?;
         }
+        Record::GlobalKey(g) => save_global_key_tx(tx, &g.id, &g.partition)?,
         Record::DataChanged(_) => {}
         Record::Format(_) | Record::ReplicationHead(_) => {
             return Err(diverged("a record that starts a log".into()));
@@ -2148,6 +2171,42 @@ CREATE TABLE IF NOT EXISTS partition_map (
     map   BLOB    NOT NULL -- the PartitionMap message, with its signature
 ) STRICT;
 ";
+
+/// On the key owner, created with the first global key it keeps (S3).
+const GLOBAL_KEYS_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS global_keys (
+    id        BLOB PRIMARY KEY,
+    partition TEXT NOT NULL -- the partition that may hold the key
+) STRICT, WITHOUT ROWID;
+";
+
+fn read_global_key(conn: &Connection, id: &[u8]) -> Result<Option<String>> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE name = 'global_keys')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        return Ok(None);
+    }
+    Ok(conn
+        .query_row(
+            "SELECT partition FROM global_keys WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+fn save_global_key_tx(tx: &Connection, id: &[u8], partition: &str) -> Result<()> {
+    tx.execute_batch(GLOBAL_KEYS_SCHEMA)?;
+    tx.execute(
+        "INSERT INTO global_keys (id, partition) VALUES (?1, ?2)
+         ON CONFLICT (id) DO UPDATE SET partition = excluded.partition",
+        params![id, partition],
+    )?;
+    Ok(())
+}
 
 /// The newest partition map, if one was ever kept.
 fn read_partition_map(conn: &Connection) -> Result<Option<PartitionMap>> {
@@ -2373,6 +2432,20 @@ fn image_records(conn: &Connection, f: &mut dyn FnMut(Record) -> Result<()>) -> 
     }
     if let Some(map) = read_partition_map(conn)? {
         f(Record::PartitionMap(map))?;
+    }
+    let held: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE name = 'global_keys')",
+        [],
+        |r| r.get(0),
+    )?;
+    if held {
+        let keys: Vec<(Vec<u8>, String)> = conn
+            .prepare("SELECT id, partition FROM global_keys ORDER BY id")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (id, partition) in keys {
+            f(Record::GlobalKey(GlobalKeyRecord { id, partition }))?;
+        }
     }
     for cp in read_checkpoints(conn, None)? {
         f(Record::Checkpoint(CheckpointRecord {

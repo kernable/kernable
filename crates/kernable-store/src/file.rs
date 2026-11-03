@@ -42,10 +42,10 @@ use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
         AggregateIndex, CheckpointRecord, Command, CommandResult, Committed, CommittedRecord,
-        DataChangedRecord, EnqueuedRecord, Event, FormatRecord, Grant, ListenerRecord, LogRecord,
-        LoggedEvent, MembershipRecord, NewEvent, PartitionMap, Rejected, RejectedRecord,
-        ReplicatedRecord, ReplicationHeadRecord, RevocationRecord, Signature, WorkerRecord,
-        command_result::Outcome, log_record::Record,
+        DataChangedRecord, EnqueuedRecord, Event, FormatRecord, GlobalKeyRecord, Grant,
+        ListenerRecord, LogRecord, LoggedEvent, MembershipRecord, NewEvent, PartitionMap, Rejected,
+        RejectedRecord, ReplicatedRecord, ReplicationHeadRecord, RevocationRecord, Signature,
+        WorkerRecord, command_result::Outcome, log_record::Record,
     },
     signing::{self, GENESIS},
 };
@@ -98,6 +98,8 @@ struct State {
     holders: HashMap<Vec<u8>, StreamKey>,
     /// The newest partition map.
     partition_map: Option<PartitionMap>,
+    /// On the key owner: which partition may hold each global key.
+    global_keys: HashMap<Vec<u8>, String>,
 }
 
 impl State {
@@ -233,6 +235,9 @@ impl State {
                     self.grants.insert(g.key_id.clone(), g);
                 }
             }
+            Record::GlobalKey(g) => {
+                self.global_keys.insert(g.id, g.partition);
+            }
             Record::PartitionMap(m) => {
                 if self
                     .partition_map
@@ -326,6 +331,7 @@ impl State {
             | Record::Membership(_)
             | Record::Grant(_)
             | Record::PartitionMap(_)
+            | Record::GlobalKey(_)
             | Record::DataChanged(_) => {}
         }
         Ok(())
@@ -1070,6 +1076,27 @@ impl Store for FileStore {
 
     fn partition_map(&self) -> Result<Option<PartitionMap>> {
         Ok(self.inner().state.partition_map.clone())
+    }
+
+    fn global_key(&self, id: &[u8]) -> Result<Option<String>> {
+        Ok(self.inner().state.global_keys.get(id).cloned())
+    }
+
+    fn save_global_key(&self, id: &[u8], partition: &str) -> Result<()> {
+        let mut inner = self.inner();
+        if inner
+            .state
+            .global_keys
+            .get(id)
+            .is_some_and(|p| p == partition)
+        {
+            return Ok(());
+        }
+        let record = Record::GlobalKey(GlobalKeyRecord {
+            id: id.to_vec(),
+            partition: partition.to_owned(),
+        });
+        append(&mut inner, record)
     }
 
     fn save_partition_map(&self, map: &PartitionMap) -> Result<()> {

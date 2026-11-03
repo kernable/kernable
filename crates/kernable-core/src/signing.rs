@@ -414,6 +414,17 @@ pub fn partitions_message(map: &crate::proto::PartitionMap) -> Vec<u8> {
     msg.str(&map.default).str(&map.control).i64(map.issued_at).0
 }
 
+/// What a partition's node key signs to reserve global keys, or to ask whether it holds them.
+pub fn global_keys_message(op: &str, keys: &[Vec<u8>], partition: &str, issued_at: i64) -> Vec<u8> {
+    let mut msg = Msg::new("kernable.v1.global-keys")
+        .str(op)
+        .u64(keys.len() as u64);
+    for k in keys {
+        msg = msg.bytes(k);
+    }
+    msg.str(partition).i64(issued_at).0
+}
+
 /// What a partition's node key signs to take the trust records from the control partition.
 pub fn trust_sync_message(issued_at: i64) -> Vec<u8> {
     Msg::new("kernable.v1.trust-sync").i64(issued_at).0

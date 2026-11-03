@@ -342,6 +342,16 @@ impl Store for FaultyStore {
         self.inner.verify(kernel_key_ids)
     }
 
+    fn global_key(&self, id: &[u8]) -> Result<Option<String>> {
+        self.faults.read()?;
+        self.inner.global_key(id)
+    }
+
+    fn save_global_key(&self, id: &[u8], partition: &str) -> Result<()> {
+        self.faults
+            .write(|| self.inner.save_global_key(id, partition))
+    }
+
     fn partition_map(&self) -> Result<Option<PartitionMap>> {
         self.faults.read()?;
         self.inner.partition_map()

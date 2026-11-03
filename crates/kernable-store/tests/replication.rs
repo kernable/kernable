@@ -289,6 +289,8 @@ fn writes(s: &dyn Store, round: u8) {
     };
     s.save_partition_map(&map(u64::from(round) + 1)).unwrap();
     s.save_partition_map(&map(0)).unwrap(); // older: kept out
+    s.save_global_key(&[round; 32], "p1").unwrap();
+    s.save_global_key(&[round; 32], "p2").unwrap(); // moved on
 }
 
 /// Applies the primary's records to the standby, `batch` at a time, until it has them all.
@@ -379,6 +381,13 @@ fn same(primary: &dyn Store, standby: &dyn Store, what: &str) {
         standby.revocations().unwrap(),
         "{what}"
     );
+    for round in 0..4u8 {
+        assert_eq!(
+            primary.global_key(&[round; 32]).unwrap(),
+            standby.global_key(&[round; 32]).unwrap(),
+            "{what}: global key"
+        );
+    }
     assert_eq!(
         primary.partition_map().unwrap(),
         standby.partition_map().unwrap(),

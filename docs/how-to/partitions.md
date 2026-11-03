@@ -6,7 +6,7 @@ Every partition is an ordinary kernel, or a [pair with a standby](./standby). On
 
 ## 1. Keys
 
-Every partition other than the control partition takes the trust records with a node key, granted `replicate` (a pair's node key does both):
+Every partition takes the trust records, and reserves global unique keys, with a node key granted `replicate` (a pair's node key does both). The control partition needs one too, to ask the others about global keys:
 
 ```sh
 kernable keys new node-p2 && kernable grant root.key node-p2.pub 'replicate=*'
@@ -80,12 +80,12 @@ On one machine, two partitions give about 1.5 times one; beyond that the shared 
 |---|---|
 | A request names a tenant of another partition | `FAILED_PRECONDITION` `wrong_partition: tenant acme is on partition p2 (map epoch 3)`; the SDKs read the map again and send it there |
 | A key is revoked on the control partition | Every partition refuses it within about a second |
-| The control partition is down | The others serve on with the map and trust records they hold; new maps, grants and memberships wait |
+| The control partition is down | The others serve on with the map and trust records they hold; new maps, grants and memberships wait, and so do commits that file a new global key |
 | A partition that was down starts again | It takes what it missed from the control partition first thing |
 
 ## Limits
 
 - **One tenant never grows beyond one partition.** Give a big tenant a partition of its own.
 - **Across tenants, there is no order and no atomicity**: a command changes one aggregate of one tenant, as always; a read model across partitions sees each partition's events in order, not one global order.
-- **Unique keys with `scope: global`** are unique within each partition, not across all of them yet.
+- **Unique keys with `scope: global`** are unique across all partitions: before a partition commits one its aggregate did not hold, it reserves the key on the control partition, which asks the partition that had it whether it still does (a moment of extra latency for those commits, and none while the control partition is down: they wait). Personal global keys are unique within each partition only.
 - New partitions in the map reach running workers and listeners when they start again.

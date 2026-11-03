@@ -65,7 +65,7 @@ After every command, also one without events, the worker computes the keys from 
 | `null`, `undefined`, `None` | nothing |
 
 - **Freeing cannot be forgotten.** A changed value frees the old one in the same commit; a value that becomes null frees it. There is no separate step to release a key.
-- **Scope.** `tenant` (the default) makes a value unique within the command's tenant; another tenant may hold the same value. `global` makes it unique across tenants.
+- **Scope.** `tenant` (the default) makes a value unique within the command's tenant; another tenant may hold the same value. `global` makes it unique across tenants, also when they live on [different partitions](../how-to/partitions): the control partition reserves each new global key before it is committed. A personal global key is unique within its partition only.
 - **Per aggregate type.** A key belongs to its domain, aggregate type and name: `pmdxId` of `funds.fund` never collides with a `pmdxId` of another aggregate type.
 - **Normalising is yours.** The kernel compares the SHA-256 of the value's UTF-8 bytes, so `LU0001` and `lu0001 ` are two values. Trim, lowercase or format the value in the function.
 - **Deterministic**, like `apply`: the function sees only the state. If it throws, the command is rejected as for a handler error (`handler_error`).
