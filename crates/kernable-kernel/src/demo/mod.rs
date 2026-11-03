@@ -325,6 +325,8 @@ impl Demo {
                 "index": state.scene,
                 "title": scene.title,
                 "intro": scene.intro,
+                "question": scene.question,
+                "takeaway": scene.takeaway,
                 "aggregate": scene.aggregate,
                 "ids": scene.ids,
                 "query": scene.query,

@@ -5,6 +5,10 @@ use super::bank::Parts;
 /// A scene of the Stage: steps on the bank parts it runs, shown with one read model.
 pub(super) struct Scene {
     pub title: &'static str,
+    /// The question the scene answers, on its opening slide.
+    pub question: &'static str,
+    /// What to remember, on its closing slide.
+    pub takeaway: &'static str,
     /// What the Stage says before the first step.
     pub intro: &'static str,
     /// The aggregate type the Stage shows, and the IDs of those it shows in the store.
@@ -121,6 +125,8 @@ pub(super) const SCENES: &[Scene] = &[
     // write.
     Scene {
         title: "Command → event → read model",
+        question: "When a command returns, does the next read see it?",
+        takeaway: "The submit returns once the read side has the event: read your own write, without polling.",
         intro: "A client sends a command, a worker decides, the kernel stores the event, a read model shows it.",
         aggregate: "account",
         ids: &["a1"],
@@ -158,6 +164,8 @@ pub(super) const SCENES: &[Scene] = &[
     // A unique key: never two holders, also when two commands race for it.
     Scene {
         title: "Two customers, one username",
+        question: "Can two customers ever end up with the same username?",
+        takeaway: "Never two holders: the kernel checks unique keys at the commit, also when commands race.",
         intro: "A username belongs to one customer only. The worker never checks it: the kernel does, when it commits, also when two commands race for it.",
         aggregate: "customer",
         ids: &["c1", "c2", "c3", "c4"],
@@ -214,6 +222,8 @@ pub(super) const SCENES: &[Scene] = &[
     // A requirement on another aggregate, checked when the command commits.
     Scene {
         title: "Only open accounts get paid",
+        question: "How does one aggregate depend on another without locking both?",
+        takeaway: "Requirements are checked at the commit: the payer's worker never sees the other account.",
         intro: "A payment requires the receiving account to be open. The paying account's worker cannot see the other account: the kernel checks it when the payment commits.",
         aggregate: "account",
         ids: &["a1", "a2"],
@@ -258,6 +268,8 @@ pub(super) const SCENES: &[Scene] = &[
     // Many commands on one aggregate: queued, one at a time, no conflicts.
     Scene {
         title: "One hot account",
+        question: "What happens when everyone writes to the same aggregate at once?",
+        takeaway: "One queue per aggregate: no version conflicts, no retries, and different aggregates run in parallel.",
         intro: "Two hundred clients deposit into the same account at once. There are no version conflicts to retry: the kernel runs one command per aggregate at a time.",
         aggregate: "account",
         ids: &[
@@ -295,6 +307,8 @@ pub(super) const SCENES: &[Scene] = &[
     // A crash in the middle of the load: nothing lost, nothing twice.
     Scene {
         title: "Kill the kernel",
+        question: "What do you lose if the kernel dies in the middle of a write?",
+        takeaway: "Nothing. Commands are idempotent by ID: resend after a crash, and every one is stored exactly once.",
         intro: "300 deposits are on their way when the kernel is killed with kill -9. It restarts on the same store; the clients send again what failed, with the same command IDs.",
         aggregate: "account",
         ids: &["a1", "a2", "a3"],
@@ -330,6 +344,8 @@ pub(super) const SCENES: &[Scene] = &[
     // The store is tamper-evident.
     Scene {
         title: "Change one byte",
+        question: "Would you notice if someone edited the database by hand?",
+        takeaway: "Yes: every event is signed and hash-chained, and verify names the one that was changed.",
         intro: "Every event is signed by the worker that produced it and chained to the one before by its hash. Someone changes one stored event directly in the database file.",
         aggregate: "account",
         ids: &["a1"],
@@ -365,6 +381,8 @@ pub(super) const SCENES: &[Scene] = &[
     // Personal data in the vault, erased for good while the events stay.
     Scene {
         title: "Forget a customer",
+        question: "How do you delete personal data from an append-only log?",
+        takeaway: "Personal data lives in the vault. Erase the subject: the values are gone, the history stays intact.",
         intro: "Names and emails are personal data. They go to the vault, encrypted per person; the events keep references. Forgetting a person erases the values, the history stays intact.",
         aggregate: "person",
         ids: &["p1", "p2"],
@@ -407,6 +425,8 @@ pub(super) const SCENES: &[Scene] = &[
     // A middleware decides before anything is queued, and fails closed.
     Scene {
         title: "Who may take money out",
+        question: "Where does authorization run, and what if it is down?",
+        takeaway: "Before the queue, in a middleware: refused commands are never stored, and it fails closed.",
         intro: "A middleware checks every withdrawal before the kernel queues it: only tellers may withdraw. A refused command is never stored, and while the middleware is away, nothing it covers passes.",
         aggregate: "account",
         ids: &["a1"],
@@ -450,6 +470,8 @@ pub(super) const SCENES: &[Scene] = &[
     // A reactor that fails parks its event, and the rest goes on.
     Scene {
         title: "A reactor that breaks",
+        question: "What happens to an event a reactor cannot handle?",
+        takeaway: "It is parked, not lost and not blocking: the rest goes on, and a retry runs it exactly once.",
         intro: "A reactor credits every payment to the receiving account. When it fails, the kernel parks the event, the rest of the system goes on, and an operator retries it later.",
         aggregate: "account",
         ids: &["a1", "a2"],
@@ -500,6 +522,8 @@ pub(super) const SCENES: &[Scene] = &[
     // Keys can be revoked while everything runs.
     Scene {
         title: "Revoke a key",
+        question: "A client key leaks. How fast can you shut it out?",
+        takeaway: "At once, while everything runs: revocations are signed by the root key and kept in the store.",
         intro: "Every client signs with its own key, granted by a root key. A mobile app's key leaks: it is revoked while the kernel runs, and from that moment on the kernel refuses it.",
         aggregate: "account",
         ids: &["a1"],
@@ -531,6 +555,8 @@ pub(super) const SCENES: &[Scene] = &[
     // The read side can always be rebuilt from the events.
     Scene {
         title: "The read side is disposable",
+        question: "What if a read model is wrong, or you need a new one?",
+        takeaway: "Rebuild it from the events: same rows, and new questions answered from old history.",
         intro: "Read models hold nothing the events do not. Throw one away, and a new one built from the history arrives at the same rows; a new question gets its answer from old events too.",
         aggregate: "account",
         ids: &["a1", "a2"],

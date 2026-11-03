@@ -277,8 +277,18 @@ async fn burst(
     } else {
         "failed"
     };
+    let headline = match (one, first) {
+        (false, Some(first)) => format!(
+            "{n} deposits · {} · {:.1}× faster on {} accounts",
+            ms(took),
+            first / (took.as_secs_f64() * 1000.0),
+            accounts.len()
+        ),
+        _ => format!("{n} deposits · {} · 0 conflicts", ms(took)),
+    };
     Ok(json!({
         "beats": beats,
+        "headline": headline,
         "commands": [listed(&format!("Deposit 10 ×{n} {target}"), outcome, &format!("{committed} committed in {}", ms(took)))],
     }))
 }
@@ -286,6 +296,26 @@ async fn burst(
 async fn crash(run: &Arc<Run>, scene: &Scene, n: usize, prefix: &str) -> Result<Value, BoxError> {
     let done = Arc::new(AtomicUsize::new(0));
     let started = Instant::now();
+    // How many have committed, every few milliseconds, for the Stage's chart.
+    let sampling = Arc::new(AtomicUsize::new(1));
+    let sampler = {
+        let (done, sampling) = (Arc::clone(&done), Arc::clone(&sampling));
+        tokio::spawn(async move {
+            let mut series = Vec::new();
+            while sampling.load(SeqCst) == 1 {
+                series.push(json!([
+                    started.elapsed().as_millis() as u64,
+                    done.load(SeqCst)
+                ]));
+                tokio::time::sleep(Duration::from_millis(4)).await;
+            }
+            series.push(json!([
+                started.elapsed().as_millis() as u64,
+                done.load(SeqCst)
+            ]));
+            series
+        })
+    };
     let ids: Vec<String> = scene.ids.iter().map(|s| (*s).to_owned()).collect();
     let mut tasks = Vec::new();
     for i in 0..n {
@@ -313,10 +343,12 @@ async fn crash(run: &Arc<Run>, scene: &Scene, n: usize, prefix: &str) -> Result<
         .collect::<HashMap<_, _>>();
     lock(&run.kernel).kill();
     let acknowledged = done.load(SeqCst);
+    let killed_ms = started.elapsed().as_millis() as u64;
     let restarted = Instant::now();
     let kernel = start_kernel(&run.dir, &run.grpc, &run.ui).await?;
     *lock(&run.kernel) = kernel;
     let restart = restarted.elapsed();
+    let listening_ms = started.elapsed().as_millis() as u64;
     let mut failed = Vec::new();
     for task in tasks {
         if let Some(f) = task.await? {
@@ -326,12 +358,17 @@ async fn crash(run: &Arc<Run>, scene: &Scene, n: usize, prefix: &str) -> Result<
     // Every client whose submit failed sends it again with the same ID, until it gets an answer.
     let mut resent = Vec::new();
     for (id, command_id) in failed.clone() {
-        let client = run.client.clone();
+        let (client, done) = (run.client.clone(), Arc::clone(&done));
         resent.push(tokio::spawn(async move {
             let deadline = Instant::now() + Duration::from_secs(60);
             loop {
                 match client.submit(deposit(&id, command_id.clone(), 1)).await {
-                    Ok(outcome) => return outcome.is_committed(),
+                    Ok(outcome) => {
+                        if outcome.is_committed() {
+                            done.fetch_add(1, SeqCst);
+                        }
+                        return outcome.is_committed();
+                    }
                     Err(_) if Instant::now() < deadline => {
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
@@ -346,6 +383,8 @@ async fn crash(run: &Arc<Run>, scene: &Scene, n: usize, prefix: &str) -> Result<
             resent_ok += 1;
         }
     }
+    sampling.store(0, SeqCst);
+    let series = sampler.await?;
     let ran_after: HashMap<String, u32> = run.stage.runs(prefix).into_iter().collect();
     let (mut stored_already, mut ran_now, mut ran_again) = (0, 0, 0);
     for (_, command_id) in &failed {
@@ -461,8 +500,28 @@ async fn crash(run: &Arc<Run>, scene: &Scene, n: usize, prefix: &str) -> Result<
     } else {
         "failed"
     };
+    // The chart, drawn as far as each beat has told.
+    let end = series
+        .last()
+        .and_then(|p| p[0].as_u64())
+        .unwrap_or(listening_ms);
+    let mut beats = beats;
+    for (beat, until) in beats
+        .iter_mut()
+        .zip([killed_ms, killed_ms, listening_ms, end, end])
+    {
+        beat["chart"] = json!({ "until": until });
+        beat["focus"] = json!("flow");
+    }
     Ok(json!({
         "beats": beats,
+        "headline": format!("{} of {n} · {lost} lost · {twice} twice", command_ids.len()),
+        "chart": {
+            "series": series,
+            "n": n,
+            "killedMs": killed_ms,
+            "listeningMs": listening_ms,
+        },
         "commands": [listed(
             &format!("Deposit 1 ×{n}, kill -9 after {acknowledged}"),
             outcome,
@@ -473,19 +532,47 @@ async fn crash(run: &Arc<Run>, scene: &Scene, n: usize, prefix: &str) -> Result<
 
 async fn verify(run: &Run) -> Result<Value, BoxError> {
     let (ok, lines) = cli(run, &["verify", "sqlite:kernable.db", "kernel.pub"]).await?;
+    // `PROBLEM event 2: …` names a changed event.
+    let bad: Vec<u64> = lines
+        .iter()
+        .filter_map(|l| l.strip_prefix("PROBLEM event "))
+        .filter_map(|l| l.split(':').next()?.trim().parse().ok())
+        .collect();
     let said = if ok {
         "Every hash matches and every signature checks: the store is *intact*."
     } else {
         "verify names what was changed: the event's hash no longer matches its content, and the worker's signature over it no longer checks. The store is *tampered*."
     };
+    let mut reads = beat_with(
+        "kernable verify reads the store, recomputes every event's hash from its content and the hash before, and checks the signatures of workers, clients and the kernel's checkpoints.",
+        &["store"],
+        &[],
+        &[],
+        &[],
+        false,
+    );
+    reads["chain"] = json!({ "scan": true, "bad": bad });
+    let mut verdict = beat_with(
+        said,
+        &["store"],
+        &[],
+        &[(
+            "store",
+            if ok { "intact" } else { "tampered" },
+            if ok { "ok" } else { "bad" },
+        )],
+        &lines,
+        false,
+    );
+    verdict["chain"] = json!({ "bad": bad, "done": true });
+    // Only a found change is the scene's headline; an intact store confirms the one before.
+    let headline = (!ok).then(|| {
+        let which: Vec<String> = bad.iter().map(|p| format!("#{p}")).collect();
+        format!("tampered: event {} found", which.join(", "))
+    });
     Ok(json!({
-        "beats": [
-            beat_with(
-                "kernable verify reads the store, recomputes every event's hash from its content and the hash before, and checks the signatures of workers, clients and the kernel's checkpoints.",
-                &["store"], &[], &[], &[], false,
-            ),
-            beat_with(said, &["store"], &[], &[("store", if ok { "intact" } else { "tampered" }, if ok { "ok" } else { "bad" })], &lines, false),
-        ],
+        "beats": [reads, verdict],
+        "headline": headline,
         "commands": [],
     }))
 }
@@ -509,17 +596,29 @@ async fn tamper(run: &Run, position: u64) -> Result<Value, BoxError> {
     })
     .await??;
     let sql = format!("UPDATE events SET payload = '{after}' WHERE global_position = {position};");
+    let mut changes = beat_with(
+        &format!(
+            "Someone with access to the database file changes event *#{position}*: {before} becomes {after}."
+        ),
+        &["store"],
+        &[],
+        &[("store", "changed", "bad")],
+        &["$ sqlite3 kernable.db".to_owned(), sql],
+        true,
+    );
+    changes["chain"] = json!({ "changed": position });
+    let mut accepted = beat_with(
+        "SQLite accepts it, and the event store now shows the new amount. Nothing else notices: the read model still has the balance it computed when the event was new.",
+        &["store", "model"],
+        &[],
+        &[],
+        &[],
+        false,
+    );
+    accepted["chain"] = json!({ "changed": position });
     Ok(json!({
-        "beats": [
-            beat_with(
-                &format!("Someone with access to the database file changes event *#{position}*: {before} becomes {after}."),
-                &["store"], &[], &[("store", "changed", "bad")], &["$ sqlite3 kernable.db".to_owned(), sql], true,
-            ),
-            beat_with(
-                "SQLite accepts it, and the event store now shows the new amount. The read model still has the balance it computed when the event was new.",
-                &["store", "model"], &[], &[], &[], false,
-            ),
-        ],
+        "beats": [changes, accepted],
+        "headline": format!("event #{position}: 100 became 1,000,000"),
         "commands": [],
     }))
 }
@@ -572,6 +671,7 @@ async fn fix_and_retry(run: &Run) -> Result<Value, BoxError> {
         .collect::<Vec<_>>()
         .join(", ");
     Ok(json!({
+        "headline": "credited exactly once, after the retry",
         "beats": [
             beat_with("The payments service is back.", &["reactor"], &[], &[("reactor", "fixed", "ok")], &[], false),
             beat_with(
@@ -623,6 +723,7 @@ async fn new_key(run: &Run, prefix: &str) -> Result<Value, BoxError> {
     let ok = matches!(outcome, Ok(Outcome::Committed(_)));
     lock(&run.kept).mobile = Some(mobile);
     Ok(json!({
+        "headline": "a key per client, granted by the root key",
         "beats": [
             beat_with(
                 "A new key for the mobile app, and a grant for it, signed by the root key: it may deposit and query in bank, nothing else.",
@@ -663,6 +764,7 @@ async fn revoke(run: &Run, prefix: &str) -> Result<Value, BoxError> {
         .await;
     let app_ok = matches!(app, Ok(Outcome::Committed(_)));
     Ok(json!({
+        "headline": "revoked: refused at once",
         "beats": [
             beat_with(
                 "The mobile key leaked. The root key signs its revocation; the kernel stores it, signed by itself, and ends the key's connections.",
@@ -728,6 +830,7 @@ async fn fail_closed(run: &Run, prefix: &str) -> Result<Value, BoxError> {
     let again = run.client.submit(withdraw("back")).await;
     let again_ok = matches!(again, Ok(Outcome::Committed(_)));
     Ok(json!({
+        "headline": "refused while away, decided again when back",
         "beats": [
             beat_with(
                 "The rbac middleware stops, like a crashed authorization service.",
@@ -773,6 +876,7 @@ async fn rebuild(run: &Run) -> Result<Value, BoxError> {
     };
     let paid: Vec<String> = paid_in.iter().map(|(id, n)| format!("{id} {n}")).collect();
     Ok(json!({
+        "headline": format!("{head} events replayed: the same rows"),
         "beats": [
             beat_with(
                 "A new read model starts empty and subscribes from position 0: it gets the whole history, in order.",
