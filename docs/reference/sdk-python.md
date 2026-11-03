@@ -285,8 +285,8 @@ What a listener handler gets besides the event's data and meta (as an optional t
 
 A running `Listener`, returned by `kernable.listener(listener)`: `run()` processes events, queries and checks until `stop()`; `ready` is set once the kernel accepted it. `run()` blocks the calling thread. To run several listeners in one process, run all but one in threads (`threading.Thread(target=handle.run, daemon=True).start()`), or use `Kernable.app`. `ready` is a `threading.Event`: `handle.ready.wait(5)` returns whether the kernel accepted the listener within 5 seconds. `stop()` ends `run()`, also from another thread. Attributes: `listener` (the definition), `position` (global position of the last handled event, or skipped, for other event types) and `store` (the listener's `Store`, while `run()` has it open).
 
-- `ListenerHandle(channel: grpc.Channel, key: Key, listener: Listener, log: _Log, service: str='', kernable: 'Kernable | None'=None)`: Use `Kernable.listener`.
-- `run() -> None`: Processes events, queries and checks until `stop()`, reconnecting when the stream drops; with a store, opens it first and continues after its position, and closes it when `run()` ends. A store that cannot be opened (a full disk) is tried again, backing off like a reconnect.
+- `ListenerHandle(channel: 'grpc.Channel | _Partitioned', key: Key, listener: Listener, log: _Log, service: str='', kernable: 'Kernable | None'=None, part: str='', store: 'Store | None'=None)`: Use `Kernable.listener`. `part` and `store`: a partition's stream, sharing the store of the handle that runs it.
+- `run() -> None`: Processes events, queries and checks until `stop()`, reconnecting when the stream drops; with a store, opens it first and continues after its position, and closes it when `run()` ends. A store that cannot be opened (a full disk) is tried again, backing off like a reconnect. With partitions, a stream per partition, each from its own position in the shared store.
 
 ### Manifest
 
@@ -386,6 +386,7 @@ A listener's store: JSON values under keys, grouped in namespaces (`ns`), in a S
 - `remove(ns: str, key: str) -> None`: Removes the value under `key` in namespace `ns`, if there is one.
 - `all(ns: str) -> list[tuple[str, Any]]`: Every key and value of a namespace, ordered by key.
 - `reset(ns: str | None=None) -> None`: Clears a namespace, or all data.
+- `committed_for(part: str) -> int`: The position up to which the data is complete for the events of partition `part`: every partition has its own positions. `""`: a kernel without partitions.
 - `close() -> None`: Closes the database, truncating its WAL first; the store cannot be used afterwards. A listener closes its store when its `run()` ends; closing it again does nothing.
 
 ### StoredEventMeta
@@ -409,7 +410,8 @@ Paths of PEM files for mutual TLS with a kernel at `host:port`: the CA that sign
 
 Runs the commands of its aggregates, one at a time: the kernel sends each command with the aggregate's events (or a snapshot and the events after it), the worker folds the state, calls the command handler and sends the new events back, signed. Made with `Kernable.worker`. `run()` processes commands until `stop()`, reconnecting when the session drops (after 1 s); it blocks the calling thread. `ready` (a `threading.Event`) is set once the kernel registered the worker: run it in a thread and wait with `worker.ready.wait(5)`, e.g. `threading.Thread(target=worker.run, daemon=True).start()`. `stop()` ends `run()`, also from another thread.
 
-- `Worker(channel: grpc.Channel, key: Key, aggregates, log: _Log, service: str='')`: Use `Kernable.worker`.
+- `Worker(channel: 'grpc.Channel | _Partitioned', key: Key, aggregates, log: _Log, service: str='')`: Use `Kernable.worker`.
+- `run() -> None`: Processes commands until `stop()`, reconnecting when the session drops; with partitions, a session per partition.
 
 ### domain()
 

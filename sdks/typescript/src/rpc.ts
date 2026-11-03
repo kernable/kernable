@@ -329,7 +329,7 @@ export interface Clients {
   cache(op: CacheOp, req: WireCacheRequest): Promise<WireCacheResult>;
   apply(membership: WireMembership, sig: WireSignature): Promise<void>;
   /** The partition map the kernel holds; `null` if it serves every tenant (no `--partition`). */
-  map(): Promise<WirePartitionMap | null>;
+  map(timeoutMs?: number): Promise<WirePartitionMap | null>;
   close(): void;
 }
 
@@ -367,12 +367,15 @@ export class Partitioned {
     this.entry = make(url);
   }
 
-  /** The map, read once and again after `refresh`; `null` without partitions. */
-  async current(refresh = false): Promise<WirePartitionMap | null> {
+  /**
+   * The map, read once and again after `refresh`; `null` without partitions. `timeoutMs`: how
+   * long to wait for the kernel (default: the client's).
+   */
+  async current(refresh = false, timeoutMs?: number): Promise<WirePartitionMap | null> {
     if (refresh) this.map = undefined;
     if (this.map !== undefined) return this.map;
     this.loading ??= this.entry
-      .map()
+      .map(timeoutMs)
       .then((m) => (this.map = m))
       .finally(() => (this.loading = undefined));
     return this.loading;
@@ -405,8 +408,8 @@ export class Partitioned {
   }
 
   /** Every partition with its clients; one, named `""`, without partitions. */
-  async all(): Promise<{ name: string; clients: Clients }[]> {
-    const map = await this.current();
+  async all(timeoutMs?: number): Promise<{ name: string; clients: Clients }[]> {
+    const map = await this.current(false, timeoutMs);
     if (!map) return [{ name: "", clients: this.entry }];
     return map.partitions.map((p) => ({ name: p.name, clients: this.clientsOf(map, p.name) }));
   }
@@ -526,10 +529,11 @@ export function connect(url: string, tls?: TlsFiles, grant?: string, timeoutMs =
       const wait = several ? Math.min(deadline, Date.now() + PER_ADDRESS_MS) : deadline;
       const ready = await new Promise<boolean>((resolve) => client.waitForReady(wait, (err?: Error) => resolve(!err)));
       if (!ready) {
+        // The next attempt, of this request or the next one, tries the next address.
+        next(at);
         if (Date.now() >= deadline) {
           throw Object.assign(new Error(`no connection to the kernel within ${ms} ms`), { code: grpc.status.DEADLINE_EXCEEDED });
         }
-        next(at);
         continue;
       }
       try {
@@ -563,9 +567,9 @@ export function connect(url: string, tls?: TlsFiles, grant?: string, timeoutMs =
     apply: async (membership, sig) => {
       await unary("memberships", "Apply", { membership, sig });
     },
-    map: async () => {
+    map: async (ms) => {
       try {
-        return await unary<WirePartitionMap>("partitions", "Map", {});
+        return await unary<WirePartitionMap>("partitions", "Map", {}, ms);
       } catch (err) {
         const code = (err as grpc.ServiceError).code;
         if (code === grpc.status.NOT_FOUND || code === grpc.status.UNIMPLEMENTED) return null;

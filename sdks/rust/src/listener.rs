@@ -731,6 +731,10 @@ struct HandleInner {
     connects: AtomicU64,
     /// Position after which the kernel delivered on the first connect.
     started_at: AtomicU64,
+    /// As a partition's stream: its partition, whose position the store keeps apart.
+    part: String,
+    /// As a partition's stream: the store is the parent's, which closes it.
+    shared: bool,
 }
 
 /// A [`Listener`] running on a connection; see [`crate::Kernable::listener`]. Cloning gives
@@ -760,6 +764,31 @@ impl ListenerHandle {
                 announce: AtomicBool::new(true),
                 connects: AtomicU64::new(0),
                 started_at: AtomicU64::new(0),
+                part: String::new(),
+                shared: false,
+            }),
+        }
+    }
+
+    /// The same listener on another client: one partition's stream, sharing `store`.
+    fn on(&self, client: Client, part: String, store: Option<Store>) -> ListenerHandle {
+        let inner = &self.inner;
+        ListenerHandle {
+            inner: Arc::new(HandleInner {
+                client,
+                kernable: inner.kernable.clone(),
+                attempts: Mutex::default(),
+                listener: inner.listener.clone(),
+                service: inner.service.clone(),
+                position: AtomicU64::new(0),
+                store: Mutex::new(store),
+                stopped: watch::Sender::new(false),
+                ready: watch::Sender::new(false),
+                announce: AtomicBool::new(inner.announce.load(Ordering::SeqCst)),
+                connects: AtomicU64::new(0),
+                started_at: AtomicU64::new(0),
+                part,
+                shared: true,
             }),
         }
     }
@@ -813,6 +842,9 @@ impl ListenerHandle {
         struct Closing<'a>(&'a HandleInner);
         impl Drop for Closing<'_> {
             fn drop(&mut self) {
+                if self.0.shared {
+                    return; // the parent's store
+                }
                 if let Some(store) = self.0.store.lock().unwrap().take() {
                     store.close();
                 }
@@ -820,13 +852,113 @@ impl ListenerHandle {
         }
         let _closing = Closing(&self.inner);
         let mut stopped = self.inner.stopped.subscribe();
+        let what = format!("listener {}", self.def().name);
+        let base = self.def().settings.lock().unwrap().reconnect;
+        let Some(parts) = crate::partitions_of(&self.inner.client, &what, base, &mut stopped).await
+        else {
+            return;
+        };
+        if parts.len() > 1 || !parts[0].0.is_empty() {
+            // A stream per partition, each from its own position in the shared store.
+            if !self.open_store(&what, &mut stopped).await {
+                return;
+            }
+            let store = self.opened_store();
+            let children: Vec<ListenerHandle> = parts
+                .into_iter()
+                .map(|(name, client)| self.on(client, name, store.clone()))
+                .collect();
+            let (this, all) = (self.clone(), children.clone());
+            tokio::spawn(async move {
+                for child in &all {
+                    child.ready().await;
+                }
+                let first = all
+                    .iter()
+                    .map(ListenerHandle::started_at)
+                    .min()
+                    .unwrap_or(0);
+                this.inner.started_at.store(first, Ordering::SeqCst);
+                this.inner.ready.send_replace(true);
+            });
+            let stopping = {
+                let (this, all) = (self.clone(), children.clone());
+                tokio::spawn(async move {
+                    let _ = this.inner.stopped.subscribe().wait_for(|s| *s).await;
+                    for child in &all {
+                        child.stop();
+                    }
+                })
+            };
+            let running: Vec<_> = children
+                .into_iter()
+                .map(|child| tokio::spawn(async move { child.run_one().await }))
+                .collect();
+            for run in running {
+                let _ = run.await;
+            }
+            stopping.abort();
+            return;
+        }
+        self.run_one().await;
+    }
+
+    /// Opens the listener's store, if it has one and it is not open; tries again while it
+    /// cannot be opened. False once stopped.
+    async fn open_store(&self, what: &str, stopped: &mut watch::Receiver<bool>) -> bool {
+        let log = &self.inner.client.log;
+        let store = {
+            let s = self.def().settings.lock().unwrap();
+            s.store.clone().map(|url| (url, s.schema.clone()))
+        };
+        let Some((url, schema)) = store else {
+            return true;
+        };
+        if self.opened_store().is_some() {
+            return true;
+        }
+        let mut attempt = 0;
+        let store = loop {
+            match Store::open(&url, &schema) {
+                Ok(store) => break store,
+                Err(e) => {
+                    attempt += 1;
+                    let base = self.def().settings.lock().unwrap().reconnect;
+                    let delay = log::backoff(base, attempt);
+                    log.error(what, || {
+                        format!("store: {e}; trying again in {} s", delay.as_secs_f64())
+                    });
+                    tokio::select! {
+                        () = tokio::time::sleep(delay) => {}
+                        _ = stopped.wait_for(|s| *s) => return false,
+                    }
+                }
+            }
+        };
+        *self.inner.store.lock().unwrap() = Some(store);
+        true
+    }
+
+    /// The stream loop on this listener's one kernel (or one partition).
+    async fn run_one(&self) {
+        let mut stopped = self.inner.stopped.subscribe();
         let log = &self.inner.client.log;
         let what = format!("listener {}", self.def().name);
         let (mut start, store) = {
             let s = self.def().settings.lock().unwrap();
             (s.start, s.store.clone().map(|url| (url, s.schema.clone())))
         };
+        if self.inner.shared
+            && let Some(store) = self.opened_store()
+        {
+            let at = store.committed_for(&self.inner.part).unwrap_or(0);
+            self.inner.position.store(at, Ordering::SeqCst);
+            if at > 0 {
+                start = Some(at);
+            }
+        }
         if let Some((url, schema)) = store
+            && !self.inner.shared
             && self.opened_store().is_none()
         {
             let mut attempt = 0;
@@ -978,6 +1110,11 @@ impl ListenerHandle {
                     let store = self.opened_store();
                     // With a store, the batch's data and position are committed together,
                     // before the ack.
+                    // The partitions' batches take turns on a shared store.
+                    let _turn = match &store {
+                        Some(s) => Some(s.turn().await),
+                        None => None,
+                    };
                     if let Some(s) = &store {
                         s.begin()?;
                     }
@@ -994,7 +1131,9 @@ impl ListenerHandle {
                     .await
                     .unwrap_or_else(|panic| Err(panic.into()))
                     .and_then(|parked| match &store {
-                        Some(s) => Ok(s.commit(up_to, erased).map(|()| parked)?),
+                        Some(s) => {
+                            Ok(s.commit_part(up_to, erased, &inner.part).map(|()| parked)?)
+                        }
                         None => Ok(parked),
                     });
                     let parked = match handled {
@@ -1002,7 +1141,8 @@ impl ListenerHandle {
                         Err(e) => {
                             if let Some(s) = &store {
                                 s.rollback();
-                                inner.position.store(s.committed(), Ordering::SeqCst);
+                                let at = s.committed_for(&inner.part).unwrap_or(0);
+                                inner.position.store(at, Ordering::SeqCst);
                             }
                             return Err(e);
                         }
@@ -1421,7 +1561,7 @@ impl Subscription {
     {
         let position = Arc::new(AtomicU64::new(options.after));
         let stopped = watch::Sender::new(false);
-        let task = tokio::spawn(subscription(
+        let task = tokio::spawn(subscriptions(
             client,
             options,
             handler,
@@ -1444,6 +1584,53 @@ impl Subscription {
     pub async fn stop(self) {
         self.stopped.send_replace(true);
         let _ = self.task.await;
+    }
+}
+
+/// With partitions: a stream per partition, each from the start (`after` names a
+/// position of one kernel); the handler takes one event at a time, in order within each
+/// partition. Without: one stream, as before.
+async fn subscriptions<F, Fut>(
+    client: Client,
+    options: SubscribeOptions,
+    handler: F,
+    position: Arc<AtomicU64>,
+    mut stopped: watch::Receiver<bool>,
+) where
+    F: Fn(StoredEvent) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<(), BoxError>> + Send + 'static,
+{
+    let Some(parts) =
+        crate::partitions_of(&client, "subscription", options.reconnect, &mut stopped).await
+    else {
+        return;
+    };
+    if parts.len() == 1 && parts[0].0.is_empty() {
+        return subscription(client, options, handler, position, stopped).await;
+    }
+    let handler = Arc::new(handler);
+    let turns = Arc::new(tokio::sync::Mutex::new(()));
+    let running: Vec<_> = parts
+        .into_iter()
+        .map(|(_, part)| {
+            let (handler, turns) = (Arc::clone(&handler), Arc::clone(&turns));
+            let in_turn = move |e: StoredEvent| {
+                let (handler, turns) = (Arc::clone(&handler), Arc::clone(&turns));
+                async move {
+                    let _turn = turns.lock().await;
+                    handler(e).await
+                }
+            };
+            let options = SubscribeOptions {
+                after: 0,
+                ..options.clone()
+            };
+            let at = Arc::new(AtomicU64::new(0));
+            tokio::spawn(subscription(part, options, in_turn, at, stopped.clone()))
+        })
+        .collect();
+    for run in running {
+        let _ = run.await;
     }
 }
 

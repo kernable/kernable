@@ -162,6 +162,48 @@ async fn two_partitions_share_the_tenants_by_the_map_of_the_control_partition() 
         "{elsewhere:?}"
     );
 
+    // An SDK client given only p1 finds acme's partition, and subscribes to both.
+    let sdk_key = p1.dir.join("sdk.key");
+    std::fs::write(&sdk_key, hex(key(1).as_bytes())).unwrap();
+    std::fs::write(
+        p1.dir.join("sdk.grant"),
+        hex(&default_grant(&key(1)).unwrap().encode_to_vec()),
+    )
+    .unwrap();
+    let sdk = kernable::Kernable::new(kernable::Options::new(&sdk_key).url(&p1.addr)).unwrap();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let subscription = {
+        let seen = std::sync::Arc::clone(&seen);
+        sdk.subscribe(
+            kernable::SubscribeOptions {
+                types: vec!["orders.*".into()],
+                ..Default::default()
+            },
+            move |e| {
+                seen.lock().unwrap().push(e.tenant.clone());
+                async { Ok(()) }
+            },
+        )
+    };
+    for tenant in ["acme", "t1"] {
+        let placed = sdk
+            .submit(
+                kernable::Submit::new("orders", "Order", &format!("sdk-{tenant}"), "PlaceOrder")
+                    .tenant(tenant)
+                    .data(serde_json::json!({}))
+                    .wait(kernable::Wait::Committed),
+            )
+            .await
+            .unwrap();
+        assert!(placed.is_committed(), "{tenant}: {placed:?}");
+    }
+    until("the subscription saw both partitions", async || {
+        let seen = seen.lock().unwrap();
+        seen.iter().any(|t| t == "acme") && seen.iter().any(|t| t == "t1")
+    })
+    .await;
+    subscription.stop().await;
+
     // A membership applied on the control partition reaches p2.
     apply(&p1.addr, membership("shop", &["orders.Order"], &[], &[]))
         .await

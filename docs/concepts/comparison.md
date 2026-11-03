@@ -20,7 +20,7 @@ kernable is an **application kernel**: storage, ordering, trust and delivery in 
 | What a service consists of | memberships: the kernel waits for exactly what is listed (`/ready`) | your deploy tooling | your deploy tooling | your deploy tooling | your deploy tooling |
 | Seeing what runs | a built-in UI: map, connections, any aggregate's history; metrics | dashboards you assemble | a database UI | depends on the setup | tools around the cluster |
 | Operating it | one binary and a SQLite file (or a log file) | a database and a message bus | a database server or cluster | a server or cluster, plus your application | a cluster |
-| Scale | one kernel per store today, with a standby | as far as you build it | clusters | clusters | clusters, very large |
+| Scale | one kernel per tenant's partition, with a standby; tenants spread over partitions | as far as you build it | clusters | clusters | clusters, very large |
 | License | Apache-2.0 | — | open source and commercial editions | open source and commercial editions | open source, and commercial offerings |
 
 **Choose kernable** when the logic of one application is spread over teams or languages, when you need to prove what happened and who asked for it, and when "write, then read it back" must simply work.

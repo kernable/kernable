@@ -1462,7 +1462,10 @@ async function partitionsOf(
 ): Promise<{ name: string; clients: Clients }[] | undefined> {
   for (let attempt = 1; ; attempt++) {
     try {
-      return await clients.all();
+      // Briefly per attempt, as a session would fail; `stop()` ends the wait at once.
+      const parts = await Promise.race([clients.all(500), wake.stopped.then(() => undefined)]);
+      if (parts === undefined || stopped()) return undefined;
+      return parts;
     } catch (err) {
       if (stopped()) return undefined;
       await log.reconnect(what, err, ms, attempt, wake);
@@ -1475,6 +1478,9 @@ async function partitionsOf(
 class Wake {
   private wake?: () => void;
   private woken = false;
+  private markStopped!: () => void;
+  /** Resolves once `now()` is called: for waits other than `sleep` to end with it. */
+  readonly stopped = new Promise<void>((resolve) => (this.markStopped = resolve));
 
   sleep(ms: number): Promise<void> {
     if (this.woken) return Promise.resolve();
@@ -1490,6 +1496,7 @@ class Wake {
   now(): void {
     this.woken = true;
     this.wake?.();
+    this.markStopped();
   }
 }
 

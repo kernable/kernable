@@ -74,9 +74,16 @@ impl Files {
     ) -> Result<(), Error> {
         let request = self.request("put", domain, key, data.into(), content_type);
         self.client
-            .call(None, request, |channel, r| {
-                let mut service = Self::service(channel);
-                async move { service.put_data(r).await }
+            .routed(&request.tenant_id.clone(), |client| {
+                let request = request.clone();
+                async move {
+                    client
+                        .call(None, request, |channel, r| {
+                            let mut service = Self::service(channel);
+                            async move { service.put_data(r).await }
+                        })
+                        .await
+                }
             })
             .await?;
         Ok(())
@@ -87,9 +94,16 @@ impl Files {
         let request = self.request("get", domain, key, Vec::new(), "");
         let res = self
             .client
-            .call(None, request, |channel, r| {
-                let mut service = Self::service(channel);
-                async move { service.get_data(r).await }
+            .routed(&request.tenant_id.clone(), |client| {
+                let request = request.clone();
+                async move {
+                    client
+                        .call(None, request, |channel, r| {
+                            let mut service = Self::service(channel);
+                            async move { service.get_data(r).await }
+                        })
+                        .await
+                }
             })
             .await?;
         Ok(res.found.then_some(Data {
@@ -103,9 +117,16 @@ impl Files {
         let request = self.request("delete", domain, key, Vec::new(), "");
         let res = self
             .client
-            .call(None, request, |channel, r| {
-                let mut service = Self::service(channel);
-                async move { service.delete_data(r).await }
+            .routed(&request.tenant_id.clone(), |client| {
+                let request = request.clone();
+                async move {
+                    client
+                        .call(None, request, |channel, r| {
+                            let mut service = Self::service(channel);
+                            async move { service.delete_data(r).await }
+                        })
+                        .await
+                }
             })
             .await?;
         Ok(res.found)
@@ -189,9 +210,16 @@ impl Cache {
         let ttl_ms = ttl.map_or(0, |t| (t.as_millis() as u64).max(1));
         let request = self.request("set", domain, key, value.into(), ttl_ms);
         self.client
-            .call(None, request, |channel, r| {
-                let mut service = Self::service(channel);
-                async move { service.set_cache(r).await }
+            .routed(&request.tenant_id.clone(), |client| {
+                let request = request.clone();
+                async move {
+                    client
+                        .call(None, request, |channel, r| {
+                            let mut service = Self::service(channel);
+                            async move { service.set_cache(r).await }
+                        })
+                        .await
+                }
             })
             .await?;
         Ok(())
@@ -202,9 +230,16 @@ impl Cache {
         let request = self.request("get", domain, key, Vec::new(), 0);
         let res = self
             .client
-            .call(None, request, |channel, r| {
-                let mut service = Self::service(channel);
-                async move { service.get_cache(r).await }
+            .routed(&request.tenant_id.clone(), |client| {
+                let request = request.clone();
+                async move {
+                    client
+                        .call(None, request, |channel, r| {
+                            let mut service = Self::service(channel);
+                            async move { service.get_cache(r).await }
+                        })
+                        .await
+                }
             })
             .await?;
         Ok(res.found.then_some(res.value))
@@ -215,9 +250,16 @@ impl Cache {
         let request = self.request("delete", domain, key, Vec::new(), 0);
         let res = self
             .client
-            .call(None, request, |channel, r| {
-                let mut service = Self::service(channel);
-                async move { service.delete_cache(r).await }
+            .routed(&request.tenant_id.clone(), |client| {
+                let request = request.clone();
+                async move {
+                    client
+                        .call(None, request, |channel, r| {
+                            let mut service = Self::service(channel);
+                            async move { service.delete_cache(r).await }
+                        })
+                        .await
+                }
             })
             .await?;
         Ok(res.found)

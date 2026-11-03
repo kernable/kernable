@@ -71,6 +71,15 @@ impl Worker {
         }
     }
 
+    /// The same worker on another client: one partition's session.
+    fn on(&self, client: Client) -> Worker {
+        let child = Worker::new(client, self.inner.service.clone());
+        *child.inner.by_command.lock().unwrap() = self.inner.by_command.lock().unwrap().clone();
+        *child.inner.settings.lock().unwrap() = *self.inner.settings.lock().unwrap();
+        child.announce(self.inner.announce.load(Ordering::SeqCst));
+        child
+    }
+
     /// Runs the commands of `aggregate`, too.
     pub fn aggregate<S: State>(&self, aggregate: &Aggregate<S>) -> Worker {
         self.runnable(Arc::new(aggregate.clone()))
@@ -120,6 +129,48 @@ impl Worker {
     /// Processes commands until `stop()`, reconnecting when the session drops. A handler's
     /// error or panic rejects that command (`handler_error`); it does not end `run`.
     pub async fn run(&self) {
+        let mut stopped = self.inner.stopped.subscribe();
+        let base = self.inner.settings.lock().unwrap().1;
+        let Some(parts) =
+            crate::partitions_of(&self.inner.client, "worker", base, &mut stopped).await
+        else {
+            return;
+        };
+        if parts.len() > 1 || !parts[0].0.is_empty() {
+            // A session per partition: commands of every partition's tenants run here.
+            let children: Vec<Worker> = parts.into_iter().map(|(_, c)| self.on(c)).collect();
+            let this = self.clone();
+            let all = children.clone();
+            tokio::spawn(async move {
+                for child in &all {
+                    child.ready().await;
+                }
+                this.inner.ready.send_replace(true);
+            });
+            let stopping = {
+                let (this, all) = (self.clone(), children.clone());
+                tokio::spawn(async move {
+                    let _ = this.inner.stopped.subscribe().wait_for(|s| *s).await;
+                    for child in &all {
+                        child.stop();
+                    }
+                })
+            };
+            let running: Vec<_> = children
+                .into_iter()
+                .map(|child| tokio::spawn(async move { child.run_one().await }))
+                .collect();
+            for run in running {
+                let _ = run.await;
+            }
+            stopping.abort();
+            return;
+        }
+        self.run_one().await;
+    }
+
+    /// The session loop on this worker's one kernel (or one partition).
+    async fn run_one(&self) {
         let mut stopped = self.inner.stopped.subscribe();
         let mut attempt = 0;
         while !*stopped.borrow() {

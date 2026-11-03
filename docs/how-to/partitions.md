@@ -1,0 +1,79 @@
+# Share tenants across kernels
+
+When one kernel is not enough for all your tenants, run several, each serving a share of them: **partitions**. A tenant lives on exactly one partition, so everything kernable guarantees within a tenant holds as before: one writer per aggregate, unique keys and requirements, listener order, settling, erasure. A signed **partition map** says where each tenant lives, and the SDKs send every request to its tenant's partition by themselves.
+
+Every partition is an ordinary kernel, or a [pair with a standby](./standby). One of them, the **control partition**, also holds the map and the trust records (grants, revocations, memberships); the others take them from it every second.
+
+## 1. Keys
+
+Every partition other than the control partition takes the trust records with a node key, granted `replicate` (a pair's node key does both):
+
+```sh
+kernable keys new node-p2 && kernable grant root.key node-p2.pub 'replicate=*'
+```
+
+Every partition trusts the same root keys (`--root`).
+
+## 2. Start the partitions
+
+```sh
+# p1: the control partition (no --control)
+kernable start --root root.pub --partition p1 --listen 10.0.1.1:7233 …
+
+# p2: takes the map and the trust records from p1
+kernable start --root root.pub --partition p2 --control 10.0.1.1:7233 \
+  --node-key node-p2.key --listen 10.0.2.1:7233 …
+```
+
+With a pair per partition, give `--control` both kernels of the control partition, comma-separated. A partition serves no tenant before it has a map: two partitions must never take the same tenant.
+
+## 3. Apply the map
+
+```json
+{
+  "epoch": 1,
+  "partitions": {
+    "p1": ["10.0.1.1:7233", "10.0.1.2:7233"],
+    "p2": ["10.0.2.1:7233", "10.0.2.2:7233"]
+  },
+  "default": "p1",
+  "control": "p1",
+  "tenants": { "acme": "p2" }
+}
+```
+
+```sh
+kernable partitions apply 10.0.1.1:7233 ops.key map.json   # ops.key: granted manage for *
+kernable partitions show 10.0.2.1:7233 ops.key             # p2 has it within seconds
+```
+
+Tenants the map lists live on their partition; every other tenant on the default partition, so new tenants need no change to the map. Every new map needs a higher `epoch`. Keep the map file in version control: it is the answer to "where is tenant X?".
+
+Placing a tenant on another partition moves no data yet. Change a tenant's partition only before it has data there (moving tenants with their events comes later).
+
+## 4. Point your processes at it
+
+Give every process the address of one partition (or of all, comma-separated): the SDK reads the map there and
+
+- sends each submit, query, file and cache request to its tenant's partition;
+- runs its workers and listeners on every partition. A read model sees the events of all of them, in order within each partition; with a store, it keeps its position per partition;
+- applies memberships on the control partition;
+- reads the map again when a partition answers `wrong_partition` (the map changed), and sends the request anew.
+
+A subscription reads every partition too, from their beginnings, with events in order within a partition but not across them.
+
+## What happens when
+
+| When | What happens |
+|---|---|
+| A request names a tenant of another partition | `FAILED_PRECONDITION` `wrong_partition: tenant acme is on partition p2 (map epoch 3)`; the SDKs read the map again and send it there |
+| A key is revoked on the control partition | Every partition refuses it within about a second |
+| The control partition is down | The others serve on with the map and trust records they hold; new maps, grants and memberships wait |
+| A partition that was down starts again | It takes what it missed from the control partition first thing |
+
+## Limits
+
+- **One tenant never grows beyond one partition.** Give a big tenant a partition of its own.
+- **Across tenants, there is no order and no atomicity**: a command changes one aggregate of one tenant, as always; a read model across partitions sees each partition's events in order, not one global order.
+- **Unique keys with `scope: global`** are unique within each partition, not across all of them yet.
+- New partitions in the map reach running workers and listeners when they start again.

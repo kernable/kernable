@@ -299,7 +299,7 @@ request to its tenant's partition.
 
 | RPC | Request | Response | Description |
 |---|---|---|---|
-| `Map` | `MapRequest` | `PartitionMap` | The newest map this kernel holds. The call needs a grant of any key (kernable-grant); the map names tenants and addresses. NOT_FOUND without one: a kernel without --partition serves every tenant. |
+| `Map` | `MapRequest` | `PartitionMap` | The newest map this kernel holds. NOT_FOUND without one (a kernel without --partition serves every tenant); with one, the call needs a grant of any key (kernable-grant): the map names tenants and addresses. |
 | `Apply` | `PartitionMap` | `MapResult` | Applies a new map on the control partition (the kernel started with --partition but without --control); the other partitions take it from there within seconds. Signed over kernable.v1.partitions by a key granted `manage` for `*`, valid 60 s around issued_at. Errors: UNAUTHENTICATED, PERMISSION_DENIED, INVALID_ARGUMENT (unknown partitions, a tenant twice), FAILED_PRECONDITION (not the control partition; an epoch not above the one held). |
 
 ### MapRequest

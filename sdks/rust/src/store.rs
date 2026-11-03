@@ -23,6 +23,8 @@ pub struct Store {
     /// `None` once closed.
     db: Arc<Mutex<Option<Connection>>>,
     committed: Arc<AtomicU64>,
+    /// Batches take turns: with partitions, several streams share the store.
+    turns: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Store {
@@ -48,7 +50,9 @@ impl Store {
                 .optional()
         };
         if meta("schema")?.as_deref() != Some(schema) {
-            db.execute_batch("BEGIN; DELETE FROM data;")?;
+            db.execute_batch(
+                "BEGIN; DELETE FROM data; DELETE FROM meta WHERE key LIKE 'position:%';",
+            )?;
             db.execute(
                 "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema', ?), ('position', '0')",
                 [schema],
@@ -59,12 +63,35 @@ impl Store {
         Ok(Store {
             db: Arc::new(Mutex::new(Some(db))),
             committed: Arc::new(AtomicU64::new(committed)),
+            turns: Arc::default(),
         })
     }
 
     /// The position up to which the stored data is complete.
     pub fn committed(&self) -> u64 {
         self.committed.load(Ordering::SeqCst)
+    }
+
+    /// The position up to which the data is complete for the events of partition `part`
+    ///: every partition has its own positions. `""`: a kernel without partitions.
+    pub fn committed_for(&self, part: &str) -> Result<u64, Error> {
+        if part.is_empty() {
+            return Ok(self.committed());
+        }
+        let value: Option<String> = self.with(|db| {
+            db.query_row(
+                "SELECT value FROM meta WHERE key = ?",
+                [format!("position:{part}")],
+                |r| r.get(0),
+            )
+            .optional()
+        })?;
+        Ok(value.and_then(|v| v.parse().ok()).unwrap_or(0))
+    }
+
+    /// Waits for the store's turn: one batch at a time, of whichever partition.
+    pub(crate) async fn turn(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.turns).lock_owned().await
     }
 
     /// `f` on the connection; [`Error::Store`] if the store is closed.
@@ -143,22 +170,31 @@ impl Store {
         })
     }
 
-    /// Ends a batch: its data and `position` take effect together. After a batch that
+    /// Ends a batch: its data and `position` (of partition `part`, see [`Store::committed_for`]) take effect together. After a batch that
     /// `erased` a subject, the write-ahead log is emptied too: it still holds the pages from
     /// before the handlers removed the subject's data.
-    pub(crate) fn commit(&self, position: u64, erased: bool) -> Result<(), Error> {
+    pub(crate) fn commit_part(&self, position: u64, erased: bool, part: &str) -> Result<(), Error> {
         self.with(|db| {
-            db.execute(
-                "UPDATE meta SET value = ? WHERE key = 'position'",
-                [position.to_string()],
-            )?;
+            if part.is_empty() {
+                db.execute(
+                    "UPDATE meta SET value = ? WHERE key = 'position'",
+                    [position.to_string()],
+                )?;
+            } else {
+                db.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                    [format!("position:{part}"), position.to_string()],
+                )?;
+            }
             db.execute_batch("COMMIT")?;
             if erased {
                 truncate(db)?;
             }
             Ok(())
         })?;
-        self.committed.store(position, Ordering::SeqCst);
+        if part.is_empty() {
+            self.committed.store(position, Ordering::SeqCst);
+        }
         Ok(())
     }
 

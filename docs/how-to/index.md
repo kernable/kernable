@@ -17,6 +17,7 @@ Short guides for tasks you meet once your application runs. They assume you know
 |---|---|
 | [Deploy and upgrade](./deploy) | You start, stop or upgrade the kernel and your processes. |
 | [Back up and restore](./backup) | You set up backups, or you need to restore. |
+| [Share tenants across kernels](./partitions) | One kernel is not enough for all your tenants: several share them by a signed map. |
 | [Run a standby](./standby) | A second kernel should hold every write and take over, with a witness by itself, when the primary's machine is lost. |
 | [Monitor kernable](./monitor) | You want metrics, health checks, alerts and logs, or a reactor parked events. |
 

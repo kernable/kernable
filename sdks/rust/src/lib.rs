@@ -51,7 +51,8 @@ use kernable_core::{
     proto::{
         self, ApplyRequest, Attribute, Membership, SubmitRequest, Wait as WireWait, command_result,
         command_service_client::CommandServiceClient,
-        membership_service_client::MembershipServiceClient, query_result,
+        membership_service_client::MembershipServiceClient,
+        partition_service_client::PartitionServiceClient, query_result,
         query_service_client::QueryServiceClient,
     },
     signing, transport,
@@ -244,10 +245,55 @@ pub(crate) struct Channels {
     current: std::sync::atomic::AtomicUsize,
 }
 
+/// What a client knows of the partitions: the map, read once (and again after a
+/// `wrong_partition`), and the channels to each partition.
+pub(crate) struct Partitions {
+    /// `None`: not read yet; `Some(None)`: the kernel serves every tenant.
+    map: tokio::sync::Mutex<Option<Option<proto::PartitionMap>>>,
+    channels: std::sync::Mutex<HashMap<String, Arc<Channels>>>,
+    tls: Option<Tls>,
+}
+
+/// The partitions of `client`, read again (backing off like a reconnect) while no kernel
+/// answers; `None` once `stopped`.
+pub(crate) async fn partitions_of(
+    client: &Client,
+    what: &str,
+    base: Duration,
+    stopped: &mut tokio::sync::watch::Receiver<bool>,
+) -> Option<Vec<(String, Client)>> {
+    let mut attempt = 0;
+    loop {
+        let read = tokio::select! {
+            read = client.partitions() => read,
+            _ = stopped.wait_for(|s| *s) => return None,
+        };
+        match read {
+            Ok(parts) => return Some(parts),
+            Err(status) => {
+                attempt += 1;
+                let error: BoxError = status.into();
+                let delay = log::reconnecting(&client.log, what, Some(&error), base, attempt);
+                tokio::select! {
+                    () = tokio::time::sleep(delay) => {}
+                    _ = stopped.wait_for(|s| *s) => return None,
+                }
+            }
+        }
+    }
+}
+
+/// Whether a kernel refused a call as one for a tenant of another partition.
+pub(crate) fn wrong_partition(status: &tonic::Status) -> bool {
+    status.code() == tonic::Code::FailedPrecondition
+        && status.message().starts_with("wrong_partition")
+}
+
 /// Channels to the kernel, this process's key and its grant: what every part needs to call.
 #[derive(Clone)]
 pub(crate) struct Client {
     channels: Arc<Channels>,
+    parts: Arc<Partitions>,
     key: Arc<SigningKey>,
     key_id: String,
     grant: Option<MetadataValue<tonic::metadata::Ascii>>,
@@ -256,6 +302,132 @@ pub(crate) struct Client {
 }
 
 impl Client {
+    /// The partition map the first kernel holds, read once and again after `refresh`;
+    /// `None` if it serves every tenant.
+    pub(crate) async fn partition_map(
+        &self,
+        refresh: bool,
+    ) -> Result<Option<proto::PartitionMap>, tonic::Status> {
+        let mut held = self.parts.map.lock().await;
+        if refresh {
+            *held = None;
+        }
+        if let Some(map) = held.as_ref() {
+            return Ok(map.clone());
+        }
+        let request = proto::MapRequest { protocol: PROTOCOL };
+        let map = match self
+            .call(None, request, |channel, r| async move {
+                PartitionServiceClient::new(channel).map(r).await
+            })
+            .await
+        {
+            Ok(map) => Some(map),
+            Err(s) if matches!(s.code(), tonic::Code::NotFound | tonic::Code::Unimplemented) => {
+                None
+            }
+            Err(s) => return Err(s),
+        };
+        *held = Some(map.clone());
+        Ok(map)
+    }
+
+    /// This client on partition `name` of `map`.
+    fn on_partition(&self, map: &proto::PartitionMap, name: &str) -> Result<Client, tonic::Status> {
+        let partition = map
+            .partitions
+            .iter()
+            .find(|p| p.name == name)
+            .ok_or_else(|| {
+                tonic::Status::internal(format!("the partition map names no partition {name}"))
+            })?;
+        let addresses = partition.addresses.join(",");
+        let mut cached = self.parts.channels.lock().unwrap();
+        let channels = match cached.get(&addresses) {
+            Some(channels) => Arc::clone(channels),
+            None => {
+                let all = partition
+                    .addresses
+                    .iter()
+                    .map(|a| {
+                        transport::connect_lazy(a, self.parts.tls.as_ref()).map_err(|e| {
+                            tonic::Status::internal(format!("partition {name}, {a}: {e}"))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let channels = Arc::new(Channels {
+                    all,
+                    current: Default::default(),
+                });
+                cached.insert(addresses, Arc::clone(&channels));
+                channels
+            }
+        };
+        Ok(Client {
+            channels,
+            ..self.clone()
+        })
+    }
+
+    /// This client on `tenant`'s partition.
+    pub(crate) async fn for_tenant(&self, tenant: &str) -> Result<Client, tonic::Status> {
+        match self.partition_map(false).await? {
+            None => Ok(self.clone()),
+            Some(map) => {
+                let name = map
+                    .tenants
+                    .iter()
+                    .find(|t| t.tenant == tenant)
+                    .map_or(map.default.as_str(), |t| t.partition.as_str())
+                    .to_owned();
+                self.on_partition(&map, &name)
+            }
+        }
+    }
+
+    /// This client on the control partition, which takes memberships.
+    pub(crate) async fn control(&self) -> Result<Client, tonic::Status> {
+        match self.partition_map(false).await? {
+            None => Ok(self.clone()),
+            Some(map) => self.on_partition(&map, &map.control),
+        }
+    }
+
+    /// This client on every partition, by name; one, named `""`, without partitions.
+    pub(crate) async fn partitions(&self) -> Result<Vec<(String, Client)>, tonic::Status> {
+        match self.partition_map(false).await? {
+            None => Ok(vec![(String::new(), self.clone())]),
+            Some(map) => map
+                .partitions
+                .iter()
+                .map(|p| Ok((p.name.clone(), self.on_partition(&map, &p.name)?)))
+                .collect(),
+        }
+    }
+
+    /// `call` on `tenant`'s partition, sent anew after reading the map again on
+    /// `wrong_partition`.
+    pub(crate) async fn routed<R, Fut>(
+        &self,
+        tenant: &str,
+        mut call: impl FnMut(Client) -> Fut,
+    ) -> Result<R, tonic::Status>
+    where
+        Fut: Future<Output = Result<R, tonic::Status>>,
+    {
+        let mut attempt = 0;
+        loop {
+            let client = self.for_tenant(tenant).await?;
+            match call(client).await {
+                Err(status) if attempt < 3 && wrong_partition(&status) => {
+                    attempt += 1;
+                    self.partition_map(true).await?;
+                }
+                result => return result,
+            }
+        }
+    }
+
     /// The current channel, with its index for [`Client::ended`].
     pub(crate) fn channel(&self) -> (usize, Channel) {
         let at = self
@@ -452,6 +624,11 @@ impl Kernable {
         Ok(Kernable {
             client: Client {
                 channels,
+                parts: Arc::new(Partitions {
+                    map: tokio::sync::Mutex::default(),
+                    channels: Default::default(),
+                    tls: tls.clone(),
+                }),
                 key_id,
                 key: Arc::new(key),
                 grant,
@@ -547,6 +724,8 @@ impl Kernable {
             protocol: PROTOCOL,
         };
         self.client
+            .control()
+            .await?
             .call(None, request, |channel, r| async move {
                 MembershipServiceClient::new(channel).apply(r).await
             })
@@ -639,10 +818,23 @@ impl Kernable {
             vault: sealed.values,
             listener: handling(),
         };
+        let tenant = request
+            .command
+            .as_ref()
+            .map(|c| c.tenant_id.clone())
+            .unwrap_or_default();
+        let timeout = s.timeout;
         Ok(self
             .client
-            .call(s.timeout, request, |channel, r| async move {
-                CommandServiceClient::new(channel).submit(r).await
+            .routed(&tenant, |client| {
+                let request = request.clone();
+                async move {
+                    client
+                        .call(timeout, request, |channel, r| async move {
+                            CommandServiceClient::new(channel).submit(r).await
+                        })
+                        .await
+                }
             })
             .await?)
     }
@@ -674,10 +866,18 @@ impl Kernable {
         };
         request.client_sig = Some(self.client.sign(&signing::query_message(&request)));
         request.listener = handling();
+        let (tenant, timeout) = (request.tenant_id.clone(), query.timeout);
         let res = self
             .client
-            .call(query.timeout, request, |channel, r| async move {
-                QueryServiceClient::new(channel).query(r).await
+            .routed(&tenant, |client| {
+                let request = request.clone();
+                async move {
+                    client
+                        .call(timeout, request, |channel, r| async move {
+                            QueryServiceClient::new(channel).query(r).await
+                        })
+                        .await
+                }
             })
             .await?;
         match res.outcome {

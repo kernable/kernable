@@ -168,12 +168,13 @@ impl PartitionService for Api {
     async fn map(&self, request: Request<MapRequest>) -> Result<Response<PartitionMap>, Status> {
         let kernel = &self.0;
         protocol(request.get_ref().protocol)?;
-        kernel.checked_grant(request.metadata())?;
-        kernel
+        // Without a map there is nothing to protect: a client learns it serves every tenant.
+        let map = kernel
             .maps
             .get()
-            .map(Response::new)
-            .ok_or_else(|| Status::not_found("this kernel holds no partition map"))
+            .ok_or_else(|| Status::not_found("this kernel holds no partition map"))?;
+        kernel.checked_grant(request.metadata())?;
+        Ok(Response::new(map))
     }
 
     async fn apply(&self, request: Request<PartitionMap>) -> Result<Response<MapResult>, Status> {

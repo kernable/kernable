@@ -633,6 +633,7 @@ position, once per batch. Errors are `Error::Store` (SQLite) or `Error::Json`.
 
 - `fn open(url: &str, schema: &str) -> Result<Store, Error>`: Opens `url` (`sqlite:<path>`, a bare path, or `memory:`). If the stored data was built at another `schema`, it is cleared and the read model rebuilds from the first event.
 - `fn committed(&self) -> u64`: The position up to which the stored data is complete.
+- `fn committed_for(&self, part: &str) -> Result<u64, Error>`: The position up to which the data is complete for the events of partition `part`: every partition has its own positions. `""`: a kernel without partitions.
 - `fn get<T: DeserializeOwned>(&self, ns: &str, key: &str) -> Result<Option<T>, Error>`: The value under `key` in namespace `ns` as a `T`; `None` if there is none.
 - `fn set<T: Serialize + ?Sized>(&self, ns: &str, key: &str, value: &T) -> Result<(), Error>`: Stores `value` as JSON under `key` in namespace `ns`, replacing a value there.
 - `fn remove(&self, ns: &str, key: &str) -> Result<(), Error>`: Removes the value under `key` in namespace `ns`, if there is one.
