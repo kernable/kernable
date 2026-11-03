@@ -9,6 +9,7 @@ import type { ClientReadableStream } from "@grpc/grpc-js";
 
 import {
   PROTOCOL,
+  Partitioned,
   connect,
   type Clients,
   type KernelMessage,
@@ -1447,6 +1448,29 @@ export interface ReindexOptions {
 
 const LEVELS = { off: 0, error: 1, warn: 2, info: 3, debug: 4 };
 
+/**
+ * The partitions of `clients`, read again (backing off like a reconnect) while no kernel answers;
+ * `undefined` once `stopped`.
+ */
+async function partitionsOf(
+  clients: Partitioned,
+  what: string,
+  log: Log,
+  ms: number,
+  wake: Wake,
+  stopped: () => boolean,
+): Promise<{ name: string; clients: Clients }[] | undefined> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await clients.all();
+    } catch (err) {
+      if (stopped()) return undefined;
+      await log.reconnect(what, err, ms, attempt, wake);
+      if (stopped()) return undefined;
+    }
+  }
+}
+
 /** A wait before reconnecting that `stop()` cuts short, so a stopped stream ends at once. */
 class Wake {
   private wake?: () => void;
@@ -1558,7 +1582,7 @@ export class Kernable {
   readonly data: Data;
   /** The shared cache of a domain; see `Cache`. */
   readonly cache: Cache;
-  private readonly clients: Clients;
+  private readonly clients: Partitioned;
   private readonly key: Key;
   private readonly log: Log;
   private readonly tenant: string;
@@ -1576,7 +1600,8 @@ export class Kernable {
     if (!tls && !(options.insecure ?? env.KERNABLE_INSECURE === "1") && !local(url)) {
       throw new Error(`${url} is not on this machine: connect with TLS (Options.tls), or set Options.insecure to send in plain text`);
     }
-    this.clients = connect(url, tls, explicit || existsSync(grant) ? readFileSync(grant, "utf8").trim() : undefined, options.timeoutMs);
+    const granted = explicit || existsSync(grant) ? readFileSync(grant, "utf8").trim() : undefined;
+    this.clients = new Partitioned(url, (u) => connect(u, tls, granted, options.timeoutMs));
     this.key = Key.fromFile(key);
     this.log = new Log(url, key, this.key);
     warnIfShared(this.log, key);
@@ -1659,7 +1684,7 @@ export class Kernable {
       metadata: Object.entries(manifest.metadata ?? {}).map(([key, value]) => ({ key, value })),
       issued_at: Date.now(),
     };
-    await this.clients.apply(membership, this.key.sign(membershipMessage(membership)));
+    await (await this.clients.control()).apply(membership, this.key.sign(membershipMessage(membership)));
   }
 
   /**
@@ -1737,14 +1762,12 @@ export class Kernable {
       min_position: options.minPosition ?? 0,
       issued_at: Date.now(),
     };
-    const res = await this.clients.query(
-      {
-        ...request,
-        client_sig: this.key.sign(queryMessage(request)),
-        listener: handling.getStore() ?? "",
-      },
-      options.timeoutMs,
-    );
+    const signed = {
+      ...request,
+      client_sig: this.key.sign(queryMessage(request)),
+      listener: handling.getStore() ?? "",
+    };
+    const res = await this.clients.route(request.tenant_id, (c) => c.query(signed, options.timeoutMs));
     if (res.outcome === "rejected") throw new Rejected(res.rejected!.message, res.rejected!.code);
     return decode(res.response!) as T;
   }
@@ -1775,7 +1798,8 @@ export class Kernable {
       vault_refs: sealed.refs,
     };
     const signed = { ...cmd, client_sig: this.key.sign(commandMessage(cmd)) };
-    return this.clients.submit(signed, wait, handling.getStore(), sealed.values, options.timeoutMs);
+    const listener = handling.getStore();
+    return this.clients.route(signed.tenant_id, (c) => c.submit(signed, wait, listener, sealed.values, options.timeoutMs));
   }
 
   /**
@@ -1832,12 +1856,12 @@ export interface PutDataOptions extends DataOptions {
  * See [Store files and cache values](../how-to/data-and-cache).
  */
 export class Data {
-  private readonly clients: Clients;
+  private readonly clients: Partitioned;
   private readonly key: Key;
   private readonly tenant: string;
   private readonly context: RequestContext;
 
-  constructor(clients: Clients, key: Key, tenant: string, context: RequestContext = {}) {
+  constructor(clients: Partitioned, key: Key, tenant: string, context: RequestContext = {}) {
     this.clients = clients;
     this.key = key;
     this.tenant = tenant;
@@ -1872,7 +1896,8 @@ export class Data {
       context: toWireContext(options.context ?? this.context),
     };
     const rpc = op === "put" ? "PutData" : op === "get" ? "GetData" : "DeleteData";
-    return this.clients.data(rpc, { ...request, client_sig: this.key.sign(dataMessage(op, request)) });
+    const signed = { ...request, client_sig: this.key.sign(dataMessage(op, request)) };
+    return this.clients.route(request.tenant_id, (c) => c.data(rpc, signed));
   }
 }
 
@@ -1902,12 +1927,12 @@ export interface SetCacheOptions extends DataOptions {
  * See [Store files and cache values](../how-to/data-and-cache).
  */
 export class Cache {
-  private readonly clients: Clients;
+  private readonly clients: Partitioned;
   private readonly key: Key;
   private readonly tenant: string;
   private readonly context: RequestContext;
 
-  constructor(clients: Clients, key: Key, tenant: string, context: RequestContext = {}) {
+  constructor(clients: Partitioned, key: Key, tenant: string, context: RequestContext = {}) {
     this.clients = clients;
     this.key = key;
     this.tenant = tenant;
@@ -1941,7 +1966,8 @@ export class Cache {
       context: toWireContext(options.context ?? this.context),
     };
     const rpc = op === "set" ? "SetCache" : op === "get" ? "GetCache" : "DeleteCache";
-    return this.clients.cache(rpc, { ...request, client_sig: this.key.sign(cacheMessage(op, request)) });
+    const signed = { ...request, client_sig: this.key.sign(cacheMessage(op, request)) };
+    return this.clients.route(request.tenant_id, (c) => c.cache(rpc, signed));
   }
 }
 
@@ -1975,37 +2001,66 @@ export class Subscription {
   private stopped = false;
   private readonly wake = new Wake();
 
-  constructor(clients: Clients, key: Key, options: SubscribeOptions, handler: (event: StoredEvent) => void | Promise<void>, log: Log) {
+  /** With partitions: one stream per partition. */
+  private readonly calls = new Set<ClientReadableStream<WireEvent>>();
+  /** With partitions: the handler takes one event at a time, of whichever partition. */
+  private turns: Promise<void> = Promise.resolve();
+
+  constructor(clients: Partitioned | Clients, key: Key, options: SubscribeOptions, handler: (event: StoredEvent) => void | Promise<void>, log: Log) {
     this.position = options.after ?? 0;
-    this.done = this.loop(clients, key, options, handler, log);
+    this.done = this.start(clients, key, options, handler, log);
   }
 
   /** Stops the subscription: ends its stream; `done` then resolves. */
   stop(): void {
     this.stopped = true;
     this.call?.cancel();
+    for (const call of this.calls) call.cancel();
     this.wake.now();
   }
 
-  private async loop(clients: Clients, key: Key, options: SubscribeOptions, handler: (event: StoredEvent) => void | Promise<void>, log: Log) {
+  private async start(clients: Partitioned | Clients, key: Key, options: SubscribeOptions, handler: (event: StoredEvent) => void | Promise<void>, log: Log) {
+    if (!(clients instanceof Partitioned)) return this.loop(clients, key, options, handler, log, "");
+    const parts = await partitionsOf(clients, "subscription", log, options.reconnectMs ?? 1000, this.wake, () => this.stopped);
+    if (!parts) return;
+    if (parts.length === 1 && parts[0].name === "") return this.loop(parts[0].clients, key, options, handler, log, "");
+    // A stream per partition, each from the start (`after` names a position of one kernel);
+    // events are in order within a partition, not across them.
+    const inTurn = (event: StoredEvent) => {
+      const run = this.turns.then(() => handler(event));
+      this.turns = run.then(
+        () => undefined,
+        () => undefined,
+      );
+      return run;
+    };
+    await Promise.all(parts.map((p) => this.loop(p.clients, key, { ...options, after: 0 }, inTurn, log, p.name)));
+  }
+
+  private async loop(clients: Clients, key: Key, options: SubscribeOptions, handler: (event: StoredEvent) => void | Promise<void>, log: Log, part: string) {
     const event_types = options.types ?? [];
+    let position = part === "" ? this.position : (options.after ?? 0);
     let attempt = 0;
     while (!this.stopped) {
-      const from = this.position;
+      const from = position;
       const issued_at = Date.now();
-      const client_sig = key.sign(subscribeMessage(this.position, event_types, issued_at));
-      this.call = clients.subscribe({ after_position: this.position, event_types, issued_at, client_sig });
+      const client_sig = key.sign(subscribeMessage(position, event_types, issued_at));
+      const call = clients.subscribe({ after_position: position, event_types, issued_at, client_sig });
+      if (part === "") this.call = call;
+      else this.calls.add(call);
       let error: unknown = new Error("stream ended");
       try {
-        for await (const e of this.call as AsyncIterable<WireEvent>) {
+        for await (const e of call as AsyncIterable<WireEvent>) {
           await handler(toStored(e));
-          this.position = e.global_position;
+          position = e.global_position;
+          if (part === "") this.position = position;
         }
       } catch (err) {
         error = err;
       }
-      attempt = this.position > from ? 1 : attempt + 1;
-      if (!this.stopped) await log.reconnect("subscription", error, options.reconnectMs ?? 1000, attempt, this.wake);
+      this.calls.delete(call);
+      attempt = position > from ? 1 : attempt + 1;
+      if (!this.stopped) await log.reconnect(part === "" ? "subscription" : `subscription ${part}`, error, options.reconnectMs ?? 1000, attempt, this.wake);
     }
   }
 }
@@ -2254,7 +2309,7 @@ export class ListenerHandle {
   /** Whether the first connect gets its own line; an `App` prints it in its overview instead. */
   announce = true;
   private connects = 0;
-  private readonly clients: Clients;
+  private readonly clients: Partitioned | Clients;
   private readonly key: Key;
   private readonly log: Log;
   /** The service it belongs to (`Options.service`). */
@@ -2266,9 +2321,32 @@ export class ListenerHandle {
   /** How often the handler failed on an event, by position, until it gets past it. */
   private readonly attempts = new Map<number, number>();
 
-  constructor(kernable: Kernable, clients: Clients, key: Key, listener: Listener, log: Log, service: string) {
+  /** With partitions: one stream per partition, sharing this handle's store. */
+  private children: ListenerHandle[] = [];
+  /** The clients of the one kernel it listens to (without partitions, or as a partition's stream). */
+  private single?: Clients;
+  /** As a partition's stream: its partition, whose position the store keeps apart. */
+  private part = "";
+  /** As a partition's stream: the handle whose store it shares. */
+  private parent?: ListenerHandle;
+  /** Batches of all partitions take turns on the shared store: one at a time. */
+  private turns: Promise<void> = Promise.resolve();
+
+  constructor(
+    kernable: Kernable,
+    clients: Partitioned | Clients,
+    key: Key,
+    listener: Listener,
+    log: Log,
+    service: string,
+    part?: { name: string; parent: ListenerHandle },
+  ) {
     this.kernable = kernable;
     this.clients = clients;
+    if (part) {
+      this.part = part.name;
+      this.parent = part.parent;
+    }
     this.key = key;
     this.log = log;
     this.service = service;
@@ -2296,16 +2374,45 @@ export class ListenerHandle {
     try {
       await this.runUntilStopped();
     } finally {
-      // Stopped: the store is released; a later run() opens it again.
-      this.stored?.close();
+      // Stopped: the store is released; a later run() opens it again. A partition's stream
+      // leaves it to the handle that owns it.
+      if (!this.parent) this.stored?.close();
       this.stored = undefined;
     }
   }
 
   private async runUntilStopped(): Promise<void> {
     const options = this.listener.options;
+    if (this.clients instanceof Partitioned) {
+      const parts = await partitionsOf(this.clients, this.what, this.log, options.reconnectMs ?? 1000, this.wake, () => this.stopped);
+      if (!parts) return;
+      if (parts.length > 1 || parts[0].name !== "") {
+        await this.openStore();
+        if (this.stopped) return;
+        // A stream per partition, each from its own position in the shared store.
+        this.children = parts.map((p) => {
+          const child = new ListenerHandle(this.kernable, p.clients, this.key, this.listener, this.log, this.service, { name: p.name, parent: this });
+          child.announce = this.announce;
+          child.stored = this.stored;
+          return child;
+        });
+        void Promise.all(this.children.map((c) => c.ready)).then(() => {
+          this.startedAt = Math.min(...this.children.map((c) => c.startedAt));
+          this.markReady();
+        });
+        await Promise.all(this.children.map((c) => c.run()));
+        return;
+      }
+      this.single = parts[0].clients;
+    } else {
+      this.single = this.clients;
+    }
     let start = options.start;
-    if (options.store && !this.stored) {
+    if (this.parent && this.stored) {
+      this.position = this.stored.committedFor(this.part);
+      if (this.position > 0) start = this.position;
+    }
+    if (!this.parent && options.store && !this.stored) {
       // A store that cannot be opened (a full disk) is tried again, backing off like a reconnect.
       for (let attempt = 1; !this.stored; attempt++) {
         try {
@@ -2343,6 +2450,21 @@ export class ListenerHandle {
     this.stopped = true;
     this.call?.cancel();
     this.wake.now();
+    for (const child of this.children) child.stop();
+  }
+
+  /** Opens the listener's store, if it has one, trying again while it cannot be opened. */
+  private async openStore(): Promise<void> {
+    const options = this.listener.options;
+    for (let attempt = 1; options.store && !this.stored; attempt++) {
+      try {
+        this.stored = await Store.open(options.store, options.schema ?? "1");
+      } catch (err) {
+        if (this.stopped) return;
+        await this.log.storeFailed(this.what, err, options.reconnectMs ?? 1000, attempt, this.wake);
+        if (this.stopped) return;
+      }
+    }
   }
 
   /** `listener <name>`, for log lines. */
@@ -2353,7 +2475,7 @@ export class ListenerHandle {
   private listen(start: number | undefined): Promise<void> {
     const { name, options, handlers, queries, middlewares } = this.listener;
     return new Promise((resolve, reject) => {
-      const call = this.clients.listen();
+      const call = this.single!.listen();
       this.call = call;
       // Batches are handled strictly one after another. Once one fails or the stream is over,
       // the messages queued behind it are dropped (the next connect resumes after the last
@@ -2413,18 +2535,22 @@ export class ListenerHandle {
       if (m.batch.up_to < this.position) {
         throw new Error(`the kernel sent a batch up to ${m.batch.up_to}, behind position ${this.position}`);
       }
-      // With a store, the batch's data and position are committed together, before the ack.
-      this.stored?.begin();
-      let parked: WireParked[];
-      try {
-        parked = await this.handleBatch(m.batch);
-        // After an erasure, nothing the handlers removed may stay in the store's files.
-        this.stored?.commit(m.batch.up_to, [...m.batch.events, ...(m.batch.retries ?? [])].some((e) => e.erases));
-      } catch (err) {
-        this.stored?.rollback();
-        if (this.stored) this.position = this.stored.committed;
-        throw err;
-      }
+      // With a store, the batch's data and position are committed together, before the ack;
+      // the partitions' batches take turns on a shared store.
+      const batch = m.batch;
+      const parked = await this.inTurn(async () => {
+        this.stored?.begin();
+        try {
+          const parked = await this.handleBatch(batch);
+          // After an erasure, nothing the handlers removed may stay in the store's files.
+          this.stored?.commit(batch.up_to, [...batch.events, ...(batch.retries ?? [])].some((e) => e.erases), this.part);
+          return parked;
+        } catch (err) {
+          this.stored?.rollback();
+          if (this.stored) this.position = this.stored.committedFor(this.part);
+          throw err;
+        }
+      });
       this.position = m.batch.up_to;
       call.write({ ack: { position: m.batch.up_to, parked } });
     } else if (m.query) {
@@ -2432,6 +2558,17 @@ export class ListenerHandle {
     } else if (m.check) {
       call.write({ verdict: { call_id: m.check.call_id, ...(await this.verdict(m.check)) } });
     }
+  }
+
+  /** Runs `batch` once the batches before it, of every partition, are done. */
+  private inTurn<T>(batch: () => Promise<T>): Promise<T> {
+    const owner = this.parent ?? this;
+    const run = owner.turns.then(batch);
+    owner.turns = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
   }
 
   private logConnected(): void {
@@ -2587,7 +2724,7 @@ export class Worker {
   /** Resolves once the kernel accepted the worker. */
   readonly ready: Promise<void>;
   private markReady!: () => void;
-  private readonly clients: Clients;
+  private readonly clients: Partitioned | Clients;
   private readonly key: Key;
   private readonly log: Log;
   private readonly byCommand = new Map<string, Aggregate<any>>();
@@ -2603,7 +2740,12 @@ export class Worker {
   private stopped = false;
   private readonly wake = new Wake();
 
-  constructor(clients: Clients, key: Key, aggregates: Aggregate<any>[], log: Log, service: string) {
+  /** With partitions: one worker per partition, run together. */
+  private children: Worker[] = [];
+  /** The clients of the one kernel it runs on (without partitions, or as a partition's worker). */
+  private single?: Clients;
+
+  constructor(clients: Partitioned | Clients, key: Key, aggregates: Aggregate<any>[], log: Log, service: string) {
     this.clients = clients;
     this.key = key;
     this.log = log;
@@ -2621,6 +2763,25 @@ export class Worker {
    * session drops. Resolves after `stop()`.
    */
   async run(options: WorkerOptions = {}): Promise<void> {
+    if (this.clients instanceof Partitioned) {
+      const parts = await partitionsOf(this.clients, "worker", this.log, options.reconnectMs ?? 1000, this.wake, () => this.stopped);
+      if (!parts) return;
+      if (parts.length > 1 || parts[0].name !== "") {
+        // A session per partition: commands of every partition's tenants run here.
+        this.children = parts.map((p) => {
+          const worker = new Worker(p.clients, this.key, this.aggregates, this.log, this.service);
+          worker.announce = this.announce;
+          return worker;
+        });
+        void Promise.all(this.children.map((w) => w.ready)).then(() => this.markReady());
+        if (this.stopped) return;
+        await Promise.all(this.children.map((w) => w.run(options)));
+        return;
+      }
+      this.single = parts[0].clients;
+    } else {
+      this.single = this.clients;
+    }
     let attempt = 0;
     while (!this.stopped) {
       const connects = this.connects;
@@ -2640,11 +2801,12 @@ export class Worker {
     this.stopped = true;
     this.call?.cancel();
     this.wake.now();
+    for (const worker of this.children) worker.stop();
   }
 
   private session(concurrency: number): Promise<void> {
     return new Promise((resolve, reject) => {
-      const call = this.clients.session();
+      const call = this.single!.session();
       this.call = call;
       call.on("data", (m: KernelMessage) => this.onMessage(call, m));
       call.on("error", reject);

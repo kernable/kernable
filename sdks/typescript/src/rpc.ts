@@ -328,7 +328,106 @@ export interface Clients {
   data(op: DataOp, req: WireDataRequest): Promise<WireDataResult>;
   cache(op: CacheOp, req: WireCacheRequest): Promise<WireCacheResult>;
   apply(membership: WireMembership, sig: WireSignature): Promise<void>;
+  /** The partition map the kernel holds; `null` if it serves every tenant (no `--partition`). */
+  map(): Promise<WirePartitionMap | null>;
   close(): void;
+}
+
+/** Where each tenant lives; see `PartitionMap` in kernable.proto. */
+export interface WirePartitionMap {
+  epoch: number;
+  partitions: { name: string; addresses: string[] }[];
+  tenants: { tenant: string; partition: string }[];
+  default: string;
+  control: string;
+}
+
+/** Whether a kernel refused a request as one for a tenant of another partition. */
+export function wrongPartition(err: unknown): boolean {
+  const e = err as grpc.ServiceError;
+  return e?.code === grpc.status.FAILED_PRECONDITION && typeof e.details === "string" && e.details.startsWith("wrong_partition");
+}
+
+/**
+ * The clients of every partition, found by the map the first kernel at `url` holds: a
+ * request goes to its tenant's partition; refused there as `wrong_partition` (the map
+ * changed), the map is read again and the request sent anew. A kernel without partitions holds
+ * no map: everything goes to `url`, as before.
+ */
+export class Partitioned {
+  readonly entry: Clients;
+  private map?: WirePartitionMap | null;
+  private loading?: Promise<WirePartitionMap | null>;
+  private readonly parts = new Map<string, Clients>();
+
+  private readonly make: (url: string) => Clients;
+
+  constructor(url: string, make: (url: string) => Clients) {
+    this.make = make;
+    this.entry = make(url);
+  }
+
+  /** The map, read once and again after `refresh`; `null` without partitions. */
+  async current(refresh = false): Promise<WirePartitionMap | null> {
+    if (refresh) this.map = undefined;
+    if (this.map !== undefined) return this.map;
+    this.loading ??= this.entry
+      .map()
+      .then((m) => (this.map = m))
+      .finally(() => (this.loading = undefined));
+    return this.loading;
+  }
+
+  private clientsOf(map: WirePartitionMap, name: string): Clients {
+    const partition = map.partitions.find((p) => p.name === name);
+    if (!partition) throw new Error(`the partition map names no partition ${name}`);
+    const url = partition.addresses.join(",");
+    let clients = this.parts.get(url);
+    if (!clients) {
+      clients = this.make(url);
+      this.parts.set(url, clients);
+    }
+    return clients;
+  }
+
+  /** The clients of `tenant`'s partition. */
+  async forTenant(tenant: string): Promise<Clients> {
+    const map = await this.current();
+    if (!map) return this.entry;
+    const name = map.tenants.find((t) => t.tenant === tenant)?.partition ?? map.default;
+    return this.clientsOf(map, name);
+  }
+
+  /** The clients of the control partition, which takes memberships. */
+  async control(): Promise<Clients> {
+    const map = await this.current();
+    return map ? this.clientsOf(map, map.control) : this.entry;
+  }
+
+  /** Every partition with its clients; one, named `""`, without partitions. */
+  async all(): Promise<{ name: string; clients: Clients }[]> {
+    const map = await this.current();
+    if (!map) return [{ name: "", clients: this.entry }];
+    return map.partitions.map((p) => ({ name: p.name, clients: this.clientsOf(map, p.name) }));
+  }
+
+  /** `call` on `tenant`'s partition, sent anew after reading the map again on `wrong_partition`. */
+  async route<R>(tenant: string, call: (clients: Clients) => Promise<R>): Promise<R> {
+    for (let attempt = 0; ; attempt++) {
+      const clients = await this.forTenant(tenant);
+      try {
+        return await call(clients);
+      } catch (err) {
+        if (attempt >= 3 || !wrongPartition(err)) throw err;
+        await this.current(true);
+      }
+    }
+  }
+
+  close(): void {
+    this.entry.close();
+    for (const clients of this.parts.values()) clients.close();
+  }
 }
 
 // Packaged next to `dist/`; in the repository, the shared `proto/` at the root.
@@ -405,6 +504,7 @@ export function connect(url: string, tls?: TlsFiles, grant?: string, timeoutMs =
     }),
     cache: new v1.CacheService(u, creds, KEEPALIVE),
     memberships: new v1.MembershipService(u, creds, KEEPALIVE),
+    partitions: new v1.PartitionService(u, creds, KEEPALIVE),
   }));
   type Target = (typeof targets)[number];
   let current = 0;
@@ -462,6 +562,15 @@ export function connect(url: string, tls?: TlsFiles, grant?: string, timeoutMs =
     cache: (op, req) => unary("cache", op, req),
     apply: async (membership, sig) => {
       await unary("memberships", "Apply", { membership, sig });
+    },
+    map: async () => {
+      try {
+        return await unary<WirePartitionMap>("partitions", "Map", {});
+      } catch (err) {
+        const code = (err as grpc.ServiceError).code;
+        if (code === grpc.status.NOT_FOUND || code === grpc.status.UNIMPLEMENTED) return null;
+        throw err;
+      }
     },
     close: () => {
       for (const t of targets) for (const client of Object.values(t)) client.close();

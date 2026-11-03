@@ -48,6 +48,7 @@ export class Store {
     if (meta("schema") !== schema) {
       db.exec("BEGIN");
       db.exec("DELETE FROM data");
+      db.exec("DELETE FROM meta WHERE key LIKE 'position:%'");
       db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema', ?), ('position', '0')").run(schema);
       db.exec("COMMIT");
     }
@@ -92,14 +93,28 @@ export class Store {
   }
 
   /**
-   * @internal Ends a batch: its data and `position` take effect together. After a batch with an
-   * erasure (`erased`), the log of old pages is emptied too: what the batch removed must not
-   * stay on disk.
+   * @internal The position up to which the data is complete for the events of partition `part`
+   *: every partition has its own positions. `""`: a kernel without partitions.
    */
-  commit(position: number, erased = false): void {
-    this.db.prepare("UPDATE meta SET value = ? WHERE key = 'position'").run(String(position));
+  committedFor(part: string): number {
+    if (part === "") return this.committed;
+    const row = this.db.prepare("SELECT value FROM meta WHERE key = ?").get(`position:${part}`) as { value: string } | undefined;
+    return Number(row?.value ?? 0);
+  }
+
+  /**
+   * @internal Ends a batch: its data and `position` (of partition `part`, see `committedFor`)
+   * take effect together. After a batch with an erasure (`erased`), the log of old pages is
+   * emptied too: what the batch removed must not stay on disk.
+   */
+  commit(position: number, erased = false, part = ""): void {
+    if (part === "") {
+      this.db.prepare("UPDATE meta SET value = ? WHERE key = 'position'").run(String(position));
+    } else {
+      this.db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)").run(`position:${part}`, String(position));
+    }
     this.db.exec("COMMIT");
-    this.committed = position;
+    if (part === "") this.committed = position;
     if (erased) this.checkpoint();
   }
 
