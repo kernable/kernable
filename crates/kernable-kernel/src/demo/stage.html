@@ -11,6 +11,7 @@
     --event: #c2410c; --event-soft: #fff1e6; --live: #1c9bb8; --code: #f4f4f0; --dim: #b4b4ad;
     --kw: #8b3fd1; --str: #2b8a3e; --com: #8f8f88; --num: #c2410c;
     --write-soft: #fdf4ec; --read-soft: #eaf6f9;
+    --note-bg: #fff4c7; --note-edge: #e0a100; --note-ink: #3b3008; --note-label: #8a6400;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -19,6 +20,7 @@
       --event: #ff9a5c; --event-soft: #3a2618; --live: #3bc9db; --code: #222220; --dim: #55554f;
       --kw: #c79bff; --str: #8ce99a; --com: #77776f; --num: #ffa94d;
       --write-soft: #241c16; --read-soft: #142326;
+      --note-bg: #3a3214; --note-edge: #e6b422; --note-ink: #f4ecd0; --note-label: #f0c75a;
     }
   }
   * { box-sizing: border-box; }
@@ -102,10 +104,13 @@
   #flow .packet.event rect { fill: var(--event); }
   #flow .packet.bad rect { fill: var(--bad); }
   #flow .packet.ok rect { fill: var(--ok); }
-  #flow .intent rect.note { fill: var(--panel); stroke: var(--accent); stroke-width: 2; }
-  #flow .intent .who { font: 700 12px system-ui, sans-serif; letter-spacing: .1em; fill: var(--accent); }
-  #flow .intent .what { font: 600 17px system-ui, sans-serif; fill: var(--text); }
-  #flow .intent path { fill: none; stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: 4 4; }
+  /* An intention is a note, not a part of the system: yellow paper, square corners, a coloured
+     edge, a tail towards its part, and italic text in quotes. */
+  #flow .intent rect.note { fill: var(--note-bg); filter: drop-shadow(0 3px 6px rgba(0, 0, 0, .18)); }
+  #flow .intent rect.edge, #flow .intent path.tail { fill: var(--note-edge); }
+  #flow .intent .who { font: 700 12px system-ui, sans-serif; letter-spacing: .12em; fill: var(--note-label); }
+  #flow .intent .what { font: italic 500 17px Georgia, "Times New Roman", serif; fill: var(--note-ink); }
+  #flow .intent path.leader { fill: none; stroke: var(--note-edge); stroke-width: 2; stroke-dasharray: 2 5; stroke-linecap: round; }
   #flow .badge rect { fill: var(--panel); stroke: var(--muted); stroke-width: 1.5; }
   #flow .badge text { font: 600 13px system-ui, sans-serif; fill: var(--text); }
   #flow .badge.bad rect { fill: var(--bad); stroke: var(--bad); } #flow .badge.bad text { fill: #fff; }
@@ -426,11 +431,18 @@ function intend(ids) {
   const [fx, fy, tx, ty] = n.x > X + W
     ? [X + W, Y + H / 2, n.x, n.y + n.h / 2]
     : [X + W / 2, Y + H, n.x + n.w / 2, n.y];
+  // The tail: a small triangle on the side the leader leaves from.
+  const tail = fx === X + W
+    ? `M${X + W} ${fy - 10} L${X + W + 12} ${fy} L${X + W} ${fy + 10} Z`
+    : `M${fx - 10} ${Y + H} L${fx} ${Y + H + 12} L${fx + 10} ${Y + H} Z`;
+  const quoted = lines.map((line, i) => `${i === 0 ? "“" : ""}${line}${i === lines.length - 1 ? "”" : ""}`);
   intentGroup.append(
-    el("svg:path", { d: `M${fx} ${fy} C ${(fx + tx) / 2} ${fy}, ${(fx + tx) / 2} ${ty}, ${tx} ${ty}` }),
-    el("svg:rect", { x: X, y: Y, width: W, height: H, rx: 12, class: "note" }),
-    el("svg:text", { x: X + 16, y: Y + 22, class: "who" }, `${NAMES[id].toUpperCase()} WANTS`),
-    ...lines.map((line, i) => el("svg:text", { x: X + 16, y: Y + 46 + i * 23, class: "what" }, line)));
+    el("svg:path", { d: `M${fx} ${fy} C ${(fx + tx) / 2} ${fy}, ${(fx + tx) / 2} ${ty}, ${tx} ${ty}`, class: "leader" }),
+    el("svg:rect", { x: X, y: Y, width: W, height: H, rx: 2, class: "note" }),
+    el("svg:rect", { x: X, y: Y, width: 6, height: H, class: "edge" }),
+    el("svg:path", { d: tail, class: "tail" }),
+    el("svg:text", { x: X + 20, y: Y + 22, class: "who" }, `${NAMES[id].toUpperCase()} WANTS`),
+    ...quoted.map((line, i) => el("svg:text", { x: X + 20, y: Y + 46 + i * 23, class: "what" }, line)));
 }
 
 async function move(wire, label, kind = "") {
