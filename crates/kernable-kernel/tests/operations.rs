@@ -175,6 +175,135 @@ async fn the_ui_shows_the_map_the_connections_and_an_aggregate_history() {
     assert!(get(&ui, "/nope").await.starts_with("HTTP/1.1 404"));
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn the_ui_searches_and_tails_the_log() {
+    let ui = free_addr();
+    let env = start_custom("ui-events", |config, _| {
+        config.ui_listen = Some(ui.clone());
+    })
+    .await;
+    spawn_worker(&env).await;
+    for (c, o) in [("c1", "o1"), ("c2", "o2"), ("c3", "o3")] {
+        submit(&env.addr, signed(command(c, "PlaceOrder", o), &key(1)))
+            .await
+            .unwrap();
+    }
+    let json = |response: String| -> serde_json::Value {
+        let (head, body) = response.split_once("\r\n\r\n").unwrap();
+        assert!(head.starts_with("HTTP/1.1 200 OK"), "{head}");
+        serde_json::from_str(body).unwrap()
+    };
+    let positions = |found: &serde_json::Value| -> Vec<u64> {
+        found["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["position"].as_u64().unwrap())
+            .collect()
+    };
+
+    // Newest first, with the aggregate each event belongs to.
+    let all = json(get(&ui, "/api/events").await);
+    assert_eq!(all["head"], 3);
+    assert_eq!(positions(&all), [3, 2, 1]);
+    assert_eq!(all["events"][0]["aggregateId"], "o3");
+    assert_eq!(all["events"][0]["domain"], "orders");
+    assert!(all["next"].is_null(), "the whole log was read");
+
+    // Filters: aggregate id, command id, type part in any case, a type that matches nothing.
+    assert_eq!(positions(&json(get(&ui, "/api/events?id=o2").await)), [2]);
+    assert_eq!(
+        positions(&json(get(&ui, "/api/events?command=c1").await)),
+        [1]
+    );
+    assert_eq!(
+        positions(&json(get(&ui, "/api/events?type=ORDERS.orderplaced").await)),
+        [3, 2, 1]
+    );
+    assert_eq!(
+        positions(&json(get(&ui, "/api/events?type=Shipped").await)),
+        Vec::<u64>::new()
+    );
+
+    // Pages: `next` continues with older events.
+    let first = json(get(&ui, "/api/events?limit=2").await);
+    assert_eq!(positions(&first), [3, 2]);
+    assert_eq!(first["next"], 2);
+    let rest = json(get(&ui, "/api/events?limit=2&before=2").await);
+    assert_eq!(positions(&rest), [1]);
+    assert!(rest["next"].is_null());
+
+    // The tail: oldest first after a position, and `last` for the next call.
+    let tail = json(get(&ui, "/api/events?after=1").await);
+    assert_eq!(positions(&tail), [2, 3]);
+    assert_eq!(tail["last"], 3);
+    let idle = json(get(&ui, "/api/events?after=3").await);
+    assert_eq!(positions(&idle), Vec::<u64>::new());
+    assert_eq!(idle["last"], 3);
+    submit(
+        &env.addr,
+        signed(command("c4", "PlaceOrder", "o4"), &key(1)),
+    )
+    .await
+    .unwrap();
+    let tail = json(get(&ui, "/api/events?after=3&id=o4").await);
+    assert_eq!(positions(&tail), [4]);
+    assert_eq!(tail["last"], 4);
+
+    assert!(
+        get(&ui, "/api/events?limit=x")
+            .await
+            .starts_with("HTTP/1.1 500")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_ui_lists_rejected_commands_newest_first() {
+    let ui = free_addr();
+    let env = start_custom("ui-rejections", |config, _| {
+        config.ui_listen = Some(ui.clone());
+    })
+    .await;
+    spawn_worker(&env).await;
+    let json = |response: String| -> serde_json::Value {
+        let (head, body) = response.split_once("\r\n\r\n").unwrap();
+        assert!(head.starts_with("HTTP/1.1 200 OK"), "{head}");
+        serde_json::from_str(body).unwrap()
+    };
+    assert_eq!(
+        json(get(&ui, "/api/rejections").await)["rejections"],
+        serde_json::json!([])
+    );
+
+    // An item for an order that does not exist is refused; placing an order is not.
+    for (c, t, o) in [
+        ("c1", "AddItem", "o1"),
+        ("c2", "PlaceOrder", "o2"),
+        ("c3", "AddItem", "o3"),
+    ] {
+        submit(&env.addr, signed(command(c, t, o), &key(1)))
+            .await
+            .unwrap();
+    }
+    let listed = json(get(&ui, "/api/rejections").await);
+    let rejected = listed["rejections"].as_array().unwrap();
+    let ids: Vec<&str> = rejected
+        .iter()
+        .map(|r| r["commandId"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["c3", "c1"]);
+    assert_eq!(rejected[0]["type"], "AddItem");
+    assert_eq!(rejected[0]["aggregateId"], "o3");
+    assert_eq!(rejected[0]["domain"], "orders");
+    assert_eq!(rejected[0]["code"], "invalid_state");
+    assert_eq!(rejected[0]["message"], "AddItem not allowed now");
+    assert!(rejected[0]["requirement"].is_null());
+
+    let newest = json(get(&ui, "/api/rejections?limit=1").await);
+    assert_eq!(newest["rejections"].as_array().unwrap().len(), 1);
+    assert_eq!(newest["limit"], 1);
+}
+
 async fn slow_worker(env: &Env, delay_ms: u64) {
     let worker = TestWorker {
         behavior: Behavior::Slow(std::time::Duration::from_millis(delay_ms)),

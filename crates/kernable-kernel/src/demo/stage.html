@@ -34,6 +34,17 @@
   .scenes button { padding: 3px 8px; min-width: 2em; }
   .scenes button.on { border-color: var(--accent); color: var(--accent); font-weight: 600; }
   .scenes .title { margin-left: 4px; }
+  .timeline { display: flex; gap: 4px; padding: 8px max(16px, 2vw) 0; overflow-x: auto; }
+  .timeline .chapter { flex: 1 1 0; min-width: 4.5rem; border-top: 3px solid var(--line); padding-top: 4px; }
+  .timeline .chapter.on { border-top-color: var(--accent); }
+  .timeline .name { all: unset; cursor: pointer; display: block; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+  .timeline .chapter.on .name { color: var(--accent); font-weight: 600; }
+  .timeline .dots { display: flex; gap: 4px; margin-top: 3px; }
+  .timeline .dot { all: unset; cursor: pointer; width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--muted); box-sizing: border-box; }
+  .timeline .dot.done { background: var(--accent); border-color: var(--accent); opacity: .55; }
+  .timeline .dot.now { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); opacity: 1; }
+  .hero .kicker { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .08em; margin-bottom: 2px; }
+  #play.on { border-color: var(--accent); color: var(--accent); }
   .dots { display: flex; gap: 6px; align-items: center; }
   .dots i { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--muted); display: inline-block; }
   .dots i.done { background: var(--accent); border-color: var(--accent); }
@@ -183,22 +194,23 @@
 <body>
 <header>
   <div class="brand">kernable <span>demo</span></div>
-  <div class="scenes" id="scenes"></div>
-  <div class="dots" id="dots"></div>
   <div class="controls">
     <label class="speed" title="How fast the animation runs; the timings stay real">
       Speed <input id="speed-slider" type="range" min="0" max="6" step="1" value="4" aria-label="Animation speed">
-      <output id="speed-value">1×</output><kbd>−</kbd><kbd>+</kbd>
+      <output id="speed-value">1×</output>
     </label>
-    <button id="reset" title="Start again on a new, empty store">Reset<kbd>R</kbd></button>
-    <button id="replay" title="Show the last step's animation again">Replay<kbd>A</kbd></button>
+    <button id="reset" title="Start the day again on a new, empty store">Reset<kbd>R</kbd></button>
     <button id="full" title="Full screen">Full screen<kbd>F</kbd></button>
     <a href="/" title="The kernel's own UI: map, connections, history">Kernel UI</a>
-    <button id="next" class="primary">Next step<kbd>→</kbd></button>
+    <button id="back" title="Back one step, shown again from what was recorded">Back<kbd>←</kbd></button>
+    <button id="play" title="Run on by itself, or stop at every hop">Play<kbd>Space</kbd></button>
+    <button id="next" class="primary" title="The next hop; Shift → finishes the step">Next step<kbd>→</kbd></button>
   </div>
 </header>
+<nav class="timeline" id="timeline" aria-label="Chapters and steps"></nav>
 <div class="error" id="error"></div>
 <section class="hero">
+  <div class="kicker" id="kicker"></div>
   <h1 id="title">Command → event → read model</h1>
   <p id="says">Press <b>Next step</b> to send the first command.</p>
 </section>
@@ -273,7 +285,7 @@ function progress(t, step) {
   return new Promise((done) => {
     let fraction = 0, last = performance.now();
     const frame = (now) => {
-      fraction = Math.min(1, fraction + ((now - last) * speed * boost) / t);
+      fraction = aborting ? 1 : Math.min(1, fraction + ((now - last) * speed * boost) / t);
       last = now;
       step(fraction);
       fraction < 1 ? requestAnimationFrame(frame) : done();
@@ -335,7 +347,13 @@ WIRES["middleware-kernel"] = vertical("middleware", "kernel", 475);
   const [rc, k] = [NODES.reactor, NODES.kernel];
   WIRES["reactor-kernel"] = `M${rc.x + rc.w - 30} ${rc.y} C ${rc.x + rc.w} ${rc.y - 30}, ${k.x} ${k.y + k.h + 20}, ${k.x + 20} ${k.y + k.h}`;
 }
-const wires = {}, nodes = {};
+const wires = {}, nodes = {}, subTexts = {};
+
+// The worker and the read model a step talks to, under their names.
+function setSubs(aggregate) {
+  if (subTexts.worker) subTexts.worker.textContent = `bank.${aggregate}`;
+  if (subTexts.model) subTexts.model.textContent = READ_SIDE[aggregate][0];
+}
 let logGroup = null;
 
 function drawFlow() {
@@ -350,14 +368,14 @@ function drawFlow() {
     if (!id.split("-").every(shown)) continue;
     svg.append(wires[id] = el("svg:path", { d, class: "wire" }));
   }
-  const subs = { worker: `bank.${demo.scene.aggregate}`, model: demo.scene.readModel };
+  const subs = { worker: "bank.account", model: "accounts" };
   for (const key of Object.keys(nodes)) delete nodes[key];
   for (const [id, n] of Object.entries(NODES)) {
     if (id === "store" || !shown(id)) continue;
     const g = el("svg:g", { class: "node" },
       el("svg:rect", { x: n.x, y: n.y, width: n.w, height: n.h, rx: 12 }),
       el("svg:text", { x: n.x + n.w / 2, y: n.y + n.h / 2 - 3, "text-anchor": "middle", class: "name" }, n.name),
-      el("svg:text", { x: n.x + n.w / 2, y: n.y + n.h / 2 + 20, "text-anchor": "middle", class: "sub" }, subs[id] || n.sub));
+      subTexts[id] = el("svg:text", { x: n.x + n.w / 2, y: n.y + n.h / 2 + 20, "text-anchor": "middle", class: "sub" }, subs[id] || n.sub));
     svg.append(nodes[id] = g);
   }
   const s = NODES.store;
@@ -424,8 +442,8 @@ function intend(ids) {
   intentGroup.replaceChildren();
   const id = ids.find((i) => nodes[i] && intentOf(i));
   if (!id) return;
-  const lines = wrap(intentOf(id), 30).slice(0, 4);
-  const X = 20, Y = 40, W = 292, H = 40 + lines.length * 23;
+  const lines = wrap(intentOf(id), 27).slice(0, 4);
+  const X = 16, Y = 36, W = 272, H = 40 + lines.length * 23;
   const n = NODES[id];
   // To the node's left edge if it is to the right of the note, else to its top.
   const [fx, fy, tx, ty] = n.x > X + W
@@ -446,6 +464,7 @@ function intend(ids) {
 }
 
 async function move(wire, label, kind = "") {
+  await gate();
   const path = wires[wire];
   if (!path) return;
   path.classList.add("on");
@@ -483,10 +502,9 @@ const KERNEL_CODES = ["unique_taken", "requirement_missing", "invalid_index"];
 const MIDDLEWARE_CODES = ["forbidden", "middleware_error"];
 
 function fresh() {
-  return { commands: [], states: [], events: [], keys: [], vault: {}, position: 0, head: 0, rows: {}, answers: [], rowsFresh: false };
+  return { commands: [], states: [], events: [], keys: [], vault: {}, position: 0, head: 0, rows: {}, model: "accounts", answers: [], rowsFresh: false };
 }
 
-const withKeys = () => demo.scene.keys;
 // A payload in words: `owner Ada · balance 70`; vault references as a lock.
 function words(data) {
   let value = data;
@@ -512,6 +530,15 @@ function commandsAfter(n) {
       : t.sends.map((s) => ({ s, outcome: s.outcome })));
 }
 
+// The read model and the query of each aggregate type.
+const READ_SIDE = { account: ["accounts", "GetAccount"], customer: ["customers", "GetCustomer"], person: ["people", "GetPerson"] };
+// The aggregate type step `i` is about: its first command's, else accounts.
+const aggregateOf = (i) => {
+  const step = demo.scene.steps[i];
+  return (step && step.sends[0] && step.sends[0].aggregate) || "account";
+};
+const modelOf = (i) => READ_SIDE[aggregateOf(i)][0];
+
 // The panel as it stands after the first `n` steps, with the store as `store` holds it.
 function after(n, store) {
   const view = fresh();
@@ -527,16 +554,18 @@ function after(n, store) {
     view.vault = store.vault;
     view.head = view.position = lastPosition(store.events);
   }
-  view.rows = n === demo.traces.length ? demo.rows : store && store.rows ? store.rows : {};
+  view.model = modelOf(Math.max(0, n === 0 ? 0 : n - 1));
+  const all = n === demo.traces.length && !store ? demo.rows : (store && store.rows) || {};
+  view.rows = all[view.model] || {};
   return view;
 }
 
 // The events of every aggregate of the scene, in order, the keys each holds, and what the vault
 // still has of their personal fields; with the read model's rows as they are now.
 async function loadStore() {
-  const histories = await Promise.all(demo.scene.ids.map(async (id) => {
+  const histories = await Promise.all(demo.scene.ids.map(async ({ aggregate, id }) => {
     try {
-      const r = await fetch(`/api/history?tenant=default&domain=bank&type=${encodeURIComponent(demo.scene.aggregate)}&id=${encodeURIComponent(id)}`);
+      const r = await fetch(`/api/history?tenant=default&domain=bank&type=${encodeURIComponent(aggregate)}&id=${encodeURIComponent(id)}`);
       return r.ok ? { id, ...(await r.json()) } : { id };
     } catch (_) { return { id }; /* the kernel is resetting */ }
   }));
@@ -587,7 +616,7 @@ function drawSides() {
     state ? words(state) : "–",
     el("div", { class: "from" }, from ? `rebuilt from ${from} event${from > 1 ? "s" : ""}, before the command` : "no events yet: the initial state"))));
   // The keys, as the kernel stores them: a name and an identity, never the value.
-  const keyed = withKeys();
+  const keyed = v.keys.length > 0;
   $("keys-col").hidden = !keyed;
   if (keyed) $("keys").replaceChildren(...(v.keys.length ? v.keys.map((k) => el("div", { class: fade(`k:${k.id}:${k.holder}`) },
     el("b", {}, k.name), " ", el("code", { title: "The key's identity: a hash over tenant, type, name and the value's hash" }, `${k.id.slice(0, 12)}…`), " → ", el("b", {}, k.holder)))
@@ -609,7 +638,7 @@ function drawSides() {
         e.erases ? el("div", { class: "why" }, `erases everything of ${e.erases} in the vault`) : null);
     }));
   // The read side.
-  $("rm-name").textContent = demo.scene.readModel;
+  $("rm-name").textContent = v.model || "accounts";
   const behind = v.head - v.position;
   $("listener").replaceChildren("at ", el("b", {}, `#${v.position}`), ` of #${v.head} `,
     el("span", { class: behind ? "mark wait" : "mark ok" }, behind ? `· ${behind} behind` : "· caught up"));
@@ -626,7 +655,7 @@ function drawSides() {
   }
   v.rowsFresh = false;
   $("answer").replaceChildren(...(v.answers.length ? v.answers.flatMap((s) => [
-    el("div", {}, el("code", {}, `${demo.scene.query} ${s.id}`), " right after the submit:"),
+    el("div", {}, el("code", {}, `${READ_SIDE[s.aggregate || "account"][1]} ${s.id}`), " right after the submit:"),
     el("div", { class: s.answer.row !== undefined ? "said" : "said none" }, s.answer.row !== undefined ? words(s.answer.row) : s.answer.error),
   ]) : [el("div", { class: "empty" }, "None yet.")]));
 }
@@ -658,49 +687,36 @@ function both(wire, first, second, kind = "") {
   return Promise.all([move(wire, first, kind), sleep(HOP_MS * 0.3).then(() => move(wire, second, kind))]);
 }
 
-// The store and the read side as they are now.
-async function refresh(t) {
+// The store after step `t`: read now and kept for replays, or in a replay the one kept then.
+async function storeAfter(t) {
+  if (replaying) return storeOf(t.step);
   const store = await loadStore();
   stores[t.step] = store;
+  return store;
+}
+
+// The store as step `k` left it: kept from when it ran here, else rebuilt from today's store
+// and what the step's trace recorded (the head then, and every read model's rows).
+let today = null;
+async function storeOf(k) {
+  if (k < 0) return { events: [], keys: [], vault: {}, rows: {} };
+  if (stores[k]) return stores[k];
+  const t = demo.traces[k];
+  if (!today || today.generation !== generation) today = { generation, store: await loadStore() };
+  const head = t && t.head !== null && t.head !== undefined ? t.head : Infinity;
+  return { ...today.store, events: today.store.events.filter((e) => e.position <= head), rows: (t && t.rows) || today.store.rows };
+}
+
+// The store and the read side as they are now.
+async function refresh(t) {
+  const store = await storeAfter(t);
   side.events = store.events;
   side.keys = store.keys;
   side.vault = store.vault;
   side.head = side.position = lastPosition(store.events);
-  side.rows = store.rows;
+  side.rows = (store.rows || {})[side.model] || {};
   side.rowsFresh = true;
   drawSides();
-}
-
-// ---- slides: the question a scene answers, and what to remember ----
-let slide = null; // "question", "takeaway" or null
-
-function showSlide(kind) {
-  const scene = demo.scene, n = scene.index + 1, total = demo.scenes.length;
-  slide = kind;
-  const box = $("slide");
-  if (kind === "question") {
-    box.replaceChildren(el("div", { class: "card" },
-      el("div", { class: "kicker" }, `Scene ${n} of ${total} · ${scene.title}`),
-      el("h2", {}, scene.question),
-      el("p", {}, scene.intro),
-      el("div", { class: "hint" }, el("kbd", {}, "→"), " start  ·  ", el("kbd", {}, "Esc"), " look around first")));
-  } else {
-    const headline = [...demo.traces].reverse().map((t) => t.headline).find(Boolean);
-    const next = n < total ? [el("kbd", {}, "→"), ` next: ${demo.scenes[n]}  ·  `] : [];
-    box.replaceChildren(el("div", { class: "card takeaway" },
-      el("div", { class: "kicker" }, `Scene ${n} · what to remember`),
-      headline ? el("div", { class: "figure" }, headline) : null,
-      el("h2", {}, scene.takeaway),
-      el("div", { class: "hint" }, ...next, el("kbd", {}, "A"), " replay  ·  ", el("kbd", {}, "Esc"), " look at the state")));
-  }
-  box.hidden = false;
-  syncButtons();
-}
-
-function hideSlide() {
-  slide = null;
-  $("slide").hidden = true;
-  syncButtons();
 }
 
 // ---- visuals over the diagram: the crash's chart, the hash chain ----
@@ -808,53 +824,307 @@ async function drawChain(opts, events) {
   } else if (opts.done) blocks.forEach(mark);
 }
 
+// ---- chapter cards: the question a chapter answers, and what to remember ----
+let slide = null; // "question", "takeaway" or null
+let slideChapter = -1;
+
+const chapterOf = (i) => (demo.scene.steps[i] ? demo.scene.steps[i].chapter : demo.scene.chapters.length - 1);
+const lastOfChapter = (c) => (c + 1 < demo.scene.chapters.length ? demo.scene.chapters[c + 1].from : demo.scene.steps.length) - 1;
+
+function showSlide(kind, c) {
+  const chapters = demo.scene.chapters, chapter = chapters[c];
+  slide = kind;
+  slideChapter = c;
+  const box = $("slide");
+  if (kind === "question") {
+    box.replaceChildren(el("div", { class: "card" },
+      el("div", { class: "kicker" }, `Chapter ${c + 1} of ${chapters.length} · ${chapter.title}`),
+      el("h2", {}, chapter.question),
+      el("div", { class: "hint" }, el("kbd", {}, "→"), " start  ·  ", el("kbd", {}, "Esc"), " look around first")));
+  } else {
+    const steps = demo.traces.filter((t) => chapterOf(t.step) === c);
+    const headline = [...steps].reverse().map((t) => t.headline).find(Boolean);
+    const next = c + 1 < chapters.length ? [el("kbd", {}, "→"), ` next: ${chapters[c + 1].title}  ·  `] : [];
+    box.replaceChildren(el("div", { class: "card takeaway" },
+      el("div", { class: "kicker" }, `Chapter ${c + 1} · ${chapter.title} · what to remember`),
+      headline ? el("div", { class: "figure" }, headline) : null,
+      el("h2", {}, chapter.takeaway),
+      el("div", { class: "hint" }, ...next, el("kbd", {}, "←"), " back  ·  ", el("kbd", {}, "Esc"), " look at the state")));
+  }
+  box.hidden = false;
+  syncButtons();
+  if (playing) advanceSlide();
+}
+
+// In play mode, a card moves on by itself after a while; only the card still shown does.
+let slideToken = 0;
+function advanceSlide(after) {
+  const mine = ++slideToken, kind = slide;
+  setTimeout(() => { if (playing && slide === kind && slideToken === mine) forward(); }, after || (kind === "question" ? 3500 : 4500));
+}
+
+function hideSlide() {
+  slide = null;
+  $("slide").hidden = true;
+  syncButtons();
+}
+
+// ---- the presenter's control: every hop waits for →, unless playing ----
+let playing = false, finishing = false, quiet = false, aborting = false, replaying = false;
+let gateWaiting = null, gateRelease = null;
+const STOP = new Error("stopped");
+
+// Resolves when the presenter moves on; throws STOP once the step is abandoned.
+function gate() {
+  if (aborting) throw STOP;
+  if (playing || finishing || quiet || boost > 1) return Promise.resolve();
+  if (!gateWaiting) {
+    gateWaiting = new Promise((ok, no) => { gateRelease = { ok, no }; });
+    syncButtons();
+  }
+  return gateWaiting;
+}
+
+function releaseGate(stop) {
+  const release = gateRelease;
+  gateWaiting = null;
+  gateRelease = null;
+  if (release) stop ? release.no(STOP) : release.ok();
+  syncButtons();
+}
+
+// Abandons the running step, if any, and waits until it has stopped.
+async function abandon() {
+  if (!animating) return;
+  aborting = true;
+  releaseGate(true);
+  while (animating) await new Promise((r) => setTimeout(r, 20));
+  aborting = false;
+}
+
 // ---- one step, animated ----
-async function animate(t) {
+async function animate(t, replay) {
   animating = true;
+  replaying = replay;
+  finishing = false;
   syncButtons();
   const step = demo.scene.steps[t.step];
-  currentStep = step;
-  // Start from the state before this step, so a replay shows it again.
-  const before = t.step === 0 ? { events: [], keys: [], vault: {}, rows: {} } : (stores[t.step - 1] || await loadStore());
-  side = after(t.step, before);
-  side.answers = [];
-  side.states = [];
+  currentStep = { ...step, intents: { ...demo.scene.chapters[step.chapter].intents, ...step.intents } };
+  setSubs(aggregateOf(t.step));
+  drawHeader();
+  try {
+    // Start from the state before this step, so a replay shows it again.
+    const before = await storeOf(t.step - 1);
+    side = after(t.step, before);
+    side.model = modelOf(t.step);
+    side.rows = (before.rows || {})[side.model] || {};
+    side.answers = [];
+    side.states = [];
+    badges = {};
+    badge([]);
+    clearVisual();
+    drawSides();
+    $("lines").replaceChildren();
+    if (t.kind === "act") {
+      $("speed").textContent = "what happened, told step by step";
+      await play(t, step);
+    } else {
+      $("speed").textContent = `slowed down: the real way took ${ms(Math.max(...t.sends.map((s) => s.micros.returned)))}`;
+      if (step.together) await race(t, step);
+      else {
+        // Several commands one after the other: faster, without waiting at each hop.
+        boost = t.sends.length > 1 ? 2.5 : 1;
+        for (const s of t.sends) await single(s, t, step, t.sends.length > 1);
+        boost = 1;
+        if (t.sends.length > 1) caption(`${t.sends.length} commands, each through the same way.`);
+      }
+    }
+    await storeAfter(t);
+    side.commands = commandsAfter(t.step + 1);
+    drawSides();
+  } catch (e) {
+    boost = 1;
+    if (e !== STOP) throw e;
+  } finally {
+    light([]);
+    animating = false;
+    finishing = false;
+    replaying = false;
+    syncButtons();
+  }
+}
+
+// The state after step `k - 1`, drawn without animation: for a page opened mid-story, a jump,
+// or a reset.
+function settle(k) {
+  shown = k;
+  side = k ? after(k, stores[k - 1]) : fresh();
+  side.model = k ? modelOf(k - 1) : "accounts";
+  side.rows = k && stores[k - 1] ? (stores[k - 1].rows || {})[side.model] || {} : {};
+  currentStep = null;
   badges = {};
   badge([]);
   clearVisual();
-  drawSides();
-  $("lines").replaceChildren();
-  if (t.kind === "act") {
-    side.states = [];
-    drawSides();
-    $("speed").textContent = "what happened, told step by step";
-    await play(t, step);
-  } else {
-    $("speed").textContent = `slowed down: the real way took ${ms(Math.max(...t.sends.map((s) => s.micros.returned)))}`;
-    if (step.together) await race(t, step);
-    else {
-      // Several commands one after the other set the scene up: faster.
-      boost = t.sends.length > 1 ? 2.5 : 1;
-      for (const s of t.sends) await single(s, t, step, t.sends.length > 1);
-      boost = 1;
-      if (t.sends.length > 1) caption(`Set up: ${t.sends.length} commands, each through the same way. ${demo.scene.steps.length > t.step + 1 ? "Next step →" : "End of the scene."}`);
-    }
-    if (!stores[t.step]) stores[t.step] = await loadStore();
-  }
   light([]);
-  animating = false;
+  drawSides();
+  drawHeader();
   syncButtons();
-  if (t.step === demo.scene.steps.length - 1) {
-    // Only for this scene, and only if nothing else started in the meantime.
-    const scene = generation;
-    await sleep(1600);
-    if (generation === scene && !animating && slide === null && shown === demo.scene.steps.length) showSlide("takeaway");
+}
+
+// Runs the next step on the kernel and waits for its trace.
+async function runNext() {
+  const before = demo.traces.length;
+  await post("/api/demo/next");
+  while (demo.traces.length <= before || demo.busy) {
+    await new Promise((r) => setTimeout(r, 120));
+    await refreshDemo();
   }
+  return demo.traces[before];
+}
+
+// Shows step `k`: a replay if it ran already; else it runs, after fast-forwarding through the
+// steps before it.
+async function goTo(k, { card = true } = {}) {
+  await abandon();
+  hideSlide();
+  k = Math.max(0, Math.min(k, demo.scene.steps.length - 1));
+  if (k > demo.traces.length) {
+    quiet = true;
+    while (demo.traces.length < k) {
+      const i = demo.traces.length;
+      caption(`Fast-forward: chapter ${chapterOf(i) + 1}, ${esc(demo.scene.steps[i].title)}…`);
+      const t = await runNext();
+      shown = t.step + 1;
+      drawHeader();
+      stores[t.step] = await loadStore();
+    }
+    quiet = false;
+    settle(k);
+  }
+  const c = chapterOf(k);
+  if (card && demo.scene.chapters[c].from === k && slideChapter !== c) {
+    settle(k);
+    showSlide("question", c);
+    return;
+  }
+  shown = k + 1;
+  drawHeader();
+  // A step that ran already is replayed from its trace; the next one runs now.
+  const ran = k < demo.traces.length;
+  const t = ran ? demo.traces[k] : await runNext();
+  await animate(t, ran);
+  afterStep(k);
+}
+
+// What follows a step: its chapter's takeaway if it was the chapter's last, and in play mode,
+// the next step.
+function afterStep(k) {
+  const c = chapterOf(k);
+  if (k === lastOfChapter(c) && shown === k + 1) {
+    setTimeout(() => {
+      if (!animating && shown === k + 1 && slide === null) showSlide("takeaway", c);
+    }, 1200);
+  } else if (playing) {
+    setTimeout(() => { if (playing && !animating && shown === k + 1) forward(); }, 1500);
+  }
+}
+
+// → : the next hop of the running step, or past a card, or the next step.
+function forward() {
+  if (gateWaiting) return releaseGate(false);
+  if (animating) return;
+  if (slide === "question") {
+    hideSlide();
+    return goTo(demo.scene.chapters[slideChapter].from, { card: false });
+  }
+  if (slide === "takeaway") {
+    hideSlide();
+    if (shown < demo.scene.steps.length) return goTo(shown);
+    return;
+  }
+  if (shown < demo.scene.steps.length) return goTo(shown);
+}
+
+// ⇧→ : the running step to its end without stopping.
+function finish() {
+  if (!animating) return forward();
+  finishing = true;
+  releaseGate(false);
+}
+
+// ← : back one step, shown again from what was recorded.
+async function backward() {
+  const current = shown - 1;
+  if (slide === "takeaway") {
+    hideSlide();
+    return goTo(current, { card: false });
+  }
+  if (slide === "question") {
+    const from = demo.scene.chapters[slideChapter].from;
+    hideSlide();
+    if (from > 0) return goTo(from - 1, { card: false });
+  }
+  if (current <= 0) {
+    await abandon();
+    settle(0);
+    showSlide("question", 0);
+    return;
+  }
+  return goTo(current - 1, { card: false });
+}
+
+function togglePlay() {
+  playing = !playing;
+  if (playing) {
+    if (gateWaiting) releaseGate(false);
+    else if (!animating && slide === null) forward();
+    else if (slide) advanceSlide(1500);
+  }
+  syncButtons();
+}
+
+// ---- the header: chapters and steps on one timeline ----
+function drawHeader() {
+  const steps = demo.scene.steps, chapters = demo.scene.chapters, current = shown - 1;
+  $("timeline").replaceChildren(...chapters.map((c, ci) => {
+    const last = lastOfChapter(ci);
+    const dots = [];
+    for (let i = c.from; i <= last; i++) {
+      const cls = i === current ? "now" : i < demo.traces.length ? "done" : "";
+      dots.push(el("button", { class: `dot ${cls}`, title: `${ci + 1}.${i - c.from + 1} ${steps[i].title}`, onclick: () => goTo(i, { card: false }) }));
+    }
+    const on = current >= c.from && current <= last;
+    return el("div", { class: `chapter${on ? " on" : ""}` },
+      el("button", { class: "name", title: c.question, onclick: () => goTo(c.from) }, `${ci + 1} ${c.title}`),
+      el("div", { class: "dots" }, dots));
+  }));
+  if (current < 0) {
+    $("kicker").textContent = demo.scene.title;
+    $("title").textContent = demo.scene.chapters[0].title;
+    $("says").textContent = demo.scene.intro;
+    return;
+  }
+  const step = steps[current], c = chapters[step.chapter];
+  $("kicker").textContent = `Chapter ${step.chapter + 1} of ${chapters.length} · ${c.title} · step ${current - c.from + 1} of ${lastOfChapter(step.chapter) - c.from + 1}`;
+  $("title").textContent = step.title;
+  $("says").textContent = step.says;
+}
+
+function syncButtons() {
+  if (!demo) return;
+  const atEnd = shown >= demo.scene.steps.length && !animating && slide === null;
+  $("next").disabled = !demo.ready || (!!demo.busy && !quiet) || atEnd || (animating && !gateWaiting);
+  $("next").firstChild.textContent = gateWaiting ? "Next hop" : slide === "question" ? "Start" : slide === "takeaway" ? "Next chapter" : "Next step";
+  $("back").disabled = !demo.ready || quiet || (shown <= 0 && slide === null);
+  $("play").firstChild.textContent = playing ? "Pause" : "Play";
+  $("play").classList.toggle("on", playing);
+  $("reset").disabled = demo.busy === "reset";
 }
 
 // A step an action did: its beats, one after the other.
 async function play(t, step) {
   for (const b of t.beats) {
+    await gate();
     light(b.light);
     caption(esc(b.caption).replace(/\*([^*]+)\*/g, "<b>$1</b>"));
     $("lines").replaceChildren(...(b.lines.length ? [el("pre", {}, b.lines.join("\n"))] : []));
@@ -873,8 +1143,6 @@ async function play(t, step) {
   }
   side.commands = commandsAfter(t.step + 1);
   drawSides();
-  const next = demo.scene.steps.length > t.step + 1 ? " Next step →" : " End of the scene.";
-  $("caption").insertAdjacentText("beforeend", next);
 }
 
 // One command: through the middleware if one checks it, the worker, then stored and delivered,
@@ -930,7 +1198,7 @@ async function single(s, t, step, quick) {
     if (!quick) await query([s]);
     return;
   }
-  const keys = withKeys();
+  const keys = s.aggregate === "customer";
   caption(`The worker rebuilds <b>${esc(s.id)}</b> ${rebuilt(s, t.step)} and runs the handler. It returns ${keys ? "an event, and the keys the new state holds" : "an event"}; it never writes to the store itself.`);
   await sleep(quick ? 600 : 1600);
   await move("worker-kernel", s.events.length ? (keys ? `${s.events[0].type} + keys` : s.events[0].type) : "event", "event");
@@ -957,9 +1225,20 @@ async function single(s, t, step, quick) {
 async function query(sends) {
   light(["client", "model"]);
   caption(`The client asks the read side, through the kernel.`);
-  const label = (s) => `${demo.scene.query} ${s.id}`;
+  const queryOf = (s) => READ_SIDE[s.aggregate || "account"][1];
+  const label = (s) => `${queryOf(s)} ${s.id}`;
   const [a, b] = sends;
-  if (b) {
+  if (!b && demo.scene.checks.includes(queryOf(a))) {
+    await move("client-kernel", label(a));
+    light(["kernel", "middleware"]);
+    caption(`Before it routes the query, the kernel asks the middleware: may <b>${esc(a.who)}</b> see <b>${esc(a.id)}</b>?`);
+    await move("kernel-middleware", "check");
+    await move("middleware-kernel", "pass", "ok");
+    light(["kernel", "model"]);
+    await move("kernel-model", "query");
+    await move("model-kernel", "answer", "ok");
+    await move("kernel-client", "answer", "ok");
+  } else if (b) {
     await both("client-kernel", label(a), label(b));
     await both("kernel-model", "query", "query");
     await both("model-kernel", "answer", "answer", "ok");
@@ -972,8 +1251,7 @@ async function query(sends) {
   }
   side.answers = sends;
   drawSides();
-  const t = demo.traces[shown - 1];
-  const next = demo.scene.steps.length > t.step + 1 ? "Next step →" : "End of the scene.";
+  const next = "";
   const winner = sends.find((s) => s.outcome === "committed");
   const losers = sends.filter((s) => s.outcome !== "committed");
   caption(!losers.length
@@ -985,13 +1263,12 @@ async function query(sends) {
 
 // A command the kernel commits: stored, delivered to the read side (and to a reactor), answered.
 async function commit(s, t, step) {
-  const keys = withKeys(), ev = s.events[0];
-  const fact = demo.scene.facts;
+  const keys = s.aggregate === "customer", ev = s.events[0];
+  const fact = s.aggregate === "account" && demo.scene.facts;
   const extra = keys ? ` In the same commit it stores the keys <b>${esc(s.id)}</b> holds now.` : fact ? ` In the same commit it stores the facts <b>${esc(s.id)}</b> holds now.` : "";
   caption(`The kernel checks the worker's signature${keys ? " and the keys" : ""}, then appends <b>${esc(ev.type)}</b> at position <b>#${esc(ev.position)}</b>, signed and chained to the event before.${extra} The write side is done.`);
   await move("kernel-store", `#${ev.position}`, "event");
-  const store = await loadStore();
-  stores[t.step] = store;
+  const store = await storeAfter(t);
   side.events = store.events.filter((e) => e.position <= ev.position);
   side.keys = store.keys;
   side.vault = store.vault;
@@ -1003,11 +1280,11 @@ async function commit(s, t, step) {
   pulse();
   await move("store-model", ev.type, "event");
   side.position = ev.position;
-  side.rows = store.rows;
+  side.rows = (store.rows || {})[side.model] || {};
   side.rowsFresh = true;
   drawSides();
   await move("model-kernel", "done", "ok");
-  if (demo.scene.nodes.includes("reactor") && ev.type === "Paid") await react(ev, step);
+  if (demo.scene.nodes.includes("reactor") && ev.type === "Paid") await react(ev, t);
   light(["client"]);
   caption(`Only now does the submit return: the read side has the event. Took ${ms(s.micros.returned)} in all.`);
   await move("kernel-client", "committed", "ok");
@@ -1016,11 +1293,11 @@ async function commit(s, t, step) {
 
 // The payments reactor's part after a payment: it credits the receiver, or the kernel parks the
 // event for it.
-async function react(ev, step) {
+async function react(ev, t) {
   light(["reactor"]);
   caption(`The payments reactor gets <b>Paid</b> too, and reacts with a command of its own.`);
   await move("store-reactor", "Paid", "event");
-  const store = await loadStore();
+  const store = await storeAfter(t);
   const credit = store.events.find((e) => e.commandId === `credit-${ev.position}`);
   if (credit) {
     await move("reactor-kernel", `Credit ${credit.id}`);
@@ -1032,7 +1309,7 @@ async function react(ev, step) {
     await move("kernel-store", `#${credit.position}`, "event");
     side.events = store.events;
     side.head = side.position = lastPosition(store.events);
-    side.rows = store.rows;
+    side.rows = (store.rows || {})[side.model] || {};
     side.rowsFresh = true;
     drawSides();
     await move("store-model", "Credited", "event");
@@ -1082,111 +1359,75 @@ async function race(t, step) {
 }
 
 // ---- sync with the demo ----
-function syncButtons() {
-  const done = demo ? demo.traces.length : 0, total = demo ? demo.scene.steps.length : 0;
-  const nextScene = slide === "takeaway" && demo && demo.scene.index + 1 < demo.scenes.length;
-  $("next").disabled = !demo || !demo.ready || !!demo.busy || animating || (done >= total && !nextScene && slide !== "question");
-  $("next").firstChild.textContent = nextScene ? "Next scene" : slide === "question" ? "Start" : "Next step";
-  $("replay").disabled = !demo || animating || !done;
-  $("reset").disabled = !demo || demo.busy === "reset";
-  for (const b of document.querySelectorAll(".scenes button")) b.disabled = !demo || !!demo.busy || animating;
-}
-
-function drawHeader() {
-  const steps = demo.scene.steps;
-  $("scenes").replaceChildren("Scene",
-    ...demo.scenes.map((title, i) => el("button", { class: i === demo.scene.index ? "on" : "", title: `${i + 1}. ${title} (key ${i + 1})`, onclick: () => post(`/api/demo/scene?n=${i + 1}`) }, `${i + 1}`)),
-  );
-  $("dots").replaceChildren(...steps.map((s, i) => el("i", { class: i < shown ? "done" : i === shown ? "now" : "", title: `${i + 1}. ${s.title}` })));
-  if (shown === 0) {
-    $("title").textContent = demo.scene.title;
-    $("says").textContent = `${demo.scene.intro} First: ${steps[0].title}.`;
-    return;
+async function refreshDemo() {
+  try {
+    demo = await (await fetch("/api/demo")).json();
+  } catch (_) {
+    $("error").textContent = "The demo does not answer: is kernable demo still running?";
+    return false;
   }
-  const step = steps[shown - 1];
-  $("title").textContent = `${shown}. ${step.title}`;
-  $("says").textContent = step.says;
+  $("error").textContent = demo.error || "";
+  return true;
 }
 
 async function poll() {
-  try {
-    const r = await fetch("/api/demo");
-    demo = await r.json();
-  } catch (_) {
-    $("error").textContent = "The demo does not answer: is kernable demo still running?";
-    return;
-  }
-  $("error").textContent = demo.error || "";
+  if (!(await refreshDemo())) return;
   if (demo.generation !== generation) {
     const firstLoad = generation === null;
     generation = demo.generation;
-    shown = firstLoad ? demo.traces.length : 0;
     stores = [];
     rendered = new Set();
+    slideChapter = -1;
     drawFlow();
-    side = fresh();
-    drawSides();
-    $("caption").textContent = demo.ready ? "A new kernel on an empty store. Press Next step." : "Starting a new kernel on an empty store…";
-    $("speed").textContent = "";
-    clearVisual();
-    if (!firstLoad || !demo.traces.length) showSlide("question");
-    else hideSlide();
-    if (shown) {
-      const t = demo.traces[shown - 1];
+    if (firstLoad && demo.traces.length) {
+      // Opened mid-story: the state as it is, no animation.
       const store = await loadStore();
-      side = after(shown, store);
-      drawSides();
-      $("caption").textContent = "Press Replay to see the last step again.";
+      stores[demo.traces.length - 1] = store;
+      settle(demo.traces.length);
+      $("caption").textContent = "← goes back a step, → goes on.";
+    } else {
+      settle(0);
+      $("caption").textContent = demo.ready ? "A new kernel on an empty store." : "Starting a new kernel on an empty store…";
+      if (demo.ready) showSlide("question", 0);
     }
   }
-  if (!animating && demo.traces.length > shown) {
-    shown = demo.traces.length;
-    drawHeader();
-    await animate(demo.traces[shown - 1]);
-  }
-  drawHeader();
+  if (generation !== null && demo.ready && shown === 0 && !slide && !animating && !demo.traces.length && slideChapter === -1) showSlide("question", 0);
   syncButtons();
 }
 
 async function post(path) {
   const r = await fetch(path, { method: "POST", headers: { "x-kernable-demo": "1" } });
   if (!r.ok) $("error").textContent = (await r.json().catch(() => ({}))).error || r.statusText;
-  await poll();
+  await refreshDemo();
 }
 
 $("speed-slider").addEventListener("input", (e) => setSpeed(Number(e.target.value)));
 try { const saved = localStorage.getItem("kernable-demo-speed"); if (saved !== null) setSpeed(Number(saved)); } catch (_) { /* private window */ }
-$("next").addEventListener("click", () => {
-  if (slide === "takeaway") {
-    hideSlide();
-    if (demo.scene.index + 1 < demo.scenes.length) post(`/api/demo/scene?n=${demo.scene.index + 2}`);
-    return;
-  }
-  if (slide === "question") hideSlide();
-  post("/api/demo/next");
-});
-$("reset").addEventListener("click", () => post("/api/demo/reset"));
-$("replay").addEventListener("click", () => { if (!animating && shown) animate(demo.traces[shown - 1]); });
+$("next").addEventListener("click", () => forward());
+$("back").addEventListener("click", () => backward());
+$("play").addEventListener("click", () => togglePlay());
+$("reset").addEventListener("click", async () => { await abandon(); playing = false; hideSlide(); generation = -1; await post("/api/demo/reset"); });
 $("full").addEventListener("click", () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen().catch(() => {}));
 document.addEventListener("keydown", (e) => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   const key = e.key.toLowerCase();
-  // Arrow keys on the focused slider move the slider, not the scene.
+  // Arrow keys on the focused slider move the slider, not the story.
   if (e.target instanceof HTMLInputElement && key.startsWith("arrow")) return;
-  if ((key === "arrowright" || key === " " || key === "enter") && !$("next").disabled) { e.preventDefault(); $("next").click(); }
+  if (key === "arrowright" && e.shiftKey) { e.preventDefault(); finish(); }
+  else if (key === "arrowright" || key === "enter") { e.preventDefault(); if (!$("next").disabled) forward(); }
+  else if (key === "arrowleft") { e.preventDefault(); if (!$("back").disabled) backward(); }
+  else if (key === " ") { e.preventDefault(); togglePlay(); }
   else if (key === "r" && !$("reset").disabled) $("reset").click();
-  else if (key === "a" && !$("replay").disabled) { hideSlide(); $("replay").click(); }
   else if (key === "f") $("full").click();
   else if (key === "escape" && slide) hideSlide();
-  else if (key === "t" && demo && demo.traces.length === demo.scene.steps.length && !animating) showSlide("takeaway");
+  else if (key === "t" && shown > 0 && !animating) showSlide("takeaway", chapterOf(shown - 1));
   else if (key === "-" || key === "_") setSpeed(SPEEDS.indexOf(speed) - 1);
   else if (key === "+" || key === "=") setSpeed(SPEEDS.indexOf(speed) + 1);
-  else if (/^[1-9]$/.test(key) && demo && Number(key) <= demo.scenes.length && !demo.busy && !animating) post(`/api/demo/scene?n=${key}`);
 });
 
 (async () => {
   await poll();
-  setInterval(() => { if (!animating) poll(); }, 400);
+  setInterval(() => { if (!animating && !quiet) poll(); }, 600);
 })();
 </script>
 </body>

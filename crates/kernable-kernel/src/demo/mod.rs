@@ -7,8 +7,8 @@
 //! Reset, and a change of scene, stop both and start them again on a new store; nothing of the
 //! demo outlives the process, and it never touches an existing store.
 //!
-//! The Stage asks with `POST /api/demo/next`, `POST /api/demo/reset` and
-//! `POST /api/demo/scene?n=<n>`, each with an `x-kernable-demo` header (a page elsewhere cannot
+//! The Stage asks with `POST /api/demo/next` and `POST /api/demo/reset`, each with an
+//! `x-kernable-demo` header (a page elsewhere cannot
 //! send one without asking first), and reads `GET /api/demo`.
 
 mod act;
@@ -261,15 +261,6 @@ impl Demo {
             ),
             ("POST", "/api/demo/next") => self.next(),
             ("POST", "/api/demo/reset") => self.reset(None),
-            ("POST", "/api/demo/scene") => {
-                let n = target
-                    .split_once("?n=")
-                    .and_then(|(_, n)| n.parse::<usize>().ok());
-                match n {
-                    Some(n) if n >= 1 => self.reset(Some(n - 1)),
-                    _ => conflict("name a scene: /api/demo/scene?n=1"),
-                }
-            }
             ("GET", _) => {
                 let ui = lock(&self.state).run.as_ref().map(|r| r.ui.clone());
                 match ui {
@@ -285,27 +276,46 @@ impl Demo {
         let state = lock(&self.state);
         let scene = &SCENES[state.scene];
         let rows = match &state.run {
-            Some(r) => r.rows.view(scene.read_model),
+            Some(r) => json!({
+                "accounts": r.rows.view("accounts"),
+                "customers": r.rows.view("customers"),
+                "people": r.rows.view("people"),
+            }),
             None => json!({}),
         };
         let steps: Vec<Value> = scene
             .steps
             .iter()
-            .map(|s| {
+            .enumerate()
+            .map(|(i, s)| {
                 let (sends, together, act) = match &s.does {
                     Does::Send { sends, together } => (
                         sends
                             .iter()
-                            .map(|c| json!({ "id": c.id, "command": c.command, "who": c.who, "data": data(c) }))
+                            .map(|c| {
+                                json!({
+                                    "aggregate": c.aggregate,
+                                    "id": c.id,
+                                    "command": c.command,
+                                    "who": c.who,
+                                    "data": data(c),
+                                })
+                            })
                             .collect(),
                         *together,
                         false,
                     ),
                     Does::Act(_) => (Vec::new(), false, true),
                 };
+                let chapter = scene
+                    .chapters
+                    .iter()
+                    .rposition(|c| c.from <= i)
+                    .unwrap_or(0);
                 json!({
                     "title": s.title,
                     "says": s.says,
+                    "chapter": chapter,
                     "sends": sends,
                     "together": together,
                     "act": act,
@@ -313,29 +323,40 @@ impl Demo {
                 })
             })
             .collect();
+        let chapters: Vec<Value> = scene
+            .chapters
+            .iter()
+            .map(|c| {
+                json!({
+                    "title": c.title,
+                    "question": c.question,
+                    "takeaway": c.takeaway,
+                    "from": c.from,
+                    "intents": intents(c.intents),
+                })
+            })
+            .collect();
+        let ids: Vec<Value> = scene
+            .ids
+            .iter()
+            .map(|(aggregate, id)| json!({ "aggregate": aggregate, "id": id }))
+            .collect();
         json!({
             "generation": state.generation,
             "ready": state.run.is_some(),
             "busy": state.busy,
             "error": state.error,
-            "scenes": SCENES.iter().map(|s| s.title).collect::<Vec<_>>(),
             "scene": {
-                "index": state.scene,
                 "title": scene.title,
                 "intro": scene.intro,
-                "question": scene.question,
-                "takeaway": scene.takeaway,
-                "aggregate": scene.aggregate,
-                "ids": scene.ids,
-                "query": scene.query,
-                "readModel": scene.read_model,
+                "ids": ids,
                 "nodes": scene.nodes,
                 "intents": intents(scene.intents),
-                // Whether its aggregates hold unique keys or facts the kernel checks.
+                // The command and query types a middleware checks before the kernel acts.
+                "checks": if scene.parts.rbac { vec!["Withdraw", "GetAccount"] } else { Vec::new() },
                 "keys": scene.parts.customers,
                 "facts": scene.parts.payments,
-                // The command types a middleware checks before the kernel queues them.
-                "checks": if scene.parts.rbac { vec!["Withdraw"] } else { Vec::new() },
+                "chapters": chapters,
                 "steps": steps,
             },
             "traces": state.traces,
@@ -362,7 +383,16 @@ impl Demo {
         };
         let demo = Arc::clone(self);
         tokio::spawn(async move {
-            let trace = step(&run, scene, generation, index).await;
+            let mut trace = step(&run, scene, generation, index).await;
+            // What the step left, so the Stage can show it again later: the store's head and
+            // every read model's rows.
+            let head = ui_json(&run, "/api/state").await.ok();
+            trace["head"] = head.map_or(Value::Null, |s| s["kernel"]["head"].clone());
+            trace["rows"] = json!({
+                "accounts": run.rows.view("accounts"),
+                "customers": run.rows.view("customers"),
+                "people": run.rows.view("people"),
+            });
             let mut state = lock(&demo.state);
             if state.generation == generation {
                 state.traces.push(trace);
@@ -513,7 +543,7 @@ async fn step(run: &Arc<Run>, scene: &'static Scene, generation: u64, index: usi
     match &s.does {
         Does::Act(act) => {
             let prefix = format!("demo-{generation}-{}", index + 1);
-            match act::run(run, scene, *act, &prefix).await {
+            match act::run(run, *act, &prefix).await {
                 Ok(mut trace) => {
                     trace["step"] = json!(index);
                     trace["kind"] = json!("act");
@@ -534,9 +564,7 @@ async fn step(run: &Arc<Run>, scene: &'static Scene, generation: u64, index: usi
                 for (n, c) in sends.iter().enumerate() {
                     let run = Arc::clone(run);
                     let command_id = format!("demo-{generation}-{}-{}", index + 1, n + 1);
-                    tasks.push(tokio::spawn(async move {
-                        sent(&run, scene, c, command_id).await
-                    }));
+                    tasks.push(tokio::spawn(async move { sent(&run, c, command_id).await }));
                 }
                 for task in tasks {
                     results.push(task.await.unwrap_or_else(
@@ -546,7 +574,7 @@ async fn step(run: &Arc<Run>, scene: &'static Scene, generation: u64, index: usi
             } else {
                 for (n, c) in sends.iter().enumerate() {
                     let command_id = format!("demo-{generation}-{}-{}", index + 1, n + 1);
-                    results.push(sent(run, scene, c, command_id).await);
+                    results.push(sent(run, c, command_id).await);
                 }
             }
             json!({ "step": index, "kind": "sends", "sends": results })
@@ -556,15 +584,16 @@ async fn step(run: &Arc<Run>, scene: &'static Scene, generation: u64, index: usi
 
 /// Sends one command and says what happened, with the time each point took from the submit,
 /// in microseconds.
-async fn sent(run: &Run, scene: &Scene, c: &Send, command_id: String) -> Value {
+async fn sent(run: &Run, c: &Send, command_id: String) -> Value {
     let data = data(c);
     let sent_at = Instant::now();
+    let (_, query) = scenes::read_side(c.aggregate);
     let sent = bank::send(
         &run.client,
         &command_id,
-        (scene.aggregate, c.id, c.command),
+        (c.aggregate, c.id, c.command),
         data.clone(),
-        (scene.query, c.who),
+        (query, c.who),
     )
     .await;
     let seen = run.stage.take(&command_id);
@@ -599,6 +628,7 @@ async fn sent(run: &Run, scene: &Scene, c: &Send, command_id: String) -> Value {
     json!({
         "commandId": command_id,
         "command": c.command,
+        "aggregate": c.aggregate,
         "id": c.id,
         "who": c.who,
         "data": data,
@@ -695,6 +725,7 @@ mod tests {
             let all = scene
                 .intents
                 .iter()
+                .chain(scene.chapters.iter().flat_map(|c| c.intents))
                 .chain(scene.steps.iter().flat_map(|s| s.intents));
             for (node, text) in all {
                 assert!(shown(node), "{}: {node}", scene.title);
@@ -719,12 +750,16 @@ mod tests {
     }
 
     #[test]
-    fn every_scene_names_the_aggregates_its_steps_send_to() {
+    fn the_chapters_cover_the_steps_in_order() {
         for scene in SCENES {
+            let froms: Vec<usize> = scene.chapters.iter().map(|c| c.from).collect();
+            assert_eq!(froms[0], 0);
+            assert!(froms.windows(2).all(|w| w[0] < w[1]), "{froms:?}");
+            assert!(froms.iter().all(|&f| f < scene.steps.len()));
             for step in scene.steps {
                 if let Does::Send { sends, .. } = &step.does {
                     for c in *sends {
-                        assert!(scene.ids.contains(&c.id), "{}: {}", scene.title, c.id);
+                        assert!(scene.ids.contains(&(c.aggregate, c.id)), "{}", c.id);
                     }
                 }
             }

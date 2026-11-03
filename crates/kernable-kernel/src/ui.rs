@@ -5,7 +5,10 @@
 //!   connected workers, the listeners, and which aggregate writes which event type;
 //! - `GET /api/streams`: the aggregates with events, the most recently changed first;
 //! - `GET /api/history?tenant=&domain=&type=&id=`: one aggregate's events with their commands,
-//!   and the unique keys (by name and identity, never the value) and facts it holds.
+//!   and the unique keys (by name and identity, never the value) and facts it holds;
+//! - `GET /api/events?…`: events of the whole log that match a filter, newest first, or the
+//!   ones after a position (the live tail); see [`events`];
+//! - `GET /api/rejections?limit=`: the most recently received rejected commands, with why.
 //!
 //! It never decrypts the vault: a vault field shows its subject, whether it is secret, or that
 //! it was erased. Snapshot states are not shown either, as they may hold personal values.
@@ -22,6 +25,21 @@ const PAGE: &str = include_str!("ui.html");
 
 /// How many aggregates `/api/streams` lists.
 const STREAMS: usize = 500;
+
+/// How many events `/api/events` returns at most, and by default.
+const EVENTS_MAX: usize = 500;
+const EVENTS_DEFAULT: usize = 100;
+
+/// How many events one `/api/events` request reads at most, matching or not: a search over a
+/// large log goes on page by page, so no request holds the store for long.
+const SCAN: u64 = 20_000;
+
+/// How many events `/api/events` reads from the store at once.
+const CHUNK: u64 = 1_000;
+
+/// How many rejected commands `/api/rejections` returns at most, and by default.
+const REJECTIONS_MAX: usize = 1_000;
+const REJECTIONS_DEFAULT: usize = 200;
 
 /// Serves the UI until the listener fails.
 pub(crate) async fn serve(kernel: Arc<Kernel>, addr: &str) -> Result<(), BoxError> {
@@ -42,6 +60,8 @@ pub(crate) fn respond(kernel: &Kernel, request: &[u8]) -> Vec<u8> {
         "/api/state" => state(kernel),
         "/api/streams" => streams(kernel),
         "/api/history" => history(kernel, &params),
+        "/api/events" => events(kernel, &params),
+        "/api/rejections" => rejections(kernel, &params),
         _ => return reply("404 Not Found", "text/plain", b"not found\n"),
     };
     match result {
@@ -235,9 +255,175 @@ fn history(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, B
     }))
 }
 
+/// What `/api/events` matches on; empty fields match everything, set ones must all match.
+struct Filter {
+    tenant: String,
+    /// Part of `domain.EventType`, any case.
+    event_type: String,
+    /// The aggregate id, exactly.
+    id: String,
+    /// The command id or the correlation id, exactly.
+    command: String,
+    /// Part of the payload as stored (vault fields are references, never values).
+    text: String,
+}
+
+impl Filter {
+    fn new(params: &HashMap<String, String>) -> Self {
+        let param = |name: &str| {
+            params
+                .get(name)
+                .map(|v| v.trim().to_owned())
+                .unwrap_or_default()
+        };
+        Self {
+            tenant: param("tenant"),
+            event_type: param("type").to_lowercase(),
+            id: param("id"),
+            command: param("command"),
+            text: param("text"),
+        }
+    }
+
+    fn matches(&self, e: &Event) -> bool {
+        let correlation = e.context.as_ref().map(|c| c.correlation_id.as_str());
+        (self.tenant.is_empty() || e.tenant_id == self.tenant)
+            && (self.event_type.is_empty()
+                || format!("{}.{}", e.domain, e.event_type)
+                    .to_lowercase()
+                    .contains(&self.event_type))
+            && (self.id.is_empty() || e.aggregate_id == self.id)
+            && (self.command.is_empty()
+                || e.command_id == self.command
+                || correlation == Some(self.command.as_str()))
+            && (self.text.is_empty() || String::from_utf8_lossy(&e.payload).contains(&self.text))
+    }
+}
+
+/// Events of the whole log that match a [`Filter`], reading at most [`SCAN`] events.
+///
+/// - Search (no `after`): newest first, from before `before` (default: the head). `next` is
+///   the `before` that continues with older events, null once the log's start was read.
+/// - Tail (`after`): the events after that position, oldest first. `last` is the `after` of
+///   the next call: the last position read, so a tail never reads an event twice.
+fn events(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, BoxError> {
+    let number = |name: &str| -> Result<Option<u64>, BoxError> {
+        match params.get(name).filter(|v| !v.is_empty()) {
+            Some(v) => Ok(Some(
+                v.parse().map_err(|_| format!("{name}: not a number"))?,
+            )),
+            None => Ok(None),
+        }
+    };
+    let filter = Filter::new(params);
+    let limit = number("limit")?
+        .map_or(EVENTS_DEFAULT, |n| n as usize)
+        .clamp(1, EVENTS_MAX);
+    let head = kernel.store.head_position()?;
+    let mut found: Vec<Value> = Vec::new();
+
+    if let Some(after) = number("after")? {
+        let mut last = after;
+        let end = after.saturating_add(SCAN).min(head);
+        'scan: while last < end {
+            let batch = kernel
+                .store
+                .read_all(last, (end - last).min(CHUNK) as u32)?;
+            if batch.is_empty() {
+                break;
+            }
+            for e in &batch {
+                last = e.global_position;
+                if filter.matches(e) {
+                    found.push(event(e));
+                    if found.len() == limit {
+                        break 'scan;
+                    }
+                }
+            }
+        }
+        return Ok(json!({ "head": head, "events": found, "last": last }));
+    }
+
+    // (lo, hi] holds at most hi - lo events, so `read_all(lo, hi - lo)` returns all of them.
+    let mut hi = number("before")?
+        .map_or(head, |b| b.saturating_sub(1))
+        .min(head);
+    let floor = hi.saturating_sub(SCAN);
+    let mut next = None;
+    'scan: while hi > floor {
+        let lo = hi.saturating_sub(CHUNK).max(floor);
+        let batch = kernel.store.read_all(lo, (hi - lo) as u32)?;
+        for e in batch.iter().rev().filter(|e| e.global_position <= hi) {
+            if filter.matches(e) {
+                found.push(event(e));
+                if found.len() == limit {
+                    next = Some(e.global_position);
+                    break 'scan;
+                }
+            }
+        }
+        hi = lo;
+    }
+    if next.is_none() && hi > 0 {
+        next = Some(hi + 1);
+    }
+    Ok(json!({ "head": head, "events": found, "next": next }))
+}
+
+/// The newest rejected commands: what was sent, by whom, and why it was refused. The rejection
+/// itself carries no time; `receivedAt` is when the kernel accepted the command.
+fn rejections(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, BoxError> {
+    let limit = match params.get("limit").filter(|v| !v.is_empty()) {
+        Some(v) => v.parse().map_err(|_| "limit: not a number")?,
+        None => REJECTIONS_DEFAULT,
+    }
+    .clamp(1, REJECTIONS_MAX);
+    let rejected: Vec<Value> = kernel
+        .store
+        .rejections(limit)?
+        .into_iter()
+        .map(|(p, r)| {
+            let c = p.command;
+            // The requirement as the worker named it; its value hash is never shown.
+            let requirement = r.requirement.map(|q| {
+                json!({
+                    "domain": q.domain,
+                    "aggregateType": q.aggregate_type,
+                    "aggregateId": q.aggregate_id,
+                    "fact": q.fact,
+                    "key": q.key,
+                    "absent": q.absent,
+                })
+            });
+            json!({
+                "commandId": c.command_id,
+                "tenant": c.tenant_id,
+                "domain": c.domain,
+                "aggregateType": c.aggregate_type,
+                "aggregateId": c.aggregate_id,
+                "type": c.command_type,
+                "payload": String::from_utf8_lossy(&c.payload),
+                "context": context(c.context.as_ref()),
+                "key": c.client_sig.map(|s| s.key_id).unwrap_or_default(),
+                "receivedAt": p.received_at,
+                "code": r.code,
+                "message": r.message,
+                "uniqueKey": r.key,
+                "requirement": requirement,
+            })
+        })
+        .collect();
+    Ok(json!({ "rejections": rejected, "limit": limit }))
+}
+
 fn event(e: &Event) -> Value {
     json!({
         "position": e.global_position,
+        "tenant": e.tenant_id,
+        "domain": e.domain,
+        "aggregateType": e.aggregate_type,
+        "aggregateId": e.aggregate_id,
         "version": e.version,
         "type": e.event_type,
         "schema": e.schema,

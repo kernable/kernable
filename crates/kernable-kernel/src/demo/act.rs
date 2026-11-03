@@ -12,10 +12,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use kernable::{Kernable, Options, Outcome, Submit};
+use kernable::{Kernable, Options, Outcome, Query, Submit};
 use serde_json::{Value, json};
 
-use super::{Run, bank, lock, scenes::Act, scenes::Scene, start_kernel, ui_json};
+use super::{Run, bank, lock, scenes::Act, start_kernel, ui_json};
 use crate::BoxError;
 
 /// A beat that says `caption` and lights `light`.
@@ -48,17 +48,12 @@ fn listed(label: &str, outcome: &str, detail: &str) -> Value {
     json!({ "label": label, "outcome": outcome, "detail": detail })
 }
 
-pub(super) async fn run(
-    run: &Arc<Run>,
-    scene: &Scene,
-    act: Act,
-    prefix: &str,
-) -> Result<Value, BoxError> {
+pub(super) async fn run(run: &Arc<Run>, act: Act, prefix: &str) -> Result<Value, BoxError> {
     match act {
         Act::Burst { accounts, n } => burst(run, accounts, n, prefix).await,
-        Act::Crash { n } => crash(run, scene, n, prefix).await,
+        Act::Crash { accounts, n } => crash(run, accounts, n, prefix).await,
         Act::Verify => verify(run).await,
-        Act::Tamper { position } => tamper(run, position).await,
+        Act::Tamper => tamper(run).await,
         Act::Break => {
             run.switches.payments_broken.store(true, SeqCst);
             Ok(json!({
@@ -69,7 +64,8 @@ pub(super) async fn run(
                 "commands": [],
             }))
         }
-        Act::FixAndRetry => fix_and_retry(run).await,
+        Act::FixAndRetry { to } => fix_and_retry(run, to).await,
+        Act::Peek => peek(run).await,
         Act::NewKey => new_key(run, prefix).await,
         Act::Revoke => revoke(run, prefix).await,
         Act::FailClosed => fail_closed(run, prefix).await,
@@ -99,7 +95,7 @@ fn ms(d: Duration) -> String {
 
 /// Runs `kernable <args>` in the run's directory; returns the command line, as typed, and its
 /// output lines.
-async fn cli(run: &Run, args: &[&str]) -> Result<(bool, Vec<String>), BoxError> {
+async fn cli(run: &Run, args: &[&str]) -> Result<(i32, Vec<String>), BoxError> {
     let exe = std::env::current_exe()?;
     let (dir, owned): (_, Vec<String>) = (
         run.dir.clone(),
@@ -121,7 +117,7 @@ async fn cli(run: &Run, args: &[&str]) -> Result<(bool, Vec<String>), BoxError> 
                 .map(str::to_owned),
         );
     }
-    Ok((out.status.success(), lines))
+    Ok((out.status.code().unwrap_or(1), lines))
 }
 
 /// The events of aggregate `id`, as the kernel's UI shows them.
@@ -293,7 +289,12 @@ async fn burst(
     }))
 }
 
-async fn crash(run: &Arc<Run>, scene: &Scene, n: usize, prefix: &str) -> Result<Value, BoxError> {
+async fn crash(
+    run: &Arc<Run>,
+    accounts: &[&str],
+    n: usize,
+    prefix: &str,
+) -> Result<Value, BoxError> {
     let done = Arc::new(AtomicUsize::new(0));
     let started = Instant::now();
     // How many have committed, every few milliseconds, for the Stage's chart.
@@ -316,7 +317,7 @@ async fn crash(run: &Arc<Run>, scene: &Scene, n: usize, prefix: &str) -> Result<
             series
         })
     };
-    let ids: Vec<String> = scene.ids.iter().map(|s| (*s).to_owned()).collect();
+    let ids: Vec<String> = accounts.iter().map(|s| (*s).to_owned()).collect();
     let mut tasks = Vec::new();
     for i in 0..n {
         let (client, done) = (run.client.clone(), Arc::clone(&done));
@@ -531,7 +532,9 @@ async fn crash(run: &Arc<Run>, scene: &Scene, n: usize, prefix: &str) -> Result<
 }
 
 async fn verify(run: &Run) -> Result<Value, BoxError> {
-    let (ok, lines) = cli(run, &["verify", "sqlite:kernable.db", "kernel.pub"]).await?;
+    let (code, lines) = cli(run, &["verify", "sqlite:kernable.db", "kernel.pub"]).await?;
+    // Exit 2: intact, but something was signed at or after its key's revocation.
+    let ok = code == 0 || code == 2;
     // `PROBLEM event 2: …` names a changed event.
     let bad: Vec<u64> = lines
         .iter()
@@ -577,22 +580,24 @@ async fn verify(run: &Run) -> Result<Value, BoxError> {
     }))
 }
 
-async fn tamper(run: &Run, position: u64) -> Result<Value, BoxError> {
+async fn tamper(run: &Run) -> Result<Value, BoxError> {
     let path = run.dir.join("kernable.db");
-    let (before, after) = tokio::task::spawn_blocking(move || {
+    let (position, before, after) = tokio::task::spawn_blocking(move || {
         let conn = rusqlite::Connection::open(path)?;
         conn.busy_timeout(Duration::from_secs(5))?;
-        let before: String = conn.query_row(
-            "SELECT payload FROM events WHERE global_position = ?1",
-            [position],
-            |r| r.get(0),
+        // Ada's first deposit.
+        let (position, before): (u64, String) = conn.query_row(
+            "SELECT global_position, payload FROM events
+             WHERE event_type = 'Deposited' AND aggregate_id = 'a1' ORDER BY global_position LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         let after = r#"{"amount":1000000}"#.to_owned();
         conn.execute(
             "UPDATE events SET payload = ?1 WHERE global_position = ?2",
             rusqlite::params![after, position],
         )?;
-        Ok::<_, BoxError>((before, after))
+        Ok::<_, BoxError>((position, before, after))
     })
     .await??;
     let sql = format!("UPDATE events SET payload = '{after}' WHERE global_position = {position};");
@@ -623,7 +628,7 @@ async fn tamper(run: &Run, position: u64) -> Result<Value, BoxError> {
     }))
 }
 
-async fn fix_and_retry(run: &Run) -> Result<Value, BoxError> {
+async fn fix_and_retry(run: &Run, to: &str) -> Result<Value, BoxError> {
     run.switches.payments_broken.store(false, SeqCst);
     let state = ui_json(run, "/api/state").await?;
     let parked = state["listeners"]
@@ -651,7 +656,7 @@ async fn fix_and_retry(run: &Run) -> Result<Value, BoxError> {
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut credited = Vec::new();
     while Instant::now() < deadline {
-        let events = history(run, "account", "a2").await?;
+        let events = history(run, "account", to).await?;
         credited = positions
             .iter()
             .filter(|p| {
@@ -684,19 +689,63 @@ async fn fix_and_retry(run: &Run) -> Result<Value, BoxError> {
             ),
             beat_with(
                 &format!(
-                    "The reactor credits a2 with the fixed ID credit-{}: had it run before, the kernel would have answered with the stored result. {} of {} credits are in the store.",
+                    "The reactor credits {to} with the fixed ID credit-{}: had it run before, the kernel would have answered with the stored result. {} of {} credits are in the store.",
                     positions.first().copied().unwrap_or_default(),
                     credited.len(),
                     positions.len()
                 ),
                 &["reactor", "kernel", "store", "model"],
-                &[("reactor-kernel", "Credit a2", ""), ("kernel-store", "Credited", "event"), ("store-model", "Credited", "event")],
+                &[("reactor-kernel", &format!("Credit {to}"), ""), ("kernel-store", "Credited", "event"), ("store-model", "Credited", "event")],
                 &[],
                 &[],
                 true,
             ),
         ],
-        "commands": [listed("Credit a2 (by the reactor, retried)", if credited.len() == positions.len() { "committed" } else { "failed" }, &format!("parked {which}"))],
+        "commands": [listed(&format!("Credit {to} (by the reactor, retried)"), if credited.len() == positions.len() { "committed" } else { "failed" }, &format!("parked {which}"))],
+    }))
+}
+
+/// Bob, then Ada, ask for Ada's account.
+async fn peek(run: &Run) -> Result<Value, BoxError> {
+    let ask = |who: &str| {
+        Query::new("bank", "GetAccount")
+            .context(kernable::RequestContext {
+                sender_identity: who.to_owned(),
+                ..Default::default()
+            })
+            .data(json!({ "id": "a1" }))
+    };
+    let said = |answer: Result<Value, kernable::Error>| match answer {
+        Ok(row) => format!("answered: balance {}", row["balance"]),
+        Err(e) => format!("refused: {e}"),
+    };
+    let bob = said(run.client.query(ask("bob")).await);
+    let ada = said(run.client.query(ask("ada")).await);
+    let bob_refused = bob.starts_with("refused");
+    Ok(json!({
+        "beats": [
+            beat_with(
+                &format!("Bob asks for Ada's account a1. Before the kernel routes the query, the middleware checks it: {bob}."),
+                &["client", "kernel", "middleware"],
+                &[("client-kernel", "GetAccount a1", ""), ("kernel-middleware", "check", ""), ("middleware-kernel", "forbidden", "bad"), ("kernel-client", "refused", "bad")],
+                &[("middleware", "bob: no", "bad")],
+                &[],
+                false,
+            ),
+            beat_with(
+                &format!("Ada asks for her own account: {ada}. The read model answers only what the middleware lets through."),
+                &["client", "kernel", "middleware", "model"],
+                &[("client-kernel", "GetAccount a1", ""), ("kernel-middleware", "check", ""), ("middleware-kernel", "pass", "ok"), ("kernel-model", "query", ""), ("model-kernel", "answer", "ok"), ("kernel-client", "answer", "ok")],
+                &[("middleware", "ada: yes", "ok")],
+                &[],
+                false,
+            ),
+        ],
+        "headline": "customers see their own accounts only",
+        "commands": [
+            listed("GetAccount a1 (by bob)", if bob_refused { "rejected" } else { "failed" }, &bob),
+            listed("GetAccount a1 (by ada)", if ada.starts_with("answered") { "committed" } else { "failed" }, &ada),
+        ],
     }))
 }
 
@@ -722,6 +771,10 @@ async fn new_key(run: &Run, prefix: &str) -> Result<Value, BoxError> {
         .await;
     let ok = matches!(outcome, Ok(Outcome::Committed(_)));
     lock(&run.kept).mobile = Some(mobile);
+    // A revocation counts from a whole second on: one in this second would make the deposit
+    // above look signed after it.
+    let into_second = crate::now_ms().rem_euclid(1000) as u64;
+    tokio::time::sleep(Duration::from_millis(1000 - into_second)).await;
     Ok(json!({
         "headline": "a key per client, granted by the root key",
         "beats": [

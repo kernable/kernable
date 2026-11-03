@@ -638,7 +638,7 @@ fn demo_idle(addr: &str) -> serde_json::Value {
 
 #[cfg(unix)]
 #[test]
-fn the_demo_runs_its_scene_resets_on_a_new_store_and_leaves_nothing_behind() {
+fn the_demo_tells_its_story_resets_on_a_new_store_and_leaves_nothing_behind() {
     let dir = temp_dir("demo");
     let addr = free_addr();
     let demo = KillOnDrop::spawn(
@@ -652,45 +652,46 @@ fn the_demo_runs_its_scene_resets_on_a_new_store_and_leaves_nothing_behind() {
     let state = demo_idle(&addr);
     assert_eq!(state["generation"], 1);
     assert!(base.join("run-1").join("kernable.db").exists());
+    assert!(state["scene"]["chapters"].as_array().unwrap().len() > 5);
 
     // A page elsewhere cannot drive it: no header, no step.
     let (status, _) = demo_http(&addr, "POST", "/api/demo/next", false);
     assert_eq!(status, 403);
 
-    let steps = state["scene"]["steps"].as_array().unwrap().len();
-    for _ in 0..steps {
+    for _ in 0..3 {
         let (status, body) = demo_http(&addr, "POST", "/api/demo/next", true);
         assert_eq!(status, 200, "{body}");
         demo_idle(&addr);
     }
-    let (status, _) = demo_http(&addr, "POST", "/api/demo/next", true);
-    assert_eq!(status, 409, "the scene is over");
     let state = demo_state(&addr);
-    let outcomes: Vec<&str> = state["traces"]
+    let outcomes: Vec<Vec<String>> = state["traces"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|t| t["sends"][0]["outcome"].as_str().unwrap())
+        .map(demo_outcomes)
         .collect();
     assert_eq!(
         outcomes,
-        ["committed", "committed", "rejected", "committed"]
+        [
+            vec!["committed".to_owned()],
+            vec!["committed".to_owned()],
+            vec!["rejected:insufficient_funds".to_owned()]
+        ]
     );
-    assert_eq!(state["rows"]["a1"]["balance"], 70);
-    let last = &state["traces"][steps - 1]["sends"][0];
+    assert_eq!(state["rows"]["accounts"]["a1"]["balance"], 100);
+    let first = &state["traces"][1]["sends"][0];
     assert_eq!(
-        last["answer"]["row"]["balance"], 70,
+        first["answer"]["row"]["balance"], 100,
         "the client reads its write"
     );
     assert_eq!(
-        last["events"][0]["position"], 3,
-        "the rejection stored nothing"
+        first["state"],
+        serde_json::json!({ "owner": "Ada", "balance": 0, "open": true }),
+        "the state the worker rebuilt before the deposit"
     );
-    assert_eq!(
-        last["state"],
-        serde_json::json!({ "owner": "Ada", "balance": 100, "open": true }),
-        "the state the worker rebuilt before the last command"
-    );
+    // What each part wants, in words, for the Stage to show next to it.
+    assert!(state["scene"]["intents"]["kernel"].is_string());
+    assert!(state["scene"]["steps"][2]["intents"]["worker"].is_string());
 
     // The kernel's own UI answers through the demo, from the store the steps wrote.
     let (status, body) = demo_http(
@@ -701,77 +702,17 @@ fn the_demo_runs_its_scene_resets_on_a_new_store_and_leaves_nothing_behind() {
     );
     assert_eq!(status, 200, "{body}");
     let history: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(history["events"].as_array().unwrap().len(), 3);
-    // What each part wants, in words, for the Stage to show next to it.
-    let state = demo_state(&addr);
-    assert!(state["scene"]["intents"]["kernel"].is_string());
-    assert!(state["scene"]["steps"][2]["intents"]["worker"].is_string());
-
-    // Scene 2: a unique username, also when two commands race for it.
-    let (status, _) = demo_http(&addr, "POST", "/api/demo/scene?n=2", true);
-    assert_eq!(status, 200);
-    let state = demo_idle(&addr);
-    assert_eq!(state["scene"]["index"], 1);
-    assert_eq!(state["traces"].as_array().unwrap().len(), 0, "a new store");
-    let steps = state["scene"]["steps"].as_array().unwrap().len();
-    for _ in 0..steps {
-        let (status, body) = demo_http(&addr, "POST", "/api/demo/next", true);
-        assert_eq!(status, 200, "{body}");
-        demo_idle(&addr);
-    }
-    let state = demo_state(&addr);
-    let outcomes: Vec<Vec<(&str, &str)>> = state["traces"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|t| {
-            t["sends"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|s| {
-                    let code = s["rejection"]["code"].as_str().unwrap_or("");
-                    (s["outcome"].as_str().unwrap(), code)
-                })
-                .collect()
-        })
-        .collect();
-    let committed = ("committed", "");
-    let taken = ("rejected", "unique_taken");
-    assert_eq!(outcomes[0], [committed]);
-    assert_eq!(outcomes[1], [taken], "ADA is ada");
-    let mut race = outcomes[2].clone();
-    race.sort();
-    assert_eq!(race, [committed, taken], "exactly one wins the race");
-    assert_eq!(outcomes[3], [committed]);
-    assert_eq!(outcomes[4], [committed], "the rename freed ada");
-    assert_eq!(state["rows"]["c2"]["username"], "ada");
-    // The kernel's UI shows the key c2 holds by name and identity, never the value.
-    let (_, body) = demo_http(
-        &addr,
-        "GET",
-        "/api/history?tenant=default&domain=bank&type=customer&id=c2",
-        false,
-    );
-    let history: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(history["index"]["keys"][0]["name"], "username");
-    assert_eq!(
-        history["index"]["keys"][0]["id"].as_str().unwrap().len(),
-        64
-    );
-    assert!(!history["index"].to_string().contains("ada"));
+    assert_eq!(history["events"].as_array().unwrap().len(), 2);
+    assert_eq!(history["index"]["facts"], serde_json::json!(["open"]));
 
     // Reset: a new kernel on a new, empty store; the old one is gone.
     let (status, _) = demo_http(&addr, "POST", "/api/demo/reset", true);
     assert_eq!(status, 200);
     let state = demo_idle(&addr);
-    assert_eq!(state["generation"], 3, "the scene switch was a reset too");
-    assert_eq!(state["scene"]["index"], 1, "a reset keeps the scene");
+    assert_eq!(state["generation"], 2);
     assert_eq!(state["traces"].as_array().unwrap().len(), 0);
-    assert_eq!(state["rows"], serde_json::json!({}));
     assert!(!base.join("run-1").exists());
-    assert!(!base.join("run-2").exists());
-    assert!(base.join("run-3").join("kernable.db").exists());
+    assert!(base.join("run-2").join("kernable.db").exists());
 
     // Ctrl-C ends it and removes everything.
     let mut demo = demo;
@@ -782,20 +723,6 @@ fn the_demo_runs_its_scene_resets_on_a_new_store_and_leaves_nothing_behind() {
     assert!(demo.child.wait().unwrap().success());
     assert!(!base.exists());
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// Runs every step of the demo's scene `n`; returns the demo's state after the last.
-#[cfg(unix)]
-fn demo_scene(addr: &str, n: usize) -> serde_json::Value {
-    let (status, body) = demo_http(addr, "POST", &format!("/api/demo/scene?n={n}"), true);
-    assert_eq!(status, 200, "{body}");
-    let state = demo_idle(addr);
-    for _ in 0..state["scene"]["steps"].as_array().unwrap().len() {
-        let (status, body) = demo_http(addr, "POST", "/api/demo/next", true);
-        assert_eq!(status, 200, "{body}");
-        demo_idle(addr);
-    }
-    demo_state(addr)
 }
 
 /// What a step's commands came to: `committed` or `rejected:<code>` per command sent, the
@@ -832,8 +759,8 @@ fn demo_badges(trace: &serde_json::Value) -> Vec<String> {
 
 #[cfg(unix)]
 #[test]
-fn every_scene_of_the_demo_shows_what_it_says() {
-    let dir = temp_dir("demo-scenes");
+fn every_chapter_of_the_demo_shows_what_it_says() {
+    let dir = temp_dir("demo-story");
     let addr = free_addr();
     let _demo = KillOnDrop::spawn(
         Process::new(env!("CARGO_BIN_EXE_kernable"))
@@ -842,40 +769,84 @@ fn every_scene_of_the_demo_shows_what_it_says() {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null()),
     );
-    demo_idle(&addr);
+    let state = demo_idle(&addr);
+    let steps = state["scene"]["steps"].as_array().unwrap().clone();
+    let mut traces = Vec::new();
+    // The step of the story whose title starts with `title`, run.
+    let mut until = |title: &str| -> serde_json::Value {
+        loop {
+            let i = traces.len();
+            let (status, body) = demo_http(&addr, "POST", "/api/demo/next", true);
+            assert_eq!(status, 200, "{body}");
+            let state = demo_idle(&addr);
+            let trace = state["traces"][i].clone();
+            traces.push(trace.clone());
+            if steps[i]["title"].as_str().unwrap().starts_with(title) {
+                return trace;
+            }
+        }
+    };
+    let s = |v: &[&str]| v.iter().map(|x| (*x).to_owned()).collect::<Vec<_>>();
 
-    // 3: a payment to a closed account is refused at the commit; the open one was credited.
-    let s = demo_scene(&addr, 3);
+    // Usernames: refused at the commit; of two racing, exactly one.
     assert_eq!(
-        demo_outcomes(&s["traces"][3]),
-        ["rejected:requirement_missing"]
+        demo_outcomes(&until("Bob wants ADA")),
+        s(&["rejected:unique_taken"])
     );
-    assert_eq!(s["rows"]["a2"]["balance"], 30, "the reactor credited a2");
-
-    // 4: 200 deposits into one account and into twenty, all committed.
-    let s = demo_scene(&addr, 4);
-    for t in s["traces"].as_array().unwrap() {
-        assert_eq!(demo_outcomes(t), ["committed"], "{t}");
-    }
-    assert_eq!(s["rows"]["h1"]["balance"], 2000);
-
-    // 5: kill -9 mid-way: nothing lost, nothing twice, the store intact.
-    let s = demo_scene(&addr, 5);
-    assert_eq!(demo_outcomes(&s["traces"][1]), ["committed"]);
-    let detail = s["traces"][1]["commands"][0]["detail"].as_str().unwrap();
+    let mut race = demo_outcomes(&until("The race"));
+    race.sort();
+    assert_eq!(race, s(&["committed", "rejected:unique_taken"]));
+    assert_eq!(
+        demo_outcomes(&until("Ada renames")),
+        s(&["committed", "committed"])
+    );
+    // Payments: to a closed account refused by its requirement.
+    assert_eq!(
+        demo_outcomes(&until("Ada pays Bob again")),
+        s(&["rejected:requirement_missing"])
+    );
+    // Rush hour: 200 and 200, all committed.
+    assert_eq!(
+        demo_outcomes(&until("200 deposits into one")),
+        s(&["committed"])
+    );
+    assert_eq!(
+        demo_outcomes(&until("200 deposits into 20")),
+        s(&["committed"])
+    );
+    // Tellers: refused before the queue, a teller passes, queries checked, fails closed.
+    assert_eq!(
+        demo_outcomes(&until("Ada withdraws by herself")),
+        s(&["rejected:forbidden"])
+    );
+    assert_eq!(
+        demo_outcomes(&until("A teller withdraws 20")),
+        s(&["committed"])
+    );
+    assert_eq!(
+        demo_outcomes(&until("Bob looks")),
+        s(&["rejected", "committed"])
+    );
+    assert_eq!(
+        demo_outcomes(&until("The middleware goes away")),
+        s(&["rejected", "committed"])
+    );
+    // Outage: parked, retried, credited once.
+    assert_eq!(demo_outcomes(&until("Fix it")), s(&["committed"]));
+    // Leaked key: refused once revoked, the app's key goes on.
+    assert_eq!(
+        demo_outcomes(&until("The key leaks")),
+        s(&["rejected", "committed"])
+    );
+    // Disaster: nothing lost, nothing twice, the store intact.
+    let crash = until("kill -9");
+    let detail = crash["commands"][0]["detail"].as_str().unwrap();
     assert!(detail.ends_with("0 lost, 0 twice"), "{detail}");
-    assert!(demo_badges(&s["traces"][2]).contains(&"intact".to_owned()));
-    for id in ["a1", "a2", "a3"] {
-        assert_eq!(s["rows"][id]["balance"], 100, "{id}");
-    }
-
-    // 6: one changed event, found by verify.
-    let s = demo_scene(&addr, 6);
-    assert!(demo_badges(&s["traces"][2]).contains(&"tampered".to_owned()));
-
-    // 7: Ada forgotten: her events stay, the vault holds nothing of her, the read model neither.
-    let s = demo_scene(&addr, 7);
-    assert!(s["rows"]["p1"].is_null() && !s["rows"]["p2"].is_null());
+    assert!(demo_badges(&until("Verify")).contains(&"intact".to_owned()));
+    // Forget me: the events stay, the vault and the read model hold nothing of Ada.
+    until("Forget Ada");
+    let state = demo_state(&addr);
+    assert!(state["rows"]["people"]["p1"].is_null() && !state["rows"]["people"]["p2"].is_null());
     let (_, body) = demo_http(
         &addr,
         "GET",
@@ -885,27 +856,14 @@ fn every_scene_of_the_demo_shows_what_it_says() {
     let history: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(history["events"].as_array().unwrap().len(), 2);
     assert_eq!(history["vault"], serde_json::json!({}));
-    assert!(!body.contains("Ada"), "{body}");
-
-    // 8: the middleware refuses a customer, passes a teller, and fails closed while away.
-    let s = demo_scene(&addr, 8);
-    assert_eq!(demo_outcomes(&s["traces"][1]), ["rejected:forbidden"]);
-    assert_eq!(demo_outcomes(&s["traces"][2]), ["committed"]);
-    assert_eq!(demo_outcomes(&s["traces"][3]), ["rejected", "committed"]);
-    assert_eq!(s["rows"]["a1"]["balance"], 60);
-
-    // 9: the broken reactor's event parked, retried, credited once.
-    let s = demo_scene(&addr, 9);
-    assert_eq!(demo_outcomes(&s["traces"][4]), ["committed"]);
-    assert_eq!(s["rows"]["a2"]["balance"], 50);
-
-    // 10: the revoked key is refused, the app's key goes on.
-    let s = demo_scene(&addr, 10);
-    assert_eq!(demo_outcomes(&s["traces"][1]), ["committed"]);
-    assert_eq!(demo_outcomes(&s["traces"][2]), ["rejected", "committed"]);
-
-    // 11: a read model rebuilt from the events equals the live one.
-    let s = demo_scene(&addr, 11);
-    assert!(demo_badges(&s["traces"][1]).contains(&"equal".to_owned()));
+    assert!(!body.contains("Lovelace"), "{body}");
+    // New report: rebuilt from the events, the same rows.
+    assert!(demo_badges(&until("Rebuild")).contains(&"equal".to_owned()));
+    // Tampering: found.
+    until("Change a deposit");
+    assert!(demo_badges(&until("Verify")).contains(&"tampered".to_owned()));
+    assert_eq!(traces.len(), steps.len(), "the story ran to its end");
+    let state = demo_state(&addr);
+    assert_eq!(state["rows"]["accounts"]["a2"]["open"], false);
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -9,6 +9,7 @@
     --bg: #f7f7f5; --panel: #ffffff; --line: #e3e3de; --text: #1d1d1b; --muted: #6d6d68;
     --accent: #3b5bdb; --ok: #2f9e44; --warn: #e8890c; --bad: #e03131; --dyn: #8f8f88; --live: #1c9bb8;
     --edge: #b9b9b2; --check: #c2255c; --code: #f1f1ed;
+    --max: 1600px;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -19,7 +20,8 @@
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  header { display: flex; align-items: center; gap: 16px; padding: 10px 20px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; flex-wrap: wrap; }
+  header { border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
+  header .bar { display: flex; align-items: center; gap: 16px; padding: 10px 20px; flex-wrap: wrap; max-width: var(--max); margin: 0 auto; }
   header h1 { font-size: 16px; margin: 0; letter-spacing: .02em; }
   header .meta { color: var(--muted); font-size: 13px; }
   nav { display: flex; gap: 4px; margin-left: auto; }
@@ -28,7 +30,7 @@
   nav button.on { color: var(--text); border-color: var(--line); background: var(--bg); }
   .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--line); font-size: 13px; }
   .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
-  main { padding: 16px 20px; }
+  main { padding: 16px 20px; max-width: var(--max); margin: 0 auto; }
   .view { display: none; } .view.on { display: block; }
   .legend { display: flex; gap: 16px; flex-wrap: wrap; color: var(--muted); font-size: 12px; margin-bottom: 10px; }
   .legend span { display: inline-flex; align-items: center; gap: 6px; }
@@ -77,20 +79,38 @@
   .cmd b { color: var(--text); font-weight: 500; }
   .snap { border-left: 3px solid var(--accent); background: var(--panel); padding: 8px 12px; border-radius: 6px; margin-bottom: 10px; font-size: 13px; }
   .empty { color: var(--muted); padding: 40px; text-align: center; }
+  .tag.ref { color: var(--muted); }
+  .search { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+  .search input { padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); font: inherit; width: 170px; }
+  .search label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+  .search .meta, .more .meta { color: var(--muted); font-size: 13px; }
+  button.plain { background: var(--panel); border: 1px solid var(--line); color: var(--text); padding: 5px 12px; border-radius: 6px; cursor: pointer; font: inherit; }
+  #found tr.row { cursor: pointer; } #found tr.row:hover td { background: var(--bg); }
+  #found tr.open td { background: var(--bg); }
+  #found td.wide { padding-top: 0; }
+  #found a, #rejections a { color: var(--accent); text-decoration: none; }
+  #rejections tr.row { cursor: pointer; } #rejections tr.row:hover td, #rejections tr.open td { background: var(--bg); }
+  #rejections td.wide { padding-top: 0; }
+  .code { color: var(--bad); font-weight: 600; }
+  .more { display: flex; gap: 12px; align-items: center; }
   .err { color: var(--bad); }
 </style>
 </head>
 <body>
 <header>
+ <div class="bar">
   <h1>kernable</h1>
   <span class="meta" id="meta"></span>
   <span class="pill" id="ready"><span class="dot"></span><span></span></span>
   <nav>
     <button data-view="map" class="on">Map</button>
     <button data-view="connections">Connections</button>
+    <button data-view="events">Events</button>
+    <button data-view="rejected">Rejected</button>
     <button data-view="history">History</button>
     <a id="stage" href="/demo" hidden>Demo stage</a>
   </nav>
+ </div>
 </header>
 <main>
   <section class="view on" id="map">
@@ -109,6 +129,27 @@
     </div>
   </section>
   <section class="view" id="connections"></section>
+  <section class="view" id="events">
+    <form class="search" id="search">
+      <input name="type" placeholder="Event type, e.g. orders.Order">
+      <input name="tenant" placeholder="Tenant">
+      <input name="id" placeholder="Aggregate id">
+      <input name="command" placeholder="Command or correlation id">
+      <input name="text" placeholder="Payload contains…">
+      <button class="plain" type="submit">Search</button>
+      <label><input type="checkbox" id="live" style="width:auto"> live</label>
+      <span class="meta" id="found-meta"></span>
+    </form>
+    <table id="found"></table>
+    <div class="more"><button class="plain" id="older" hidden>Older</button><span class="meta" id="older-meta"></span></div>
+  </section>
+  <section class="view" id="rejected">
+    <div class="search">
+      <input id="reject-filter" placeholder="Filter: type, code, aggregate, tenant, message…" style="width:340px">
+      <span class="meta" id="rejected-meta"></span>
+    </div>
+    <table id="rejections"></table>
+  </section>
   <section class="view" id="history">
     <div class="history">
       <div class="streams"><input id="filter" placeholder="Filter aggregates…"><ul id="streams"></ul></div>
@@ -364,8 +405,10 @@ function payloadView(text, vault) {
   const walk = (v, indent) => {
     const pad = "  ".repeat(indent);
     if (v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).length === 1 && typeof v.$vault === "string") {
-      const held = vault[v.$vault];
-      pre.append(held ? el("span", { class: `tag ${held.secret ? "secret" : "personal"}`, title: v.$vault }, held.secret ? "secret" : `personal · ${held.subject}`)
+      const held = vault?.[v.$vault];
+      // Without the vault's view (the events search), only that it is a reference.
+      pre.append(!vault ? el("span", { class: "tag ref", title: v.$vault }, "vault")
+        : held ? el("span", { class: `tag ${held.secret ? "secret" : "personal"}`, title: v.$vault }, held.secret ? "secret" : `personal · ${held.subject}`)
         : el("span", { class: "tag erased", title: v.$vault }, "erased"));
     } else if (Array.isArray(v)) {
       pre.append("[");
@@ -407,6 +450,126 @@ async function loadHistory() {
   $("timeline").replaceChildren(...cards);
 }
 
+// ---- events: search and live tail ----
+const FOUND_MAX = 1000;
+let found = [], older = null, tail = null, opened = new Set(), searching = 0;
+
+function filters() {
+  const q = new URLSearchParams();
+  for (const [k, v] of new FormData($("search"))) if (v.trim()) q.set(k, v.trim());
+  return q;
+}
+
+/** A new search: newest first. Its head is where the live tail starts. */
+async function search() {
+  const run = ++searching;
+  let r;
+  try { r = await get(`/api/events?${filters()}`); } catch (e) { $("found-meta").textContent = String(e); return; }
+  if (run !== searching) return;
+  found = r.events; older = r.next; tail = r.head; opened = new Set();
+  drawFound();
+}
+
+async function loadOlder() {
+  if (older === null) return;
+  const q = filters();
+  q.set("before", older);
+  const run = searching;
+  let r;
+  try { r = await get(`/api/events?${q}`); } catch (e) { $("older-meta").textContent = String(e); return; }
+  if (run !== searching) return;
+  found.push(...r.events); older = r.next;
+  drawFound();
+}
+
+async function follow() {
+  if (!$("live").checked || tail === null) return;
+  const q = filters();
+  q.set("after", tail);
+  q.set("limit", 500);
+  const run = searching;
+  let r;
+  try { r = await get(`/api/events?${q}`); } catch { return; }
+  if (run !== searching) return;
+  tail = r.last;
+  if (!r.events.length) return;
+  found.unshift(...r.events.reverse());
+  if (found.length > FOUND_MAX) { found.length = FOUND_MAX; older = found[found.length - 1].position; }
+  drawFound();
+}
+
+/** Opens an aggregate in the History view. */
+function openStream(e) {
+  stream = { tenant: e.tenant, domain: e.domain, type: e.aggregateType, id: e.aggregateId };
+  document.querySelector('nav button[data-view="history"]').click();
+}
+
+function drawFound() {
+  const rows = [el("tr", {}, ["Position", "Time", "Event", "Aggregate", "Tenant", "Command"].map((h) => el("th", {}, h)))];
+  for (const e of found) {
+    const open = opened.has(e.position);
+    rows.push(el("tr", { class: `row${open ? " open" : ""}`, onclick: () => { open ? opened.delete(e.position) : opened.add(e.position); drawFound(); } },
+      el("td", { class: "mono" }, e.position),
+      el("td", {}, time(e.createdAt)),
+      el("td", {}, el("b", {}, `${e.domain}.${e.type}`), e.erases ? [" ", el("span", { class: "tag erased" }, "erases")] : null),
+      el("td", {}, el("a", { href: "#", onclick: (ev) => { ev.preventDefault(); ev.stopPropagation(); openStream(e); } }, `${e.aggregateType} ${e.aggregateId}`), el("span", { class: "meta" }, ` · v${e.version}`)),
+      el("td", {}, e.tenant),
+      el("td", { class: "mono", title: e.commandId }, fit(e.commandId, 24))));
+    if (open) rows.push(el("tr", {}, el("td", { colspan: 6, class: "wide" },
+      payloadView(e.payload, null),
+      el("pre", {}, JSON.stringify(e.context, null, 2)),
+      el("div", { class: "mono meta" }, `schema ${e.schema} · worker ${short(e.key)} · hash ${e.hash.slice(0, 16)}…`))));
+  }
+  if (!found.length) rows.push(el("tr", {}, el("td", { colspan: 6, class: "meta" }, "No matching events.")));
+  $("found").replaceChildren(...rows);
+  $("found-meta").textContent = `${found.length} shown${$("live").checked ? " · following" : ""}`;
+  $("older").hidden = older === null;
+  $("older-meta").textContent = older === null ? (found.length ? "start of the log reached" : "") : `searched down to position ${older}`;
+}
+
+// ---- rejected commands ----
+let rejections = [], rejectionsLimit = 0, openedRejections = new Set();
+
+async function loadRejections() {
+  try {
+    const r = await get("/api/rejections");
+    rejections = r.rejections; rejectionsLimit = r.limit;
+  } catch (e) { $("rejected-meta").textContent = String(e); return; }
+  drawRejections();
+}
+
+/** Why the command was refused, in one line: the unique key or the requirement that did not hold. */
+function why(r) {
+  const q = r.requirement;
+  const need = q ? ` · requires ${q.domain}.${q.aggregateType} ${q.aggregateId || `by key ${q.key}`} ${q.absent ? "not " : ""}${q.fact}` : "";
+  return `${r.message}${r.uniqueKey ? ` · key ${r.uniqueKey}` : ""}${need}`;
+}
+
+function drawRejections() {
+  const f = $("reject-filter").value.toLowerCase();
+  const text = (r) => `${r.domain}.${r.type} ${r.code} ${r.domain}.${r.aggregateType} ${r.aggregateId} ${r.tenant} ${r.message} ${r.commandId}`.toLowerCase();
+  const shown = rejections.filter((r) => text(r).includes(f));
+  const rows = [el("tr", {}, ["Received", "Command", "Aggregate", "Tenant", "Code", "Why"].map((h) => el("th", {}, h)))];
+  for (const r of shown) {
+    const open = openedRejections.has(r.commandId);
+    rows.push(el("tr", { class: `row${open ? " open" : ""}`, onclick: () => { open ? openedRejections.delete(r.commandId) : openedRejections.add(r.commandId); drawRejections(); } },
+      el("td", {}, time(r.receivedAt)),
+      el("td", {}, el("b", {}, `${r.domain}.${r.type}`)),
+      el("td", {}, el("a", { href: "#", onclick: (ev) => { ev.preventDefault(); ev.stopPropagation(); openStream(r); } }, `${r.aggregateType} ${r.aggregateId}`)),
+      el("td", {}, r.tenant),
+      el("td", {}, el("span", { class: "code" }, r.code)),
+      el("td", {}, why(r))));
+    if (open) rows.push(el("tr", {}, el("td", { colspan: 6, class: "wide" },
+      payloadView(r.payload, null),
+      el("pre", {}, JSON.stringify(r.context, null, 2)),
+      el("div", { class: "mono meta" }, `command ${r.commandId} · signed by ${short(r.key)}`))));
+  }
+  if (!shown.length) rows.push(el("tr", {}, el("td", { colspan: 6, class: "meta" }, rejections.length ? "None matches the filter." : "No rejected commands.")));
+  $("rejections").replaceChildren(...rows);
+  const capped = rejections.length === rejectionsLimit ? ` (the newest ${rejectionsLimit})` : "";
+  $("rejected-meta").textContent = `${shown.length} of ${rejections.length}${capped}`;
+}
+
 // ---- refresh ----
 async function refresh() {
   try {
@@ -423,21 +586,29 @@ async function refresh() {
   const view = document.querySelector("nav button.on").dataset.view;
   if (view === "map") drawMap();
   if (view === "connections") drawConnections();
+  if (view === "events") follow();
 }
 
 document.querySelectorAll("nav button").forEach((b) => b.addEventListener("click", () => {
   document.querySelectorAll("nav button").forEach((x) => x.classList.toggle("on", x === b));
   document.querySelectorAll(".view").forEach((v) => v.classList.toggle("on", v.id === b.dataset.view));
   if (b.dataset.view === "history") { loadStreams(); loadHistory(); }
+  if (b.dataset.view === "events" && tail === null) search();
+  if (b.dataset.view === "rejected") loadRejections();
   refresh();
 }));
 $("filter").addEventListener("input", drawStreams);
+$("search").addEventListener("submit", (ev) => { ev.preventDefault(); search(); });
+$("older").addEventListener("click", loadOlder);
+$("reject-filter").addEventListener("input", drawRejections);
+$("live").addEventListener("change", () => ($("live").checked ? search() : drawFound()));
 window.addEventListener("resize", () => state && drawMap());
 refresh();
 setInterval(refresh, 1000);
 // Under `kernable demo` only: the way back to the Stage.
 fetch("/api/demo").then((r) => { if (r.ok) $("stage").hidden = false; }).catch(() => {});
 setInterval(() => document.querySelector("nav button.on").dataset.view === "history" && loadStreams(), 5000);
+setInterval(() => document.querySelector("nav button.on").dataset.view === "rejected" && loadRejections(), 5000);
 </script>
 </body>
 </html>

@@ -490,16 +490,44 @@ fn payments(bank_domain: &Domain, switches: &Switches) {
 }
 
 /// The `rbac` middleware: only tellers may withdraw.
+/// The `rbac` middleware: only tellers may withdraw, and a customer may look only at their own
+/// account. It knows who owns which account from the events, like any read model.
 fn rbac(bank_domain: &Domain) {
+    let owners: Arc<Mutex<BTreeMap<String, String>>> = Arc::default();
     let rbac = bank_domain.read_model("rbac");
-    rbac.middleware(MiddlewareOptions::new(&["Withdraw"]), |check| async move {
-        // Before the command is queued: a refused one is never stored.
-        if check.request.sender_identity != "teller" {
-            let message = format!("{} may not withdraw", check.request.sender_identity);
-            return Err(Rejected::new(message).code("forbidden").into());
-        }
-        Ok(())
+    let o = Arc::clone(&owners);
+    rbac.on("AccountOpened", move |data: Opened, evt, _ctx| {
+        lock(&o).insert(evt.aggregate_id, data.owner.to_lowercase());
+        async { Ok(()) }
     });
+    let o = Arc::clone(&owners);
+    rbac.middleware(
+        MiddlewareOptions::new(&["Withdraw", "GetAccount"]),
+        move |check| {
+            let who = check.request.sender_identity.clone();
+            // A query names its account in the data, a command as its aggregate.
+            let account = check.data["id"].as_str().map(str::to_owned);
+            let owner = account.and_then(|id| lock(&o).get(&id).cloned());
+            async move {
+                // Before the command is queued, or the query routed: a refused one is never
+                // stored and never answered.
+                let allowed = match check.type_name.as_str() {
+                    "Withdraw" => who == "teller",
+                    _ => who == "teller" || owner.as_deref() == Some(who.as_str()),
+                };
+                if !allowed {
+                    let what = if check.type_name == "Withdraw" {
+                        "withdraw"
+                    } else {
+                        "see this account"
+                    };
+                    let message = format!("{who} may not {what}");
+                    return Err(Rejected::new(message).code("forbidden").into());
+                }
+                Ok(())
+            }
+        },
+    );
 }
 
 /// The accounts read model built again from every event, by a subscription from position 0,
@@ -585,12 +613,14 @@ pub(super) async fn send(
     };
     let submit = Submit::new("bank", aggregate, id, command)
         .id(command_id)
-        .context(who)
+        .context(who.clone())
         .data(data);
     // Returns once every listener has the events: the query below already sees them.
     let outcome = kernable.submit(submit).await;
     let returned = Instant::now(); // stage
-    let get = Query::new("bank", query).data(json!({ "id": id }));
+    let get = Query::new("bank", query)
+        .context(who.clone())
+        .data(json!({ "id": id }));
     let answer: Result<Value, _> = kernable.query(get).await;
     Sent {
         outcome,
