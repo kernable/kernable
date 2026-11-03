@@ -18,6 +18,8 @@ kernable-store = { path = "../kernable-store" }
 # `kernable demo` runs its bank with the Rust SDK.
 kernable = { path = "../../sdks/rust" }
 serde.workspace = true
+# `kernable demo` changes an event in its own store, to show that verify finds it.
+rusqlite.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 prost.workspace = true

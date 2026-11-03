@@ -4,11 +4,17 @@
 
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    sync::{
+        Arc, Mutex, MutexGuard, PoisonError,
+        atomic::{AtomicBool, Ordering::SeqCst},
+    },
     time::Instant,
 };
 
-use kernable::{Domain, Kernable, NewEvent, Outcome, Query, Rejected, Submit, Unique, domain};
+use kernable::{
+    BoxError, Domain, Kernable, MiddlewareOptions, NewEvent, Outcome, Query, Rejected,
+    RequestContext, Requirement, Submit, SubscribeOptions, Unique, domain,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -19,6 +25,36 @@ use super::Recorder;
 pub(super) struct Rows {
     pub accounts: Arc<Mutex<BTreeMap<String, Row>>>,
     pub customers: Arc<Mutex<BTreeMap<String, CustomerRow>>>,
+    pub people: Arc<Mutex<BTreeMap<String, PersonRow>>>,
+}
+
+impl Rows {
+    /// The rows of read model `name`, as JSON.
+    pub(super) fn view(&self, name: &str) -> Value {
+        match name {
+            "customers" => json!(*lock(&self.customers)),
+            "people" => json!(*lock(&self.people)),
+            _ => json!(*lock(&self.accounts)),
+        }
+    }
+}
+
+/// Which parts of the bank a scene's app runs.
+#[derive(Clone, Copy, Default)]
+pub(super) struct Parts {
+    pub accounts: bool,
+    pub customers: bool,
+    pub people: bool,
+    /// The `payments` reactor, which credits what an account pays.
+    pub payments: bool,
+    /// The `rbac` middleware, which lets only tellers withdraw.
+    pub rbac: bool,
+}
+
+/// What the Stage may switch while a scene runs: the payments reactor's failure.
+#[derive(Clone, Default)]
+pub(super) struct Switches {
+    pub payments_broken: Arc<AtomicBool>,
 }
 
 /// The rows, also after a handler panicked while holding them.
@@ -32,6 +68,12 @@ struct Account {
     owner: String,
     balance: i64,
     open: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Payment {
+    to: String,
+    amount: i64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -50,12 +92,33 @@ struct Amount {
 pub(super) struct Row {
     owner: String,
     balance: i64,
+    open: bool,
 }
 // #endregion row
 
-/// The `bank` domain: the `account` and `customer` aggregates and their read models.
-pub(super) fn bank(stage: &Recorder, rows: &Rows) -> Domain {
+/// The `bank` domain with the parts a scene needs.
+pub(super) fn bank(parts: Parts, stage: &Recorder, rows: &Rows, switches: &Switches) -> Domain {
     let bank_domain = domain("bank");
+    if parts.accounts {
+        accounts(&bank_domain, stage, rows);
+    }
+    if parts.customers {
+        customers(&bank_domain, stage, rows);
+    }
+    if parts.people {
+        people(&bank_domain, stage, rows);
+    }
+    if parts.payments {
+        payments(&bank_domain, switches);
+    }
+    if parts.rbac {
+        rbac(&bank_domain);
+    }
+    bank_domain
+}
+
+/// The `account` aggregate and the `accounts` read model.
+fn accounts(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
     let account = bank_domain.aggregate("account", Account::default());
 
     // #region events
@@ -69,7 +132,21 @@ pub(super) fn bank(stage: &Recorder, rows: &Rows) -> Domain {
     account.apply("Withdrawn", |state, data: Amount, _evt, _ctx| {
         state.balance -= data.amount
     });
+    account.apply("Paid", |state, data: Payment, _evt, _ctx| {
+        state.balance -= data.amount
+    });
+    account.apply("Credited", |state, data: Amount, _evt, _ctx| {
+        state.balance += data.amount
+    });
+    account.apply("AccountClosed", |state, _: Value, _evt, _ctx| {
+        state.open = false
+    });
     // #endregion events
+
+    // #region fact
+    // Other aggregates' commands can require it; the kernel checks it when they commit.
+    account.fact("open", |state| state.open);
+    // #endregion fact
 
     let c = stage.clone(); // stage
     // #region open
@@ -108,6 +185,44 @@ pub(super) fn bank(stage: &Recorder, rows: &Rows) -> Domain {
     });
     // #endregion withdraw
 
+    let c = stage.clone(); // stage
+    // #region close
+    account.command("Close", move |state, _: Value, cmd, _ctx| {
+        c.worker(&cmd.command_id, state); // stage
+        if !state.open {
+            return Err(Rejected::new("the account is not open"));
+        }
+        Ok(vec![NewEvent::new("AccountClosed", json!({}))])
+    });
+    // #endregion close
+
+    let c = stage.clone(); // stage
+    // #region pay
+    account.command("Pay", move |state, data: Payment, cmd, _ctx| {
+        c.worker(&cmd.command_id, state); // stage
+        if data.amount > state.balance {
+            let message = format!("insufficient funds: the balance is {}", state.balance);
+            return Err(Rejected::new(message).code("insufficient_funds"));
+        }
+        Ok(vec![NewEvent::new("Paid", data)])
+    });
+    // The receiving account must be open when the payment commits: the kernel checks it.
+    account.requires("Pay", |_state, data: Payment| {
+        [Requirement::new("bank", "account", &data.to, "open")]
+    });
+    // #endregion pay
+
+    let c = stage.clone(); // stage
+    // #region credit
+    account.command("Credit", move |state, data: Amount, cmd, _ctx| {
+        c.worker(&cmd.command_id, state); // stage
+        if !state.open {
+            return Err(Rejected::new("the account is closed").code("closed"));
+        }
+        Ok(vec![NewEvent::new("Credited", data)])
+    });
+    // #endregion credit
+
     let accounts_readmodel = bank_domain.read_model("accounts");
 
     let (r, c) = (Arc::clone(&rows.accounts), stage.clone());
@@ -117,6 +232,7 @@ pub(super) fn bank(stage: &Recorder, rows: &Rows) -> Domain {
         let row = Row {
             owner: data.owner,
             balance: 0,
+            open: true,
         };
         lock(&r).insert(evt.aggregate_id, row);
         async { Ok(()) }
@@ -145,6 +261,39 @@ pub(super) fn bank(stage: &Recorder, rows: &Rows) -> Domain {
     });
     // #endregion project-withdrawn
 
+    let (r, c) = (Arc::clone(&rows.accounts), stage.clone());
+    // #region project-paid
+    accounts_readmodel.on("Paid", move |data: Payment, evt, _ctx| {
+        c.read_model(&evt.command_id); // stage
+        if let Some(row) = lock(&r).get_mut(&evt.aggregate_id) {
+            row.balance -= data.amount;
+        }
+        async { Ok(()) }
+    });
+    // #endregion project-paid
+
+    let (r, c) = (Arc::clone(&rows.accounts), stage.clone());
+    // #region project-credited
+    accounts_readmodel.on("Credited", move |data: Amount, evt, _ctx| {
+        c.read_model(&evt.command_id); // stage
+        if let Some(row) = lock(&r).get_mut(&evt.aggregate_id) {
+            row.balance += data.amount;
+        }
+        async { Ok(()) }
+    });
+    // #endregion project-credited
+
+    let (r, c) = (Arc::clone(&rows.accounts), stage.clone());
+    // #region project-closed
+    accounts_readmodel.on("AccountClosed", move |_: Value, evt, _ctx| {
+        c.read_model(&evt.command_id); // stage
+        if let Some(row) = lock(&r).get_mut(&evt.aggregate_id) {
+            row.open = false;
+        }
+        async { Ok(()) }
+    });
+    // #endregion project-closed
+
     #[derive(Deserialize)]
     struct GetAccount {
         id: String,
@@ -157,9 +306,6 @@ pub(super) fn bank(stage: &Recorder, rows: &Rows) -> Domain {
         async move { Ok(row.ok_or_else(|| Rejected::new("no such account").code("not_found"))?) }
     });
     // #endregion query
-
-    customers(&bank_domain, stage, rows);
-    bank_domain
 }
 
 // #region customer-state
@@ -278,6 +424,211 @@ fn customers(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
     });
 }
 
+// #region person-vault
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct Person {
+    onboarded: bool,
+    forgotten: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Onboarded {
+    name: Option<String>,
+    email: Option<String>,
+}
+// #endregion person-vault
+
+#[derive(Clone, Serialize)]
+pub(super) struct PersonRow {
+    name: Option<String>,
+    email: Option<String>,
+}
+
+/// The `person` aggregate, whose name and email are personal data in the vault, and the
+/// `people` read model.
+fn people(bank_domain: &Domain, stage: &Recorder, rows: &Rows) {
+    // #region personal
+    // Name and email go to the vault, encrypted per person; commands and events keep only
+    // references. Forgetting a person erases them everywhere at once.
+    bank_domain
+        .command("Onboard")
+        .personal(&["name", "email"], |_, id| id.to_owned());
+    bank_domain
+        .event("PersonOnboarded", 1)
+        .personal(&["name", "email"], |_, id| id.to_owned());
+    bank_domain
+        .event("PersonForgotten", 1)
+        .erases(|_, id| id.to_owned());
+    // #endregion personal
+
+    let person = bank_domain.aggregate("person", Person::default());
+    person.apply("PersonOnboarded", |state, _: Value, _evt, _ctx| {
+        state.onboarded = true
+    });
+    person.apply("PersonForgotten", |state, _: Value, _evt, _ctx| {
+        state.forgotten = true
+    });
+
+    let c = stage.clone(); // stage
+    // #region onboard
+    person.command("Onboard", move |state, data: Onboarded, cmd, _ctx| {
+        c.worker(&cmd.command_id, state); // stage
+        if state.onboarded {
+            return Err(Rejected::new("this person is onboarded already"));
+        }
+        // The handler gets the values in clear; the kernel stores them in the vault.
+        Ok(vec![NewEvent::new("PersonOnboarded", data)])
+    });
+    // #endregion onboard
+
+    let c = stage.clone(); // stage
+    // #region forget
+    person.command("Forget", move |state, _: Value, cmd, _ctx| {
+        c.worker(&cmd.command_id, state); // stage
+        if !state.onboarded || state.forgotten {
+            return Err(Rejected::new("no such person").code("not_found"));
+        }
+        Ok(vec![NewEvent::new("PersonForgotten", json!({}))])
+    });
+    // #endregion forget
+
+    let people_readmodel = bank_domain.read_model("people");
+
+    let (r, c) = (Arc::clone(&rows.people), stage.clone());
+    // #region project-onboarded
+    people_readmodel.on("PersonOnboarded", move |data: Onboarded, evt, _ctx| {
+        c.read_model(&evt.command_id); // stage
+        let row = PersonRow {
+            name: data.name,
+            email: data.email,
+        };
+        lock(&r).insert(evt.aggregate_id, row);
+        async { Ok(()) }
+    });
+    // #endregion project-onboarded
+
+    let (r, c) = (Arc::clone(&rows.people), stage.clone());
+    // #region project-forgotten
+    people_readmodel.on("PersonForgotten", move |_: Value, evt, _ctx| {
+        c.read_model(&evt.command_id); // stage
+        // Drop what the read model holds of the person; the vault forgot the rest.
+        lock(&r).remove(&evt.aggregate_id);
+        async { Ok(()) }
+    });
+    // #endregion project-forgotten
+
+    #[derive(Deserialize)]
+    struct GetPerson {
+        id: String,
+    }
+
+    let r = Arc::clone(&rows.people);
+    people_readmodel.query("GetPerson", move |data: GetPerson, _qry, _ctx| {
+        let row = lock(&r).get(&data.id).cloned();
+        async move { Ok(row.ok_or_else(|| Rejected::new("no such person").code("not_found"))?) }
+    });
+}
+
+/// The `payments` reactor: it credits the receiving account of every payment. The Stage can
+/// break it, to show an event it cannot handle parked.
+fn payments(bank_domain: &Domain, switches: &Switches) {
+    let broken = Arc::clone(&switches.payments_broken); // stage
+    // #region reactor
+    let payments_reactor = bank_domain.reactor("payments").park_after(1);
+    payments_reactor.on("Paid", move |data: Payment, evt, ctx| {
+        let broken = broken.load(SeqCst); // stage
+        async move {
+            if broken {
+                return Err("the payments service is down".into()); // stage
+            }
+            // A fixed ID: if the event comes again, the credit still happens once.
+            let credit = Submit::new("bank", "account", &data.to, "Credit")
+                .id(format!("credit-{}", evt.position))
+                .data(json!({ "amount": data.amount }));
+            ctx.submit(credit).await?;
+            Ok(())
+        }
+    });
+    // #endregion reactor
+}
+
+/// The `rbac` middleware: only tellers may withdraw.
+fn rbac(bank_domain: &Domain) {
+    // #region rbac
+    let rbac = bank_domain.read_model("rbac");
+    rbac.middleware(MiddlewareOptions::new(&["Withdraw"]), |check| async move {
+        // Before the command is queued: a refused one is never stored.
+        if check.request.sender_identity != "teller" {
+            let message = format!("{} may not withdraw", check.request.sender_identity);
+            return Err(Rejected::new(message).code("forbidden").into());
+        }
+        Ok(())
+    });
+    // #endregion rbac
+}
+
+/// The accounts read model built again from every event, by a subscription from position 0,
+/// until it has seen `head`; with an answer to a question the live one never asked: how much
+/// each account was paid in, in all.
+pub(super) async fn rebuild(
+    kernable: &Kernable,
+    head: u64,
+) -> Result<(BTreeMap<String, Row>, BTreeMap<String, i64>), BoxError> {
+    // #region rebuild
+    let rows: Arc<Mutex<BTreeMap<String, Row>>> = Arc::default();
+    let paid_in: Arc<Mutex<BTreeMap<String, i64>>> = Arc::default();
+    let (r, p) = (Arc::clone(&rows), Arc::clone(&paid_in));
+    let from_the_start = SubscribeOptions {
+        after: 0,
+        types: vec!["bank.*".into()],
+        ..Default::default()
+    };
+    let subscription = kernable.subscribe(from_the_start, move |e| {
+        let (r, p) = (Arc::clone(&r), Arc::clone(&p));
+        async move {
+            let (mut rows, id) = (lock(&r), e.aggregate_id.clone());
+            match e.event_type.as_str() {
+                "AccountOpened" => {
+                    let owner = e.parse::<Opened>()?.owner;
+                    let row = Row {
+                        owner,
+                        balance: 0,
+                        open: true,
+                    };
+                    rows.insert(id, row);
+                }
+                "Deposited" | "Credited" => {
+                    let amount = e.parse::<Amount>()?.amount;
+                    rows.entry(id.clone())
+                        .and_modify(|row| row.balance += amount);
+                    *lock(&p).entry(id).or_default() += amount;
+                }
+                "Withdrawn" => {
+                    let amount = e.parse::<Amount>()?.amount;
+                    rows.entry(id).and_modify(|row| row.balance -= amount);
+                }
+                "Paid" => {
+                    let amount = e.parse::<Payment>()?.amount;
+                    rows.entry(id).and_modify(|row| row.balance -= amount);
+                }
+                "AccountClosed" => {
+                    rows.entry(id).and_modify(|row| row.open = false);
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+    });
+    // #endregion rebuild
+    while subscription.position() < head {
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+    subscription.stop().await;
+    let rows = lock(&rows).clone();
+    let paid_in = lock(&paid_in).clone();
+    Ok((rows, paid_in))
+}
+
 /// What a step of the Stage sends, and what came back.
 pub(super) struct Sent {
     pub outcome: Result<Outcome, kernable::Error>,
@@ -292,11 +643,17 @@ pub(super) async fn send(
     command_id: &str,
     (aggregate, id, command): (&str, &str, &str),
     data: Value,
-    query: &str,
+    (query, who): (&str, &str),
 ) -> Sent {
     // #region client
+    // Who sends it: the request context travels signed with the command.
+    let who = RequestContext {
+        sender_identity: who.to_owned(),
+        ..Default::default()
+    };
     let submit = Submit::new("bank", aggregate, id, command)
         .id(command_id)
+        .context(who)
         .data(data);
     // Returns once every listener has the events: the query below already sees them.
     let outcome = kernable.submit(submit).await;

@@ -782,3 +782,129 @@ fn the_demo_runs_its_scene_resets_on_a_new_store_and_leaves_nothing_behind() {
     assert!(!base.exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Runs every step of the demo's scene `n`; returns the demo's state after the last.
+#[cfg(unix)]
+fn demo_scene(addr: &str, n: usize) -> serde_json::Value {
+    let (status, body) = demo_http(addr, "POST", &format!("/api/demo/scene?n={n}"), true);
+    assert_eq!(status, 200, "{body}");
+    let state = demo_idle(addr);
+    for _ in 0..state["scene"]["steps"].as_array().unwrap().len() {
+        let (status, body) = demo_http(addr, "POST", "/api/demo/next", true);
+        assert_eq!(status, 200, "{body}");
+        demo_idle(addr);
+    }
+    demo_state(addr)
+}
+
+/// What a step's commands came to: `committed` or `rejected:<code>` per command sent, the
+/// outcome of each command an action lists.
+#[cfg(unix)]
+fn demo_outcomes(trace: &serde_json::Value) -> Vec<String> {
+    let list = |key: &str| trace[key].as_array().cloned().unwrap_or_default();
+    if trace["kind"] == "act" {
+        return list("commands")
+            .iter()
+            .map(|c| c["outcome"].as_str().unwrap().to_owned())
+            .collect();
+    }
+    list("sends")
+        .iter()
+        .map(|s| match s["rejection"]["code"].as_str() {
+            Some(code) => format!("{}:{code}", s["outcome"].as_str().unwrap()),
+            None => s["outcome"].as_str().unwrap().to_owned(),
+        })
+        .collect()
+}
+
+/// Every badge an action's beats put on a node.
+#[cfg(unix)]
+fn demo_badges(trace: &serde_json::Value) -> Vec<String> {
+    trace["beats"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|b| b["badges"].as_array().unwrap().clone())
+        .filter_map(|b| b["text"].as_str().map(str::to_owned))
+        .collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn every_scene_of_the_demo_shows_what_it_says() {
+    let dir = temp_dir("demo-scenes");
+    let addr = free_addr();
+    let _demo = KillOnDrop::spawn(
+        Process::new(env!("CARGO_BIN_EXE_kernable"))
+            .current_dir(&dir)
+            .args(["demo", "--ui-listen", &addr])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    );
+    demo_idle(&addr);
+
+    // 3: a payment to a closed account is refused at the commit; the open one was credited.
+    let s = demo_scene(&addr, 3);
+    assert_eq!(
+        demo_outcomes(&s["traces"][3]),
+        ["rejected:requirement_missing"]
+    );
+    assert_eq!(s["rows"]["a2"]["balance"], 30, "the reactor credited a2");
+
+    // 4: 200 deposits into one account and into twenty, all committed.
+    let s = demo_scene(&addr, 4);
+    for t in s["traces"].as_array().unwrap() {
+        assert_eq!(demo_outcomes(t), ["committed"], "{t}");
+    }
+    assert_eq!(s["rows"]["h1"]["balance"], 2000);
+
+    // 5: kill -9 mid-way: nothing lost, nothing twice, the store intact.
+    let s = demo_scene(&addr, 5);
+    assert_eq!(demo_outcomes(&s["traces"][1]), ["committed"]);
+    let detail = s["traces"][1]["commands"][0]["detail"].as_str().unwrap();
+    assert!(detail.ends_with("0 lost, 0 twice"), "{detail}");
+    assert!(demo_badges(&s["traces"][2]).contains(&"intact".to_owned()));
+    for id in ["a1", "a2", "a3"] {
+        assert_eq!(s["rows"][id]["balance"], 100, "{id}");
+    }
+
+    // 6: one changed event, found by verify.
+    let s = demo_scene(&addr, 6);
+    assert!(demo_badges(&s["traces"][2]).contains(&"tampered".to_owned()));
+
+    // 7: Ada forgotten: her events stay, the vault holds nothing of her, the read model neither.
+    let s = demo_scene(&addr, 7);
+    assert!(s["rows"]["p1"].is_null() && !s["rows"]["p2"].is_null());
+    let (_, body) = demo_http(
+        &addr,
+        "GET",
+        "/api/history?tenant=default&domain=bank&type=person&id=p1",
+        false,
+    );
+    let history: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(history["events"].as_array().unwrap().len(), 2);
+    assert_eq!(history["vault"], serde_json::json!({}));
+    assert!(!body.contains("Ada"), "{body}");
+
+    // 8: the middleware refuses a customer, passes a teller, and fails closed while away.
+    let s = demo_scene(&addr, 8);
+    assert_eq!(demo_outcomes(&s["traces"][1]), ["rejected:forbidden"]);
+    assert_eq!(demo_outcomes(&s["traces"][2]), ["committed"]);
+    assert_eq!(demo_outcomes(&s["traces"][3]), ["rejected", "committed"]);
+    assert_eq!(s["rows"]["a1"]["balance"], 60);
+
+    // 9: the broken reactor's event parked, retried, credited once.
+    let s = demo_scene(&addr, 9);
+    assert_eq!(demo_outcomes(&s["traces"][4]), ["committed"]);
+    assert_eq!(s["rows"]["a2"]["balance"], 50);
+
+    // 10: the revoked key is refused, the app's key goes on.
+    let s = demo_scene(&addr, 10);
+    assert_eq!(demo_outcomes(&s["traces"][1]), ["committed"]);
+    assert_eq!(demo_outcomes(&s["traces"][2]), ["rejected", "committed"]);
+
+    // 11: a read model rebuilt from the events equals the live one.
+    let s = demo_scene(&addr, 11);
+    assert!(demo_badges(&s["traces"][1]).contains(&"equal".to_owned()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
