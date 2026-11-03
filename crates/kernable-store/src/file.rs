@@ -716,6 +716,31 @@ impl Store for FileStore {
         Ok(commands.into_iter().map(|(_, id)| id.clone()).collect())
     }
 
+    fn rejections(&self, limit: usize) -> Result<Vec<(Pending, Rejected)>> {
+        let inner = self.inner();
+        let mut rejected: Vec<(&Cmd, &Rejected)> = inner
+            .state
+            .commands
+            .values()
+            .filter_map(|c| match c.result.as_ref()?.outcome.as_ref()? {
+                Outcome::Rejected(r) => Some((c, r)),
+                _ => None,
+            })
+            .collect();
+        rejected.sort_by_key(|(c, _)| std::cmp::Reverse((c.received_at, c.seq)));
+        Ok(rejected
+            .into_iter()
+            .take(limit)
+            .map(|(c, r)| {
+                let pending = Pending {
+                    command: c.command.clone(),
+                    received_at: c.received_at,
+                };
+                (pending, r.clone())
+            })
+            .collect())
+    }
+
     fn command(&self, command_id: &str) -> Result<Option<Pending>> {
         Ok(self
             .inner()

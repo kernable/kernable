@@ -289,6 +289,9 @@ pub trait Store: Send + Sync {
     /// The IDs of every stored command, pending or completed, in the order they were stored.
     fn command_ids(&self) -> Result<Vec<String>>;
 
+    /// The `limit` most recently received rejected commands, newest first, each with why.
+    fn rejections(&self, limit: usize) -> Result<Vec<(Pending, Rejected)>>;
+
     /// Puts every write that returned before this call on the disk, if the store was opened
     /// with [`Durability::Full`]; concurrent calls share one flush (group commit). Call it
     /// before telling anyone about a write. An error means the store refuses every further

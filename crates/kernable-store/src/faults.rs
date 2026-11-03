@@ -241,6 +241,11 @@ impl Store for FaultyStore {
         self.inner.command_ids()
     }
 
+    fn rejections(&self, limit: usize) -> Result<Vec<(Pending, Rejected)>> {
+        self.faults.read()?;
+        self.inner.rejections(limit)
+    }
+
     fn event_schemas(&self) -> Result<Vec<(String, u32)>> {
         self.faults.read()?;
         self.inner.event_schemas()

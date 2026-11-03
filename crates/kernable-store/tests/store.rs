@@ -4,8 +4,8 @@ use std::{collections::HashSet, path::PathBuf, sync::Arc, thread};
 
 use kernable_core::proto::{
     AggregateIndex, Attribute, Command, Grant, ListenerRecord, Membership, MembershipRecord,
-    Middleware, NewEvent, ParkedEvent, Permission, Rejected, RequestContext, RevocationRecord,
-    Signature, StoredKey, When, WorkerRecord, command_result::Outcome,
+    Middleware, NewEvent, ParkedEvent, Permission, Rejected, RequestContext, Requirement,
+    RevocationRecord, Signature, StoredKey, When, WorkerRecord, command_result::Outcome,
 };
 use kernable_store::{Enqueued, Error, FileStore, SqliteStore, Store, StreamId};
 
@@ -159,6 +159,42 @@ fn reject_completes_command_without_events(store: &dyn Store) {
     let result = store.result("c1").unwrap().unwrap();
     assert_eq!(result.outcome, Some(Outcome::Rejected(reason)));
     assert!(versions(store).is_empty());
+}
+
+fn rejections_list_the_newest_first_with_why(store: &dyn Store) {
+    for (id, at) in [("c1", 10), ("c2", 20), ("c3", 30)] {
+        store.enqueue(&cmd(id, "PlaceOrder"), at).unwrap();
+    }
+    let early = Rejected {
+        code: "invalid_state".into(),
+        message: "no order".into(),
+        ..Default::default()
+    };
+    let late = Rejected {
+        code: "requirement_missing".into(),
+        message: "the customer is not active".into(),
+        key: "email".into(),
+        requirement: Some(Box::new(Requirement {
+            domain: "crm".into(),
+            aggregate_type: "Customer".into(),
+            fact: "active".into(),
+            ..Default::default()
+        })),
+    };
+    store.reject("c1", early.clone()).unwrap();
+    store.reject("c3", late.clone()).unwrap();
+
+    // c2 is still pending: not a rejection.
+    let all = store.rejections(10).unwrap();
+    let seen: Vec<(&str, i64, &Rejected)> = all
+        .iter()
+        .map(|(p, r)| (p.command.command_id.as_str(), p.received_at, r))
+        .collect();
+    assert_eq!(seen, [("c3", 30, &late), ("c1", 10, &early)]);
+    assert_eq!(all[0].0.command.command_type, "PlaceOrder");
+    let newest = store.rejections(1).unwrap();
+    assert_eq!(newest.len(), 1);
+    assert_eq!(newest[0].0.command.command_id, "c3");
 }
 
 fn listener(name: &str, order: i32, position: u64) -> ListenerRecord {
@@ -920,6 +956,7 @@ for_each_backend!(
     pending_lists_open_commands_in_submission_order,
     enqueue_is_idempotent,
     reject_completes_command_without_events,
+    rejections_list_the_newest_first_with_why,
     concurrent_threads_lose_no_updates,
     listeners_are_saved_replaced_and_removed,
     parked_events_change_only_with_their_flag,

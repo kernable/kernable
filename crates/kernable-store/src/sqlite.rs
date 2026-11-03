@@ -745,6 +745,43 @@ impl Store for SqliteStore {
         Ok(ids)
     }
 
+    fn rejections(&self, limit: usize) -> Result<Vec<(Pending, Rejected)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {COMMAND_COLUMNS}, created_at, rejected_code, rejected_message, rejected_key,
+                    rejected_requirement
+             FROM commands WHERE status = 'rejected'
+             ORDER BY created_at DESC, rowid DESC LIMIT ?1"
+        ))?;
+        let rows = stmt.query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |r| {
+            let pending = Pending {
+                command: command_from_row(r)?,
+                received_at: r.get(11)?,
+            };
+            let code: Option<String> = r.get(12)?;
+            let message: Option<String> = r.get(13)?;
+            let key: Option<String> = r.get(14)?;
+            let requirement: Option<Vec<u8>> = r.get(15)?;
+            Ok((pending, code, message, key, requirement))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (pending, code, message, key, requirement) = row?;
+            let requirement = requirement
+                .map(|bytes| Requirement::decode(bytes.as_slice()).map(Box::new))
+                .transpose()
+                .map_err(|e| Error::Corrupt(format!("a stored requirement: {e}")))?;
+            let reason = Rejected {
+                code: code.unwrap_or_default(),
+                message: message.unwrap_or_default(),
+                key: key.unwrap_or_default(),
+                requirement,
+            };
+            out.push((pending, reason));
+        }
+        Ok(out)
+    }
+
     fn command(&self, command_id: &str) -> Result<Option<Pending>> {
         Ok(self
             .conn()
