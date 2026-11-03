@@ -50,3 +50,7 @@ required-features = ["crash-points"]
 [[test]]
 name = "replication_crashes"
 required-features = ["crash-points"]
+
+[[test]]
+name = "move_crashes"
+required-features = ["crash-points"]

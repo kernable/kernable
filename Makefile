@@ -20,6 +20,8 @@ check: prune py
 	CARGO_TARGET_DIR=target/crash KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --features crash-points --test crashes
 	CARGO_TARGET_DIR=target/crash cargo test -p kernable-kernel --features crash-points --test replication_crashes
 	CARGO_TARGET_DIR=target/crash KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --features crash-points --test replication_crashes
+	CARGO_TARGET_DIR=target/crash cargo test -p kernable-kernel --features crash-points --test move_crashes
+	CARGO_TARGET_DIR=target/crash KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --features crash-points --test move_crashes
 	cargo build --workspace
 	cd sdks/typescript && npm install --no-audit --no-fund --silent && npm run -s check \
 		&& KERNABLE_TEST_STORE=file npm run -s check

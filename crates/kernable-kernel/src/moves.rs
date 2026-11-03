@@ -339,6 +339,8 @@ fn export(
 /// What an import gathered: the latest index per stream (for the global keys) and the streams.
 #[derive(Default)]
 struct Imported {
+    /// The stream of each command the source sent.
+    streams: HashMap<String, StreamId>,
     indexes: HashMap<StreamId, AggregateIndex>,
 }
 
@@ -382,9 +384,25 @@ fn apply(
                     )
                     .into());
                 }
+                imported.streams.insert(
+                    cmd.command_id.clone(),
+                    StreamId {
+                        tenant_id: cmd.tenant_id.clone(),
+                        domain: cmd.domain.clone(),
+                        aggregate_type: cmd.aggregate_type.clone(),
+                        aggregate_id: cmd.aggregate_id.clone(),
+                    },
+                );
                 store.enqueue(&cmd, e.created_at)?;
+                crate::crash::point("move.enqueued");
             }
             Record::Committed(c) => {
+                // What each stream holds, also of commits copied before: the global keys move
+                // with the tenant however often the copy started.
+                if let (Some(index), Some(stream)) = (&c.index, imported.streams.get(&c.command_id))
+                {
+                    imported.indexes.insert(stream.clone(), index.clone());
+                }
                 if store.result(&c.command_id)?.is_some() {
                     continue; // copied before, or committed here before the tenant moved away
                 }
@@ -417,24 +435,14 @@ fn apply(
                     ),
                     None => (0, Signature::default(), now_ms()),
                 };
-                let committed =
-                    match store.commit(&c.command_id, expected, &new, &sig, c.index.as_ref(), at) {
-                        // A commit without events stands at whatever version its stream has.
-                        Err(StoreError::VersionConflict { actual, .. }) if new.is_empty() => {
-                            store.commit(&c.command_id, actual, &new, &sig, c.index.as_ref(), at)?
-                        }
-                        other => other?,
-                    };
-                if let (Some(index), Some(e)) = (&c.index, committed.first()) {
-                    imported.indexes.insert(
-                        StreamId {
-                            tenant_id: e.tenant_id.clone(),
-                            domain: e.domain.clone(),
-                            aggregate_type: e.aggregate_type.clone(),
-                            aggregate_id: e.aggregate_id.clone(),
-                        },
-                        index.clone(),
-                    );
+                match store.commit(&c.command_id, expected, &new, &sig, c.index.as_ref(), at) {
+                    // A commit without events stands at whatever version its stream has.
+                    Err(StoreError::VersionConflict { actual, .. }) if new.is_empty() => {
+                        store.commit(&c.command_id, actual, &new, &sig, c.index.as_ref(), at)?;
+                    }
+                    other => {
+                        other?;
+                    }
                 }
             }
             Record::Rejected(r) => {
@@ -483,6 +491,7 @@ async fn import(kernel: &Arc<Kernel>, map: &PartitionMap, m: &TenantMove) -> Res
     })
     .await??;
     // The index caches nothing of the tenant's streams any more.
+    crate::crash::point("move.copied");
     let streams: Vec<StreamId> = imported.indexes.keys().cloned().collect();
     kernel.index().erased(&streams);
     let global_keys: Vec<Vec<u8>> = imported
@@ -512,6 +521,7 @@ async fn import(kernel: &Arc<Kernel>, map: &PartitionMap, m: &TenantMove) -> Res
             )
             .await?;
     }
+    crate::crash::point("move.handed");
     let record = TenantImportedRecord {
         tenant: m.tenant.clone(),
         from: m.from.clone(),
@@ -584,6 +594,7 @@ pub(crate) async fn follow_moves(kernel: &Arc<Kernel>) {
                         if streams > 0 {
                             k.sync(0);
                             k.index().forget_tenant(&t);
+                            crate::crash::point("move.dropped");
                         }
                         let values = match &k.vault {
                             Some(vault) => vault.drop_tenant(&t)?,

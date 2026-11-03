@@ -711,3 +711,165 @@ async fn a_tenant_moves_with_its_events_and_global_keys_and_back() {
         assert!(violations.is_empty(), "{}: {violations:?}", env.store);
     }
 }
+
+/// Clients keep writing to a tenant while it moves: every command a client was told about is
+/// on the target exactly once, each aggregate's versions are whole, and both logs keep every
+/// invariant.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tenant_moves_while_clients_write_to_it() {
+    let p1 = start_custom("mvl-p1", |config, dir| {
+        config.partition = Some(PartitionConfig {
+            name: "p1".into(),
+            control: None,
+            node_key: node_key(dir),
+        });
+    })
+    .await;
+    let p1_addr = p1.addr.clone();
+    let p2 = start_custom("mvl-p2", |config, dir| {
+        config.partition = Some(PartitionConfig {
+            name: "p2".into(),
+            control: Some(p1_addr.clone()),
+            node_key: node_key(dir),
+        });
+    })
+    .await;
+    for env in [&p1, &p2] {
+        env.kernel
+            .grant(grant(&key(13), &[("replicate", &["*"])]))
+            .unwrap();
+    }
+    apply_map(&p1.addr, map(1, &p1.addr, &p2.addr))
+        .await
+        .unwrap();
+    until("p2 holds the map", async || {
+        map_of(&p2.addr).await.is_some()
+    })
+    .await;
+    spawn_worker(&p1).await;
+    spawn_worker(&p2).await;
+
+    let sdk_key = p1.dir.join("sdk.key");
+    std::fs::write(&sdk_key, hex(key(1).as_bytes())).unwrap();
+    std::fs::write(
+        p1.dir.join("sdk.grant"),
+        hex(&default_grant(&key(1)).unwrap().encode_to_vec()),
+    )
+    .unwrap();
+    std::fs::write(p1.dir.join("ops.key"), hex(key(1).as_bytes())).unwrap();
+    std::fs::copy(p1.dir.join("sdk.grant"), p1.dir.join("ops.grant")).unwrap();
+    let sdk = kernable::Kernable::new(kernable::Options::new(&sdk_key).url(&p1.addr)).unwrap();
+
+    // Four clients, each on an order of t1, one command after the other until told to stop.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut clients = Vec::new();
+    for c in 0..4 {
+        let (sdk, stop) = (sdk.clone(), std::sync::Arc::clone(&stop));
+        clients.push(tokio::spawn(async move {
+            let mut told: Vec<(String, u64)> = Vec::new();
+            let mut n = 0;
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) || n < 3 {
+                let (id, kind) = (
+                    format!("c{c}-{n}"),
+                    if n == 0 { "PlaceOrder" } else { "AddItem" },
+                );
+                // The same command again until it is answered: commands are idempotent by ID.
+                let outcome = loop {
+                    match sdk
+                        .submit(
+                            kernable::Submit::new("orders", "Order", &format!("o{c}"), kind)
+                                .tenant("t1")
+                                .id(&id)
+                                .data(serde_json::json!({}))
+                                .wait(kernable::Wait::Committed),
+                        )
+                        .await
+                    {
+                        Ok(outcome) => break outcome,
+                        Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+                    }
+                };
+                let events = outcome.events().to_vec();
+                assert_eq!(events.len(), 1, "{id}: {outcome:?}");
+                told.push((id, events[0].version));
+                n += 1;
+            }
+            told
+        }));
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let args = [
+        "partitions".to_owned(),
+        "move".into(),
+        p1.addr.clone(),
+        p1.dir.join("ops.key").display().to_string(),
+        "t1".into(),
+        "p2".into(),
+    ];
+    let out = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(env!("CARGO_BIN_EXE_kernable"))
+            .args(&args)
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut told = Vec::new();
+    for client in clients {
+        told.extend(client.await.unwrap());
+    }
+
+    // On p2: every told command once, at the version it was told; versions whole per order.
+    let p2_store = kernable_store::open_read_only(&p2.store).unwrap();
+    let t1: Vec<_> = p2_store
+        .read_all(0, 100_000)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.tenant_id == "t1")
+        .collect();
+    let mut by_command = std::collections::HashMap::new();
+    for e in &t1 {
+        assert!(
+            by_command.insert(e.command_id.clone(), e.version).is_none(),
+            "{} twice",
+            e.command_id
+        );
+    }
+    for (id, version) in &told {
+        assert_eq!(by_command.get(id), Some(version), "{id}");
+    }
+    for c in 0..4 {
+        let versions: Vec<u64> = t1
+            .iter()
+            .filter(|e| e.aggregate_id == format!("o{c}"))
+            .map(|e| e.version)
+            .collect();
+        assert_eq!(
+            versions,
+            (1..=versions.len() as u64).collect::<Vec<_>>(),
+            "o{c}"
+        );
+    }
+    let copied = t1.iter().filter(|e| !e.origin_partition.is_empty()).count();
+    assert!(
+        copied > 0 && copied < t1.len(),
+        "some copied, some written on p2: {copied} of {}",
+        t1.len()
+    );
+    drop(p2_store);
+    for env in [&p1, &p2] {
+        let store = kernable_store::open_read_only(&env.store).unwrap();
+        let log =
+            kernable_store::invariants::Log::read(store.as_ref(), &[id(&env.kernel_key)]).unwrap();
+        let violations = log.check();
+        assert!(violations.is_empty(), "{}: {violations:?}", env.store);
+    }
+}

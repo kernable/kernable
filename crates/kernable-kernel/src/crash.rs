@@ -32,6 +32,14 @@ pub const REPLICATION_POINTS: &[&str] = &[
     "standby.imaging",  // the standby applied part of an image
 ];
 
+/// The crash points of moving a tenant: on the target, and on the source.
+pub const MOVE_POINTS: &[&str] = &[
+    "move.enqueued", // the target stored a copied command, not its events
+    "move.copied",   // the target copied everything, the control partition does not know
+    "move.handed", // the control partition handed over the global keys, the target has not noted the move
+    "move.dropped", // the source dropped the tenant's keys, not its vault values and files
+];
+
 #[cfg(feature = "crash-points")]
 pub(crate) fn point(name: &str) {
     use std::sync::OnceLock;
@@ -39,7 +47,8 @@ pub(crate) fn point(name: &str) {
     debug_assert!(
         POINTS.contains(&name)
             || STATE_POINTS.contains(&name)
-            || REPLICATION_POINTS.contains(&name),
+            || REPLICATION_POINTS.contains(&name)
+            || MOVE_POINTS.contains(&name),
         "unknown crash point {name}"
     );
     if AT
