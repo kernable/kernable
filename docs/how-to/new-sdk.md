@@ -74,7 +74,7 @@ If the worker meets an event with a newer schema than it knows, it must not reje
 
 ## 5. Listeners
 
-Open `ListenerService.Listen` and send `Hello`: `name`, `key_id`, `order`, qualified `event_types` and `query_types`, `middlewares` (at most one per `when`: `order`, types, `WHEN_BEFORE` or `WHEN_AFTER`), `service`, `live`, `protocol`, and `from_position` only when you want to start somewhere else than the stored position (on a reconnect, or for a read model with its own store). Answer the challenge, then wait for `Ready`: events up to `head_position` are a replay.
+Open `ListenerService.Listen` and send `Hello`: `name`, `key_id`, `order`, qualified `event_types` and `query_types`, `middlewares` (at most one per `when`: `order`, types, `WHEN_BEFORE` or `WHEN_AFTER`), `service`, `live`, `protocol`, `instance` and `single` ([instances](./instances): take `instance` from `KERNABLE_INSTANCE` unless the listener names one; `single` defaults to true for reactors, false for read models, and is never set without an instance or for a live listener), and `from_position` only when you want to start somewhere else than the stored position (on a reconnect, or for a read model with its own store). Answer the challenge, then wait for `Ready`: events up to `head_position` are a replay. An instance of a single group may get `Waiting` instead while another instance is active: count it as started (it must not hold up the process), log the active instance, and keep the stream open; `Ready` follows when it takes over. Resume from the last handled position only after a `Ready`: an instance that only waited has none, and must not send `from_position` 0 for a reactor.
 
 Handle the deliveries **one at a time, in order**:
 

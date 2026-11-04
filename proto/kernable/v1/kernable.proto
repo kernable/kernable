@@ -640,6 +640,7 @@ message ListenerDelivery {
     // Also in order with the batches; sent only once the listener has caught up with the
     // events committed before it connected.
     MiddlewareCall check = 5;
+    Waiting waiting = 6; // instead of Ready, while another instance of a single group is active
   }
 }
 
@@ -738,6 +739,25 @@ message Hello {
   // reactions that only matter while the process runs. Cannot be a middleware, nor use the
   // name of a registered listener.
   bool live = 10;
+  // One of several processes that run this listener under one name, e.g. a read model on
+  // each node of a pair: 1 to 128 letters, digits, `-`, `_` and `.`, unique in the group. Empty:
+  // the only one, and a second connection of the name is refused. The group counts for
+  // readiness, settling and the order of delivery as one listener: through an event once one
+  // instance acknowledged it, ready once one instance has caught up. Every instance of a group
+  // must agree on `single`.
+  string instance = 11;
+  // With `instance`: one instance at a time gets events, so a reactor's side effects happen
+  // once; the others get `Waiting`, and the first of them takes over after the group's position
+  // when the active one leaves. Without: every instance gets every event, from its own position,
+  // and queries and checks go to any instance that has reached what they need; such an instance
+  // cannot park events. Not for live listeners.
+  bool single = 12;
+}
+
+// Another instance of the same `single` group is active; this one gets `Ready` and its
+// deliveries when it takes over.
+message Waiting {
+  string active = 1; // the active instance
 }
 
 // The kernel accepted the listener; deliveries follow.

@@ -778,7 +778,7 @@ class Domain:
 
     def read_model(self, name: str, *, order: int = 0, start: int | None = 0, reconnect_s: float = 1.0,
                    store: str | None = None, schema: str = "1", live: bool = False,
-                   park_after: int = 0) -> "Listener":
+                   park_after: int = 0, instance: str | None = None, single: bool = False) -> "Listener":
         """A read model of this domain named `name`: builds a view from events and answers
         queries from it (`on`, `query`; see `Listener`). Kept in memory and rebuilt from the
         first event on every start (default). Run it with `kernable.listener(read_model)` or in
@@ -794,14 +794,21 @@ class Domain:
         `store`: data and position are written together per batch, and a restart continues after
         the stored position. Change `schema` when the handlers store data differently: the store is
         cleared and the read model rebuilds from the first event. `live` and `park_after` (default
-        0: never; a read model that parks misses the event's change): see `reactor`. Raises
-        `ValueError` if the domain has a listener (read model or reactor) of that name already."""
+        0: never; a read model that parks misses the event's change): see `reactor`.
+
+        `instance`: runs this process's read model as one instance of a group under its name,
+        e.g. one per node of a pair (1 to 128 letters, digits, `-`, `_` and `.`; default
+        `KERNABLE_INSTANCE`, which `kernable node` sets; without either, the name has one
+        connection). Every instance gets every event, from its own position, and answers
+        queries; the group is through an event once one instance has handled it. `single`: see
+        `reactor`. Raises `ValueError` if the domain has a listener (read model or reactor) of
+        that name already."""
         return self._listener(Listener(self, name, order, start, reconnect_s, store, schema, live=live,
-                                       park_after=park_after))
+                                       park_after=park_after, instance=instance, single=single))
 
     def reactor(self, name: str, *, order: int = 10, start: int | None = None, reconnect_s: float = 1.0,
                 store: str | None = None, schema: str = "1", live: bool = False,
-                park_after: int = _PARK_AFTER) -> "Listener":
+                park_after: int = _PARK_AFTER, instance: str | None = None, single: bool = True) -> "Listener":
         """A reactor of this domain named `name`: triggers side effects and follow-up commands
         (`on`; see `Listener`). It starts at the newest event when it is new, then resumes after
         the last acknowledged event (`start=None`, default), so it never reacts to what happened
@@ -826,9 +833,15 @@ class Domain:
         `live`: not registered with the kernel: no stored position, always starts at the newest
         event, nobody waits for it, and it is forgotten when it disconnects. For reactions that
         only matter while the process runs, e.g. pushing to connected browsers. Cannot be a
-        middleware. Raises `ValueError` if the domain has a listener of that name already."""
+        middleware.
+
+        `instance`: see `read_model`. `single` (default `True` for reactors): the instances take
+        turns: one gets events, the others wait and the first of them takes over when it leaves,
+        so a side effect happens once. `False`: every instance gets every event; such a listener
+        cannot park events. Live listeners are never single. Raises `ValueError` if the domain
+        has a listener of that name already."""
         return self._listener(Listener(self, name, order, start, reconnect_s, store, schema, live=live,
-                                       park_after=park_after))
+                                       park_after=park_after, instance=instance, single=single))
 
     def _listener(self, listener: "Listener") -> "Listener":
         if any(l.name == listener.name for l in self.listeners):
@@ -2423,8 +2436,13 @@ class Listener:
     safe to use as state there; guard state that other threads also touch."""
 
     def __init__(self, domain: Domain, name: str, order: int, start: int | None, reconnect_s: float,
-                 store: str | None = None, schema: str = "1", *, live: bool = False, park_after: int = 0):
+                 store: str | None = None, schema: str = "1", *, live: bool = False, park_after: int = 0,
+                 instance: str | None = None, single: bool = False):
         """Use `Domain.read_model` or `Domain.reactor`."""
+        #: The instance ID it connects with (`None`: `KERNABLE_INSTANCE`, else none); see `Domain.read_model`.
+        self.instance = instance
+        #: Whether the instances take turns; see `Domain.reactor`.
+        self.single = single
         #: Attempts before an event its handler keeps failing on is parked; 0: never.
         self.park_after = park_after
         #: The domain the listener belongs to: unqualified type names are its types.
@@ -2637,13 +2655,16 @@ class ListenerHandle(_Stream):
 
     def _hello(self):
         d = self.listener
+        instance = d.instance if d.instance is not None else os.environ.get("KERNABLE_INSTANCE", "")
         hello = pb.Hello(name=d.name, key_id=self._key.id, protocol=PROTOCOL, order=d.order,
                          event_types=list(d._handlers),
                          query_types=list(d._queries),
                          middlewares=[spec for spec, _ in d._middlewares.values()], live=d.live,
-                         service=self._service)
-        # Reconnects resume after the last handled event.
-        start = self.position if self.ready.is_set() else self._start
+                         service=self._service, instance=instance,
+                         single=bool(instance) and d.single and not d.live)
+        # Reconnects resume after the last handled event, once the kernel sent one (an instance
+        # that only waited has none).
+        start = self.position if self._connects > 0 else self._start
         self._sent_start = start
         if start is not None:
             hello.from_position = start
@@ -2670,6 +2691,10 @@ class ListenerHandle(_Stream):
                 self._parent._advanced(self._part, msg.ready.after_position)
             self._replay_up_to = msg.ready.head_position
             self._log_connected(msg.ready.after_position)
+            self.ready.set()
+        elif kind == "waiting":
+            # Another instance runs the group: this one is ready to take over.
+            self._log.print("info", self._what, f"waiting: instance {msg.waiting.active} is active")
             self.ready.set()
         elif kind == "batch":
             # A kernel that goes back (a bug, or not the kernel) must not make a store apply

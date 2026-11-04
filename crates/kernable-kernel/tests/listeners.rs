@@ -121,6 +121,9 @@ struct Opts {
     service: &'static str,
     live: bool,
     middlewares: Vec<Middleware>,
+    /// `Hello.instance` and `Hello.single`.
+    instance: &'static str,
+    single: bool,
 }
 
 fn opts(order: i32) -> Opts {
@@ -133,6 +136,17 @@ fn opts(order: i32) -> Opts {
         service: "",
         live: false,
         middlewares: Vec::new(),
+        instance: "",
+        single: false,
+    }
+}
+
+/// Options of the instance `instance` of a replicated (or `single`) group.
+fn instance(instance: &'static str, single: bool) -> Opts {
+    Opts {
+        instance,
+        single,
+        ..opts(0)
     }
 }
 
@@ -142,6 +156,18 @@ fn of(service: &'static str) -> Opts {
 }
 
 async fn listen(env: &Env, name: &str, o: Opts) -> Result<Listener, Status> {
+    let mut l = connect(env, name, o).await?;
+    match l.inbound.message().await?.and_then(|m| m.msg) {
+        Some(Out::Ready(r)) => {
+            l.start = r.after_position;
+            Ok(l)
+        }
+        other => panic!("expected Ready, got {other:?}"),
+    }
+}
+
+/// Connects and answers the challenge; the next message is Ready or Waiting.
+async fn connect(env: &Env, name: &str, o: Opts) -> Result<Listener, Status> {
     let (tx, rx) = mpsc::channel(16);
     let hello = In::Hello(Hello {
         protocol: kernable_core::PROTOCOL,
@@ -153,6 +179,8 @@ async fn listen(env: &Env, name: &str, o: Opts) -> Result<Listener, Status> {
         service: o.service.into(),
         live: o.live,
         middlewares: o.middlewares,
+        instance: o.instance.into(),
+        single: o.single,
         ..Default::default()
     });
     tx.send(ListenerMessage { msg: Some(hello) }).await.unwrap();
@@ -161,23 +189,19 @@ async fn listen(env: &Env, name: &str, o: Opts) -> Result<Listener, Status> {
         .listen(ReceiverStream::new(rx))
         .await?
         .into_inner();
-    loop {
-        match inbound.message().await?.and_then(|m| m.msg) {
-            Some(Out::Challenge(c)) => {
-                let sig = signing::sign(&o.signer, &signing::challenge_message(&c.nonce)).sig;
-                let msg = In::ChallengeResponse(ChallengeResponse { sig });
-                tx.send(ListenerMessage { msg: Some(msg) }).await.unwrap();
-            }
-            Some(Out::Ready(r)) => {
-                return Ok(Listener {
-                    acks: tx,
-                    inbound,
-                    start: r.after_position,
-                });
-            }
-            other => panic!("unexpected handshake message {other:?}"),
+    match inbound.message().await?.and_then(|m| m.msg) {
+        Some(Out::Challenge(c)) => {
+            let sig = signing::sign(&o.signer, &signing::challenge_message(&c.nonce)).sig;
+            let msg = In::ChallengeResponse(ChallengeResponse { sig });
+            tx.send(ListenerMessage { msg: Some(msg) }).await.unwrap();
         }
+        other => panic!("unexpected handshake message {other:?}"),
     }
+    Ok(Listener {
+        acks: tx,
+        inbound,
+        start: 0,
+    })
 }
 
 fn spawn_submit(env: &Env, id: &str, command_type: &str) -> JoinHandle<CommandResult> {
@@ -976,4 +1000,98 @@ async fn a_settling_submit_stops_waiting_for_a_listener_its_membership_drops() {
         started.elapsed() < Duration::from_secs(3),
         "woken, not timed out"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_instance_of_a_replicated_listener_gets_every_event_and_one_ack_settles() {
+    let env = start("listener-replicated").await;
+    spawn_worker(&env).await;
+    let mut a = listen(&env, "reports", instance("node-a", false))
+        .await
+        .unwrap();
+    let mut b = listen(&env, "reports", instance("node-b", false))
+        .await
+        .unwrap();
+    let first = spawn_submit(&env, "c1", "PlaceOrder");
+    assert_eq!(positions(&a.next().await), [1]);
+    assert_eq!(positions(&b.next().await), [1]);
+    a.ack(1).await;
+    assert!(settled(&first.await.unwrap()), "one instance is enough");
+
+    // node-a goes away: node-b keeps the group going.
+    drop(a);
+    let second = spawn_submit(&env, "c2", "AddItem");
+    assert_eq!(positions(&b.next().await), [2]);
+    b.ack(2).await;
+    assert!(settled(&second.await.unwrap()));
+
+    // node-a comes back from its own position (its store), and gets what it missed.
+    let back = Opts {
+        from: Some(1),
+        ..instance("node-a", false)
+    };
+    let mut a = listen(&env, "reports", back).await.unwrap();
+    assert_eq!(a.start, 1);
+    assert_eq!(positions(&a.next().await), [2]);
+    b.nothing_for(200).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn one_instance_of_a_single_listener_runs_and_the_next_takes_over() {
+    let env = start("listener-single").await;
+    spawn_worker(&env).await;
+    let mut a = listen(&env, "mailer", instance("node-a", true))
+        .await
+        .unwrap();
+    let mut b = connect(&env, "mailer", instance("node-b", true))
+        .await
+        .unwrap();
+    match b.inbound.message().await.unwrap().and_then(|m| m.msg) {
+        Some(Out::Waiting(w)) => assert_eq!(w.active, "node-a"),
+        other => panic!("expected Waiting, got {other:?}"),
+    }
+    let first = spawn_submit(&env, "c1", "PlaceOrder");
+    assert_eq!(positions(&a.next().await), [1]);
+    a.ack(1).await;
+    assert!(settled(&first.await.unwrap()));
+    b.nothing_for(200).await;
+
+    // node-a dies: node-b takes over after the group's position, so 1 is not sent again.
+    drop(a);
+    match tokio::time::timeout(Duration::from_secs(2), b.inbound.message()).await {
+        Ok(Ok(Some(m))) => match m.msg {
+            Some(Out::Ready(r)) => assert_eq!(r.after_position, 1),
+            other => panic!("expected Ready, got {other:?}"),
+        },
+        other => panic!("no takeover within 2 s: {other:?}"),
+    }
+    let second = spawn_submit(&env, "c2", "AddItem");
+    assert_eq!(positions(&b.next().await), [2]);
+    b.ack(2).await;
+    assert!(settled(&second.await.unwrap()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn instances_are_checked() {
+    let env = start("listener-instances").await;
+    let _a = listen(&env, "reports", instance("node-a", false))
+        .await
+        .unwrap();
+    let refused = |r: Result<Listener, Status>| r.err().map(|s| (s.code(), s.message().to_owned()));
+    let (code, _) = refused(listen(&env, "reports", instance("node-a", false)).await).unwrap();
+    assert_eq!(code, Code::AlreadyExists, "the same instance twice");
+    let (code, message) = refused(listen(&env, "reports", instance("node-b", true)).await).unwrap();
+    assert_eq!(code, Code::FailedPrecondition);
+    assert!(message.contains("disagree on single"), "{message}");
+    let (code, _) = refused(listen(&env, "reports", opts(0)).await).unwrap();
+    assert_eq!(code, Code::AlreadyExists, "no instance next to instances");
+    let single_alone = Opts {
+        single: true,
+        ..opts(0)
+    };
+    let (code, _) = refused(listen(&env, "mailer", single_alone).await).unwrap();
+    assert_eq!(code, Code::InvalidArgument, "single needs an instance");
+    let bad = instance("no spaces", false);
+    let (code, _) = refused(listen(&env, "mailer", bad).await).unwrap();
+    assert_eq!(code, Code::InvalidArgument);
 }

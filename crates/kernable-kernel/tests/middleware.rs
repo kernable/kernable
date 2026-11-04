@@ -180,7 +180,7 @@ fn middleware(env: &Env, spec: Spec, log: &Log) -> (JoinHandle<tonic::Status>, m
                 Out::Challenge(c) => In::ChallengeResponse(ChallengeResponse {
                     sig: signing::sign(&spec.key, &signing::challenge_message(&c.nonce)).sig,
                 }),
-                Out::Ready(_) => continue,
+                Out::Ready(_) | Out::Waiting(_) => continue,
                 Out::Batch(b) => {
                     seen += b.events.len();
                     if !spec.acks {

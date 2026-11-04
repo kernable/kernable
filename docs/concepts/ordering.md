@@ -35,6 +35,8 @@ Not every listener holds the others back. Those that **count** decide when highe
 
 A **middleware** counts like a listener and fails closed besides: while it is away, what it checks is refused.
 
+A listener that runs as several **instances** (one per machine, [Run a listener on several machines](../how-to/instances)) counts once: it is through an event once one instance has processed it, and caught up once one instance has, so an instance that is gone or rebuilding holds nothing back. A query goes to an instance that has reached its `min_position`.
+
 ## When a listener is slow or stuck
 
 A listener that counts and does not acknowledge holds things up, on purpose, rather than letting a reader see an incomplete state:

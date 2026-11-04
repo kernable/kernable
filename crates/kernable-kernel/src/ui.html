@@ -363,6 +363,7 @@ function details(n) {
     for (const m of i.middlewares ?? []) row(`checks ${m.when}`, `${m.types.join(", ")} (order ${m.order})`);
     if (i.position !== undefined) row("position", `${i.position} of ${state.kernel.head}`);
     row("connected", i.connected ? `since ${ago(i.since)}` : i.lastSeen ? `no, last seen ${ago(i.lastSeen)}` : "no");
+    if (i.instances?.length) row(`instances · ${i.single ? "single" : "replicated"}`, i.instances.map((n) => `${n.id}: position ${n.position}, since ${ago(n.since)}`).join("\n"));
     row("counts", i.counts === undefined ? undefined : i.counts ? "yes: others wait for it" : "no");
     row("key", short(i.key));
     if (i.parked) {

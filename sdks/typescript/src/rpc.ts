@@ -211,6 +211,8 @@ export interface WireQueryResult {
 export interface ListenerDelivery {
   challenge?: { nonce: Buffer } | null;
   ready?: { after_position: number; head_position: number } | null;
+  /** Instead of `ready`, while another instance of a single group is active. */
+  waiting?: { active: string } | null;
   batch?: { events: WireEvent[]; up_to: number; vault: WireVaultValue[]; retries?: WireEvent[] } | null;
   query?: { call_id: string; query: WireQueryRequest } | null;
   check?: {
@@ -246,6 +248,8 @@ export type ListenerMessage =
         middlewares: { order: number; types: string[]; when: number }[];
         service: string;
         live: boolean;
+        instance: string;
+        single: boolean;
       };
     }
   | { challenge_response: { sig: Buffer } }

@@ -177,7 +177,7 @@ impl Domain {
     ///
     /// If the domain has a read model or reactor named `name` already.
     pub fn read_model(&self, name: &str) -> Listener {
-        self.remember(Listener::new(self, name, 0, Some(0), 0))
+        self.remember(Listener::new(self, name, 0, Some(0), 0, false))
     }
 
     /// A reactor of this domain named `name`: triggers side effects and follow-up commands; see
@@ -198,6 +198,7 @@ impl Domain {
             10,
             None,
             crate::listener::PARK_AFTER,
+            true,
         ))
     }
 

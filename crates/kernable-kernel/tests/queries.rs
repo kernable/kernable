@@ -58,7 +58,7 @@ fn read_model(env: &Env, name: &str, key: SigningKey, ack: bool) -> JoinHandle<t
                 Out::Challenge(c) => In::ChallengeResponse(ChallengeResponse {
                     sig: signing::sign(&key, &signing::challenge_message(&c.nonce)).sig,
                 }),
-                Out::Ready(_) => continue,
+                Out::Ready(_) | Out::Waiting(_) => continue,
                 Out::Batch(b) => {
                     count += b.events.len();
                     if !ack {

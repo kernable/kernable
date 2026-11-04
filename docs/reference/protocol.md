@@ -675,6 +675,7 @@ From the kernel; exactly one field is set.
 | `batch` |  `Batch` | 3 |  |
 | `query` |  `QueryCall` | 4 | Delivered in order with the batches: the answer reflects every batch sent before it. |
 | `check` |  `MiddlewareCall` | 5 | Also in order with the batches; sent only once the listener has caught up with the events committed before it connected. |
+| `waiting` |  `Waiting` | 6 | instead of Ready, while another instance of a single group is active |
 
 ### QueryCall
 
@@ -757,6 +758,17 @@ connections; it counts (see Membership) also while disconnected.
 | `protocol` |  `uint32` | 8 |  |
 | `service` |  `string` | 9 | The service this listener belongs to; its membership (see `Membership`) decides whether it counts and whether it may be a middleware. Empty: no service, it always counts. |
 | `live` |  `bool` | 10 | Not registered: no stored position, starts at the newest event, does not count for readiness, settling or the order of delivery, and is forgotten when it disconnects. For reactions that only matter while the process runs. Cannot be a middleware, nor use the name of a registered listener. |
+| `instance` |  `string` | 11 | One of several processes that run this listener under one name, e.g. a read model on each node of a pair: 1 to 128 letters, digits, `-`, `_` and `.`, unique in the group. Empty: the only one, and a second connection of the name is refused. The group counts for readiness, settling and the order of delivery as one listener: through an event once one instance acknowledged it, ready once one instance has caught up. Every instance of a group must agree on `single`. |
+| `single` |  `bool` | 12 | With `instance`: one instance at a time gets events, so a reactor's side effects happen once; the others get `Waiting`, and the first of them takes over after the group's position when the active one leaves. Without: every instance gets every event, from its own position, and queries and checks go to any instance that has reached what they need; such an instance cannot park events. Not for live listeners. |
+
+### Waiting
+
+Another instance of the same `single` group is active; this one gets `Ready` and its
+deliveries when it takes over.
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `active` |  `string` | 1 | the active instance |
 
 ### Ready
 

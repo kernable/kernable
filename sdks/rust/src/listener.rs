@@ -309,6 +309,10 @@ struct Settings {
     schema: String,
     /// Attempts before an event whose handler fails is parked; 0: never.
     park_after: u32,
+    /// The instance ID; `None`: `KERNABLE_INSTANCE`, else none.
+    instance: Option<String>,
+    /// Whether the instances take turns; see [`Listener::single`].
+    single: bool,
 }
 
 struct ListenerInner {
@@ -383,6 +387,7 @@ impl Listener {
         order: i32,
         start: Option<u64>,
         park_after: u32,
+        single: bool,
     ) -> Listener {
         let domains = HashMap::from([(domain.name().to_owned(), domain.clone())]);
         Listener {
@@ -397,6 +402,8 @@ impl Listener {
                     store: None,
                     schema: "1".into(),
                     park_after,
+                    instance: None,
+                    single,
                 }),
                 handlers: RwLock::default(),
                 event_types: RwLock::default(),
@@ -460,6 +467,38 @@ impl Listener {
         );
         self.inner.settings.lock().unwrap().live = true;
         self.clone()
+    }
+
+    /// Runs this process's listener as the instance `id` of a group under the listener's name,
+    /// e.g. one per node of a pair: 1 to 128 letters, digits, `-`, `_` and `.`. Default:
+    /// `KERNABLE_INSTANCE`, which `kernable node` sets; without either, the name has one
+    /// connection. Read models are replicated: every instance gets every event and answers
+    /// queries. Reactors are single (see [`Listener::single`]).
+    pub fn instance(&self, id: &str) -> Listener {
+        self.inner.settings.lock().unwrap().instance = Some(id.to_owned());
+        self.clone()
+    }
+
+    /// Whether the instances take turns (default for reactors): one gets events, the others
+    /// wait and the first of them takes over when it leaves, so a side effect happens once.
+    /// `false` (default for read models): every instance gets every event, from its own
+    /// position; such a listener cannot park events. Live listeners are never single.
+    pub fn single(&self, single: bool) -> Listener {
+        self.inner.settings.lock().unwrap().single = single;
+        self.clone()
+    }
+
+    /// The instance ID it connects with, and whether its group is single; ("", false) without
+    /// an instance.
+    pub(crate) fn instance_of(&self) -> (String, bool) {
+        let s = self.inner.settings.lock().unwrap();
+        let instance = s
+            .instance
+            .clone()
+            .or_else(|| std::env::var("KERNABLE_INSTANCE").ok())
+            .unwrap_or_default();
+        let single = !instance.is_empty() && s.single && !s.live;
+        (instance, single)
     }
 
     pub(crate) fn is_live(&self) -> bool {
@@ -1075,6 +1114,7 @@ impl ListenerHandle {
         let event_types = self.inner.listener.event_types();
         let query_types = self.inner.listener.query_types();
         let what = format!("listener {}", def.name);
+        let (instance, single) = self.inner.listener.instance_of();
         let hello = Hello {
             name: def.name.clone(),
             key_id: client.key_id.clone(),
@@ -1086,6 +1126,8 @@ impl ListenerHandle {
             protocol: PROTOCOL,
             service: inner.service.clone(),
             live,
+            instance,
+            single,
         };
         tx.send(msg(Reply::Hello(hello))).await?;
         let (at, channel) = client.channel();
@@ -1126,6 +1168,14 @@ impl ListenerHandle {
                             });
                         }
                     }
+                    inner.ready.send_replace(true);
+                    continue;
+                }
+                Some(Delivery::Waiting(w)) => {
+                    // Another instance runs the group: this one is ready to take over.
+                    client.log.info(&what, || {
+                        format!("waiting: instance {} is active", w.active)
+                    });
                     inner.ready.send_replace(true);
                     continue;
                 }

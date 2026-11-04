@@ -888,7 +888,7 @@ export class Domain {
    * already.
    */
   reactor(name: string, options: ListenerOptions = {}): Listener {
-    return this.listen(new Listener(this, name, { order: 10, parkAfter: PARK_AFTER, ...options }));
+    return this.listen(new Listener(this, name, { order: 10, parkAfter: PARK_AFTER, single: true, ...options }));
   }
 
   /** Adds `listener`, unless the domain has one of its name: a read model or a reactor. */
@@ -2155,6 +2155,20 @@ export interface ListenerOptions {
    */
   live?: boolean;
   /**
+   * Runs this process's listener as one instance of a group under the listener's name, e.g. one
+   * per node of a pair: 1 to 128 letters, digits, `-`, `_` and `.`. Default: `KERNABLE_INSTANCE`,
+   * which `kernable node` sets; without either, the name has one connection. The group counts
+   * as one listener: it is through an event once one instance has handled it.
+   */
+  instance?: string;
+  /**
+   * Whether the instances take turns (default for reactors): one gets events, the others wait
+   * and the first of them takes over when it leaves, so a side effect happens once. `false`
+   * (default for read models): every instance gets every event, from its own position, and
+   * answers queries; such a listener cannot park events. Live listeners are never single.
+   */
+  single?: boolean;
+  /**
    * Milliseconds to wait before reconnecting after the stream ends (default 1000); twice as
    * long after each further failed attempt, at most 30 s.
    */
@@ -2539,6 +2553,8 @@ export class ListenerHandle {
 
   private listen(start: number | undefined): Promise<void> {
     const { name, options, handlers, queries, middlewares } = this.listener;
+    const instance = options.instance ?? process.env.KERNABLE_INSTANCE ?? "";
+    const single = instance !== "" && (options.single ?? false) && !(options.live ?? false);
     return new Promise((resolve, reject) => {
       const call = this.single!.listen();
       this.call = call;
@@ -2576,6 +2592,8 @@ export class ListenerHandle {
           ...(start === undefined ? {} : { from_position: start }),
           service: this.service,
           live: options.live ?? false,
+          instance,
+          single,
           middlewares: [...middlewares].map(([when, m]) => ({
             order: m.options.order ?? 0,
             types: m.options.types,
@@ -2594,6 +2612,10 @@ export class ListenerHandle {
       this.parent?.advanced(this.part, Number(m.ready.after_position));
       this.replayUpTo = m.ready.head_position;
       this.logConnected();
+      this.markReady();
+    } else if (m.waiting) {
+      // Another instance runs the group: this one is ready to take over.
+      this.log.print("info", this.what, `waiting: instance ${m.waiting.active} is active`);
       this.markReady();
     } else if (m.batch) {
       // A kernel that goes back (a bug, or not the kernel) must not make a store apply events
