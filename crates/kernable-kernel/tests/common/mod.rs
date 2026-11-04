@@ -184,6 +184,7 @@ pub async fn start_wrapped(
         durability: kernable_kernel::config::Durability::Normal,
         limits: Default::default(),
         replication: Default::default(),
+        key_command: Vec::new(),
         partition: None,
     };
     customize(&mut config, &dir);

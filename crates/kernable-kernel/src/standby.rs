@@ -62,7 +62,7 @@ impl Stores {
         let store = kernable_store::open_with(&config.store, config.durability)?;
         store.keep_record_log(true)?;
         let vault = match &config.vault {
-            Some(v) => Some(Vault::open(&v.store, &*signing::read_secret(&v.key)?)?),
+            Some(v) => Some(Vault::open(&v.store, &*config.read_secret(&v.key)?)?),
             None => None,
         };
         let data = kernable_store::data::open(&config.data)?;
@@ -200,7 +200,8 @@ pub(crate) async fn run_with(config: Config, link: Option<Arc<Link>>) -> Result<
     if kernable_store::backend(&config.store).0 == "memory" {
         return Err("a standby keeps what it follows: --store cannot be memory:".into());
     }
-    let key = signing::read_signing_key(&follow.key)
+    let key = config
+        .read_signing_key(&follow.key)
         .map_err(|e| format!("--follow-key {}: {e}", follow.key.display()))?;
     let grant_path = follow.key.with_extension("grant");
     let grant = std::fs::read_to_string(&grant_path)

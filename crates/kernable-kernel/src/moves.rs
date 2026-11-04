@@ -158,12 +158,15 @@ impl Kernel {
             .find(|p| p.name == name)
             .map(|p| p.addresses.clone())
             .ok_or_else(|| Status::unavailable(format!("the partition map names no {name}")))?;
-        let node_key = signing::read_signing_key(&partition.node_key).map_err(|e| {
-            Status::failed_precondition(format!(
-                "moving tenants needs --node-key ({}): {e}",
-                partition.node_key.display()
-            ))
-        })?;
+        let node_key = self
+            .config()
+            .read_signing_key(&partition.node_key)
+            .map_err(|e| {
+                Status::failed_precondition(format!(
+                    "moving tenants needs --node-key ({}): {e}",
+                    partition.node_key.display()
+                ))
+            })?;
         let grant = std::fs::read_to_string(partition.node_key.with_extension("grant"))
             .map_err(|e| Status::failed_precondition(format!("the node key's grant: {e}")))?;
         let mut last = Status::unavailable(format!("partition {name} has no address"));

@@ -122,6 +122,7 @@ fn node_config(dir: &Path, name: &str, kernel_seed: u8, node_seed: u8) -> Config
             }),
             backup: false,
         },
+        key_command: Vec::new(),
         partition: None,
     }
 }

@@ -374,7 +374,9 @@ async fn sync_once(
     node_key: &std::path::Path,
     address: &str,
 ) -> Result<(), BoxError> {
-    let key = signing::read_signing_key(node_key)
+    let key = kernel
+        .config()
+        .read_signing_key(node_key)
         .map_err(|e| format!("--node-key {}: {e}", node_key.display()))?;
     let grant = std::fs::read_to_string(node_key.with_extension("grant"))?;
     let issued_at = now_ms();

@@ -311,7 +311,7 @@ impl Kernel {
     /// Like [`Kernel::open`], on a store opened already (`config.store` is not opened): for
     /// tests that wrap the store, e.g. in one that fails on purpose.
     pub fn open_on(config: Config, store: Box<dyn Store>) -> Result<Arc<Self>, BoxError> {
-        let key = signing::read_signing_key(&config.kernel_key)?;
+        let key = config.read_signing_key(&config.kernel_key)?;
         let revoked: HashMap<String, i64> = store
             .revocations()?
             .into_iter()
@@ -324,7 +324,7 @@ impl Kernel {
         let snapshots = kernable_store::snapshots::open(&config.snapshots)?;
         let vault = match &config.vault {
             Some(v) => {
-                let key = signing::read_secret(&v.key).map_err(|e| match e.kind() {
+                let key = config.read_secret(&v.key).map_err(|e| match e.kind() {
                     std::io::ErrorKind::InvalidData => {
                         "the vault key must be 32 bytes, hex encoded".into()
                     }
@@ -470,7 +470,7 @@ impl Kernel {
 
     /// Reads the kernel key again (on SIGHUP), so a new key signs from now on.
     pub fn reload(&self) -> Result<(), BoxError> {
-        let key = signing::read_signing_key(&self.config.kernel_key)?;
+        let key = self.config().read_signing_key(&self.config().kernel_key)?;
         *self.key.lock().unwrap_or_else(PoisonError::into_inner) = key;
         Ok(())
     }

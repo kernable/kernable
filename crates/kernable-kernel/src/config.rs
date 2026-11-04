@@ -270,6 +270,12 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "Bytes the cache service keeps (values and keys). When a value would exceed it, the oldest values are dropped first, as a cache may; a single value larger than the limit is refused with `RESOURCE_EXHAUSTED`.",
     ),
     (
+        "--key-command",
+        "KERNABLE_KEY_COMMAND",
+        "",
+        "A program and its arguments, separated by spaces, that unwraps a key: the kernel runs it with a key file's path as the last argument and reads the key from its output (64 hex characters, as in a key file), for the kernel key, the vault key and the node keys, at start and on SIGHUP. The key files then hold wrapped keys (age, a KMS, systemd-creds). Empty: the files hold the keys.",
+    ),
+    (
         "--max-store-bytes",
         "KERNABLE_MAX_STORE_BYTES",
         "0",
@@ -326,6 +332,8 @@ pub struct Config {
     pub durability: Durability,
     pub limits: Limits,
     pub replication: Replication,
+    /// `--key-command`: the program and arguments that unwrap a key file; empty: none.
+    pub key_command: Vec<String>,
     /// `--partition`: one partition of several (S2).
     pub partition: Option<PartitionConfig>,
 }
@@ -644,6 +652,11 @@ impl Config {
                 requests_per_second_per_key: number("--max-requests-per-second-per-key")?,
             },
             replication,
+            key_command: get("--key-command")
+                .unwrap_or_default()
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect(),
             partition: match get("--partition") {
                 None => None,
                 Some(name) if !valid_domain(&name) => {
@@ -822,8 +835,93 @@ pub fn snapshots_next_to(store: &str) -> String {
     )
 }
 
+impl Config {
+    /// The 32 secret bytes of the key file at `path`: read from it, or unwrapped by
+    /// `--key-command`.
+    pub fn read_secret(
+        &self,
+        path: &std::path::Path,
+    ) -> std::io::Result<zeroize::Zeroizing<[u8; 32]>> {
+        let Some((program, args)) = self.key_command.split_first() else {
+            return kernable_core::signing::read_secret(path);
+        };
+        let out = std::process::Command::new(program)
+            .args(args)
+            .arg(path)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|e| std::io::Error::other(format!("--key-command {program}: {e}")))?;
+        let text = zeroize::Zeroizing::new(String::from_utf8_lossy(&out.stdout).into_owned());
+        if !out.status.success() {
+            let why = String::from_utf8_lossy(&out.stderr);
+            return Err(std::io::Error::other(format!(
+                "--key-command {program} failed for {} ({}): {}",
+                path.display(),
+                out.status,
+                why.trim().chars().take(200).collect::<String>()
+            )));
+        }
+        let mut key = zeroize::Zeroizing::new([0u8; 32]);
+        hex::decode_to_slice(text.trim(), key.as_mut()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "--key-command {program} printed no 32-byte key in hex for {}",
+                    path.display()
+                ),
+            )
+        })?;
+        Ok(key)
+    }
+
+    /// The signing key in the key file at `path`; see [`Config::read_secret`].
+    pub fn read_signing_key(
+        &self,
+        path: &std::path::Path,
+    ) -> std::io::Result<ed25519_dalek::SigningKey> {
+        Ok(ed25519_dalek::SigningKey::from_bytes(
+            &*self.read_secret(path)?,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_key_command_unwraps_key_files_and_its_failures_are_named() {
+        let dir = std::env::temp_dir().join(format!("kn-keycmd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("kernel.key.wrapped");
+        std::fs::write(&file, format!("{}\n", "ab".repeat(32))).unwrap();
+        let root = kernable_core::signing::key_id(
+            &ed25519_dalek::SigningKey::from_bytes(&[1; 32]).verifying_key(),
+        );
+        let with = |command: &str| Config {
+            key_command: command.split_whitespace().map(str::to_owned).collect(),
+            ..Config::from_args(&["--root", &root], |_| None).unwrap()
+        };
+        // `cat` stands in for an unwrapping tool: it prints the key.
+        assert_eq!(*with("cat").read_secret(&file).unwrap(), [0xab; 32]);
+        assert_eq!(
+            *with("").read_secret(&file).unwrap(),
+            [0xab; 32],
+            "no command: the file itself"
+        );
+        let failed = with("false").read_secret(&file).unwrap_err().to_string();
+        assert!(failed.contains("--key-command false failed"), "{failed}");
+        let garbage = with("echo not-a-key")
+            .read_secret(&file)
+            .unwrap_err()
+            .to_string();
+        assert!(garbage.contains("no 32-byte key"), "{garbage}");
+        let missing = with("no-such-program-kn")
+            .read_secret(&file)
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("no-such-program-kn"), "{missing}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     #[test]

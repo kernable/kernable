@@ -120,6 +120,33 @@ The old key cannot read the vault afterwards. Backups made before still need the
 
 Rekey also when a key has encrypted many values. Each value gets a random nonce, and one key is safe for 2^32 of them. The kernel counts them, logs a warning at startup past 2^31, and refuses new values at 2^32 until the vault is rekeyed.
 
+## Keys that are not on the disk in clear
+
+With `--key-command`, the key files of the kernel, the vault and the node hold **wrapped** keys, and a program you name unwraps them when the kernel starts (and on SIGHUP). The kernel runs it with the key file's path as its last argument and reads the key from its output: 64 hex characters, as a key file holds them. Nothing in the kernel depends on a provider; any tool that decrypts a file works.
+
+With [age](https://age-encryption.org) and an identity on a hardware key or in a protected place:
+
+```sh
+age -e -r age1… -o kernel.key.age kernel.key && shred -u kernel.key
+kernable start --kernel-key kernel.key.age --key-command "age -d -i /etc/kernable/age.identity" …
+```
+
+With systemd-creds, bound to the machine's TPM:
+
+```sh
+systemd-creds encrypt --with-key=tpm2 kernel.key kernel.key.cred && shred -u kernel.key
+kernable start --kernel-key kernel.key.cred --key-command "systemd-creds decrypt" …
+```
+
+With a cloud KMS, a small script that takes the path, for example `/usr/local/bin/kms-unwrap`:
+
+```sh
+#!/bin/sh
+aws kms decrypt --ciphertext-blob "fileb://$1" --query Plaintext --output text | base64 -d
+```
+
+A key the command cannot unwrap stops the kernel at start, with the command's message; on SIGHUP the previous key stays. A key bound to one machine (the TPM) needs wrapping again for the standby on another one. TLS keys (`--tls-key`) are read as files.
+
 ## The root key
 
 The root key signs only grants and revocations, so it can stay offline: issue grants on a separate machine and copy the `.grant` files. To replace it, start the kernel with both roots (`--root keys/root.pub --root keys/root-2.pub`), issue new grants with the new root and restart the services with them. Then restart the kernel without the old `--root`: grants signed by it are refused from then on. If the old root leaked, revoke it first, signed with the new root (`kernable revoke <addr> keys/root-2.key keys/root.pub <since>`): the kernel drops the grants the old root signed at once and refuses them from then on.
