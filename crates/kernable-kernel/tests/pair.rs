@@ -441,3 +441,90 @@ async fn a_revoked_standby_is_not_named_in_sync() {
     })
     .await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_switchover_hands_the_primary_role_over_without_waiting_for_the_lease() {
+    use kernable_core::{
+        proto::{SwitchoverRequest, replication_service_client::ReplicationServiceClient},
+        signing, transport,
+    };
+    let dir = std::env::temp_dir().join(format!("kn-pair-switch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = Dir(dir);
+    let state = dir.0.join("witness.state");
+    tokio::spawn(witness::run(WitnessConfig {
+        listen: format!("unix:{}", dir.0.join("witness.sock").display()),
+        roots: vec![id(&root())],
+        state: state.clone(),
+        lease_ms: LEASE_MS,
+        tls: None,
+    }));
+    wait_for(&format!("unix:{}", dir.0.join("witness.sock").display())).await;
+    let witnessed = || {
+        Witness::open(&state, Duration::from_millis(LEASE_MS))
+            .unwrap()
+            .state()
+    };
+    let (a_config, b_config) = (
+        node_config(&dir.0, "a", 3, 11),
+        node_config(&dir.0, "b", 8, 12),
+    );
+    let addr = |c: &Config| c.replication.pair.as_ref().unwrap().advertise.clone();
+    let (a_addr, b_addr) = (addr(&a_config), addr(&b_config));
+    let (a_task, a_primary) = run_node(a_config.clone());
+    let a = a_primary.await.unwrap();
+    let (_b_task, b_primary) = run_node(b_config.clone());
+    for seed in [1, 2] {
+        a.grant(default_grant(&key(seed)).unwrap()).unwrap();
+    }
+    until("the witness knows B is in sync", || {
+        witnessed().in_sync == id(&key(12))
+    })
+    .await;
+    start_worker(a_addr.clone(), TestWorker::honest()).await;
+    let mut told = Vec::new();
+    for i in 0..5 {
+        told.push(submit(&a_addr, place(i)).await.unwrap());
+    }
+
+    let issued_at = issued_now();
+    let request = SwitchoverRequest {
+        issued_at,
+        sig: Some(signing::sign(
+            &key(1),
+            &signing::switchover_message(issued_at),
+        )),
+        protocol: kernable_core::PROTOCOL,
+    };
+    let started = std::time::Instant::now();
+    let result = ReplicationServiceClient::new(transport::connect(&a_addr).await.unwrap())
+        .switchover(with_grant(request, &key(1)))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(result.standby, id(&key(12)));
+    let why = a_task.await.unwrap();
+    assert!(why.contains("handed over"), "{why}");
+    let b = tokio::time::timeout(Duration::from_secs(5), b_primary)
+        .await
+        .expect("B takes over")
+        .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_millis(LEASE_MS),
+        "B serves before A's lease could have run out: {:?}",
+        started.elapsed()
+    );
+    let kept = witnessed();
+    assert_eq!(
+        (kept.term, kept.primary.as_str()),
+        (2, id(&key(12)).as_str())
+    );
+    // B holds everything A told.
+    start_worker(b_addr.clone(), TestWorker::honest()).await;
+    for (i, result) in told.iter().enumerate() {
+        let again = submit(&b_addr, place(i as u32)).await.unwrap();
+        assert_eq!(events(&again), events(result));
+    }
+    drop((a, b));
+}

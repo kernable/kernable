@@ -492,6 +492,11 @@ pub fn promote_message(issued_at: i64) -> Vec<u8> {
     Msg::new("kernable.v1.promote").i64(issued_at).0
 }
 
+/// What an operator's key signs to hand a pair's primary role over (`kernable switchover`).
+pub fn switchover_message(issued_at: i64) -> Vec<u8> {
+    Msg::new("kernable.v1.switchover").i64(issued_at).0
+}
+
 /// What a kernel of a pair signs to ask the witness (`WitnessRequest`).
 pub fn witness_message(
     op: i32,

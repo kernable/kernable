@@ -18,6 +18,26 @@ service ReplicationService {
   // Asked of a standby: stop following and serve as the primary. Signed by a key granted
   // `manage` for `*`, over kernable.v1.promote, valid 60 s around issued_at.
   rpc Promote(PromoteRequest) returns (PromoteResult);
+  // Asked of the primary of a pair: hand the primary role over to the standby in sync now,
+  // without waiting for the lease. The primary refuses new requests (UNAVAILABLE), lets running
+  // ones finish, waits until the standby holds every record, then tells the witness HANDOVER;
+  // the standby claims at once, and the old primary stops. Signed by a key granted `manage` for
+  // `*`, over kernable.v1.switchover, valid 60 s around issued_at. FAILED_PRECONDITION: not the
+  // primary of a pair, no standby in sync, or the standby did not catch up in time (the primary
+  // then serves on).
+  rpc Switchover(SwitchoverRequest) returns (SwitchoverResult);
+}
+
+message SwitchoverRequest {
+  int64 issued_at = 1;
+  Signature sig = 2;
+  uint32 protocol = 3; // not signed
+}
+
+// The standby holds every record up to `seq` and takes over.
+message SwitchoverResult {
+  uint64 seq = 1;
+  string standby = 2; // the new primary's key ID
 }
 
 message FollowRequest {
@@ -238,6 +258,9 @@ enum WitnessOp {
   IN_SYNC = 3;
   // The in-sync standby takes the primary's place: granted once the primary's lease expired.
   CLAIM = 4;
+  // The primary of `term` gives its place to the standby in sync (a planned switchover):
+  // its lease ends now, and the standby's claim is granted without waiting for it.
+  HANDOVER = 5;
 }
 
 // Signed by the node's key over kernable.v1.witness (op, term, address, standby, issued_at);

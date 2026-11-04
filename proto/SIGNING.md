@@ -51,6 +51,7 @@ Each message starts with a `str` **tag** for domain separation. Payloads are sig
 | Kernel of a partition | `kernable.v1.move` | `op` (`precopy`, `export` or `done`), `tenant`, `from`, `to`, `issued_at: i64`, and for an export after a precopy `after: u64` |
 | Kernel of a partition | `kernable.v1.global-keys` | `op` (`reserve` or `holds`), `key_count: u64` and every key, `partition`, `issued_at: i64` |
 | Operator tooling | `kernable.v1.promote` | `issued_at: i64` (a key granted `manage` for `*`; asked of a standby, see `replication.proto`) |
+| Operator tooling | `kernable.v1.switchover` | `issued_at: i64` (a key granted `manage` for `*`; asked of the primary of a pair, see `replication.proto`) |
 | Operator tooling | `kernable.v1.export` | `issued_at: i64` (a key granted `export` for `*`; see `export.proto`) |
 
 Four more tagged messages are hashed, not signed: `kernable.v1.vault` ([Vault references](#vault-references)), `kernable.v1.id` ([Derived IDs](#derived-ids)), `kernable.v1.key` ([Unique keys and facts](#unique-keys-and-facts)) and `kernable.v1.event` ([Event hash chain](#event-hash-chain)).

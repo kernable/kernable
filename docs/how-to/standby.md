@@ -56,6 +56,22 @@ kernable start --root root.pub --witness 10.0.0.9:7300 \
 
 Keep the witness on a third machine, so a lost machine never takes the witness and a kernel down together. Its state file decides who is the primary: back it up, and never start a pair against a new, empty witness while the old primary may still run.
 
+### Update a pair without downtime
+
+With `kernable switchover`, the primary hands its role over to the standby at once, without waiting for its lease to run out:
+
+1. **Update the standby**: stop it, install the new binary, start it again; it catches up and is in sync again (`kernable_standby_in_sync` on the primary).
+2. **Switch over**, with a key granted `manage` for `*`:
+
+   ```sh
+   kernable switchover https://10.0.0.1:7233 admin.key
+   ```
+
+   The primary refuses new requests (`UNAVAILABLE`: clients with both addresses turn to the other kernel), lets running ones finish, waits until the standby holds every record, and tells the witness. The standby serves at once, without losing a told write; the old primary stops.
+3. **Update the old primary** and start it: it follows the new primary as its standby.
+
+If the standby is not in sync, or does not hold everything within 10 s, the switchover is refused and the primary serves on. Under [`kernable node`](./node), the stopped kernel is started again by itself.
+
 ## A fixed primary and standby
 
 Without a witness, the roles stay as you start them, and you promote the standby by hand.

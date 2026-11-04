@@ -14,8 +14,8 @@ use kernable_core::{
     proto::{
         ApplyRequest, Attribute, Command, ExportRequest, ListenerRecord, MapRequest, Membership,
         MoveStatusRequest, Partition, PartitionMap, Permission, PromoteRequest, RetryRequest,
-        RevokeRequest, SubmitRequest, TenantMove, TenantPartition, When, WorkerRecord,
-        command_result::Outcome, command_service_client::CommandServiceClient,
+        RevokeRequest, SubmitRequest, SwitchoverRequest, TenantMove, TenantPartition, When,
+        WorkerRecord, command_result::Outcome, command_service_client::CommandServiceClient,
         export_service_client::ExportServiceClient, listener_service_client::ListenerServiceClient,
         membership_service_client::MembershipServiceClient,
         partition_service_client::PartitionServiceClient,
@@ -106,6 +106,15 @@ Keys and trust:
                                           primary is gone: a primary that still runs is fenced (it
                                           tells nobody of a write from then on), and rejoins as a
                                           standby of the new one.
+  kernable switchover <addr> <key>        Hands the primary role of a pair (started with --witness)
+                                          over to its standby without waiting for the lease: the
+                                          primary at <addr> refuses new requests (the SDKs retry
+                                          them on the other kernel), lets running ones finish, waits
+                                          until the standby holds every record (at most 10 s), and
+                                          tells the witness; the standby serves at once, and the old
+                                          primary stops. Started again, it follows. For updates:
+                                          update the standby, switch over, update the old primary.
+                                          <key> needs a grant for manage on *.
   kernable certs new <dir> <client>...    Writes a development CA (ca.tls.crt), a kernel certificate
                                           (kernel.tls.crt, kernel.tls.key) and a certificate per
                                           <client> (<client>.tls.crt, <client>.tls.key) to <dir>,
@@ -338,6 +347,7 @@ async fn main() -> ExitCode {
         }
         ["revoke", addr, root, key, since] => revoke(addr, root, key, since).await,
         ["promote", addr, key] => promote(addr, key).await,
+        ["switchover", addr, key] => switchover(addr, key).await,
         ["partitions", "apply", addr, key, map] => partitions_apply(addr, key, map).await,
         ["partitions", "show", addr, key] => partitions_show(addr, key).await,
         ["partitions", "move", addr, key, tenant, to] => {
@@ -1399,6 +1409,27 @@ async fn promote(addr: &str, key_path: &str) -> Result<bool> {
     println!(
         "promoted {addr}: it serves as the primary from record {}",
         result.seq
+    );
+    Ok(true)
+}
+
+/// `kernable switchover <addr> <key>`: the primary of a pair hands its role over.
+async fn switchover(addr: &str, key_path: &str) -> Result<bool> {
+    let key = signing::read_signing_key(key_path)?;
+    let issued_at = now_ms();
+    let mut request = tonic::Request::new(SwitchoverRequest {
+        issued_at,
+        sig: Some(signing::sign(&key, &signing::switchover_message(issued_at))),
+        protocol: kernable_core::PROTOCOL,
+    });
+    with_key_grant(&mut request, key_path)?;
+    let result = ReplicationServiceClient::new(connect(addr).await?)
+        .switchover(request)
+        .await?
+        .into_inner();
+    println!(
+        "switched over: {} is the primary now, from record {}; {addr} stops (start it again, and it follows)",
+        result.standby, result.seq
     );
     Ok(true)
 }

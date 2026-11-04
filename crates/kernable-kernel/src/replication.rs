@@ -16,8 +16,8 @@ use kernable_core::{
     proto::{
         Challenge, DataFile, FollowAck, FollowMode, FollowRequest, FollowResponse, FollowStart,
         ImageBatch, ImageEnd, LogRecord, PromoteRequest, PromoteResult, RecordBatch,
-        ReplicatedRecord, Signature, VaultRow, follow_request, follow_response, log_record::Record,
-        replication_service_server::ReplicationService,
+        ReplicatedRecord, Signature, SwitchoverRequest, SwitchoverResult, VaultRow, follow_request,
+        follow_response, log_record::Record, replication_service_server::ReplicationService,
     },
     signing,
 };
@@ -288,6 +288,54 @@ impl ReplicationService for Api {
         Err(Status::failed_precondition(
             "this kernel is a primary already",
         ))
+    }
+
+    async fn switchover(
+        &self,
+        request: Request<SwitchoverRequest>,
+    ) -> Result<Response<SwitchoverResult>, Status> {
+        let kernel = &self.0;
+        let metadata = request.metadata().clone();
+        let req = request.into_inner();
+        protocol(req.protocol)?;
+        let sig = req
+            .sig
+            .ok_or_else(|| Status::unauthenticated("the switchover request is not signed"))?;
+        signing::verify(&sig, &signing::switchover_message(req.issued_at))
+            .map_err(|_| Status::unauthenticated("invalid switchover request signature"))?;
+        if (crate::now_ms() - req.issued_at).abs() > crate::MAX_REQUEST_AGE_MS {
+            return Err(Status::unauthenticated(
+                "switchover request expired; check the clock",
+            ));
+        }
+        kernel.present(&metadata, &sig.key_id)?;
+        if !config::allowed(&kernel.permissions().manage, &sig.key_id, "*") {
+            return Err(Status::permission_denied(
+                "the key may not switch over: its grant needs manage for *",
+            ));
+        }
+        let asks = kernel
+            .switchover
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .ok_or_else(|| {
+                Status::failed_precondition(
+                    "this kernel is not the primary of a pair (--witness): there is nobody to hand over to",
+                )
+            })?;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tracing::warn!(key = %sig.key_id, "switchover asked by an operator");
+        asks.send(tx)
+            .await
+            .map_err(|_| Status::failed_precondition("this kernel is no longer the primary"))?;
+        match rx.await {
+            Ok(Ok(result)) => Ok(Response::new(result)),
+            Ok(Err(why)) => Err(Status::failed_precondition(why)),
+            Err(_) => Err(Status::failed_precondition(
+                "this kernel is no longer the primary",
+            )),
+        }
     }
 }
 

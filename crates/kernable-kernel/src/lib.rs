@@ -273,7 +273,7 @@ pub struct Kernel {
     /// Values of the cache service.
     cache: cache::Cache,
     /// Set on shutdown: new submits and queries are refused while running ones finish.
-    draining: AtomicBool,
+    pub(crate) draining: AtomicBool,
     /// Submits and queries being handled, and a wake-up when one ends.
     requests: AtomicUsize,
     idle: Notify,
@@ -290,6 +290,8 @@ pub struct Kernel {
     replication: Option<Arc<replication::Primary>>,
     /// The backup follower, with `--backup on`.
     backup: replication::Backup,
+    /// The primary of a pair takes switchover requests here; None otherwise.
+    switchover: Mutex<Option<tokio::sync::mpsc::Sender<node::SwitchoverAsk>>>,
     /// Bytes of the event store, the vault and the files, measured every 10 s.
     stored_bytes: AtomicU64,
     /// Requests per key and second.
@@ -391,6 +393,7 @@ impl Kernel {
             failed_commits: AtomicU32::new(0),
             appended: Notify::new(),
             backup: replication::Backup::default(),
+            switchover: Mutex::default(),
             stored_bytes: AtomicU64::new(0),
             rates: Rates::default(),
             listeners,

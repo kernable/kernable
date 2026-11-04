@@ -70,6 +70,9 @@ struct Inner {
     kept: WitnessState,
     /// Until when the primary's lease runs, here.
     lease_until: Instant,
+    /// The primary handed its place over (HANDOVER): its standby claims without waiting,
+    /// and it renews no more. Not kept on the disk: a restarted witness waits a lease anyway.
+    released: bool,
 }
 
 impl Witness {
@@ -86,6 +89,7 @@ impl Witness {
             inner: Mutex::new(Inner {
                 kept,
                 lease_until: Instant::now() + lease,
+                released: false,
             }),
             path: path.to_owned(),
             lease,
@@ -124,12 +128,30 @@ impl Witness {
                     in_sync: String::new(),
                 };
             }
+            WitnessOp::Lease if primary && inner.released => {
+                return refuse("the primary handed its place over to its standby".into());
+            }
             WitnessOp::Lease if primary => next.primary_address = ask.address.clone(),
             WitnessOp::Lease => {
                 return refuse(format!(
                     "the primary of term {} is {} at {}",
                     kept.term, kept.primary, kept.primary_address
                 ));
+            }
+            WitnessOp::Handover if !primary || ask.term != kept.term || !leased => {
+                return refuse(format!(
+                    "only the primary of term {} may hand over, while its lease holds",
+                    kept.term
+                ));
+            }
+            WitnessOp::Handover if kept.in_sync.is_empty() => {
+                return refuse("no standby is in sync: there is nobody to hand over to".into());
+            }
+            WitnessOp::Handover => {
+                inner.released = true;
+                inner.lease_until = now;
+                tracing::warn!(term = kept.term, primary = %kept.primary, standby = %kept.in_sync, "the primary hands its place over");
+                return Ok(answer(&kept, true, "", self.lease));
             }
             WitnessOp::Alone | WitnessOp::InSync if !primary || ask.term != kept.term => {
                 return refuse(format!("only the primary of term {} may say so", kept.term));
@@ -149,7 +171,9 @@ impl Witness {
                     format!("the standby in sync is {}", kept.in_sync)
                 });
             }
-            WitnessOp::Claim if now < inner.lease_until + Self::margin(self.lease) => {
+            WitnessOp::Claim
+                if !inner.released && now < inner.lease_until + Self::margin(self.lease) =>
+            {
                 return refuse(format!(
                     "the primary {} still holds its lease",
                     kept.primary
@@ -179,6 +203,9 @@ impl Witness {
         }
         if matches!(ask.op, WitnessOp::Lease | WitnessOp::Claim) {
             inner.lease_until = now + self.lease;
+        }
+        if next.term != kept.term {
+            inner.released = false;
         }
         Ok(answer(&next, true, "", self.lease))
     }
@@ -457,6 +484,41 @@ mod tests {
         );
         assert!(
             w.decide(&ask(WitnessOp::Claim, "b", 1), now + Duration::from_secs(5))
+                .unwrap()
+                .granted
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_handover_lets_the_standby_in_sync_claim_at_once_and_ends_the_old_lease() {
+        let (w, path) = open("handover");
+        let t0 = Instant::now();
+        w.decide(&ask(WitnessOp::Lease, "a", 0), t0).unwrap();
+        let handover = |node: &str, at: Instant| {
+            w.decide(&ask(WitnessOp::Handover, node, 1), at)
+                .unwrap()
+                .granted
+        };
+        assert!(!handover("a", t0), "no standby in sync to hand over to");
+        let mut in_sync = ask(WitnessOp::InSync, "a", 1);
+        in_sync.standby = "b".into();
+        assert!(w.decide(&in_sync, t0).unwrap().granted);
+        assert!(!handover("b", t0), "only the primary hands over");
+        let t1 = t0 + Duration::from_millis(500);
+        assert!(handover("a", t1));
+        // The old primary renews no more; the standby claims well before the lease would end.
+        assert!(
+            !w.decide(&ask(WitnessOp::Lease, "a", 1), t1)
+                .unwrap()
+                .granted
+        );
+        let won = w.decide(&ask(WitnessOp::Claim, "b", 1), t1).unwrap();
+        assert!(won.granted, "{}", won.message);
+        assert_eq!((won.term, won.primary.as_str()), (2, "b"));
+        // The new primary renews as any primary does.
+        assert!(
+            w.decide(&ask(WitnessOp::Lease, "b", 2), t1)
                 .unwrap()
                 .granted
         );

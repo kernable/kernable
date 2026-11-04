@@ -102,8 +102,6 @@ struct Standby {
     /// With `--witness`: this kernel towards the witness, through which it claims the
     /// primary's place.
     link: Option<Arc<Link>>,
-    /// Since when the stream to the primary is lost.
-    lost_since: Mutex<Option<Instant>>,
 }
 
 impl Standby {
@@ -220,7 +218,6 @@ pub(crate) async fn run_with(config: Config, link: Option<Arc<Link>>) -> Result<
         applied: AtomicU64::new(0),
         primary_head: AtomicU64::new(0),
         link,
-        lost_since: Mutex::default(),
         config,
     });
     // A store an image was left half-filled in starts over.
@@ -256,18 +253,11 @@ pub(crate) async fn run_with(config: Config, link: Option<Arc<Link>>) -> Result<
                 }
             }
             if let Some(link) = &standby.link {
-                let lost = *standby
-                    .lost_since
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .get_or_insert_with(Instant::now);
-                if lost.elapsed() >= link.lease() + link.margin() {
-                    match claim(&standby, link).await {
-                        Ok(term) => {
-                            tracing::warn!(term, "claimed the primary's place: its lease ran out")
-                        }
-                        Err(why) => tracing::info!(%why, "cannot take the primary's place"),
-                    }
+                // The witness decides whether the primary's lease ran out, or the primary handed
+                // its place over: asking at once makes a switchover quick.
+                match claim(&standby, link).await {
+                    Ok(term) => tracing::warn!(term, "claimed the primary's place"),
+                    Err(why) => tracing::info!(%why, "cannot take the primary's place"),
                 }
                 // A pair reconnects and claims promptly.
                 delay = delay.min(link.lease() / 3);
@@ -331,10 +321,6 @@ async fn follow_once(
     let Some(follow_response::Msg::Start(start)) = next(&mut inbound).await? else {
         return Err("the primary did not start the stream".into());
     };
-    *standby
-        .lost_since
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner) = None;
     match start.mode() {
         FollowMode::Follow => {
             tracing::info!(from = head.seq, "following the primary");
@@ -651,6 +637,16 @@ impl ReplicationService for Api {
         _request: Request<Streaming<FollowRequest>>,
     ) -> Result<Response<Self::FollowStream>, Status> {
         Err(not_primary(&self.0.follow.primary))
+    }
+
+    async fn switchover(
+        &self,
+        _request: Request<kernable_core::proto::SwitchoverRequest>,
+    ) -> Result<Response<kernable_core::proto::SwitchoverResult>, Status> {
+        Err(Status::failed_precondition(format!(
+            "this kernel is the standby: ask the primary ({}) to switch over",
+            self.0.follow.primary
+        )))
     }
 
     async fn promote(

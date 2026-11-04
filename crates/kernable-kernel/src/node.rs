@@ -140,6 +140,14 @@ pub struct NodePrimary {
     pub lease: Pin<Box<dyn Future<Output = BoxError> + Send>>,
 }
 
+/// A switchover request: answered with where the standby took over, or why not.
+pub(crate) type SwitchoverAsk =
+    tokio::sync::oneshot::Sender<Result<kernable_core::proto::SwitchoverResult, String>>;
+
+/// How long a switchover waits for the standby to hold every record before it gives up and the
+/// primary serves on.
+const SWITCHOVER_CATCH_UP: Duration = Duration::from_secs(10);
+
 /// Follows the primary until this kernel is the primary (see the module), then opens it.
 pub async fn become_primary(config: Config) -> Result<NodePrimary, BoxError> {
     let pair = config
@@ -166,12 +174,18 @@ pub async fn become_primary(config: Config) -> Result<NodePrimary, BoxError> {
                 .expect("a kernel of a pair runs with --replication sync");
             primary.set_lease(sent + link.lease() - link.margin());
             tracing::warn!(term = answer.term, "this kernel is the primary");
+            let (asks, asked) = tokio::sync::mpsc::channel(1);
+            *kernel
+                .switchover
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(asks);
             let lease = Box::pin(keep_lease(
                 Arc::clone(&kernel),
                 link,
                 answer.term,
                 Duration::from_millis(pair.standby_timeout_ms),
                 answer.in_sync,
+                asked,
             ));
             return Ok(NodePrimary { kernel, lease });
         }
@@ -186,6 +200,62 @@ pub async fn become_primary(config: Config) -> Result<NodePrimary, BoxError> {
     }
 }
 
+/// Hands the primary role of `term` over to the standby in sync: refuses new requests,
+/// lets running ones finish, waits until the standby holds every record, then tells the
+/// witness. On any refusal the primary serves on.
+async fn switch_over(
+    kernel: &Arc<Kernel>,
+    link: &Link,
+    term: u64,
+    in_sync: &str,
+) -> Result<kernable_core::proto::SwitchoverResult, String> {
+    let primary = kernel
+        .replication
+        .clone()
+        .expect("a kernel of a pair runs with --replication sync");
+    if primary.alone() || in_sync.is_empty() || primary.standby().as_deref() != Some(in_sync) {
+        return Err("no standby is in sync: there is nobody to hand over to".into());
+    }
+    let serve_on = |why: String| {
+        kernel
+            .draining
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        tracing::warn!(%why, "switchover abandoned: serving on");
+        Err(why)
+    };
+    // New requests go to the other kernel (the SDKs retry UNAVAILABLE); running ones finish.
+    if !kernel.drain().await {
+        tracing::warn!("running requests did not finish in time; they run again on the standby");
+    }
+    let started = Instant::now();
+    let head = loop {
+        let head = kernel.store.record_head().map_or(0, |h| h.seq);
+        if primary.acked_seq() >= head {
+            break head;
+        }
+        if started.elapsed() >= SWITCHOVER_CATCH_UP {
+            return serve_on(format!(
+                "the standby holds record {} of {head} after {SWITCHOVER_CATCH_UP:?}",
+                primary.acked_seq()
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    match link.ask(WitnessOp::Handover, term, "").await {
+        Ok(a) if a.granted => {
+            // Nothing more is told: the lease is gone, and the standby stops following.
+            primary.set_lease(Instant::now());
+            tracing::warn!(standby = %in_sync, record = head, "handed the primary role over");
+            Ok(kernable_core::proto::SwitchoverResult {
+                seq: head,
+                standby: in_sync.to_owned(),
+            })
+        }
+        Ok(a) => serve_on(format!("the witness refused: {}", a.message)),
+        Err(e) => serve_on(format!("the witness does not answer: {e}")),
+    }
+}
+
 /// Keeps the primary's lease of `term`, and tells the witness when the primary commits alone
 /// and when its standby is in sync again. Ends with why, once the witness gave the lease to
 /// the other kernel.
@@ -195,6 +265,7 @@ async fn keep_lease(
     term: u64,
     timeout: Duration,
     mut reported: String,
+    mut asked: tokio::sync::mpsc::Receiver<SwitchoverAsk>,
 ) -> BoxError {
     let primary = kernel
         .replication
@@ -207,7 +278,21 @@ async fn keep_lease(
     let mut must_reach = head_now();
     let mut last_head = must_reach;
     loop {
-        tokio::time::sleep(link.lease() / 3).await;
+        tokio::select! {
+            () = tokio::time::sleep(link.lease() / 3) => {}
+            Some(reply) = asked.recv() => {
+                let done = switch_over(&kernel, &link, term, &reported).await;
+                let handed = done.as_ref().map(|r| r.standby.clone()).ok();
+                let _ = reply.send(done);
+                if let Some(standby) = handed {
+                    return format!(
+                        "handed over: {standby} is the primary now; start this kernel again to follow it"
+                    )
+                    .into();
+                }
+                continue;
+            }
+        }
         let sent = Instant::now();
         match link.ask(WitnessOp::Lease, term, "").await {
             Ok(a) if a.granted && a.term == term => {

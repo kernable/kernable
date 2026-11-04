@@ -91,6 +91,14 @@ kernable promote <addr> <key>
 
 Makes the standby at `<addr>` (started with `--follow`) the primary: it stops following and serves. `<key>` needs a grant for manage on `*`. Promote only a standby whose primary is gone: a primary that still runs is fenced (it tells nobody of a write from then on), and rejoins as a standby of the new one.
 
+### `kernable switchover`
+
+```text
+kernable switchover <addr> <key>
+```
+
+Hands the primary role of a pair (started with `--witness`) over to its standby without waiting for the lease: the primary at `<addr>` refuses new requests (the SDKs retry them on the other kernel), lets running ones finish, waits until the standby holds every record (at most 10 s), and tells the witness; the standby serves at once, and the old primary stops. Started again, it follows. For updates: update the standby, switch over, update the old primary. `<key>` needs a grant for manage on `*`.
+
 ### `kernable certs new`
 
 ```text

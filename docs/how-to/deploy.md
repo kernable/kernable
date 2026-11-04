@@ -40,6 +40,8 @@ What the new membership no longer lists stops counting: the kernel stops waiting
 
 ## The kernel
 
+A [pair with a witness](./standby#a-pair-with-a-witness) updates without downtime: [update the standby, switch over, update the old primary](./standby#update-a-pair-without-downtime). A single kernel:
+
 1. **Back up** the store and the vault ([Back up and restore](./backup)).
 2. **Stop the kernel with SIGTERM** (or SIGINT). It refuses new submits and queries, lets running ones finish for `--drain-timeout-ms` (default 10 s), then signs a checkpoint, saves listener positions and exits. Commands that did not finish stay queued and run again after the restart.
 3. **Install the new `kernable` binary.**
