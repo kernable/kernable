@@ -411,10 +411,42 @@ fn within_bytes(mut records: Vec<ReplicatedRecord>) -> Vec<ReplicatedRecord> {
 /// deleted meanwhile travels as absent, and the records after converge the standby.
 pub(crate) fn attachments<'a>(
     kernel: &Kernel,
-    records: impl Iterator<Item = &'a Record>,
+    records: impl Iterator<Item = &'a Record> + Clone,
 ) -> Result<(Vec<VaultRow>, Vec<DataFile>), Status> {
-    let mut refs = Vec::new();
+    let refs = vault_refs(records.clone());
     let mut files = Vec::new();
+    for record in records {
+        if let Record::DataChanged(d) = record {
+            let key = DataKey {
+                tenant_id: d.tenant_id.clone(),
+                domain: d.domain.clone(),
+                key: d.key.clone(),
+            };
+            let file = kernel.data.get(&key).map_err(internal)?;
+            files.push(DataFile {
+                tenant_id: d.tenant_id.clone(),
+                domain: d.domain.clone(),
+                key: d.key.clone(),
+                absent: file.is_none(),
+                content_type: file
+                    .as_ref()
+                    .map(|f| f.content_type.clone())
+                    .unwrap_or_default(),
+                data: file.map(|f| f.data).unwrap_or_default(),
+                path: String::new(),
+            });
+        }
+    }
+    let vault = match &kernel.vault {
+        Some(vault) if !refs.is_empty() => vault.export(&refs).map_err(internal)?,
+        _ => Vec::new(),
+    };
+    Ok((vault, files))
+}
+
+/// The vault values `records` refer to: those of commands, events and personal unique keys.
+pub(crate) fn vault_refs<'a>(records: impl Iterator<Item = &'a Record>) -> Vec<String> {
+    let mut refs = Vec::new();
     for record in records {
         match record {
             Record::Enqueued(e) => {
@@ -437,34 +469,10 @@ pub(crate) fn attachments<'a>(
                         .map(|k| k.vault_ref.clone()),
                 );
             }
-            Record::DataChanged(d) => {
-                let key = DataKey {
-                    tenant_id: d.tenant_id.clone(),
-                    domain: d.domain.clone(),
-                    key: d.key.clone(),
-                };
-                let file = kernel.data.get(&key).map_err(internal)?;
-                files.push(DataFile {
-                    tenant_id: d.tenant_id.clone(),
-                    domain: d.domain.clone(),
-                    key: d.key.clone(),
-                    absent: file.is_none(),
-                    content_type: file
-                        .as_ref()
-                        .map(|f| f.content_type.clone())
-                        .unwrap_or_default(),
-                    data: file.map(|f| f.data).unwrap_or_default(),
-                    path: String::new(),
-                });
-            }
             _ => {}
         }
     }
-    let vault = match &kernel.vault {
-        Some(vault) if !refs.is_empty() => vault.export(&refs).map_err(internal)?,
-        _ => Vec::new(),
-    };
-    Ok((vault, files))
+    refs
 }
 
 /// Sends a full image: the store's records, with the vault rows they refer to, then every file

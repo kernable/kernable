@@ -41,7 +41,7 @@ Writes `<name>.key` (the secret key, readable by the owner only, never overwritt
 kernable grant <root.key> <name.pub> [--succeeds <old.pub>] <permission>...
 ```
 
-Writes `<name>.grant`, signed by the root key, and prints its permissions. A permission is `<action>=<type>,<type>`... or a bare `<type>` for every action. Actions: `submit` `run` `subscribe` `listen` `query` `answer` `check` `privileged` `vault_read` `vault_erase` `data_read` `data_write` `cache` `manage`. A type is `*`, `<domain>.*` or `<domain>.<Type>`; manage takes service names, privileged takes `bypass_authorization`. `--succeeds` lets this key take over the aggregates and listeners registered with `<old.pub>`. A newer grant for the same key replaces the older one.
+Writes `<name>.grant`, signed by the root key, and prints its permissions. A permission is `<action>=<type>,<type>`... or a bare `<type>` for every action. Actions: `submit` `run` `subscribe` `listen` `query` `answer` `check` `privileged` `vault_read` `vault_erase` `data_read` `data_write` `cache` `manage` `replicate` `export`. A type is `*`, `<domain>.*` or `<domain>.<Type>`; manage takes service names, privileged takes `bypass_authorization`; replicate and export take `*`. `--succeeds` lets this key take over the aggregates and listeners registered with `<old.pub>`. A newer grant for the same key replaces the older one.
 
 ### `kernable revoke`
 
@@ -184,6 +184,32 @@ kernable checkpoint <store> <kernel.key>
 ```
 
 Signs a checkpoint of the newest event now, as the running kernel does every `--checkpoint-interval-ms`. Kernel stopped.
+
+## Export and import
+
+### `kernable export`
+
+```text
+kernable export <addr> <key> <file>
+```
+
+Writes everything the running kernel at `<addr>` holds to `<file>`: every record of its store, every file of its data store and the vault values, which stay encrypted with its vault key. The kernel signs a checkpoint first. `<key>` needs a grant for export on `*`; the grant file next to the key is sent along. `<file>` must not exist; it is written readable by its owner only, and deleted if the export does not finish. Snapshots and the cache are not exported. Prints the counts and the kernel keys that signed the store.
+
+### `kernable export`
+
+```text
+kernable export <file> [--store <s>] [--data-store <d>] [--vault-store <v> --vault-key <k>]
+```
+
+The same from stores read directly, kernel stopped. The flags name the stores as for kernable start, with its defaults; without `--vault-key` the vault is left out, which fails if the store refers to vault values.
+
+### `kernable import`
+
+```text
+kernable import <file> [--store <s>] [--data-store <d>] [--vault-store <v> --vault-key <k>] [--kernel-pub <kernel.pub>]...
+```
+
+Fills new, empty stores from an export, then checks the store like verify, with the same output and exit codes. `--vault-key` must be the source's vault key. The whole file is checked before anything is written: a copy cut short or changed, or a wrong vault key, is refused. Without `--kernel-pub`, the store is checked with the kernel keys the export names; compare them with the source's `.pub` files, or name those. Keep the source's kernel `.pub` files for verify after the kernel runs on the new stores.
 
 ## Maintenance, with the kernel stopped
 

@@ -1,6 +1,6 @@
 # Back up and restore
 
-Read this before you run a kernel with data you cannot lose. The event store is the system of record: everything else either depends on it (the vault, the keys) or is rebuilt from it (snapshots, read models).
+Read this before you run a kernel with data you cannot lose. The event store is the system of record: everything else either depends on it (the vault, the keys) or is rebuilt from it (snapshots, read models). To copy a whole kernel into one file, for another machine or a self-hosted kernel, use [export and import](./export).
 
 ## What to back up
 

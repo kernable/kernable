@@ -1,0 +1,56 @@
+// A whole kernel in one file: the exit into a self-hosted kernel, and the format of
+// `kernable export` and `kernable import`. Not part of the client protocol.
+//
+// The file is the 8 bytes `KNBLEXP\n`, then ExportFrame messages, each preceded by its length
+// as a varint (protobuf's length-delimited encoding): one header, any number of batches, one
+// end. The end's `digest` is the SHA-256 of every byte before the end frame (magic included),
+// so a copy that was cut short or changed is refused on import.
+syntax = "proto3";
+
+package kernable.v1;
+
+import "kernable/v1/kernable.proto";
+import "kernable/v1/replication.proto";
+
+// A running kernel streams its export (`kernable export <addr> <key> <file>`). Signed over
+// kernable.v1.export (issued_at) by a key granted `export` for `*`, valid 60 s around
+// issued_at. The stream holds every record, file and vault value of the kernel: run it over
+// mutual TLS only. The kernel signs a checkpoint first, so every event of the export is
+// anchored.
+// Errors: UNAUTHENTICATED (invalid signature, outside the time window), PERMISSION_DENIED,
+// INTERNAL (a store could not be read; the stream ends with it). A standby does not serve it.
+service ExportService {
+  rpc Export(ExportRequest) returns (stream ExportFrame);
+}
+
+message ExportRequest {
+  int64 issued_at = 1;
+  Signature sig = 2;
+  uint32 protocol = 3; // not signed
+}
+
+message ExportFrame {
+  oneof frame {
+    ExportHeader header = 1;
+    ImageBatch batch = 2;
+    ExportEnd end = 3;
+  }
+}
+
+message ExportHeader {
+  uint32 format = 1;     // 1
+  int64 created_at = 2;  // ms since epoch
+  string partition = 3;  // the exporting kernel's --partition, if any
+  // The vault values are sealed with the source's vault key (VaultRow.sealed): import them
+  // with that key.
+  bool vault = 4;
+}
+
+message ExportEnd {
+  uint64 records = 1;
+  uint64 vault_values = 2;
+  uint64 files = 3;
+  // The kernel keys that signed the export's checkpoints and revocations, by key ID.
+  repeated string kernel_keys = 4;
+  bytes digest = 5; // set by whoever writes the file; see above
+}

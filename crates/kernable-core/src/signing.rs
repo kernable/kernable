@@ -482,6 +482,11 @@ pub fn trust_sync_message(issued_at: i64) -> Vec<u8> {
     Msg::new("kernable.v1.trust-sync").i64(issued_at).0
 }
 
+/// What an operator's key signs to export a running kernel (`kernable export`).
+pub fn export_message(issued_at: i64) -> Vec<u8> {
+    Msg::new("kernable.v1.export").i64(issued_at).0
+}
+
 /// What an operator's key signs to promote a standby to the primary (`kernable promote`).
 pub fn promote_message(issued_at: i64) -> Vec<u8> {
     Msg::new("kernable.v1.promote").i64(issued_at).0

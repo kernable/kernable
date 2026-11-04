@@ -12,11 +12,11 @@ use std::{
 
 use kernable_core::{
     proto::{
-        ApplyRequest, Attribute, Command, ListenerRecord, MapRequest, Membership,
+        ApplyRequest, Attribute, Command, ExportRequest, ListenerRecord, MapRequest, Membership,
         MoveStatusRequest, Partition, PartitionMap, Permission, PromoteRequest, RetryRequest,
         RevokeRequest, SubmitRequest, TenantMove, TenantPartition, When, WorkerRecord,
         command_result::Outcome, command_service_client::CommandServiceClient,
-        listener_service_client::ListenerServiceClient,
+        export_service_client::ExportServiceClient, listener_service_client::ListenerServiceClient,
         membership_service_client::MembershipServiceClient,
         partition_service_client::PartitionServiceClient,
         replication_service_client::ReplicationServiceClient,
@@ -25,8 +25,8 @@ use kernable_core::{
     signing, transport,
 };
 use kernable_kernel::{
-    BoxError, Config, GRANT_HEADER, Kernel, config, grants, node, partitions::partition_of, serve,
-    standby, witness,
+    BoxError, Config, GRANT_HEADER, Kernel, config, export, grants, node, partitions::partition_of,
+    serve, standby, witness,
 };
 use prost::Message;
 use tracing_subscriber::EnvFilter;
@@ -62,12 +62,13 @@ Keys and trust:
                                           its permissions. A permission is <action>=<type>,<type>...
                                           or a bare <type> for every action. Actions: submit run
                                           subscribe listen query answer check privileged vault_read
-                                          vault_erase data_read data_write cache manage. A type is
-                                          *, <domain>.* or <domain>.<Type>; manage takes service
-                                          names, privileged takes bypass_authorization. --succeeds
-                                          lets this key take over the aggregates and listeners
-                                          registered with <old.pub>. A newer grant for the same key
-                                          replaces the older one.
+                                          vault_erase data_read data_write cache manage replicate
+                                          export. A type is *, <domain>.* or <domain>.<Type>; manage
+                                          takes service names, privileged takes
+                                          bypass_authorization; replicate and export take *.
+                                          --succeeds lets this key take over the aggregates and
+                                          listeners registered with <old.pub>. A newer grant for the
+                                          same key replaces the older one.
   kernable revoke <addr> <root.key> <key.pub> <since>
                                           Revokes a key for good from <since> on (UTC, like
                                           2026-10-27T09:00:00Z): the kernel refuses it, ends its
@@ -163,6 +164,34 @@ Check the store:
                                           Signs a checkpoint of the newest event now, as the running
                                           kernel does every --checkpoint-interval-ms. Kernel
                                           stopped.
+
+Export and import:
+  kernable export <addr> <key> <file>
+                                          Writes everything the running kernel at <addr> holds to
+                                          <file>: every record of its store, every file of its data
+                                          store and the vault values, which stay encrypted with its
+                                          vault key. The kernel signs a checkpoint first. <key>
+                                          needs a grant for export on *; the grant file next to the
+                                          key is sent along. <file> must not exist; it is written
+                                          readable by its owner only, and deleted if the export does
+                                          not finish. Snapshots and the cache are not exported.
+                                          Prints the counts and the kernel keys that signed the
+                                          store.
+  kernable export <file> [--store <s>] [--data-store <d>] [--vault-store <v> --vault-key <k>]
+                                          The same from stores read directly, kernel stopped. The
+                                          flags name the stores as for kernable start, with its
+                                          defaults; without --vault-key the vault is left out, which
+                                          fails if the store refers to vault values.
+  kernable import <file> [--store <s>] [--data-store <d>] [--vault-store <v> --vault-key <k>] [--kernel-pub <kernel.pub>]...
+                                          Fills new, empty stores from an export, then checks the
+                                          store like verify, with the same output and exit codes.
+                                          --vault-key must be the source's vault key. The whole file
+                                          is checked before anything is written: a copy cut short or
+                                          changed, or a wrong vault key, is refused. Without
+                                          --kernel-pub, the store is checked with the kernel keys
+                                          the export names; compare them with the source's .pub
+                                          files, or name those. Keep the source's kernel .pub files
+                                          for verify after the kernel runs on the new stores.
 
 Maintenance, with the kernel stopped:
   kernable listeners remove <store> <name>
@@ -272,6 +301,16 @@ async fn main() -> ExitCode {
             });
         }
         ["vault", "rekey", vault, old, new] => vault_rekey(vault, old, new),
+        ["export", addr, key, file] if ![addr, key, file].iter().any(|a| a.starts_with("--")) => {
+            export_running(addr, key, file).await
+        }
+        ["export", file, flags @ ..] if !file.starts_with("--") => export_stopped(file, flags),
+        ["import", file, flags @ ..] if !file.starts_with("--") => {
+            return import(file, flags).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            });
+        }
         ["certs", "new", dir, clients @ ..] if !clients.is_empty() => {
             match kernable_core::certs::create(std::path::Path::new(dir), clients) {
                 Ok(()) => {
@@ -1150,6 +1189,11 @@ fn verify(store: &str, keys: &[&str]) -> Result<ExitCode> {
         .map(|k| Ok(signing::key_id(&signing::read_verifying_key(k)?)))
         .collect::<Result<Vec<_>>>()?;
     let report = kernable_store::open_read_only(store)?.verify(&key_ids)?;
+    Ok(report_verify(&report))
+}
+
+/// Prints a verify report; the exit code of `kernable verify`.
+fn report_verify(report: &kernable_store::Report) -> ExitCode {
     println!(
         "{} events, {} commands, {} checkpoints, {} events after the last checkpoint",
         report.events, report.commands, report.checkpoints, report.unanchored
@@ -1160,7 +1204,7 @@ fn verify(store: &str, keys: &[&str]) -> Result<ExitCode> {
     for s in &report.suspects {
         println!("SUSPECT {s}");
     }
-    Ok(if !report.is_ok() {
+    if !report.is_ok() {
         println!("TAMPERED");
         ExitCode::FAILURE
     } else if !report.suspects.is_empty() {
@@ -1169,7 +1213,237 @@ fn verify(store: &str, keys: &[&str]) -> Result<ExitCode> {
     } else {
         println!("OK");
         ExitCode::SUCCESS
+    }
+}
+
+/// The flags of `export` and `import`: the stores as `kernable start` names them.
+struct StoreFlags {
+    store: String,
+    data: String,
+    /// The vault store and its key, with `--vault-key`.
+    vault: Option<(String, String)>,
+    kernel_pubs: Vec<String>,
+}
+
+impl StoreFlags {
+    fn parse(flags: &[&str], kernel_pubs: bool) -> Result<Self> {
+        let mut values: HashMap<&str, Vec<&str>> = HashMap::new();
+        let mut known = vec!["--store", "--data-store", "--vault-store", "--vault-key"];
+        if kernel_pubs {
+            known.push("--kernel-pub");
+        }
+        let mut rest = flags.iter();
+        while let Some(flag) = rest.next() {
+            if !known.contains(flag) {
+                return Err(format!("unknown flag {flag}").into());
+            }
+            let value = rest.next().ok_or_else(|| format!("{flag} needs a value"))?;
+            values.entry(flag).or_default().push(value);
+        }
+        let one = |flag: &str, default: &str| -> Result<String> {
+            match values.get(flag).map(Vec::as_slice) {
+                None => Ok(default.to_owned()),
+                Some([v]) => Ok((*v).to_owned()),
+                Some(_) => Err(format!("{flag} is given twice").into()),
+            }
+        };
+        let vault = match values.contains_key("--vault-key") {
+            true => Some((
+                one("--vault-store", "sqlite:vault.db")?,
+                one("--vault-key", "")?,
+            )),
+            false if values.contains_key("--vault-store") => {
+                return Err("--vault-store needs --vault-key".into());
+            }
+            false => None,
+        };
+        Ok(StoreFlags {
+            store: one("--store", "sqlite:kernable.db")?,
+            data: one("--data-store", "file:data")?,
+            vault,
+            kernel_pubs: values
+                .get("--kernel-pub")
+                .map(|v| v.iter().map(|s| (*s).to_owned()).collect())
+                .unwrap_or_default(),
+        })
+    }
+
+    fn open_vault(&self) -> Result<Option<kernable_store::vault::Vault>> {
+        let Some((store, key)) = &self.vault else {
+            return Ok(None);
+        };
+        let key = signing::read_secret(key).map_err(|e| match e.kind() {
+            io::ErrorKind::InvalidData => format!("{key}: not a 32-byte key in hex").into(),
+            _ => Box::<dyn std::error::Error>::from(format!("{key}: {e}")),
+        })?;
+        Ok(Some(kernable_store::vault::Vault::open(store, &key)?))
+    }
+}
+
+fn boxed(e: BoxError) -> Box<dyn std::error::Error> {
+    e
+}
+
+/// A new export file, readable by its owner only; never overwrites one.
+fn create_export(file: &str) -> Result<export::Writer<io::BufWriter<fs::File>>> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let out = options.open(file).map_err(|e| format!("{file}: {e}"))?;
+    Ok(export::Writer::new(io::BufWriter::new(out))?)
+}
+
+fn exported(file: &str, end: &kernable_core::proto::ExportEnd) {
+    println!(
+        "exported {} records, {} vault values and {} files to {file}",
+        end.records, end.vault_values, end.files
+    );
+    if !end.kernel_keys.is_empty() {
+        println!("signed by the kernel keys {}", end.kernel_keys.join(", "));
+    }
+}
+
+/// Writes the frames to `file`; deletes it if they do not reach their end.
+fn write_export(
+    file: &str,
+    frames: impl FnOnce(&mut dyn FnMut(kernable_core::proto::ExportFrame) -> Result<bool>) -> Result<()>,
+) -> Result<bool> {
+    let mut writer = create_export(file)?;
+    let mut end = None;
+    let outcome = frames(&mut |frame| {
+        if let Some(kernable_core::proto::export_frame::Frame::End(e)) = &frame.frame {
+            end = Some(e.clone());
+        }
+        Ok(writer.write(frame)?)
+    });
+    let done = outcome.and_then(|()| {
+        let file = writer
+            .into_inner()
+            .into_inner()
+            .map_err(|e| e.into_error())?;
+        file.sync_all()?;
+        end.ok_or_else(|| "the export ended early".into())
+    });
+    match done {
+        Ok(end) => {
+            exported(file, &end);
+            Ok(true)
+        }
+        Err(e) => {
+            let _ = fs::remove_file(file);
+            Err(e)
+        }
+    }
+}
+
+/// `kernable export <addr> <key> <file>`: the running kernel streams its export.
+async fn export_running(addr: &str, key_path: &str, file: &str) -> Result<bool> {
+    let key = signing::read_signing_key(key_path)?;
+    let issued_at = now_ms();
+    let mut request = tonic::Request::new(ExportRequest {
+        issued_at,
+        sig: Some(signing::sign(&key, &signing::export_message(issued_at))),
+        protocol: kernable_core::PROTOCOL,
+    });
+    with_key_grant(&mut request, key_path)?;
+    let mut stream = ExportServiceClient::new(connect(addr).await?)
+        .max_decoding_message_size(usize::MAX)
+        .export(request)
+        .await?
+        .into_inner();
+    let mut writer = create_export(file)?;
+    let mut end = None;
+    let outcome: Result<()> = async {
+        while let Some(frame) = stream.message().await? {
+            if let Some(kernable_core::proto::export_frame::Frame::End(e)) = &frame.frame {
+                end = Some(e.clone());
+            }
+            if writer.write(frame)? {
+                break;
+            }
+        }
+        let out = writer
+            .into_inner()
+            .into_inner()
+            .map_err(|e| e.into_error())?;
+        out.sync_all()?;
+        Ok(())
+    }
+    .await;
+    match (outcome, end) {
+        (Ok(()), Some(end)) => {
+            exported(file, &end);
+            Ok(true)
+        }
+        (Ok(()), None) => {
+            let _ = fs::remove_file(file);
+            Err("the kernel ended the export early".into())
+        }
+        (Err(e), _) => {
+            let _ = fs::remove_file(file);
+            Err(e)
+        }
+    }
+}
+
+/// `kernable export <file> [flags]`: stopped stores, read directly.
+fn export_stopped(file: &str, flags: &[&str]) -> Result<bool> {
+    let flags = StoreFlags::parse(flags, false)?;
+    let store = kernable_store::open_read_only(&flags.store)?;
+    let vault = flags.open_vault()?;
+    let data = kernable_store::data::open(&flags.data)?;
+    let source = export::Source {
+        store: store.as_ref(),
+        vault: vault.as_ref(),
+        data: data.as_ref(),
+        partition: "",
+    };
+    write_export(file, |write| {
+        export::produce(&source, &mut |frame| {
+            write(frame).map(|_| ()).map_err(|e| e.to_string().into())
+        })
+        .map_err(boxed)?;
+        Ok(())
     })
+}
+
+/// `kernable import <file> [flags]`: fills new, empty stores, then checks the store.
+fn import(file: &str, flags: &[&str]) -> Result<ExitCode> {
+    let flags = StoreFlags::parse(flags, true)?;
+    let store = kernable_store::open(&flags.store)?;
+    let vault = flags.open_vault()?;
+    let data = kernable_store::data::open(&flags.data)?;
+    let target = export::Target {
+        store: store.as_ref(),
+        vault: vault.as_ref(),
+        data: data.as_ref(),
+    };
+    let imported = export::import(Path::new(file), &target).map_err(boxed)?;
+    let end = &imported.end;
+    println!(
+        "imported {} records, {} vault values and {} files",
+        end.records, end.vault_values, end.files
+    );
+    let key_ids = match flags.kernel_pubs.is_empty() {
+        false => flags
+            .kernel_pubs
+            .iter()
+            .map(|k| key_id_of(k))
+            .collect::<Result<Vec<_>>>()?,
+        true => {
+            if !end.kernel_keys.is_empty() {
+                println!(
+                    "checked with the kernel keys the export names: {}; compare them with the \
+                     source's kernel .pub files, or name those with --kernel-pub",
+                    end.kernel_keys.join(", ")
+                );
+            }
+            end.kernel_keys.clone()
+        }
+    };
+    let report = store.verify(&key_ids)?;
+    Ok(report_verify(&report))
 }
 
 fn vault_rekey(vault: &str, old: &str, new: &str) -> Result<bool> {

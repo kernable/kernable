@@ -217,6 +217,8 @@ except where noted. The action `*` stands for all actions.
 - data_read, data_write: get, or put and delete, the files of a domain (`domain.*` or `*`).
 - cache: use the cache of a domain (`domain.*` or `*`).
 - manage: apply the membership of these services (service names, or `*`).
+- replicate: follow the kernel as its standby (`*`).
+- export: export the whole kernel (`*`, ExportService in export.proto).
 
 | Field | Type | Number | Description |
 |---|---|---|---|

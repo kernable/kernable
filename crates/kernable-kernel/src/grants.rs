@@ -10,7 +10,7 @@ use kernable_core::proto::Grant;
 use crate::config;
 
 /// The actions a grant names; `*` stands for all of them.
-pub const ACTIONS: [&str; 15] = [
+pub const ACTIONS: [&str; 16] = [
     "submit",
     "run",
     "subscribe",
@@ -26,6 +26,7 @@ pub const ACTIONS: [&str; 15] = [
     "cache",
     "manage",
     "replicate",
+    "export",
 ];
 
 /// Key ID -> the type patterns it may use for one action.
@@ -65,6 +66,9 @@ pub struct Permissions {
     /// Keys a standby may follow the kernel with (`*`): it gets every record, vault value and
     /// file (design/replication.md).
     pub replicate: Rules,
+    /// Keys that may export the whole kernel (`*`): every record, file and vault value, the
+    /// vault values sealed (`kernable export`).
+    pub export: Rules,
     /// Old key ID -> new key ID: a listener registered with the old key may connect with the
     /// new one and keeps its position, order and middleware registration.
     pub successors: HashMap<String, String>,
@@ -123,6 +127,7 @@ impl Permissions {
             "cache" => &mut self.cache,
             "manage" => &mut self.manage,
             "replicate" => &mut self.replicate,
+            "export" => &mut self.export,
             _ => unreachable!("not an action: {action}"),
         }
     }

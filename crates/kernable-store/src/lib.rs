@@ -563,6 +563,12 @@ pub trait Store: Send + Sync {
         Err(Error::NoRecordLog)
     }
 
+    /// Calls `f` with the whole state as records, read in one consistent view, like
+    /// [`Store::image`], but also where no record log is kept: what `kernable export` writes.
+    fn snapshot(&self, f: &mut dyn FnMut(Record) -> Result<()>) -> Result<()> {
+        self.image(f).map(|_| ())
+    }
+
     /// Calls `f` with the records of `tenant` (S4, moving a tenant), in one consistent view, in
     /// an order that applies (each command as enqueued before its outcome, commits in log
     /// order, the index with each stream's last commit). With `after` (a copy while the tenant

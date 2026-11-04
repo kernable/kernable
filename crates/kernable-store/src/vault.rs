@@ -360,6 +360,17 @@ impl Vault {
     /// The values of `refs` that are still held, decrypted, with what the vault keeps about
     /// them: what a primary sends its standby (design/replication.md).
     pub fn export(&self, refs: &[String]) -> Result<Vec<VaultRow>> {
+        self.rows(refs, false)
+    }
+
+    /// Like [`Vault::export`], but each value stays encrypted as stored: its nonce, then the
+    /// ciphertext ([`VaultRow::sealed`]). What `kernable export` writes; only a vault with
+    /// this vault's key imports it.
+    pub fn export_sealed(&self, refs: &[String]) -> Result<Vec<VaultRow>> {
+        self.rows(refs, true)
+    }
+
+    fn rows(&self, refs: &[String], sealed: bool) -> Result<Vec<VaultRow>> {
         if refs.is_empty() {
             return Ok(Vec::new());
         }
@@ -385,6 +396,7 @@ impl Vault {
                     value: Vec::new(),
                     created_at: r.get(11)?,
                     key: r.get(12)?,
+                    sealed: false,
                 },
                 r.get::<_, Vec<u8>>(9)?,
                 r.get::<_, Vec<u8>>(10)?,
@@ -392,7 +404,15 @@ impl Vault {
         })?;
         let mut out = Vec::new();
         for row in rows {
-            let (mut row, nonce, sealed) = row?;
+            let (mut row, nonce, value) = row?;
+            if sealed {
+                stored_nonce(&row.r#ref, &nonce)?;
+                row.value = [nonce, value].concat();
+                row.sealed = true;
+                out.push(row);
+                continue;
+            }
+            let sealed = value;
             row.value = self
                 .cipher
                 .decrypt(
@@ -416,11 +436,22 @@ impl Vault {
     /// Keeps rows another vault exported ([`Vault::export`]), encrypted with this vault's key;
     /// a value held already stays as it is. The rows cannot be checked against their
     /// references (the vault keeps no salts): a standby takes them from its authenticated
-    /// primary.
+    /// primary. Sealed rows ([`Vault::export_sealed`]) must have been sealed with this
+    /// vault's key; one that was not is refused, and nothing is kept.
     pub fn import(&self, rows: &[VaultRow]) -> Result<()> {
         if rows.is_empty() {
             return Ok(());
         }
+        let opened: Vec<VaultRow>;
+        let rows = if rows.iter().any(|r| r.sealed) {
+            opened = rows
+                .iter()
+                .map(|r| self.open_sealed(r))
+                .collect::<Result<_>>()?;
+            &opened
+        } else {
+            rows
+        };
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         let sealed: u64 = tx.query_row("SELECT count FROM sealed", [], |r| r.get(0))?;
@@ -480,6 +511,49 @@ impl Vault {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Whether this vault's key opens the sealed `rows` ([`Vault::export_sealed`]); an error
+    /// names the first it does not.
+    pub fn check_sealed(&self, rows: &[VaultRow]) -> Result<()> {
+        for row in rows {
+            self.open_sealed(row)?;
+        }
+        Ok(())
+    }
+
+    /// A row with its value decrypted, if it is sealed.
+    fn open_sealed(&self, row: &VaultRow) -> Result<VaultRow> {
+        if !row.sealed {
+            return Ok(row.clone());
+        }
+        if row.value.len() < 12 {
+            return Err(Error::Vault(format!(
+                "sealed value {} is shorter than its nonce",
+                row.r#ref
+            )));
+        }
+        let (nonce, sealed) = row.value.split_at(12);
+        let value = self
+            .cipher
+            .decrypt(
+                Nonce::from_slice(nonce),
+                Payload {
+                    msg: sealed,
+                    aad: row.r#ref.as_bytes(),
+                },
+            )
+            .map_err(|_| {
+                Error::Vault(format!(
+                    "value {} was sealed with another key: use the source's vault key",
+                    row.r#ref
+                ))
+            })?;
+        Ok(VaultRow {
+            value,
+            sealed: false,
+            ..row.clone()
+        })
     }
 
     /// Deletes every value of `tenant`, for a tenant that moved to another partition (S4);

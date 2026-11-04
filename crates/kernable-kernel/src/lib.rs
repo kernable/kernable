@@ -22,6 +22,7 @@ pub mod config;
 mod connections;
 pub mod crash;
 pub mod demo;
+pub mod export;
 #[cfg(feature = "fuzzing")]
 pub mod fuzzing;
 pub mod global_keys;
@@ -68,6 +69,7 @@ use kernable_core::{
         command_service_server::{CommandService, CommandServiceServer},
         data_service_server::{DataService, DataServiceServer},
         event_service_server::{EventService, EventServiceServer},
+        export_service_server::ExportServiceServer,
         global_key_service_server::GlobalKeyServiceServer,
         kernel_message::Msg as Out,
         listener_service_server::{ListenerService, ListenerServiceServer},
@@ -1190,6 +1192,10 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
                 .max_encoding_message_size(replication::MAX_MESSAGE_BYTES),
         )
         .add_service(TrustSyncServiceServer::new(api.clone()))
+        .add_service(
+            ExportServiceServer::new(api.clone())
+                .max_encoding_message_size(replication::MAX_MESSAGE_BYTES),
+        )
         .add_service(
             ReplicationServiceServer::new(api.clone())
                 .max_decoding_message_size(max)

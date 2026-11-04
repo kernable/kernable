@@ -51,6 +51,7 @@ const SIDEBAR = [
       { text: "Overview", link: "/how-to/" },
       { text: "Deploy and upgrade", link: "/how-to/deploy" },
       { text: "Back up and restore", link: "/how-to/backup" },
+      { text: "Move a kernel", link: "/how-to/export" },
       { text: "Run a standby", link: "/how-to/standby" },
       { text: "Share tenants across kernels", link: "/how-to/partitions" },
       { text: "Monitor kernable", link: "/how-to/monitor" },

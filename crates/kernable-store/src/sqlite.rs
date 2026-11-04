@@ -1277,6 +1277,13 @@ impl Store for SqliteStore {
         })
     }
 
+    fn snapshot(&self, f: &mut dyn FnMut(Record) -> Result<()>) -> Result<()> {
+        self.read(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            image_records(&tx, f)
+        })
+    }
+
     fn apply_image(&self, records: &[Record]) -> Result<()> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;

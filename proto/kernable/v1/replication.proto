@@ -103,6 +103,9 @@ message VaultRow {
   int64 created_at = 11;
   // A personal unique key's value: filed under its identity (see Vault::put_key).
   bool key = 12;
+  // `value` is the 12-byte nonce and the ciphertext as the source vault stores them (an
+  // export, ExportHeader.vault): only a vault with the source's key reads it.
+  bool sealed = 13;
 }
 
 // A file of the data store as it is now; `absent` if it was deleted. In an image, files go by

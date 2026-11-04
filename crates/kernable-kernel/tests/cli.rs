@@ -346,6 +346,207 @@ fn vault_rekey_moves_every_value_to_the_new_key() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The vault fixture that belongs to the backend under test.
+fn vault_fixture(dir: &Path, name: &str) -> String {
+    let file = match backend().0 {
+        "file" => "vault-file.db",
+        _ => "vault-sqlite.db",
+    };
+    std::fs::copy(fixtures().join(file), dir.join(name)).unwrap();
+    format!("sqlite:{}", dir.join(name).display())
+}
+
+#[test]
+fn an_export_of_stopped_stores_imports_into_new_ones() {
+    let dir = temp_dir("export-stopped");
+    write_key(&dir, "kernel", 3);
+    std::fs::copy(fixtures().join("vault.key"), dir.join("vault.key")).unwrap();
+    std::fs::write(dir.join("other-vault.key"), hex(&[7; 32])).unwrap();
+    let store = fixture(&dir, "store");
+    let vault = vault_fixture(&dir, "vault.db");
+    let data = kernable_store::data::open(&format!("file:{}", dir.join("data").display())).unwrap();
+    let invoice = kernable_store::data::DataKey {
+        tenant_id: "t1".into(),
+        domain: "orders".into(),
+        key: "invoice-1.pdf".into(),
+    };
+    let pdf = kernable_store::data::Data {
+        content_type: "application/pdf".into(),
+        data: b"%PDF-1.7 invoice".to_vec(),
+    };
+    data.put(&invoice, &pdf).unwrap();
+    let source = [
+        "--store",
+        &store,
+        "--vault-store",
+        &vault,
+        "--vault-key",
+        "vault.key",
+        "--data-store",
+        "file:data",
+    ];
+
+    // Without the vault, the values the store refers to cannot be exported.
+    let (code, printed) = kernable(&dir, &["export", "plain.kx", "--store", &store]);
+    assert_eq!(code, 1, "{printed}");
+    assert!(printed.contains("refers to vault values"), "{printed}");
+    assert!(
+        !dir.join("plain.kx").exists(),
+        "a failed export leaves no file"
+    );
+
+    let (code, printed) = kernable(&dir, &[&["export", "out.kx"][..], &source].concat());
+    assert_eq!(code, 0, "{printed}");
+    assert!(printed.starts_with("exported "), "{printed}");
+    assert!(
+        printed.contains(" vault values and 1 files to out.kx"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains(&format!("signed by the kernel keys {}", id(&key(3)))),
+        "{printed}"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dir.join("out.kx"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    // An export never overwrites a file.
+    let (code, printed) = kernable(&dir, &[&["export", "out.kx"][..], &source].concat());
+    assert_eq!(code, 1, "{printed}");
+
+    let (backend, _) = backend();
+    let target = |name: &str| {
+        (
+            format!("{backend}:{}", dir.join(name).display()),
+            format!("sqlite:{}", dir.join(format!("{name}-vault.db")).display()),
+            format!("file:{}", dir.join(format!("{name}-data")).display()),
+        )
+    };
+    let import = |file: &str, name: &str, vault_key: &str| {
+        let (store, vault, data) = target(name);
+        kernable(
+            &dir,
+            &[
+                "import",
+                file,
+                "--store",
+                &store,
+                "--vault-store",
+                &vault,
+                "--vault-key",
+                vault_key,
+                "--data-store",
+                &data,
+            ],
+        )
+    };
+
+    // The fixture holds c11, signed by key 7 after its revocation: one suspect, as at the source.
+    let (code, printed) = import("out.kx", "new", "vault.key");
+    assert_eq!(code, 2, "{printed}");
+    assert!(printed.starts_with("imported "), "{printed}");
+    assert!(
+        printed.contains("5 events, 7 commands, 1 checkpoints"),
+        "{printed}"
+    );
+    assert!(has_line(&printed, "OK, 1 suspect"), "{printed}");
+    let (new_store, new_vault, new_data) = target("new");
+    for inspect in ["listeners", "workers", "services"] {
+        assert_eq!(
+            kernable(&dir, &[inspect, &new_store]),
+            kernable(&dir, &[inspect, &store]),
+            "{inspect}"
+        );
+    }
+    let (_, verified) = kernable(&dir, &["verify", &new_store, "kernel.pub"]);
+    assert!(has_line(&verified, "OK, 1 suspect"), "{verified}");
+    // The values are readable with the target's vault key, which is the source's.
+    let email = signing::vault_ref(&[1; 16], "k-1", false, b"\"max@firma.de\"");
+    let key: [u8; 32] = hex::decode(
+        std::fs::read_to_string(dir.join("vault.key"))
+            .unwrap()
+            .trim(),
+    )
+    .unwrap()
+    .try_into()
+    .unwrap();
+    let values = Vault::open(&new_vault, &key)
+        .unwrap()
+        .get(&[email])
+        .unwrap();
+    assert_eq!(values[0].value, b"\"max@firma.de\"");
+    let copied = kernable_store::data::open(&new_data).unwrap();
+    assert_eq!(copied.get(&invoice).unwrap(), Some(pdf));
+
+    // Into the other backend: the same store.
+    let other = match backend {
+        "file" => format!("sqlite:{}", dir.join("other.db").display()),
+        _ => format!("file:{}", dir.join("other.log").display()),
+    };
+    let (code, printed) = kernable(
+        &dir,
+        &[
+            "import",
+            "out.kx",
+            "--store",
+            &other,
+            "--vault-store",
+            &format!("sqlite:{}", dir.join("other-vault.db").display()),
+            "--vault-key",
+            "vault.key",
+            "--data-store",
+            &format!("file:{}", dir.join("other-data").display()),
+            "--kernel-pub",
+            "kernel.pub",
+        ],
+    );
+    assert_eq!(code, 2, "{printed}");
+    assert!(
+        printed.contains("5 events, 7 commands, 1 checkpoints"),
+        "{printed}"
+    );
+    for inspect in ["listeners", "workers", "services"] {
+        assert_eq!(
+            kernable(&dir, &[inspect, &other]),
+            kernable(&dir, &[inspect, &store]),
+            "{inspect}"
+        );
+    }
+
+    // Into a store that holds data, or with another vault key: refused.
+    let (code, printed) = import("out.kx", "new", "vault.key");
+    assert_eq!(code, 1, "{printed}");
+    assert!(printed.contains("holds data already"), "{printed}");
+    let (code, printed) = import("out.kx", "wrong-key", "other-vault.key");
+    assert_eq!(code, 1, "{printed}");
+    assert!(printed.contains("sealed with another key"), "{printed}");
+
+    // A copy cut short, or with one byte changed, is refused.
+    let bytes = std::fs::read(dir.join("out.kx")).unwrap();
+    std::fs::write(dir.join("short.kx"), &bytes[..bytes.len() - 40]).unwrap();
+    let (code, printed) = import("short.kx", "short", "vault.key");
+    assert_eq!(code, 1, "{printed}");
+    assert!(
+        printed.contains("cut short") || printed.contains("damaged"),
+        "{printed}"
+    );
+    let mut changed = bytes.clone();
+    changed[bytes.len() / 2] ^= 1;
+    std::fs::write(dir.join("changed.kx"), &changed).unwrap();
+    let (code, printed) = import("changed.kx", "changed", "vault.key");
+    assert_eq!(code, 1, "{printed}");
+    assert!(printed.contains("damaged"), "{printed}");
+    let (code, printed) = import("vault.key", "garbage", "vault.key");
+    assert_eq!(code, 1, "{printed}");
+    assert!(printed.contains("not a kernable export"), "{printed}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn grant_apply_submit_and_revoke_work_against_a_running_kernel() {
     let env = start("cli-online").await;
@@ -866,4 +1067,109 @@ fn every_chapter_of_the_demo_shows_what_it_says() {
     let state = demo_state(&addr);
     assert_eq!(state["rows"]["accounts"]["a2"]["open"], false);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_running_kernel_exports_to_a_key_granted_export() {
+    let env = start_custom("cli-export-running", |config, dir| {
+        std::fs::write(dir.join("vault.key"), hex(&[8; 32])).unwrap();
+        config.vault = Some(kernable_kernel::config::VaultConfig {
+            store: format!("sqlite:{}", dir.join("vault.db").display()),
+            key: dir.join("vault.key"),
+        });
+    })
+    .await;
+    spawn_worker(&env).await;
+    let dir = env.dir.clone();
+    std::fs::write(dir.join("root.key"), hex(root().as_bytes())).unwrap();
+    write_key(&dir, "ops", 9);
+    write_key(&dir, "kernel", 3);
+    write_key(&dir, "nobody", 10);
+    let run = |args: Vec<String>| {
+        let dir = dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            kernable(&dir, &args)
+        })
+    };
+    let args = |a: &[&str]| a.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+    let (code, printed) = run(args(&[
+        "grant",
+        "root.key",
+        "ops.pub",
+        "export=*",
+        "submit=orders.*",
+    ]))
+    .await
+    .unwrap();
+    assert_eq!(code, 0, "{printed}");
+    let (code, printed) = run(args(&[
+        "grant",
+        "root.key",
+        "nobody.pub",
+        "submit=orders.*",
+    ]))
+    .await
+    .unwrap();
+    assert_eq!(code, 0, "{printed}");
+    for order in ["o1", "o2", "o3"] {
+        let (code, printed) = run(args(&[
+            "submit",
+            &env.addr,
+            "ops.key",
+            "t1",
+            "orders",
+            "Order",
+            order,
+            "PlaceOrder",
+            "{}",
+        ]))
+        .await
+        .unwrap();
+        assert_eq!(code, 0, "{printed}");
+    }
+
+    let (code, printed) = run(args(&["export", &env.addr, "nobody.key", "denied.kx"]))
+        .await
+        .unwrap();
+    assert_eq!(code, 1, "{printed}");
+    assert!(printed.contains("needs export for *"), "{printed}");
+    assert!(!dir.join("denied.kx").exists());
+
+    let (code, printed) = run(args(&["export", &env.addr, "ops.key", "out.kx"]))
+        .await
+        .unwrap();
+    assert_eq!(code, 0, "{printed}");
+    assert!(printed.starts_with("exported "), "{printed}");
+
+    // The kernel signed a checkpoint first: every event is anchored.
+    let (backend, _) = backend();
+    let store = format!("{backend}:{}", dir.join("imported").display());
+    let vault = format!("sqlite:{}", dir.join("imported-vault.db").display());
+    let data = format!("file:{}", dir.join("imported-data").display());
+    let (code, printed) = run(args(&[
+        "import",
+        "out.kx",
+        "--store",
+        &store,
+        "--vault-store",
+        &vault,
+        "--vault-key",
+        "vault.key",
+        "--data-store",
+        &data,
+        "--kernel-pub",
+        "kernel.pub",
+    ]))
+    .await
+    .unwrap();
+    assert_eq!(code, 0, "{printed}");
+    assert!(
+        printed.contains("3 events, 3 commands, ") && printed.contains(" 0 events after the last"),
+        "{printed}"
+    );
+    assert!(has_line(&printed, "OK"), "{printed}");
+    let (_, imported) = run(args(&["workers", &store])).await.unwrap();
+    let (_, source) = run(args(&["workers", &env.store])).await.unwrap();
+    assert_eq!(imported, source);
 }

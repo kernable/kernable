@@ -195,6 +195,8 @@ message Grant {
 // - data_read, data_write: get, or put and delete, the files of a domain (`domain.*` or `*`).
 // - cache: use the cache of a domain (`domain.*` or `*`).
 // - manage: apply the membership of these services (service names, or `*`).
+// - replicate: follow the kernel as its standby (`*`).
+// - export: export the whole kernel (`*`, ExportService in export.proto).
 message Permission {
   string action = 1;
   repeated string types = 2;
