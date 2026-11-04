@@ -193,6 +193,20 @@ Export and import:
                                           files, or name those. Keep the source's kernel .pub files
                                           for verify after the kernel runs on the new stores.
 
+Run a node:
+  kernable node <project.toml>            Runs one node of a project: the kernel and, with a
+                                          [backup] section, the backup follower, as child processes
+                                          it restarts when they exit. It reads the file again every
+                                          two seconds or on SIGHUP, and restarts a child whose
+                                          command changed or whose binary was replaced. SIGTERM or
+                                          SIGINT stops the children (SIGKILL after stop-seconds,
+                                          default 30). The file has [kernel] (flags: the flags of
+                                          kernable start without their dashes, env, binary,
+                                          stop-seconds) and [backup] (to, key, backup-key, follow,
+                                          segment-seconds, base-hours, keep, env); paths are
+                                          relative to its directory. Exit 2 if the file is invalid
+                                          at start.
+
 Continuous backup:
   kernable backup key <file>              Writes a new backup key (32 random bytes in hex) to
                                           <file>, readable by its owner only; never overwrites one.
@@ -324,6 +338,7 @@ async fn main() -> ExitCode {
             partitions_move(addr, key, tenant, to).await
         }
         ["witness", flags @ ..] => return run_witness(flags).await,
+        ["node", project] => return run_node(project).await,
         ["backup", "key", file] => backup_key(file),
         ["backup", "list", to, flags @ ..] if !to.starts_with("--") => backup_list(to, flags),
         ["backup", flags @ ..] => return run_backup(flags).await,
@@ -850,6 +865,22 @@ fn flag_values<'a>(flags: &[&'a str], known: &[&str]) -> Result<HashMap<&'a str,
         given.push(value);
     }
     Ok(values)
+}
+
+/// `kernable node <project.toml>`: runs one node of a project until stopped.
+async fn run_node(project: &str) -> ExitCode {
+    let filter = EnvFilter::try_from_env("KERNABLE_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
+    match kernable_kernel::supervisor::run(Path::new(project)).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::from(2)
+        }
+    }
 }
 
 /// `kernable backup key <file>`.

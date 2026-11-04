@@ -211,6 +211,16 @@ kernable import <file> [--store <s>] [--data-store <d>] [--vault-store <v> --vau
 
 Fills new, empty stores from an export, then checks the store like verify, with the same output and exit codes. `--vault-key` must be the source's vault key. The whole file is checked before anything is written: a copy cut short or changed, or a wrong vault key, is refused. Without `--kernel-pub`, the store is checked with the kernel keys the export names; compare them with the source's `.pub` files, or name those. Keep the source's kernel `.pub` files for verify after the kernel runs on the new stores.
 
+## Run a node
+
+### `kernable node`
+
+```text
+kernable node <project.toml>
+```
+
+Runs one node of a project: the kernel and, with a [backup] section, the backup follower, as child processes it restarts when they exit. It reads the file again every two seconds or on SIGHUP, and restarts a child whose command changed or whose binary was replaced. SIGTERM or SIGINT stops the children (SIGKILL after stop-seconds, default 30). The file has [kernel] (flags: the flags of kernable start without their dashes, env, binary, stop-seconds) and [backup] (to, key, backup-key, follow, segment-seconds, base-hours, keep, env); paths are relative to its directory. Exit 2 if the file is invalid at start.
+
 ## Continuous backup
 
 ### `kernable backup key`

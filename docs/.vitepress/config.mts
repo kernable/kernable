@@ -54,6 +54,7 @@ const SIDEBAR = [
       { text: "Move a kernel", link: "/how-to/export" },
       { text: "Run a standby", link: "/how-to/standby" },
       { text: "Run a listener on several machines", link: "/how-to/instances" },
+      { text: "Run a node from one file", link: "/how-to/node" },
       { text: "Share tenants across kernels", link: "/how-to/partitions" },
       { text: "Monitor kernable", link: "/how-to/monitor" },
       { text: "Mutual TLS with your own PKI", link: "/how-to/tls" },

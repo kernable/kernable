@@ -40,6 +40,7 @@ mod queue;
 mod replays;
 mod replication;
 pub mod standby;
+pub mod supervisor;
 mod trend;
 mod ui;
 pub mod witness;
