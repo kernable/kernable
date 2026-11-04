@@ -8,7 +8,7 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock},
+    sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, TryLockError},
 };
 
 use kernable_core::{
@@ -43,8 +43,16 @@ impl Memberships {
         }
     }
 
+    /// Held while the membership is stored, which waits for the standby: a second one waits
+    /// for it as a write waits for the standby (`replication::blocking`).
     fn applying(&self) -> MutexGuard<'_, ()> {
-        self.applying.lock().unwrap_or_else(PoisonError::into_inner)
+        match self.applying.try_lock() {
+            Ok(guard) => guard,
+            Err(TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(TryLockError::WouldBlock) => crate::replication::blocking(|| {
+                self.applying.lock().unwrap_or_else(PoisonError::into_inner)
+            }),
+        }
     }
 
     /// Refuses `m` unless it is newer than the applied membership of its service: an older

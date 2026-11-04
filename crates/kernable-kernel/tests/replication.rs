@@ -398,3 +398,96 @@ async fn a_standby_whose_key_is_revoked_follows_no_longer() {
     .await;
     following.abort();
 }
+
+/// A socket in front of the primary's, for the standby: held, nothing it sends reaches the
+/// primary until it is let go.
+struct Gate {
+    held: tokio::sync::watch::Sender<bool>,
+}
+
+impl Gate {
+    fn new(front: &Path, back: &Path) -> Self {
+        let listener = tokio::net::UnixListener::bind(front).unwrap();
+        let (held, watch) = tokio::sync::watch::channel(false);
+        let back = back.to_owned();
+        tokio::spawn(async move {
+            while let Ok((client, _)) = listener.accept().await {
+                let Ok(kernel) = tokio::net::UnixStream::connect(&back).await else {
+                    return;
+                };
+                let (mut from_standby, to_kernel) = (client.into_split(), kernel.into_split());
+                let mut watch = watch.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let (mut to_kernel, mut buf) = (to_kernel.1, vec![0u8; 64 << 10]);
+                    while let Ok(n @ 1..) = from_standby.0.read(&mut buf).await {
+                        if watch.wait_for(|held| !held).await.is_err()
+                            || to_kernel.write_all(&buf[..n]).await.is_err()
+                        {
+                            return;
+                        }
+                    }
+                });
+                let (mut from_kernel, mut to_standby) = (to_kernel.0, from_standby.1);
+                tokio::spawn(async move {
+                    let _ = tokio::io::copy(&mut from_kernel, &mut to_standby).await;
+                });
+            }
+        });
+        Gate { held }
+    }
+}
+
+/// A membership waits for the standby under the lock that keeps memberships in order; a second
+/// one waits for that lock. On a primary of one worker thread, the second must not take the
+/// thread that reads the standby's acknowledgements from the network with it: both are applied
+/// once the standby acknowledges.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_membership_waiting_for_the_standby_does_not_stall_the_primary() {
+    let dir = Dir::new("one-worker");
+    let mut primary_config = config(&dir.0, "primary", 3);
+    primary_config.replication.sync = true;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let primary = {
+        let _primary_runtime = runtime.enter();
+        Kernel::open(primary_config.clone()).unwrap()
+    };
+    runtime.spawn(serve(Arc::clone(&primary)));
+    wait_for(&primary_config.listen).await;
+
+    let mut standby_config = standby_config(&dir.0, &primary_config);
+    let gate_path = dir.0.join("gate.sock");
+    let gate = Gate::new(
+        &gate_path,
+        Path::new(primary_config.listen.trim_start_matches("unix:")),
+    );
+    if let Some(follow) = standby_config.replication.follow.as_mut() {
+        follow.primary = format!("unix:{}", gate_path.display());
+    }
+    let following = tokio::spawn(standby::run(standby_config));
+    until("the standby is in sync", || primary.readiness().is_ok()).await;
+    // Key 1's grant is stored with the first membership.
+    apply(&primary_config.listen, membership("first", &[], &[], &[]))
+        .await
+        .unwrap();
+
+    gate.held.send_replace(true);
+    let (addr_a, addr_b) = (primary_config.listen.clone(), primary_config.listen.clone());
+    let a = tokio::spawn(async move { apply(&addr_a, membership("a", &[], &[], &[])).await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let b = tokio::spawn(async move { apply(&addr_b, membership("b", &[], &[], &[])).await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    gate.held.send_replace(false);
+    for (name, apply) in [("a", a), ("b", b)] {
+        match tokio::time::timeout(Duration::from_secs(20), apply).await {
+            Ok(result) => result.unwrap().unwrap(),
+            Err(_) => panic!("membership {name} not applied in 20 s: the primary stalled"),
+        }
+    }
+    following.abort();
+    runtime.shutdown_background();
+}

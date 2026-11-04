@@ -42,6 +42,20 @@ const TICK: Duration = Duration::from_millis(50);
 /// The largest message on a replication stream: a batch with files of the data service.
 pub(crate) const MAX_MESSAGE_BYTES: usize = 256 << 20;
 
+/// Runs `f`, which blocks until the standby acknowledges, or until a request that waits for it
+/// is done (a lock held across [`Primary::wait`]), with the worker's tasks handed to another
+/// thread. A worker blocked in place may be the one that last polled the network for the
+/// runtime: the others asleep, nobody would read the acknowledgement, and the kernel would stop
+/// answering for good.
+pub(crate) fn blocking<R>(f: impl FnOnce() -> R) -> R {
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(f)
+        }
+        _ => f(),
+    }
+}
+
 /// The standby, as the primary sees it.
 pub(crate) struct Primary {
     state: Mutex<State>,
@@ -90,7 +104,7 @@ impl Primary {
 
     /// Returns once the standby holds record `seq` (P1). Waits as long as it takes: without a
     /// standby, nothing written may be told (S1b lets the witness decide otherwise). Blocks the
-    /// thread; on a multi-threaded runtime the other tasks move on meanwhile.
+    /// thread, [`blocking`]: the other tasks move on meanwhile.
     pub(crate) fn wait(&self, seq: u64) {
         self.wrote.notify_one();
         let wait = || {
@@ -114,12 +128,7 @@ impl Primary {
                 }
             }
         };
-        match tokio::runtime::Handle::try_current() {
-            Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-                tokio::task::block_in_place(wait)
-            }
-            _ => wait(),
-        }
+        blocking(wait);
     }
 
     /// A standby is connected and has acknowledged the head at least once, or the primary
