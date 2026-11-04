@@ -137,6 +137,8 @@ impl From<prost::DecodeError> for Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// A write of a moving tenant's copy on the target (S4), for [`Store::import`].
+// Held only for one batch of a copy: boxing the commit would buy nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum Copy {
     /// A command, as the source stored it.
