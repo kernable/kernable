@@ -284,8 +284,14 @@ async fn run(a: Args) -> Result<(), String> {
     ];
 
     let store_of = |name: &str| match backend.as_str() {
-        "sqlite" => Ok(format!("sqlite:{}", data.join(format!("{name}.db")).display())),
-        "file" => Ok(format!("file:{}", data.join(format!("{name}.log")).display())),
+        "sqlite" => Ok(format!(
+            "sqlite:{}",
+            data.join(format!("{name}.db")).display()
+        )),
+        "file" => Ok(format!(
+            "file:{}",
+            data.join(format!("{name}.log")).display()
+        )),
         other => Err(format!("unknown backend {other}")),
     };
     let store = store_of("k")?;
@@ -313,13 +319,20 @@ async fn run(a: Args) -> Result<(), String> {
                 "--kernel-key",
                 &format!("kernel{suffix}.key"),
                 "--snapshots",
-                &format!("sqlite:{}", data.join(format!("snapshots{suffix}.db")).display()),
+                &format!(
+                    "sqlite:{}",
+                    data.join(format!("snapshots{suffix}.db")).display()
+                ),
                 "--data-store",
                 &format!("file:{}", data.join(format!("files{suffix}")).display()),
                 "--witness",
                 &format!("127.0.0.1:{wport}"),
                 "--node-key",
-                if suffix.is_empty() { "node-a.key" } else { "node-b.key" },
+                if suffix.is_empty() {
+                    "node-a.key"
+                } else {
+                    "node-b.key"
+                },
                 "--advertise",
                 &format!("127.0.0.1:{pport}"),
                 "--primary-kernel-key",
@@ -645,10 +658,12 @@ async fn run(a: Args) -> Result<(), String> {
 }
 
 fn procs_index(name: &str) -> usize {
-    ["kernel", "app-ts", "app-py", "app-rs", "kernel-b", "witness"]
-        .iter()
-        .position(|n| *n == name)
-        .unwrap_or(0)
+    [
+        "kernel", "app-ts", "app-py", "app-rs", "kernel-b", "witness",
+    ]
+    .iter()
+    .position(|n| *n == name)
+    .unwrap_or(0)
 }
 
 fn do_later(action: Later, procs: &mut [Proc]) {
