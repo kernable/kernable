@@ -162,8 +162,11 @@ impl Vault {
         let tables: u32 = conn.query_row("SELECT COUNT(*) FROM sqlite_master", [], |r| r.get(0))?;
         match (format, tables) {
             (0, 0) => {
-                conn.execute_batch(SCHEMA)?;
-                conn.pragma_update(None, "user_version", FORMAT)?;
+                // One transaction: a vault killed while it is created has no tables, or all
+                // of them with their format.
+                conn.execute_batch(&format!(
+                    "BEGIN IMMEDIATE; {SCHEMA}; PRAGMA user_version = {FORMAT}; COMMIT;"
+                ))?;
             }
             (FORMAT, _) => {}
             (found, _) => {

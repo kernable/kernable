@@ -83,6 +83,8 @@ CREATE TABLE IF NOT EXISTS events (
     erases          TEXT    NOT NULL DEFAULT '',
     prev_hash       BLOB    NOT NULL,
     hash            BLOB    NOT NULL,
+    origin_partition TEXT   NOT NULL DEFAULT '', -- a moved event: where it was first committed
+    origin_position INTEGER NOT NULL DEFAULT 0,
     UNIQUE (tenant_id, domain, aggregate_type, aggregate_id, version)
 ) STRICT;
 CREATE TABLE IF NOT EXISTS commands (
@@ -300,23 +302,15 @@ impl SqliteStore {
         let tables: u32 = conn.query_row("SELECT COUNT(*) FROM sqlite_master", [], |r| r.get(0))?;
         match (format, tables) {
             (0, 0) => {
-                conn.execute_batch(SCHEMA)?;
-                conn.pragma_update(None, "user_version", FORMAT)?;
+                // One transaction: a store killed while it is created has either no tables or
+                // every table with its format, never tables without a format (a "format 0"
+                // store that would never open again).
+                conn.execute_batch(&format!(
+                    "BEGIN IMMEDIATE; {SCHEMA}; PRAGMA user_version = {FORMAT}; COMMIT;"
+                ))?;
             }
             (FORMAT, _) => {}
             (found, _) => return Err(Error::Format(found)),
-        }
-        // Where moved events came from (S4); added to a store of an earlier build in place.
-        let origins: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('events') WHERE name = 'origin_partition'",
-            [],
-            |r| r.get(0),
-        )?;
-        if origins == 0 {
-            conn.execute_batch(
-                "ALTER TABLE events ADD COLUMN origin_partition TEXT NOT NULL DEFAULT '';
-                 ALTER TABLE events ADD COLUMN origin_position INTEGER NOT NULL DEFAULT 0;",
-            )?;
         }
         let log = load_log(&conn)?;
         Ok(Self {

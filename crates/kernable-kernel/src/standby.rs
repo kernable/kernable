@@ -119,25 +119,39 @@ impl Standby {
         self.stores.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Closes the stores, moves them aside (`<path>.diverged-<ms>`) and opens new, empty ones:
-    /// for a standby whose log diverged, or that needs an image while it holds data (P4).
-    async fn start_over(&self, why: &str) -> Result<(), BoxError> {
-        let old = self.lock_stores().take();
-        if let Some(mut old) = old {
-            // Every handle closes before the files move: SQLite's lock goes with the last one.
-            loop {
-                match Arc::try_unwrap(old) {
-                    Ok(stores) => {
-                        drop(stores);
-                        break;
+    /// Takes the stores and returns once every handle on them is gone (a request still being
+    /// answered may hold one), so their locks are released.
+    async fn close_stores(&self) {
+        let Some(mut old) = self.lock_stores().take() else {
+            return;
+        };
+        let mut warned = Instant::now();
+        loop {
+            match Arc::try_unwrap(old) {
+                Ok(stores) => {
+                    drop(stores);
+                    return;
+                }
+                Err(shared) => {
+                    old = shared;
+                    if warned.elapsed() >= Duration::from_secs(5) {
+                        warned = Instant::now();
+                        tracing::warn!(
+                            handles = Arc::strong_count(&old) - 1,
+                            "waiting for requests to let go of the stores"
+                        );
                     }
-                    Err(shared) => {
-                        old = shared;
-                        tokio::time::sleep(Duration::from_millis(10)).await;
-                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             }
         }
+    }
+
+    /// Closes the stores, moves them aside (`<path>.diverged-<ms>`) and opens new, empty ones:
+    /// for a standby whose log diverged, or that needs an image while it holds data (P4).
+    async fn start_over(&self, why: &str) -> Result<(), BoxError> {
+        // Every handle closes before the files move: SQLite's lock goes with the last one.
+        self.close_stores().await;
         let at = now_ms();
         let mut moved = Vec::new();
         for url in self.urls() {
@@ -271,9 +285,9 @@ pub(crate) async fn run_with(config: Config, link: Option<Arc<Link>>) -> Result<
     }
     let _ = stop_serving.send(());
     drop(metrics);
-    // Every handle on the stores closes before the kernel opens them.
-    let stores = standby.lock_stores().take();
-    drop(stores);
+    // Every handle on the stores closes before the kernel opens them, also one held by a
+    // request still being answered (the promotion itself).
+    standby.close_stores().await;
     tracing::warn!(
         record = standby.applied.load(SeqCst),
         "promoted: this kernel is the primary now"

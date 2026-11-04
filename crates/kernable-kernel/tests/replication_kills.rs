@@ -162,8 +162,13 @@ async fn submit_until_answered(addrs: &[String], cmd: &Command) -> CommandResult
     let started = Instant::now();
     let mut at = 0;
     loop {
+        // Each try is bounded, so a kernel that never answers fails the test, not hangs it.
         if let Ok(channel) = transport::connect(&addrs[at % addrs.len()]).await
-            && let Ok(result) = submit_on(channel, cmd.clone(), Wait::Committed).await
+            && let Ok(Ok(result)) = tokio::time::timeout(
+                Duration::from_secs(5),
+                submit_on(channel, cmd.clone(), Wait::Committed),
+            )
+            .await
         {
             return result;
         }
