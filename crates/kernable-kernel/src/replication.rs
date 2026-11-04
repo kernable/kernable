@@ -108,6 +108,7 @@ impl Primary {
                         record = seq,
                         waited_s = started.elapsed().as_secs(),
                         standby = state.standby.is_some(),
+                        acknowledged = state.acked,
                         "a write waits for the standby (--replication sync)"
                     );
                 }
