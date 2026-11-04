@@ -49,13 +49,13 @@ impl Node {
         Node { process, started }
     }
 
-    /// The pid of the next start of `child`, within 10 s.
+    /// The pid of the next start of `child`, within 180 s.
     fn next_start(&self, child: &str) -> u32 {
         loop {
             let (name, pid) = self
                 .started
-                .recv_timeout(Duration::from_secs(10))
-                .expect("no start within 10 s");
+                .recv_timeout(Duration::from_secs(180))
+                .expect("no start within 180 s (a build pulls its base image)");
             if name == child {
                 return pid;
             }
@@ -129,5 +129,55 @@ async fn a_node_restarts_its_kernel_and_stops_it_with_itself() {
     let status = node.process.wait().unwrap();
     assert!(status.success(), "{status}");
     assert!(!alive(third), "the kernel stopped with the node");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Whether `podman` runs here; the container test is skipped without it.
+fn podman() -> bool {
+    Command::new("podman")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_builds_and_runs_a_service_after_its_kernel() {
+    if !podman() {
+        eprintln!("skipped: podman is not installed");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("kn-node-svc-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("svc")).unwrap();
+    std::fs::write(
+        dir.join("svc/Containerfile"),
+        "FROM docker.io/library/alpine:3.20\nCMD [\"sh\", \"-c\", \"echo instance=$KERNABLE_INSTANCE url=$KERNABLE_URL; exec sleep 600\"]\n",
+    )
+    .unwrap();
+    let addr = free_addr();
+    let text = format!(
+        "[kernel]\nflags = {{ dev = true, listen = \"{addr}\", ui-listen = \"\" }}\nstop-seconds = 5\n\n[node]\ninstance = \"node-a\"\nproject = \"t{}\"\n\n[[service]]\nname = \"echo\"\nbuild = \"svc\"\nstop-seconds = 5\n",
+        std::process::id()
+    );
+    std::fs::write(dir.join("project.toml"), text).unwrap();
+    let mut node = Node::start(&dir);
+    node.next_start("kernel");
+    let service = node.next_start("echo");
+    assert!(alive(service));
+    wait_for(&addr).await;
+
+    // SAFETY: SIGTERM to the node we started.
+    unsafe { libc::kill(node.process.id() as libc::pid_t, libc::SIGTERM) };
+    let status = node.process.wait().unwrap();
+    assert!(status.success(), "{status}");
+    let ps = Command::new("podman")
+        .args(["ps", "--all", "--format", "{{.Names}}"])
+        .output()
+        .unwrap();
+    let names = String::from_utf8_lossy(&ps.stdout);
+    assert!(
+        !names.contains(&format!("kernable-t{}-echo", std::process::id())),
+        "the container is gone: {names}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

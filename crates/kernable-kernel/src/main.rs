@@ -202,10 +202,14 @@ Run a node:
                                           SIGINT stops the children (SIGKILL after stop-seconds,
                                           default 30). The file has [kernel] (flags: the flags of
                                           kernable start without their dashes, env, binary,
-                                          stop-seconds) and [backup] (to, key, backup-key, follow,
-                                          segment-seconds, base-hours, keep, env); paths are
-                                          relative to its directory. Exit 2 if the file is invalid
-                                          at start.
+                                          stop-seconds), [backup] (to, key, backup-key, follow,
+                                          segment-seconds, base-hours, keep, env), [node]
+                                          (instance, project, podman) and any number of [[service]]
+                                          (name, build, file, command, key, env, cpus, memory,
+                                          stop-seconds): containers built with podman on the node,
+                                          rebuilt on SIGHUP, run after the kernel with KERNABLE_URL,
+                                          KERNABLE_INSTANCE and their key. Paths are relative to its
+                                          directory. Exit 2 if the file is invalid at start.
 
 Continuous backup:
   kernable backup key <file>              Writes a new backup key (32 random bytes in hex) to
