@@ -69,11 +69,13 @@ torture:
 
 # The soak: the kernel and an app per SDK under load and random faults for SOAK_MINUTES, every
 # invariant checked every 10 minutes (crates/kernable-soak; more options in its main.rs).
+# SOAK_PAIR=yes runs a pair with a witness instead of one kernel, and fails it over.
 SOAK_MINUTES ?= 60
 SOAK_BACKEND ?= sqlite
+SOAK_PAIR ?= no
 soak: py
 	cargo build --release -p kernable-kernel -p kernable-soak
-	target/release/kernable-soak run --minutes $(SOAK_MINUTES) --backend $(SOAK_BACKEND) --dir target/soak-$$(date +%Y%m%d-%H%M%S)
+	target/release/kernable-soak run --minutes $(SOAK_MINUTES) --backend $(SOAK_BACKEND) --pair $(SOAK_PAIR) --dir target/soak-$$(date +%Y%m%d-%H%M%S)
 
 # Coverage-guided fuzzing, FUZZ_SECONDS per target (needs nightly Rust and cargo-fuzz).
 # Findings land in fuzz/artifacts/<target>; add them to fuzz/seeds/<target> once fixed.

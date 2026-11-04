@@ -17,6 +17,7 @@ hex.workspace = true
 kernable = { path = "../../sdks/rust" }
 kernable-core = { path = "../kernable-core" }
 kernable-store = { path = "../kernable-store" }
+prost.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

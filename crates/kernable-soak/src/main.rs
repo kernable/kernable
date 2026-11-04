@@ -7,13 +7,20 @@
 //! ```text
 //! kernable-soak run [--minutes 60] [--dir DIR] [--backend sqlite|file] [--check-every 10]
 //!                   [--clients 8] [--rate 0] [--seed N] [--fault-every 45] [--faults a,b,...]
-//!                   [--data DIR] [--fill DIR] [--power-loss-cmd CMD]
+//!                   [--data DIR] [--fill DIR] [--power-loss-cmd CMD] [--pair yes]
 //! kernable-soak app    (the Rust app; started by `run`)
 //! ```
 //!
 //! `--rate` limits the load to that many commands per second (0: as fast as they are answered).
 //!
-//! Faults: kernel-kill, kernel-term, app-kill, app-pause, net-reset, net-down, net-slow, and
+//! `--pair yes` runs a pair: two kernels and a witness, each kernel behind a proxy of its
+//! own, through which the other kernel and the apps (given both addresses) reach it. The kernel
+//! faults hit either kernel, the network faults either proxy, so the pair fails over; each check
+//! round reads the primary's store and checks that the standby holds the same (P2).
+//!
+//! Faults: kernel-kill, kernel-term, kernel-down (killed, back after 6 to 15 s: with a pair,
+//! longer than the primary's lease, so the standby takes over), app-kill, app-pause, net-reset,
+//! net-down, net-slow, and
 //! with `--fill` (a directory on a small file system that also holds `--data`) disk-full, with
 //! `--power-loss-cmd` (run after every process was killed, e.g. to drop a LazyFS cache)
 //! power-loss.
@@ -162,9 +169,10 @@ fn key(path: &Path) -> Result<SigningKey, String> {
     Ok(SigningKey::from_bytes(&secret))
 }
 
-const FAULTS: [&str; 9] = [
+const FAULTS: [&str; 10] = [
     "kernel-kill",
     "kernel-term",
+    "kernel-down",
     "app-kill",
     "app-pause",
     "net-reset",
@@ -227,6 +235,9 @@ async fn run(a: Args) -> Result<(), String> {
     let data = data.canonicalize().map_err(|e| e.to_string())?;
     let _ = LOG.set(dir.join("soak.log"));
     let (kport, pport) = (a.num("kernel-port", 17233)?, a.num("proxy-port", 17234)?);
+    let pair = a.get("pair").is_some_and(|p| p == "yes");
+    // With a pair: kernel B, its proxy and the witness.
+    let (kport_b, pport_b, wport) = (kport + 10, pport + 10, kport + 20);
     say(&format!(
         "soak for {minutes} min in {}, {backend}, seed {seed}, faults {}",
         dir.display(),
@@ -234,7 +245,7 @@ async fn run(a: Args) -> Result<(), String> {
     ));
 
     // Keys, a grant for the apps (also used by the soak's clients and audit listener).
-    for name in ["root", "kernel", "app"] {
+    for name in ["root", "kernel", "app", "kernel-b", "node-a", "node-b"] {
         if !dir.join(format!("{name}.key")).exists() {
             cli(&kernable_bin, &dir, &["keys", "new", name])?;
         }
@@ -253,6 +264,13 @@ async fn run(a: Args) -> Result<(), String> {
     ];
     grant.extend(actions);
     cli(&kernable_bin, &dir, &grant)?;
+    for node in ["node-a.pub", "node-b.pub"] {
+        cli(
+            &kernable_bin,
+            &dir,
+            &["grant", "root.key", node, "replicate=*"],
+        )?;
+    }
     let me = Identity {
         key: Arc::new(key(&dir.join("app.key"))?),
         grant: std::fs::read_to_string(dir.join("app.grant"))
@@ -260,29 +278,59 @@ async fn run(a: Args) -> Result<(), String> {
             .trim()
             .to_owned(),
     };
-    let kernel_key_id = signing::key_id(&key(&dir.join("kernel.key"))?.verifying_key());
+    let kernel_key_ids = vec![
+        signing::key_id(&key(&dir.join("kernel.key"))?.verifying_key()),
+        signing::key_id(&key(&dir.join("kernel-b.key"))?.verifying_key()),
+    ];
 
-    let store = match backend.as_str() {
-        "sqlite" => format!("sqlite:{}", data.join("k.db").display()),
-        "file" => format!("file:{}", data.join("k.log").display()),
-        other => return Err(format!("unknown backend {other}")),
+    let store_of = |name: &str| match backend.as_str() {
+        "sqlite" => Ok(format!("sqlite:{}", data.join(format!("{name}.db")).display())),
+        "file" => Ok(format!("file:{}", data.join(format!("{name}.log")).display())),
+        other => Err(format!("unknown backend {other}")),
     };
+    let store = store_of("k")?;
+    let store_b = store_of("k-b")?;
     let log = |name: &str| dir.join("logs").join(format!("{name}.log"));
-    let url = format!("http://127.0.0.1:{pport}");
-    let kernel_listen = format!("127.0.0.1:{kport}");
-    let mut procs = vec![
-        Proc::new("kernel", &kernable_bin, &dir, log("kernel")).args(&[
+    let url = if pair {
+        format!("http://127.0.0.1:{pport},http://127.0.0.1:{pport_b}")
+    } else {
+        format!("http://127.0.0.1:{pport}")
+    };
+    let kernel = |name: &str, store: &str, kport: u64, pport: u64, suffix: &str| {
+        let mut p = Proc::new(name, &kernable_bin, &dir, log(name)).args(&[
             "start",
             "--root",
             "root.pub",
             "--store",
-            &store,
+            store,
             "--listen",
-            &kernel_listen,
+            &format!("127.0.0.1:{kport}"),
             "--checkpoint-interval-ms",
             "1000",
-        ]),
-    ];
+        ]);
+        if pair {
+            p = p.args(&[
+                "--kernel-key",
+                &format!("kernel{suffix}.key"),
+                "--snapshots",
+                &format!("sqlite:{}", data.join(format!("snapshots{suffix}.db")).display()),
+                "--data-store",
+                &format!("file:{}", data.join(format!("files{suffix}")).display()),
+                "--witness",
+                &format!("127.0.0.1:{wport}"),
+                "--node-key",
+                if suffix.is_empty() { "node-a.key" } else { "node-b.key" },
+                "--advertise",
+                &format!("127.0.0.1:{pport}"),
+                "--primary-kernel-key",
+                "kernel.pub",
+                "--primary-kernel-key",
+                "kernel-b.pub",
+            ]);
+        }
+        p
+    };
+    let mut procs = vec![kernel("kernel", &store, kport, pport, "")];
     let app_env = |p: Proc, sdk: &str| {
         p.env("KERNABLE_URL", &url)
             .env("KERNABLE_KEY", &dir.join("app.key").display().to_string())
@@ -322,26 +370,76 @@ async fn run(a: Args) -> Result<(), String> {
         "rs",
     ));
 
-    procs[0].start().map_err(|e| e.to_string())?;
-    wait_for_port(kport, Duration::from_secs(30)).await?;
+    if pair {
+        procs.push(kernel("kernel-b", &store_b, kport_b, pport_b, "-b"));
+        procs.push(
+            Proc::new("witness", &kernable_bin, &dir, log("witness")).args(&[
+                "witness",
+                "--root",
+                "root.pub",
+                "--listen",
+                &format!("127.0.0.1:{wport}"),
+                "--state",
+                "witness.state",
+            ]),
+        );
+    }
     let addr = |p: u64| {
         format!("127.0.0.1:{p}")
             .parse()
             .map_err(|e: std::net::AddrParseError| e.to_string())
     };
-    let proxy = Proxy::start(addr(pport)?, addr(kport)?)
-        .await
-        .map_err(|e| e.to_string())?;
-    for p in &mut procs[1..] {
+    let mut proxies = vec![
+        Proxy::start(addr(pport)?, addr(kport)?)
+            .await
+            .map_err(|e| e.to_string())?,
+    ];
+    if pair {
+        proxies.push(
+            Proxy::start(addr(pport_b)?, addr(kport_b)?)
+                .await
+                .map_err(|e| e.to_string())?,
+        );
+        procs[5].start().map_err(|e| e.to_string())?;
+        wait_for_port(wport, Duration::from_secs(30)).await?;
+    }
+    procs[0].start().map_err(|e| e.to_string())?;
+    wait_for_port(kport, Duration::from_secs(30)).await?;
+    if pair {
+        // A asks the witness first and becomes the primary; B follows it.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        procs[4].start().map_err(|e| e.to_string())?;
+        wait_for_port(kport_b, Duration::from_secs(30)).await?;
+    }
+    for p in &mut procs[1..4] {
         p.start().map_err(|e| e.to_string())?;
     }
+    // The primary's store, and the standby's: by the witness's state.
+    let witness_state = dir.join("witness.state");
+    let stores = |pair: bool| -> (String, Option<String>) {
+        if !pair {
+            return (store.clone(), None);
+        }
+        let primary = std::fs::read(&witness_state)
+            .ok()
+            .and_then(|b| {
+                <kernable_core::proto::WitnessState as prost::Message>::decode(b.as_slice()).ok()
+            })
+            .map(|s| s.primary_address)
+            .unwrap_or_default();
+        if primary == format!("127.0.0.1:{pport_b}") {
+            (store_b.clone(), Some(store.clone()))
+        } else {
+            (store.clone(), Some(store_b.clone()))
+        }
+    };
     let load = Load::new(&format!("r{stamp}"));
     load.audit(url.clone(), me.clone());
     // Every listener must be connected before the load starts: a new reactor starts at the
     // newest event, and would miss withdrawals sent before.
     let started = Instant::now();
     loop {
-        if let Ok(read) = kernable_store::open_read_only(&store)
+        if let Ok(read) = kernable_store::open_read_only(&stores(pair).0)
             && read.listeners().map_or(0, |l| l.len()) >= 7
         {
             break;
@@ -405,7 +503,9 @@ async fn run(a: Args) -> Result<(), String> {
             {
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
-            proxy.heal();
+            for proxy in &proxies {
+                proxy.heal();
+            }
             while filling.load(Ordering::SeqCst) {
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
@@ -421,7 +521,16 @@ async fn run(a: Args) -> Result<(), String> {
                 }
             }
             say("check round: waiting until everything is quiet");
-            let report = check::round(&store, &kernel_key_id, &load, &client).await;
+            let (primary, standby) = stores(pair);
+            say(&format!("check round on {primary}"));
+            let report = check::round(
+                &primary,
+                &kernel_key_ids,
+                standby.as_deref(),
+                &load,
+                &client,
+            )
+            .await;
             say(&format!(
                 "check round at head {}: {} violations ({:.0} s)",
                 report.head,
@@ -453,14 +562,21 @@ async fn run(a: Args) -> Result<(), String> {
             let fault = faults[rng.below(faults.len() as u64) as usize].clone();
             *injected.entry(fault.clone()).or_default() += 1;
             let app = 1 + rng.below(3) as usize;
+            // With a pair, either kernel and either proxy.
+            let k = if pair && rng.below(2) == 1 { 4 } else { 0 };
+            let proxy = &proxies[if k == 4 { 1 } else { 0 }];
             match fault.as_str() {
                 "kernel-kill" => {
-                    procs[0].kill();
-                    later.push((now + rng.ms(0, 3_000), Later::Start(0)));
+                    procs[k].kill();
+                    later.push((now + rng.ms(0, 3_000), Later::Start(k)));
+                }
+                "kernel-down" => {
+                    procs[k].kill();
+                    later.push((now + rng.ms(6_000, 15_000), Later::Start(k)));
                 }
                 "kernel-term" => {
-                    procs[0].terminate(Duration::from_secs(10));
-                    later.push((Instant::now() + rng.ms(0, 1_000), Later::Start(0)));
+                    procs[k].terminate(Duration::from_secs(10));
+                    later.push((Instant::now() + rng.ms(0, 1_000), Later::Start(k)));
                 }
                 "app-kill" => {
                     procs[app].kill();
@@ -505,6 +621,8 @@ async fn run(a: Args) -> Result<(), String> {
                 "fault {fault}{}",
                 if fault.starts_with("app") {
                     format!(" ({})", procs[app].name)
+                } else if fault.starts_with("kernel") || fault.starts_with("net") {
+                    format!(" ({})", procs[k].name)
                 } else {
                     String::new()
                 }
@@ -527,7 +645,7 @@ async fn run(a: Args) -> Result<(), String> {
 }
 
 fn procs_index(name: &str) -> usize {
-    ["kernel", "app-ts", "app-py", "app-rs"]
+    ["kernel", "app-ts", "app-py", "app-rs", "kernel-b", "witness"]
         .iter()
         .position(|n| *n == name)
         .unwrap_or(0)

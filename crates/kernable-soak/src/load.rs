@@ -158,6 +158,9 @@ impl Load {
         stats.submitted.fetch_add(1, Ordering::SeqCst);
         let started = Instant::now();
         let mut pause = Duration::from_millis(100);
+        // A pair's addresses, comma-separated: after a failure, the next one.
+        let addresses: Vec<&str> = addr.split(',').collect();
+        let mut turn = 0;
         for attempt in 0.. {
             if attempt > 0 {
                 stats.resubmits.fetch_add(1, Ordering::SeqCst);
@@ -173,7 +176,10 @@ impl Load {
                 return None;
             }
             if channel.is_none() {
-                *channel = transport::connect(addr).await.ok();
+                turn += 1;
+                *channel = transport::connect(addresses[turn % addresses.len()])
+                    .await
+                    .ok();
             }
             let Some(ch) = channel.clone() else { continue };
             let request = SubmitRequest {
@@ -246,8 +252,10 @@ impl Load {
     pub fn audit(&self, addr: String, me: Identity) {
         let observed = Arc::clone(&self.observed);
         tokio::spawn(async move {
-            loop {
-                let _ = listen_once(&addr, &me, &observed).await;
+            // A pair's addresses in turn: the standby refuses, the primary takes it.
+            let addresses: Vec<String> = addr.split(',').map(str::to_owned).collect();
+            for turn in 0.. {
+                let _ = listen_once(&addresses[turn % addresses.len()], &me, &observed).await;
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
         });

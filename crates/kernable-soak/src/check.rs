@@ -89,7 +89,13 @@ struct Row {
     flags: i64,
 }
 
-pub async fn round(store: &str, kernel_key_id: &str, load: &Load, client: &Kernable) -> Report {
+pub async fn round(
+    store: &str,
+    kernel_key_ids: &[String],
+    standby: Option<&str>,
+    load: &Load,
+    client: &Kernable,
+) -> Report {
     let started = Instant::now();
     let mut violations = Vec::new();
     let head = match quiesce(store, Duration::from_secs(300)).await {
@@ -102,7 +108,7 @@ pub async fn round(store: &str, kernel_key_id: &str, load: &Load, client: &Kerna
     let mut ids = load.observed.lock().unwrap().command_ids();
     ids.extend(load.stats.unanswered.lock().unwrap().iter().cloned());
     let log = kernable_store::open_read_only(store)
-        .and_then(|read| Log::read_with(read.as_ref(), &[kernel_key_id.to_owned()], &ids));
+        .and_then(|read| Log::read_with(read.as_ref(), kernel_key_ids, &ids));
     let log = match log {
         Ok(log) => log,
         Err(e) => {
@@ -123,6 +129,35 @@ pub async fn round(store: &str, kernel_key_id: &str, load: &Load, client: &Kerna
             .iter()
             .map(ToString::to_string),
     );
+    // A pair: the standby holds exactly what the primary holds, once it has caught up (P2).
+    if let Some(standby) = standby {
+        let waited = Instant::now();
+        loop {
+            let held = kernable_store::open_read_only(standby)
+                .and_then(|read| Log::read_with(read.as_ref(), kernel_key_ids, &ids));
+            match held {
+                Ok(s) if s.events == log.events => break,
+                Ok(s) if waited.elapsed() > Duration::from_secs(120) => {
+                    violations.push(format!(
+                        "P2 standby: {} events, the primary {} ({} differ)",
+                        s.events.len(),
+                        log.events.len(),
+                        s.events
+                            .iter()
+                            .zip(&log.events)
+                            .filter(|(a, b)| a != b)
+                            .count()
+                    ));
+                    break;
+                }
+                Err(e) if waited.elapsed() > Duration::from_secs(120) => {
+                    violations.push(format!("P2 standby: reading its store: {e}"));
+                    break;
+                }
+                _ => tokio::time::sleep(Duration::from_millis(500)).await,
+            }
+        }
+    }
     let expected = bank_rules(&log, &mut violations);
     index_rules(&log, &load.refusals.lock().unwrap(), &mut violations);
 
