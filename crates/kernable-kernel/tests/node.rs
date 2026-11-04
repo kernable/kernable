@@ -33,6 +33,11 @@ impl Node {
         std::thread::spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                 let line = plain(&line);
+                // A service's own output, passed on by the node.
+                if let Some(rest) = line.strip_prefix("reached-kernel ") {
+                    let _ = tx.send((format!("reached {rest}"), 0));
+                    continue;
+                }
                 if !line.contains("started") {
                     continue;
                 }
@@ -151,7 +156,8 @@ async fn a_node_builds_and_runs_a_service_after_its_kernel() {
     std::fs::create_dir_all(dir.join("svc")).unwrap();
     std::fs::write(
         dir.join("svc/Containerfile"),
-        "FROM docker.io/library/alpine:3.20\nCMD [\"sh\", \"-c\", \"echo instance=$KERNABLE_INSTANCE url=$KERNABLE_URL; exec sleep 600\"]\n",
+        // It waits until the kernel answers on KERNABLE_URL, over the host's network.
+        "FROM docker.io/library/alpine:3.20\nCMD [\"sh\", \"-c\", \"until nc -z ${KERNABLE_URL%:*} ${KERNABLE_URL##*:}; do sleep 0.2; done; echo reached-kernel instance=$KERNABLE_INSTANCE >&2; exec sleep 600\"]\n",
     )
     .unwrap();
     let addr = free_addr();
@@ -165,6 +171,10 @@ async fn a_node_builds_and_runs_a_service_after_its_kernel() {
     let service = node.next_start("echo");
     assert!(alive(service));
     wait_for(&addr).await;
+    // On Linux the container shares the host's network; on a Mac it runs in Podman's VM.
+    if cfg!(target_os = "linux") {
+        node.next_start("reached instance=node-a");
+    }
 
     // SAFETY: SIGTERM to the node we started.
     unsafe { libc::kill(node.process.id() as libc::pid_t, libc::SIGTERM) };
