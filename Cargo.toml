@@ -33,4 +33,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "1"
 rcgen = "0.14"
 tracing = "0.1"
+# The backup follower's S3 requests: a small blocking client with rustls.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+hmac = "0.12"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

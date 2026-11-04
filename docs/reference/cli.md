@@ -41,7 +41,7 @@ Writes `<name>.key` (the secret key, readable by the owner only, never overwritt
 kernable grant <root.key> <name.pub> [--succeeds <old.pub>] <permission>...
 ```
 
-Writes `<name>.grant`, signed by the root key, and prints its permissions. A permission is `<action>=<type>,<type>`... or a bare `<type>` for every action. Actions: `submit` `run` `subscribe` `listen` `query` `answer` `check` `privileged` `vault_read` `vault_erase` `data_read` `data_write` `cache` `manage` `replicate` `export`. A type is `*`, `<domain>.*` or `<domain>.<Type>`; manage takes service names, privileged takes `bypass_authorization`; replicate and export take `*`. `--succeeds` lets this key take over the aggregates and listeners registered with `<old.pub>`. A newer grant for the same key replaces the older one.
+Writes `<name>.grant`, signed by the root key, and prints its permissions. A permission is `<action>=<type>,<type>`... or a bare `<type>` for every action. Actions: `submit` `run` `subscribe` `listen` `query` `answer` `check` `privileged` `vault_read` `vault_erase` `data_read` `data_write` `cache` `manage` `replicate` `export` `backup`. A type is `*`, `<domain>.*` or `<domain>.<Type>`; manage takes service names, privileged takes `bypass_authorization`; replicate, export and backup take `*`. `--succeeds` lets this key take over the aggregates and listeners registered with `<old.pub>`. A newer grant for the same key replaces the older one.
 
 ### `kernable revoke`
 
@@ -210,6 +210,40 @@ kernable import <file> [--store <s>] [--data-store <d>] [--vault-store <v> --vau
 ```
 
 Fills new, empty stores from an export, then checks the store like verify, with the same output and exit codes. `--vault-key` must be the source's vault key. The whole file is checked before anything is written: a copy cut short or changed, or a wrong vault key, is refused. Without `--kernel-pub`, the store is checked with the kernel keys the export names; compare them with the source's `.pub` files, or name those. Keep the source's kernel `.pub` files for verify after the kernel runs on the new stores.
+
+## Continuous backup
+
+### `kernable backup key`
+
+```text
+kernable backup key <file>
+```
+
+Writes a new backup key (32 random bytes in hex) to `<file>`, readable by its owner only; never overwrites one. Keep it apart from the backups, as you keep the root key: without it a backup cannot be read.
+
+### `kernable backup`
+
+```text
+kernable backup --follow <addr>[,<addr>] --key <key> --to <target> --backup-key <file> [--segment-seconds <s>] [--base-hours <h>] [--keep <n>]
+```
+
+Follows the kernel at `<addr>` (started with `--backup` on; both kernels of a pair, comma-separated) and writes its records to `<target>`, encrypted with the backup key, until stopped: a base, then a segment every `--segment-seconds` (default 5) or 16 MiB, a new generation every `--base-hours` (default 24), the newest `--keep` (default 7) kept. `<key>` needs a grant for backup on `*`; the grant file next to it is sent along. `<target>` is `file:<dir>` or `s3://<bucket>/<prefix>`, with `KERNABLE_S3_ENDPOINT`, `KERNABLE_S3_REGION`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. Vault values stay encrypted with the kernel's vault key besides.
+
+### `kernable backup list`
+
+```text
+kernable backup list <target> --backup-key <file>
+```
+
+Prints the generations of a backup: each base's record and time, and how far its segments reach.
+
+### `kernable restore`
+
+```text
+kernable restore <target> --backup-key <file> [--at <time> | --at-record <n>] [--store <s>] [--data-store <d>] [--vault-store <v> --vault-key <k>] [--kernel-pub <kernel.pub>]...
+```
+
+Fills new, empty stores from a backup: the newest generation that begins before `--at` (UTC, like `2026-11-04T13:40:00Z`) or `--at-record`, its base, then its segments up to there (default: everything), then checks the store like verify, with the same output and exit codes. `--vault-key` must be the source's vault key; the flags name the stores as for kernable start. Without `--kernel-pub`, the store is checked with the kernel keys the backup names.
 
 ## Maintenance, with the kernel stopped
 

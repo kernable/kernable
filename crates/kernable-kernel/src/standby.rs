@@ -49,12 +49,12 @@ use crate::{
     config::Follow, erase_subjects, node::Link, now_ms, protocol, recover_vault, replication,
 };
 
-/// What a standby keeps.
-struct Stores {
-    store: Box<dyn Store>,
-    vault: Option<Vault>,
-    data: Box<dyn DataStore>,
-    snapshots: Box<dyn SnapshotStore>,
+/// What a standby keeps; also what a backup is restored into.
+pub struct Stores {
+    pub store: Box<dyn Store>,
+    pub vault: Option<Vault>,
+    pub data: Box<dyn DataStore>,
+    pub snapshots: Box<dyn SnapshotStore>,
 }
 
 impl Stores {
@@ -313,6 +313,7 @@ async fn follow_once(
         seq: head.seq,
         hash: head.hash.clone(),
         protocol: kernable_core::PROTOCOL,
+        backup: false,
     })))
     .await?;
     let mut request = Request::new(ReceiverStream::new(rx));
@@ -415,7 +416,11 @@ async fn take_image(
     }
 }
 
-fn apply_image(stores: &Stores, batch: ImageBatch, keys: &[String]) -> Result<(), BoxError> {
+pub(crate) fn apply_image(
+    stores: &Stores,
+    batch: ImageBatch,
+    keys: &[String],
+) -> Result<(), BoxError> {
     let records: Vec<Record> = batch.records.into_iter().filter_map(|l| l.record).collect();
     check_checkpoints(records.iter(), keys)?;
     for file in &batch.files {
@@ -475,7 +480,7 @@ struct Around {
 /// Applies a batch of the primary's records: files and vault values first (the records refer
 /// to them), erasures noted, the records, then what the vault drops after a commit. Returns the
 /// last record applied.
-fn apply(stores: &Stores, batch: RecordBatch, keys: &[String]) -> Result<u64, BoxError> {
+pub(crate) fn apply(stores: &Stores, batch: RecordBatch, keys: &[String]) -> Result<u64, BoxError> {
     let last = batch.records.last().map_or(0, |r| r.seq);
     let records: Vec<&Record> = batch
         .records

@@ -17,6 +17,7 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 
+pub mod backup;
 mod cache;
 pub mod config;
 mod connections;
@@ -261,6 +262,8 @@ pub struct Kernel {
     replays: replays::Replays,
     /// The standby, with `--replication sync`: writes count once it holds them.
     replication: Option<Arc<replication::Primary>>,
+    /// The backup follower, with `--backup on`.
+    backup: replication::Backup,
     /// The partition map, with `--partition` (S2).
     maps: partitions::Maps,
     /// Global keys of commits in flight on this partition (S3).
@@ -320,8 +323,9 @@ impl Kernel {
         let data = kernable_store::data::open(&config.data)?;
         let cache = cache::Cache::open(&config.cache, config.limits.cache_bytes)?;
         let durable = AtomicU64::new(store.head_position()?);
-        // A standby continues the record log (design/replication.md); without one it is not kept.
-        store.keep_record_log(config.replication.sync)?;
+        // A standby and a backup follower continue the record log (design/replication.md);
+        // without either it is not kept.
+        store.keep_record_log(config.replication.sync || config.replication.backup)?;
         let replication = config
             .replication
             .sync
@@ -356,6 +360,7 @@ impl Kernel {
             work: Notify::new(),
             failed_commits: AtomicU32::new(0),
             appended: Notify::new(),
+            backup: replication::Backup::default(),
             listeners,
             workers,
             memberships,

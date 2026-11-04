@@ -64,6 +64,43 @@ Keep keys apart from the data, as you would keep any secret, and the vault key a
 
 Everything written after the backup was taken is lost: commands, events, erasures, files.
 
+## Continuous backup
+
+The steps above copy the stores now and then: what happened since the last copy is lost. A **backup follower** writes every record to object storage seconds after it is written, and `kernable restore` builds the stores again, up to the newest record or a point in time before something went wrong, such as a faulty deploy at 13:40.
+
+1. **Start the kernel with `--backup on`.** It keeps its record log for the follower, as for a standby.
+2. **Make a key for the follower and a backup key:**
+
+   ```sh
+   kernable keys new backup && kernable grant root.key backup.pub 'backup=*'
+   kernable backup key backup-encryption.key
+   ```
+
+   The grant lets the key read every record and file; vault values reach it sealed with the kernel's vault key. The backup key encrypts everything the follower writes (AES-256-GCM): a bucket that leaks reveals nothing. Keep the backup key apart from the bucket, as you keep the root key; without it, no backup can be read.
+
+3. **Run the follower**, next to the kernel or on another machine:
+
+   ```sh
+   AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=… KERNABLE_S3_ENDPOINT=https://fsn1.your-objectstorage.com \
+   kernable backup --follow https://10.0.0.1:7233,https://10.0.0.2:7233 --key backup.key \
+     --to s3://acme-backups/shop --backup-key backup-encryption.key
+   ```
+
+   `--follow` names both kernels of a pair: the follower turns to whichever is the primary. `--to` is `s3://<bucket>/<prefix>` for AWS S3 and S3-compatible storage (Hetzner, MinIO with `KERNABLE_S3_PATH_STYLE=1`), or `file:<directory>`. The connection uses `KERNABLE_TLS_*`, as the SDKs do.
+
+What it writes, in **generations**: a base (a full image of the kernel, or nothing if the record log reaches back to the start), then a segment every `--segment-seconds` (default 5) or 16 MiB. A new generation starts every `--base-hours` (default 24), and the newest `--keep` (default 7) are kept. So a lost primary loses at most the last few seconds that were not uploaded yet, unless a [standby](./standby) holds them. The follower never holds up the kernel: it is not a standby, and a write never waits for it. Stopped and started again, it continues where its last segment ends; if the kernel no longer keeps those records, or its log differs from the backup's, a new generation begins.
+
+`kernable backup list s3://acme-backups/shop --backup-key backup-encryption.key` shows the generations, each base's record and time, and how far its segments reach.
+
+### Restore from a continuous backup
+
+```sh
+kernable restore s3://acme-backups/shop --backup-key backup-encryption.key \
+  --at 2026-11-04T13:39:00Z --store sqlite:kernable.db --vault-store sqlite:vault.db --vault-key vault.key
+```
+
+It fills new, empty stores from the newest generation that begins before `--at` (or `--at-record <n>`; without either, everything), and stops before the first batch the follower took after that time. Then it checks the store like `kernable verify`. `--vault-key` must be the source's vault key. Then start the kernel on the restored stores and rebuild the read models that have a store, as in steps 5 and 6 of [Restore](#restore); the note on erasure below applies too.
+
 ## Backups and erasure
 
 A backup keeps personal data that was erased after it was taken. Keep vault backups only as long as your retention rules allow.

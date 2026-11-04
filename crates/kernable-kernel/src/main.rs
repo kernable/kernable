@@ -7,7 +7,7 @@ use std::{
     path::Path,
     process::ExitCode,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use kernable_core::{
@@ -25,8 +25,8 @@ use kernable_core::{
     signing, transport,
 };
 use kernable_kernel::{
-    BoxError, Config, GRANT_HEADER, Kernel, config, export, grants, node, partitions::partition_of,
-    serve, standby, witness,
+    BoxError, Config, GRANT_HEADER, Kernel, backup, config, export, grants, node,
+    partitions::partition_of, serve, standby, witness,
 };
 use prost::Message;
 use tracing_subscriber::EnvFilter;
@@ -63,9 +63,9 @@ Keys and trust:
                                           or a bare <type> for every action. Actions: submit run
                                           subscribe listen query answer check privileged vault_read
                                           vault_erase data_read data_write cache manage replicate
-                                          export. A type is *, <domain>.* or <domain>.<Type>; manage
-                                          takes service names, privileged takes
-                                          bypass_authorization; replicate and export take *.
+                                          export backup. A type is *, <domain>.* or <domain>.<Type>;
+                                          manage takes service names, privileged takes
+                                          bypass_authorization; replicate, export and backup take *.
                                           --succeeds lets this key take over the aggregates and
                                           listeners registered with <old.pub>. A newer grant for the
                                           same key replaces the older one.
@@ -193,6 +193,38 @@ Export and import:
                                           files, or name those. Keep the source's kernel .pub files
                                           for verify after the kernel runs on the new stores.
 
+Continuous backup:
+  kernable backup key <file>              Writes a new backup key (32 random bytes in hex) to
+                                          <file>, readable by its owner only; never overwrites one.
+                                          Keep it apart from the backups, as you keep the root key:
+                                          without it a backup cannot be read.
+  kernable backup --follow <addr>[,<addr>] --key <key> --to <target> --backup-key <file> [--segment-seconds <s>] [--base-hours <h>] [--keep <n>]
+                                          Follows the kernel at <addr> (started with --backup on;
+                                          both kernels of a pair, comma-separated) and writes its
+                                          records to <target>, encrypted with the backup key, until
+                                          stopped: a base, then a segment every --segment-seconds
+                                          (default 5) or 16 MiB, a new generation every
+                                          --base-hours (default 24), the newest --keep (default 7)
+                                          kept. <key> needs a grant for backup on *; the grant file
+                                          next to it is sent along. <target> is file:<dir> or
+                                          s3://<bucket>/<prefix>, with KERNABLE_S3_ENDPOINT,
+                                          KERNABLE_S3_REGION, AWS_ACCESS_KEY_ID and
+                                          AWS_SECRET_ACCESS_KEY. Vault values stay encrypted with the
+                                          kernel's vault key besides.
+  kernable backup list <target> --backup-key <file>
+                                          Prints the generations of a backup: each base's record
+                                          and time, and how far its segments reach.
+  kernable restore <target> --backup-key <file> [--at <time> | --at-record <n>] [--store <s>] [--data-store <d>] [--vault-store <v> --vault-key <k>] [--kernel-pub <kernel.pub>]...
+                                          Fills new, empty stores from a backup: the newest
+                                          generation that begins before --at (UTC, like
+                                          2026-11-04T13:40:00Z) or --at-record, its base, then its
+                                          segments up to there (default: everything), then checks
+                                          the store like verify, with the same output and exit
+                                          codes. --vault-key must be the source's vault key; the
+                                          flags name the stores as for kernable start. Without
+                                          --kernel-pub, the store is checked with the kernel keys
+                                          the backup names.
+
 Maintenance, with the kernel stopped:
   kernable listeners remove <store> <name>
                                           Removes a listener and its middleware, so they no longer
@@ -292,6 +324,15 @@ async fn main() -> ExitCode {
             partitions_move(addr, key, tenant, to).await
         }
         ["witness", flags @ ..] => return run_witness(flags).await,
+        ["backup", "key", file] => backup_key(file),
+        ["backup", "list", to, flags @ ..] if !to.starts_with("--") => backup_list(to, flags),
+        ["backup", flags @ ..] => return run_backup(flags).await,
+        ["restore", from, flags @ ..] if !from.starts_with("--") => {
+            return restore(from, flags).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            });
+        }
         ["keys", "new", name] => keys_new(name),
         ["checkpoint", store, key] => checkpoint(store, key),
         ["verify", store, keys @ ..] if !keys.is_empty() => {
@@ -790,6 +831,210 @@ async fn run_witness(flags: &[&str]) -> ExitCode {
         },
         _ = shutdown_signal() => ExitCode::SUCCESS,
     }
+}
+
+/// Flags given as `--flag value`, each at most once, of the `known` ones; `--kernel-pub` may
+/// repeat.
+fn flag_values<'a>(flags: &[&'a str], known: &[&str]) -> Result<HashMap<&'a str, Vec<&'a str>>> {
+    let mut values: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut rest = flags.iter();
+    while let Some(&flag) = rest.next() {
+        if !known.contains(&flag) {
+            return Err(format!("unknown flag {flag}").into());
+        }
+        let value = rest.next().ok_or_else(|| format!("{flag} needs a value"))?;
+        let given = values.entry(flag).or_default();
+        if !given.is_empty() && flag != "--kernel-pub" {
+            return Err(format!("{flag} is given twice").into());
+        }
+        given.push(value);
+    }
+    Ok(values)
+}
+
+/// `kernable backup key <file>`.
+fn backup_key(file: &str) -> Result<bool> {
+    backup::crypt::BackupKey::create(Path::new(file)).map_err(boxed)?;
+    let key = backup::crypt::BackupKey::read(Path::new(file)).map_err(boxed)?;
+    println!("wrote the backup key {} to {file}", key.id());
+    Ok(true)
+}
+
+/// `kernable backup list <target> --backup-key <file>`.
+fn backup_list(to: &str, flags: &[&str]) -> Result<bool> {
+    let values = flag_values(flags, &["--backup-key"])?;
+    let key = values
+        .get("--backup-key")
+        .and_then(|v| v.first())
+        .ok_or("--backup-key is missing")?;
+    let crypt = backup::crypt::BackupKey::read(Path::new(key)).map_err(boxed)?;
+    let target = backup::target::open(to).map_err(boxed)?;
+    let gens = backup::generations(target.as_ref(), &crypt).map_err(boxed)?;
+    if gens.is_empty() {
+        println!("no generations in {}", target.describe());
+    }
+    for g in gens {
+        match &g.base {
+            Some(b) => {
+                let reach = g.segments.last().map_or(b.seq, |s| s.last);
+                println!(
+                    "{}  base at record {} ({}, {} records, {} vault values, {} files), {} segments up to record {}",
+                    g.name,
+                    b.seq,
+                    config::utc(b.created_at),
+                    b.records,
+                    b.vault_values,
+                    b.files,
+                    g.segments.len(),
+                    reach
+                );
+            }
+            None => println!(
+                "{}  unfinished: its base was not written to the end",
+                g.name
+            ),
+        }
+    }
+    Ok(true)
+}
+
+/// `kernable backup --follow ...`: runs the backup follower until stopped.
+async fn run_backup(flags: &[&str]) -> ExitCode {
+    let parsed = (|| -> Result<backup::Follower> {
+        let values = flag_values(
+            flags,
+            &[
+                "--follow",
+                "--key",
+                "--to",
+                "--backup-key",
+                "--segment-seconds",
+                "--base-hours",
+                "--keep",
+            ],
+        )?;
+        let one = |flag: &str| values.get(flag).and_then(|v| v.first().copied());
+        let need = |flag: &str| one(flag).ok_or_else(|| format!("{flag} is missing"));
+        let number = |flag: &str, default: u64| -> Result<u64> {
+            match one(flag) {
+                None => Ok(default),
+                Some(v) => match v.parse::<u64>() {
+                    Ok(n) if n > 0 => Ok(n),
+                    _ => Err(format!("{flag}: {v} is not a positive number").into()),
+                },
+            }
+        };
+        let key_path = need("--key")?;
+        let key =
+            signing::read_signing_key(key_path).map_err(|e| format!("--key {key_path}: {e}"))?;
+        let grant_path = Path::new(key_path).with_extension("grant");
+        let grant = fs::read_to_string(&grant_path)
+            .map_err(|e| format!("the backup key's grant {}: {e}", grant_path.display()))?
+            .trim()
+            .to_owned();
+        let addrs: Vec<String> = need("--follow")?
+            .split(',')
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if addrs.is_empty() {
+            return Err("--follow needs an address".into());
+        }
+        Ok(backup::Follower {
+            addrs,
+            key,
+            grant,
+            target: Arc::from(backup::target::open(need("--to")?).map_err(boxed)?),
+            crypt: Arc::new(
+                backup::crypt::BackupKey::read(Path::new(need("--backup-key")?)).map_err(boxed)?,
+            ),
+            segment_every: Duration::from_secs(number("--segment-seconds", 5)?),
+            base_every: Duration::from_secs(number("--base-hours", 24)? * 3600),
+            keep: number("--keep", 7)? as usize,
+        })
+    })();
+    let follower = match parsed {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let filter = EnvFilter::try_from_env("KERNABLE_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
+    tokio::select! {
+        result = backup::run(follower) => match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                tracing::error!(error = %e, "the backup follower stopped");
+                ExitCode::FAILURE
+            }
+        },
+        _ = shutdown_signal() => ExitCode::SUCCESS,
+    }
+}
+
+/// `kernable restore <target> [flags]`: fills new, empty stores, then checks the store.
+fn restore(from: &str, flags: &[&str]) -> Result<ExitCode> {
+    // Every flag takes a value: the backup's go here, the stores' to StoreFlags.
+    let (mut mine, mut rest) = (Vec::new(), Vec::new());
+    for pair in flags.chunks(2) {
+        match ["--backup-key", "--at", "--at-record"].contains(&pair[0]) {
+            true => mine.extend_from_slice(pair),
+            false => rest.extend_from_slice(pair),
+        }
+    }
+    let values = flag_values(&mine, &["--backup-key", "--at", "--at-record"])?;
+    let one = |flag: &str| values.get(flag).and_then(|v| v.first().copied());
+    let until = match (one("--at"), one("--at-record")) {
+        (Some(_), Some(_)) => return Err("give --at or --at-record, not both".into()),
+        (Some(at), None) => backup::Until::Time(
+            config::utc_ms(at)
+                .ok_or_else(|| format!("--at {at}: not a UTC time like 2026-11-04T13:40:00Z"))?,
+        ),
+        (None, Some(n)) => backup::Until::Record(
+            n.parse()
+                .map_err(|_| format!("--at-record {n}: not a number"))?,
+        ),
+        (None, None) => backup::Until::End,
+    };
+    let key = one("--backup-key").ok_or("--backup-key is missing")?;
+    let crypt = backup::crypt::BackupKey::read(Path::new(key)).map_err(boxed)?;
+    let target = backup::target::open(from).map_err(boxed)?;
+    let flags = StoreFlags::parse(&rest, true)?;
+    let stores = standby::Stores {
+        store: kernable_store::open(&flags.store)?,
+        vault: flags.open_vault()?,
+        data: kernable_store::data::open(&flags.data)?,
+        snapshots: kernable_store::snapshots::open("memory:")?,
+    };
+    let kernel_keys = flags
+        .kernel_pubs
+        .iter()
+        .map(|k| key_id_of(k))
+        .collect::<Result<Vec<_>>>()?;
+    let restored =
+        backup::restore(target.as_ref(), &crypt, &stores, until, &kernel_keys).map_err(boxed)?;
+    println!(
+        "restored generation {}: base at record {}, up to record {} (taken {})",
+        restored.generation,
+        restored.base,
+        restored.record,
+        config::utc(restored.taken_at)
+    );
+    if kernel_keys.is_empty() && !restored.kernel_keys.is_empty() {
+        println!(
+            "checked with the kernel keys the backup names: {}; compare them with the source's \
+             kernel .pub files, or name those with --kernel-pub",
+            restored.kernel_keys.join(", ")
+        );
+    }
+    let report = stores.store.verify(&restored.kernel_keys)?;
+    Ok(report_verify(&report))
 }
 
 async fn partitions_apply(addr: &str, key_path: &str, path: &str) -> Result<bool> {

@@ -48,6 +48,8 @@ kernable grant root.key app.pub 'submit=shop.*' 'listen=shop.*'   # writes app.g
 | `cache` | domains whose cache it may use |
 | `manage` | services whose membership it may apply (service names, or `*`); with `*` also `kernable promote` |
 | `replicate` | `*`: following the kernel as its [standby](../how-to/standby); the key gets every record, file and vault value |
+| `export` | `*`: [exporting](../how-to/export) the whole kernel; the vault values stay sealed with its vault key |
+| `backup` | `*`: following the kernel as its [backup follower](../how-to/backup#continuous-backup); the key gets every record and file, the vault values sealed |
 
 A type is a qualified type (`shop.PlaceOrder`), a whole domain (`shop.*`) or everything (`*`). A bare type (`'shop.*'`) means every action on it.
 

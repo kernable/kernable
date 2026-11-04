@@ -175,6 +175,79 @@ impl Primary {
     }
 }
 
+/// The backup follower, as the kernel sees it: one at a time, and how far it got.
+#[derive(Default)]
+pub(crate) struct Backup {
+    state: Mutex<BackupState>,
+}
+
+#[derive(Default)]
+struct BackupState {
+    /// The key of the backup follower that is connected.
+    connected: Option<String>,
+    /// The record it acknowledged last, connected or not.
+    acked: u64,
+}
+
+impl Backup {
+    fn state(&self) -> MutexGuard<'_, BackupState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn connect(&self, key_id: &str) -> Result<BackupConnected<'_>, Status> {
+        let mut state = self.state();
+        if let Some(other) = &state.connected {
+            return Err(Status::already_exists(format!(
+                "a backup follower is connected already (key {other})"
+            )));
+        }
+        state.connected = Some(key_id.to_owned());
+        Ok(BackupConnected(self))
+    }
+
+    fn ack(&self, seq: u64) {
+        let mut state = self.state();
+        state.acked = state.acked.max(seq);
+    }
+
+    /// The record it acknowledged last.
+    pub(crate) fn acked(&self) -> u64 {
+        self.state().acked
+    }
+}
+
+struct BackupConnected<'a>(&'a Backup);
+
+impl Drop for BackupConnected<'_> {
+    fn drop(&mut self) {
+        self.0.state().connected = None;
+        tracing::warn!("the backup follower disconnected");
+    }
+}
+
+/// Records SQLite keeps for a backup follower that is away, beyond what the standby needs: once
+/// it is further behind, it takes a full image again (a new generation of the backup).
+const BACKUP_RETAIN: u64 = 1_000_000;
+
+/// The record up to which SQLite may drop its record log, given the standby's and the backup
+/// follower's acknowledgements.
+fn prune_point(kernel: &Kernel) -> Option<u64> {
+    let head = kernel.store.record_head().ok()?.seq;
+    let mut keep = head;
+    if let Some(primary) = &kernel.replication {
+        keep = keep.min(primary.acked_seq());
+    }
+    if kernel.config().replication.backup {
+        keep = keep.min(
+            kernel
+                .backup
+                .acked()
+                .max(head.saturating_sub(BACKUP_RETAIN)),
+        );
+    }
+    keep.checked_sub(RETAIN).filter(|&p| p > 0)
+}
+
 /// The connected standby; disconnects it when dropped.
 struct Connected(Arc<Primary>);
 
@@ -242,20 +315,41 @@ async fn run(
     inbound: &mut Streaming<FollowRequest>,
     out: &Outbox,
 ) -> Result<(), Status> {
-    let Some(primary) = kernel.replication.clone() else {
-        return Err(Status::failed_precondition(
-            "this kernel runs without --replication sync: it keeps no standby",
-        ));
-    };
     let Some(follow_request::Msg::Hello(hello)) = kernel.handshake(next(inbound)).await? else {
         return Err(Status::invalid_argument("expected FollowHello"));
     };
     protocol(hello.protocol)?;
+    let backup = hello.backup;
+    let primary = match (backup, kernel.replication.clone()) {
+        (true, _) if !kernel.config().replication.backup => {
+            return Err(Status::failed_precondition(
+                "this kernel runs without --backup on: it keeps no backup follower",
+            ));
+        }
+        (true, _) => None,
+        (false, Some(primary)) => Some(primary),
+        (false, None) => {
+            return Err(Status::failed_precondition(
+                "this kernel runs without --replication sync: it keeps no standby",
+            ));
+        }
+    };
     kernel.present_standby(metadata, &hello.key_id)?;
-    if !config::allowed(&kernel.permissions().replicate, &hello.key_id, "*") {
-        return Err(Status::permission_denied(
-            "the key may not follow this kernel: its grant needs replicate",
-        ));
+    let allowed = |kernel: &Kernel| {
+        let permissions = kernel.permissions();
+        let rules = if backup {
+            &permissions.backup
+        } else {
+            &permissions.replicate
+        };
+        config::allowed(rules, &hello.key_id, "*")
+    };
+    if !allowed(&kernel) {
+        return Err(Status::permission_denied(if backup {
+            "the key may not back up this kernel: its grant needs backup"
+        } else {
+            "the key may not follow this kernel: its grant needs replicate"
+        }));
     }
     let mut nonce = [0u8; 32];
     getrandom::fill(&mut nonce).map_err(|_| Status::internal("no randomness"))?;
@@ -277,7 +371,17 @@ async fn run(
     };
     signing::verify(&proof, &signing::challenge_message(&nonce))
         .map_err(|_| Status::unauthenticated("challenge failed"))?;
-    let _connected = primary.connect(&hello.key_id)?;
+    let _connected = primary
+        .as_ref()
+        .map(|p| p.connect(&hello.key_id))
+        .transpose()?;
+    let _backup = backup
+        .then(|| kernel.backup.connect(&hello.key_id))
+        .transpose()?;
+    let acked = |kernel: &Kernel| match &primary {
+        Some(p) => p.acked_seq(),
+        None => kernel.backup.acked(),
+    };
 
     // Where the standby stands against this log.
     let head = kernel.store.record_head().map_err(internal)?;
@@ -299,7 +403,11 @@ async fn run(
         ),
         None => (FollowMode::Image, String::new()),
     };
-    tracing::info!(standby = %hello.key_id, from = hello.seq, mode = ?mode, "a standby follows");
+    if backup {
+        tracing::info!(key = %hello.key_id, from = hello.seq, mode = ?mode, "a backup follower follows");
+    } else {
+        tracing::info!(standby = %hello.key_id, from = hello.seq, mode = ?mode, "a standby follows");
+    }
     send(
         out,
         follow_response::Msg::Start(FollowStart {
@@ -310,10 +418,13 @@ async fn run(
     .await?;
     let mut sent = match mode {
         FollowMode::Follow => {
-            primary.ack(hello.seq, head.seq);
+            match &primary {
+                Some(p) => p.ack(hello.seq, head.seq),
+                None => kernel.backup.ack(hello.seq),
+            }
             hello.seq
         }
-        FollowMode::Image => send_image(&kernel, out).await?,
+        FollowMode::Image => send_image(&kernel, out, backup).await?,
         _ => return Ok(()),
     };
 
@@ -321,7 +432,7 @@ async fn run(
     let mut pruned = 0;
     let mut changes = kernel.changes();
     loop {
-        if sent < primary.acked_seq() + AHEAD {
+        if sent < acked(&kernel) + AHEAD {
             let records = kernel
                 .store
                 .records_after(sent, BATCH)
@@ -335,7 +446,7 @@ async fn run(
                 let records = within_bytes(records);
                 sent = records.last().map_or(sent, |r| r.seq);
                 let inner: Vec<&Record> = records.iter().filter_map(inner).collect();
-                let (vault, files) = attachments(&kernel, inner.into_iter())?;
+                let (vault, files) = attachments(&kernel, inner.into_iter(), backup)?;
                 let head = kernel.store.record_head().map_err(internal)?.seq;
                 send(
                     out,
@@ -360,13 +471,19 @@ async fn run(
                         )));
                     }
                     let head = kernel.store.record_head().map_err(internal)?.seq;
-                    primary.ack(seq, head);
-                    // SQLite keeps what a reconnecting standby may need; the file log keeps all.
-                    if seq >= pruned + RETAIN / 10 && seq > RETAIN {
+                    match &primary {
+                        Some(p) => p.ack(seq, head),
+                        None => kernel.backup.ack(seq),
+                    }
+                    // SQLite keeps what a reconnecting standby or backup follower may need;
+                    // the file log keeps all.
+                    if seq >= pruned + RETAIN / 10
+                        && let Some(point) = prune_point(&kernel)
+                    {
                         pruned = seq;
                         let kernel = Arc::clone(&kernel);
                         tokio::task::spawn_blocking(move || {
-                            if let Err(e) = kernel.store.prune_records(seq - RETAIN) {
+                            if let Err(e) = kernel.store.prune_records(point) {
                                 tracing::error!(error = %e, "pruning the record log failed");
                             }
                         });
@@ -375,17 +492,26 @@ async fn run(
                 None => return Ok(()),
                 Some(_) => return Err(Status::invalid_argument("unexpected message")),
             },
-            () = primary.wrote.notified() => {}
+            () = wrote(primary.as_deref()) => {}
             Ok(()) = changes.changed() => {
-                // A revoked key, or a grant without replicate: the standby follows no longer.
-                if !config::allowed(&kernel.permissions().replicate, &hello.key_id, "*") {
+                // A revoked key, or a grant without replicate (backup): it follows no longer.
+                if !allowed(&kernel) {
                     return Err(Status::permission_denied(
-                        "the standby's key may follow no longer: revoked, or its grant changed",
+                        "the follower's key may follow no longer: revoked, or its grant changed",
                     ));
                 }
             }
             _ = tick.tick() => {}
         }
+    }
+}
+
+/// Resolves when the primary wrote records for its standby; never for a backup follower, which
+/// looks every tick.
+async fn wrote(primary: Option<&Primary>) {
+    match primary {
+        Some(p) => p.wrote.notified().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -408,10 +534,12 @@ fn within_bytes(mut records: Vec<ReplicatedRecord>) -> Vec<ReplicatedRecord> {
 }
 
 /// The vault rows and files `records` refer to, as they are now: a value erased or a file
-/// deleted meanwhile travels as absent, and the records after converge the standby.
+/// deleted meanwhile travels as absent, and the records after converge the standby. `sealed`:
+/// the vault values as stored, encrypted with the kernel's vault key (for a backup).
 pub(crate) fn attachments<'a>(
     kernel: &Kernel,
     records: impl Iterator<Item = &'a Record> + Clone,
+    sealed: bool,
 ) -> Result<(Vec<VaultRow>, Vec<DataFile>), Status> {
     let refs = vault_refs(records.clone());
     let mut files = Vec::new();
@@ -438,6 +566,9 @@ pub(crate) fn attachments<'a>(
         }
     }
     let vault = match &kernel.vault {
+        Some(vault) if !refs.is_empty() && sealed => {
+            vault.export_sealed(&refs).map_err(internal)?
+        }
         Some(vault) if !refs.is_empty() => vault.export(&refs).map_err(internal)?,
         _ => Vec::new(),
     };
@@ -477,13 +608,13 @@ pub(crate) fn vault_refs<'a>(records: impl Iterator<Item = &'a Record>) -> Vec<S
 
 /// Sends a full image: the store's records, with the vault rows they refer to, then every file
 /// of the data store, then where the image stands. Returns that record's sequence number.
-async fn send_image(kernel: &Arc<Kernel>, out: &Outbox) -> Result<u64, Status> {
+async fn send_image(kernel: &Arc<Kernel>, out: &Outbox, sealed: bool) -> Result<u64, Status> {
     let (tx, mut rx) = mpsc::channel::<ImageBatch>(4);
     let k = Arc::clone(kernel);
     let reading = tokio::task::spawn_blocking(move || -> Result<Head, Status> {
         let left = || StoreError::Io(std::io::Error::other("the standby left"));
         let flush = |batch: &mut Vec<Record>| -> Result<(), StoreError> {
-            let (vault, files) = attachments(&k, batch.iter())
+            let (vault, files) = attachments(&k, batch.iter(), sealed)
                 .map_err(|s| StoreError::Io(std::io::Error::other(s.message().to_owned())))?;
             let records = batch
                 .drain(..)

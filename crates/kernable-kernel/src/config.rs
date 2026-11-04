@@ -96,6 +96,12 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "`sync`: a standby (`--follow`) holds every write before anyone is told of it. Commits, revocations, grants and memberships wait until the standby has stored them; without a standby in sync they wait, and `/ready` answers 503. `off`: no standby.",
     ),
     (
+        "--backup",
+        "KERNABLE_BACKUP",
+        "off",
+        "`on`: a backup follower (`kernable backup`, a key granted `backup`) may follow the kernel and write its records to object storage; the kernel keeps its record log for it, as for a standby. `off`: no backup follower.",
+    ),
+    (
         "--partition",
         "KERNABLE_PARTITION",
         "",
@@ -326,6 +332,8 @@ pub struct Replication {
     pub follow: Option<Follow>,
     /// `--witness`: one kernel of a pair, its role decided by the witness.
     pub pair: Option<Pair>,
+    /// `--backup on`: a backup follower may follow the kernel.
+    pub backup: bool,
 }
 
 /// A kernel of a pair.
@@ -522,6 +530,11 @@ impl Config {
             },
             follow,
             pair,
+            backup: match get("--backup").expect("has a default").as_str() {
+                "on" => true,
+                "off" => false,
+                other => return Err(format!("--backup: {other} is neither on nor off").into()),
+            },
         };
         let tls = match (get("--tls-cert"), get("--tls-key"), get("--tls-client-ca")) {
             (Some(cert), Some(key), Some(client_ca)) => Some(Tls {

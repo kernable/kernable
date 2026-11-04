@@ -120,6 +120,7 @@ fn node_config(dir: &Path, name: &str, kernel_seed: u8, node_seed: u8) -> Config
                 standby_timeout_ms: LEASE_MS,
                 kernel_keys: vec![id(&key(3)), id(&key(8))],
             }),
+            backup: false,
         },
         partition: None,
     }

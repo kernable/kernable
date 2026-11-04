@@ -34,6 +34,11 @@ message FollowHello {
   uint64 seq = 2;
   bytes hash = 3;
   uint32 protocol = 4;
+  // A backup follower (`kernable backup`), not a standby: its key needs `backup` for `*`
+  // and the kernel `--backup on`. It never counts for `--replication sync`, gets the vault
+  // values sealed (VaultRow.sealed) as an export does, and one follows at a time. Its acks only
+  // keep the records it still needs. Seq 0 asks for a full image.
+  bool backup = 5;
 }
 
 // Every record up to `seq` is applied and on the standby's disk.
@@ -264,4 +269,25 @@ message WitnessState {
   string primary = 2;
   string primary_address = 3;
   string in_sync = 4;
+}
+
+// One batch a backup follower took, with the time it took it: what a backup segment
+// holds, one after another, each preceded by its length as a varint. `kernable restore --at`
+// stops before the first batch taken after that time.
+message BackupBatch {
+  int64 taken_at = 1; // ms since epoch
+  RecordBatch batch = 2;
+}
+
+// A backup generation's base is complete (its last object, written after every part): the
+// image stands at record `seq` with `hash`, and the parts `base-000001`.. hold ImageBatch
+// messages, each preceded by its length as a varint.
+message BackupBase {
+  uint64 seq = 1;
+  bytes hash = 2;
+  uint32 parts = 3;
+  int64 created_at = 4; // ms since epoch, when the image ended
+  uint64 records = 5;
+  uint64 vault_values = 6;
+  uint64 files = 7;
 }

@@ -319,7 +319,7 @@ fn export(
     let mut batch: Vec<Record> = Vec::new();
     let mut bytes = 0;
     let flush = |batch: &mut Vec<Record>| -> Result<(), StoreError> {
-        let (vault, _) = replication::attachments(kernel, batch.iter())
+        let (vault, _) = replication::attachments(kernel, batch.iter(), false)
             .map_err(|s| StoreError::Io(std::io::Error::other(s.message().to_owned())))?;
         let records = batch
             .drain(..)
