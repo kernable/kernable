@@ -41,6 +41,7 @@ Recorded by the test harness while it runs; checked against the store afterwards
 | O6 | **Listener order.** Event N reaches order k only after every counting listener of a lower order acknowledged N | listener order | `model.rs`: every delivery to order 1 against order 0's acknowledgements |
 | O7 | **One writer.** At most one lease per aggregate at any time | one writer | `model.rs`: two workers record what they execute (`Held`) |
 | O8 | **Parked, never lost.** An event a reactor gives up on is parked with its reason and stays parked, also across a crash, until a retry gets past it or it is dismissed; the listener's position moves on. Only a rejection, or an error repeated `park_after` times, parks; a kernel that is away or busy never does, nor a read model, a live listener, or an erasing event | nothing lost | `listeners.rs` (`a_parked_event_stays_parked_until_a_retry_gets_past_it`, `a_retry_waits_for_the_listener_and_survives_a_restart`), `crashes.rs` (a listener parks at every crash point), three tests per SDK, soak B7 |
+| O9 | **One instance acts.** A single group delivers to one instance at a time; an instance never starts behind the group's position, so a reactor's side effect is not made twice by two instances; a replicated group's instances never park | one instance | `tests/listeners.rs` (`one_instance_of_a_single_listener_runs_and_the_next_takes_over`), SDK tests per language |
 
 ## X: security
 
@@ -81,6 +82,7 @@ Built 2026-11-03. Checked so far by `crates/kernable-kernel/tests/replication.rs
 | P2 | **One primary per term.** At most one kernel commits per term; a replication record of an older term is refused | no split brain |
 | P3 | **Promoted means complete.** A promoted standby holds every acknowledged record | RPO 0 |
 | P4 | **The unacknowledged tail is cut.** A former primary that rejoins cuts the records after the point where the terms diverge, keeps them aside (like `<path>.torn-<offset>`) and catches up from the new primary; by P1, nobody saw them | the log converges |
+| P5 | **A handover tells nothing twice and nothing lost.** A switchover hands over only once the standby in sync holds every record the primary wrote; after HANDOVER the witness renews no lease of the old primary, which tells nothing more, and only the standby in sync may claim | planned updates without downtime | `tests/pair.rs` (`a_switchover_hands_the_primary_role_over_without_waiting_for_the_lease`), witness unit tests, the soak's `switchover` fault |
 
 ## B: the soak's bank rules
 
