@@ -33,3 +33,15 @@ Counters and durations count since the kernel started and begin at 0 again after
 | `kernable_ready` | gauge |  | 1 while the kernel is ready: every aggregate that counts has a worker, every listener that counts is connected and caught up, and it is not shutting down. |
 | `kernable_standby_applied` | gauge |  | On a standby: the newest record of the primary's log it holds. |
 | `kernable_standby_lag` | gauge |  | On a standby: records it is behind the primary's head as last seen. |
+
+## kernable node
+
+With `metrics-listen` in its `[node]` section, `kernable node` serves `GET /metrics` too, a line per child (the kernel, the backup follower, each service), named by the `child` label ([Run a node from one file](../how-to/node#metrics)).
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `kernable_node_child_up` | gauge | `child` | Whether the child runs (1) or not (0). |
+| `kernable_node_child_restarts_total` | counter | `child` | Times the node started the child again. |
+| `kernable_node_child_uptime_seconds` | gauge | `child` | Seconds since the child last started, while it runs. |
+| `kernable_node_service_cpu_seconds_total` | counter | `child` | CPU time a service's container used, from its cgroup (Linux). |
+| `kernable_node_service_memory_bytes` | gauge | `child` | Memory a service's container uses now, from its cgroup (Linux). |

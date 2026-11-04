@@ -5,7 +5,9 @@
 - **A child that exits is started again**, after 1 s, backing off up to 30 s while it keeps failing at once. A kernel crash never takes the node down.
 - **A change to the file is applied by itself.** The node reads it every two seconds (or at once on SIGHUP); a child whose command changed is stopped and started again with the new one, and the others run on.
 - **An update is a new binary.** Point `binary` at it, or replace the file it names: the node stops the child and starts it on the new binary.
-- **A new build of a service on SIGHUP.** Change your code, send the node SIGHUP: it builds every service again, and restarts those whose image changed.
+- **A new build of a service on SIGHUP.** Change your code, send the node SIGHUP: it builds every service again in the background, and restarts those whose image changed. The other children are looked after meanwhile.
+- **One log for everything.** Every line of every child comes out of the node, on stdout or stderr as the child wrote it, prefixed with its name (`worker | …`, `kernel | …`). Under systemd, journald keeps, rotates and searches them: `journalctl -u kernable-node | grep 'worker |'`.
+- **Metrics** with `metrics-listen` in `[node]`: see [below](#metrics).
 - **SIGTERM or SIGINT stops everything**: your services and the backup follower first, then the kernel, each with SIGTERM, and SIGKILL after `stop-seconds` (default 30) if it has not stopped by then. The kernel drains as it does on its own ([Deploy and upgrade](./deploy)).
 
 ## The file
@@ -28,6 +30,7 @@ env = { AWS_ACCESS_KEY_ID = "…", AWS_SECRET_ACCESS_KEY = "…" }
 [node]                                     # optional
 instance = "node-a"                        # KERNABLE_INSTANCE for the services (default the host name)
 project = "shop"                           # names the containers (default the file's directory)
+metrics-listen = "127.0.0.1:7240"          # optional: GET /metrics
 
 [[service]]                                # one per service, as many as you need
 name = "worker"
@@ -52,6 +55,20 @@ Run it under your service manager (systemd, launchd) so the node itself starts w
 Each `[[service]]` is built with `podman build` on the machine, at start, when its section changes, and on SIGHUP, then run with `podman run --rm` as `kernable-<project>-<name>`, after the kernel and stopped before it. It runs on the machine's network and finds the kernel by itself: the node sets `KERNABLE_URL` to the kernel's `listen` and `KERNABLE_INSTANCE` to the node's instance, which the SDKs read. With `key`, the key file and the `.grant` file next to it are mounted read-only and named in `KERNABLE_KEY` and `KERNABLE_GRANT`; create them with `kernable keys new` and `kernable grant`, so the root key never comes near the machine. A service that exits is started again like the kernel.
 
 Install Podman on the machine first (rootless is fine). Services run on Linux; on a Mac, Podman's containers live in a virtual machine and do not share its network.
+
+## Metrics
+
+With `metrics-listen`, `GET /metrics` answers in Prometheus' text format, a line per child:
+
+| Metric | Type | What |
+|---|---|---|
+| `kernable_node_child_up{child}` | gauge | 1 while the child runs |
+| `kernable_node_child_restarts_total{child}` | counter | times the node started it again |
+| `kernable_node_child_uptime_seconds{child}` | gauge | seconds since it last started, while it runs |
+| `kernable_node_service_cpu_seconds_total{child}` | counter | CPU time of a service's container (Linux, from its cgroup, every 10 s) |
+| `kernable_node_service_memory_bytes{child}` | gauge | memory of a service's container now (Linux) |
+
+The kernel keeps its own metrics on its `--metrics-listen` ([Monitor kernable](./monitor)). The address is read when the node starts; a change applies after a restart of the node.
 
 ## Two machines
 

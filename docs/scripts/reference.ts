@@ -253,6 +253,9 @@ function metricsReference(): string {
     const kind = m[2] ?? (m[1].endsWith("_seconds") ? "summary" : "gauge");
     rows.push(`| \`${m[1]}\` | ${kind} | ${labels.map((l) => `\`${l}\``).join(", ")} | ${cell(m[3])} |`);
   });
+  const nodeRows = [...read("crates/kernable-kernel/src/supervisor.rs").matchAll(re)].map(
+    (m) => `| \`${m[1]}\` | ${m[2]} | \`child\` | ${cell(m[3])} |`,
+  );
   return `${HEADER}# Metrics and health
 
 With \`--metrics-listen 127.0.0.1:9233\` the kernel serves plain HTTP with no login on that address, so bind it to a private one. How to use it for health checks, alerts and graphs: [Monitor kernable](../how-to/monitor).
@@ -266,6 +269,14 @@ Counters and durations count since the kernel started and begin at 0 again after
 | Metric | Type | Labels | Description |
 |---|---|---|---|
 ${rows.join("\n")}
+
+## kernable node
+
+With \`metrics-listen\` in its \`[node]\` section, \`kernable node\` serves \`GET /metrics\` too, a line per child (the kernel, the backup follower, each service), named by the \`child\` label ([Run a node from one file](../how-to/node#metrics)).
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+${nodeRows.join("\n")}
 `;
 }
 

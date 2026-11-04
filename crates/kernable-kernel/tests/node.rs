@@ -33,8 +33,9 @@ impl Node {
         std::thread::spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                 let line = plain(&line);
-                // A service's own output, passed on by the node.
-                if let Some(rest) = line.strip_prefix("reached-kernel ") {
+                // A service's own output, passed on by the node with its name.
+                let own = line.split_once(" | ").map_or("", |(_, rest)| rest);
+                if let Some(rest) = own.strip_prefix("reached-kernel ") {
                     let _ = tx.send((format!("reached {rest}"), 0));
                     continue;
                 }
@@ -92,9 +93,9 @@ fn plain(line: &str) -> String {
     out
 }
 
-fn project(dir: &Path, addr: &str, extra: &str) {
+fn project(dir: &Path, addr: &str, extra: &str, metrics: &str) {
     let text = format!(
-        "[kernel]\nflags = {{ dev = true, listen = \"{addr}\", ui-listen = \"\"{extra} }}\nstop-seconds = 5\n"
+        "[kernel]\nflags = {{ dev = true, listen = \"{addr}\", ui-listen = \"\"{extra} }}\nstop-seconds = 5\n\n[node]\nmetrics-listen = \"{metrics}\"\n"
     );
     std::fs::write(dir.join("project.toml"), text).unwrap();
 }
@@ -109,8 +110,8 @@ async fn a_node_restarts_its_kernel_and_stops_it_with_itself() {
     let dir = std::env::temp_dir().join(format!("kn-node-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let addr = free_addr();
-    project(&dir, &addr, "");
+    let (addr, metrics) = (free_addr(), free_addr());
+    project(&dir, &addr, "", &metrics);
     let mut node = Node::start(&dir);
     let first = node.next_start("kernel");
     wait_for(&addr).await;
@@ -121,9 +122,18 @@ async fn a_node_restarts_its_kernel_and_stops_it_with_itself() {
     let second = node.next_start("kernel");
     assert_ne!(first, second);
     wait_for(&addr).await;
+    let shown = get(&metrics, "/metrics").await;
+    assert!(
+        shown.contains("kernable_node_child_restarts_total{child=\"kernel\"} 1"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("kernable_node_child_up{child=\"kernel\"} 1"),
+        "{shown}"
+    );
 
     // A changed flag restarts it, stopped first.
-    project(&dir, &addr, ", drain-timeout-ms = 500");
+    project(&dir, &addr, ", drain-timeout-ms = 500", &metrics);
     let third = node.next_start("kernel");
     assert!(!alive(second), "the old kernel was stopped");
     wait_for(&addr).await;
