@@ -53,6 +53,9 @@ use target::Target;
 pub const PART_BYTES: usize = 64 << 20;
 /// Plaintext bytes after which a segment is written, whatever the time.
 pub const SEGMENT_BYTES: usize = 16 << 20;
+/// Records after which a segment is written: the follower acknowledges records only once they
+/// are in the target, and the kernel sends at most 8,192 ahead of its acknowledgements.
+pub const SEGMENT_RECORDS: u64 = 4_096;
 
 /// How a backup follower runs.
 pub struct Follower {
@@ -77,6 +80,8 @@ pub struct Generation {
     pub name: String,
     /// The finished base, if it is.
     pub base: Option<BackupBase>,
+    /// Why its base marker could not be read, if it could not.
+    pub unreadable: Option<String>,
     pub segments: Vec<Segment>,
 }
 
@@ -156,13 +161,24 @@ pub fn generations(target: &dyn Target, crypt: &BackupKey) -> Result<Vec<Generat
             gens.push(Generation {
                 name: generation.to_owned(),
                 base: None,
+                unreadable: None,
                 segments: Vec::new(),
             });
         }
         let g = gens.last_mut().expect("pushed above");
         if object == "base.done" {
-            let plain = crypt.open(&target.get(&name)?)?;
-            g.base = Some(BackupBase::decode(plain.as_slice())?);
+            // One unreadable base leaves its generation unfinished, not the backup unusable.
+            let read = target
+                .get(&name)
+                .and_then(|sealed| crypt.open(&name, &sealed))
+                .and_then(|plain| Ok(BackupBase::decode(plain.as_slice())?));
+            match read {
+                Ok(base) => g.base = Some(base),
+                Err(e) => {
+                    tracing::warn!(object = %name, error = %e, "a base cannot be read: its generation is left out");
+                    g.unreadable = Some(e.to_string());
+                }
+            }
         } else if let Some(s) = parse_segment(&name) {
             g.segments.push(s);
         }
@@ -288,7 +304,7 @@ async fn follow_once(
     prune(follower, &generation).await;
 
     let mut segment: Vec<u8> = Vec::new();
-    let mut first = None;
+    let mut first: Option<u64> = None;
     let mut deadline = Instant::now() + follower.segment_every;
     let flush = |segment: &mut Vec<u8>, first: &mut Option<u64>, head: &Head| {
         let (target, crypt) = (Arc::clone(&follower.target), Arc::clone(&follower.crypt));
@@ -296,11 +312,19 @@ async fn follow_once(
         let name = first
             .take()
             .map(|first| segment_name(&generation, first, head.seq, &head.hash));
+        let seq = head.seq;
+        let tx = tx.clone();
         async move {
             let Some(name) = name else {
-                return Ok(());
+                return Ok::<(), BoxError>(());
             };
-            blocking(move || target.put(&name, &crypt.seal(&plain)?)).await
+            blocking(move || target.put(&name, &crypt.seal(&name, &plain)?)).await?;
+            // In the target: the kernel may drop these records from its log now.
+            tx.send(FollowRequest {
+                msg: Some(follow_request::Msg::Ack(FollowAck { seq })),
+            })
+            .await?;
+            Ok(())
         }
     };
     loop {
@@ -317,9 +341,8 @@ async fn follow_once(
                     first.get_or_insert(batch.records[0].seq);
                     BackupBatch { taken_at: now_ms(), batch: Some(batch) }
                         .encode_length_delimited(&mut segment)?;
-                    // Only for flow control: the records stay in the kernel's log for a while.
-                    tx.send(say(follow_request::Msg::Ack(FollowAck { seq: head.seq }))).await?;
-                    if segment.len() >= SEGMENT_BYTES {
+                    let held = first.map_or(0, |f| head.seq + 1 - f);
+                    if segment.len() >= SEGMENT_BYTES || held >= SEGMENT_RECORDS {
                         flush(&mut segment, &mut first, &head).await?;
                     }
                 }
@@ -361,7 +384,7 @@ async fn take_image(
     let put = |n: u32, plain: Vec<u8>| {
         let (target, crypt) = (Arc::clone(&follower.target), Arc::clone(&follower.crypt));
         let name = part_name(generation, n);
-        blocking(move || target.put(&name, &crypt.seal(&plain)?))
+        blocking(move || target.put(&name, &crypt.seal(&name, &plain)?))
     };
     loop {
         match next(inbound).await? {
@@ -412,7 +435,7 @@ async fn write_base(
     };
     let (target, crypt) = (Arc::clone(&follower.target), Arc::clone(&follower.crypt));
     let name = format!("{generation}/base.done");
-    blocking(move || target.put(&name, &crypt.seal(&base.encode_to_vec())?)).await
+    blocking(move || target.put(&name, &crypt.seal(&name, &base.encode_to_vec())?)).await
 }
 
 /// Deletes the generations beyond `--keep` (oldest first) and unfinished ones before
@@ -477,6 +500,9 @@ pub struct Restored {
     pub taken_at: i64,
     /// The kernel keys that signed the restored checkpoints, by key ID.
     pub kernel_keys: Vec<String>,
+    /// Why the restore ends before the point it was asked for, if it does: the backup ends
+    /// there, or holds nothing until the next generation's base.
+    pub short: Option<String>,
 }
 
 /// Builds `stores` (new and empty) from the backup in `target`: the newest generation that
@@ -502,7 +528,10 @@ pub fn restore(
     };
     let Some(generation) = gens.iter().rev().find(usable) else {
         return Err(match gens.iter().find_map(|g| g.base.as_ref()) {
-            None => "the backup holds no finished generation".into(),
+            None => match gens.iter().find_map(|g| g.unreadable.as_ref()) {
+                Some(why) => format!("the backup cannot be read: {why}").into(),
+                None => "the backup holds no finished generation".into(),
+            },
             Some(b) => format!(
                 "the backup begins later: its oldest base is at record {} ({})",
                 b.seq,
@@ -529,7 +558,8 @@ pub fn restore(
     };
     stores.store.keep_record_log(true)?;
     for n in 1..=base.parts {
-        let plain = crypt.open(&target.get(&part_name(&generation.name, n))?)?;
+        let part = part_name(&generation.name, n);
+        let plain = crypt.open(&part, &target.get(&part)?)?;
         let mut rest = plain.as_slice();
         while !rest.is_empty() {
             let batch = ImageBatch::decode_length_delimited(&mut rest)?;
@@ -551,6 +581,7 @@ pub fn restore(
         record: base.seq,
         taken_at: base.created_at,
         kernel_keys: Vec::new(),
+        short: None,
     };
     'segments: for segment in &generation.segments {
         if segment.first != restored.record + 1 {
@@ -563,7 +594,7 @@ pub fn restore(
         if matches!(until, Until::Record(n) if segment.first > n) {
             break;
         }
-        let plain = crypt.open(&target.get(&segment.name)?)?;
+        let plain = crypt.open(&segment.name, &target.get(&segment.name)?)?;
         let mut rest = plain.as_slice();
         while !rest.is_empty() {
             let taken = BackupBatch::decode_length_delimited(&mut rest)?;
@@ -594,6 +625,38 @@ pub fn restore(
     }
     stores.store.sync()?;
     restored.kernel_keys = keys;
+    let reached = match until {
+        Until::End => true,
+        Until::Record(n) => restored.record >= n,
+        Until::Time(t) => {
+            restored.taken_at >= t
+                || generation
+                    .segments
+                    .last()
+                    .is_some_and(|s| s.last > restored.record)
+        }
+    };
+    if !reached {
+        let next = gens
+            .iter()
+            .filter(|g| g.name > generation.name)
+            .find_map(|g| g.base.as_ref());
+        restored.short = Some(match next {
+            Some(b) => format!(
+                "the backup holds nothing between record {} ({}) and the next generation's base at record {} ({}): restored up to record {}",
+                restored.record,
+                crate::config::utc(restored.taken_at),
+                b.seq,
+                crate::config::utc(b.created_at),
+                restored.record
+            ),
+            None => format!(
+                "the backup ends at record {} ({}): restored up to there",
+                restored.record,
+                crate::config::utc(restored.taken_at)
+            ),
+        });
+    }
     Ok(restored)
 }
 

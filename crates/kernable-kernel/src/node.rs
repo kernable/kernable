@@ -200,61 +200,32 @@ pub async fn become_primary(config: Config) -> Result<NodePrimary, BoxError> {
     }
 }
 
-/// Hands the primary role of `term` over to the standby in sync: refuses new requests,
-/// lets running ones finish, waits until the standby holds every record, then tells the
-/// witness. On any refusal the primary serves on.
-async fn switch_over(
-    kernel: &Arc<Kernel>,
-    link: &Link,
-    term: u64,
-    in_sync: &str,
-) -> Result<kernable_core::proto::SwitchoverResult, String> {
+/// Gets a switchover ready: refuses new requests, lets running ones finish, and waits
+/// until the standby holds every record; the record it holds then, or why not. Runs next to the
+/// lease, which [`keep_lease`] goes on renewing meanwhile.
+async fn get_ready(kernel: Arc<Kernel>) -> Result<u64, String> {
     let primary = kernel
         .replication
         .clone()
         .expect("a kernel of a pair runs with --replication sync");
-    if primary.alone() || in_sync.is_empty() || primary.standby().as_deref() != Some(in_sync) {
-        return Err("no standby is in sync: there is nobody to hand over to".into());
-    }
-    let serve_on = |why: String| {
-        kernel
-            .draining
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-        tracing::warn!(%why, "switchover abandoned: serving on");
-        Err(why)
-    };
     // New requests go to the other kernel (the SDKs retry UNAVAILABLE); running ones finish.
-    if !kernel.drain().await {
+    let drain = Duration::from_millis(kernel.config().drain_timeout_ms);
+    if !kernel.idle_within(drain).await {
         tracing::warn!("running requests did not finish in time; they run again on the standby");
     }
     let started = Instant::now();
-    let head = loop {
+    loop {
         let head = kernel.store.record_head().map_or(0, |h| h.seq);
         if primary.acked_seq() >= head {
-            break head;
+            return Ok(head);
         }
         if started.elapsed() >= SWITCHOVER_CATCH_UP {
-            return serve_on(format!(
+            return Err(format!(
                 "the standby holds record {} of {head} after {SWITCHOVER_CATCH_UP:?}",
                 primary.acked_seq()
             ));
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
-    };
-    match link.ask(WitnessOp::Handover, term, "").await {
-        Ok(a) if a.granted => {
-            // Nothing more is told: the lease is gone, and the standby stops following and
-            // claims at once.
-            primary.set_lease(Instant::now());
-            primary.hand_over();
-            tracing::warn!(standby = %in_sync, record = head, "handed the primary role over");
-            Ok(kernable_core::proto::SwitchoverResult {
-                seq: head,
-                standby: in_sync.to_owned(),
-            })
-        }
-        Ok(a) => serve_on(format!("the witness refused: {}", a.message)),
-        Err(e) => serve_on(format!("the witness does not answer: {e}")),
     }
 }
 
@@ -279,18 +250,61 @@ async fn keep_lease(
     // kernel restarted): the witness hears of a standby in sync only once it holds them.
     let mut must_reach = head_now();
     let mut last_head = must_reach;
+    // A switchover getting ready: who asked, and the task that drains and waits.
+    let mut switching: Option<(SwitchoverAsk, tokio::task::JoinHandle<Result<u64, String>>)> = None;
     loop {
+        let ready = async {
+            match switching.as_mut() {
+                Some((_, task)) => task.await.unwrap_or_else(|e| Err(e.to_string())),
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             () = tokio::time::sleep(link.lease() / 3) => {}
             Some(reply) = asked.recv() => {
-                let done = switch_over(&kernel, &link, term, &reported).await;
-                let handed = done.as_ref().map(|r| r.standby.clone()).ok();
-                let _ = reply.send(done);
-                if let Some(standby) = handed {
-                    return format!(
-                        "handed over: {standby} is the primary now; start this kernel again to follow it"
-                    )
-                    .into();
+                let standby = primary.standby();
+                if switching.is_some() {
+                    let _ = reply.send(Err("a switchover is under way already".into()));
+                } else if primary.alone() || reported.is_empty() || standby.as_deref() != Some(reported.as_str()) {
+                    let _ = reply.send(Err("no standby is in sync: there is nobody to hand over to".into()));
+                } else {
+                    kernel.switching.store(true, std::sync::atomic::Ordering::SeqCst);
+                    switching = Some((reply, tokio::spawn(get_ready(Arc::clone(&kernel)))));
+                }
+                continue;
+            }
+            result = ready => {
+                let (reply, _) = switching.take().expect("ready only while switching");
+                // The lease is fresh: the loop renewed it while the switchover got ready.
+                let handed = match result {
+                    Ok(head) => match link.ask(WitnessOp::Handover, term, "").await {
+                        Ok(a) if a.granted => Ok(head),
+                        Ok(a) => Err(format!("the witness refused: {}", a.message)),
+                        Err(e) => Err(format!("the witness does not answer: {e}")),
+                    },
+                    Err(why) => Err(why),
+                };
+                match handed {
+                    Ok(head) => {
+                        // Nothing more is told: the lease is gone, and the standby stops
+                        // following and claims at once.
+                        primary.set_lease(Instant::now());
+                        primary.hand_over();
+                        tracing::warn!(standby = %reported, record = head, "handed the primary role over");
+                        let _ = reply.send(Ok(kernable_core::proto::SwitchoverResult {
+                            seq: head,
+                            standby: reported.clone(),
+                        }));
+                        return format!(
+                            "handed over: {reported} is the primary now; start this kernel again to follow it"
+                        )
+                        .into();
+                    }
+                    Err(why) => {
+                        kernel.switching.store(false, std::sync::atomic::Ordering::SeqCst);
+                        tracing::warn!(%why, "switchover abandoned: serving on");
+                        let _ = reply.send(Err(why));
+                    }
                 }
                 continue;
             }

@@ -8,6 +8,7 @@
 - **A new build of a service on SIGHUP.** Change your code, send the node SIGHUP: it builds every service again in the background, and restarts those whose image changed. The other children are looked after meanwhile.
 - **One log for everything.** Every line of every child comes out of the node, on stdout or stderr as the child wrote it, prefixed with its name (`worker | …`, `kernel | …`). Under systemd, journald keeps, rotates and searches them: `journalctl -u kernable-node | grep 'worker |'`.
 - **Metrics** with `metrics-listen` in `[node]`: see [below](#metrics).
+- **SIGHUP also goes to the kernel**, which reads its keys again (and runs `--key-command` again).
 - **SIGTERM or SIGINT stops everything**: your services and the backup follower first, then the kernel, each with SIGTERM, and SIGKILL after `stop-seconds` (default 30) if it has not stopped by then. The kernel drains as it does on its own ([Deploy and upgrade](./deploy)).
 
 ## The file
@@ -48,7 +49,7 @@ stop-seconds = 10                          # optional
 kernable node project.toml
 ```
 
-Run it under your service manager (systemd, launchd) so the node itself starts with the machine.
+Run it under your service manager (systemd, launchd) so the node itself starts with the machine. The children run in process groups of their own, so a Ctrl-C reaches only the node, which stops them in order; under systemd, set `KillMode=mixed`, so SIGTERM goes to the node alone, and a `TimeoutStopSec` longer than the children's `stop-seconds` together. On Linux, a node that is killed takes its children along.
 
 ## Your services
 

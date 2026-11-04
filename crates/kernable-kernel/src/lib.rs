@@ -273,7 +273,9 @@ pub struct Kernel {
     /// Values of the cache service.
     cache: cache::Cache,
     /// Set on shutdown: new submits and queries are refused while running ones finish.
-    pub(crate) draining: AtomicBool,
+    draining: AtomicBool,
+    /// A switchover is under way: new requests are refused, as while draining.
+    pub(crate) switching: AtomicBool,
     /// Submits and queries being handled, and a wake-up when one ends.
     requests: AtomicUsize,
     idle: Notify,
@@ -409,6 +411,7 @@ impl Kernel {
             data,
             cache,
             draining: Default::default(),
+            switching: Default::default(),
             requests: Default::default(),
             idle: Notify::new(),
             requests_by_key: PerKey::default(),
@@ -473,6 +476,7 @@ impl Kernel {
 
     /// Reads the kernel key again (on SIGHUP), so a new key signs from now on.
     pub fn reload(&self) -> Result<(), BoxError> {
+        config::forget_unwrapped_keys();
         let key = self.config().read_signing_key(&self.config().kernel_key)?;
         *self.key.lock().unwrap_or_else(PoisonError::into_inner) = key;
         Ok(())
@@ -780,7 +784,12 @@ impl Kernel {
     /// so running commands can complete and settle.
     pub async fn drain(&self) -> bool {
         self.draining.store(true, SeqCst);
-        let timeout = Duration::from_millis(self.config().drain_timeout_ms);
+        self.idle_within(Duration::from_millis(self.config().drain_timeout_ms))
+            .await
+    }
+
+    /// Waits up to `timeout` until no submit or query runs; whether none does.
+    pub(crate) async fn idle_within(&self, timeout: Duration) -> bool {
         let idle = async {
             loop {
                 let ended = self.idle.notified();
@@ -942,6 +951,11 @@ impl Kernel {
         let running = Running(self);
         if self.draining.load(SeqCst) {
             return Err(Status::unavailable("the kernel is shutting down; retry"));
+        }
+        if self.switching.load(SeqCst) {
+            return Err(Status::unavailable(
+                "the kernel hands its role over to its standby; retry",
+            ));
         }
         Ok(running)
     }
@@ -1916,8 +1930,8 @@ impl DataService for Api {
                 "a file has at most {max} bytes (--max-data-bytes)"
             )));
         }
-        self.0.quota(&config::qualified(&r.domain, "PutData"))?;
         let claim = self.0.claim(r.client_sig.as_ref(), r.issued_at)?;
+        self.0.quota(&config::qualified(&r.domain, "PutData"))?;
         let data = Data {
             content_type: r.content_type.clone(),
             data: r.data.clone(),

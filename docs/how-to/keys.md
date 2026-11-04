@@ -145,7 +145,7 @@ With a cloud KMS, a small script that takes the path, for example `/usr/local/bi
 aws kms decrypt --ciphertext-blob "fileb://$1" --query Plaintext --output text | base64 -d
 ```
 
-A key the command cannot unwrap stops the kernel at start, with the command's message; on SIGHUP the previous key stays. A key bound to one machine (the TPM) needs wrapping again for the standby on another one. TLS keys (`--tls-key`) are read as files.
+The command runs once per key file and has 30 s for it; the kernel keeps the unwrapped key in memory until SIGHUP, when it runs the command again. A key the command cannot unwrap stops the kernel at start, with the command's message; on SIGHUP the previous key stays. A key bound to one machine (the TPM) needs wrapping again for the standby on another one. TLS keys (`--tls-key`) are read as files.
 
 ## The root key
 

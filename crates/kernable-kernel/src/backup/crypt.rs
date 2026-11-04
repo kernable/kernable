@@ -4,8 +4,9 @@
 //! An object is `KNBLBAK\n`, the key's ID (the first 8 bytes of the SHA-256 of the key), 8
 //! random bytes, then chunks of at most 1 MiB of plaintext, each its ciphertext's length (4
 //! bytes, big-endian) and the ciphertext with its tag (AES-256-GCM). Chunk `i`'s nonce is the 8
-//! random bytes and `i`; its associated data is the header, `i` and whether it is the last
-//! chunk, so chunks cannot be reordered, dropped or cut off unnoticed.
+//! random bytes and `i`; its associated data is the header, the object's name, `i` and whether
+//! it is the last chunk, so chunks cannot be reordered, dropped or cut off, and objects not
+//! swapped under each other's names, unnoticed.
 
 use std::path::Path;
 
@@ -69,8 +70,8 @@ impl BackupKey {
         hex::encode(self.id)
     }
 
-    /// `plain`, encrypted.
-    pub fn seal(&self, plain: &[u8]) -> Result<Vec<u8>, BoxError> {
+    /// `plain`, encrypted as the object `name`.
+    pub fn seal(&self, name: &str, plain: &[u8]) -> Result<Vec<u8>, BoxError> {
         let mut header = [0u8; HEADER];
         header[..8].copy_from_slice(MAGIC);
         header[8..16].copy_from_slice(&self.id);
@@ -84,7 +85,7 @@ impl BackupKey {
         out.extend_from_slice(&header);
         let last = chunks.len() - 1;
         for (i, chunk) in chunks.into_iter().enumerate() {
-            let (nonce, aad) = nonce_and_aad(&header, i, i == last)?;
+            let (nonce, aad) = nonce_and_aad(&header, name, i, i == last)?;
             let sealed = self
                 .cipher
                 .encrypt(
@@ -101,8 +102,9 @@ impl BackupKey {
         Ok(out)
     }
 
-    /// The plaintext of `sealed`; an error if another key sealed it, or it was changed or cut.
-    pub fn open(&self, sealed: &[u8]) -> Result<Vec<u8>, BoxError> {
+    /// The plaintext of the object `name`; an error if another key sealed it, it was changed or
+    /// cut, or it was sealed under another name.
+    pub fn open(&self, name: &str, sealed: &[u8]) -> Result<Vec<u8>, BoxError> {
         if sealed.len() < HEADER || &sealed[..8] != MAGIC {
             return Err("not a kernable backup object".into());
         }
@@ -127,7 +129,7 @@ impl BackupKey {
                 return Err("the backup object is damaged: a chunk length is invalid".into());
             }
             let last = rest.len() == 4 + len;
-            let (nonce, aad) = nonce_and_aad(&header, i, last)?;
+            let (nonce, aad) = nonce_and_aad(&header, name, i, last)?;
             let chunk = self
                 .cipher
                 .decrypt(
@@ -150,6 +152,7 @@ impl BackupKey {
 
 fn nonce_and_aad(
     header: &[u8; HEADER],
+    name: &str,
     i: usize,
     last: bool,
 ) -> Result<([u8; 12], Vec<u8>), BoxError> {
@@ -158,6 +161,8 @@ fn nonce_and_aad(
     nonce[..8].copy_from_slice(&header[16..]);
     nonce[8..].copy_from_slice(&i.to_be_bytes());
     let mut aad = header.to_vec();
+    aad.extend_from_slice(&(name.len() as u32).to_be_bytes());
+    aad.extend_from_slice(name.as_bytes());
     aad.extend_from_slice(&i.to_be_bytes());
     aad.push(u8::from(last));
     Ok((nonce, aad))
@@ -175,9 +180,9 @@ mod tests {
     fn what_is_sealed_opens_with_the_same_key_only() {
         for len in [0, 1, CHUNK - 1, CHUNK, CHUNK + 1, 3 * CHUNK + 17] {
             let plain: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
-            let sealed = key(1).seal(&plain).unwrap();
-            assert_eq!(key(1).open(&sealed).unwrap(), plain, "{len} bytes");
-            let other = key(2).open(&sealed).unwrap_err().to_string();
+            let sealed = key(1).seal("g/seg", &plain).unwrap();
+            assert_eq!(key(1).open("g/seg", &sealed).unwrap(), plain, "{len} bytes");
+            let other = key(2).open("g/seg", &sealed).unwrap_err().to_string();
             assert!(other.contains("another key"), "{other}");
         }
     }
@@ -185,26 +190,31 @@ mod tests {
     #[test]
     fn a_changed_reordered_or_cut_object_is_refused() {
         let plain: Vec<u8> = (0..3 * CHUNK).map(|i| (i % 7) as u8).collect();
-        let sealed = key(1).seal(&plain).unwrap();
+        let sealed = key(1).seal("g/seg", &plain).unwrap();
         let mut changed = sealed.clone();
         changed[HEADER + 100] ^= 1;
-        assert!(key(1).open(&changed).is_err());
+        assert!(key(1).open("g/seg", &changed).is_err());
         // Without its last chunk, the one before is not marked last: refused.
         let chunk = 4 + CHUNK + TAG;
         let cut = &sealed[..HEADER + 2 * chunk];
-        assert!(key(1).open(cut).is_err());
+        assert!(key(1).open("g/seg", cut).is_err());
         // Two chunks swapped.
         let mut swapped = sealed[..HEADER].to_vec();
         swapped.extend_from_slice(&sealed[HEADER + chunk..HEADER + 2 * chunk]);
         swapped.extend_from_slice(&sealed[HEADER..HEADER + chunk]);
         swapped.extend_from_slice(&sealed[HEADER + 2 * chunk..]);
-        assert!(key(1).open(&swapped).is_err());
-        assert!(key(1).open(b"KNBLBAK\nshort").is_err());
-        assert!(key(1).open(b"something else entirely").is_err());
+        assert!(key(1).open("g/seg", &swapped).is_err());
+        assert!(key(1).open("g/seg", b"KNBLBAK\nshort").is_err());
+        assert!(key(1).open("g/seg", b"something else entirely").is_err());
+        // The same bytes under another name: a part swapped for another one.
+        assert!(key(1).open("g/base-000002", &sealed).is_err());
     }
 
     #[test]
     fn the_same_plaintext_seals_differently_each_time() {
-        assert_ne!(key(1).seal(b"x").unwrap(), key(1).seal(b"x").unwrap());
+        assert_ne!(
+            key(1).seal("x", b"x").unwrap(),
+            key(1).seal("x", b"x").unwrap()
+        );
     }
 }

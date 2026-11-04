@@ -171,7 +171,25 @@ async fn a_restore_stops_at_a_record() {
     let events = restored.store.read_all(0, 1_000).unwrap();
     let source = kernable_store::open_read_only(&env.store).unwrap();
     let all = source.read_all(0, 1_000).unwrap();
+    assert!(done.short.is_none(), "{:?}", done.short);
     assert!(events.len() < all.len(), "later orders are not restored");
+    // Asked for more than the backup holds: everything, and it says so.
+    let beyond = backup::restore(
+        t.as_ref(),
+        &BackupKey::new(&[7; 32]),
+        &stores(&env, "beyond"),
+        Until::Record(1_000_000),
+        &[id(&key(3))],
+    )
+    .unwrap();
+    assert!(
+        beyond
+            .short
+            .as_deref()
+            .is_some_and(|s| s.contains("the backup ends")),
+        "{:?}",
+        beyond.short
+    );
     assert_eq!(
         events,
         all[..events.len()],

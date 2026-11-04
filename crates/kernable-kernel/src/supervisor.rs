@@ -378,6 +378,8 @@ struct Running {
     image: Option<String>,
     /// A service's build on its way, in the background.
     building: Option<JoinHandle<Result<String, String>>>,
+    /// SIGHUP came while it was building: build again once that build is done.
+    build_again: bool,
     /// Times it was started again.
     restarts: u64,
     /// When it last started (ms since epoch), for the metrics.
@@ -395,6 +397,7 @@ impl Running {
             backoff: Duration::from_millis(500),
             image: None,
             building: None,
+            build_again: false,
             restarts: 0,
             started_ms: 0,
         }
@@ -412,13 +415,26 @@ fn forward(name: &str, out: Option<impl AsyncRead + Unpin + Send + 'static>, std
     };
     let name = name.to_owned();
     tokio::spawn(async move {
-        let mut lines = BufReader::new(out).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            if stderr {
-                eprintln!("{name} | {line}");
-            } else {
-                println!("{name} | {line}");
+        use std::io::Write;
+        // Bytes, not text: output that is not UTF-8 goes on (lossily) instead of ending the
+        // pipe, and a line longer than LINE is cut. A closed stdout or stderr is no reason to
+        // stop reading: the child would get SIGPIPE.
+        const LINE: u64 = 64 << 10;
+        let mut reader = BufReader::new(out);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            match (&mut reader).take(LINE).read_until(b'\n', &mut line).await {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
             }
+            let text = String::from_utf8_lossy(&line);
+            let text = text.trim_end_matches(['\n', '\r']);
+            let _ = if stderr {
+                writeln!(std::io::stderr().lock(), "{name} | {text}")
+            } else {
+                writeln!(std::io::stdout().lock(), "{name} | {text}")
+            };
         }
     });
 }
@@ -469,7 +485,19 @@ fn spawn(spec: &Spec, image: Option<&str>, dir: &Path) -> Result<Child, BoxError
         .current_dir(dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true);
+        .kill_on_drop(true)
+        // A group of its own: a Ctrl-C in the terminal reaches the node, which stops its
+        // children in order, and not every child at once.
+        .process_group(0);
+    #[cfg(target_os = "linux")]
+    // SAFETY: prctl(2) in the child before exec, async-signal-safe: a node that is killed takes
+    // its children along instead of leaving them holding ports and stores.
+    unsafe {
+        command.pre_exec(|| {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+            Ok(())
+        });
+    }
     let mut child = command
         .spawn()
         .map_err(|e| format!("{}: {e}", spec.binary.display()))?;
@@ -556,13 +584,23 @@ pub async fn run(path: &Path) -> Result<(), BoxError> {
     let mut tick = tokio::time::interval(Duration::from_millis(500));
     let mut hangup = signal(libc::SIGHUP)?;
     let mut terminate = signal(libc::SIGTERM)?;
+    let mut interrupt = signal(libc::SIGINT)?;
     let mut sampled = Instant::now() - Duration::from_secs(60);
     loop {
         let (reread, rebuild) = tokio::select! {
             _ = tick.tick() => (modified(&path) != last_read, false),
-            _ = hangup.recv() => (true, true),
+            _ = hangup.recv() => {
+                // The kernel reads its keys again on SIGHUP (and --key-command runs again).
+                for c in children.iter().filter(|c| c.spec.name == "kernel") {
+                    if let Some(pid) = c.child.as_ref().and_then(Child::id) {
+                        // SAFETY: kill(2) on our own child's pid.
+                        unsafe { libc::kill(pid as libc::pid_t, libc::SIGHUP) };
+                    }
+                }
+                (true, true)
+            }
             _ = terminate.recv() => break,
-            _ = tokio::signal::ctrl_c() => break,
+            _ = interrupt.recv() => break,
         };
         if reread {
             last_read = modified(&path);
@@ -582,9 +620,12 @@ pub async fn run(path: &Path) -> Result<(), BoxError> {
         }
         if rebuild {
             // Built again in the background; a service whose image changed restarts then.
-            for c in children.iter_mut() {
-                if c.spec.container.is_some() && c.building.is_none() {
+            for c in children.iter_mut().filter(|c| c.spec.container.is_some()) {
+                if c.building.is_none() {
                     c.building = Some(tokio::spawn(build(c.spec.clone())));
+                } else {
+                    // The code may have changed after this build started: build once more.
+                    c.build_again = true;
                 }
             }
         }
@@ -612,6 +653,9 @@ pub async fn run(path: &Path) -> Result<(), BoxError> {
 async fn step(c: &mut Running, dir: &Path) {
     if c.building.as_ref().is_some_and(JoinHandle::is_finished) {
         let result = c.building.take().expect("checked").await;
+        if std::mem::take(&mut c.build_again) {
+            c.building = Some(tokio::spawn(build(c.spec.clone())));
+        }
         match result.unwrap_or_else(|e| Err(e.to_string())) {
             Ok(id) if Some(&id) != c.image.as_ref() => {
                 if c.child.is_some() {

@@ -1073,6 +1073,9 @@ fn restore(from: &str, flags: &[&str]) -> Result<ExitCode> {
         restored.record,
         config::utc(restored.taken_at)
     );
+    if let Some(short) = &restored.short {
+        println!("note: {short}");
+    }
     if kernel_keys.is_empty() && !restored.kernel_keys.is_empty() {
         println!(
             "checked with the kernel keys the backup names: {}; compare them with the source's \

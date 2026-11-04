@@ -1069,6 +1069,17 @@ async fn one_instance_of_a_single_listener_runs_and_the_next_takes_over() {
     assert_eq!(positions(&b.next().await), [2]);
     b.ack(2).await;
     assert!(settled(&second.await.unwrap()));
+
+    // node-a comes back alone and asks for its own old position: the group handled 1 and 2
+    // already, so nothing is delivered twice.
+    drop(b);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let behind = Opts {
+        from: Some(0),
+        ..instance("node-a", true)
+    };
+    let a = listen(&env, "mailer", behind).await.unwrap();
+    assert_eq!(a.start, 2, "after the group's position, not its own");
 }
 
 #[tokio::test(flavor = "multi_thread")]

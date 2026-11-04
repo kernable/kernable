@@ -76,6 +76,10 @@ impl Target for Dir {
             f.sync_all()?;
         }
         std::fs::rename(&tmp, &path)?;
+        // The rename on the disk too, or a crash could lose an object already acknowledged.
+        if let Some(parent) = path.parent() {
+            std::fs::File::open(parent)?.sync_all()?;
+        }
         Ok(())
     }
 

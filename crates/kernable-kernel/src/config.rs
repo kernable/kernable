@@ -835,9 +835,24 @@ pub fn snapshots_next_to(store: &str) -> String {
     )
 }
 
+/// Keys `--key-command` unwrapped, by file: the command runs once per file until SIGHUP
+/// ([`forget_unwrapped_keys`]), not on every use.
+type Unwrapped = HashMap<PathBuf, zeroize::Zeroizing<[u8; 32]>>;
+static UNWRAPPED: std::sync::Mutex<Option<Unwrapped>> = std::sync::Mutex::new(None);
+
+/// How long `--key-command` may take for one key.
+const KEY_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Drops the keys `--key-command` unwrapped, so the next use runs it again (on SIGHUP).
+pub fn forget_unwrapped_keys() {
+    *UNWRAPPED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+}
+
 impl Config {
     /// The 32 secret bytes of the key file at `path`: read from it, or unwrapped by
-    /// `--key-command`.
+    /// `--key-command`, once until [`forget_unwrapped_keys`].
     pub fn read_secret(
         &self,
         path: &std::path::Path,
@@ -845,12 +860,41 @@ impl Config {
         let Some((program, args)) = self.key_command.split_first() else {
             return kernable_core::signing::read_secret(path);
         };
-        let out = std::process::Command::new(program)
+        let cached = UNWRAPPED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(|keys| keys.get(path).cloned());
+        if let Some(key) = cached {
+            return Ok(key);
+        }
+        let child = std::process::Command::new(program)
             .args(args)
             .arg(path)
             .stdin(std::process::Stdio::null())
-            .output()
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .map_err(|e| std::io::Error::other(format!("--key-command {program}: {e}")))?;
+        let pid = child.id();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(child.wait_with_output());
+        });
+        let out = match rx.recv_timeout(KEY_COMMAND_TIMEOUT) {
+            Ok(out) => out?,
+            Err(_) => {
+                #[cfg(unix)]
+                // SAFETY: kill(2) on the command's own pid, which has not been waited for yet.
+                unsafe {
+                    libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                }
+                return Err(std::io::Error::other(format!(
+                    "--key-command {program} did not answer within {KEY_COMMAND_TIMEOUT:?} for {}",
+                    path.display()
+                )));
+            }
+        };
         let text = zeroize::Zeroizing::new(String::from_utf8_lossy(&out.stdout).into_owned());
         if !out.status.success() {
             let why = String::from_utf8_lossy(&out.stderr);
@@ -871,6 +915,11 @@ impl Config {
                 ),
             )
         })?;
+        UNWRAPPED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_or_insert_with(HashMap::new)
+            .insert(path.to_owned(), key.clone());
         Ok(key)
     }
 
@@ -907,6 +956,7 @@ mod tests {
             [0xab; 32],
             "no command: the file itself"
         );
+        forget_unwrapped_keys();
         let failed = with("false").read_secret(&file).unwrap_err().to_string();
         assert!(failed.contains("--key-command false failed"), "{failed}");
         let garbage = with("echo not-a-key")
@@ -919,6 +969,30 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(missing.contains("no-such-program-kn"), "{missing}");
+        // Unwrapped once, it is kept until SIGHUP: the command does not run on every use.
+        let counted = dir.join("count.sh");
+        let script = format!("#!/bin/sh\necho x >> {}/runs; cat \"$1\"\n", dir.display());
+        std::fs::write(&counted, script).unwrap();
+        std::fs::set_permissions(
+            &counted,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        let counting = with(&counted.display().to_string());
+        let runs = || {
+            std::fs::read_to_string(dir.join("runs"))
+                .unwrap()
+                .lines()
+                .count()
+        };
+        for _ in 0..3 {
+            counting.read_secret(&file).unwrap();
+        }
+        assert_eq!(runs(), 1);
+        forget_unwrapped_keys();
+        counting.read_secret(&file).unwrap();
+        assert_eq!(runs(), 2);
+        forget_unwrapped_keys();
         let _ = std::fs::remove_dir_all(&dir);
     }
 

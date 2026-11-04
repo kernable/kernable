@@ -975,8 +975,14 @@ pub(crate) async fn run(
             // A new listener starts at the newest event: it never reacts to what happened before
             // it existed, unless it asks to (a read model rebuilding from 0). An instance taking
             // over a single group goes on after the group's position.
+            // An instance of a single group never goes back behind what the group acknowledged:
+            // another instance may have handled those events, side effects and all, while this
+            // one was away.
             let position = match (hello.live, hello.from_position) {
                 (true, _) => head,
+                (false, Some(from)) if hello.single => {
+                    previous.map_or(from, |e| e.record.position.max(from))
+                }
                 (false, Some(from)) if !waiting => from,
                 (false, _) => previous.map_or(head, |e| e.record.position),
             };
@@ -999,7 +1005,9 @@ pub(crate) async fn run(
                 parked: previous
                     .map(|e| e.record.parked.clone())
                     .unwrap_or_default(),
-                parked_changed: false,
+                // A change not flushed yet (an instance that parked and left just now) is stored
+                // with the registration.
+                parked_changed: previous.is_some_and(|e| e.record.parked_changed),
             };
             // Registration is stored right away; positions follow with the periodic flush.
             if !hello.live {

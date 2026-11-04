@@ -88,7 +88,7 @@ The steps above copy the stores now and then: what happened since the last copy 
 
    `--follow` names both kernels of a pair: the follower turns to whichever is the primary. `--to` is `s3://<bucket>/<prefix>` for AWS S3 and S3-compatible storage (Hetzner, MinIO with `KERNABLE_S3_PATH_STYLE=1`), or `file:<directory>`. The connection uses `KERNABLE_TLS_*`, as the SDKs do.
 
-What it writes, in **generations**: a base (a full image of the kernel, or nothing if the record log reaches back to the start), then a segment every `--segment-seconds` (default 5) or 16 MiB. A new generation starts every `--base-hours` (default 24), and the newest `--keep` (default 7) are kept. So a lost primary loses at most the last few seconds that were not uploaded yet, unless a [standby](./standby) holds them. The follower never holds up the kernel: it is not a standby, and a write never waits for it. Stopped and started again, it continues where its last segment ends; if the kernel no longer keeps those records, or its log differs from the backup's, a new generation begins.
+What it writes, in **generations**: a base (a full image of the kernel, or nothing if the record log reaches back to the start), then a segment every `--segment-seconds` (default 5), 16 MiB or 4,096 records. The follower acknowledges records to the kernel only once their segment is in the target, so the kernel keeps them until then. A new generation starts every `--base-hours` (default 24), and the newest `--keep` (default 7) are kept. So a lost primary loses at most the last few seconds that were not uploaded yet, unless a [standby](./standby) holds them. The follower never holds up the kernel: it is not a standby, and a write never waits for it. Stopped and started again, it continues where its last segment ends; if the kernel no longer keeps those records, or its log differs from the backup's, a new generation begins.
 
 `kernable backup list s3://acme-backups/shop --backup-key backup-encryption.key` shows the generations, each base's record and time, and how far its segments reach.
 
@@ -99,7 +99,7 @@ kernable restore s3://acme-backups/shop --backup-key backup-encryption.key \
   --at 2026-11-04T13:39:00Z --store sqlite:kernable.db --vault-store sqlite:vault.db --vault-key vault.key
 ```
 
-It fills new, empty stores from the newest generation that begins before `--at` (or `--at-record <n>`; without either, everything), and stops before the first batch the follower took after that time. Then it checks the store like `kernable verify`. `--vault-key` must be the source's vault key. Then start the kernel on the restored stores and rebuild the read models that have a store, as in steps 5 and 6 of [Restore](#restore); the note on erasure below applies too.
+It fills new, empty stores from the newest generation that begins before `--at` (or `--at-record <n>`; without either, everything), and stops before the first batch the follower took after that time. If the backup ends earlier, or holds nothing between the end of that generation and the base of the next, it says so in a `note:` line and restores up to there. Then it checks the store like `kernable verify`. `--vault-key` must be the source's vault key. Then start the kernel on the restored stores and rebuild the read models that have a store, as in steps 5 and 6 of [Restore](#restore); the note on erasure below applies too.
 
 ## Backups and erasure
 
