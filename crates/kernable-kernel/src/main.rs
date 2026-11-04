@@ -808,10 +808,11 @@ async fn partitions_apply(addr: &str, key_path: &str, path: &str) -> Result<bool
         protocol: kernable_core::PROTOCOL,
         moving: Vec::new(),
         moved: Vec::new(),
+        copying: Vec::new(),
     };
     // Moves stay as the held map has them: one in progress is finished with `partitions move`.
     if let Some(held) = held_map(addr, key_path).await? {
-        if let Some(m) = held.moving.first() {
+        if let Some(m) = held.moving.first().or(held.copying.first()) {
             return Err(format!(
                 "tenant {} is moving from {} to {}; finish it first: kernable partitions move {addr} {key_path} {} {}",
                 m.tenant, m.from, m.to, m.tenant, m.to
@@ -865,61 +866,19 @@ async fn held_map(addr: &str, key_path: &str) -> Result<Option<PartitionMap>> {
     }
 }
 
-async fn partitions_move(addr: &str, key_path: &str, tenant: &str, to: &str) -> Result<bool> {
-    let key = signing::read_signing_key(key_path)?;
-    let held = held_map(addr, key_path)
-        .await?
-        .ok_or("the control partition holds no partition map; apply one first")?;
-    // 1. The map that marks the tenant moving, unless it is moving there already.
-    let m = match held.moving.iter().find(|m| m.tenant == tenant) {
-        Some(m) if m.to == to => {
-            println!(
-                "tenant {tenant} is moving from {} to {to} already; waiting for the copy",
-                m.from
-            );
-            m.clone()
-        }
-        Some(m) => {
-            return Err(format!(
-                "tenant {tenant} is moving to {} already; finish that first",
-                m.to
-            )
-            .into());
-        }
-        None => {
-            let from = partition_of(&held, tenant).to_owned();
-            if from == to {
-                return Err(format!("tenant {tenant} is on partition {to} already").into());
-            }
-            let mut map = held.clone();
-            map.epoch += 1;
-            let m = TenantMove {
-                tenant: tenant.to_owned(),
-                from,
-                to: to.to_owned(),
-                epoch: map.epoch,
-                ..Default::default()
-            };
-            map.moving.push(m.clone());
-            apply_map(addr, key_path, &key, &mut map).await?;
-            println!(
-                "map epoch {}: tenant {tenant} moves from {} to {to}; its requests wait meanwhile",
-                map.epoch, m.from
-            );
-            m
-        }
-    };
-    // 2. Wait until the target has copied it.
-    let addresses = held
-        .partitions
-        .iter()
-        .find(|p| p.name == to)
-        .map(|p| p.addresses.clone())
-        .ok_or_else(|| format!("the map lists no partition {to}"))?;
+/// Waits until partition `to` (at `addresses`) has copied `tenant` for the move or copy of
+/// `epoch`.
+async fn wait_copied(
+    addresses: &[String],
+    key_path: &str,
+    tenant: &str,
+    to: &str,
+    epoch: u64,
+) -> Result<kernable_core::proto::MoveStatus> {
     let started = std::time::Instant::now();
     let mut said = std::time::Instant::now();
-    let status = 'copied: loop {
-        for address in &addresses {
+    loop {
+        for address in addresses {
             let mut request = tonic::Request::new(MoveStatusRequest {
                 tenant: tenant.to_owned(),
                 protocol: kernable_core::PROTOCOL,
@@ -929,8 +888,8 @@ async fn partitions_move(addr: &str, key_path: &str, tenant: &str, to: &str) -> 
                 continue;
             };
             match PartitionServiceClient::new(channel).moving(request).await {
-                Ok(s) if s.get_ref().done && s.get_ref().epoch == m.epoch => {
-                    break 'copied s.into_inner();
+                Ok(s) if s.get_ref().done && s.get_ref().epoch == epoch => {
+                    return Ok(s.into_inner());
                 }
                 Ok(_) => break,
                 Err(_) => continue,
@@ -944,8 +903,103 @@ async fn partitions_move(addr: &str, key_path: &str, tenant: &str, to: &str) -> 
             );
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
+async fn partitions_move(addr: &str, key_path: &str, tenant: &str, to: &str) -> Result<bool> {
+    let key = signing::read_signing_key(key_path)?;
+    let held = held_map(addr, key_path)
+        .await?
+        .ok_or("the control partition holds no partition map; apply one first")?;
+    let addresses = held
+        .partitions
+        .iter()
+        .find(|p| p.name == to)
+        .map(|p| p.addresses.clone())
+        .ok_or_else(|| format!("the map lists no partition {to}"))?;
+    let started = std::time::Instant::now();
+    // The move, and when the tenant stopped.
+    let (m, stopped) = match held.moving.iter().find(|m| m.tenant == tenant) {
+        Some(m) if m.to == to => {
+            println!(
+                "tenant {tenant} is moving from {} to {to} already; waiting for the copy",
+                m.from
+            );
+            (m.clone(), std::time::Instant::now())
+        }
+        Some(m) => {
+            return Err(format!(
+                "tenant {tenant} is moving to {} already; finish that first",
+                m.to
+            )
+            .into());
+        }
+        None => {
+            // 1. Copy the tenant while it runs, unless that is under way already.
+            let c = match held.copying.iter().find(|m| m.tenant == tenant) {
+                Some(c) if c.to == to => {
+                    println!("tenant {tenant} is being copied to {to} already; waiting for it");
+                    c.clone()
+                }
+                Some(c) => {
+                    return Err(format!(
+                        "tenant {tenant} is being copied to {} already; finish that first",
+                        c.to
+                    )
+                    .into());
+                }
+                None => {
+                    let from = partition_of(&held, tenant).to_owned();
+                    if from == to {
+                        return Err(format!("tenant {tenant} is on partition {to} already").into());
+                    }
+                    let mut map = held.clone();
+                    map.epoch += 1;
+                    let c = TenantMove {
+                        tenant: tenant.to_owned(),
+                        from,
+                        to: to.to_owned(),
+                        epoch: map.epoch,
+                        ..Default::default()
+                    };
+                    map.copying.push(c.clone());
+                    apply_map(addr, key_path, &key, &mut map).await?;
+                    println!(
+                        "map epoch {}: tenant {tenant} is copied from {} to {to} while it runs",
+                        map.epoch, c.from
+                    );
+                    c
+                }
+            };
+            let copied = wait_copied(&addresses, key_path, tenant, to, c.epoch).await?;
+            println!(
+                "copied while it ran in {}s (source head {})",
+                started.elapsed().as_secs(),
+                copied.source_head
+            );
+            // 2. The map that stops the tenant for the rest.
+            let mut map = held_map(addr, key_path)
+                .await?
+                .ok_or("the control partition lost its partition map")?;
+            map.epoch += 1;
+            map.copying.retain(|x| x.tenant != tenant);
+            let m = TenantMove {
+                epoch: map.epoch,
+                ..c
+            };
+            map.moving.push(m.clone());
+            let stopped = std::time::Instant::now();
+            apply_map(addr, key_path, &key, &mut map).await?;
+            println!(
+                "map epoch {}: tenant {tenant} moves from {} to {to}; its requests wait meanwhile",
+                map.epoch, m.from
+            );
+            (m, stopped)
+        }
     };
-    // 3. The map with the tenant on the target, from the map held now.
+    // 3. Wait until the target has copied the rest.
+    let status = wait_copied(&addresses, key_path, tenant, to, m.epoch).await?;
+    // 4. The map with the tenant on the target, from the map held now.
     let mut map = held_map(addr, key_path)
         .await?
         .ok_or("the control partition lost its partition map")?;
@@ -965,10 +1019,11 @@ async fn partitions_move(addr: &str, key_path: &str, tenant: &str, to: &str) -> 
     });
     apply_map(addr, key_path, &key, &mut map).await?;
     println!(
-        "map epoch {}: tenant {tenant} moved from {} to {to} in {}s (source head {}, target after {})",
+        "map epoch {}: tenant {tenant} moved from {} to {to} in {}s, stopped for {} ms (source head {}, target after {})",
         map.epoch,
         m.from,
         started.elapsed().as_secs(),
+        stopped.elapsed().as_millis(),
         status.source_head,
         status.target_after
     );
@@ -988,6 +1043,12 @@ async fn partitions_show(addr: &str, key_path: &str) -> Result<bool> {
     }
     for t in &map.tenants {
         println!("tenant {} -> {}", t.tenant, t.partition);
+    }
+    for m in &map.copying {
+        println!(
+            "tenant {} being copied {} -> {} while it runs",
+            m.tenant, m.from, m.to
+        );
     }
     for m in &map.moving {
         println!("tenant {} moving {} -> {}", m.tenant, m.from, m.to);

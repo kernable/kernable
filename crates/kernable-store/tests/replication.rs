@@ -594,3 +594,103 @@ fn the_file_log_finds_every_record_across_its_marks() {
     }
     assert_eq!(primary.records_after(3001, 1).unwrap(), None);
 }
+
+/// The command IDs of `tenant`'s records, by kind: (enqueued, committed, rejected).
+fn tenant_ids(s: &dyn Store, after: Option<u64>) -> [Vec<String>; 3] {
+    let mut ids: [Vec<String>; 3] = Default::default();
+    s.tenant_records("t1", after, &mut |record| {
+        match record {
+            Record::Enqueued(e) => ids[0].push(e.command.unwrap().command_id),
+            Record::Committed(c) => ids[1].push(c.command_id),
+            Record::Rejected(r) => ids[2].push(r.command_id),
+            other => panic!("not a tenant's record: {other:?}"),
+        }
+        Ok(())
+    })
+    .unwrap();
+    for list in &mut ids {
+        list.sort();
+    }
+    ids
+}
+
+#[test]
+fn a_tenant_is_exported_whole_or_after_a_position() {
+    let strings = |ids: &[&str]| ids.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+    for kind in [File, Sqlite] {
+        let dir = Dir::new(&format!("tenant-after-{kind:?}"));
+        let s = dir.open(kind, "s");
+        writes(s.as_ref(), 0); // events 1 to 4
+        writes(s.as_ref(), 1); // events 5 to 8
+        let [enqueued, committed, rejected] = tenant_ids(s.as_ref(), None);
+        assert_eq!(
+            enqueued.len(),
+            12,
+            "{kind:?}: every command, also the pending ones"
+        );
+        assert_eq!(committed.len(), 8, "{kind:?}");
+        assert_eq!(rejected, strings(&["c3-0", "c3-1"]), "{kind:?}");
+
+        // A copy while the tenant runs: every command with an outcome, none pending.
+        let [enqueued, committed, rejected] = tenant_ids(s.as_ref(), Some(0));
+        assert_eq!(enqueued.len(), 10, "{kind:?}: no pending command");
+        assert!(!enqueued.iter().any(|c| c.starts_with("c6")), "{kind:?}");
+        assert_eq!(committed.len(), 8, "{kind:?}");
+        assert_eq!(rejected.len(), 2, "{kind:?}");
+
+        // The rest after position 4: commits with later events, and every rejection and
+        // commit without events (they have no position to tell when).
+        let [enqueued, committed, rejected] = tenant_ids(s.as_ref(), Some(4));
+        assert_eq!(
+            committed,
+            strings(&["c1-1", "c2-1", "c4-0", "c4-1", "c5-1"]),
+            "{kind:?}"
+        );
+        assert_eq!(rejected, strings(&["c3-0", "c3-1"]), "{kind:?}");
+        assert_eq!(
+            enqueued,
+            strings(&["c1-1", "c2-1", "c3-0", "c3-1", "c4-0", "c4-1", "c5-1"]),
+            "{kind:?}: each command with its outcome"
+        );
+
+        let mut index = s.index().unwrap();
+        index.retain(|(stream, _)| stream.tenant_id == "t1");
+        index.sort_by(|a, b| a.0.aggregate_id.cmp(&b.0.aggregate_id));
+        let mut of_tenant = s.tenant_index("t1").unwrap();
+        of_tenant.sort_by(|a, b| a.0.aggregate_id.cmp(&b.0.aggregate_id));
+        assert_eq!(of_tenant, index, "{kind:?}");
+        assert!(!of_tenant.is_empty(), "{kind:?}");
+        assert!(s.tenant_index("t2").unwrap().is_empty(), "{kind:?}");
+
+        // Setting the tenant's index replaces it, on the standbys and their images too.
+        let standby = dir.open(kind, "standby");
+        let streams = vec![kernable_core::proto::StreamIndex {
+            domain: "orders".into(),
+            aggregate_type: "Order".into(),
+            aggregate_id: "b-1".into(),
+            index: Some(holds(99)),
+        }];
+        assert_eq!(s.set_tenant_index("t1", &streams).unwrap(), of_tenant.len());
+        let only = s.tenant_index("t1").unwrap();
+        assert_eq!(only.len(), 1, "{kind:?}");
+        assert_eq!(
+            (only[0].0.aggregate_id.as_str(), &only[0].1),
+            ("b-1", &holds(99))
+        );
+        follow(s.as_ref(), standby.as_ref(), 7);
+        same(
+            s.as_ref(),
+            standby.as_ref(),
+            &format!("{kind:?} after a tenant index"),
+        );
+        let imaged = dir.open(kind, "imaged");
+        take_image(s.as_ref(), imaged.as_ref());
+        assert_eq!(
+            imaged.tenant_index("t1").unwrap(),
+            only,
+            "{kind:?}: the image"
+        );
+        assert_eq!(s.drop_tenant_index("t1").unwrap(), 1, "{kind:?}");
+        assert!(s.tenant_index("t1").unwrap().is_empty(), "{kind:?}");
+    }
+}

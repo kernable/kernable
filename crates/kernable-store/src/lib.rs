@@ -38,9 +38,9 @@ use std::fmt;
 
 use ed25519_dalek::SigningKey;
 use kernable_core::proto::{
-    AggregateIndex, Command, CommandResult, Event, Grant, ListenerRecord, MembershipRecord,
-    NewEvent, PartitionMap, Rejected, ReplicatedRecord, RevocationRecord, Signature,
-    TenantImportedRecord, WorkerRecord, log_record::Record,
+    AggregateIndex, Command, CommandResult, EnqueuedRecord, Event, Grant, ListenerRecord,
+    MembershipRecord, NewEvent, PartitionMap, Rejected, ReplicatedRecord, RevocationRecord,
+    Signature, StreamIndex, TenantImportedRecord, WorkerRecord, log_record::Record,
 };
 
 /// The version of the stored data format this build reads and writes; a store of another
@@ -475,7 +475,13 @@ pub trait Store: Send + Sync {
     /// On the source of a move (S4): `tenant`'s streams hold no unique keys or facts here any
     /// more; returns how many streams held some.
     fn drop_tenant_index(&self, tenant: &str) -> Result<usize> {
-        let _ = tenant;
+        self.set_tenant_index(tenant, &[])
+    }
+
+    /// `tenant`'s streams hold exactly `streams` from now on (a `TenantIndex` record): on the
+    /// target of a move, the source's index. Returns how many streams held something before.
+    fn set_tenant_index(&self, tenant: &str, streams: &[StreamIndex]) -> Result<usize> {
+        let _ = (tenant, streams);
         Err(Error::ReadOnly)
     }
 
@@ -557,27 +563,78 @@ pub trait Store: Send + Sync {
         Err(Error::NoRecordLog)
     }
 
-    /// Calls `f` with the records of `tenant` (S4, moving a tenant): its commands as enqueued,
-    /// then its commits in log order (the index with each stream's last), then its rejections,
-    /// in one consistent view.
-    fn tenant_records(&self, tenant: &str, f: &mut dyn FnMut(Record) -> Result<()>) -> Result<()> {
-        let mut commands = std::collections::HashSet::new();
-        self.image(&mut |record| {
-            let ours = match &record {
-                Record::Enqueued(e) => {
-                    let ours = e.command.as_ref().is_some_and(|c| c.tenant_id == tenant);
-                    if ours {
-                        commands.extend(e.command.iter().map(|c| c.command_id.clone()));
+    /// Calls `f` with the records of `tenant` (S4, moving a tenant), in one consistent view, in
+    /// an order that applies (each command as enqueued before its outcome, commits in log
+    /// order, the index with each stream's last commit). With `after` (a copy while the tenant
+    /// runs, and the rest after it): only commands with an outcome, and of those only commits
+    /// with events after that position, rejections and commits without events.
+    fn tenant_records(
+        &self,
+        tenant: &str,
+        after: Option<u64>,
+        f: &mut dyn FnMut(Record) -> Result<()>,
+    ) -> Result<()> {
+        let ours = |e: &EnqueuedRecord| e.command.as_ref().is_some_and(|c| c.tenant_id == tenant);
+        let Some(after) = after else {
+            let mut commands = std::collections::HashSet::new();
+            self.image(&mut |record| {
+                let ours = match &record {
+                    Record::Enqueued(e) => {
+                        let mine = ours(e);
+                        if mine {
+                            commands.extend(e.command.iter().map(|c| c.command_id.clone()));
+                        }
+                        mine
                     }
-                    ours
+                    Record::Committed(c) => commands.contains(&c.command_id),
+                    Record::Rejected(r) => commands.contains(&r.command_id),
+                    _ => false,
+                };
+                if ours { f(record) } else { Ok(()) }
+            })?;
+            return Ok(());
+        };
+        // Each command waits for its outcome; one still pending is not sent.
+        let mut enqueued: std::collections::HashMap<String, Record> =
+            std::collections::HashMap::new();
+        self.image(&mut |record| match &record {
+            Record::Enqueued(e) if ours(e) => {
+                let id = e.command.as_ref().map(|c| c.command_id.clone());
+                enqueued.insert(id.unwrap_or_default(), record);
+                Ok(())
+            }
+            Record::Committed(c) => match enqueued.remove(&c.command_id) {
+                Some(command)
+                    if c.events.is_empty()
+                        || c.events
+                            .iter()
+                            .filter_map(|l| l.event.as_ref())
+                            .any(|e| e.global_position > after) =>
+                {
+                    f(command)?;
+                    f(record)
                 }
-                Record::Committed(c) => commands.contains(&c.command_id),
-                Record::Rejected(r) => commands.contains(&r.command_id),
-                _ => false,
-            };
-            if ours { f(record) } else { Ok(()) }
+                _ => Ok(()),
+            },
+            Record::Rejected(r) => match enqueued.remove(&r.command_id) {
+                Some(command) => {
+                    f(command)?;
+                    f(record)
+                }
+                None => Ok(()),
+            },
+            _ => Ok(()),
         })?;
         Ok(())
+    }
+
+    /// The unique keys and facts each stream of `tenant` holds here.
+    fn tenant_index(&self, tenant: &str) -> Result<Vec<(StreamId, AggregateIndex)>> {
+        Ok(self
+            .index()?
+            .into_iter()
+            .filter(|(stream, _)| stream.tenant_id == tenant)
+            .collect())
     }
 
     /// Applies records of an image ([`Store::image`]) to an empty store, unnumbered, with the

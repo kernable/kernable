@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# How long moving a tenant takes: its requests wait for the whole copy. Two partitions;
-# a load generator (64 clients, wait=committed, 1 KB payloads) fills tenant t1 on p1 for each of
-# FILL (seconds, default "5 15 45"), then `kernable partitions move` copies it to p2, timed.
+# How long moving a tenant takes and how long it is stopped: the move copies the
+# tenant while it runs, then stops it for the rest. Two partitions; a load generator (64
+# clients, wait=committed, 1 KB payloads) fills tenant t1 on p1 for each of FILL (seconds,
+# default "5 15 45"), then `kernable partitions move` copies it to p2, timed.
 # STORE (sqlite or file) and DURABILITY as in run.sh; both kernels share this machine.
 set -euo pipefail
 
@@ -54,9 +55,11 @@ run() { # <fill seconds>
   out=$(cd "$DIR" && "$BIN/kernable" partitions move "$(sock 1)" ops.key t1 p2)
   end=$(now)
   local events
+  local events stopped
   events=$(echo "$out" | sed -n 's/.*source head \([0-9]*\).*/\1/p' | tail -1)
-  printf 'events=%s move=%.2fs (%.0f events/s)  p1 log %s\n' "$events" "$(echo "$end - $start" | bc)" \
-    "$(echo "$events / ($end - $start)" | bc -l)" "$(du -sh "$DIR"/p1.* 2>/dev/null | awk '{print $1}' | head -1)"
+  stopped=$(echo "$out" | sed -n 's/.*stopped for \([0-9]*\) ms.*/\1/p' | tail -1)
+  printf 'events=%s move=%.2fs (%.0f events/s) stopped=%s ms  p1 log %s\n' "$events" "$(echo "$end - $start" | bc)" \
+    "$(echo "$events / ($end - $start)" | bc -l)" "$stopped" "$(du -sh "$DIR"/p1.* 2>/dev/null | awk '{print $1}' | head -1)"
   for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done
   for p in "${PIDS[@]:-}"; do wait "$p" 2>/dev/null || true; done
   PIDS=()

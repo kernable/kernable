@@ -328,8 +328,11 @@ message PartitionMap {
   int64 issued_at = 6;               // ms since epoch
   Signature sig = 7;                 // over kernable.v1.partitions
   uint32 protocol = 8;               // not signed
-  repeated TenantMove moving = 9;    // being copied to `to`
+  repeated TenantMove moving = 9;    // being copied to `to`; the tenant waits meanwhile
   repeated TenantMove moved = 10;    // done, with their heads
+  // Copied to `to` while the tenant runs on `from` (its finished commands, up to the source's
+  // head as of then), so that the move after it stops the tenant only for the rest.
+  repeated TenantMove copying = 11;
 }
 
 // What a target partition knows of a tenant moving to it.
@@ -338,6 +341,7 @@ message MoveStatus {
   uint64 source_head = 2;
   uint64 target_after = 3;
   uint64 epoch = 4; // of the move it copied (TenantMove.epoch)
+  bool precopy = 5; // copied while the tenant ran (`copying`): the move's first part only
 }
 
 message MoveStatusRequest {

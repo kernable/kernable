@@ -88,19 +88,18 @@ The SDK first sends a wait-only query to every partition at once; each returns a
 kernable partitions move 10.0.1.1:7233 ops.key acme p3
 ```
 
-The command applies a map that marks `acme` as moving from p2 to p3, waits until p3 has copied it, and applies the map with `acme` on p3. Meanwhile:
+The command moves `acme` from p2 to p3 in two parts, and applies a map for each:
 
-1. Both partitions answer `acme`'s requests with `UNAVAILABLE` (`moving: …`); the SDKs wait and send them again, for up to 30 seconds.
-2. p3 asks p2 for the tenant. Once p2's queue holds none of `acme`'s commands, p2 sends every command, event and rejection of the tenant, with the vault values and files they need.
-3. p3 commits the events again under the same commands and worker signatures: new positions in p3's log, the same aggregate versions, and on each copy where it was first committed (`origin_partition`, `origin_position`). Listeners and subscriptions do not get the copies; the originals were delivered on p2.
-4. p3 tells the control partition, which hands it `acme`'s global unique keys.
-5. The final map puts `acme` on p3. p2 drops `acme`'s unique keys, vault values and files; its events stay in p2's log as history.
+1. **While `acme` runs on.** A map marks `acme` as being copied to p3. p3 asks p2 for every command of the tenant that has an outcome, with its events, vault values and files, and commits the events again under the same commands and worker signatures: new positions in p3's log, the same aggregate versions, and on each copy where it was first committed (`origin_partition`, `origin_position`). Listeners and subscriptions do not get the copies; the originals were delivered on p2. p3 holds none of `acme`'s unique keys yet.
+2. **The rest, with `acme` stopped.** A map marks `acme` as moving. Both partitions answer its requests with `UNAVAILABLE` (`moving: …`); the SDKs wait and send them again, for up to 30 seconds. Once p2's queue holds none of `acme`'s commands, p2 sends only what p3 lacks (commands that completed since the first part) and what each of `acme`'s aggregates holds: its unique keys and facts.
+3. p3 files those keys and tells the control partition, which hands it `acme`'s global unique keys.
+4. The final map puts `acme` on p3. p2 drops `acme`'s unique keys, vault values and files; its events stay in p2's log as history.
 
 A listener (with the SDK) keeps a tenant's order across the move: it handles `acme`'s new events on p3 only after its stream of p2 has passed `acme`'s last event there. A subscription sees each partition in order, not across them.
 
 If the command stops (or a partition does), run it again: it continues the move, and p3 keeps what it copied already. Moving a tenant back works the same way; only what happened since it left is copied.
 
-The tenant is unavailable for as long as the copy takes, which grows with its data. Measured on one Apple M2 Max with both partitions on it (`bench/move.sh`, a command per event, 1 KB each): about 2 seconds plus 60 seconds per million events with SQLite, 30 seconds per million with the file log. Move tenants at a quiet time, and give a tenant that grows big a partition of its own early.
+The tenant is unavailable only for the second part. Measured on one Apple M2 Max with both partitions on it (`bench/move.sh`, a command per event, 1 KB each): with SQLite about a second, whatever the tenant's size (1 s for 268,000 events); with the file log, which reads its whole log for the rest, it grows with the log (2 s for 422,000 events, 1 GB). The move as a whole takes about 60 seconds per million events with SQLite and 30 with the file log, nearly all of it in the first part. Files go along in both parts, so a tenant with many large files stops longer.
 
 ## What it gains
 
@@ -122,7 +121,7 @@ On one machine, two partitions give about 1.5 times one; beyond that the shared 
 | A key is revoked on the control partition | Every partition refuses it within about a second |
 | The control partition is down | The others serve on with the map and trust records they hold; new maps, grants and memberships wait, and so do commits that file a new global key |
 | A partition that was down starts again | It takes what it missed from the control partition first thing |
-| A tenant moves | Its requests wait (`UNAVAILABLE`, `moving: …`) until the copy is done; the SDKs send them again |
+| A tenant moves | While it is copied it runs on; then its requests wait (`UNAVAILABLE`, `moving: …`) for the rest, about a second; the SDKs send them again |
 | The target of a move stops during the copy | It copies again when it is back; what it holds already it keeps |
 
 ## Limits

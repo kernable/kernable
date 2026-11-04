@@ -1,7 +1,8 @@
 //! Crash points of moving a tenant (`--features crash-points`): the target or the source
 //! aborts at each point during a move, is started again, and the move completes: every command
 //! of the tenant is on the target once, at its version, its global keys moved with it, and both
-//! logs keep every store invariant.
+//! logs keep every store invariant. The move starts with a copy while the tenant runs (an order
+//! comes after it), so each point is also reached in that copy or in the rest after it.
 
 mod common;
 
@@ -99,6 +100,23 @@ fn map(dir: &Path, epoch: u64, tenants: Vec<TenantPartition>) -> PartitionMap {
         protocol: kernable_core::PROTOCOL,
         ..Default::default()
     }
+}
+
+/// The status of t1's move or copy on p2, once its copy of `epoch` is done.
+async fn copied(dir: &Path, epoch: u64) -> Option<kernable_core::proto::MoveStatus> {
+    let channel = transport::connect(&sock(dir, "p2")).await.ok()?;
+    let status = PartitionServiceClient::new(channel)
+        .moving(with_grant(
+            MoveStatusRequest {
+                tenant: "t1".into(),
+                protocol: kernable_core::PROTOCOL,
+            },
+            &key(1),
+        ))
+        .await
+        .ok()?
+        .into_inner();
+    (status.done && status.epoch == epoch).then_some(status)
 }
 
 async fn apply_map(addr: &str, mut map: PartitionMap) -> Result<(), tonic::Status> {
@@ -232,34 +250,43 @@ async fn crash_and_recover(point: &str) {
         }
     }
 
-    // The move, with p1 or p2 crashing and coming back on the way.
-    let mut moving = map(&dir, 2, Vec::new());
-    moving.moving.push(TenantMove {
+    // A copy while t1 runs, then the move, with p1 or p2 crashing and coming back on the way.
+    let t1_move = |epoch| TenantMove {
         tenant: "t1".into(),
         from: "p1".into(),
         to: "p2".into(),
-        epoch: 2,
+        epoch,
         ..Default::default()
-    });
-    apply_map(&p1_addr, moving).await.unwrap();
+    };
+    let mut copying = map(&dir, 2, Vec::new());
+    copying.copying.push(t1_move(2));
+    apply_map(&p1_addr, copying).await.unwrap();
     let mut crashed = false;
+    loop {
+        crashed |= revive(&dir, "p1", &mut p1).await;
+        crashed |= revive(&dir, "p2", &mut p2).await;
+        if copied(&dir, 2).await.is_some_and(|s| s.precopy) {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "{point}: the copy while t1 runs never finished"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // t1 runs on p1 meanwhile: this order only reaches p2 with the rest.
+    let late = order("m-late", "PlaceOrder", "o3", "o3@x");
+    let late = submit_until(&p1_addr, late, started, point).await;
+    told.push((late.command_id.clone(), version(&late)));
+    let mut moving = map(&dir, 3, Vec::new());
+    moving.moving.push(t1_move(3));
+    apply_map(&p1_addr, moving).await.unwrap();
     let status = loop {
         crashed |= revive(&dir, "p1", &mut p1).await;
         crashed |= revive(&dir, "p2", &mut p2).await;
-        if let Ok(channel) = transport::connect(&p2_addr).await
-            && let Ok(status) = PartitionServiceClient::new(channel)
-                .moving(with_grant(
-                    MoveStatusRequest {
-                        tenant: "t1".into(),
-                        protocol: kernable_core::PROTOCOL,
-                    },
-                    &key(1),
-                ))
-                .await
-            && status.get_ref().done
-            && status.get_ref().epoch == 2
-        {
-            break status.into_inner();
+        if let Some(status) = copied(&dir, 3).await {
+            assert!(!status.precopy, "{point}");
+            break status;
         }
         assert!(
             started.elapsed() < Duration::from_secs(60),
@@ -269,7 +296,7 @@ async fn crash_and_recover(point: &str) {
     };
     let mut moved = map(
         &dir,
-        3,
+        4,
         vec![TenantPartition {
             tenant: "t1".into(),
             partition: "p2".into(),
@@ -279,7 +306,7 @@ async fn crash_and_recover(point: &str) {
         tenant: "t1".into(),
         from: "p1".into(),
         to: "p2".into(),
-        epoch: 2,
+        epoch: 3,
         source_head: status.source_head,
         target_after: status.target_after,
     });

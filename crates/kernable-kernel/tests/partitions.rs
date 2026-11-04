@@ -52,6 +52,7 @@ fn map(epoch: u64, p1: &str, p2: &str) -> PartitionMap {
         protocol: kernable_core::PROTOCOL,
         moving: Vec::new(),
         moved: Vec::new(),
+        copying: Vec::new(),
     };
     map.sig = Some(signing::sign(&key(1), &signing::partitions_message(&map)));
     map
@@ -895,12 +896,16 @@ async fn a_tenant_moves_while_clients_write_to_it() {
     })
     .await
     .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(
         out.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
+        "{said}{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    // Copied while the clients wrote on, then stopped only for the rest.
+    assert!(said.contains("copied while it ran"), "{said}");
+    assert!(said.contains("stopped for"), "{said}");
+    eprintln!("{said}");
     tokio::time::sleep(Duration::from_millis(500)).await;
     stop.store(true, std::sync::atomic::Ordering::SeqCst);
     let mut told = Vec::new();

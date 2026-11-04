@@ -187,7 +187,7 @@ service MoveService {
 }
 
 message MoveRequest {
-  string op = 1;          // export | done
+  string op = 1;          // precopy | export | done
   string tenant = 2;
   string from = 3;
   string to = 4;
@@ -195,6 +195,9 @@ message MoveRequest {
   int64 issued_at = 6;
   Signature sig = 7;
   uint32 protocol = 8;
+  // export: only what the target lacks after a precopy up to this source position (0: all):
+  // commits with events after it, and every rejection and commit without events.
+  uint64 after = 9;
 }
 
 // The tenant's records in an order that applies (commands as enqueued, commits in log order,
@@ -205,6 +208,9 @@ message MoveBatch {
   repeated DataFile files = 3;
   uint64 source_head = 4;
   bool last = 5;
+  // With the last batch: what each of the tenant's streams holds, read after its queue drained
+  // (an export, not a precopy, which leaves the target holding no keys of the tenant).
+  repeated StreamIndex indexes = 6;
 }
 
 message MoveResult {}

@@ -45,8 +45,8 @@ use kernable_core::{
         DataChangedRecord, EnqueuedRecord, Event, FormatRecord, GlobalKeyRecord, Grant,
         ListenerRecord, LogRecord, LoggedEvent, MembershipRecord, NewEvent, PartitionMap, Rejected,
         RejectedRecord, ReplicatedRecord, ReplicationHeadRecord, RevocationRecord, Signature,
-        TenantImportedRecord, TenantMovedAwayRecord, WorkerRecord, command_result::Outcome,
-        log_record::Record,
+        StreamIndex, TenantImportedRecord, TenantIndexRecord, WorkerRecord,
+        command_result::Outcome, log_record::Record,
     },
     signing::{self, GENESIS},
 };
@@ -106,6 +106,24 @@ struct State {
 }
 
 impl State {
+    /// Files what `stream` holds now; a key another stream holds is an error.
+    fn set_index(&mut self, stream: StreamKey, index: AggregateIndex) -> Result<()> {
+        if let Some(old) = self.index.remove(&stream) {
+            for k in old.keys.iter().filter(|k| !k.id.is_empty()) {
+                self.holders.remove(&k.id);
+            }
+        }
+        for k in index.keys.iter().filter(|k| !k.id.is_empty()) {
+            if self.holders.insert(k.id.clone(), stream.clone()).is_some() {
+                return Err(corrupt("a unique key is held twice"));
+            }
+        }
+        if !index.keys.is_empty() || !index.facts.is_empty() {
+            self.index.insert(stream, index);
+        }
+        Ok(())
+    }
+
     /// Forgets the keys and facts `tenant`'s streams hold.
     fn drop_index(&mut self, tenant: &str) {
         let gone: Vec<StreamKey> = self
@@ -159,21 +177,9 @@ impl State {
                         ))
                     })?;
                     let stream = stream_key(&cmd.command);
-                    if let Some(old) = self.index.remove(&stream) {
-                        for k in old.keys.iter().filter(|k| !k.id.is_empty()) {
-                            self.holders.remove(&k.id);
-                        }
-                    }
-                    for k in index.keys.iter().filter(|k| !k.id.is_empty()) {
-                        if self.holders.insert(k.id.clone(), stream.clone()).is_some() {
-                            return Err(corrupt(&format!(
-                                "a unique key of {command_id} is held twice"
-                            )));
-                        }
-                    }
-                    if !index.keys.is_empty() || !index.facts.is_empty() {
-                        self.index.insert(stream, index);
-                    }
+                    self.set_index(stream, index).map_err(|_| {
+                        corrupt(&format!("a unique key of {command_id} is held twice"))
+                    })?;
                 }
                 let mut stored = Vec::with_capacity(events.len());
                 for logged in events {
@@ -261,8 +267,12 @@ impl State {
             Record::TenantImported(t) => {
                 self.imported.insert(t.tenant.clone(), t);
             }
-            Record::TenantMovedAway(t) => {
+            Record::TenantIndex(t) => {
                 self.drop_index(&t.tenant);
+                for s in t.streams {
+                    let stream = (t.tenant.clone(), s.domain, s.aggregate_type, s.aggregate_id);
+                    self.set_index(stream, s.index.unwrap_or_default())?;
+                }
             }
             Record::PartitionMap(m) => {
                 if self
@@ -359,7 +369,7 @@ impl State {
             | Record::PartitionMap(_)
             | Record::GlobalKey(_)
             | Record::TenantImported(_)
-            | Record::TenantMovedAway(_)
+            | Record::TenantIndex(_)
             | Record::DataChanged(_) => {}
         }
         Ok(())
@@ -1116,12 +1126,13 @@ impl Store for FileStore {
         Ok(self.inner().state.imported.get(tenant).cloned())
     }
 
-    fn drop_tenant_index(&self, tenant: &str) -> Result<usize> {
+    fn set_tenant_index(&self, tenant: &str, streams: &[StreamIndex]) -> Result<usize> {
         let mut inner = self.inner();
         let held = inner.state.index.keys().filter(|s| s.0 == tenant).count();
-        if held > 0 {
-            let record = Record::TenantMovedAway(TenantMovedAwayRecord {
+        if held > 0 || !streams.is_empty() {
+            let record = Record::TenantIndex(TenantIndexRecord {
                 tenant: tenant.to_owned(),
+                streams: streams.to_vec(),
             });
             append(&mut inner, record)?;
         }

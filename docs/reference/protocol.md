@@ -365,8 +365,9 @@ Tenants listed in `tenants` live on their partition; every other tenant on `defa
 | `issued_at` |  `int64` | 6 | ms since epoch |
 | `sig` |  `Signature` | 7 | over kernable.v1.partitions |
 | `protocol` |  `uint32` | 8 | not signed |
-| `moving` | repeated `TenantMove` | 9 | being copied to `to` |
+| `moving` | repeated `TenantMove` | 9 | being copied to `to`; the tenant waits meanwhile |
 | `moved` | repeated `TenantMove` | 10 | done, with their heads |
+| `copying` | repeated `TenantMove` | 11 | Copied to `to` while the tenant runs on `from` (its finished commands, up to the source's head as of then), so that the move after it stops the tenant only for the rest. |
 
 ### MoveStatus
 
@@ -378,6 +379,7 @@ What a target partition knows of a tenant moving to it.
 | `source_head` |  `uint64` | 2 |  |
 | `target_after` |  `uint64` | 3 |  |
 | `epoch` |  `uint64` | 4 | of the move it copied (TenantMove.epoch) |
+| `precopy` |  `bool` | 5 | copied while the tenant ran (`copying`): the move's first part only |
 
 ### MoveStatusRequest
 

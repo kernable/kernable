@@ -1,14 +1,20 @@
 //! Moving a tenant between partitions.
 //!
-//! The operator applies a map that lists the tenant under `moving` (`kernable partitions move`).
-//! From then on, both partitions answer the tenant's requests with `UNAVAILABLE`, and:
+//! `kernable partitions move` first applies a map that lists the tenant under `copying`: the
+//! tenant runs on, and the target copies its finished commands while it does (op `precopy`),
+//! noting how far it got (`TenantImportedRecord.precopy`, the source's head then). It holds no
+//! unique keys of the tenant yet. Then the map lists the tenant under `moving`. From then on,
+//! both partitions answer the tenant's requests with `UNAVAILABLE`, and:
 //!
 //! 1. the target asks the source for the tenant ([`MoveService::export`]): once the source's
 //!    queue holds none of the tenant's commands, it sends every command, commit and rejection
-//!    of the tenant with the vault values and files they need, and its head (`source_head`);
+//!    of the tenant (after a precopy only those the target lacks: commits with events after
+//!    its head, every rejection and commit without events) with the vault values and files
+//!    they need, then what each of the tenant's streams holds, and its head (`source_head`);
 //! 2. the target commits the events again, with where they came from (`origin_partition`,
-//!    `origin_position`), under the same commands and worker signatures; listeners and
-//!    subscriptions do not get these copies, the originals stay delivered where they are;
+//!    `origin_position`), under the same commands and worker signatures, then files the
+//!    source's index for the tenant (a `TenantIndex` record); listeners and subscriptions do
+//!    not get these copies, the originals stay delivered where they are;
 //! 3. the target tells the control partition ([`MoveService::done`]), which hands it the
 //!    tenant's global keys, and notes the move done (`TenantImportedRecord`, with its head
 //!    after the copies: `target_after`);
@@ -21,20 +27,20 @@
 //! already it keeps.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use kernable_core::{
     proto::{
-        AggregateIndex, LogRecord, MoveBatch, MoveRequest, MoveResult, NewEvent, PartitionMap,
-        Signature, TenantImportedRecord, TenantMove, log_record::Record,
+        LogRecord, MoveBatch, MoveRequest, MoveResult, NewEvent, PartitionMap, Signature,
+        StreamIndex, TenantImportedRecord, TenantMove, log_record::Record,
         move_service_client::MoveServiceClient, move_service_server::MoveService,
     },
     signing,
 };
-use kernable_store::{Copy, Error as StoreError, StreamId};
+use kernable_store::{Copy, Error as StoreError};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
@@ -50,6 +56,15 @@ const EVERY: Duration = Duration::from_secs(1);
 /// How long the source waits for the tenant's queued commands to complete.
 const DRAIN: Duration = Duration::from_secs(30);
 
+/// What a move request carries besides its op and move.
+#[derive(Default)]
+struct Extra {
+    /// done: the tenant's global keys, now on the target.
+    global_keys: Vec<Vec<u8>>,
+    /// export: the source's head the target copied up to while the tenant ran (0: none).
+    after: u64,
+}
+
 impl Kernel {
     /// The move of `tenant` the map lists, if it moves.
     pub(crate) fn moving(&self, tenant: &str) -> Option<TenantMove> {
@@ -57,6 +72,15 @@ impl Kernel {
         self.maps
             .get()?
             .moving
+            .into_iter()
+            .find(|m| m.tenant == tenant)
+    }
+
+    /// The copy of `tenant` the map lists while it runs, if any.
+    fn copying(&self, tenant: &str) -> Option<TenantMove> {
+        self.maps
+            .get()?
+            .copying
             .into_iter()
             .find(|m| m.tenant == tenant)
     }
@@ -69,7 +93,7 @@ impl Kernel {
             .sig
             .as_ref()
             .ok_or_else(|| Status::unauthenticated("the request is not signed"))?;
-        let msg = signing::move_message(op, &r.tenant, &r.from, &r.to, r.issued_at);
+        let msg = signing::move_message(op, &r.tenant, &r.from, &r.to, r.after, r.issued_at);
         if r.op != op || signing::verify(sig, &msg).is_err() {
             return Err(Status::unauthenticated("invalid signature"));
         }
@@ -82,11 +106,19 @@ impl Kernel {
                 "only a partition's node key (granted replicate) may move tenants",
             ));
         }
-        match self.moving(&r.tenant) {
+        let listed = if op == "precopy" {
+            self.copying(&r.tenant)
+        } else {
+            self.moving(&r.tenant)
+        };
+        match listed {
             Some(m) if m.from == r.from && m.to == r.to => Ok(()),
             _ => Err(Status::failed_precondition(format!(
-                "the partition map moves no tenant {} from {} to {}",
-                r.tenant, r.from, r.to
+                "the partition map {} no tenant {} from {} to {}",
+                if op == "precopy" { "copies" } else { "moves" },
+                r.tenant,
+                r.from,
+                r.to
             ))),
         }
     }
@@ -109,7 +141,7 @@ impl Kernel {
         name: &str,
         op: &str,
         m: &TenantMove,
-        global_keys: Vec<Vec<u8>>,
+        extra: Extra,
         mut call: impl AsyncFnMut(
             MoveServiceClient<tonic::transport::Channel>,
             Request<MoveRequest>,
@@ -137,16 +169,17 @@ impl Kernel {
         let mut last = Status::unavailable(format!("partition {name} has no address"));
         for address in &addresses {
             let issued_at = now_ms();
-            let msg = signing::move_message(op, &m.tenant, &m.from, &m.to, issued_at);
+            let msg = signing::move_message(op, &m.tenant, &m.from, &m.to, extra.after, issued_at);
             let mut request = Request::new(MoveRequest {
                 op: op.to_owned(),
                 tenant: m.tenant.clone(),
                 from: m.from.clone(),
                 to: m.to.clone(),
-                global_keys: global_keys.clone(),
+                global_keys: extra.global_keys.clone(),
                 issued_at,
                 sig: Some(signing::sign(&node_key, &msg)),
                 protocol: kernable_core::PROTOCOL,
+                after: extra.after,
             });
             request.metadata_mut().insert(
                 GRANT_HEADER,
@@ -198,7 +231,11 @@ impl MoveService for Api {
         request: Request<MoveRequest>,
     ) -> Result<Response<Self::ExportStream>, Status> {
         let kernel = Arc::clone(&self.0);
-        kernel.check_move(&request, "export")?;
+        let op = request.get_ref().op.clone();
+        if op != "precopy" && op != "export" {
+            return Err(Status::invalid_argument(format!("no export op {op}")));
+        }
+        kernel.check_move(&request, &op)?;
         let r = request.into_inner();
         let me = kernel.config.partition.as_ref().map(|p| p.name.as_str());
         if me != Some(r.from.as_str()) {
@@ -206,6 +243,16 @@ impl MoveService for Api {
                 "this is not partition {}",
                 r.from
             )));
+        }
+        // A copy while the tenant runs: its finished commands, as of now.
+        if op == "precopy" {
+            let (tx, rx) = mpsc::channel(4);
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = export(&kernel, &r.tenant, Some(0), &tx) {
+                    let _ = tx.blocking_send(Err(e));
+                }
+            });
+            return Ok(Response::new(ReceiverStream::new(rx)));
         }
         // The tenant's commands accepted before the move complete first; new ones are refused.
         // Twice empty, a moment apart: a submit that passed its check just before the map
@@ -227,8 +274,9 @@ impl MoveService for Api {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         let (tx, rx) = mpsc::channel(4);
+        let after = (r.after > 0).then_some(r.after);
         tokio::task::spawn_blocking(move || {
-            if let Err(e) = export(&kernel, &r.tenant, &tx) {
+            if let Err(e) = export(&kernel, &r.tenant, after, &tx) {
                 let _ = tx.blocking_send(Err(e));
             }
         });
@@ -255,12 +303,14 @@ impl MoveService for Api {
     }
 }
 
-/// Sends the tenant's records in batches: commands as enqueued, then commits in log order,
-/// then rejections, each batch with the vault values it refers to; then the tenant's files and
-/// the head every event of the tenant is at or before.
+/// Sends the tenant's records in batches ([`kernable_store::Store::tenant_records`] with
+/// `after`), each batch with the vault values it refers to; then the tenant's files, the head
+/// every event of the tenant is at or before and, unless it is a precopy (`after` 0, the
+/// tenant still running), what each of its streams holds.
 fn export(
     kernel: &Kernel,
     tenant: &str,
+    after: Option<u64>,
     tx: &mpsc::Sender<Result<MoveBatch, Status>>,
 ) -> Result<(), Status> {
     let left = || StoreError::Io(std::io::Error::other("the target left"));
@@ -284,7 +334,7 @@ fn export(
     };
     kernel
         .store
-        .tenant_records(tenant, &mut |record| {
+        .tenant_records(tenant, after, &mut |record| {
             if let Record::Enqueued(e) = &record {
                 commands.extend(e.command.iter().map(|c| c.command_id.clone()));
             }
@@ -325,33 +375,37 @@ fn export(
             Ok(())
         })
         .map_err(internal)?;
+    let indexes = if after == Some(0) {
+        Vec::new()
+    } else {
+        kernel
+            .store
+            .tenant_index(tenant)
+            .map_err(internal)?
+            .into_iter()
+            .map(|(stream, index)| StreamIndex {
+                domain: stream.domain,
+                aggregate_type: stream.aggregate_type,
+                aggregate_id: stream.aggregate_id,
+                index: Some(index),
+            })
+            .collect()
+    };
     tx.blocking_send(Ok(MoveBatch {
         files,
         source_head,
         last: true,
+        indexes,
         ..Default::default()
     }))
     .map_err(|_| Status::cancelled("the target left"))?;
-    tracing::info!(%tenant, commands = commands.len(), source_head, "sent a moving tenant");
+    tracing::info!(%tenant, commands = commands.len(), source_head, ?after, "sent a moving tenant");
     Ok(())
 }
 
-/// What an import gathered: the latest index per stream (for the global keys) and the streams.
-#[derive(Default)]
-struct Imported {
-    /// The stream of each command the source sent.
-    streams: HashMap<String, StreamId>,
-    indexes: HashMap<StreamId, AggregateIndex>,
-}
-
-/// Takes one batch of the source's records into this store.
-fn apply(
-    kernel: &Kernel,
-    tenant: &str,
-    from: &str,
-    batch: MoveBatch,
-    imported: &mut Imported,
-) -> Result<(), BoxError> {
+/// Takes one batch of the source's records into this store. The commits hold no keys or
+/// facts here: the tenant's whole index is filed at the end of the move, from the source's.
+fn apply(kernel: &Kernel, tenant: &str, from: &str, batch: MoveBatch) -> Result<(), BoxError> {
     if !batch.vault.is_empty() {
         let vault = kernel
             .vault
@@ -376,27 +430,12 @@ fn apply(
                         format!("command {} is not of tenant {tenant}", cmd.command_id).into(),
                     );
                 }
-                imported.streams.insert(
-                    cmd.command_id.clone(),
-                    StreamId {
-                        tenant_id: cmd.tenant_id.clone(),
-                        domain: cmd.domain.clone(),
-                        aggregate_type: cmd.aggregate_type.clone(),
-                        aggregate_id: cmd.aggregate_id.clone(),
-                    },
-                );
                 copies.push(Copy::Enqueue {
                     command: cmd,
                     created_at: e.created_at,
                 });
             }
             Record::Committed(c) => {
-                // What each stream holds, also of commits copied before: the global keys move
-                // with the tenant however often the copy started.
-                if let (Some(index), Some(stream)) = (&c.index, imported.streams.get(&c.command_id))
-                {
-                    imported.indexes.insert(stream.clone(), index.clone());
-                }
                 let events: Vec<_> = c.events.iter().filter_map(|l| l.event.as_ref()).collect();
                 let new: Vec<NewEvent> = events
                     .iter()
@@ -432,7 +471,7 @@ fn apply(
                     expected_version: expected,
                     events: new,
                     producer_sig: sig,
-                    index: c.index,
+                    index: None,
                     at,
                 });
             }
@@ -449,47 +488,83 @@ fn apply(
     Ok(())
 }
 
-/// On the target: copies the tenant from the source, tells the control partition, notes it.
-async fn import(kernel: &Arc<Kernel>, map: &PartitionMap, m: &TenantMove) -> Result<(), BoxError> {
-    let mut imported = Imported::default();
-    let mut source_head = None;
-    let stream = kernel
+/// On the target: copies the tenant from the source. A precopy (`copying`) notes how far it
+/// got; a move (`moving`) copies the rest, files the tenant's index, tells the control
+/// partition and notes the move done.
+async fn import(
+    kernel: &Arc<Kernel>,
+    map: &PartitionMap,
+    m: &TenantMove,
+    precopy: bool,
+) -> Result<(), BoxError> {
+    // After a precopy from the same source, only what came after its head.
+    let after = match kernel.store.tenant_imported(&m.tenant)? {
+        Some(r) if !precopy && r.precopy && r.from == m.from => r.source_head,
+        _ => 0,
+    };
+    let op = if precopy { "precopy" } else { "export" };
+    let mut stream = kernel
         .ask_partition(
             map,
             &m.from,
-            "export",
+            op,
             m,
-            Vec::new(),
+            Extra {
+                after,
+                ..Extra::default()
+            },
             async |mut client, request| Ok(client.export(request).await?.into_inner()),
         )
         .await?;
-    let mut stream = stream;
-    while let Some(batch) = stream.message().await? {
+    let (mut source_head, mut indexes) = (None, Vec::new());
+    while let Some(mut batch) = stream.message().await? {
         if batch.last {
             source_head = Some(batch.source_head);
+            indexes = std::mem::take(&mut batch.indexes);
         }
         let k = Arc::clone(kernel);
         let (tenant, from) = (m.tenant.clone(), m.from.clone());
-        imported = tokio::task::spawn_blocking(move || {
-            apply(&k, &tenant, &from, batch, &mut imported).map(|()| imported)
-        })
-        .await??;
+        tokio::task::spawn_blocking(move || apply(&k, &tenant, &from, batch)).await??;
     }
     let source_head = source_head.ok_or("the source ended the copy early")?;
+    // The tenant's keys and facts, as the source's streams hold them (none after a precopy).
     let k = Arc::clone(kernel);
-    let target_after = tokio::task::spawn_blocking(move || {
-        let head = k.store.head_position();
-        k.sync(*head.as_ref().unwrap_or(&0));
-        head
+    let tenant = m.tenant.clone();
+    let filed = indexes.clone();
+    let target_after = tokio::task::spawn_blocking(move || -> Result<u64, BoxError> {
+        if !precopy {
+            k.store.set_tenant_index(&tenant, &filed)?;
+        }
+        let head = k.store.head_position()?;
+        k.sync(head);
+        Ok(head)
     })
     .await??;
+    let record = TenantImportedRecord {
+        tenant: m.tenant.clone(),
+        from: m.from.clone(),
+        source_head,
+        target_after,
+        epoch: m.epoch,
+        precopy,
+    };
+    if precopy {
+        let k = Arc::clone(kernel);
+        tokio::task::spawn_blocking(move || -> Result<(), BoxError> {
+            k.store.save_tenant_imported(&record)?;
+            k.sync(0);
+            Ok(())
+        })
+        .await??;
+        tracing::info!(tenant = %m.tenant, from = %m.from, source_head, "copied a tenant while it runs");
+        return Ok(());
+    }
     // The index caches nothing of the tenant's streams any more.
     crate::crash::point("move.copied");
-    let streams: Vec<StreamId> = imported.indexes.keys().cloned().collect();
-    kernel.index().erased(&streams);
-    let global_keys: Vec<Vec<u8>> = imported
-        .indexes
-        .values()
+    kernel.index().forget_tenant(&m.tenant);
+    let global_keys: Vec<Vec<u8>> = indexes
+        .iter()
+        .filter_map(|s| s.index.as_ref())
         .flat_map(|i| &i.keys)
         .filter(|k| k.global && !k.id.is_empty())
         .map(|k| k.id.clone())
@@ -509,19 +584,15 @@ async fn import(kernel: &Arc<Kernel>, map: &PartitionMap, m: &TenantMove) -> Res
                 &map.control,
                 "done",
                 m,
-                global_keys,
+                Extra {
+                    global_keys,
+                    ..Extra::default()
+                },
                 async |mut client, request| client.done(request).await.map(|_| ()),
             )
             .await?;
     }
     crate::crash::point("move.handed");
-    let record = TenantImportedRecord {
-        tenant: m.tenant.clone(),
-        from: m.from.clone(),
-        source_head,
-        target_after,
-        epoch: m.epoch,
-    };
     let k = Arc::clone(kernel);
     tokio::task::spawn_blocking(move || -> Result<(), BoxError> {
         k.store.save_tenant_imported(&record)?;
@@ -530,7 +601,7 @@ async fn import(kernel: &Arc<Kernel>, map: &PartitionMap, m: &TenantMove) -> Res
     })
     .await??;
     kernel.appended.notify_waiters();
-    tracing::warn!(tenant = %m.tenant, from = %m.from, source_head, target_after, global_keys = keys, "a moving tenant is copied here");
+    tracing::warn!(tenant = %m.tenant, from = %m.from, source_head, target_after, after, global_keys = keys, "a moving tenant is copied here");
     Ok(())
 }
 
@@ -544,11 +615,19 @@ pub(crate) async fn follow_moves(kernel: &Arc<Kernel>) {
     let mut cleaned = None;
     let mut failing: HashSet<String> = HashSet::new();
     loop {
-        tick.tick().await;
+        tokio::select! {
+            _ = tick.tick() => {}
+            () = kernel.maps.changed() => {}
+        }
         let Some(map) = kernel.maps.get() else {
             continue;
         };
-        for m in map.moving.iter().filter(|m| m.to == partition.name) {
+        let precopies = map.copying.iter().map(|m| (m, true));
+        let moves = map.moving.iter().map(|m| (m, false));
+        for (m, precopy) in precopies
+            .chain(moves)
+            .filter(|(m, _)| m.to == partition.name)
+        {
             match kernel.store.tenant_imported(&m.tenant) {
                 Ok(Some(done)) if done.epoch == m.epoch => continue,
                 Ok(_) => {}
@@ -557,7 +636,7 @@ pub(crate) async fn follow_moves(kernel: &Arc<Kernel>) {
                     continue;
                 }
             }
-            match import(kernel, &map, m).await {
+            match import(kernel, &map, m, precopy).await {
                 Ok(()) => {
                     failing.remove(&m.tenant);
                 }

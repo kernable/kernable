@@ -39,11 +39,16 @@ const EVERY: Duration = Duration::from_secs(1);
 
 /// The partition map a kernel holds.
 #[derive(Default)]
-pub(crate) struct Maps(RwLock<Option<PartitionMap>>);
+pub(crate) struct Maps(RwLock<Option<PartitionMap>>, tokio::sync::Notify);
 
 impl Maps {
     pub(crate) fn new(map: Option<PartitionMap>) -> Self {
-        Maps(RwLock::new(map))
+        Maps(RwLock::new(map), tokio::sync::Notify::new())
+    }
+
+    /// Completes when a new map is taken (moves start at once, not at the next tick).
+    pub(crate) fn changed(&self) -> tokio::sync::futures::Notified<'_> {
+        self.1.notified()
     }
 
     pub(crate) fn get(&self) -> Option<PartitionMap> {
@@ -55,6 +60,7 @@ impl Maps {
 
     fn set(&self, map: PartitionMap) {
         *self.0.write().unwrap_or_else(PoisonError::into_inner) = Some(map);
+        self.1.notify_waiters();
     }
 }
 
@@ -184,9 +190,12 @@ fn validate(map: &PartitionMap) -> Result<(), Status> {
         }
     }
     let mut moving = HashSet::new();
-    for m in &map.moving {
+    for m in map.moving.iter().chain(&map.copying) {
         if !moving.insert(m.tenant.as_str()) {
-            return bad(format!("tenant {} moves twice", m.tenant));
+            return bad(format!(
+                "tenant {} moves twice (or is both copied and moved)",
+                m.tenant
+            ));
         }
         if !names.contains(m.to.as_str()) || m.from == m.to {
             return bad(format!(
@@ -281,6 +290,7 @@ impl PartitionService for Api {
                     source_head: r.source_head,
                     target_after: r.target_after,
                     epoch: r.epoch,
+                    precopy: r.precopy,
                 },
                 None => MoveStatus::default(),
             },

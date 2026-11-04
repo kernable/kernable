@@ -22,8 +22,8 @@ use kernable_core::{
         ListenerRecord, LogRecord, LoggedEvent, Membership, MembershipRecord, Middleware, NewEvent,
         ParkedEvent, PartitionMap, Rejected, RejectedRecord, ReplicatedRecord,
         ReplicationHeadRecord, RequestContext, Requirement, RevocationRecord, Signature,
-        TenantImportedRecord, TenantMovedAwayRecord, When, WorkerRecord, command_result::Outcome,
-        log_record::Record,
+        StreamIndex, TenantImportedRecord, TenantIndexRecord, When, WorkerRecord,
+        command_result::Outcome, log_record::Record,
     },
     signing::{self, GENESIS},
 };
@@ -977,16 +977,17 @@ impl Store for SqliteStore {
         Ok(read_imported(&self.conn(), Some(tenant))?.pop())
     }
 
-    fn drop_tenant_index(&self, tenant: &str) -> Result<usize> {
+    fn set_tenant_index(&self, tenant: &str, streams: &[StreamIndex]) -> Result<usize> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let held = drop_index_tx(&tx, tenant)?;
-        if held == 0 {
+        let held = set_tenant_index_tx(&tx, tenant, streams)?;
+        if held == 0 && streams.is_empty() {
             return Ok(0);
         }
         let head = self.file(&tx, || {
-            vec![Record::TenantMovedAway(TenantMovedAwayRecord {
+            vec![Record::TenantIndex(TenantIndexRecord {
                 tenant: tenant.to_owned(),
+                streams: streams.to_vec(),
             })]
         })?;
         tx.commit()?;
@@ -1214,10 +1215,40 @@ impl Store for SqliteStore {
         Ok(())
     }
 
-    fn tenant_records(&self, tenant: &str, f: &mut dyn FnMut(Record) -> Result<()>) -> Result<()> {
+    fn tenant_records(
+        &self,
+        tenant: &str,
+        after: Option<u64>,
+        f: &mut dyn FnMut(Record) -> Result<()>,
+    ) -> Result<()> {
         self.read(|conn| {
             let tx = conn.unchecked_transaction()?;
-            records_of(&tx, Some(tenant), f)
+            records_of(&tx, Some(tenant), after, f)
+        })
+    }
+
+    fn tenant_index(&self, tenant: &str) -> Result<Vec<(StreamId, AggregateIndex)>> {
+        self.read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT tenant_id, domain, aggregate_type, aggregate_id, record
+                 FROM aggregate_index WHERE tenant_id = ?1",
+            )?;
+            let rows = stmt.query_map([tenant], |r| {
+                Ok((
+                    StreamId {
+                        tenant_id: r.get(0)?,
+                        domain: r.get(1)?,
+                        aggregate_type: r.get(2)?,
+                        aggregate_id: r.get(3)?,
+                    },
+                    r.get::<_, Vec<u8>>(4)?,
+                ))
+            })?;
+            rows.map(|row| {
+                let (stream, record) = row?;
+                Ok((stream, AggregateIndex::decode(record.as_slice())?))
+            })
+            .collect()
         })
     }
 
@@ -1795,66 +1826,15 @@ fn commit_tx(
         stored.push(event);
     }
 
-    let stream = params![
-        cmd.tenant_id,
-        cmd.domain,
-        cmd.aggregate_type,
-        cmd.aggregate_id
-    ];
     if let Some(index) = index {
-        // The keys it held before are free, then its new ones are filed: a key another
-        // stream holds fails the commit (the kernel checks first, so that is a bug).
-        if let Some(old) = stream_index(tx, stream)? {
-            for k in old.keys.iter().filter(|k| !k.id.is_empty()) {
-                tx.execute("DELETE FROM unique_keys WHERE id = ?1", [&k.id])?;
-            }
-        }
-        if index.keys.is_empty() && index.facts.is_empty() {
-            tx.execute(
-                "DELETE FROM aggregate_index
-                 WHERE tenant_id = ?1 AND domain = ?2 AND aggregate_type = ?3
-                   AND aggregate_id = ?4",
-                stream,
-            )?;
-        } else {
-            let personal = index.keys.iter().any(|k| !k.vault_ref.is_empty());
-            tx.execute(
-                "INSERT INTO aggregate_index
-                     (tenant_id, domain, aggregate_type, aggregate_id, record, personal)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                 ON CONFLICT (tenant_id, domain, aggregate_type, aggregate_id)
-                 DO UPDATE SET record = excluded.record, personal = excluded.personal",
-                params![
-                    cmd.tenant_id,
-                    cmd.domain,
-                    cmd.aggregate_type,
-                    cmd.aggregate_id,
-                    index.encode_to_vec(),
-                    personal
-                ],
-            )?;
-        }
-        for k in index.keys.iter().filter(|k| !k.id.is_empty()) {
-            tx.execute(
-                "INSERT INTO unique_keys (id, tenant_id, domain, aggregate_type, aggregate_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    k.id,
-                    cmd.tenant_id,
-                    cmd.domain,
-                    cmd.aggregate_type,
-                    cmd.aggregate_id
-                ],
-            )
-            .map_err(|e| match e {
-                rusqlite::Error::SqliteFailure(f, _)
-                    if f.code == rusqlite::ErrorCode::ConstraintViolation =>
-                {
-                    Error::KeyTaken
-                }
-                e => e.into(),
-            })?;
-        }
+        // The kernel checks the keys first, so a key another stream holds is a bug.
+        let stream_id = StreamId {
+            tenant_id: cmd.tenant_id.clone(),
+            domain: cmd.domain.clone(),
+            aggregate_type: cmd.aggregate_type.clone(),
+            aggregate_id: cmd.aggregate_id.clone(),
+        };
+        set_stream_index_tx(tx, &stream_id, index)?;
     }
 
     tx.execute(
@@ -2288,8 +2268,8 @@ fn apply_record(tx: &Transaction<'_>, record: &Record) -> Result<()> {
         }
         Record::GlobalKey(g) => save_global_key_tx(tx, &g.id, &g.partition)?,
         Record::TenantImported(t) => save_imported_tx(tx, t)?,
-        Record::TenantMovedAway(t) => {
-            drop_index_tx(tx, &t.tenant)?;
+        Record::TenantIndex(t) => {
+            set_tenant_index_tx(tx, &t.tenant, &t.streams)?;
         }
         Record::DataChanged(_) => {}
         Record::Format(_) | Record::ReplicationHead(_) => {
@@ -2338,6 +2318,90 @@ fn read_imported(conn: &Connection, tenant: Option<&str>) -> Result<Vec<TenantIm
 }
 
 /// Forgets the keys and facts `tenant`'s streams hold; how many streams held some.
+/// Files what `stream_id` holds now: the keys it held before are free, then its new ones are
+/// filed; a key another stream holds is `KeyTaken`.
+fn set_stream_index_tx(
+    tx: &Connection,
+    stream_id: &StreamId,
+    index: &AggregateIndex,
+) -> Result<()> {
+    let stream = params![
+        stream_id.tenant_id,
+        stream_id.domain,
+        stream_id.aggregate_type,
+        stream_id.aggregate_id
+    ];
+    // The keys it held before are free, then its new ones are filed: a key another
+    // stream holds fails the commit (the kernel checks first, so that is a bug).
+    if let Some(old) = stream_index(tx, stream)? {
+        for k in old.keys.iter().filter(|k| !k.id.is_empty()) {
+            tx.execute("DELETE FROM unique_keys WHERE id = ?1", [&k.id])?;
+        }
+    }
+    if index.keys.is_empty() && index.facts.is_empty() {
+        tx.execute(
+            "DELETE FROM aggregate_index
+             WHERE tenant_id = ?1 AND domain = ?2 AND aggregate_type = ?3
+               AND aggregate_id = ?4",
+            stream,
+        )?;
+    } else {
+        let personal = index.keys.iter().any(|k| !k.vault_ref.is_empty());
+        tx.execute(
+            "INSERT INTO aggregate_index
+                 (tenant_id, domain, aggregate_type, aggregate_id, record, personal)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT (tenant_id, domain, aggregate_type, aggregate_id)
+             DO UPDATE SET record = excluded.record, personal = excluded.personal",
+            params![
+                stream_id.tenant_id,
+                stream_id.domain,
+                stream_id.aggregate_type,
+                stream_id.aggregate_id,
+                index.encode_to_vec(),
+                personal
+            ],
+        )?;
+    }
+    for k in index.keys.iter().filter(|k| !k.id.is_empty()) {
+        tx.execute(
+            "INSERT INTO unique_keys (id, tenant_id, domain, aggregate_type, aggregate_id)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                k.id,
+                stream_id.tenant_id,
+                stream_id.domain,
+                stream_id.aggregate_type,
+                stream_id.aggregate_id
+            ],
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::SqliteFailure(f, _)
+                if f.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                Error::KeyTaken
+            }
+            e => e.into(),
+        })?;
+    }
+    Ok(())
+}
+
+/// Replaces what `tenant`'s streams hold with `streams`; how many held something before.
+fn set_tenant_index_tx(tx: &Connection, tenant: &str, streams: &[StreamIndex]) -> Result<usize> {
+    let held = drop_index_tx(tx, tenant)?;
+    for s in streams {
+        let stream = StreamId {
+            tenant_id: tenant.to_owned(),
+            domain: s.domain.clone(),
+            aggregate_type: s.aggregate_type.clone(),
+            aggregate_id: s.aggregate_id.clone(),
+        };
+        set_stream_index_tx(tx, &stream, &s.index.clone().unwrap_or_default())?;
+    }
+    Ok(held)
+}
+
 fn drop_index_tx(tx: &Connection, tenant: &str) -> Result<usize> {
     tx.execute("DELETE FROM unique_keys WHERE tenant_id = ?1", [tenant])?;
     Ok(tx.execute("DELETE FROM aggregate_index WHERE tenant_id = ?1", [tenant])?)
@@ -2502,17 +2566,29 @@ fn apply_commit(tx: &Transaction<'_>, c: &CommittedRecord) -> Result<()> {
 /// their parked events, checkpoints.
 /// The commands as enqueued, the commits in log order (each stream's index with its last
 /// commit), then the rejections: of every tenant, or of `tenant` only.
+/// The records of `tenant` (every tenant: `None`); with `after`, see [`Store::tenant_records`].
 fn records_of(
     conn: &Connection,
     tenant: Option<&str>,
+    after: Option<u64>,
     f: &mut dyn FnMut(Record) -> Result<()>,
 ) -> Result<()> {
+    // Events (and the commits they make) after this position; 0: all.
+    let since = after.unwrap_or(0);
     {
+        // With `after`: commands with an outcome that is not sent already.
+        let delta = if after.is_some() {
+            " AND status != 'pending' AND (status = 'rejected' OR positions = ''
+               OR command_id IN (SELECT command_id FROM events
+                                 WHERE tenant_id = ?1 AND global_position > ?2))"
+        } else {
+            ""
+        };
         let mut stmt = conn.prepare(&format!(
             "SELECT {COMMAND_COLUMNS}, created_at FROM commands
-             WHERE ?1 IS NULL OR tenant_id = ?1 ORDER BY rowid"
+             WHERE (?1 IS NULL OR tenant_id = ?1) AND ?2 >= 0{delta} ORDER BY rowid"
         ))?;
-        let mut rows = stmt.query([tenant])?;
+        let mut rows = stmt.query(params![tenant, since])?;
         while let Some(r) = rows.next()? {
             f(Record::Enqueued(EnqueuedRecord {
                 command: Some(command_from_row(r)?),
@@ -2543,9 +2619,10 @@ fn records_of(
     {
         let mut stmt = conn.prepare(&format!(
             "SELECT {EVENT_COLUMNS}, prev_hash FROM events
-             WHERE ?1 IS NULL OR tenant_id = ?1 ORDER BY global_position"
+             WHERE (?1 IS NULL OR tenant_id = ?1) AND global_position > ?2
+             ORDER BY global_position"
         ))?;
-        let mut rows = stmt.query([tenant])?;
+        let mut rows = stmt.query(params![tenant, since])?;
         let mut commit: Option<CommittedRecord> = None;
         while let Some(r) = rows.next()? {
             let event = event_from_row(r)?;
@@ -2621,7 +2698,7 @@ fn image_records(conn: &Connection, f: &mut dyn FnMut(Record) -> Result<()>) -> 
     for w in read_workers(conn)? {
         f(Record::Worker(w))?;
     }
-    records_of(conn, None, f)?;
+    records_of(conn, None, None, f)?;
     for mut l in read_listeners(conn)? {
         l.parked_changed = true;
         f(Record::Listener(l))?;

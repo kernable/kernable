@@ -437,18 +437,33 @@ pub fn partitions_message(map: &crate::proto::PartitionMap) -> Vec<u8> {
             }
         }
     }
+    // Copies while the tenant runs, appended only when there are any, under their own tag.
+    if !map.copying.is_empty() {
+        msg = msg.str("copying").u64(map.copying.len() as u64);
+        for m in &map.copying {
+            msg = msg.str(&m.tenant).str(&m.from).str(&m.to).u64(m.epoch);
+        }
+    }
     msg.0
 }
 
-/// What a partition's node key signs to export a moving tenant, or to report it moved.
-pub fn move_message(op: &str, tenant: &str, from: &str, to: &str, issued_at: i64) -> Vec<u8> {
-    Msg::new("kernable.v1.move")
+/// What a partition's node key signs to export a moving tenant, or to report it moved; `after`
+/// (an export after a precopy) is appended only when set.
+pub fn move_message(
+    op: &str,
+    tenant: &str,
+    from: &str,
+    to: &str,
+    after: u64,
+    issued_at: i64,
+) -> Vec<u8> {
+    let msg = Msg::new("kernable.v1.move")
         .str(op)
         .str(tenant)
         .str(from)
         .str(to)
-        .i64(issued_at)
-        .0
+        .i64(issued_at);
+    if after > 0 { msg.u64(after).0 } else { msg.0 }
 }
 
 /// What a partition's node key signs to reserve global keys, or to ask whether it holds them.

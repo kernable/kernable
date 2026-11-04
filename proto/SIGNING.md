@@ -46,9 +46,9 @@ Each message starts with a `str` **tag** for domain separation. Payloads are sig
 | Operator tooling | `kernable.v1.retry` | `listener`, `positions_count: u64` and every `position: u64`, `dismiss: u64` (1 or 0), `issued_at: i64` |
 | Root key | `kernable.v1.revoke` | `key_id`, `since: i64`, `issued_at: i64` |
 | Kernel of a pair | `kernable.v1.witness` | `op: u64`, `term: u64`, `address`, `standby`, `issued_at: i64` (see `WitnessRequest` in `replication.proto`) |
-| Deploy tooling | `kernable.v1.partitions` | `epoch: u64`, `partition_count: u64`, then per partition `name`, `address_count: u64` and every address, then `tenant_count: u64` and per tenant `tenant`, `partition`, then `default`, `control`, `issued_at: i64`; with moves, then for `moving` and `moved` each `count: u64` and per move `tenant`, `from`, `to`, `source_head: u64`, `target_after: u64`, `epoch: u64` (a key granted `manage` for `*`) |
+| Deploy tooling | `kernable.v1.partitions` | `epoch: u64`, `partition_count: u64`, then per partition `name`, `address_count: u64` and every address, then `tenant_count: u64` and per tenant `tenant`, `partition`, then `default`, `control`, `issued_at: i64`; with moves, then for `moving` and `moved` each `count: u64` and per move `tenant`, `from`, `to`, `source_head: u64`, `target_after: u64`, `epoch: u64`; with copies while tenants run, then the `str` `copying`, `count: u64` and per copy `tenant`, `from`, `to`, `epoch: u64` (a key granted `manage` for `*`) |
 | Kernel of a partition | `kernable.v1.trust-sync` | `issued_at: i64` |
-| Kernel of a partition | `kernable.v1.move` | `op` (`export` or `done`), `tenant`, `from`, `to`, `issued_at: i64` |
+| Kernel of a partition | `kernable.v1.move` | `op` (`precopy`, `export` or `done`), `tenant`, `from`, `to`, `issued_at: i64`, and for an export after a precopy `after: u64` |
 | Kernel of a partition | `kernable.v1.global-keys` | `op` (`reserve` or `holds`), `key_count: u64` and every key, `partition`, `issued_at: i64` |
 | Operator tooling | `kernable.v1.promote` | `issued_at: i64` (a key granted `manage` for `*`; asked of a standby, see `replication.proto`) |
 

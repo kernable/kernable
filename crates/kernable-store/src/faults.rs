@@ -347,13 +347,28 @@ impl Store for FaultyStore {
         self.inner.tenant_imported(tenant)
     }
 
-    fn tenant_records(&self, tenant: &str, f: &mut dyn FnMut(Record) -> Result<()>) -> Result<()> {
+    fn tenant_records(
+        &self,
+        tenant: &str,
+        after: Option<u64>,
+        f: &mut dyn FnMut(Record) -> Result<()>,
+    ) -> Result<()> {
         self.faults.read()?;
-        self.inner.tenant_records(tenant, f)
+        self.inner.tenant_records(tenant, after, f)
     }
 
-    fn drop_tenant_index(&self, tenant: &str) -> Result<usize> {
-        self.faults.write(|| self.inner.drop_tenant_index(tenant))
+    fn set_tenant_index(
+        &self,
+        tenant: &str,
+        streams: &[kernable_core::proto::StreamIndex],
+    ) -> Result<usize> {
+        self.faults
+            .write(|| self.inner.set_tenant_index(tenant, streams))
+    }
+
+    fn tenant_index(&self, tenant: &str) -> Result<Vec<(StreamId, AggregateIndex)>> {
+        self.faults.read()?;
+        self.inner.tenant_index(tenant)
     }
 
     fn import(&self, copies: &[crate::Copy]) -> Result<()> {

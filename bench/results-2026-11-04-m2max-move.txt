@@ -12,3 +12,17 @@ events=440945 move=13.65s (32308 events/s)
 # About 2 s of each move is fixed: the partitions take each map from the control partition
 # within a second. Before batching the target's writes (Store::import), SQLite moved
 # 286,689 events in 32.6 s (8,802 events/s).
+
+== Apple M2 Max, 12 CPUs, 2026-11-04, store=sqlite, durability=normal, copy while the tenant runs
+events=32649 move=3.38s (9651 events/s) stopped=515 ms
+events=96244 move=7.36s (13084 events/s) stopped=1017 ms
+events=268443 move=17.64s (15220 events/s) stopped=1019 ms
+== Apple M2 Max, 12 CPUs, 2026-11-04, store=file, durability=normal, copy while the tenant runs
+events=61740 move=3.32s (18602 events/s) stopped=760 ms
+events=180169 move=7.68s (23453 events/s) stopped=1526 ms
+events=422158 move=14.98s (28187 events/s) stopped=2033 ms
+
+# Since the copy while the tenant runs, the tenant is stopped only for the rest: on SQLite
+# about a second whatever its size (most of it the partitions taking the map that stops it);
+# the file log scans its whole log for the rest, so its stop grows with the log (2 s for 1 GB).
+# The move as a whole takes as long as before.
