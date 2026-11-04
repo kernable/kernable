@@ -470,6 +470,14 @@ async fn a_switchover_hands_the_primary_role_over_without_waiting_for_the_lease(
         node_config(&dir.0, "a", 3, 11),
         node_config(&dir.0, "b", 8, 12),
     );
+    // Both are reached through their plugs (see node_config).
+    let plug = |name: &str| {
+        Plug::new(
+            &dir.0.join(format!("{name}-plug.sock")),
+            &dir.0.join(format!("{name}.sock")),
+        )
+    };
+    let (_a_plug, _b_plug) = (plug("a"), plug("b"));
     let addr = |c: &Config| c.replication.pair.as_ref().unwrap().advertise.clone();
     let (a_addr, b_addr) = (addr(&a_config), addr(&b_config));
     let (a_task, a_primary) = run_node(a_config.clone());

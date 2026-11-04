@@ -243,8 +243,10 @@ async fn switch_over(
     };
     match link.ask(WitnessOp::Handover, term, "").await {
         Ok(a) if a.granted => {
-            // Nothing more is told: the lease is gone, and the standby stops following.
+            // Nothing more is told: the lease is gone, and the standby stops following and
+            // claims at once.
             primary.set_lease(Instant::now());
+            primary.hand_over();
             tracing::warn!(standby = %in_sync, record = head, "handed the primary role over");
             Ok(kernable_core::proto::SwitchoverResult {
                 seq: head,

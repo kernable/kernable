@@ -48,6 +48,8 @@ pub(crate) struct Primary {
     acked: Condvar,
     /// Wakes the standby's stream: records were written.
     wrote: Notify,
+    /// The primary handed its role over: the standby's stream ends, so it claims at once.
+    handed_over: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Default)]
@@ -78,6 +80,7 @@ impl Primary {
             state: Mutex::default(),
             acked: Condvar::new(),
             wrote: Notify::new(),
+            handed_over: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -145,6 +148,13 @@ impl Primary {
     pub(crate) fn set_lease(&self, until: Instant) {
         self.state().lease_until = Some(until);
         self.acked.notify_all();
+    }
+
+    /// Ends the standby's stream for good: the primary handed its role over.
+    pub(crate) fn hand_over(&self) {
+        self.handed_over
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.wrote.notify_one();
     }
 
     /// The record the standby acknowledged last.
@@ -478,8 +488,18 @@ async fn run(
 
     let mut tick = tokio::time::interval(TICK);
     let mut pruned = 0;
+    let handed_over = || {
+        primary
+            .as_ref()
+            .is_some_and(|p| p.handed_over.load(std::sync::atomic::Ordering::SeqCst))
+    };
     let mut changes = kernel.changes();
     loop {
+        if handed_over() {
+            return Err(Status::unavailable(
+                "the primary handed its role over: ask the witness who serves now",
+            ));
+        }
         if sent < acked(&kernel) + AHEAD {
             let records = kernel
                 .store

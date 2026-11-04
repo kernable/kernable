@@ -694,8 +694,12 @@ async fn a_key_beyond_its_rate_is_refused_and_another_key_is_not() {
     );
     assert!(refused(&metrics, "rate").await >= 2);
     // Another key has its own bucket; and a second later the first has tokens again.
-    let other = signed(command("x1", "PlaceOrder", "x1"), &key(2));
-    assert!(submit(&env.addr, other).await.is_ok());
+    env.kernel
+        .grant(grant(&key(9), &[("submit", &["*"])]))
+        .unwrap();
+    let other = signed(command("x1", "PlaceOrder", "x1"), &key(9));
+    let other = submit(&env.addr, other).await;
+    assert!(other.is_ok(), "{other:?}");
     tokio::time::sleep(Duration::from_millis(1100)).await;
     let again = signed(command("r9", "PlaceOrder", "o9"), &key(1));
     assert!(submit(&env.addr, again).await.is_ok());

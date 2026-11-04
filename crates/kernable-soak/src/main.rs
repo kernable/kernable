@@ -20,7 +20,7 @@
 //!
 //! Faults: kernel-kill, kernel-term, kernel-down (killed, back after 6 to 15 s: with a pair,
 //! longer than the primary's lease, so the standby takes over), app-kill, app-pause, net-reset,
-//! net-down, net-slow, and
+//! net-down, net-slow, switchover (with a pair: `kernable switchover` asked of both kernels), and
 //! with `--fill` (a directory on a small file system that also holds `--data`) disk-full, with
 //! `--power-loss-cmd` (run after every process was killed, e.g. to drop a LazyFS cache)
 //! power-loss.
@@ -169,7 +169,7 @@ fn key(path: &Path) -> Result<SigningKey, String> {
     Ok(SigningKey::from_bytes(&secret))
 }
 
-const FAULTS: [&str; 10] = [
+const FAULTS: [&str; 11] = [
     "kernel-kill",
     "kernel-term",
     "kernel-down",
@@ -180,6 +180,7 @@ const FAULTS: [&str; 10] = [
     "net-slow",
     "disk-full",
     "power-loss",
+    "switchover",
 ];
 
 /// Something to do later: restart or resume a process.
@@ -215,6 +216,7 @@ async fn run(a: Args) -> Result<(), String> {
             .filter(|f| {
                 (**f != "disk-full" || fill.is_some())
                     && (**f != "power-loss" || power_loss.is_some())
+                    && (**f != "switchover" || a.get("pair").is_some_and(|p| p == "yes"))
             })
             .map(|f| (*f).to_owned())
             .collect(),
@@ -600,6 +602,20 @@ async fn run(a: Args) -> Result<(), String> {
                         procs[app].pause();
                         later.push((now + rng.ms(1_000, 20_000), Later::Resume(app)));
                     }
+                }
+                "switchover" => {
+                    // Asked of both kernels: the standby refuses, the primary hands over and
+                    // stops (restarted above, as a process that exits by itself, it follows).
+                    let (bin, dir) = (kernable_bin.clone(), dir.clone());
+                    let addrs = [format!("127.0.0.1:{pport}"), format!("127.0.0.1:{pport_b}")];
+                    tokio::task::spawn_blocking(move || {
+                        for addr in addrs {
+                            match cli(&bin, &dir, &["switchover", &addr, "app.key"]) {
+                                Ok(()) => say(&format!("switchover: {addr} handed over")),
+                                Err(e) => say(&format!("switchover: {e}")),
+                            }
+                        }
+                    });
                 }
                 "net-reset" => proxy.reset(),
                 "net-down" => proxy.down(rng.ms(1_000, 20_000)),
