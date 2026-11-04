@@ -1,6 +1,6 @@
 # Replication and the standby
 
-Status: S1a built 2026-11-03: the store's record log (increment 1), the primary and the standby (2, 3), `kernable promote` and the docs (4, [Run a standby](../docs/how-to/standby.md)). Tests: `crates/kernable-store/tests/replication.rs`, `crates/kernable-kernel/tests/replication.rs`. S1b built the same day: the witness and pairs (below). Not yet: crash points during replication, model tests for P1–P4, soak runs with failover faults; address lists in the SDKs. Invariants P1–P4 are in [invariants.md](invariants.md).
+Status: S1a built 2026-11-03: the store's record log (increment 1), the primary and the standby (2, 3), `kernable promote` and the docs (4, [Run a standby](../docs/how-to/standby.md)). Tests: `crates/kernable-store/tests/replication.rs`, `crates/kernable-kernel/tests/replication.rs`. S1b built the same day: the witness and pairs (below). S1c and S1d followed: address lists in the SDKs, crash points during replication, `kill -9` tests, soak runs with failover faults (2026-11-04) and the model-based test of a pair under seeded kills and pauses (2026-11-04). Invariants P1–P4 are in [invariants.md](invariants.md).
 
 ## Goal
 

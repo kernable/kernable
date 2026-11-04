@@ -931,6 +931,7 @@ dependencies = [
  "kernable",
  "kernable-core",
  "kernable-store",
+ "prost",
  "serde",
  "serde_json",
  "sha2",
