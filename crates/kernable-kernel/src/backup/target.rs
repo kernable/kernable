@@ -161,15 +161,12 @@ impl S3 {
             .unwrap_or_else(|| "us-east-1".into());
         let endpoint = var("KERNABLE_S3_ENDPOINT")
             .unwrap_or_else(|| format!("https://s3.{region}.amazonaws.com"));
-        let (scheme, endpoint_host) = endpoint
-            .trim_end_matches('/')
-            .split_once("://")
-            .ok_or("KERNABLE_S3_ENDPOINT: not a URL like https://fsn1.your-objectstorage.com")?;
+        let (scheme, host, base) = endpoint_parts(&endpoint)?;
         let path_style = var("KERNABLE_S3_PATH_STYLE").is_some_and(|v| v == "1");
         let (host, root) = if path_style {
-            (endpoint_host.to_owned(), format!("/{bucket}/"))
+            (host, format!("{base}/{bucket}/"))
         } else {
-            (format!("{bucket}.{endpoint_host}"), "/".to_owned())
+            (format!("{bucket}.{host}"), format!("{base}/"))
         };
         let creds = Credentials {
             region,
@@ -311,6 +308,29 @@ impl Target for S3 {
     fn describe(&self) -> String {
         format!("s3://{}/{}", self.bucket, self.prefix)
     }
+}
+
+/// The scheme, host and path of an endpoint URL: `https://host[:port][/path]`. A default port
+/// (443 for https, 80 for http) is left out, as the client leaves it out of the `Host` header the
+/// signature covers.
+fn endpoint_parts(endpoint: &str) -> Result<(String, String, String), BoxError> {
+    let (scheme, rest) = endpoint
+        .trim_end_matches('/')
+        .split_once("://")
+        .filter(|(scheme, _)| matches!(*scheme, "http" | "https"))
+        .ok_or("KERNABLE_S3_ENDPOINT: not a URL like https://fsn1.your-objectstorage.com")?;
+    let (host, path) = match rest.split_once('/') {
+        Some((host, path)) => (host, format!("/{}", path.trim_matches('/'))),
+        None => (rest, String::new()),
+    };
+    let host = match (scheme, host.rsplit_once(':')) {
+        ("https", Some((h, "443"))) | ("http", Some((h, "80"))) => h,
+        _ => host,
+    };
+    if host.is_empty() {
+        return Err("KERNABLE_S3_ENDPOINT: no host".into());
+    }
+    Ok((scheme.to_owned(), host.to_owned(), path))
 }
 
 fn between<'a>(text: &'a str, open: &str, close: &str) -> Option<&'a str> {
@@ -481,6 +501,29 @@ mod tests {
             "list-type=2&prefix=g%2F"
         );
         assert_eq!(xml_unescape("a&amp;b&lt;"), "a&b<");
+    }
+
+    #[test]
+    fn endpoints_keep_their_path_and_drop_a_default_port() {
+        let parts = |e: &str| endpoint_parts(e).unwrap();
+        assert_eq!(
+            parts("https://fsn1.your-objectstorage.com"),
+            (
+                "https".into(),
+                "fsn1.your-objectstorage.com".into(),
+                String::new()
+            )
+        );
+        assert_eq!(
+            parts("https://s3.example.com:443/storage/"),
+            ("https".into(), "s3.example.com".into(), "/storage".into())
+        );
+        assert_eq!(
+            parts("http://127.0.0.1:9000"),
+            ("http".into(), "127.0.0.1:9000".into(), String::new())
+        );
+        assert!(endpoint_parts("s3.example.com").is_err());
+        assert!(endpoint_parts("ftp://x").is_err());
     }
 
     #[test]

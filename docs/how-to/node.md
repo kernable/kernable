@@ -2,7 +2,7 @@
 
 `kernable node` runs one machine of your deployment from a single `project.toml`: the kernel, the [backup follower](./backup#continuous-backup) if you want it, and your own services (workers, read models, reactors, apps) as [Podman](https://podman.io) containers it builds on the machine. It looks after all of them as child processes. It is the same in every place kernable runs, on your own machines or someone else's.
 
-- **A child that exits is started again**, after 1 s, backing off up to 30 s while it keeps failing at once. A kernel crash never takes the node down.
+- **A child that exits is started again**, after 1 s, backing off up to 30 s while it keeps failing at once. A kernel crash never takes the node down. A child being stopped for a restart stops in the background: the node looks after the others meanwhile, and starts it again once its old process ended.
 - **A change to the file is applied by itself.** The node reads it every two seconds (or at once on SIGHUP); a child whose command changed is stopped and started again with the new one, and the others run on.
 - **An update is a new binary.** Point `binary` at it, or replace the file it names: the node stops the child and starts it on the new binary.
 - **A new build of a service on SIGHUP.** Change your code, send the node SIGHUP: it builds every service again in the background, and restarts those whose image changed. The other children are looked after meanwhile.

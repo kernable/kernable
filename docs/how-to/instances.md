@@ -30,6 +30,7 @@ To set it per listener instead, or to change the kind, use the listener's option
 - **A replicated listener cannot park events.** Each instance has its own copy, and a parked event would be missing from one copy only; read models do not park by default. Make a listener single if it parks.
 - **A read model with a store keeps its position on its machine.** Back on, it continues after its own stored position and gets what it missed. One in memory rebuilds from the first event, as on every start.
 - **Both machines run every reactor's code, one at a time.** A reactor whose side effects must not happen from a second place at all, such as a scheduled job that ignores events, belongs in one process only.
+- **The newest registration counts.** Instances normally run the same code. During a rolling deploy they may differ in order, event types or middleware for a while: the kernel takes the registration of the instance that connected last, and logs a warning, in case the difference lasts.
 - **At most 64 instances** of one listener are connected at once.
 
 The browser UI shows a listener's connected instances, each with its position; `kernable listeners` reads the store, which keeps only the group's position.

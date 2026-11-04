@@ -986,6 +986,15 @@ pub(crate) async fn run(
                 (false, Some(from)) if !waiting => from,
                 (false, _) => previous.map_or(head, |e| e.record.position),
             };
+            // Instances of one listener normally run the same code; during a rolling deploy they
+            // may differ for a while. The newest registration counts; say so, in case it lasts.
+            if let Some(e) = previous.filter(|e| e.connected())
+                && (e.record.order != hello.order
+                    || e.record.event_types != hello.event_types
+                    || e.record.middlewares != hello.middlewares)
+            {
+                tracing::warn!(listener = %hello.name, instance = %hello.instance, "instances of the listener differ in order, event types or middleware; this one's registration counts now");
+            }
             // The group's position is the highest any instance acknowledged; an instance that
             // rebuilds while others run does not take it back.
             let group = match previous.filter(|e| e.connected()) {

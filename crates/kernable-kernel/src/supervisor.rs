@@ -380,6 +380,8 @@ struct Running {
     building: Option<JoinHandle<Result<String, String>>>,
     /// SIGHUP came while it was building: build again once that build is done.
     build_again: bool,
+    /// Its previous process, being stopped in the background.
+    stopping: Option<JoinHandle<()>>,
     /// Times it was started again.
     restarts: u64,
     /// When it last started (ms since epoch), for the metrics.
@@ -398,6 +400,7 @@ impl Running {
             image: None,
             building: None,
             build_again: false,
+            stopping: None,
             restarts: 0,
             started_ms: 0,
         }
@@ -507,14 +510,39 @@ fn spawn(spec: &Spec, image: Option<&str>, dir: &Path) -> Result<Child, BoxError
     Ok(child)
 }
 
-/// Stops a child: SIGTERM (`podman run` passes it on to the container), then SIGKILL after its
-/// stop time; a killed service's container is removed too.
-async fn stop(c: &mut Running) {
+/// Stops a child in the background: SIGTERM (`podman run` passes it on to the container), then
+/// SIGKILL after its stop time; a killed service's container is removed too. The node looks
+/// after the other children meanwhile; this one starts again only once its process ended.
+fn stop(c: &mut Running) {
     let Some(mut child) = c.child.take() else {
         return;
     };
-    let (name, stop) = (&c.spec.name, c.spec.stop);
-    let child = &mut child;
+    let (name, stop, binary) = (c.spec.name.clone(), c.spec.stop, c.spec.binary.clone());
+    let container = c.spec.container.as_ref().map(|c| c.name.clone());
+    let previous = c.stopping.take();
+    c.stopping = Some(tokio::spawn(async move {
+        if let Some(previous) = previous {
+            let _ = previous.await;
+        }
+        stopped(&name, &mut child, stop, &binary, container.as_deref()).await;
+    }));
+}
+
+/// Stops a child and waits until it ended: in order, at the node's own end.
+async fn stop_now(c: &mut Running) {
+    stop(c);
+    if let Some(stopping) = c.stopping.take() {
+        let _ = stopping.await;
+    }
+}
+
+async fn stopped(
+    name: &str,
+    child: &mut Child,
+    stop: Duration,
+    binary: &Path,
+    container: Option<&str>,
+) {
     if let Some(pid) = child.id() {
         #[cfg(unix)]
         // SAFETY: kill(2) on our own child's pid; a pid that already exited is harmless.
@@ -527,9 +555,9 @@ async fn stop(c: &mut Running) {
         Err(_) => {
             tracing::warn!(child = %name, "did not stop in time: killed");
             let _ = child.kill().await;
-            if let Some(container) = &c.spec.container {
-                let _ = Command::new(&c.spec.binary)
-                    .args(["rm", "--force", &container.name])
+            if let Some(container) = container {
+                let _ = Command::new(binary)
+                    .args(["rm", "--force", container])
                     .output()
                     .await;
             }
@@ -586,6 +614,8 @@ pub async fn run(path: &Path) -> Result<(), BoxError> {
     let mut terminate = signal(libc::SIGTERM)?;
     let mut interrupt = signal(libc::SIGINT)?;
     let mut sampled = Instant::now() - Duration::from_secs(60);
+    let usages: Usages = Arc::default();
+    let mut sampling: Option<JoinHandle<()>> = None;
     loop {
         let (reread, rebuild) = tokio::select! {
             _ = tick.tick() => (modified(&path) != last_read, false),
@@ -632,19 +662,41 @@ pub async fn run(path: &Path) -> Result<(), BoxError> {
         for c in &mut children {
             step(c, &dir).await;
         }
-        if sampled.elapsed() >= Duration::from_secs(10) {
+        // The services' CPU and memory, in the background every 10 s: `podman inspect` may take
+        // its time, and the node goes on looking after its children meanwhile.
+        if sampled.elapsed() >= Duration::from_secs(10)
+            && sampling.as_ref().is_none_or(JoinHandle::is_finished)
+        {
             sampled = Instant::now();
-            show(&board, &children, true).await;
-        } else {
-            show(&board, &children, false).await;
+            let running: Vec<(String, PathBuf, String)> = children
+                .iter()
+                .filter(|c| c.child.is_some())
+                .filter_map(|c| {
+                    let container = c.spec.container.as_ref()?;
+                    Some((
+                        c.spec.name.clone(),
+                        c.spec.binary.clone(),
+                        container.name.clone(),
+                    ))
+                })
+                .collect();
+            let usages = Arc::clone(&usages);
+            sampling = Some(tokio::spawn(async move {
+                let mut measured = BTreeMap::new();
+                for (name, podman, container) in running {
+                    measured.insert(name, usage(&podman, &container).await);
+                }
+                *usages.lock().unwrap_or_else(PoisonError::into_inner) = measured;
+            }));
         }
+        show(&board, &children, &usages);
     }
-    // Reverse order: the services and the backup follower before the kernel.
+    // Reverse order: the services and the backup follower before the kernel, each to the end.
     for c in children.iter_mut().rev() {
         if let Some(b) = c.building.take() {
             b.abort();
         }
-        stop(c).await;
+        stop_now(c).await;
     }
     Ok(())
 }
@@ -660,7 +712,7 @@ async fn step(c: &mut Running, dir: &Path) {
             Ok(id) if Some(&id) != c.image.as_ref() => {
                 if c.child.is_some() {
                     tracing::info!(child = %c.spec.name, "its image changed: restarting it");
-                    stop(c).await;
+                    stop(c);
                 }
                 c.image = Some(id);
                 c.restart_at = Some(Instant::now());
@@ -679,7 +731,7 @@ async fn step(c: &mut Running, dir: &Path) {
     // A replaced binary: start the child on the new one.
     if c.child.is_some() && modified(&c.spec.binary) != c.binary_changed {
         tracing::info!(child = %c.spec.name, "its binary changed: restarting it");
-        stop(c).await;
+        stop(c);
         c.restart_at = Some(Instant::now());
     }
     if let Some(child) = &mut c.child
@@ -695,6 +747,11 @@ async fn step(c: &mut Running, dir: &Path) {
         c.child = None;
         c.restart_at = Some(Instant::now() + c.backoff);
     }
+    // The previous process first ends (it may hold the port or the store).
+    if c.stopping.as_ref().is_some_and(|s| !s.is_finished()) {
+        return;
+    }
+    c.stopping = None;
     if c.child.is_some() || c.restart_at.is_none_or(|at| Instant::now() < at) {
         return;
     }
@@ -735,6 +792,9 @@ fn signal(kind: libc::c_int) -> Result<tokio::signal::unix::Signal, BoxError> {
 /// changed start with the next look (in order).
 async fn apply(children: &mut Vec<Running>, specs: Vec<Spec>) {
     let mut keep = Vec::new();
+    // Processes of changed or removed children still stopping: a child of the same name
+    // starts once its old process ended.
+    let mut ending: Vec<(String, JoinHandle<()>)> = Vec::new();
     for mut c in std::mem::take(children).into_iter().rev() {
         if specs.contains(&c.spec) {
             keep.push(c);
@@ -743,21 +803,38 @@ async fn apply(children: &mut Vec<Running>, specs: Vec<Spec>) {
             if let Some(b) = c.building.take() {
                 b.abort();
             }
-            stop(&mut c).await;
+            stop(&mut c);
+            if let Some(stopping) = c.stopping.take() {
+                ending.push((c.spec.name.clone(), stopping));
+            }
         }
     }
     keep.reverse();
     for spec in specs {
         match keep.iter().position(|c| c.spec == spec) {
             Some(i) => children.push(keep.remove(i)),
-            None => children.push(Running::new(spec)),
+            None => {
+                let mut c = Running::new(spec);
+                if let Some(i) = ending.iter().position(|(name, _)| *name == c.spec.name) {
+                    c.stopping = Some(ending.remove(i).1);
+                }
+                children.push(c);
+            }
         }
     }
+    // A child that is gone for good still ends in the background.
+    drop(ending);
 }
 
-/// Puts what the metrics show on the board; `sample`: also the services' CPU and memory.
-async fn show(board: &Board, children: &[Running], sample: bool) {
-    let old: Vec<Shown> = board.lock().unwrap_or_else(PoisonError::into_inner).clone();
+/// Each running service's CPU seconds and memory, as last measured.
+type Usages = Arc<Mutex<BTreeMap<String, (Option<f64>, Option<u64>)>>>;
+
+/// Puts what the metrics show on the board, with the services' last measured usage.
+fn show(board: &Board, children: &[Running], usages: &Usages) {
+    let usages = usages
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
     let mut shown = Vec::with_capacity(children.len());
     for c in children {
         let mut s = Shown {
@@ -768,16 +845,11 @@ async fn show(board: &Board, children: &[Running], sample: bool) {
             started_ms: c.started_ms,
             ..Default::default()
         };
-        match (sample, &c.spec.container, &c.child) {
-            (true, Some(container), Some(_)) => {
-                (s.cpu_seconds, s.memory_bytes) = usage(&c.spec.binary, &container.name).await;
-            }
-            (false, Some(_), Some(_)) => {
-                if let Some(o) = old.iter().find(|o| o.name == s.name) {
-                    (s.cpu_seconds, s.memory_bytes) = (o.cpu_seconds, o.memory_bytes);
-                }
-            }
-            _ => {}
+        if s.service
+            && s.up
+            && let Some(&(cpu, memory)) = usages.get(&s.name)
+        {
+            (s.cpu_seconds, s.memory_bytes) = (cpu, memory);
         }
         shown.push(s);
     }
