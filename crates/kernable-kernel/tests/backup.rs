@@ -30,6 +30,17 @@ fn follower(env: &Env, to: &str) -> Follower {
     }
 }
 
+/// Where the test's backup goes: a directory, or `KERNABLE_TEST_BACKUP_TARGET` (an
+/// `s3://<bucket>/<prefix>` with the `KERNABLE_S3_*` and `AWS_*` variables), under a prefix of
+/// the test's own.
+fn target_of(env: &Env) -> String {
+    let name = env.dir.file_name().unwrap().to_string_lossy();
+    match std::env::var("KERNABLE_TEST_BACKUP_TARGET") {
+        Ok(base) if !base.is_empty() => format!("{}/{name}", base.trim_end_matches('/')),
+        _ => format!("file:{}", env.dir.join("backup").display()),
+    }
+}
+
 /// How far the backup in `to` reaches, and in how many generations.
 fn reach(to: &str) -> (u64, usize) {
     let t = target::open(to).unwrap();
@@ -89,7 +100,7 @@ fn stores(env: &Env, name: &str) -> Stores {
 async fn a_backup_restores_the_same_store_and_continues_after_a_restart() {
     let env = start_custom("backup", |c, _| c.replication.backup = true).await;
     spawn_worker(&env).await;
-    let to = format!("file:{}", env.dir.join("backup").display());
+    let to = target_of(&env);
     place(&env, 0, 10).await;
     let running = tokio::spawn(backup::run(follower(&env, &to)));
     backed_up(&env, &to).await;
@@ -136,7 +147,7 @@ async fn a_backup_restores_the_same_store_and_continues_after_a_restart() {
 async fn a_restore_stops_at_a_record() {
     let env = start_custom("backup-at", |c, _| c.replication.backup = true).await;
     spawn_worker(&env).await;
-    let to = format!("file:{}", env.dir.join("backup").display());
+    let to = target_of(&env);
     let running = tokio::spawn(backup::run(follower(&env, &to)));
     place(&env, 0, 5).await;
     backed_up(&env, &to).await;
@@ -171,7 +182,7 @@ async fn a_restore_stops_at_a_record() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_kernel_without_backup_on_refuses_the_follower() {
     let env = start("backup-off").await;
-    let to = format!("file:{}", env.dir.join("backup").display());
+    let to = target_of(&env);
     let running = tokio::spawn(backup::run(follower(&env, &to)));
     tokio::time::sleep(Duration::from_millis(300)).await;
     running.abort();
