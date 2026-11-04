@@ -270,6 +270,24 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "Bytes the cache service keeps (values and keys). When a value would exceed it, the oldest values are dropped first, as a cache may; a single value larger than the limit is refused with `RESOURCE_EXHAUSTED`.",
     ),
     (
+        "--max-store-bytes",
+        "KERNABLE_MAX_STORE_BYTES",
+        "0",
+        "Bytes the event store, the vault and the files may take together, measured every 10 s (0: no limit). At the limit, new commands and file puts are refused with `RESOURCE_EXHAUSTED` `quota_storage`; queries, listeners, file deletes and the commands of `--quota-exempt` go on. At 80 % the kernel logs a warning.",
+    ),
+    (
+        "--quota-exempt",
+        "KERNABLE_QUOTA_EXEMPT",
+        "",
+        "Commands `--max-store-bytes` never refuses, comma-separated (`identity.ErasePerson`, `identity.*`): list the commands that erase personal data, so an erasure request is always possible.",
+    ),
+    (
+        "--max-requests-per-second-per-key",
+        "KERNABLE_MAX_REQUESTS_PER_SECOND_PER_KEY",
+        "0",
+        "Submits, queries, file and cache requests one key may start per second, with a burst of one second's worth (0: no limit). More are refused with `RESOURCE_EXHAUSTED` `rate`, to retry a moment later.",
+    ),
+    (
         "--max-data-bytes",
         "KERNABLE_MAX_DATA_BYTES",
         "16777216",
@@ -376,6 +394,12 @@ pub struct Limits {
     pub listeners_per_key: usize,
     pub cache_bytes: usize,
     pub data_bytes: usize,
+    /// `--max-store-bytes`; 0: no limit.
+    pub store_bytes: u64,
+    /// `--quota-exempt`: command patterns the storage quota never refuses.
+    pub quota_exempt: Vec<String>,
+    /// `--max-requests-per-second-per-key`; 0: no limit.
+    pub requests_per_second_per_key: u64,
 }
 
 /// The defaults of the `--max-*` flags and `--handshake-timeout-ms`.
@@ -394,6 +418,9 @@ impl Default for Limits {
             listeners_per_key: 64,
             cache_bytes: 256 << 20,
             data_bytes: 16 << 20,
+            store_bytes: 0,
+            quota_exempt: Vec::new(),
+            requests_per_second_per_key: 0,
         }
     }
 }
@@ -597,6 +624,24 @@ impl Config {
                     }
                     n => n as usize,
                 },
+                store_bytes: number("--max-store-bytes")?,
+                quota_exempt: {
+                    let list: Vec<String> = get("--quota-exempt")
+                        .unwrap_or_default()
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|t| !t.is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                    if let Some(bad) = list.iter().find(|t| !valid_pattern(t) || *t == "*") {
+                        return Err(format!(
+                            "--quota-exempt: {bad} is not a command type (domain.Command) or domain (domain.*)"
+                        )
+                        .into());
+                    }
+                    list
+                },
+                requests_per_second_per_key: number("--max-requests-per-second-per-key")?,
             },
             replication,
             partition: match get("--partition") {

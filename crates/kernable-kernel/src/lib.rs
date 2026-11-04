@@ -147,6 +147,31 @@ const ENVELOPE_BYTES: usize = 16;
 #[derive(Default)]
 struct PerKey(Arc<Mutex<HashMap<String, usize>>>);
 
+/// A token bucket per key: `rate` tokens a second, at most `rate` saved up.
+#[derive(Default)]
+struct Rates(Mutex<HashMap<String, (f64, Instant)>>);
+
+impl Rates {
+    /// Takes a token for `key_id`; false if it has none left.
+    fn take(&self, key_id: &str, rate: u64) -> bool {
+        let rate = rate as f64;
+        let now = Instant::now();
+        let mut buckets = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        // Full buckets say nothing: dropped now and then, so idle keys do not pile up.
+        if buckets.len() > 10_000 {
+            buckets.retain(|_, (tokens, at)| *tokens + at.elapsed().as_secs_f64() * rate < rate);
+        }
+        let (tokens, at) = buckets.entry(key_id.to_owned()).or_insert((rate, now));
+        *tokens = (*tokens + now.duration_since(*at).as_secs_f64() * rate).min(rate);
+        *at = now;
+        if *tokens < 1.0 {
+            return false;
+        }
+        *tokens -= 1.0;
+        true
+    }
+}
+
 /// One counted request or stream of a key.
 struct Slot(Arc<Mutex<HashMap<String, usize>>>, String);
 
@@ -265,6 +290,10 @@ pub struct Kernel {
     replication: Option<Arc<replication::Primary>>,
     /// The backup follower, with `--backup on`.
     backup: replication::Backup,
+    /// Bytes of the event store, the vault and the files, measured every 10 s.
+    stored_bytes: AtomicU64,
+    /// Requests per key and second.
+    rates: Rates,
     /// The partition map, with `--partition` (S2).
     maps: partitions::Maps,
     /// Global keys of commits in flight on this partition (S3).
@@ -362,6 +391,8 @@ impl Kernel {
             failed_commits: AtomicU32::new(0),
             appended: Notify::new(),
             backup: replication::Backup::default(),
+            stored_bytes: AtomicU64::new(0),
+            rates: Rates::default(),
             listeners,
             workers,
             memberships,
@@ -791,8 +822,17 @@ impl Kernel {
         }
     }
 
-    /// A slot for one more request of `key_id`, or RESOURCE_EXHAUSTED at `--max-requests-per-key`.
+    /// A slot for one more request of `key_id`, or RESOURCE_EXHAUSTED at `--max-requests-per-key`
+    /// or `--max-requests-per-second-per-key`.
     fn request_slot(&self, key_id: &str) -> Result<Slot, Status> {
+        let rate = self.config.limits.requests_per_second_per_key;
+        if rate > 0 && !self.rates.take(key_id, rate) {
+            self.metrics.limited("rate");
+            return Err(Status::resource_exhausted(format!(
+                "rate: the key started {rate} requests in the last second \
+                 (--max-requests-per-second-per-key); retry later"
+            )));
+        }
         let max = self.config.limits.requests_per_key;
         self.requests_by_key.take(key_id, max).ok_or_else(|| {
             self.metrics.limited("requests_per_key");
@@ -800,6 +840,35 @@ impl Kernel {
                 "the key has {max} requests in progress (--max-requests-per-key); retry later"
             ))
         })
+    }
+
+    /// RESOURCE_EXHAUSTED `quota_storage` if the stores reached `--max-store-bytes` and `name` (a
+    /// qualified command or file request type) is not exempt.
+    fn quota(&self, name: &str) -> Result<(), Status> {
+        let limits = &self.config.limits;
+        let held = self.stored_bytes.load(SeqCst);
+        if limits.store_bytes == 0
+            || held < limits.store_bytes
+            || limits.quota_exempt.iter().any(|p| config::covers(p, name))
+        {
+            return Ok(());
+        }
+        self.metrics.limited("quota_storage");
+        Err(Status::resource_exhausted(format!(
+            "quota_storage: the kernel holds {held} of its {} bytes (--max-store-bytes); \
+             delete files or erase data, or raise the limit",
+            limits.store_bytes
+        )))
+    }
+
+    /// The bytes of the event store, the vault and the files on the disk now.
+    fn measure_store(&self) -> u64 {
+        let config = self.config();
+        let mut urls = vec![config.store.clone(), config.data.clone()];
+        if let Some(v) = &config.vault {
+            urls.push(v.store.clone());
+        }
+        urls.iter().map(|u| bytes_of(u)).sum()
     }
 
     /// The next message of a worker's or listener's handshake, within `--handshake-timeout-ms`.
@@ -1239,6 +1308,7 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
     tokio::select! {
         result = server => result,
         _ = checkpoints(&kernel) => unreachable!(),
+        _ = measure_stores(&kernel) => unreachable!(),
         _ = flush_listeners(&kernel) => unreachable!(),
         _ = sample_trend(&kernel) => unreachable!(),
         () = partitions::follow_control(&kernel) => unreachable!(),
@@ -1293,6 +1363,55 @@ async fn sample_trend(kernel: &Kernel) {
                 .record(now_ms(), head, &kernel.listeners.snapshot()),
             Err(e) => tracing::warn!(error = %e, "sampling listener positions failed"),
         }
+    }
+}
+
+/// The bytes a store at `url` takes on the disk: a SQLite file with its journal, a file log, or
+/// a directory of files.
+fn bytes_of(url: &str) -> u64 {
+    fn walk(path: &std::path::Path) -> u64 {
+        match std::fs::symlink_metadata(path) {
+            Ok(m) if m.is_dir() => std::fs::read_dir(path)
+                .map(|entries| entries.flatten().map(|e| walk(&e.path())).sum())
+                .unwrap_or(0),
+            Ok(m) => m.len(),
+            Err(_) => 0,
+        }
+    }
+    match kernable_store::backend(url) {
+        ("memory", _) => 0,
+        ("sqlite", path) => ["", "-wal", "-shm"]
+            .iter()
+            .map(|suffix| walk(std::path::Path::new(&format!("{path}{suffix}"))))
+            .sum(),
+        (_, path) => walk(std::path::Path::new(path)),
+    }
+}
+
+/// Measures the stores every 10 s, and warns once they pass 80 % of `--max-store-bytes`.
+async fn measure_stores(kernel: &Arc<Kernel>) {
+    let mut tick = tokio::time::interval(Duration::from_secs(10));
+    let mut warned = false;
+    loop {
+        tick.tick().await;
+        let k = Arc::clone(kernel);
+        let Ok(held) = tokio::task::spawn_blocking(move || k.measure_store()).await else {
+            continue;
+        };
+        kernel.stored_bytes.store(held, SeqCst);
+        let max = kernel.config().limits.store_bytes;
+        if max == 0 {
+            continue;
+        }
+        let high = held.saturating_mul(10) >= max.saturating_mul(8);
+        if high && !warned {
+            tracing::warn!(
+                held,
+                max,
+                "the stores passed 80 % of --max-store-bytes; at the limit, new commands and file puts are refused"
+            );
+        }
+        warned = high;
     }
 }
 
@@ -1399,6 +1518,16 @@ impl CommandService for Api {
             return Err(Status::not_found(format!(
                 "no worker registered {name} for {aggregate}"
             )));
+        }
+        // A full store refuses new commands; a stored one is always answered.
+        if let Err(status) = kernel.quota(&name)
+            && kernel
+                .store
+                .command(&cmd.command_id)
+                .map_err(internal)?
+                .is_none()
+        {
+            return Err(status);
         }
         // A full queue refuses new commands before anything is stored; a stored one is always
         // answered.
@@ -1784,6 +1913,7 @@ impl DataService for Api {
                 "a file has at most {max} bytes (--max-data-bytes)"
             )));
         }
+        self.0.quota(&config::qualified(&r.domain, "PutData"))?;
         let claim = self.0.claim(r.client_sig.as_ref(), r.issued_at)?;
         let data = Data {
             content_type: r.content_type.clone(),
@@ -3443,6 +3573,41 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_key_gets_its_rate_with_a_burst_of_one_second_and_no_more() {
+        let rates = Rates::default();
+        let took = (0..5).filter(|_| rates.take("k", 3)).count();
+        assert_eq!(took, 3);
+        assert!(rates.take("other", 3), "each key has its own bucket");
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(
+            rates.take("k", 3),
+            "a token comes back after a third of a second"
+        );
+        assert!(!rates.take("k", 3));
+    }
+
+    #[test]
+    fn the_size_of_a_store_counts_its_journal_and_every_file() {
+        let dir = std::env::temp_dir().join(format!("kn-bytes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("data/t1")).unwrap();
+        std::fs::write(dir.join("k.db"), [0u8; 100]).unwrap();
+        std::fs::write(dir.join("k.db-wal"), [0u8; 20]).unwrap();
+        std::fs::write(dir.join("data/t1/a"), [0u8; 7]).unwrap();
+        std::fs::write(dir.join("data/b"), [0u8; 3]).unwrap();
+        assert_eq!(
+            bytes_of(&format!("sqlite:{}", dir.join("k.db").display())),
+            120
+        );
+        assert_eq!(
+            bytes_of(&format!("file:{}", dir.join("data").display())),
+            10
+        );
+        assert_eq!(bytes_of("memory:"), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_long_history_is_split_into_parts_that_each_fit() {

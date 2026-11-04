@@ -231,6 +231,19 @@ pub(crate) fn render(kernel: &Kernel) -> String {
             vec![(String::new(), primary.in_sync() as u64)],
         );
     }
+    let limits = &kernel.config().limits;
+    metric(
+        "kernable_store_bytes",
+        "Bytes the event store, the vault and the files take on the disk, measured every 10 s.",
+        vec![(String::new(), kernel.stored_bytes.load(Relaxed))],
+    );
+    if limits.store_bytes > 0 {
+        metric(
+            "kernable_store_bytes_max",
+            "--max-store-bytes: at it, new commands and file puts are refused (quota_storage).",
+            vec![(String::new(), limits.store_bytes)],
+        );
+    }
     metric(
         "kernable_ready",
         "1 while the kernel is ready: every aggregate that counts has a worker, every listener that counts is connected and caught up, and it is not shutting down.",

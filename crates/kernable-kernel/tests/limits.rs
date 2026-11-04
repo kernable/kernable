@@ -633,3 +633,70 @@ async fn after_the_snapshots_are_lost_a_long_history_comes_in_parts_with_every_v
     want.sort();
     assert_eq!(seen, want);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_store_refuses_new_commands_but_not_the_exempt_ones() {
+    // One byte: the store is over it from its first measurement on.
+    let limits = Limits {
+        store_bytes: 1,
+        quota_exempt: vec!["orders.AddItem".into()],
+        ..Limits::default()
+    };
+    let (env, metrics) = start_limited("limits-quota", limits).await;
+    spawn_worker(&env).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let refused_now = submit(
+        &env.addr,
+        signed(command("c1", "PlaceOrder", "o1"), &key(1)),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(refused_now.code(), Code::ResourceExhausted);
+    assert!(
+        refused_now.message().contains("quota_storage"),
+        "{}",
+        refused_now.message()
+    );
+    assert_eq!(refused(&metrics, "quota_storage").await, 1);
+    // The exempt command goes on (here it is rejected by the worker: the order does not exist).
+    let exempt = submit(&env.addr, signed(command("c2", "AddItem", "o1"), &key(1))).await;
+    assert!(exempt.is_ok(), "{exempt:?}");
+    let shown = get(&metrics, "/metrics").await;
+    assert!(shown.contains("kernable_store_bytes_max 1"), "{shown}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_key_beyond_its_rate_is_refused_and_another_key_is_not() {
+    let limits = Limits {
+        requests_per_second_per_key: 3,
+        ..Limits::default()
+    };
+    let (env, metrics) = start_limited("limits-rate", limits).await;
+    spawn_worker(&env).await;
+    let mut codes = Vec::new();
+    for i in 0..5 {
+        let cmd = signed(
+            command(&format!("r{i}"), "PlaceOrder", &format!("o{i}")),
+            &key(1),
+        );
+        codes.push(submit(&env.addr, cmd).await.err().map(|s| s.code()));
+    }
+    assert_eq!(
+        &codes[..3],
+        [None, None, None],
+        "a burst of one second's worth"
+    );
+    assert!(
+        codes[3..]
+            .iter()
+            .all(|c| *c == Some(Code::ResourceExhausted)),
+        "{codes:?}"
+    );
+    assert!(refused(&metrics, "rate").await >= 2);
+    // Another key has its own bucket; and a second later the first has tokens again.
+    let other = signed(command("x1", "PlaceOrder", "x1"), &key(2));
+    assert!(submit(&env.addr, other).await.is_ok());
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let again = signed(command("r9", "PlaceOrder", "o9"), &key(1));
+    assert!(submit(&env.addr, again).await.is_ok());
+}

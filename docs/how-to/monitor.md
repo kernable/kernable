@@ -72,9 +72,12 @@ groups:
       - alert: KernableLimitReached      # requests refused by a limit (--max-*)
         expr: rate(kernable_refused_total[5m]) > 0
         for: 5m
+      - alert: KernableStoreFilling      # the stores passed 80 % of --max-store-bytes
+        expr: kernable_store_bytes / kernable_store_bytes_max > 0.8
+        for: 15m
 ```
 
-- `kernable_refused_total` names the limit in its `reason` label ([Limits](../reference/configuration#limits)). A growing `queued_commands` or `queued_per_aggregate` usually means a worker is away; `requests_per_key` a client that does not wait for its answers; `handshake_timeout` or `connections` something that opens connections and never uses them.
+- `kernable_refused_total` names the limit in its `reason` label ([Limits](../reference/configuration#limits)). A growing `queued_commands` or `queued_per_aggregate` usually means a worker is away; `requests_per_key` a client that does not wait for its answers; `handshake_timeout` or `connections` something that opens connections and never uses them. `rate` is a key that starts more requests per second than `--max-requests-per-second-per-key`; `quota_storage` a kernel whose stores reached `--max-store-bytes`, which refuses new commands and file puts until data is deleted or the limit raised.
 - The per-listener metrics (`kernable_listener_lag`, `kernable_listener_connected`) cover every listener the kernel knows, also dynamic ones that nobody waits for. Exclude those by their `listener` label, or remove them ([Remove a listener](./remove-listener)).
 - A listener stuck at an event it cannot handle (a throwing handler, or a newer event version) shows as lag that keeps growing while the listener stays connected ([When a listener is slow or stuck](../concepts/ordering#when-a-listener-is-slow-or-stuck)).
 
