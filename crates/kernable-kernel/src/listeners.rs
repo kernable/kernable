@@ -976,8 +976,7 @@ pub(crate) async fn run(
             // it existed, unless it asks to (a read model rebuilding from 0). An instance taking
             // over a single group goes on after the group's position.
             let position = match (hello.live, hello.from_position) {
-                (true, None) => head,
-                (true, Some(from)) => from,
+                (true, _) => head,
                 (false, Some(from)) if !waiting => from,
                 (false, _) => previous.map_or(head, |e| e.record.position),
             };
