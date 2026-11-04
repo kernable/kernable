@@ -58,12 +58,29 @@ fn positions(store: &str) -> Result<Positions, String> {
     Ok((head, listeners, pending))
 }
 
+/// Reads `store` as it is now, with its kernels' keys, off the runtime: a long log takes a
+/// while, and the load, the audit listener and the client of the check round go on meanwhile.
+async fn read_log(store: &str, kernel_key_ids: &[String], ids: &[String]) -> Result<Log, String> {
+    let (store, keys, ids) = (store.to_owned(), kernel_key_ids.to_vec(), ids.to_vec());
+    tokio::task::spawn_blocking(move || {
+        kernable_store::open_read_only(&store)
+            .and_then(|read| Log::read_with(read.as_ref(), &keys, &ids))
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Waits until nothing is pending and every listener is at the head, twice in a row.
 async fn quiesce(store: &str, limit: Duration) -> Result<u64, String> {
     let started = Instant::now();
     let mut last = None;
     loop {
-        let state = positions(store);
+        let at = store.to_owned();
+        let state = tokio::task::spawn_blocking(move || positions(&at))
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|state| state);
         if let Ok((head, listeners, 0)) = &state
             && listeners.iter().all(|(_, p)| p == head)
         {
@@ -107,9 +124,7 @@ pub async fn round(
     };
     let mut ids = load.observed.lock().unwrap().command_ids();
     ids.extend(load.stats.unanswered.lock().unwrap().iter().cloned());
-    let log = kernable_store::open_read_only(store)
-        .and_then(|read| Log::read_with(read.as_ref(), kernel_key_ids, &ids));
-    let log = match log {
+    let log = match read_log(store, kernel_key_ids, &ids).await {
         Ok(log) => log,
         Err(e) => {
             violations.push(format!("reading the store: {e}"));
@@ -133,9 +148,7 @@ pub async fn round(
     if let Some(standby) = standby {
         let waited = Instant::now();
         loop {
-            let held = kernable_store::open_read_only(standby)
-                .and_then(|read| Log::read_with(read.as_ref(), kernel_key_ids, &ids));
-            match held {
+            match read_log(standby, kernel_key_ids, &ids).await {
                 Ok(s) if s.events == log.events => break,
                 Ok(s) if waited.elapsed() > Duration::from_secs(120) => {
                     violations.push(format!(

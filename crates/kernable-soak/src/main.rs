@@ -127,17 +127,32 @@ impl Args {
     }
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let result = match args.first().map(String::as_str) {
-        Some("app") => app::run().await.map_err(|e| e.to_string()),
-        Some("run") => match Args::parse(&args[1..]) {
-            Ok(a) => run(a).await,
-            Err(e) => Err(e),
-        },
-        _ => Err("usage: kernable-soak run [--minutes N] [--dir DIR] ... | kernable-soak app (see src/main.rs)".into()),
+fn main() -> ExitCode {
+    // At least four workers, also on a machine of one core: the harness blocks one now and
+    // then (stopping a process), and the load and the audit listener go on meanwhile.
+    let workers = std::thread::available_parallelism().map_or(4, |n| n.get().max(4));
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            eprintln!("kernable-soak: no runtime: {e}");
+            return ExitCode::FAILURE;
+        }
     };
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let result = runtime.block_on(async {
+        match args.first().map(String::as_str) {
+            Some("app") => app::run().await.map_err(|e| e.to_string()),
+            Some("run") => match Args::parse(&args[1..]) {
+                Ok(a) => run(a).await,
+                Err(e) => Err(e),
+            },
+            _ => Err("usage: kernable-soak run [--minutes N] [--dir DIR] ... | kernable-soak app (see src/main.rs)".into()),
+        }
+    });
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -454,9 +469,15 @@ async fn run(a: Args) -> Result<(), String> {
     // newest event, and would miss withdrawals sent before.
     let started = Instant::now();
     loop {
-        if let Ok(read) = kernable_store::open_read_only(&stores(pair).0)
-            && read.listeners().map_or(0, |l| l.len()) >= 7
-        {
+        let primary = stores(pair).0;
+        let connected = tokio::task::spawn_blocking(move || {
+            kernable_store::open_read_only(&primary)
+                .and_then(|read| read.listeners())
+                .map_or(0, |l| l.len())
+        })
+        .await
+        .unwrap_or(0);
+        if connected >= 7 {
             break;
         }
         if started.elapsed() > Duration::from_secs(120) {
@@ -511,18 +532,11 @@ async fn run(a: Args) -> Result<(), String> {
 
         let last = now >= end;
         if now >= next_check || last {
+            // The faults end first, then the commands still in flight get their answers: a
+            // kernel down until later, or a stopped app, would hold them up otherwise.
             load.running.store(false, Ordering::SeqCst);
-            let waited = Instant::now();
-            while load.stats.in_flight.load(Ordering::SeqCst) > 0
-                && waited.elapsed() < Duration::from_secs(400)
-            {
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
             for proxy in &proxies {
                 proxy.heal();
-            }
-            while filling.load(Ordering::SeqCst) {
-                tokio::time::sleep(Duration::from_millis(200)).await;
             }
             for (_, action) in later.drain(..) {
                 do_later(action, &mut procs);
@@ -534,6 +548,15 @@ async fn run(a: Args) -> Result<(), String> {
                 if p.pid().is_none() {
                     let _ = p.start();
                 }
+            }
+            while filling.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            let waited = Instant::now();
+            while load.stats.in_flight.load(Ordering::SeqCst) > 0
+                && waited.elapsed() < Duration::from_secs(400)
+            {
+                tokio::time::sleep(Duration::from_millis(200)).await;
             }
             say("check round: waiting until everything is quiet");
             let (primary, standby) = stores(pair);

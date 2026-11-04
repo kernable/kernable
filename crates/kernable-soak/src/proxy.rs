@@ -1,18 +1,35 @@
 //! A TCP proxy between every client and the kernel that can fail the network: reset every
 //! connection, stall all traffic for a while (a partition: nothing is lost, it waits), or delay
 //! it.
+//!
+//! The proxies run on a runtime of their own: while the harness blocks (reading a store,
+//! stopping a process), the network goes on as it would without the harness, so a stall the
+//! kernels see is one of the faults, never the harness's.
 
 use std::{
     net::SocketAddr,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    runtime::Runtime,
     task::AbortHandle,
 };
+
+fn runtime() -> &'static Runtime {
+    static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("proxy")
+            .enable_all()
+            .build()
+            .expect("a runtime for the proxies")
+    })
+}
 
 #[derive(Clone, Copy)]
 enum Net {
@@ -32,13 +49,13 @@ pub struct Proxy {
 impl Proxy {
     /// Listens on `listen` and forwards to `target`.
     pub async fn start(listen: SocketAddr, target: SocketAddr) -> std::io::Result<Proxy> {
-        let listener = TcpListener::bind(listen).await?;
+        let listener = runtime().spawn(TcpListener::bind(listen)).await??;
         let proxy = Proxy {
             net: Arc::new(Mutex::new(Net::Up)),
             connections: Arc::default(),
         };
         let p = proxy.clone();
-        tokio::spawn(async move {
+        runtime().spawn(async move {
             while let Ok((client, _)) = listener.accept().await {
                 let net = Arc::clone(&p.net);
                 let task = tokio::spawn(async move {
