@@ -25,6 +25,7 @@ Listeners are defined on a domain too and run through the connection:
 Stubs: generate them first (`make py-stubs`), see sdks/python/README.md.
 """
 
+import concurrent.futures
 import contextvars
 import copy
 import hashlib
@@ -1593,13 +1594,32 @@ class Kernable:
         return self._send(domain, aggregate_type, aggregate_id, type, data, tenant, id, pb.WAIT_ACCEPTED,
                           context, timeout_s).command_id
 
+    def _caught_up_everywhere(self, q: "pb.QueryRequest", timeout_s: float | None) -> None:
+        """Returns once a read model that answers `q` has processed every partition's head, as
+        of the call: a wait-only query to each partition, at the same time."""
+        wait = pb.QueryRequest()
+        wait.CopyFrom(q)
+        wait.payload, wait.min_position, wait.wait_only, wait.listener = b"", 0, True, ""
+        wait.client_sig.CopyFrom(self._key.sign(query_message(wait)))
+        wait.listener = q.listener
+        parts = self._parts.all(timeout_s)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(parts))) as pool:
+            waits = [pool.submit(lambda ch=ch: rpc.QueryServiceStub(ch).Query(wait, timeout=timeout_s))
+                     for _, ch in parts]
+            for w in waits:
+                w.result()
+
     def query(self, domain: str, type: str, data: Any = None, *, tenant: str | None = None,
-              context: RequestContext | None = None, min_position: int = 0, timeout_s: float | None = None) -> Any:
+              context: RequestContext | None = None, min_position: int = 0, timeout_s: float | None = None,
+              all_partitions: bool = False) -> Any:
         """Asks the read model that answers `domain.type` with `data` and returns its answer,
         decoded from JSON. Queries always go through the kernel, also within one process.
         `min_position`: answer only after the read model has processed this global position
         (e.g. of an event from a `wait="committed"` submit). `tenant` and `context` replace the
-        client's; `timeout_s` its deadline for this call.
+        client's; `timeout_s` its deadline for this call. `all_partitions`, for a read model
+        across tenants with partitions: answer only once the read model has processed every
+        partition's events up to the query, not only those of the tenant's partition (a
+        wait-only query to each partition first).
 
         Raises `Rejected` if the read model or a middleware rejects it, `grpc.RpcError` if the
         kernel refuses the call (e.g. `UNAVAILABLE` when no read model answers it). Example:
@@ -1609,6 +1629,9 @@ class Kernable:
                             payload=_encode(data), context=_to_wire_context(context or self._context, query_id),
                             min_position=min_position, issued_at=int(time.time() * 1000), protocol=PROTOCOL,
                             listener=_HANDLING.get())
+        if all_partitions:
+            self._caught_up_everywhere(q, timeout_s)
+            q.issued_at = int(time.time() * 1000)
         q.client_sig.CopyFrom(self._key.sign(query_message(q)))
         res = self._parts.route(q.tenant_id, lambda ch: rpc.QueryServiceStub(ch).Query(q, timeout=timeout_s))
         if res.WhichOneof("outcome") == "rejected":

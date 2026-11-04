@@ -599,6 +599,7 @@ async fn a_tenant_moves_with_its_events_and_global_keys_and_back() {
                     ("subscribe", all),
                     ("query", all),
                     ("listen", all),
+                    ("answer", all),
                     ("privileged", &["bypass_authorization"]),
                     ("manage", all),
                 ],
@@ -632,6 +633,86 @@ async fn a_tenant_moves_with_its_events_and_global_keys_and_back() {
     assert_eq!(*order.lock().unwrap(), [1, 2, 3, 4]);
     replaying.stop();
     running.await.unwrap();
+
+    // A read model across tenants, slow on t1's events (now on p2): asked in t9's partition
+    // (p1), a query with `all_partitions` waits until it has processed p2 as well (S5).
+    let seen = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    // Slow only once it has caught up, so the first query need not wait long.
+    let slowly = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let slow = {
+        let (counted, asked) = (std::sync::Arc::clone(&seen), std::sync::Arc::clone(&seen));
+        let slowly = std::sync::Arc::clone(&slowly);
+        kernable::domain("orders")
+            .read_model("all-orders")
+            .on(
+                "orders.*",
+                move |_: serde_json::Value, evt: kernable::StoredEventMeta, _| {
+                    let counted = std::sync::Arc::clone(&counted);
+                    let slow = slowly.load(std::sync::atomic::Ordering::SeqCst);
+                    async move {
+                        if slow && evt.tenant == "t1" {
+                            tokio::time::sleep(Duration::from_millis(400)).await;
+                        }
+                        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(())
+                    }
+                },
+            )
+            .query("Count", move |_: serde_json::Value, _qry, _ctx| {
+                let n = asked.load(std::sync::atomic::Ordering::SeqCst);
+                async move { Ok(n) }
+            })
+    };
+    let summing = sdk.listener(&slow);
+    let summed = tokio::spawn({
+        let summing = summing.clone();
+        async move { summing.run().await }
+    });
+    tokio::time::timeout(Duration::from_secs(10), summing.ready())
+        .await
+        .expect("the read model connected");
+    let ask = async |all: bool| -> u64 {
+        let query = kernable::Query::new("orders", "Count")
+            .tenant("t9")
+            .timeout(Duration::from_secs(10));
+        sdk.query(if all { query.all_partitions() } else { query })
+            .await
+            .unwrap()
+    };
+    // The kernels here give a query 1 s: ask until the new read model has caught up.
+    let mut before = None;
+    for _ in 0..20 {
+        let query = kernable::Query::new("orders", "Count")
+            .tenant("t9")
+            .all_partitions();
+        if let Ok(n) = sdk.query::<u64>(query).await {
+            before = Some(n);
+            break;
+        }
+    }
+    let before = before.expect("the read model caught up");
+    assert!(before > 0, "caught up on both partitions");
+    slowly.store(true, std::sync::atomic::Ordering::SeqCst);
+    let added = submit_with(
+        &p2.addr,
+        with_email("m-s5", "PlaceOrder", "o-s5", "t1", "s5@x"),
+        kernable_core::proto::Wait::Committed,
+    )
+    .await
+    .unwrap();
+    assert_eq!(committed_versions(&added).len(), 1);
+    assert_eq!(
+        ask(false).await,
+        before,
+        "a plain query is current only on p1"
+    );
+    assert_eq!(
+        ask(true).await,
+        before + 1,
+        "all_partitions waits for t1's event on p2"
+    );
+    summing.stop();
+    summed.await.unwrap();
     let a9 = submit(&p1.addr, with_email("m8", "PlaceOrder", "o9", "t9", "a@x"))
         .await
         .unwrap();
@@ -680,7 +761,7 @@ async fn a_tenant_moves_with_its_events_and_global_keys_and_back() {
         .read_all(0, 100)
         .unwrap()
         .into_iter()
-        .filter(|e| e.tenant_id == "t1")
+        .filter(|e| e.tenant_id == "t1" && e.aggregate_id == "o1")
         .map(|e| (e.version, e.origin_partition))
         .collect();
     assert_eq!(

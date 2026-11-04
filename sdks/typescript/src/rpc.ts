@@ -196,6 +196,8 @@ export interface WireQueryRequest {
   client_sig?: WireSignature | null;
   /** Not signed; see `QueryRequest.listener`. */
   listener?: string;
+  /** Signed when set: return once the read model has caught up here; see `QueryRequest.wait_only`. */
+  wait_only?: boolean;
 }
 
 export interface WireQueryResult {

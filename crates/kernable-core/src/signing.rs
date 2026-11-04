@@ -130,7 +130,7 @@ pub fn command_message(cmd: &Command) -> Vec<u8> {
 
 /// What a client signs when asking a query.
 pub fn query_message(q: &QueryRequest) -> Vec<u8> {
-    Msg::new("kernable.v1.query")
+    let m = Msg::new("kernable.v1.query")
         .str(&q.query_id)
         .str(&q.tenant_id)
         .str(&q.domain)
@@ -138,8 +138,13 @@ pub fn query_message(q: &QueryRequest) -> Vec<u8> {
         .bytes(&q.payload)
         .context(q.context.as_ref())
         .u64(q.min_position)
-        .i64(q.issued_at)
-        .0
+        .i64(q.issued_at);
+    // Only when set, so a query signs as before.
+    if q.wait_only {
+        m.str("wait_only").0
+    } else {
+        m.0
+    }
 }
 
 /// What a worker signs when returning events for `cmd` based on `expected_version`.

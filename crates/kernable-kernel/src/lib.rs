@@ -1911,6 +1911,52 @@ impl CacheService for Api {
     }
 }
 
+/// A wait-only query (`QueryRequest.wait_only`): an empty response once a read model that
+/// answers `name` has processed this kernel's head as of now (and `min_position`). It reads
+/// nothing, so no middleware checks it.
+async fn wait_only(
+    kernel: &Kernel,
+    name: &str,
+    query: QueryRequest,
+    caller: Option<&listeners::Caller>,
+) -> Result<Response<QueryResult>, Status> {
+    let target = query.min_position.max(kernel.durable.load(SeqCst));
+    let probe = QueryRequest {
+        min_position: target,
+        ..query.clone()
+    };
+    if !kernel.listeners.answers(name, &probe, caller) {
+        return Err(Status::unavailable(format!(
+            "no read model answers {name}{}",
+            if caller.is_some() {
+                " without waiting behind the listener that asks"
+            } else {
+                ""
+            }
+        )));
+    }
+    let timeout = Duration::from_millis(kernel.config().query_timeout_ms);
+    tokio::time::timeout(timeout, async {
+        loop {
+            let progressed = kernel.listeners.progress.notified();
+            if kernel.listeners.caught_up(name, &probe, caller) {
+                return;
+            }
+            progressed.await;
+        }
+    })
+    .await
+    .map_err(|_| {
+        Status::deadline_exceeded(format!(
+            "no read model that answers {name} reached position {target} in time"
+        ))
+    })?;
+    Ok(Response::new(QueryResult {
+        query_id: query.query_id,
+        outcome: Some(query_result::Outcome::Response(Vec::new())),
+    }))
+}
+
 #[tonic::async_trait]
 impl QueryService for Api {
     async fn query(&self, request: Request<QueryRequest>) -> Result<Response<QueryResult>, Status> {
@@ -1918,7 +1964,10 @@ impl QueryService for Api {
         let metadata = request.metadata().clone();
         let query = request.into_inner();
         protocol(query.protocol)?;
-        kernel.owns(&query.tenant_id)?;
+        if !query.wait_only {
+            // A wait-only query reads nothing of its tenant: every partition takes it.
+            kernel.owns(&query.tenant_id)?;
+        }
         let _running = kernel.request()?;
         let sig = query
             .client_sig
@@ -1952,6 +2001,9 @@ impl QueryService for Api {
             ));
         }
         let caller = kernel.caller(&query.listener, &name, true)?;
+        if query.wait_only {
+            return wait_only(kernel, &name, query, caller.as_ref()).await;
+        }
         let request = middleware_call::Request::Query(query.clone());
         if let Some(reason) = kernel
             .check(&name, &query.query_id, When::Before, request, &[], None)

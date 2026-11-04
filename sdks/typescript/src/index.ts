@@ -250,6 +250,12 @@ export interface QueryOptions {
   minPosition?: number;
   /** How long to wait for the connection and the answer; default `Options.timeoutMs`. */
   timeoutMs?: number;
+  /**
+   * For a read model across tenants with partitions: answer only once the read model has
+   * processed every partition's events up to the query, not only those of the tenant's
+   * partition. Costs a wait-only query to each partition first.
+   */
+  allPartitions?: boolean;
 }
 
 /**
@@ -1771,6 +1777,15 @@ export class Kernable {
       min_position: options.minPosition ?? 0,
       issued_at: Date.now(),
     };
+    if (options.allPartitions) {
+      // A wait-only query to every partition at once: each returns once the read model has
+      // processed that partition's head.
+      const wait = { ...request, payload: Buffer.alloc(0), min_position: 0, wait_only: true };
+      const signedWait = { ...wait, client_sig: this.key.sign(queryMessage(wait)), listener: handling.getStore() ?? "" };
+      const parts = await this.clients.all(options.timeoutMs);
+      await Promise.all(parts.map((p) => p.clients.query(signedWait, options.timeoutMs)));
+      request.issued_at = Date.now();
+    }
     const signed = {
       ...request,
       client_sig: this.key.sign(queryMessage(request)),

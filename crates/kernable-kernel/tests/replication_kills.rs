@@ -94,7 +94,11 @@ impl Dir {
 
 impl Drop for Dir {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        if std::thread::panicking() {
+            eprintln!("kept for its logs: {}", self.0.display());
+        } else if std::env::var_os("KERNABLE_TEST_LOGS").is_none() {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 }
 
@@ -123,13 +127,21 @@ fn flags(dir: &Dir, name: &str, kernel_seed: u8) -> Vec<String> {
     .to_vec()
 }
 
+/// Each process's stderr goes to `<dir>/<n>-<command>.log`, kept when a test fails (or with
+/// `KERNABLE_TEST_LOGS`).
 fn start(dir: &Dir, args: &[String]) -> KillOnDrop {
+    static STARTED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = STARTED.fetch_add(1, SeqCst);
+    let name = format!("{n:03}-{}.log", args.first().map_or("", String::as_str));
+    let log = std::fs::File::create(dir.0.join(name)).unwrap();
+    std::fs::write(dir.0.join(format!("{n:03}.args")), args.join(" ")).unwrap();
+    let stderr = Stdio::from(log);
     KillOnDrop::spawn(
         Process::new(env!("CARGO_BIN_EXE_kernable"))
             .current_dir(&dir.0)
             .args(args)
             .stdout(Stdio::null())
-            .stderr(Stdio::null()),
+            .stderr(stderr),
     )
 }
 

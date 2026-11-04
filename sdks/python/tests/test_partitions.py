@@ -107,6 +107,36 @@ class Partitions(unittest.TestCase):
         time.sleep(0.2)
         self.assertEqual(order, [1, 2, 3])
 
+        # A read model across tenants, slow on acme's events: asked in t9's partition (p1), a
+        # query with all_partitions waits until it has processed p2 as well (S5).
+        total = {"sum": 0}
+        slow = counters_domain.read_model("sum", reconnect_s=0.05)
+
+        @slow.on("Incremented")
+        def _(data, evt, ctx):
+            if evt.tenant == "acme":
+                time.sleep(1)
+            total["sum"] += data["by"]
+
+        @slow.query("Sum")
+        def _(data, ctx):
+            return total["sum"]
+
+        summing = k.listener(slow)
+        threading.Thread(target=summing.run, daemon=True).start()
+        self.addCleanup(summing.stop)
+        self.assertTrue(summing.ready.wait(10))
+
+        def ask(all_partitions):
+            return k.query("counters", "Sum", tenant="t9", all_partitions=all_partitions)
+
+        self.assertEqual(ask(True), 14, "caught up on both partitions")
+        placed = k.submit("counters", "Counter", "c2", "Increment", {"by": 10}, tenant="acme", id="acme-2",
+                          wait="committed")
+        self.assertTrue(placed.committed, placed)
+        self.assertEqual(ask(False), 14, "a plain query is current only on p1")
+        self.assertEqual(ask(True), 24, "all_partitions waits for acme's event on p2")
+
 
 if __name__ == "__main__":
     unittest.main()

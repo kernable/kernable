@@ -189,6 +189,7 @@ const cart = await kernable.query<Cart>({ domain: "shop", type: "GetCart", data:
 - `context?: RequestContext`: Replaces the client's default context (`Options.context`).
 - `minPosition?: number`: Answer only after the read model has processed this global position, e.g. the last event's `position` of a `committed` submit. Default 0: answer at once.
 - `timeoutMs?: number`: How long to wait for the connection and the answer; default `Options.timeoutMs`.
+- `allPartitions?: boolean`: For a read model across tenants with partitions: answer only once the read model has processed every partition's events up to the query, not only those of the tenant's partition. Costs a wait-only query to each partition first.
 
 ### Check
 

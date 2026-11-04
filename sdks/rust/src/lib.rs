@@ -881,10 +881,16 @@ impl Kernable {
             client_sig: None,
             protocol: PROTOCOL,
             listener: String::new(),
+            wait_only: false,
         };
+        let timeout = query.timeout;
+        if query.all_partitions {
+            self.caught_up_everywhere(&request, timeout).await?;
+            request.issued_at = now_ms();
+        }
         request.client_sig = Some(self.client.sign(&signing::query_message(&request)));
         request.listener = handling();
-        let (tenant, timeout) = (request.tenant_id.clone(), query.timeout);
+        let tenant = request.tenant_id.clone();
         let res = self
             .client
             .routed(&tenant, |client| {
@@ -905,6 +911,38 @@ impl Kernable {
             }
             None => Err(Error::Status(tonic::Status::internal("no outcome"))),
         }
+    }
+
+    /// Returns once a read model that answers `query` has processed every partition's head, as
+    /// of the call: a wait-only query to each partition, at the same time.
+    async fn caught_up_everywhere(
+        &self,
+        query: &proto::QueryRequest,
+        timeout: Option<Duration>,
+    ) -> Result<(), Error> {
+        let mut wait = proto::QueryRequest {
+            wait_only: true,
+            min_position: 0,
+            payload: Vec::new(),
+            ..query.clone()
+        };
+        wait.client_sig = Some(self.client.sign(&signing::query_message(&wait)));
+        wait.listener = handling();
+        let mut waits = tokio::task::JoinSet::new();
+        for (_, client) in self.client.partitions().await? {
+            let wait = wait.clone();
+            waits.spawn(async move {
+                client
+                    .call(timeout, wait, |channel, r| async move {
+                        QueryServiceClient::new(channel).query(r).await
+                    })
+                    .await
+            });
+        }
+        while let Some(waited) = waits.join_next().await {
+            waited.map_err(|e| Error::Status(tonic::Status::internal(e.to_string())))??;
+        }
+        Ok(())
     }
 
     /// Streams committed events after `options.after` (backlog first, then live) to `handler`,
@@ -1110,6 +1148,7 @@ pub struct Query {
     context: Option<RequestContext>,
     min_position: u64,
     timeout: Option<Duration>,
+    all_partitions: bool,
 }
 
 impl Query {
@@ -1123,6 +1162,7 @@ impl Query {
             context: None,
             min_position: 0,
             timeout: None,
+            all_partitions: false,
         }
     }
 
@@ -1158,6 +1198,14 @@ impl Query {
     /// How long to wait for the connection and the answer; default [`Options::timeout`].
     pub fn timeout(mut self, timeout: Duration) -> Query {
         self.timeout = Some(timeout);
+        self
+    }
+
+    /// For a read model across tenants with partitions: answer only once the read model has
+    /// processed every partition's events up to the query, not only those of the tenant's
+    /// partition. Costs a wait-only query to each partition first.
+    pub fn all_partitions(mut self) -> Query {
+        self.all_partitions = true;
         self
     }
 }

@@ -90,6 +90,29 @@ test("one client serves the tenants of two partitions", async () => {
       replaying.stop();
       await replayed;
     }
+
+    // A read model across tenants, slow on acme's events: asked in t9's partition (p1), a query with
+    // `allPartitions` waits until it has processed p2 as well (S5).
+    let sum = 0;
+    const slow = counters.readModel("sum", { reconnectMs: 50 })
+      .on("Incremented", async (data: { by: number }, evt) => {
+        if (evt.tenant === "acme") await sleep(1000);
+        sum += data.by;
+      })
+      .query("Sum", () => sum);
+    const summing = kernable.listener(slow);
+    const summed = summing.run();
+    try {
+      await summing.ready;
+      const ask = (allPartitions: boolean) => kernable.query<number>({ domain: "counters", type: "Sum", tenant: "t9", allPartitions });
+      assert.equal(await ask(true), 14, "caught up on both partitions");
+      await kernable.submit({ domain: "counters", aggregateType: "Counter", aggregateId: "c1", type: "Increment", data: { by: 10 }, tenant: "acme", id: "acme-2", wait: "committed" });
+      assert.equal(await ask(false), 14, "a plain query is current only on p1");
+      assert.equal(await ask(true), 24, "allPartitions waits for acme's event on p2");
+    } finally {
+      summing.stop();
+      await summed;
+    }
   } finally {
     worker.stop();
     listener.stop();

@@ -175,10 +175,15 @@ fn query() -> impl Strategy<Value = QueryRequest> {
         (text(), text(), text(), text()),
         text(),
         context(),
-        (0u64..2, 0i64..2),
+        (0u64..2, 0i64..2, proptest::bool::ANY),
     )
         .prop_map(
-            |((id, tenant, domain, query_type), payload, context, (min_position, issued_at))| {
+            |(
+                (id, tenant, domain, query_type),
+                payload,
+                context,
+                (min_position, issued_at, wait_only),
+            )| {
                 QueryRequest {
                     query_id: id,
                     tenant_id: tenant,
@@ -188,6 +193,7 @@ fn query() -> impl Strategy<Value = QueryRequest> {
                     context: Some(context.unwrap_or_default()),
                     min_position,
                     issued_at,
+                    wait_only,
                     ..Default::default()
                 }
             },

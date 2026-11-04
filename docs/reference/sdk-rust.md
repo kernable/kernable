@@ -188,6 +188,7 @@ query's data is an empty object (`{}`).
 - `fn context(self, context: RequestContext) -> Query`: Replaces the client's default context.
 - `fn min_position(self, position: u64) -> Query`: Answer only after the read model has processed this global position (e.g. of a committed submit).
 - `fn timeout(self, timeout: Duration) -> Query`: How long to wait for the connection and the answer; default `Options::timeout`.
+- `fn all_partitions(self) -> Query`: For a read model across tenants with partitions: answer only once the read model has processed every partition's events up to the query, not only those of the tenant's partition. Costs a wait-only query to each partition first.
 
 ### Outcome
 

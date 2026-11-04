@@ -103,6 +103,7 @@ fn now_ms() -> i64 {
 fn signed_query(query_type: &str, min_position: u64, key: &SigningKey) -> QueryRequest {
     let mut q = QueryRequest {
         listener: String::new(),
+        wait_only: false,
         protocol: kernable_core::PROTOCOL,
         query_id: "q1".into(),
         tenant_id: "t1".into(),
@@ -309,4 +310,51 @@ async fn a_read_model_that_goes_away_fails_the_query_at_once() {
         started.elapsed() < Duration::from_millis(900),
         "should not wait for the timeout"
     );
+}
+
+fn wait_only(key: &SigningKey) -> QueryRequest {
+    let mut q = signed_query("CountOrders", 0, key);
+    q.wait_only = true;
+    q.client_sig = Some(signing::sign(key, &signing::query_message(&q)));
+    q
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wait_only_query_returns_once_the_read_model_reached_the_head() {
+    let env = start("query-wait-only").await;
+    spawn_worker(&env).await;
+    // Never acknowledges: its position stays 0.
+    let behind = read_model(&env, "behind", key(5), false);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let cmd = signed(command("c1", "PlaceOrder", "o1"), &key(1));
+    common::submit_with(&env.addr, cmd, kernable_core::proto::Wait::Committed)
+        .await
+        .unwrap();
+    // A plain query is answered at once; a wait-only one waits for the head, here in vain.
+    assert_eq!(
+        response(
+            &ask(&env, signed_query("CountOrders", 0, &key(1)))
+                .await
+                .unwrap()
+        ),
+        "1"
+    );
+    assert_eq!(
+        ask(&env, wait_only(&key(1))).await.unwrap_err().code(),
+        Code::DeadlineExceeded
+    );
+    // The flag is signed: set on a plain query's signature, it is refused.
+    let mut flipped = signed_query("CountOrders", 0, &key(1));
+    flipped.wait_only = true;
+    assert_eq!(
+        ask(&env, flipped).await.unwrap_err().code(),
+        Code::Unauthenticated
+    );
+
+    // A read model that acknowledges reaches the head: the wait returns, with nothing in it.
+    behind.abort();
+    let _model = read_model(&env, "orders", key(5), true);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let waited = ask(&env, wait_only(&key(1))).await.unwrap();
+    assert_eq!(response(&waited), "");
 }

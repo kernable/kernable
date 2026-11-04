@@ -107,7 +107,11 @@ def snapshot_message(c, version: int, schema: str, state: bytes) -> bytes:
 
 def query_message(q) -> bytes:
     m = Msg("kernable.v1.query").str(q.query_id).str(q.tenant_id).str(q.domain).str(q.query_type).bytes(q.payload)
-    return bytes(m.context(q.context).u64(q.min_position).i64(q.issued_at).buf)
+    m = m.context(q.context).u64(q.min_position).i64(q.issued_at)
+    # Only when set, so a query signs as before.
+    if q.wait_only:
+        m = m.str("wait_only")
+    return bytes(m.buf)
 
 
 def data_message(op: str, r) -> bytes:

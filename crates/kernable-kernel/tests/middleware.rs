@@ -252,6 +252,7 @@ fn query(query_type: &str, key: &SigningKey) -> QueryRequest {
         .as_millis() as i64;
     let mut q = QueryRequest {
         listener: String::new(),
+        wait_only: false,
         protocol: kernable_core::PROTOCOL,
         query_id: "q1".into(),
         tenant_id: "t1".into(),

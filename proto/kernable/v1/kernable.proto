@@ -472,6 +472,12 @@ message QueryRequest {
   // after that listener, and refused (FAILED_PRECONDITION) if no other read model answers it
   // or if the listener itself checks the query as a middleware.
   string listener = 11;
+  // Signed, and only when set: answer nothing; return an empty response once a read model that
+  // answers `query_type` has processed this kernel's head (as of the request) and
+  // `min_position`. Not checked by middleware, and any partition takes it, whatever the
+  // tenant: the SDKs send it to every partition before a query across tenants
+  // (`allPartitions`), so that its answer holds every event committed before it.
+  bool wait_only = 12;
 }
 
 message QueryResult {

@@ -135,7 +135,7 @@ export function vaultRef(salt: Buffer, subject: string, secret: boolean, value: 
 }
 
 export function queryMessage(q: WireQueryRequest): Buffer {
-  return new Msg("kernable.v1.query")
+  const m = new Msg("kernable.v1.query")
     .str(q.query_id)
     .str(q.tenant_id)
     .str(q.domain)
@@ -143,8 +143,9 @@ export function queryMessage(q: WireQueryRequest): Buffer {
     .bytes(q.payload)
     .context(q.context)
     .u64(q.min_position)
-    .i64(q.issued_at)
-    .done();
+    .i64(q.issued_at);
+  // Only when set, so a query signs as before.
+  return (q.wait_only ? m.str("wait_only") : m).done();
 }
 
 export function resultMessage(c: Stream, expectedVersion: number, events: WireNewEvent[]): Buffer {

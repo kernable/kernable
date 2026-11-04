@@ -510,6 +510,22 @@ impl Registry {
         })
     }
 
+    /// Whether a connected listener that answers `query_type` has processed the query's
+    /// `min_position` (a wait-only query).
+    pub(crate) fn caught_up(
+        &self,
+        query_type: &str,
+        query: &QueryRequest,
+        caller: Option<&Caller>,
+    ) -> bool {
+        self.entries().values().any(|e| {
+            e.out.is_some()
+                && e.record.position >= query.min_position
+                && e.query_types.iter().any(|t| t == query_type)
+                && caller.is_none_or(|c| c.independent(e, query.min_position))
+        })
+    }
+
     /// Picks a connected listener that answers `query_type` and has processed the query's
     /// `min_position`, and registers the call. Returns `None` if there is none (yet).
     pub(crate) fn dispatch(

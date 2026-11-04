@@ -1,6 +1,8 @@
 //! Checks the signing layout against `proto/test-vectors/signing.json`, which every SDK must pass too.
 //! Regenerate after an intentional layout change with `KERNABLE_REGEN_VECTORS=1 cargo test -p kernable-core`.
 
+#![recursion_limit = "256"]
+
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
@@ -228,6 +230,26 @@ fn vectors() -> Value {
                    "issued_at": 1_700_000_000_000i64}),
             signing::query_message(&kernable_core::proto::QueryRequest {
                 listener: String::new(),
+                wait_only: false,
+                protocol: kernable_core::PROTOCOL,
+                query_id: "q-1".into(),
+                tenant_id: cmd.tenant_id.clone(),
+                domain: "identity".into(),
+                query_type: "GetAccount".into(),
+                payload: br#"{"id":"a-1"}"#.to_vec(),
+                context: Some(context.clone()),
+                min_position: 7,
+                issued_at: 1_700_000_000_000,
+                client_sig: None,
+            }),
+        ),
+        "query_wait_only": entry(
+            json!({"query_id": "q-1", "tenant_id": cmd.tenant_id, "domain": "identity", "query_type": "GetAccount",
+                   "payload_hex": hex::encode(br#"{"id":"a-1"}"#), "context": context_json, "min_position": 7, "wait_only": true,
+                   "issued_at": 1_700_000_000_000i64}),
+            signing::query_message(&kernable_core::proto::QueryRequest {
+                listener: String::new(),
+                wait_only: true,
                 protocol: kernable_core::PROTOCOL,
                 query_id: "q-1".into(),
                 tenant_id: cmd.tenant_id.clone(),

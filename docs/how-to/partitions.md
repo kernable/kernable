@@ -62,6 +62,26 @@ Give every process the address of one partition (or of all, comma-separated): th
 
 A subscription reads every partition too, from their beginnings, with events in order within a partition but not across them.
 
+A **read model across tenants** (totals over all customers, an admin list) holds the events of every partition, but a query reaches it through one partition, its tenant's, and the kernel there only knows how far the read model got on that partition. To get an answer that holds everything committed anywhere before the query, ask with `allPartitions`:
+
+::: code-group
+
+```ts [TypeScript]
+const total = await kernable.query<number>({ domain: "billing", type: "Revenue", allPartitions: true });
+```
+
+```python [Python]
+total = k.query("billing", "Revenue", all_partitions=True)
+```
+
+```rust [Rust]
+let total: u64 = kernable.query(Query::new("billing", "Revenue").all_partitions()).await?;
+```
+
+:::
+
+The SDK first sends a wait-only query to every partition at once; each returns as soon as the read model has processed that partition's events up to that moment, and then the query itself goes to the tenant's partition. It costs one round trip per partition, in parallel, plus however long the read model needs to catch up. Without partitions it waits for the one kernel the same way.
+
 ## 5. Move a tenant
 
 ```sh
@@ -108,7 +128,7 @@ On one machine, two partitions give about 1.5 times one; beyond that the shared 
 ## Limits
 
 - **One tenant never grows beyond one partition.** Give a big tenant a partition of its own.
-- **Across tenants, there is no order and no atomicity**: a command changes one aggregate of one tenant, as always; a read model across partitions sees each partition's events in order, not one global order.
+- **Across tenants, there is no order and no atomicity**: a command changes one aggregate of one tenant, as always; a read model across partitions sees each partition's events in order, not one global order. A query with `allPartitions` sees everything committed before it, but no order between partitions either.
 - **Unique keys with `scope: global`** are unique across all partitions: before a partition commits one its aggregate did not hold, it reserves the key on the control partition, which asks the partition that had it whether it still does (a moment of extra latency for those commits, and none while the control partition is down: they wait). Personal global keys are unique within each partition only.
 - New partitions in the map reach running workers and listeners when they start again.
 - A move copies the tenant's vault values only to a target with a vault. The source's standby drops the tenant's vault values and files only once it serves as the primary.
