@@ -201,3 +201,28 @@ async fn a_node_builds_and_runs_a_service_after_its_kernel() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Linux only: children are bound to the node with PR_SET_PDEATHSIG.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_killed_node_takes_its_kernel_along() {
+    let dir = std::env::temp_dir().join(format!("kn-node-killed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (addr, metrics) = (free_addr(), free_addr());
+    project(&dir, &addr, "", &metrics);
+    let mut node = Node::start(&dir);
+    let kernel = node.next_start("kernel");
+    wait_for(&addr).await;
+    // SAFETY: SIGKILL to the node we started: it cannot stop its children itself.
+    unsafe { libc::kill(node.process.id() as libc::pid_t, libc::SIGKILL) };
+    let _ = node.process.wait();
+    for _ in 0..100 {
+        if !alive(kernel) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(!alive(kernel), "the kernel ended with its node");
+    let _ = std::fs::remove_dir_all(&dir);
+}
