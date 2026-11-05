@@ -264,7 +264,7 @@ async fn worker(addr: &str, key: &str, concurrency: u32, keys: bool) -> Result<(
         ..Default::default()
     })))
     .await?;
-    let mut client = WorkerGatewayClient::new(transport::connect(addr).await?);
+    let mut client = WorkerGatewayClient::new(connect(addr).await?);
     let mut inbound = client
         .session(granted(ReceiverStream::new(rx)))
         .await?
@@ -335,7 +335,7 @@ async fn listener(addr: &str, key: &str, name: &str, order: i32) -> Result<(), B
         ..Default::default()
     })))
     .await?;
-    let mut client = ListenerServiceClient::new(transport::connect(addr).await?);
+    let mut client = ListenerServiceClient::new(connect(addr).await?);
     let mut inbound = client
         .listen(granted(ReceiverStream::new(rx)))
         .await?
@@ -371,7 +371,7 @@ async fn reader(addr: &str, key: &str, name: &str) -> Result<(), BoxError> {
         ..Default::default()
     })))
     .await?;
-    let mut client = ListenerServiceClient::new(transport::connect(addr).await?);
+    let mut client = ListenerServiceClient::new(connect(addr).await?);
     let mut inbound = client
         .listen(granted(ReceiverStream::new(rx)))
         .await?
@@ -533,7 +533,7 @@ async fn subscribe(addr: &str, key: &str, after: u64, count: usize) -> Result<()
         protocol: kernable_core::PROTOCOL,
     };
     let started = Instant::now();
-    let mut stream = EventServiceClient::new(transport::connect(addr).await?)
+    let mut stream = EventServiceClient::new(connect(addr).await?)
         .subscribe(granted(request))
         .await?
         .into_inner();
@@ -616,10 +616,26 @@ impl Opts {
     }
 }
 
+/// A channel to the kernel at `addr`, over mutual TLS when `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT`
+/// and `KERNABLE_TLS_KEY` name its files, as for the SDKs.
+async fn connect(addr: &str) -> Result<Channel, BoxError> {
+    let var = |name: &str| std::env::var_os(name).map(std::path::PathBuf::from);
+    match (
+        var("KERNABLE_TLS_CA"),
+        var("KERNABLE_TLS_CERT"),
+        var("KERNABLE_TLS_KEY"),
+    ) {
+        (Some(ca), Some(cert), Some(key)) => {
+            transport::connect_tls(addr, &transport::Tls { ca, cert, key }).await
+        }
+        _ => Ok(transport::connect(addr).await?),
+    }
+}
+
 async fn channels(addr: &str, n: usize) -> Result<Vec<Channel>, BoxError> {
     let mut all = Vec::with_capacity(n);
     for _ in 0..n {
-        all.push(transport::connect(addr).await?);
+        all.push(connect(addr).await?);
     }
     Ok(all)
 }
@@ -793,7 +809,7 @@ async fn load(addr: &str, key: &str, opts: Opts) -> Result<(), BoxError> {
 async fn history(addr: &str, key: &str, events: usize) -> Result<(), BoxError> {
     const SAMPLES: usize = 200;
     let key = signing::read_signing_key(key)?;
-    let channel = transport::connect(addr).await?;
+    let channel = connect(addr).await?;
     let payload = pad(1024);
     let run = run_id();
     let one = |i: usize| {

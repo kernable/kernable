@@ -28,9 +28,11 @@ pub(crate) trait Accept: Send + 'static {
 impl Accept for tokio::net::TcpListener {
     type Io = tokio::net::TcpStream;
     async fn accept(&self) -> io::Result<Self::Io> {
-        tokio::net::TcpListener::accept(self)
-            .await
-            .map(|(io, _)| io)
+        let (io, _) = tokio::net::TcpListener::accept(self).await?;
+        // Each answer goes out at once: with Nagle's algorithm a small answer waits for the
+        // client's delayed acknowledgement, about 40 ms on Linux.
+        io.set_nodelay(true)?;
+        Ok(io)
     }
 }
 
@@ -137,5 +139,20 @@ impl<Io: AsyncWrite + Unpin> AsyncWrite for Limited<Io> {
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.io).poll_shutdown(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_tcp_connection_sends_each_answer_at_once() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(tokio::net::TcpStream::connect(addr));
+        let io = Accept::accept(&listener).await.unwrap();
+        assert!(io.nodelay().unwrap(), "no Nagle delay on the kernel's side");
+        drop(client.await);
     }
 }
