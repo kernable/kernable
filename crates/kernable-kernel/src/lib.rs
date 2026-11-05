@@ -2701,7 +2701,14 @@ async fn dispatch(session: Arc<Session>, command_types: Vec<String>, permits: Ar
         };
         let (lease_id, command, received_at) = loop {
             let notified = kernel.work.notified();
-            if let Some(lease) = kernel.queue.lease(&types, ttl) {
+            // Not one it still runs itself: a lease that ran out under it goes to another
+            // worker first, so a worker too slow for its lease cannot keep a command forever.
+            let busy: std::collections::HashSet<String> = session
+                .in_flight()
+                .values()
+                .map(|f| f.command.command_id.clone())
+                .collect();
+            if let Some(lease) = kernel.queue.lease(&types, ttl, &busy) {
                 break lease;
             }
             tokio::select! {

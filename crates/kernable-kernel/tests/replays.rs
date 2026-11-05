@@ -246,6 +246,12 @@ async fn a_write_signed_before_the_kernel_started_is_refused() {
 #[tokio::test]
 async fn a_failed_data_write_cannot_be_sent_again_under_the_same_signature() {
     use std::os::unix::fs::PermissionsExt;
+    // The write fails because the directory refuses it, which root's never does.
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: as root no directory refuses a write");
+        return;
+    }
     let env = start_with_writer("replay-failed-write").await;
     let mut files = DataServiceClient::new(transport::connect(&env.addr).await.unwrap());
     let files_dir = env.dir.join("data");

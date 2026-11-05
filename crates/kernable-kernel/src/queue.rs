@@ -131,19 +131,30 @@ impl Queue {
     }
 
     /// Leases the command that has waited longest among the free aggregates whose next
-    /// command has one of the qualified `command_types`. Expired leases are given back first.
+    /// command has one of the qualified `command_types`, but none of the `busy` ones (commands
+    /// the asking worker still runs: a lease that ran out under it goes to another worker first,
+    /// and back to it once its own attempt is over). Expired leases are given back first.
     /// Returns the lease ID, the command and when it was received.
     pub(crate) fn lease(
         &self,
         command_types: &[&str],
         ttl: Duration,
+        busy: &HashSet<String>,
     ) -> Option<(String, Command, i64)> {
         let now = Instant::now();
         let mut inner = self.inner();
         inner.expire(now);
+        let inner_ref = &*inner;
         let (command_type, seq) = command_types
             .iter()
-            .filter_map(|t| Some((*t, *inner.ready.get(*t)?.first_key_value()?.0)))
+            .filter_map(|t| {
+                let (seq, _) = inner_ref.ready.get(*t)?.iter().find(|(_, key)| {
+                    inner_ref.aggregates[*key]
+                        .front()
+                        .is_some_and(|(c, _)| !busy.contains(&c.command_id))
+                })?;
+                Some((*t, *seq))
+            })
             .min_by_key(|(_, seq)| *seq)?;
         let key = inner
             .ready
@@ -222,7 +233,8 @@ mod tests {
     }
 
     fn lease(q: &Queue, types: &[&str]) -> Option<(String, String)> {
-        q.lease(types, TTL).map(|(l, c, _)| (l, c.command_id))
+        q.lease(types, TTL, &HashSet::new())
+            .map(|(l, c, _)| (l, c.command_id))
     }
 
     #[test]
@@ -276,11 +288,30 @@ mod tests {
         q.release(&first);
         assert!(!q.holds(&first));
 
-        let (_, id, _) = q.lease(&["d.A"], Duration::ZERO).unwrap();
+        let (_, id, _) = q.lease(&["d.A"], Duration::ZERO, &HashSet::new()).unwrap();
         assert_eq!(id.command_id, "c1");
         let (again, id) = lease(&q, &["d.A"]).unwrap(); // the zero-TTL lease has expired
         assert_eq!(id, "c1");
         assert!(q.holds(&again));
+    }
+
+    #[test]
+    fn a_lease_that_ran_out_goes_to_another_worker_than_the_one_still_running_it() {
+        let q = Queue::default();
+        q.push(cmd("c1", "A", "x"), 0);
+        q.push(cmd("c2", "A", "y"), 0);
+        let (_, first, _) = q.lease(&["d.A"], Duration::ZERO, &HashSet::new()).unwrap();
+        assert_eq!(first.command_id, "c1");
+        // Its lease ran out while the worker still runs it: it gets the next command, not c1.
+        let running = HashSet::from(["c1".to_owned()]);
+        let (_, next, _) = q.lease(&["d.A"], TTL, &running).unwrap();
+        assert_eq!(next.command_id, "c2");
+        assert!(
+            q.lease(&["d.A"], TTL, &running).is_none(),
+            "c1 waits for another"
+        );
+        // Another worker gets it; and so does the first once its own attempt is over.
+        assert_eq!(lease(&q, &["d.A"]).unwrap().1, "c1");
     }
 
     #[test]
@@ -315,7 +346,9 @@ mod tests {
             ..Limits::default()
         };
         assert_eq!(q.room(&cmd("c4", "A", "o3"), &small), Err("queued_bytes"));
-        let (lease, _, _) = q.lease(&["d.A"], Duration::from_secs(9)).unwrap();
+        let (lease, _, _) = q
+            .lease(&["d.A"], Duration::from_secs(9), &HashSet::new())
+            .unwrap();
         q.done(&lease);
         assert!(
             q.inner().bytes < bytes,
