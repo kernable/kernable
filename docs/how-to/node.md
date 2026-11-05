@@ -28,6 +28,13 @@ follow = "10.0.0.1:7233,10.0.0.2:7233"     # optional: default the kernel's list
 segment-seconds = 5                        # optional, as base-hours and keep
 env = { AWS_ACCESS_KEY_ID = "…", AWS_SECRET_ACCESS_KEY = "…" }
 
+[pair]                                     # optional: one node of a pair
+witness = "10.0.0.9:7300"
+node-key = "node-a.key"
+advertise = "10.0.0.1:7233"                # optional: default the kernel's listen
+peer = "10.0.0.2:7233"                     # the other node's kernel
+kernel-keys = ["kernel-a.pub", "kernel-b.pub"]
+
 [node]                                     # optional
 instance = "node-a"                        # KERNABLE_INSTANCE for the services (default the host name)
 project = "shop"                           # names the containers (default the file's directory)
@@ -39,8 +46,13 @@ build = "./worker"                         # a directory with a Containerfile or
 command = ["node", "app.ts"]               # optional: the image's own by default
 key = "keys/worker.key"                    # optional: with keys/worker.grant next to it
 env = { SHOP_MAIL = "smtp://mail:25" }     # optional
+secrets = ["stripe"]                       # optional: see [[secret]]
 cpus = "1.5"                               # optional, as memory = "512m"
 stop-seconds = 10                          # optional
+
+[[secret]]                                 # one per secret
+name = "stripe"
+file = "secrets/stripe.key"                # or: command = ["vault", "kv", "get", "-field=key", "shop/stripe"]
 ```
 
 `flags` are the flags of `kernable start` ([Configuration](../reference/configuration)) without their dashes; `dev = true` stands for `--dev`. With a `[backup]` section the kernel gets `--backup on`. Paths are relative to the file's directory, where the children run. Unknown keys are refused, so a typo does not go unnoticed: at start the node exits with 2, later it logs the error and the children run on as they are.
@@ -56,6 +68,15 @@ Run it under your service manager (systemd, launchd) so the node itself starts w
 Each `[[service]]` is built with `podman build` on the machine, at start, when its section changes, and on SIGHUP, then run with `podman run --rm` as `kernable-<project>-<name>`, after the kernel and stopped before it. It runs on the machine's network and finds the kernel by itself: the node sets `KERNABLE_URL` to the kernel's `listen` and `KERNABLE_INSTANCE` to the node's instance, which the SDKs read. With `key`, the key file and the `.grant` file next to it are mounted read-only and named in `KERNABLE_KEY` and `KERNABLE_GRANT`; create them with `kernable keys new` and `kernable grant`, so the root key never comes near the machine. A service that exits is started again like the kernel.
 
 Install Podman on the machine first (rootless is fine). Services run on Linux; on a Mac, Podman's containers live in a virtual machine and do not share its network.
+
+## Secrets
+
+A `[[secret]]` names a value your services need (a payment provider's key, a mail password) without writing it into the file: it comes from a file, or from the output of a command such as your KMS's client. A service that lists it in `secrets` finds it, read-only, at `/run/secrets/<name>`.
+
+- **A file** is read again when it changes; **a command** runs at start and on SIGHUP, as `--key-command` does.
+- **A new value** restarts the services that read it, and only those.
+- **Where the values live:** in a directory only the node's user may enter, in memory where the system has one (`$XDG_RUNTIME_DIR`, or `/run` as root).
+- **A secret that cannot be read** stops the node at start; later, the services keep the value they have, and the log names the secret.
 
 ## Metrics
 
@@ -73,5 +94,5 @@ The kernel keeps its own metrics on its `--metrics-listen` ([Monitor kernable](.
 
 ## Two machines
 
-Each machine of a [standby pair](./standby) runs its own node, with its own `project.toml`: the kernel's flags name the witness and its node key, and `follow` names both kernels, so the backup follower turns to whichever is the primary. Your read models and reactors run on both machines as [instances](./instances).
+Each machine of a [standby pair](./standby) runs its own node, with its own `project.toml` and a `[pair]` section: the witness, this node's key, its own address and the other node's (`peer`), and both kernels' kernel keys. From it the node sets the kernel's pair flags (don't repeat them in `flags`), lets the backup follower turn to whichever kernel is the primary, and gives your services both addresses in `KERNABLE_URL`. Your read models and reactors run on both machines as [instances](./instances).
 

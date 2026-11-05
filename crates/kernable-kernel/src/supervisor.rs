@@ -47,6 +47,11 @@
 //! the host's network with `KERNABLE_URL` (the kernel's `--listen`), `KERNABLE_INSTANCE`, and,
 //! with a key, `KERNABLE_KEY` and `KERNABLE_GRANT` naming the files mounted read-only.
 //!
+//! Secrets are named in `[[secret]]` (a `file`, or a `command` run at start and on SIGHUP)
+//! and mounted read-only at `/run/secrets/<name>` into the services that list them; a new value
+//! restarts those. A `[pair]` section (witness, node-key, advertise, peer, kernel-keys) sets the
+//! kernel's pair flags and gives the backup follower and the services both kernels' addresses.
+//!
 //! The kernel's flags are those of `kernable start`, without their dashes; a `[backup]`
 //! section adds `--backup on`. Paths are relative to the file's directory, where the children
 //! run.
@@ -66,6 +71,8 @@ use tokio::{
     task::JoinHandle,
 };
 
+use sha2::Digest;
+
 use crate::BoxError;
 
 /// A child process as the file describes it; a change restarts it.
@@ -81,6 +88,8 @@ pub struct Spec {
     pub stop: Duration,
     /// A service: what to build before it runs.
     pub container: Option<Container>,
+    /// A service: the secrets it reads; a new value of one restarts it.
+    pub secrets: Vec<String>,
 }
 
 /// How a service's image is built and named.
@@ -99,9 +108,36 @@ pub struct Container {
 struct Project {
     kernel: KernelSection,
     backup: Option<BackupSection>,
+    pair: Option<PairSection>,
     node: Option<NodeSection>,
     #[serde(default)]
     service: Vec<ServiceSection>,
+    #[serde(default)]
+    secret: Vec<SecretSection>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct SecretSection {
+    name: String,
+    file: Option<PathBuf>,
+    #[serde(default)]
+    command: Vec<String>,
+}
+
+/// A named secret: its value comes from a file, read at every look, or from a command
+/// (a KMS client), run at start and on SIGHUP; it never stands in `project.toml`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Secret {
+    pub name: String,
+    pub source: SecretSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SecretSource {
+    /// Absolute.
+    File(PathBuf),
+    Command(Vec<String>),
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -120,6 +156,10 @@ pub struct Plan {
     pub children: Vec<Spec>,
     /// `[node] metrics-listen`.
     pub metrics_listen: Option<String>,
+    pub secrets: Vec<Secret>,
+    /// Where the node keeps the secrets' values for the services to mount: a directory only
+    /// its user may enter, in memory where the system has one (`XDG_RUNTIME_DIR`, `/run`).
+    pub secrets_dir: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -133,6 +173,8 @@ struct ServiceSection {
     key: Option<PathBuf>,
     #[serde(default)]
     env: BTreeMap<String, String>,
+    #[serde(default)]
+    secrets: Vec<String>,
     cpus: Option<String>,
     memory: Option<String>,
     stop_seconds: Option<u64>,
@@ -148,6 +190,32 @@ struct KernelSection {
     #[serde(default)]
     env: BTreeMap<String, String>,
 }
+
+/// One node of a pair: the kernel's pair flags, the backup follower's and the services'
+/// addresses, from one place.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct PairSection {
+    witness: String,
+    node_key: String,
+    /// Where the other node, the backup follower and the services reach this kernel. Default:
+    /// the kernel's `listen`.
+    advertise: Option<String>,
+    /// The other node's kernel, as it advertises itself.
+    peer: String,
+    /// Both kernels' kernel keys: either may be the primary.
+    kernel_keys: Vec<String>,
+    standby_timeout_ms: Option<u64>,
+}
+
+/// The kernel flags `[pair]` sets.
+const PAIR_FLAGS: [&str; 5] = [
+    "witness",
+    "node-key",
+    "advertise",
+    "primary-kernel-key",
+    "standby-timeout-ms",
+];
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
@@ -201,6 +269,33 @@ pub fn plan(text: &str, dir: &Path, this: &Path) -> Result<Plan, BoxError> {
         args.push(format!("--{flag}"));
         args.push(value);
     }
+    // The other kernel of a pair, for the backup follower and the services: they turn to
+    // whichever is the primary.
+    let mut peer = None;
+    if let Some(pair) = &project.pair {
+        if let Some(flag) = PAIR_FLAGS.iter().find(|f| k.flags.contains_key(**f)) {
+            return Err(format!("[kernel] flags: {flag} comes from [pair]; drop it").into());
+        }
+        if pair.kernel_keys.is_empty() {
+            return Err("[pair] kernel-keys: name both kernels' kernel keys".into());
+        }
+        let advertise = pair.advertise.clone().unwrap_or_else(|| listen.clone());
+        args.extend([
+            "--witness".into(),
+            pair.witness.clone(),
+            "--node-key".into(),
+            pair.node_key.clone(),
+            "--advertise".into(),
+            advertise.clone(),
+        ]);
+        for key in &pair.kernel_keys {
+            args.extend(["--primary-kernel-key".into(), key.clone()]);
+        }
+        if let Some(ms) = pair.standby_timeout_ms {
+            args.extend(["--standby-timeout-ms".into(), ms.to_string()]);
+        }
+        peer = Some((advertise, pair.peer.clone()));
+    }
     if project.backup.is_some() && !k.flags.contains_key("backup") {
         args.extend(["--backup".into(), "on".into()]);
     }
@@ -211,12 +306,16 @@ pub fn plan(text: &str, dir: &Path, this: &Path) -> Result<Plan, BoxError> {
         env: k.env,
         stop,
         container: None,
+        secrets: Vec::new(),
     }];
     if let Some(b) = project.backup {
         let mut args = vec![
             "backup".to_owned(),
             "--follow".into(),
-            b.follow.unwrap_or_else(|| listen.clone()),
+            b.follow.unwrap_or_else(|| match &peer {
+                Some((this, other)) => format!("{this},{other}"),
+                None => listen.clone(),
+            }),
             "--key".into(),
             b.key,
             "--to".into(),
@@ -240,6 +339,7 @@ pub fn plan(text: &str, dir: &Path, this: &Path) -> Result<Plan, BoxError> {
             env: b.env,
             stop,
             container: None,
+            secrets: Vec::new(),
         });
     }
     let node = project.node.unwrap_or_default();
@@ -262,20 +362,49 @@ pub fn plan(text: &str, dir: &Path, this: &Path) -> Result<Plan, BoxError> {
         return Err(format!("[node] project {name}: letters, digits, - and _ only").into());
     }
     let podman = node.podman.unwrap_or_else(|| PathBuf::from("podman"));
-    // Services reach the kernel on the host's network.
-    let url = match listen.rsplit_once(':') {
+    // Services reach the kernel on the host's network, and in a pair the other one too.
+    let mut url = match listen.rsplit_once(':') {
         Some(("0.0.0.0" | "[::]" | "", port)) => {
             format!("127.0.0.1:{port}")
         }
         _ => listen.clone(),
     };
+    if let Some((_, other)) = &peer {
+        url = format!("{url},{other}");
+    }
+    let mut secrets = Vec::new();
+    for sec in project.secret {
+        if !valid_name(&sec.name) {
+            return Err(format!(
+                "[[secret]] {}: a name has 1 to 63 lowercase letters, digits and -",
+                sec.name
+            )
+            .into());
+        }
+        if secrets.iter().any(|s: &Secret| s.name == sec.name) {
+            return Err(format!("[[secret]] {} is named twice", sec.name).into());
+        }
+        let source = match (sec.file, sec.command.is_empty()) {
+            (Some(file), true) => SecretSource::File(dir.join(file)),
+            (None, false) => SecretSource::Command(sec.command),
+            _ => {
+                return Err(format!(
+                    "[[secret]] {}: give its value either as a file or as a command",
+                    sec.name
+                )
+                .into());
+            }
+        };
+        secrets.push(Secret {
+            name: sec.name,
+            source,
+        });
+    }
+    let secrets_dir = runtime_dir()
+        .join(format!("kernable-{name}"))
+        .join("secrets");
     for svc in project.service {
-        let valid = (1..=63).contains(&svc.name.len())
-            && svc
-                .name
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
-        if !valid || matches!(svc.name.as_str(), "kernel" | "backup") {
+        if !valid_name(&svc.name) || matches!(svc.name.as_str(), "kernel" | "backup") {
             return Err(format!(
                 "[[service]] {}: a name has 1 to 63 lowercase letters, digits and -, and is not kernel or backup",
                 svc.name
@@ -317,6 +446,20 @@ pub fn plan(text: &str, dir: &Path, this: &Path) -> Result<Plan, BoxError> {
         for (k, v) in &svc.env {
             args.extend(["--env".into(), format!("{k}={v}")]);
         }
+        for secret in &svc.secrets {
+            if !secrets.iter().any(|s| &s.name == secret) {
+                return Err(
+                    format!("[[service]] {}: no [[secret]] is named {secret}", svc.name).into(),
+                );
+            }
+            args.extend([
+                "--volume".into(),
+                format!(
+                    "{}:/run/secrets/{secret}:ro,Z",
+                    secrets_dir.join(secret).display()
+                ),
+            ]);
+        }
         if let Some(cpus) = &svc.cpus {
             args.extend(["--cpus".into(), cpus.clone()]);
         }
@@ -335,12 +478,146 @@ pub fn plan(text: &str, dir: &Path, this: &Path) -> Result<Plan, BoxError> {
                 file: svc.file,
                 command: svc.command,
             }),
+            secrets: svc.secrets,
         });
     }
     Ok(Plan {
         children: specs,
         metrics_listen,
+        secrets,
+        secrets_dir,
     })
+}
+
+/// The project file and every file a secret is read from.
+fn watched_files(project: &Path, secrets: &[Secret]) -> Vec<PathBuf> {
+    let mut files = vec![project.to_owned()];
+    for secret in secrets {
+        if let SecretSource::File(path) = &secret.source {
+            files.push(path.clone());
+        }
+    }
+    files
+}
+
+/// A name of a service or a secret: 1 to 63 lowercase letters, digits and `-`.
+fn valid_name(name: &str) -> bool {
+    (1..=63).contains(&name.len())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// A directory in memory for this user, where the system has one.
+fn runtime_dir() -> PathBuf {
+    match std::env::var_os("XDG_RUNTIME_DIR") {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        // SAFETY: geteuid(2) cannot fail.
+        _ if unsafe { libc::geteuid() } == 0 => PathBuf::from("/run"),
+        _ => std::env::temp_dir(),
+    }
+}
+
+/// The secrets' values as the node last read them: written to `Plan::secrets_dir`, and their
+/// hashes stamped on the services that read them.
+#[derive(Default)]
+struct Secrets {
+    held: BTreeMap<String, [u8; 32]>,
+}
+
+impl Secrets {
+    /// Reads every secret again (a command's only with `commands`, or when it has no value
+    /// yet) and writes a changed one. A secret that cannot be read keeps its value; the error
+    /// names every one that failed.
+    async fn refresh(&mut self, plan: &Plan, dir: &Path, commands: bool) -> Result<(), String> {
+        let mut failed = Vec::new();
+        for secret in &plan.secrets {
+            let value = match &secret.source {
+                SecretSource::File(path) => {
+                    std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))
+                }
+                SecretSource::Command(_) if !commands && self.held.contains_key(&secret.name) => {
+                    continue;
+                }
+                SecretSource::Command(command) => run_secret_command(command, dir).await,
+            };
+            let written = value.and_then(|value| {
+                let hash: [u8; 32] = sha2::Sha256::digest(&value).into();
+                if self.held.get(&secret.name) != Some(&hash) {
+                    write_secret(&plan.secrets_dir, &secret.name, &value)
+                        .map_err(|e| format!("writing it: {e}"))?;
+                    self.held.insert(secret.name.clone(), hash);
+                }
+                Ok(())
+            });
+            if let Err(e) = written {
+                failed.push(format!("{}: {e}", secret.name));
+            }
+        }
+        match failed.is_empty() {
+            true => Ok(()),
+            false => Err(format!("secrets not read: {}", failed.join("; "))),
+        }
+    }
+
+    /// Labels every service with the hashes of the secrets it reads: a new value changes its
+    /// command, so it starts again with it.
+    fn stamp(&self, children: &mut [Spec]) {
+        for spec in children {
+            for name in &spec.secrets {
+                if let Some(hash) = self.held.get(name) {
+                    let short: String = hash[..8].iter().map(|b| format!("{b:02x}")).collect();
+                    spec.args
+                        .extend(["--label".into(), format!("kernable.secret.{name}={short}")]);
+                }
+            }
+        }
+    }
+}
+
+/// Runs a secret's command in the project directory; its output, without a final newline, is
+/// the value. Waits 30 s at most.
+async fn run_secret_command(command: &[String], dir: &Path) -> Result<Vec<u8>, String> {
+    let (program, args) = command.split_first().ok_or("an empty command")?;
+    let output = Command::new(program)
+        .args(args)
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let output = tokio::time::timeout(Duration::from_secs(30), output)
+        .await
+        .map_err(|_| format!("{program} did not finish within 30 s"))?
+        .map_err(|e| format!("{program}: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{program} failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let mut value = output.stdout;
+    if value.last() == Some(&b'\n') {
+        value.pop();
+    }
+    Ok(value)
+}
+
+/// Writes a secret's value into `dir` (created for this user alone), replacing the file whole.
+fn write_secret(dir: &Path, name: &str, value: &[u8]) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    let path = dir.join(name);
+    let next = dir.join(format!(".{name}.next"));
+    // Readable inside the container whatever user it runs as; the directory keeps everyone
+    // else on the machine out.
+    std::fs::write(&next, value)?;
+    std::fs::set_permissions(&next, std::fs::Permissions::from_mode(0o644))?;
+    std::fs::rename(&next, &path)
 }
 
 /// This machine's name, for `KERNABLE_INSTANCE`.
@@ -590,7 +867,13 @@ pub async fn run(path: &Path) -> Result<(), BoxError> {
             std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         plan(&text, &dir, &this).map_err(|e| format!("{}: {e}", path.display()).into())
     };
-    let first = read()?;
+    let mut first = read()?;
+    let mut secrets = Secrets::default();
+    secrets
+        .refresh(&first, &dir, true)
+        .await
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    secrets.stamp(&mut first.children);
     let board: Board = Arc::default();
     let _metrics = match &first.metrics_listen {
         Some(addr) => {
@@ -607,7 +890,9 @@ pub async fn run(path: &Path) -> Result<(), BoxError> {
     };
     let metrics_listen = first.metrics_listen.clone();
     let mut children: Vec<Running> = Vec::new();
-    let mut last_read = modified(&path);
+    // The file and the secrets read from files: a change to either is read at the next look.
+    let mut watched = watched_files(&path, &first.secrets);
+    let mut last_read = watched.iter().map(|p| modified(p)).collect::<Vec<_>>();
     apply(&mut children, first.children).await;
     let mut tick = tokio::time::interval(Duration::from_millis(500));
     let mut hangup = signal(libc::SIGHUP)?;
@@ -618,7 +903,9 @@ pub async fn run(path: &Path) -> Result<(), BoxError> {
     let mut sampling: Option<JoinHandle<()>> = None;
     loop {
         let (reread, rebuild) = tokio::select! {
-            _ = tick.tick() => (modified(&path) != last_read, false),
+            _ = tick.tick() => {
+                (watched.iter().map(|p| modified(p)).collect::<Vec<_>>() != last_read, false)
+            }
             _ = hangup.recv() => {
                 // The kernel reads its keys again on SIGHUP (and --key-command runs again).
                 for c in children.iter().filter(|c| c.spec.name == "kernel") {
@@ -633,9 +920,16 @@ pub async fn run(path: &Path) -> Result<(), BoxError> {
             _ = interrupt.recv() => break,
         };
         if reread {
-            last_read = modified(&path);
+            last_read = watched.iter().map(|p| modified(p)).collect();
             match read() {
-                Ok(plan) => {
+                Ok(mut plan) => {
+                    // A command's secret runs again on SIGHUP only, as --key-command does.
+                    if let Err(e) = secrets.refresh(&plan, &dir, rebuild).await {
+                        tracing::error!(error = %e, "the services keep the values they have");
+                    }
+                    secrets.stamp(&mut plan.children);
+                    watched = watched_files(&path, &plan.secrets);
+                    last_read = watched.iter().map(|p| modified(p)).collect();
                     if plan.metrics_listen != metrics_listen {
                         tracing::warn!(
                             "[node] metrics-listen changed: it applies when the node starts again"
@@ -1153,6 +1447,175 @@ memory = "512m"
             !text.contains("uptime_seconds{child=\"worker\"}"),
             "not while it is down"
         );
+    }
+
+    #[test]
+    fn a_pair_section_sets_the_kernel_s_pair_flags_and_both_addresses() {
+        let text = r#"
+[kernel]
+flags = { listen = "10.0.0.1:7233", root = "root.pub" }
+
+[pair]
+witness = "10.0.0.9:7300"
+node-key = "node-a.key"
+peer = "10.0.0.2:7233"
+kernel-keys = ["kernel-a.pub", "kernel-b.pub"]
+
+[backup]
+to = "file:backups"
+key = "backup.key"
+backup-key = "backup-encryption.key"
+
+[[service]]
+name = "worker"
+build = "."
+"#;
+        let specs = specs_of(text).unwrap();
+        assert_eq!(
+            specs[0].args.join(" "),
+            "start --listen 10.0.0.1:7233 --root root.pub --witness 10.0.0.9:7300 \
+             --node-key node-a.key --advertise 10.0.0.1:7233 --primary-kernel-key kernel-a.pub \
+             --primary-kernel-key kernel-b.pub --backup on"
+        );
+        assert_eq!(
+            specs[1].args[..3],
+            ["backup", "--follow", "10.0.0.1:7233,10.0.0.2:7233"]
+        );
+        let worker = specs[2].args.join(" ");
+        assert!(
+            worker.contains("--env KERNABLE_URL=10.0.0.1:7233,10.0.0.2:7233"),
+            "{worker}"
+        );
+        let twice = text.replace("root = \"root.pub\"", "witness = \"w:1\"");
+        let error = specs_of(&twice).unwrap_err().to_string();
+        assert!(error.contains("witness comes from [pair]"), "{error}");
+        let keyless = text.replace("[\"kernel-a.pub\", \"kernel-b.pub\"]", "[]");
+        assert!(specs_of(&keyless).is_err());
+    }
+
+    #[test]
+    fn a_service_reads_the_secrets_it_lists_as_files() {
+        let text = r#"
+[kernel]
+[node]
+project = "shop"
+
+[[secret]]
+name = "stripe"
+file = "secrets/stripe.key"
+
+[[secret]]
+name = "smtp"
+command = ["kms", "decrypt", "smtp"]
+
+[[service]]
+name = "worker"
+build = "."
+secrets = ["stripe"]
+"#;
+        let plan = plan(text, Path::new("/srv/shop"), Path::new("/bin/kernable")).unwrap();
+        assert_eq!(
+            plan.secrets[0].source,
+            SecretSource::File("/srv/shop/secrets/stripe.key".into())
+        );
+        assert_eq!(
+            plan.secrets[1].source,
+            SecretSource::Command(vec!["kms".into(), "decrypt".into(), "smtp".into()])
+        );
+        assert!(plan.secrets_dir.ends_with("kernable-shop/secrets"));
+        let worker = plan.children[1].args.join(" ");
+        let mount = format!(
+            "--volume {}:/run/secrets/stripe:ro,Z",
+            plan.secrets_dir.join("stripe").display()
+        );
+        assert!(worker.contains(&mount), "{worker}");
+        assert!(!worker.contains("smtp"), "only what it lists: {worker}");
+        assert_eq!(plan.children[1].secrets, ["stripe"]);
+
+        let unknown = text.replace("secrets = [\"stripe\"]", "secrets = [\"paypal\"]");
+        assert!(
+            specs_of(&unknown)
+                .unwrap_err()
+                .to_string()
+                .contains("paypal")
+        );
+        let both = text.replace(
+            "file = \"secrets/stripe.key\"",
+            "file = \"a\"\ncommand = [\"b\"]",
+        );
+        assert!(specs_of(&both).unwrap_err().to_string().contains("either"));
+        let twice = text.replace("name = \"smtp\"", "name = \"stripe\"");
+        assert!(specs_of(&twice).unwrap_err().to_string().contains("twice"));
+    }
+
+    #[tokio::test]
+    async fn a_secret_s_new_value_restarts_only_the_services_that_read_it() {
+        let dir = std::env::temp_dir().join(format!("kn-secrets-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("stripe.key"), "sk_1").unwrap();
+        std::fs::write(dir.join("counter"), "").unwrap();
+        let text = r#"
+[kernel]
+[[secret]]
+name = "stripe"
+file = "stripe.key"
+[[secret]]
+name = "smtp"
+command = ["sh", "-c", "echo x >> counter; echo pw-$(wc -l < counter | tr -d ' ')"]
+[[service]]
+name = "pay"
+build = "."
+secrets = ["stripe"]
+[[service]]
+name = "mail"
+build = "."
+secrets = ["smtp"]
+"#;
+        let mut plan = plan(text, &dir, Path::new("/bin/kernable")).unwrap();
+        plan.secrets_dir = dir.join("run");
+        let mut secrets = Secrets::default();
+        secrets.refresh(&plan, &dir, true).await.unwrap();
+        let read = |name: &str| std::fs::read_to_string(dir.join("run").join(name)).unwrap();
+        assert_eq!(
+            (read("stripe"), read("smtp")),
+            ("sk_1".into(), "pw-1".into())
+        );
+        let stamped = |secrets: &Secrets| {
+            let mut children = plan.children.clone();
+            secrets.stamp(&mut children);
+            children
+        };
+        let before = stamped(&secrets);
+
+        // A look without SIGHUP: the file is read again, the command does not run.
+        std::fs::write(dir.join("stripe.key"), "sk_2").unwrap();
+        secrets.refresh(&plan, &dir, false).await.unwrap();
+        assert_eq!(
+            (read("stripe"), read("smtp")),
+            ("sk_2".into(), "pw-1".into())
+        );
+        let after = stamped(&secrets);
+        assert_ne!(before[1], after[1], "pay restarts");
+        assert_eq!(before[2], after[2], "mail runs on");
+
+        // SIGHUP: the command runs again.
+        secrets.refresh(&plan, &dir, true).await.unwrap();
+        assert_eq!(read("smtp"), "pw-2");
+        assert_ne!(after[2], stamped(&secrets)[2], "mail restarts");
+
+        // A file that is gone: an error, and the value stays.
+        std::fs::remove_file(dir.join("stripe.key")).unwrap();
+        let error = secrets.refresh(&plan, &dir, false).await.unwrap_err();
+        assert!(error.contains("stripe"), "{error}");
+        assert_eq!(read("stripe"), "sk_2");
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dir.join("run"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700, "nobody else enters the directory");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
