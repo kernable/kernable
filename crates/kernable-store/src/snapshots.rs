@@ -1,4 +1,5 @@
-//! The snapshot store: the latest snapshot per aggregate, kept apart from the event log. Snapshots are a cache that workers rebuild from the events at any time. Unlike the
+//! The snapshot store: the latest snapshot per aggregate, kept apart from the event log.
+//! Snapshots are a cache that workers rebuild from the events at any time. Unlike the
 //! log, they are replaced and deleted for real, so state with personal values does not outlive
 //! an erasure.
 //!

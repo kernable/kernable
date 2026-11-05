@@ -1,4 +1,5 @@
-"""A read model's store: a key-value store with namespaces in a SQLite file (or in memory). The listener writes its data and its position in one transaction
+"""A read model's store: a key-value store with namespaces in a SQLite file (or in memory).
+The listener writes its data and its position in one transaction
 per batch, so after a crash every event has taken effect exactly once, and a restart continues
 where it left off instead of replaying everything."""
 

@@ -66,7 +66,7 @@ file = "secrets/stripe.key"                # or: command = ["vault", "kv", "get"
 kernable node project.toml
 ```
 
-Run it under your service manager (systemd, launchd) so the node itself starts with the machine; on a Linux server, [`kernable-host`](./host) does that for you, one user per instance. The children run in process groups of their own, so a Ctrl-C reaches only the node, which stops them in order; under systemd, set `KillMode=mixed`, so SIGTERM goes to the node alone, and a `TimeoutStopSec` longer than the children's `stop-seconds` together. On Linux, a node that is killed takes its children along: a small watchdog process removes the instance's pod once the node is gone, and a node that starts again replaces whatever pod an earlier one left.
+Run it under your service manager (systemd, launchd) so the node itself starts with the machine. The children run in process groups of their own, so a Ctrl-C reaches only the node, which stops them in order; under systemd, set `KillMode=mixed`, so SIGTERM goes to the node alone, and a `TimeoutStopSec` longer than the children's `stop-seconds` together. On Linux, a node that is killed takes its children along: a small watchdog process removes the instance's pod once the node is gone, and a node that starts again replaces whatever pod an earlier one left.
 
 ## Your services
 
@@ -91,7 +91,7 @@ On Linux the instance's pod has a network of its own, so its services see neithe
 
 - **The kernel listens on a socket**, `run/kernel.sock` in the project directory; the node chooses it, so `flags` takes no `listen`. Each service finds it, read-only, at `/run/kernable/kernel/kernel.sock`, named in `KERNABLE_URL`.
 - **Clients from outside, and the other kernel of a pair, will reach it through the ingress**, which ends TLS and passes requests on to the socket. Until the ingress exists, run an instance that must be reached from outside, or one of a pair, with `network = "host"`.
-- **Your services reach the internet** as usual (rootless, through Podman's pasta). The machine's loopback is out of their reach; on a server set up with [`kernable-host`](./host#the-firewall), so are its other addresses, internal networks and the provider's metadata service.
+- **Your services reach the internet** as usual (rootless, through Podman's pasta). The machine's loopback is out of their reach. Run each instance as a user of its own, and keep its user from the machine's other addresses and the provider's metadata service with your firewall.
 
 `network = "host"` puts the whole pod on the machine's network, as on a machine of its own, where nothing else runs beside the instance: the kernel listens where `listen` says (plain TCP on a loopback address only, mutual TLS elsewhere), and the services find it there. A change of `network` starts every part again in a new pod.
 

@@ -2,7 +2,7 @@
 
 Status: H0 of the hardening plan; O5–O7 and X1–X8 made executable in H4; the soak's bank rules B1–B7 added in H7 and after; updated 2026-11-02 for parked events, erasure after the commit, file writes once tried and requirements by key; 2026-11-03: replication and failover P1–P4 planned.
 
-What must hold whatever happens: any input, any crash, any fault, any interleaving. Every robustness test checks these invariants rather than its own ad-hoc assertions, so a failure names the guarantee that broke. The threat model is in [threat-model.md](threat-model.md).
+What must hold whatever happens: any input, any crash, any fault, any interleaving. Every robustness test checks these invariants rather than its own ad-hoc assertions, so a failure names the guarantee that broke.
 
 The **S** and **O** invariants are executable today, in `kernable_store::invariants`:
 

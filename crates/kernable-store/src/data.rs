@@ -1,4 +1,5 @@
-//! The data store: files of a domain, under (tenant, domain, key), apart from the event log. They are not part of the hash chain and not erased with the vault: a domain that
+//! The data store: files of a domain, under (tenant, domain, key), apart from the event log.
+//! They are not part of the hash chain and not erased with the vault: a domain that
 //! keeps personal data in files deletes them itself.
 //!
 //! Backends, selected by URL: `file:<directory>` and `memory:`. A file backend keeps each file

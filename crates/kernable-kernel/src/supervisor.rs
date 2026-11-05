@@ -1296,7 +1296,7 @@ async fn make_pod(podman: &Path, pod: &Pod) -> Result<(), String> {
     match &pod.network {
         Network::Own { sockets } => {
             std::fs::create_dir_all(sockets).map_err(|e| format!("{}: {e}", sockets.display()))?;
-            // Rootless (as under `kernable-host`): pasta, without `host.containers.internal`,
+            // Rootless (one user per instance): pasta, without `host.containers.internal`,
             // which would reach whatever listens on the machine's other addresses. As root,
             // which pasta does not support, Podman's bridge.
             // SAFETY: geteuid(2) cannot fail.

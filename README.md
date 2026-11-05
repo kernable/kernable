@@ -23,7 +23,7 @@ Every code example in the documentation is a file that runs in `make check` agai
 | `crates/kernable-core` | Protocol types, signing, hash chain, client transport |
 | `crates/kernable-store` | The event store (`sqlite:`, `file:`, `memory:`), the snapshot store and the vault |
 | `crates/kernable-kernel` | The kernel and the `kernable` command: `kernable start --root <root.pub>`, keys, grants, revocation, certificates, verify, listeners, vault |
-| `crates/kernable-bench`, `bench/` | Load generator, benchmark matrix, results |
+| `crates/kernable-bench`, `bench/` | Load generator, benchmark matrix and results |
 | `sdks/typescript`, `sdks/python`, `sdks/rust` | The SDKs |
 | `examples/shop` | Reference application: identity in Python, orders and an HTTP API in TypeScript, with kill tests |
 | `docs/` | The documentation site and its runnable examples |
