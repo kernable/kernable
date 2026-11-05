@@ -498,10 +498,17 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
     // The other kernel of a pair, for the backup follower and the services: they turn to
     // whichever is the primary.
     let mut peer = None;
-    if let (Some(_), Some(_)) = (&project.pair, &sockets) {
+    // In the pod's own network the other kernel reaches this one through the machine's
+    // ingress: `advertise` says where.
+    if let (Some(pair), Some(_)) = (&project.pair, &sockets)
+        && pair
+            .advertise
+            .as_deref()
+            .is_none_or(|a| a.starts_with("unix:"))
+    {
         return Err(
-            "[pair] in the pod's own network: the kernels of a pair reach each other through \
-             the ingress, which is not built yet; set [node] network = \"host\" for now"
+            "[pair] advertise: in the pod's own network, name where the other node reaches this \
+             kernel, through this machine's ingress (host:443)"
                 .into(),
         );
     }
@@ -547,6 +554,8 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
             "backup".to_owned(),
             "--follow".into(),
             b.follow.unwrap_or_else(|| match &peer {
+                // In the pod's own network, this kernel on its socket.
+                Some((_, other)) if sockets.is_some() => format!("{listen},{other}"),
                 Some((this, other)) => format!("{this},{other}"),
                 None => listen.clone(),
             }),
@@ -2361,7 +2370,38 @@ build = "."
             "{text}\n[pair]\nwitness = \"10.0.0.9:7300\"\nnode-key = \"n.key\"\npeer = \"10.0.0.2:7233\"\nkernel-keys = [\"a.pub\"]\n"
         );
         let error = plan_on(&pair, dir, this, true).unwrap_err().to_string();
-        assert!(error.contains("ingress"), "{error}");
+        assert!(
+            error.contains("advertise") && error.contains("ingress"),
+            "{error}"
+        );
+        // Through the ingress: the kernel says where it is reached; the backup follower stays
+        // on the socket here and turns to the other node through its ingress.
+        let advertised = pair.replace(
+            "peer = \"10.0.0.2:7233\"",
+            "advertise = \"a.example.com:443\"\npeer = \"b.example.com:443\"",
+        );
+        let plan = plan_on(&advertised, dir, this, true).unwrap();
+        let kernel = plan.children[0]
+            .container
+            .as_ref()
+            .unwrap()
+            .command
+            .join(" ");
+        assert!(kernel.contains("--advertise a.example.com:443"), "{kernel}");
+        assert!(
+            kernel.contains("--listen unix:/srv/shop/run/kernel.sock"),
+            "{kernel}"
+        );
+        let backup = plan.children[1]
+            .container
+            .as_ref()
+            .unwrap()
+            .command
+            .join(" ");
+        assert!(
+            backup.contains("--follow unix:/srv/shop/run/kernel.sock,b.example.com:443"),
+            "{backup}"
+        );
         let host = pair.replace(
             "project = \"shop\"",
             "project = \"shop\"\nnetwork = \"host\"",
