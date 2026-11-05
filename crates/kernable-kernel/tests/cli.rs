@@ -829,8 +829,10 @@ fn demo_idle(addr: &str) -> serde_json::Value {
                 return state;
             }
         }
+        // Generous: a debug build on a slow machine takes over 10 s for a chapter of
+        // hundreds of commands (a release build there: under 2 s).
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(30),
+            started.elapsed() < std::time::Duration::from_secs(120),
             "the demo did not become ready"
         );
         std::thread::sleep(std::time::Duration::from_millis(50));
