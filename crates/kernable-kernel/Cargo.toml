@@ -2,7 +2,8 @@
 name = "kernable-kernel"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+# The kernel and its tools: Functional Source License, Apache-2.0 after two years (BUSINESS_MODEL §2).
+license = "FSL-1.1-ALv2"
 publish.workspace = true
 
 [[bin]]
