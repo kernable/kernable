@@ -43,7 +43,7 @@ Where the kernel listens. Plain TCP only on a loopback address; anything else ne
 
 | Flag | Variable | Default | Description |
 |---|---|---|---|
-| `--listen` | `KERNABLE_LISTEN` | `127.0.0.1:7233` | The gRPC address for every service and client: `host:port`, or `unix:<path>` on Unix. Plain TCP is accepted only on a loopback address (`127.0.0.1`, `::1`, `localhost`); any other address needs mutual TLS (`--tls-cert`, `--tls-key`, `--tls-client-ca`), or the kernel does not start. |
+| `--listen` | `KERNABLE_LISTEN` | `127.0.0.1:7233` | The gRPC address for every service and client: `host:port`, or `unix:<path>` on Unix, whose owner and group may connect (mode 0660). Plain TCP is accepted only on a loopback address (`127.0.0.1`, `::1`, `localhost`); any other address needs mutual TLS (`--tls-cert`, `--tls-key`, `--tls-client-ca`), or the kernel does not start. |
 | `--tls-cert` | `KERNABLE_KERNEL_TLS_CERT` | — | Mutual TLS on a TCP `--listen`: the kernel's certificate (PEM). `kernable certs new` writes development certificates. Give all three TLS flags or none; TLS with a `unix:` address is an error. |
 | `--tls-key` | `KERNABLE_KERNEL_TLS_KEY` | — | Mutual TLS: the private key of `--tls-cert` (PEM). |
 | `--tls-client-ca` | `KERNABLE_TLS_CLIENT_CA` | — | Mutual TLS: the CA certificate (PEM) that must have signed every client's certificate. A client without one is refused. |

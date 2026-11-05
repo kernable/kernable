@@ -1191,6 +1191,15 @@ impl Kernel {
 }
 
 /// Whether the TCP address `host:port` only accepts connections from this machine.
+/// A kernel's socket: its owner and group may connect, others only through an ACL that grants
+/// them (the default mode would let others read it but not connect, and leave an ACL's write
+/// masked off).
+#[cfg(unix)]
+pub(crate) fn socket_mode(path: &str) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
+}
+
 fn loopback(addr: &str) -> bool {
     let host = addr.rsplit_once(':').map_or(addr, |(host, _)| host);
     let host = host.trim_start_matches('[').trim_end_matches(']');
@@ -1309,6 +1318,7 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
                     std::fs::remove_file(path)?;
                 }
                 let listener = tokio::net::UnixListener::bind(path)?;
+                socket_mode(path)?;
                 let incoming = connections::limited(Arc::clone(&kernel), listener);
                 router.serve_with_incoming(incoming).await?;
             }
@@ -3715,6 +3725,19 @@ mod tests {
             ..Default::default()
         };
         assert!(in_parts(execute, &[], 8 << 10).is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_kernel_socket_lets_its_owner_and_group_connect() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!("kn-mode-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        super::socket_mode(path.to_str().unwrap()).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o660);
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

@@ -21,7 +21,7 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "--listen",
         "KERNABLE_LISTEN",
         "127.0.0.1:7233",
-        "The gRPC address for every service and client: `host:port`, or `unix:<path>` on Unix. Plain TCP is accepted only on a loopback address (`127.0.0.1`, `::1`, `localhost`); any other address needs mutual TLS (`--tls-cert`, `--tls-key`, `--tls-client-ca`), or the kernel does not start.",
+        "The gRPC address for every service and client: `host:port`, or `unix:<path>` on Unix, whose owner and group may connect (mode 0660). Plain TCP is accepted only on a loopback address (`127.0.0.1`, `::1`, `localhost`); any other address needs mutual TLS (`--tls-cert`, `--tls-key`, `--tls-client-ca`), or the kernel does not start.",
     ),
     (
         "--kernel-key",
