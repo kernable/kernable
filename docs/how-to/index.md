@@ -22,6 +22,7 @@ Short guides for tasks you meet once your application runs. They assume you know
 | [Run a standby](./standby) | A second kernel should hold every write and take over, with a witness by itself, when the primary's machine is lost. |
 | [Run a listener on several machines](./instances) | The same read models and reactors run on more than one machine, each with its own copy. |
 | [Run a node from one file](./node) | One file says what runs on a machine: the kernel and its backup follower, started again when they exit or the file changes. |
+| [Run several instances on one server](./host) | One Linux server runs several instances, each under a user of its own, so none reaches into another. |
 | [Monitor kernable](./monitor) | You want metrics, health checks, alerts and logs, or a reactor parked events. |
 
 ## Security
