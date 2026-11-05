@@ -52,6 +52,7 @@ env = { SHOP_MAIL = "smtp://mail:25" }     # optional
 secrets = ["stripe"]                       # optional: see [[secret]]
 cpus = "1.5"                               # optional, as memory = "512m"
 stop-seconds = 10                          # optional
+writable = true                            # optional: see Hardening
 
 [[secret]]                                 # one per secret
 name = "stripe"
@@ -82,6 +83,16 @@ On Linux every part of the instance runs in Podman, in one pod named `kernable-<
 - **Variables** in `env` reach the containers from Podman's own environment, so their values never show in a process list.
 
 On macOS and other systems the kernel and the backup follower run as plain processes, without limits; asking for them there is an error.
+
+## Hardening
+
+Every container the node starts, the kernel's included, gets the same protection, so that code which takes over a process gets as little as possible:
+
+- **No capabilities**, and **no way to gain privileges**: a setuid binary in the image does not work.
+- **At most 4096 processes**, so a fork bomb stays inside its container.
+- **A read-only root filesystem**, with a fresh, empty `/tmp`, `/var/tmp` and `/run` in memory. What has to last belongs in the kernel.
+
+Most images run as they are. One that writes elsewhere (some frameworks keep a cache next to their code) takes `writable = true` in its `[[service]]`; the node logs it at each start. Images that start as root to switch to a user of their own, such as the official `nginx`, do not start without capabilities: use an image that runs as an ordinary user from the start (`nginxinc/nginx-unprivileged`, say).
 
 ## Secrets
 

@@ -214,6 +214,9 @@ struct ServiceSection {
     cpus: Option<String>,
     memory: Option<String>,
     stop_seconds: Option<u64>,
+    /// A root filesystem the service may write to, for an image that writes outside `/tmp`.
+    #[serde(default)]
+    writable: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -272,7 +275,6 @@ struct BackupSection {
     env: BTreeMap<String, String>,
 }
 
-/// The children `text` (a `project.toml` in `dir`) asks for, in start order; `this` is the
 /// The children `text` (a `project.toml` in `dir`) asks for, in start order; `this` is the
 /// running binary.
 pub fn specs(text: &str, dir: &Path, this: &Path) -> Result<Vec<Spec>, BoxError> {
@@ -391,6 +393,7 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
         for var in env.keys() {
             run.extend(["--env".into(), var.clone()]);
         }
+        harden(&mut run, false);
         limits(&mut run, cpus, memory);
         Spec {
             name: child.into(),
@@ -608,6 +611,7 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
                 ),
             ]);
         }
+        harden(&mut args, svc.writable);
         limits(&mut args, &svc.cpus, &svc.memory);
         specs.push(Spec {
             name: svc.name,
@@ -635,6 +639,26 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
         pod,
         podman,
     })
+}
+
+/// Most processes a container may have at once.
+const PIDS: u32 = 4096;
+
+/// What every container gets: no capabilities, no way to gain privileges (no
+/// setuid binary works), a cap on its processes, and a root filesystem it cannot change unless
+/// `writable`; Podman mounts a tmpfs on `/tmp`, `/var/tmp` and `/run` of a read-only one.
+fn harden(args: &mut Vec<String>, writable: bool) {
+    args.extend([
+        "--cap-drop".into(),
+        "all".into(),
+        "--security-opt".into(),
+        "no-new-privileges".into(),
+        "--pids-limit".into(),
+        PIDS.to_string(),
+    ]);
+    if !writable {
+        args.push("--read-only".into());
+    }
 }
 
 /// `--cpus` and `--memory` for `podman run`.
@@ -950,6 +974,9 @@ fn spawn(spec: &Spec, image: Option<&str>, dir: &Path) -> Result<Child, BoxError
     forward(&spec.name, child.stdout.take(), false);
     forward(&spec.name, child.stderr.take(), true);
     tracing::info!(child = %spec.name, pid = child.id().unwrap_or(0), binary = %spec.binary.display(), "started");
+    if spec.container.is_some() && !spec.args.iter().any(|a| a == "--read-only") {
+        tracing::warn!(child = %spec.name, "its root filesystem is writable (writable = true)");
+    }
     Ok(child)
 }
 
@@ -1694,7 +1721,7 @@ memory = "512m"
             "--env KERNABLE_INSTANCE=node-a",
             "--volume /srv/shop/keys/worker.key:/run/kernable/key:ro,Z --env KERNABLE_KEY=/run/kernable/key",
             "--volume /srv/shop/keys/worker.grant:/run/kernable/grant:ro,Z",
-            "--env SHOP_MAIL --memory 512m",
+            "--env SHOP_MAIL --cap-drop all --security-opt no-new-privileges --pids-limit 4096 --read-only --memory 512m",
         ] {
             assert!(args.contains(part), "{part} missing from {args}");
         }
@@ -1704,6 +1731,46 @@ memory = "512m"
         }
         let twice = format!("{text}\n[[service]]\nname = \"worker\"\nbuild = \".\"\n");
         assert!(specs_of(&twice).unwrap_err().to_string().contains("twice"));
+    }
+
+    #[test]
+    fn every_container_is_hardened_and_a_service_may_ask_for_a_writable_root() {
+        let text = r#"
+[kernel]
+flags = { listen = "127.0.0.1:7233" }
+
+[[service]]
+name = "web"
+build = "."
+
+[[service]]
+name = "legacy"
+build = "."
+writable = true
+"#;
+        let plan = plan_on(
+            text,
+            Path::new("/srv/shop"),
+            Path::new("/bin/kernable"),
+            true,
+        )
+        .unwrap();
+        for spec in &plan.children {
+            let args = spec.args.join(" ");
+            for part in [
+                "--cap-drop all",
+                "--security-opt no-new-privileges",
+                "--pids-limit 4096",
+            ] {
+                assert!(
+                    args.contains(part),
+                    "{}: {part} missing from {args}",
+                    spec.name
+                );
+            }
+            let read_only = spec.args.iter().any(|a| a == "--read-only");
+            assert_eq!(read_only, spec.name != "legacy", "{}: {args}", spec.name);
+        }
     }
 
     fn specs_of(text: &str) -> Result<Vec<Spec>, BoxError> {
@@ -1960,7 +2027,8 @@ build = "."
             "run --rm --replace --name kernable-shop-kernel --pod kernable-shop \
              --volume /opt/kernable/kernable:/usr/local/bin/kernable:ro \
              --volume /srv/shop:/srv/shop --workdir /srv/shop --security-opt label=disable \
-             --env KERNABLE_LOG --cpus 2 --memory 1g"
+             --env KERNABLE_LOG --cap-drop all --security-opt no-new-privileges \
+             --pids-limit 4096 --read-only --cpus 2 --memory 1g"
         );
         let c = kernel.container.as_ref().unwrap();
         assert_eq!(c.image, Image::Base(BASE_IMAGE.into()));
