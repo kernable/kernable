@@ -93,9 +93,29 @@ fn plain(line: &str) -> String {
     out
 }
 
+/// Where the kernel of a project in `dir` listens: on Linux the socket the node chooses in the
+/// pod's own network, elsewhere a free TCP port.
+fn kernel_addr(dir: &Path) -> String {
+    if cfg!(target_os = "linux") {
+        format!("unix:{}/run/kernel.sock", dir.display())
+    } else {
+        free_addr()
+    }
+}
+
+/// The `listen` flag for `addr`, which the node sets itself for a socket.
+fn listen(addr: &str) -> String {
+    if addr.starts_with("unix:") {
+        String::new()
+    } else {
+        format!(", listen = \"{addr}\"")
+    }
+}
+
 fn project(dir: &Path, addr: &str, extra: &str, metrics: &str) {
+    let listen = listen(addr);
     let text = format!(
-        "[kernel]\nflags = {{ dev = true, listen = \"{addr}\", ui-listen = \"\"{extra} }}\nstop-seconds = 5\n\n[node]\nmetrics-listen = \"{metrics}\"\n"
+        "[kernel]\nflags = {{ dev = true, ui-listen = \"\"{listen}{extra} }}\nstop-seconds = 5\n\n[node]\nmetrics-listen = \"{metrics}\"\n"
     );
     std::fs::write(dir.join("project.toml"), text).unwrap();
 }
@@ -110,7 +130,7 @@ async fn a_node_restarts_its_kernel_and_stops_it_with_itself() {
     let dir = std::env::temp_dir().join(format!("kn-node-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let (addr, metrics) = (free_addr(), free_addr());
+    let (addr, metrics) = (kernel_addr(&dir), free_addr());
     project(&dir, &addr, "", &metrics);
     let mut node = Node::start(&dir);
     let first = node.next_start("kernel");
@@ -166,13 +186,15 @@ async fn a_node_builds_and_runs_a_service_after_its_kernel() {
     std::fs::create_dir_all(dir.join("svc")).unwrap();
     std::fs::write(
         dir.join("svc/Containerfile"),
-        // It waits until the kernel answers on KERNABLE_URL, over the host's network.
-        "FROM docker.io/library/alpine:3.20\nCMD [\"sh\", \"-c\", \"until nc -z ${KERNABLE_URL%:*} ${KERNABLE_URL##*:}; do sleep 0.2; done; echo reached-kernel instance=$KERNABLE_INSTANCE >&2; exec sleep 600\"]\n",
+        // It waits until the kernel answers at KERNABLE_URL: its socket in the pod's own
+        // network, or a port on the host's.
+        "FROM docker.io/library/alpine:3.20\nCMD [\"sh\", \"-c\", \"case $KERNABLE_URL in unix:*) until [ -S ${KERNABLE_URL#unix:} ]; do sleep 0.2; done;; *) until nc -z ${KERNABLE_URL%:*} ${KERNABLE_URL##*:}; do sleep 0.2; done;; esac; echo reached-kernel instance=$KERNABLE_INSTANCE >&2; exec sleep 600\"]\n",
     )
     .unwrap();
-    let addr = free_addr();
+    let addr = kernel_addr(&dir);
+    let listen = listen(&addr);
     let text = format!(
-        "[kernel]\nflags = {{ dev = true, listen = \"{addr}\", ui-listen = \"\" }}\nstop-seconds = 5\n\n[node]\ninstance = \"node-a\"\nproject = \"t{}\"\n\n[[service]]\nname = \"echo\"\nbuild = \"svc\"\nstop-seconds = 5\n",
+        "[kernel]\nflags = {{ dev = true, ui-listen = \"\"{listen} }}\nstop-seconds = 5\n\n[node]\ninstance = \"node-a\"\nproject = \"t{}\"\n\n[[service]]\nname = \"echo\"\nbuild = \"svc\"\nstop-seconds = 5\n",
         std::process::id()
     );
     std::fs::write(dir.join("project.toml"), text).unwrap();
@@ -181,7 +203,7 @@ async fn a_node_builds_and_runs_a_service_after_its_kernel() {
     let service = node.next_start("echo");
     assert!(alive(service));
     wait_for(&addr).await;
-    // On Linux the container shares the host's network; on a Mac it runs in Podman's VM.
+    // On Linux the service reaches its kernel's socket; on a Mac it runs in Podman's VM, apart.
     if cfg!(target_os = "linux") {
         node.next_start("reached instance=node-a");
     }
@@ -210,7 +232,7 @@ async fn a_killed_node_takes_its_kernel_along() {
     let dir = std::env::temp_dir().join(format!("kn-node-killed-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let (addr, metrics) = (free_addr(), free_addr());
+    let (addr, metrics) = (kernel_addr(&dir), free_addr());
     project(&dir, &addr, "", &metrics);
     let mut node = Node::start(&dir);
     let kernel = node.next_start("kernel");

@@ -126,7 +126,25 @@ pub struct Pod {
     pub name: String,
     pub cpus: Option<String>,
     pub memory: Option<String>,
+    pub network: Network,
 }
+
+/// How an instance's pod reaches the network.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Network {
+    /// A namespace of its own: the kernel listens on a socket in `sockets`, which its services
+    /// see read-only; nothing in the pod is reachable from outside, and only the services' own
+    /// traffic leaves it. Everything else reaches the kernel through the ingress.
+    Own { sockets: PathBuf },
+    /// The machine's network (`[node] network = "host"`), for a machine of its own.
+    Host,
+}
+
+/// The directory of the kernel's socket in the project directory, its file, and where a
+/// service finds it.
+const SOCKETS: &str = "run";
+const SOCKET: &str = "kernel.sock";
+const SOCKETS_INSIDE: &str = "/run/kernable/kernel";
 
 /// The kernel's and the backup follower's base image, unless `[kernel] image` names another
 /// (one with your KMS's client for `--key-command`, say). Its C library is newer than any
@@ -180,6 +198,8 @@ struct NodeSection {
     /// The instance's total: every part together.
     cpus: Option<String>,
     memory: Option<String>,
+    /// `own` (the default) or `host`.
+    network: Option<String>,
 }
 
 /// What a `project.toml` asks the node for.
@@ -325,11 +345,29 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
         )
         .into());
     }
+    let network = match node.network.as_deref() {
+        None | Some("own") => Network::Own {
+            sockets: dir.join(SOCKETS),
+        },
+        Some("host") => Network::Host,
+        Some(other) => {
+            return Err(format!("[node] network {other}: own or host").into());
+        }
+    };
     let pod = contained.then(|| Pod {
         name: format!("kernable-{name}"),
         cpus: node.cpus.clone(),
         memory: node.memory.clone(),
+        network,
     });
+    // The kernel's socket, when the pod has a network of its own.
+    let sockets = match &pod {
+        Some(Pod {
+            network: Network::Own { sockets },
+            ..
+        }) => Some(sockets.clone()),
+        _ => None,
+    };
     // Its container sees the project directory and nothing else of the machine.
     let inside = |what: &str, value: &str| -> Result<(), BoxError> {
         let path = ["sqlite:", "file:", "unix:"]
@@ -425,6 +463,14 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
             }
         };
         inside(&format!("[kernel] flags: {flag}"), &value)?;
+        if flag == "listen" && sockets.is_some() {
+            return Err(format!(
+                "[kernel] flags: listen {value}: in the pod's own network the kernel listens on a \
+                 socket the node chooses, and the ingress takes outside connections; drop listen, \
+                 or set [node] network = \"host\""
+            )
+            .into());
+        }
         if flag == "listen" {
             listen.clone_from(&value);
         }
@@ -437,9 +483,20 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
         args.push(format!("--{flag}"));
         args.push(value);
     }
+    if let Some(sockets) = &sockets {
+        listen = format!("unix:{}", sockets.join(SOCKET).display());
+        args.extend(["--listen".into(), listen.clone()]);
+    }
     // The other kernel of a pair, for the backup follower and the services: they turn to
     // whichever is the primary.
     let mut peer = None;
+    if let (Some(_), Some(_)) = (&project.pair, &sockets) {
+        return Err(
+            "[pair] in the pod's own network: the kernels of a pair reach each other through \
+             the ingress, which is not built yet; set [node] network = \"host\" for now"
+                .into(),
+        );
+    }
     if let Some(pair) = &project.pair {
         if let Some(flag) = PAIR_FLAGS.iter().find(|f| k.flags.contains_key(**f)) {
             return Err(format!("[kernel] flags: {flag} comes from [pair]; drop it").into());
@@ -508,8 +565,10 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
         Some(i) => i,
         None => host_name(),
     };
-    // Services reach the kernel on the host's network, and in a pair the other one too.
+    // Services reach the kernel through its socket, or on the host's network, and in a pair
+    // the other one too.
     let mut url = match listen.rsplit_once(':') {
+        _ if sockets.is_some() => format!("unix:{SOCKETS_INSIDE}/{SOCKET}"),
         Some(("0.0.0.0" | "[::]" | "", port)) => {
             format!("127.0.0.1:{port}")
         }
@@ -578,6 +637,12 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
             "--env".into(),
             format!("KERNABLE_INSTANCE={instance}"),
         ]);
+        if let Some(sockets) = &sockets {
+            args.extend([
+                "--volume".into(),
+                format!("{}:{SOCKETS_INSIDE}:ro", sockets.display()),
+            ]);
+        }
         if let Some(key) = &svc.key {
             let key = dir.join(key);
             let grant = key.with_extension("grant");
@@ -1227,9 +1292,20 @@ async fn make_pod(podman: &Path, pod: &Pod) -> Result<(), String> {
         "--replace".into(),
         "--name".into(),
         pod.name.clone(),
-        "--network".into(),
-        "host".into(),
     ];
+    match &pod.network {
+        Network::Own { sockets } => {
+            std::fs::create_dir_all(sockets).map_err(|e| format!("{}: {e}", sockets.display()))?;
+            // Rootless (as under `kernable-host`): pasta, without `host.containers.internal`,
+            // which would reach whatever listens on the machine's other addresses. As root,
+            // which pasta does not support, Podman's bridge.
+            // SAFETY: geteuid(2) cannot fail.
+            if unsafe { libc::geteuid() } != 0 {
+                args.extend(["--network".into(), "pasta:--map-guest-addr,none".into()]);
+            }
+        }
+        Network::Host => args.extend(["--network".into(), "host".into()]),
+    }
     limits(&mut args, &pod.cpus, &pod.memory);
     let made = Command::new(podman)
         .args(&args)
@@ -1737,7 +1813,6 @@ memory = "512m"
     fn every_container_is_hardened_and_a_service_may_ask_for_a_writable_root() {
         let text = r#"
 [kernel]
-flags = { listen = "127.0.0.1:7233" }
 
 [[service]]
 name = "web"
@@ -2003,6 +2078,7 @@ memory = "256m"
 project = "shop"
 cpus = "4"
 memory = "4g"
+network = "host"
 
 [[service]]
 name = "worker"
@@ -2015,7 +2091,8 @@ build = "."
             Some(Pod {
                 name: "kernable-shop".into(),
                 cpus: Some("4".into()),
-                memory: Some("4g".into())
+                memory: Some("4g".into()),
+                network: Network::Host,
             })
         );
         let kernel = &plan.children[0];
@@ -2067,6 +2144,95 @@ build = "."
         // Without containers there is nothing to limit the kernel with.
         let error = plan_on(text, dir, this, false).unwrap_err().to_string();
         assert!(error.contains("need Linux"), "{error}");
+    }
+
+    #[test]
+    fn in_a_network_of_its_own_the_kernel_listens_on_a_socket_its_services_see() {
+        let text = r#"
+[kernel]
+flags = { root = "root.pub" }
+
+[backup]
+to = "file:backups"
+key = "backup.key"
+backup-key = "backup-encryption.key"
+
+[node]
+project = "shop"
+
+[[service]]
+name = "worker"
+build = "."
+"#;
+        let (dir, this) = (Path::new("/srv/shop"), Path::new("/bin/kernable"));
+        let plan = plan_on(text, dir, this, true).unwrap();
+        let pod = plan.pod.as_ref().unwrap();
+        assert_eq!(
+            pod.network,
+            Network::Own {
+                sockets: "/srv/shop/run".into()
+            }
+        );
+        let kernel = &plan.children[0].container.as_ref().unwrap().command;
+        assert!(
+            kernel
+                .join(" ")
+                .contains("--listen unix:/srv/shop/run/kernel.sock"),
+            "{kernel:?}"
+        );
+        let backup = plan.children[1]
+            .container
+            .as_ref()
+            .unwrap()
+            .command
+            .join(" ");
+        assert!(
+            backup.contains("--follow unix:/srv/shop/run/kernel.sock"),
+            "{backup}"
+        );
+        let worker = plan.children[2].args.join(" ");
+        assert!(
+            worker.contains("--volume /srv/shop/run:/run/kernable/kernel:ro"),
+            "read-only, so no service puts a socket of its own in the kernel's place: {worker}"
+        );
+        assert!(
+            worker.contains("--env KERNABLE_URL=unix:/run/kernable/kernel/kernel.sock"),
+            "{worker}"
+        );
+        assert!(!worker.contains("--network"), "{worker}");
+
+        // The node chooses the address; a pair needs the ingress.
+        let listen = text.replace(
+            "root = \"root.pub\"",
+            "root = \"root.pub\", listen = \"0.0.0.0:7233\"",
+        );
+        let error = plan_on(&listen, dir, this, true).unwrap_err().to_string();
+        assert!(error.contains("network = \"host\""), "{error}");
+        let pair = format!(
+            "{text}\n[pair]\nwitness = \"10.0.0.9:7300\"\nnode-key = \"n.key\"\npeer = \"10.0.0.2:7233\"\nkernel-keys = [\"a.pub\"]\n"
+        );
+        let error = plan_on(&pair, dir, this, true).unwrap_err().to_string();
+        assert!(error.contains("ingress"), "{error}");
+        let host = pair.replace(
+            "project = \"shop\"",
+            "project = \"shop\"\nnetwork = \"host\"",
+        );
+        assert!(plan_on(&host, dir, this, true).is_ok());
+        let wrong = text.replace(
+            "project = \"shop\"",
+            "project = \"shop\"\nnetwork = \"bridge\"",
+        );
+        assert!(plan_on(&wrong, dir, this, true).is_err());
+
+        // Without a pod nothing changes: the kernel listens where its flags say.
+        let plain = plan_on(text, dir, this, false).unwrap();
+        assert_eq!(plain.pod, None);
+        assert!(
+            !plain.children[0]
+                .args
+                .iter()
+                .any(|a| a.starts_with("unix:"))
+        );
     }
 
     #[test]

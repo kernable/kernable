@@ -17,7 +17,7 @@
 [kernel]
 binary = "/opt/kernable/1.0.1/kernable"   # optional: default the binary that runs the node
 stop-seconds = 30                          # optional
-flags = { root = "root.pub", store = "sqlite:kernable.db", vault-key = "vault.key", listen = "10.0.0.1:7233" }
+flags = { root = "root.pub", store = "sqlite:kernable.db", vault-key = "vault.key" }
 env = { KERNABLE_LOG = "info" }            # optional
 cpus = "2"                                 # optional (Linux), as memory = "2g"
 image = "docker.io/library/debian:trixie-slim"  # optional (Linux): the base image, this one by default
@@ -42,6 +42,7 @@ instance = "node-a"                        # KERNABLE_INSTANCE for the services 
 project = "shop"                           # names the containers (default the file's directory)
 metrics-listen = "127.0.0.1:7240"          # optional: GET /metrics
 cpus = "4"                                 # optional (Linux): the whole instance, as memory = "8g"
+network = "host"                           # optional (Linux): see Network; default own
 
 [[service]]                                # one per service, as many as you need
 name = "worker"
@@ -69,7 +70,7 @@ Run it under your service manager (systemd, launchd) so the node itself starts w
 
 ## Your services
 
-Each `[[service]]` is built with `podman build` on the machine, at start, when its section changes, and on SIGHUP, then run with `podman run --rm` as `kernable-<project>-<name>`, after the kernel and stopped before it. It runs on the machine's network and finds the kernel by itself: the node sets `KERNABLE_URL` to the kernel's `listen` and `KERNABLE_INSTANCE` to the node's instance, which the SDKs read. With `key`, the key file and the `.grant` file next to it are mounted read-only and named in `KERNABLE_KEY` and `KERNABLE_GRANT`; create them with `kernable keys new` and `kernable grant`, so the root key never comes near the machine. A service that exits is started again like the kernel.
+Each `[[service]]` is built with `podman build` on the machine, at start, when its section changes, and on SIGHUP, then run with `podman run --rm` as `kernable-<project>-<name>`, after the kernel and stopped before it. It finds the kernel by itself: the node sets `KERNABLE_URL` to the kernel's socket (on Linux, see [Network](#network)) or its `listen`, and `KERNABLE_INSTANCE` to the node's instance, which the SDKs read. With `key`, the key file and the `.grant` file next to it are mounted read-only and named in `KERNABLE_KEY` and `KERNABLE_GRANT`; create them with `kernable keys new` and `kernable grant`, so the root key never comes near the machine. A service that exits is started again like the kernel.
 
 Install Podman on the machine first (rootless is fine). Services run on Linux; on a Mac, Podman's containers live in a virtual machine and do not share its network.
 
@@ -77,12 +78,22 @@ Install Podman on the machine first (rootless is fine). Services run on Linux; o
 
 On Linux every part of the instance runs in Podman, in one pod named `kernable-<project>`:
 
-- **The kernel and the backup follower** run in a small base image with the node's kernable binary mounted read-only, so an update is still a new binary. The project directory is mounted at its own path, and the pod uses the machine's network, so addresses do not change. Name your own base image in `[kernel] image`, for one with your KMS's client for `--key-command`, say. Podman pulls it on the first start.
+- **The kernel and the backup follower** run in a small base image with the node's kernable binary mounted read-only, so an update is still a new binary. The project directory is mounted at its own path. Name your own base image in `[kernel] image`, for one with your KMS's client for `--key-command`, say. Podman pulls it on the first start.
 - **Each part** takes `cpus` and `memory`: `[kernel]`, `[backup]`, every `[[service]]`.
 - **The instance as a whole** takes them in `[node]`: the kernel and every service together never use more, so instances side by side on one machine cannot starve each other. A change to these restarts every part in a new pod.
 - **Variables** in `env` reach the containers from Podman's own environment, so their values never show in a process list.
 
 On macOS and other systems the kernel and the backup follower run as plain processes, without limits; asking for them there is an error.
+
+## Network
+
+On Linux the instance's pod has a network of its own, so its services see neither the machine's other services nor other instances, and nothing in it can be reached from outside:
+
+- **The kernel listens on a socket**, `run/kernel.sock` in the project directory; the node chooses it, so `flags` takes no `listen`. Each service finds it, read-only, at `/run/kernable/kernel/kernel.sock`, named in `KERNABLE_URL`.
+- **Clients from outside, and the other kernel of a pair, will reach it through the ingress**, which ends TLS and passes requests on to the socket. Until the ingress exists, run an instance that must be reached from outside, or one of a pair, with `network = "host"`.
+- **Your services reach the internet** as usual (rootless, through Podman's pasta). The machine's loopback is out of their reach; its other addresses and the provider's metadata service follow with a firewall per instance.
+
+`network = "host"` puts the whole pod on the machine's network, as on a machine of its own, where nothing else runs beside the instance: the kernel listens where `listen` says (plain TCP on a loopback address only, mutual TLS elsewhere), and the services find it there. A change of `network` starts every part again in a new pod.
 
 ## Hardening
 
@@ -119,5 +130,5 @@ The kernel keeps its own metrics on its `--metrics-listen` ([Monitor kernable](.
 
 ## Two machines
 
-Each machine of a [standby pair](./standby) runs its own node, with its own `project.toml` and a `[pair]` section: the witness, this node's key, its own address and the other node's (`peer`), and both kernels' kernel keys. From it the node sets the kernel's pair flags (don't repeat them in `flags`), lets the backup follower turn to whichever kernel is the primary, and gives your services both addresses in `KERNABLE_URL`. Your read models and reactors run on both machines as [instances](./instances).
+Each machine of a [standby pair](./standby) runs its own node (with `network = "host"` until the ingress exists), with its own `project.toml` and a `[pair]` section: the witness, this node's key, its own address and the other node's (`peer`), and both kernels' kernel keys. From it the node sets the kernel's pair flags (don't repeat them in `flags`), lets the backup follower turn to whichever kernel is the primary, and gives your services both addresses in `KERNABLE_URL`. Your read models and reactors run on both machines as [instances](./instances).
 
