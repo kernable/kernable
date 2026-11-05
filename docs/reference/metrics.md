@@ -45,5 +45,5 @@ With `metrics-listen` in its `[node]` section, `kernable node` serves `GET /metr
 | `kernable_node_child_up` | gauge | `child` | Whether the child runs (1) or not (0). |
 | `kernable_node_child_restarts_total` | counter | `child` | Times the node started the child again. |
 | `kernable_node_child_uptime_seconds` | gauge | `child` | Seconds since the child last started, while it runs. |
-| `kernable_node_service_cpu_seconds_total` | counter | `child` | CPU time a service's container used, from its cgroup (Linux). |
-| `kernable_node_service_memory_bytes` | gauge | `child` | Memory a service's container uses now, from its cgroup (Linux). |
+| `kernable_node_container_cpu_seconds_total` | counter | `child` | CPU time a child's container used (a service, and on Linux the kernel and the backup follower), from its cgroup. |
+| `kernable_node_container_memory_bytes` | gauge | `child` | Memory a child's container uses now, from its cgroup. |

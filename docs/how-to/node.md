@@ -1,6 +1,6 @@
 # Run a node from one file
 
-`kernable node` runs one machine of your deployment from a single `project.toml`: the kernel, the [backup follower](./backup#continuous-backup) if you want it, and your own services (workers, read models, reactors, apps) as [Podman](https://podman.io) containers it builds on the machine. It looks after all of them as child processes. It is the same in every place kernable runs, on your own machines or someone else's.
+`kernable node` runs one instance of your deployment on a machine from a single `project.toml`: the kernel, the [backup follower](./backup#continuous-backup) if you want it, and your own services (workers, read models, reactors, apps) as [Podman](https://podman.io) containers it builds on the machine. On Linux the kernel and the backup follower run in Podman too, all in one pod per instance, so [limits](#limits) hold for every part and for the instance as a whole. It looks after all of them as child processes. It is the same in every place kernable runs, on your own machines or someone else's.
 
 - **A child that exits is started again**, after 1 s, backing off up to 30 s while it keeps failing at once. A kernel crash never takes the node down. A child being stopped for a restart stops in the background: the node looks after the others meanwhile, and starts it again once its old process ended.
 - **A change to the file is applied by itself.** The node reads it every two seconds (or at once on SIGHUP); a child whose command changed is stopped and started again with the new one, and the others run on.
@@ -19,6 +19,8 @@ binary = "/opt/kernable/1.0.1/kernable"   # optional: default the binary that ru
 stop-seconds = 30                          # optional
 flags = { root = "root.pub", store = "sqlite:kernable.db", vault-key = "vault.key", listen = "10.0.0.1:7233" }
 env = { KERNABLE_LOG = "info" }            # optional
+cpus = "2"                                 # optional (Linux), as memory = "2g"
+image = "docker.io/library/debian:trixie-slim"  # optional (Linux): the base image, this one by default
 
 [backup]                                   # optional
 to = "s3://acme-backups/shop"
@@ -39,6 +41,7 @@ kernel-keys = ["kernel-a.pub", "kernel-b.pub"]
 instance = "node-a"                        # KERNABLE_INSTANCE for the services (default the host name)
 project = "shop"                           # names the containers (default the file's directory)
 metrics-listen = "127.0.0.1:7240"          # optional: GET /metrics
+cpus = "4"                                 # optional (Linux): the whole instance, as memory = "8g"
 
 [[service]]                                # one per service, as many as you need
 name = "worker"
@@ -55,7 +58,7 @@ name = "stripe"
 file = "secrets/stripe.key"                # or: command = ["vault", "kv", "get", "-field=key", "shop/stripe"]
 ```
 
-`flags` are the flags of `kernable start` ([Configuration](../reference/configuration)) without their dashes; `dev = true` stands for `--dev`. With a `[backup]` section the kernel gets `--backup on`. Paths are relative to the file's directory, where the children run. Unknown keys are refused, so a typo does not go unnoticed: at start the node exits with 2, later it logs the error and the children run on as they are.
+`flags` are the flags of `kernable start` ([Configuration](../reference/configuration)) without their dashes; `dev = true` stands for `--dev`. With a `[backup]` section the kernel gets `--backup on`; it takes `cpus` and `memory` too. Paths are relative to the file's directory, where the children run; on Linux every path the kernel and the backup follower use lies inside it, since that directory is all their container sees. Unknown keys are refused, so a typo does not go unnoticed: at start the node exits with 2, later it logs the error and the children run on as they are.
 
 ```sh
 kernable node project.toml
@@ -68,6 +71,17 @@ Run it under your service manager (systemd, launchd) so the node itself starts w
 Each `[[service]]` is built with `podman build` on the machine, at start, when its section changes, and on SIGHUP, then run with `podman run --rm` as `kernable-<project>-<name>`, after the kernel and stopped before it. It runs on the machine's network and finds the kernel by itself: the node sets `KERNABLE_URL` to the kernel's `listen` and `KERNABLE_INSTANCE` to the node's instance, which the SDKs read. With `key`, the key file and the `.grant` file next to it are mounted read-only and named in `KERNABLE_KEY` and `KERNABLE_GRANT`; create them with `kernable keys new` and `kernable grant`, so the root key never comes near the machine. A service that exits is started again like the kernel.
 
 Install Podman on the machine first (rootless is fine). Services run on Linux; on a Mac, Podman's containers live in a virtual machine and do not share its network.
+
+## Limits
+
+On Linux every part of the instance runs in Podman, in one pod named `kernable-<project>`:
+
+- **The kernel and the backup follower** run in a small base image with the node's kernable binary mounted read-only, so an update is still a new binary. The project directory is mounted at its own path, and the pod uses the machine's network, so addresses do not change. Name your own base image in `[kernel] image`, for one with your KMS's client for `--key-command`, say. Podman pulls it on the first start.
+- **Each part** takes `cpus` and `memory`: `[kernel]`, `[backup]`, every `[[service]]`.
+- **The instance as a whole** takes them in `[node]`: the kernel and every service together never use more, so instances side by side on one machine cannot starve each other. A change to these restarts every part in a new pod.
+- **Variables** in `env` reach the containers from Podman's own environment, so their values never show in a process list.
+
+On macOS and other systems the kernel and the backup follower run as plain processes, without limits; asking for them there is an error.
 
 ## Secrets
 
@@ -87,8 +101,8 @@ With `metrics-listen`, `GET /metrics` answers in Prometheus' text format, a line
 | `kernable_node_child_up{child}` | gauge | 1 while the child runs |
 | `kernable_node_child_restarts_total{child}` | counter | times the node started it again |
 | `kernable_node_child_uptime_seconds{child}` | gauge | seconds since it last started, while it runs |
-| `kernable_node_service_cpu_seconds_total{child}` | counter | CPU time of a service's container (Linux, from its cgroup, every 10 s) |
-| `kernable_node_service_memory_bytes{child}` | gauge | memory of a service's container now (Linux) |
+| `kernable_node_container_cpu_seconds_total{child}` | counter | CPU time of the child's container: a service, and on Linux the kernel and the backup follower (from its cgroup, every 10 s) |
+| `kernable_node_container_memory_bytes{child}` | gauge | memory of the child's container now |
 
 The kernel keeps its own metrics on its `--metrics-listen` ([Monitor kernable](./monitor)). The address is read when the node starts; a change applies after a restart of the node.
 

@@ -47,6 +47,10 @@
 //! the host's network with `KERNABLE_URL` (the kernel's `--listen`), `KERNABLE_INSTANCE`, and,
 //! with a key, `KERNABLE_KEY` and `KERNABLE_GRANT` naming the files mounted read-only.
 //!
+//! On Linux every part runs in Podman, in one pod per instance (`kernable-<project>`): the
+//! kernel and the backup follower in a base image with the kernable binary mounted, the project
+//! directory at its own path; `cpus` and `memory` limit each part, and in `[node]` the instance.
+//!
 //! Secrets are named in `[[secret]]` (a `file`, or a `command` run at start and on SIGHUP)
 //! and mounted read-only at `/run/secrets/<name>` into the services that list them; a new value
 //! restarts those. A `[pair]` section (witness, node-key, advertise, peer, kernel-keys) sets the
@@ -86,22 +90,48 @@ pub struct Spec {
     pub args: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub stop: Duration,
-    /// A service: what to build before it runs.
+    /// A child in a container: `binary` is Podman, `args` those of `podman run`.
     pub container: Option<Container>,
     /// A service: the secrets it reads; a new value of one restarts it.
     pub secrets: Vec<String>,
+    /// The file whose replacement restarts the child: its binary, or the kernable binary its
+    /// container runs.
+    pub watch: PathBuf,
 }
 
-/// How a service's image is built and named.
+/// A child's container: its name, its image and the command it runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Container {
-    /// The container's name: `kernable-<project>-<service>`.
+    /// `kernable-<project>-<child>`.
     pub name: String,
-    /// The build directory, absolute.
-    pub context: PathBuf,
-    pub file: Option<String>,
+    pub image: Image,
     pub command: Vec<String>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Image {
+    /// A service's, built on the node from its directory (absolute).
+    Build {
+        context: PathBuf,
+        file: Option<String>,
+    },
+    /// The kernel's and the backup follower's: a base image, the kernable binary mounted in.
+    Base(String),
+}
+
+/// The pod all of an instance's containers join (Linux): one network, one total limit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pod {
+    /// `kernable-<project>`.
+    pub name: String,
+    pub cpus: Option<String>,
+    pub memory: Option<String>,
+}
+
+/// The kernel's and the backup follower's base image, unless `[kernel] image` names another
+/// (one with your KMS's client for `--key-command`, say). Its C library is newer than any
+/// supported host's, so a binary built there runs in it.
+const BASE_IMAGE: &str = "docker.io/library/debian:trixie-slim";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -147,6 +177,9 @@ struct NodeSection {
     project: Option<String>,
     podman: Option<PathBuf>,
     metrics_listen: Option<String>,
+    /// The instance's total: every part together.
+    cpus: Option<String>,
+    memory: Option<String>,
 }
 
 /// What a `project.toml` asks the node for.
@@ -160,6 +193,9 @@ pub struct Plan {
     /// Where the node keeps the secrets' values for the services to mount: a directory only
     /// its user may enter, in memory where the system has one (`XDG_RUNTIME_DIR`, `/run`).
     pub secrets_dir: PathBuf,
+    /// On Linux: the pod of the instance's containers.
+    pub pod: Option<Pod>,
+    pub podman: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -184,6 +220,9 @@ struct ServiceSection {
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct KernelSection {
     binary: Option<PathBuf>,
+    image: Option<String>,
+    cpus: Option<String>,
+    memory: Option<String>,
     stop_seconds: Option<u64>,
     #[serde(default)]
     flags: BTreeMap<String, toml::Value>,
@@ -227,22 +266,147 @@ struct BackupSection {
     segment_seconds: Option<u64>,
     base_hours: Option<u64>,
     keep: Option<u64>,
+    cpus: Option<String>,
+    memory: Option<String>,
     #[serde(default)]
     env: BTreeMap<String, String>,
 }
 
+/// The children `text` (a `project.toml` in `dir`) asks for, in start order; `this` is the
 /// The children `text` (a `project.toml` in `dir`) asks for, in start order; `this` is the
 /// running binary.
 pub fn specs(text: &str, dir: &Path, this: &Path) -> Result<Vec<Spec>, BoxError> {
     Ok(plan(text, dir, this)?.children)
 }
 
-/// What `text` (a `project.toml` in `dir`) asks for; `this` is the running binary.
+/// What `text` (a `project.toml` in `dir`) asks for; `this` is the running binary. On Linux
+/// every part runs in Podman; elsewhere the kernel and the backup follower are plain
+/// processes.
 pub fn plan(text: &str, dir: &Path, this: &Path) -> Result<Plan, BoxError> {
+    plan_on(text, dir, this, cfg!(target_os = "linux"))
+}
+
+/// [`plan`], with every part in Podman or not.
+fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan, BoxError> {
     let project: Project = toml::from_str(text)?;
+    let node = project.node.unwrap_or_default();
+    let name = match node.project {
+        Some(p) => p,
+        None => dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_else(|| "project".into()),
+    };
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(format!("[node] project {name}: letters, digits, - and _ only").into());
+    }
+    let podman = node.podman.unwrap_or_else(|| PathBuf::from("podman"));
     let k = project.kernel;
-    let binary = k.binary.clone().unwrap_or_else(|| this.to_owned());
+    let limited = [
+        ("[node]", &node.cpus, &node.memory),
+        ("[kernel]", &k.cpus, &k.memory),
+    ]
+    .into_iter()
+    .chain(
+        project
+            .backup
+            .as_ref()
+            .map(|b| ("[backup]", &b.cpus, &b.memory)),
+    )
+    .find(|(_, cpus, memory)| cpus.is_some() || memory.is_some());
+    if let (false, Some((section, _, _))) = (contained, limited) {
+        return Err(format!(
+            "{section} cpus and memory need Linux: the kernel runs in Podman there only"
+        )
+        .into());
+    }
+    let pod = contained.then(|| Pod {
+        name: format!("kernable-{name}"),
+        cpus: node.cpus.clone(),
+        memory: node.memory.clone(),
+    });
+    // Its container sees the project directory and nothing else of the machine.
+    let inside = |what: &str, value: &str| -> Result<(), BoxError> {
+        let path = ["sqlite:", "file:", "unix:"]
+            .iter()
+            .find_map(|scheme| value.strip_prefix(scheme))
+            .unwrap_or(value);
+        if contained && path.starts_with('/') && !Path::new(path).starts_with(dir) {
+            return Err(format!(
+                "{what} {value}: outside {}, the only directory the kernel's container sees; \
+                 move it there or name it relative to it",
+                dir.display()
+            )
+            .into());
+        }
+        Ok(())
+    };
+    let binary = k
+        .binary
+        .as_ref()
+        .map_or_else(|| this.to_owned(), |b| dir.join(b));
+    let image = k.image.clone().unwrap_or_else(|| BASE_IMAGE.to_owned());
     let stop = Duration::from_secs(k.stop_seconds.unwrap_or(30));
+    // The kernel or the backup follower: in a container of the pod, or a plain process.
+    let kernable = |child: &str,
+                    args: Vec<String>,
+                    env: BTreeMap<String, String>,
+                    cpus: &Option<String>,
+                    memory: &Option<String>| {
+        let Some(pod) = &pod else {
+            return Spec {
+                name: child.into(),
+                binary: binary.clone(),
+                args,
+                env,
+                stop,
+                container: None,
+                secrets: Vec::new(),
+                watch: binary.clone(),
+            };
+        };
+        let container = format!("kernable-{name}-{child}");
+        let mut run = vec![
+            "run".to_owned(),
+            "--rm".into(),
+            "--replace".into(),
+            "--name".into(),
+            container.clone(),
+            "--pod".into(),
+            pod.name.clone(),
+            "--volume".into(),
+            format!("{}:/usr/local/bin/kernable:ro", binary.display()),
+            "--volume".into(),
+            format!("{0}:{0}", dir.display()),
+            "--workdir".into(),
+            dir.display().to_string(),
+            // The stores are the container's own files; no label to set on them.
+            "--security-opt".into(),
+            "label=disable".into(),
+        ];
+        // The values from Podman's own environment, so they never show in a process list.
+        for var in env.keys() {
+            run.extend(["--env".into(), var.clone()]);
+        }
+        limits(&mut run, cpus, memory);
+        Spec {
+            name: child.into(),
+            binary: podman.clone(),
+            args: run,
+            env,
+            stop,
+            container: Some(Container {
+                name: container,
+                image: Image::Base(image.clone()),
+                command: std::iter::once("kernable".to_owned()).chain(args).collect(),
+            }),
+            secrets: Vec::new(),
+            watch: binary.clone(),
+        }
+    };
     let mut args = vec!["start".to_owned()];
     let mut listen = "127.0.0.1:7233".to_owned();
     for (flag, value) in &k.flags {
@@ -257,6 +421,7 @@ pub fn plan(text: &str, dir: &Path, this: &Path) -> Result<Plan, BoxError> {
                 return Err(format!("[kernel] flags: {flag} is a {}", other.type_str()).into());
             }
         };
+        inside(&format!("[kernel] flags: {flag}"), &value)?;
         if flag == "listen" {
             listen.clone_from(&value);
         }
@@ -279,6 +444,7 @@ pub fn plan(text: &str, dir: &Path, this: &Path) -> Result<Plan, BoxError> {
         if pair.kernel_keys.is_empty() {
             return Err("[pair] kernel-keys: name both kernels' kernel keys".into());
         }
+        inside("[pair] node-key", &pair.node_key)?;
         let advertise = pair.advertise.clone().unwrap_or_else(|| listen.clone());
         args.extend([
             "--witness".into(),
@@ -289,6 +455,7 @@ pub fn plan(text: &str, dir: &Path, this: &Path) -> Result<Plan, BoxError> {
             advertise.clone(),
         ]);
         for key in &pair.kernel_keys {
+            inside("[pair] kernel-keys", key)?;
             args.extend(["--primary-kernel-key".into(), key.clone()]);
         }
         if let Some(ms) = pair.standby_timeout_ms {
@@ -299,16 +466,15 @@ pub fn plan(text: &str, dir: &Path, this: &Path) -> Result<Plan, BoxError> {
     if project.backup.is_some() && !k.flags.contains_key("backup") {
         args.extend(["--backup".into(), "on".into()]);
     }
-    let mut specs = vec![Spec {
-        name: "kernel".into(),
-        binary: binary.clone(),
-        args,
-        env: k.env,
-        stop,
-        container: None,
-        secrets: Vec::new(),
-    }];
+    let mut specs = vec![kernable("kernel", args, k.env.clone(), &k.cpus, &k.memory)];
     if let Some(b) = project.backup {
+        for (what, value) in [
+            ("[backup] key", &b.key),
+            ("[backup] backup-key", &b.backup_key),
+            ("[backup] to", &b.to),
+        ] {
+            inside(what, value)?;
+        }
         let mut args = vec![
             "backup".to_owned(),
             "--follow".into(),
@@ -332,36 +498,13 @@ pub fn plan(text: &str, dir: &Path, this: &Path) -> Result<Plan, BoxError> {
                 args.extend([flag.to_owned(), v.to_string()]);
             }
         }
-        specs.push(Spec {
-            name: "backup".into(),
-            binary,
-            args,
-            env: b.env,
-            stop,
-            container: None,
-            secrets: Vec::new(),
-        });
+        specs.push(kernable("backup", args, b.env, &b.cpus, &b.memory));
     }
-    let node = project.node.unwrap_or_default();
     let metrics_listen = node.metrics_listen.clone();
     let instance = match node.instance {
         Some(i) => i,
         None => host_name(),
     };
-    let name = match node.project {
-        Some(p) => p,
-        None => dir
-            .file_name()
-            .map(|n| n.to_string_lossy().to_lowercase())
-            .unwrap_or_else(|| "project".into()),
-    };
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        return Err(format!("[node] project {name}: letters, digits, - and _ only").into());
-    }
-    let podman = node.podman.unwrap_or_else(|| PathBuf::from("podman"));
     // Services reach the kernel on the host's network, and in a pair the other one too.
     let mut url = match listen.rsplit_once(':') {
         Some(("0.0.0.0" | "[::]" | "", port)) => {
@@ -421,13 +564,17 @@ pub fn plan(text: &str, dir: &Path, this: &Path) -> Result<Plan, BoxError> {
             "--replace".into(),
             "--name".into(),
             container.clone(),
-            "--network".into(),
-            "host".into(),
+        ];
+        match &pod {
+            Some(pod) => args.extend(["--pod".into(), pod.name.clone()]),
+            None => args.extend(["--network".into(), "host".into()]),
+        }
+        args.extend([
             "--env".into(),
             format!("KERNABLE_URL={url}"),
             "--env".into(),
             format!("KERNABLE_INSTANCE={instance}"),
-        ];
+        ]);
         if let Some(key) = &svc.key {
             let key = dir.join(key);
             let grant = key.with_extension("grant");
@@ -443,8 +590,9 @@ pub fn plan(text: &str, dir: &Path, this: &Path) -> Result<Plan, BoxError> {
                 ]);
             }
         }
-        for (k, v) in &svc.env {
-            args.extend(["--env".into(), format!("{k}={v}")]);
+        // The values from Podman's own environment, so they never show in a process list.
+        for var in svc.env.keys() {
+            args.extend(["--env".into(), var.clone()]);
         }
         for secret in &svc.secrets {
             if !secrets.iter().any(|s| &s.name == secret) {
@@ -460,25 +608,23 @@ pub fn plan(text: &str, dir: &Path, this: &Path) -> Result<Plan, BoxError> {
                 ),
             ]);
         }
-        if let Some(cpus) = &svc.cpus {
-            args.extend(["--cpus".into(), cpus.clone()]);
-        }
-        if let Some(memory) = &svc.memory {
-            args.extend(["--memory".into(), memory.clone()]);
-        }
+        limits(&mut args, &svc.cpus, &svc.memory);
         specs.push(Spec {
             name: svc.name,
             binary: podman.clone(),
             args,
-            env: BTreeMap::new(),
+            env: svc.env,
             stop: Duration::from_secs(svc.stop_seconds.unwrap_or(30)),
             container: Some(Container {
                 name: container,
-                context: dir.join(&svc.build),
-                file: svc.file,
+                image: Image::Build {
+                    context: dir.join(&svc.build),
+                    file: svc.file,
+                },
                 command: svc.command,
             }),
             secrets: svc.secrets,
+            watch: podman.clone(),
         });
     }
     Ok(Plan {
@@ -486,7 +632,19 @@ pub fn plan(text: &str, dir: &Path, this: &Path) -> Result<Plan, BoxError> {
         metrics_listen,
         secrets,
         secrets_dir,
+        pod,
+        podman,
     })
+}
+
+/// `--cpus` and `--memory` for `podman run`.
+fn limits(args: &mut Vec<String>, cpus: &Option<String>, memory: &Option<String>) {
+    if let Some(cpus) = cpus {
+        args.extend(["--cpus".into(), cpus.clone()]);
+    }
+    if let Some(memory) = memory {
+        args.extend(["--memory".into(), memory.clone()]);
+    }
 }
 
 /// The project file and every file a secret is read from.
@@ -667,6 +825,11 @@ struct Running {
 
 impl Running {
     fn new(spec: Spec) -> Self {
+        // A base image needs no build: Podman pulls it on the first run.
+        let image = match spec.container.as_ref().map(|c| &c.image) {
+            Some(Image::Base(image)) => Some(image.clone()),
+            _ => None,
+        };
         Running {
             spec,
             binary_changed: None,
@@ -674,7 +837,7 @@ impl Running {
             started: Instant::now(),
             restart_at: Some(Instant::now()),
             backoff: Duration::from_millis(500),
-            image: None,
+            image,
             building: None,
             build_again: false,
             stopping: None,
@@ -722,17 +885,20 @@ fn forward(name: &str, out: Option<impl AsyncRead + Unpin + Send + 'static>, std
 /// Builds a service's image; its ID. The build's own output goes on as the service's.
 async fn build(spec: Spec) -> Result<String, String> {
     let c = spec.container.as_ref().expect("a service");
+    let Image::Build { context, file } = &c.image else {
+        return Err(format!("{} is not built", spec.name));
+    };
     let mut command = Command::new(&spec.binary);
     command.args(["build", "--quiet", "--tag", &format!("{}:latest", c.name)]);
-    if let Some(file) = &c.file {
-        command.args(["--file", &c.context.join(file).to_string_lossy()]);
+    if let Some(file) = file {
+        command.args(["--file", &context.join(file).to_string_lossy()]);
     }
     command
-        .arg(&c.context)
+        .arg(context)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    tracing::info!(child = %spec.name, context = %c.context.display(), "building");
+    tracing::info!(child = %spec.name, context = %context.display(), "building");
     let mut child = command
         .spawn()
         .map_err(|e| format!("{}: {e}", spec.binary.display()))?;
@@ -846,11 +1012,11 @@ async fn stopped(
 #[derive(Debug, Clone, Default)]
 struct Shown {
     name: String,
-    service: bool,
+    contained: bool,
     up: bool,
     restarts: u64,
     started_ms: i64,
-    /// A service's CPU seconds and memory, from its container's cgroup (Linux).
+    /// A container's CPU seconds and memory, from its cgroup (Linux).
     cpu_seconds: Option<f64>,
     memory_bytes: Option<u64>,
 }
@@ -874,6 +1040,12 @@ pub async fn run(path: &Path) -> Result<(), BoxError> {
         .await
         .map_err(|e| format!("{}: {e}", path.display()))?;
     secrets.stamp(&mut first.children);
+    let (mut pod, mut podman) = (first.pod.clone(), first.podman.clone());
+    if let Some(p) = &pod {
+        make_pod(&podman, p)
+            .await
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+    }
     let board: Board = Arc::default();
     let _metrics = match &first.metrics_listen {
         Some(addr) => {
@@ -930,6 +1102,24 @@ pub async fn run(path: &Path) -> Result<(), BoxError> {
                     secrets.stamp(&mut plan.children);
                     watched = watched_files(&path, &plan.secrets);
                     last_read = watched.iter().map(|p| modified(p)).collect();
+                    if plan.pod != pod {
+                        // A pod's limits are set when it is made: every part starts again in
+                        // a new one.
+                        tracing::warn!("the instance's limits changed: every part starts again");
+                        for c in children.iter_mut().rev() {
+                            if let Some(b) = c.building.take() {
+                                b.abort();
+                            }
+                            stop_now(c).await;
+                        }
+                        children.clear();
+                        if let Some(p) = &plan.pod
+                            && let Err(e) = make_pod(&plan.podman, p).await
+                        {
+                            tracing::error!(error = %e, "cannot make the instance's pod");
+                        }
+                        (pod, podman) = (plan.pod.clone(), plan.podman.clone());
+                    }
                     if plan.metrics_listen != metrics_listen {
                         tracing::warn!(
                             "[node] metrics-listen changed: it applies when the node starts again"
@@ -944,7 +1134,7 @@ pub async fn run(path: &Path) -> Result<(), BoxError> {
         }
         if rebuild {
             // Built again in the background; a service whose image changed restarts then.
-            for c in children.iter_mut().filter(|c| c.spec.container.is_some()) {
+            for c in children.iter_mut().filter(|c| built(&c.spec)) {
                 if c.building.is_none() {
                     c.building = Some(tokio::spawn(build(c.spec.clone())));
                 } else {
@@ -992,7 +1182,65 @@ pub async fn run(path: &Path) -> Result<(), BoxError> {
         }
         stop_now(c).await;
     }
+    if let Some(p) = &pod {
+        remove_pod(&podman, &p.name).await;
+    }
     Ok(())
+}
+
+/// Makes the instance's pod, replacing one a node before left: the host's network, and the
+/// instance's total limits.
+async fn make_pod(podman: &Path, pod: &Pod) -> Result<(), String> {
+    let mut args = vec![
+        "pod".to_owned(),
+        "create".into(),
+        "--replace".into(),
+        "--name".into(),
+        pod.name.clone(),
+        "--network".into(),
+        "host".into(),
+    ];
+    limits(&mut args, &pod.cpus, &pod.memory);
+    let made = Command::new(podman)
+        .args(&args)
+        .stdin(Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let output = tokio::time::timeout(Duration::from_secs(300), made)
+        .await
+        .map_err(|_| format!("podman pod create {} took over 300 s", pod.name))?
+        .map_err(|e| format!("{}: {e}", podman.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "podman pod create {} failed: {}",
+            pod.name,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    tracing::info!(pod = %pod.name, cpus = ?pod.cpus, memory = ?pod.memory, "the instance's pod is made");
+    Ok(())
+}
+
+/// Removes the instance's pod once its containers stopped.
+async fn remove_pod(podman: &Path, name: &str) {
+    let removed = Command::new(podman)
+        .args(["pod", "rm", "--force", name])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await;
+    if !removed.is_ok_and(|s| s.success()) {
+        tracing::warn!(pod = %name, "cannot remove the instance's pod");
+    }
+}
+
+/// Whether the child's image is built on the node (a service's).
+fn built(spec: &Spec) -> bool {
+    matches!(
+        spec.container.as_ref().map(|c| &c.image),
+        Some(Image::Build { .. })
+    )
 }
 
 /// One look at a child: a finished build, a replaced binary, an exit, a due start.
@@ -1023,7 +1271,7 @@ async fn step(c: &mut Running, dir: &Path) {
         }
     }
     // A replaced binary: start the child on the new one.
-    if c.child.is_some() && modified(&c.spec.binary) != c.binary_changed {
+    if c.child.is_some() && modified(&c.spec.watch) != c.binary_changed {
         tracing::info!(child = %c.spec.name, "its binary changed: restarting it");
         stop(c);
         c.restart_at = Some(Instant::now());
@@ -1057,7 +1305,7 @@ async fn step(c: &mut Running, dir: &Path) {
         c.restart_at = None;
         return;
     }
-    c.binary_changed = modified(&c.spec.binary);
+    c.binary_changed = modified(&c.spec.watch);
     c.started = Instant::now();
     match spawn(&c.spec, c.image.as_deref(), dir) {
         Ok(child) => {
@@ -1133,13 +1381,13 @@ fn show(board: &Board, children: &[Running], usages: &Usages) {
     for c in children {
         let mut s = Shown {
             name: c.spec.name.clone(),
-            service: c.spec.container.is_some(),
+            contained: c.spec.container.is_some(),
             up: c.child.is_some(),
             restarts: c.restarts,
             started_ms: c.started_ms,
             ..Default::default()
         };
-        if s.service
+        if s.contained
             && s.up
             && let Some(&(cpu, memory)) = usages.get(&s.name)
         {
@@ -1219,20 +1467,24 @@ fn metrics_text(shown: &[Shown]) -> String {
         }),
     );
     family(
-        "kernable_node_service_cpu_seconds_total",
+        "kernable_node_container_cpu_seconds_total",
         "counter",
-        "CPU time a service's container used, from its cgroup (Linux).",
+        "CPU time a child's container used (a service, and on Linux the kernel and the backup follower), from its cgroup.",
         rows(&|s| {
             s.cpu_seconds
-                .filter(|_| s.service)
+                .filter(|_| s.contained)
                 .map(|v| format!("{v:.3}"))
         }),
     );
     family(
-        "kernable_node_service_memory_bytes",
+        "kernable_node_container_memory_bytes",
         "gauge",
-        "Memory a service's container uses now, from its cgroup (Linux).",
-        rows(&|s| s.memory_bytes.filter(|_| s.service).map(|v| v.to_string())),
+        "Memory a child's container uses now, from its cgroup.",
+        rows(&|s| {
+            s.memory_bytes
+                .filter(|_| s.contained)
+                .map(|v| v.to_string())
+        }),
     );
     out
 }
@@ -1271,6 +1523,16 @@ async fn serve_metrics(listener: tokio::net::TcpListener, board: Board) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The same on every system: the kernel as a plain process, unless a test asks for Linux's
+    // containers with `plan_on`.
+    fn plan(text: &str, dir: &Path, this: &Path) -> Result<Plan, BoxError> {
+        plan_on(text, dir, this, false)
+    }
+
+    fn specs(text: &str, dir: &Path, this: &Path) -> Result<Vec<Spec>, BoxError> {
+        Ok(plan(text, dir, this)?.children)
+    }
 
     const PROJECT: &str = r#"
 [kernel]
@@ -1385,7 +1647,17 @@ memory = "512m"
         assert_eq!(worker.binary, Path::new("podman"));
         let c = worker.container.as_ref().unwrap();
         assert_eq!(c.name, "kernable-shop-worker");
-        assert_eq!(c.context, Path::new("/srv/shop/./worker"));
+        assert_eq!(
+            c.image,
+            Image::Build {
+                context: "/srv/shop/./worker".into(),
+                file: None
+            }
+        );
+        assert_eq!(
+            worker.env["SHOP_MAIL"], "smtp://mail:25",
+            "from Podman's environment"
+        );
         assert_eq!(c.command, ["node", "app.ts"]);
         let args = worker.args.join(" ");
         for part in [
@@ -1394,8 +1666,7 @@ memory = "512m"
             "--env KERNABLE_INSTANCE=node-a",
             "--volume /srv/shop/keys/worker.key:/run/kernable/key:ro,Z --env KERNABLE_KEY=/run/kernable/key",
             "--volume /srv/shop/keys/worker.grant:/run/kernable/grant:ro,Z",
-            "--env SHOP_MAIL=smtp://mail:25",
-            "--memory 512m",
+            "--env SHOP_MAIL --memory 512m",
         ] {
             assert!(args.contains(part), "{part} missing from {args}");
         }
@@ -1423,7 +1694,7 @@ memory = "512m"
             },
             Shown {
                 name: "worker".into(),
-                service: true,
+                contained: true,
                 cpu_seconds: Some(1.5),
                 memory_bytes: Some(4096),
                 ..Default::default()
@@ -1435,8 +1706,8 @@ memory = "512m"
             "kernable_node_child_up{child=\"worker\"} 0",
             "kernable_node_child_restarts_total{child=\"kernel\"} 2",
             "kernable_node_child_uptime_seconds{child=\"kernel\"} 5",
-            "kernable_node_service_cpu_seconds_total{child=\"worker\"} 1.500",
-            "kernable_node_service_memory_bytes{child=\"worker\"} 4096",
+            "kernable_node_container_cpu_seconds_total{child=\"worker\"} 1.500",
+            "kernable_node_container_memory_bytes{child=\"worker\"} 4096",
         ] {
             assert!(
                 text.lines().any(|l| l == line),
@@ -1616,6 +1887,90 @@ secrets = ["smtp"]
             .mode();
         assert_eq!(mode & 0o777, 0o700, "nobody else enters the directory");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn on_linux_every_part_runs_in_the_instance_s_pod_within_its_limits() {
+        let text = r#"
+[kernel]
+flags = { root = "root.pub", store = "sqlite:/srv/shop/data/k.db", listen = "0.0.0.0:7233" }
+env = { KERNABLE_LOG = "info" }
+cpus = "2"
+memory = "1g"
+
+[backup]
+to = "file:backups"
+key = "backup.key"
+backup-key = "backup-encryption.key"
+memory = "256m"
+
+[node]
+project = "shop"
+cpus = "4"
+memory = "4g"
+
+[[service]]
+name = "worker"
+build = "."
+"#;
+        let (dir, this) = (Path::new("/srv/shop"), Path::new("/opt/kernable/kernable"));
+        let plan = plan_on(text, dir, this, true).unwrap();
+        assert_eq!(
+            plan.pod,
+            Some(Pod {
+                name: "kernable-shop".into(),
+                cpus: Some("4".into()),
+                memory: Some("4g".into())
+            })
+        );
+        let kernel = &plan.children[0];
+        assert_eq!(kernel.binary, Path::new("podman"));
+        assert_eq!(kernel.watch, this, "a new binary restarts it");
+        assert_eq!(kernel.env["KERNABLE_LOG"], "info");
+        assert_eq!(
+            kernel.args.join(" "),
+            "run --rm --replace --name kernable-shop-kernel --pod kernable-shop \
+             --volume /opt/kernable/kernable:/usr/local/bin/kernable:ro \
+             --volume /srv/shop:/srv/shop --workdir /srv/shop --security-opt label=disable \
+             --env KERNABLE_LOG --cpus 2 --memory 1g"
+        );
+        let c = kernel.container.as_ref().unwrap();
+        assert_eq!(c.image, Image::Base(BASE_IMAGE.into()));
+        assert_eq!(c.command[..2], ["kernable", "start"]);
+        let backup = &plan.children[1];
+        assert!(backup.args.join(" ").ends_with("--memory 256m"));
+        assert_eq!(
+            backup.container.as_ref().unwrap().command[..2],
+            ["kernable", "backup"]
+        );
+        let worker = plan.children[2].args.join(" ");
+        assert!(worker.contains("--pod kernable-shop"), "{worker}");
+        assert!(!worker.contains("--network"), "the pod's network: {worker}");
+
+        let own = text.replace(
+            "[kernel]\n",
+            "[kernel]\nimage = \"registry.example/kms:1\"\n",
+        );
+        let plan = plan_on(&own, dir, this, true).unwrap();
+        let image = &plan.children[0].container.as_ref().unwrap().image;
+        assert_eq!(image, &Image::Base("registry.example/kms:1".into()));
+
+        // The container sees the project directory only.
+        let outside = text.replace("sqlite:/srv/shop/data/k.db", "sqlite:/var/lib/k.db");
+        let error = plan_on(&outside, dir, this, true).unwrap_err().to_string();
+        assert!(
+            error.contains("/var/lib/k.db") && error.contains("only directory"),
+            "{error}"
+        );
+        let error = plan_on(&outside, dir, this, false).unwrap_err().to_string();
+        assert!(
+            !error.contains("only directory"),
+            "a plain process sees it: {error}"
+        );
+
+        // Without containers there is nothing to limit the kernel with.
+        let error = plan_on(text, dir, this, false).unwrap_err().to_string();
+        assert!(error.contains("need Linux"), "{error}");
     }
 
     #[test]
