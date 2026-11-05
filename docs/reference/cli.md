@@ -227,7 +227,15 @@ Fills new, empty stores from an export, then checks the store like verify, with 
 kernable node <project.toml>
 ```
 
-Runs one node of a project: the kernel and, with a [backup] section, the backup follower, as child processes it restarts when they exit. It reads the file again every two seconds or on SIGHUP, and restarts a child whose command changed or whose binary was replaced. SIGTERM or SIGINT stops the children (SIGKILL after stop-seconds, default 30). The file has [kernel] (flags: the flags of kernable start without their dashes, env, binary, stop-seconds), [backup] (to, key, backup-key, follow, segment-seconds, base-hours, keep, env), [node] (instance, project, podman, metrics-listen: GET /metrics) and any number of [[service]] (name, build, file, command, key, env, cpus, memory, stop-seconds): containers built with podman on the node, rebuilt on SIGHUP, run after the kernel with `KERNABLE_URL`, `KERNABLE_INSTANCE` and their key. Every child's output comes out of the node prefixed with its name. Paths are relative to its directory. Exit 2 if the file is invalid at start.
+Runs one node of a project: the kernel and, with a [backup] section, the backup follower, as child processes it restarts when they exit. It reads the file again every two seconds or on SIGHUP, and restarts a child whose command changed or whose binary was replaced. SIGTERM or SIGINT stops the children (SIGKILL after stop-seconds, default 30). The file has [kernel] (flags: the flags of kernable start without their dashes, env, binary, stop-seconds), [backup] (to, key, backup-key, follow, segment-seconds, base-hours, keep, env), [node] (instance, project, podman, metrics-listen: GET /metrics) and any number of [[service]] (name, build, file, command, key, env, secrets, cpus, memory, stop-seconds, writable, expose): containers built with podman on the node, rebuilt on SIGHUP, run after the kernel with `KERNABLE_URL`, `KERNABLE_INSTANCE` and their key. Every child's output comes out of the node prefixed with its name. Paths are relative to its directory. Exit 2 if the file is invalid at start.
+
+### `kernable expose`
+
+```text
+kernable expose <socket>=<host:port>... Passes every connection to each Unix socket on to its
+```
+
+address, both ways: a node runs it in an instance's pod, for a service's port to be reached through the socket.
 
 ## Continuous backup
 
