@@ -91,7 +91,7 @@ On Linux the instance's pod has a network of its own, so its services see neithe
 
 - **The kernel listens on a socket**, `run/kernel.sock` in the project directory; the node chooses it, so `flags` takes no `listen`. Each service finds it, read-only, at `/run/kernable/kernel/kernel.sock`, named in `KERNABLE_URL`.
 - **Clients from outside, and the other kernel of a pair, will reach it through the ingress**, which ends TLS and passes requests on to the socket. Until the ingress exists, run an instance that must be reached from outside, or one of a pair, with `network = "host"`.
-- **Your services reach the internet** as usual (rootless, through Podman's pasta). The machine's loopback is out of their reach; its other addresses and the provider's metadata service follow with a firewall per instance.
+- **Your services reach the internet** as usual (rootless, through Podman's pasta). The machine's loopback is out of their reach; on a server set up with [`kernable-host`](./host#the-firewall), so are its other addresses, internal networks and the provider's metadata service.
 
 `network = "host"` puts the whole pod on the machine's network, as on a machine of its own, where nothing else runs beside the instance: the kernel listens where `listen` says (plain TCP on a loopback address only, mutual TLS elsewhere), and the services find it there. A change of `network` starts every part again in a new pod.
 
