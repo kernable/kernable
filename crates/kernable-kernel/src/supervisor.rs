@@ -1041,10 +1041,12 @@ pub async fn run(path: &Path) -> Result<(), BoxError> {
         .map_err(|e| format!("{}: {e}", path.display()))?;
     secrets.stamp(&mut first.children);
     let (mut pod, mut podman) = (first.pod.clone(), first.podman.clone());
+    let mut _watchdog = None;
     if let Some(p) = &pod {
         make_pod(&podman, p)
             .await
             .map_err(|e| format!("{}: {e}", path.display()))?;
+        _watchdog = pod_watchdog(&podman, p);
     }
     let board: Board = Arc::default();
     let _metrics = match &first.metrics_listen {
@@ -1113,10 +1115,11 @@ pub async fn run(path: &Path) -> Result<(), BoxError> {
                             stop_now(c).await;
                         }
                         children.clear();
-                        if let Some(p) = &plan.pod
-                            && let Err(e) = make_pod(&plan.podman, p).await
-                        {
-                            tracing::error!(error = %e, "cannot make the instance's pod");
+                        if let Some(p) = &plan.pod {
+                            if let Err(e) = make_pod(&plan.podman, p).await {
+                                tracing::error!(error = %e, "cannot make the instance's pod");
+                            }
+                            _watchdog = pod_watchdog(&plan.podman, p);
                         }
                         (pod, podman) = (plan.pod.clone(), plan.podman.clone());
                     }
@@ -1219,6 +1222,31 @@ async fn make_pod(podman: &Path, pod: &Pod) -> Result<(), String> {
     }
     tracing::info!(pod = %pod.name, cpus = ?pod.cpus, memory = ?pod.memory, "the instance's pod is made");
     Ok(())
+}
+
+/// Removes the instance's pod once the node is gone, however it ended: a process of its own
+/// that waits for the node's end of a pipe to close. Rootless `podman run` runs the container
+/// from a process it executes anew, which the node's death does not reach (a killed node would
+/// leave its containers running). Dropped, it ends without removing anything.
+fn pod_watchdog(podman: &Path, pod: &Pod) -> Option<Child> {
+    let watchdog = Command::new("sh")
+        .args(["-c", r#"read _ || exec "$0" pod rm --force --time 10 "$1""#])
+        .arg(podman)
+        .arg(&pod.name)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        // Out of the node's group: a Ctrl-C meant for the node does not end it.
+        .process_group(0)
+        .kill_on_drop(true)
+        .spawn();
+    match watchdog {
+        Ok(child) => Some(child),
+        Err(e) => {
+            tracing::warn!(error = %e, "no watchdog: a killed node would leave its containers");
+            None
+        }
+    }
 }
 
 /// Removes the instance's pod once its containers stopped.

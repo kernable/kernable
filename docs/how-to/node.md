@@ -64,7 +64,7 @@ file = "secrets/stripe.key"                # or: command = ["vault", "kv", "get"
 kernable node project.toml
 ```
 
-Run it under your service manager (systemd, launchd) so the node itself starts with the machine. The children run in process groups of their own, so a Ctrl-C reaches only the node, which stops them in order; under systemd, set `KillMode=mixed`, so SIGTERM goes to the node alone, and a `TimeoutStopSec` longer than the children's `stop-seconds` together. On Linux, a node that is killed takes its children along.
+Run it under your service manager (systemd, launchd) so the node itself starts with the machine. The children run in process groups of their own, so a Ctrl-C reaches only the node, which stops them in order; under systemd, set `KillMode=mixed`, so SIGTERM goes to the node alone, and a `TimeoutStopSec` longer than the children's `stop-seconds` together. On Linux, a node that is killed takes its children along: a small watchdog process removes the instance's pod once the node is gone, and a node that starts again replaces whatever pod an earlier one left.
 
 ## Your services
 

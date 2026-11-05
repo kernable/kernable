@@ -202,7 +202,8 @@ async fn a_node_builds_and_runs_a_service_after_its_kernel() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Linux only: children are bound to the node with PR_SET_PDEATHSIG.
+/// Linux only: a killed node takes its children along. The kernel runs in the instance's pod
+/// there, which the node's watchdog removes once the node is gone.
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_killed_node_takes_its_kernel_along() {
@@ -217,7 +218,7 @@ async fn a_killed_node_takes_its_kernel_along() {
     // SAFETY: SIGKILL to the node we started: it cannot stop its children itself.
     unsafe { libc::kill(node.process.id() as libc::pid_t, libc::SIGKILL) };
     let _ = node.process.wait();
-    for _ in 0..100 {
+    for _ in 0..600 {
         if !alive(kernel) {
             break;
         }
