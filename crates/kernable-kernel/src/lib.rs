@@ -1195,7 +1195,7 @@ impl Kernel {
 /// them (the default mode would let others read it but not connect, and leave an ACL's write
 /// masked off).
 #[cfg(unix)]
-pub(crate) fn socket_mode(path: &str) -> std::io::Result<()> {
+pub fn socket_mode(path: &str) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
 }

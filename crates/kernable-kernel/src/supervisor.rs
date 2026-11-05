@@ -239,6 +239,9 @@ struct ServiceSection {
     /// A root filesystem the service may write to, for an image that writes outside `/tmp`.
     #[serde(default)]
     writable: bool,
+    /// The port it serves HTTP on in the pod, for the ingress to reach it through
+    /// `run/<name>.sock`.
+    expose: Option<u16>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -613,16 +616,32 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
     let secrets_dir = runtime_dir()
         .join(format!("kernable-{name}"))
         .join("secrets");
+    // The services' ports the ingress reaches, as `kernable expose` takes them.
+    let mut exposed: Vec<String> = Vec::new();
     for svc in project.service {
-        if !valid_name(&svc.name) || matches!(svc.name.as_str(), "kernel" | "backup") {
+        if !valid_name(&svc.name) || matches!(svc.name.as_str(), "kernel" | "backup" | "expose") {
             return Err(format!(
-                "[[service]] {}: a name has 1 to 63 lowercase letters, digits and -, and is not kernel or backup",
+                "[[service]] {}: a name has 1 to 63 lowercase letters, digits and -, and is not kernel, backup or expose",
                 svc.name
             )
             .into());
         }
         if specs.iter().any(|s| s.name == svc.name) {
             return Err(format!("[[service]] {} is named twice", svc.name).into());
+        }
+        if let Some(port) = svc.expose {
+            let Some(sockets) = &sockets else {
+                return Err(format!(
+                    "[[service]] {}: expose needs the pod's own network, on Linux",
+                    svc.name
+                )
+                .into());
+            };
+            exposed.push(format!(
+                "{}={}",
+                sockets.join(format!("{}.sock", svc.name)).display(),
+                std::net::SocketAddr::from(([127, 0, 0, 1], port))
+            ));
         }
         let container = format!("kernable-{name}-{}", svc.name);
         let mut args = vec![
@@ -704,6 +723,14 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
             secrets: svc.secrets,
             watch: podman.clone(),
         });
+    }
+    // One forwarder for the instance: each exposed service's socket in run/ to its port in the
+    // pod's own network.
+    if !exposed.is_empty() {
+        let args = std::iter::once("expose".to_owned())
+            .chain(exposed)
+            .collect();
+        specs.push(kernable("expose", args, BTreeMap::new(), &None, &None));
     }
     Ok(Plan {
         children: specs,
@@ -2354,6 +2381,63 @@ build = "."
                 .args
                 .iter()
                 .any(|a| a.starts_with("unix:"))
+        );
+    }
+
+    #[test]
+    fn an_exposed_service_is_reached_through_a_socket_beside_the_kernel_s() {
+        let text = r#"
+[kernel]
+
+[[service]]
+name = "web"
+build = "web"
+expose = 3000
+
+[[service]]
+name = "api"
+build = "api"
+expose = 8080
+
+[[service]]
+name = "worker"
+build = "worker"
+"#;
+        let (dir, this) = (Path::new("/srv/shop"), Path::new("/bin/kernable"));
+        let plan = plan_on(text, dir, this, true).unwrap();
+        let forwarder = plan.children.last().unwrap();
+        assert_eq!(forwarder.name, "expose");
+        assert_eq!(
+            forwarder.container.as_ref().unwrap().command,
+            [
+                "kernable",
+                "expose",
+                "/srv/shop/run/web.sock=127.0.0.1:3000",
+                "/srv/shop/run/api.sock=127.0.0.1:8080"
+            ]
+        );
+        assert!(forwarder.args.join(" ").contains("--pod kernable-shop"));
+        assert_eq!(
+            plan.children.iter().filter(|c| c.name == "expose").count(),
+            1,
+            "one for the instance"
+        );
+        let named = text.replace("name = \"worker\"", "name = \"expose\"");
+        assert!(
+            plan_on(&named, dir, this, true).is_err(),
+            "the forwarder's name"
+        );
+        let error = plan_on(text, dir, this, false).unwrap_err().to_string();
+        assert!(error.contains("expose needs"), "{error}");
+        let none = text
+            .replace("expose = 3000\n", "")
+            .replace("expose = 8080\n", "");
+        assert!(
+            plan_on(&none, dir, this, true)
+                .unwrap()
+                .children
+                .iter()
+                .all(|c| c.name != "expose")
         );
     }
 

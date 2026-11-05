@@ -54,6 +54,7 @@ secrets = ["stripe"]                       # optional: see [[secret]]
 cpus = "1.5"                               # optional, as memory = "512m"
 stop-seconds = 10                          # optional
 writable = true                            # optional: see Hardening
+expose = 3000                              # optional (Linux): see Network
 
 [[secret]]                                 # one per secret
 name = "stripe"
@@ -90,7 +91,8 @@ On macOS and other systems the kernel and the backup follower run as plain proce
 On Linux the instance's pod has a network of its own, so its services see neither the machine's other services nor other instances, and nothing in it can be reached from outside:
 
 - **The kernel listens on a socket**, `run/kernel.sock` in the project directory; the node chooses it, so `flags` takes no `listen`. Each service finds it, read-only, at `/run/kernable/kernel/kernel.sock`, named in `KERNABLE_URL`.
-- **Clients from outside, and the other kernel of a pair, will reach it through the ingress**, which ends TLS and passes requests on to the socket. Until the ingress exists, run an instance that must be reached from outside, or one of a pair, with `network = "host"`.
+- **A service that serves HTTP** (a web frontend, an API, webhooks) takes `expose = <port>`, the port it listens on in the pod. The node passes `run/<name>.sock` on to it, so the service listens on plain TCP as usual and is reached through its socket.
+- **From outside**, a reverse proxy on the machine ends TLS and passes requests on to these sockets: gRPC to `run/kernel.sock` (HTTP/2 without TLS: `grpc_pass unix:…` in nginx), HTTP to `run/<name>.sock`. The sockets let their owner and group connect; grant your proxy's user access with an ACL (`setfacl -m u:<proxy>:x` on the directory and `u:<proxy>:rx,d:u:<proxy>:rw` on `run/`). An instance that is one of a pair runs with `network = "host"`.
 - **Your services reach the internet** as usual (rootless, through Podman's pasta). The machine's loopback is out of their reach. Run each instance as a user of its own, and keep its user from the machine's other addresses and the provider's metadata service with your firewall.
 
 `network = "host"` puts the whole pod on the machine's network, as on a machine of its own, where nothing else runs beside the instance: the kernel listens where `listen` says (plain TCP on a loopback address only, mutual TLS elsewhere), and the services find it there. A change of `network` starts every part again in a new pod.

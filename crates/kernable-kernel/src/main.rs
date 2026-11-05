@@ -215,12 +215,16 @@ Run a node:
                                           segment-seconds, base-hours, keep, env), [node]
                                           (instance, project, podman, metrics-listen: GET /metrics)
                                           and any number of [[service]]
-                                          (name, build, file, command, key, env, cpus, memory,
-                                          stop-seconds): containers built with podman on the node,
+                                          (name, build, file, command, key, env, secrets, cpus,
+                                          memory, stop-seconds, writable, expose): containers built
+                                          with podman on the node,
                                           rebuilt on SIGHUP, run after the kernel with KERNABLE_URL,
                                           KERNABLE_INSTANCE and their key. Every child's output comes
                                           out of the node prefixed with its name. Paths are relative
                                           to its directory. Exit 2 if the file is invalid at start.
+  kernable expose <socket>=<host:port>... Passes every connection to each Unix socket on to its
+                                          address, both ways: a node runs it in an instance's pod,
+                                          for a service's port to be reached through the socket.
 
 Continuous backup:
   kernable backup key <file>              Writes a new backup key (32 random bytes in hex) to
@@ -355,6 +359,7 @@ async fn main() -> ExitCode {
         }
         ["witness", flags @ ..] => return run_witness(flags).await,
         ["node", project] => return run_node(project).await,
+        ["expose", pairs @ ..] if !pairs.is_empty() => return expose(pairs).await,
         ["backup", "key", file] => backup_key(file),
         ["backup", "list", to, flags @ ..] if !to.starts_with("--") => backup_list(to, flags),
         ["backup", flags @ ..] => return run_backup(flags).await,
@@ -881,6 +886,61 @@ fn flag_values<'a>(flags: &[&'a str], known: &[&str]) -> Result<HashMap<&'a str,
         given.push(value);
     }
     Ok(values)
+}
+
+/// `kernable expose <socket>=<host:port>...`: each Unix socket passes its connections on to its
+/// address, both ways, until stopped. A node runs it in an instance's pod, so that what reaches
+/// the socket from outside (the ingress) reaches a service's port in the pod's own network.
+async fn expose(pairs: &[&str]) -> ExitCode {
+    use std::os::unix::fs::FileTypeExt;
+    for pair in pairs {
+        let Some((socket, to)) = pair.split_once('=') else {
+            eprintln!("error: {pair}: <socket>=<host:port>");
+            return ExitCode::from(2);
+        };
+        // A stale socket from an earlier run, but never any other file.
+        if std::fs::metadata(socket).is_ok_and(|m| m.file_type().is_socket()) {
+            let _ = std::fs::remove_file(socket);
+        }
+        let listener = match tokio::net::UnixListener::bind(socket) {
+            Ok(listener) => listener,
+            Err(e) => {
+                eprintln!("error: {socket}: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        if let Err(e) = kernable_kernel::socket_mode(socket) {
+            eprintln!("error: {socket}: {e}");
+            return ExitCode::FAILURE;
+        }
+        let to = to.to_owned();
+        tokio::spawn(async move {
+            loop {
+                let mut inbound = match listener.accept().await {
+                    Ok((inbound, _)) => inbound,
+                    Err(e) => {
+                        eprintln!("accepting on the socket failed: {e}");
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        continue;
+                    }
+                };
+                let to = to.clone();
+                tokio::spawn(async move {
+                    match tokio::net::TcpStream::connect(&to).await {
+                        Ok(mut outbound) => {
+                            let _ = outbound.set_nodelay(true);
+                            let _ =
+                                tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                        }
+                        Err(e) => eprintln!("{to}: {e}"),
+                    }
+                });
+            }
+        });
+    }
+    eprintln!("exposing {}", pairs.join(" "));
+    std::future::pending::<()>().await;
+    ExitCode::SUCCESS
 }
 
 /// `kernable node <project.toml>`: runs one node of a project until stopped.
