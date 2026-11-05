@@ -127,6 +127,8 @@ pub struct Pod {
     pub cpus: Option<String>,
     pub memory: Option<String>,
     pub network: Network,
+    /// The seccomp profile of its containers, which the node writes as it makes the pod.
+    pub seccomp: PathBuf,
 }
 
 /// How an instance's pod reaches the network.
@@ -359,6 +361,9 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
         cpus: node.cpus.clone(),
         memory: node.memory.clone(),
         network,
+        seccomp: runtime_dir()
+            .join(format!("kernable-{name}"))
+            .join("seccomp.json"),
     });
     // The kernel's socket, when the pod has a network of its own.
     let sockets = match &pod {
@@ -431,7 +436,7 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
         for var in env.keys() {
             run.extend(["--env".into(), var.clone()]);
         }
-        harden(&mut run, false);
+        harden(&mut run, false, Some(&pod.seccomp));
         limits(&mut run, cpus, memory);
         Spec {
             name: child.into(),
@@ -676,7 +681,11 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
                 ),
             ]);
         }
-        harden(&mut args, svc.writable);
+        harden(
+            &mut args,
+            svc.writable,
+            pod.as_ref().map(|p| p.seccomp.as_path()),
+        );
         limits(&mut args, &svc.cpus, &svc.memory);
         specs.push(Spec {
             name: svc.name,
@@ -710,9 +719,10 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
 const PIDS: u32 = 4096;
 
 /// What every container gets: no capabilities, no way to gain privileges (no
-/// setuid binary works), a cap on its processes, and a root filesystem it cannot change unless
-/// `writable`; Podman mounts a tmpfs on `/tmp`, `/var/tmp` and `/run` of a read-only one.
-fn harden(args: &mut Vec<String>, writable: bool) {
+/// setuid binary works), a cap on its processes, a root filesystem it cannot change unless
+/// `writable` (Podman mounts a tmpfs on `/tmp`, `/var/tmp` and `/run` of a read-only one), and,
+/// in a pod, the node's tightened `seccomp` profile.
+fn harden(args: &mut Vec<String>, writable: bool, seccomp: Option<&Path>) {
     args.extend([
         "--cap-drop".into(),
         "all".into(),
@@ -721,9 +731,90 @@ fn harden(args: &mut Vec<String>, writable: bool) {
         "--pids-limit".into(),
         PIDS.to_string(),
     ]);
+    if let Some(profile) = seccomp {
+        args.extend([
+            "--security-opt".into(),
+            format!("seccomp={}", profile.display()),
+        ]);
+    }
     if !writable {
         args.push("--read-only".into());
     }
+}
+
+/// Where Podman keeps its default seccomp profile: an administrator's own first.
+const SECCOMP_DEFAULTS: [&str; 2] = [
+    "/etc/containers/seccomp.json",
+    "/usr/share/containers/seccomp.json",
+];
+/// `clone`'s and `unshare`'s flag for a new user namespace.
+const CLONE_NEWUSER: u64 = 0x1000_0000;
+
+/// Podman's default seccomp `profile`, tightened: no new user namespaces, whose
+/// root holds capabilities that open the kernel paths most container escapes go through, and
+/// no kernel keyrings, which no namespace separates. Podman allows both by default.
+fn tighten(mut profile: serde_json::Value) -> Result<serde_json::Value, String> {
+    const CLOSED: [&str; 6] = [
+        "unshare",
+        "clone",
+        "clone3",
+        "keyctl",
+        "add_key",
+        "request_key",
+    ];
+    let rules = profile
+        .get_mut("syscalls")
+        .and_then(|s| s.as_array_mut())
+        .ok_or("no list of syscalls")?;
+    for rule in rules.iter_mut() {
+        if let Some(names) = rule.get_mut("names").and_then(|n| n.as_array_mut()) {
+            names.retain(|n| !n.as_str().is_some_and(|n| CLOSED.contains(&n)));
+        }
+    }
+    rules.retain(|r| {
+        r.get("names")
+            .and_then(|n| n.as_array())
+            .is_none_or(|n| !n.is_empty())
+    });
+    let new_user = |value: u64| {
+        serde_json::json!([{
+            "index": 0,
+            "value": CLONE_NEWUSER,
+            "valueTwo": value,
+            "op": "SCMP_CMP_MASKED_EQ"
+        }])
+    };
+    rules.extend([
+        serde_json::json!({"names": ["unshare", "clone"], "action": "SCMP_ACT_ALLOW", "args": new_user(0)}),
+        serde_json::json!({"names": ["unshare", "clone"], "action": "SCMP_ACT_ERRNO", "errnoRet": libc::EPERM, "args": new_user(CLONE_NEWUSER)}),
+        // Its flags are out of a filter's reach: "not there", and C libraries use clone instead.
+        serde_json::json!({"names": ["clone3"], "action": "SCMP_ACT_ERRNO", "errnoRet": libc::ENOSYS}),
+        serde_json::json!({"names": ["keyctl", "add_key", "request_key"], "action": "SCMP_ACT_ERRNO", "errnoRet": libc::EPERM}),
+    ]);
+    Ok(profile)
+}
+
+/// Writes Podman's default seccomp profile, [`tighten`]ed, to `to`; without one, no container
+/// starts.
+fn write_seccomp(to: &Path) -> Result<(), String> {
+    let (from, text) = SECCOMP_DEFAULTS
+        .iter()
+        .find_map(|p| std::fs::read_to_string(p).ok().map(|t| (*p, t)))
+        .ok_or_else(|| {
+            format!(
+                "no seccomp profile of Podman's in {}",
+                SECCOMP_DEFAULTS.join(" or ")
+            )
+        })?;
+    let profile = serde_json::from_str(&text)
+        .map_err(|e| e.to_string())
+        .and_then(tighten)
+        .map_err(|e| format!("{from}: {e}"))?;
+    if let Some(dir) = to.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    std::fs::write(to, serde_json::to_vec(&profile).expect("JSON"))
+        .map_err(|e| format!("{}: {e}", to.display()))
 }
 
 /// `--cpus` and `--memory` for `podman run`.
@@ -971,8 +1062,28 @@ fn forward(name: &str, out: Option<impl AsyncRead + Unpin + Send + 'static>, std
     });
 }
 
+/// One build at a time: two builds of the same layers at once into one rootless storage hang
+/// for good once their steps are done (seen with Podman 5.7, 3 of 3 times), and they share the
+/// disk and the network anyway.
+static BUILDS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+/// A build that takes longer is stopped, and tried again after a pause like a failed one.
+const BUILD_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+
 /// Builds a service's image; its ID. The build's own output goes on as the service's.
 async fn build(spec: Spec) -> Result<String, String> {
+    let _turn = BUILDS.acquire().await.expect("never closed");
+    tokio::time::timeout(BUILD_TIMEOUT, build_now(&spec))
+        .await
+        .unwrap_or_else(|_| {
+            Err(format!(
+                "building {} took over {} min: stopped",
+                spec.name,
+                BUILD_TIMEOUT.as_secs() / 60
+            ))
+        })
+}
+
+async fn build_now(spec: &Spec) -> Result<String, String> {
     let c = spec.container.as_ref().expect("a service");
     let Image::Build { context, file } = &c.image else {
         return Err(format!("{} is not built", spec.name));
@@ -1286,6 +1397,7 @@ pub async fn run(path: &Path) -> Result<(), BoxError> {
 /// Makes the instance's pod, replacing one a node before left: the host's network, and the
 /// instance's total limits.
 async fn make_pod(podman: &Path, pod: &Pod) -> Result<(), String> {
+    write_seccomp(&pod.seccomp)?;
     let mut args = vec![
         "pod".to_owned(),
         "create".into(),
@@ -2086,6 +2198,7 @@ build = "."
 "#;
         let (dir, this) = (Path::new("/srv/shop"), Path::new("/opt/kernable/kernable"));
         let plan = plan_on(text, dir, this, true).unwrap();
+        let seccomp = runtime_dir().join("kernable-shop/seccomp.json");
         assert_eq!(
             plan.pod,
             Some(Pod {
@@ -2093,6 +2206,7 @@ build = "."
                 cpus: Some("4".into()),
                 memory: Some("4g".into()),
                 network: Network::Host,
+                seccomp: seccomp.clone(),
             })
         );
         let kernel = &plan.children[0];
@@ -2101,11 +2215,19 @@ build = "."
         assert_eq!(kernel.env["KERNABLE_LOG"], "info");
         assert_eq!(
             kernel.args.join(" "),
-            "run --rm --replace --name kernable-shop-kernel --pod kernable-shop \
-             --volume /opt/kernable/kernable:/usr/local/bin/kernable:ro \
-             --volume /srv/shop:/srv/shop --workdir /srv/shop --security-opt label=disable \
-             --env KERNABLE_LOG --cap-drop all --security-opt no-new-privileges \
-             --pids-limit 4096 --read-only --cpus 2 --memory 1g"
+            format!(
+                "run --rm --replace --name kernable-shop-kernel --pod kernable-shop \
+                 --volume /opt/kernable/kernable:/usr/local/bin/kernable:ro \
+                 --volume /srv/shop:/srv/shop --workdir /srv/shop --security-opt label=disable \
+                 --env KERNABLE_LOG --cap-drop all --security-opt no-new-privileges \
+                 --pids-limit 4096 --security-opt seccomp={} --read-only --cpus 2 --memory 1g",
+                seccomp.display()
+            )
+        );
+        let worker = plan.children[2].args.join(" ");
+        assert!(
+            worker.contains(&format!("--security-opt seccomp={}", seccomp.display())),
+            "{worker}"
         );
         let c = kernel.container.as_ref().unwrap();
         assert_eq!(c.image, Image::Base(BASE_IMAGE.into()));
@@ -2232,6 +2354,54 @@ build = "."
                 .args
                 .iter()
                 .any(|a| a.starts_with("unix:"))
+        );
+    }
+
+    #[test]
+    fn the_seccomp_profile_closes_new_user_namespaces_and_keyrings() {
+        let default = serde_json::json!({
+            "defaultAction": "SCMP_ACT_ERRNO",
+            "syscalls": [
+                {"names": ["read", "unshare", "clone", "clone3", "keyctl"], "action": "SCMP_ACT_ALLOW"},
+                {"names": ["clone"], "action": "SCMP_ACT_ALLOW", "includes": {"caps": ["CAP_SYS_ADMIN"]}},
+                {"names": ["add_key"], "action": "SCMP_ACT_ALLOW"},
+            ]
+        });
+        let tight = tighten(default).unwrap();
+        let rules = tight["syscalls"].as_array().unwrap();
+        // Every rule of the default that allowed them lost them; others stay as they were.
+        assert_eq!(rules[0]["names"], serde_json::json!(["read"]));
+        assert!(
+            rules.iter().all(|r| r["action"] != "SCMP_ACT_ALLOW"
+                || r["names"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|n| n != "keyctl" && n != "clone3" && n != "add_key")),
+            "{tight}"
+        );
+        let rule = |names: &[&str], action: &str| {
+            rules
+                .iter()
+                .find(|r| r["names"] == serde_json::json!(names) && r["action"] == action)
+                .unwrap_or_else(|| panic!("{names:?} {action} missing: {tight}"))
+        };
+        // unshare and clone pass unless they ask for a new user namespace.
+        let allow = rule(&["unshare", "clone"], "SCMP_ACT_ALLOW");
+        assert_eq!(allow["args"][0]["value"], 0x1000_0000);
+        assert_eq!(allow["args"][0]["valueTwo"], 0);
+        assert_eq!(allow["args"][0]["op"], "SCMP_CMP_MASKED_EQ");
+        let deny = rule(&["unshare", "clone"], "SCMP_ACT_ERRNO");
+        assert_eq!(deny["args"][0]["valueTwo"], 0x1000_0000);
+        assert_eq!(deny["errnoRet"], libc::EPERM);
+        assert_eq!(
+            rule(&["clone3"], "SCMP_ACT_ERRNO")["errnoRet"],
+            libc::ENOSYS
+        );
+        rule(&["keyctl", "add_key", "request_key"], "SCMP_ACT_ERRNO");
+        assert!(
+            tighten(serde_json::json!({})).is_err(),
+            "no list of syscalls"
         );
     }
 

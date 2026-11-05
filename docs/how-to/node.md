@@ -70,7 +70,7 @@ Run it under your service manager (systemd, launchd) so the node itself starts w
 
 ## Your services
 
-Each `[[service]]` is built with `podman build` on the machine, at start, when its section changes, and on SIGHUP, then run with `podman run --rm` as `kernable-<project>-<name>`, after the kernel and stopped before it. It finds the kernel by itself: the node sets `KERNABLE_URL` to the kernel's socket (on Linux, see [Network](#network)) or its `listen`, and `KERNABLE_INSTANCE` to the node's instance, which the SDKs read. With `key`, the key file and the `.grant` file next to it are mounted read-only and named in `KERNABLE_KEY` and `KERNABLE_GRANT`; create them with `kernable keys new` and `kernable grant`, so the root key never comes near the machine. A service that exits is started again like the kernel.
+Each `[[service]]` is built with `podman build` on the machine, at start, when its section changes, and on SIGHUP, then run with `podman run --rm` as `kernable-<project>-<name>`, after the kernel and stopped before it. The node builds one image at a time, and stops a build that takes over 20 minutes; a build that fails or is stopped is tried again after a pause, and a service that already runs keeps its image meanwhile. It finds the kernel by itself: the node sets `KERNABLE_URL` to the kernel's socket (on Linux, see [Network](#network)) or its `listen`, and `KERNABLE_INSTANCE` to the node's instance, which the SDKs read. With `key`, the key file and the `.grant` file next to it are mounted read-only and named in `KERNABLE_KEY` and `KERNABLE_GRANT`; create them with `kernable keys new` and `kernable grant`, so the root key never comes near the machine. A service that exits is started again like the kernel.
 
 Install Podman on the machine first (rootless is fine). Services run on Linux; on a Mac, Podman's containers live in a virtual machine and do not share its network.
 
@@ -102,8 +102,9 @@ Every container the node starts, the kernel's included, gets the same protection
 - **No capabilities**, and **no way to gain privileges**: a setuid binary in the image does not work.
 - **At most 4096 processes**, so a fork bomb stays inside its container.
 - **A read-only root filesystem**, with a fresh, empty `/tmp`, `/var/tmp` and `/run` in memory. What has to last belongs in the kernel.
+- **On Linux, Podman's system call filter, tightened**: no new user namespaces, whose "root" would hold capabilities again and reach the kernel paths most container escapes go through, and no kernel keyrings, which nothing separates between containers. The node writes the profile from Podman's own (`/usr/share/containers/seccomp.json`, or yours in `/etc/containers/`) when it makes the pod, so Podman's updates reach it; without one it does not start.
 
-Most images run as they are. One that writes elsewhere (some frameworks keep a cache next to their code) takes `writable = true` in its `[[service]]`; the node logs it at each start. Images that start as root to switch to a user of their own, such as the official `nginx`, do not start without capabilities: use an image that runs as an ordinary user from the start (`nginxinc/nginx-unprivileged`, say).
+Most images run as they are. One that writes elsewhere (some frameworks keep a cache next to their code) takes `writable = true` in its `[[service]]`; the node logs it at each start. Images that start as root to switch to a user of their own, such as the official `nginx`, do not start without capabilities: use an image that runs as an ordinary user from the start (`nginxinc/nginx-unprivileged`, say). Software that builds a sandbox of its own from user namespaces runs without it, as is usual in containers: Chromium (Puppeteer, Playwright) with `--no-sandbox`; containers inside a service do not run.
 
 ## Secrets
 
