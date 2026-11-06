@@ -36,6 +36,8 @@ impl Drop for Dir {
 struct Plug {
     accept: JoinHandle<()>,
     open: Arc<std::sync::Mutex<Vec<JoinHandle<()>>>>,
+    /// Frozen, it passes nothing on and closes nothing: a network that drops packets silently.
+    frozen: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Plug {
@@ -43,27 +45,61 @@ impl Plug {
         let _ = std::fs::remove_file(front);
         let listener = UnixListener::bind(front).unwrap();
         let open: Arc<std::sync::Mutex<Vec<JoinHandle<()>>>> = Arc::default();
-        let (back, kept) = (back.to_owned(), Arc::clone(&open));
+        let frozen: Arc<std::sync::atomic::AtomicBool> = Arc::default();
+        let (back, kept, ice) = (back.to_owned(), Arc::clone(&open), Arc::clone(&frozen));
         let accept = tokio::spawn(async move {
             loop {
-                let Ok((mut client, _)) = listener.accept().await else {
+                let Ok((client, _)) = listener.accept().await else {
                     return;
                 };
-                let back = back.clone();
+                let (back, ice) = (back.clone(), Arc::clone(&ice));
                 kept.lock().unwrap().push(tokio::spawn(async move {
-                    if let Ok(mut kernel) = tokio::net::UnixStream::connect(&back).await {
-                        let _ = tokio::io::copy_bidirectional(&mut client, &mut kernel).await;
+                    if let Ok(kernel) = tokio::net::UnixStream::connect(&back).await {
+                        let (cr, cw) = client.into_split();
+                        let (kr, kw) = kernel.into_split();
+                        tokio::join!(pass(cr, kw, &ice), pass(kr, cw, &ice));
                     }
                 }));
             }
         });
-        Plug { accept, open }
+        Plug {
+            accept,
+            open,
+            frozen,
+        }
+    }
+
+    /// Passes nothing on from now on, and closes nothing.
+    fn freeze(&self) {
+        self.frozen.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn cut(&self) {
         self.accept.abort();
         for connection in self.open.lock().unwrap().drain(..) {
             connection.abort();
+        }
+    }
+}
+
+/// Copies `from` to `to` until either ends; while `frozen`, what it reads it drops.
+async fn pass(
+    mut from: impl tokio::io::AsyncRead + Unpin,
+    mut to: impl tokio::io::AsyncWrite + Unpin,
+    frozen: &std::sync::atomic::AtomicBool,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = match from.read(&mut buf).await {
+            Ok(0) | Err(_) => return,
+            Ok(n) => n,
+        };
+        if frozen.load(std::sync::atomic::Ordering::SeqCst) {
+            continue;
+        }
+        if to.write_all(&buf[..n]).await.is_err() {
+            return;
         }
     }
 }
@@ -536,4 +572,61 @@ async fn a_switchover_hands_the_primary_role_over_without_waiting_for_the_lease(
         assert_eq!(events(&again), events(result));
     }
     drop((a, b));
+}
+
+/// A partition: the primary's machine stays up, but the network drops what it sends and
+/// what is sent to it, without closing anything. Its standby's stream goes silent; pings end it
+/// within two thirds of a lease, and the standby takes over once the lease ran out.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_standby_takes_over_from_a_primary_the_network_cut_off_silently() {
+    let dir = std::env::temp_dir().join(format!("kn-pair-cut-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = Dir(dir);
+    let state = dir.0.join("witness.state");
+    tokio::spawn(witness::run(WitnessConfig {
+        listen: format!("unix:{}", dir.0.join("witness.sock").display()),
+        roots: vec![id(&root())],
+        state: state.clone(),
+        lease_ms: LEASE_MS,
+        tls: None,
+    }));
+    wait_for(&format!("unix:{}", dir.0.join("witness.sock").display())).await;
+    // A reaches the witness through a plug of its own, cut off with it.
+    let mut a_config = node_config(&dir.0, "a", 3, 11);
+    a_config.replication.pair.as_mut().unwrap().witness =
+        format!("unix:{}", dir.0.join("a-witness.sock").display());
+    let b_config = node_config(&dir.0, "b", 8, 12);
+    let a_witness = Plug::new(&dir.0.join("a-witness.sock"), &dir.0.join("witness.sock"));
+    let a_plug = Plug::new(&dir.0.join("a-plug.sock"), &dir.0.join("a.sock"));
+    let _b_plug = Plug::new(&dir.0.join("b-plug.sock"), &dir.0.join("b.sock"));
+    let (_a_task, a_primary) = run_node(a_config.clone());
+    let a = a_primary.await.unwrap();
+    let (_b_task, b_primary) = run_node(b_config.clone());
+    for seed in [1, 2] {
+        a.grant(default_grant(&key(seed)).unwrap()).unwrap();
+    }
+    let witnessed = || {
+        Witness::open(&state, Duration::from_millis(LEASE_MS))
+            .unwrap()
+            .state()
+    };
+    until("the witness knows B is in sync", || {
+        witnessed().in_sync == id(&key(12))
+    })
+    .await;
+
+    a_plug.freeze();
+    a_witness.freeze();
+    let cut = std::time::Instant::now();
+    let _b = tokio::time::timeout(Duration::from_secs(10), b_primary)
+        .await
+        .expect("B takes over from a primary it no longer hears")
+        .unwrap();
+    let took = cut.elapsed();
+    assert_eq!(witnessed().primary, id(&key(12)));
+    eprintln!(
+        "B took over {} ms after the partition (lease {LEASE_MS} ms)",
+        took.as_millis()
+    );
 }

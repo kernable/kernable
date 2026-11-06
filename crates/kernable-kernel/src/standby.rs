@@ -380,9 +380,16 @@ async fn follow_once(
     grant: &str,
 ) -> Result<(), BoxError> {
     let follow = &standby.follow;
-    let mut client = ReplicationServiceClient::new(connect(&follow.primary).await?)
-        .max_decoding_message_size(replication::MAX_MESSAGE_BYTES)
-        .max_encoding_message_size(replication::MAX_MESSAGE_BYTES);
+    // A primary the network cut off sends nothing more, and TCP tells nothing for minutes: pings
+    // end the stream within two thirds of a lease, so a pair's standby claims in time.
+    let every = standby
+        .link
+        .as_ref()
+        .map_or(Duration::from_secs(5), |link| link.lease() / 3);
+    let mut client =
+        ReplicationServiceClient::new(connect_pinging(&follow.primary, Some(every)).await?)
+            .max_decoding_message_size(replication::MAX_MESSAGE_BYTES)
+            .max_encoding_message_size(replication::MAX_MESSAGE_BYTES);
     let head = standby.stores().store.record_head()?;
     let (tx, rx) = mpsc::channel(16);
     let say = |msg| FollowRequest { msg: Some(msg) };
@@ -745,6 +752,15 @@ fn move_aside(url: &str, at: i64) -> Result<Vec<PathBuf>, BoxError> {
 /// A channel to the primary, over mutual TLS when `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and
 /// `KERNABLE_TLS_KEY` name the files, as for the SDKs.
 pub(crate) async fn connect(addr: &str) -> Result<tonic::transport::Channel, BoxError> {
+    connect_pinging(addr, None).await
+}
+
+/// Like [`connect`], the connection pinged every `every` and ended when a ping goes unanswered
+/// as long: a standby's stream to a primary the network cut off ends, so it claims.
+pub(crate) async fn connect_pinging(
+    addr: &str,
+    every: Option<Duration>,
+) -> Result<tonic::transport::Channel, BoxError> {
     let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
     match (
         var("KERNABLE_TLS_CA"),
@@ -757,9 +773,9 @@ pub(crate) async fn connect(addr: &str) -> Result<tonic::transport::Channel, Box
                 cert: cert.into(),
                 key: key.into(),
             };
-            transport::connect_tls(addr, &tls).await
+            transport::connect_tls_pinging(addr, &tls, every).await
         }
-        _ => Ok(transport::connect(addr).await?),
+        _ => Ok(transport::connect_pinging(addr, every).await?),
     }
 }
 

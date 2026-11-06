@@ -586,7 +586,10 @@ async fn start(config: Config, dev_notes: Option<Vec<String>>) -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             tracing::error!(error = %e, "kernel stopped");
-            ExitCode::FAILURE
+            // At once: a deposed primary's writes that wait for a standby must never be told,
+            // and the runtime would wait for their threads forever. Their clients see the
+            // connection end and submit again on the new primary.
+            std::process::exit(1)
         }
     }
 }

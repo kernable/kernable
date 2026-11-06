@@ -21,27 +21,59 @@ pub async fn connect_tls(
     addr: &str,
     tls: &Tls,
 ) -> Result<Channel, Box<dyn std::error::Error + Send + Sync>> {
+    connect_tls_pinging(addr, tls, None).await
+}
+
+/// Pings on the connection every `every`, also when idle, and ends it when a ping is not
+/// answered within as long: a peer the network dropped without a word (a partition) shows
+/// within twice `every`, not after TCP's minutes.
+fn pinging(endpoint: Endpoint, every: Option<std::time::Duration>) -> Endpoint {
+    match every {
+        Some(every) => endpoint
+            .http2_keep_alive_interval(every)
+            .keep_alive_timeout(every)
+            .keep_alive_while_idle(true)
+            .connect_timeout(every.max(std::time::Duration::from_secs(1)) * 2),
+        None => endpoint,
+    }
+}
+
+/// Like [`connect_tls`], pinging every `every` (see [`connect_pinging`]).
+pub async fn connect_tls_pinging(
+    addr: &str,
+    tls: &Tls,
+    every: Option<std::time::Duration>,
+) -> Result<Channel, Box<dyn std::error::Error + Send + Sync>> {
     let config = ClientTlsConfig::new()
         .ca_certificate(Certificate::from_pem(std::fs::read(&tls.ca)?))
         .identity(Identity::from_pem(
             std::fs::read(&tls.cert)?,
             std::fs::read(&tls.key)?,
         ));
-    Ok(
-        Endpoint::from_shared(format!("https://{}", tcp_addr(addr)))?
-            .tls_config(config)?
-            .connect()
-            .await?,
+    Ok(pinging(
+        Endpoint::from_shared(format!("https://{}", tcp_addr(addr)))?.tls_config(config)?,
+        every,
     )
+    .connect()
+    .await?)
 }
 
 pub async fn connect(addr: &str) -> Result<Channel, Error> {
+    connect_pinging(addr, None).await
+}
+
+/// Like [`connect`]; with `every`, the connection is pinged that often and ends when a ping is
+/// not answered within as long: a standby notices a primary the network cut off.
+pub async fn connect_pinging(
+    addr: &str,
+    every: Option<std::time::Duration>,
+) -> Result<Channel, Error> {
     match unix_path(addr) {
         #[cfg(unix)]
         Some(path) => {
             let path = path.to_owned();
             // The URI is ignored by the connector but must be valid.
-            Endpoint::from_static("http://kernable")
+            pinging(Endpoint::from_static("http://kernable"), every)
                 .connect_with_connector(service_fn(move |_: Uri| {
                     let path = path.clone();
                     async move {
@@ -59,9 +91,12 @@ pub async fn connect(addr: &str) -> Result<Channel, Error> {
                 .await
         }
         None => {
-            Endpoint::from_shared(format!("http://{}", tcp_addr(addr)))?
-                .connect()
-                .await
+            pinging(
+                Endpoint::from_shared(format!("http://{}", tcp_addr(addr)))?,
+                every,
+            )
+            .connect()
+            .await
         }
     }
 }
