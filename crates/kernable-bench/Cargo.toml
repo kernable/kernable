@@ -14,8 +14,10 @@ test = false
 [dependencies]
 ed25519-dalek.workspace = true
 getrandom.workspace = true
+kernable = { path = "../../sdks/rust" }
 kernable-core = { path = "../kernable-core" }
 kernable-store = { path = "../kernable-store" }
+serde_json.workspace = true
 sha2.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true

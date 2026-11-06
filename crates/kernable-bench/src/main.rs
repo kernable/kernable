@@ -49,7 +49,11 @@ const USAGE: &str = "usage:
   kernable-bench load <addr> <client.key> (rate=<n> | concurrency=<n>) [seconds=10] [aggregates=10000] [payload=1024] [wait=settled|committed]
       [target=spread|new|existing|repeat|query] [filled=<n>]
   kernable-bench subscribe <addr> <client.key> <after> <count>
-  kernable-bench history <addr> <client.key> <events>";
+  kernable-bench history <addr> <client.key> <events>
+  kernable-bench probe <client.key> [seconds=60] [every-ms=50]
+      one command after the other through the Rust SDK (KERNABLE_URL with several kernels, and
+      KERNABLE_TLS_*, as for the SDKs): the longest time without a commit, as a client of a pair
+      or of a moving instance sees it";
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -110,6 +114,7 @@ async fn main() -> ExitCode {
         }
         ["load", addr, key, opts @ ..] => load(addr, key, Opts::parse(opts)).await,
         ["history", addr, key, n] => history(addr, key, n.parse().unwrap_or(100)).await,
+        ["probe", key, opts @ ..] => probe(key, opts).await,
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
@@ -614,6 +619,53 @@ impl Opts {
             filled: get("filled").and_then(|v| v.parse().ok()).unwrap_or(0),
         }
     }
+}
+
+/// `probe`: commands one after the other through the Rust SDK, which turns to the other kernel
+/// in `KERNABLE_URL` when one answers `not_primary` or is gone. The longest time between two
+/// commits is how long such a client could not write: during a failover, a switchover or a move.
+async fn probe(key: &str, opts: &[&str]) -> Result<(), BoxError> {
+    let opt = |name: &str, default: u64| {
+        opts.iter()
+            .find_map(|o| o.strip_prefix(&format!("{name}="))?.parse().ok())
+            .unwrap_or(default)
+    };
+    let (seconds, every) = (opt("seconds", 60), opt("every-ms", 50));
+    let client = kernable::Kernable::new(kernable::Options::new(key).tenant(tenant()))?;
+    let start = Instant::now();
+    let (mut last, mut n, mut committed, mut failed) = (Instant::now(), 0u64, 0u64, 0u64);
+    let (mut longest, mut at) = (Duration::ZERO, 0.0);
+    while start.elapsed() < Duration::from_secs(seconds) {
+        n += 1;
+        let submit = kernable::Submit::new("bench", "Bench", &format!("p{}", n % 100), "Write")
+            .data(serde_json::json!({ "probe": n }))
+            .wait(kernable::Wait::Committed)
+            .timeout(Duration::from_secs(30));
+        match client.submit(submit).await {
+            Ok(kernable::Outcome::Committed(_)) => {
+                let gap = last.elapsed();
+                if gap > longest {
+                    (longest, at) = (gap, (start.elapsed() - gap).as_secs_f64());
+                }
+                last = Instant::now();
+                committed += 1;
+            }
+            Ok(kernable::Outcome::Rejected(r)) => {
+                failed += 1;
+                eprintln!("probe {n}: rejected: {}", r.message);
+            }
+            Err(e) => {
+                failed += 1;
+                eprintln!("probe {n}: {e}");
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(every)).await;
+    }
+    println!(
+        "probe: n={n} committed={committed} failed={failed} longest-gap-ms={} at={at:.1}s",
+        longest.as_millis()
+    );
+    Ok(())
 }
 
 /// A channel to the kernel at `addr`, over mutual TLS when `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT`

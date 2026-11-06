@@ -867,8 +867,10 @@ version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.3.4",
+ "kernable",
  "kernable-core",
  "kernable-store",
+ "serde_json",
  "sha2",
  "tokio",
  "tokio-stream",
