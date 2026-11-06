@@ -574,7 +574,12 @@ async fn a_planned_stop_of_a_pairs_primary_hands_over_without_waiting_for_the_le
     let log = std::fs::read_dir(&dir.0)
         .unwrap()
         .map(|e| e.unwrap().path())
-        .filter(|p| p.extension().is_some_and(|x| x == "log"))
+        .filter(|p| {
+            // The processes' logs (`<n>-<command>.log`), not a file store (`<name>.log`).
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".log") && n.starts_with(|c: char| c.is_ascii_digit()))
+        })
         .max()
         .unwrap();
     let started = Instant::now();
@@ -704,7 +709,12 @@ async fn a_pair_updates_both_kernels_by_handing_their_stores_over() {
         std::fs::read_dir(&dir.0)
             .unwrap()
             .map(|e| e.unwrap().path())
-            .filter(|p| p.extension().is_some_and(|x| x == "log"))
+            .filter(|p| {
+                // The processes' logs (`<n>-<command>.log`), not a file store (`<name>.log`).
+                p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                    n.ends_with(".log") && n.starts_with(|c: char| c.is_ascii_digit())
+                })
+            })
             .max()
             .unwrap()
     };
