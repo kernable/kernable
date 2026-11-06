@@ -15,6 +15,11 @@ fn word(value: &str, first: impl Fn(char) -> bool) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
+/// A relation's name: lowercase first, then letters, digits and `_`.
+fn relation_name(value: &str) -> bool {
+    word(value, |c| c.is_ascii_lowercase()) && !value.contains('-')
+}
+
 /// `*`, `domain.*` or `domain.Type`.
 pub fn valid_pattern(p: &str) -> bool {
     if p == "*" {
@@ -39,7 +44,7 @@ pub fn permissions(value: Vec<Permission>) -> Result<Vec<Permission>, Rejected> 
                 ));
             }
             if let Some(when) = &p.when
-                && !(word(when, |c| c.is_ascii_lowercase()) && !when.contains('-'))
+                && !relation_name(when)
             {
                 return Err(rejected(
                     &format!("Not a relation: {when}"),
