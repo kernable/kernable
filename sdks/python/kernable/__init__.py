@@ -657,6 +657,19 @@ class CommandSchema:
         return self
 
 
+_issued_lock = threading.Lock()
+_issued_last = 0
+
+
+def _issued_now() -> int:
+    """A request's issued_at: now, but later than every one this process issued before. Two calls in the
+    same millisecond would otherwise carry the same signature, and the kernel refuses the second as a replay."""
+    global _issued_last
+    with _issued_lock:
+        _issued_last = max(int(time.time() * 1000), _issued_last + 1)
+        return _issued_last
+
+
 def _seal(data: Any, vault: _VaultFields | None, aggregate_id: str) -> tuple[bytes, list[str], list]:
     """Moves the vault fields of `data` into vault values; the payload keeps `{"$vault": ref}`.
     Absent and None fields stay as they are."""
@@ -1564,7 +1577,7 @@ class Kernable:
                                    listeners=[l.name for l in listeners],
                                    middlewares=[l.name for l in middlewares],
                                    metadata=[pb.Attribute(key=k, value=v) for k, v in (metadata or {}).items()],
-                                   issued_at=int(time.time() * 1000))
+                                   issued_at=_issued_now())
         rpc.MembershipServiceStub(self._parts.control()).Apply(
             pb.ApplyRequest(membership=membership, sig=self._key.sign(membership_message(membership)),
                             protocol=PROTOCOL))
@@ -1640,11 +1653,11 @@ class Kernable:
         query_id = str(uuid.uuid4())
         q = pb.QueryRequest(query_id=query_id, tenant_id=tenant or self._tenant, domain=domain, query_type=type,
                             payload=_encode(data), context=_to_wire_context(context or self._context, query_id),
-                            min_position=min_position, issued_at=int(time.time() * 1000), protocol=PROTOCOL,
+                            min_position=min_position, issued_at=_issued_now(), protocol=PROTOCOL,
                             listener=_HANDLING.get())
         if all_partitions:
             self._caught_up_everywhere(q, timeout_s)
-            q.issued_at = int(time.time() * 1000)
+            q.issued_at = _issued_now()
         q.client_sig.CopyFrom(self._key.sign(query_message(q)))
         res = self._parts.route(q.tenant_id, lambda ch: rpc.QueryServiceStub(ch).Query(q, timeout=timeout_s))
         if res.WhichOneof("outcome") == "rejected":
@@ -1743,7 +1756,7 @@ class DataClient:
 
     def _call(self, op, method, tenant, context, domain, key, **fields):
         r = pb.DataRequest(tenant_id=tenant or self._k._tenant, domain=domain, key=key,
-                           issued_at=int(time.time() * 1000), protocol=PROTOCOL,
+                           issued_at=_issued_now(), protocol=PROTOCOL,
                            context=_to_wire_context(context or self._k._context, ""), **fields)
         r.client_sig.CopyFrom(self._k._key.sign(data_message(op, r)))
         return self._k._parts.route(r.tenant_id, lambda ch: getattr(self._stub(ch), method)(r))
@@ -1787,7 +1800,7 @@ class CacheClient:
 
     def _call(self, op, method, tenant, context, domain, key, **fields):
         r = pb.CacheRequest(tenant_id=tenant or self._k._tenant, domain=domain, key=key,
-                            issued_at=int(time.time() * 1000), protocol=PROTOCOL,
+                            issued_at=_issued_now(), protocol=PROTOCOL,
                             context=_to_wire_context(context or self._k._context, ""), **fields)
         r.client_sig.CopyFrom(self._k._key.sign(cache_message(op, r)))
         return self._k._parts.route(r.tenant_id, lambda ch: getattr(self._stub(ch), method)(r))

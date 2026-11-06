@@ -78,7 +78,7 @@ pub use listener::{
 pub use store::Store;
 pub use worker::Worker;
 
-use context::{now_ms, random_id};
+use context::{issued_now, random_id};
 use domain::{decode, encode};
 
 tokio::task_local! {
@@ -733,7 +733,7 @@ impl Kernable {
                 .into_iter()
                 .map(|(key, value)| Attribute { key, value })
                 .collect(),
-            issued_at: now_ms(),
+            issued_at: issued_now(),
         };
         let sig = self.client.sign(&signing::membership_message(&membership));
         let request = ApplyRequest {
@@ -877,7 +877,7 @@ impl Kernable {
                     .to_wire(),
             ),
             min_position: query.min_position,
-            issued_at: now_ms(),
+            issued_at: issued_now(),
             client_sig: None,
             protocol: PROTOCOL,
             listener: String::new(),
@@ -886,7 +886,7 @@ impl Kernable {
         let timeout = query.timeout;
         if query.all_partitions {
             self.caught_up_everywhere(&request, timeout).await?;
-            request.issued_at = now_ms();
+            request.issued_at = issued_now();
         }
         request.client_sig = Some(self.client.sign(&signing::query_message(&request)));
         request.listener = handling();

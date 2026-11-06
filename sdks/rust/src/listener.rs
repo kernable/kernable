@@ -30,7 +30,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::{
     BoxError, Client, Domain, Error, HANDLING, Kernable, Outcome, Query, QueryOutcome, Rejected,
     RequestContext, Store, StoredEvent, Submit, Timestamp,
-    context::now_ms,
+    context::issued_now,
     domain::{decode, upcast},
     log, vault,
 };
@@ -1809,7 +1809,7 @@ async fn subscription<F, Fut>(
 {
     let read = async |position: &AtomicU64| -> Result<(), BoxError> {
         let after = position.load(Ordering::SeqCst);
-        let issued_at = now_ms();
+        let issued_at = issued_now();
         let sig = client.sign(&signing::subscribe_message(
             after,
             &options.types,

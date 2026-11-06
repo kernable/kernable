@@ -458,6 +458,15 @@ export type Outcome =
   | { committed: false; code: string; message: string; key?: string; requirement?: Requirement };
 
 /** The outcome of a rejected command, with the key or requirement the kernel named. */
+let issuedLast = 0;
+
+/** A request's `issued_at`: now, but later than every one this process issued before. Two calls in the same
+ * millisecond would otherwise carry the same signature, and the kernel refuses the second as a replay. */
+function issuedNow(): number {
+  issuedLast = Math.max(Date.now(), issuedLast + 1);
+  return issuedLast;
+}
+
 function rejectedOutcome(r: WireRejected): Outcome {
   const outcome: Extract<Outcome, { committed: false }> = { committed: false, code: r.code, message: r.message };
   if (r.key) outcome.key = r.key;
@@ -1697,7 +1706,7 @@ export class Kernable {
       listeners: (manifest.listeners ?? []).map((l) => l.name),
       middlewares: (manifest.middlewares ?? []).map((l) => l.name),
       metadata: Object.entries(manifest.metadata ?? {}).map(([key, value]) => ({ key, value })),
-      issued_at: Date.now(),
+      issued_at: issuedNow(),
     };
     await (await this.clients.control()).apply(membership, this.key.sign(membershipMessage(membership)));
   }
@@ -1775,7 +1784,7 @@ export class Kernable {
       payload: encode(options.data),
       context: toWireContext(options.context ?? this.context),
       min_position: options.minPosition ?? 0,
-      issued_at: Date.now(),
+      issued_at: issuedNow(),
     };
     if (options.allPartitions) {
       // A wait-only query to every partition at once: each returns once the read model has
@@ -1784,7 +1793,7 @@ export class Kernable {
       const signedWait = { ...wait, client_sig: this.key.sign(queryMessage(wait)), listener: handling.getStore() ?? "" };
       const parts = await this.clients.all(options.timeoutMs);
       await Promise.all(parts.map((p) => p.clients.query(signedWait, options.timeoutMs)));
-      request.issued_at = Date.now();
+      request.issued_at = issuedNow();
     }
     const signed = {
       ...request,
@@ -1922,7 +1931,7 @@ export class Data {
       key: prefix,
       data: Buffer.alloc(0),
       content_type: "",
-      issued_at: Date.now(),
+      issued_at: issuedNow(),
       context: toWireContext(options.context ?? this.context),
       after: options.after ?? "",
     };
@@ -1946,7 +1955,7 @@ export class Data {
       key,
       data,
       content_type: contentType,
-      issued_at: Date.now(),
+      issued_at: issuedNow(),
       context: toWireContext(options.context ?? this.context),
     };
     const rpc = op === "put" ? "PutData" : op === "get" ? "GetData" : "DeleteData";
@@ -2022,7 +2031,7 @@ export class Cache {
       key,
       value,
       ttl_ms: ttlMs,
-      issued_at: Date.now(),
+      issued_at: issuedNow(),
       context: toWireContext(options.context ?? this.context),
     };
     const rpc = op === "set" ? "SetCache" : op === "get" ? "GetCache" : "DeleteCache";
@@ -2103,7 +2112,7 @@ export class Subscription {
     let attempt = 0;
     while (!this.stopped) {
       const from = position;
-      const issued_at = Date.now();
+      const issued_at = issuedNow();
       const client_sig = key.sign(subscribeMessage(position, event_types, issued_at));
       const call = clients.subscribe({ after_position: position, event_types, issued_at, client_sig });
       if (part === "") this.call = call;

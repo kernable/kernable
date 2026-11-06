@@ -148,6 +148,23 @@ pub(crate) fn now_ms() -> i64 {
         .map_or(0, |d| d.as_millis() as i64)
 }
 
+/// A request's `issued_at`: now, but later than every one this process issued before. Two calls
+/// in the same millisecond would otherwise carry the same signature, and the kernel refuses the
+/// second as a replay.
+pub(crate) fn issued_now() -> i64 {
+    use std::sync::atomic::{AtomicI64, Ordering::Relaxed};
+    static LAST: AtomicI64 = AtomicI64::new(0);
+    let now = now_ms();
+    let mut last = LAST.load(Relaxed);
+    loop {
+        let next = now.max(last + 1);
+        match LAST.compare_exchange_weak(last, next, Relaxed, Relaxed) {
+            Ok(_) => return next,
+            Err(seen) => last = seen,
+        }
+    }
+}
+
 /// A random UUID (version 4).
 pub(crate) fn random_id() -> String {
     let mut b = [0u8; 16];

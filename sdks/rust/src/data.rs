@@ -17,7 +17,7 @@ use kernable_core::{
     signing,
 };
 
-use crate::{Client, Error, RequestContext, now_ms};
+use crate::{Client, Error, RequestContext, issued_now};
 
 /// Room for the largest file a kernel takes (`--max-data-bytes`, at most 128 MiB) and the rest
 /// of the message.
@@ -211,7 +211,7 @@ impl Files {
             key: key.to_owned(),
             data,
             content_type: content_type.to_owned(),
-            issued_at: now_ms(),
+            issued_at: issued_now(),
             client_sig: None,
             protocol: PROTOCOL,
             context: Some(self.context.to_wire()),
@@ -345,7 +345,7 @@ impl Cache {
             key: key.to_owned(),
             value,
             ttl_ms,
-            issued_at: now_ms(),
+            issued_at: issued_now(),
             client_sig: None,
             protocol: PROTOCOL,
             context: Some(self.context.to_wire()),
