@@ -330,15 +330,22 @@ async fn a_wait_only_query_returns_once_the_read_model_reached_the_head() {
     common::submit_with(&env.addr, cmd, kernable_core::proto::Wait::Committed)
         .await
         .unwrap();
-    // A plain query is answered at once; a wait-only one waits for the head, here in vain.
-    assert_eq!(
-        response(
-            &ask(&env, signed_query("CountOrders", 0, &key(1)))
-                .await
-                .unwrap()
-        ),
-        "1"
-    );
+    // A plain query is answered at once; a wait-only one waits for the head, here in vain. The
+    // read model counts what it was sent, which reaches it a moment after the commit.
+    let started = std::time::Instant::now();
+    loop {
+        let answer = ask(&env, signed_query("CountOrders", 0, &key(1)))
+            .await
+            .unwrap();
+        if response(&answer) == "1" {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the read model never got the event"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert_eq!(
         ask(&env, wait_only(&key(1))).await.unwrap_err().code(),
         Code::DeadlineExceeded
