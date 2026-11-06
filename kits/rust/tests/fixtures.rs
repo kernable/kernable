@@ -161,6 +161,10 @@ fn aggregates() -> BTreeMap<String, Runner> {
     let mut all: BTreeMap<String, Runner> = BTreeMap::new();
     let tenancy = kit::tenancy::tenancy();
     all.insert("tenancy.tenant".into(), runner(tenancy.tenant));
+    let account = kit::account::account();
+    all.insert("account.account".into(), runner(account.account));
+    all.insert("account.session".into(), runner(account.session));
+    all.insert("account.sso".into(), runner(account.sso));
     all
 }
 
