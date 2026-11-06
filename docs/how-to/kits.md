@@ -5,8 +5,8 @@ their roles in a tenant, invitations, and a middleware that decides every reques
 **kit** is that groundwork as source code you copy into your project. It is yours afterwards:
 change fields, rules and flows, or delete what you do not need. It is open source (Apache-2.0).
 
-The kit is available for **TypeScript** and **Python**; Rust follows. Both kits write the same
-events, so a TypeScript API and a Python service, say, work on one log.
+The kit is available for **TypeScript**, **Python** and **Rust**. Every kit writes the same
+events, so a TypeScript API and a Rust service, say, work on one log.
 
 ## What you get
 
@@ -35,6 +35,11 @@ node --test kit/test/unit/*.test.ts
 kernable-sdk add kit                # into ./kit, a package; or: add kit <dir>
 pip install -r kit/requirements.txt
 python -m unittest discover -s kit/tests -t .
+```
+```sh [Rust]
+cargo install kernable-sdk
+kernable-sdk add kit                # the crate ./kit; or: add kit <dir>
+cargo test -p kit                   # after adding it to your workspace
 ```
 :::
 
@@ -71,6 +76,20 @@ relation("shop.order", "owner").set("shop.OrderPlaced", lambda e: e.data["custom
 use_authorization_store("sqlite:authorization.db")  # the middleware resumes after a restart
 Kernable().app(service="kit", domains=[*kit_domains(), shop_domain]).run()
 ```
+```rust [Rust]
+use kernable::{App, Kernable};
+use kit::authorization::{ids, relation, use_authorization_store};
+
+// Who stands in which relation to your aggregates, from your events.
+relation("shop.order", "owner").set("shop.OrderPlaced", |e| ids(&e.data["customer"]));
+
+use_authorization_store("sqlite:authorization.db"); // the middleware resumes after a restart
+let mut app = App::new().service("kit");
+for d in kit::kit_domains().iter().chain([&shop_domain]) {
+    app = app.domain(d);
+}
+Kernable::new("kit.key")?.app(app)?.run().await?;
+```
 :::
 
 Once, `bootstrap()` creates the platform tenant (where accounts and the platform's
@@ -90,7 +109,7 @@ See [Keys per service](./keys) for issuing them.
 
 Your API is the one process that sees passwords, tokens and provider answers. `KitApi` holds what
 only it can do; wire it into your HTTP framework (`kit/example/server.ts` shows `node:http`,
-`kit/example/server.py` shows `http.server`):
+`kit/example/server.py` shows `http.server`, `kit/examples/server.rs` axum):
 
 ::: code-group
 ```ts [TypeScript]
@@ -109,10 +128,18 @@ claims = api.check(access_token)                                     # per reque
 context = api.context_for(claims, tenant_id)                         # sender_account, sender_session, sender_tenant, sender_identity
 kernable.submit(PlaceOrder(...), aggregate_id=aggregate_id, tenant=tenant_id, context=context)
 ```
+```rust [Rust]
+let api = KitApi::new(kernable.clone(), signing_keys_from("token-signing.pem")?, &service_identity, &service_key_id);
+
+let signed_in = api.sign_in(&email, &password, ip, None).await?;      // access and refresh token
+let claims = api.check(&access_token);                               // per request, without the kernel
+let context = api.context_for(&claims, Some(&tenant_id)).await?;     // sender_account, sender_session, sender_tenant, sender_identity
+kernable.submit(Submit::command(PlaceOrder { .. }, &aggregate_id).tenant(&tenant_id).context(context)).await?;
+```
 :::
 
 In Python, `KitApi` blocks like the SDK's client; for FastAPI or another asyncio framework,
-`AsyncKitApi(KitApi(...))` has the same methods, awaited.
+`AsyncKitApi(KitApi(...))` has the same methods, awaited. In Rust, `KitApi` is async.
 
 Access tokens live 15 minutes and are checked by your API alone; the middleware still refuses an
 ended session, a suspended account or a revoked API key at once. Refresh tokens rotate, and using
@@ -137,6 +164,12 @@ CreateGroup(name="Customers", permissions=[
     {"pattern": "shop.CancelOrder", "when": "owner"},  # only orders they placed
 ])
 ```
+```rust [Rust]
+CreateGroup { name: "Customers".into(), description: None, permissions: vec![
+    Permission { pattern: "shop.PlaceOrder".into(), ..Permission::default() },
+    Permission { pattern: "shop.CancelOrder".into(), when: Some("owner".into()), via_parent: None }, // only orders they placed
+] };
+```
 :::
 
 Nobody grants a group with permissions they do not hold. `Explain` answers why a request is
@@ -146,11 +179,11 @@ app read model the same decision, so a list shows only what each asker may get.
 ## Changing the kit
 
 Each domain has the same files: `domain`, `events`, `aggregates`, `commands`, `readmodels`,
-`queries`, `reactors` where it has any, and `index.ts` or `__init__.py`, which registers the parts.
+`queries`, `reactors` where it has any, and `index.ts`, `__init__.py` or `mod.rs`, which registers the parts.
 Events, commands and queries are classes, so a changed field shows wherever it is used. Settings
 you are likely to change (lockout, token lifetimes, reserved slugs, the passkey relying party) are
-in `shared/constants`. Fields are camelCase in TypeScript and snake_case in Python; the log holds
-camelCase either way.
+in `shared/constants`. Fields are camelCase in TypeScript and snake_case in Python and Rust; the
+log holds camelCase either way.
 
 A newer kit is not installed over yours: copy it into another directory and take over what you
 want.
