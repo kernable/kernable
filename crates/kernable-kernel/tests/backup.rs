@@ -225,7 +225,9 @@ async fn a_backup_check_reads_it_through_and_finds_a_damaged_segment() {
 
     let t = target::open(&to).unwrap();
     let checked = backup::check(t.as_ref(), &BackupKey::new(&[7; 32])).unwrap();
-    assert_eq!(checked.record, env.kernel_head());
+    // What the target holds (the kernel's head moves on with its checkpoints).
+    assert_eq!(checked.record, reach(&to).0);
+    assert!(checked.record >= 15);
     assert!(checked.segments > 0, "{checked:?}");
     assert!(backup::check(t.as_ref(), &BackupKey::new(&[8; 32])).is_err());
 
