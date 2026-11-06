@@ -500,6 +500,8 @@ pub struct CommandContext {
     received_at: Timestamp,
     deadline: Timestamp,
     ids: u64,
+    /// For [`Aggregate::handle`]: the aggregate and tenant its `CommandMeta` names.
+    target: (String, String),
 }
 
 impl CommandContext {
@@ -516,7 +518,15 @@ impl CommandContext {
             received_at,
             deadline: Timestamp(received_at.0 + 30_000),
             ids: 0,
+            target: (String::new(), String::new()),
         }
+    }
+
+    /// For [`Aggregate::handle`]: the aggregate ID and tenant the handler's [`CommandMeta`]
+    /// names (default: empty), e.g. for a handler that checks them.
+    pub fn on(mut self, aggregate_id: &str, tenant: &str) -> CommandContext {
+        self.target = (aggregate_id.to_owned(), tenant.to_owned());
+        self
     }
 
     /// When the kernel received the command: the same every time the command runs. Use it
@@ -1051,7 +1061,8 @@ impl<S: State> Aggregate<S> {
             command_type: command_type.to_owned(),
             domain: self.inner.domain.name().to_owned(),
             aggregate_type: self.inner.name.clone(),
-            ..CommandMeta::default()
+            aggregate_id: ctx.target.0.clone(),
+            tenant: ctx.target.1.clone(),
         };
         match caught(|| handler(state, data, &cmd, ctx)).and_then(|r| r) {
             Ok(events) => Ok(events),
@@ -1217,6 +1228,7 @@ impl<S: State> Runnable for Aggregate<S> {
             received_at: Timestamp(x.received_at),
             deadline: Timestamp(x.deadline),
             ids: 0,
+            target: (cmd.aggregate_id.clone(), cmd.tenant_id.clone()),
         };
         let indexed = self.indexed();
         let handler = self.handler(&cmd.command_type);
