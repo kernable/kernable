@@ -28,7 +28,7 @@ It checks **file and cache requests** too, before they run, under their own type
 
 <FlowDiagram name="chain" loop bare silent />
 
-- **Registered in code.** A listener declares the types it checks and its order; its key needs a grant for `check` on those types. Negative orders are reserved for kernable. If its service has a membership, it must list the listener as a middleware ([membership](../how-to/remove-listener)).
+- **Registered in code.** A listener declares the types it checks and its order; its key needs a grant for `check` on those types. Negative orders are reserved for kernable's [kits](./trust#keys-and-grants): they need a grant of `reserved_order`. If its service has a membership, it must list the listener as a middleware ([membership](../how-to/remove-listener)).
 - **A chain.** Middlewares run by order, then by name; the first rejection refuses the request. A refused command is never stored.
 - **Fails closed.** The kernel keeps the registration. While a middleware is away, also right after a kernel restart, every request it covers is refused with `UNAVAILABLE`. Only a membership of its service that no longer lists it as a middleware, or `kernable listeners remove`, unregisters it.
 - **Never stale.** After a reconnect, a middleware is asked only once it has processed every event committed before; checks travel in order with its events.

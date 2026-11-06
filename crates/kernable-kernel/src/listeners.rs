@@ -802,15 +802,15 @@ pub(crate) async fn run(
             "a listener name has 1 to 128 letters, digits, `-`, `_` and `.`",
         ));
     }
-    if hello.order < 0 {
-        return Err(Status::invalid_argument(
-            "negative orders are reserved for kernable",
-        ));
-    }
     kernel.present(metadata, &hello.key_id)?;
     let permissions = kernel.permissions();
     let types = config::readable(&permissions.listen, &hello.key_id, &hello.event_types)
         .map_err(Status::permission_denied)?;
+    if !order_allowed(&permissions, &hello) {
+        return Err(Status::permission_denied(
+            "negative orders are reserved for kernable's kits: the key's grant needs reserved_order",
+        ));
+    }
     if !hello.query_types.iter().all(|t| config::valid_qualified(t)) {
         return Err(Status::invalid_argument(
             "answer qualified query types: domain.QueryType",
@@ -860,11 +860,6 @@ pub(crate) async fn run(
         if When::try_from(m.when).is_err() {
             return Err(Status::invalid_argument(
                 "a middleware runs before or after",
-            ));
-        }
-        if m.order < 0 {
-            return Err(Status::invalid_argument(
-                "negative middleware orders are reserved for kernable",
             ));
         }
         if m.types.is_empty() || !m.types.iter().all(|t| config::valid_pattern(t)) {
@@ -1312,10 +1307,19 @@ fn truncated(s: &str, max: usize) -> String {
     s[..end].to_owned()
 }
 
-/// Whether the listener's key may still read, answer and check what it registered for.
+/// Whether the listener's key may take the orders it asked for: negative ones need a grant of
+/// `reserved_order`.
+fn order_allowed(permissions: &crate::Permissions, hello: &Hello) -> bool {
+    let negative = hello.order < 0 || hello.middlewares.iter().any(|m| m.order < 0);
+    !negative || config::allowed(&permissions.reserved_order, &hello.key_id, "*")
+}
+
+/// Whether the listener's key may still read, answer and check what it registered for, at the
+/// orders it registered with.
 fn still_allowed(permissions: &crate::Permissions, hello: &Hello) -> bool {
     let key = &hello.key_id;
-    config::readable(&permissions.listen, key, &hello.event_types).is_ok()
+    order_allowed(permissions, hello)
+        && config::readable(&permissions.listen, key, &hello.event_types).is_ok()
         && hello
             .query_types
             .iter()

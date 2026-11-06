@@ -2538,7 +2538,7 @@ class Listener:
         it. "after" gets the request's outcome too: raising refuses a query's response; a
         command's outcome, and a rejected query, it only observes, best effort (it misses what
         happens while it is away, and nobody waits for it).
-        Negative orders are reserved for kernable. A live listener cannot be a middleware.
+        Negative orders are reserved for kernable's kits (a grant of `reserved_order`). A live listener cannot be a middleware.
         Example: `@guard_readmodel.middleware(["shop.*"])` over a `def _(check):` that raises
         `Rejected("not allowed", "forbidden")` unless `check.request.sender_identity` may send
         `check.type`.

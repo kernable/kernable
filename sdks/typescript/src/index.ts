@@ -322,7 +322,7 @@ export interface MiddlewareOptions {
   when?: "before" | "after";
   /**
    * Position in the chain: lower runs first, equal orders by listener name (default 0).
-   * Negative orders are reserved for kernable.
+   * Negative orders are reserved for kernable's kits (a grant of `reserved_order`).
    */
   order?: number;
 }
@@ -2147,7 +2147,7 @@ export class Subscription {
 export interface ListenerOptions {
   /**
    * Listeners with a lower order process each event first; equal orders run in parallel.
-   * Defaults: 0 for read models, 10 for reactors. Negative orders are reserved for kernable.
+   * Defaults: 0 for read models, 10 for reactors. Negative orders are reserved for kernable's kits (a grant of `reserved_order`).
    */
   order?: number;
   /**

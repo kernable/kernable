@@ -704,7 +704,7 @@ enum When {
 // A listener's registration as a middleware, see Hello.middlewares.
 message Middleware {
   // Position in the chain: lower runs first, equal orders by listener name. Negative orders
-  // are reserved for kernable.
+  // are reserved for kernable's kits: they need a grant of `reserved_order`.
   int32 order = 1;
   // Command and query types it checks: `*`, a domain (`orders.*`) or a qualified type. Not
   // empty; needs `check` for each.
@@ -718,7 +718,7 @@ message Middleware {
 message Hello {
   string name = 1;   // unique; one connection per name at a time
   string key_id = 2; // the key that answers the challenge; registered with the name
-  // Order of delivery, from 0 (negative orders are reserved for kernable): event N reaches
+  // Order of delivery, from 0 (negative orders are reserved for kernable's kits and need a grant of `reserved_order`): event N reaches
   // this listener only after every listener that counts with a lower order acknowledged N.
   int32 order = 3;
   repeated string event_types = 4; // qualified (`orders.OrderPlaced`, `orders.*`); empty = all the key may read

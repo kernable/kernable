@@ -222,7 +222,7 @@ policy.middleware({ types: ["shop.*"] }, (check) => {
 
 - `types: string[]`: Request types it checks: `*` (all), a type of the listener's own domain (`Type`), another domain's type (`domain.Type`) or a whole domain (`domain.*`). Besides command and query types, these cover the file and cache requests of a domain (`Kernable.data`, `Kernable.cache`) under the types `PutData`, `GetData`, `DeleteData`, `SetCache`, `GetCache` and `DeleteCache`, checked before they run: `shop.*` includes `shop.PutData`.
 - `when?: "before" | "after"`: `before` (default): checks a request before the kernel accepts it; throwing refuses it. `after`: gets the request's outcome too. Throwing refuses a query's response; a command's outcome, and a rejected query, it only observes, best effort (it misses what happens while it is away, and nobody waits for it). File and cache requests are checked only before.
-- `order?: number`: Position in the chain: lower runs first, equal orders by listener name (default 0). Negative orders are reserved for kernable.
+- `order?: number`: Position in the chain: lower runs first, equal orders by listener name (default 0). Negative orders are reserved for kernable's kits (a grant of `reserved_order`).
 
 ### ListenerContext
 
@@ -760,7 +760,7 @@ const carts = shopDomain.readModel("carts", { store: "sqlite:carts.db" });
 const push = shopDomain.reactor("push", { live: true });
 ```
 
-- `order?: number`: Listeners with a lower order process each event first; equal orders run in parallel. Defaults: 0 for read models, 10 for reactors. Negative orders are reserved for kernable.
+- `order?: number`: Listeners with a lower order process each event first; equal orders run in parallel. Defaults: 0 for read models, 10 for reactors. Negative orders are reserved for kernable's kits (a grant of `reserved_order`).
 - `start?: number`: Position to start after on the first connect: 0 rebuilds from the beginning (default for read models); omitted, the kernel resumes after the last acknowledged event, and a new listener starts at the newest event, so it never reacts to what happened before it existed (default for reactors). Reconnects always resume after the last handled event.
 - `live?: boolean`: Not registered with the kernel: no stored position, always starts at the newest event, nobody waits for it, and it is forgotten when it disconnects. For reactions that only matter while the process runs, e.g. pushing to connected browsers. Cannot be a middleware.
 - `instance?: string`: Runs this process's listener as one instance of a group under the listener's name, e.g. one per node of a pair: 1 to 128 letters, digits, `-`, `_` and `.`. Default: `KERNABLE_INSTANCE`, which `kernable node` sets; without either, the name has one connection. The group counts as one listener: it is through an event once one instance has handled it.

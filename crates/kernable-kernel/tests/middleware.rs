@@ -629,13 +629,62 @@ async fn middleware_registration_is_allowed_per_key() {
     let (task, _stop) = middleware(&env, stranger, &log);
     assert_eq!(task.await.unwrap().code(), Code::PermissionDenied);
 
+    // A negative order needs a grant of reserved_order, which key 5 lacks.
     let (task, _stop) = middleware(&env, spec("reserved", -10, pass), &log);
-    assert_eq!(task.await.unwrap().code(), Code::InvalidArgument);
+    assert_eq!(task.await.unwrap().code(), Code::PermissionDenied);
 
     let mut bad = spec("bad", 0, pass);
     bad.types = vec!["orders".into()];
     let (task, _stop) = middleware(&env, bad, &log);
     assert_eq!(task.await.unwrap().code(), Code::InvalidArgument);
+}
+
+/// Negative orders are kernable's kits', for keys granted `reserved_order`; such a
+/// middleware runs before every app middleware, and loses its place with a grant without it.
+#[tokio::test(flavor = "multi_thread")]
+async fn negative_orders_need_a_grant_of_reserved_order() {
+    let env = start("mw-reserved").await;
+    spawn_worker(&env).await;
+    let log = Log::default();
+    let mut listener = spec("early-listener", 0, pass);
+    listener.listener_order = -20;
+    listener.when = None;
+    let (task, _stop) = middleware(&env, listener, &log);
+    assert_eq!(task.await.unwrap().code(), Code::PermissionDenied);
+
+    let kit_grant = |reserved: bool| {
+        let mut permissions: Vec<(&str, &[&str])> = vec![("listen", &["*"]), ("check", &["*"])];
+        if reserved {
+            permissions.push(("reserved_order", &["*"]));
+        }
+        grant(&key(8), &permissions)
+    };
+    env.kernel.grant(kit_grant(true)).unwrap();
+    let kit = Spec {
+        key: key(8),
+        listener_order: -30,
+        ..spec("z-kit", -30, pass)
+    };
+    let (kit_task, _kit_stop) = middleware(&env, kit, &log);
+    let _app = middleware(&env, spec("a-app", 0, pass), &log);
+    settle_in().await;
+    let ok = submit(
+        &env.addr,
+        signed(command("c1", "PlaceOrder", "o1"), &key(1)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(committed_versions(&ok), [1]);
+    // By order, not by name: the kit's middleware comes first.
+    assert_eq!(*log.lock().unwrap(), ["z-kit", "a-app"]);
+
+    // A newer grant without reserved_order ends its stream.
+    env.kernel.grant(kit_grant(false)).unwrap();
+    let status = tokio::time::timeout(Duration::from_secs(10), kit_task)
+        .await
+        .expect("the kit's stream ends")
+        .unwrap();
+    assert_eq!(status.code(), Code::PermissionDenied, "{status:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

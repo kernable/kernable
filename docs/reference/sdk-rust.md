@@ -545,7 +545,7 @@ What a middleware checks: `MiddlewareOptions::new(&["shop.*"])`, with
 `.after()` to run after requests.
 
 - `types: Vec<String>`: Command and query types: `*` (all), a type of the listener's domain (`Place`), of another domain (`orders.Place`) or a whole domain (`orders.*`). File and cache requests are types too: `PutData`, `GetData`, `DeleteData`, `SetCache`, `GetCache`, `DeleteCache` (e.g. `shop.PutData`); `*` and `orders.*` cover them.
-- `order: i32`: Position in the chain: lower runs first, equal orders by listener name (default 0). Negative orders are reserved for kernable.
+- `order: i32`: Position in the chain: lower runs first, equal orders by listener name (default 0). Negative orders are reserved for kernable's kits (a grant of `reserved_order`).
 - `when: When`: Before (default) or after requests; see `When`.
 - `fn new(types: &[&str]) -> MiddlewareOptions`: Checks `types` (see `MiddlewareOptions::types`) before requests, at order 0.
 - `fn after(self) -> MiddlewareOptions`: Runs after requests instead of before: the handler gets their outcome too.
@@ -579,7 +579,7 @@ A query handler returns its answer (any `Serialize`) or a `Rejected` as a `BoxEr
 
 - `fn name(&self) -> &str`: The listener's name: the kernel keeps its position under it.
 - `fn domain(&self) -> &Domain`: The domain the listener belongs to: types without a domain are its.
-- `fn order(&self, order: i32) -> Listener`: Listeners with a lower order process each event first; equal orders run in parallel. Defaults: 0 for read models, 10 for reactors. Negative orders are reserved for kernable.
+- `fn order(&self, order: i32) -> Listener`: Listeners with a lower order process each event first; equal orders run in parallel. Defaults: 0 for read models, 10 for reactors. Negative orders are reserved for kernable's kits (a grant of `reserved_order`).
 - `fn start(&self, position: u64) -> Listener`: Position to start after on the first connect: 0 rebuilds from the beginning (default for read models). Reactors resume after the last acknowledged event unless given one, and a new one starts at the newest event, so it never reacts to what happened before it existed. Reconnects always resume after the last handled event.
 - `fn live(&self) -> Listener`: Not registered with the kernel: no stored position, always starts at the newest event, nobody waits for it, and it is forgotten when it disconnects. For reactions that only matter while the process runs, e.g. pushing to connected browsers. Make it live before running it. Panics if the listener is a middleware: a live listener cannot be one.
 - `fn instance(&self, id: &str) -> Listener`: Runs this process's listener as the instance `id` of a group under the listener's name, e.g. one per node of a pair: 1 to 128 letters, digits, `-`, `_` and `.`. Default: `KERNABLE_INSTANCE`, which `kernable node` sets; without either, the name has one connection. Read models are replicated: every instance gets every event and answers queries. Reactors are single (see `Listener::single`).

@@ -273,7 +273,7 @@ pub struct MiddlewareOptions {
     /// (e.g. `shop.PutData`); `*` and `orders.*` cover them.
     pub types: Vec<String>,
     /// Position in the chain: lower runs first, equal orders by listener name (default 0).
-    /// Negative orders are reserved for kernable.
+    /// Negative orders are reserved for kernable's kits (a grant of `reserved_order`).
     pub order: i32,
     /// Before (default) or after requests; see [`When`].
     pub when: When,
@@ -436,7 +436,7 @@ impl Listener {
     }
 
     /// Listeners with a lower order process each event first; equal orders run in parallel.
-    /// Defaults: 0 for read models, 10 for reactors. Negative orders are reserved for kernable.
+    /// Defaults: 0 for read models, 10 for reactors. Negative orders are reserved for kernable's kits (a grant of `reserved_order`).
     pub fn order(&self, order: i32) -> Listener {
         self.inner.settings.lock().unwrap().order = order;
         self.clone()

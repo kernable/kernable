@@ -736,7 +736,7 @@ A listener's registration as a middleware, see Hello.middlewares.
 
 | Field | Type | Number | Description |
 |---|---|---|---|
-| `order` |  `int32` | 1 | Position in the chain: lower runs first, equal orders by listener name. Negative orders are reserved for kernable. |
+| `order` |  `int32` | 1 | Position in the chain: lower runs first, equal orders by listener name. Negative orders are reserved for kernable's kits: they need a grant of `reserved_order`. |
 | `types` | repeated `string` | 2 | Command and query types it checks: `*`, a domain (`orders.*`) or a qualified type. Not empty; needs `check` for each. |
 | `when` |  `When` | 3 |  |
 
@@ -750,7 +750,7 @@ connections; it counts (see Membership) also while disconnected.
 |---|---|---|---|
 | `name` |  `string` | 1 | unique; one connection per name at a time |
 | `key_id` |  `string` | 2 | the key that answers the challenge; registered with the name |
-| `order` |  `int32` | 3 | Order of delivery, from 0 (negative orders are reserved for kernable): event N reaches this listener only after every listener that counts with a lower order acknowledged N. |
+| `order` |  `int32` | 3 | Order of delivery, from 0 (negative orders are reserved for kernable's kits and need a grant of `reserved_order`): event N reaches this listener only after every listener that counts with a lower order acknowledged N. |
 | `event_types` | repeated `string` | 4 | qualified (`orders.OrderPlaced`, `orders.*`); empty = all the key may read |
 | `from_position` | optional `uint64` | 5 | Start after this position instead of the stored one, e.g. 0 to rebuild an in-memory read model. Absent: after the stored position, or at the newest event on the first connect, so a new listener never reacts to what happened before it existed. |
 | `query_types` | repeated `string` | 6 | qualified query types this listener answers |
