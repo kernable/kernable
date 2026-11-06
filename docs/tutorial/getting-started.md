@@ -7,7 +7,7 @@ You need Node.js ≥ 22.18 (step 5 submits from TypeScript), and Python ≥ 3.10
 ## 1. Install the kernel
 
 ::: warning Not released yet
-kernable is in private preview: the install scripts and the SDK packages (`@kernable/sdk` on npm, `kernable` on PyPI and crates.io) are not public yet, so the commands below do not work for everyone yet. [Request early access](https://kernable.com/#access) to get the binaries and the SDKs.
+kernable is in private preview: the install scripts and the SDK packages (`@kernable/sdk` on npm, `kernable-sdk` on PyPI and crates.io) are not public yet, so the commands below do not work for everyone yet. [Request early access](https://kernable.com/#access) to get the binaries and the SDKs.
 :::
 
 ::: code-group

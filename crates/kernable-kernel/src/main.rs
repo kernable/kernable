@@ -33,6 +33,7 @@ use tracing_subscriber::EnvFilter;
 use zeroize::Zeroizing;
 
 const USAGE: &str = "usage:
+  kernable --version                      Prints the version, the system and the architecture.
 
 Run the kernel:
   kernable start --root <root.pub> [<flag> <value>]...
@@ -220,7 +221,7 @@ Run a node:
                                           default 30). The file has [kernel] (flags: the flags of
                                           kernable start without their dashes, env, binary,
                                           stop-seconds), [backup] (to, key, backup-key, follow,
-                                          segment-seconds, base-hours, keep, env), [node]
+                                          segment-seconds, base-hours, keep, check-hours, env), [node]
                                           (instance, project, podman, metrics-listen: GET /metrics)
                                           and any number of [[service]]
                                           (name, build, file, command, key, env, secrets, cpus,
@@ -316,6 +317,15 @@ async fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let outcome = match args.as_slice() {
+        ["--version" | "version"] => {
+            println!(
+                "kernable {} ({} {})",
+                env!("CARGO_PKG_VERSION"),
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            );
+            return ExitCode::SUCCESS;
+        }
         ["start", "--help"] => {
             println!("{}", start_help());
             return ExitCode::SUCCESS;

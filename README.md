@@ -4,6 +4,31 @@ Event sourcing and CQRS with a Rust kernel and business logic in any language.
 
 The kernel stores commands and events, signs and checks every message, runs commands one at a time per aggregate, and delivers events to listeners in a fixed order. Your processes hold the business logic: workers decide, read models answer queries, reactors act, middleware checks. They connect over gRPC; TypeScript, Python and Rust have SDKs with the same API.
 
+## Quickstart
+
+```sh
+curl -fsSL https://kernable.com/install.sh | sh     # macOS and Linux, x86_64 and arm64
+mkdir demo && cd demo
+kernable start --dev                                # a kernel on 127.0.0.1:7233, its UI on :7234
+```
+
+`--dev` creates the keys in the directory, among them `app.key`, which may do everything. In a second terminal, a worker in TypeScript (`npm install @kernable/sdk`; Python: `pip install kernable-sdk`, Rust: `cargo add kernable-sdk`):
+
+```ts
+import { Kernable, Rejected, domain } from "@kernable/sdk";
+
+const cart = domain("shop").aggregate("cart", { items: 0 });
+cart.apply("ItemAdded", (state, data: { qty: number }) => { state.items += data.qty; });
+cart.command("AddItem", (state, data: { sku: string; qty: number }) => {
+  if (data.qty < 1) throw new Rejected("At least one");
+  return [{ type: "ItemAdded", data }];
+});
+
+await new Kernable({ key: "app.key" }).worker(cart).run();
+```
+
+The [getting-started guide](docs/tutorial/getting-started.md) goes on from here: a read model, a query that reads its own writes, and the same in Python and Rust. A container image runs the same kernel, listening with mutual TLS outside the container (see `Dockerfile`).
+
 ## Documentation
 
 `docs/` is the documentation site (VitePress): `make docs` serves it at http://localhost:5173.

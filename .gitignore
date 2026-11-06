@@ -17,3 +17,4 @@ __pycache__/
 # Frozen test stores (see crates/kernable-kernel/tests/compat.rs)
 !crates/kernable-kernel/tests/fixtures/**
 .DS_Store
+/dist
