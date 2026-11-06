@@ -2346,7 +2346,12 @@ type QueryHandler = (data: unknown, qry: QueryMeta, ctx: QueryContext) => unknow
  * Checks a request. After it, `outcome` is what came of it: an `Outcome` for a command, a
  * `QueryOutcome` for a query (`check.kind` tells which); before it, `undefined`.
  */
-type MiddlewareHandler = (check: Check, outcome?: Outcome | QueryOutcome) => void | Promise<void>;
+/** What a middleware handler gets besides the check: the listener's store, if it has one. */
+export interface MiddlewareContext {
+  store?: Store;
+}
+
+type MiddlewareHandler = (check: Check, outcome: Outcome | QueryOutcome | undefined, ctx: MiddlewareContext) => void | Promise<void>;
 
 /** A type within its domain (`ItemAdded`), not qualified and no wildcard. */
 const UNQUALIFIED = /^[^.*]+$/;
@@ -2488,8 +2493,8 @@ export class Listener {
    * away, the kernel refuses those requests (`kernable listeners remove` unregisters it). The
    * handler cannot submit or query what it checks itself (it would wait behind itself): the
    * kernel refuses it. A listener has at most one middleware before and one after.
-   * `handler(check, outcome)` gets the `Check`; after the request, also its `Outcome` (a command)
-   * or `QueryOutcome` (a query). The key needs `check` for the types; if its service has a
+   * `handler(check, outcome, ctx)` gets the `Check`; after the request, also its `Outcome` (a command)
+   * or `QueryOutcome` (a query); and a `MiddlewareContext` with the listener's store, if it has one. The key needs `check` for the types; if its service has a
    * membership, the membership must list it as a middleware (`Kernable.app` does that). Throws for a live listener, a malformed type, or a second
    * middleware at the same `when`. See [Middleware](../concepts/queries-and-middleware#middleware).
    */
@@ -2978,7 +2983,7 @@ export class ListenerHandle {
       const when = c.when === 1 ? "after" : "before";
       const middleware = this.listener.middlewares.get(when);
       if (!middleware) throw new Rejected(`no middleware ${when}`, "not_a_middleware");
-      await middleware.handler(toCheck(c), when === "after" ? toOutcome(c) : undefined);
+      await middleware.handler(toCheck(c), when === "after" ? toOutcome(c) : undefined, { store: this.stored });
       return {};
     } catch (err) {
       return {

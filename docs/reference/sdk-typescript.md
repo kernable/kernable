@@ -807,6 +807,12 @@ Options of one event handler: the third argument of `Listener.on`.
 
 - `raw?: boolean`: Get events as stored, without upcasting, whatever their schema (for archives and exports). By default a listener stops at an event whose schema it does not know.
 
+### MiddlewareContext
+
+What a middleware handler gets besides the check: the listener's store, if it has one.
+
+- `store?: Store`
+
 ### Listener
 
 The definition of a durable, named event listener: which events it handles, which queries it
@@ -853,7 +859,7 @@ carts
 - `query<D = any, R = unknown>(queryType: string, handler: (data: D, qry: QueryMeta, ctx: QueryContext) => R | Promise<R>): this`: Answers the query type `queryType`, of the own domain (`GetCart`) or another one (`orders.GetOrder`), from this listener's state. The kernel delivers queries in order with the events, so an answer reflects every event handled before it. `handler(data, qry, ctx)` gets the query's data, its `QueryMeta` and a `QueryContext`, and returns the answer (or a promise of it), sent as JSON. Throw `Rejected` to refuse; any other error refuses with `handler_error`. A handler cannot query its own listener (the answer would wait behind itself): the kernel refuses it. Throws for a malformed type.
 - `query<Q>(query: QueryClass<Q>, handler: (data: Fields<Q>, qry: QueryMeta, ctx: QueryContext) => AnswerOf<Q> | Promise<AnswerOf<Q>>): this`: The same with a query class: `query(GetCart, (data) => …)`, typed by its fields and its answer.
 - `query(query: string | QueryClass<unknown>, handler: (data: any, qry: QueryMeta, ctx: QueryContext) => unknown): this`
-- `middleware(options: MiddlewareOptions, handler: MiddlewareHandler): this`: Makes this listener a middleware: the kernel asks `handler` about every command, query, file and cache request of `options.types`, before accepting or routing it (or after, see `MiddlewareOptions.when`), in chain order, and only once this listener has caught up with the events. Throw `Rejected` to refuse; any other error refuses too. The registration is stored: while this listener is away, the kernel refuses those requests (`kernable listeners remove` unregisters it). The handler cannot submit or query what it checks itself (it would wait behind itself): the kernel refuses it. A listener has at most one middleware before and one after. `handler(check, outcome)` gets the `Check`; after the request, also its `Outcome` (a command) or `QueryOutcome` (a query). The key needs `check` for the types; if its service has a membership, the membership must list it as a middleware (`Kernable.app` does that). Throws for a live listener, a malformed type, or a second middleware at the same `when`. See [Middleware](../concepts/queries-and-middleware#middleware).
+- `middleware(options: MiddlewareOptions, handler: MiddlewareHandler): this`: Makes this listener a middleware: the kernel asks `handler` about every command, query, file and cache request of `options.types`, before accepting or routing it (or after, see `MiddlewareOptions.when`), in chain order, and only once this listener has caught up with the events. Throw `Rejected` to refuse; any other error refuses too. The registration is stored: while this listener is away, the kernel refuses those requests (`kernable listeners remove` unregisters it). The handler cannot submit or query what it checks itself (it would wait behind itself): the kernel refuses it. A listener has at most one middleware before and one after. `handler(check, outcome, ctx)` gets the `Check`; after the request, also its `Outcome` (a command) or `QueryOutcome` (a query); and a `MiddlewareContext` with the listener's store, if it has one. The key needs `check` for the types; if its service has a membership, the membership must list it as a middleware (`Kernable.app` does that). Throws for a live listener, a malformed type, or a second middleware at the same `when`. See [Middleware](../concepts/queries-and-middleware#middleware).
 
 ### ListenerHandle
 
