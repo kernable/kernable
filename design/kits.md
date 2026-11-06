@@ -7,11 +7,12 @@ Status: decided, not built. The kits are the open set of tenancy, accounts, iden
 - **Domains**: `tenancy`, `account`, `identity`, `group`, `invitation`. Types are written qualified here (`tenancy.TenantCreated`).
 - **Names**: commands imperative (`SuspendTenant`), events past tense (`TenantSuspended`), queries what is asked (`GetTenant`).
 - **Payloads**: JSON, camelCase. An event carries what changed, not the whole state. Every event is schema version 1 while kernable is unreleased.
-- **Who and when**: not in the payload. The request context stored with every event says who (`senderIdentity`, `senderTenant`, `onBehalfOf`), the command's `received_at` says when (`now()` in the handler).
+- **Who and when**: who is never in the payload: the request context stored with every event says it (`senderIdentity`, `senderTenant`, `onBehalfOf`). When is in the payload (`at`, from `now()`) only where the state computes with it (a suspension's retention, the lockout, a session's lifetime), since `apply` does not see the event's time; elsewhere the event's commit time says it.
 - **IDs**: random UUIDs, except where an aggregate's ID is another's (a tenant's ID is its `tenant_id`).
 - **Personal and secret fields** are marked; they go to the vault (`personal`, subject named) or are `secret`.
 - **Levels**: `public`, `authenticated`, `platform` (platform groups only), or a group permission (`tenancy.RenameTenant`); `owners` hold every permission in their tenant.
 - **Constants** a customer may change in the copy are named in capitals.
+- **Layout**: per domain `domain.ts` (the domain object, types, vault declarations), `aggregate/` (state, apply, unique keys, facts), `command/` (one command per file), `readmodel/` (rows and event handlers), `query/` (one query per file), `reactor/`, and `index.ts`, which imports every part: a part it does not import does not exist (a test checks the catalogue against it).
 
 ## tenancy
 
@@ -44,8 +45,8 @@ none → pending → active ⇄ suspended → deleted
 | `ActivateTenant` | `pending` | `TenantActivated` | — | `platform` |
 | `RenameTenant` | `pending`, `active` | `TenantRenamed` | `name` | group |
 | `ChangeTenantSlug` | `active`; slug free and not reserved | `TenantSlugChanged` | `slug` | group |
-| `SuspendTenant` | `pending`, `active` | `TenantSuspended` | `reason` | `platform`; owners with `owner_requested` |
-| `ReactivateTenant` | `suspended` | `TenantReactivated` | — | `platform`; owners if `owner_requested` |
+| `SuspendTenant` | `pending` (reason `rejected` only), `active` (any other reason) | `TenantSuspended` | `reason`, `at` | `platform`; owners with `owner_requested` |
+| `ReactivateTenant` | `suspended`, not `rejected` | `TenantReactivated` | — | `platform`; owners if `owner_requested` |
 | `DeleteTenant` | `suspended` for at least `DELETE_AFTER_DAYS` (default 0) | `TenantDeleted` | — | `platform` |
 | `AddOwner` | not `deleted`; identity active in this tenant (required fact) | `OwnerAdded` | `identityId` | owners |
 | `RemoveOwner` | not the last owner | `OwnerRemoved` | `identityId` | owners |
@@ -165,7 +166,7 @@ Locked while `failures.count ≥ LOCKOUT_AFTER` and `now < lastAt + min(2^(count
 
 ### `account.account`: unique keys and facts
 
-- `email`: the verified email while not deleted (scope: the platform tenant, where every account lives). A pending change holds nothing until confirmed.
+- `email`: held from registration on while not deleted (scope: the platform tenant, where every account lives), so nobody registers an address twice. A registration whose verification expired unverified is taken over by a new registration of the same address (same aggregate, new token), so nobody blocks someone else's address. A pending change holds nothing until confirmed.
 - `link`: one value per link, `<provider>:<subject>`.
 - Fact `active`.
 

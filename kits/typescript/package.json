@@ -1,0 +1,22 @@
+{
+  "name": "kernable-kits",
+  "private": true,
+  "type": "module",
+  "description": "kernable's kits for TypeScript: tenancy, accounts, identities, groups, invitations and authorization, copied into your project by `kernable kits add typescript`",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "test": "tsc && node --test --conditions=source test/unit/*.test.ts",
+    "check": "tsc && KERNABLE_LOG=${KERNABLE_LOG:-warn} node --test --conditions=source test/unit/*.test.ts test/*.test.ts"
+  },
+  "dependencies": {
+    "@kernable/sdk": "file:../../sdks/typescript",
+    "@node-rs/argon2": "^2.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "~5.9.0"
+  }
+}

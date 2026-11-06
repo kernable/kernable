@@ -1,0 +1,73 @@
+// Who may send which of the kit's types at all: the levels, kept as data. Types not
+// listed here need a group permission (or an owner). Your own types need nothing here: give
+// groups permissions for them.
+
+export type Level =
+  /** Anyone, also without a session: the command carries its proof (password, token). */
+  | "public"
+  /** A signed-in session, no identity in a tenant needed. */
+  | "authenticated"
+  /** Only the kit's reactors (with `bypassAuthorization`, which only privileged keys may set). */
+  | "internal"
+  /** Only the tenant's owners (and platform owners). */
+  | "owners"
+  /** Only platform groups and platform owners. */
+  | "platform"
+  /** A group permission, or an owner. */
+  | "group";
+
+export interface Rule {
+  level: Level;
+  /** Also allowed when the target is the sender itself: its identity, account or session. */
+  self?: boolean;
+}
+
+export const RULES: Record<string, Rule> = {
+  "tenancy.CreateTenant": { level: "authenticated" }, // self-service; the platform's groups otherwise
+  "tenancy.ActivateTenant": { level: "platform" },
+  "tenancy.SuspendTenant": { level: "platform" }, // owners too, with owner_requested: see policy.ts
+  "tenancy.ReactivateTenant": { level: "platform" }, // owners too, after owner_requested
+  "tenancy.DeleteTenant": { level: "platform" },
+  "tenancy.ChangeSignUpPolicy": { level: "platform" },
+  "tenancy.AddOwner": { level: "owners" },
+  "tenancy.RemoveOwner": { level: "owners" },
+  "tenancy.RequireMfa": { level: "owners" },
+  "tenancy.ListTenants": { level: "platform" },
+
+  "account.RegisterAccount": { level: "public" }, // `verified` only from the API: see policy.ts
+  "account.VerifyEmail": { level: "public" },
+  "account.SignIn": { level: "public" },
+  "account.RefreshSession": { level: "public" },
+  "account.ProveSecondFactor": { level: "public" },
+  "account.ResetPassword": { level: "public" },
+  "account.ConfirmEmailChange": { level: "public" },
+  "account.OpenSession": { level: "internal" },
+  "account.AddSessionFactor": { level: "internal" },
+  "account.EndSession": { level: "group", self: true },
+  "account.GetAccount": { level: "group", self: true },
+  "account.ListSessions": { level: "group", self: true },
+
+  "identity.CreateIdentity": { level: "internal" },
+  "identity.UpdateProfile": { level: "group", self: true },
+  "identity.GetIdentity": { level: "group", self: true },
+  "identity.DeleteIdentity": { level: "group", self: true },
+  "identity.ListMyIdentities": { level: "authenticated", self: true },
+
+  "invitation.DeclineInvitation": { level: "public" },
+};
+
+/** Which field names a query's target: queries name no aggregate. */
+export const QUERY_TARGETS: Record<string, { type: string; field: string }> = {
+  "tenancy.GetTenant": { type: "tenancy.tenant", field: "tenantId" },
+  "account.GetAccount": { type: "account.account", field: "accountId" },
+  "account.ListSessions": { type: "account.account", field: "accountId" },
+  "identity.GetIdentity": { type: "identity.identity", field: "identityId" },
+  "identity.ListMyIdentities": { type: "account.account", field: "accountId" },
+};
+
+/** Requests for which the sender must hold every permission of the group concerned. */
+export const ESCALATION = ["identity.GrantMembership", "invitation.CreateInvitation", "group.CreateGroup", "group.SetPermissions"];
+
+export function ruleOf(type: string): Rule {
+  return RULES[type] ?? { level: "group" };
+}
