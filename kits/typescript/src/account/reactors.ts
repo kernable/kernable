@@ -31,7 +31,7 @@ export const mailReactor = accountDomain
 export const sessionsReactor = accountDomain
   .reactor("account.sessions", { order: ORDERS.reactors })
   .on(SecondFactorProved, async (d, evt, ctx) => {
-    await ctx.submit(AddSessionFactor.new({ factor: d.method === "recovery" ? "recovery" : "totp", accountId: evt.aggregateId }), {
+    await ctx.submit(AddSessionFactor.new({ factor: d.method, accountId: evt.aggregateId }), {
       id: `factor-${d.sessionId}-${evt.commandId}`, aggregateId: d.sessionId, tenant: PLATFORM_TENANT, context: { ...ctx.follow(), ...INTERNAL },
     });
   })

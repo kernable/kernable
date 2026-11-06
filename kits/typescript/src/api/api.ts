@@ -4,14 +4,18 @@
 import { randomUUID } from "node:crypto";
 
 import type { Kernable, Outcome, RequestContext, StoredEvent } from "@kernable/sdk";
+import {
+  generateAuthenticationOptions, generateRegistrationOptions, type AuthenticationResponseJSON, type PublicKeyCredentialCreationOptionsJSON,
+  type PublicKeyCredentialRequestOptionsJSON, type RegistrationResponseJSON,
+} from "@simplewebauthn/server";
 
 import {
-  ChangePassword, ConfirmEmailChange, ConfirmTotp, ProveSecondFactor, StartTotp, EndSession, FindAccountByEmail, GetAccount, NoteRegistrationAttempt, RefreshSession, RegisterAccount, RequestEmailChange,
+  AddPasskey, ChangePassword, ConfirmEmailChange, ConfirmTotp, ProvePasskey, ProveSecondFactor, SignInWithPasskey, StartTotp, EndSession, FindAccountByEmail, GetAccount, NoteRegistrationAttempt, RefreshSession, RegisterAccount, RequestEmailChange,
   RequestPasswordReset, ResetPassword, SignIn, VerifyEmail, type SessionRefreshed, type SignInFailed, type SignedIn,
 } from "../account/index.ts";
 import { AcceptInvitation, PeekInvitation } from "../invitation/index.ts";
 import { CreateApiKey, FindApiKey, FindIdentityByAccount, apiKey, parseApiKey } from "../identity/index.ts";
-import { PLATFORM_TENANT } from "../shared/constants.ts";
+import { CHALLENGE_SECONDS, PASSKEYS, PLATFORM_TENANT } from "../shared/constants.ts";
 import { equalSecrets, parseInvitationToken, parseToken, randomSecret, token, totpSecret } from "../shared/secrets.ts";
 import { checkAccessToken, issueAccessToken, type Claims, type SigningKeys } from "./tokens.ts";
 
@@ -201,6 +205,78 @@ export class KitApi {
   /** The context of the token's account acting on itself. */
   private own(claims: Claims): RequestContext {
     return { senderAccount: claims.sub, senderSession: claims.sid };
+  }
+
+  // --- Passkeys: challenges live a few minutes in the kernable cache and count once. ---
+
+  private async keepChallenge(challenge: string): Promise<void> {
+    await this.kernable.cache.set("account", `challenge:${challenge}`, "1", { ttlMs: CHALLENGE_SECONDS * 1000, tenant: PLATFORM_TENANT, context: this.serviceContext });
+  }
+
+  /** The challenge a browser response answers, if it is one the API issued and nobody used yet. */
+  private async takeChallenge(response: { response: { clientDataJSON: string } }): Promise<string | null> {
+    try {
+      const { challenge } = JSON.parse(Buffer.from(response.response.clientDataJSON, "base64url").toString("utf8")) as { challenge: string };
+      const taken = await this.kernable.cache.delete("account", `challenge:${challenge}`, { tenant: PLATFORM_TENANT, context: this.serviceContext });
+      return taken ? challenge : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** What the browser needs to create a passkey for the signed-in account. */
+  async passkeyRegistrationOptions(claims: Claims, userName: string): Promise<PublicKeyCredentialCreationOptionsJSON> {
+    const options = await generateRegistrationOptions({
+      rpName: PASSKEYS.rpName, rpID: PASSKEYS.rpId, userName, userID: new TextEncoder().encode(claims.sub),
+      authenticatorSelection: { residentKey: "required", userVerification: "required" },
+    });
+    await this.keepChallenge(options.challenge);
+    return options;
+  }
+
+  /** Adds the passkey the browser created. */
+  async addPasskey(claims: Claims, response: RegistrationResponseJSON, label?: string): Promise<{ ok: boolean; reason?: string }> {
+    const challenge = await this.takeChallenge(response);
+    if (!challenge) return { ok: false, reason: "invalid_challenge" };
+    const outcome = await this.kernable.submit(AddPasskey.new({ challenge, response, label }), { aggregateId: claims.sub, tenant: PLATFORM_TENANT, context: this.own(claims) });
+    return outcome.committed ? { ok: true } : { ok: false, reason: outcome.code };
+  }
+
+  /** What the browser needs to sign in with a passkey (or prove one): any of the user's passkeys. */
+  async passkeySignInOptions(): Promise<PublicKeyCredentialRequestOptionsJSON> {
+    const options = await generateAuthenticationOptions({ rpID: PASSKEYS.rpId, userVerification: "required" });
+    await this.keepChallenge(options.challenge);
+    return options;
+  }
+
+  /** Signs in with a passkey, without a password: the passkey names its account (its user handle). */
+  async signInWithPasskey(response: AuthenticationResponseJSON, ip?: string): Promise<SignInResult> {
+    const challenge = await this.takeChallenge(response);
+    const accountId = response.response.userHandle ? Buffer.from(response.response.userHandle, "base64url").toString("utf8") : "";
+    if (!challenge || !accountId) return { ok: false, reason: "wrong_password" };
+    const sessionId = randomUUID();
+    const refreshToken = token(sessionId, 1, randomSecret());
+    const outcome = await this.kernable.submit(SignInWithPasskey.new({ sessionId, challenge, response, refreshToken, ip }), {
+      aggregateId: accountId, tenant: PLATFORM_TENANT, context: this.serviceContext,
+    });
+    if (!outcome.committed) return { ok: false, reason: "wrong_password" };
+    const signedIn = outcome.events.find((e) => e.type === "SignedIn");
+    if (!signedIn) return { ok: false, reason: (outcome.events[0].data as SignInFailed).reason };
+    return {
+      ok: true, accountId, sessionId, refreshToken, secondFactor: false,
+      accessToken: issueAccessToken(this.keys, { sub: accountId, sid: sessionId, fac: (signedIn.data as SignedIn).factors }),
+    };
+  }
+
+  /** Proves a passkey as the second factor of a password session. */
+  async provePasskey(claims: Claims, response: AuthenticationResponseJSON): Promise<{ ok: true; accessToken: string } | { ok: false; reason: string }> {
+    const challenge = await this.takeChallenge(response);
+    if (!challenge) return { ok: false, reason: "invalid_challenge" };
+    const outcome = await this.kernable.submit(ProvePasskey.new({ sessionId: claims.sid, challenge, response }), {
+      aggregateId: claims.sub, tenant: PLATFORM_TENANT, context: this.serviceContext,
+    });
+    if (!outcome.committed || !outcome.events.some((e) => e.type === "SecondFactorProved")) return { ok: false, reason: "wrong_passkey" };
+    return { ok: true, accessToken: issueAccessToken(this.keys, { sub: claims.sub, sid: claims.sid, fac: [...claims.fac, "passkey"] }) };
   }
 
   /** Changes the password; the other sessions end, this one stays. */

@@ -5,7 +5,7 @@ export { accountDomain } from "./domain.ts";
 export type * from "./domain.ts";
 export * from "./events.ts";
 export { accountAggregate, lockedUntil, type Account, sessionAggregate, type Session } from "./aggregates.ts";
-export { RegisterAccount, RequestVerification, VerifyEmail, SignIn, OpenSession, RefreshSession, AddSessionFactor, EndSession, SuspendAccount, ReactivateAccount, DeleteAccount, ChangePassword, RequestPasswordReset, ResetPassword, RequestEmailChange, ConfirmEmailChange, NoteRegistrationAttempt, StartTotp, ConfirmTotp, DisableTotp, RegenerateRecoveryCodes, ProveSecondFactor } from "./commands.ts";
+export { RegisterAccount, RequestVerification, VerifyEmail, SignIn, OpenSession, RefreshSession, AddSessionFactor, EndSession, SuspendAccount, ReactivateAccount, DeleteAccount, ChangePassword, RequestPasswordReset, ResetPassword, RequestEmailChange, ConfirmEmailChange, NoteRegistrationAttempt, StartTotp, ConfirmTotp, DisableTotp, RegenerateRecoveryCodes, ProveSecondFactor, AddPasskey, RemovePasskey, SignInWithPasskey, ProvePasskey } from "./commands.ts";
 export { accountsReadModel, type AccountRow, type SessionRow } from "./readmodels.ts";
 export { FindAccountByEmail, GetAccount, ListSessions } from "./queries.ts";
 export { sessionsReactor, mailReactor, endingReactor } from "./reactors.ts";

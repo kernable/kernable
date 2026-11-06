@@ -13,6 +13,13 @@ export { relation, parent } from "./authorization/relations.ts";
 export { useAuthorizationStore } from "./authorization/middleware.ts";
 export { PLATFORM_TENANT } from "./shared/constants.ts";
 
+import { PASSKEYS } from "./shared/constants.ts";
+
+/** The relying party passkeys are bound to: your domain (`example.com`), a name, the origins your pages are served from. */
+export function usePasskeys(rp: { rpId: string; rpName: string; origins: string[] }): void {
+  Object.assign(PASSKEYS, rp);
+}
+
 /**
  * Every domain of the kit, with the relations declared so far: declare yours (`relation`,
  * `parent`) before calling it.

@@ -1,12 +1,13 @@
 // The account commands: each class with its handler.
 
 import { Command, type PersonalFields, Rejected } from "@kernable/sdk";
+import { verifyAuthenticationResponse, verifyRegistrationResponse, type AuthenticationResponseJSON, type RegistrationResponseJSON } from "@simplewebauthn/server";
 
-import { DAY, HOUR, SESSION_IDLE_DAYS, SESSION_MAX_DAYS, VERIFICATION_HOURS, MINUTE, RESET_MINUTES } from "../shared/constants.ts";
+import { DAY, HOUR, SESSION_IDLE_DAYS, SESSION_MAX_DAYS, VERIFICATION_HOURS, MINUTE, RESET_MINUTES, PASSKEYS } from "../shared/constants.ts";
 import { checkPassword, equalSecrets, hashPassword, normalEmail, parseToken, randomSecret, sha256, validEmail, validPassword, totpStep } from "../shared/secrets.ts";
 import { type Account, accountAggregate, lockedUntil, sessionAggregate } from "./aggregates.ts";
 import { ACCOUNT_SUSPENSION_REASONS, type AccountSuspensionReason, type SessionEnd } from "./domain.ts";
-import { RecoveryCodesGenerated, SecondFactorFailed, SecondFactorProved, TotpConfirmed, TotpDisabled, TotpStarted, EmailChangeRequested, EmailChanged, PasswordChanged, PasswordReset, PasswordResetRequested, RegistrationAttempted, AccountDeleted, AccountReactivated, AccountSuspended, AccountRegistered, EmailVerified, SessionEnded, SessionFactorAdded, SessionOpened, SessionRefreshed, SignedIn, SignInFailed, VerificationRequested } from "./events.ts";
+import { PasskeyAdded, PasskeyRemoved, PasskeyUsed, RecoveryCodesGenerated, SecondFactorFailed, SecondFactorProved, TotpConfirmed, TotpDisabled, TotpStarted, EmailChangeRequested, EmailChanged, PasswordChanged, PasswordReset, PasswordResetRequested, RegistrationAttempted, AccountDeleted, AccountReactivated, AccountSuspended, AccountRegistered, EmailVerified, SessionEnded, SessionFactorAdded, SessionOpened, SessionRefreshed, SignedIn, SignInFailed, VerificationRequested } from "./events.ts";
 
 /** Internal: after a second factor was proved on the account. */
 export class AddSessionFactor extends Command {
@@ -349,4 +350,111 @@ accountAggregate.command(ProveSecondFactor, (s, d, _cmd, ctx) => {
   const proof = secondFactor(s, d.code, now);
   if (!proof) return [SecondFactorFailed.new({ sessionId: d.sessionId, at: now })];
   return [SecondFactorProved.new({ sessionId: d.sessionId, ...proof })];
+});
+
+/** Whether the account keeps another way to sign in without `except` (never remove the last one). */
+function anotherMethod(s: Account, except: { passkey?: string }): boolean {
+  return s.password !== null || s.passkeys.some((p) => p.credentialId !== except.passkey);
+}
+
+/**
+ * The account's own: a passkey, registered against a challenge the API issued and keeps for
+ * a few minutes. The aggregate checks the attestation; the challenge proves freshness.
+ */
+export class AddPasskey extends Command {
+  static personal: PersonalFields<AddPasskey>[] = [{ fields: ["label"], subject: (_d, id) => id }];
+  challenge!: string;
+  response!: RegistrationResponseJSON;
+  label?: string;
+}
+
+accountAggregate.command(AddPasskey, async (s, d, _cmd, ctx) => {
+  if (s.status !== "active") throw new Rejected("The account is not active", "invalid_state");
+  let verified;
+  try {
+    verified = await verifyRegistrationResponse({
+      response: d.response, expectedChallenge: d.challenge, expectedOrigin: PASSKEYS.origins, expectedRPID: PASSKEYS.rpId, requireUserVerification: true,
+    });
+  } catch (err) {
+    throw new Rejected(`Not a valid passkey: ${(err as Error).message}`, "invalid_passkey");
+  }
+  if (!verified.verified || !verified.registrationInfo) throw new Rejected("Not a valid passkey", "invalid_passkey");
+  const { credential } = verified.registrationInfo;
+  if (s.passkeys.some((p) => p.credentialId === credential.id)) throw new Rejected("The passkey is added already", "exists");
+  return [PasskeyAdded.new({
+    credentialId: credential.id, publicKey: Buffer.from(credential.publicKey).toString("base64url"), counter: credential.counter,
+    label: d.label ?? null, at: ctx.now().getTime(),
+  })];
+});
+
+export class RemovePasskey extends Command {
+  credentialId!: string;
+}
+
+accountAggregate.command(RemovePasskey, (s, d) => {
+  if (!s.passkeys.some((p) => p.credentialId === d.credentialId)) throw new Rejected("No such passkey", "not_found");
+  if (!anotherMethod(s, { passkey: d.credentialId })) throw new Rejected("The last way to sign in stays", "last_method");
+  return [PasskeyRemoved.new({ credentialId: d.credentialId })];
+});
+
+/** The assertion checked against the account's passkey, or the reason it fails. */
+async function asserted(s: Account, challenge: string, response: AuthenticationResponseJSON): Promise<{ credentialId: string; counter: number } | null> {
+  const passkey = s.passkeys.find((p) => p.credentialId === response?.id);
+  if (!passkey?.credentialId) return null;
+  try {
+    const result = await verifyAuthenticationResponse({
+      response, expectedChallenge: challenge, expectedOrigin: PASSKEYS.origins, expectedRPID: PASSKEYS.rpId, requireUserVerification: true,
+      credential: { id: passkey.credentialId, publicKey: new Uint8Array(Buffer.from(passkey.publicKey, "base64url")), counter: passkey.counter },
+    });
+    return result.verified ? { credentialId: passkey.credentialId, counter: result.authenticationInfo.newCounter } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The API's (it issued the challenge): a passwordless sign-in. A passkey verifies the user, so it
+ * counts as two factors.
+ */
+export class SignInWithPasskey extends Command {
+  static secret: (keyof SignInWithPasskey)[] = ["refreshToken", "ip", "userAgent"];
+  sessionId!: string;
+  challenge!: string;
+  response!: AuthenticationResponseJSON;
+  refreshToken!: string;
+  ip?: string;
+  userAgent?: string;
+}
+
+accountAggregate.command(SignInWithPasskey, async (s, d, _cmd, ctx) => {
+  const at = ctx.now().getTime();
+  const failed = (reason: SignInFailed["reason"]) => [SignInFailed.new({ method: "passkey", reason, ip: d.ip ?? null, at })];
+  if (s.status === "none" || s.status === "deleted") throw new Rejected("No such account", "not_found");
+  const refresh = parseToken(d.refreshToken);
+  if (!refresh || refresh[0] !== d.sessionId || refresh[1] !== "1") throw new Rejected("A malformed refresh token", "invalid_token");
+  if (at < lockedUntil(s)) return failed("locked");
+  const ok = await asserted(s, d.challenge, d.response);
+  if (!ok) return failed("wrong_password");
+  if (s.status !== "active") return failed("not_active");
+  return [
+    PasskeyUsed.new(ok),
+    SignedIn.new({
+      sessionId: d.sessionId, method: "passkey", factors: ["passkey"], refreshTokenHash: sha256(d.refreshToken),
+      ip: d.ip ?? null, userAgent: d.userAgent ?? null, mfa: false, at,
+    }),
+  ];
+});
+
+/** The API's: a passkey as the second factor after a password. */
+export class ProvePasskey extends Command {
+  sessionId!: string;
+  challenge!: string;
+  response!: AuthenticationResponseJSON;
+}
+
+accountAggregate.command(ProvePasskey, async (s, d, _cmd, ctx) => {
+  if (s.status !== "active") throw new Rejected("The account is not active", "invalid_state");
+  const ok = await asserted(s, d.challenge, d.response);
+  if (!ok) return [SecondFactorFailed.new({ sessionId: d.sessionId, at: ctx.now().getTime() })];
+  return [PasskeyUsed.new(ok), SecondFactorProved.new({ sessionId: d.sessionId, method: "passkey", step: null, recoveryCodeHash: null })];
 });

@@ -33,3 +33,7 @@ export const INTERNAL = { bypassAuthorization: true } as const;
 
 /** The authorization middleware's store; `useAuthorizationStore` changes it. */
 export const AUTHORIZATION_STORE = "sqlite:authorization.db";
+
+/** The relying party passkeys are bound to (WebAuthn): your site's domain, name and origins; `usePasskeys` sets it. */
+export const PASSKEYS = { rpId: "localhost", rpName: "kernable", origins: ["http://localhost:3000"] };
+export const CHALLENGE_SECONDS = 300;

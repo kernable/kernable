@@ -2,7 +2,7 @@
 
 import { LOCKOUT_AFTER, LOCKOUT_MAX_MINUTES, MINUTE } from "../shared/constants.ts";
 import { accountDomain, type AccountStatus, type AccountSuspensionReason, type SessionEnd, type TokenPurpose } from "./domain.ts";
-import { RecoveryCodesGenerated, SecondFactorFailed, SecondFactorProved, TotpConfirmed, TotpDisabled, TotpStarted, EmailChangeRequested, EmailChanged, PasswordChanged, PasswordReset, PasswordResetRequested, AccountDeleted, AccountReactivated, AccountRegistered, AccountSuspended, EmailVerified, SessionEnded, SessionFactorAdded, SessionOpened, SessionRefreshed, SignedIn, SignInFailed, VerificationRequested } from "./events.ts";
+import { PasskeyAdded, PasskeyRemoved, PasskeyUsed, RecoveryCodesGenerated, SecondFactorFailed, SecondFactorProved, TotpConfirmed, TotpDisabled, TotpStarted, EmailChangeRequested, EmailChanged, PasswordChanged, PasswordReset, PasswordResetRequested, AccountDeleted, AccountReactivated, AccountRegistered, AccountSuspended, EmailVerified, SessionEnded, SessionFactorAdded, SessionOpened, SessionRefreshed, SignedIn, SignInFailed, VerificationRequested } from "./events.ts";
 
 export interface Account {
   id?: string;
@@ -17,6 +17,8 @@ export interface Account {
   suspension: { reason: AccountSuspensionReason; at: number } | null;
   /** TOTP: its secret (vault), whether confirmed, the last step used (no code twice). */
   totp: { secret: string | null; confirmed: boolean; lastStep: number } | null;
+  /** Passkeys: credential ID (vault), COSE public key (base64url), signature counter, label (vault). */
+  passkeys: { credentialId: string | null; publicKey: string; counter: number; label: string | null }[];
   /** SHA-256 of the unused recovery codes. */
   recoveryCodes: string[];
   /** A new address waiting for its confirmation: it holds no key yet. */
@@ -40,6 +42,7 @@ export const accountAggregate = accountDomain
     suspension: null,
     totp: null,
     recoveryCodes: [],
+    passkeys: [],
   })
   .apply(AccountRegistered, (s, d, evt) => {
     s.id = evt.aggregateId;
@@ -110,6 +113,12 @@ export const accountAggregate = accountDomain
     s.failures = { count: 0, lastAt: 0 };
   })
   .apply(SecondFactorFailed, (s, d) => void (s.failures = { count: s.failures.count + 1, lastAt: d.at }))
+  .apply(PasskeyAdded, (s, d) => void s.passkeys.push({ credentialId: d.credentialId, publicKey: d.publicKey, counter: d.counter, label: d.label }))
+  .apply(PasskeyRemoved, (s, d) => void (s.passkeys = s.passkeys.filter((p) => p.credentialId !== d.credentialId)))
+  .apply(PasskeyUsed, (s, d) => {
+    const p = s.passkeys.find((x) => x.credentialId === d.credentialId);
+    if (p) p.counter = d.counter;
+  })
   .apply(SignedIn, (s) => void (s.failures = { count: 0, lastAt: 0 }))
   .apply(SignInFailed, (s, d) => {
     if (d.reason === "wrong_password") s.failures = { count: s.failures.count + 1, lastAt: d.at };

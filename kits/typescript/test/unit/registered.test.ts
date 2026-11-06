@@ -15,7 +15,8 @@ const COMMANDS: Record<string, string[]> = {
   ],
   "account.account": ["RegisterAccount", "RequestVerification", "VerifyEmail", "SignIn", "SuspendAccount", "ReactivateAccount", "DeleteAccount",
     "ChangePassword", "RequestPasswordReset", "ResetPassword", "RequestEmailChange", "ConfirmEmailChange", "NoteRegistrationAttempt",
-    "StartTotp", "ConfirmTotp", "DisableTotp", "RegenerateRecoveryCodes", "ProveSecondFactor"],
+    "StartTotp", "ConfirmTotp", "DisableTotp", "RegenerateRecoveryCodes", "ProveSecondFactor",
+    "AddPasskey", "RemovePasskey", "SignInWithPasskey", "ProvePasskey"],
   "account.session": ["OpenSession", "RefreshSession", "AddSessionFactor", "EndSession"],
   "identity.identity": [
     "CreateIdentity", "CreateServiceIdentity", "UpdateProfile", "GrantMembership", "SuspendMembership",

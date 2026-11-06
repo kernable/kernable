@@ -1872,6 +1872,374 @@
           "active"
         ]
       }
+    },
+    {
+      "name": "a passkey is added from a registration answering the issued challenge",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        }
+      ],
+      "when": {
+        "type": "AddPasskey",
+        "data": {
+          "challenge": "cmVnaXN0cmF0aW9uLWNoYWxsZW5nZQ",
+          "response": {
+            "id": "yoFh-Le2Pa0GV387WJCp6w",
+            "rawId": "yoFh-Le2Pa0GV387WJCp6w",
+            "type": "public-key",
+            "clientExtensionResults": {},
+            "response": {
+              "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiY21WbmFYTjBjbUYwYVc5dUxXTm9ZV3hzWlc1blpRIiwib3JpZ2luIjoiaHR0cDovL2xvY2FsaG9zdDozMDAwIiwiY3Jvc3NPcmlnaW4iOmZhbHNlfQ",
+              "attestationObject": "o2NmbXRkbm9uZWdhdHRTdG10oGhhdXRoRGF0YViUSZYN5YgOjGh0NBcPZHZgW4_krrmihjLHmVzzuoMdl2NFAAAAAAAAAAAAAAAAAAAAAAAAAAAAEMqBYfi3tj2tBld_O1iQqeulAQIDJiABIVggVqn3L1ohw51UwgZUUkjGturQSS77nzN3hp1Lv3NqZpQiWCADgWgggqO_35-tmGF0Wczr6MXr-KaYNMDxKBUvhAUeRg",
+              "transports": [
+                "internal"
+              ]
+            }
+          },
+          "label": "Laptop"
+        }
+      },
+      "then": [
+        {
+          "type": "PasskeyAdded",
+          "data": {
+            "credentialId": "yoFh-Le2Pa0GV387WJCp6w",
+            "publicKey": "pQECAyYgASFYIFap9y9aIcOdVMIGVFJIxrbq0Eku-58zd4adS79zamaUIlggA4FoIIKjv9-frZhhdFnM6-jF6_immDTA8SgVL4QFHkY",
+            "counter": 0,
+            "label": "Laptop",
+            "at": 1000000
+          }
+        }
+      ]
+    },
+    {
+      "name": "a registration answering another challenge is refused",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        }
+      ],
+      "when": {
+        "type": "AddPasskey",
+        "data": {
+          "challenge": "b3RoZXI",
+          "response": {
+            "id": "yoFh-Le2Pa0GV387WJCp6w",
+            "rawId": "yoFh-Le2Pa0GV387WJCp6w",
+            "type": "public-key",
+            "clientExtensionResults": {},
+            "response": {
+              "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiY21WbmFYTjBjbUYwYVc5dUxXTm9ZV3hzWlc1blpRIiwib3JpZ2luIjoiaHR0cDovL2xvY2FsaG9zdDozMDAwIiwiY3Jvc3NPcmlnaW4iOmZhbHNlfQ",
+              "attestationObject": "o2NmbXRkbm9uZWdhdHRTdG10oGhhdXRoRGF0YViUSZYN5YgOjGh0NBcPZHZgW4_krrmihjLHmVzzuoMdl2NFAAAAAAAAAAAAAAAAAAAAAAAAAAAAEMqBYfi3tj2tBld_O1iQqeulAQIDJiABIVggVqn3L1ohw51UwgZUUkjGturQSS77nzN3hp1Lv3NqZpQiWCADgWgggqO_35-tmGF0Wczr6MXr-KaYNMDxKBUvhAUeRg",
+              "transports": [
+                "internal"
+              ]
+            }
+          }
+        }
+      },
+      "rejected": "invalid_passkey"
+    },
+    {
+      "name": "a passkey signs in without a password, counting as two factors",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        },
+        {
+          "type": "PasskeyAdded",
+          "data": {
+            "credentialId": "yoFh-Le2Pa0GV387WJCp6w",
+            "publicKey": "pQECAyYgASFYIFap9y9aIcOdVMIGVFJIxrbq0Eku-58zd4adS79zamaUIlggA4FoIIKjv9-frZhhdFnM6-jF6_immDTA8SgVL4QFHkY",
+            "counter": 0,
+            "label": "Laptop",
+            "at": 1
+          }
+        }
+      ],
+      "when": {
+        "type": "SignInWithPasskey",
+        "data": {
+          "sessionId": "s1",
+          "challenge": "c2lnbi1pbi1jaGFsbGVuZ2U",
+          "response": {
+            "id": "yoFh-Le2Pa0GV387WJCp6w",
+            "rawId": "yoFh-Le2Pa0GV387WJCp6w",
+            "type": "public-key",
+            "clientExtensionResults": {},
+            "response": {
+              "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiYzJsbmJpMXBiaTFqYUdGc2JHVnVaMlUiLCJvcmlnaW4iOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+              "authenticatorData": "SZYN5YgOjGh0NBcPZHZgW4_krrmihjLHmVzzuoMdl2MFAAAAAQ",
+              "signature": "MEUCIBCI8lhPXZoU7_tWKtjhCdIpcpcft_GLzYYTCzmOjRBMAiEAuNHsly_MSnQ4DNFlBmctlbYf3uZ10qZX_ooAr65fah0",
+              "userHandle": "YTE"
+            }
+          },
+          "refreshToken": "s1.1.r"
+        }
+      },
+      "then": [
+        {
+          "type": "PasskeyUsed",
+          "data": {
+            "credentialId": "yoFh-Le2Pa0GV387WJCp6w",
+            "counter": 1
+          }
+        },
+        {
+          "type": "SignedIn",
+          "data": {
+            "sessionId": "s1",
+            "method": "passkey",
+            "factors": [
+              "passkey"
+            ],
+            "refreshTokenHash": "623eb122f7c6115ddd49a01a83d1367e2f5fdffed24ba88b069c85458dfe645c",
+            "ip": null,
+            "userAgent": null,
+            "mfa": false,
+            "at": 1000000
+          }
+        }
+      ]
+    },
+    {
+      "name": "a passkey answer from another origin fails",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        },
+        {
+          "type": "PasskeyAdded",
+          "data": {
+            "credentialId": "yoFh-Le2Pa0GV387WJCp6w",
+            "publicKey": "pQECAyYgASFYIFap9y9aIcOdVMIGVFJIxrbq0Eku-58zd4adS79zamaUIlggA4FoIIKjv9-frZhhdFnM6-jF6_immDTA8SgVL4QFHkY",
+            "counter": 0,
+            "label": "Laptop",
+            "at": 1
+          }
+        }
+      ],
+      "when": {
+        "type": "SignInWithPasskey",
+        "data": {
+          "sessionId": "s1",
+          "challenge": "c2lnbi1pbi1jaGFsbGVuZ2U",
+          "response": {
+            "id": "yoFh-Le2Pa0GV387WJCp6w",
+            "rawId": "yoFh-Le2Pa0GV387WJCp6w",
+            "type": "public-key",
+            "clientExtensionResults": {},
+            "response": {
+              "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiYzJsbmJpMXBiaTFqYUdGc2JHVnVaMlUiLCJvcmlnaW4iOiJodHRwOi8vZXZpbC5leGFtcGxlIiwiY3Jvc3NPcmlnaW4iOmZhbHNlfQ",
+              "authenticatorData": "SZYN5YgOjGh0NBcPZHZgW4_krrmihjLHmVzzuoMdl2MFAAAAAg",
+              "signature": "MEUCIQD_0qo2HlDZKJPqa0hGFXBxOhk239lpY-kFA33CXnFq_AIgAbfxOxQLeoGNs1Z8FDInMNWcDCFsXjTwNRa1yM4G8wI",
+              "userHandle": "YTE"
+            }
+          },
+          "refreshToken": "s1.1.r"
+        }
+      },
+      "then": [
+        {
+          "type": "SignInFailed",
+          "data": {
+            "method": "passkey",
+            "reason": "wrong_password",
+            "ip": null,
+            "at": 1000000
+          }
+        }
+      ]
+    },
+    {
+      "name": "a passkey proves the second factor",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        },
+        {
+          "type": "PasskeyAdded",
+          "data": {
+            "credentialId": "yoFh-Le2Pa0GV387WJCp6w",
+            "publicKey": "pQECAyYgASFYIFap9y9aIcOdVMIGVFJIxrbq0Eku-58zd4adS79zamaUIlggA4FoIIKjv9-frZhhdFnM6-jF6_immDTA8SgVL4QFHkY",
+            "counter": 0,
+            "label": "Laptop",
+            "at": 1
+          }
+        }
+      ],
+      "when": {
+        "type": "ProvePasskey",
+        "data": {
+          "sessionId": "s1",
+          "challenge": "c2lnbi1pbi1jaGFsbGVuZ2U",
+          "response": {
+            "id": "yoFh-Le2Pa0GV387WJCp6w",
+            "rawId": "yoFh-Le2Pa0GV387WJCp6w",
+            "type": "public-key",
+            "clientExtensionResults": {},
+            "response": {
+              "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiYzJsbmJpMXBiaTFqYUdGc2JHVnVaMlUiLCJvcmlnaW4iOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+              "authenticatorData": "SZYN5YgOjGh0NBcPZHZgW4_krrmihjLHmVzzuoMdl2MFAAAAAQ",
+              "signature": "MEUCIBCI8lhPXZoU7_tWKtjhCdIpcpcft_GLzYYTCzmOjRBMAiEAuNHsly_MSnQ4DNFlBmctlbYf3uZ10qZX_ooAr65fah0",
+              "userHandle": "YTE"
+            }
+          }
+        }
+      },
+      "then": [
+        {
+          "type": "PasskeyUsed",
+          "data": {
+            "credentialId": "yoFh-Le2Pa0GV387WJCp6w",
+            "counter": 1
+          }
+        },
+        {
+          "type": "SecondFactorProved",
+          "data": {
+            "sessionId": "s1",
+            "method": "passkey",
+            "step": null,
+            "recoveryCodeHash": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "the last way to sign in is not removed",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": null,
+            "verified": true,
+            "at": 1
+          }
+        },
+        {
+          "type": "PasskeyAdded",
+          "data": {
+            "credentialId": "yoFh-Le2Pa0GV387WJCp6w",
+            "publicKey": "pQECAyYgASFYIFap9y9aIcOdVMIGVFJIxrbq0Eku-58zd4adS79zamaUIlggA4FoIIKjv9-frZhhdFnM6-jF6_immDTA8SgVL4QFHkY",
+            "counter": 0,
+            "label": "Laptop",
+            "at": 1
+          }
+        }
+      ],
+      "when": {
+        "type": "RemovePasskey",
+        "data": {
+          "credentialId": "yoFh-Le2Pa0GV387WJCp6w"
+        }
+      },
+      "rejected": "last_method"
+    },
+    {
+      "name": "a passkey is removed while a password remains",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        },
+        {
+          "type": "PasskeyAdded",
+          "data": {
+            "credentialId": "yoFh-Le2Pa0GV387WJCp6w",
+            "publicKey": "pQECAyYgASFYIFap9y9aIcOdVMIGVFJIxrbq0Eku-58zd4adS79zamaUIlggA4FoIIKjv9-frZhhdFnM6-jF6_immDTA8SgVL4QFHkY",
+            "counter": 0,
+            "label": "Laptop",
+            "at": 1
+          }
+        }
+      ],
+      "when": {
+        "type": "RemovePasskey",
+        "data": {
+          "credentialId": "yoFh-Le2Pa0GV387WJCp6w"
+        }
+      },
+      "then": [
+        {
+          "type": "PasskeyRemoved",
+          "data": {
+            "credentialId": "yoFh-Le2Pa0GV387WJCp6w"
+          }
+        }
+      ]
     }
   ]
 }

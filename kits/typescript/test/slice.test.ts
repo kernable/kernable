@@ -20,6 +20,7 @@ import { CreateInvitation, EraseInvitation, ListInvitations } from "../src/invit
 import { kitDomains, kitSchemas, relation, useAuthorizationStore } from "../src/kit.ts";
 import { MemoryMailer, useMailer } from "../src/shared/mail.ts";
 import { totpCode } from "../src/shared/secrets.ts";
+import { Authenticator } from "./authenticator.ts";
 import { CreateTenant, DeleteTenant, GetTenant, SuspendTenant } from "../src/tenancy/index.ts";
 
 // --- A small app: orders that belong to whoever placed them --------------------------------------
@@ -67,7 +68,7 @@ before(async () => {
   cli(
     "grant", "root.key", "kit.pub",
     "run=tenancy.*,account.*,identity.*,group.*,invitation.*,shop.*",
-    ...["submit", "listen", "query", "answer", "check", "vault_read", "vault_erase", "manage", "reserved_order"].map((a) => `${a}=*`),
+    ...["submit", "listen", "query", "answer", "check", "vault_read", "vault_erase", "manage", "reserved_order", "cache"].map((a) => `${a}=*`),
     "privileged=bypass_authorization",
   );
   const options = { url: kernel.url, key: join(kernel.dir, "kit.key") };
@@ -381,4 +382,33 @@ test("a second factor: TOTP with recovery codes; and a service with an API key",
   assert.ok((await kit.submit(RevokeApiKey.new({ keyId: created.keyId }), { aggregateId: service, tenant: henrys, context: asHenry })).committed);
   const revoked = await byKey("h2");
   assert.equal(!revoked.committed && revoked.code, "unauthenticated");
+});
+
+test("passkeys: added against an issued challenge, signing in without a password, a challenge counting once", async () => {
+  const email = "ivy@example.com";
+  const ivy = await person(email);
+  const device = new Authenticator("localhost", "http://localhost:3000", ivy.accountId);
+  const creation = await api.passkeyRegistrationOptions(ivy.claims, email);
+  assert.deepEqual(await api.addPasskey(ivy.claims, device.register("bm90LWlzc3VlZA") as never), { ok: false, reason: "invalid_challenge" });
+  assert.deepEqual(await api.addPasskey(ivy.claims, device.register(creation.challenge) as never, "Laptop"), { ok: true });
+
+  // Without a password: the passkey names the account and counts as two factors.
+  const request = await api.passkeySignInOptions();
+  const answer = device.assert(request.challenge);
+  const signedIn = await api.signInWithPasskey(answer as never);
+  assert.ok(signedIn.ok && signedIn.accountId === ivy.accountId, JSON.stringify(signedIn));
+  assert.deepEqual(api.check(signedIn.accessToken)!.fac, ["passkey"]);
+  // The same answer again: its challenge is used up.
+  assert.deepEqual(await api.signInWithPasskey(answer as never), { ok: false, reason: "wrong_password" });
+  // A passkey answer from another site's page fails.
+  const other = await api.passkeySignInOptions();
+  assert.equal((await api.signInWithPasskey(device.assert(other.challenge, "http://evil.example") as never)).ok, false);
+
+  // The passkey session acts like any other.
+  const claims = api.check(signedIn.accessToken)!;
+  const ivys = crypto.randomUUID();
+  const opened = await kit.submit(CreateTenant.new({ slug: "ivys", name: "Ivy's", owner: { accountId: claims.sub } }), {
+    aggregateId: ivys, tenant: ivys, context: { senderAccount: claims.sub, senderSession: claims.sid },
+  });
+  assert.ok(opened.committed, JSON.stringify(opened));
 });

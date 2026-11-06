@@ -49,6 +49,8 @@ export const RULES: Record<string, Rule> = {
   "account.EndSession": { level: "group", self: true },
   "account.ChangePassword": { level: "group", self: true },
   "account.StartTotp": { level: "group", self: true },
+  "account.AddPasskey": { level: "group", self: true },
+  "account.RemovePasskey": { level: "group", self: true },
   "account.ConfirmTotp": { level: "group", self: true },
   "account.DisableTotp": { level: "group", self: true },
   "account.RegenerateRecoveryCodes": { level: "group", self: true },

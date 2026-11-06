@@ -176,7 +176,7 @@ export class RecoveryCodesGenerated extends Event {
 /** A session proved a second factor; a reactor adds it to the session. */
 export class SecondFactorProved extends Event {
   sessionId!: string;
-  method!: "totp" | "recovery";
+  method!: "totp" | "recovery" | "passkey";
   /** The TOTP code's step (no code twice), or null. */
   step!: number | null;
   /** The used recovery code's hash, or null. */
@@ -189,5 +189,27 @@ export class SecondFactorFailed extends Event {
   at!: number;
 }
 
+/** A passkey: its credential ID and label are personal; the public key (COSE, base64url) is not. */
+export class PasskeyAdded extends Event {
+  static personal: PersonalFields<PasskeyAdded>[] = [{ fields: ["credentialId", "label"], subject: (_d, id) => id }];
+  credentialId!: string | null;
+  publicKey!: string;
+  counter!: number;
+  label!: string | null;
+  at!: number;
+}
+
+export class PasskeyRemoved extends Event {
+  static personal: PersonalFields<PasskeyRemoved>[] = [{ fields: ["credentialId"], subject: (_d, id) => id }];
+  credentialId!: string | null;
+}
+
+/** A passkey signed: its counter moves on (a cloned authenticator would fall behind). */
+export class PasskeyUsed extends Event {
+  static personal: PersonalFields<PasskeyUsed>[] = [{ fields: ["credentialId"], subject: (_d, id) => id }];
+  credentialId!: string | null;
+  counter!: number;
+}
+
 // Declared on the domain, so a process that only reads them knows them too.
-accountDomain.event(TotpStarted, TotpConfirmed, TotpDisabled, RecoveryCodesGenerated, SecondFactorProved, SecondFactorFailed, AccountRegistered, VerificationRequested, EmailVerified, SignedIn, SignInFailed, SessionOpened, SessionRefreshed, SessionFactorAdded, SessionEnded, AccountSuspended, AccountReactivated, AccountDeleted, PasswordChanged, PasswordResetRequested, PasswordReset, EmailChangeRequested, EmailChanged, RegistrationAttempted);
+accountDomain.event(PasskeyAdded, PasskeyRemoved, PasskeyUsed, TotpStarted, TotpConfirmed, TotpDisabled, RecoveryCodesGenerated, SecondFactorProved, SecondFactorFailed, AccountRegistered, VerificationRequested, EmailVerified, SignedIn, SignInFailed, SessionOpened, SessionRefreshed, SessionFactorAdded, SessionEnded, AccountSuspended, AccountReactivated, AccountDeleted, PasswordChanged, PasswordResetRequested, PasswordReset, EmailChangeRequested, EmailChanged, RegistrationAttempted);
