@@ -89,7 +89,7 @@ Moves `<tenant>` with its data to partition `<to>`: applies a map that marks it 
 kernable promote <addr> <key>
 ```
 
-Makes the standby at `<addr>` (started with `--follow`) the primary: it stops following and serves. `<key>` needs a grant for manage on `*`. Promote only a standby whose primary is gone: a primary that still runs is fenced (it tells nobody of a write from then on), and rejoins as a standby of the new one.
+Makes the standby at `<addr>` (started with `--follow`) the primary: it stops following and serves. `<key>` needs a grant for manage on `*`. Promote only a standby whose primary is gone: a primary that still runs is fenced (it tells nobody of a write from then on), and rejoins as a standby of the new one. Without a witness, a standby the primary never told it is in sync is refused: the primary may have told writes it lacks.
 
 ### `kernable switchover`
 
@@ -97,7 +97,7 @@ Makes the standby at `<addr>` (started with `--follow`) the primary: it stops fo
 kernable switchover <addr> <key>
 ```
 
-Hands the primary role of a pair (started with `--witness`) over to its standby without waiting for the lease: the primary at `<addr>` refuses new requests (the SDKs retry them on the other kernel), lets running ones finish, waits until the standby holds every record (at most 10 s), and tells the witness; the standby serves at once, and the old primary stops. Started again, it follows. For updates: update the standby, switch over, update the old primary. `<key>` needs a grant for manage on `*`.
+Hands the primary role over to the standby in sync now: the primary at `<addr>` refuses new requests (the SDKs retry them on the other kernel), lets running ones finish, and waits until the standby holds every record (at most 10 s). In a pair (`--witness`) it tells the witness; without one it tells the standby on its stream. The standby serves at once, and the old primary stops: in a pair, started again, it follows; without a witness, it starts only with `--follow`. For updates and moves: update or start the standby, switch over, update or retire the old primary. `<key>` needs a grant for manage on `*`.
 
 ### `kernable certs new`
 

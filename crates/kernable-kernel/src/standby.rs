@@ -22,7 +22,7 @@ use kernable_core::{
     proto::{
         ChallengeResponse, CheckpointRecord, FollowAck, FollowHello, FollowMode, FollowRequest,
         FollowResponse, Grant, ImageBatch, ImageEnd, PromoteRequest, PromoteResult, RecordBatch,
-        StoredKey, WitnessOp, follow_request, follow_response,
+        StoredKey, TookOver, WitnessOp, follow_request, follow_response,
         log_record::Record,
         replication_service_client::ReplicationServiceClient,
         replication_service_server::{ReplicationService, ReplicationServiceServer},
@@ -148,6 +148,7 @@ impl Standby {
     /// Closes the stores, moves them aside (`<path>.diverged-<ms>`) and opens new, empty ones:
     /// for a standby whose log diverged, or that needs an image while it holds data (P4).
     async fn start_over(&self, why: &str) -> Result<(), BoxError> {
+        self.forget_in_sync();
         // Every handle closes before the files move: SQLite's lock goes with the last one.
         self.close_stores().await;
         let at = now_ms();
@@ -168,10 +169,29 @@ impl Standby {
         urls
     }
 
+    /// Where the standby notes that its primary (without a witness) told it it is in sync.
+    fn in_sync_marker(&self) -> Option<PathBuf> {
+        marker(&self.config.store, "in-sync")
+    }
+
+    /// Until the primary tells it again, the standby may not be promoted.
+    fn forget_in_sync(&self) {
+        if let Some(m) = self.in_sync_marker() {
+            let _ = std::fs::remove_file(m);
+        }
+    }
+
     /// Why this standby may not become the primary, if it may not.
     fn unpromotable(&self) -> Option<String> {
         if image_marker(&self.config.store).is_some_and(|m| m.exists()) {
             return Some("its image from the primary is not complete".into());
+        }
+        // Without a witness, a primary whose standby never caught up told writes alone.
+        if self.link.is_none() && !self.in_sync_marker().is_some_and(|m| m.exists()) {
+            return Some(
+                "it never caught up with its primary: the primary may have told writes it lacks"
+                    .into(),
+            );
         }
         let stores = self.stores();
         match stores.store.record_head() {
@@ -220,6 +240,14 @@ pub(crate) async fn run_with(config: Config, link: Option<Arc<Link>>) -> Result<
         link,
         config,
     });
+    // Following, it is no primary that handed over. Its note that it is in sync stays
+    // until it reaches a primary again: a standby restarted after its primary was lost can
+    // still be promoted.
+    for name in ["handed-over", "standby-caught-up"] {
+        if let Some(m) = marker(&standby.config.store, name) {
+            let _ = std::fs::remove_file(m);
+        }
+    }
     // A store an image was left half-filled in starts over.
     if image_marker(&standby.config.store).is_some_and(|m| m.exists()) {
         standby
@@ -321,6 +349,8 @@ async fn follow_once(
     let Some(follow_response::Msg::Start(start)) = next(&mut inbound).await? else {
         return Err("the primary did not start the stream".into());
     };
+    // Whether it is in sync now, the primary tells it again once it caught up.
+    standby.forget_in_sync();
     match start.mode() {
         FollowMode::Follow => {
             tracing::info!(from = head.seq, "following the primary");
@@ -332,6 +362,7 @@ async fn follow_once(
                     .await?;
                 return Ok(());
             }
+            standby.forget_in_sync();
             let seq = take_image(standby, &mut inbound).await?;
             tx.send(say(follow_request::Msg::Ack(FollowAck { seq })))
                 .await?;
@@ -354,6 +385,49 @@ async fn follow_once(
                 standby.applied.store(seq, SeqCst);
                 tx.send(say(follow_request::Msg::Ack(FollowAck { seq })))
                     .await?;
+            }
+            Some(follow_response::Msg::InSync(_)) => {
+                crate::crash::point("standby.in_sync");
+                if let Some(m) = standby.in_sync_marker() {
+                    std::fs::write(m, b"the primary told this standby it is in sync\n")?;
+                }
+                tracing::info!(
+                    record = standby.applied.load(SeqCst),
+                    "in sync: the primary waits for this standby"
+                );
+            }
+            Some(follow_response::Msg::TakeOver(take)) => {
+                let applied = standby.applied.load(SeqCst);
+                if applied != take.seq {
+                    return Err(format!(
+                        "asked to take over at record {}, but this standby holds {applied}",
+                        take.seq
+                    )
+                    .into());
+                }
+                tx.send(say(follow_request::Msg::TookOver(TookOver {
+                    seq: take.seq,
+                })))
+                .await?;
+                crate::crash::point("standby.took_over");
+                // The primary ends the stream once it has the answer; then this standby serves.
+                let _ = tokio::time::timeout(Duration::from_secs(2), async {
+                    while let Ok(Some(_)) = next(&mut inbound).await {}
+                })
+                .await;
+                tracing::warn!(
+                    record = take.seq,
+                    "the primary handed its role over: taking over"
+                );
+                if let Some(promote) = standby
+                    .promote
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                {
+                    let _ = promote.send(());
+                }
+                return Ok(());
             }
             None => return Ok(()),
             Some(_) => return Err("the primary sent something other than records".into()),
@@ -577,9 +651,14 @@ pub(crate) fn apply(stores: &Stores, batch: RecordBatch, keys: &[String]) -> Res
 
 /// Where a store marks an image in progress: `<path>.image`.
 fn image_marker(url: &str) -> Option<PathBuf> {
+    marker(url, "image")
+}
+
+/// A note beside the store at `url`: `<path>.<name>`; none for a store in memory.
+pub(crate) fn marker(url: &str, name: &str) -> Option<PathBuf> {
     match kernable_store::backend(url) {
         ("memory", _) => None,
-        (_, path) => Some(PathBuf::from(format!("{path}.image"))),
+        (_, path) => Some(PathBuf::from(format!("{path}.{name}"))),
     }
 }
 

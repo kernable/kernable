@@ -3,11 +3,14 @@
 //!
 //! With `--replication sync`, [`crate::Kernel::sync`] waits in [`Primary::wait`] until the
 //! standby has acknowledged every record written so far, before the `durable` position moves
-//! and before anyone hears of the write. The standby connects with `Follow`: it says where its
+//! and before anyone hears of the write. Without a witness, a primary whose standby never caught
+//! up commits alone until it has: it then waits for it from that write on, notes so beside
+//! its store, and tells the standby, which only then may be promoted. The standby connects with `Follow`: it says where its
 //! record log stands, and gets the records after it, or first a full image if it is empty or
 //! too far behind, or `DIVERGED` if it holds records the primary does not.
 
 use std::{
+    path::PathBuf,
     sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError},
     time::{Duration, Instant},
 };
@@ -16,8 +19,9 @@ use kernable_core::{
     proto::{
         Challenge, DataFile, FollowAck, FollowMode, FollowRequest, FollowResponse, FollowStart,
         ImageBatch, ImageEnd, LogRecord, PromoteRequest, PromoteResult, RecordBatch,
-        ReplicatedRecord, Signature, SwitchoverRequest, SwitchoverResult, VaultRow, follow_request,
-        follow_response, log_record::Record, replication_service_server::ReplicationService,
+        ReplicatedRecord, Signature, StandbyInSync, SwitchoverRequest, SwitchoverResult, TakeOver,
+        TookOver, VaultRow, follow_request, follow_response, log_record::Record,
+        replication_service_server::ReplicationService,
     },
     signing,
 };
@@ -27,7 +31,7 @@ use tokio::sync::{Notify, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming, metadata::MetadataMap};
 
-use crate::{Api, Kernel, config, protocol};
+use crate::{Api, BoxError, Kernel, config, protocol};
 
 /// Records in one batch at most; a batch also ends after [`BATCH_BYTES`].
 pub(crate) const BATCH: usize = 512;
@@ -64,6 +68,13 @@ pub(crate) struct Primary {
     wrote: Notify,
     /// The primary handed its role over: the standby's stream ends, so it claims at once.
     handed_over: std::sync::atomic::AtomicBool,
+    /// Without a witness; a pair's primary has one.
+    fixed: bool,
+    /// Without a witness: where the primary notes that its standby caught up (`<store>.standby-
+    /// caught-up`); `None` for a pair, or a store in memory.
+    caught_up_marker: Option<PathBuf>,
+    /// A switchover without a witness: the standby answered TookOver.
+    took_over: Notify,
 }
 
 #[derive(Default)]
@@ -79,6 +90,20 @@ struct State {
     /// Until when the primary's lease at the witness holds, measured from when it asked and a
     /// margin short of the witness's own count.
     lease_until: Option<Instant>,
+    /// Without a witness: no standby has caught up yet, so writes are told without one.
+    catching_up: bool,
+    /// The newest record told without the standby holding it: the standby has caught up only
+    /// once it holds this one.
+    told_alone: u64,
+    /// The standby caught up just now: the stream notes it on the disk and tells the standby.
+    caught_up_now: bool,
+    /// Without a witness: whether the standby may be told it is in sync (the note is on the
+    /// disk, or there is no disk).
+    in_sync_noted: bool,
+    /// A switchover without a witness: the record the standby takes over at.
+    take_over: Option<u64>,
+    /// The record the standby took over at.
+    took_over: Option<u64>,
 }
 
 impl State {
@@ -89,13 +114,41 @@ impl State {
 }
 
 impl Primary {
+    /// The primary of a pair: the witness decides when it commits alone.
     pub(crate) fn new() -> Self {
         Primary {
             state: Mutex::default(),
             acked: Condvar::new(),
             wrote: Notify::new(),
             handed_over: std::sync::atomic::AtomicBool::new(false),
+            fixed: false,
+            caught_up_marker: None,
+            took_over: Notify::new(),
         }
+    }
+
+    /// A primary without a witness, its store at `store`: until a standby has caught up
+    /// once, writes are told without one; after that, as long as the note beside the store
+    /// says so, never again.
+    pub(crate) fn fixed(store: &str) -> Self {
+        let marker = crate::standby::marker(store, "standby-caught-up");
+        let caught_up = marker.as_ref().is_some_and(|m| m.exists());
+        let primary = Primary {
+            fixed: true,
+            caught_up_marker: marker,
+            ..Primary::new()
+        };
+        {
+            let mut state = primary.state();
+            state.catching_up = !caught_up;
+            state.in_sync_noted = caught_up;
+        }
+        primary
+    }
+
+    /// Whether writes are told without a standby until one catches up.
+    pub(crate) fn catching_up(&self) -> bool {
+        self.state().catching_up
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
@@ -110,7 +163,7 @@ impl Primary {
         let wait = || {
             let (started, mut warned) = (Instant::now(), Instant::now());
             let mut state = self.state();
-            while state.acked < seq && !state.alone_now() {
+            while state.acked < seq && !state.alone_now() && !state.catching_up {
                 state = self
                     .acked
                     .wait_timeout(state, Duration::from_millis(100))
@@ -127,15 +180,24 @@ impl Primary {
                     );
                 }
             }
+            if state.acked < seq {
+                state.told_alone = state.told_alone.max(seq);
+            }
         };
         blocking(wait);
     }
 
     /// A standby is connected and has acknowledged the head at least once, or the primary
-    /// commits alone under a lease: writes are told.
+    /// commits alone (under a lease, or until its first standby caught up): writes are told.
     pub(crate) fn in_sync(&self) -> bool {
         let state = self.state();
-        (state.standby.is_some() && state.in_sync) || state.alone_now()
+        (state.standby.is_some() && state.in_sync) || state.alone_now() || state.catching_up
+    }
+
+    /// A standby is connected, has caught up, and the primary waits for it.
+    pub(crate) fn standby_in_sync(&self) -> bool {
+        let state = self.state();
+        state.standby.is_some() && state.in_sync && !state.catching_up && !state.alone
     }
 
     /// The key of the connected standby.
@@ -167,6 +229,11 @@ impl Primary {
         self.wrote.notify_one();
     }
 
+    /// Whether the primary handed its role over.
+    pub(crate) fn handed_over(&self) -> bool {
+        self.handed_over.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// The record the standby acknowledged last.
     pub(crate) fn acked_seq(&self) -> u64 {
         self.state().acked
@@ -178,7 +245,57 @@ impl Primary {
         if seq >= head {
             state.in_sync = true;
         }
+        // Caught up: it holds every write told without it. Writes from here wait for it, so
+        // nothing is told it lacks. A write that passed `wait` alone after `head` was read
+        // raised `told_alone` above `seq`, and keeps the primary catching up a little longer.
+        if state.catching_up && state.standby.is_some() && seq >= head && seq >= state.told_alone {
+            state.catching_up = false;
+            state.caught_up_now = true;
+            tracing::info!(
+                record = seq,
+                "the standby caught up: writes wait for it from now on"
+            );
+        }
         self.acked.notify_all();
+    }
+
+    /// Notes beside the store that a standby caught up, once it did: started again, the primary
+    /// waits for its standby at once. Whether the standby may be told it is in sync.
+    fn note_caught_up(&self) -> bool {
+        let mut state = self.state();
+        if std::mem::take(&mut state.caught_up_now) {
+            crate::crash::point("replication.caught_up");
+            match &self.caught_up_marker {
+                Some(marker) => {
+                    match write_synced(marker, b"a standby caught up; writes wait for it\n") {
+                        Ok(()) => state.in_sync_noted = true,
+                        Err(e) => {
+                            tracing::error!(error = %e, marker = %marker.display(), "noting that the standby caught up failed; it is not told it is in sync")
+                        }
+                    }
+                }
+                // A store in memory keeps nothing.
+                None => state.in_sync_noted = true,
+            }
+        }
+        state.in_sync_noted && !state.catching_up && state.in_sync
+    }
+
+    /// A switchover without a witness: the standby takes over at `seq`, which it holds.
+    pub(crate) fn take_over(&self, seq: u64) {
+        self.state().take_over = Some(seq);
+        self.wrote.notify_one();
+    }
+
+    /// Resolves once the standby took over; the record it took over at.
+    pub(crate) async fn took_over(&self) -> u64 {
+        loop {
+            let notified = self.took_over.notified();
+            if let Some(seq) = self.state().took_over {
+                return seq;
+            }
+            notified.await;
+        }
     }
 
     /// Admits `key_id` as the standby, unless another one is connected.
@@ -193,6 +310,120 @@ impl Primary {
         state.in_sync = false;
         Ok(Connected(Arc::clone(self)))
     }
+}
+
+/// How long a primary without a witness waits for its standby to confirm that it took over.
+const TAKE_OVER_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A primary without a witness answers `kernable switchover`: the future ends, with why,
+/// once it handed its role to its standby, and never otherwise. `None` for a kernel without
+/// `--replication sync`, or one of a pair (whose lease keeper answers instead).
+pub fn switchover_keeper(
+    kernel: &Arc<Kernel>,
+) -> Option<std::pin::Pin<Box<dyn Future<Output = BoxError> + Send>>> {
+    let primary = kernel.replication.clone().filter(|p| p.fixed)?;
+    let (tx, asked) = mpsc::channel(1);
+    *kernel
+        .switchover
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = Some(tx);
+    Some(Box::pin(hand_over_when_asked(
+        Arc::clone(kernel),
+        primary,
+        asked,
+    )))
+}
+
+async fn hand_over_when_asked(
+    kernel: Arc<Kernel>,
+    primary: Arc<Primary>,
+    mut asked: mpsc::Receiver<crate::node::SwitchoverAsk>,
+) -> BoxError {
+    use std::sync::atomic::Ordering::SeqCst;
+    loop {
+        let Some(reply) = asked.recv().await else {
+            return std::future::pending().await;
+        };
+        if !primary.standby_in_sync() {
+            let _ = reply.send(Err(
+                "no standby is in sync: there is nobody to hand over to".into(),
+            ));
+            continue;
+        }
+        let standby = primary.standby().unwrap_or_default();
+        kernel.switching.store(true, SeqCst);
+        let head = match crate::node::get_ready(Arc::clone(&kernel)).await {
+            Ok(head) => head,
+            Err(why) => {
+                kernel.switching.store(false, SeqCst);
+                tracing::warn!(%why, "switchover abandoned: serving on");
+                let _ = reply.send(Err(why));
+                continue;
+            }
+        };
+        // From here this kernel tells nothing more, whatever the standby does; noted beside the
+        // store, so that it does not serve as the primary again by mistake.
+        if let Some(marker) = crate::standby::marker(&kernel.config().store, "handed-over") {
+            let note =
+                format!("handed the primary role over to standby {standby} at record {head}\n");
+            if let Err(e) = write_synced(&marker, note.as_bytes()) {
+                kernel.switching.store(false, SeqCst);
+                let why = format!("noting the switchover in {} failed: {e}", marker.display());
+                tracing::warn!(%why, "switchover abandoned: serving on");
+                let _ = reply.send(Err(why));
+                continue;
+            }
+        }
+        primary.take_over(head);
+        match tokio::time::timeout(TAKE_OVER_TIMEOUT, primary.took_over()).await {
+            Ok(seq) => {
+                primary.hand_over();
+                tracing::warn!(%standby, record = seq, "handed the primary role over");
+                let _ = reply.send(Ok(SwitchoverResult {
+                    seq,
+                    standby: standby.clone(),
+                }));
+                return format!(
+                    "handed over: standby {standby} is the primary now; start this kernel with --follow to follow it"
+                )
+                .into();
+            }
+            Err(_) => {
+                let why = format!(
+                    "the standby did not confirm within {TAKE_OVER_TIMEOUT:?}; this kernel serves no more. \
+                     The standby holds every record up to {head}: promote it by hand (kernable promote)"
+                );
+                let _ = reply.send(Err(why.clone()));
+                return why.into();
+            }
+        }
+    }
+}
+
+/// Refuses to start a kernel as the primary on stores that handed the role over: the
+/// standby serves now. Started with `--follow`, it follows it instead.
+pub fn refuse_if_handed_over(config: &crate::config::Config) -> Result<(), BoxError> {
+    if config.replication.follow.is_some() || config.replication.pair.is_some() {
+        return Ok(());
+    }
+    match crate::standby::marker(&config.store, "handed-over") {
+        Some(marker) if marker.exists() => Err(format!(
+            "{}: {}this kernel's standby serves as the primary now. Start this kernel with --follow \
+             to follow it, or delete the file if that standby is gone for good and this kernel must serve again",
+            marker.display(),
+            std::fs::read_to_string(&marker).unwrap_or_default()
+        )
+        .into()),
+        _ => Ok(()),
+    }
+}
+
+/// Writes `bytes` to `path` and syncs it.
+fn write_synced(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::File::create(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
 /// The backup follower, as the kernel sees it: one at a time, and how far it got.
@@ -341,7 +572,7 @@ impl ReplicationService for Api {
             .clone()
             .ok_or_else(|| {
                 Status::failed_precondition(
-                    "this kernel is not the primary of a pair (--witness): there is nobody to hand over to",
+                    "this kernel runs without --replication sync: it has no standby to hand over to",
                 )
             })?;
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -504,7 +735,30 @@ async fn run(
             .is_some_and(|p| p.handed_over.load(std::sync::atomic::Ordering::SeqCst))
     };
     let mut changes = kernel.changes();
+    let mut told_in_sync = false;
+    let mut told_take_over = false;
     loop {
+        if let Some(p) = &primary {
+            // Without a witness: the standby learns that it is in sync, once per stream.
+            if p.fixed {
+                if !told_in_sync && p.note_caught_up() {
+                    crate::crash::point("replication.noted");
+                    send(out, follow_response::Msg::InSync(StandbyInSync {})).await?;
+                    told_in_sync = true;
+                }
+                let take_over = p.state().take_over;
+                if let Some(seq) = take_over
+                    && !told_take_over
+                    && sent >= seq
+                    && p.acked_seq() >= seq
+                {
+                    send(out, follow_response::Msg::TakeOver(TakeOver { seq })).await?;
+                    told_take_over = true;
+                    crate::crash::point("replication.take_over");
+                    tracing::warn!(record = seq, "told the standby to take over");
+                }
+            }
+        }
         if handed_over() {
             return Err(Status::unavailable(
                 "the primary handed its role over: ask the witness who serves now",
@@ -542,6 +796,13 @@ async fn run(
         }
         tokio::select! {
             message = next(inbound) => match message? {
+                Some(follow_request::Msg::TookOver(TookOver { seq })) if told_take_over => {
+                    if let Some(p) = &primary {
+                        p.state().took_over = Some(seq);
+                        p.took_over.notify_waiters();
+                    }
+                    return Ok(());
+                }
                 Some(follow_request::Msg::Ack(FollowAck { seq })) => {
                     if seq > sent {
                         return Err(Status::invalid_argument(format!(

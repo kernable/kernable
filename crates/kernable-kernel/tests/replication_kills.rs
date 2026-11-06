@@ -314,6 +314,21 @@ async fn random_kills_of_primary_and_standby_lose_nothing_a_client_was_told() {
     let mut primary = start(&dir, &primary_args);
     wait_for(&dir.sock("p")).await;
     let mut standby = start(&dir, &standby_args);
+    // Until the standby is in sync the primary serves alone: nothing a client is told
+    // before then is promised to the standby.
+    let note = {
+        let url = dir.store("s");
+        let (_, path) = kernable_store::backend(&url);
+        PathBuf::from(format!("{path}.in-sync"))
+    };
+    let started = Instant::now();
+    while !note.exists() {
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the standby never got in sync"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     worker(dir.sock("p"));
     let load = Load::start(&primary_addr);
     for _ in 0..kills() {

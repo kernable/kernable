@@ -18,13 +18,14 @@ service ReplicationService {
   // Asked of a standby: stop following and serve as the primary. Signed by a key granted
   // `manage` for `*`, over kernable.v1.promote, valid 60 s around issued_at.
   rpc Promote(PromoteRequest) returns (PromoteResult);
-  // Asked of the primary of a pair: hand the primary role over to the standby in sync now,
-  // without waiting for the lease. The primary refuses new requests (UNAVAILABLE), lets running
-  // ones finish, waits until the standby holds every record, then tells the witness HANDOVER;
-  // the standby claims at once, and the old primary stops. Signed by a key granted `manage` for
-  // `*`, over kernable.v1.switchover, valid 60 s around issued_at. FAILED_PRECONDITION: not the
-  // primary of a pair, no standby in sync, or the standby did not catch up in time (the primary
-  // then serves on).
+  // Asked of a primary with a standby in sync: hand the primary role over to it now. The
+  // primary refuses new requests (UNAVAILABLE), lets running ones finish, and waits until the
+  // standby holds every record. In a pair it then tells the witness HANDOVER and the
+  // standby claims at once; without a witness it sends the standby TAKE_OVER on its stream, and
+  // the standby takes over. Either way the old primary stops, and never serves as the primary
+  // again unless started to follow. Signed by a key granted `manage` for `*`, over
+  // kernable.v1.switchover, valid 60 s around issued_at. FAILED_PRECONDITION: no standby in
+  // sync, or the standby did not catch up in time (the primary then serves on).
   rpc Switchover(SwitchoverRequest) returns (SwitchoverResult);
 }
 
@@ -45,6 +46,7 @@ message FollowRequest {
     FollowHello hello = 1;
     ChallengeResponse challenge_response = 2;
     FollowAck ack = 3;
+    TookOver took_over = 4;
   }
 }
 
@@ -73,7 +75,24 @@ message FollowResponse {
     ImageBatch image = 3;
     ImageEnd image_end = 4;
     RecordBatch records = 5;
+    StandbyInSync in_sync = 6;
+    TakeOver take_over = 7;
   }
+}
+
+// Without a witness: the standby has caught up, and the primary tells nothing from now on that
+// the standby does not hold. Only a standby told so may be promoted.
+message StandbyInSync {}
+
+// A switchover without a witness: the primary tells nothing more, and the standby holds every
+// record up to `seq`. The standby answers TookOver and serves as the primary.
+message TakeOver {
+  uint64 seq = 1;
+}
+
+// The standby took over at record `seq`.
+message TookOver {
+  uint64 seq = 1;
 }
 
 enum FollowMode {

@@ -105,15 +105,19 @@ Keys and trust:
                                           grant for manage on *. Promote only a standby whose
                                           primary is gone: a primary that still runs is fenced (it
                                           tells nobody of a write from then on), and rejoins as a
-                                          standby of the new one.
-  kernable switchover <addr> <key>        Hands the primary role of a pair (started with --witness)
-                                          over to its standby without waiting for the lease: the
-                                          primary at <addr> refuses new requests (the SDKs retry
-                                          them on the other kernel), lets running ones finish, waits
-                                          until the standby holds every record (at most 10 s), and
-                                          tells the witness; the standby serves at once, and the old
-                                          primary stops. Started again, it follows. For updates:
-                                          update the standby, switch over, update the old primary.
+                                          standby of the new one. Without a witness, a standby the
+                                          primary never told it is in sync is refused: the primary
+                                          may have told writes it lacks.
+  kernable switchover <addr> <key>        Hands the primary role over to the standby in sync now:
+                                          the primary at <addr> refuses new requests (the SDKs retry
+                                          them on the other kernel), lets running ones finish, and
+                                          waits until the standby holds every record (at most 10 s).
+                                          In a pair (--witness) it tells the witness; without one it
+                                          tells the standby on its stream. The standby serves at
+                                          once, and the old primary stops: in a pair, started again,
+                                          it follows; without a witness, it starts only with
+                                          --follow. For updates and moves: update or start the
+                                          standby, switch over, update or retire the old primary.
                                           <key> needs a grant for manage on *.
   kernable certs new <dir> <client>...    Writes a development CA (ca.tls.crt), a kernel certificate
                                           (kernel.tls.crt, kernel.tls.key) and a certificate per
@@ -653,11 +657,14 @@ async fn run_kernel(config: Config) -> std::result::Result<(), BoxError> {
         tls = config.tls.is_some(),
         "kernel starting"
     );
-    run_kernel_on(Kernel::open(config)?, None).await
+    kernable_kernel::refuse_if_handed_over(&config)?;
+    let kernel = Kernel::open(config)?;
+    let keeper = kernable_kernel::switchover_keeper(&kernel);
+    run_kernel_on(kernel, keeper).await
 }
 
-/// Serves `kernel` until a signal; with `lease` (a primary of a pair), also until the witness
-/// deposes it.
+/// Serves `kernel` until a signal; with `lease`, also until it ends: a primary of a pair the
+/// witness deposed, or one that handed its role over to its standby.
 async fn run_kernel_on(
     kernel: Arc<Kernel>,
     lease: Option<std::pin::Pin<Box<dyn Future<Output = BoxError> + Send>>>,
@@ -1476,7 +1483,7 @@ async fn promote(addr: &str, key_path: &str) -> Result<bool> {
     Ok(true)
 }
 
-/// `kernable switchover <addr> <key>`: the primary of a pair hands its role over.
+/// `kernable switchover <addr> <key>`: the primary hands its role to its standby in sync.
 async fn switchover(addr: &str, key_path: &str) -> Result<bool> {
     let key = signing::read_signing_key(key_path)?;
     let issued_at = now_ms();
@@ -1491,7 +1498,7 @@ async fn switchover(addr: &str, key_path: &str) -> Result<bool> {
         .await?
         .into_inner();
     println!(
-        "switched over: {} is the primary now, from record {}; {addr} stops (start it again, and it follows)",
+        "switched over: {} is the primary now, from record {}; {addr} stops (to follow it, start it again: in a pair as before, otherwise with --follow)",
         result.standby, result.seq
     );
     Ok(true)

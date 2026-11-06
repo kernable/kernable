@@ -1,7 +1,8 @@
 //! Crash points of replication (`--features crash-points`): the primary or the standby
 //! aborts at each point under load, is started again, and afterwards everything a client was
-//! told is on the standby (P1), the standby holds exactly what the primary holds, and every
-//! store invariant holds on both.
+//! told once the standby was in sync is on the standby (P1; before, the primary serves alone), the standby holds exactly what the primary holds, and every store invariant holds on
+//! both. A switchover without a witness interrupted by a crash on either side ends with the
+//! standby serving everything told, and the old primary refusing to serve.
 //!
 //! `KERNABLE_CRASH_ROUNDS=<n>` repeats every point n times (`make torture`).
 
@@ -18,7 +19,7 @@ use kernable_core::{
     proto::{Command, CommandResult, Event, Wait, command_result::Outcome},
     transport,
 };
-use kernable_kernel::crash::REPLICATION_POINTS;
+use kernable_kernel::crash::{REPLICATION_POINTS, SWITCHOVER_POINTS};
 use kernable_store::invariants::Log;
 use prost::Message;
 
@@ -75,6 +76,35 @@ fn workload(round: u32) -> Vec<Command> {
             signed(command(&format!("r{round}-c{i}"), t, &order), &key(1))
         })
         .collect()
+}
+
+/// Whether the primary told the standby `s` it is in sync.
+fn in_sync(dir: &Path) -> bool {
+    let url = store(dir, "s");
+    let (_, path) = kernable_store::backend(&url);
+    Path::new(&format!("{path}.in-sync")).exists()
+}
+
+/// Starts again whichever of the two crashed, without a crash point; whether one had.
+async fn restart_crashed(
+    dir: &Path,
+    primary: &mut KillOnDrop,
+    primary_args: &[String],
+    standby: &mut KillOnDrop,
+    standby_args: &[String],
+) -> bool {
+    let mut crashed = false;
+    for (process, args, name) in [(primary, primary_args, "p"), (standby, standby_args, "s")] {
+        if process.child.try_wait().unwrap().is_some() {
+            crashed = true;
+            let _ = std::fs::remove_file(dir.join(format!("{name}.sock")));
+            *process = start(dir, args, None);
+            if name == "p" {
+                wait_for(&sock(dir, "p")).await;
+            }
+        }
+    }
+    crashed
 }
 
 fn events(result: &CommandResult) -> Vec<Event> {
@@ -137,25 +167,39 @@ async fn crash_and_recover(point: &str, round: u32) {
         }
     });
 
-    // The workload; whichever process crashes is started again, without the crash point.
-    let mut told = Vec::new();
+    // Until the standby is in sync the primary serves alone; P1 counts from then on.
+    // Whichever process crashes is started again, without the crash point.
     let mut crashed = false;
+    let started = Instant::now();
+    while !in_sync(&dir) {
+        crashed |= restart_crashed(
+            &dir,
+            &mut primary,
+            &primary_args,
+            &mut standby,
+            &standby_args,
+        )
+        .await;
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "{point}: the standby never got in sync"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // The workload.
+    let mut told = Vec::new();
     let started = Instant::now();
     for cmd in workload(round) {
         loop {
-            for (process, args, name) in [
-                (&mut primary, &primary_args, "p"),
-                (&mut standby, &standby_args, "s"),
-            ] {
-                if process.child.try_wait().unwrap().is_some() {
-                    crashed = true;
-                    let _ = std::fs::remove_file(dir.join(format!("{name}.sock")));
-                    *process = start(&dir, args, None);
-                    if name == "p" {
-                        wait_for(&addr).await;
-                    }
-                }
-            }
+            crashed |= restart_crashed(
+                &dir,
+                &mut primary,
+                &primary_args,
+                &mut standby,
+                &standby_args,
+            )
+            .await;
             let answer = match transport::connect(&addr).await {
                 Ok(channel) => tokio::time::timeout(
                     Duration::from_secs(3),
@@ -241,5 +285,181 @@ async fn every_replication_crash_point_loses_nothing_told() {
         for point in REPLICATION_POINTS {
             crash_and_recover(point, round).await;
         }
+    }
+}
+
+/// A switchover without a witness, with a crash on either side after the primary told
+/// the standby to take over: the standby ends up serving everything that was told, by itself or
+/// promoted by hand, and the old primary refuses to start as the primary.
+async fn switchover_crash(point: &str) {
+    use kernable_core::{
+        proto::{
+            PromoteRequest, SwitchoverRequest, replication_service_client::ReplicationServiceClient,
+        },
+        signing,
+    };
+    let dir = std::env::temp_dir().join(format!("kn-sc-{point}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("p-kernel.key"), hex(key(3).as_bytes())).unwrap();
+    std::fs::write(dir.join("s-kernel.key"), hex(key(8).as_bytes())).unwrap();
+    std::fs::write(dir.join("standby.key"), hex(key(7).as_bytes())).unwrap();
+    let grant = grant(&key(7), &[("replicate", &["*"])]);
+    std::fs::write(dir.join("standby.grant"), hex(&grant.encode_to_vec())).unwrap();
+    let mut primary_args = args(&dir, "p");
+    primary_args.extend(["--replication".into(), "sync".into()]);
+    let mut standby_args = args(&dir, "s");
+    standby_args.extend([
+        "--replication".into(),
+        "sync".into(),
+        "--follow".into(),
+        sock(&dir, "p"),
+        "--follow-key".into(),
+        dir.join("standby.key").display().to_string(),
+        "--primary-kernel-key".into(),
+        id(&key(3)),
+    ]);
+    let on_primary = point.starts_with("replication.");
+    let mut primary = start(&dir, &primary_args, on_primary.then_some(point));
+    wait_for(&sock(&dir, "p")).await;
+    let mut standby = start(&dir, &standby_args, (!on_primary).then_some(point));
+    let (p, s) = (sock(&dir, "p"), sock(&dir, "s"));
+    let worker = tokio::spawn({
+        let p = p.clone();
+        async move { run_worker(p, TestWorker::honest()).await }
+    });
+    let started = Instant::now();
+    while !in_sync(&dir) {
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "{point}: not in sync"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut told = Vec::new();
+    for cmd in workload(0) {
+        let channel = transport::connect(&p).await.unwrap();
+        told.push(submit_on(channel, cmd, Wait::Committed).await.unwrap());
+    }
+
+    let issued_at = issued_now();
+    let request = SwitchoverRequest {
+        issued_at,
+        sig: Some(signing::sign(
+            &key(1),
+            &signing::switchover_message(issued_at),
+        )),
+        protocol: kernable_core::PROTOCOL,
+    };
+    let asked = ReplicationServiceClient::new(transport::connect(&p).await.unwrap())
+        .switchover(with_grant(request, &key(1)))
+        .await;
+    // The crashed side died at its point; the other one ends as it does without a crash: the
+    // old primary stops once it handed over, the standby serves once it took over.
+    let started = Instant::now();
+    while primary.child.try_wait().unwrap().is_none() {
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "{point}: the old primary runs on ({asked:?})"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    worker.abort();
+    if !on_primary {
+        // The standby died after it answered: started again, its primary gone, it waits.
+        assert!(
+            standby.child.try_wait().unwrap().is_some(),
+            "{point}: the standby crashed"
+        );
+        let _ = std::fs::remove_file(dir.join("s.sock"));
+        standby = start(&dir, &standby_args, None);
+    }
+    wait_for(&s).await;
+    // A standby that never heard TAKE_OVER (the primary died before it left), or died before it
+    // served, waits for its primary. It was told it is in sync and holds every record the
+    // primary told: promoted by hand, it serves. One that took over is a primary already.
+    let issued_at = issued_now();
+    let request = PromoteRequest {
+        issued_at,
+        sig: Some(signing::sign(&key(1), &signing::promote_message(issued_at))),
+        protocol: kernable_core::PROTOCOL,
+    };
+    if let Ok(channel) = transport::connect(&s).await
+        && let Err(e) = ReplicationServiceClient::new(channel)
+            .promote(request)
+            .await
+    {
+        assert!(
+            e.message().contains("primary already"),
+            "{point}: promote: {e:?}"
+        );
+    }
+
+    // The standby serves everything that was told.
+    tokio::spawn({
+        let s = s.clone();
+        async move {
+            loop {
+                run_worker(s.clone(), TestWorker::honest()).await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    });
+    for result in &told {
+        let started = Instant::now();
+        let again = loop {
+            if let Ok(channel) = transport::connect(&s).await
+                && let Ok(Ok(again)) = tokio::time::timeout(
+                    Duration::from_secs(3),
+                    submit_on(
+                        channel,
+                        workload(0)
+                            .into_iter()
+                            .find(|c| c.command_id == result.command_id)
+                            .unwrap(),
+                        Wait::Committed,
+                    ),
+                )
+                .await
+            {
+                break again;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "{point}: the standby does not serve"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        assert_eq!(
+            events(&again),
+            events(result),
+            "{point}: {}",
+            result.command_id
+        );
+    }
+
+    // The old primary does not start as the primary again.
+    let _ = std::fs::remove_file(dir.join("p.sock"));
+    let mut again = start(&dir, &primary_args, None);
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = again.child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{point}: the old primary serves again"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert!(!status.success(), "{point}");
+    drop((primary, standby));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_switchover_interrupted_by_a_crash_loses_nothing_told() {
+    for point in SWITCHOVER_POINTS {
+        switchover_crash(point).await;
     }
 }

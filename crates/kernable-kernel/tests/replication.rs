@@ -1,6 +1,8 @@
 //! A primary with `--replication sync` and its standby (design/replication.md): every
 //! write a client is told of is on the standby first (P1), the standby refuses clients, and a
-//! promoted standby serves what the primary held, with the grants it got from it.
+//! promoted standby serves what the primary held, with the grants it got from it. Without a
+//! witness the primary serves alone until its standby caught up, and hands its role over to it
+//! on a switchover.
 
 mod common;
 
@@ -99,6 +101,12 @@ fn standby_config(dir: &Path, primary: &Config) -> Config {
     config
 }
 
+/// The primary told the standby it is in sync: every write from then on waits for it.
+fn in_sync(standby: &Config) -> bool {
+    let (_, path) = kernable_store::backend(&standby.store);
+    Path::new(&format!("{path}.in-sync")).exists()
+}
+
 async fn until(what: &str, done: impl Fn() -> bool) {
     for _ in 0..1_000 {
         if done() {
@@ -191,13 +199,13 @@ async fn a_standby_holds_every_write_a_client_was_told_and_takes_over() {
     primary_config.replication.sync = true;
     let primary = open(&primary_config).await;
     assert!(
-        primary.readiness().unwrap_err().contains("standby"),
-        "not ready without a standby"
+        primary.readiness().is_ok(),
+        "ready without a standby: it serves alone until one caught up"
     );
 
     let standby_config = standby_config(&dir.0, &primary_config);
     let following = tokio::spawn(standby::run(standby_config.clone()));
-    until("the standby is in sync", || primary.readiness().is_ok()).await;
+    until("the standby is in sync", || in_sync(&standby_config)).await;
     for seed in [1, 2, 4, 5, 6] {
         primary.grant(default_grant(&key(seed)).unwrap()).unwrap();
     }
@@ -295,10 +303,10 @@ async fn a_standby_of_a_primary_that_ran_alone_takes_an_image_and_follows() {
         }
     }
     primary_config.replication.sync = true;
-    let primary = open(&primary_config).await;
+    let _primary = open(&primary_config).await;
     let standby_config = standby_config(&dir.0, &primary_config);
     let _following = tokio::spawn(standby::run(standby_config.clone()));
-    until("the standby is in sync", || primary.readiness().is_ok()).await;
+    until("the standby is in sync", || in_sync(&standby_config)).await;
     start_worker(primary_config.listen.clone(), TestWorker::honest()).await;
     for i in 5..10 {
         let result = submit(&primary_config.listen, place(i)).await.unwrap();
@@ -326,14 +334,17 @@ async fn a_standby_without_a_grant_for_replicate_is_refused() {
     let dir = Dir::new("refused");
     let mut primary_config = config(&dir.0, "primary", 3);
     primary_config.replication.sync = true;
-    let primary = open(&primary_config).await;
+    let _primary = open(&primary_config).await;
     let standby_config = standby_config(&dir.0, &primary_config);
     // Its grant allows something else.
     let grant = grant(&key(7), &[("listen", &["*"])]);
     std::fs::write(dir.0.join("standby.grant"), hex(&grant.encode_to_vec())).unwrap();
     let following = tokio::spawn(standby::run(standby_config.clone()));
     tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(primary.readiness().is_err(), "no standby is in sync");
+    assert!(
+        !in_sync(&standby_config),
+        "a standby refused is never in sync"
+    );
     // And a standby that never followed cannot be promoted.
     let refused = promote(&standby_config.listen).await.unwrap_err();
     assert_eq!(refused.code(), Code::PermissionDenied, "{refused:?}");
@@ -354,7 +365,7 @@ async fn a_standby_whose_log_diverged_moves_its_stores_aside_and_starts_over() {
         store.enqueue(&place(77), 0).unwrap();
     }
     let _following = tokio::spawn(standby::run(standby_config.clone()));
-    until("the standby is in sync", || primary.readiness().is_ok()).await;
+    until("the standby is in sync", || in_sync(&standby_config)).await;
     for seed in [1, 2] {
         primary.grant(default_grant(&key(seed)).unwrap()).unwrap();
     }
@@ -390,7 +401,7 @@ async fn a_standby_whose_key_is_revoked_follows_no_longer() {
     let primary = open(&primary_config).await;
     let standby_config = standby_config(&dir.0, &primary_config);
     let following = tokio::spawn(standby::run(standby_config.clone()));
-    until("the standby is in sync", || primary.readiness().is_ok()).await;
+    until("the standby is in sync", || in_sync(&standby_config)).await;
     primary.revoke(&id(&key(7)), 0).unwrap();
     until("the revoked standby is no longer in sync", || {
         primary.readiness().is_err()
@@ -468,8 +479,8 @@ async fn a_membership_waiting_for_the_standby_does_not_stall_the_primary() {
     if let Some(follow) = standby_config.replication.follow.as_mut() {
         follow.primary = format!("unix:{}", gate_path.display());
     }
-    let following = tokio::spawn(standby::run(standby_config));
-    until("the standby is in sync", || primary.readiness().is_ok()).await;
+    let following = tokio::spawn(standby::run(standby_config.clone()));
+    until("the standby is in sync", || in_sync(&standby_config)).await;
     // Key 1's grant is stored with the first membership.
     apply(&primary_config.listen, membership("first", &[], &[], &[]))
         .await
@@ -490,4 +501,183 @@ async fn a_membership_waiting_for_the_standby_does_not_stall_the_primary() {
     }
     following.abort();
     runtime.shutdown_background();
+}
+
+/// Without a witness, a primary serves alone until its standby has caught up; from then
+/// on every write waits for it, and only a standby the primary told so may be promoted.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_primary_without_a_witness_serves_alone_until_its_standby_caught_up() {
+    let dir = Dir::new("catch-up");
+    let mut primary_config = config(&dir.0, "primary", 3);
+    primary_config.replication.sync = true;
+    let primary = open(&primary_config).await;
+    for seed in [1, 2] {
+        primary.grant(default_grant(&key(seed)).unwrap()).unwrap();
+    }
+    start_worker(primary_config.listen.clone(), TestWorker::honest()).await;
+    // No standby yet: writes are told without one.
+    for i in 0..5 {
+        submit(&primary_config.listen, place(i)).await.unwrap();
+    }
+
+    let standby_config = standby_config(&dir.0, &primary_config);
+    // A runtime of its own: shut down, it ends the standby as its process would.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.spawn(standby::run(standby_config.clone()));
+    until("the standby caught up", || in_sync(&standby_config)).await;
+    for i in 0..5 {
+        assert!(
+            held(&standby_config)
+                .result(&format!("c{i}"))
+                .unwrap()
+                .is_some(),
+            "it holds c{i}, told alone"
+        );
+    }
+    // From now on, what a client is told the standby holds first (P1).
+    for i in 5..10 {
+        let result = submit(&primary_config.listen, place(i)).await.unwrap();
+        let stored = held(&standby_config)
+            .result(&format!("c{i}"))
+            .unwrap()
+            .expect("held before it was told");
+        assert_eq!(events(&stored), events(&result));
+    }
+    runtime.shutdown_background();
+
+    // A standby never told it is in sync is not promoted, though it holds records: its primary
+    // may have told writes it lacks. Here: its note gone, its primary out of reach.
+    let (_, path) = kernable_store::backend(&standby_config.store);
+    std::fs::remove_file(format!("{path}.in-sync")).unwrap();
+    let mut alone = standby_config.clone();
+    alone.listen = format!("unix:{}", dir.0.join("standby-2.sock").display());
+    if let Some(follow) = alone.replication.follow.as_mut() {
+        follow.primary = format!("unix:{}", dir.0.join("nowhere.sock").display());
+    }
+    // Shut down in the background, the first runtime lets go of the stores a moment later.
+    let mut waiting = tokio::spawn(standby::run(alone.clone()));
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if !waiting.is_finished() {
+            break;
+        }
+        waiting = tokio::spawn(standby::run(alone.clone()));
+    }
+    wait_for(&alone.listen).await;
+    let refused = promote(&alone.listen).await.unwrap_err();
+    assert!(refused.message().contains("never caught up"), "{refused:?}");
+    // Told so before it lost its primary, it is: the note stays when it starts again.
+    std::fs::write(format!("{path}.in-sync"), b"in sync\n").unwrap();
+    promote(&alone.listen).await.unwrap();
+    waiting.await.unwrap().unwrap();
+}
+
+/// A switchover without a witness: the primary hands its role to its standby in sync,
+/// which serves everything the primary told; the old primary does not start as the primary
+/// again, and started to follow, it follows the new one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_switchover_without_a_witness_hands_the_role_to_the_standby() {
+    use kernable_core::proto::SwitchoverRequest;
+    let dir = Dir::new("switchover");
+    let mut primary_config = config(&dir.0, "primary", 3);
+    primary_config.replication.sync = true;
+    // A runtime of its own: shut down, it ends the old primary as its process would.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let primary = {
+        let _primary_runtime = runtime.enter();
+        Kernel::open(primary_config.clone()).unwrap()
+    };
+    runtime.spawn(serve(Arc::clone(&primary)));
+    wait_for(&primary_config.listen).await;
+    let handed = runtime
+        .spawn(kernable_kernel::switchover_keeper(&primary).expect("a primary without a witness"));
+    for seed in [1, 2] {
+        primary.grant(default_grant(&key(seed)).unwrap()).unwrap();
+    }
+    start_worker(primary_config.listen.clone(), TestWorker::honest()).await;
+    let mut standby_config = standby_config(&dir.0, &primary_config);
+    // With the flags it has as the primary later: a standby of its own may follow it.
+    standby_config.replication.sync = true;
+    let following = tokio::spawn(standby::run(standby_config.clone()));
+    until("the standby is in sync", || in_sync(&standby_config)).await;
+    let mut told = Vec::new();
+    for i in 0..5 {
+        told.push(submit(&primary_config.listen, place(i)).await.unwrap());
+    }
+
+    let issued_at = issued_now();
+    let request = SwitchoverRequest {
+        issued_at,
+        sig: Some(signing::sign(
+            &key(1),
+            &signing::switchover_message(issued_at),
+        )),
+        protocol: kernable_core::PROTOCOL,
+    };
+    let result =
+        ReplicationServiceClient::new(transport::connect(&primary_config.listen).await.unwrap())
+            .switchover(with_grant(request, &key(1)))
+            .await
+            .unwrap()
+            .into_inner();
+    assert_eq!(result.standby, id(&key(7)));
+    let why = handed.await.unwrap();
+    assert!(why.to_string().contains("handed over"), "{why}");
+    following.await.unwrap().unwrap();
+
+    // The old primary takes nothing more, and does not start as the primary again.
+    let refused = submit(&primary_config.listen, place(99)).await.unwrap_err();
+    assert_eq!(refused.code(), Code::Unavailable, "{refused:?}");
+    let err = kernable_kernel::refuse_if_handed_over(&primary_config).unwrap_err();
+    assert!(
+        err.to_string().contains("handed the primary role over"),
+        "{err}"
+    );
+    // It stops, as its process does once it handed over, writing nothing more.
+    primary.shutdown().unwrap();
+    drop(primary);
+    runtime.shutdown_background();
+
+    // The standby serves, with everything the primary told.
+    let new = open(&standby_config).await;
+    start_worker(standby_config.listen.clone(), TestWorker::honest()).await;
+    for (i, result) in told.iter().enumerate() {
+        let again = submit(&standby_config.listen, place(i as u32))
+            .await
+            .unwrap();
+        assert_eq!(events(&again), events(result), "c{i}");
+    }
+
+    // Started to follow, the old primary follows the new one. Records it wrote after the
+    // handover were never told (no standby acknowledged them): its log may differ, and it
+    // then moves its stores aside and takes an image, as a pair's old primary does.
+    let mut back = primary_config.clone();
+    back.listen = format!("unix:{}", dir.0.join("primary-2.sock").display());
+    back.replication.sync = false;
+    back.replication.follow = Some(Follow {
+        primary: standby_config.listen.clone(),
+        key: dir.0.join("standby.key"),
+        primary_kernel_keys: vec![id(&key(3)), id(&key(8))],
+    });
+    let rejoined = tokio::spawn(standby::run(back.clone()));
+    until("the old primary follows the new one", || {
+        if rejoined.is_finished() {
+            panic!("the old primary stopped following");
+        }
+        in_sync(&back)
+    })
+    .await;
+    assert!(
+        kernable_kernel::refuse_if_handed_over(&primary_config).is_ok(),
+        "following, it no longer counts as handed over"
+    );
+    drop(new);
 }

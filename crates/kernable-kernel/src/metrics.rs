@@ -230,6 +230,11 @@ pub(crate) fn render(kernel: &Kernel) -> String {
             "1 while a standby is connected and has caught up; without it, writes wait.",
             vec![(String::new(), primary.in_sync() as u64)],
         );
+        metric(
+            "kernable_standby_catching_up",
+            "1 while no standby has caught up yet (without a witness): writes are told without one.",
+            vec![(String::new(), primary.catching_up() as u64)],
+        );
     }
     let limits = &kernel.config().limits;
     metric(

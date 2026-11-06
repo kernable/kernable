@@ -74,7 +74,7 @@ If the standby is not in sync, or does not hold everything within 10 s, the swit
 
 ## A fixed primary and standby
 
-Without a witness, the roles stay as you start them, and you promote the standby by hand.
+Without a witness, the roles stay as you start them: you promote the standby by hand when the primary is lost, or hand the role over with a [switchover](#switch-over) while both run.
 
 ## 1. Keys
 
@@ -99,7 +99,7 @@ kernable start --root root.pub --replication sync \
   --vault-key vault.key
 ```
 
-Until a standby is in sync, writes wait and `/ready` answers `waiting for a standby in sync`.
+Until a standby has caught up once, the primary serves alone, and the standby takes its image and catches up meanwhile without holding up a write. Once it holds every write the primary told, the primary waits for it from the next write on, notes so beside its store (`<store>.standby-caught-up`, so that started again it waits at once), and tells the standby it is in sync. From then on, writes wait without a standby in sync and `/ready` answers `waiting for a standby in sync`.
 
 ## 3. Start the standby
 
@@ -117,13 +117,14 @@ kernable start --root root.pub \
 - `--primary-kernel-key` is the primary's kernel public key: the standby checks the primary's checkpoints with it. Give every key the primary had, if it changed its key.
 - Start it with the flags it should have as the primary later, such as `--replication sync` if it should wait for a standby of its own once promoted.
 
-An **empty** standby takes a full image of the primary first, then follows. While it takes the image, the primary's writes wait. With a large store, add the standby in a quiet hour. A standby that was away only briefly catches up from where it stopped: the file log keeps every record, and SQLite keeps 100,000 records beyond what the standby acknowledged.
+An **empty** standby takes a full image of the primary first, then follows. The first standby of a primary does so while the primary serves alone. A standby that replaces one that caught up before makes the primary's writes wait while it takes the image: with a large store, add it in a quiet hour. To let it catch up without the wait instead, stop the primary, delete `<store>.standby-caught-up`, and start it again; from then on, the old standby must not be promoted. A standby that was away only briefly catches up from where it stopped: the file log keeps every record, and SQLite keeps 100,000 records beyond what the standby acknowledged.
 
 ## 4. Watch it
 
 | Metric | On | Meaning |
 |---|---|---|
-| `kernable_standby_in_sync` | primary | 1 while a standby is connected and has caught up |
+| `kernable_standby_in_sync` | primary | 1 while writes are told: a standby is connected and has caught up, or the primary serves alone until its first standby has |
+| `kernable_standby_catching_up` | primary | 1 while no standby has caught up yet: the primary serves alone |
 | `kernable_standby_acknowledged`, `kernable_record_head` | primary | the newest record the standby holds, and the newest written; writes in between wait |
 | `kernable_standby_lag` | standby | records behind the primary's head as last seen |
 
@@ -148,11 +149,24 @@ The standby stops following, opens its stores as a kernel does after a restart, 
 
 Processes given both addresses turn to it by themselves. Others: change the address they use (DNS, a load balancer that checks `/ready`), and restart them if they do not pick up the change.
 
-The standby refuses promotion if it never followed a primary, or if it is in the middle of an image.
+The standby refuses promotion if it never followed a primary, if it is in the middle of an image, or if the primary never told it it is in sync (`<store>.in-sync` beside its store is missing): the primary may then have told writes it lacks. The note stays when the standby starts again, so a standby whose primary was lost can still be promoted; it goes when it reaches a primary again, which tells it anew once it has caught up.
+
+## Switch over
+
+To move the primary role to the standby on purpose (an update, or a move to another machine), while both run:
+
+```sh
+kernable switchover 10.0.0.1:7233 ops.key    # ops.key: granted manage for *
+# switched over: <standby key> is the primary now, from record 48213; 10.0.0.1:7233 stops …
+```
+
+The primary refuses new requests (the SDKs retry them on the standby), lets running ones finish, waits until the standby holds every record (at most 10 s), and tells it to take over on its stream. The standby answers and serves at once; the old primary stops. It notes beside its store that it handed over (`<store>.handed-over`): started again as a primary, it refuses, so it never serves next to the new one by mistake. Start it with `--follow` and the new primary's address to make it the new standby.
+
+If the old primary stops before the standby heard it (it crashed in between), the standby waits for its primary: promote it by hand, it holds every record the primary told. The switchover is refused while no standby is in sync, and if the standby does not catch up within 10 s the primary serves on.
 
 ## Bring the old primary back
 
-Never start the old primary as a primary again. Start it as a standby of the new one, with `--follow` and the new primary's kernel key. It may hold writes it never told anyone of; then its log differs from the new primary's. It moves its stores aside (`<file>.diverged-<ms>`) and takes an image. The files it moves aside can hold personal data: delete them once you know nothing in them is needed.
+Never start the old primary as a primary again; after a switchover it refuses to. Start it as a standby of the new one, with `--follow` and the new primary's kernel key. It may hold writes it never told anyone of; then its log differs from the new primary's. It moves its stores aside (`<file>.diverged-<ms>`) and takes an image. The files it moves aside can hold personal data: delete them once you know nothing in them is needed.
 
 A primary that still ran when you promoted its standby tells nobody of anything it writes from then on: no standby acknowledges it any more.
 

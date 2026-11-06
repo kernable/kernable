@@ -30,6 +30,7 @@ Counters and durations count since the kernel started and begin at 0 again after
 | `kernable_record_head` | gauge |  | The newest record of the record log a standby follows (--replication sync). |
 | `kernable_standby_acknowledged` | gauge |  | The newest record the standby holds on its disk; writes after it wait. |
 | `kernable_standby_in_sync` | gauge |  | 1 while a standby is connected and has caught up; without it, writes wait. |
+| `kernable_standby_catching_up` | gauge |  | 1 while no standby has caught up yet (without a witness): writes are told without one. |
 | `kernable_store_bytes` | gauge |  | Bytes the event store, the vault and the files take on the disk, measured every 10 s. |
 | `kernable_store_bytes_max` | gauge |  | --max-store-bytes: at it, new commands and file puts are refused (quota_storage). |
 | `kernable_ready` | gauge |  | 1 while the kernel is ready: every aggregate that counts has a worker, every listener that counts is connected and caught up, and it is not shutting down. |

@@ -30,6 +30,15 @@ pub const REPLICATION_POINTS: &[&str] = &[
     "replication.sent", // the primary sent records to the standby, nobody was told of them
     "standby.applied",  // the standby applied and synced records, not acknowledged, vault not swept
     "standby.imaging",  // the standby applied part of an image
+    "replication.caught_up", // the standby caught up, the primary noted nothing yet
+    "replication.noted", // the primary noted the standby caught up, has not told it
+    "standby.in_sync",  // the primary told the standby it is in sync, it noted nothing yet
+];
+
+/// The crash points of a switchover without a witness.
+pub const SWITCHOVER_POINTS: &[&str] = &[
+    "replication.take_over", // the primary told the standby to take over, has no answer yet
+    "standby.took_over",     // the standby answered that it takes over, does not serve yet
 ];
 
 /// The crash points of moving a tenant: on the target, and on the source.
@@ -48,6 +57,7 @@ pub(crate) fn point(name: &str) {
         POINTS.contains(&name)
             || STATE_POINTS.contains(&name)
             || REPLICATION_POINTS.contains(&name)
+            || SWITCHOVER_POINTS.contains(&name)
             || MOVE_POINTS.contains(&name),
         "unknown crash point {name}"
     );

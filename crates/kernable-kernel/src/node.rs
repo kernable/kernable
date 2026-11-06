@@ -203,11 +203,11 @@ pub async fn become_primary(config: Config) -> Result<NodePrimary, BoxError> {
 /// Gets a switchover ready: refuses new requests, lets running ones finish, and waits
 /// until the standby holds every record; the record it holds then, or why not. Runs next to the
 /// lease, which [`keep_lease`] goes on renewing meanwhile.
-async fn get_ready(kernel: Arc<Kernel>) -> Result<u64, String> {
+pub(crate) async fn get_ready(kernel: Arc<Kernel>) -> Result<u64, String> {
     let primary = kernel
         .replication
         .clone()
-        .expect("a kernel of a pair runs with --replication sync");
+        .expect("a kernel that switches over runs with --replication sync");
     // New requests go to the other kernel (the SDKs retry UNAVAILABLE); running ones finish.
     let drain = Duration::from_millis(kernel.config().drain_timeout_ms);
     if !kernel.idle_within(drain).await {

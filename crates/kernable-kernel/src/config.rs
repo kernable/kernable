@@ -93,7 +93,7 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "--replication",
         "KERNABLE_REPLICATION",
         "off",
-        "`sync`: a standby (`--follow`) holds every write before anyone is told of it. Commits, revocations, grants and memberships wait until the standby has stored them; without a standby in sync they wait, and `/ready` answers 503. `off`: no standby.",
+        "`sync`: a standby (`--follow`) holds every write before anyone is told of it. Commits, revocations, grants and memberships wait until the standby has stored them; without a standby in sync they wait, and `/ready` answers 503. Without a witness, until a standby has caught up once (a note beside the store keeps it), the kernel serves alone and the standby catches up meanwhile; only a standby told it caught up may be promoted. `off`: no standby.",
     ),
     (
         "--backup",

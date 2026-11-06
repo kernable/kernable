@@ -39,6 +39,7 @@ pub mod partitions;
 mod queue;
 mod replays;
 mod replication;
+pub use replication::{refuse_if_handed_over, switchover_keeper};
 pub mod standby;
 pub mod supervisor;
 mod trend;
@@ -360,10 +361,12 @@ impl Kernel {
         // A standby and a backup follower continue the record log (design/replication.md);
         // without either it is not kept.
         store.keep_record_log(config.replication.sync || config.replication.backup)?;
-        let replication = config
-            .replication
-            .sync
-            .then(|| Arc::new(replication::Primary::new()));
+        let replication = config.replication.sync.then(|| {
+            Arc::new(match config.replication.pair {
+                Some(_) => replication::Primary::new(),
+                None => replication::Primary::fixed(&config.store),
+            })
+        });
         let maps = partitions::Maps::new(store.partition_map()?);
         let queue = queue::Queue::default();
         // Commands of a tenant moving here are copies a stopped copy left pending: the next
@@ -976,6 +979,11 @@ impl Kernel {
     /// Writes a final checkpoint and the listener positions. Leases are not persisted:
     /// after a restart, every unfinished command is delivered again right away.
     pub fn shutdown(&self) -> Result<(), BoxError> {
+        // Handed over, it writes nothing more: its log stays the new primary's beginning, so it
+        // follows it without an image. The new primary holds every position acknowledged.
+        if self.replication.as_ref().is_some_and(|p| p.handed_over()) {
+            return Ok(());
+        }
         self.store.checkpoint(&self.key(), now_ms())?;
         self.listeners.seen_now();
         listeners::flush(self)?;
