@@ -14,13 +14,14 @@ import { KitApi } from "../src/api/api.ts";
 import { newSigningKeys, type Claims } from "../src/api/tokens.ts";
 import { bootstrap } from "../src/bootstrap.ts";
 import { CreateGroup } from "../src/group/index.ts";
-import { DeleteAccount, SuspendAccount } from "../src/account/index.ts";
-import { CreateServiceIdentity, DeleteIdentity, GrantMembership, RevokeApiKey } from "../src/identity/index.ts";
+import { AddSsoDomain, CreateSso, DeleteAccount, EnforceSso, GetSso, SuspendAccount } from "../src/account/index.ts";
+import { CreateServiceIdentity, DeleteIdentity, GetIdentity, GrantMembership, RevokeApiKey } from "../src/identity/index.ts";
 import { CreateInvitation, EraseInvitation, ListInvitations } from "../src/invitation/index.ts";
 import { kitDomains, kitSchemas, relation, useAuthorizationStore } from "../src/kit.ts";
 import { MemoryMailer, useMailer } from "../src/shared/mail.ts";
 import { totpCode } from "../src/shared/secrets.ts";
 import { Authenticator } from "./authenticator.ts";
+import { OidcProvider } from "./oidc-provider.ts";
 import { CreateTenant, DeleteTenant, GetTenant, SuspendTenant } from "../src/tenancy/index.ts";
 
 // --- A small app: orders that belong to whoever placed them --------------------------------------
@@ -56,6 +57,8 @@ let kernel: TestKernel;
 let kit: Kernable;
 let app: ReturnType<Kernable["app"]>;
 let api: KitApi;
+/** The API's own identity and key, from the bootstrap. */
+let service: { identityId: string; keyId: string };
 let tenant: string;
 /** From the first test, for the second. */
 let acme: { alice: RequestContext; bobIdentity: string };
@@ -75,10 +78,11 @@ before(async () => {
   kit = new Kernable(options).use(...kitSchemas());
   useAuthorizationStore(`sqlite:${join(kernel.dir, "authorization.db")}`);
   await startApp();
-  const { api: service } = await bootstrap(kit, {
+  const booted = await bootstrap(kit, {
     signUp: { tenants: "active", accounts: "open" },
     admin: { email: "admin@example.com", name: "Admin", password: PASSWORD },
   });
+  service = booted.api;
   api = new KitApi({ kernable: kit, keys: newSigningKeys(), service });
 });
 
@@ -411,4 +415,78 @@ test("passkeys: added against an issued challenge, signing in without a password
     aggregateId: ivys, tenant: ivys, context: { senderAccount: claims.sub, senderSession: claims.sid },
   });
   assert.ok(opened.committed, JSON.stringify(opened));
+});
+
+test("OAuth and SSO: a social login registers or signs in, links on request; a tenant's SSO verified by DNS and enforced", async () => {
+  const social = new OidcProvider();
+  const company = new OidcProvider();
+  await social.start();
+  await company.start();
+  const txt = new Map<string, string>();
+  const sso = new KitApi({
+    kernable: kit, keys: newSigningKeys(), service,
+    providers: { social: { issuer: social.issuer, clientId: social.clientId, clientSecret: social.clientSecret } },
+    redirectUri: "http://localhost:3000/callback", insecureIssuers: true,
+    resolveTxt: async (name) => (txt.has(name) ? [[txt.get(name)!]] : []),
+  });
+  try {
+    // A social login of a new person registers and links them; the second time signs them in.
+    const jack = { sub: "s-jack", email: "jack@example.com", email_verified: true };
+    const start = async (by: { provider: string } | { email: string }, link?: Parameters<KitApi["oidcStart"]>[1]) => {
+      const s = await sso.oidcStart(by, link);
+      assert.ok(s.ok, JSON.stringify(s));
+      return s.url;
+    };
+    const first = await sso.oidcFinish(social.login(await start({ provider: "social" }), jack));
+    assert.ok(first.ok && "accountId" in first, JSON.stringify(first));
+    const second = await sso.oidcFinish(social.login(await start({ provider: "social" }), jack));
+    assert.ok(second.ok && "accountId" in second && second.accountId === first.accountId);
+    // A callback used once does not work twice.
+    const url = social.login(await start({ provider: "social" }), jack);
+    assert.ok((await sso.oidcFinish(url)).ok);
+    assert.deepEqual(await sso.oidcFinish(url), { ok: false, reason: "invalid_state" });
+
+    // A social login whose email has an account is not linked by itself: sign in and link it.
+    const kate = await person("kate@example.com");
+    const kateSocial = { sub: "s-kate", email: "kate@example.com", email_verified: true };
+    assert.deepEqual(await sso.oidcFinish(social.login(await start({ provider: "social" }), kateSocial)), { ok: false, reason: "not_linked" });
+    assert.deepEqual(await sso.oidcFinish(social.login(await start({ provider: "social" }, kate.claims), kateSocial)), { ok: true, linked: true });
+    const kateIn = await sso.oidcFinish(social.login(await start({ provider: "social" }), kateSocial));
+    assert.ok(kateIn.ok && "accountId" in kateIn && kateIn.accountId === kate.accountId);
+
+    // Liam's tenant sets up SSO: the domain proven by DNS, then enforced.
+    const liam = await person("liam@lumen.example");
+    const lumen = crypto.randomUUID();
+    assert.ok((await kit.submit(CreateTenant.new({ slug: "lumen", name: "Lumen", owner: { accountId: liam.accountId } }), {
+      aggregateId: lumen, tenant: lumen, context: await api.contextFor(liam.claims),
+    })).committed);
+    const asLiam = await api.contextFor(liam.claims, lumen);
+    const ssoId = crypto.randomUUID();
+    const at = (c: Parameters<typeof kit.submit>[0]) => kit.submit(c as never, { aggregateId: ssoId, tenant: lumen, context: asLiam });
+    assert.ok((await at(CreateSso.new({ issuer: company.issuer, clientId: company.clientId, clientSecret: company.clientSecret }))).committed);
+    assert.ok((await at(AddSsoDomain.new({ domain: "lumen.example" }))).committed);
+    assert.deepEqual(await sso.verifySsoDomain(lumen, ssoId, "lumen.example"), { ok: false, reason: "not_verified" });
+    const config = await kit.query(GetSso.new({ ssoId }), { tenant: lumen, context: asLiam });
+    txt.set("_kernable-sso.lumen.example", config.domains[0].txt);
+    assert.deepEqual(await sso.verifySsoDomain(lumen, ssoId, "lumen.example"), { ok: true });
+    assert.ok((await at(EnforceSso.new({ enforced: true }))).committed);
+
+    // Mia of lumen.example joins with a password; in Lumen only an SSO session counts.
+    const mia = await person("mia@lumen.example");
+    await kit.submit(CreateInvitation.new({ email: "mia@lumen.example" }), { aggregateId: crypto.randomUUID(), tenant: lumen, context: asLiam });
+    assert.ok((await api.acceptInvitation(mailer.last("mia@lumen.example")!.token, { claims: mia.claims })).ok);
+    const asMia = await api.contextFor(mia.claims, lumen);
+    const own = (context: typeof asMia) => kit.query(GetIdentity.new({ identityId: context.senderIdentity! }), { tenant: lumen, context });
+    await assert.rejects(own(asMia), (e: Rejected) => e.code === "sso_required");
+    // Through the company's provider: linked to her account by the verified domain and email.
+    const miaSso = await sso.oidcFinish(company.login(await start({ email: "mia@lumen.example" }), { sub: "c-mia", email: "mia@lumen.example", email_verified: true }));
+    assert.ok(miaSso.ok && "accountId" in miaSso && miaSso.accountId === mia.accountId, JSON.stringify(miaSso));
+    const asMiaSso = await api.contextFor(sso.check(miaSso.accessToken)!, lumen);
+    assert.equal((await own(asMiaSso)).id, asMia.senderIdentity);
+    // The owner keeps a password session, so a broken SSO can be mended.
+    assert.ok((await own(asLiam)).id);
+  } finally {
+    social.stop();
+    company.stop();
+  }
 });

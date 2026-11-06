@@ -2,7 +2,7 @@
 
 import { LOCKOUT_AFTER, LOCKOUT_MAX_MINUTES, MINUTE } from "../shared/constants.ts";
 import { accountDomain, type AccountStatus, type AccountSuspensionReason, type SessionEnd, type TokenPurpose } from "./domain.ts";
-import { PasskeyAdded, PasskeyRemoved, PasskeyUsed, RecoveryCodesGenerated, SecondFactorFailed, SecondFactorProved, TotpConfirmed, TotpDisabled, TotpStarted, EmailChangeRequested, EmailChanged, PasswordChanged, PasswordReset, PasswordResetRequested, AccountDeleted, AccountReactivated, AccountRegistered, AccountSuspended, EmailVerified, SessionEnded, SessionFactorAdded, SessionOpened, SessionRefreshed, SignedIn, SignInFailed, VerificationRequested } from "./events.ts";
+import { ProviderLinked, ProviderUnlinked, SsoCreated, SsoDeleted, SsoDisabled, SsoDomainAdded, SsoDomainRemoved, SsoDomainVerified, SsoEnabled, SsoEnforcementChanged, SsoUpdated, PasskeyAdded, PasskeyRemoved, PasskeyUsed, RecoveryCodesGenerated, SecondFactorFailed, SecondFactorProved, TotpConfirmed, TotpDisabled, TotpStarted, EmailChangeRequested, EmailChanged, PasswordChanged, PasswordReset, PasswordResetRequested, AccountDeleted, AccountReactivated, AccountRegistered, AccountSuspended, EmailVerified, SessionEnded, SessionFactorAdded, SessionOpened, SessionRefreshed, SignedIn, SignInFailed, VerificationRequested } from "./events.ts";
 
 export interface Account {
   id?: string;
@@ -19,6 +19,8 @@ export interface Account {
   totp: { secret: string | null; confirmed: boolean; lastStep: number } | null;
   /** Passkeys: credential ID (vault), COSE public key (base64url), signature counter, label (vault). */
   passkeys: { credentialId: string | null; publicKey: string; counter: number; label: string | null }[];
+  /** External logins: provider and subject (vault). */
+  links: { provider: string; subject: string | null }[];
   /** SHA-256 of the unused recovery codes. */
   recoveryCodes: string[];
   /** A new address waiting for its confirmation: it holds no key yet. */
@@ -43,6 +45,7 @@ export const accountAggregate = accountDomain
     totp: null,
     recoveryCodes: [],
     passkeys: [],
+    links: [],
   })
   .apply(AccountRegistered, (s, d, evt) => {
     s.id = evt.aggregateId;
@@ -119,11 +122,15 @@ export const accountAggregate = accountDomain
     const p = s.passkeys.find((x) => x.credentialId === d.credentialId);
     if (p) p.counter = d.counter;
   })
+  .apply(ProviderLinked, (s, d) => void s.links.push({ provider: d.provider, subject: d.subject }))
+  .apply(ProviderUnlinked, (s, d) => void (s.links = s.links.filter((l) => !(l.provider === d.provider && l.subject === d.subject))))
   .apply(SignedIn, (s) => void (s.failures = { count: 0, lastAt: 0 }))
   .apply(SignInFailed, (s, d) => {
     if (d.reason === "wrong_password") s.failures = { count: s.failures.count + 1, lastAt: d.at };
   })
   // Held from registration on, while not deleted: nobody registers an email twice.
+  // Each external login belongs to one account.
+  .unique("link", (s) => (s.status === "deleted" ? null : s.links.filter((l) => l.subject).map((l) => `${l.provider}:${l.subject}`)), { personal: (s) => s.id })
   .unique("email", (s) => (s.status !== "none" && s.status !== "deleted" ? s.email : null), { personal: (s) => s.id })
   .fact("active", (s) => s.status === "active")
   .fact("mfa", (s) => s.totp?.confirmed === true);
@@ -162,3 +169,44 @@ export const sessionAggregate = accountDomain
     s.status = "ended";
     s.endReason = d.reason;
   });
+
+// --- account.sso: a tenant's single sign-on, under the tenant's ID ---
+
+export interface Sso {
+  status: "none" | "active" | "disabled" | "deleted";
+  issuer?: string;
+  clientId?: string;
+  clientSecret: string | null;
+  domains: { domain: string; txt: string; verified: boolean }[];
+  enforced: boolean;
+}
+
+export const ssoAggregate = accountDomain
+  .aggregate<Sso>("sso", { status: "none", clientSecret: null, domains: [], enforced: false })
+  .apply(SsoCreated, (s, d) => {
+    s.status = "active";
+    s.issuer = d.issuer;
+    s.clientId = d.clientId;
+    s.clientSecret = d.clientSecret;
+  })
+  .apply(SsoUpdated, (s, d) => {
+    s.issuer = d.issuer;
+    s.clientId = d.clientId;
+    s.clientSecret = d.clientSecret;
+  })
+  .apply(SsoDomainAdded, (s, d) => void s.domains.push({ domain: d.domain, txt: d.txt, verified: false }))
+  .apply(SsoDomainVerified, (s, d) => {
+    const x = s.domains.find((y) => y.domain === d.domain);
+    if (x) x.verified = true;
+  })
+  .apply(SsoDomainRemoved, (s, d) => void (s.domains = s.domains.filter((x) => x.domain !== d.domain)))
+  .apply(SsoEnforcementChanged, (s, d) => void (s.enforced = d.enforced))
+  .apply(SsoDisabled, (s) => void (s.status = "disabled"))
+  .apply(SsoEnabled, (s) => void (s.status = "active"))
+  .apply(SsoDeleted, (s) => {
+    s.status = "deleted";
+    s.clientSecret = null;
+    s.domains = [];
+  })
+  // A verified domain belongs to one tenant's SSO.
+  .unique("domain", (s) => (s.status === "deleted" ? null : s.domains.filter((x) => x.verified).map((x) => x.domain)), { scope: "global" });

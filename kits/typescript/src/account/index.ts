@@ -4,8 +4,8 @@
 export { accountDomain } from "./domain.ts";
 export type * from "./domain.ts";
 export * from "./events.ts";
-export { accountAggregate, lockedUntil, type Account, sessionAggregate, type Session } from "./aggregates.ts";
-export { RegisterAccount, RequestVerification, VerifyEmail, SignIn, OpenSession, RefreshSession, AddSessionFactor, EndSession, SuspendAccount, ReactivateAccount, DeleteAccount, ChangePassword, RequestPasswordReset, ResetPassword, RequestEmailChange, ConfirmEmailChange, NoteRegistrationAttempt, StartTotp, ConfirmTotp, DisableTotp, RegenerateRecoveryCodes, ProveSecondFactor, AddPasskey, RemovePasskey, SignInWithPasskey, ProvePasskey } from "./commands.ts";
-export { accountsReadModel, type AccountRow, type SessionRow } from "./readmodels.ts";
-export { FindAccountByEmail, GetAccount, ListSessions } from "./queries.ts";
+export { accountAggregate, lockedUntil, type Account, sessionAggregate, type Session, ssoAggregate, type Sso } from "./aggregates.ts";
+export { RegisterAccount, RequestVerification, VerifyEmail, SignIn, OpenSession, RefreshSession, AddSessionFactor, EndSession, SuspendAccount, ReactivateAccount, DeleteAccount, ChangePassword, RequestPasswordReset, ResetPassword, RequestEmailChange, ConfirmEmailChange, NoteRegistrationAttempt, StartTotp, ConfirmTotp, DisableTotp, RegenerateRecoveryCodes, ProveSecondFactor, AddPasskey, RemovePasskey, SignInWithPasskey, ProvePasskey, SignInWithProvider, LinkProvider, UnlinkProvider, CreateSso, UpdateSso, AddSsoDomain, VerifySsoDomain, RemoveSsoDomain, EnforceSso, DisableSso, EnableSso, DeleteSso } from "./commands.ts";
+export { accountsReadModel, ssosReadModel, type AccountRow, type SessionRow, type SsoRow } from "./readmodels.ts";
+export { FindAccountByEmail, GetAccount, ListSessions, FindAccountByLink, FindSsoByDomain, GetSsoSecret, GetSso } from "./queries.ts";
 export { sessionsReactor, mailReactor, endingReactor } from "./reactors.ts";

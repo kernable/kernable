@@ -2240,6 +2240,485 @@
           }
         }
       ]
+    },
+    {
+      "name": "a linked login signs in",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@acme.example",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        },
+        {
+          "type": "ProviderLinked",
+          "data": {
+            "provider": "social",
+            "subject": "x-1",
+            "email": null,
+            "at": 1
+          }
+        }
+      ],
+      "when": {
+        "type": "SignInWithProvider",
+        "data": {
+          "sessionId": "s1",
+          "provider": "social",
+          "subject": "x-1",
+          "refreshToken": "s1.1.r"
+        }
+      },
+      "then": [
+        {
+          "type": "SignedIn",
+          "data": {
+            "sessionId": "s1",
+            "method": "social",
+            "factors": [
+              "provider"
+            ],
+            "refreshTokenHash": "623eb122f7c6115ddd49a01a83d1367e2f5fdffed24ba88b069c85458dfe645c",
+            "ip": null,
+            "userAgent": null,
+            "mfa": false,
+            "at": 1000000
+          }
+        }
+      ]
+    },
+    {
+      "name": "an unlinked social login does not, even with the same verified email",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@acme.example",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        }
+      ],
+      "when": {
+        "type": "SignInWithProvider",
+        "data": {
+          "sessionId": "s1",
+          "provider": "social",
+          "subject": "x-1",
+          "refreshToken": "s1.1.r",
+          "email": "ann@acme.example",
+          "emailVerified": true
+        }
+      },
+      "then": [
+        {
+          "type": "SignInFailed",
+          "data": {
+            "method": "social",
+            "reason": "not_linked",
+            "ip": null,
+            "at": 1000000
+          }
+        }
+      ]
+    },
+    {
+      "name": "a tenant's SSO with a verified domain links the same verified email and signs in",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@acme.example",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        }
+      ],
+      "when": {
+        "type": "SignInWithProvider",
+        "data": {
+          "sessionId": "s1",
+          "provider": "sso:sso1",
+          "subject": "x-1",
+          "refreshToken": "s1.1.r",
+          "email": "Ann@Acme.example",
+          "emailVerified": true,
+          "autoLink": true
+        }
+      },
+      "then": [
+        {
+          "type": "ProviderLinked",
+          "data": {
+            "provider": "sso:sso1",
+            "subject": "x-1",
+            "email": "ann@acme.example",
+            "at": 1000000
+          }
+        },
+        {
+          "type": "SignedIn",
+          "data": {
+            "sessionId": "s1",
+            "method": "sso:sso1",
+            "factors": [
+              "sso"
+            ],
+            "refreshTokenHash": "623eb122f7c6115ddd49a01a83d1367e2f5fdffed24ba88b069c85458dfe645c",
+            "ip": null,
+            "userAgent": null,
+            "mfa": false,
+            "at": 1000000
+          }
+        }
+      ],
+      "index": {
+        "keys": [
+          {
+            "name": "link",
+            "value": "sso:sso1:x-1",
+            "scope": "tenant",
+            "subject": "a1"
+          },
+          {
+            "name": "email",
+            "value": "ann@acme.example",
+            "scope": "tenant",
+            "subject": "a1"
+          }
+        ],
+        "facts": [
+          "active"
+        ]
+      }
+    },
+    {
+      "name": "... not an unverified email",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@acme.example",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        }
+      ],
+      "when": {
+        "type": "SignInWithProvider",
+        "data": {
+          "sessionId": "s1",
+          "provider": "sso:sso1",
+          "subject": "x-1",
+          "refreshToken": "s1.1.r",
+          "email": "ann@acme.example",
+          "emailVerified": false,
+          "autoLink": true
+        }
+      },
+      "then": [
+        {
+          "type": "SignInFailed",
+          "data": {
+            "method": "sso:sso1",
+            "reason": "not_linked",
+            "ip": null,
+            "at": 1000000
+          }
+        }
+      ]
+    },
+    {
+      "name": "the last way to sign in is not unlinked",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@acme.example",
+            "name": "Ann",
+            "passwordHash": null,
+            "verified": true,
+            "at": 1
+          }
+        },
+        {
+          "type": "ProviderLinked",
+          "data": {
+            "provider": "social",
+            "subject": "x-1",
+            "email": null,
+            "at": 1
+          }
+        }
+      ],
+      "when": {
+        "type": "UnlinkProvider",
+        "data": {
+          "provider": "social",
+          "subject": "x-1"
+        }
+      },
+      "rejected": "last_method"
+    },
+    {
+      "name": "an SSO configuration keeps its secret in the vault",
+      "aggregate": "sso",
+      "aggregateId": "sso1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateSso",
+        "data": {
+          "issuer": "https://id.acme.example/",
+          "clientId": "c",
+          "clientSecret": "s"
+        }
+      },
+      "then": [
+        {
+          "type": "SsoCreated",
+          "data": {
+            "issuer": "https://id.acme.example",
+            "clientId": "c",
+            "clientSecret": "s"
+          }
+        }
+      ],
+      "index": {
+        "keys": [],
+        "facts": []
+      }
+    },
+    {
+      "name": "a domain gets the TXT value to publish",
+      "aggregate": "sso",
+      "aggregateId": "sso1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "SsoCreated",
+          "data": {
+            "issuer": "https://id.acme.example",
+            "clientId": "c",
+            "clientSecret": "s"
+          }
+        }
+      ],
+      "when": {
+        "type": "AddSsoDomain",
+        "data": {
+          "domain": "Acme.Example"
+        }
+      },
+      "then": [
+        {
+          "type": "SsoDomainAdded",
+          "data": {
+            "domain": "acme.example",
+            "txt": "<string>"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a domain is verified only by its TXT record",
+      "aggregate": "sso",
+      "aggregateId": "sso1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "SsoCreated",
+          "data": {
+            "issuer": "https://id.acme.example",
+            "clientId": "c",
+            "clientSecret": "s"
+          }
+        },
+        {
+          "type": "SsoDomainAdded",
+          "data": {
+            "domain": "acme.example",
+            "txt": "kernable-sso=abc"
+          }
+        }
+      ],
+      "when": {
+        "type": "VerifySsoDomain",
+        "data": {
+          "domain": "acme.example",
+          "found": [
+            "other"
+          ]
+        }
+      },
+      "rejected": "not_verified"
+    },
+    {
+      "name": "a verified domain belongs to one tenant",
+      "aggregate": "sso",
+      "aggregateId": "sso1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "SsoCreated",
+          "data": {
+            "issuer": "https://id.acme.example",
+            "clientId": "c",
+            "clientSecret": "s"
+          }
+        },
+        {
+          "type": "SsoDomainAdded",
+          "data": {
+            "domain": "acme.example",
+            "txt": "kernable-sso=abc"
+          }
+        }
+      ],
+      "when": {
+        "type": "VerifySsoDomain",
+        "data": {
+          "domain": "acme.example",
+          "found": [
+            "kernable-sso=abc"
+          ]
+        }
+      },
+      "then": [
+        {
+          "type": "SsoDomainVerified",
+          "data": {
+            "domain": "acme.example"
+          }
+        }
+      ],
+      "index": {
+        "keys": [
+          {
+            "name": "domain",
+            "value": "acme.example",
+            "scope": "global"
+          }
+        ],
+        "facts": []
+      }
+    },
+    {
+      "name": "disabling an enforced SSO lifts the enforcement first",
+      "aggregate": "sso",
+      "aggregateId": "sso1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "SsoCreated",
+          "data": {
+            "issuer": "https://id.acme.example",
+            "clientId": "c",
+            "clientSecret": "s"
+          }
+        },
+        {
+          "type": "SsoEnforcementChanged",
+          "data": {
+            "enforced": true
+          }
+        }
+      ],
+      "when": {
+        "type": "DisableSso",
+        "data": {}
+      },
+      "then": [
+        {
+          "type": "SsoEnforcementChanged",
+          "data": {
+            "enforced": false
+          }
+        },
+        {
+          "type": "SsoDisabled",
+          "data": {}
+        }
+      ]
+    },
+    {
+      "name": "deleting erases the secret and frees the domains",
+      "aggregate": "sso",
+      "aggregateId": "sso1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "SsoCreated",
+          "data": {
+            "issuer": "https://id.acme.example",
+            "clientId": "c",
+            "clientSecret": "s"
+          }
+        },
+        {
+          "type": "SsoDomainAdded",
+          "data": {
+            "domain": "acme.example",
+            "txt": "kernable-sso=abc"
+          }
+        },
+        {
+          "type": "SsoDomainVerified",
+          "data": {
+            "domain": "acme.example"
+          }
+        }
+      ],
+      "when": {
+        "type": "DeleteSso",
+        "data": {}
+      },
+      "then": [
+        {
+          "type": "SsoDeleted",
+          "data": {}
+        }
+      ],
+      "index": {
+        "keys": [],
+        "facts": []
+      }
     }
   ]
 }

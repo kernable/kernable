@@ -5,7 +5,7 @@ import { Rejected, type Listener } from "@kernable/sdk";
 
 import {
   AccountDeleted, AccountReactivated, AccountRegistered, AccountSuspended, EmailVerified, SessionEnded, SessionFactorAdded, SessionOpened, TotpConfirmed,
-  TotpDisabled,
+  TotpDisabled, SsoDeleted, SsoDisabled, SsoEnforcementChanged,
 } from "../account/index.ts";
 import { GroupCreated, GroupDeleted, GroupPermissionsSet, groupDomain } from "../group/index.ts";
 import {
@@ -111,7 +111,7 @@ export const authorizationListener: Listener = groupDomain
   .on(AccountDeleted, setAccount("deleted"))
   .on(SessionOpened, (d, evt, ctx) => {
     use(ctx.store);
-    k.sessions.set(evt.aggregateId, { accountId: d.accountId, factors: [...d.factors], active: true });
+    k.sessions.set(evt.aggregateId, { accountId: d.accountId, factors: [...d.factors], active: true, method: d.method });
   })
   .on(SessionFactorAdded, (d, evt, ctx) => {
     use(ctx.store);
@@ -120,6 +120,18 @@ export const authorizationListener: Listener = groupDomain
   .on(SessionEnded, (_d, evt, ctx) => {
     use(ctx.store);
     k.sessions.update(evt.aggregateId, (s) => void (s.active = false));
+  })
+  .on(SsoEnforcementChanged, (d, evt, ctx) => {
+    use(ctx.store);
+    k.tenants.update(evt.tenant, (t) => void (t.ssoEnforced = d.enforced ? evt.aggregateId : t.ssoEnforced === evt.aggregateId ? null : t.ssoEnforced));
+  })
+  .on(SsoDisabled, (_d, evt, ctx) => {
+    use(ctx.store);
+    k.tenants.update(evt.tenant, (t) => void (t.ssoEnforced === evt.aggregateId && (t.ssoEnforced = null)));
+  })
+  .on(SsoDeleted, (_d, evt, ctx) => {
+    use(ctx.store);
+    k.tenants.update(evt.tenant, (t) => void (t.ssoEnforced === evt.aggregateId && (t.ssoEnforced = null)));
   })
   // identity
   .on(IdentityCreated, (d, evt, ctx) => {

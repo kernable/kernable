@@ -10,7 +10,7 @@ import { PLATFORM_TENANT } from "../shared/constants.ts";
 import { ESCALATION, QUERY_TARGETS, ruleOf } from "./levels.ts";
 
 export interface Refusal {
-  code: "unauthenticated" | "forbidden" | "tenant_suspended" | "mfa_required" | "sign_up_closed";
+  code: "unauthenticated" | "forbidden" | "tenant_suspended" | "mfa_required" | "sso_required" | "sign_up_closed";
   message: string;
 }
 
@@ -77,7 +77,7 @@ export class Table<V> {
   }
 }
 
-export interface TenantKnown { status: TenantStatus; owners: string[]; mfaRequired: boolean; suspension: string | null }
+export interface TenantKnown { status: TenantStatus; owners: string[]; mfaRequired: boolean; suspension: string | null; ssoEnforced?: string | null }
 
 /** What the middleware knows, folded from events (design/kits.md, "What it knows"). */
 export class Knowledge {
@@ -88,7 +88,7 @@ export class Knowledge {
   tenants = new Table<TenantKnown>(this, "tenants");
   /** `mfa`: the account turned a second factor on: every session needs it. */
   accounts = new Table<{ status: string; mfa?: boolean }>(this, "accounts");
-  sessions = new Table<{ accountId: string; factors: string[]; active: boolean }>(this, "sessions");
+  sessions = new Table<{ accountId: string; factors: string[]; active: boolean; method?: string }>(this, "sessions");
   /** `tenant/identityId` */
   identities = new Table<{ accountId: string | null; active: boolean; memberships: Membership[] }>(this, "identities");
   /** keyId */
@@ -165,6 +165,8 @@ function isSelf(k: Knowledge, check: Check, r: RequestContext, target: Target | 
 
 interface Sender {
   accountId?: string;
+  /** How the session signed in: `password`, `passkey`, a provider, `sso:<id>`. */
+  method?: string;
   factors: string[];
   /** Signed in with an API key rather than a session. */
   apiKey: boolean;
@@ -179,7 +181,7 @@ function authenticate(k: Knowledge, r: RequestContext, now: number): Sender | Re
     if (!session.active) return refuse("unauthenticated", "The session has ended");
     if (session.accountId !== r.senderAccount) return refuse("unauthenticated", "The session is another account's");
     if (k.accounts.get(session.accountId)?.status !== "active") return refuse("unauthenticated", "The account is not active");
-    return { accountId: session.accountId, factors: session.factors, apiKey: false };
+    return { accountId: session.accountId, factors: session.factors, method: session.method, apiKey: false };
   }
   const key = k.apiKeys.get(sid);
   if (key) {
@@ -263,7 +265,10 @@ export function decide(k: Knowledge, check: Check, now: number): Refusal | null 
     return refuse("mfa_required", "Prove the second factor first");
   }
   const target = targetOf(check);
-  if (rule.self && isSelf(k, check, r, target)) return null;
+  // Oneself: the account and its sessions at once; an identity lives in a tenant, so only after
+  // the tenant's checks (suspended, MFA, enforced SSO) below.
+  const self = rule.self === true && isSelf(k, check, r, target);
+  if (self && target?.type !== "identity.identity") return null;
   // The person suspends their own account only for themselves.
   if (type === "account.SuspendAccount" && data.reason === "owner_requested" && isSelf(k, check, r, target)) return null;
 
@@ -304,6 +309,10 @@ export function decide(k: Knowledge, check: Check, now: number): Refusal | null 
   // 7. Owners hold every permission in their tenant, except what is the platform's: they suspend
   // and reactivate their tenant only for themselves (owner_requested). Platform owners hold all.
   const owner = homeTenant?.owners.includes(identityId) ?? false;
+  // A tenant with enforced SSO: only sessions signed in through it (owners excepted, so they can mend it).
+  const sso = tenant?.ssoEnforced;
+  if (sso && !platform && !owner && !sender.apiKey && sender.method !== `sso:${sso}`) return refuse("sso_required", "Sign in through the tenant's single sign-on");
+  if (self) return null;
   if (rule.level === "platform" && !platform) {
     const own = owner && (
       (type === "tenancy.SuspendTenant" && data.reason === "owner_requested") ||

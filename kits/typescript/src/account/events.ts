@@ -50,7 +50,7 @@ export class SignedIn extends Event {
 export class SignInFailed extends Event {
   static personal: PersonalFields<SignInFailed>[] = [{ fields: ["ip"], subject: (_d, id) => id }];
   method!: string;
-  reason!: "wrong_password" | "locked" | "not_verified" | "not_active";
+  reason!: "wrong_password" | "locked" | "not_verified" | "not_active" | "not_linked";
   ip!: string | null;
   at!: number;
 }
@@ -211,5 +211,64 @@ export class PasskeyUsed extends Event {
   counter!: number;
 }
 
+/** An external login (OAuth/OIDC, or a tenant's SSO as `sso:<id>`) linked to the account. */
+export class ProviderLinked extends Event {
+  static personal: PersonalFields<ProviderLinked>[] = [{ fields: ["subject", "email"], subject: (_d, id) => id }];
+  provider!: string;
+  subject!: string | null;
+  email!: string | null;
+  at!: number;
+}
+
+export class ProviderUnlinked extends Event {
+  static personal: PersonalFields<ProviderUnlinked>[] = [{ fields: ["subject"], subject: (_d, id) => id }];
+  provider!: string;
+  subject!: string | null;
+}
+
+// --- A tenant's single sign-on (account.sso, under the tenant's ID) ---
+
+/** The client secret is personal data of the configuration (`sso:<id>`), erased with it. */
+export class SsoCreated extends Event {
+  static personal: PersonalFields<SsoCreated>[] = [{ fields: ["clientSecret"], subject: (_d, id) => `sso:${id}` }];
+  issuer!: string;
+  clientId!: string;
+  clientSecret!: string | null;
+}
+
+export class SsoUpdated extends Event {
+  static personal: PersonalFields<SsoUpdated>[] = [{ fields: ["clientSecret"], subject: (_d, id) => `sso:${id}` }];
+  issuer!: string;
+  clientId!: string;
+  clientSecret!: string | null;
+}
+
+/** `txt`: the value the domain's DNS must carry at `_kernable-sso.<domain>`. */
+export class SsoDomainAdded extends Event {
+  domain!: string;
+  txt!: string;
+}
+
+export class SsoDomainVerified extends Event {
+  domain!: string;
+}
+
+export class SsoDomainRemoved extends Event {
+  domain!: string;
+}
+
+/** Enforced: in this tenant, only sessions signed in through this SSO count (owners excepted). */
+export class SsoEnforcementChanged extends Event {
+  enforced!: boolean;
+}
+
+export class SsoDisabled extends Event {}
+
+export class SsoEnabled extends Event {}
+
+export class SsoDeleted extends Event {
+  static erases = (_d: unknown, id: string) => `sso:${id}`;
+}
+
 // Declared on the domain, so a process that only reads them knows them too.
-accountDomain.event(PasskeyAdded, PasskeyRemoved, PasskeyUsed, TotpStarted, TotpConfirmed, TotpDisabled, RecoveryCodesGenerated, SecondFactorProved, SecondFactorFailed, AccountRegistered, VerificationRequested, EmailVerified, SignedIn, SignInFailed, SessionOpened, SessionRefreshed, SessionFactorAdded, SessionEnded, AccountSuspended, AccountReactivated, AccountDeleted, PasswordChanged, PasswordResetRequested, PasswordReset, EmailChangeRequested, EmailChanged, RegistrationAttempted);
+accountDomain.event(ProviderLinked, ProviderUnlinked, SsoCreated, SsoUpdated, SsoDomainAdded, SsoDomainVerified, SsoDomainRemoved, SsoEnforcementChanged, SsoDisabled, SsoEnabled, SsoDeleted, PasskeyAdded, PasskeyRemoved, PasskeyUsed, TotpStarted, TotpConfirmed, TotpDisabled, RecoveryCodesGenerated, SecondFactorProved, SecondFactorFailed, AccountRegistered, VerificationRequested, EmailVerified, SignedIn, SignInFailed, SessionOpened, SessionRefreshed, SessionFactorAdded, SessionEnded, AccountSuspended, AccountReactivated, AccountDeleted, PasswordChanged, PasswordResetRequested, PasswordReset, EmailChangeRequested, EmailChanged, RegistrationAttempted);

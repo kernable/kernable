@@ -2,6 +2,9 @@
 // your HTTP framework; `example/server.ts` shows one with node:http.
 
 import { randomUUID } from "node:crypto";
+import { resolveTxt } from "node:dns/promises";
+
+import * as oidc from "openid-client";
 
 import type { Kernable, Outcome, RequestContext, StoredEvent } from "@kernable/sdk";
 import {
@@ -10,7 +13,7 @@ import {
 } from "@simplewebauthn/server";
 
 import {
-  AddPasskey, ChangePassword, ConfirmEmailChange, ConfirmTotp, ProvePasskey, ProveSecondFactor, SignInWithPasskey, StartTotp, EndSession, FindAccountByEmail, GetAccount, NoteRegistrationAttempt, RefreshSession, RegisterAccount, RequestEmailChange,
+  AddPasskey, FindAccountByLink, FindSsoByDomain, GetSsoSecret, LinkProvider, SignInWithProvider, VerifySsoDomain, ChangePassword, ConfirmEmailChange, ConfirmTotp, ProvePasskey, ProveSecondFactor, SignInWithPasskey, StartTotp, EndSession, FindAccountByEmail, GetAccount, NoteRegistrationAttempt, RefreshSession, RegisterAccount, RequestEmailChange,
   RequestPasswordReset, ResetPassword, SignIn, VerifyEmail, type SessionRefreshed, type SignInFailed, type SignedIn,
 } from "../account/index.ts";
 import { AcceptInvitation, PeekInvitation } from "../invitation/index.ts";
@@ -26,7 +29,18 @@ export interface KitApiOptions {
   keys: SigningKeys;
   /** The API's own identity (a service of the platform tenant with an API key, from the bootstrap). */
   service: { identityId: string; keyId: string };
+  /** Social OAuth/OIDC providers by name (`google`, …); tenants' SSO is configured as `account.sso`. */
+  providers?: Record<string, { issuer: string; clientId: string; clientSecret: string }>;
+  /** Where providers send the browser back to; your route calls `oidcFinish` with the full URL. */
+  redirectUri?: string;
+  /** Allows http:// issuers: for development and tests only. */
+  insecureIssuers?: boolean;
+  /** How DNS TXT records are read (tests replace it). */
+  resolveTxt?: (name: string) => Promise<string[][]>;
 }
+
+/** What `oidcStart` keeps in the cache until the browser comes back. */
+interface OidcState { provider: string; tenant?: string; ssoId?: string; verifier: string; nonce: string; link?: { accountId: string } }
 
 export type SignInResult =
   | {
@@ -45,12 +59,15 @@ function events(outcome: Outcome): StoredEvent[] {
 export class KitApi {
   private readonly kernable: Kernable;
   private readonly keys: SigningKeys;
+  private readonly options: KitApiOptions;
+  private readonly configs = new Map<string, Promise<oidc.Configuration>>();
   /** The request context of the API's own requests: lookups no one else may make. */
   readonly serviceContext: RequestContext;
 
   constructor(options: KitApiOptions) {
     this.kernable = options.kernable;
     this.keys = options.keys;
+    this.options = options;
     this.serviceContext = {
       senderTenant: PLATFORM_TENANT,
       senderIdentity: options.service.identityId,
@@ -277,6 +294,145 @@ export class KitApi {
     });
     if (!outcome.committed || !outcome.events.some((e) => e.type === "SecondFactorProved")) return { ok: false, reason: "wrong_passkey" };
     return { ok: true, accessToken: issueAccessToken(this.keys, { sub: claims.sub, sid: claims.sid, fac: [...claims.fac, "passkey"] }) };
+  }
+
+  // --- OAuth/OIDC and SSO: the API does the exchange; the account decides. ---
+
+  private config(issuer: string, clientId: string, clientSecret: string): Promise<oidc.Configuration> {
+    const key = `${issuer}|${clientId}`;
+    let config = this.configs.get(key);
+    if (!config) {
+      const insecure = this.options.insecureIssuers ? { execute: [oidc.allowInsecureRequests] } : undefined;
+      config = oidc.discovery(new URL(issuer), clientId, clientSecret, undefined, insecure);
+      config.catch(() => this.configs.delete(key));
+      this.configs.set(key, config);
+    }
+    return config;
+  }
+
+  /** The provider's settings: a social one by name, or the SSO of the tenant that verified the email's domain. */
+  private async provider(by: { provider: string } | { email: string }): Promise<{ provider: string; issuer: string; clientId: string; clientSecret: string; tenant?: string; ssoId?: string } | null> {
+    if ("provider" in by) {
+      const p = this.options.providers?.[by.provider];
+      return p ? { provider: by.provider, ...p } : null;
+    }
+    try {
+      const domain = by.email.split("@")[1] ?? "";
+      const found = await this.kernable.query(FindSsoByDomain.new({ domain }), { tenant: PLATFORM_TENANT, context: this.serviceContext, allPartitions: true });
+      const secret = await this.kernable.query(GetSsoSecret.new({ ssoId: found.ssoId }), { tenant: found.tenant, context: this.serviceContext });
+      if (!secret.clientSecret) return null;
+      return { provider: `sso:${found.ssoId}`, issuer: secret.issuer, clientId: secret.clientId, clientSecret: secret.clientSecret, tenant: found.tenant, ssoId: found.ssoId };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Where to send the browser: a social provider by name, or a person's tenant SSO by their email.
+   * With `link`, the signed-in account links the login instead of signing in.
+   */
+  async oidcStart(by: { provider: string } | { email: string }, link?: Claims): Promise<{ ok: true; url: string } | { ok: false; reason: string }> {
+    const p = await this.provider(by);
+    if (!p || !this.options.redirectUri) return { ok: false, reason: "no_provider" };
+    const config = await this.config(p.issuer, p.clientId, p.clientSecret);
+    const verifier = oidc.randomPKCECodeVerifier();
+    const state = oidc.randomState();
+    const nonce = oidc.randomNonce();
+    const kept: OidcState = { provider: p.provider, tenant: p.tenant, ssoId: p.ssoId, verifier, nonce, ...(link ? { link: { accountId: link.sub } } : {}) };
+    await this.kernable.cache.set("account", `oidc:${state}`, JSON.stringify(kept), { ttlMs: CHALLENGE_SECONDS * 1000, tenant: PLATFORM_TENANT, context: this.serviceContext });
+    const url = oidc.buildAuthorizationUrl(config, {
+      redirect_uri: this.options.redirectUri, scope: "openid email", state, nonce,
+      code_challenge: await oidc.calculatePKCECodeChallenge(verifier), code_challenge_method: "S256",
+    });
+    return { ok: true, url: url.href };
+  }
+
+  /**
+   * The browser came back (`callback` is the full URL). Signs in a linked login; links a tenant SSO
+   * login to the account with the same verified email; registers a new person whose email nobody
+   * has; refuses a social login whose email has an account (`not_linked`: sign in and link it).
+   */
+  async oidcFinish(callback: string, ip?: string): Promise<SignInResult | { ok: true; linked: true }> {
+    const state = new URL(callback).searchParams.get("state") ?? "";
+    const raw = await this.kernable.cache.get("account", `oidc:${state}`, { tenant: PLATFORM_TENANT, context: this.serviceContext });
+    if (!raw || !(await this.kernable.cache.delete("account", `oidc:${state}`, { tenant: PLATFORM_TENANT, context: this.serviceContext }))) {
+      return { ok: false, reason: "invalid_state" };
+    }
+    const kept = JSON.parse(Buffer.from(raw).toString("utf8")) as OidcState;
+    const p = kept.ssoId
+      ? await this.ssoSettings(kept.tenant!, kept.ssoId)
+      : this.options.providers?.[kept.provider] ? { provider: kept.provider, ...this.options.providers[kept.provider] } : null;
+    if (!p) return { ok: false, reason: "no_provider" };
+    let claims: { sub: string; email?: string; email_verified?: boolean };
+    try {
+      const tokens = await oidc.authorizationCodeGrant(await this.config(p.issuer, p.clientId, p.clientSecret), new URL(callback), {
+        pkceCodeVerifier: kept.verifier, expectedState: state, expectedNonce: kept.nonce,
+      });
+      claims = tokens.claims() as typeof claims;
+    } catch {
+      return { ok: false, reason: "provider_refused" };
+    }
+    const email = claims.email ?? "";
+    const emailVerified = claims.email_verified === true;
+    if (kept.link) {
+      const linked = await this.kernable.submit(LinkProvider.new({ provider: kept.provider, subject: claims.sub, email }), {
+        aggregateId: kept.link.accountId, tenant: PLATFORM_TENANT, context: this.serviceContext,
+      });
+      return linked.committed ? { ok: true, linked: true } : { ok: false, reason: linked.code };
+    }
+    const find = async (q: FindAccountByLink | FindAccountByEmail) => {
+      try {
+        return (await this.kernable.query(q as FindAccountByLink, { tenant: PLATFORM_TENANT, context: this.serviceContext })).id;
+      } catch {
+        return null;
+      }
+    };
+    let accountId = (await find(FindAccountByLink.new({ provider: kept.provider, subject: claims.sub }))) ?? (email ? await find(FindAccountByEmail.new({ email })) : null);
+    const sso = kept.provider.startsWith("sso:");
+    if (!accountId) {
+      // A new person: registered (verified if the provider says so), the login linked.
+      if (!email) return { ok: false, reason: "no_email" };
+      accountId = randomUUID();
+      const registered = await this.kernable.submit(RegisterAccount.new({ email, name: email.split("@")[0], verified: emailVerified }), {
+        aggregateId: accountId, tenant: PLATFORM_TENANT, context: this.serviceContext,
+      });
+      if (!registered.committed) return { ok: false, reason: registered.code };
+      if (!sso) {
+        await this.kernable.submit(LinkProvider.new({ provider: kept.provider, subject: claims.sub, email }), { aggregateId: accountId, tenant: PLATFORM_TENANT, context: this.serviceContext });
+      }
+    }
+    const sessionId = randomUUID();
+    const refreshToken = token(sessionId, 1, randomSecret());
+    const outcome = await this.kernable.submit(
+      SignInWithProvider.new({ sessionId, provider: kept.provider, subject: claims.sub, email, emailVerified, autoLink: sso, refreshToken, ip }),
+      { aggregateId: accountId, tenant: PLATFORM_TENANT, context: this.serviceContext },
+    );
+    if (!outcome.committed) return { ok: false, reason: outcome.code };
+    const signedIn = outcome.events.find((e) => e.type === "SignedIn");
+    if (!signedIn) return { ok: false, reason: (outcome.events[0].data as SignInFailed).reason };
+    const d = signedIn.data as SignedIn;
+    return { ok: true, accountId, sessionId, refreshToken, secondFactor: d.mfa, accessToken: issueAccessToken(this.keys, { sub: accountId, sid: sessionId, fac: d.factors }) };
+  }
+
+  private async ssoSettings(tenant: string, ssoId: string) {
+    try {
+      const s = await this.kernable.query(GetSsoSecret.new({ ssoId }), { tenant, context: this.serviceContext });
+      return s.clientSecret ? { provider: `sso:${ssoId}`, issuer: s.issuer, clientId: s.clientId, clientSecret: s.clientSecret } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Looks for the SSO domain's TXT record (`_kernable-sso.<domain>`) and verifies the domain if it is there. */
+  async verifySsoDomain(tenant: string, ssoId: string, domain: string): Promise<{ ok: boolean; reason?: string }> {
+    let found: string[] = [];
+    try {
+      found = (await (this.options.resolveTxt ?? resolveTxt)(`_kernable-sso.${domain}`)).map((parts) => parts.join(""));
+    } catch {
+      // no record
+    }
+    const outcome = await this.kernable.submit(VerifySsoDomain.new({ domain, found }), { aggregateId: ssoId, tenant, context: this.serviceContext });
+    return outcome.committed ? { ok: true } : { ok: false, reason: outcome.code };
   }
 
   /** Changes the password; the other sessions end, this one stays. */

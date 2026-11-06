@@ -2174,6 +2174,219 @@
           "data": {}
         }
       ]
+    },
+    {
+      "name": "a tenant enforcing SSO refuses password sessions",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "sso_required",
+      "extra": [
+        {
+          "domain": "account",
+          "aggregateType": "sso",
+          "type": "SsoEnforcementChanged",
+          "tenant": "t1",
+          "aggregateId": "sso1",
+          "data": {
+            "enforced": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "... also reading one's own identity there",
+      "check": {
+        "kind": "query",
+        "tenant": "t1",
+        "domain": "identity",
+        "type": "GetIdentity",
+        "data": {
+          "identityId": "i-mem"
+        },
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "sso_required",
+      "extra": [
+        {
+          "domain": "account",
+          "aggregateType": "sso",
+          "type": "SsoEnforcementChanged",
+          "tenant": "t1",
+          "aggregateId": "sso1",
+          "data": {
+            "enforced": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "... and lets its SSO's sessions in",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem-sso",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "allow",
+      "extra": [
+        {
+          "domain": "account",
+          "aggregateType": "sso",
+          "type": "SsoEnforcementChanged",
+          "tenant": "t1",
+          "aggregateId": "sso1",
+          "data": {
+            "enforced": true
+          }
+        },
+        {
+          "domain": "account",
+          "aggregateType": "session",
+          "type": "SessionOpened",
+          "tenant": "platform",
+          "aggregateId": "s-mem-sso",
+          "data": {
+            "accountId": "a-mem",
+            "method": "sso:sso1",
+            "factors": [
+              "sso"
+            ],
+            "refreshTokenHash": "h",
+            "ip": null,
+            "userAgent": null,
+            "at": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "... its owners keep any session, to mend it",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderAccount": "a-own",
+          "senderSession": "s-own",
+          "senderTenant": "t1",
+          "senderIdentity": "i-own"
+        }
+      },
+      "expect": "allow",
+      "extra": [
+        {
+          "domain": "account",
+          "aggregateType": "sso",
+          "type": "SsoEnforcementChanged",
+          "tenant": "t1",
+          "aggregateId": "sso1",
+          "data": {
+            "enforced": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "a disabled SSO is no longer enforced",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "allow",
+      "extra": [
+        {
+          "domain": "account",
+          "aggregateType": "sso",
+          "type": "SsoEnforcementChanged",
+          "tenant": "t1",
+          "aggregateId": "sso1",
+          "data": {
+            "enforced": true
+          }
+        },
+        {
+          "domain": "account",
+          "aggregateType": "sso",
+          "type": "SsoDisabled",
+          "tenant": "t1",
+          "aggregateId": "sso1",
+          "data": {}
+        }
+      ]
+    },
+    {
+      "name": "one's own identity in a suspended tenant is not readable",
+      "check": {
+        "kind": "query",
+        "tenant": "t1",
+        "domain": "identity",
+        "type": "GetIdentity",
+        "data": {
+          "identityId": "i-mem"
+        },
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "tenant_suspended",
+      "extra": [
+        {
+          "domain": "tenancy",
+          "aggregateType": "tenant",
+          "type": "TenantSuspended",
+          "tenant": "t1",
+          "aggregateId": "t1",
+          "data": {
+            "reason": "unpaid",
+            "at": 1
+          }
+        }
+      ]
     }
   ]
 }

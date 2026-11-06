@@ -16,7 +16,8 @@ const COMMANDS: Record<string, string[]> = {
   "account.account": ["RegisterAccount", "RequestVerification", "VerifyEmail", "SignIn", "SuspendAccount", "ReactivateAccount", "DeleteAccount",
     "ChangePassword", "RequestPasswordReset", "ResetPassword", "RequestEmailChange", "ConfirmEmailChange", "NoteRegistrationAttempt",
     "StartTotp", "ConfirmTotp", "DisableTotp", "RegenerateRecoveryCodes", "ProveSecondFactor",
-    "AddPasskey", "RemovePasskey", "SignInWithPasskey", "ProvePasskey"],
+    "AddPasskey", "RemovePasskey", "SignInWithPasskey", "ProvePasskey", "SignInWithProvider", "LinkProvider", "UnlinkProvider"],
+  "account.sso": ["CreateSso", "UpdateSso", "AddSsoDomain", "VerifySsoDomain", "RemoveSsoDomain", "EnforceSso", "DisableSso", "EnableSso", "DeleteSso"],
   "account.session": ["OpenSession", "RefreshSession", "AddSessionFactor", "EndSession"],
   "identity.identity": [
     "CreateIdentity", "CreateServiceIdentity", "UpdateProfile", "GrantMembership", "SuspendMembership",
@@ -31,7 +32,8 @@ const COMMANDS: Record<string, string[]> = {
 
 const QUERIES: Record<string, string[]> = {
   "tenancy.tenants": ["GetTenant", "GetTenantBySlug", "ListTenants", "GetSignUpPolicy"],
-  "account.accounts": ["FindAccountByEmail", "GetAccount", "ListSessions"],
+  "account.accounts": ["FindAccountByEmail", "GetAccount", "ListSessions", "FindAccountByLink"],
+  "account.ssos": ["FindSsoByDomain", "GetSsoSecret", "GetSso"],
   "identity.identities": ["GetIdentity", "ListIdentities", "ListMyIdentities", "FindIdentityByAccount", "FindApiKey"],
   "group.groups": ["ListGroups", "GetGroup"],
   "invitation.invitations": ["ListInvitations", "PeekInvitation"],

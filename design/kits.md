@@ -440,3 +440,11 @@ The set's listeners take kernable's reserved orders: the authorization middlewar
 3. **Refusals are logged and counted** (metrics), not stored as events: a stream of refused requests must not fill the log.
 4. **The index is kept in a store** (the SDK's SQLite listener store), so a restart resumes instead of replaying the whole log while every request is refused.
 5. **Escalation is judged conservatively**: only the sender's permissions without scope and `when` count as held.
+
+## Found while building (to confirm)
+
+- **An account with TOTP on needs it in every session**, not only in tenants that require MFA; one line in `policy.ts` to narrow it.
+- **Owners are exempt from enforced SSO**, so a broken SSO can be mended; everyone else in the tenant needs an SSO session.
+- **Oneself, for an identity, after the tenant's checks**: reading one's own identity in a suspended tenant, or with enforced SSO, is refused like anything else (found by the SSO test; the account and its sessions stay reachable).
+- **The API's key needs `cache` on `account`** (passkey challenges and OIDC state live a few minutes in the kernable cache).
+- **Every `events.ts` declares its events on its domain**, so an event without `apply` is known too.

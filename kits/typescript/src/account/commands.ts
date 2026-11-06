@@ -5,9 +5,9 @@ import { verifyAuthenticationResponse, verifyRegistrationResponse, type Authenti
 
 import { DAY, HOUR, SESSION_IDLE_DAYS, SESSION_MAX_DAYS, VERIFICATION_HOURS, MINUTE, RESET_MINUTES, PASSKEYS } from "../shared/constants.ts";
 import { checkPassword, equalSecrets, hashPassword, normalEmail, parseToken, randomSecret, sha256, validEmail, validPassword, totpStep } from "../shared/secrets.ts";
-import { type Account, accountAggregate, lockedUntil, sessionAggregate } from "./aggregates.ts";
+import { type Account, accountAggregate, lockedUntil, sessionAggregate, ssoAggregate } from "./aggregates.ts";
 import { ACCOUNT_SUSPENSION_REASONS, type AccountSuspensionReason, type SessionEnd } from "./domain.ts";
-import { PasskeyAdded, PasskeyRemoved, PasskeyUsed, RecoveryCodesGenerated, SecondFactorFailed, SecondFactorProved, TotpConfirmed, TotpDisabled, TotpStarted, EmailChangeRequested, EmailChanged, PasswordChanged, PasswordReset, PasswordResetRequested, RegistrationAttempted, AccountDeleted, AccountReactivated, AccountSuspended, AccountRegistered, EmailVerified, SessionEnded, SessionFactorAdded, SessionOpened, SessionRefreshed, SignedIn, SignInFailed, VerificationRequested } from "./events.ts";
+import { ProviderLinked, ProviderUnlinked, SsoCreated, SsoDeleted, SsoDisabled, SsoDomainAdded, SsoDomainRemoved, SsoDomainVerified, SsoEnabled, SsoEnforcementChanged, SsoUpdated, PasskeyAdded, PasskeyRemoved, PasskeyUsed, RecoveryCodesGenerated, SecondFactorFailed, SecondFactorProved, TotpConfirmed, TotpDisabled, TotpStarted, EmailChangeRequested, EmailChanged, PasswordChanged, PasswordReset, PasswordResetRequested, RegistrationAttempted, AccountDeleted, AccountReactivated, AccountSuspended, AccountRegistered, EmailVerified, SessionEnded, SessionFactorAdded, SessionOpened, SessionRefreshed, SignedIn, SignInFailed, VerificationRequested } from "./events.ts";
 
 /** Internal: after a second factor was proved on the account. */
 export class AddSessionFactor extends Command {
@@ -353,8 +353,9 @@ accountAggregate.command(ProveSecondFactor, (s, d, _cmd, ctx) => {
 });
 
 /** Whether the account keeps another way to sign in without `except` (never remove the last one). */
-function anotherMethod(s: Account, except: { passkey?: string }): boolean {
-  return s.password !== null || s.passkeys.some((p) => p.credentialId !== except.passkey);
+function anotherMethod(s: Account, except: { passkey?: string; link?: { provider: string; subject: string } }): boolean {
+  return s.password !== null || s.passkeys.some((p) => p.credentialId !== except.passkey) ||
+    s.links.some((l) => !(except.link && l.provider === except.link.provider && l.subject === except.link.subject));
 }
 
 /**
@@ -457,4 +458,180 @@ accountAggregate.command(ProvePasskey, async (s, d, _cmd, ctx) => {
   const ok = await asserted(s, d.challenge, d.response);
   if (!ok) return [SecondFactorFailed.new({ sessionId: d.sessionId, at: ctx.now().getTime() })];
   return [PasskeyUsed.new(ok), SecondFactorProved.new({ sessionId: d.sessionId, method: "passkey", step: null, recoveryCodeHash: null })];
+});
+
+function provider(value: unknown): string {
+  if (typeof value !== "string" || !/^(sso:[\w-]+|[a-z][\w-]{1,40})$/.test(value)) throw new Rejected("A provider is a name, or sso:<id>", "invalid_provider");
+  return value;
+}
+
+/**
+ * The API's: it did the OAuth/OIDC exchange and checked the ID token. A linked login signs in;
+ * an unlinked one is linked first only for a tenant's SSO whose domain the tenant verified
+ * (`autoLink`, which the API sets) and the same verified email. Else `not_linked`.
+ */
+export class SignInWithProvider extends Command {
+  static secret: (keyof SignInWithProvider)[] = ["refreshToken", "ip", "userAgent", "subject", "email"];
+  sessionId!: string;
+  provider!: string;
+  subject!: string;
+  email?: string;
+  emailVerified?: boolean;
+  autoLink?: boolean;
+  refreshToken!: string;
+  ip?: string;
+  userAgent?: string;
+}
+
+accountAggregate.command(SignInWithProvider, (s, d, _cmd, ctx) => {
+  const at = ctx.now().getTime();
+  const p = provider(d.provider);
+  const failed = (reason: SignInFailed["reason"]) => [SignInFailed.new({ method: p, reason, ip: d.ip ?? null, at })];
+  if (s.status === "none" || s.status === "deleted") throw new Rejected("No such account", "not_found");
+  const refresh = parseToken(d.refreshToken);
+  if (!refresh || refresh[0] !== d.sessionId || refresh[1] !== "1") throw new Rejected("A malformed refresh token", "invalid_token");
+  if (typeof d.subject !== "string" || !d.subject) throw new Rejected("Which subject?", "invalid_subject");
+  if (s.status !== "active") return failed("not_active");
+  const linked = s.links.some((l) => l.provider === p && l.subject === d.subject);
+  const autoLink = !linked && d.autoLink === true && d.emailVerified === true && normalEmail(d.email) === s.email;
+  if (!linked && !autoLink) return failed("not_linked");
+  const signedIn = SignedIn.new({
+    sessionId: d.sessionId, method: p, factors: [p.startsWith("sso:") ? "sso" : "provider"], refreshTokenHash: sha256(d.refreshToken),
+    ip: d.ip ?? null, userAgent: d.userAgent ?? null, mfa: s.totp?.confirmed === true, at,
+  });
+  return autoLink ? [ProviderLinked.new({ provider: p, subject: d.subject, email: normalEmail(d.email), at }), signedIn] : [signedIn];
+});
+
+/** The account's own, through the API (it checked the provider's answer): links an external login. */
+export class LinkProvider extends Command {
+  static secret: (keyof LinkProvider)[] = ["subject", "email"];
+  provider!: string;
+  subject!: string;
+  email?: string;
+}
+
+accountAggregate.command(LinkProvider, (s, d, _cmd, ctx) => {
+  if (s.status !== "active") throw new Rejected("The account is not active", "invalid_state");
+  const p = provider(d.provider);
+  if (typeof d.subject !== "string" || !d.subject) throw new Rejected("Which subject?", "invalid_subject");
+  if (s.links.some((l) => l.provider === p && l.subject === d.subject)) throw new Rejected("Linked already", "exists");
+  return [ProviderLinked.new({ provider: p, subject: d.subject, email: d.email ? normalEmail(d.email) : null, at: ctx.now().getTime() })];
+});
+
+export class UnlinkProvider extends Command {
+  static secret: (keyof UnlinkProvider)[] = ["subject"];
+  provider!: string;
+  subject!: string;
+}
+
+accountAggregate.command(UnlinkProvider, (s, d) => {
+  if (!s.links.some((l) => l.provider === d.provider && l.subject === d.subject)) throw new Rejected("Not linked", "not_found");
+  if (!anotherMethod(s, { link: { provider: d.provider, subject: d.subject } })) throw new Rejected("The last way to sign in stays", "last_method");
+  return [ProviderUnlinked.new({ provider: d.provider, subject: d.subject })];
+});
+
+// --- account.sso ---
+
+function issuer(value: unknown): string {
+  if (typeof value !== "string" || !/^https?:\/\/[^\s]+$/.test(value)) throw new Rejected("An issuer URL", "invalid_issuer");
+  return value.replace(/\/$/, "");
+}
+
+function ssoDomain(value: unknown): string {
+  const d = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (!/^([a-z0-9](-?[a-z0-9])*\.)+[a-z]{2,}$/.test(d)) throw new Rejected("A domain name", "invalid_domain");
+  return d;
+}
+
+/** The tenant's owners: an OIDC provider for the tenant's people. Its ID is chosen by the caller. */
+export class CreateSso extends Command {
+  static secret: (keyof CreateSso)[] = ["clientSecret"];
+  issuer!: string;
+  clientId!: string;
+  clientSecret!: string;
+}
+
+ssoAggregate.command(CreateSso, (s, d) => {
+  if (s.status !== "none") throw new Rejected("The SSO exists", "exists");
+  if (typeof d.clientId !== "string" || !d.clientId || typeof d.clientSecret !== "string" || !d.clientSecret) throw new Rejected("A client ID and secret", "invalid_client");
+  return [SsoCreated.new({ issuer: issuer(d.issuer), clientId: d.clientId, clientSecret: d.clientSecret })];
+});
+
+export class UpdateSso extends Command {
+  static secret: (keyof UpdateSso)[] = ["clientSecret"];
+  issuer!: string;
+  clientId!: string;
+  clientSecret!: string;
+}
+
+ssoAggregate.command(UpdateSso, (s, d) => {
+  if (s.status !== "active" && s.status !== "disabled") throw new Rejected("No such SSO", "not_found");
+  return [SsoUpdated.new({ issuer: issuer(d.issuer), clientId: d.clientId, clientSecret: d.clientSecret })];
+});
+
+/** A domain whose people sign in through this SSO, once the DNS proves the tenant holds it. */
+export class AddSsoDomain extends Command {
+  domain!: string;
+}
+
+ssoAggregate.command(AddSsoDomain, (s, d) => {
+  if (s.status !== "active" && s.status !== "disabled") throw new Rejected("No such SSO", "not_found");
+  const domain = ssoDomain(d.domain);
+  if (s.domains.some((x) => x.domain === domain)) throw new Rejected("Added already", "exists");
+  return [SsoDomainAdded.new({ domain, txt: `kernable-sso=${randomSecret(18)}` })];
+});
+
+/** The API's: it found the TXT record at `_kernable-sso.<domain>`. */
+export class VerifySsoDomain extends Command {
+  domain!: string;
+  /** The TXT values the API found. */
+  found!: string[];
+}
+
+ssoAggregate.command(VerifySsoDomain, (s, d) => {
+  const x = s.domains.find((y) => y.domain === d.domain);
+  if (!x) throw new Rejected("No such domain", "not_found");
+  if (x.verified) return [];
+  if (!Array.isArray(d.found) || !d.found.includes(x.txt)) throw new Rejected("The TXT record is not there", "not_verified");
+  return [SsoDomainVerified.new({ domain: x.domain })];
+});
+
+export class RemoveSsoDomain extends Command {
+  domain!: string;
+}
+
+ssoAggregate.command(RemoveSsoDomain, (s, d) => {
+  if (!s.domains.some((y) => y.domain === d.domain)) throw new Rejected("No such domain", "not_found");
+  return [SsoDomainRemoved.new({ domain: d.domain })];
+});
+
+export class EnforceSso extends Command {
+  enforced!: boolean;
+}
+
+ssoAggregate.command(EnforceSso, (s, d) => {
+  if (s.status !== "active") throw new Rejected("Only an active SSO is enforced", "invalid_state");
+  return [SsoEnforcementChanged.new({ enforced: d.enforced === true })];
+});
+
+export class DisableSso extends Command {}
+
+ssoAggregate.command(DisableSso, (s) => {
+  if (s.status !== "active") throw new Rejected("Only an active SSO is disabled", "invalid_state");
+  return s.enforced ? [SsoEnforcementChanged.new({ enforced: false }), SsoDisabled.new()] : [SsoDisabled.new()];
+});
+
+export class EnableSso extends Command {}
+
+ssoAggregate.command(EnableSso, (s) => {
+  if (s.status !== "disabled") throw new Rejected("Only a disabled SSO is enabled", "invalid_state");
+  return [SsoEnabled.new()];
+});
+
+/** Erases the client secret. */
+export class DeleteSso extends Command {}
+
+ssoAggregate.command(DeleteSso, (s) => {
+  if (s.status === "none" || s.status === "deleted") throw new Rejected("No such SSO", "not_found");
+  return [SsoDeleted.new()];
 });
