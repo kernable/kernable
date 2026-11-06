@@ -1,20 +1,11 @@
-// Registers every part of the account domain: a part that is not imported here does not exist.
-
-import "./aggregate/account.ts";
-import "./aggregate/session.ts";
-import "./command/register.ts";
-import "./command/request-verification.ts";
-import "./command/verify-email.ts";
-import "./command/sign-in.ts";
-import "./command/open-session.ts";
-import "./command/refresh-session.ts";
-import "./command/add-session-factor.ts";
-import "./command/end-session.ts";
-import "./readmodel/accounts.ts";
-import "./query/find-by-email.ts";
-import "./query/get.ts";
-import "./reactor/sessions.ts";
-import "./reactor/mail.ts";
+// Registers every part of the account domain (a part not imported here does not exist) and
+// exports what other domains and clients use.
 
 export { accountDomain } from "./domain.ts";
 export type * from "./domain.ts";
+export * from "./events.ts";
+export { accountAggregate, lockedUntil, type Account, sessionAggregate, type Session } from "./aggregates.ts";
+export { RegisterAccount, RequestVerification, VerifyEmail, SignIn, OpenSession, RefreshSession, AddSessionFactor, EndSession } from "./commands.ts";
+export { accountsReadModel, type AccountRow } from "./readmodels.ts";
+export { FindAccountByEmail, GetAccount } from "./queries.ts";
+export { sessionsReactor, mailReactor } from "./reactors.ts";

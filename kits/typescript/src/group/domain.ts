@@ -15,13 +15,3 @@ export interface Permission {
   when?: string;
   viaParent?: boolean;
 }
-
-export interface Group {
-  status: "none" | "active" | "deleted";
-  name?: string;
-  description?: string;
-  permissions: Permission[];
-}
-
-// Event payloads.
-export interface GroupCreated { name: string; description: string; permissions: Permission[] }

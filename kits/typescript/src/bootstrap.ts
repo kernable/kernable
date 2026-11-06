@@ -3,11 +3,12 @@
 
 import { randomBytes } from "node:crypto";
 
-import type { Kernable, Outcome, RequestContext } from "@kernable/sdk";
+import type { Command, Kernable, Outcome, RequestContext } from "@kernable/sdk";
 
+import { CreateGroup } from "./group/index.ts";
+import { CreateApiKey, CreateServiceIdentity, GrantMembership, apiKey } from "./identity/index.ts";
 import { PLATFORM_TENANT } from "./shared/constants.ts";
-import type { SignUpPolicy } from "./tenancy/domain.ts";
-import { apiKey } from "./identity/domain.ts";
+import { ChangeSignUpPolicy, CreateTenant, type SignUpPolicy } from "./tenancy/index.ts";
 
 /** What the API may ask for itself: lookups before anyone is signed in. */
 export const API_PERMISSIONS = [
@@ -35,20 +36,17 @@ function ok(outcome: Outcome): void {
 export async function bootstrap(kernable: Kernable, options: { signUp: SignUpPolicy; platformName?: string }): Promise<Bootstrapped> {
   const context: RequestContext = { bypassAuthorization: true };
   const tenant = PLATFORM_TENANT;
-  const submit = (domain: string, aggregateType: string, aggregateId: string, type: string, data: unknown) =>
-    kernable.submit({ id: `bootstrap-${domain}-${aggregateId}-${type}`, domain, aggregateType, aggregateId, tenant, type, data, context }).then(ok);
+  const submit = (command: Command, aggregateId: string, id?: string) =>
+    kernable.submit(command, { id: id ?? `bootstrap-${command.constructor.name}-${aggregateId}`, aggregateId, tenant, context }).then(ok);
 
-  await submit("tenancy", "tenant", tenant, "CreateTenant", { slug: "platform", name: options.platformName ?? "Platform", owner: {} });
-  await submit("tenancy", "tenant", tenant, "ChangeSignUpPolicy", options.signUp);
+  await submit(CreateTenant.new({ slug: "platform", name: options.platformName ?? "Platform", owner: { email: "" } }), tenant);
+  await submit(ChangeSignUpPolicy.new(options.signUp), tenant);
   const identityId = "api";
-  await submit("identity", "identity", identityId, "CreateServiceIdentity", { displayName: "API" });
-  await submit("group", "group", "api", "CreateGroup", { name: "api", description: "What the API asks for itself", permissions: API_PERMISSIONS });
-  await submit("identity", "identity", identityId, "GrantMembership", { membershipId: "api", group: "api" });
+  await submit(CreateServiceIdentity.new({ displayName: "API" }), identityId);
+  await submit(CreateGroup.new({ name: "api", description: "What the API asks for itself", permissions: API_PERMISSIONS }), "api");
+  await submit(GrantMembership.new({ membershipId: "api", group: "api" }), identityId);
   const keyId = randomBytes(8).toString("hex");
   const secret = randomBytes(32).toString("base64url");
-  await kernable.submit({
-    domain: "identity", aggregateType: "identity", aggregateId: identityId, tenant, type: "CreateApiKey",
-    data: { keyId, secret, label: "API" }, context,
-  }).then(ok);
+  await submit(CreateApiKey.new({ keyId, secret, label: "API" }), identityId, randomBytes(8).toString("hex"));
   return { api: { identityId, keyId, key: apiKey(keyId, secret) } };
 }

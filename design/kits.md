@@ -12,7 +12,8 @@ Status: decided, not built. The kits are the open set of tenancy, accounts, iden
 - **Personal and secret fields** are marked; they go to the vault (`personal`, subject named) or are `secret`.
 - **Levels**: `public`, `authenticated`, `platform` (platform groups only), or a group permission (`tenancy.RenameTenant`); `owners` hold every permission in their tenant.
 - **Constants** a customer may change in the copy are named in capitals.
-- **Layout**: per domain `domain.ts` (the domain object, types, vault declarations), `aggregate/` (state, apply, unique keys, facts), `command/` (one command per file), `readmodel/` (rows and event handlers), `query/` (one query per file), `reactor/`, and `index.ts`, which imports every part: a part it does not import does not exist (a test checks the catalogue against it).
+- **Events, commands and queries are classes** (`class TenantCreated extends Event { slug!: string; … }`, `extends Command`, `extends Query<Answer>`), defined once and used by reference: `apply(TenantCreated, …)`, `command(CreateTenant, …)`, `TenantCreated.new({ … })` (checked; the constructor is protected), `on(TenantCreated, …)`, `query(GetTenant, …)`, `kernable.submit(CreateTenant.new({ … }), { aggregateId })`, `kernable.query(GetTenant.new({ … }))`. The class name is the type; statics carry `version`, `upcasts`, `personal`, `erases` and `secret`. No type name is written as a string.
+- **Layout**: one file per kind and domain, no subfolders: `domain.ts` (the domain object, shared types), `events.ts`, `aggregates.ts`, `commands.ts` (each command class with its handler), `readmodels.ts`, `queries.ts` (each query class with its handler), `reactors.ts`, and `index.ts`, which imports every part and exports what others use (a test checks the catalogue against the registrations).
 
 ## tenancy
 

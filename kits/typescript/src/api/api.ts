@@ -5,6 +5,8 @@ import { randomUUID } from "node:crypto";
 
 import type { Kernable, Outcome, RequestContext, StoredEvent } from "@kernable/sdk";
 
+import { EndSession, FindAccountByEmail, RegisterAccount, SignIn, VerifyEmail, type SignInFailed, type SignedIn } from "../account/index.ts";
+import { FindIdentityByAccount } from "../identity/index.ts";
 import { PLATFORM_TENANT } from "../shared/constants.ts";
 import { parseToken, randomSecret, token } from "../shared/secrets.ts";
 import { checkAccessToken, issueAccessToken, type Claims, type SigningKeys } from "./tokens.ts";
@@ -50,10 +52,7 @@ export class KitApi {
    */
   async register(input: { email: string; name: string; password?: string }): Promise<{ accountId: string } | { ok: false; code: string }> {
     const accountId = randomUUID();
-    const outcome = await this.kernable.submit({
-      domain: "account", aggregateType: "account", aggregateId: accountId, tenant: PLATFORM_TENANT,
-      type: "RegisterAccount", data: input, context: {},
-    });
+    const outcome = await this.kernable.submit(RegisterAccount.new(input), { aggregateId: accountId, tenant: PLATFORM_TENANT, context: {} });
     if (outcome.committed) return { accountId };
     // A taken email: the same answer as success (a mail to the existing account is still to do).
     if (outcome.code === "unique_taken") return { accountId: randomUUID() };
@@ -64,10 +63,7 @@ export class KitApi {
   async verifyEmail(emailToken: string): Promise<boolean> {
     const parts = parseToken(emailToken);
     if (!parts) return false;
-    const outcome = await this.kernable.submit({
-      domain: "account", aggregateType: "account", aggregateId: parts[0], tenant: PLATFORM_TENANT,
-      type: "VerifyEmail", data: { token: emailToken }, context: {},
-    });
+    const outcome = await this.kernable.submit(VerifyEmail.new({ token: emailToken }), { aggregateId: parts[0], tenant: PLATFORM_TENANT, context: {} });
     return outcome.committed;
   }
 
@@ -75,23 +71,19 @@ export class KitApi {
   async signIn(input: { email: string; password: string; ip?: string; userAgent?: string }): Promise<SignInResult> {
     let account: { id: string };
     try {
-      account = await this.kernable.query({
-        domain: "account", type: "FindAccountByEmail", data: { email: input.email }, tenant: PLATFORM_TENANT,
-        context: this.serviceContext,
-      });
+      account = await this.kernable.query(FindAccountByEmail.new({ email: input.email }), { tenant: PLATFORM_TENANT, context: this.serviceContext });
     } catch {
       return { ok: false, reason: "wrong_password" }; // never say whether the account exists
     }
     const sessionId = randomUUID();
     const refreshToken = token(sessionId, 1, randomSecret());
-    const outcome = await this.kernable.submit({
-      domain: "account", aggregateType: "account", aggregateId: account.id, tenant: PLATFORM_TENANT,
-      type: "SignIn", context: {},
-      data: { sessionId, password: input.password, refreshToken, ip: input.ip, userAgent: input.userAgent },
-    });
+    const outcome = await this.kernable.submit(
+      SignIn.new({ sessionId, password: input.password, refreshToken, ip: input.ip, userAgent: input.userAgent }),
+      { aggregateId: account.id, tenant: PLATFORM_TENANT, context: {} },
+    );
     const [event] = events(outcome);
-    if (event.type !== "SignedIn") return { ok: false, reason: (event.data as { reason: string }).reason };
-    const factors = (event.data as { factors: string[] }).factors;
+    if (event.type !== "SignedIn") return { ok: false, reason: (event.data as SignInFailed).reason };
+    const factors = (event.data as SignedIn).factors;
     return {
       ok: true, accountId: account.id, sessionId, refreshToken,
       accessToken: issueAccessToken(this.keys, { sub: account.id, sid: sessionId, fac: factors }),
@@ -110,18 +102,14 @@ export class KitApi {
   async contextFor(claims: Claims, tenant?: string): Promise<RequestContext> {
     const context: RequestContext = { senderAccount: claims.sub, senderSession: claims.sid };
     if (!tenant) return context;
-    const found = await this.kernable.query<{ identityId: string }>({
-      domain: "identity", type: "FindIdentityByAccount", data: { accountId: claims.sub }, tenant,
-      context: this.serviceContext,
-    });
+    const found = await this.kernable.query(FindIdentityByAccount.new({ accountId: claims.sub }), { tenant, context: this.serviceContext });
     return { ...context, senderTenant: tenant, senderIdentity: found.identityId };
   }
 
   /** Signs out: ends the session. */
   async signOut(claims: Claims): Promise<void> {
-    events(await this.kernable.submit({
-      domain: "account", aggregateType: "session", aggregateId: claims.sid, tenant: PLATFORM_TENANT,
-      type: "EndSession", data: { reason: "signed_out" }, context: { senderAccount: claims.sub, senderSession: claims.sid },
+    events(await this.kernable.submit(EndSession.new({ reason: "signed_out" }), {
+      aggregateId: claims.sid, tenant: PLATFORM_TENANT, context: { senderAccount: claims.sub, senderSession: claims.sid },
     }));
   }
 }
