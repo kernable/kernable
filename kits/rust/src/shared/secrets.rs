@@ -20,6 +20,22 @@ pub fn random_secret(size: usize) -> String {
     BASE64URL_NOPAD.encode(&random_bytes(size))
 }
 
+/// A new random ID in the UUID v4 form, e.g. for an aggregate a reactor creates.
+pub fn new_id() -> String {
+    let mut b = random_bytes(16);
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h = HEXLOWER.encode(&b);
+    format!(
+        "{}-{}-{}-{}-{}",
+        &h[..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..]
+    )
+}
+
 /// SHA-256 in hex: how high-entropy tokens are stored (refresh tokens, API keys, recovery codes).
 pub fn sha256(value: &str) -> String {
     HEXLOWER.encode(&Sha256::digest(value.as_bytes()))

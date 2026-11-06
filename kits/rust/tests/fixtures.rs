@@ -165,6 +165,15 @@ fn aggregates() -> BTreeMap<String, Runner> {
     all.insert("account.account".into(), runner(account.account));
     all.insert("account.session".into(), runner(account.session));
     all.insert("account.sso".into(), runner(account.sso));
+    all.insert("group.group".into(), runner(kit::group::group().group));
+    all.insert(
+        "identity.identity".into(),
+        runner(kit::identity::identity().identity),
+    );
+    all.insert(
+        "invitation.invitation".into(),
+        runner(kit::invitation::invitation().invitation),
+    );
     all
 }
 

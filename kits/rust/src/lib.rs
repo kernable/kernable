@@ -21,6 +21,9 @@ macro_rules! on {
 }
 
 pub mod account;
+pub mod group;
+pub mod identity;
+pub mod invitation;
 pub mod shared;
 pub mod tenancy;
 
@@ -28,5 +31,11 @@ use kernable::Domain;
 
 /// Every domain of the kit, built anew, ready for an app: `kernable.app(App::new("kit").domains(kit_domains()))`.
 pub fn kit_domains() -> Vec<Domain> {
-    vec![tenancy::tenancy().domain, account::account().domain]
+    vec![
+        tenancy::tenancy().domain,
+        account::account().domain,
+        group::group().domain,
+        identity::identity().domain,
+        invitation::invitation().domain,
+    ]
 }
