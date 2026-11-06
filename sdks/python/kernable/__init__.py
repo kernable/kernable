@@ -60,7 +60,7 @@ from .messages import (  # noqa: E402
     declare_event as _declare_event, from_wire as _from_wire, is_message_class as _is_message_class, to_wire as _to_wire,
 )
 
-__all__ = ["PROTOCOL", "Event", "Command", "Query", "StoredEvent", "Aggregate", "AggregateType", "App", "ApplyContext", "CacheClient", "Check", "ClientClosed", "CommandContext", "CommandMeta",
+__all__ = ["PROTOCOL", "Event", "Command", "Query", "StoredEvent", "Aggregate", "AggregateType", "MiddlewareContext", "App", "ApplyContext", "CacheClient", "Check", "ClientClosed", "CommandContext", "CommandMeta",
            "CommandSchema",
            "Data", "DataClient", "Domain", "Listed", "Listing",
            "EventMeta", "EventSchema", "HeldKey", "Index", "Kernable", "Key", "Listener", "ListenerContext", "ListenerHandle", "Manifest", "NotSettled", "Outcome",
@@ -216,6 +216,14 @@ class QueryContext:
     #: Who asks: check permissions here.
     request: RequestContext
     #: The listener's store, if it has one (`store=` of `Domain.read_model` and `Domain.reactor`).
+    store: "Store | None" = None
+
+
+@dataclass
+class MiddlewareContext:
+    """What a middleware handler gets besides the check (an optional third parameter)."""
+
+    #: The listener's store, if it has one.
     store: "Store | None" = None
 
 
@@ -2714,7 +2722,8 @@ class Listener:
         every command and query of `types` (`*` for all, `Type` of the own domain, `domain.*` or
         `domain.Type`) before accepting or routing it (or after, see `when`), in chain order (lower
         `order` first, then by listener name), and only once this listener has caught up with the
-        events. `fn(check, outcome)` gets a `Check` and, after, what came of it (optional): an
+        events. `fn(check, outcome, ctx)` gets a `Check`, after the request what came of it, and a
+`MiddlewareContext` with the listener's store (both optional): an
         `Outcome` for a command, a `QueryOutcome` for a query (`check.kind` tells which); before,
         None. `types` cover file and cache requests too, before they run: `domain.PutData`,
         `.GetData`, `.DeleteData`, `.SetCache`, `.GetCache` and `.DeleteCache` (and `domain.*` or
@@ -3076,7 +3085,7 @@ class ListenerHandle(_Stream):
             middleware = self.listener._middlewares.get(when)
             if middleware is None:
                 raise Rejected(f"no middleware {when}", "not_a_middleware")
-            verdict = _call(middleware[1], _to_check(call), _to_outcome(call) if when == "after" else None)
+            verdict = _call(middleware[1], _to_check(call), _to_outcome(call) if when == "after" else None, MiddlewareContext(self.store))
             if verdict is False:
                 raise Rejected(f"refused by {self.listener.name}", "refused")
             if verdict is not None and verdict is not True:
