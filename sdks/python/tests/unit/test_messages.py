@@ -19,7 +19,7 @@ class CartCleared(Event):
 
 
 class AddItem(Command):
-    secret = ["coupon_code"]
+    vault = {"secret": ["coupon_code"]}
     sku: str
     item_count: int
     coupon_code: str | None = None

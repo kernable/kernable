@@ -3,8 +3,9 @@
 Every subclass of `Event`, `Command` and `Query` is a keyword-only dataclass, without
 `@dataclass`. The class name is its type; class attributes (`ClassVar`, or plain assignments
 without an annotation) declare what `Domain.event` and `Domain.command` declare: `version`,
-`upcasts`, `personal`, `erases`, `secret`, `raw` (fields passed through as they are, e.g. a
-browser's WebAuthn answer), and `type` to override the name.
+`upcasts`, `vault` (a dict with `personal`, `secret` and, for an event, `erases`: kept apart from
+the fields, so a field may be called `secret` too), `raw` (fields passed through as they are,
+e.g. a browser's WebAuthn answer), and `type` to override the name.
 
 Fields are snake_case in Python and camelCase in the log (`account_id` is `accountId`), so a
 Python and a TypeScript process write and read the same events. Nested dicts are converted too,
@@ -150,9 +151,10 @@ def declare_event(cls: type, events: dict, make_schema: Callable[[str, int], Any
         spec = make_schema(name, int(getattr(cls, "version", 1)))
         for start, fn in sorted((getattr(cls, "upcasts", None) or {}).items()):
             spec.upcast(int(start), (lambda f: lambda d: to_wire(f(from_wire(d))))(fn))
-        for p in getattr(cls, "personal", None) or []:
+        vault = getattr(cls, "vault", None) or {}
+        for p in vault.get("personal", []):
             spec.personal([camel(f) for f in p["fields"]], _snake_subject(p["subject"]))
-        erases = getattr(cls, "erases", None)
+        erases = vault.get("erases")
         if erases:
             spec.erases(_snake_subject(erases))
         events[name] = spec
@@ -164,9 +166,10 @@ def declare_command(cls: type, commands: dict, make_schema: Callable[[str], Any]
     name = cls.type_name()
     if name not in commands:
         spec = make_schema(name)
-        for p in getattr(cls, "personal", None) or []:
+        vault = getattr(cls, "vault", None) or {}
+        for p in vault.get("personal", []):
             spec.personal([camel(f) for f in p["fields"]], _snake_subject(p["subject"]))
-        secret = getattr(cls, "secret", None)
+        secret = vault.get("secret")
         if secret:
             spec.secret([camel(f) for f in secret])
         commands[name] = spec

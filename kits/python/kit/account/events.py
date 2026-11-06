@@ -16,7 +16,7 @@ def _of_account(d, _id):
 
 
 class AccountRegistered(Event):
-    personal = [{"fields": ["email", "name", "password_hash"], "subject": own}]
+    vault = {"personal": [{"fields": ["email", "name", "password_hash"], "subject": own}]}
     email: str | None
     name: str | None
     #: argon2id; None for an account without a password (passkeys, single sign-on).
@@ -28,7 +28,7 @@ class AccountRegistered(Event):
 
 class VerificationRequested(Event):
     """The token stays in the vault under its own subject until it is used."""
-    personal = [{"fields": ["email"], "subject": own}, {"fields": ["token"], "subject": _token}]
+    vault = {"personal": [{"fields": ["email"], "subject": own}, {"fields": ["token"], "subject": _token}]}
     token_id: str
     token: str | None
     email: str | None
@@ -37,12 +37,12 @@ class VerificationRequested(Event):
 
 class EmailVerified(Event):
     """Erases the used token."""
-    erases = _token
+    vault = {"erases": _token}
     token_id: str
 
 
 class SignedIn(Event):
-    personal = [{"fields": ["ip", "user_agent"], "subject": own}]
+    vault = {"personal": [{"fields": ["ip", "user_agent"], "subject": own}]}
     session_id: str
     method: str
     factors: list[str]
@@ -56,7 +56,7 @@ class SignedIn(Event):
 
 class SignInFailed(Event):
     """An event, not a rejection: audited, and it counts toward the lockout."""
-    personal = [{"fields": ["ip"], "subject": own}]
+    vault = {"personal": [{"fields": ["ip"], "subject": own}]}
     method: str
     reason: Literal["wrong_password", "locked", "not_verified", "not_active", "not_linked"]
     ip: str | None
@@ -64,7 +64,7 @@ class SignInFailed(Event):
 
 
 class SessionOpened(Event):
-    personal = [{"fields": ["ip", "user_agent"], "subject": _of_account}]
+    vault = {"personal": [{"fields": ["ip", "user_agent"], "subject": _of_account}]}
     account_id: str
     method: str
     factors: list[str]
@@ -75,7 +75,7 @@ class SessionOpened(Event):
 
 
 class SessionRefreshed(Event):
-    personal = [{"fields": ["ip"], "subject": _of_account}]
+    vault = {"personal": [{"fields": ["ip"], "subject": _of_account}]}
     generation: int
     refresh_token_hash: str
     ip: str | None
@@ -105,19 +105,19 @@ class AccountReactivated(Event):
 
 class AccountDeleted(Event):
     """Erases the account's personal data, in its events and its sessions'."""
-    erases = own
+    vault = {"erases": own}
 
 
 class PasswordChanged(Event):
     """Ends the account's other sessions (a reactor); `keep_session_id` is the one it was changed from."""
-    personal = [{"fields": ["hash"], "subject": own}]
+    vault = {"personal": [{"fields": ["hash"], "subject": own}]}
     hash: str | None
     keep_session_id: str | None
     at: int
 
 
 class PasswordResetRequested(Event):
-    personal = [{"fields": ["email"], "subject": own}, {"fields": ["token"], "subject": _token}]
+    vault = {"personal": [{"fields": ["email"], "subject": own}, {"fields": ["token"], "subject": _token}]}
     token_id: str
     token: str | None
     email: str | None
@@ -126,8 +126,7 @@ class PasswordResetRequested(Event):
 
 class PasswordReset(Event):
     """Erases the used token; ends every session (a reactor)."""
-    personal = [{"fields": ["hash"], "subject": own}]
-    erases = _token
+    vault = {"personal": [{"fields": ["hash"], "subject": own}], "erases": _token}
     token_id: str
     hash: str | None
     at: int
@@ -135,7 +134,7 @@ class PasswordReset(Event):
 
 class EmailChangeRequested(Event):
     """The new address gets a token; it holds nothing until confirmed."""
-    personal = [{"fields": ["email"], "subject": own}, {"fields": ["token"], "subject": _token}]
+    vault = {"personal": [{"fields": ["email"], "subject": own}, {"fields": ["token"], "subject": _token}]}
     token_id: str
     token: str | None
     email: str | None
@@ -143,21 +142,20 @@ class EmailChangeRequested(Event):
 
 
 class EmailChanged(Event):
-    personal = [{"fields": ["email"], "subject": own}]
-    erases = _token
+    vault = {"personal": [{"fields": ["email"], "subject": own}], "erases": _token}
     token_id: str
     email: str | None
 
 
 class RegistrationAttempted(Event):
     """Someone registered with this account's address: it gets a mail saying it exists."""
-    personal = [{"fields": ["email"], "subject": own}]
+    vault = {"personal": [{"fields": ["email"], "subject": own}]}
     email: str | None
     at: int
 
 
 class TotpStarted(Event):
-    personal = [{"fields": ["secret"], "subject": own}]
+    vault = {"personal": [{"fields": ["secret"], "subject": own}]}
     secret: str | None
 
 
@@ -187,7 +185,7 @@ class SecondFactorFailed(Event):
 
 
 class PasskeyAdded(Event):
-    personal = [{"fields": ["credential_id", "label"], "subject": own}]
+    vault = {"personal": [{"fields": ["credential_id", "label"], "subject": own}]}
     credential_id: str | None
     public_key: str
     counter: int
@@ -196,18 +194,18 @@ class PasskeyAdded(Event):
 
 
 class PasskeyRemoved(Event):
-    personal = [{"fields": ["credential_id"], "subject": own}]
+    vault = {"personal": [{"fields": ["credential_id"], "subject": own}]}
     credential_id: str | None
 
 
 class PasskeyUsed(Event):
-    personal = [{"fields": ["credential_id"], "subject": own}]
+    vault = {"personal": [{"fields": ["credential_id"], "subject": own}]}
     credential_id: str | None
     counter: int
 
 
 class ProviderLinked(Event):
-    personal = [{"fields": ["subject", "email"], "subject": own}]
+    vault = {"personal": [{"fields": ["subject", "email"], "subject": own}]}
     provider: str
     subject: str | None
     email: str | None
@@ -215,7 +213,7 @@ class ProviderLinked(Event):
 
 
 class ProviderUnlinked(Event):
-    personal = [{"fields": ["subject"], "subject": own}]
+    vault = {"personal": [{"fields": ["subject"], "subject": own}]}
     provider: str
     subject: str | None
 
@@ -225,14 +223,14 @@ def _of_sso(_d, sso_id):
 
 
 class SsoCreated(Event):
-    personal = [{"fields": ["client_secret"], "subject": _of_sso}]
+    vault = {"personal": [{"fields": ["client_secret"], "subject": _of_sso}]}
     issuer: str
     client_id: str
     client_secret: str | None
 
 
 class SsoUpdated(Event):
-    personal = [{"fields": ["client_secret"], "subject": _of_sso}]
+    vault = {"personal": [{"fields": ["client_secret"], "subject": _of_sso}]}
     issuer: str
     client_id: str
     client_secret: str | None
@@ -264,7 +262,7 @@ class SsoEnabled(Event):
 
 
 class SsoDeleted(Event):
-    erases = _of_sso
+    vault = {"erases": _of_sso}
 
 
 # Declared on the domain, so a process that only reads them knows them too.
