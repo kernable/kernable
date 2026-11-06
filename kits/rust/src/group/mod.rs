@@ -34,6 +34,8 @@ pub struct GroupDomain {
     pub domain: Domain,
     pub group: Aggregate<Group>,
     pub groups: Listener,
+    /// The authorization middleware.
+    pub authorization: Listener,
 }
 
 /// The group domain, every part registered.
@@ -43,9 +45,11 @@ pub fn group() -> GroupDomain {
     commands::handle(&group);
     let (groups, rows) = readmodels::groups(&group_domain);
     queries::answer(&groups, &rows);
+    let authorization = crate::authorization::middleware::authorization(&group_domain);
     GroupDomain {
         domain: group_domain,
         group,
         groups,
+        authorization,
     }
 }
