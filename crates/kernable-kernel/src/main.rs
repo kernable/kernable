@@ -239,7 +239,7 @@ Continuous backup:
                                           <file>, readable by its owner only; never overwrites one.
                                           Keep it apart from the backups, as you keep the root key:
                                           without it a backup cannot be read.
-  kernable backup --follow <addr>[,<addr>] --key <key> --to <target> --backup-key <file> [--segment-seconds <s>] [--base-hours <h>] [--keep <n>]
+  kernable backup --follow <addr>[,<addr>] --key <key> --to <target> --backup-key <file> [--segment-seconds <s>] [--base-hours <h>] [--keep <n>] [--check-hours <h>]
                                           Follows the kernel at <addr> (started with --backup on;
                                           both kernels of a pair, comma-separated) and writes its
                                           records to <target>, encrypted with the backup key, until
@@ -251,10 +251,18 @@ Continuous backup:
                                           s3://<bucket>/<prefix>, with KERNABLE_S3_ENDPOINT,
                                           KERNABLE_S3_REGION, AWS_ACCESS_KEY_ID and
                                           AWS_SECRET_ACCESS_KEY. Vault values stay encrypted with the
-                                          kernel's vault key besides.
+                                          kernel's vault key besides. With --check-hours, it also
+                                          checks the backup that often, as backup check does, and
+                                          logs what it found.
   kernable backup list <target> --backup-key <file>
                                           Prints the generations of a backup: each base's record
                                           and time, and how far its segments reach.
+  kernable backup check <target> --backup-key <file>
+                                          Reads the newest generation all through, without writing
+                                          a store: every object opens with the key and decodes, and
+                                          the records chain from the base to the last segment.
+                                          Prints the record a restore reaches and how old it is;
+                                          exits 1 if the backup does not check out.
   kernable restore <target> --backup-key <file> [--at <time> | --at-record <n>] [--store <s>] [--data-store <d>] [--vault-store <v> --vault-key <k>] [--kernel-pub <kernel.pub>]...
                                           Fills new, empty stores from a backup: the newest
                                           generation that begins before --at (UTC, like
@@ -370,6 +378,7 @@ async fn main() -> ExitCode {
         ["expose", pairs @ ..] if !pairs.is_empty() => return expose(pairs).await,
         ["backup", "key", file] => backup_key(file),
         ["backup", "list", to, flags @ ..] if !to.starts_with("--") => backup_list(to, flags),
+        ["backup", "check", to, flags @ ..] if !to.starts_with("--") => backup_check(to, flags),
         ["backup", flags @ ..] => return run_backup(flags).await,
         ["restore", from, flags @ ..] if !from.starts_with("--") => {
             return restore(from, flags).unwrap_or_else(|e| {
@@ -1049,6 +1058,44 @@ fn backup_key(file: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// `kernable backup check <target> --backup-key <file>`.
+fn backup_check(to: &str, flags: &[&str]) -> Result<bool> {
+    let values = flag_values(flags, &["--backup-key"])?;
+    let key = values
+        .get("--backup-key")
+        .and_then(|v| v.first())
+        .ok_or("--backup-key is missing")?;
+    let crypt = backup::crypt::BackupKey::read(Path::new(key)).map_err(boxed)?;
+    let target = backup::target::open(to).map_err(boxed)?;
+    let started = std::time::Instant::now();
+    match backup::check(target.as_ref(), &crypt) {
+        Ok(c) => {
+            println!(
+                "generation {}: base at record {} ({} records), {} segments to record {}, {} bytes, \
+                 the newest taken {} s ago; read in {:.1} s",
+                c.generation,
+                c.base,
+                c.image_records,
+                c.segments,
+                c.record,
+                c.bytes,
+                (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis() as i64)
+                    - c.taken_at)
+                    / 1000,
+                started.elapsed().as_secs_f64()
+            );
+            println!("OK");
+            Ok(true)
+        }
+        Err(e) => {
+            println!("the backup does not check out: {e}");
+            Ok(false)
+        }
+    }
+}
+
 /// `kernable backup list <target> --backup-key <file>`.
 fn backup_list(to: &str, flags: &[&str]) -> Result<bool> {
     let values = flag_values(flags, &["--backup-key"])?;
@@ -1100,6 +1147,7 @@ async fn run_backup(flags: &[&str]) -> ExitCode {
                 "--segment-seconds",
                 "--base-hours",
                 "--keep",
+                "--check-hours",
             ],
         )?;
         let one = |flag: &str| values.get(flag).and_then(|v| v.first().copied());
@@ -1141,6 +1189,10 @@ async fn run_backup(flags: &[&str]) -> ExitCode {
             segment_every: Duration::from_secs(number("--segment-seconds", 5)?),
             base_every: Duration::from_secs(number("--base-hours", 24)? * 3600),
             keep: number("--keep", 7)? as usize,
+            check_every: match one("--check-hours") {
+                None => None,
+                Some(_) => Some(Duration::from_secs(number("--check-hours", 24)? * 3600)),
+            },
         })
     })();
     let follower = match parsed {

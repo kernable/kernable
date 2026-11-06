@@ -28,6 +28,7 @@ key = "backup.key"
 backup-key = "backup-encryption.key"
 follow = "10.0.0.1:7233,10.0.0.2:7233"     # optional: default the kernel's listen
 segment-seconds = 5                        # optional, as base-hours and keep
+check-hours = 24                           # optional: reads the backup through that often
 env = { AWS_ACCESS_KEY_ID = "…", AWS_SECRET_ACCESS_KEY = "…" }
 
 [pair]                                     # optional: one node of a pair

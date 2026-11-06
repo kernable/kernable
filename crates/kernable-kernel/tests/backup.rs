@@ -27,6 +27,7 @@ fn follower(env: &Env, to: &str) -> Follower {
         segment_every: Duration::from_millis(100),
         base_every: Duration::from_secs(3600),
         keep: 3,
+        check_every: None,
     }
 }
 
@@ -205,4 +206,35 @@ async fn a_kernel_without_backup_on_refuses_the_follower() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     running.abort();
     assert_eq!(reach(&to), (0, 0), "nothing written");
+}
+
+/// `backup check` reads the newest generation through without a store: it reaches the kernel's
+/// head; a segment changed in the target, or another key, does not check out.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_backup_check_reads_it_through_and_finds_a_damaged_segment() {
+    let env = start_custom("backup-check", |c, _| c.replication.backup = true).await;
+    spawn_worker(&env).await;
+    let to = format!("file:{}", env.dir.join("backup").display());
+    place(&env, 0, 5).await;
+    let running = tokio::spawn(backup::run(follower(&env, &to)));
+    backed_up(&env, &to).await;
+    place(&env, 5, 15).await;
+    backed_up(&env, &to).await;
+    running.abort();
+
+    let t = target::open(&to).unwrap();
+    let checked = backup::check(t.as_ref(), &BackupKey::new(&[7; 32])).unwrap();
+    assert_eq!(checked.record, env.kernel_head());
+    assert!(checked.segments > 0, "{checked:?}");
+    assert!(backup::check(t.as_ref(), &BackupKey::new(&[8; 32])).is_err());
+
+    // One byte of the newest segment changed: the key's authentication refuses it.
+    let gens = backup::generations(t.as_ref(), &BackupKey::new(&[7; 32])).unwrap();
+    let segment = &gens.last().unwrap().segments.last().unwrap().name;
+    let path = env.dir.join("backup").join(segment);
+    let mut bytes = std::fs::read(&path).unwrap();
+    let at = bytes.len() / 2;
+    bytes[at] ^= 1;
+    std::fs::write(&path, bytes).unwrap();
+    assert!(backup::check(t.as_ref(), &BackupKey::new(&[7; 32])).is_err());
 }

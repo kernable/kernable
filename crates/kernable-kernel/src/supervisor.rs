@@ -23,6 +23,7 @@
 //! backup-key = "backup-encryption.key"
 //! follow = "127.0.0.1:7233"                  # optional: default the kernel's --listen
 //! segment-seconds = 5                        # optional, as base-hours and keep
+//! check-hours = 24                           # optional: reads the backup through that often
 //! ```
 //!
 //! The customer's services are built and run with Podman, one `[[service]]` each:
@@ -297,6 +298,7 @@ struct BackupSection {
     segment_seconds: Option<u64>,
     base_hours: Option<u64>,
     keep: Option<u64>,
+    check_hours: Option<u64>,
     cpus: Option<String>,
     memory: Option<String>,
     #[serde(default)]
@@ -573,6 +575,7 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
             ("--segment-seconds", b.segment_seconds),
             ("--base-hours", b.base_hours),
             ("--keep", b.keep),
+            ("--check-hours", b.check_hours),
         ] {
             if let Some(v) = value {
                 args.extend([flag.to_owned(), v.to_string()]);

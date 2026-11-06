@@ -72,6 +72,122 @@ pub struct Follower {
     pub base_every: Duration,
     /// Generations to keep, the current one included.
     pub keep: usize,
+    /// Reads the newest generation through this often ([`check`]); `None`: never.
+    pub check_every: Option<Duration>,
+}
+
+/// What [`check`] read of a backup's newest generation.
+#[derive(Debug)]
+pub struct Checked {
+    pub generation: String,
+    /// The base's record, and the records its image holds.
+    pub base: u64,
+    pub image_records: u64,
+    /// The last record the segments reach, chained from the base.
+    pub record: u64,
+    pub segments: usize,
+    pub bytes: u64,
+    /// When the newest segment (or the base) was taken, ms since epoch.
+    pub taken_at: i64,
+}
+
+/// Reads the newest finished generation of the backup at `target` all through: every object
+/// opens with the key, every batch decodes, and the segments' records chain from the base's
+/// hash to the last one without a gap. What a restore would need, without writing a store.
+pub fn check(target: &dyn Target, crypt: &BackupKey) -> Result<Checked, BoxError> {
+    let gens = generations(target, crypt)?;
+    let generation = gens
+        .iter()
+        .rev()
+        .find(|g| g.base.is_some())
+        .ok_or_else(|| match gens.iter().find_map(|g| g.unreadable.as_ref()) {
+            Some(why) => format!("the backup cannot be read: {why}"),
+            None => "the backup holds no finished generation".into(),
+        })?;
+    let base = generation.base.clone().expect("found with a base");
+    let mut checked = Checked {
+        generation: generation.name.clone(),
+        base: base.seq,
+        image_records: 0,
+        record: base.seq,
+        segments: 0,
+        bytes: 0,
+        taken_at: base.created_at,
+    };
+    for n in 1..=base.parts {
+        let part = part_name(&generation.name, n);
+        let sealed = target.get(&part)?;
+        checked.bytes += sealed.len() as u64;
+        let plain = crypt.open(&part, &sealed)?;
+        let mut rest = plain.as_slice();
+        while !rest.is_empty() {
+            let batch = ImageBatch::decode_length_delimited(&mut rest)?;
+            checked.image_records += batch.records.len() as u64;
+        }
+    }
+    if checked.image_records != base.records {
+        return Err(format!(
+            "generation {}: its base holds {} records, its marker says {}",
+            generation.name, checked.image_records, base.records
+        )
+        .into());
+    }
+    let mut head = Head {
+        seq: base.seq,
+        hash: base.hash.clone(),
+    };
+    for segment in &generation.segments {
+        if segment.first != head.seq + 1 {
+            return Err(format!(
+                "generation {}: a gap from record {} to {}",
+                generation.name, head.seq, segment.first
+            )
+            .into());
+        }
+        let sealed = target.get(&segment.name)?;
+        checked.bytes += sealed.len() as u64;
+        let plain = crypt.open(&segment.name, &sealed)?;
+        let mut rest = plain.as_slice();
+        while !rest.is_empty() {
+            let taken = BackupBatch::decode_length_delimited(&mut rest)?;
+            let batch = taken.batch.unwrap_or_default();
+            let (_, next) = kernable_store::replication::chained(&head, &batch.records)
+                .map_err(|e| format!("segment {}: {e}", segment.name))?;
+            head = next;
+            checked.taken_at = taken.taken_at;
+        }
+        if head.seq != segment.last || head.hash[..] != segment.hash[..] {
+            return Err(format!(
+                "segment {}: its records end at {}, its name says {}",
+                segment.name, head.seq, segment.last
+            )
+            .into());
+        }
+        checked.segments += 1;
+    }
+    checked.record = head.seq;
+    Ok(checked)
+}
+
+/// Checks the backup every `every` ([`check`]), logging what it found; runs beside the follower.
+async fn check_now_and_then(target: Arc<dyn Target>, crypt: Arc<BackupKey>, every: Duration) {
+    loop {
+        tokio::time::sleep(every).await;
+        let started = Instant::now();
+        let (target, crypt) = (Arc::clone(&target), Arc::clone(&crypt));
+        match blocking(move || check(target.as_ref(), &crypt)).await {
+            Ok(c) => tracing::info!(
+                generation = %c.generation,
+                record = c.record,
+                segments = c.segments,
+                bytes = c.bytes,
+                age_s = (now_ms() - c.taken_at) / 1000,
+                took_ms = started.elapsed().as_millis() as u64,
+                "the backup checks out: it restores to record {}", c.record
+            ),
+            Err(e) => tracing::error!(error = %e, "the backup does not check out"),
+        }
+    }
 }
 
 /// A generation as listed in the target.
@@ -196,6 +312,13 @@ pub async fn run(follower: Follower) -> Result<(), BoxError> {
     let mut delay = Duration::from_secs(1);
     let mut turn = 0;
     tracing::info!(to = %follower.target.describe(), key = %follower.crypt.id(), "backup follower starting");
+    let _checks = follower.check_every.map(|every| {
+        crate::AbortOnDrop(tokio::spawn(check_now_and_then(
+            Arc::clone(&follower.target),
+            Arc::clone(&follower.crypt),
+            every,
+        )))
+    });
     loop {
         let addr = follower.addrs[turn % follower.addrs.len()].clone();
         match follow_once(&follower, &addr, &mut fresh).await {
