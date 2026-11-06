@@ -16,37 +16,112 @@ export interface Refusal {
 
 export interface Target { type: string; id: string }
 
+/** Where the knowledge lives: the listener's store, or memory (unit tests). */
+export interface KeyValues {
+  get<T = unknown>(ns: string, key: string): T | undefined;
+  set(ns: string, key: string, value: unknown): void;
+  remove(ns: string, key: string): void;
+  all<T = unknown>(ns: string): [string, T][];
+}
+
+/** Key-values in memory, the same as a store holds them. */
+export class MemoryKeyValues implements KeyValues {
+  private readonly data = new Map<string, Map<string, string>>();
+  private ns(ns: string) {
+    let m = this.data.get(ns);
+    if (!m) this.data.set(ns, (m = new Map()));
+    return m;
+  }
+  get<T>(ns: string, key: string): T | undefined {
+    const v = this.ns(ns).get(key);
+    return v === undefined ? undefined : (JSON.parse(v) as T);
+  }
+  set(ns: string, key: string, value: unknown): void {
+    this.ns(ns).set(key, JSON.stringify(value));
+  }
+  remove(ns: string, key: string): void {
+    this.ns(ns).delete(key);
+  }
+  all<T>(ns: string): [string, T][] {
+    return [...this.ns(ns)].sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => [k, JSON.parse(v) as T]);
+  }
+}
+
+/** One namespace of the knowledge, read and written like a map. Values are copies: write back with `set` or `update`. */
+export class Table<V> {
+  private readonly owner: Knowledge;
+  private readonly ns: string;
+  constructor(owner: Knowledge, ns: string) {
+    this.owner = owner;
+    this.ns = ns;
+  }
+  get(key: string): V | undefined {
+    return this.owner.kv.get<V>(this.ns, key);
+  }
+  set(key: string, value: V): void {
+    this.owner.kv.set(this.ns, key, value);
+  }
+  delete(key: string): void {
+    this.owner.kv.remove(this.ns, key);
+  }
+  /** Changes the value under `key`, if there is one. */
+  update(key: string, f: (v: V) => void): void {
+    const v = this.get(key);
+    if (v === undefined) return;
+    f(v);
+    this.set(key, v);
+  }
+  /** Removes every key starting with `prefix` (a deleted tenant's). */
+  deletePrefix(prefix: string): void {
+    for (const [key] of this.owner.kv.all(this.ns)) if (key.startsWith(prefix)) this.owner.kv.remove(this.ns, key);
+  }
+}
+
+export interface TenantKnown { status: TenantStatus; owners: string[]; mfaRequired: boolean; suspension: string | null }
+
+/** What the middleware knows, folded from events (design/kits.md, "What it knows"). */
 export class Knowledge {
-  tenants = new Map<string, { status: TenantStatus; owners: Set<string>; mfaRequired: boolean; suspension: string | null }>();
-  signUp: SignUpPolicy = { tenants: "off", accounts: "off" };
-  accounts = new Map<string, { status: string }>();
-  sessions = new Map<string, { accountId: string; factors: string[]; active: boolean }>();
+  kv: KeyValues;
+  constructor(kv: KeyValues = new MemoryKeyValues()) {
+    this.kv = kv;
+  }
+  tenants = new Table<TenantKnown>(this, "tenants");
+  accounts = new Table<{ status: string }>(this, "accounts");
+  sessions = new Table<{ accountId: string; factors: string[]; active: boolean }>(this, "sessions");
   /** `tenant/identityId` */
-  identities = new Map<string, { accountId: string | null; active: boolean; memberships: Membership[] }>();
+  identities = new Table<{ accountId: string | null; active: boolean; memberships: Membership[] }>(this, "identities");
   /** keyId */
-  apiKeys = new Map<string, { tenant: string; identityId: string; expiresAt: number | null; revoked: boolean }>();
+  apiKeys = new Table<{ tenant: string; identityId: string; expiresAt: number | null; revoked: boolean }>(this, "apiKeys");
   /** `tenant/groupId` */
-  groups = new Map<string, Permission[]>();
+  groups = new Table<Permission[]>(this, "groups");
   /** `tenant/type/id` → relation → identity IDs */
-  relations = new Map<string, Map<string, Set<string>>>();
+  relations = new Table<Record<string, string[]>>(this, "relations");
   /** `tenant/type/id` → the parent */
-  parents = new Map<string, Target>();
+  parents = new Table<Target>(this, "parents");
+  private settings = new Table<SignUpPolicy>(this, "settings");
+
+  get signUp(): SignUpPolicy {
+    return this.settings.get("signUp") ?? { tenants: "off", accounts: "off" };
+  }
+  set signUp(policy: SignUpPolicy) {
+    this.settings.set("signUp", policy);
+  }
 
   identity(tenant: string, id: string | undefined) {
     return id ? this.identities.get(`${tenant}/${id}`) : undefined;
   }
 
   holds(tenant: string, target: Target, relation: string, identityId: string): boolean {
-    return this.relations.get(`${tenant}/${target.type}/${target.id}`)?.get(relation)?.has(identityId) ?? false;
+    return this.relations.get(`${tenant}/${target.type}/${target.id}`)?.[relation]?.includes(identityId) ?? false;
   }
 
   relate(tenant: string, target: Target, relation: string, ids: string[], on: boolean): void {
     const key = `${tenant}/${target.type}/${target.id}`;
-    let rels = this.relations.get(key);
-    if (!rels) this.relations.set(key, (rels = new Map()));
-    let set = rels.get(relation);
-    if (!set) rels.set(relation, (set = new Set()));
+    const rels = this.relations.get(key) ?? {};
+    const set = new Set(rels[relation] ?? []);
     for (const id of ids) on ? set.add(id) : set.delete(id);
+    rels[relation] = [...set];
+    this.relations.set(key, rels);
   }
 }
 
@@ -221,7 +296,7 @@ export function decide(k: Knowledge, check: Check, now: number): Refusal | null 
 
   // 7. Owners hold every permission in their tenant, except what is the platform's: they suspend
   // and reactivate their tenant only for themselves (owner_requested). Platform owners hold all.
-  const owner = homeTenant?.owners.has(identityId) ?? false;
+  const owner = homeTenant?.owners.includes(identityId) ?? false;
   if (rule.level === "platform" && !platform) {
     const own = owner && (
       (type === "tenancy.SuspendTenant" && data.reason === "owner_requested") ||

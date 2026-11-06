@@ -11,96 +11,153 @@ import {
   ApiKeyCreated, ApiKeyRevoked, IdentityCreated, IdentityDeleted, IdentityReactivated, IdentitySuspended, MembershipGranted,
   MembershipResumed, MembershipRevoked, MembershipSuspended, type Membership,
 } from "../identity/index.ts";
-import { ORDERS } from "../shared/constants.ts";
+import { AUTHORIZATION_STORE, ORDERS } from "../shared/constants.ts";
 import {
   MfaRequirementChanged, OwnerAdded, OwnerRemoved, SignUpPolicyChanged, TenantActivated, TenantCreated, TenantDeleted,
   TenantReactivated, TenantSuspended,
 } from "../tenancy/index.ts";
-import { Knowledge, decide } from "./policy.ts";
+import { Knowledge, MemoryKeyValues, decide, type KeyValues } from "./policy.ts";
 import { parentRules, relationEvents, relationRules } from "./relations.ts";
 
+/** The knowledge, in the listener's store when it has one. */
 export const knowledge = new Knowledge();
 const k = knowledge;
+const memory = new MemoryKeyValues();
+/** Points the knowledge at the store the SDK hands this listener's handlers. */
+const use = (store: KeyValues | undefined) => void (k.kv = store ?? memory);
 
 type Evt = { tenant: string; aggregateId: string };
-const setTenant = (id: string, f: (t: NonNullable<ReturnType<typeof k.tenants.get>>) => void) => {
-  const t = k.tenants.get(id);
-  if (t) f(t);
+const identityKey = (evt: Evt) => `${evt.tenant}/${evt.aggregateId}`;
+const setMembership = (status: Membership["status"]) => (d: { membershipId: string }, evt: Evt, ctx: { store?: KeyValues }) => {
+  use(ctx.store);
+  k.identities.update(identityKey(evt), (i) => {
+    const m = i.memberships.find((x) => x.membershipId === d.membershipId);
+    if (m) m.status = status;
+  });
 };
-const identity = (evt: Evt) => k.identities.get(`${evt.tenant}/${evt.aggregateId}`);
-const setMembership = (status: Membership["status"]) => (d: { membershipId: string }, evt: Evt) => {
-  const m = identity(evt)?.memberships.find((x) => x.membershipId === d.membershipId);
-  if (m) m.status = status;
+const setIdentity = (active: boolean) => (_d: unknown, evt: Evt, ctx: { store?: KeyValues }) => {
+  use(ctx.store);
+  k.identities.update(identityKey(evt), (i) => void (i.active = active));
 };
-const setIdentity = (active: boolean) => (_d: unknown, evt: Evt) => {
-  const i = identity(evt);
-  if (i) i.active = active;
+const setAccount = (status: string) => (_d: unknown, evt: Evt, ctx: { store?: KeyValues }) => {
+  use(ctx.store);
+  k.accounts.set(evt.aggregateId, { status });
 };
 
 export const authorizationListener: Listener = groupDomain
-  .readModel("group.authorization", { order: ORDERS.authorization })
+  .readModel("group.authorization", { order: ORDERS.authorization, store: AUTHORIZATION_STORE })
   // tenancy
-  .on(TenantCreated, (d, evt) => void k.tenants.set(evt.aggregateId, { status: d.status, owners: new Set(), mfaRequired: false, suspension: null }))
-  .on(TenantActivated, (_d, evt) => setTenant(evt.aggregateId, (t) => void (t.status = "active")))
-  .on(TenantSuspended, (d, evt) => setTenant(evt.aggregateId, (t) => {
-    t.status = "suspended";
-    t.suspension = d.reason;
-  }))
-  .on(TenantReactivated, (_d, evt) => setTenant(evt.aggregateId, (t) => {
-    t.status = "active";
-    t.suspension = null;
-  }))
-  .on(TenantDeleted, (_d, evt) => {
-    setTenant(evt.aggregateId, (t) => {
-      t.status = "deleted";
-      t.owners.clear();
+  .on(TenantCreated, (d, evt, ctx) => {
+    use(ctx.store);
+    k.tenants.set(evt.aggregateId, { status: d.status, owners: [], mfaRequired: false, suspension: null });
+  })
+  .on(TenantActivated, (_d, evt, ctx) => {
+    use(ctx.store);
+    k.tenants.update(evt.aggregateId, (t) => void (t.status = "active"));
+  })
+  .on(TenantSuspended, (d, evt, ctx) => {
+    use(ctx.store);
+    k.tenants.update(evt.aggregateId, (t) => {
+      t.status = "suspended";
+      t.suspension = d.reason;
     });
-    const prefix = `${evt.aggregateId}/`;
-    for (const map of [k.identities, k.groups, k.relations, k.parents] as Map<string, unknown>[]) {
-      for (const key of map.keys()) if (key.startsWith(prefix)) map.delete(key);
-    }
   })
-  .on(OwnerAdded, (d, evt) => setTenant(evt.aggregateId, (t) => void t.owners.add(d.identityId)))
-  .on(OwnerRemoved, (d, evt) => setTenant(evt.aggregateId, (t) => void t.owners.delete(d.identityId)))
-  .on(MfaRequirementChanged, (d, evt) => setTenant(evt.aggregateId, (t) => void (t.mfaRequired = d.required)))
-  .on(SignUpPolicyChanged, (d) => void (k.signUp = { tenants: d.tenants, accounts: d.accounts }))
+  .on(TenantReactivated, (_d, evt, ctx) => {
+    use(ctx.store);
+    k.tenants.update(evt.aggregateId, (t) => {
+      t.status = "active";
+      t.suspension = null;
+    });
+  })
+  .on(TenantDeleted, (_d, evt, ctx) => {
+    use(ctx.store);
+    k.tenants.update(evt.aggregateId, (t) => {
+      t.status = "deleted";
+      t.owners = [];
+    });
+    for (const table of [k.identities, k.groups, k.relations, k.parents]) table.deletePrefix(`${evt.aggregateId}/`);
+  })
+  .on(OwnerAdded, (d, evt, ctx) => {
+    use(ctx.store);
+    k.tenants.update(evt.aggregateId, (t) => void (t.owners.includes(d.identityId) || t.owners.push(d.identityId)));
+  })
+  .on(OwnerRemoved, (d, evt, ctx) => {
+    use(ctx.store);
+    k.tenants.update(evt.aggregateId, (t) => void (t.owners = t.owners.filter((o) => o !== d.identityId)));
+  })
+  .on(MfaRequirementChanged, (d, evt, ctx) => {
+    use(ctx.store);
+    k.tenants.update(evt.aggregateId, (t) => void (t.mfaRequired = d.required));
+  })
+  .on(SignUpPolicyChanged, (d, _evt, ctx) => {
+    use(ctx.store);
+    k.signUp = { tenants: d.tenants, accounts: d.accounts };
+  })
   // account
-  .on(AccountRegistered, (d, evt) => void k.accounts.set(evt.aggregateId, { status: d.verified ? "active" : "pending" }))
-  .on(EmailVerified, (_d, evt) => {
-    const a = k.accounts.get(evt.aggregateId);
-    if (a?.status === "pending") a.status = "active";
+  .on(AccountRegistered, (d, evt, ctx) => setAccount(d.verified ? "active" : "pending")(d, evt, ctx))
+  .on(EmailVerified, (_d, evt, ctx) => {
+    use(ctx.store);
+    k.accounts.update(evt.aggregateId, (a) => void (a.status === "pending" && (a.status = "active")));
   })
-  .on(AccountSuspended, (_d, evt) => void k.accounts.set(evt.aggregateId, { status: "suspended" }))
-  .on(AccountReactivated, (_d, evt) => void k.accounts.set(evt.aggregateId, { status: "active" }))
-  .on(AccountDeleted, (_d, evt) => void k.accounts.set(evt.aggregateId, { status: "deleted" }))
-  .on(SessionOpened, (d, evt) => void k.sessions.set(evt.aggregateId, { accountId: d.accountId, factors: [...d.factors], active: true }))
-  .on(SessionFactorAdded, (d, evt) => void k.sessions.get(evt.aggregateId)?.factors.push(d.factor))
-  .on(SessionEnded, (_d, evt) => {
-    const s = k.sessions.get(evt.aggregateId);
-    if (s) s.active = false;
+  .on(AccountSuspended, setAccount("suspended"))
+  .on(AccountReactivated, setAccount("active"))
+  .on(AccountDeleted, setAccount("deleted"))
+  .on(SessionOpened, (d, evt, ctx) => {
+    use(ctx.store);
+    k.sessions.set(evt.aggregateId, { accountId: d.accountId, factors: [...d.factors], active: true });
+  })
+  .on(SessionFactorAdded, (d, evt, ctx) => {
+    use(ctx.store);
+    k.sessions.update(evt.aggregateId, (s) => void s.factors.push(d.factor));
+  })
+  .on(SessionEnded, (_d, evt, ctx) => {
+    use(ctx.store);
+    k.sessions.update(evt.aggregateId, (s) => void (s.active = false));
   })
   // identity
-  .on(IdentityCreated, (d, evt) => void k.identities.set(`${evt.tenant}/${evt.aggregateId}`, { accountId: d.accountId, active: true, memberships: [] }))
+  .on(IdentityCreated, (d, evt, ctx) => {
+    use(ctx.store);
+    k.identities.set(identityKey(evt), { accountId: d.accountId, active: true, memberships: [] });
+  })
   .on(IdentitySuspended, setIdentity(false))
   .on(IdentityReactivated, setIdentity(true))
-  .on(IdentityDeleted, (_d, evt) => void k.identities.delete(`${evt.tenant}/${evt.aggregateId}`))
-  .on(MembershipGranted, (d, evt) => void identity(evt)?.memberships.push({ ...d, status: "active" }))
+  .on(IdentityDeleted, (_d, evt, ctx) => {
+    use(ctx.store);
+    k.identities.delete(identityKey(evt));
+  })
+  .on(MembershipGranted, (d, evt, ctx) => {
+    use(ctx.store);
+    k.identities.update(identityKey(evt), (i) => void i.memberships.push({ ...d, status: "active" }));
+  })
   .on(MembershipSuspended, setMembership("suspended"))
   .on(MembershipResumed, setMembership("active"))
-  .on(MembershipRevoked, (d, evt) => {
-    const i = identity(evt);
-    if (i) i.memberships = i.memberships.filter((m) => m.membershipId !== d.membershipId);
+  .on(MembershipRevoked, (d, evt, ctx) => {
+    use(ctx.store);
+    k.identities.update(identityKey(evt), (i) => void (i.memberships = i.memberships.filter((m) => m.membershipId !== d.membershipId)));
   })
-  .on(ApiKeyCreated, (d, evt) => void k.apiKeys.set(d.keyId, { tenant: evt.tenant, identityId: evt.aggregateId, expiresAt: d.expiresAt, revoked: false }))
-  .on(ApiKeyRevoked, (d) => {
-    const key = k.apiKeys.get(d.keyId);
-    if (key) key.revoked = true;
+  .on(ApiKeyCreated, (d, evt, ctx) => {
+    use(ctx.store);
+    k.apiKeys.set(d.keyId, { tenant: evt.tenant, identityId: evt.aggregateId, expiresAt: d.expiresAt, revoked: false });
+  })
+  .on(ApiKeyRevoked, (d, _evt, ctx) => {
+    use(ctx.store);
+    k.apiKeys.update(d.keyId, (key) => void (key.revoked = true));
   })
   // group: a deleted group's memberships stop counting at once.
-  .on(GroupCreated, (d, evt) => void k.groups.set(`${evt.tenant}/${evt.aggregateId}`, d.permissions))
-  .on(GroupPermissionsSet, (d, evt) => void k.groups.set(`${evt.tenant}/${evt.aggregateId}`, d.permissions))
-  .on(GroupDeleted, (_d, evt) => void k.groups.delete(`${evt.tenant}/${evt.aggregateId}`))
-  .middleware({ types: ["*"], order: ORDERS.authorization }, (check) => {
+  .on(GroupCreated, (d, evt, ctx) => {
+    use(ctx.store);
+    k.groups.set(identityKey(evt), d.permissions);
+  })
+  .on(GroupPermissionsSet, (d, evt, ctx) => {
+    use(ctx.store);
+    k.groups.set(identityKey(evt), d.permissions);
+  })
+  .on(GroupDeleted, (_d, evt, ctx) => {
+    use(ctx.store);
+    k.groups.delete(identityKey(evt));
+  })
+  .middleware({ types: ["*"], order: ORDERS.authorization }, (check, _outcome, ctx) => {
+    use(ctx.store);
     const refusal = decide(k, check, Date.now());
     if (refusal) throw new Rejected(refusal.message, refusal.code);
   });
@@ -115,7 +172,8 @@ export function installRelations(): void {
   if (relationsInstalled) return;
   relationsInstalled = true;
   for (const event of relationEvents()) {
-    authorizationListener.on(event, (data, evt) => {
+    authorizationListener.on(event, (data, evt, ctx) => {
+      use(ctx.store);
       const e = { data, aggregateId: evt.aggregateId, tenant: evt.tenant };
       const aggregate = `${evt.domain}.${evt.aggregateType}`;
       for (const rule of relationRules.filter((r) => r.event === event && r.type === aggregate)) {
@@ -129,4 +187,12 @@ export function installRelations(): void {
       }
     });
   }
+}
+
+/**
+ * Where the middleware keeps its knowledge: a SQLite file, so a restart continues where it
+ * stopped instead of replaying the log while every request is refused. Call before the app runs.
+ */
+export function useAuthorizationStore(url: string): void {
+  authorizationListener.options.store = url;
 }

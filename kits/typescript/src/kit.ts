@@ -10,6 +10,7 @@ import { invitationDomain } from "./invitation/index.ts";
 import { tenancyDomain } from "./tenancy/index.ts";
 
 export { relation, parent } from "./authorization/relations.ts";
+export { useAuthorizationStore } from "./authorization/middleware.ts";
 export { PLATFORM_TENANT } from "./shared/constants.ts";
 
 /**

@@ -30,3 +30,6 @@ export const DAY = 24 * HOUR;
 
 /** The context of the kit's own follow-up commands: they pass the middleware as internal. */
 export const INTERNAL = { bypassAuthorization: true } as const;
+
+/** The authorization middleware's store; `useAuthorizationStore` changes it. */
+export const AUTHORIZATION_STORE = "sqlite:authorization.db";

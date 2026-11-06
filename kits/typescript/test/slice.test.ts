@@ -17,7 +17,7 @@ import { CreateGroup } from "../src/group/index.ts";
 import { DeleteAccount, SuspendAccount } from "../src/account/index.ts";
 import { DeleteIdentity, GrantMembership } from "../src/identity/index.ts";
 import { CreateInvitation, EraseInvitation, ListInvitations } from "../src/invitation/index.ts";
-import { kitDomains, kitSchemas, relation } from "../src/kit.ts";
+import { kitDomains, kitSchemas, relation, useAuthorizationStore } from "../src/kit.ts";
 import { MemoryMailer, useMailer } from "../src/shared/mail.ts";
 import { CreateTenant, DeleteTenant, GetTenant, SuspendTenant } from "../src/tenancy/index.ts";
 
@@ -71,9 +71,8 @@ before(async () => {
   );
   const options = { url: kernel.url, key: join(kernel.dir, "kit.key") };
   kit = new Kernable(options).use(...kitSchemas());
-  app = new Kernable(options).app({ service: "kit", domains: [...kitDomains(), shop] });
-  void app.run();
-  await app.ready;
+  useAuthorizationStore(`sqlite:${join(kernel.dir, "authorization.db")}`);
+  await startApp();
   const { api: service } = await bootstrap(kit, {
     signUp: { tenants: "active", accounts: "open" },
     admin: { email: "admin@example.com", name: "Admin", password: PASSWORD },
@@ -86,6 +85,12 @@ after(async () => {
   kit?.close();
   await kernel?.dispose();
 });
+
+async function startApp(): Promise<void> {
+  app = new Kernable({ url: kernel.url, key: join(kernel.dir, "kit.key") }).app({ service: "kit", domains: [...kitDomains(), shop] });
+  void app.run();
+  await app.ready;
+}
 
 async function person(email: string): Promise<{ claims: Claims; accountId: string }> {
   await api.register({ email, name: email.split("@")[0], password: PASSWORD });
@@ -244,4 +249,33 @@ test("suspended and deleted: sessions end at once, and a deleted tenant leaves n
     aggregateId: reuse, tenant: reuse, context: await api.contextFor(api.check(bobAgain.accessToken)!),
   });
   assert.ok(acme2.committed, JSON.stringify(acme2));
+});
+
+test("the middleware resumes from its store after a restart, and decides as before", async () => {
+  const grace = await person("grace@example.com");
+  const graces = crypto.randomUUID();
+  const opened = await kit.submit(CreateTenant.new({ slug: "graces", name: "Grace's", owner: { accountId: grace.accountId } }), {
+    aggregateId: graces, tenant: graces, context: await api.contextFor(grace.claims),
+  });
+  assert.ok(opened.committed, JSON.stringify(opened));
+  const asGrace = await api.contextFor(grace.claims, graces);
+  const order = (id: string) => kit.submit(PlaceOrder.new(), { aggregateId: id, tenant: graces, context: asGrace });
+  assert.ok((await order("g1")).committed);
+
+  app.stop();
+  await new Promise((r) => setTimeout(r, 200));
+  // The knowledge is in the store file, with the position it continues from.
+  const { DatabaseSync } = await import("node:sqlite");
+  const db = new DatabaseSync(join(kernel.dir, "authorization.db"), { readOnly: true });
+  const position = Number((db.prepare("SELECT value FROM meta WHERE key = 'position'").get() as { value: string }).value);
+  const stored = db.prepare("SELECT value FROM data WHERE ns = 'tenants' AND key = ?").get(graces) as { value: string } | undefined;
+  db.close();
+  assert.ok(position > 0, "a stored position");
+  assert.ok(stored && JSON.parse(stored.value).owners.length === 1, "Grace's tenant and its owner in the store");
+  await startApp();
+  // The owner still may, an ended session still may not: both from the stored knowledge.
+  assert.ok((await order("g2")).committed);
+  await api.signOut(grace.claims);
+  const after = await order("g3");
+  assert.equal(!after.committed && after.code, "unauthenticated");
 });
