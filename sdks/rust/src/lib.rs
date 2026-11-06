@@ -488,6 +488,22 @@ impl Client {
         &self,
         timeout: Option<Duration>,
         message: T,
+        call: impl FnMut(Channel, tonic::Request<T>) -> Fut,
+    ) -> Result<R, tonic::Status>
+    where
+        Fut: Future<Output = Result<tonic::Response<R>, tonic::Status>>,
+    {
+        self.call_with(timeout, message, false, call).await
+    }
+
+    /// Like [`call`](Self::call); `idempotent`, it also tries again when the connection dropped
+    /// with the request under way: whether it ran is unknown, and running it again is safe (a
+    /// command, by its ID: the kernel answers a resubmission with the stored result).
+    async fn call_with<T: Clone, R, Fut>(
+        &self,
+        timeout: Option<Duration>,
+        message: T,
+        idempotent: bool,
         mut call: impl FnMut(Channel, tonic::Request<T>) -> Fut,
     ) -> Result<R, tonic::Status>
     where
@@ -514,7 +530,10 @@ impl Client {
                     tokio::time::sleep(pause).await;
                     pause = (pause * 2).min(MAX_PAUSE);
                 }
-                Err(status) if not_connected(&status) && Instant::now() + pause < deadline => {
+                Err(status)
+                    if (not_connected(&status) || (idempotent && dropped(&status)))
+                        && Instant::now() + pause < deadline =>
+                {
                     tokio::time::sleep(pause).await;
                     pause = (pause * 2).min(MAX_PAUSE);
                 }
@@ -857,7 +876,7 @@ impl Kernable {
                 let request = request.clone();
                 async move {
                     client
-                        .call(timeout, request, |channel, r| async move {
+                        .call_with(timeout, request, true, |channel, r| async move {
                             CommandServiceClient::new(channel).submit(r).await
                         })
                         .await
@@ -1358,6 +1377,35 @@ impl StoredEvent {
 }
 
 /// Whether `status` says the connection could not be made: the request was not sent.
+/// Whether the connection dropped with the request under way (a kernel that stopped or handed
+/// its stores over, a proxy that closed): unknown whether it ran.
+fn dropped(status: &tonic::Status) -> bool {
+    use std::io::ErrorKind::{BrokenPipe, ConnectionAborted, ConnectionReset, UnexpectedEof};
+    if !matches!(
+        status.code(),
+        tonic::Code::Unknown | tonic::Code::Unavailable | tonic::Code::Internal
+    ) {
+        return false;
+    }
+    let mut source = std::error::Error::source(status);
+    while let Some(e) = source {
+        if let Some(io) = e.downcast_ref::<std::io::Error>()
+            && matches!(
+                io.kind(),
+                ConnectionReset | ConnectionAborted | BrokenPipe | UnexpectedEof
+            )
+        {
+            return true;
+        }
+        source = e.source();
+    }
+    let message = status.message();
+    message.contains("transport error")
+        || message.contains("connection closed")
+        || message.contains("error reading a body from connection")
+        || message.contains("h2 protocol error")
+}
+
 fn not_connected(status: &tonic::Status) -> bool {
     use std::io::ErrorKind::{AddrNotAvailable, ConnectionRefused, NotFound, TimedOut};
     let mut source = std::error::Error::source(status);
@@ -1405,3 +1453,23 @@ fn local(url: &str) -> bool {
 /// kernel update takes a few hundred milliseconds, and the client finds the kernel serving again
 /// within this much of it.
 const MAX_PAUSE: Duration = Duration::from_millis(200);
+
+#[cfg(test)]
+mod dropped_tests {
+    use super::*;
+
+    #[test]
+    fn a_connection_that_dropped_under_way_counts_as_dropped_and_nothing_else_does() {
+        assert!(dropped(&tonic::Status::unknown("transport error")));
+        assert!(dropped(&tonic::Status::unavailable(
+            "h2 protocol error: error reading a body from connection"
+        )));
+        assert!(!dropped(&tonic::Status::unknown("a worker's error")));
+        assert!(!dropped(&tonic::Status::invalid_argument(
+            "transport error"
+        )));
+        assert!(!dropped(&tonic::Status::deadline_exceeded(
+            "transport error"
+        )));
+    }
+}
