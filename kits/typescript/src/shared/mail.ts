@@ -5,7 +5,7 @@ export interface Mail {
   subject: string;
   text: string;
   /** What the mail is for, and the token it carries: tests and logs read these. */
-  purpose: "verify" | "reset" | "email_change" | "invitation";
+  purpose: "verify" | "reset" | "email_change" | "invitation" | "account_exists";
   token: string;
 }
 

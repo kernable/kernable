@@ -2,7 +2,7 @@
 
 import { Event, type PersonalFields } from "@kernable/sdk";
 
-import type { Scope } from "./domain.ts";
+import { identityDomain, type Scope } from "./domain.ts";
 
 export class IdentityCreated extends Event {
   static personal: PersonalFields<IdentityCreated>[] = [{ fields: ["displayName", "title", "email"], subject: (_d, id) => `identity:${id}` }];
@@ -62,3 +62,6 @@ export class IdentityReactivated extends Event {}
 export class IdentityDeleted extends Event {
   static erases = (_d: unknown, id: string) => `identity:${id}`;
 }
+
+// Declared on the domain, so a process that only reads them knows them too.
+identityDomain.event(IdentityCreated, ProfileUpdated, MembershipGranted, MembershipSuspended, MembershipResumed, MembershipRevoked, ApiKeyCreated, ApiKeyRevoked, IdentitySuspended, IdentityReactivated, IdentityDeleted);

@@ -2,7 +2,7 @@
 
 import { Event, type PersonalFields } from "@kernable/sdk";
 
-import type { InvitedGroup } from "./domain.ts";
+import { invitationDomain, type InvitedGroup } from "./domain.ts";
 
 /** The email belongs to the invitation (its own subject); the token sits in the vault until used. */
 export class InvitationCreated extends Event {
@@ -59,3 +59,6 @@ export class InvitationMailSent extends Event {
 export class InvitationErased extends Event {
   static erases = (_d: unknown, id: string) => `invitation:${id}`;
 }
+
+// Declared on the domain, so a process that only reads them knows them too.
+invitationDomain.event(InvitationCreated, InvitationResent, InvitationRevoked, InvitationDeclined, InvitationAccepted, InvitationMailSent, InvitationErased);

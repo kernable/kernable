@@ -19,6 +19,7 @@ export const API_PERMISSIONS = [
   { pattern: "account.RegisterAccount" },
   { pattern: "account.RequestVerification" },
   { pattern: "account.RequestPasswordReset" },
+  { pattern: "account.NoteRegistrationAttempt" },
   { pattern: "identity.FindIdentityByAccount" },
   { pattern: "identity.FindApiKey" },
   { pattern: "tenancy.GetTenantBySlug" },

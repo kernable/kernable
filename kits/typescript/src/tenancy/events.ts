@@ -2,7 +2,7 @@
 
 import { Event } from "@kernable/sdk";
 
-import type { Owner, SuspensionReason } from "./domain.ts";
+import { tenancyDomain, type Owner, type SuspensionReason } from "./domain.ts";
 
 export class TenantCreated extends Event {
   slug!: string;
@@ -48,3 +48,6 @@ export class SignUpPolicyChanged extends Event {
   tenants!: "off" | "pending" | "active";
   accounts!: "off" | "open";
 }
+
+// Declared on the domain, so a process that only reads them knows them too.
+tenancyDomain.event(TenantCreated, TenantActivated, TenantRenamed, TenantSlugChanged, TenantSuspended, TenantReactivated, TenantDeleted, OwnerAdded, OwnerRemoved, MfaRequirementChanged, SignUpPolicyChanged);

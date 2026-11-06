@@ -5,7 +5,10 @@ import { randomUUID } from "node:crypto";
 
 import type { Kernable, Outcome, RequestContext, StoredEvent } from "@kernable/sdk";
 
-import { EndSession, FindAccountByEmail, GetAccount, RegisterAccount, SignIn, VerifyEmail, type SignInFailed, type SignedIn } from "../account/index.ts";
+import {
+  ChangePassword, ConfirmEmailChange, EndSession, FindAccountByEmail, GetAccount, NoteRegistrationAttempt, RefreshSession, RegisterAccount, RequestEmailChange,
+  RequestPasswordReset, ResetPassword, SignIn, VerifyEmail, type SessionRefreshed, type SignInFailed, type SignedIn,
+} from "../account/index.ts";
 import { AcceptInvitation, PeekInvitation } from "../invitation/index.ts";
 import { FindIdentityByAccount } from "../identity/index.ts";
 import { PLATFORM_TENANT } from "../shared/constants.ts";
@@ -62,6 +65,9 @@ export class KitApi {
     if (held.status === "pending") {
       const again = await this.kernable.submit(RegisterAccount.new(input), { aggregateId: held.id, tenant: PLATFORM_TENANT, context: {} });
       if (again.committed) return { accountId: held.id };
+    } else {
+      // The account's owner learns that someone tried; the caller learns nothing.
+      await this.kernable.submit(NoteRegistrationAttempt.new(), { aggregateId: held.id, tenant: PLATFORM_TENANT, context: this.serviceContext });
     }
     return { accountId: randomUUID() };
   }
@@ -111,6 +117,67 @@ export class KitApi {
     if (!tenant) return context;
     const found = await this.kernable.query(FindIdentityByAccount.new({ accountId: claims.sub }), { tenant, context: this.serviceContext });
     return { ...context, senderTenant: tenant, senderIdentity: found.identityId };
+  }
+
+  /**
+   * A new access token and a rotated refresh token. An older refresh token is a reuse:
+   * the session ends, and so does every token of it.
+   */
+  async refresh(refreshToken: string, ip?: string): Promise<{ ok: true; accessToken: string; refreshToken: string } | { ok: false; reason: string }> {
+    const parts = parseToken(refreshToken);
+    if (!parts) return { ok: false, reason: "invalid_token" };
+    const [sessionId, generation] = parts;
+    const next = token(sessionId, Number(generation) + 1, randomSecret());
+    const outcome = await this.kernable.submit(RefreshSession.new({ refreshToken, newRefreshToken: next, ip }), {
+      aggregateId: sessionId, tenant: PLATFORM_TENANT, context: {},
+    });
+    if (!outcome.committed) return { ok: false, reason: outcome.code };
+    const [event] = outcome.events;
+    if (event.type !== "SessionRefreshed") return { ok: false, reason: (event.data as { reason: string }).reason };
+    const d = event.data as SessionRefreshed;
+    return { ok: true, refreshToken: next, accessToken: issueAccessToken(this.keys, { sub: d.accountId, sid: sessionId, fac: d.factors }) };
+  }
+
+  /** Changes the password; the other sessions end, this one stays. */
+  async changePassword(claims: Claims, current: string | undefined, next: string): Promise<{ ok: boolean; reason?: string }> {
+    const outcome = await this.kernable.submit(ChangePassword.new({ current, new: next, keepSessionId: claims.sid }), {
+      aggregateId: claims.sub, tenant: PLATFORM_TENANT, context: { senderAccount: claims.sub, senderSession: claims.sid },
+    });
+    return outcome.committed ? { ok: true } : { ok: false, reason: outcome.code };
+  }
+
+  /** Sends a reset mail if the address has an active account; answers the same either way. */
+  async requestPasswordReset(email: string): Promise<void> {
+    try {
+      const held = await this.kernable.query(FindAccountByEmail.new({ email }), { tenant: PLATFORM_TENANT, context: this.serviceContext });
+      await this.kernable.submit(RequestPasswordReset.new(), { aggregateId: held.id, tenant: PLATFORM_TENANT, context: this.serviceContext });
+    } catch {
+      // no such account: nothing to send, nothing to say
+    }
+  }
+
+  /** Sets a new password with the mailed token; every session ends. */
+  async resetPassword(resetToken: string, next: string): Promise<{ ok: boolean; reason?: string }> {
+    const parts = parseToken(resetToken);
+    if (!parts) return { ok: false, reason: "invalid_token" };
+    const outcome = await this.kernable.submit(ResetPassword.new({ token: resetToken, new: next }), { aggregateId: parts[0], tenant: PLATFORM_TENANT, context: {} });
+    return outcome.committed ? { ok: true } : { ok: false, reason: outcome.code };
+  }
+
+  /** Asks to change the account's address: a token goes to the new one. */
+  async requestEmailChange(claims: Claims, email: string): Promise<{ ok: boolean; reason?: string }> {
+    const outcome = await this.kernable.submit(RequestEmailChange.new({ email }), {
+      aggregateId: claims.sub, tenant: PLATFORM_TENANT, context: { senderAccount: claims.sub, senderSession: claims.sid },
+    });
+    return outcome.committed ? { ok: true } : { ok: false, reason: outcome.code };
+  }
+
+  /** Confirms the new address with its token; a taken address is refused (`unique_taken`). */
+  async confirmEmailChange(changeToken: string): Promise<{ ok: boolean; reason?: string }> {
+    const parts = parseToken(changeToken);
+    if (!parts) return { ok: false, reason: "invalid_token" };
+    const outcome = await this.kernable.submit(ConfirmEmailChange.new({ token: changeToken }), { aggregateId: parts[0], tenant: PLATFORM_TENANT, context: {} });
+    return outcome.committed ? { ok: true } : { ok: false, reason: outcome.code };
   }
 
   /** What the acceptance page shows for an invitation token. */

@@ -2,7 +2,7 @@
 
 import { Event } from "@kernable/sdk";
 
-import type { Permission } from "./domain.ts";
+import { groupDomain, type Permission } from "./domain.ts";
 
 export class GroupCreated extends Event {
   name!: string;
@@ -21,3 +21,6 @@ export class GroupPermissionsSet extends Event {
 }
 
 export class GroupDeleted extends Event {}
+
+// Declared on the domain, so a process that only reads them knows them too.
+groupDomain.event(GroupCreated, GroupUpdated, GroupPermissionsSet, GroupDeleted);

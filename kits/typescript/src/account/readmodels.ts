@@ -3,7 +3,7 @@
 import { ORDERS } from "../shared/constants.ts";
 import { accountDomain, type AccountStatus } from "./domain.ts";
 import {
-  AccountDeleted, AccountReactivated, AccountRegistered, AccountSuspended, EmailVerified, SessionEnded, SessionOpened, SessionRefreshed,
+  AccountDeleted, AccountReactivated, AccountRegistered, AccountSuspended, EmailChanged, EmailVerified, SessionEnded, SessionOpened, SessionRefreshed,
 } from "./events.ts";
 
 export interface AccountRow { id: string; email: string | null; name: string | null; status: AccountStatus }
@@ -28,6 +28,14 @@ export const accountsReadModel = accountDomain
   .on(EmailVerified, (_d, evt) => {
     const a = accountRows.get(evt.aggregateId);
     if (a?.status === "pending") a.status = "active";
+  })
+  // The new address finds the account, the old one no more.
+  .on(EmailChanged, (d, evt) => {
+    const a = accountRows.get(evt.aggregateId);
+    if (!a) return;
+    if (a.email) accountsByEmail.delete(a.email);
+    a.email = d.email;
+    if (d.email) accountsByEmail.set(d.email, evt.aggregateId);
   })
   .on(AccountSuspended, status("suspended"))
   .on(AccountReactivated, status("active"))

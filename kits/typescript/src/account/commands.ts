@@ -2,11 +2,11 @@
 
 import { Command, type PersonalFields, Rejected } from "@kernable/sdk";
 
-import { DAY, HOUR, SESSION_IDLE_DAYS, SESSION_MAX_DAYS, VERIFICATION_HOURS } from "../shared/constants.ts";
+import { DAY, HOUR, SESSION_IDLE_DAYS, SESSION_MAX_DAYS, VERIFICATION_HOURS, MINUTE, RESET_MINUTES } from "../shared/constants.ts";
 import { checkPassword, equalSecrets, hashPassword, normalEmail, parseToken, randomSecret, sha256, validEmail, validPassword } from "../shared/secrets.ts";
-import { accountAggregate, lockedUntil, sessionAggregate } from "./aggregates.ts";
+import { type Account, accountAggregate, lockedUntil, sessionAggregate } from "./aggregates.ts";
 import { ACCOUNT_SUSPENSION_REASONS, type AccountSuspensionReason, type SessionEnd } from "./domain.ts";
-import { AccountDeleted, AccountReactivated, AccountSuspended, AccountRegistered, EmailVerified, SessionEnded, SessionFactorAdded, SessionOpened, SessionRefreshed, SignedIn, SignInFailed, VerificationRequested } from "./events.ts";
+import { EmailChangeRequested, EmailChanged, PasswordChanged, PasswordReset, PasswordResetRequested, RegistrationAttempted, AccountDeleted, AccountReactivated, AccountSuspended, AccountRegistered, EmailVerified, SessionEnded, SessionFactorAdded, SessionOpened, SessionRefreshed, SignedIn, SignInFailed, VerificationRequested } from "./events.ts";
 
 /** Internal: after a second factor was proved on the account. */
 export class AddSessionFactor extends Command {
@@ -68,7 +68,7 @@ sessionAggregate.command(RefreshSession, (s, d, cmd, ctx) => {
   if (at > s.openedAt + SESSION_MAX_DAYS * DAY) return [SessionEnded.new({ reason: "expired" })];
   if (!next || next[0] !== cmd.aggregateId || Number(next[1]) !== s.generation + 1) throw new Rejected("A malformed refresh token", "invalid_token");
   return [SessionRefreshed.new({
-    generation: s.generation + 1, refreshTokenHash: sha256(d.newRefreshToken), ip: d.ip ?? null, accountId: s.accountId!, at,
+    generation: s.generation + 1, refreshTokenHash: sha256(d.newRefreshToken), ip: d.ip ?? null, accountId: s.accountId!, factors: s.factors, at,
   })];
 });
 
@@ -182,4 +182,83 @@ export class DeleteAccount extends Command {}
 accountAggregate.command(DeleteAccount, (s) => {
   if (s.status !== "suspended") throw new Rejected("Only a suspended account is deleted", "invalid_state");
   return [AccountDeleted.new()];
+});
+
+/** The open token of `purpose` that `value` proves, or a rejection. */
+function proven(s: Account, purpose: "reset" | "email_change", value: unknown, aggregateId: string, now: number) {
+  const parts = parseToken(value);
+  const open = s.openTokens.find((t) => t.purpose === purpose && parts && t.tokenId === parts[1]);
+  if (!parts || parts[0] !== aggregateId || !open?.token || !equalSecrets(open.token, parts[2])) throw new Rejected("The link is not valid", "invalid_token");
+  if (now > open.expiresAt) throw new Rejected("The link has expired", "expired_token");
+  return open.tokenId;
+}
+
+/** The account's own. Needs the current password if it has one; ends the other sessions (a reactor). */
+export class ChangePassword extends Command {
+  static secret: (keyof ChangePassword)[] = ["current", "new"];
+  current?: string;
+  new!: string;
+  /** The session the change comes from: it stays. */
+  keepSessionId?: string;
+}
+
+accountAggregate.command(ChangePassword, async (s, d, _cmd, ctx) => {
+  if (s.status !== "active") throw new Rejected("The account is not active", "invalid_state");
+  if (s.password && !(await checkPassword(s.password.hash, d.current))) throw new Rejected("The current password is wrong", "wrong_password");
+  if (!validPassword(d.new)) throw new Rejected("A password has 10 to 1024 characters", "weak_password");
+  return [PasswordChanged.new({ hash: await hashPassword(d.new), keepSessionId: d.keepSessionId ?? null, at: ctx.now().getTime() })];
+});
+
+/** The API's: asked for by email, without saying whether the account exists. */
+export class RequestPasswordReset extends Command {}
+
+accountAggregate.command(RequestPasswordReset, (s, _d, _cmd, ctx) => {
+  if (s.status !== "active") throw new Rejected("The account is not active", "invalid_state");
+  return [PasswordResetRequested.new({ tokenId: randomSecret(9), token: randomSecret(), email: s.email!, expiresAt: ctx.now().getTime() + RESET_MINUTES * MINUTE })];
+});
+
+/** Public: the emailed token is the proof. Ends every session (a reactor). */
+export class ResetPassword extends Command {
+  static secret: (keyof ResetPassword)[] = ["token", "new"];
+  token!: string;
+  new!: string;
+}
+
+accountAggregate.command(ResetPassword, async (s, d, cmd, ctx) => {
+  const tokenId = proven(s, "reset", d.token, cmd.aggregateId, ctx.now().getTime());
+  if (!validPassword(d.new)) throw new Rejected("A password has 10 to 1024 characters", "weak_password");
+  return [PasswordReset.new({ tokenId, hash: await hashPassword(d.new), at: ctx.now().getTime() })];
+});
+
+/** The account's own: the new address gets a token and holds nothing until confirmed. */
+export class RequestEmailChange extends Command {
+  static personal: PersonalFields<RequestEmailChange>[] = [{ fields: ["email"], subject: (_d, id) => id }];
+  email!: string;
+}
+
+accountAggregate.command(RequestEmailChange, (s, d, _cmd, ctx) => {
+  if (s.status !== "active") throw new Rejected("The account is not active", "invalid_state");
+  const email = normalEmail(d.email);
+  if (!validEmail(email)) throw new Rejected("Not an email address", "invalid_email");
+  if (email === s.email) throw new Rejected("That is the address already", "unchanged");
+  return [EmailChangeRequested.new({ tokenId: randomSecret(9), token: randomSecret(), email, expiresAt: ctx.now().getTime() + VERIFICATION_HOURS * HOUR })];
+});
+
+/** Public: the token sent to the new address is the proof. The kernel refuses a taken address (the key). */
+export class ConfirmEmailChange extends Command {
+  static secret: (keyof ConfirmEmailChange)[] = ["token"];
+  token!: string;
+}
+
+accountAggregate.command(ConfirmEmailChange, (s, d, cmd, ctx) => {
+  const tokenId = proven(s, "email_change", d.token, cmd.aggregateId, ctx.now().getTime());
+  return [EmailChanged.new({ tokenId, email: s.pendingEmail! })];
+});
+
+/** The API's, when someone registers with this account's address: the account gets a mail. */
+export class NoteRegistrationAttempt extends Command {}
+
+accountAggregate.command(NoteRegistrationAttempt, (s, _d, _cmd, ctx) => {
+  if (s.status !== "active" && s.status !== "suspended") throw new Rejected("No account to tell", "invalid_state");
+  return [RegistrationAttempted.new({ email: s.email!, at: ctx.now().getTime() })];
 });

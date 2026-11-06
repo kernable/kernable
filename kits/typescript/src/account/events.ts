@@ -2,7 +2,7 @@
 
 import { Event, type PersonalFields } from "@kernable/sdk";
 
-import type { AccountSuspensionReason, SessionEnd } from "./domain.ts";
+import { accountDomain, type AccountSuspensionReason, type SessionEnd } from "./domain.ts";
 
 export class AccountRegistered extends Event {
   static personal: PersonalFields<AccountRegistered>[] = [{ fields: ["email", "name", "passwordHash"], subject: (_d, id) => id }];
@@ -70,6 +70,8 @@ export class SessionRefreshed extends Event {
   refreshTokenHash!: string;
   ip!: string | null;
   accountId!: string;
+  /** The session's factors, so the API issues the new access token without asking. */
+  factors!: string[];
   at!: number;
 }
 
@@ -93,3 +95,62 @@ export class AccountReactivated extends Event {}
 export class AccountDeleted extends Event {
   static erases = (_d: unknown, id: string) => id;
 }
+
+/** Ends the account's other sessions (a reactor); `keepSessionId` is the one it was changed from. */
+export class PasswordChanged extends Event {
+  static personal: PersonalFields<PasswordChanged>[] = [{ fields: ["hash"], subject: (_d, id) => id }];
+  hash!: string;
+  keepSessionId!: string | null;
+  at!: number;
+}
+
+/** The reset token sits in the vault under its own subject until used. */
+export class PasswordResetRequested extends Event {
+  static personal: PersonalFields<PasswordResetRequested>[] = [
+    { fields: ["email"], subject: (_d, id) => id },
+    { fields: ["token"], subject: (d) => `token:${d.tokenId}` },
+  ];
+  tokenId!: string;
+  token!: string | null;
+  email!: string | null;
+  expiresAt!: number;
+}
+
+/** Erases the used token; ends every session (a reactor). */
+export class PasswordReset extends Event {
+  static personal: PersonalFields<PasswordReset>[] = [{ fields: ["hash"], subject: (_d, id) => id }];
+  static erases = (d: { tokenId: string }) => `token:${d.tokenId}`;
+  tokenId!: string;
+  hash!: string;
+  at!: number;
+}
+
+/** The new address gets a token; it holds nothing until confirmed. */
+export class EmailChangeRequested extends Event {
+  static personal: PersonalFields<EmailChangeRequested>[] = [
+    { fields: ["email"], subject: (_d, id) => id },
+    { fields: ["token"], subject: (d) => `token:${d.tokenId}` },
+  ];
+  tokenId!: string;
+  token!: string | null;
+  email!: string | null;
+  expiresAt!: number;
+}
+
+/** Erases the used token; the account now holds the new address. */
+export class EmailChanged extends Event {
+  static personal: PersonalFields<EmailChanged>[] = [{ fields: ["email"], subject: (_d, id) => id }];
+  static erases = (d: { tokenId: string }) => `token:${d.tokenId}`;
+  tokenId!: string;
+  email!: string;
+}
+
+/** Someone registered with this account's address: it gets a mail saying it exists. */
+export class RegistrationAttempted extends Event {
+  static personal: PersonalFields<RegistrationAttempted>[] = [{ fields: ["email"], subject: (_d, id) => id }];
+  email!: string | null;
+  at!: number;
+}
+
+// Declared on the domain, so a process that only reads them knows them too.
+accountDomain.event(AccountRegistered, VerificationRequested, EmailVerified, SignedIn, SignInFailed, SessionOpened, SessionRefreshed, SessionFactorAdded, SessionEnded, AccountSuspended, AccountReactivated, AccountDeleted, PasswordChanged, PasswordResetRequested, PasswordReset, EmailChangeRequested, EmailChanged, RegistrationAttempted);

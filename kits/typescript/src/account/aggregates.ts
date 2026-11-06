@@ -2,7 +2,7 @@
 
 import { LOCKOUT_AFTER, LOCKOUT_MAX_MINUTES, MINUTE } from "../shared/constants.ts";
 import { accountDomain, type AccountStatus, type AccountSuspensionReason, type SessionEnd, type TokenPurpose } from "./domain.ts";
-import { AccountDeleted, AccountReactivated, AccountRegistered, AccountSuspended, EmailVerified, SessionEnded, SessionFactorAdded, SessionOpened, SessionRefreshed, SignedIn, SignInFailed, VerificationRequested } from "./events.ts";
+import { EmailChangeRequested, EmailChanged, PasswordChanged, PasswordReset, PasswordResetRequested, AccountDeleted, AccountReactivated, AccountRegistered, AccountSuspended, EmailVerified, SessionEnded, SessionFactorAdded, SessionOpened, SessionRefreshed, SignedIn, SignInFailed, VerificationRequested } from "./events.ts";
 
 export interface Account {
   id?: string;
@@ -15,6 +15,8 @@ export interface Account {
   /** Open emailed tokens; the token itself is in the vault until it is used. */
   openTokens: { tokenId: string; purpose: TokenPurpose; token: string | null; expiresAt: number }[];
   suspension: { reason: AccountSuspensionReason; at: number } | null;
+  /** A new address waiting for its confirmation: it holds no key yet. */
+  pendingEmail?: string | null;
 }
 
 /** Until when the account is locked after failed sign-ins: computed, never stored. */
@@ -62,6 +64,27 @@ export const accountAggregate = accountDomain
     s.status = "deleted";
     s.password = null;
     s.openTokens = [];
+  })
+  .apply(PasswordChanged, (s, d) => void (s.password = { hash: d.hash, setAt: d.at }))
+  .apply(PasswordResetRequested, (s, d) => {
+    s.openTokens = s.openTokens.filter((t) => t.purpose !== "reset");
+    s.openTokens.push({ tokenId: d.tokenId, purpose: "reset", token: d.token, expiresAt: d.expiresAt });
+  })
+  .apply(PasswordReset, (s, d) => {
+    s.password = { hash: d.hash, setAt: d.at };
+    s.failures = { count: 0, lastAt: 0 };
+    s.openTokens = s.openTokens.filter((t) => t.tokenId !== d.tokenId);
+  })
+  .apply(EmailChangeRequested, (s, d) => {
+    s.pendingEmail = d.email;
+    s.openTokens = s.openTokens.filter((t) => t.purpose !== "email_change");
+    s.openTokens.push({ tokenId: d.tokenId, purpose: "email_change", token: d.token, expiresAt: d.expiresAt });
+  })
+  .apply(EmailChanged, (s, d) => {
+    s.email = d.email;
+    s.emailVerified = true;
+    s.pendingEmail = null;
+    s.openTokens = s.openTokens.filter((t) => t.tokenId !== d.tokenId);
   })
   .apply(SignedIn, (s) => void (s.failures = { count: 0, lastAt: 0 }))
   .apply(SignInFailed, (s, d) => {

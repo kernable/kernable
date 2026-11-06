@@ -13,7 +13,8 @@ const COMMANDS: Record<string, string[]> = {
     "CreateTenant", "ActivateTenant", "RenameTenant", "ChangeTenantSlug", "SuspendTenant", "ReactivateTenant",
     "DeleteTenant", "AddOwner", "RemoveOwner", "RequireMfa", "ChangeSignUpPolicy",
   ],
-  "account.account": ["RegisterAccount", "RequestVerification", "VerifyEmail", "SignIn", "SuspendAccount", "ReactivateAccount", "DeleteAccount"],
+  "account.account": ["RegisterAccount", "RequestVerification", "VerifyEmail", "SignIn", "SuspendAccount", "ReactivateAccount", "DeleteAccount",
+    "ChangePassword", "RequestPasswordReset", "ResetPassword", "RequestEmailChange", "ConfirmEmailChange", "NoteRegistrationAttempt"],
   "account.session": ["OpenSession", "RefreshSession", "AddSessionFactor", "EndSession"],
   "identity.identity": [
     "CreateIdentity", "CreateServiceIdentity", "UpdateProfile", "GrantMembership", "SuspendMembership",

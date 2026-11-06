@@ -279,3 +279,55 @@ test("the middleware resumes from its store after a restart, and decides as befo
   const after = await order("g3");
   assert.equal(!after.committed && after.code, "unauthenticated");
 });
+
+test("account flows: refresh and reuse, password change and reset, email change, a taken address", async () => {
+  const email = "frank@example.com";
+  await person(email);
+  const signIn = async (address = email, password = PASSWORD) => {
+    const s = await api.signIn({ email: address, password });
+    assert.ok(s.ok, JSON.stringify(s));
+    return s;
+  };
+  const one = await signIn();
+  const two = await signIn();
+  const three = await signIn();
+
+  // A refresh rotates the token; the old one again is a reuse and ends the session.
+  const refreshed = await api.refresh(one.refreshToken);
+  assert.ok(refreshed.ok && api.check(refreshed.accessToken)?.sid === one.sessionId);
+  assert.deepEqual(await api.refresh(one.refreshToken), { ok: false, reason: "reuse" });
+  assert.equal((await api.refresh(refreshed.ok ? refreshed.refreshToken : "")).ok, false, "the session ended with the reuse");
+
+  // A password change keeps its own session and ends the others.
+  assert.deepEqual(await api.changePassword(api.check(two.accessToken)!, "wrong password!", "another horse battery"), { ok: false, reason: "wrong_password" });
+  assert.deepEqual(await api.changePassword(api.check(two.accessToken)!, PASSWORD, "another horse battery"), { ok: true });
+  const twoAgain = await api.refresh(two.refreshToken);
+  assert.ok(twoAgain.ok, "the changing session stays");
+  assert.equal((await api.refresh(three.refreshToken)).ok, false, "the other session ended");
+  await signIn(email, "another horse battery");
+
+  // A reset by mail sets a new password and ends every session; asking for nobody sends nothing.
+  const before = mailer.sent.length;
+  await api.requestPasswordReset("nobody@example.com");
+  assert.equal(mailer.sent.length, before);
+  await api.requestPasswordReset(email);
+  const reset = mailer.last(email)!;
+  assert.equal(reset.purpose, "reset");
+  assert.deepEqual(await api.resetPassword(reset.token, "third horse battery"), { ok: true });
+  assert.equal((await api.refresh(twoAgain.ok ? twoAgain.refreshToken : "")).ok, false, "every session ended");
+  assert.deepEqual(await api.signIn({ email, password: "another horse battery" }), { ok: false, reason: "wrong_password" });
+  const four = await signIn(email, "third horse battery");
+
+  // A new address is confirmed from that address; the old one then signs in no more.
+  assert.deepEqual(await api.requestEmailChange(api.check(four.accessToken)!, "frank@new.example"), { ok: true });
+  const change = mailer.last("frank@new.example")!;
+  assert.equal(change.purpose, "email_change");
+  assert.deepEqual(await api.confirmEmailChange(change.token), { ok: true });
+  await signIn("frank@new.example", "third horse battery");
+  assert.deepEqual(await api.signIn({ email, password: "third horse battery" }), { ok: false, reason: "wrong_password" });
+
+  // Registering with a taken address answers as usual; the account's owner gets a mail.
+  const again = await api.register({ email: "frank@new.example", name: "Not Frank", password: PASSWORD });
+  assert.ok("accountId" in again);
+  assert.equal(mailer.last("frank@new.example")!.purpose, "account_exists");
+});

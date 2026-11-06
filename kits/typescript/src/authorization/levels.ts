@@ -47,6 +47,8 @@ export const RULES: Record<string, Rule> = {
   "account.ReactivateAccount": { level: "platform" },
   "account.DeleteAccount": { level: "platform" },
   "account.EndSession": { level: "group", self: true },
+  "account.ChangePassword": { level: "group", self: true },
+  "account.RequestEmailChange": { level: "group", self: true },
   "account.GetAccount": { level: "group", self: true },
   "account.ListSessions": { level: "group", self: true },
 

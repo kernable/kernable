@@ -726,7 +726,10 @@
             "refreshTokenHash": "cdb350a26128d8c1311f44cddc350d79344cd06d4c9d93292da91b7116409534",
             "ip": null,
             "accountId": "a1",
-            "at": 1000000
+            "at": 1000000,
+            "factors": [
+              "password"
+            ]
           }
         }
       ]
@@ -759,7 +762,10 @@
             "refreshTokenHash": "cdb350a26128d8c1311f44cddc350d79344cd06d4c9d93292da91b7116409534",
             "ip": null,
             "accountId": "a1",
-            "at": 950000
+            "at": 950000,
+            "factors": [
+              "password"
+            ]
           }
         }
       ],
@@ -810,6 +816,408 @@
           "type": "SessionEnded",
           "data": {
             "reason": "signed_out"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a password change needs the current one",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        }
+      ],
+      "when": {
+        "type": "ChangePassword",
+        "data": {
+          "current": "wrong password!",
+          "new": "another horse battery"
+        }
+      },
+      "rejected": "wrong_password"
+    },
+    {
+      "name": "a changed password keeps the session it came from",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        }
+      ],
+      "when": {
+        "type": "ChangePassword",
+        "data": {
+          "current": "correct horse battery",
+          "new": "another horse battery",
+          "keepSessionId": "s1"
+        }
+      },
+      "then": [
+        {
+          "type": "PasswordChanged",
+          "data": {
+            "hash": "<argon2>",
+            "keepSessionId": "s1",
+            "at": 1000000
+          }
+        }
+      ]
+    },
+    {
+      "name": "a reset is for an active account",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": false,
+            "at": 1
+          }
+        }
+      ],
+      "when": {
+        "type": "RequestPasswordReset",
+        "data": {}
+      },
+      "rejected": "invalid_state"
+    },
+    {
+      "name": "a reset token lasts an hour",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        }
+      ],
+      "when": {
+        "type": "RequestPasswordReset",
+        "data": {}
+      },
+      "then": [
+        {
+          "type": "PasswordResetRequested",
+          "data": {
+            "tokenId": "<string>",
+            "token": "<string>",
+            "email": "ann@example.com",
+            "expiresAt": 4600000
+          }
+        }
+      ]
+    },
+    {
+      "name": "the reset token sets a new password",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        },
+        {
+          "type": "PasswordResetRequested",
+          "data": {
+            "tokenId": "rt",
+            "token": "rsec",
+            "email": "ann@example.com",
+            "expiresAt": 2000000
+          }
+        }
+      ],
+      "when": {
+        "type": "ResetPassword",
+        "data": {
+          "token": "a1.rt.rsec",
+          "new": "another horse battery"
+        }
+      },
+      "then": [
+        {
+          "type": "PasswordReset",
+          "data": {
+            "tokenId": "rt",
+            "hash": "<argon2>",
+            "at": 1000000
+          }
+        }
+      ]
+    },
+    {
+      "name": "an expired reset token is refused",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        },
+        {
+          "type": "PasswordResetRequested",
+          "data": {
+            "tokenId": "rt",
+            "token": "rsec",
+            "email": "ann@example.com",
+            "expiresAt": 500
+          }
+        }
+      ],
+      "when": {
+        "type": "ResetPassword",
+        "data": {
+          "token": "a1.rt.rsec",
+          "new": "another horse battery"
+        }
+      },
+      "rejected": "expired_token"
+    },
+    {
+      "name": "a verification token does not reset a password",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        },
+        {
+          "type": "VerificationRequested",
+          "data": {
+            "tokenId": "tk",
+            "token": "secret1",
+            "email": "ann@example.com",
+            "expiresAt": 2000000
+          }
+        }
+      ],
+      "when": {
+        "type": "ResetPassword",
+        "data": {
+          "token": "a1.tk.secret1",
+          "new": "another horse battery"
+        }
+      },
+      "rejected": "invalid_token"
+    },
+    {
+      "name": "a new address waits for its confirmation, holding nothing",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        }
+      ],
+      "when": {
+        "type": "RequestEmailChange",
+        "data": {
+          "email": "Ann@New.Example"
+        }
+      },
+      "then": [
+        {
+          "type": "EmailChangeRequested",
+          "data": {
+            "tokenId": "<string>",
+            "token": "<string>",
+            "email": "ann@new.example",
+            "expiresAt": 173800000
+          }
+        }
+      ],
+      "index": {
+        "keys": [
+          {
+            "name": "email",
+            "value": "ann@example.com",
+            "scope": "tenant",
+            "subject": "a1"
+          }
+        ],
+        "facts": [
+          "active"
+        ]
+      }
+    },
+    {
+      "name": "the same address is no change",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        }
+      ],
+      "when": {
+        "type": "RequestEmailChange",
+        "data": {
+          "email": "ann@example.com"
+        }
+      },
+      "rejected": "unchanged"
+    },
+    {
+      "name": "the confirmed address replaces the old one",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        },
+        {
+          "type": "EmailChangeRequested",
+          "data": {
+            "tokenId": "ct",
+            "token": "csec",
+            "email": "ann@new.example",
+            "expiresAt": 2000000
+          }
+        }
+      ],
+      "when": {
+        "type": "ConfirmEmailChange",
+        "data": {
+          "token": "a1.ct.csec"
+        }
+      },
+      "then": [
+        {
+          "type": "EmailChanged",
+          "data": {
+            "tokenId": "ct",
+            "email": "ann@new.example"
+          }
+        }
+      ],
+      "index": {
+        "keys": [
+          {
+            "name": "email",
+            "value": "ann@new.example",
+            "scope": "tenant",
+            "subject": "a1"
+          }
+        ],
+        "facts": [
+          "active"
+        ]
+      }
+    },
+    {
+      "name": "a registration with the address is told to the account",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        }
+      ],
+      "when": {
+        "type": "NoteRegistrationAttempt",
+        "data": {}
+      },
+      "then": [
+        {
+          "type": "RegistrationAttempted",
+          "data": {
+            "email": "ann@example.com",
+            "at": 1000000
           }
         }
       ]
