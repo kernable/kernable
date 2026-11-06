@@ -32,7 +32,9 @@ use crate::{
     RequestContext, Store, StoredEvent, Submit, Timestamp,
     context::issued_now,
     domain::{decode, upcast},
-    log, vault,
+    log,
+    messages::{Key, TypeKey},
+    vault,
 };
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
@@ -229,6 +231,9 @@ pub struct Check {
     pub request: RequestContext,
     /// After it, what came of the request; before it, `None`.
     pub outcome: Option<CheckOutcome>,
+    /// The listener's store, if it has one ([`Listener::store`]): what the middleware learned
+    /// from events, to decide with.
+    pub store: Option<Store>,
 }
 
 /// When a middleware runs.
@@ -427,6 +432,29 @@ impl Listener {
 
     /// `t` qualified: a type without a domain is the listener's domain's. `None` if `t` is
     /// neither a type nor qualified (`domain.Type`, or `domain.*` with `wildcard`).
+    /// The type as this listener names it; a message type's schema declared on its domain,
+    /// which the listener then upcasts its events with.
+    fn learn(&self, key: Key) -> String {
+        let name = key.qualified_for(&self.inner.domain);
+        if let (Some(own), Some(declare)) = (key.domain, key.declare) {
+            if own == self.inner.domain.name() {
+                self.inner.domain.declare_once(&key.name, declare);
+            } else {
+                let mut domains = self.inner.domains.write().unwrap();
+                domains
+                    .entry(own.to_owned())
+                    .or_insert_with(|| crate::domain(own))
+                    .declare_once(&key.name, declare);
+            }
+        }
+        name
+    }
+
+    #[cfg(test)]
+    pub(crate) fn domain_of(&self, name: &str) -> Option<Domain> {
+        self.inner.domains.read().unwrap().get(name).cloned()
+    }
+
     fn qualify(&self, t: &str, wildcard: bool) -> Option<String> {
         if t.contains('.') {
             qualified(t, wildcard).then(|| t.to_owned())
@@ -592,7 +620,8 @@ impl Listener {
     }
 
     /// Handles `event_type` events: a type of the listener's domain (`ItemAdded`), of another
-    /// domain (`orders.OrderPlaced`) or a whole domain (`orders.*`). `handler(data, evt, ctx)`
+    /// domain (`orders.OrderPlaced`), a whole domain (`orders.*`), or an event type's constant
+    /// (see [`crate::event`]; `query` takes a query type's likewise). `handler(data, evt, ctx)`
     /// gets the payload as `D` (`serde_json::Value` for any), a [`StoredEventMeta`] and a
     /// [`ListenerContext`], and returns a future of `Result<(), BoxError>`. A payload that is
     /// not a `D` or an `Err` fails the batch: the listener reconnects and the event is
@@ -601,24 +630,26 @@ impl Listener {
     /// # Panics
     ///
     /// If `event_type` is none of these.
-    pub fn on<D, F, Fut>(&self, event_type: &str, handler: F) -> Listener
+    pub fn on<D, F, Fut>(&self, event_type: impl TypeKey<D>, handler: F) -> Listener
     where
         D: DeserializeOwned + Send + 'static,
         F: Fn(D, StoredEventMeta, ListenerContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(), BoxError>> + Send + 'static,
     {
-        self.handle(event_type, handler, false)
+        let event_type = self.learn(event_type.key());
+        self.handle(&event_type, handler, false)
     }
 
     /// Like [`on`](Self::on), but gets events as stored, without upcasting, whatever their
     /// schema (for archives and exports).
-    pub fn on_raw<D, F, Fut>(&self, event_type: &str, handler: F) -> Listener
+    pub fn on_raw<D, F, Fut>(&self, event_type: impl TypeKey<D>, handler: F) -> Listener
     where
         D: DeserializeOwned + Send + 'static,
         F: Fn(D, StoredEventMeta, ListenerContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(), BoxError>> + Send + 'static,
     {
-        self.handle(event_type, handler, true)
+        let event_type = self.learn(event_type.key());
+        self.handle(&event_type, handler, true)
     }
 
     fn handle<D, F, Fut>(&self, event_type: &str, handler: F, raw: bool) -> Listener
@@ -663,14 +694,15 @@ impl Listener {
     /// # Panics
     ///
     /// If `query_type` is neither.
-    pub fn query<D, R, F, Fut>(&self, query_type: &str, handler: F) -> Listener
+    pub fn query<D, R, F, Fut>(&self, query_type: impl TypeKey<D>, handler: F) -> Listener
     where
         D: DeserializeOwned + Send + 'static,
         R: Serialize,
         F: Fn(D, QueryMeta, QueryContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<R, BoxError>> + Send + 'static,
     {
-        let Some(query_type) = self.qualify(query_type, false) else {
+        let query_type = self.learn(query_type.key());
+        let Some(query_type) = self.qualify(&query_type, false) else {
             panic!("answer a query type (Query or Domain.Query), not {query_type:?}");
         };
         let handler = Arc::new(handler);
@@ -1577,6 +1609,7 @@ impl ListenerHandle {
             }
         };
         let vault = call.vault;
+        let store = self.opened_store();
         let check = match call.request {
             Some(middleware_call::Request::Command(x)) => Check {
                 kind: CheckKind::Command,
@@ -1590,6 +1623,7 @@ impl ListenerHandle {
                 data: vault::unseal(decode(&x.payload), &vault).0,
                 request: RequestContext::from_wire(x.context.as_ref()),
                 outcome,
+                store: store.clone(),
             },
             Some(middleware_call::Request::Query(q)) => Check {
                 kind: CheckKind::Query,
@@ -1603,6 +1637,7 @@ impl ListenerHandle {
                 data: decode(&q.payload),
                 request: RequestContext::from_wire(q.context.as_ref()),
                 outcome,
+                store: store.clone(),
             },
             Some(middleware_call::Request::Data(d)) => Check {
                 kind: CheckKind::Data,
@@ -1616,6 +1651,7 @@ impl ListenerHandle {
                 data: Value::Null,
                 request: RequestContext::from_wire(d.context.as_ref()),
                 outcome,
+                store: store.clone(),
             },
             Some(middleware_call::Request::Cache(c)) => Check {
                 kind: CheckKind::Cache,
@@ -1629,6 +1665,7 @@ impl ListenerHandle {
                 data: Value::Null,
                 request: RequestContext::from_wire(c.context.as_ref()),
                 outcome,
+                store: store.clone(),
             },
             None => {
                 return Some(

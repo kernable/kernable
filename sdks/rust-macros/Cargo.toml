@@ -1,0 +1,15 @@
+[package]
+name = "kernable-sdk-macros"
+description = "The #[event], #[command] and #[query] attributes of kernable-sdk; use them through kernable-sdk."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }

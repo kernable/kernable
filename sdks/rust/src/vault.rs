@@ -14,6 +14,16 @@ pub(crate) struct VaultFields {
     pub secret: Vec<String>,
 }
 
+impl std::fmt::Debug for VaultFields {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let personal: Vec<&Vec<String>> = self.personal.iter().map(|(fields, _)| fields).collect();
+        f.debug_struct("VaultFields")
+            .field("personal", &personal)
+            .field("secret", &self.secret)
+            .finish()
+    }
+}
+
 pub(crate) struct Sealed {
     pub payload: Vec<u8>,
     pub refs: Vec<String>,

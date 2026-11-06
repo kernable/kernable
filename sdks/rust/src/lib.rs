@@ -33,6 +33,7 @@ mod error;
 mod index;
 mod listener;
 mod log;
+mod messages;
 mod store;
 mod vault;
 mod worker;
@@ -71,11 +72,18 @@ pub use domain::{
 pub use error::{BoxError, Error, Rejected};
 pub use index::{Index, Reindex, Requirement, Unique, UniqueKey, reindex_type};
 pub use kernable_core::transport::Tls;
+pub use kernable_sdk_macros::{command, event, query};
 pub use listener::{
     Check, CheckKind, CheckOutcome, Listener, ListenerContext, ListenerHandle, MiddlewareOptions,
     QueryContext, QueryMeta, StoredEventMeta, SubscribeOptions, Subscription, When,
 };
+#[doc(hidden)]
+pub use messages::__private;
+pub use messages::{CommandType, EventType, Message, Of, QueryType, TypeKey};
 pub use store::Store;
+
+// The attributes name the crate `::kernable`; within it too (its tests).
+extern crate self as kernable;
 pub use worker::Worker;
 
 use context::{issued_now, random_id};
@@ -804,12 +812,13 @@ impl Kernable {
 
     async fn send(&self, s: Submit, wait: WireWait) -> Result<proto::CommandResult, Error> {
         let command_id = s.id.unwrap_or_else(random_id);
-        let vault = self
-            .domains
-            .read()
-            .unwrap()
-            .get(&s.domain)
-            .and_then(|d| d.command_vault(&s.command_type));
+        let vault = s.vault.clone().or_else(|| {
+            self.domains
+                .read()
+                .unwrap()
+                .get(&s.domain)
+                .and_then(|d| d.command_vault(&s.command_type))
+        });
         let sealed =
             vault::seal(&s.data, vault.as_ref(), &s.aggregate_id).map_err(Error::Config)?;
         let mut context = s.context.unwrap_or_else(|| self.context.clone());
@@ -911,6 +920,16 @@ impl Kernable {
             }
             None => Err(Error::Status(tonic::Status::internal("no outcome"))),
         }
+    }
+
+    /// Asks a query of a message type and returns its typed answer: `kernable.ask(GetOrder {
+    /// id }, |q| q.tenant(t)).await?`; `options` sets what [`Query`]'s methods set.
+    pub async fn ask<Q: QueryType>(
+        &self,
+        query: Q,
+        options: impl FnOnce(Query) -> Query,
+    ) -> Result<Q::Answer, Error> {
+        self.query(options(Query::of(query))).await
     }
 
     /// Returns once a read model that answers `query` has processed every partition's head, as
@@ -1069,6 +1088,8 @@ pub struct Submit {
     context: Option<RequestContext>,
     wait: Wait,
     timeout: Option<Duration>,
+    /// A message type's vault fields, from its declaration.
+    vault: Option<vault::VaultFields>,
 }
 
 impl Submit {
@@ -1091,6 +1112,22 @@ impl Submit {
             context: None,
             wait: Wait::Settled,
             timeout: None,
+            vault: None,
+        }
+    }
+
+    /// A command of a message type (see [`command`]) for the aggregate with ID `aggregate_id`:
+    /// its type says the domain, the aggregate type and the vault fields.
+    /// `Submit::command(PlaceOrder { customer_id }, "o1").tenant(t)`.
+    ///
+    /// # Panics
+    ///
+    /// If `command` cannot be represented as JSON.
+    pub fn command<C: CommandType>(command: C, aggregate_id: &str) -> Submit {
+        let vault = messages::domain_of::<C>().command_vault(C::TYPE);
+        Submit {
+            vault,
+            ..Submit::new(C::DOMAIN, C::AGGREGATE, aggregate_id, C::TYPE).data(command)
         }
     }
 
@@ -1164,6 +1201,16 @@ impl Query {
             timeout: None,
             all_partitions: false,
         }
+    }
+
+    /// A query of a message type (see [`query`]); its type says the domain. Ask it with
+    /// [`Kernable::ask`] for its typed answer.
+    ///
+    /// # Panics
+    ///
+    /// If `query` cannot be represented as JSON.
+    pub fn of<Q: QueryType>(query: Q) -> Query {
+        Query::new(Q::DOMAIN, Q::TYPE).data(query)
     }
 
     /// The query's data.

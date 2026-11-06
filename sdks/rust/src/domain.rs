@@ -1,7 +1,7 @@
 //! Domains, their event and command schemas, and aggregates.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, Mutex, RwLock},
 };
@@ -14,6 +14,7 @@ use crate::{
     BoxError, Error, Listener, Rejected, RequestContext,
     context::Timestamp,
     index::{Index, KeySubject, Requirement, Unique, UniqueKey, reindex_type},
+    messages::{EventType, TypeKey},
     vault::{self, VaultFields},
 };
 
@@ -37,6 +38,8 @@ struct DomainInner {
     aggregates: RwLock<Vec<Arc<dyn Runnable>>>,
     /// The read models and reactors created through it, in order.
     listeners: RwLock<Vec<Listener>>,
+    /// The message types whose schemas are declared from their type (see [`crate::Message`]).
+    declared: RwLock<HashSet<String>>,
 }
 
 /// A domain: a name that scopes its aggregates, commands and events, lowercase by convention
@@ -72,6 +75,7 @@ pub fn domain(name: &str) -> Domain {
             commands: RwLock::default(),
             aggregates: RwLock::default(),
             listeners: RwLock::default(),
+            declared: RwLock::default(),
         }),
     }
 }
@@ -239,6 +243,23 @@ impl Domain {
             .unwrap()
             .get(command_type)
             .cloned()
+    }
+
+    /// Runs a message type's `declare` on this domain once, unless its schema was declared by
+    /// name already ([`Domain::event`], [`Domain::command`]).
+    pub(crate) fn declare_once(&self, message_type: &str, declare: fn(&Domain)) {
+        let by_name =
+            self.event_def(message_type).is_some() || self.command_vault(message_type).is_some();
+        if self
+            .inner
+            .declared
+            .write()
+            .unwrap()
+            .insert(message_type.to_owned())
+            && !by_name
+        {
+            declare(self);
+        }
     }
 
     /// The payload version this domain writes `event_type` events at.
@@ -422,6 +443,13 @@ impl NewEvent {
             event_type: event_type.to_owned(),
             data: serde_json::to_value(data).expect("event data is JSON"),
         }
+    }
+}
+
+impl<E: EventType> From<E> for NewEvent {
+    /// The event of a message type: `Ok(vec![OrderPlaced { ... }.into()])`.
+    fn from(event: E) -> NewEvent {
+        NewEvent::new(E::TYPE, event)
     }
 }
 
@@ -688,12 +716,16 @@ impl<S: State> Aggregate<S> {
     /// How an event of `event_type` changes the state: `f(state, data, evt, ctx)` changes
     /// `state` in place, or replaces it with `*state = …`. `data` is the event's payload as `D`,
     /// upcast to the current version; `evt` is an [`EventMeta`], `ctx` an [`ApplyContext`].
-    /// See [`Aggregate`] for an example.
+    /// `event_type` is a name, or an event type's constant (see [`crate::event`]), whose data
+    /// `D` then is: `order_aggregate.apply(OrderPlaced, |s, d, _evt, _ctx| ...)`. The same holds
+    /// for `command` and `requires`. See [`Aggregate`] for an example.
     pub fn apply<D: DeserializeOwned>(
         &self,
-        event_type: &str,
+        event_type: impl TypeKey<D>,
         f: impl Fn(&mut S, D, &EventMeta, &ApplyContext) + Send + Sync + 'static,
     ) -> Self {
+        let event_type = event_type.key().within(&self.inner.domain, "apply");
+        let event_type = event_type.as_str();
         let apply: Apply<S> = Arc::new(move |state, data, meta, ctx| {
             let data = serde_json::from_value(data)
                 .map_err(|e| format!("{} data: {e}", meta.event_type))?;
@@ -721,12 +753,14 @@ impl<S: State> Aggregate<S> {
     /// cannot see the other aggregate types of its domain.
     pub fn command<D: DeserializeOwned>(
         &self,
-        command_type: &str,
+        command_type: impl TypeKey<D>,
         f: impl Fn(&S, D, &CommandMeta, &mut CommandContext) -> Result<Vec<NewEvent>, Rejected>
         + Send
         + Sync
         + 'static,
     ) -> Self {
+        let command_type = command_type.key().within(&self.inner.domain, "command");
+        let command_type = command_type.as_str();
         assert!(
             !command_type.starts_with("_reindex_"),
             "{command_type}: command types starting with _reindex_ are reserved for the built-in \
@@ -831,9 +865,11 @@ impl<S: State> Aggregate<S> {
     /// [`Aggregate::command`] first).
     pub fn requires<D: DeserializeOwned, I: IntoIterator<Item = Requirement>>(
         &self,
-        command_type: &str,
+        command_type: impl TypeKey<D>,
         f: impl Fn(&S, D) -> I + Send + Sync + 'static,
     ) -> Self {
+        let command_type = command_type.key().within(&self.inner.domain, "requires");
+        let command_type = command_type.as_str();
         assert!(
             self.handler(command_type).is_some(),
             "{} has no command {command_type} to require facts for: declare it first",

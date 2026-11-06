@@ -15,6 +15,7 @@ ed25519-dalek.workspace = true
 getrandom.workspace = true
 hex.workspace = true
 kernable-core = { path = "../../crates/kernable-core" }
+kernable-sdk-macros = { path = "../rust-macros" }
 prost.workspace = true
 rusqlite.workspace = true
 serde.workspace = true

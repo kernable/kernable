@@ -27,6 +27,12 @@ pub struct Store {
     turns: Arc<tokio::sync::Mutex<()>>,
 }
 
+impl std::fmt::Debug for Store {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Store")
+    }
+}
+
 impl Store {
     /// Opens `url` (`sqlite:<path>`, a bare path, or `memory:`). If the stored data was built
     /// at another `schema`, it is cleared and the read model rebuilds from the first event.

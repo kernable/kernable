@@ -918,6 +918,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hex",
  "kernable-core",
+ "kernable-sdk-macros",
  "prost",
  "rusqlite",
  "serde",
@@ -926,6 +927,15 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic",
+]
+
+[[package]]
+name = "kernable-sdk-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
