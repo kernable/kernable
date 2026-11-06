@@ -661,6 +661,11 @@ async fn probe(key: &str, opts: &[&str]) -> Result<(), BoxError> {
         }
         tokio::time::sleep(Duration::from_millis(every)).await;
     }
+    // A stall that lasts to the end counts too: no commit came after it.
+    let tail = last.elapsed();
+    if tail > longest {
+        (longest, at) = (tail, (start.elapsed() - tail).as_secs_f64());
+    }
     println!(
         "probe: n={n} committed={committed} failed={failed} longest-gap-ms={} at={at:.1}s",
         longest.as_millis()
