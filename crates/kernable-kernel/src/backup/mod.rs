@@ -86,6 +86,10 @@ pub struct Follower {
 pub struct Status {
     pub uploaded_at: i64,
     pub record: u64,
+    /// When it was last connected to the kernel and had put everything it got into the target:
+    /// a backup that is current although nothing new came.
+    #[serde(default)]
+    pub current_at: i64,
     pub checked_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check_error: Option<String>,
@@ -527,6 +531,7 @@ async fn follow_once(
             },
             () = tokio::time::sleep_until(deadline.into()) => {
                 flush(&mut segment, &mut first, &head).await?;
+                note(&follower.status_file, |s| s.current_at = now_ms());
                 deadline = Instant::now() + follower.segment_every;
                 let began = generation.strip_prefix('g').and_then(|t| t.parse::<i64>().ok()).unwrap_or(0);
                 if now_ms() - began >= base_age.as_millis() as i64 {

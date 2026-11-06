@@ -259,7 +259,7 @@ async fn the_status_file_says_how_far_the_backup_reached_and_what_its_check_foun
     };
     for _ in 0..100 {
         let s = read();
-        if s.record >= head && s.checked_at > 0 {
+        if s.record >= head && s.checked_at > 0 && s.current_at > 0 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -267,6 +267,6 @@ async fn the_status_file_says_how_far_the_backup_reached_and_what_its_check_foun
     running.abort();
     let s = read();
     assert_eq!(s.record, head);
-    assert!(s.uploaded_at > 0 && s.checked_at > 0, "{s:?}");
+    assert!(s.uploaded_at > 0 && s.checked_at > 0 && s.current_at > 0, "{s:?}");
     assert_eq!(s.check_error, None);
 }
