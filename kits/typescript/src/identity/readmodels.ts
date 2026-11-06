@@ -16,6 +16,9 @@ export interface IdentityRow {
   apiKeys: Omit<ApiKey, "hash">[];
 }
 
+/** keyId → what the API checks a key against (FindApiKey). */
+export const apiKeyRows = new Map<string, { tenant: string; identityId: string; hash: string; expiresAt: number | null; revoked: boolean }>();
+
 /** `tenant/identityId` */
 export const identityRows = new Map<string, IdentityRow>();
 export const rowKey = (tenant: string, id: string) => `${tenant}/${id}`;
@@ -49,13 +52,18 @@ export const identitiesReadModel = identityDomain
   .on(MembershipRevoked, (d, evt) => update(evt.tenant, evt.aggregateId, (r) => {
     r.memberships = r.memberships.filter((m) => m.membershipId !== d.membershipId);
   }))
-  .on(ApiKeyCreated, (d, evt) => update(evt.tenant, evt.aggregateId, (r) => {
-    r.apiKeys.push({ keyId: d.keyId, label: d.label, expiresAt: d.expiresAt, revoked: false });
-  }))
-  .on(ApiKeyRevoked, (d, evt) => update(evt.tenant, evt.aggregateId, (r) => {
-    const k = r.apiKeys.find((x) => x.keyId === d.keyId);
-    if (k) k.revoked = true;
-  }))
+  .on(ApiKeyCreated, (d, evt) => {
+    apiKeyRows.set(d.keyId, { tenant: evt.tenant, identityId: evt.aggregateId, hash: d.hash, expiresAt: d.expiresAt, revoked: false });
+    update(evt.tenant, evt.aggregateId, (r) => void r.apiKeys.push({ keyId: d.keyId, label: d.label, expiresAt: d.expiresAt, revoked: false }));
+  })
+  .on(ApiKeyRevoked, (d, evt) => {
+    const key = apiKeyRows.get(d.keyId);
+    if (key) key.revoked = true;
+    update(evt.tenant, evt.aggregateId, (r) => {
+      const k = r.apiKeys.find((x) => x.keyId === d.keyId);
+      if (k) k.revoked = true;
+    });
+  })
   .on(IdentitySuspended, (_d, evt) => update(evt.tenant, evt.aggregateId, (r) => void (r.status = "suspended")))
   .on(IdentityReactivated, (_d, evt) => update(evt.tenant, evt.aggregateId, (r) => void (r.status = "active")))
   .on(IdentityDeleted, (_d, evt) => void identityRows.delete(rowKey(evt.tenant, evt.aggregateId)))

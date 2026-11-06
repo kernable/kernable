@@ -1,6 +1,6 @@
 // Tokens, hashes and passwords.
 
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 import { hash, verify } from "@node-rs/argon2";
 
@@ -72,4 +72,42 @@ export function parseInvitationToken(value: unknown): { tenant: string; invitati
   if (typeof value !== "string") return null;
   const p = value.split(".");
   return p.length === 4 && p.every((x) => x.length > 0) ? { tenant: p[0], invitationId: p[1], tokenId: p[2], secret: p[3] } : null;
+}
+
+// --- TOTP (RFC 6238): HMAC-SHA1, 30 s steps, 6 digits, base32 secrets -----------------------------
+
+const BASE32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+/** A new TOTP secret: 20 random bytes in base32, as authenticator apps take it. */
+export function totpSecret(): string {
+  let bits = "";
+  for (const b of randomBytes(20)) bits += b.toString(2).padStart(8, "0");
+  return bits.match(/.{1,5}/g)!.map((c) => BASE32[parseInt(c.padEnd(5, "0"), 2)]).join("");
+}
+
+function base32(secret: string): Buffer {
+  let bits = "";
+  for (const c of secret.replace(/=+$/, "").toUpperCase()) {
+    const v = BASE32.indexOf(c);
+    if (v < 0) throw new Error("not base32");
+    bits += v.toString(2).padStart(5, "0");
+  }
+  return Buffer.from((bits.match(/.{8}/g) ?? []).map((b) => parseInt(b, 2)));
+}
+
+/** The 6-digit code of `secret` for the 30-second step `step`. */
+export function totpCode(secret: string, step: number): string {
+  const counter = Buffer.alloc(8);
+  counter.writeBigUInt64BE(BigInt(step));
+  const mac = createHmac("sha1", base32(secret)).update(counter).digest();
+  const offset = mac[mac.length - 1] & 0xf;
+  return String((mac.readUInt32BE(offset) & 0x7fffffff) % 1_000_000).padStart(6, "0");
+}
+
+/** The step `code` belongs to, at `now` give or take one step (clock drift), or null. */
+export function totpStep(secret: string, code: unknown, now: number): number | null {
+  if (typeof code !== "string" || !/^\d{6}$/.test(code)) return null;
+  const step = Math.floor(now / 30_000);
+  for (const s of [step, step - 1, step + 1]) if (equalSecrets(totpCode(secret, s), code)) return s;
+  return null;
 }

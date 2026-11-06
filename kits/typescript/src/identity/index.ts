@@ -7,5 +7,5 @@ export * from "./events.ts";
 export { identityAggregate, type Identity } from "./aggregates.ts";
 export { CreateIdentity, CreateServiceIdentity, UpdateProfile, GrantMembership, SuspendMembership, ResumeMembership, RevokeMembership, CreateApiKey, RevokeApiKey, SuspendIdentity, ReactivateIdentity, DeleteIdentity } from "./commands.ts";
 export { identitiesReadModel, type IdentityRow } from "./readmodels.ts";
-export { GetIdentity, ListIdentities, ListMyIdentities, FindIdentityByAccount } from "./queries.ts";
+export { GetIdentity, ListIdentities, ListMyIdentities, FindIdentityByAccount, FindApiKey } from "./queries.ts";
 export { ownersReactor, invitationsReactor, identityCleanupReactor, identityFollowReactor } from "./reactors.ts";

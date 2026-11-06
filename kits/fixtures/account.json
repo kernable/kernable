@@ -416,7 +416,8 @@
             "refreshTokenHash": "623eb122f7c6115ddd49a01a83d1367e2f5fdffed24ba88b069c85458dfe645c",
             "ip": "203.0.113.7",
             "userAgent": null,
-            "at": 1000000
+            "at": 1000000,
+            "mfa": false
           }
         }
       ]
@@ -1221,6 +1222,656 @@
           }
         }
       ]
+    },
+    {
+      "name": "TOTP starts with a base32 secret, not yet in use",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        }
+      ],
+      "when": {
+        "type": "StartTotp",
+        "data": {
+          "secret": "JBSWY3DPEHPK3PXP"
+        }
+      },
+      "then": [
+        {
+          "type": "TotpStarted",
+          "data": {
+            "secret": "JBSWY3DPEHPK3PXP"
+          }
+        }
+      ],
+      "index": {
+        "keys": [
+          {
+            "name": "email",
+            "value": "ann@example.com",
+            "scope": "tenant",
+            "subject": "a1"
+          }
+        ],
+        "facts": [
+          "active"
+        ]
+      }
+    },
+    {
+      "name": "the first code turns TOTP on, with the recovery codes' hashes",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        },
+        {
+          "type": "TotpStarted",
+          "data": {
+            "secret": "JBSWY3DPEHPK3PXP"
+          }
+        }
+      ],
+      "when": {
+        "type": "ConfirmTotp",
+        "data": {
+          "code": "475209",
+          "recoveryCodes": [
+            "rec-0000001",
+            "rec-0000002",
+            "rec-0000003",
+            "rec-0000004",
+            "rec-0000005",
+            "rec-0000006",
+            "rec-0000007",
+            "rec-0000008"
+          ]
+        }
+      },
+      "then": [
+        {
+          "type": "TotpConfirmed",
+          "data": {
+            "step": 33,
+            "at": 1000000
+          }
+        },
+        {
+          "type": "RecoveryCodesGenerated",
+          "data": {
+            "hashes": [
+              "30559909d14601391fb693aec14ed820ecc599b90b1a4f83064b933eab83f47c",
+              "74a9d4d3942d984063752c3d64ef15a74cc4bf19a2e375193170c5f99d12397f",
+              "61863d512a8171b743520262b3e09a42e33765394201a53a7c082b62da65dd6e",
+              "702a867cf6e9605c51028ad0571af6d40c9aa627bb46c8e88a825dd6ae8435d2",
+              "6a748a3d5f7dc0718e193a3e8f7671263d1085882e3fa3bef5513d76c17b0f6e",
+              "7eec13a482c355a6ce8c3c4af980e9a3b4b94c65463032780d78bb3d5ef4836f",
+              "e027c732ec3161ae07e51b2dd4a3e48c4b071c10833368a6580c43bd84142aeb",
+              "a7278afd2f428832e706b60afefc25a553bcc74684ff611eb8d52f920c9d3c63"
+            ]
+          }
+        }
+      ],
+      "index": {
+        "keys": [
+          {
+            "name": "email",
+            "value": "ann@example.com",
+            "scope": "tenant",
+            "subject": "a1"
+          }
+        ],
+        "facts": [
+          "active",
+          "mfa"
+        ]
+      }
+    },
+    {
+      "name": "a code from the step before counts (clock drift)",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        },
+        {
+          "type": "TotpStarted",
+          "data": {
+            "secret": "JBSWY3DPEHPK3PXP"
+          }
+        }
+      ],
+      "when": {
+        "type": "ConfirmTotp",
+        "data": {
+          "code": "579200",
+          "recoveryCodes": [
+            "rec-0000001",
+            "rec-0000002",
+            "rec-0000003",
+            "rec-0000004",
+            "rec-0000005",
+            "rec-0000006",
+            "rec-0000007",
+            "rec-0000008"
+          ]
+        }
+      },
+      "then": [
+        {
+          "type": "TotpConfirmed",
+          "data": {
+            "step": 32,
+            "at": 1000000
+          }
+        },
+        {
+          "type": "RecoveryCodesGenerated",
+          "data": {
+            "hashes": [
+              "30559909d14601391fb693aec14ed820ecc599b90b1a4f83064b933eab83f47c",
+              "74a9d4d3942d984063752c3d64ef15a74cc4bf19a2e375193170c5f99d12397f",
+              "61863d512a8171b743520262b3e09a42e33765394201a53a7c082b62da65dd6e",
+              "702a867cf6e9605c51028ad0571af6d40c9aa627bb46c8e88a825dd6ae8435d2",
+              "6a748a3d5f7dc0718e193a3e8f7671263d1085882e3fa3bef5513d76c17b0f6e",
+              "7eec13a482c355a6ce8c3c4af980e9a3b4b94c65463032780d78bb3d5ef4836f",
+              "e027c732ec3161ae07e51b2dd4a3e48c4b071c10833368a6580c43bd84142aeb",
+              "a7278afd2f428832e706b60afefc25a553bcc74684ff611eb8d52f920c9d3c63"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "an old code does not",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        },
+        {
+          "type": "TotpStarted",
+          "data": {
+            "secret": "JBSWY3DPEHPK3PXP"
+          }
+        }
+      ],
+      "when": {
+        "type": "ConfirmTotp",
+        "data": {
+          "code": "545915",
+          "recoveryCodes": [
+            "rec-0000001",
+            "rec-0000002",
+            "rec-0000003",
+            "rec-0000004",
+            "rec-0000005",
+            "rec-0000006",
+            "rec-0000007",
+            "rec-0000008"
+          ]
+        }
+      },
+      "rejected": "wrong_code"
+    },
+    {
+      "name": "sign-in says that a second factor is needed",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        },
+        {
+          "type": "TotpStarted",
+          "data": {
+            "secret": "JBSWY3DPEHPK3PXP"
+          }
+        },
+        {
+          "type": "TotpConfirmed",
+          "data": {
+            "step": 23,
+            "at": 1
+          }
+        },
+        {
+          "type": "RecoveryCodesGenerated",
+          "data": {
+            "hashes": [
+              "30559909d14601391fb693aec14ed820ecc599b90b1a4f83064b933eab83f47c",
+              "74a9d4d3942d984063752c3d64ef15a74cc4bf19a2e375193170c5f99d12397f",
+              "61863d512a8171b743520262b3e09a42e33765394201a53a7c082b62da65dd6e",
+              "702a867cf6e9605c51028ad0571af6d40c9aa627bb46c8e88a825dd6ae8435d2",
+              "6a748a3d5f7dc0718e193a3e8f7671263d1085882e3fa3bef5513d76c17b0f6e",
+              "7eec13a482c355a6ce8c3c4af980e9a3b4b94c65463032780d78bb3d5ef4836f",
+              "e027c732ec3161ae07e51b2dd4a3e48c4b071c10833368a6580c43bd84142aeb",
+              "a7278afd2f428832e706b60afefc25a553bcc74684ff611eb8d52f920c9d3c63"
+            ]
+          }
+        }
+      ],
+      "when": {
+        "type": "SignIn",
+        "data": {
+          "sessionId": "s1",
+          "password": "correct horse battery",
+          "refreshToken": "s1.1.r"
+        }
+      },
+      "then": [
+        {
+          "type": "SignedIn",
+          "data": {
+            "sessionId": "s1",
+            "method": "password",
+            "factors": [
+              "password"
+            ],
+            "refreshTokenHash": "623eb122f7c6115ddd49a01a83d1367e2f5fdffed24ba88b069c85458dfe645c",
+            "ip": null,
+            "userAgent": null,
+            "mfa": true,
+            "at": 1000000
+          }
+        }
+      ]
+    },
+    {
+      "name": "a TOTP code proves the second factor",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        },
+        {
+          "type": "TotpStarted",
+          "data": {
+            "secret": "JBSWY3DPEHPK3PXP"
+          }
+        },
+        {
+          "type": "TotpConfirmed",
+          "data": {
+            "step": 23,
+            "at": 1
+          }
+        },
+        {
+          "type": "RecoveryCodesGenerated",
+          "data": {
+            "hashes": [
+              "30559909d14601391fb693aec14ed820ecc599b90b1a4f83064b933eab83f47c",
+              "74a9d4d3942d984063752c3d64ef15a74cc4bf19a2e375193170c5f99d12397f",
+              "61863d512a8171b743520262b3e09a42e33765394201a53a7c082b62da65dd6e",
+              "702a867cf6e9605c51028ad0571af6d40c9aa627bb46c8e88a825dd6ae8435d2",
+              "6a748a3d5f7dc0718e193a3e8f7671263d1085882e3fa3bef5513d76c17b0f6e",
+              "7eec13a482c355a6ce8c3c4af980e9a3b4b94c65463032780d78bb3d5ef4836f",
+              "e027c732ec3161ae07e51b2dd4a3e48c4b071c10833368a6580c43bd84142aeb",
+              "a7278afd2f428832e706b60afefc25a553bcc74684ff611eb8d52f920c9d3c63"
+            ]
+          }
+        }
+      ],
+      "when": {
+        "type": "ProveSecondFactor",
+        "data": {
+          "sessionId": "s1",
+          "code": "475209"
+        }
+      },
+      "then": [
+        {
+          "type": "SecondFactorProved",
+          "data": {
+            "sessionId": "s1",
+            "method": "totp",
+            "step": 33,
+            "recoveryCodeHash": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "a TOTP code counts once",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        },
+        {
+          "type": "TotpStarted",
+          "data": {
+            "secret": "JBSWY3DPEHPK3PXP"
+          }
+        },
+        {
+          "type": "TotpConfirmed",
+          "data": {
+            "step": 23,
+            "at": 1
+          }
+        },
+        {
+          "type": "RecoveryCodesGenerated",
+          "data": {
+            "hashes": [
+              "30559909d14601391fb693aec14ed820ecc599b90b1a4f83064b933eab83f47c",
+              "74a9d4d3942d984063752c3d64ef15a74cc4bf19a2e375193170c5f99d12397f",
+              "61863d512a8171b743520262b3e09a42e33765394201a53a7c082b62da65dd6e",
+              "702a867cf6e9605c51028ad0571af6d40c9aa627bb46c8e88a825dd6ae8435d2",
+              "6a748a3d5f7dc0718e193a3e8f7671263d1085882e3fa3bef5513d76c17b0f6e",
+              "7eec13a482c355a6ce8c3c4af980e9a3b4b94c65463032780d78bb3d5ef4836f",
+              "e027c732ec3161ae07e51b2dd4a3e48c4b071c10833368a6580c43bd84142aeb",
+              "a7278afd2f428832e706b60afefc25a553bcc74684ff611eb8d52f920c9d3c63"
+            ]
+          }
+        },
+        {
+          "type": "SecondFactorProved",
+          "data": {
+            "sessionId": "s1",
+            "method": "totp",
+            "step": 33,
+            "recoveryCodeHash": null
+          }
+        }
+      ],
+      "when": {
+        "type": "ProveSecondFactor",
+        "data": {
+          "sessionId": "s2",
+          "code": "475209"
+        }
+      },
+      "then": [
+        {
+          "type": "SecondFactorFailed",
+          "data": {
+            "sessionId": "s2",
+            "at": 1000000
+          }
+        }
+      ]
+    },
+    {
+      "name": "a recovery code proves it once, and is used up",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        },
+        {
+          "type": "TotpStarted",
+          "data": {
+            "secret": "JBSWY3DPEHPK3PXP"
+          }
+        },
+        {
+          "type": "TotpConfirmed",
+          "data": {
+            "step": 23,
+            "at": 1
+          }
+        },
+        {
+          "type": "RecoveryCodesGenerated",
+          "data": {
+            "hashes": [
+              "30559909d14601391fb693aec14ed820ecc599b90b1a4f83064b933eab83f47c",
+              "74a9d4d3942d984063752c3d64ef15a74cc4bf19a2e375193170c5f99d12397f",
+              "61863d512a8171b743520262b3e09a42e33765394201a53a7c082b62da65dd6e",
+              "702a867cf6e9605c51028ad0571af6d40c9aa627bb46c8e88a825dd6ae8435d2",
+              "6a748a3d5f7dc0718e193a3e8f7671263d1085882e3fa3bef5513d76c17b0f6e",
+              "7eec13a482c355a6ce8c3c4af980e9a3b4b94c65463032780d78bb3d5ef4836f",
+              "e027c732ec3161ae07e51b2dd4a3e48c4b071c10833368a6580c43bd84142aeb",
+              "a7278afd2f428832e706b60afefc25a553bcc74684ff611eb8d52f920c9d3c63"
+            ]
+          }
+        }
+      ],
+      "when": {
+        "type": "ProveSecondFactor",
+        "data": {
+          "sessionId": "s1",
+          "code": "rec-0000003"
+        }
+      },
+      "then": [
+        {
+          "type": "SecondFactorProved",
+          "data": {
+            "sessionId": "s1",
+            "method": "recovery",
+            "step": null,
+            "recoveryCodeHash": "61863d512a8171b743520262b3e09a42e33765394201a53a7c082b62da65dd6e"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a used recovery code fails",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        },
+        {
+          "type": "TotpStarted",
+          "data": {
+            "secret": "JBSWY3DPEHPK3PXP"
+          }
+        },
+        {
+          "type": "TotpConfirmed",
+          "data": {
+            "step": 23,
+            "at": 1
+          }
+        },
+        {
+          "type": "RecoveryCodesGenerated",
+          "data": {
+            "hashes": [
+              "30559909d14601391fb693aec14ed820ecc599b90b1a4f83064b933eab83f47c",
+              "74a9d4d3942d984063752c3d64ef15a74cc4bf19a2e375193170c5f99d12397f",
+              "61863d512a8171b743520262b3e09a42e33765394201a53a7c082b62da65dd6e",
+              "702a867cf6e9605c51028ad0571af6d40c9aa627bb46c8e88a825dd6ae8435d2",
+              "6a748a3d5f7dc0718e193a3e8f7671263d1085882e3fa3bef5513d76c17b0f6e",
+              "7eec13a482c355a6ce8c3c4af980e9a3b4b94c65463032780d78bb3d5ef4836f",
+              "e027c732ec3161ae07e51b2dd4a3e48c4b071c10833368a6580c43bd84142aeb",
+              "a7278afd2f428832e706b60afefc25a553bcc74684ff611eb8d52f920c9d3c63"
+            ]
+          }
+        },
+        {
+          "type": "SecondFactorProved",
+          "data": {
+            "sessionId": "s0",
+            "method": "recovery",
+            "step": null,
+            "recoveryCodeHash": "61863d512a8171b743520262b3e09a42e33765394201a53a7c082b62da65dd6e"
+          }
+        }
+      ],
+      "when": {
+        "type": "ProveSecondFactor",
+        "data": {
+          "sessionId": "s1",
+          "code": "rec-0000003"
+        }
+      },
+      "then": [
+        {
+          "type": "SecondFactorFailed",
+          "data": {
+            "sessionId": "s1",
+            "at": 1000000
+          }
+        }
+      ]
+    },
+    {
+      "name": "TOTP is turned off with a code",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        },
+        {
+          "type": "TotpStarted",
+          "data": {
+            "secret": "JBSWY3DPEHPK3PXP"
+          }
+        },
+        {
+          "type": "TotpConfirmed",
+          "data": {
+            "step": 23,
+            "at": 1
+          }
+        },
+        {
+          "type": "RecoveryCodesGenerated",
+          "data": {
+            "hashes": [
+              "30559909d14601391fb693aec14ed820ecc599b90b1a4f83064b933eab83f47c",
+              "74a9d4d3942d984063752c3d64ef15a74cc4bf19a2e375193170c5f99d12397f",
+              "61863d512a8171b743520262b3e09a42e33765394201a53a7c082b62da65dd6e",
+              "702a867cf6e9605c51028ad0571af6d40c9aa627bb46c8e88a825dd6ae8435d2",
+              "6a748a3d5f7dc0718e193a3e8f7671263d1085882e3fa3bef5513d76c17b0f6e",
+              "7eec13a482c355a6ce8c3c4af980e9a3b4b94c65463032780d78bb3d5ef4836f",
+              "e027c732ec3161ae07e51b2dd4a3e48c4b071c10833368a6580c43bd84142aeb",
+              "a7278afd2f428832e706b60afefc25a553bcc74684ff611eb8d52f920c9d3c63"
+            ]
+          }
+        }
+      ],
+      "when": {
+        "type": "DisableTotp",
+        "data": {
+          "code": "475209"
+        }
+      },
+      "then": [
+        {
+          "type": "TotpDisabled",
+          "data": {}
+        }
+      ],
+      "index": {
+        "keys": [
+          {
+            "name": "email",
+            "value": "ann@example.com",
+            "scope": "tenant",
+            "subject": "a1"
+          }
+        ],
+        "facts": [
+          "active"
+        ]
+      }
     }
   ]
 }

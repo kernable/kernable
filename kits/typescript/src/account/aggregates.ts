@@ -2,7 +2,7 @@
 
 import { LOCKOUT_AFTER, LOCKOUT_MAX_MINUTES, MINUTE } from "../shared/constants.ts";
 import { accountDomain, type AccountStatus, type AccountSuspensionReason, type SessionEnd, type TokenPurpose } from "./domain.ts";
-import { EmailChangeRequested, EmailChanged, PasswordChanged, PasswordReset, PasswordResetRequested, AccountDeleted, AccountReactivated, AccountRegistered, AccountSuspended, EmailVerified, SessionEnded, SessionFactorAdded, SessionOpened, SessionRefreshed, SignedIn, SignInFailed, VerificationRequested } from "./events.ts";
+import { RecoveryCodesGenerated, SecondFactorFailed, SecondFactorProved, TotpConfirmed, TotpDisabled, TotpStarted, EmailChangeRequested, EmailChanged, PasswordChanged, PasswordReset, PasswordResetRequested, AccountDeleted, AccountReactivated, AccountRegistered, AccountSuspended, EmailVerified, SessionEnded, SessionFactorAdded, SessionOpened, SessionRefreshed, SignedIn, SignInFailed, VerificationRequested } from "./events.ts";
 
 export interface Account {
   id?: string;
@@ -15,6 +15,10 @@ export interface Account {
   /** Open emailed tokens; the token itself is in the vault until it is used. */
   openTokens: { tokenId: string; purpose: TokenPurpose; token: string | null; expiresAt: number }[];
   suspension: { reason: AccountSuspensionReason; at: number } | null;
+  /** TOTP: its secret (vault), whether confirmed, the last step used (no code twice). */
+  totp: { secret: string | null; confirmed: boolean; lastStep: number } | null;
+  /** SHA-256 of the unused recovery codes. */
+  recoveryCodes: string[];
   /** A new address waiting for its confirmation: it holds no key yet. */
   pendingEmail?: string | null;
 }
@@ -34,6 +38,8 @@ export const accountAggregate = accountDomain
     failures: { count: 0, lastAt: 0 },
     openTokens: [],
     suspension: null,
+    totp: null,
+    recoveryCodes: [],
   })
   .apply(AccountRegistered, (s, d, evt) => {
     s.id = evt.aggregateId;
@@ -86,13 +92,32 @@ export const accountAggregate = accountDomain
     s.pendingEmail = null;
     s.openTokens = s.openTokens.filter((t) => t.tokenId !== d.tokenId);
   })
+  .apply(TotpStarted, (s, d) => void (s.totp = { secret: d.secret, confirmed: false, lastStep: 0 }))
+  .apply(TotpConfirmed, (s, d) => {
+    if (s.totp) {
+      s.totp.confirmed = true;
+      s.totp.lastStep = d.step;
+    }
+  })
+  .apply(TotpDisabled, (s) => {
+    s.totp = null;
+    s.recoveryCodes = [];
+  })
+  .apply(RecoveryCodesGenerated, (s, d) => void (s.recoveryCodes = d.hashes))
+  .apply(SecondFactorProved, (s, d) => {
+    if (d.step !== null && s.totp) s.totp.lastStep = d.step;
+    if (d.recoveryCodeHash) s.recoveryCodes = s.recoveryCodes.filter((h) => h !== d.recoveryCodeHash);
+    s.failures = { count: 0, lastAt: 0 };
+  })
+  .apply(SecondFactorFailed, (s, d) => void (s.failures = { count: s.failures.count + 1, lastAt: d.at }))
   .apply(SignedIn, (s) => void (s.failures = { count: 0, lastAt: 0 }))
   .apply(SignInFailed, (s, d) => {
     if (d.reason === "wrong_password") s.failures = { count: s.failures.count + 1, lastAt: d.at };
   })
   // Held from registration on, while not deleted: nobody registers an email twice.
   .unique("email", (s) => (s.status !== "none" && s.status !== "deleted" ? s.email : null), { personal: (s) => s.id })
-  .fact("active", (s) => s.status === "active");
+  .fact("active", (s) => s.status === "active")
+  .fact("mfa", (s) => s.totp?.confirmed === true);
 
 export interface Session {
   status: "none" | "active" | "ended";

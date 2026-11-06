@@ -6,13 +6,13 @@ import { randomUUID } from "node:crypto";
 import type { Kernable, Outcome, RequestContext, StoredEvent } from "@kernable/sdk";
 
 import {
-  ChangePassword, ConfirmEmailChange, EndSession, FindAccountByEmail, GetAccount, NoteRegistrationAttempt, RefreshSession, RegisterAccount, RequestEmailChange,
+  ChangePassword, ConfirmEmailChange, ConfirmTotp, ProveSecondFactor, StartTotp, EndSession, FindAccountByEmail, GetAccount, NoteRegistrationAttempt, RefreshSession, RegisterAccount, RequestEmailChange,
   RequestPasswordReset, ResetPassword, SignIn, VerifyEmail, type SessionRefreshed, type SignInFailed, type SignedIn,
 } from "../account/index.ts";
 import { AcceptInvitation, PeekInvitation } from "../invitation/index.ts";
-import { FindIdentityByAccount } from "../identity/index.ts";
+import { CreateApiKey, FindApiKey, FindIdentityByAccount, apiKey, parseApiKey } from "../identity/index.ts";
 import { PLATFORM_TENANT } from "../shared/constants.ts";
-import { parseInvitationToken, parseToken, randomSecret, token } from "../shared/secrets.ts";
+import { equalSecrets, parseInvitationToken, parseToken, randomSecret, token, totpSecret } from "../shared/secrets.ts";
 import { checkAccessToken, issueAccessToken, type Claims, type SigningKeys } from "./tokens.ts";
 
 export interface KitApiOptions {
@@ -25,7 +25,11 @@ export interface KitApiOptions {
 }
 
 export type SignInResult =
-  | { ok: true; accessToken: string; refreshToken: string; accountId: string; sessionId: string }
+  | {
+      ok: true; accessToken: string; refreshToken: string; accountId: string; sessionId: string;
+      /** The account has a second factor on: prove it (`proveSecondFactor`) before anything else. */
+      secondFactor: boolean;
+    }
   | { ok: false; reason: string };
 
 /** The events of a committed outcome; a rejection as an error with its code. */
@@ -96,9 +100,9 @@ export class KitApi {
     );
     const [event] = events(outcome);
     if (event.type !== "SignedIn") return { ok: false, reason: (event.data as SignInFailed).reason };
-    const factors = (event.data as SignedIn).factors;
+    const { factors, mfa } = event.data as SignedIn;
     return {
-      ok: true, accountId: account.id, sessionId, refreshToken,
+      ok: true, accountId: account.id, sessionId, refreshToken, secondFactor: mfa,
       accessToken: issueAccessToken(this.keys, { sub: account.id, sid: sessionId, fac: factors }),
     };
   }
@@ -136,6 +140,67 @@ export class KitApi {
     if (event.type !== "SessionRefreshed") return { ok: false, reason: (event.data as { reason: string }).reason };
     const d = event.data as SessionRefreshed;
     return { ok: true, refreshToken: next, accessToken: issueAccessToken(this.keys, { sub: d.accountId, sid: sessionId, fac: d.factors }) };
+  }
+
+  /** Proves the second factor (a TOTP or recovery code) for the session: a new access token with it. */
+  async proveSecondFactor(claims: Claims, code: string): Promise<{ ok: true; accessToken: string } | { ok: false; reason: string }> {
+    const outcome = await this.kernable.submit(ProveSecondFactor.new({ sessionId: claims.sid, code }), { aggregateId: claims.sub, tenant: PLATFORM_TENANT, context: {} });
+    if (!outcome.committed) return { ok: false, reason: outcome.code };
+    const [event] = outcome.events;
+    if (event.type !== "SecondFactorProved") return { ok: false, reason: "wrong_code" };
+    const factor = (event.data as { method: string }).method === "recovery" ? "recovery" : "totp";
+    return { ok: true, accessToken: issueAccessToken(this.keys, { sub: claims.sub, sid: claims.sid, fac: [...claims.fac, factor] }) };
+  }
+
+  /** Starts TOTP: a new secret, and the `otpauth:` URI an authenticator app reads (as a QR code). */
+  async startTotp(claims: Claims, issuer: string, label: string): Promise<{ ok: true; secret: string; uri: string } | { ok: false; reason: string }> {
+    const secret = totpSecret();
+    const outcome = await this.kernable.submit(StartTotp.new({ secret }), { aggregateId: claims.sub, tenant: PLATFORM_TENANT, context: this.own(claims) });
+    if (!outcome.committed) return { ok: false, reason: outcome.code };
+    const uri = `otpauth://totp/${encodeURIComponent(`${issuer}:${label}`)}?secret=${secret}&issuer=${encodeURIComponent(issuer)}`;
+    return { ok: true, secret, uri };
+  }
+
+  /** Turns TOTP on with its first code: the recovery codes, shown this once. */
+  async confirmTotp(claims: Claims, code: string): Promise<{ ok: true; recoveryCodes: string[] } | { ok: false; reason: string }> {
+    const recoveryCodes = Array.from({ length: 10 }, () => randomSecret(8));
+    const outcome = await this.kernable.submit(ConfirmTotp.new({ code, recoveryCodes }), { aggregateId: claims.sub, tenant: PLATFORM_TENANT, context: this.own(claims) });
+    return outcome.committed ? { ok: true, recoveryCodes } : { ok: false, reason: outcome.code };
+  }
+
+  /** A new API key for a service identity, shown this once. */
+  async createApiKey(context: RequestContext, tenant: string, identityId: string, label = "", expiresAt: number | null = null): Promise<{ ok: true; key: string; keyId: string } | { ok: false; reason: string }> {
+    const keyId = randomSecret(9).replace(/[^A-Za-z0-9]/g, "x");
+    const secret = randomSecret();
+    const outcome = await this.kernable.submit(CreateApiKey.new({ keyId, secret, label, expiresAt }), { aggregateId: identityId, tenant, context });
+    return outcome.committed ? { ok: true, key: apiKey(keyId, secret), keyId } : { ok: false, reason: outcome.code };
+  }
+
+  private readonly keys_ = new Map<string, { context: RequestContext; until: number }>();
+
+  /**
+   * The request context of an API key, or null: checked against its hash, cached for a minute. A
+   * revoked key is refused by the middleware at once, cache or not.
+   */
+  async checkApiKey(key: string): Promise<RequestContext | null> {
+    const parsed = parseApiKey(key);
+    if (!parsed) return null;
+    const cached = this.keys_.get(parsed.hash);
+    if (cached && cached.until > Date.now()) return cached.context;
+    try {
+      const found = await this.kernable.query(FindApiKey.new({ keyId: parsed.keyId }), { tenant: PLATFORM_TENANT, context: this.serviceContext, allPartitions: true });
+      if (found.revoked || (found.expiresAt !== null && Date.now() > found.expiresAt) || !equalSecrets(found.hash, parsed.hash)) return null;
+      const context = { senderTenant: found.tenant, senderIdentity: found.identityId, senderSession: parsed.keyId };
+      this.keys_.set(parsed.hash, { context, until: Date.now() + 60_000 });
+      return context;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The context of the token's account acting on itself. */
+  private own(claims: Claims): RequestContext {
+    return { senderAccount: claims.sub, senderSession: claims.sid };
   }
 
   /** Changes the password; the other sessions end, this one stays. */

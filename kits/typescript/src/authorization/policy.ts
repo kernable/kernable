@@ -86,7 +86,8 @@ export class Knowledge {
     this.kv = kv;
   }
   tenants = new Table<TenantKnown>(this, "tenants");
-  accounts = new Table<{ status: string }>(this, "accounts");
+  /** `mfa`: the account turned a second factor on: every session needs it. */
+  accounts = new Table<{ status: string; mfa?: boolean }>(this, "accounts");
   sessions = new Table<{ accountId: string; factors: string[]; active: boolean }>(this, "sessions");
   /** `tenant/identityId` */
   identities = new Table<{ accountId: string | null; active: boolean; memberships: Membership[] }>(this, "identities");
@@ -255,6 +256,12 @@ export function decide(k: Knowledge, check: Check, now: number): Refusal | null 
   // 3. Who is asking.
   const sender = authenticate(k, r, now);
   if ("code" in sender) return sender;
+
+  // An account with a second factor on: nothing but signing out until the session proved it.
+  const account = sender.accountId ? k.accounts.get(sender.accountId) : undefined;
+  if (account?.mfa && sender.factors.length < 2 && !sender.factors.includes("passkey") && type !== "account.EndSession") {
+    return refuse("mfa_required", "Prove the second factor first");
+  }
   const target = targetOf(check);
   if (rule.self && isSelf(k, check, r, target)) return null;
   // The person suspends their own account only for themselves.

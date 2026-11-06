@@ -5,11 +5,11 @@ import type { ListenerContext } from "@kernable/sdk";
 import { INTERNAL, ORDERS, PLATFORM_TENANT } from "../shared/constants.ts";
 import { currentMailer } from "../shared/mail.ts";
 import { token } from "../shared/secrets.ts";
-import { EndSession, OpenSession } from "./commands.ts";
+import { AddSessionFactor, EndSession, OpenSession } from "./commands.ts";
 import { accountDomain } from "./domain.ts";
 import {
   AccountDeleted, AccountSuspended, EmailChangeRequested, PasswordChanged, PasswordReset, PasswordResetRequested, RegistrationAttempted,
-  SignedIn, VerificationRequested,
+  SecondFactorProved, SignedIn, VerificationRequested,
 } from "./events.ts";
 import { ListSessions } from "./queries.ts";
 
@@ -30,6 +30,11 @@ export const mailReactor = accountDomain
 
 export const sessionsReactor = accountDomain
   .reactor("account.sessions", { order: ORDERS.reactors })
+  .on(SecondFactorProved, async (d, evt, ctx) => {
+    await ctx.submit(AddSessionFactor.new({ factor: d.method === "recovery" ? "recovery" : "totp", accountId: evt.aggregateId }), {
+      id: `factor-${d.sessionId}-${evt.commandId}`, aggregateId: d.sessionId, tenant: PLATFORM_TENANT, context: { ...ctx.follow(), ...INTERNAL },
+    });
+  })
   .on(SignedIn, async (d, evt, ctx) => {
     await ctx.submit(
       OpenSession.new({

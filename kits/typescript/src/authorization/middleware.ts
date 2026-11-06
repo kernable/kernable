@@ -4,7 +4,8 @@
 import { Rejected, type Listener } from "@kernable/sdk";
 
 import {
-  AccountDeleted, AccountReactivated, AccountRegistered, AccountSuspended, EmailVerified, SessionEnded, SessionFactorAdded, SessionOpened,
+  AccountDeleted, AccountReactivated, AccountRegistered, AccountSuspended, EmailVerified, SessionEnded, SessionFactorAdded, SessionOpened, TotpConfirmed,
+  TotpDisabled,
 } from "../account/index.ts";
 import { GroupCreated, GroupDeleted, GroupPermissionsSet, groupDomain } from "../group/index.ts";
 import {
@@ -41,7 +42,11 @@ const setIdentity = (active: boolean) => (_d: unknown, evt: Evt, ctx: { store?: 
 };
 const setAccount = (status: string) => (_d: unknown, evt: Evt, ctx: { store?: KeyValues }) => {
   use(ctx.store);
-  k.accounts.set(evt.aggregateId, { status });
+  k.accounts.set(evt.aggregateId, { ...k.accounts.get(evt.aggregateId), status });
+};
+const setMfa = (mfa: boolean) => (_d: unknown, evt: Evt, ctx: { store?: KeyValues }) => {
+  use(ctx.store);
+  k.accounts.update(evt.aggregateId, (a) => void (a.mfa = mfa));
 };
 
 export const authorizationListener: Listener = groupDomain
@@ -99,6 +104,8 @@ export const authorizationListener: Listener = groupDomain
     use(ctx.store);
     k.accounts.update(evt.aggregateId, (a) => void (a.status === "pending" && (a.status = "active")));
   })
+  .on(TotpConfirmed, setMfa(true))
+  .on(TotpDisabled, setMfa(false))
   .on(AccountSuspended, setAccount("suspended"))
   .on(AccountReactivated, setAccount("active"))
   .on(AccountDeleted, setAccount("deleted"))

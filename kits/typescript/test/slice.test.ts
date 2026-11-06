@@ -15,10 +15,11 @@ import { newSigningKeys, type Claims } from "../src/api/tokens.ts";
 import { bootstrap } from "../src/bootstrap.ts";
 import { CreateGroup } from "../src/group/index.ts";
 import { DeleteAccount, SuspendAccount } from "../src/account/index.ts";
-import { DeleteIdentity, GrantMembership } from "../src/identity/index.ts";
+import { CreateServiceIdentity, DeleteIdentity, GrantMembership, RevokeApiKey } from "../src/identity/index.ts";
 import { CreateInvitation, EraseInvitation, ListInvitations } from "../src/invitation/index.ts";
 import { kitDomains, kitSchemas, relation, useAuthorizationStore } from "../src/kit.ts";
 import { MemoryMailer, useMailer } from "../src/shared/mail.ts";
+import { totpCode } from "../src/shared/secrets.ts";
 import { CreateTenant, DeleteTenant, GetTenant, SuspendTenant } from "../src/tenancy/index.ts";
 
 // --- A small app: orders that belong to whoever placed them --------------------------------------
@@ -330,4 +331,54 @@ test("account flows: refresh and reuse, password change and reset, email change,
   const again = await api.register({ email: "frank@new.example", name: "Not Frank", password: PASSWORD });
   assert.ok("accountId" in again);
   assert.equal(mailer.last("frank@new.example")!.purpose, "account_exists");
+});
+
+test("a second factor: TOTP with recovery codes; and a service with an API key", async () => {
+  const email = "henry@example.com";
+  const first = await person(email);
+  const totp = await api.startTotp(first.claims, "Kit", email);
+  assert.ok(totp.ok && totp.uri.startsWith("otpauth://totp/"));
+  const step = Math.floor(Date.now() / 30_000);
+  const confirmed = await api.confirmTotp(first.claims, totpCode(totp.secret, step));
+  assert.ok(confirmed.ok && confirmed.recoveryCodes.length === 10);
+
+  // Signing in now needs the second factor before anything else.
+  const signedIn = await api.signIn({ email, password: PASSWORD });
+  assert.ok(signedIn.ok && signedIn.secondFactor);
+  const claims = api.check(signedIn.accessToken)!;
+  const henrys = crypto.randomUUID();
+  const open = () => kit.submit(CreateTenant.new({ slug: "henrys", name: "Henry's", owner: { accountId: claims.sub } }), {
+    aggregateId: henrys, tenant: henrys, context: { senderAccount: claims.sub, senderSession: claims.sid },
+  });
+  const refused = await open();
+  assert.equal(!refused.committed && refused.code, "mfa_required");
+  // The confirming code counts once; the next step's code, or a recovery code, proves it.
+  assert.deepEqual(await api.proveSecondFactor(claims, totpCode(totp.secret, step)), { ok: false, reason: "wrong_code" });
+  const proved = await api.proveSecondFactor(claims, confirmed.recoveryCodes[0]);
+  assert.ok(proved.ok);
+  assert.ok((await open()).committed);
+  const again = await api.signIn({ email, password: PASSWORD });
+  assert.ok(again.ok);
+  assert.ok((await api.proveSecondFactor(api.check(again.accessToken)!, totpCode(totp.secret, step + 1))).ok);
+  assert.deepEqual(await api.proveSecondFactor(api.check(again.accessToken)!, confirmed.recoveryCodes[0]), { ok: false, reason: "wrong_code" });
+
+  // Henry, now an owner, gives a service an API key, and a group to act in.
+  const asHenry = { senderAccount: claims.sub, senderSession: claims.sid, senderTenant: henrys, senderIdentity: (await api.contextFor(claims, henrys)).senderIdentity };
+  const service = crypto.randomUUID();
+  assert.ok((await kit.submit(CreateServiceIdentity.new({ displayName: "Billing" }), { aggregateId: service, tenant: henrys, context: asHenry })).committed);
+  const orders = crypto.randomUUID();
+  assert.ok((await kit.submit(CreateGroup.new({ name: "Orders", permissions: [{ pattern: "shop.PlaceOrder" }] }), { aggregateId: orders, tenant: henrys, context: asHenry })).committed);
+  assert.ok((await kit.submit(GrantMembership.new({ membershipId: "svc", group: orders }), { aggregateId: service, tenant: henrys, context: asHenry })).committed);
+  const created = await api.createApiKey(asHenry, henrys, service, "billing");
+  assert.ok(created.ok);
+  const asService = await api.checkApiKey(created.key);
+  assert.deepEqual(asService, { senderTenant: henrys, senderIdentity: service, senderSession: created.keyId });
+  assert.equal(await api.checkApiKey(`${created.key}x`), null, "a wrong key");
+  const byKey = (id: string) => kit.submit(PlaceOrder.new(), { aggregateId: id, tenant: henrys, context: asService! });
+  assert.ok((await byKey("h1")).committed);
+
+  // Revoked: refused at once, even with the API's cached context.
+  assert.ok((await kit.submit(RevokeApiKey.new({ keyId: created.keyId }), { aggregateId: service, tenant: henrys, context: asHenry })).committed);
+  const revoked = await byKey("h2");
+  assert.equal(!revoked.committed && revoked.code, "unauthenticated");
 });

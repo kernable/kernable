@@ -14,7 +14,8 @@ const COMMANDS: Record<string, string[]> = {
     "DeleteTenant", "AddOwner", "RemoveOwner", "RequireMfa", "ChangeSignUpPolicy",
   ],
   "account.account": ["RegisterAccount", "RequestVerification", "VerifyEmail", "SignIn", "SuspendAccount", "ReactivateAccount", "DeleteAccount",
-    "ChangePassword", "RequestPasswordReset", "ResetPassword", "RequestEmailChange", "ConfirmEmailChange", "NoteRegistrationAttempt"],
+    "ChangePassword", "RequestPasswordReset", "ResetPassword", "RequestEmailChange", "ConfirmEmailChange", "NoteRegistrationAttempt",
+    "StartTotp", "ConfirmTotp", "DisableTotp", "RegenerateRecoveryCodes", "ProveSecondFactor"],
   "account.session": ["OpenSession", "RefreshSession", "AddSessionFactor", "EndSession"],
   "identity.identity": [
     "CreateIdentity", "CreateServiceIdentity", "UpdateProfile", "GrantMembership", "SuspendMembership",
@@ -30,7 +31,7 @@ const COMMANDS: Record<string, string[]> = {
 const QUERIES: Record<string, string[]> = {
   "tenancy.tenants": ["GetTenant", "GetTenantBySlug", "ListTenants", "GetSignUpPolicy"],
   "account.accounts": ["FindAccountByEmail", "GetAccount", "ListSessions"],
-  "identity.identities": ["GetIdentity", "ListIdentities", "ListMyIdentities", "FindIdentityByAccount"],
+  "identity.identities": ["GetIdentity", "ListIdentities", "ListMyIdentities", "FindIdentityByAccount", "FindApiKey"],
   "group.groups": ["ListGroups", "GetGroup"],
   "invitation.invitations": ["ListInvitations", "PeekInvitation"],
 };

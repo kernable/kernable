@@ -1998,6 +1998,182 @@
         }
       },
       "expect": "forbidden"
+    },
+    {
+      "name": "an account with TOTP on needs it in every session",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "mfa_required",
+      "extra": [
+        {
+          "domain": "account",
+          "aggregateType": "account",
+          "type": "TotpConfirmed",
+          "tenant": "platform",
+          "aggregateId": "a-mem",
+          "data": {
+            "step": 1,
+            "at": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "... also for its own settings",
+      "check": {
+        "kind": "command",
+        "tenant": "platform",
+        "domain": "account",
+        "type": "ChangePassword",
+        "aggregateType": "account",
+        "aggregateId": "a-mem",
+        "data": {
+          "new": "x"
+        },
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem"
+        }
+      },
+      "expect": "mfa_required",
+      "extra": [
+        {
+          "domain": "account",
+          "aggregateType": "account",
+          "type": "TotpConfirmed",
+          "tenant": "platform",
+          "aggregateId": "a-mem",
+          "data": {
+            "step": 1,
+            "at": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "... but lets a session that proved it in",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "allow",
+      "extra": [
+        {
+          "domain": "account",
+          "aggregateType": "account",
+          "type": "TotpConfirmed",
+          "tenant": "platform",
+          "aggregateId": "a-mem",
+          "data": {
+            "step": 1,
+            "at": 1
+          }
+        },
+        {
+          "domain": "account",
+          "aggregateType": "session",
+          "type": "SessionFactorAdded",
+          "tenant": "platform",
+          "aggregateId": "s-mem",
+          "data": {
+            "factor": "totp"
+          }
+        }
+      ]
+    },
+    {
+      "name": "signing out needs no second factor",
+      "check": {
+        "kind": "command",
+        "tenant": "platform",
+        "domain": "account",
+        "type": "EndSession",
+        "aggregateType": "session",
+        "aggregateId": "s-mem",
+        "data": {},
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem"
+        }
+      },
+      "expect": "allow",
+      "extra": [
+        {
+          "domain": "account",
+          "aggregateType": "account",
+          "type": "TotpConfirmed",
+          "tenant": "platform",
+          "aggregateId": "a-mem",
+          "data": {
+            "step": 1,
+            "at": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "TOTP turned off, one factor is enough again",
+      "check": {
+        "kind": "command",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "PlaceOrder",
+        "aggregateType": "order",
+        "aggregateId": "o2",
+        "data": {},
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        }
+      },
+      "expect": "allow",
+      "extra": [
+        {
+          "domain": "account",
+          "aggregateType": "account",
+          "type": "TotpConfirmed",
+          "tenant": "platform",
+          "aggregateId": "a-mem",
+          "data": {
+            "step": 1,
+            "at": 1
+          }
+        },
+        {
+          "domain": "account",
+          "aggregateType": "account",
+          "type": "TotpDisabled",
+          "tenant": "platform",
+          "aggregateId": "a-mem",
+          "data": {}
+        }
+      ]
     }
   ]
 }

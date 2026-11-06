@@ -41,6 +41,8 @@ export class SignedIn extends Event {
   refreshTokenHash!: string;
   ip!: string | null;
   userAgent!: string | null;
+  /** The account has a second factor on: the session must prove it before anything else. */
+  mfa!: boolean;
   at!: number;
 }
 
@@ -152,5 +154,40 @@ export class RegistrationAttempted extends Event {
   at!: number;
 }
 
+/** The TOTP secret the API generated and showed: personal, in the vault. Not in use until confirmed. */
+export class TotpStarted extends Event {
+  static personal: PersonalFields<TotpStarted>[] = [{ fields: ["secret"], subject: (_d, id) => id }];
+  secret!: string | null;
+}
+
+/** TOTP is the account's second factor from now on (the first code's step: no code twice). */
+export class TotpConfirmed extends Event {
+  step!: number;
+  at!: number;
+}
+
+export class TotpDisabled extends Event {}
+
+/** The recovery codes' hashes; the codes were shown once. */
+export class RecoveryCodesGenerated extends Event {
+  hashes!: string[];
+}
+
+/** A session proved a second factor; a reactor adds it to the session. */
+export class SecondFactorProved extends Event {
+  sessionId!: string;
+  method!: "totp" | "recovery";
+  /** The TOTP code's step (no code twice), or null. */
+  step!: number | null;
+  /** The used recovery code's hash, or null. */
+  recoveryCodeHash!: string | null;
+}
+
+/** Counts toward the lockout, like a wrong password. */
+export class SecondFactorFailed extends Event {
+  sessionId!: string;
+  at!: number;
+}
+
 // Declared on the domain, so a process that only reads them knows them too.
-accountDomain.event(AccountRegistered, VerificationRequested, EmailVerified, SignedIn, SignInFailed, SessionOpened, SessionRefreshed, SessionFactorAdded, SessionEnded, AccountSuspended, AccountReactivated, AccountDeleted, PasswordChanged, PasswordResetRequested, PasswordReset, EmailChangeRequested, EmailChanged, RegistrationAttempted);
+accountDomain.event(TotpStarted, TotpConfirmed, TotpDisabled, RecoveryCodesGenerated, SecondFactorProved, SecondFactorFailed, AccountRegistered, VerificationRequested, EmailVerified, SignedIn, SignInFailed, SessionOpened, SessionRefreshed, SessionFactorAdded, SessionEnded, AccountSuspended, AccountReactivated, AccountDeleted, PasswordChanged, PasswordResetRequested, PasswordReset, EmailChangeRequested, EmailChanged, RegistrationAttempted);

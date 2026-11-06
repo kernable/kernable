@@ -3,7 +3,7 @@
 import { Query, Rejected } from "@kernable/sdk";
 
 import type { IdentityStatus } from "./domain.ts";
-import { identitiesReadModel, type IdentityRow, identityRows, rowKey } from "./readmodels.ts";
+import { apiKeyRows, identitiesReadModel, type IdentityRow, identityRows, rowKey } from "./readmodels.ts";
 
 /** The API's only: it sets `senderIdentity` from it. */
 export class FindIdentityByAccount extends Query<{ identityId: string; status: IdentityStatus }> {
@@ -37,3 +37,14 @@ identitiesReadModel.query(ListMyIdentities, (d) =>
 export class ListIdentities extends Query<IdentityRow[]> {}
 
 identitiesReadModel.query(ListIdentities, (_d, qry) => [...identityRows.values()].filter((r) => r.tenant === qry.tenant));
+
+/** The API's only: what it checks an API key against. */
+export class FindApiKey extends Query<{ tenant: string; identityId: string; hash: string; expiresAt: number | null; revoked: boolean }> {
+  keyId!: string;
+}
+
+identitiesReadModel.query(FindApiKey, (d) => {
+  const key = apiKeyRows.get(d?.keyId);
+  if (!key) throw new Rejected("No such key", "not_found");
+  return key;
+});
