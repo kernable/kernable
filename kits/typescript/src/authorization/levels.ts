@@ -73,6 +73,7 @@ export const RULES: Record<string, Rule> = {
   "identity.GetIdentity": { level: "group", self: true },
   "identity.DeleteIdentity": { level: "group", self: true },
   "identity.ListMyIdentities": { level: "authenticated", self: true },
+  "group.Explain": { level: "group", self: true },
 
   "invitation.DeclineInvitation": { level: "public" },
   "invitation.RecordInvitationMailSent": { level: "internal" },
@@ -86,6 +87,7 @@ export const QUERY_TARGETS: Record<string, { type: string; field: string }> = {
   "account.ListSessions": { type: "account.account", field: "accountId" },
   "identity.GetIdentity": { type: "identity.identity", field: "identityId" },
   "identity.ListMyIdentities": { type: "account.account", field: "accountId" },
+  "group.Explain": { type: "identity.identity", field: "identityId" },
 };
 
 /** Requests for which the sender must hold every permission of the group concerned. */

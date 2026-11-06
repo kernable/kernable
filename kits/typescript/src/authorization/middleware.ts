@@ -1,7 +1,7 @@
 // The authorization middleware: one listener at order -30 that learns from events and
 // checks every request before the kernel accepts or routes it.
 
-import { Rejected, type Listener } from "@kernable/sdk";
+import { Query, Rejected, type Check, type Listener } from "@kernable/sdk";
 
 import {
   AccountDeleted, AccountReactivated, AccountRegistered, AccountSuspended, EmailVerified, SessionEnded, SessionFactorAdded, SessionOpened, TotpConfirmed,
@@ -180,6 +180,36 @@ export const authorizationListener: Listener = groupDomain
     const refusal = decide(k, check, Date.now());
     if (refusal) throw new Rejected(refusal.message, refusal.code);
   });
+
+/**
+ * Why a request would be allowed or refused: the middleware's own steps. For oneself, with
+ * one's real session; for another identity of the tenant (needs `group.Explain`), sessions aside.
+ */
+export class Explain extends Query<{ allowed: boolean; code: string | null; steps: string[] }> {
+  identityId!: string;
+  /** The request type, qualified: `shop.CancelOrder`. */
+  type!: string;
+  /** For a command: its aggregate (the relation's target). */
+  aggregateType?: string;
+  aggregateId?: string;
+  data?: unknown;
+}
+
+authorizationListener.query(Explain, (d, qry, ctx) => {
+  use(ctx.store);
+  const [domain, type] = String(d?.type ?? "").split(".");
+  if (!domain || !type) throw new Rejected("A qualified type: domain.Type", "invalid_type");
+  const asker = ctx.request;
+  const oneself = asker.senderIdentity === d.identityId && asker.senderTenant === qry.tenant;
+  const request = oneself ? asker : { senderTenant: qry.tenant, senderIdentity: d.identityId };
+  const check: Check = {
+    kind: d.aggregateId ? "command" : "query", id: "", tenant: qry.tenant, domain, type, data: d.data ?? {}, request,
+    ...(d.aggregateId ? { aggregateType: d.aggregateType, aggregateId: d.aggregateId } : {}),
+  };
+  const steps: string[] = [];
+  const refusal = decide(k, check, Date.now(), { trace: steps, assumeSession: !oneself });
+  return { allowed: refusal === null, code: refusal?.code ?? null, steps };
+});
 
 let relationsInstalled = false;
 

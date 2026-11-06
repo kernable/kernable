@@ -231,78 +231,97 @@ function concerned(k: Knowledge, type: string, check: Check): string[] {
   }
 }
 
+/** How `decide` runs: with a trace of its steps (`group.Explain`), or for another identity, sessions aside. */
+export interface DecideOptions {
+  /** Each step that decided, in words. */
+  trace?: string[];
+  /** Explaining what another identity may do: its sessions are not checked. */
+  assumeSession?: boolean;
+}
+
 /**
  * Decides on a request (design/kits.md, steps 1–9): null allows it. `now` is the middleware's
  * clock; the request carries no time of its own at this point.
  */
-export function decide(k: Knowledge, check: Check, now: number): Refusal | null {
+export function decide(k: Knowledge, check: Check, now: number, options: DecideOptions = {}): Refusal | null {
   const type = `${check.domain}.${check.type}`;
   const r = check.request ?? {};
   const rule = ruleOf(type);
   const data = (check.data ?? {}) as Record<string, any>;
+  const say = (line: string) => void options.trace?.push(line);
+  const allow = (why: string): null => (say(`allowed: ${why}`), null);
+  const no = (code: Refusal["code"], message: string): Refusal => (say(`refused (${code}): ${message}`), refuse(code, message));
 
   // 1. Privileged keys (the kernel checked the grant): the kit's reactors and the bootstrap.
-  if (r.bypassAuthorization) return null;
-  if (rule.level === "internal") return refuse("forbidden", `${type} is sent by the kit only`);
+  if (r.bypassAuthorization) return allow("a privileged key (bypassAuthorization)");
+  if (rule.level === "internal") return no("forbidden", `${type} is sent by the kit only`);
 
   // 2. Public: the command carries its proof, the aggregate checks it.
   if (rule.level === "public") {
     if (type === "account.RegisterAccount" && data.verified === true) {
       // Only the API's identity, after an invitation proved the email: handled as a group permission below.
     } else {
-      if (type === "account.RegisterAccount" && k.signUp.accounts !== "open") return refuse("sign_up_closed", "Registration is by invitation only");
-      return null;
+      if (type === "account.RegisterAccount" && k.signUp.accounts !== "open") return no("sign_up_closed", "Registration is by invitation only");
+      return allow(`${type} is public; the command carries its proof`);
     }
   }
 
   // 3. Who is asking.
-  const sender = authenticate(k, r, now);
-  if ("code" in sender) return sender;
+  let sender: Sender | Refusal;
+  if (options.assumeSession) {
+    const who = k.identity(r.senderTenant ?? "", r.senderIdentity);
+    sender = { accountId: who?.accountId ?? undefined, factors: ["password", "assumed"], apiKey: !who?.accountId };
+    say("sessions not checked (explaining for another identity)");
+  } else {
+    sender = authenticate(k, r, now);
+  }
+  if ("code" in sender) return no(sender.code, sender.message);
+  if (!options.assumeSession) say(sender.apiKey ? `signed in with the API key ${r.senderSession}` : `signed in as account ${sender.accountId} (session ${r.senderSession}, ${sender.factors.join(" + ")})`);
 
   // An account with a second factor on: nothing but signing out until the session proved it.
   const account = sender.accountId ? k.accounts.get(sender.accountId) : undefined;
   if (account?.mfa && sender.factors.length < 2 && !sender.factors.includes("passkey") && type !== "account.EndSession") {
-    return refuse("mfa_required", "Prove the second factor first");
+    return no("mfa_required", "Prove the second factor first");
   }
   const target = targetOf(check);
   // Oneself: the account and its sessions at once; an identity lives in a tenant, so only after
   // the tenant's checks (suspended, MFA, enforced SSO) below.
   const self = rule.self === true && isSelf(k, check, r, target);
-  if (self && target?.type !== "identity.identity") return null;
+  if (self && target?.type !== "identity.identity") return allow(`oneself (${target?.type})`);
   // The person suspends their own account only for themselves.
-  if (type === "account.SuspendAccount" && data.reason === "owner_requested" && isSelf(k, check, r, target)) return null;
+  if (type === "account.SuspendAccount" && data.reason === "owner_requested" && isSelf(k, check, r, target)) return allow("one's own account, for oneself");
 
   // 4. Authenticated: a session is enough.
   if (rule.level === "authenticated") {
     if (type === "tenancy.CreateTenant") {
       const own = data.owner?.accountId && data.owner.accountId === sender.accountId;
-      if (own && k.signUp.tenants !== "off" && (data.status ?? "active") === k.signUp.tenants) return null;
+      if (own && k.signUp.tenants !== "off" && (data.status ?? "active") === k.signUp.tenants) return allow("self-service sign-up of a tenant");
       // Else only the platform may create tenants (below).
     } else {
-      return null;
+      return allow(`${type} needs a session only`);
     }
   }
 
   // 5. The tenant, and the sender's tenant.
   const platform = r.senderTenant === PLATFORM_TENANT;
-  if (!r.senderTenant || (!platform && r.senderTenant !== check.tenant)) return refuse("forbidden", "Not a member of this tenant");
+  if (!r.senderTenant || (!platform && r.senderTenant !== check.tenant)) return no("forbidden", "Not a member of this tenant");
   const tenant = k.tenants.get(check.tenant);
   if (!platform) {
-    if (!tenant || tenant.status === "deleted") return refuse("forbidden", "No such tenant");
+    if (!tenant || tenant.status === "deleted") return no("forbidden", "No such tenant");
     // An owner may undo their own suspension (owner_requested), decided in step 7.
-    if (tenant.status !== "active" && type !== "tenancy.ReactivateTenant") return refuse("tenant_suspended", `The tenant is ${tenant.status}`);
+    if (tenant.status !== "active" && type !== "tenancy.ReactivateTenant") return no("tenant_suspended", `The tenant is ${tenant.status}`);
   }
 
   // 6. The identity, and the tenant's MFA requirement.
-  if (r.onBehalfOf) return refuse("forbidden", "Acting on behalf of others is not available yet");
+  if (r.onBehalfOf) return no("forbidden", "Acting on behalf of others is not available yet");
   const identityId = r.senderIdentity;
   const identity = k.identity(r.senderTenant, identityId);
-  if (!identityId || !identity?.active) return refuse("forbidden", "No active identity in this tenant");
-  if (!sender.apiKey && identity.accountId !== sender.accountId) return refuse("forbidden", "The identity is another account's");
+  if (!identityId || !identity?.active) return no("forbidden", "No active identity in this tenant");
+  if (!sender.apiKey && identity.accountId !== sender.accountId) return no("forbidden", "The identity is another account's");
   const homeTenant = k.tenants.get(r.senderTenant);
   for (const t of [tenant, homeTenant]) {
     if (t?.mfaRequired && !sender.apiKey && sender.factors.length < 2 && !sender.factors.includes("passkey")) {
-      return refuse("mfa_required", "This tenant requires a second factor");
+      return no("mfa_required", "This tenant requires a second factor");
     }
   }
 
@@ -311,30 +330,38 @@ export function decide(k: Knowledge, check: Check, now: number): Refusal | null 
   const owner = homeTenant?.owners.includes(identityId) ?? false;
   // A tenant with enforced SSO: only sessions signed in through it (owners excepted, so they can mend it).
   const sso = tenant?.ssoEnforced;
-  if (sso && !platform && !owner && !sender.apiKey && sender.method !== `sso:${sso}`) return refuse("sso_required", "Sign in through the tenant's single sign-on");
-  if (self) return null;
+  if (sso && !platform && !owner && !sender.apiKey && !options.assumeSession && sender.method !== `sso:${sso}`) {
+    return no("sso_required", "Sign in through the tenant's single sign-on");
+  }
+  if (self) return allow("oneself (identity.identity)");
   if (rule.level === "platform" && !platform) {
     const own = owner && (
       (type === "tenancy.SuspendTenant" && data.reason === "owner_requested") ||
       (type === "tenancy.ReactivateTenant" && tenant?.suspension === "owner_requested"));
-    return own ? null : refuse("forbidden", `${type} is for the platform`);
+    return own ? allow("an owner, for their own suspension") : no("forbidden", `${type} is for the platform`);
   }
-  if (owner) return null;
-  if (type === "invitation.CreateInvitation" && data.owner === true && !platform) return refuse("forbidden", "Owner invitations are the owners'");
-  if (!platform && tenant?.status !== "active") return refuse("tenant_suspended", `The tenant is ${tenant?.status}`);
-  if (rule.level === "owners") return refuse("forbidden", `${type} is for the tenant's owners`);
+  if (owner) return allow(platform ? "an owner of the platform" : "an owner of the tenant (every permission)");
+  if (type === "invitation.CreateInvitation" && data.owner === true && !platform) return no("forbidden", "Owner invitations are the owners'");
+  if (!platform && tenant?.status !== "active") return no("tenant_suspended", `The tenant is ${tenant?.status}`);
+  if (rule.level === "owners") return no("forbidden", `${type} is for the tenant's owners`);
 
   // 8. Memberships: pattern, scope, relation, expiry.
   const held = permissions(k, r.senderTenant, identityId, now);
-  if (!held.some(({ p, m }) => matches(k, r.senderTenant!, identityId, p, m, type, target, check, r))) {
-    return refuse("forbidden", `No permission for ${type}`);
-  }
+  const match = held.find(({ p, m }) => matches(k, r.senderTenant!, identityId, p, m, type, target, check, r));
+  if (!match) return no("forbidden", `No permission for ${type}`);
 
   // 9. No escalation: only permissions held without scope and relation count.
   if (ESCALATION.includes(type)) {
     const plain = held.filter(({ p, m }) => !p.when && !m.scope).map(({ p }) => p.pattern);
     const missing = concerned(k, type, check).find((pattern) => !plain.some((h) => covers(h, pattern)));
-    if (missing) return refuse("forbidden", `Granting ${missing} needs holding it`);
+    if (missing) return no("forbidden", `Granting ${missing} needs holding it`);
   }
-  return null;
+  if (!options.trace) return null;
+  const { p, m } = match;
+  const until = m.expiresAt === null ? "" : `, until ${Number.isFinite(new Date(m.expiresAt).getTime()) ? new Date(m.expiresAt).toISOString() : m.expiresAt}`;
+  return allow(
+    `membership ${m.membershipId} of group ${m.group}${platform ? " (platform)" : ""}: ${p.pattern}` +
+      (p.when ? ` when ${p.when}${p.viaParent ? " (via parent)" : ""}` : "") +
+      (m.scope ? `, scoped to ${m.scope.type} ${m.scope.id}` : "") + until,
+  );
 }

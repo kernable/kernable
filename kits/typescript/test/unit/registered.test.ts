@@ -36,6 +36,7 @@ const QUERIES: Record<string, string[]> = {
   "account.ssos": ["FindSsoByDomain", "GetSsoSecret", "GetSso"],
   "identity.identities": ["GetIdentity", "ListIdentities", "ListMyIdentities", "FindIdentityByAccount", "FindApiKey"],
   "group.groups": ["ListGroups", "GetGroup"],
+  "group.authorization": ["Explain"],
   "invitation.invitations": ["ListInvitations", "PeekInvitation"],
 };
 

@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 
-import { Command, Event, Kernable, Rejected, domain, type RequestContext } from "@kernable/sdk";
+import { Command, Event, Kernable, Query, Rejected, domain, type RequestContext } from "@kernable/sdk";
 
 import { TestKernel } from "../../../sdks/typescript/test/kernel.ts";
 import { FindAccountByEmail } from "../src/account/index.ts";
@@ -17,11 +17,12 @@ import { CreateGroup } from "../src/group/index.ts";
 import { AddSsoDomain, CreateSso, DeleteAccount, EnforceSso, GetSso, SuspendAccount } from "../src/account/index.ts";
 import { CreateServiceIdentity, DeleteIdentity, GetIdentity, GrantMembership, RevokeApiKey } from "../src/identity/index.ts";
 import { CreateInvitation, EraseInvitation, ListInvitations } from "../src/invitation/index.ts";
-import { kitDomains, kitSchemas, relation, useAuthorizationStore } from "../src/kit.ts";
+import { Explain, kitDomains, kitSchemas, relation, useAuthorizationStore, visibility } from "../src/kit.ts";
 import { MemoryMailer, useMailer } from "../src/shared/mail.ts";
 import { totpCode } from "../src/shared/secrets.ts";
 import { Authenticator } from "./authenticator.ts";
 import { OidcProvider } from "./oidc-provider.ts";
+import { exampleServer } from "../example/server.ts";
 import { CreateTenant, DeleteTenant, GetTenant, SuspendTenant } from "../src/tenancy/index.ts";
 
 // --- A small app: orders that belong to whoever placed them --------------------------------------
@@ -47,6 +48,14 @@ shop
     return [OrderCancelled.new()];
   });
 relation("shop.order", "owner").set("shop.OrderPlaced", (e) => e.data.customer);
+
+// The app's list of orders, showing each asker only what the middleware would let them get.
+class ListOrders extends Query<string[]> {}
+const orderRows = new Map<string, { tenant: string; id: string }>();
+const ordersModel = shop.readModel("shop.orders").on(OrderPlaced, (_d, evt) => void orderRows.set(`${evt.tenant}/${evt.aggregateId}`, { tenant: evt.tenant, id: evt.aggregateId }));
+const visible = visibility(ordersModel);
+ordersModel.query(ListOrders, (_d, qry, ctx) =>
+  [...orderRows.values()].filter((o) => o.tenant === qry.tenant && visible(qry.tenant, ctx.request, "shop.GetOrder", { type: "shop.order", id: o.id })).map((o) => o.id).sort());
 
 // --- Setup ---------------------------------------------------------------------------------------
 
@@ -488,5 +497,72 @@ test("OAuth and SSO: a social login registers or signs in, links on request; a t
   } finally {
     social.stop();
     company.stop();
+  }
+});
+
+test("lists show what one may see; Explain says why a request is allowed or refused", async () => {
+  const nora = await person("nora@example.com");
+  const shopTenant = crypto.randomUUID();
+  assert.ok((await kit.submit(CreateTenant.new({ slug: "noras", name: "Nora's", owner: { accountId: nora.accountId } }), {
+    aggregateId: shopTenant, tenant: shopTenant, context: await api.contextFor(nora.claims),
+  })).committed);
+  const asNora = await api.contextFor(nora.claims, shopTenant);
+  const buyers = crypto.randomUUID();
+  assert.ok((await kit.submit(CreateGroup.new({
+    name: "Buyers", permissions: [{ pattern: "shop.PlaceOrder" }, { pattern: "shop.ListOrders" }, { pattern: "shop.GetOrder", when: "owner" }],
+  }), { aggregateId: buyers, tenant: shopTenant, context: asNora })).committed);
+  const join = async (email: string) => {
+    const who = await person(email);
+    await kit.submit(CreateInvitation.new({ email, groups: [{ group: buyers }] }), { aggregateId: crypto.randomUUID(), tenant: shopTenant, context: asNora });
+    assert.ok((await api.acceptInvitation(mailer.last(email)!.token, { claims: who.claims })).ok);
+    return api.contextFor(who.claims, shopTenant);
+  };
+  const asOscar = await join("oscar@example.com");
+  const asPia = await join("pia@example.com");
+  for (const [id, as] of [["o-oscar", asOscar], ["o-pia", asPia]] as const) {
+    assert.ok((await kit.submit(PlaceOrder.new(), { aggregateId: id, tenant: shopTenant, context: as })).committed);
+  }
+  const list = (context: RequestContext) => kit.query(ListOrders.new(), { tenant: shopTenant, context });
+  assert.deepEqual(await list(asOscar), ["o-oscar"]);
+  assert.deepEqual(await list(asPia), ["o-pia"]);
+  assert.deepEqual(await list(asNora), ["o-oscar", "o-pia"], "the owner sees all");
+
+  // Explain, for oneself: with one's own session; the deciding membership named.
+  const mine = await kit.query(Explain.new({ identityId: asOscar.senderIdentity!, type: "shop.GetOrder", aggregateType: "order", aggregateId: "o-oscar" }), { tenant: shopTenant, context: asOscar });
+  assert.equal(mine.allowed, true);
+  assert.match(mine.steps.at(-1)!, /^allowed: membership .* of group .*: shop.GetOrder when owner/);
+  const theirs = await kit.query(Explain.new({ identityId: asOscar.senderIdentity!, type: "shop.GetOrder", aggregateType: "order", aggregateId: "o-pia" }), { tenant: shopTenant, context: asOscar });
+  assert.deepEqual([theirs.allowed, theirs.code], [false, "forbidden"]);
+  // For someone else: the owner may ask, a member may not.
+  const forPia = await kit.query(Explain.new({ identityId: asPia.senderIdentity!, type: "shop.PlaceOrder" }), { tenant: shopTenant, context: asNora });
+  assert.ok(forPia.allowed && forPia.steps[0].startsWith("sessions not checked"));
+  await assert.rejects(
+    kit.query(Explain.new({ identityId: asPia.senderIdentity!, type: "shop.PlaceOrder" }), { tenant: shopTenant, context: asOscar }),
+    (e: Rejected) => e.code === "forbidden",
+  );
+});
+
+test("the example server: register, verify, sign in, and a command as the caller", async () => {
+  const server = exampleServer(api, kit);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const post = async (path: string, body: unknown, headers: Record<string, string> = {}) => {
+    const res = await fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+    return [res.status, res.status === 204 ? null : await res.json()] as const;
+  };
+  try {
+    assert.equal((await post("/register", { email: "quinn@example.com", name: "Quinn", password: PASSWORD }))[0], 202);
+    assert.equal((await post("/verify", { token: mailer.last("quinn@example.com")!.token }))[0], 200);
+    const [status, tokens] = await post("/sign-in", { email: "quinn@example.com", password: PASSWORD });
+    assert.equal(status, 200);
+    const bearer = { authorization: `Bearer ${tokens.accessToken}` };
+    // Outside a tenant, Quinn has no identity: the shop refuses.
+    assert.deepEqual(await post("/commands/shop/order/PlaceOrder", { aggregateId: "q1" }, bearer), [403, { error: "forbidden" }]);
+    const [unauth] = await post("/commands/shop/order/PlaceOrder", { aggregateId: "q1" });
+    assert.equal(unauth, 401);
+    assert.equal((await post("/sign-out", {}, bearer))[0], 204);
+    assert.equal((await post("/refresh", { refreshToken: tokens.refreshToken }))[0], 401, "signed out");
+  } finally {
+    server.close();
   }
 });
