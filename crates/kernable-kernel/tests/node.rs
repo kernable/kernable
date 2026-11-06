@@ -249,3 +249,92 @@ async fn a_killed_node_takes_its_kernel_along() {
     assert!(!alive(kernel), "the kernel ended with its node");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A kernel update: the project names another kernel binary; the node starts the new
+/// kernel, which waits for the stores, and the old one hands them over. A client that commits
+/// one command after the other sees a short gap and loses nothing.
+#[cfg(not(target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_kernel_binary_takes_the_stores_over_while_writes_go_on() {
+    let dir = std::env::temp_dir().join(format!("kn-node-update-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for version in ["a", "b"] {
+        std::fs::create_dir_all(dir.join(version)).unwrap();
+        std::fs::copy(
+            env!("CARGO_BIN_EXE_kernable"),
+            dir.join(version).join("kernable"),
+        )
+        .unwrap();
+    }
+    std::fs::write(dir.join("kernel.key"), hex(key(3).as_bytes())).unwrap();
+    let addr = free_addr();
+    let write = |version: &str| {
+        std::fs::write(
+            dir.join("project.toml"),
+            format!(
+                "[kernel]\nbinary = \"{version}/kernable\"\nflags = {{ root = \"{}\", kernel-key = \"kernel.key\", store = \"sqlite:k.db\", ui-listen = \"\", listen = \"{addr}\", drain-timeout-ms = 2000 }}\nstop-seconds = 5\n",
+                id(&root())
+            ),
+        )
+        .unwrap();
+    };
+    write("a");
+    let node = Node::start(&dir);
+    let first = node.next_start("kernel");
+    wait_for(&addr).await;
+    // A worker that connects again after it lost its kernel, as the SDKs' workers do.
+    tokio::spawn({
+        let addr = addr.clone();
+        async move {
+            loop {
+                run_worker(addr.clone(), TestWorker::honest()).await;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    });
+
+    // One command after the other; a command that meets no kernel is sent again (by its ID).
+    let writer = tokio::spawn({
+        let addr = addr.clone();
+        async move {
+            let (mut last, mut longest) = (std::time::Instant::now(), Duration::ZERO);
+            for i in 0..400 {
+                let cmd = signed(
+                    command(&format!("c{i}"), "PlaceOrder", &format!("o{i}")),
+                    &key(1),
+                );
+                loop {
+                    if let Ok(channel) = kernable_core::transport::connect(&addr).await
+                        && submit_on(channel, cmd.clone(), kernable_core::proto::Wait::Committed)
+                            .await
+                            .is_ok()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                longest = longest.max(last.elapsed());
+                last = std::time::Instant::now();
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            longest
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    write("b");
+    let second = node.next_start("kernel");
+    assert_ne!(first, second);
+    let longest = writer.await.unwrap();
+    eprintln!("the longest time between two commits across the update: {longest:?}");
+    assert!(!alive(first), "the old kernel handed over and ended");
+    assert!(alive(second), "the new kernel serves");
+    assert!(longest < Duration::from_secs(3), "{longest:?}");
+    // Every command is in the store, once.
+    drop(node);
+    let store =
+        kernable_store::open_read_only(&format!("sqlite:{}", dir.join("k.db").display())).unwrap();
+    for i in 0..400 {
+        assert!(store.result(&format!("c{i}")).unwrap().is_some(), "c{i}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

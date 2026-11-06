@@ -98,6 +98,7 @@ fn node_config(dir: &Path, name: &str, kernel_seed: u8, node_seed: u8) -> Config
         query_timeout_ms: 1_000,
         middleware_timeout_ms: 1_000,
         drain_timeout_ms: 1_000,
+        take_over_ms: 0,
         tls: None,
         snapshots: format!(
             "sqlite:{}",

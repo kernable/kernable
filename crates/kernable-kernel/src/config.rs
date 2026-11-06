@@ -198,6 +198,12 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "On SIGTERM or SIGINT, the kernel refuses new submits and queries and waits this long, in milliseconds, for running ones to finish before it exits. Commands still unfinished run again after a restart.",
     ),
     (
+        "--take-over-ms",
+        "KERNABLE_TAKE_OVER_MS",
+        "0",
+        "Start while another kernel still holds the stores, and take them over (a kernel update on the same machine): wait at most this long, in milliseconds, for it to let them go, then serve on the same address. The other kernel lets go when it gets SIGTERM, once its running requests finished. `kernable node` does this when its kernel's binary changes. 0: refuse stores another kernel holds.",
+    ),
+    (
         "--durability",
         "KERNABLE_DURABILITY",
         "full",
@@ -319,6 +325,8 @@ pub struct Config {
     pub query_timeout_ms: u64,
     pub middleware_timeout_ms: u64,
     pub drain_timeout_ms: u64,
+    /// `--take-over-ms`: how long to wait for another kernel to let go of the stores; 0: not.
+    pub take_over_ms: u64,
     pub tls: Option<Tls>,
     pub snapshots: String,
     /// Files of the data service: `file:<directory>` or `memory:`.
@@ -592,6 +600,7 @@ impl Config {
             query_timeout_ms: number("--query-timeout-ms")?,
             middleware_timeout_ms: number("--middleware-timeout-ms")?,
             drain_timeout_ms: number("--drain-timeout-ms")?,
+            take_over_ms: number("--take-over-ms")?,
             tls,
             snapshots: get("--snapshots")
                 .unwrap_or_else(|| snapshots_next_to(&get("--store").expect("has a default"))),

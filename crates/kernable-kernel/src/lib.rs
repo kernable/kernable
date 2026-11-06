@@ -309,8 +309,33 @@ pub struct Kernel {
 
 impl Kernel {
     pub fn open(config: Config) -> Result<Arc<Self>, BoxError> {
-        let store = kernable_store::open_with(&config.store, config.durability)?;
-        Self::open_on(config, store)
+        // A kernel update on the same machine: the old kernel lets go of its stores once
+        // its running requests finished; this one opens them the moment it does.
+        let deadline = std::time::Instant::now() + Duration::from_millis(config.take_over_ms);
+        let mut waited = false;
+        loop {
+            let opened = kernable_store::open_with(&config.store, config.durability)
+                .map_err(BoxError::from)
+                .and_then(|store| Self::open_on(config.clone(), store));
+            match opened {
+                Err(e) if in_use(&e) && std::time::Instant::now() < deadline => {
+                    if !waited {
+                        tracing::info!(
+                            "another kernel holds the stores: waiting to take them over"
+                        );
+                        waited = true;
+                    }
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                Ok(kernel) => {
+                    if waited {
+                        tracing::warn!("took the stores over from the kernel before");
+                    }
+                    return Ok(kernel);
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// Like [`Kernel::open`], on a store opened already (`config.store` is not opened): for
@@ -1215,6 +1240,11 @@ fn loopback(addr: &str) -> bool {
         || host
             .parse::<std::net::IpAddr>()
             .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Whether `e` says another process holds a store (its lock), as a kernel being replaced does.
+fn in_use(e: &BoxError) -> bool {
+    e.to_string().contains("in use by another process")
 }
 
 /// Serves the gRPC API on `config.listen` and writes checkpoints until dropped.

@@ -4,7 +4,10 @@
 //! processes of the same (or a named) kernable binary. It restarts a child that exits, backing
 //! off up to 30 s, and reads the file again every two seconds (or on SIGHUP): a child whose
 //! command changed, or whose binary was replaced, is stopped and started again, so an update is
-//! a new binary and nothing else. SIGTERM or SIGINT stops the children in reverse order, each
+//! a new binary and nothing else. The kernel is not restarted for a new binary but hands its
+//! stores over: the new kernel starts at once and waits for them (`--take-over-ms`), the
+//! old one gets SIGTERM once it waits, finishes its running requests and lets them go, and the
+//! services run on and reconnect. SIGTERM or SIGINT stops the children in reverse order, each
 //! with SIGTERM, then SIGKILL after `stop-seconds`. A kernel crash never takes the node down.
 //!
 //! ```toml
@@ -1037,7 +1040,25 @@ struct Running {
     restarts: u64,
     /// When it last started (ms since epoch), for the metrics.
     started_ms: i64,
+    /// The container it runs in now: a kernel that hands over runs in the other of two names.
+    container_name: Option<String>,
+    /// The kernel's previous process, still serving until the new one waits for the stores.
+    handover: Option<Handover>,
 }
+
+/// A kernel handing its stores over to a new process.
+struct Handover {
+    old: Child,
+    old_container: Option<String>,
+    /// The new kernel said it waits for the stores.
+    ready: Arc<std::sync::atomic::AtomicBool>,
+    since: Instant,
+}
+
+/// What the new kernel of a handover is started with: it waits for the stores.
+const TAKE_OVER: [&str; 2] = ["--take-over-ms", "60000"];
+/// The line in which a new kernel says it waits for the stores (`Kernel::open`).
+const TAKE_OVER_WAITING: &str = "waiting to take them over";
 
 impl Running {
     fn new(spec: Spec) -> Self {
@@ -1059,6 +1080,8 @@ impl Running {
             stopping: None,
             restarts: 0,
             started_ms: 0,
+            container_name: None,
+            handover: None,
         }
     }
 }
@@ -1068,7 +1091,12 @@ fn modified(path: &Path) -> Option<SystemTime> {
 }
 
 /// Passes the lines of a child's output on to the node's own, prefixed with its name.
-fn forward(name: &str, out: Option<impl AsyncRead + Unpin + Send + 'static>, stderr: bool) {
+fn forward(
+    name: &str,
+    out: Option<impl AsyncRead + Unpin + Send + 'static>,
+    stderr: bool,
+    ready: Option<Arc<std::sync::atomic::AtomicBool>>,
+) {
     let Some(out) = out else {
         return;
     };
@@ -1089,6 +1117,11 @@ fn forward(name: &str, out: Option<impl AsyncRead + Unpin + Send + 'static>, std
             }
             let text = String::from_utf8_lossy(&line);
             let text = text.trim_end_matches(['\n', '\r']);
+            if let Some(ready) = &ready
+                && text.contains(TAKE_OVER_WAITING)
+            {
+                ready.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
             let _ = if stderr {
                 writeln!(std::io::stderr().lock(), "{name} | {text}")
             } else {
@@ -1138,7 +1171,7 @@ async fn build_now(spec: &Spec) -> Result<String, String> {
     let mut child = command
         .spawn()
         .map_err(|e| format!("{}: {e}", spec.binary.display()))?;
-    forward(&spec.name, child.stderr.take(), true);
+    forward(&spec.name, child.stderr.take(), true, None);
     let mut id = String::new();
     if let Some(out) = child.stdout.take() {
         let mut lines = BufReader::new(out).lines();
@@ -1157,10 +1190,32 @@ async fn build_now(spec: &Spec) -> Result<String, String> {
 }
 
 fn spawn(spec: &Spec, image: Option<&str>, dir: &Path) -> Result<Child, BoxError> {
+    spawn_with(spec, image, dir, &[], None, None)
+}
+
+/// Like [`spawn`], with `extra` arguments for the child itself, in the container `name` instead
+/// of its own, and `ready` set once it says it waits for the stores (a kernel's handover).
+fn spawn_with(
+    spec: &Spec,
+    image: Option<&str>,
+    dir: &Path,
+    extra: &[&str],
+    name: Option<&str>,
+    ready: Option<Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<Child, BoxError> {
     let mut command = Command::new(&spec.binary);
-    command.args(&spec.args);
-    if let (Some(c), Some(image)) = (&spec.container, image) {
-        command.arg(image).args(&c.command);
+    let mut args = spec.args.clone();
+    if let (Some(name), Some(i)) = (name, args.iter().position(|a| a == "--name")) {
+        args[i + 1] = name.to_owned();
+    }
+    command.args(&args);
+    match (&spec.container, image) {
+        (Some(c), Some(image)) => {
+            command.arg(image).args(&c.command).args(extra);
+        }
+        _ => {
+            command.args(extra);
+        }
     }
     command
         .envs(&spec.env)
@@ -1183,8 +1238,8 @@ fn spawn(spec: &Spec, image: Option<&str>, dir: &Path) -> Result<Child, BoxError
     let mut child = command
         .spawn()
         .map_err(|e| format!("{}: {e}", spec.binary.display()))?;
-    forward(&spec.name, child.stdout.take(), false);
-    forward(&spec.name, child.stderr.take(), true);
+    forward(&spec.name, child.stdout.take(), false, ready.clone());
+    forward(&spec.name, child.stderr.take(), true, ready);
     tracing::info!(child = %spec.name, pid = child.id().unwrap_or(0), binary = %spec.binary.display(), "started");
     if spec.container.is_some() && !spec.args.iter().any(|a| a == "--read-only") {
         tracing::warn!(child = %spec.name, "its root filesystem is writable (writable = true)");
@@ -1200,7 +1255,10 @@ fn stop(c: &mut Running) {
         return;
     };
     let (name, stop, binary) = (c.spec.name.clone(), c.spec.stop, c.spec.binary.clone());
-    let container = c.spec.container.as_ref().map(|c| c.name.clone());
+    let container = c
+        .container_name
+        .clone()
+        .or_else(|| c.spec.container.as_ref().map(|c| c.name.clone()));
     let previous = c.stopping.take();
     c.stopping = Some(tokio::spawn(async move {
         if let Some(previous) = previous {
@@ -1549,11 +1607,16 @@ async fn step(c: &mut Running, dir: &Path) {
             }
         }
     }
-    // A replaced binary: start the child on the new one.
-    if c.child.is_some() && modified(&c.spec.watch) != c.binary_changed {
-        tracing::info!(child = %c.spec.name, "its binary changed: restarting it");
-        stop(c);
-        c.restart_at = Some(Instant::now());
+    handing_over(c).await;
+    // A replaced binary: start the child on the new one; the kernel hands its stores over.
+    if c.child.is_some() && c.handover.is_none() && modified(&c.spec.watch) != c.binary_changed {
+        if c.spec.name == "kernel" {
+            hand_over(c, dir);
+        } else {
+            tracing::info!(child = %c.spec.name, "its binary changed: restarting it");
+            stop(c);
+            c.restart_at = Some(Instant::now());
+        }
     }
     if let Some(child) = &mut c.child
         && let Ok(Some(status)) = child.try_wait()
@@ -1586,6 +1649,7 @@ async fn step(c: &mut Running, dir: &Path) {
     }
     c.binary_changed = modified(&c.spec.watch);
     c.started = Instant::now();
+    c.container_name = c.spec.container.as_ref().map(|k| k.name.clone());
     match spawn(&c.spec, c.image.as_deref(), dir) {
         Ok(child) => {
             if c.started_ms != 0 {
@@ -1603,6 +1667,102 @@ async fn step(c: &mut Running, dir: &Path) {
     }
 }
 
+/// The kernel's binary changed: the new kernel starts at once, in the other container
+/// name, and waits for the stores; the old one serves until it does (see [`handing_over`]).
+fn hand_over(c: &mut Running, dir: &Path) {
+    let Some(old) = c.child.take() else {
+        return;
+    };
+    let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let name = c.spec.container.as_ref().map(|k| {
+        if c.container_name.as_deref() == Some(k.name.as_str()) {
+            format!("{}-b", k.name)
+        } else {
+            k.name.clone()
+        }
+    });
+    tracing::info!(child = %c.spec.name, "its binary changed: the new kernel takes the stores over");
+    match spawn_with(
+        &c.spec,
+        c.image.as_deref(),
+        dir,
+        &TAKE_OVER,
+        name.as_deref(),
+        Some(Arc::clone(&ready)),
+    ) {
+        Ok(new) => {
+            c.handover = Some(Handover {
+                old,
+                old_container: c.container_name.take(),
+                ready,
+                since: Instant::now(),
+            });
+            c.child = Some(new);
+            c.container_name = name;
+            c.binary_changed = modified(&c.spec.watch);
+            c.started = Instant::now();
+            c.restarts += 1;
+            c.started_ms = crate::now_ms();
+        }
+        Err(e) => {
+            tracing::error!(child = %c.spec.name, error = %e, "cannot start the new kernel: the old one serves on");
+            c.child = Some(old);
+            c.binary_changed = modified(&c.spec.watch);
+        }
+    }
+}
+
+/// A handover under way: once the new kernel waits for the stores (or the old one ended), the
+/// old one gets SIGTERM and lets them go; a new kernel that ends first leaves the old serving.
+async fn handing_over(c: &mut Running) {
+    let Some(h) = c.handover.as_mut() else {
+        return;
+    };
+    if let Some(new) = &mut c.child
+        && let Ok(Some(status)) = new.try_wait()
+        && !h.ready.load(std::sync::atomic::Ordering::SeqCst)
+    {
+        tracing::error!(child = %c.spec.name, %status, "the new kernel ended before it took the stores over: the old one serves on");
+        let h = c.handover.take().expect("checked");
+        c.child = Some(h.old);
+        c.container_name = h.old_container;
+        return;
+    }
+    let old_ended = matches!(h.old.try_wait(), Ok(Some(_)));
+    if !h.ready.load(std::sync::atomic::Ordering::SeqCst)
+        && !old_ended
+        && h.since.elapsed() < Duration::from_secs(60)
+    {
+        return;
+    }
+    let mut h = c.handover.take().expect("checked");
+    tracing::info!(child = %c.spec.name, "the new kernel waits for the stores: the old one hands them over");
+    let (name, stop, binary) = (c.spec.name.clone(), c.spec.stop, c.spec.binary.clone());
+    tokio::spawn(async move {
+        stopped(&name, &mut h.old, stop, &binary, h.old_container.as_deref()).await;
+    });
+}
+
+/// Whether `new` is `old` with only another kernable binary: a kernel that hands over.
+fn only_binary_changed(old: &Spec, new: &Spec) -> bool {
+    if old.name != "kernel" || new.name != "kernel" || old.watch == new.watch {
+        return false;
+    }
+    let (from, to) = (
+        old.watch.display().to_string(),
+        new.watch.display().to_string(),
+    );
+    let swap = |s: &String| s.replace(&from, &to);
+    let mut moved = old.clone();
+    moved.binary = PathBuf::from(swap(&old.binary.display().to_string()));
+    moved.args = old.args.iter().map(swap).collect();
+    moved.watch = new.watch.clone();
+    if let Some(c) = &mut moved.container {
+        c.command = c.command.iter().map(swap).collect();
+    }
+    moved == *new
+}
+
 fn signal(kind: libc::c_int) -> Result<tokio::signal::unix::Signal, BoxError> {
     Ok(tokio::signal::unix::signal(
         tokio::signal::unix::SignalKind::from_raw(kind),
@@ -1618,6 +1778,11 @@ async fn apply(children: &mut Vec<Running>, specs: Vec<Spec>) {
     let mut ending: Vec<(String, JoinHandle<()>)> = Vec::new();
     for mut c in std::mem::take(children).into_iter().rev() {
         if specs.contains(&c.spec) {
+            keep.push(c);
+        } else if let Some(new) = specs.iter().find(|s| only_binary_changed(&c.spec, s)) {
+            // The next look hands the stores over to a kernel on the new binary.
+            c.spec = new.clone();
+            c.binary_changed = Some(std::time::UNIX_EPOCH);
             keep.push(c);
         } else {
             tracing::info!(child = %c.spec.name, "its command changed: restarting it");
