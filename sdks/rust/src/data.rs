@@ -247,6 +247,13 @@ impl Cache {
         }
     }
 
+    /// The tenant to keep values under. Default: the connection's ([`crate::Options::tenant`]).
+    #[must_use]
+    pub fn tenant(mut self, tenant: impl Into<String>) -> Cache {
+        self.tenant = tenant.into();
+        self
+    }
+
     /// Replaces the client's default context for the requests of this handle (signed with
     /// each; middlewares decide on it); inside a listener, pass `ctx.follow()`. Example:
     /// `kernable.cache().context(alice).get("shop", "k").await?`.
