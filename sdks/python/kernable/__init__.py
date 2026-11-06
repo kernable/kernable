@@ -54,10 +54,15 @@ from kernable.store import Store
 from kernable.v1 import kernable_pb2 as pb
 from kernable.v1 import kernable_pb2_grpc as rpc
 
-__all__ = ["PROTOCOL", "Aggregate", "App", "ApplyContext", "CacheClient", "Check", "ClientClosed", "CommandContext", "CommandMeta",
+from .messages import (  # noqa: E402
+    Command, Event, Query, bind as _bind, binding as _binding, declare_command as _declare_command,
+    declare_event as _declare_event, from_wire as _from_wire, is_message_class as _is_message_class, to_wire as _to_wire,
+)
+
+__all__ = ["PROTOCOL", "Event", "Command", "Query", "StoredEvent", "Aggregate", "App", "ApplyContext", "CacheClient", "Check", "ClientClosed", "CommandContext", "CommandMeta",
            "CommandSchema",
            "Data", "DataClient", "Domain", "Listed", "Listing",
-           "Event", "EventMeta", "EventSchema", "HeldKey", "Index", "Kernable", "Key", "Listener", "ListenerContext", "ListenerHandle", "Manifest", "NotSettled", "Outcome",
+           "EventMeta", "EventSchema", "HeldKey", "Index", "Kernable", "Key", "Listener", "ListenerContext", "ListenerHandle", "Manifest", "NotSettled", "Outcome",
            "QueryContext", "QueryMeta", "QueryOutcome", "Rejected", "RequestContext", "Requirement", "Store", "StoredEventMeta", "Tls", "Worker",
            "domain", "reindex_type"]
 
@@ -244,7 +249,7 @@ class Check:
 
 
 @dataclass
-class Event:
+class StoredEvent:
     """An event as stored by the kernel, as `Outcome.events` holds it."""
 
     #: Global position of the event in the kernel's log.
@@ -318,9 +323,9 @@ class ListenerContext:
     #: The listener's client, for follow-up commands and queries.
     _kernable: "Kernable | None" = field(default=None, repr=False)
 
-    def submit(self, aggregate_type: str, aggregate_id: str, type: str, data: Any = None, *, id: str,
+    def submit(self, aggregate_type, aggregate_id: str | None = None, type: str | None = None, data: Any = None, *, id: str,
                domain: str | None = None, tenant: str | None = None, context: "RequestContext | None" = None,
-               wait: str = "settled", timeout_s: float | None = None) -> "list[Event]":
+               wait: str = "settled", timeout_s: float | None = None) -> "list":
         """Submits a command this event causes, on the listener's client, and returns its events.
         It needs a fixed `id` (`f"confirm-{evt.aggregate_id}"`), so a redelivered event runs it
         once. `domain` defaults to the listener's, `context` to `follow()`, `tenant` to the
@@ -331,8 +336,10 @@ class ListenerContext:
         `Domain.reactor`); catch it to accept a rejection. Raises like `Kernable.submit` otherwise.
         Example: `ctx.submit("order", evt.aggregate_id, "Confirm", id=f"confirm-{evt.aggregate_id}")`."""
         if not id:
-            raise ValueError(f"{type}: a follow-up command needs a fixed id, so a redelivered event runs it once")
+            raise ValueError(f"{type or aggregate_type}: a follow-up command needs a fixed id, so a redelivered event runs it once")
         assert self._kernable is not None, "only a running listener's handlers submit follow-ups"
+        if isinstance(aggregate_type, Command):
+            domain, aggregate_type, type, data = self._kernable._command_of(aggregate_type)
         outcome = self._kernable.submit(domain or self._domain, aggregate_type, aggregate_id, type, data,
                                         tenant=tenant or self._tenant, id=id, wait=wait,
                                         context=context or self.follow(), timeout_s=timeout_s)
@@ -343,14 +350,17 @@ class ListenerContext:
         rejected.requirement = outcome.requirement
         raise rejected
 
-    def query(self, type: str, data: Any = None, *, tenant: str | None = None,
+    def query(self, type, data: Any = None, *, tenant: str | None = None,
               context: "RequestContext | None" = None, min_position: int = 0,
-              timeout_s: float | None = None) -> Any:
+              timeout_s: float | None = None, all_partitions: bool = False) -> Any:
         """Asks a query on the listener's client, like `Kernable.query`: `type` is of the
         listener's domain (`GetOrder`) or qualified (`crm.GetCustomer`). `tenant` defaults to the
         event's. It is the listener's own read: it keeps the client's context, not the event's
         sender."""
         assert self._kernable is not None, "only a running listener's handlers ask queries"
+        if isinstance(type, Query):
+            return self._kernable.query(type, tenant=tenant or self._tenant, context=context, min_position=min_position,
+                                        timeout_s=timeout_s, all_partitions=all_partitions)
         domain, _, name = type.rpartition(".")
         return self._kernable.query(domain or self._domain, name, data, tenant=tenant or self._tenant,
                                     context=context, min_position=min_position,
@@ -373,8 +383,8 @@ class Outcome:
     #: Whether the command's events were stored; `False` if it was rejected.
     committed: bool
     #: The committed events, in order; empty if the command was rejected. Vault fields in them
-    #: are `None` (see `Event.redacted`).
-    events: list[Event] = field(default_factory=list)
+    #: are `None` (see `StoredEvent.redacted`).
+    events: list[StoredEvent] = field(default_factory=list)
     #: The rejection code (see `Rejected`), if rejected.
     code: str = ""
     #: The rejection message, if rejected.
@@ -767,12 +777,24 @@ class Domain:
         self.commands[type] = spec
         return spec
 
-    def event(self, type: str, schema: int) -> EventSchema:
+    def event(self, type, schema: int | None = None, *more) -> EventSchema | None:
         """Declares that this domain writes `type` events at version `schema` (from 1), with an
         `upcast` per older version, and which of their fields the vault keeps; see
         `EventSchema`. The domain's aggregates and listeners use it; listeners of other domains
         get it with `Listener.use(domain)`. Types not declared are at version 1. Example:
-        `shop_domain.event("ItemAdded", 2).upcast(1, lambda d: {**d, "qty": 1})`."""
+        `shop_domain.event("ItemAdded", 2).upcast(1, lambda d: {**d, "qty": 1})`.
+
+        With event classes instead (`shop_domain.event(ItemAdded, CartCleared)`), declares them
+        from their class attributes, e.g. in a process that only reads them; an aggregate's
+        `apply` declares them too."""
+        if _is_message_class(type):
+            schemas = self
+            for cls in (type, schema, *more):
+                if cls is None:
+                    continue
+                _declare_event(cls, self.events, EventSchema)
+                _bind(cls, self.name, schemas)
+            return None
         spec = EventSchema(type, schema)
         self.events[type] = spec
         return spec
@@ -918,8 +940,38 @@ class Aggregate:
         to the current version; `evt` (an `EventMeta`) and `ctx` (an `ApplyContext`) are
         optional. Works as a decorator too: `@cart_aggregate.apply("ItemAdded")` over
         `def _(state, data): state["items"] += data["qty"]`. Returns the decorated function, or
-        the aggregate when `fn` is given."""
+        the aggregate when `fn` is given.
+
+        With an event class (`@cart_aggregate.apply(ItemAdded)`), `data` is an instance of it."""
+        if _is_message_class(event_type, Event):
+            cls = event_type
+            name = _declare_event(cls, self.events, EventSchema)
+            _bind(cls, self.domain, self._schemas())
+
+            def wrap(f: Callable) -> Callable:
+                return lambda state, data, evt=None, ctx=None: _call(f, state, cls.from_wire(data), evt, ctx)
+
+            return _register_wrapped(self, self.appliers, name, fn, wrap)
         return _register(self, self.appliers, event_type, fn)
+
+    def _schemas(self):
+        """This aggregate's domain's schemas, as a class binding carries them."""
+        from types import SimpleNamespace
+        return SimpleNamespace(name=self.domain, events=self.events, commands=self.commands)
+
+    def _plain(self, produced: Any) -> Any:
+        """Event class instances a handler returned, as `{"type": ..., "data": ...}`."""
+        if not isinstance(produced, list):
+            return produced
+        out = []
+        for e in produced:
+            if isinstance(e, Event):
+                name = _declare_event(type(e), self.events, EventSchema)
+                _bind(type(e), self.domain, self._schemas())
+                out.append({"type": name, "data": e.to_wire()})
+            else:
+                out.append(e)
+        return out
 
     def command(self, command_type: str, fn: Callable | None = None, *, requires: Callable | None = None):
         """Which events a `command_type` command produces: `fn(state, data, cmd, ctx)` returns
@@ -938,6 +990,20 @@ class Aggregate:
         Raises `ValueError` for a type that starts with `_reindex_`: aggregates with keys or
         facts run `_reindex_<aggregate_type>` themselves (see `unique`), and one of another aggregate
         of the domain could clash."""
+        if _is_message_class(command_type, Command):
+            cls = command_type
+            name = _declare_command(cls, self.commands, CommandSchema)
+            _bind(cls, self.domain, self._schemas(), self.name)
+            if requires is not None:
+                given = requires
+                requires = lambda data, state: given(cls.from_wire(data), state)  # noqa: E731
+
+            def wrap(f: Callable) -> Callable:
+                return lambda state, data, meta=None, ctx=None: self._plain(_call(f, state, cls.from_wire(data), meta, ctx))
+
+            if requires is not None:
+                self.requirements[name] = requires
+            return _register_wrapped(self, self.handlers, name, fn, wrap)
         if command_type.startswith("_reindex_"):
             raise ValueError(f"{command_type}: command types starting with _reindex_ are the built-in commands "
                              "of aggregates with keys or facts; name yours differently")
@@ -1046,7 +1112,7 @@ class Aggregate:
                 state = draft if result is None else result
         return state
 
-    def handle(self, state: Any, command_type: str, data: Any, ctx: CommandContext) -> list[dict]:
+    def handle(self, state: Any, command_type: str, data: Any, ctx: CommandContext, *, aggregate_id: str = "", tenant: str = "") -> list[dict]:
         """Runs the `command_type` handler on `state`, e.g. in a unit test, and returns its events.
         `data` reaches it as from a client (after a JSON round trip; `None` as `{}`), `state` as a
         copy. The handler's `CommandMeta` has the command ID of `ctx` (see `CommandContext.new`),
@@ -1056,7 +1122,7 @@ class Aggregate:
         fn = self.handlers.get(command_type)
         if fn is None:
             raise ValueError(f"no handler for {command_type} on {self.domain}.{self.name}")
-        meta = CommandMeta(ctx._command_id, command_type, self.domain, self.name)
+        meta = CommandMeta(ctx._command_id, command_type, self.domain, self.name, aggregate_id, tenant)
         return _call(fn, copy.deepcopy(state), _decode(_encode(data)), meta, ctx)
 
 
@@ -1107,6 +1173,19 @@ def _check_personal(agg: Aggregate, cmd, produced: list[dict]) -> None:
                 raise Rejected(f"{cmd.command_type} declares {f} personal, but {e['type']} does not: it would be "
                                f"stored in clear (declare it with Domain.event({e['type']!r}, …).personal)",
                                "personal_in_clear")
+
+
+def _register_wrapped(owner, table: dict, name: str, fn: Callable | None, wrap: Callable[[Callable], Callable]):
+    """`_register` for a message class: the handler is stored wrapped, the decorator returns it unwrapped."""
+    if fn is not None:
+        table[name] = wrap(fn)
+        return owner
+
+    def decorator(f: Callable) -> Callable:
+        table[name] = wrap(f)
+        return f
+
+    return decorator
 
 
 def _register(owner, table: dict, name: str, fn: Callable | None):
@@ -1582,7 +1661,13 @@ class Kernable:
             pb.ApplyRequest(membership=membership, sig=self._key.sign(membership_message(membership)),
                             protocol=PROTOCOL))
 
-    def submit(self, domain: str, aggregate_type: str, aggregate_id: str, type: str, data: Any = None, *,
+    def _command_of(self, command: Command) -> tuple:
+        """Domain, aggregate type, type and payload of a command class instance; its domain's vault fields known."""
+        b = _binding(type(command), "handled by an aggregate")
+        self._domains.setdefault(b.domain, b.schemas)
+        return b.domain, b.aggregate_type, type(command).type_name(), command.to_wire()
+
+    def submit(self, domain, aggregate_type: str | None = None, aggregate_id: str | None = None, type: str | None = None, data: Any = None, *,
                tenant: str | None = None, id: str | None = None, wait: str = "settled",
                context: RequestContext | None = None, timeout_s: float | None = None) -> Outcome:
         """Runs a `type` command of `domain` on the aggregate `aggregate_type` with ID
@@ -1601,7 +1686,12 @@ class Kernable:
         raise. Raises `grpc.RpcError` if the kernel refuses the call (no grant, unknown aggregate
         type, timeout). Example: `k.submit("shop", "cart", "c1", "AddItem", {"sku": "apple",
         "qty": 2})`.
+
+        With a command class instance: `k.submit(AddItem(sku="apple", qty=2), aggregate_id="c1")`;
+        its class says the domain, aggregate type, type and vault fields (no `use` needed).
         """
+        if isinstance(domain, Command):
+            domain, aggregate_type, type, data = self._command_of(domain)
         mode = pb.WAIT_COMMITTED if wait == "committed" else pb.WAIT_SETTLED
         res = self._send(domain, aggregate_type, aggregate_id, type, data, tenant, id, mode, context, timeout_s)
         if res.WhichOneof("outcome") == "rejected":
@@ -1611,12 +1701,14 @@ class Kernable:
             raise NotSettled(outcome)
         return outcome
 
-    def enqueue(self, domain: str, aggregate_type: str, aggregate_id: str, type: str, data: Any = None, *,
+    def enqueue(self, domain, aggregate_type: str | None = None, aggregate_id: str | None = None, type: str | None = None, data: Any = None, *,
                 tenant: str | None = None, id: str | None = None, context: RequestContext | None = None,
                 timeout_s: float | None = None) -> str:
         """Stores the command in the kernel's queue and returns its ID without waiting for it to
         run (`wait="accepted"`). Submit it again with the same `id` to get the outcome. The
         parameters are those of `submit`."""
+        if isinstance(domain, Command):
+            domain, aggregate_type, type, data = self._command_of(domain)
         return self._send(domain, aggregate_type, aggregate_id, type, data, tenant, id, pb.WAIT_ACCEPTED,
                           context, timeout_s).command_id
 
@@ -1635,7 +1727,7 @@ class Kernable:
             for w in waits:
                 w.result()
 
-    def query(self, domain: str, type: str, data: Any = None, *, tenant: str | None = None,
+    def query(self, domain, type: str | None = None, data: Any = None, *, tenant: str | None = None,
               context: RequestContext | None = None, min_position: int = 0, timeout_s: float | None = None,
               all_partitions: bool = False) -> Any:
         """Asks the read model that answers `domain.type` with `data` and returns its answer,
@@ -1650,6 +1742,13 @@ class Kernable:
         Raises `Rejected` if the read model or a middleware rejects it, `grpc.RpcError` if the
         kernel refuses the call (e.g. `UNAVAILABLE` when no read model answers it). Example:
         `cart = k.query("shop", "GetCart", {"id": "c1"})`."""
+        if isinstance(domain, Query):
+            asked = domain
+            kind = asked.__class__
+            b = _binding(kind, "answered by a read model")
+            answer = self.query(b.domain, kind.type_name(), asked.to_wire(), tenant=tenant, context=context,
+                                min_position=min_position, timeout_s=timeout_s, all_partitions=all_partitions)
+            return _from_wire(answer)
         query_id = str(uuid.uuid4())
         q = pb.QueryRequest(query_id=query_id, tenant_id=tenant or self._tenant, domain=domain, query_type=type,
                             payload=_encode(data), context=_to_wire_context(context or self._context, query_id),
@@ -2496,6 +2595,17 @@ class Listener:
         rows[evt.aggregate_id] = data["qty"]`. If the handler raises, the listener reconnects and
         the event is delivered again, so handlers must be idempotent. Raises `ValueError` if
         `event_type` is none of these."""
+        if _is_message_class(event_type, Event):
+            cls = event_type
+            b = _binding(cls, "declared (an aggregate's apply, or Domain.event)")
+            self._domains.setdefault(b.domain, b.schemas.events)
+            qualified = f"{b.domain}.{cls.type_name()}"
+            self._raw.discard(qualified)
+
+            def wrap(f: Callable) -> Callable:
+                return lambda data, evt=None, ctx=None: _call(f, cls.from_wire(data), evt, ctx)
+
+            return _register_wrapped(self, self._handlers, qualified, fn, wrap)
         # A bare `*` is not the own domain (that is `<domain>.*`): in middleware it means everything.
         if not _UNQUALIFIED.match(event_type) and not _LISTENED.match(event_type):
             raise ValueError(f"listen to a type (Type), a qualified type (domain.Type) or a domain (domain.*), not {event_type!r}")
@@ -2512,6 +2622,15 @@ class Listener:
         `handler_error`). A handler cannot query its own listener (the answer would wait behind
         itself): the kernel refuses it. Example: `@carts_readmodel.query("GetCart")` over
         `def _(data): return rows[data["id"]]`. Raises `ValueError` if `query_type` is invalid."""
+        if _is_message_class(query_type, Query):
+            cls = query_type
+            _bind(cls, self.domain.name, self.domain)
+            qualified = f"{self.domain.name}.{cls.type_name()}"
+
+            def wrap(f: Callable) -> Callable:
+                return lambda data, qry=None, ctx=None: _to_wire(_call(f, cls.from_wire(data), qry, ctx))
+
+            return _register_wrapped(self, self._queries, qualified, fn, wrap)
         qualified = self._qualify(query_type)
         if not _QUERY.match(qualified):
             raise ValueError(f"answer a query type (Query or domain.Query), not {query_type!r}")
@@ -3019,9 +3138,9 @@ def _to_outcome(call) -> Outcome | QueryOutcome:
     return QueryOutcome(answered=False, code=r.rejected.code, message=r.rejected.message)
 
 
-def _to_event(e, vault=None) -> Event:
+def _to_event(e, vault=None) -> StoredEvent:
     data, redacted = _unseal(_decode(e.payload), vault)
-    return Event(position=e.global_position, tenant=e.tenant_id, domain=e.domain, aggregate_type=e.aggregate_type,
+    return StoredEvent(position=e.global_position, tenant=e.tenant_id, domain=e.domain, aggregate_type=e.aggregate_type,
                  aggregate_id=e.aggregate_id, version=e.version, type=e.event_type,
                  data=data, command_id=e.command_id, request=_from_wire_context(e.context),
                  schema=e.schema, redacted=redacted, created_at=_time(e.created_at))
