@@ -1,0 +1,818 @@
+{
+  "domain": "account",
+  "cases": [
+    {
+      "name": "a person registers: pending, a verification token for 48 hours",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "RegisterAccount",
+        "data": {
+          "email": "  Ann@Example.com ",
+          "name": "Ann",
+          "password": "correct horse battery"
+        }
+      },
+      "then": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "<argon2>",
+            "verified": false,
+            "at": 1000000
+          }
+        },
+        {
+          "type": "VerificationRequested",
+          "data": {
+            "tokenId": "<string>",
+            "token": "<string>",
+            "email": "ann@example.com",
+            "expiresAt": 173800000
+          }
+        }
+      ],
+      "index": {
+        "keys": [
+          {
+            "name": "email",
+            "value": "ann@example.com",
+            "scope": "tenant",
+            "subject": "a1"
+          }
+        ],
+        "facts": []
+      }
+    },
+    {
+      "name": "an email address is checked",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "RegisterAccount",
+        "data": {
+          "email": "ann",
+          "name": "Ann"
+        }
+      },
+      "rejected": "invalid_email"
+    },
+    {
+      "name": "a password has at least 10 characters",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "RegisterAccount",
+        "data": {
+          "email": "ann@example.com",
+          "name": "Ann",
+          "password": "short"
+        }
+      },
+      "rejected": "weak_password"
+    },
+    {
+      "name": "an invitation proved the email: active at once, no token",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "RegisterAccount",
+        "data": {
+          "email": "ann@example.com",
+          "name": "Ann",
+          "verified": true
+        }
+      },
+      "then": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": null,
+            "verified": true,
+            "at": 1000000
+          }
+        }
+      ],
+      "index": {
+        "keys": [
+          {
+            "name": "email",
+            "value": "ann@example.com",
+            "scope": "tenant",
+            "subject": "a1"
+          }
+        ],
+        "facts": [
+          "active"
+        ]
+      }
+    },
+    {
+      "name": "a pending registration with a valid token is not taken over",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": false,
+            "at": 1
+          }
+        },
+        {
+          "type": "VerificationRequested",
+          "data": {
+            "tokenId": "tk",
+            "token": "secret1",
+            "email": "ann@example.com",
+            "expiresAt": 2000000
+          }
+        }
+      ],
+      "when": {
+        "type": "RegisterAccount",
+        "data": {
+          "email": "ann@example.com",
+          "name": "Ann"
+        }
+      },
+      "rejected": "exists"
+    },
+    {
+      "name": "an expired unverified registration is taken over by the same address",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": false,
+            "at": 1
+          }
+        },
+        {
+          "type": "VerificationRequested",
+          "data": {
+            "tokenId": "tk",
+            "token": "secret1",
+            "email": "ann@example.com",
+            "expiresAt": 500
+          }
+        }
+      ],
+      "when": {
+        "type": "RegisterAccount",
+        "data": {
+          "email": "ann@example.com",
+          "name": "Ann B",
+          "password": "correct horse battery"
+        }
+      },
+      "then": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann B",
+            "passwordHash": "<argon2>",
+            "verified": false,
+            "at": 1000000
+          }
+        },
+        {
+          "type": "VerificationRequested",
+          "data": {
+            "tokenId": "<string>",
+            "token": "<string>",
+            "email": "ann@example.com",
+            "expiresAt": 173800000
+          }
+        }
+      ]
+    },
+    {
+      "name": "an expired registration is not taken over by another address",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": false,
+            "at": 1
+          }
+        },
+        {
+          "type": "VerificationRequested",
+          "data": {
+            "tokenId": "tk",
+            "token": "secret1",
+            "email": "ann@example.com",
+            "expiresAt": 500
+          }
+        }
+      ],
+      "when": {
+        "type": "RegisterAccount",
+        "data": {
+          "email": "bob@example.com",
+          "name": "Bob"
+        }
+      },
+      "rejected": "exists"
+    },
+    {
+      "name": "the emailed token verifies the address",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": false,
+            "at": 1
+          }
+        },
+        {
+          "type": "VerificationRequested",
+          "data": {
+            "tokenId": "tk",
+            "token": "secret1",
+            "email": "ann@example.com",
+            "expiresAt": 2000000
+          }
+        }
+      ],
+      "when": {
+        "type": "VerifyEmail",
+        "data": {
+          "token": "a1.tk.secret1"
+        }
+      },
+      "then": [
+        {
+          "type": "EmailVerified",
+          "data": {
+            "tokenId": "tk"
+          }
+        }
+      ],
+      "index": {
+        "keys": [
+          {
+            "name": "email",
+            "value": "ann@example.com",
+            "scope": "tenant",
+            "subject": "a1"
+          }
+        ],
+        "facts": [
+          "active"
+        ]
+      }
+    },
+    {
+      "name": "a wrong token is refused",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": false,
+            "at": 1
+          }
+        },
+        {
+          "type": "VerificationRequested",
+          "data": {
+            "tokenId": "tk",
+            "token": "secret1",
+            "email": "ann@example.com",
+            "expiresAt": 2000000
+          }
+        }
+      ],
+      "when": {
+        "type": "VerifyEmail",
+        "data": {
+          "token": "a1.tk.wrong"
+        }
+      },
+      "rejected": "invalid_token"
+    },
+    {
+      "name": "an expired token is refused",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": false,
+            "at": 1
+          }
+        },
+        {
+          "type": "VerificationRequested",
+          "data": {
+            "tokenId": "tk",
+            "token": "secret1",
+            "email": "ann@example.com",
+            "expiresAt": 500
+          }
+        }
+      ],
+      "when": {
+        "type": "VerifyEmail",
+        "data": {
+          "token": "a1.tk.secret1"
+        }
+      },
+      "rejected": "expired_token"
+    },
+    {
+      "name": "the right password signs in, keeping only the refresh token's hash",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        }
+      ],
+      "when": {
+        "type": "SignIn",
+        "data": {
+          "sessionId": "s1",
+          "password": "correct horse battery",
+          "refreshToken": "s1.1.r",
+          "ip": "203.0.113.7"
+        }
+      },
+      "then": [
+        {
+          "type": "SignedIn",
+          "data": {
+            "sessionId": "s1",
+            "method": "password",
+            "factors": [
+              "password"
+            ],
+            "refreshTokenHash": "623eb122f7c6115ddd49a01a83d1367e2f5fdffed24ba88b069c85458dfe645c",
+            "ip": "203.0.113.7",
+            "userAgent": null,
+            "at": 1000000
+          }
+        }
+      ]
+    },
+    {
+      "name": "a wrong password is an event, not a rejection",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        }
+      ],
+      "when": {
+        "type": "SignIn",
+        "data": {
+          "sessionId": "s1",
+          "password": "wrong password!",
+          "refreshToken": "s1.1.r"
+        }
+      },
+      "then": [
+        {
+          "type": "SignInFailed",
+          "data": {
+            "method": "password",
+            "reason": "wrong_password",
+            "ip": null,
+            "at": 1000000
+          }
+        }
+      ]
+    },
+    {
+      "name": "five failures lock the account for a while, even with the right password",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        },
+        {
+          "type": "SignInFailed",
+          "data": {
+            "method": "password",
+            "reason": "wrong_password",
+            "ip": null,
+            "at": 999000
+          }
+        },
+        {
+          "type": "SignInFailed",
+          "data": {
+            "method": "password",
+            "reason": "wrong_password",
+            "ip": null,
+            "at": 999000
+          }
+        },
+        {
+          "type": "SignInFailed",
+          "data": {
+            "method": "password",
+            "reason": "wrong_password",
+            "ip": null,
+            "at": 999000
+          }
+        },
+        {
+          "type": "SignInFailed",
+          "data": {
+            "method": "password",
+            "reason": "wrong_password",
+            "ip": null,
+            "at": 999000
+          }
+        },
+        {
+          "type": "SignInFailed",
+          "data": {
+            "method": "password",
+            "reason": "wrong_password",
+            "ip": null,
+            "at": 999000
+          }
+        }
+      ],
+      "when": {
+        "type": "SignIn",
+        "data": {
+          "sessionId": "s1",
+          "password": "correct horse battery",
+          "refreshToken": "s1.1.r"
+        }
+      },
+      "then": [
+        {
+          "type": "SignInFailed",
+          "data": {
+            "method": "password",
+            "reason": "locked",
+            "ip": null,
+            "at": 1000000
+          }
+        }
+      ]
+    },
+    {
+      "name": "an unverified account does not sign in",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": false,
+            "at": 1
+          }
+        }
+      ],
+      "when": {
+        "type": "SignIn",
+        "data": {
+          "sessionId": "s1",
+          "password": "correct horse battery",
+          "refreshToken": "s1.1.r"
+        }
+      },
+      "then": [
+        {
+          "type": "SignInFailed",
+          "data": {
+            "method": "password",
+            "reason": "not_verified",
+            "ip": null,
+            "at": 1000000
+          }
+        }
+      ]
+    },
+    {
+      "name": "an account is suspended with a reason",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        }
+      ],
+      "when": {
+        "type": "SuspendAccount",
+        "data": {
+          "reason": "abuse"
+        }
+      },
+      "then": [
+        {
+          "type": "AccountSuspended",
+          "data": {
+            "reason": "abuse",
+            "at": 1000000
+          }
+        }
+      ],
+      "index": {
+        "keys": [
+          {
+            "name": "email",
+            "value": "ann@example.com",
+            "scope": "tenant",
+            "subject": "a1"
+          }
+        ],
+        "facts": []
+      }
+    },
+    {
+      "name": "only a suspended account is deleted",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        }
+      ],
+      "when": {
+        "type": "DeleteAccount",
+        "data": {}
+      },
+      "rejected": "invalid_state"
+    },
+    {
+      "name": "a deleted account frees its address",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        },
+        {
+          "type": "AccountSuspended",
+          "data": {
+            "reason": "owner_requested",
+            "at": 1
+          }
+        }
+      ],
+      "when": {
+        "type": "DeleteAccount",
+        "data": {}
+      },
+      "then": [
+        {
+          "type": "AccountDeleted",
+          "data": {}
+        }
+      ],
+      "index": {
+        "keys": [],
+        "facts": []
+      }
+    },
+    {
+      "name": "a refresh rotates the token: a new generation, the new token's hash",
+      "aggregate": "session",
+      "aggregateId": "s1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "SessionOpened",
+          "data": {
+            "accountId": "a1",
+            "method": "password",
+            "factors": [
+              "password"
+            ],
+            "refreshTokenHash": "623eb122f7c6115ddd49a01a83d1367e2f5fdffed24ba88b069c85458dfe645c",
+            "ip": null,
+            "userAgent": null,
+            "at": 900000
+          }
+        }
+      ],
+      "when": {
+        "type": "RefreshSession",
+        "data": {
+          "refreshToken": "s1.1.r",
+          "newRefreshToken": "s1.2.n"
+        }
+      },
+      "then": [
+        {
+          "type": "SessionRefreshed",
+          "data": {
+            "generation": 2,
+            "refreshTokenHash": "cdb350a26128d8c1311f44cddc350d79344cd06d4c9d93292da91b7116409534",
+            "ip": null,
+            "accountId": "a1",
+            "at": 1000000
+          }
+        }
+      ]
+    },
+    {
+      "name": "an older token is a reuse: the session ends",
+      "aggregate": "session",
+      "aggregateId": "s1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "SessionOpened",
+          "data": {
+            "accountId": "a1",
+            "method": "password",
+            "factors": [
+              "password"
+            ],
+            "refreshTokenHash": "623eb122f7c6115ddd49a01a83d1367e2f5fdffed24ba88b069c85458dfe645c",
+            "ip": null,
+            "userAgent": null,
+            "at": 900000
+          }
+        },
+        {
+          "type": "SessionRefreshed",
+          "data": {
+            "generation": 2,
+            "refreshTokenHash": "cdb350a26128d8c1311f44cddc350d79344cd06d4c9d93292da91b7116409534",
+            "ip": null,
+            "accountId": "a1",
+            "at": 950000
+          }
+        }
+      ],
+      "when": {
+        "type": "RefreshSession",
+        "data": {
+          "refreshToken": "s1.1.r",
+          "newRefreshToken": "s1.2.x"
+        }
+      },
+      "then": [
+        {
+          "type": "SessionEnded",
+          "data": {
+            "reason": "reuse"
+          }
+        }
+      ]
+    },
+    {
+      "name": "signing out ends the session",
+      "aggregate": "session",
+      "aggregateId": "s1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "SessionOpened",
+          "data": {
+            "accountId": "a1",
+            "method": "password",
+            "factors": [
+              "password"
+            ],
+            "refreshTokenHash": "623eb122f7c6115ddd49a01a83d1367e2f5fdffed24ba88b069c85458dfe645c",
+            "ip": null,
+            "userAgent": null,
+            "at": 900000
+          }
+        }
+      ],
+      "when": {
+        "type": "EndSession",
+        "data": {}
+      },
+      "then": [
+        {
+          "type": "SessionEnded",
+          "data": {
+            "reason": "signed_out"
+          }
+        }
+      ]
+    }
+  ]
+}

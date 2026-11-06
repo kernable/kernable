@@ -1,0 +1,292 @@
+{
+  "domain": "invitation",
+  "cases": [
+    {
+      "name": "an invitation holds its address while open, its token for 7 days",
+      "aggregate": "invitation",
+      "aggregateId": "i1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateInvitation",
+        "data": {
+          "email": "Bob@Example.com",
+          "groups": [
+            {
+              "group": "g1"
+            }
+          ]
+        }
+      },
+      "then": [
+        {
+          "type": "InvitationCreated",
+          "data": {
+            "email": "bob@example.com",
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ],
+            "owner": false,
+            "tokenId": "<string>",
+            "token": "<string>",
+            "expiresAt": 605800000
+          }
+        }
+      ],
+      "index": {
+        "keys": [
+          {
+            "name": "email",
+            "value": "bob@example.com",
+            "scope": "tenant"
+          }
+        ],
+        "facts": []
+      }
+    },
+    {
+      "name": "the invited address accepts, taking the groups along",
+      "aggregate": "invitation",
+      "aggregateId": "i1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "InvitationCreated",
+          "data": {
+            "email": "bob@example.com",
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ],
+            "owner": false,
+            "tokenId": "tk",
+            "token": "sec",
+            "expiresAt": 2000000
+          }
+        }
+      ],
+      "when": {
+        "type": "AcceptInvitation",
+        "data": {
+          "token": "t1.i1.tk.sec",
+          "accountId": "a2",
+          "email": "Bob@Example.com",
+          "newAccount": false
+        }
+      },
+      "then": [
+        {
+          "type": "InvitationAccepted",
+          "data": {
+            "tokenId": "tk",
+            "accountId": "a2",
+            "newAccount": false,
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ],
+            "owner": false
+          }
+        }
+      ],
+      "index": {
+        "keys": [],
+        "facts": []
+      }
+    },
+    {
+      "name": "another address does not accept",
+      "aggregate": "invitation",
+      "aggregateId": "i1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "InvitationCreated",
+          "data": {
+            "email": "bob@example.com",
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ],
+            "owner": false,
+            "tokenId": "tk",
+            "token": "sec",
+            "expiresAt": 2000000
+          }
+        }
+      ],
+      "when": {
+        "type": "AcceptInvitation",
+        "data": {
+          "token": "t1.i1.tk.sec",
+          "accountId": "a3",
+          "email": "carol@example.com",
+          "newAccount": false
+        }
+      },
+      "rejected": "wrong_email"
+    },
+    {
+      "name": "a token of another tenant is refused",
+      "aggregate": "invitation",
+      "aggregateId": "i1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "InvitationCreated",
+          "data": {
+            "email": "bob@example.com",
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ],
+            "owner": false,
+            "tokenId": "tk",
+            "token": "sec",
+            "expiresAt": 2000000
+          }
+        }
+      ],
+      "when": {
+        "type": "AcceptInvitation",
+        "data": {
+          "token": "t2.i1.tk.sec",
+          "accountId": "a2",
+          "email": "bob@example.com",
+          "newAccount": false
+        }
+      },
+      "rejected": "invalid_token"
+    },
+    {
+      "name": "an expired invitation is refused",
+      "aggregate": "invitation",
+      "aggregateId": "i1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "InvitationCreated",
+          "data": {
+            "email": "bob@example.com",
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ],
+            "owner": false,
+            "tokenId": "tk",
+            "token": "sec",
+            "expiresAt": 500
+          }
+        }
+      ],
+      "when": {
+        "type": "AcceptInvitation",
+        "data": {
+          "token": "t1.i1.tk.sec",
+          "accountId": "a2",
+          "email": "bob@example.com",
+          "newAccount": false
+        }
+      },
+      "rejected": "expired_token"
+    },
+    {
+      "name": "the invited person may decline with the token",
+      "aggregate": "invitation",
+      "aggregateId": "i1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "InvitationCreated",
+          "data": {
+            "email": "bob@example.com",
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ],
+            "owner": false,
+            "tokenId": "tk",
+            "token": "sec",
+            "expiresAt": 2000000
+          }
+        }
+      ],
+      "when": {
+        "type": "DeclineInvitation",
+        "data": {
+          "token": "t1.i1.tk.sec"
+        }
+      },
+      "then": [
+        {
+          "type": "InvitationDeclined",
+          "data": {
+            "tokenId": "tk"
+          }
+        }
+      ]
+    },
+    {
+      "name": "erasing an open invitation revokes it first",
+      "aggregate": "invitation",
+      "aggregateId": "i1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "InvitationCreated",
+          "data": {
+            "email": "bob@example.com",
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ],
+            "owner": false,
+            "tokenId": "tk",
+            "token": "sec",
+            "expiresAt": 2000000
+          }
+        }
+      ],
+      "when": {
+        "type": "EraseInvitation",
+        "data": {}
+      },
+      "then": [
+        {
+          "type": "InvitationRevoked",
+          "data": {
+            "tokenId": "tk"
+          }
+        },
+        {
+          "type": "InvitationErased",
+          "data": {}
+        }
+      ]
+    }
+  ]
+}
