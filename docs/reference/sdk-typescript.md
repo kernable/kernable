@@ -233,7 +233,17 @@ What a listener handler gets besides the event's data and `StoredEventMeta` (its
 - `request: RequestContext`: The request context of the command that caused the event.
 - `store?: Store`: The listener's store, if it has one (`ListenerOptions.store`).
 - `submit(command: FollowUp): Promise<StoredEvent[]>`: Submits a command this event causes, on the listener's connection, and returns its events. It needs a fixed `id` (`confirm-<order>`), so a redelivered event runs it once. The domain defaults to the listener's, the context to `follow()`, the tenant to the event's. Throws `Rejected` (with the kernel's `key` or `requirement`, if any) if the command is rejected: a reactor then parks the event at once (see `ListenerOptions.parkAfter`); catch it to accept a rejection. Throws like `Kernable.submit` otherwise. ```ts await ctx.submit({ aggregateType: "order", aggregateId: evt.aggregateId, type: "Confirm", id: `confirm-${evt.aggregateId}` }); ```
+- `submit(command: Command, target: CommandTarget & { id: string }): Promise<StoredEvent[]>`: The same with a command class instance: `ctx.submit(new Confirm({ … }), { id, aggregateId })`.
 - `query<T = unknown>(type: string, data?: unknown, options?: Omit<QueryOptions, "domain" | "type" | "data">): Promise<T>`: Asks a query on the listener's connection, like `Kernable.query`: `type` is of the listener's domain (`GetOrder`) or qualified (`crm.GetCustomer`). The tenant defaults to the event's. It is the listener's own read: it keeps the client's context, not the event's sender.
+- `query<Q extends Query<any>>(query: Q, options?: Omit<QueryOptions, "domain" | "type" | "data">): Promise<AnswerOf<Q>>`: The same with a query class instance, typed by its answer: `ctx.query(new GetOrder({ id }))`.
+
+### CommandTarget
+
+```ts
+export type CommandTarget = Omit<SubmitOptions, "domain" | "aggregateType" | "type" | "data">;
+```
+
+Where a command class instance goes: `SubmitOptions` without what the class says.
 
 ### FollowUp
 
@@ -326,6 +336,14 @@ export type FoldEvent = Partial<EventMeta> & { type: string; schema: number; dat
 ```
 
 An event to fold: type, payload version and data, plus as much of `EventMeta` and its request context as known.
+
+### Produced
+
+```ts
+export type Produced = (NewEvent | Event)[];
+```
+
+What a command handler returns: `NewEvent`s or event class instances.
 
 ### Requirement
 
@@ -466,6 +484,8 @@ const mailer = shopDomain.reactor("mailer");
 - `readonly aggregates: Aggregate<any>[] = []`: The aggregates defined on it, which `Kernable.app` runs.
 - `readonly listeners: Listener[] = []`: The read models and reactors defined on it, which `Kernable.app` runs.
 - `event(type: string, schema: number): EventSchema`: Declares the payload format of `type` events (unqualified): this domain writes them at version `schema` (from 1), with an `upcast` per older version, and may keep fields in the vault (`personal`) or erase a subject (`erases`). Returns the `EventSchema` to chain on. Types not declared are at version 1. The domain's aggregates and listeners use it; listeners of other domains get it with `use(domain)`. Throws for a qualified type or a version below 1.
+- `event(...classes: EventClass<unknown>[]): void`: Declares event classes of this domain (their statics: `version`, `upcasts`, `personal`, `erases`), e.g. in a process that only reads them. An aggregate's `apply` declares them too.
+- `event(type: string | EventClass<unknown>, ...rest: (number | EventClass<unknown>)[]): EventSchema | void`
 - `command(type: string): CommandSchema`: Declares which fields of `type` commands (unqualified) the vault keeps: returns the `CommandSchema` to chain `personal` and `secret` on. Only needed for commands with such fields. Clients that submit them need the domain: `kernable.use(domain)`.
 - `aggregate<S>(name: string, initial: S, options?: AggregateOptions): Aggregate<S>`: Defines an aggregate type `name` (`cart`) of this domain, with the state `initial` every aggregate of it starts from: `shopDomain.aggregate("cart", { items: 0 })`. Add its event appliers and command handlers with `apply` and `command`; run it with `kernable.worker(cart)` or `kernable.app`. `options`: snapshots, see `AggregateOptions`. Throws if the domain has an aggregate `name` already.
 - `readModel(name: string, options: ListenerOptions = {}): Listener`: Defines a read model named `name`: a listener that builds a view from events (`on`) and answers queries from it (`query`). Without a store it is kept in memory and rebuilt from the first event on every start (defaults: order 0, start 0); with `options.store` it continues where it left off. `options` override the defaults, see `ListenerOptions`. Run it with `kernable.listener(definition)` or `kernable.app`. Throws if the domain has a listener `name` already.
@@ -520,7 +540,11 @@ cart.command("AddItem", (state, data: { sku: string; qty: number }) => {
 - `readonly facts = new Map<string, (state: S) => boolean>()`: The facts by name; see `fact`.
 - `readonly requirements = new Map<string, (data: any, state: S) => Requirement[]>()`: What the commands require, per command type; see `CommandOptions.requires`.
 - `apply<D = any>(eventType: string, fn: (state: S, data: D, evt: EventMeta, ctx: ApplyContext) => S | void): this`: How an event of `eventType` (unqualified, of this domain) changes the state: `fn(state, data, evt, ctx)` changes `state` in place and returns nothing, or returns a new state that replaces it. `state` is a copy, so changing it never touches the state it came from. `data` is upcast to the version declared with `Domain.event`. Events without an `apply` leave the state as it is. Must be deterministic: no clock, no random values, no I/O.
-- `command<D = any>(commandType: string, fn: (state: S, data: D, cmd: CommandMeta, ctx: CommandContext) => NewEvent[] | Promise<NewEvent[]>, options: CommandOptions<S, D> = {}): this`: Which events a `commandType` command (unqualified, of this domain) produces: `fn(state, data, cmd, ctx)` gets the current state and the command's data and returns the events (`NewEvent[]`, possibly empty), or a promise of them. Throw `Rejected` to reject the command. It may run more than once for the same command, so it must decide the same way every time: use `ctx.now()` and `ctx.id()` instead of the clock and random IDs, and leave side effects to reactors. `options.requires`: facts other aggregates must hold for the command to commit, see `CommandOptions`. Throws for a type starting with `_reindex_`: the built-in commands aggregates with unique keys or facts run themselves (`_reindex_Customer`, see `Kernable.reindex`).
+- `apply<E>(event: EventClass<E>, fn: (state: S, data: Fields<E>, evt: EventMeta, ctx: ApplyContext) => S | void): this`: The same with an event class: `apply(ItemAdded, (state, data) => …)`, `data` typed by its fields.
+- `apply(event: string | EventClass<unknown>, fn: Apply<S>): this`
+- `command<D = any>(commandType: string, fn: (state: S, data: D, cmd: CommandMeta, ctx: CommandContext) => Produced | Promise<Produced>, options?: CommandOptions<S, D>): this`: Which events a `commandType` command (unqualified, of this domain) produces: `fn(state, data, cmd, ctx)` gets the current state and the command's data and returns the events (`NewEvent[]`, possibly empty), or a promise of them. Throw `Rejected` to reject the command. It may run more than once for the same command, so it must decide the same way every time: use `ctx.now()` and `ctx.id()` instead of the clock and random IDs, and leave side effects to reactors. `options.requires`: facts other aggregates must hold for the command to commit, see `CommandOptions`. Throws for a type starting with `_reindex_`: the built-in commands aggregates with unique keys or facts run themselves (`_reindex_Customer`, see `Kernable.reindex`).
+- `command<C>(command: CommandClass<C>, fn: (state: S, data: Fields<C>, cmd: CommandMeta, ctx: CommandContext) => Produced | Promise<Produced>, options?: CommandOptions<S, Fields<C>>): this`: The same with a command class: `command(AddItem, (state, data) => [new ItemAdded({ … })])`, `data` typed by its fields; its statics declare its vault fields.
+- `command(command: string | CommandClass<unknown>, fn: (state: S, data: any, cmd: CommandMeta, ctx: CommandContext) => Produced | Promise<Produced>, options: CommandOptions<S, any> = {}): this`
 - `unique(name: string, fn: (state: S) => string | string[] | null | undefined, options: UniqueOptions<S> = {}): this`: Declares a unique key `name`: `fn(state)` returns the value (or values) this aggregate holds, or `null`/`undefined` for none, and no other aggregate of this type holds the same value within the tenant (`options.scope`, default `tenant`) or in any tenant (`global`). After every command the aggregate holds exactly the values its new state yields: a changed value frees the old one in the same commit. A command that would leave the aggregate with a value another one holds is rejected with `unique_taken`, and nothing is written. Normalise the value yourself (`email.trim().toLowerCase()`); the kernel gets only its SHA-256 hash. `options.personal` keeps the key in the vault, freed by erasing its subject. Aggregates that existed before the key was declared hold it from their next command on; run `Kernable.reindex` to give it to them at once. Two of them with the same value: the second to run a command is rejected with `unique_taken` until its value changes. `fn` must be deterministic, as `apply` must; if it throws, the command is rejected as for a handler error. Throws for a name declared already, an empty name, or one with a dot or over 128 bytes. ```ts customer.unique("email", (state) => state.email?.toLowerCase(), { personal: (state) => state.id }); ```
 - `fact(name: string, fn: (state: S) => boolean): this`: Declares a fact `name` this aggregate holds while `fn(state)` is true: what other aggregates' commands require (`CommandOptions.requires`). The kernel keeps the facts each aggregate holds after its last command. `fn` must be deterministic, as `apply` must. Throws for a name declared already, an empty name, or one with a dot or over 128 bytes. ```ts vehicle.fact("open", (state) => state.status === "open"); ```
 - `index(state: S): Index`: The unique keys and facts this aggregate holds in `state`, as a worker computes them after a command; no kernel needed, so it suits tests next to `handle`: `cart.index(cart.fold(history))`. A key's values come once each; a personal key without a subject holds none. Throws what a key's or fact's function throws, or if a key's function returns something other than a string, a list of strings, `null` or `undefined`.
@@ -650,9 +674,16 @@ differently: `submit` returns them in its `Outcome`, `query` throws `Rejected`.
 - `app(options: AppOptions): App`: An app made of whole domains: `run()` applies the service's membership (its domains' aggregates as workers, their read models and reactors as listeners, those that check requests as middlewares; live ones are not listed), then runs all of them: `await kernable.app({ service: "shop", domains: [shopDomain] }).run()`. Throws if neither `options.service` nor `Options.service` names a service. One service is one app: two processes with the same service would replace each other's membership. To split a service over several processes, run `worker` and `listener` and `apply` the membership yourself.
 - `async apply(manifest: Manifest): Promise<void>`: Replaces the membership of a service (default: this process's): the workers, listeners and middlewares the kernel waits for, and free metadata. Apply it once per deploy, e.g. from a deploy script, not from every process: the newest apply wins, and an older one that arrives late is refused. The key needs `manage` for the service. A middleware the new membership no longer lists stops checking. Throws if neither `manifest.service` nor `Options.service` names a service. See [Remove a listener](../how-to/remove-listener).
 - `async submit(options: SubmitOptions): Promise<Outcome>`: Runs a command and returns its outcome: `{ committed: true, events }`, or `{ committed: false, code, message }` if it was rejected (a rejection does not throw). By default it returns once the command settled, so a query right after it sees the events; see `SubmitOptions.wait`. Throws `NotSettled` if the command committed but did not settle in time. Idempotent on `options.id`.
+- `async submit(command: Command, target: CommandTarget): Promise<Outcome>`: The same with a command class instance: `submit(new AddItem({ sku, qty }), { aggregateId })`. Its class says the domain, aggregate type, type and vault fields (no `use` needed).
+- `async submit(command: SubmitOptions | Command, target?: CommandTarget): Promise<Outcome>`
 - `async enqueue(options: Omit<SubmitOptions, "wait">): Promise<string>`: Stores the command in the kernel's queue and returns its ID without waiting for it to run (fire and forget). Submit it again with the same `id` to get the outcome.
+- `async enqueue(command: Command, target: Omit<CommandTarget, "wait">): Promise<string>`
+- `async enqueue(command: Omit<SubmitOptions, "wait"> | Command, target?: Omit<CommandTarget, "wait">): Promise<string>`
+- `followUpOf(command: Command, target: CommandTarget & { id: string }): FollowUp`: A follow-up command (`ListenerContext.submit`) from a command class instance and its target.
 - `async reindex(options: ReindexOptions): Promise<Map<string, Outcome>>`: Has these aggregates store the unique keys and facts their current state yields, e.g. after declaring a key on an aggregate type with existing aggregates: each runs the built-in reindex command of its type (`_reindex_<aggregateType>`, see `reindexType`), which produces no events. Returns the outcome per ID, once committed: committed (with no events), or rejected, e.g. with `unique_taken` if another aggregate holds the same value. An ID without events holds nothing. The key needs `run` for `<domain>._reindex_<aggregateType>` on the worker and `submit` here. ```ts const outcomes = await kernable.reindex({ domain: "crm", aggregateType: "Customer", aggregateIds: ["k1", "k2"] }); ```
 - `async query<T = unknown>(options: QueryOptions): Promise<T>`: Asks the read model that answers `domain.type` and returns its answer, typed as `T` (unchecked): `await kernable.query<Cart>({ domain: "shop", type: "GetCart", data: { id: "c1" } })`. Queries always go through the kernel, also within one process, so grants and middleware apply. The kernel waits until the read model has caught up (and reached `minPosition`). Throws `Rejected` if the read model or a middleware rejects it.
+- `async query<Q extends Query<any>>(query: Q, options?: Omit<QueryOptions, "domain" | "type" | "data">): Promise<AnswerOf<Q>>`: The same with a query class instance, typed by its answer: `query(new GetCart({ id }), { tenant })`.
+- `async query(query: QueryOptions | Query<any>, more?: Omit<QueryOptions, "domain" | "type" | "data">): Promise<unknown>`
 - `listener(listener: Listener): ListenerHandle`: Runs a listener defined with `Domain.readModel` or `Domain.reactor` over this connection: `await kernable.listener(carts).run()`. Handlers added to the definition later still count until `run()` connects.
 - `subscribe(options: SubscribeOptions, handler: (event: StoredEvent) => void | Promise<void>): Subscription`: Streams committed events after `options.after` (backlog first, then live) to `handler`, one at a time, e.g. to export them: `kernable.subscribe({ types: ["shop.*"] }, (e) => ...)`. Reconnects and resumes after the last handled event; if the handler throws, that event is delivered again. Persist `position` yourself to resume across restarts. Unlike a listener, a subscription is not registered: the kernel keeps no position, nobody waits for it, and events arrive as stored (not upcast, vault fields `null`). The key needs `subscribe` for the types.
 - `close(): void`: Closes the connection now; only needed in a long-running process that discards the client.
@@ -816,8 +847,12 @@ carts
 - `readonly middlewares = new Map<"before" | "after", { options: MiddlewareOptions; handler: MiddlewareHandler }>()`: The middleware handlers and their qualified types, before and after requests.
 - `readonly domains = new Map<string, Domain>()`: The domains whose event schemas upcast events, by name: the own domain and those it `use`s.
 - `use(...domains: Domain[]): this`: Upcasts the events of these other domains with their event schemas (see `Domain.event`).
-- `on<D = any>(eventType: string, handler: (data: D, evt: StoredEventMeta, ctx: ListenerContext) => void | Promise<void>, options: HandlerOptions = {}): this`: Handles events of `eventType`: a type of the own domain (`ItemAdded`), of another domain (`identity.AccountRegistered`) or a whole domain (`identity.*`): `handler(data, evt, ctx)` gets the upcast payload, the event's `StoredEventMeta` and a `ListenerContext`. A handler for the exact type wins over one for its domain; one handler per type (a second replaces the first). The listener acknowledges an event only after the handler finished (a returned promise resolved); if it throws, the event is delivered again. With `options.raw`, it gets the payload as stored. Throws for a malformed type.
+- `on<D = any>(eventType: string, handler: (data: D, evt: StoredEventMeta, ctx: ListenerContext) => void | Promise<void>, options?: HandlerOptions): this`: Handles events of `eventType`: a type of the own domain (`ItemAdded`), of another domain (`identity.AccountRegistered`) or a whole domain (`identity.*`): `handler(data, evt, ctx)` gets the upcast payload, the event's `StoredEventMeta` and a `ListenerContext`. A handler for the exact type wins over one for its domain; one handler per type (a second replaces the first). The listener acknowledges an event only after the handler finished (a returned promise resolved); if it throws, the event is delivered again. With `options.raw`, it gets the payload as stored. Throws for a malformed type.
+- `on<E>(event: EventClass<E>, handler: (data: Fields<E>, evt: StoredEventMeta, ctx: ListenerContext) => void | Promise<void>, options?: HandlerOptions): this`: The same with an event class, of this domain or another: `on(ItemAdded, (data) => …)`, `data` typed by its fields. The class must be declared (an aggregate's `apply` or `Domain.event`); its domain's event schemas upcast its events.
+- `on(event: string | EventClass<unknown>, handler: (data: any, evt: StoredEventMeta, ctx: ListenerContext) => void | Promise<void>, options: HandlerOptions = {}): this`
 - `query<D = any, R = unknown>(queryType: string, handler: (data: D, qry: QueryMeta, ctx: QueryContext) => R | Promise<R>): this`: Answers the query type `queryType`, of the own domain (`GetCart`) or another one (`orders.GetOrder`), from this listener's state. The kernel delivers queries in order with the events, so an answer reflects every event handled before it. `handler(data, qry, ctx)` gets the query's data, its `QueryMeta` and a `QueryContext`, and returns the answer (or a promise of it), sent as JSON. Throw `Rejected` to refuse; any other error refuses with `handler_error`. A handler cannot query its own listener (the answer would wait behind itself): the kernel refuses it. Throws for a malformed type.
+- `query<Q>(query: QueryClass<Q>, handler: (data: Fields<Q>, qry: QueryMeta, ctx: QueryContext) => AnswerOf<Q> | Promise<AnswerOf<Q>>): this`: The same with a query class: `query(GetCart, (data) => …)`, typed by its fields and its answer.
+- `query(query: string | QueryClass<unknown>, handler: (data: any, qry: QueryMeta, ctx: QueryContext) => unknown): this`
 - `middleware(options: MiddlewareOptions, handler: MiddlewareHandler): this`: Makes this listener a middleware: the kernel asks `handler` about every command, query, file and cache request of `options.types`, before accepting or routing it (or after, see `MiddlewareOptions.when`), in chain order, and only once this listener has caught up with the events. Throw `Rejected` to refuse; any other error refuses too. The registration is stored: while this listener is away, the kernel refuses those requests (`kernable listeners remove` unregisters it). The handler cannot submit or query what it checks itself (it would wait behind itself): the kernel refuses it. A listener has at most one middleware before and one after. `handler(check, outcome)` gets the `Check`; after the request, also its `Outcome` (a command) or `QueryOutcome` (a query). The key needs `check` for the types; if its service has a membership, the membership must list it as a middleware (`Kernable.app` does that). Throws for a live listener, a malformed type, or a second middleware at the same `when`. See [Middleware](../concepts/queries-and-middleware#middleware).
 
 ### ListenerHandle
@@ -868,6 +903,172 @@ await kernable.worker(cart).run({ concurrency: 32 });
 - `announce = true`: Whether the first connect gets its own line; an `App` prints it in its overview instead.
 - `async run(options: WorkerOptions = {}): Promise<void>`: Registers the aggregates and processes commands until `stop()`, reconnecting when the session drops. Resolves after `stop()`.
 - `stop(): void`: Stops the worker: ends its session, so `run()` resolves.
+
+### Fields
+
+```ts
+export type Fields<T> = {
+  [K in keyof T as K extends `__${string}` ? never : T[K] extends (...args: any[]) => any ? never : K]: T[K];
+};
+```
+
+A message's data: the instance fields of its class, without methods.
+
+### SubjectOf
+
+```ts
+export type SubjectOf<T> = (data: Fields<T>, aggregateId: string) => string;
+```
+
+Whose personal data fields hold: from the payload and the aggregate's ID.
+
+### PersonalFields
+
+Fields kept in the vault as personal data of `subject`.
+
+- `fields: readonly (keyof Fields<T> & string)[]`
+- `subject: SubjectOf<T>`
+
+### Event
+
+An event: what happened, in the past tense. Its class name is its type within the domain of the
+aggregate that writes it; its fields are its payload.
+
+```ts
+export class TenantCreated extends Event {
+  slug!: string;
+  name!: string;
+}
+tenant.apply(TenantCreated, (state, data) => { state.slug = data.slug; });
+return [TenantCreated.new({ slug, name })];
+```
+
+Statics declare what `Domain.event` declares: `version` (default 1), `upcasts` (from each older
+version), `personal` fields and `erases`. `type` overrides the class name, e.g. if a bundler
+renames classes.
+
+
+
+### Command
+
+A command: what should happen, imperative. Its class name is its type within the domain of the
+aggregate that handles it; its fields are its data. Statics: `personal` and `secret` fields,
+`type`.
+
+```ts
+export class SignIn extends Command {
+  static secret: (keyof SignIn)[] = ["password"];
+  email!: string;
+  password!: string;
+}
+account.command(SignIn, (state, data) => …);
+await kernable.submit(SignIn.new({ email, password }), { aggregateId });
+```
+
+
+
+### Query
+
+A query: what is asked, with `R` its answer. Its class name is its type within the domain of
+the read model that answers it.
+
+```ts
+export class GetTenant extends Query<TenantRow> {
+  tenantId!: string;
+}
+tenants.query(GetTenant, (data) => rows.get(data.tenantId));
+const row = await kernable.query(GetTenant.new({ tenantId }), { tenant });   // a TenantRow
+```
+
+
+
+### MessageStatics
+
+The statics a message class may declare.
+
+- `type?: string`: The type, if not the class name.
+- `version?: number`
+- `upcasts?: Record<number, (data: any) => unknown>`
+- `personal?: readonly { fields: readonly string[]; subject: (data: any, aggregateId: string) => string }[]`
+- `erases?: (data: any, aggregateId: string) => string`
+- `secret?: readonly string[]`
+
+### EventClass
+
+```ts
+export type EventClass<E> = MessageClass<E>;
+```
+
+
+
+### CommandClass
+
+```ts
+export type CommandClass<C> = MessageClass<C>;
+```
+
+
+
+### QueryClass
+
+```ts
+export type QueryClass<Q> = MessageClass<Q>;
+```
+
+
+
+### AnswerOf
+
+```ts
+export type AnswerOf<Q> = Q extends Query<infer R> ? R : unknown;
+```
+
+
+
+### Binding
+
+Where a class was put to use: its domain, and for a command its aggregate type.
+
+- `domain: string`
+- `aggregateType?: string`
+- `schemas?: unknown`: The domain's event and command schemas: what upcasts and seals its messages.
+
+### isMessageClass()
+
+`export function isMessageClass(value: unknown): value is EventClass<unknown>`
+
+Whether `value` is a message class rather than a type name.
+
+### typeOf()
+
+`export function typeOf(cls: Function & MessageStatics): string`
+
+The type a class stands for: `static type`, else its name. A name that is no type (a bundler
+renamed the class) throws, so a renamed class never writes events under a wrong type.
+
+### bind()
+
+`export function bind(cls: Function, binding: Binding): void`
+
+Records where `cls` is used; a class belongs to one domain (and one aggregate type).
+
+### bindingOf()
+
+`export function bindingOf(cls: Function): Binding | undefined`
+
+Where `cls` is used, if anywhere yet.
+
+### boundOrThrow()
+
+`export function boundOrThrow(cls: Function, what: string): Binding`
+
+`cls`'s binding, or an error that names what to do.
+
+### dataOf()
+
+`export function dataOf(message: object): Record<string, unknown>`
+
+A message instance's data, as plain JSON fields.
 
 ### Store
 

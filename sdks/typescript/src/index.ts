@@ -51,10 +51,16 @@ import {
   valueHash,
   vaultRef,
 } from "./signing.ts";
+import {
+  Command, Event, Query, bind, boundOrThrow, dataOf, typeOf as messageType,
+  type AnswerOf, type CommandClass, type EventClass, type Fields, type MessageStatics, type QueryClass,
+} from "./messages.ts";
 import { Store } from "./store.ts";
 
 export { Key } from "./signing.ts";
 export { Store } from "./store.ts";
+export { Command, Event, Query } from "./messages.ts";
+export type { AnswerOf, CommandClass, EventClass, Fields, PersonalFields, QueryClass, SubjectOf } from "./messages.ts";
 
 /**
  * A refusal with a business reason: throw it from a command handler, a query handler or a
@@ -361,13 +367,20 @@ export interface ListenerContext {
    * ```
    */
   submit(command: FollowUp): Promise<StoredEvent[]>;
+  /** The same with a command class instance: `ctx.submit(new Confirm({ … }), { id, aggregateId })`. */
+  submit(command: Command, target: CommandTarget & { id: string }): Promise<StoredEvent[]>;
   /**
    * Asks a query on the listener's connection, like `Kernable.query`: `type` is of the
    * listener's domain (`GetOrder`) or qualified (`crm.GetCustomer`). The tenant defaults to the
    * event's. It is the listener's own read: it keeps the client's context, not the event's sender.
    */
   query<T = unknown>(type: string, data?: unknown, options?: Omit<QueryOptions, "domain" | "type" | "data">): Promise<T>;
+  /** The same with a query class instance, typed by its answer: `ctx.query(new GetOrder({ id }))`. */
+  query<Q extends Query<any>>(query: Q, options?: Omit<QueryOptions, "domain" | "type" | "data">): Promise<AnswerOf<Q>>;
 }
+
+/** Where a command class instance goes: `SubmitOptions` without what the class says. */
+export type CommandTarget = Omit<SubmitOptions, "domain" | "aggregateType" | "type" | "data">;
 
 /** A command a listener's handler submits (`ListenerContext.submit`): `SubmitOptions` with a required `id`, and the domain optional. */
 export type FollowUp = Omit<SubmitOptions, "domain" | "id"> & { domain?: string; id: string };
@@ -489,6 +502,42 @@ export type FoldEvent = Partial<EventMeta> & { type: string; schema: number; dat
 
 type Apply<S> = (state: S, data: any, evt: EventMeta, ctx: ApplyContext) => S | void;
 type Handle<S> = (state: S, data: any, cmd: CommandMeta, ctx: CommandContext) => NewEvent[] | Promise<NewEvent[]>;
+/** What a command handler returns: `NewEvent`s or event class instances. */
+export type Produced = (NewEvent | Event)[];
+
+/** The event and command schemas of a domain, as a class binding carries them. */
+function schemasOf(domain: string, events: Map<string, EventSchema>, commands: Map<string, CommandSchema>) {
+  return { name: domain, events, commands };
+}
+
+/** Declares an event class in a domain (its statics, unless declared by name already); its type. */
+function declareEvent(domain: string, events: Map<string, EventSchema>, cls: EventClass<unknown>): string {
+  const type = messageType(cls);
+  bind(cls, { domain, schemas: schemasOf(domain, events, new Map()) });
+  if (!events.has(type)) {
+    const statics = cls as MessageStatics;
+    const def = new EventSchema(type, statics.version ?? 1);
+    for (const [from, fn] of Object.entries(statics.upcasts ?? {})) def.upcast(Number(from), fn);
+    for (const p of statics.personal ?? []) def.personal([...p.fields], p.subject);
+    if (statics.erases) def.erases(statics.erases);
+    events.set(type, def);
+  }
+  return type;
+}
+
+/** Declares a command class of an aggregate (its vault statics, unless declared by name); its type. */
+function declareCommand(domain: string, aggregateType: string, events: Map<string, EventSchema>, commands: Map<string, CommandSchema>, cls: CommandClass<unknown>): string {
+  const type = messageType(cls);
+  bind(cls, { domain, aggregateType, schemas: schemasOf(domain, events, commands) });
+  if (!commands.has(type)) {
+    const statics = cls as MessageStatics;
+    const def = new CommandSchema(type);
+    for (const p of statics.personal ?? []) def.personal([...p.fields], p.subject);
+    if (statics.secret?.length) def.secret([...statics.secret]);
+    commands.set(type, def);
+  }
+  return type;
+}
 
 /**
  * A fact another aggregate of the command's tenant must hold (or, `absent`, must not hold) when
@@ -843,8 +892,18 @@ export class Domain {
    * listeners of other domains get it with `use(domain)`. Throws for a qualified type or a
    * version below 1.
    */
-  event(type: string, schema: number): EventSchema {
-    const def = new EventSchema(type, schema);
+  event(type: string, schema: number): EventSchema;
+  /**
+   * Declares event classes of this domain (their statics: `version`, `upcasts`, `personal`,
+   * `erases`), e.g. in a process that only reads them. An aggregate's `apply` declares them too.
+   */
+  event(...classes: EventClass<unknown>[]): void;
+  event(type: string | EventClass<unknown>, ...rest: (number | EventClass<unknown>)[]): EventSchema | void {
+    if (typeof type !== "string") {
+      for (const cls of [type, ...rest] as EventClass<unknown>[]) declareEvent(this.name, this.events, cls);
+      return;
+    }
+    const def = new EventSchema(type, rest[0] as number);
     this.events.set(type, def);
     return def;
   }
@@ -994,8 +1053,12 @@ export class Aggregate<S> {
    * from. `data` is upcast to the version declared with `Domain.event`. Events without an `apply`
    * leave the state as it is. Must be deterministic: no clock, no random values, no I/O.
    */
-  apply<D = any>(eventType: string, fn: (state: S, data: D, evt: EventMeta, ctx: ApplyContext) => S | void): this {
-    this.appliers.set(eventType, fn);
+  apply<D = any>(eventType: string, fn: (state: S, data: D, evt: EventMeta, ctx: ApplyContext) => S | void): this;
+  /** The same with an event class: `apply(ItemAdded, (state, data) => …)`, `data` typed by its fields. */
+  apply<E>(event: EventClass<E>, fn: (state: S, data: Fields<E>, evt: EventMeta, ctx: ApplyContext) => S | void): this;
+  apply(event: string | EventClass<unknown>, fn: Apply<S>): this {
+    const type = typeof event === "string" ? event : declareEvent(this.domain, this.events, event);
+    this.appliers.set(type, fn);
     return this;
   }
 
@@ -1012,13 +1075,33 @@ export class Aggregate<S> {
    */
   command<D = any>(
     commandType: string,
-    fn: (state: S, data: D, cmd: CommandMeta, ctx: CommandContext) => NewEvent[] | Promise<NewEvent[]>,
-    options: CommandOptions<S, D> = {},
+    fn: (state: S, data: D, cmd: CommandMeta, ctx: CommandContext) => Produced | Promise<Produced>,
+    options?: CommandOptions<S, D>,
+  ): this;
+  /**
+   * The same with a command class: `command(AddItem, (state, data) => [new ItemAdded({ … })])`,
+   * `data` typed by its fields; its statics declare its vault fields.
+   */
+  command<C>(
+    command: CommandClass<C>,
+    fn: (state: S, data: Fields<C>, cmd: CommandMeta, ctx: CommandContext) => Produced | Promise<Produced>,
+    options?: CommandOptions<S, Fields<C>>,
+  ): this;
+  command(
+    command: string | CommandClass<unknown>,
+    fn: (state: S, data: any, cmd: CommandMeta, ctx: CommandContext) => Produced | Promise<Produced>,
+    options: CommandOptions<S, any> = {},
   ): this {
+    const commandType = typeof command === "string" ? command : declareCommand(this.domain, this.name, this.events, this.commands, command);
     if (commandType.startsWith(REINDEX)) {
       throw new Error(`${commandType}: command types starting with ${REINDEX} are reserved for the reindex commands aggregates with unique keys or facts run themselves`);
     }
-    this.handlers.set(commandType, fn);
+    // Event class instances become `NewEvent`s, declaring their classes.
+    const plain = (events: Produced) => events.map((e) => (e instanceof Event ? this.newEvent(e) : e));
+    this.handlers.set(commandType, (state, data, cmd, ctx) => {
+      const produced = fn(state, data, cmd, ctx);
+      return produced instanceof Promise ? produced.then(plain) : plain(produced);
+    });
     if (options.requires) this.requirements.set(commandType, options.requires);
     else this.requirements.delete(commandType);
     return this;
@@ -1112,6 +1195,11 @@ export class Aggregate<S> {
     if (!handler) throw new Error(`no handler for ${commandType} on ${this.name}`);
     const cmd: CommandMeta = { commandId: ctx.commandId, type: commandType, domain: this.domain, aggregateType: this.name, aggregateId: "", tenant: "" };
     return handler(structuredClone(state), decode(encode(data)), cmd, ctx);
+  }
+
+  /** An event class instance as the `NewEvent` it stands for. */
+  private newEvent(e: Event): NewEvent {
+    return { type: declareEvent(this.domain, this.events, e.constructor as EventClass<unknown>), data: dataOf(e) };
   }
 
   /** The payload version this aggregate writes `type` events at. */
@@ -1718,7 +1806,14 @@ export class Kernable {
    * `SubmitOptions.wait`. Throws `NotSettled` if the command committed but did not settle in time.
    * Idempotent on `options.id`.
    */
-  async submit(options: SubmitOptions): Promise<Outcome> {
+  async submit(options: SubmitOptions): Promise<Outcome>;
+  /**
+   * The same with a command class instance: `submit(new AddItem({ sku, qty }), { aggregateId })`.
+   * Its class says the domain, aggregate type, type and vault fields (no `use` needed).
+   */
+  async submit(command: Command, target: CommandTarget): Promise<Outcome>;
+  async submit(command: SubmitOptions | Command, target?: CommandTarget): Promise<Outcome> {
+    const options = this.commandOptions(command, target);
     const wait = options.wait === "committed" ? "WAIT_COMMITTED" : "WAIT_SETTLED";
     const res = await this.send(options, wait);
     if (res.outcome === "rejected") {
@@ -1734,8 +1829,25 @@ export class Kernable {
    * Stores the command in the kernel's queue and returns its ID without waiting for it to run
    * (fire and forget). Submit it again with the same `id` to get the outcome.
    */
-  async enqueue(options: Omit<SubmitOptions, "wait">): Promise<string> {
-    return (await this.send(options, "WAIT_ACCEPTED")).command_id;
+  async enqueue(options: Omit<SubmitOptions, "wait">): Promise<string>;
+  async enqueue(command: Command, target: Omit<CommandTarget, "wait">): Promise<string>;
+  async enqueue(command: Omit<SubmitOptions, "wait"> | Command, target?: Omit<CommandTarget, "wait">): Promise<string> {
+    return (await this.send(this.commandOptions(command, target), "WAIT_ACCEPTED")).command_id;
+  }
+
+  /** A follow-up command (`ListenerContext.submit`) from a command class instance and its target. */
+  followUpOf(command: Command, target: CommandTarget & { id: string }): FollowUp {
+    return this.commandOptions(command, target) as unknown as FollowUp;
+  }
+
+  /** `SubmitOptions` from options as they are, or from a command class instance and its target. */
+  private commandOptions<O extends Omit<SubmitOptions, "wait">>(command: O | Command, target?: Partial<SubmitOptions>): O {
+    if (!(command instanceof Command)) return command;
+    if (!target?.aggregateId) throw new Error(`${command.constructor.name}: say which aggregate (aggregateId)`);
+    const cls = command.constructor as CommandClass<unknown>;
+    const binding = boundOrThrow(cls, "handled by an aggregate");
+    if (!this.domains.has(binding.domain) && binding.schemas) this.domains.set(binding.domain, binding.schemas as Domain);
+    return { ...target, domain: binding.domain, aggregateType: binding.aggregateType!, type: messageType(cls), data: dataOf(command) } as unknown as O;
   }
 
   /**
@@ -1775,7 +1887,17 @@ export class Kernable {
    * apply. The kernel waits until the read model has caught up (and reached `minPosition`).
    * Throws `Rejected` if the read model or a middleware rejects it.
    */
-  async query<T = unknown>(options: QueryOptions): Promise<T> {
+  async query<T = unknown>(options: QueryOptions): Promise<T>;
+  /** The same with a query class instance, typed by its answer: `query(new GetCart({ id }), { tenant })`. */
+  async query<Q extends Query<any>>(query: Q, options?: Omit<QueryOptions, "domain" | "type" | "data">): Promise<AnswerOf<Q>>;
+  async query(query: QueryOptions | Query<any>, more?: Omit<QueryOptions, "domain" | "type" | "data">): Promise<unknown> {
+    let options: QueryOptions;
+    if (query instanceof Query) {
+      const cls = query.constructor as QueryClass<unknown>;
+      options = { ...more, domain: boundOrThrow(cls, "answered by a read model").domain, type: messageType(cls), data: dataOf(query) };
+    } else {
+      options = query;
+    }
     const request = {
       query_id: randomUUID(),
       tenant_id: options.tenant ?? this.tenant,
@@ -1802,7 +1924,7 @@ export class Kernable {
     };
     const res = await this.clients.route(request.tenant_id, (c) => c.query(signed, options.timeoutMs));
     if (res.outcome === "rejected") throw new Rejected(res.rejected!.message, res.rejected!.code);
-    return decode(res.response!) as T;
+    return decode(res.response!);
   }
 
   /**
@@ -2303,8 +2425,27 @@ export class Listener {
   on<D = any>(
     eventType: string,
     handler: (data: D, evt: StoredEventMeta, ctx: ListenerContext) => void | Promise<void>,
-    options: HandlerOptions = {},
-  ): this {
+    options?: HandlerOptions,
+  ): this;
+  /**
+   * The same with an event class, of this domain or another: `on(ItemAdded, (data) => …)`, `data`
+   * typed by its fields. The class must be declared (an aggregate's `apply` or `Domain.event`);
+   * its domain's event schemas upcast its events.
+   */
+  on<E>(
+    event: EventClass<E>,
+    handler: (data: Fields<E>, evt: StoredEventMeta, ctx: ListenerContext) => void | Promise<void>,
+    options?: HandlerOptions,
+  ): this;
+  on(event: string | EventClass<unknown>, handler: (data: any, evt: StoredEventMeta, ctx: ListenerContext) => void | Promise<void>, options: HandlerOptions = {}): this {
+    let eventType: string;
+    if (typeof event === "string") {
+      eventType = event;
+    } else {
+      const binding = boundOrThrow(event, "declared (an aggregate's apply, or Domain.event)");
+      eventType = `${binding.domain}.${messageType(event)}`;
+      if (!this.domains.has(binding.domain) && binding.schemas) this.domains.set(binding.domain, binding.schemas as Domain);
+    }
     if (!UNQUALIFIED.test(eventType) && !QUALIFIED_OR_DOMAIN.test(eventType)) {
       throw new Error(`listen to a type (Type), a qualified type (domain.Type) or a domain (domain.*), not ${JSON.stringify(eventType)}`);
     }
@@ -2321,7 +2462,17 @@ export class Listener {
    * `handler_error`. A handler cannot query its own listener (the answer would wait behind
    * itself): the kernel refuses it. Throws for a malformed type.
    */
-  query<D = any, R = unknown>(queryType: string, handler: (data: D, qry: QueryMeta, ctx: QueryContext) => R | Promise<R>): this {
+  query<D = any, R = unknown>(queryType: string, handler: (data: D, qry: QueryMeta, ctx: QueryContext) => R | Promise<R>): this;
+  /** The same with a query class: `query(GetCart, (data) => …)`, typed by its fields and its answer. */
+  query<Q>(query: QueryClass<Q>, handler: (data: Fields<Q>, qry: QueryMeta, ctx: QueryContext) => AnswerOf<Q> | Promise<AnswerOf<Q>>): this;
+  query(query: string | QueryClass<unknown>, handler: (data: any, qry: QueryMeta, ctx: QueryContext) => unknown): this {
+    let queryType: string;
+    if (typeof query === "string") {
+      queryType = query;
+    } else {
+      bind(query, { domain: this.domain.name, schemas: this.domain });
+      queryType = messageType(query);
+    }
     if (!UNQUALIFIED.test(queryType) && !/^[A-Za-z][A-Za-z0-9_-]*\.[^.*]+$/.test(queryType)) {
       throw new Error(`answer a query type (Query) or a qualified one (domain.Query), not ${JSON.stringify(queryType)}`);
     }
@@ -2761,8 +2912,12 @@ export class ListenerHandle {
           follow: () => follow(stored),
           request,
           store: this.stored,
-          submit: (command) => this.followUp(command, stored),
-          query: (type, data, options) => this.kernable.query({ ...options, ...qualifiedType(type, this.listener.domain.name), data, tenant: options?.tenant ?? stored.tenant }),
+          submit: (command: FollowUp | Command, target?: CommandTarget & { id: string }) =>
+            this.followUp(command instanceof Command ? this.kernable.followUpOf(command, target!) : command, stored),
+          query: (query: string | Query<any>, data?: unknown, options?: Omit<QueryOptions, "domain" | "type" | "data">) =>
+            typeof query === "string"
+              ? this.kernable.query({ ...options, ...qualifiedType(query, this.listener.domain.name), data, tenant: options?.tenant ?? stored.tenant })
+              : this.kernable.query(query, { ...(data as object), tenant: (data as QueryOptions | undefined)?.tenant ?? stored.tenant }),
         };
         const type = `${e.domain}.${e.event_type}`;
         const saved = this.stored !== undefined && parkAfter > 0;
