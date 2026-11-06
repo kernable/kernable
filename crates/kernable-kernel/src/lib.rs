@@ -44,6 +44,7 @@ pub mod standby;
 pub mod supervisor;
 mod trend;
 mod ui;
+pub mod usage;
 pub mod witness;
 mod workers;
 
@@ -297,6 +298,8 @@ pub struct Kernel {
     switchover: Mutex<Option<tokio::sync::mpsc::Sender<node::SwitchoverAsk>>>,
     /// Bytes of the event store, the vault and the files, measured every 10 s.
     stored_bytes: AtomicU64,
+    /// The usage counts it started from: `<store>.usage` as the kernel before left it.
+    usage_base: usage::Usage,
     /// Requests per key and second.
     rates: Rates,
     /// The partition map, with `--partition` (S2).
@@ -324,6 +327,7 @@ impl Kernel {
     /// Like [`Kernel::open`], on a store opened already (`config.store` is not opened): for
     /// tests that wrap the store, e.g. in one that fails on purpose.
     pub fn open_on(config: Config, store: Box<dyn Store>) -> Result<Arc<Self>, BoxError> {
+        let usage_base = usage::read(&config.store).unwrap_or_default();
         let key = config.read_signing_key(&config.kernel_key)?;
         let revoked: HashMap<String, i64> = store
             .revocations()?
@@ -408,6 +412,7 @@ impl Kernel {
             backup: replication::Backup::default(),
             switchover: Mutex::default(),
             stored_bytes: AtomicU64::new(0),
+            usage_base,
             rates: Rates::default(),
             listeners,
             workers,
@@ -987,6 +992,7 @@ impl Kernel {
     /// Writes a final checkpoint and the listener positions. Leases are not persisted:
     /// after a restart, every unfinished command is delivered again right away.
     pub fn shutdown(&self) -> Result<(), BoxError> {
+        usage::write(self);
         // Handed over, it writes nothing more: its log stays the new primary's beginning, so it
         // follows it without an image. The new primary holds every position acknowledged.
         if self.replication.as_ref().is_some_and(|p| p.handed_over()) {
@@ -1385,6 +1391,7 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
     tokio::select! {
         result = server => result,
         _ = checkpoints(&kernel) => unreachable!(),
+        _ = usage::keep(&kernel) => unreachable!(),
         _ = measure_stores(&kernel) => unreachable!(),
         _ = flush_listeners(&kernel) => unreachable!(),
         _ = sample_trend(&kernel) => unreachable!(),

@@ -346,3 +346,37 @@ async fn draining_gives_up_after_its_timeout() {
     assert!(!env.kernel.drain().await);
     assert!(started.elapsed() < std::time::Duration::from_millis(500));
 }
+
+/// `<store>.usage`: the kernel goes on from the counts the file holds, and writes the
+/// sum at shutdown: committed commands across restarts, the store's head as its events.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_usage_beside_the_store_counts_on_across_restarts() {
+    let env = start_custom("usage", |config, _| {
+        let before = kernable_kernel::usage::Usage {
+            at: 1,
+            events: 0,
+            commands: 10,
+            rejected: 1,
+            queries: 5,
+            store_bytes: 0,
+        };
+        let path = kernable_kernel::usage::path(&config.store).unwrap();
+        std::fs::write(path, serde_json::to_vec(&before).unwrap()).unwrap();
+    })
+    .await;
+    spawn_worker(&env).await;
+    for i in 0..3 {
+        let cmd = signed(
+            command(&format!("c{i}"), "PlaceOrder", &format!("o{i}")),
+            &key(1),
+        );
+        submit(&env.addr, cmd).await.unwrap();
+    }
+    env.kernel.shutdown().unwrap();
+    let usage = kernable_kernel::usage::read(&env.store).unwrap();
+    assert_eq!(
+        (usage.commands, usage.rejected, usage.queries, usage.events),
+        (13, 1, 5, 3)
+    );
+    assert!(usage.at > 1);
+}

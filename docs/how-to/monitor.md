@@ -107,6 +107,16 @@ kernable listeners parked sqlite:shop.db   # each parked event: listener, positi
 
 `last seen` tells you when a worker or listener was last connected. See the [CLI reference](../reference/cli).
 
+## Usage beside the store
+
+The kernel writes `<store>.usage` beside its store (`kernable.db.usage`) every minute and when it stops, one line of JSON:
+
+```json
+{"at":1793996832409,"events":205200,"commands":205211,"rejected":3,"queries":1200,"store_bytes":241172480}
+```
+
+`events` is the store's head, `store_bytes` what its stores take on the disk; `commands` (committed), `rejected` and `queries` (answered) go on across restarts: a kernel starts from the counts in the file, so a crash loses at most a minute of them. For whoever bills or watches the machine without scraping metrics.
+
 ## Parked events
 
 A reactor that gives up on an event parks it and moves on ([Failures](../concepts/failures)): its follow-up was rejected, or its handler failed five times. The kernel keeps the event's position with the reason until you act on it; the UI shows the count on the listener, the first ones in its details and all of them under Connections, and `kernable_listener_parked` counts them.
