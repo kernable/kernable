@@ -6,6 +6,8 @@ pub mod levels;
 pub mod middleware;
 pub mod policy;
 pub mod relations;
+pub mod visibility;
 
 pub use middleware::{Explain, Explained, use_authorization_store};
 pub use relations::{Target, ids, parent, relation};
+pub use visibility::{Visibility, visibility};

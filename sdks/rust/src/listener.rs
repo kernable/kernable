@@ -652,6 +652,41 @@ impl Listener {
         self.handle(&event_type, handler, true)
     }
 
+    /// Like [`on`](Self::on), but keeps a handler registered for the type already: this one runs
+    /// after it, in the same delivery (a failing first one skips it). For code that adds to a
+    /// listener it does not own, e.g. the kit's `visibility`; register it after your own handlers.
+    pub fn also_on<D, F, Fut>(&self, event_type: impl TypeKey<D>, handler: F) -> Listener
+    where
+        D: DeserializeOwned + Send + 'static,
+        F: Fn(D, StoredEventMeta, ListenerContext) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), BoxError>> + Send + 'static,
+    {
+        let event_type = self.learn(event_type.key());
+        let Some(qualified) = self.qualify(&event_type, true) else {
+            panic!(
+                "listen to a type (Type or domain.Type) or a domain (domain.*), not {event_type:?}"
+            );
+        };
+        let before = self.inner.handlers.read().unwrap().get(&qualified).cloned();
+        self.handle(&event_type, handler, false);
+        if let Some((first, raw)) = before {
+            let mut handlers = self.inner.handlers.write().unwrap();
+            let then = handlers
+                .get(&qualified)
+                .map(|(h, _)| Arc::clone(h))
+                .expect("registered just now");
+            let both: EventHandler = Arc::new(move |e, ctx| {
+                let (first, then) = (Arc::clone(&first), Arc::clone(&then));
+                Box::pin(async move {
+                    first(e.clone(), ctx.clone()).await?;
+                    then(e, ctx).await
+                })
+            });
+            handlers.insert(qualified, (both, raw));
+        }
+        self.clone()
+    }
+
     fn handle<D, F, Fut>(&self, event_type: &str, handler: F, raw: bool) -> Listener
     where
         D: DeserializeOwned + Send + 'static,
