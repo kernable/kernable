@@ -182,6 +182,8 @@ export function decide(k: Knowledge, check: Check, now: number): Refusal | null 
   if ("code" in sender) return sender;
   const target = targetOf(check);
   if (rule.self && isSelf(k, check, r, target)) return null;
+  // The person suspends their own account only for themselves.
+  if (type === "account.SuspendAccount" && data.reason === "owner_requested" && isSelf(k, check, r, target)) return null;
 
   // 4. Authenticated: a session is enough.
   if (rule.level === "authenticated") {
@@ -227,6 +229,7 @@ export function decide(k: Knowledge, check: Check, now: number): Refusal | null 
     return own ? null : refuse("forbidden", `${type} is for the platform`);
   }
   if (owner) return null;
+  if (type === "invitation.CreateInvitation" && data.owner === true && !platform) return refuse("forbidden", "Owner invitations are the owners'");
   if (!platform && tenant?.status !== "active") return refuse("tenant_suspended", `The tenant is ${tenant?.status}`);
   if (rule.level === "owners") return refuse("forbidden", `${type} is for the tenant's owners`);
 

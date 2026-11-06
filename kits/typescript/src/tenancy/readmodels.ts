@@ -23,7 +23,7 @@ const update = (id: string, f: (r: TenantRow) => void) => {
 };
 
 export const tenantsReadModel = tenancyDomain
-  .readModel("tenants", { order: ORDERS.readModels })
+  .readModel("tenancy.tenants", { order: ORDERS.readModels })
   .on(TenantCreated, (d, evt) => {
     tenantRows.set(evt.aggregateId, { id: evt.aggregateId, slug: d.slug, name: d.name, status: d.status, suspension: null, mfaRequired: false, owners: [] });
   })

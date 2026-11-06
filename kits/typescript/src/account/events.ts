@@ -2,7 +2,7 @@
 
 import { Event, type PersonalFields } from "@kernable/sdk";
 
-import type { SessionEnd } from "./domain.ts";
+import type { AccountSuspensionReason, SessionEnd } from "./domain.ts";
 
 export class AccountRegistered extends Event {
   static personal: PersonalFields<AccountRegistered>[] = [{ fields: ["email", "name", "passwordHash"], subject: (_d, id) => id }];
@@ -79,4 +79,17 @@ export class SessionFactorAdded extends Event {
 
 export class SessionEnded extends Event {
   reason!: SessionEnd;
+}
+
+/** Ends every session (a reactor); sign-in is refused. */
+export class AccountSuspended extends Event {
+  reason!: AccountSuspensionReason;
+  at!: number;
+}
+
+export class AccountReactivated extends Event {}
+
+/** Erases the account's personal data, in its events and its sessions'. */
+export class AccountDeleted extends Event {
+  static erases = (_d: unknown, id: string) => id;
 }

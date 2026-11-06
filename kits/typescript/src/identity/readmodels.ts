@@ -30,7 +30,7 @@ const setMembership = (status: "active" | "suspended") => (d: { membershipId: st
   });
 
 export const identitiesReadModel = identityDomain
-  .readModel("identities", { order: ORDERS.readModels })
+  .readModel("identity.identities", { order: ORDERS.readModels })
   .on(IdentityCreated, (d, evt) => {
     identityRows.set(rowKey(evt.tenant, evt.aggregateId), {
       id: evt.aggregateId, tenant: evt.tenant, kind: d.kind, accountId: d.accountId, displayName: d.displayName,

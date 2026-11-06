@@ -13,7 +13,7 @@ const COMMANDS: Record<string, string[]> = {
     "CreateTenant", "ActivateTenant", "RenameTenant", "ChangeTenantSlug", "SuspendTenant", "ReactivateTenant",
     "DeleteTenant", "AddOwner", "RemoveOwner", "RequireMfa", "ChangeSignUpPolicy",
   ],
-  "account.account": ["RegisterAccount", "RequestVerification", "VerifyEmail", "SignIn"],
+  "account.account": ["RegisterAccount", "RequestVerification", "VerifyEmail", "SignIn", "SuspendAccount", "ReactivateAccount", "DeleteAccount"],
   "account.session": ["OpenSession", "RefreshSession", "AddSessionFactor", "EndSession"],
   "identity.identity": [
     "CreateIdentity", "CreateServiceIdentity", "UpdateProfile", "GrantMembership", "SuspendMembership",
@@ -21,13 +21,17 @@ const COMMANDS: Record<string, string[]> = {
     "ReactivateIdentity", "DeleteIdentity",
   ],
   "group.group": ["CreateGroup", "UpdateGroup", "SetPermissions", "DeleteGroup"],
+  "invitation.invitation": [
+    "CreateInvitation", "ResendInvitation", "RevokeInvitation", "DeclineInvitation", "AcceptInvitation", "RecordInvitationMailSent", "EraseInvitation",
+  ],
 };
 
 const QUERIES: Record<string, string[]> = {
   "tenancy.tenants": ["GetTenant", "GetTenantBySlug", "ListTenants", "GetSignUpPolicy"],
-  "account.accounts": ["FindAccountByEmail", "GetAccount"],
+  "account.accounts": ["FindAccountByEmail", "GetAccount", "ListSessions"],
   "identity.identities": ["GetIdentity", "ListIdentities", "ListMyIdentities", "FindIdentityByAccount"],
   "group.groups": ["ListGroups", "GetGroup"],
+  "invitation.invitations": ["ListInvitations", "PeekInvitation"],
 };
 
 const domains: Domain[] = kitDomains();
@@ -38,6 +42,6 @@ test("every command of the catalogue is registered on its aggregate", () => {
 });
 
 test("every query of the catalogue is registered on its read model", () => {
-  const found = Object.fromEntries(domains.flatMap((d) => d.listeners.map((l) => [`${d.name}.${l.name}`, [...l.queries.keys()].map((q) => q.split(".")[1]).sort()])));
+  const found = Object.fromEntries(domains.flatMap((d) => d.listeners.map((l) => [l.name, [...l.queries.keys()].map((q) => q.split(".")[1]).sort()])));
   for (const [readModel, queries] of Object.entries(QUERIES)) assert.deepEqual(found[readModel], [...queries].sort(), readModel);
 });

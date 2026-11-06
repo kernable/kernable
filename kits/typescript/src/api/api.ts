@@ -5,10 +5,11 @@ import { randomUUID } from "node:crypto";
 
 import type { Kernable, Outcome, RequestContext, StoredEvent } from "@kernable/sdk";
 
-import { EndSession, FindAccountByEmail, RegisterAccount, SignIn, VerifyEmail, type SignInFailed, type SignedIn } from "../account/index.ts";
+import { EndSession, FindAccountByEmail, GetAccount, RegisterAccount, SignIn, VerifyEmail, type SignInFailed, type SignedIn } from "../account/index.ts";
+import { AcceptInvitation, PeekInvitation } from "../invitation/index.ts";
 import { FindIdentityByAccount } from "../identity/index.ts";
 import { PLATFORM_TENANT } from "../shared/constants.ts";
-import { parseToken, randomSecret, token } from "../shared/secrets.ts";
+import { parseInvitationToken, parseToken, randomSecret, token } from "../shared/secrets.ts";
 import { checkAccessToken, issueAccessToken, type Claims, type SigningKeys } from "./tokens.ts";
 
 export interface KitApiOptions {
@@ -54,9 +55,15 @@ export class KitApi {
     const accountId = randomUUID();
     const outcome = await this.kernable.submit(RegisterAccount.new(input), { aggregateId: accountId, tenant: PLATFORM_TENANT, context: {} });
     if (outcome.committed) return { accountId };
-    // A taken email: the same answer as success (a mail to the existing account is still to do).
-    if (outcome.code === "unique_taken") return { accountId: randomUUID() };
-    return { ok: false, code: outcome.code };
+    if (outcome.code !== "unique_taken") return { ok: false, code: outcome.code };
+    // The address is held: a registration that expired unverified is taken over (same aggregate);
+    // otherwise the same answer as success, so nobody learns who has an account.
+    const held = await this.kernable.query(FindAccountByEmail.new({ email: input.email }), { tenant: PLATFORM_TENANT, context: this.serviceContext });
+    if (held.status === "pending") {
+      const again = await this.kernable.submit(RegisterAccount.new(input), { aggregateId: held.id, tenant: PLATFORM_TENANT, context: {} });
+      if (again.committed) return { accountId: held.id };
+    }
+    return { accountId: randomUUID() };
   }
 
   /** Confirms an email address with the token from the mail. */
@@ -104,6 +111,58 @@ export class KitApi {
     if (!tenant) return context;
     const found = await this.kernable.query(FindIdentityByAccount.new({ accountId: claims.sub }), { tenant, context: this.serviceContext });
     return { ...context, senderTenant: tenant, senderIdentity: found.identityId };
+  }
+
+  /** What the acceptance page shows for an invitation token. */
+  async peekInvitation(invitationToken: string) {
+    const t = parseInvitationToken(invitationToken);
+    if (!t) return null;
+    try {
+      return await this.kernable.query(PeekInvitation.new({ token: invitationToken }), { tenant: t.tenant, context: this.serviceContext });
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Accepts an invitation: as the signed-in account (`claims`), or as a new person with a
+   * name and password, registered in the same step (active: the token proved the email). The
+   * accepting account's email must be the invited one.
+   */
+  async acceptInvitation(
+    invitationToken: string,
+    as: { claims: Claims } | { name: string; password: string },
+  ): Promise<{ ok: true; accountId: string; tenant: string } | { ok: false; reason: string }> {
+    const peek = await this.peekInvitation(invitationToken);
+    if (!peek || !peek.email) return { ok: false, reason: "invalid_token" };
+    let accountId: string;
+    let email: string;
+    const newAccount = !("claims" in as);
+    if ("claims" in as) {
+      accountId = as.claims.sub;
+      const account = await this.kernable.query(GetAccount.new({ accountId }), { tenant: PLATFORM_TENANT, context: this.serviceContext });
+      email = account.email ?? "";
+    } else {
+      // Someone with an account signs in first, so nobody gets an account they could not use.
+      try {
+        await this.kernable.query(FindAccountByEmail.new({ email: peek.email }), { tenant: PLATFORM_TENANT, context: this.serviceContext });
+        return { ok: false, reason: "sign_in_first" };
+      } catch {
+        accountId = randomUUID();
+        email = peek.email;
+      }
+    }
+    const accepted = await this.kernable.submit(AcceptInvitation.new({ token: invitationToken, accountId, email, newAccount }), {
+      aggregateId: peek.invitationId, tenant: peek.tenant, context: this.serviceContext,
+    });
+    if (!accepted.committed) return { ok: false, reason: accepted.code };
+    if (!("claims" in as)) {
+      const registered = await this.kernable.submit(RegisterAccount.new({ email, name: as.name, password: as.password, verified: true }), {
+        aggregateId: accountId, tenant: PLATFORM_TENANT, context: this.serviceContext,
+      });
+      if (!registered.committed) return { ok: false, reason: registered.code };
+    }
+    return { ok: true, accountId, tenant: peek.tenant };
   }
 
   /** Signs out: ends the session. */

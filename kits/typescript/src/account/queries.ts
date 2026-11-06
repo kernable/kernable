@@ -4,7 +4,7 @@ import { Query, Rejected } from "@kernable/sdk";
 
 import { normalEmail } from "../shared/secrets.ts";
 import type { AccountStatus } from "./domain.ts";
-import { type AccountRow, accountRows, accountsByEmail, accountsReadModel } from "./readmodels.ts";
+import { type AccountRow, accountRows, accountsByEmail, accountsReadModel, type SessionRow, sessionRows } from "./readmodels.ts";
 
 /** The API's only: an open lookup would reveal who has an account. */
 export class FindAccountByEmail extends Query<{ id: string; status: AccountStatus }> {
@@ -27,3 +27,11 @@ accountsReadModel.query(GetAccount, (d) => {
   if (!a) throw new Rejected("No such account", "not_found");
   return a;
 });
+
+/** The account's sessions, the open ones first: "my devices". */
+export class ListSessions extends Query<SessionRow[]> {
+  accountId!: string;
+}
+
+accountsReadModel.query(ListSessions, (d) =>
+  [...(sessionRows.get(d?.accountId)?.values() ?? [])].sort((a, b) => Number(b.active) - Number(a.active) || b.lastAt - a.lastAt));

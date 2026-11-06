@@ -1,14 +1,17 @@
 // The account reactors: side effects and follow-up commands.
 
+import type { ListenerContext } from "@kernable/sdk";
+
 import { INTERNAL, ORDERS, PLATFORM_TENANT } from "../shared/constants.ts";
 import { currentMailer } from "../shared/mail.ts";
 import { token } from "../shared/secrets.ts";
-import { OpenSession } from "./commands.ts";
+import { EndSession, OpenSession } from "./commands.ts";
 import { accountDomain } from "./domain.ts";
-import { SignedIn, VerificationRequested } from "./events.ts";
+import { AccountDeleted, AccountSuspended, SignedIn, VerificationRequested } from "./events.ts";
+import { ListSessions } from "./queries.ts";
 
 export const mailReactor = accountDomain
-  .reactor("mail", { order: ORDERS.reactors })
+  .reactor("account.mail", { order: ORDERS.reactors })
   .on(VerificationRequested, async (d, evt) => {
     // Erased already (the account verified, or was deleted): nothing to send.
     if (!d.token || !d.email) return;
@@ -20,7 +23,7 @@ export const mailReactor = accountDomain
   });
 
 export const sessionsReactor = accountDomain
-  .reactor("sessions", { order: ORDERS.reactors })
+  .reactor("account.sessions", { order: ORDERS.reactors })
   .on(SignedIn, async (d, evt, ctx) => {
     await ctx.submit(
       OpenSession.new({
@@ -30,3 +33,22 @@ export const sessionsReactor = accountDomain
       { id: `open-session-${d.sessionId}`, aggregateId: d.sessionId, tenant: PLATFORM_TENANT, context: { ...ctx.follow(), ...INTERNAL } },
     );
   });
+
+/** A suspended or deleted account's sessions end at once. */
+export const endingReactor = accountDomain
+  .reactor("account.ending", { order: ORDERS.reactors })
+  .on(AccountSuspended, (_d, evt, ctx) => endAll(evt.aggregateId, "account_suspended", ctx))
+  .on(AccountDeleted, (_d, evt, ctx) => endAll(evt.aggregateId, "account_deleted", ctx));
+
+async function endAll(accountId: string, reason: "account_suspended" | "account_deleted", ctx: ListenerContext): Promise<void> {
+  const sessions = await ctx.query(ListSessions.new({ accountId }), { tenant: PLATFORM_TENANT, context: INTERNAL });
+  for (const s of sessions.filter((x) => x.active)) {
+    try {
+      await ctx.submit(EndSession.new({ reason }), {
+        id: `end-${s.id}-${reason}`, aggregateId: s.id, tenant: PLATFORM_TENANT, context: { ...ctx.follow(), ...INTERNAL },
+      });
+    } catch (err) {
+      if ((err as { code?: string }).code !== "invalid_state") throw err; // ended meanwhile (signed out)
+    }
+  }
+}

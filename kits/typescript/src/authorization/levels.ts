@@ -43,6 +43,9 @@ export const RULES: Record<string, Rule> = {
   "account.ConfirmEmailChange": { level: "public" },
   "account.OpenSession": { level: "internal" },
   "account.AddSessionFactor": { level: "internal" },
+  "account.SuspendAccount": { level: "platform" }, // the person too, with owner_requested: see policy.ts
+  "account.ReactivateAccount": { level: "platform" },
+  "account.DeleteAccount": { level: "platform" },
   "account.EndSession": { level: "group", self: true },
   "account.GetAccount": { level: "group", self: true },
   "account.ListSessions": { level: "group", self: true },
@@ -54,6 +57,8 @@ export const RULES: Record<string, Rule> = {
   "identity.ListMyIdentities": { level: "authenticated", self: true },
 
   "invitation.DeclineInvitation": { level: "public" },
+  "invitation.RecordInvitationMailSent": { level: "internal" },
+  "invitation.EraseInvitation": { level: "platform" },
 };
 
 /** Which field names a query's target: queries name no aggregate. */

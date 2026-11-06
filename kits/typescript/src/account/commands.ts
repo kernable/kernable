@@ -5,8 +5,8 @@ import { Command, type PersonalFields, Rejected } from "@kernable/sdk";
 import { DAY, HOUR, SESSION_IDLE_DAYS, SESSION_MAX_DAYS, VERIFICATION_HOURS } from "../shared/constants.ts";
 import { checkPassword, equalSecrets, hashPassword, normalEmail, parseToken, randomSecret, sha256, validEmail, validPassword } from "../shared/secrets.ts";
 import { accountAggregate, lockedUntil, sessionAggregate } from "./aggregates.ts";
-import type { SessionEnd } from "./domain.ts";
-import { AccountRegistered, EmailVerified, SessionEnded, SessionFactorAdded, SessionOpened, SessionRefreshed, SignedIn, SignInFailed, VerificationRequested } from "./events.ts";
+import { ACCOUNT_SUSPENSION_REASONS, type AccountSuspensionReason, type SessionEnd } from "./domain.ts";
+import { AccountDeleted, AccountReactivated, AccountSuspended, AccountRegistered, EmailVerified, SessionEnded, SessionFactorAdded, SessionOpened, SessionRefreshed, SignedIn, SignInFailed, VerificationRequested } from "./events.ts";
 
 /** Internal: after a second factor was proved on the account. */
 export class AddSessionFactor extends Command {
@@ -88,12 +88,16 @@ export function verificationRequested(email: string, at: number): VerificationRe
 }
 
 accountAggregate.command(RegisterAccount, async (s, d, _cmd, ctx) => {
-  if (s.status !== "none") throw new Rejected("The account exists", "exists");
+  const at = ctx.now().getTime();
+  // A registration whose verification expired unverified is taken over by a new one of the same
+  // address, so nobody blocks someone else's address (design/kits.md).
+  const expired = s.status === "pending" && !s.openTokens.some((t) => t.purpose === "verify" && t.expiresAt > at);
+  if (s.status !== "none" && !expired) throw new Rejected("The account exists", "exists");
   const email = normalEmail(d.email);
+  if (expired && email !== s.email) throw new Rejected("Only the same address takes over a registration", "exists");
   if (!validEmail(email)) throw new Rejected("Not an email address", "invalid_email");
   if (typeof d.name !== "string" || !d.name.trim() || d.name.length > 200) throw new Rejected("A name is needed", "invalid_name");
   if (d.password !== undefined && !validPassword(d.password)) throw new Rejected("A password has 10 to 1024 characters", "weak_password");
-  const at = ctx.now().getTime();
   const passwordHash = d.password === undefined ? null : await hashPassword(d.password);
   const verified = d.verified === true;
   const registered = AccountRegistered.new({ email, name: d.name.trim(), passwordHash, verified, at });
@@ -152,4 +156,30 @@ accountAggregate.command(VerifyEmail, (s, d, cmd, ctx) => {
   }
   if (ctx.now().getTime() > open.expiresAt) throw new Rejected("The link has expired", "expired_token");
   return [EmailVerified.new({ tokenId: open.tokenId })];
+});
+
+/** The platform's; the person itself with `owner_requested`. Ends every session (a reactor). */
+export class SuspendAccount extends Command {
+  reason!: AccountSuspensionReason;
+}
+
+accountAggregate.command(SuspendAccount, (s, d, _cmd, ctx) => {
+  if (s.status !== "pending" && s.status !== "active") throw new Rejected("Cannot suspend this account", "invalid_state");
+  if (!ACCOUNT_SUSPENSION_REASONS.includes(d.reason)) throw new Rejected("Unknown reason", "invalid_reason");
+  return [AccountSuspended.new({ reason: d.reason, at: ctx.now().getTime() })];
+});
+
+export class ReactivateAccount extends Command {}
+
+accountAggregate.command(ReactivateAccount, (s) => {
+  if (s.status !== "suspended") throw new Rejected("Only a suspended account is reactivated", "invalid_state");
+  return [AccountReactivated.new()];
+});
+
+/** Final, only from suspended: erases the account's personal data; its identities go too (a reactor). */
+export class DeleteAccount extends Command {}
+
+accountAggregate.command(DeleteAccount, (s) => {
+  if (s.status !== "suspended") throw new Rejected("Only a suspended account is deleted", "invalid_state");
+  return [AccountDeleted.new()];
 });

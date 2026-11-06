@@ -12,7 +12,7 @@ export const groupRows = new Map<string, GroupRow>();
 export const rowKey = (tenant: string, id: string) => `${tenant}/${id}`;
 
 export const groupsReadModel = groupDomain
-  .readModel("groups", { order: ORDERS.readModels })
+  .readModel("group.groups", { order: ORDERS.readModels })
   .on(GroupCreated, (d, evt) => void groupRows.set(rowKey(evt.tenant, evt.aggregateId), { id: evt.aggregateId, tenant: evt.tenant, ...d }))
   .on(GroupUpdated, (d, evt) => {
     const g = groupRows.get(rowKey(evt.tenant, evt.aggregateId));

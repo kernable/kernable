@@ -4,7 +4,7 @@
 import { Rejected, type Listener } from "@kernable/sdk";
 
 import {
-  AccountRegistered, EmailVerified, SessionEnded, SessionFactorAdded, SessionOpened,
+  AccountDeleted, AccountReactivated, AccountRegistered, AccountSuspended, EmailVerified, SessionEnded, SessionFactorAdded, SessionOpened,
 } from "../account/index.ts";
 import { GroupCreated, GroupDeleted, GroupPermissionsSet, groupDomain } from "../group/index.ts";
 import {
@@ -38,7 +38,7 @@ const setIdentity = (active: boolean) => (_d: unknown, evt: Evt) => {
 };
 
 export const authorizationListener: Listener = groupDomain
-  .readModel("authorization", { order: ORDERS.authorization })
+  .readModel("group.authorization", { order: ORDERS.authorization })
   // tenancy
   .on(TenantCreated, (d, evt) => void k.tenants.set(evt.aggregateId, { status: d.status, owners: new Set(), mfaRequired: false, suspension: null }))
   .on(TenantActivated, (_d, evt) => setTenant(evt.aggregateId, (t) => void (t.status = "active")))
@@ -70,6 +70,9 @@ export const authorizationListener: Listener = groupDomain
     const a = k.accounts.get(evt.aggregateId);
     if (a?.status === "pending") a.status = "active";
   })
+  .on(AccountSuspended, (_d, evt) => void k.accounts.set(evt.aggregateId, { status: "suspended" }))
+  .on(AccountReactivated, (_d, evt) => void k.accounts.set(evt.aggregateId, { status: "active" }))
+  .on(AccountDeleted, (_d, evt) => void k.accounts.set(evt.aggregateId, { status: "deleted" }))
   .on(SessionOpened, (d, evt) => void k.sessions.set(evt.aggregateId, { accountId: d.accountId, factors: [...d.factors], active: true }))
   .on(SessionFactorAdded, (d, evt) => void k.sessions.get(evt.aggregateId)?.factors.push(d.factor))
   .on(SessionEnded, (_d, evt) => {

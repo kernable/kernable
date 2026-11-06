@@ -1,8 +1,8 @@
 // The account aggregates: state, how each event changes it, unique keys and facts.
 
 import { LOCKOUT_AFTER, LOCKOUT_MAX_MINUTES, MINUTE } from "../shared/constants.ts";
-import { accountDomain, type AccountStatus, type SessionEnd, type TokenPurpose } from "./domain.ts";
-import { AccountRegistered, EmailVerified, SessionEnded, SessionFactorAdded, SessionOpened, SessionRefreshed, SignedIn, SignInFailed, VerificationRequested } from "./events.ts";
+import { accountDomain, type AccountStatus, type AccountSuspensionReason, type SessionEnd, type TokenPurpose } from "./domain.ts";
+import { AccountDeleted, AccountReactivated, AccountRegistered, AccountSuspended, EmailVerified, SessionEnded, SessionFactorAdded, SessionOpened, SessionRefreshed, SignedIn, SignInFailed, VerificationRequested } from "./events.ts";
 
 export interface Account {
   id?: string;
@@ -14,6 +14,7 @@ export interface Account {
   failures: { count: number; lastAt: number };
   /** Open emailed tokens; the token itself is in the vault until it is used. */
   openTokens: { tokenId: string; purpose: TokenPurpose; token: string | null; expiresAt: number }[];
+  suspension: { reason: AccountSuspensionReason; at: number } | null;
 }
 
 /** Until when the account is locked after failed sign-ins: computed, never stored. */
@@ -30,6 +31,7 @@ export const accountAggregate = accountDomain
     password: null,
     failures: { count: 0, lastAt: 0 },
     openTokens: [],
+    suspension: null,
   })
   .apply(AccountRegistered, (s, d, evt) => {
     s.id = evt.aggregateId;
@@ -47,6 +49,19 @@ export const accountAggregate = accountDomain
     s.emailVerified = true;
     if (s.status === "pending") s.status = "active";
     s.openTokens = s.openTokens.filter((t) => t.tokenId !== d.tokenId);
+  })
+  .apply(AccountSuspended, (s, d) => {
+    s.status = "suspended";
+    s.suspension = { reason: d.reason, at: d.at };
+  })
+  .apply(AccountReactivated, (s) => {
+    s.status = "active";
+    s.suspension = null;
+  })
+  .apply(AccountDeleted, (s) => {
+    s.status = "deleted";
+    s.password = null;
+    s.openTokens = [];
   })
   .apply(SignedIn, (s) => void (s.failures = { count: 0, lastAt: 0 }))
   .apply(SignInFailed, (s, d) => {

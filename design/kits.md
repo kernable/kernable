@@ -353,7 +353,7 @@ One aggregate, `invitation.invitation`, with a random ID, under its tenant's `te
 | `RecordMailSent` | `tokenId` | — | `MailSent` | the mail reactor |
 | `EraseInvitation` | — | not `open` | `InvitationErased` (erases `invitation:<id>`) | `platform`; the invitation reactor (tenant deleted) |
 
-The token is `<invitationId>.<tokenId>.<secret>` (base64url), in the vault under `token:<tokenId>` until used.
+The token is `<tenantId>.<invitationId>.<tokenId>.<secret>`, so the API knows the tenant to accept it in; it sits in the vault under `token:<tokenId>` until used.
 
 ### Accepting
 
@@ -431,7 +431,7 @@ Refusals reach the client as `PERMISSION_DENIED` with the code. `group.Explain` 
 
 ### Orders
 
-The set's listeners take kernable's reserved orders: the authorization middleware -30, the set's other read models -20, its reactors -10. Their keys are granted `reserved_order`; app listeners cannot go below 0.
+The set's listeners take kernable's reserved orders: the authorization middleware -30, the cleanup reactors -25 (they must see a deleted tenant's rows before the read models drop them), the read models -20, the other reactors -10. Listener names are qualified with their domain (`account.mail`, `invitation.mail`): the kernel tracks listeners by name across domains. Their keys are granted `reserved_order`; app listeners cannot go below 0.
 
 ### Decided (2026-11-06)
 

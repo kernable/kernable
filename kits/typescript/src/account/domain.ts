@@ -7,5 +7,7 @@ import { domain } from "@kernable/sdk";
 export const accountDomain = domain("account");
 
 export type AccountStatus = "none" | "pending" | "active" | "suspended" | "deleted";
+export type AccountSuspensionReason = "owner_requested" | "abuse" | "by_platform";
+export const ACCOUNT_SUSPENSION_REASONS: AccountSuspensionReason[] = ["owner_requested", "abuse", "by_platform"];
 export type TokenPurpose = "verify" | "reset" | "email_change";
 export type SessionEnd = "signed_out" | "revoked" | "account_suspended" | "password_changed" | "account_deleted" | "reuse" | "idle" | "expired";

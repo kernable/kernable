@@ -21,7 +21,8 @@ export const SESSION_MAX_DAYS = 90;
 export const INVITATION_DAYS = 7;
 
 /** Listener orders the kit takes: its keys need a grant of `reserved_order`. */
-export const ORDERS = { authorization: -30, readModels: -20, reactors: -10 } as const;
+/** `cleanup`: reactors that must see a deleted tenant's rows before the read models drop them. */
+export const ORDERS = { authorization: -30, cleanup: -25, readModels: -20, reactors: -10 } as const;
 
 export const MINUTE = 60_000;
 export const HOUR = 60 * MINUTE;

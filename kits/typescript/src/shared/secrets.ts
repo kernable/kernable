@@ -62,3 +62,14 @@ export function validEmail(email: string): boolean {
 export function validPassword(password: unknown): password is string {
   return typeof password === "string" && password.length >= 10 && password.length <= 1024;
 }
+
+/** An invitation's token names its tenant too, so the API knows where to accept it: four parts. */
+export function invitationToken(tenant: string, invitationId: string, tokenId: string, secret: string): string {
+  return [tenant, invitationId, tokenId, secret].join(".");
+}
+
+export function parseInvitationToken(value: unknown): { tenant: string; invitationId: string; tokenId: string; secret: string } | null {
+  if (typeof value !== "string") return null;
+  const p = value.split(".");
+  return p.length === 4 && p.every((x) => x.length > 0) ? { tenant: p[0], invitationId: p[1], tokenId: p[2], secret: p[3] } : null;
+}
