@@ -1186,14 +1186,17 @@ export class Aggregate<S> {
    * Runs the `commandType` handler on a copy of `state`, as a worker does, e.g. in a unit test,
    * and returns the events it produces: `await cart.handle(state, "AddItem", { sku: "apple", qty: 2 }, new CommandContext("c-1"))`.
    * The handler's `CommandMeta` has the command ID of `ctx`, this aggregate's domain and name,
-   * and an empty aggregate ID and tenant; `data` goes through JSON as it would on the wire.
+   * and the aggregate ID and tenant of `target` (default empty); `data` goes through JSON as it would on the wire.
    * Rejects with the handler's `Rejected` (or other error), or with an error if there is no
    * handler for `commandType`.
    */
-  async handle(state: S, commandType: string, data: unknown, ctx: CommandContext): Promise<NewEvent[]> {
+  async handle(state: S, commandType: string, data: unknown, ctx: CommandContext, target: { aggregateId?: string; tenant?: string } = {}): Promise<NewEvent[]> {
     const handler = this.handlers.get(commandType);
     if (!handler) throw new Error(`no handler for ${commandType} on ${this.name}`);
-    const cmd: CommandMeta = { commandId: ctx.commandId, type: commandType, domain: this.domain, aggregateType: this.name, aggregateId: "", tenant: "" };
+    const cmd: CommandMeta = {
+      commandId: ctx.commandId, type: commandType, domain: this.domain, aggregateType: this.name,
+      aggregateId: target.aggregateId ?? "", tenant: target.tenant ?? "",
+    };
     return handler(structuredClone(state), decode(encode(data)), cmd, ctx);
   }
 
