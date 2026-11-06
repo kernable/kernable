@@ -512,11 +512,11 @@ impl Client {
                 Ok(response) => return Ok(response.into_inner()),
                 Err(status) if Instant::now() + pause < deadline && self.ended(at, &status) => {
                     tokio::time::sleep(pause).await;
-                    pause = (pause * 2).min(Duration::from_secs(1));
+                    pause = (pause * 2).min(MAX_PAUSE);
                 }
                 Err(status) if not_connected(&status) && Instant::now() + pause < deadline => {
                     tokio::time::sleep(pause).await;
-                    pause = (pause * 2).min(Duration::from_secs(1));
+                    pause = (pause * 2).min(MAX_PAUSE);
                 }
                 Err(status) if not_connected(&status) => {
                     return Err(tonic::Status::deadline_exceeded(format!(
@@ -1400,3 +1400,8 @@ fn local(url: &str) -> bool {
             rest.split('.').count() == 3 && rest.split('.').all(|p| p.parse::<u8>().is_ok())
         })
 }
+
+/// The longest pause between tries of a call while the kernel is away: a pair's switchover or a
+/// kernel update takes a few hundred milliseconds, and the client finds the kernel serving again
+/// within this much of it.
+const MAX_PAUSE: Duration = Duration::from_millis(200);
