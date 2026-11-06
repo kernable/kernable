@@ -436,9 +436,10 @@ async fn invalid_listeners_are_refused() {
         code(listen(&env, "x", impostor).await),
         Some(Code::Unauthenticated)
     );
+    // A negative order needs a grant of reserved_order, which the default key lacks.
     assert_eq!(
         code(listen(&env, "x", opts(-10)).await),
-        Some(Code::InvalidArgument)
+        Some(Code::PermissionDenied)
     );
     let too_much = Opts {
         key: key(6),
