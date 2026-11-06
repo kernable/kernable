@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Kernel;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     /// When it was written, ms since epoch.
     pub at: i64,
@@ -26,6 +26,11 @@ pub struct Usage {
     pub rejected: u64,
     pub queries: u64,
     pub store_bytes: u64,
+    /// With `--replication sync`: `in-sync` (a standby holds every write), `alone` (it commits
+    /// without one, as the witness allows), `catching-up` (without a witness, before a standby
+    /// caught up), `waiting` (writes wait for a standby that is away). Empty without.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub replication: String,
 }
 
 /// Where the store at `url` keeps its usage; `None` for a store in memory.
@@ -48,6 +53,11 @@ pub(crate) fn now(kernel: &Kernel) -> Usage {
         rejected: base.rejected + m.rejected.load(Relaxed),
         queries: base.queries + m.queries_answered.load(Relaxed),
         store_bytes: kernel.stored_bytes.load(Relaxed),
+        replication: kernel
+            .replication
+            .as_ref()
+            .map(|p| p.state_name().to_owned())
+            .unwrap_or_default(),
     }
 }
 

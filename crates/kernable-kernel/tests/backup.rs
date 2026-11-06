@@ -28,6 +28,7 @@ fn follower(env: &Env, to: &str) -> Follower {
         base_every: Duration::from_secs(3600),
         keep: 3,
         check_every: None,
+        status_file: None,
     }
 }
 
@@ -237,4 +238,35 @@ async fn a_backup_check_reads_it_through_and_finds_a_damaged_segment() {
     bytes[at] ^= 1;
     std::fs::write(&path, bytes).unwrap();
     assert!(backup::check(t.as_ref(), &BackupKey::new(&[7; 32])).is_err());
+}
+
+/// `--status-file`: the follower notes how far it uploaded and what its checks found.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_status_file_says_how_far_the_backup_reached_and_what_its_check_found() {
+    let env = start_custom("backup-status", |c, _| c.replication.backup = true).await;
+    spawn_worker(&env).await;
+    let to = format!("file:{}", env.dir.join("backup").display());
+    let status = env.dir.join("backup.status");
+    place(&env, 0, 5).await;
+    let mut f = follower(&env, &to);
+    f.status_file = Some(status.clone());
+    f.check_every = Some(Duration::from_millis(200));
+    let running = tokio::spawn(backup::run(f));
+    backed_up(&env, &to).await;
+    let head = env.kernel_head();
+    let read = || -> backup::Status {
+        serde_json::from_slice(&std::fs::read(&status).unwrap_or_default()).unwrap_or_default()
+    };
+    for _ in 0..100 {
+        let s = read();
+        if s.record >= head && s.checked_at > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    running.abort();
+    let s = read();
+    assert_eq!(s.record, head);
+    assert!(s.uploaded_at > 0 && s.checked_at > 0, "{s:?}");
+    assert_eq!(s.check_error, None);
 }

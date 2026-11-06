@@ -239,7 +239,7 @@ Continuous backup:
                                           <file>, readable by its owner only; never overwrites one.
                                           Keep it apart from the backups, as you keep the root key:
                                           without it a backup cannot be read.
-  kernable backup --follow <addr>[,<addr>] --key <key> --to <target> --backup-key <file> [--segment-seconds <s>] [--base-hours <h>] [--keep <n>] [--check-hours <h>]
+  kernable backup --follow <addr>[,<addr>] --key <key> --to <target> --backup-key <file> [--segment-seconds <s>] [--base-hours <h>] [--keep <n>] [--check-hours <h>] [--status-file <file>]
                                           Follows the kernel at <addr> (started with --backup on;
                                           both kernels of a pair, comma-separated) and writes its
                                           records to <target>, encrypted with the backup key, until
@@ -253,7 +253,9 @@ Continuous backup:
                                           AWS_SECRET_ACCESS_KEY. Vault values stay encrypted with the
                                           kernel's vault key besides. With --check-hours, it also
                                           checks the backup that often, as backup check does, and
-                                          logs what it found.
+                                          logs what it found. With --status-file, it notes there
+                                          (JSON) when it last uploaded, up to which record, and when
+                                          it last checked and what it found.
   kernable backup list <target> --backup-key <file>
                                           Prints the generations of a backup: each base's record
                                           and time, and how far its segments reach.
@@ -1161,6 +1163,7 @@ async fn run_backup(flags: &[&str]) -> ExitCode {
                 "--base-hours",
                 "--keep",
                 "--check-hours",
+                "--status-file",
             ],
         )?;
         let one = |flag: &str| values.get(flag).and_then(|v| v.first().copied());
@@ -1206,6 +1209,7 @@ async fn run_backup(flags: &[&str]) -> ExitCode {
                 None => None,
                 Some(_) => Some(Duration::from_secs(number("--check-hours", 24)? * 3600)),
             },
+            status_file: one("--status-file").map(std::path::PathBuf::from),
         })
     })();
     let follower = match parsed {

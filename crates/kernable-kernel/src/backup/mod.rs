@@ -74,6 +74,39 @@ pub struct Follower {
     pub keep: usize,
     /// Reads the newest generation through this often ([`check`]); `None`: never.
     pub check_every: Option<Duration>,
+    /// Where it notes how far it uploaded and what its last check found ([`Status`]), for
+    /// whoever watches it.
+    pub status_file: Option<std::path::PathBuf>,
+}
+
+/// What the follower last did, as `--status-file` holds it (JSON): when it last put something
+/// into the target and up to which record, and when it last checked the backup and what it
+/// found. Times in ms since epoch, 0 for never.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Status {
+    pub uploaded_at: i64,
+    pub record: u64,
+    pub checked_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_error: Option<String>,
+}
+
+/// Updates the status file at `path`, if there is one: read, changed, written in one step.
+fn note(path: &Option<std::path::PathBuf>, update: impl FnOnce(&mut Status)) {
+    let Some(path) = path else {
+        return;
+    };
+    let mut status: Status = std::fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    update(&mut status);
+    let next = path.with_extension("next");
+    let written = std::fs::write(&next, serde_json::to_vec(&status).expect("serializes"))
+        .and_then(|()| std::fs::rename(&next, path));
+    if let Err(e) = written {
+        tracing::warn!(path = %path.display(), error = %e, "writing the backup's status failed");
+    }
 }
 
 /// What [`check`] read of a backup's newest generation.
@@ -169,13 +202,24 @@ pub fn check(target: &dyn Target, crypt: &BackupKey) -> Result<Checked, BoxError
     Ok(checked)
 }
 
-/// Checks the backup every `every` ([`check`]), logging what it found; runs beside the follower.
-async fn check_now_and_then(target: Arc<dyn Target>, crypt: Arc<BackupKey>, every: Duration) {
+/// Checks the backup every `every` ([`check`]), logging what it found and noting it in the
+/// status file; runs beside the follower.
+async fn check_now_and_then(
+    target: Arc<dyn Target>,
+    crypt: Arc<BackupKey>,
+    every: Duration,
+    status_file: Option<std::path::PathBuf>,
+) {
     loop {
         tokio::time::sleep(every).await;
         let started = Instant::now();
         let (target, crypt) = (Arc::clone(&target), Arc::clone(&crypt));
-        match blocking(move || check(target.as_ref(), &crypt)).await {
+        let checked = blocking(move || check(target.as_ref(), &crypt)).await;
+        note(&status_file, |s| {
+            s.checked_at = now_ms();
+            s.check_error = checked.as_ref().err().map(|e| e.to_string());
+        });
+        match checked {
             Ok(c) => tracing::info!(
                 generation = %c.generation,
                 record = c.record,
@@ -317,6 +361,7 @@ pub async fn run(follower: Follower) -> Result<(), BoxError> {
             Arc::clone(&follower.target),
             Arc::clone(&follower.crypt),
             every,
+            follower.status_file.clone(),
         )))
     });
     loop {
@@ -437,11 +482,16 @@ async fn follow_once(
             .map(|first| segment_name(&generation, first, head.seq, &head.hash));
         let seq = head.seq;
         let tx = tx.clone();
+        let status_file = follower.status_file.clone();
         async move {
             let Some(name) = name else {
                 return Ok::<(), BoxError>(());
             };
             blocking(move || target.put(&name, &crypt.seal(&name, &plain)?)).await?;
+            note(&status_file, |s| {
+                s.uploaded_at = now_ms();
+                s.record = seq;
+            });
             // In the target: the kernel may drop these records from its log now.
             tx.send(FollowRequest {
                 msg: Some(follow_request::Msg::Ack(FollowAck { seq })),
@@ -558,7 +608,13 @@ async fn write_base(
     };
     let (target, crypt) = (Arc::clone(&follower.target), Arc::clone(&follower.crypt));
     let name = format!("{generation}/base.done");
-    blocking(move || target.put(&name, &crypt.seal(&name, &base.encode_to_vec())?)).await
+    let seq = base.seq;
+    blocking(move || target.put(&name, &crypt.seal(&name, &base.encode_to_vec())?)).await?;
+    note(&follower.status_file, |s| {
+        s.uploaded_at = now_ms();
+        s.record = seq;
+    });
+    Ok(())
 }
 
 /// Deletes the generations beyond `--keep` (oldest first) and unfinished ones before

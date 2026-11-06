@@ -570,6 +570,9 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
             b.to,
             "--backup-key".into(),
             b.backup_key,
+            // Beside the project, for whoever watches the node.
+            "--status-file".into(),
+            "backup.status".into(),
         ];
         for (flag, value) in [
             ("--segment-seconds", b.segment_seconds),
@@ -2050,6 +2053,8 @@ segment-seconds = 2
                 "s3://acme-backups/shop",
                 "--backup-key",
                 "backup-encryption.key",
+                "--status-file",
+                "backup.status",
                 "--segment-seconds",
                 "2"
             ]

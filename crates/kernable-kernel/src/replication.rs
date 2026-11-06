@@ -210,6 +210,19 @@ impl Primary {
         state.standby.is_some() && state.in_sync && !state.catching_up && !state.alone
     }
 
+    /// Where replication stands, for the usage file.
+    pub(crate) fn state_name(&self) -> &'static str {
+        if self.standby_in_sync() {
+            "in-sync"
+        } else if self.state().alone_now() {
+            "alone"
+        } else if self.catching_up() {
+            "catching-up"
+        } else {
+            "waiting"
+        }
+    }
+
     /// The key of the connected standby.
     pub(crate) fn standby(&self) -> Option<String> {
         self.state().standby.clone()

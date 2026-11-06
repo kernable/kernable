@@ -359,6 +359,7 @@ async fn the_usage_beside_the_store_counts_on_across_restarts() {
             rejected: 1,
             queries: 5,
             store_bytes: 0,
+            replication: String::new(),
         };
         let path = kernable_kernel::usage::path(&config.store).unwrap();
         std::fs::write(path, serde_json::to_vec(&before).unwrap()).unwrap();
