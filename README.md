@@ -47,3 +47,7 @@ make fuzz           # fuzzes the file log and the wire messages (nightly Rust, c
 `crates/kernable-kernel/tests/fixtures/format-<n>` holds a frozen store of the current data format; `make check` verifies and runs it. There are no migrations before the first release: a format change bumps `kernable_store::FORMAT`, and the fixture is regenerated in a new directory (`KERNABLE_WRITE_FIXTURES=1` fills only missing ones).
 
 The repository is private.
+
+## License
+
+The kernel, the store and their tools: [FSL-1.1-ALv2](LICENSE-FSL.md); the core types and the SDKs: [Apache-2.0](LICENSE-APACHE). See [LICENSE.md](LICENSE.md).
