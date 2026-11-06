@@ -27,3 +27,8 @@ ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 jsonwebtoken = "9"
 hickory-resolver = "0.25"
+
+[dev-dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
+rusqlite = { version = "0.41", features = ["bundled"] }

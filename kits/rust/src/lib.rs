@@ -23,6 +23,7 @@ macro_rules! on {
 pub mod account;
 pub mod api;
 pub mod authorization;
+pub mod bootstrap;
 pub mod group;
 pub mod identity;
 pub mod invitation;
