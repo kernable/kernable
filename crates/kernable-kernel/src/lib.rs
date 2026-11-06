@@ -309,11 +309,16 @@ pub struct Kernel {
 
 impl Kernel {
     pub fn open(config: Config) -> Result<Arc<Self>, BoxError> {
-        taking_over(config.take_over_ms, || {
+        let kernel = taking_over(config.take_over_ms, || {
             kernable_store::open_with(&config.store, config.durability)
                 .map_err(BoxError::from)
                 .and_then(|store| Self::open_on(config.clone(), store))
-        })
+        })?;
+        // It follows no primary (any more): the standby's note goes.
+        if let Some(m) = standby::marker(&kernel.config().store, "following") {
+            let _ = std::fs::remove_file(m);
+        }
+        Ok(kernel)
     }
 
     /// Like [`Kernel::open`], on a store opened already (`config.store` is not opened): for

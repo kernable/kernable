@@ -259,6 +259,11 @@ pub(crate) async fn run_with(config: Config, link: Option<Arc<Link>>) -> Result<
             let _ = std::fs::remove_file(m);
         }
     }
+    // While it follows, a note says so beside the store, for whoever looks after the machine
+    // (a pair's kernels are updated standby first); the kernel opened on the stores removes it.
+    if let Some(m) = marker(&standby.config.store, "following") {
+        let _ = std::fs::write(m, format!("{}\n", follow.primary));
+    }
     // A store an image was left half-filled in starts over.
     if image_marker(&standby.config.store).is_some_and(|m| m.exists()) {
         standby
@@ -283,7 +288,9 @@ pub(crate) async fn run_with(config: Config, link: Option<Arc<Link>>) -> Result<
         None => None,
     };
     let following = async {
-        let mut delay = Duration::from_secs(1);
+        // The first try again comes soon: a primary whose binary was replaced serves again
+        // within a moment, and a pair's writes wait for its standby meanwhile.
+        let mut delay = Duration::from_millis(100);
         loop {
             match follow_once(&standby, &key, &grant).await {
                 Ok(()) => tracing::warn!("the primary ended the stream; connecting again"),

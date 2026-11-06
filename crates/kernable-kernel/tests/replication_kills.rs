@@ -662,6 +662,16 @@ async fn a_pair_updates_both_kernels_by_handing_their_stores_over() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let first = primary();
+    // The standby notes beside its store that it follows; the primary has no such note.
+    let following = |at: usize| {
+        let store = dir.store(nodes[at].0);
+        let path = store.split_once(':').unwrap().1.to_owned();
+        std::path::Path::new(&format!("{path}.following")).exists()
+    };
+    assert!(
+        following(1 - first) && !following(first),
+        "the following note"
+    );
     // The newest log is the process started last.
     let newest_log = || {
         std::fs::read_dir(&dir.0)
@@ -711,6 +721,10 @@ async fn a_pair_updates_both_kernels_by_handing_their_stores_over() {
         }
         assert_eq!(primary(), first, "the roles stay");
     }
+    assert!(
+        following(1 - first) && !following(first),
+        "the notes stay with the roles"
+    );
     tokio::time::sleep(Duration::from_millis(1000)).await;
     let (placed, told) = load.finish().await;
     assert!(!told.is_empty());
