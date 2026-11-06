@@ -3,7 +3,7 @@
 # Rust SDK
 
 ```sh
-cargo add kernable serde_json
+cargo add kernable-sdk serde_json
 cargo add serde --features derive
 cargo add tokio --features macros,rt-multi-thread
 ```

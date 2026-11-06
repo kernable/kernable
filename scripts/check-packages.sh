@@ -27,7 +27,7 @@ KERNEL_PID=$!
 for _ in $(seq 50); do [ -S k.sock ] && break; sleep 0.1; done
 
 # Python: a read model of the demo domain answering demo.GetTotal, installed from the wheel.
-python3 -m venv py && py/bin/pip install -q --disable-pip-version-check kernable-*.whl
+python3 -m venv py && py/bin/pip install -q --disable-pip-version-check kernable_sdk-*.whl
 cat > model.py <<'PY'
 import sys
 from kernable import Kernable
@@ -69,4 +69,4 @@ RESULT=$(node app.js "unix:$DIR/k.sock")
 kill $MODEL_PID 2>/dev/null || true
 wait $MODEL_PID 2>/dev/null || true
 [ "$RESULT" = "5" ] || { echo "unexpected answer: $RESULT"; exit 1; }
-echo "packages OK: npm $(ls kernable-sdk-*.tgz), wheel $(ls kernable-*.whl); TypeScript worker -> Python read model -> TypeScript query: $RESULT"
+echo "packages OK: npm $(ls kernable-sdk-*.tgz), wheel $(ls kernable_sdk-*.whl); TypeScript worker -> Python read model -> TypeScript query: $RESULT"

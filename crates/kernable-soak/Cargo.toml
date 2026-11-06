@@ -15,7 +15,7 @@ test = false
 ed25519-dalek.workspace = true
 getrandom.workspace = true
 hex.workspace = true
-kernable = { path = "../../sdks/rust" }
+kernable = { package = "kernable-sdk", path = "../../sdks/rust" }
 kernable-core = { path = "../kernable-core" }
 kernable-store = { path = "../kernable-store" }
 prost.workspace = true

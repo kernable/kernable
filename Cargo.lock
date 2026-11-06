@@ -297,7 +297,7 @@ dependencies = [
 name = "concepts"
 version = "0.1.0"
 dependencies = [
- "kernable",
+ "kernable-sdk",
  "serde",
  "serde_json",
 ]
@@ -624,7 +624,7 @@ dependencies = [
 name = "getting-started"
 version = "0.1.0"
 dependencies = [
- "kernable",
+ "kernable-sdk",
  "serde",
  "serde_json",
  "tokio",
@@ -844,24 +844,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
-name = "kernable"
-version = "0.1.0"
-dependencies = [
- "ed25519-dalek",
- "getrandom 0.3.4",
- "hex",
- "kernable-core",
- "prost",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "tokio-stream",
- "tonic",
-]
-
-[[package]]
 name = "kernable-bench"
 version = "0.1.0"
 dependencies = [
@@ -907,8 +889,8 @@ dependencies = [
  "getrandom 0.3.4",
  "hex",
  "hmac",
- "kernable",
  "kernable-core",
+ "kernable-sdk",
  "kernable-store",
  "libc",
  "proptest",
@@ -929,14 +911,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "kernable-sdk"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "getrandom 0.3.4",
+ "hex",
+ "kernable-core",
+ "prost",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+]
+
+[[package]]
 name = "kernable-soak"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.3.4",
  "hex",
- "kernable",
  "kernable-core",
+ "kernable-sdk",
  "kernable-store",
  "prost",
  "serde",
@@ -1673,7 +1673,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 name = "shop"
 version = "0.1.0"
 dependencies = [
- "kernable",
+ "kernable-sdk",
  "scrypt",
  "serde",
  "serde_json",

@@ -11,6 +11,6 @@ path = "lib.rs"
 test = false
 
 [dependencies]
-kernable = { path = "../../../sdks/rust" }
+kernable = { package = "kernable-sdk", path = "../../../sdks/rust" }
 serde.workspace = true
 serde_json.workspace = true

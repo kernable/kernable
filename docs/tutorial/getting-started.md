@@ -92,14 +92,14 @@ node cart.ts
 
 ```sh [Python]
 python3 -m venv py                # Windows: python -m venv py
-py/bin/pip install kernable       # Windows: py\Scripts\pip install kernable
+py/bin/pip install kernable-sdk       # Windows: py\Scripts\pip install kernable-sdk
 # save cart.py, then:
 py/bin/python cart.py             # Windows: py\Scripts\python cart.py
 ```
 
 ```sh [Rust]
 cargo init --name demo
-cargo add kernable serde_json
+cargo add kernable-sdk serde_json
 cargo add serde --features derive
 cargo add tokio --features macros,rt-multi-thread
 # save src/bin/cart.rs, then:

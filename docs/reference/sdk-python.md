@@ -3,7 +3,7 @@
 # Python SDK
 
 ```sh
-pip install kernable
+pip install kernable-sdk
 ```
 
 Python ≥ 3.10; it brings `grpcio`, `protobuf` and `cryptography`. A kernel to connect to: `kernable start --dev` (see [Getting started](../tutorial/getting-started)).

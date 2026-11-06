@@ -6,7 +6,7 @@ test: py
 	cargo clippy --workspace --all-targets -- -D warnings
 	cargo test --workspace --lib
 	cargo test -p kernable-core -p kernable-store --tests
-	cargo test -p kernable --test store
+	cargo test -p kernable-sdk --test store
 	cd sdks/typescript && npm install --no-audit --no-fund --silent && npm test
 	cd sdks/python && .venv/bin/python -m unittest discover -s tests/unit -t .
 
