@@ -3,7 +3,8 @@
 Every subclass of `Event`, `Command` and `Query` is a keyword-only dataclass, without
 `@dataclass`. The class name is its type; class attributes (`ClassVar`, or plain assignments
 without an annotation) declare what `Domain.event` and `Domain.command` declare: `version`,
-`upcasts`, `personal`, `erases`, `secret`, and `type` to override the name.
+`upcasts`, `personal`, `erases`, `secret`, `raw` (fields passed through as they are, e.g. a
+browser's WebAuthn answer), and `type` to override the name.
 
 Fields are snake_case in Python and camelCase in the log (`account_id` is `accountId`), so a
 Python and a TypeScript process write and read the same events. Nested dicts are converted too,
@@ -84,13 +85,16 @@ class Message:
             value = getattr(self, f.name)
             if value is None and f.default is None:
                 continue
-            out[camel(f.name)] = to_wire(value)
+            out[camel(f.name)] = value if f.name in (getattr(self, "raw", None) or ()) else to_wire(value)
         return out
 
     @classmethod
     def from_wire(cls, data: Any) -> "Message":
         """An instance from a payload of the log; a field it lacks (an older event, an erased value) is None."""
-        values = from_wire(data) if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            data = {}
+        raw = set(getattr(cls, "raw", None) or ())
+        values = {snake(k): (v if snake(k) in raw else from_wire(v)) for k, v in data.items()}
         return cls(**{f.name: values.get(f.name) for f in dataclasses.fields(cls) if f.init})
 
 

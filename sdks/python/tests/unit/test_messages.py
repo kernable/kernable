@@ -86,6 +86,16 @@ class MessagesTest(unittest.TestCase):
         with self.assertRaises(TypeError):
             ItemAdded("x", 1)  # type: ignore[misc]  keyword-only
 
+    def test_raw_fields_pass_through_as_they_are(self):
+        class AddPasskey(Command):
+            raw = ["response"]
+            response: dict
+            label_text: str
+
+        wire = {"response": {"clientDataJSON": "x", "rawId": "y"}, "labelText": "Laptop"}
+        self.assertEqual(AddPasskey.from_wire(wire).response, {"clientDataJSON": "x", "rawId": "y"})
+        self.assertEqual(AddPasskey.from_wire(wire).to_wire(), wire)
+
     def test_an_unset_optional_field_is_left_out(self):
         self.assertEqual(AddItem(sku="a", item_count=1).to_wire(), {"sku": "a", "itemCount": 1})
 
@@ -123,3 +133,45 @@ class MessagesTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClassAggregateTest(unittest.TestCase):
+    def test_an_aggregate_class_is_its_state_and_registers_itself(self):
+        from kernable import Aggregate
+
+        library = domain("library")
+
+        class BookAdded(Event):
+            title: str
+
+        class AddBook(Command):
+            title: str
+
+        class Shelf(Aggregate, domain=library):
+            count: int = 0
+            titles: list = []
+
+        @Shelf.apply(BookAdded)
+        def _(s: Shelf, d: BookAdded):
+            s.count += 1
+            s.titles.append(d.title)
+
+        @Shelf.command(AddBook)
+        def _(s: Shelf, d: AddBook):
+            if d.title in s.titles:
+                raise Rejected("On the shelf already", "exists")
+            return [BookAdded(title=d.title)]
+
+        Shelf.unique("first", lambda s: s.titles[0] if s.titles else None)
+        self.assertEqual(library.aggregates[0].name, "shelf")
+        state = Shelf.fold([("BookAdded", 1, {"title": "Dune"})])
+        self.assertEqual((state.count, state.titles), (1, ["Dune"]))
+        self.assertEqual(Shelf().titles, [], "a mutable default is copied for every aggregate")
+        self.assertEqual(Shelf.handle(state, "AddBook", {"title": "Emma"}, CommandContext.new("c")), [{"type": "BookAdded", "data": {"title": "Emma"}}])
+        with self.assertRaises(Rejected):
+            Shelf.handle(state, "AddBook", {"title": "Dune"}, CommandContext.new("c"))
+        self.assertEqual([k.value for k in Shelf.index(state).keys], ["Dune"])
+        # A snapshot holds the fields as JSON, and comes back as the class.
+        definition = Shelf.__aggregate__
+        self.assertEqual(definition._to_json(state), {"count": 1, "titles": ["Dune"]})
+        self.assertEqual(definition._from_json({"count": 1, "titles": ["Dune"], "gone": 3}), state)

@@ -28,6 +28,7 @@ Stubs: generate them first (`make py-stubs`), see sdks/python/README.md.
 import concurrent.futures
 import contextvars
 import copy
+import dataclasses
 import hashlib
 import inspect
 import json
@@ -43,7 +44,7 @@ import traceback
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Iterable
+from typing import ClassVar, Any, Callable, Iterable
 
 import grpc
 
@@ -59,7 +60,7 @@ from .messages import (  # noqa: E402
     declare_event as _declare_event, from_wire as _from_wire, is_message_class as _is_message_class, to_wire as _to_wire,
 )
 
-__all__ = ["PROTOCOL", "Event", "Command", "Query", "StoredEvent", "Aggregate", "App", "ApplyContext", "CacheClient", "Check", "ClientClosed", "CommandContext", "CommandMeta",
+__all__ = ["PROTOCOL", "Event", "Command", "Query", "StoredEvent", "Aggregate", "AggregateType", "App", "ApplyContext", "CacheClient", "Check", "ClientClosed", "CommandContext", "CommandMeta",
            "CommandSchema",
            "Data", "DataClient", "Domain", "Listed", "Listing",
            "EventMeta", "EventSchema", "HeldKey", "Index", "Kernable", "Key", "Listener", "ListenerContext", "ListenerHandle", "Manifest", "NotSettled", "Outcome",
@@ -766,7 +767,7 @@ class Domain:
         #: Vault fields per command type; see `command`.
         self.commands: dict[str, CommandSchema] = {}
         #: The aggregates defined on it, which `Kernable.app` runs.
-        self.aggregates: list[Aggregate] = []
+        self.aggregates: list[AggregateType] = []
         #: The read models and reactors defined on it, which `Kernable.app` runs.
         self.listeners: list[Listener] = []
 
@@ -799,7 +800,7 @@ class Domain:
         self.events[type] = spec
         return spec
 
-    def aggregate(self, name: str, initial: Any, snapshot_every: int = 100, schema: str = "1") -> "Aggregate":
+    def aggregate(self, name: str, initial: Any, snapshot_every: int = 100, schema: str = "1") -> "AggregateType":
         """An aggregate of this domain named `name` (lowercase by convention, like `cart`), whose
         state starts as `initial` (a JSON-like value, usually a dict); see `Aggregate` for
         `snapshot_every` and `schema`. Run it with `kernable.worker(aggregate)` or in an app.
@@ -807,7 +808,7 @@ class Domain:
         `ValueError` if the domain has an aggregate of that name already."""
         if any(a.name == name for a in self.aggregates):
             raise ValueError(f"{self.name} has an aggregate {name} already")
-        aggregate = Aggregate(self.name, name, initial, snapshot_every, schema, self.events, self.commands)
+        aggregate = AggregateType(self.name, name, initial, snapshot_every, schema, self.events, self.commands)
         self.aggregates.append(aggregate)
         return aggregate
 
@@ -892,7 +893,7 @@ def domain(name: str) -> Domain:
     return Domain(name)
 
 
-class Aggregate:
+class AggregateType:
     """How events change an aggregate's state (`apply`) and which events a command produces
     (`command`). Handlers must be deterministic and free of side effects; they may run again.
 
@@ -932,6 +933,9 @@ class Aggregate:
         self.keys: dict[str, tuple[Callable, str, Callable | None]] = {}
         #: The facts, by name; see `fact`.
         self.facts: dict[str, Callable] = {}
+        #: How a state becomes the JSON of a snapshot, and back (an `Aggregate` class: its fields).
+        self._to_json: Callable[[Any], Any] = lambda state: state
+        self._from_json: Callable[[Any], Any] = lambda data: data
 
     def apply(self, event_type: str, fn: Callable | None = None):
         """How an event of `event_type` changes the state: `fn(state, data, evt, ctx)` changes
@@ -1132,7 +1136,7 @@ def _no_events(state, data) -> list[dict]:
     return []
 
 
-def _check_index_name(kind: str, name: str, declared: dict, agg: Aggregate) -> None:
+def _check_index_name(kind: str, name: str, declared: dict, agg: AggregateType) -> None:
     if not isinstance(name, str) or not name or "." in name or len(name.encode()) > 128:
         raise ValueError(f"a {kind} name is not empty, has no dots and at most 128 bytes, not {name!r}")
     if name in declared:
@@ -1156,7 +1160,7 @@ def _personal(vault: _VaultFields) -> set[str]:
     return {f for fields, _ in vault.personal for f in fields}
 
 
-def _check_personal(agg: Aggregate, cmd, produced: list[dict]) -> None:
+def _check_personal(agg: AggregateType, cmd, produced: list[dict]) -> None:
     """Rejects (`personal_in_clear`) an event that holds a personal field of its command, under the
     same name, but does not declare it personal: the value would go into the log in clear, for good."""
     spec = agg.commands.get(cmd.command_type)
@@ -1173,6 +1177,74 @@ def _check_personal(agg: Aggregate, cmd, produced: list[dict]) -> None:
                 raise Rejected(f"{cmd.command_type} declares {f} personal, but {e['type']} does not: it would be "
                                f"stored in clear (declare it with Domain.event({e['type']!r}, …).personal)",
                                "personal_in_clear")
+
+
+class Aggregate:
+    """An aggregate defined as a class: its fields are the state, and the class is registered as an
+    aggregate of `domain` (its name: the class name in lowercase, or `name`). The state is a
+    dataclass (no `@dataclass`); mutable defaults (`[]`, `{}`) are copied for every aggregate, and
+    snapshots hold its fields as JSON. Handlers get and change an instance: `s.status = "active"`.
+
+        class Cart(Aggregate, domain=shop_domain):
+            items: int = 0
+
+        @Cart.apply(ItemAdded)
+        def _(s: Cart, d: ItemAdded):
+            s.items += d.count
+
+    `Cart.command`, `Cart.unique`, `Cart.fact`, `Cart.fold`, `Cart.handle` and `Cart.index` work
+    as on `AggregateType` (what `domain.aggregate` returns, which keeps working with a dict)."""
+
+    __aggregate__: "ClassVar[AggregateType]"
+
+    def __init_subclass__(cls, *, domain: "Domain | None" = None, name: str | None = None, snapshot_every: int = 100,
+                          schema: str = "1", **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if domain is None:
+            return
+        for field_name in list(cls.__dict__.get("__annotations__", {})):
+            default = cls.__dict__.get(field_name)
+            if isinstance(default, (list, dict, set)):
+                setattr(cls, field_name, dataclasses.field(default_factory=lambda v=default: copy.deepcopy(v)))
+        dataclasses.dataclass(cls)
+        definition = domain.aggregate(name or cls.__name__.lower(), cls(), snapshot_every, schema)
+        definition._to_json = lambda state: dataclasses.asdict(state) if isinstance(state, cls) else state
+        names = {f.name for f in dataclasses.fields(cls)}
+        definition._from_json = lambda data: cls(**{k: v for k, v in data.items() if k in names}) if isinstance(data, dict) else data
+        cls.__aggregate__ = definition
+
+    def update(self, **values: Any) -> None:
+        """Sets several fields at once: `s.update(status="active", slug=d.slug)`."""
+        for key, value in values.items():
+            setattr(self, key, value)
+
+    @classmethod
+    def apply(cls, event_type, fn: Callable | None = None):
+        return cls.__aggregate__.apply(event_type, fn)
+
+    @classmethod
+    def command(cls, command_type, fn: Callable | None = None, *, requires: Callable | None = None):
+        return cls.__aggregate__.command(command_type, fn, requires=requires)
+
+    @classmethod
+    def unique(cls, name: str, fn: Callable | None = None, *, scope: str = "tenant", personal: Callable | None = None):
+        return cls.__aggregate__.unique(name, fn, scope=scope, personal=personal)
+
+    @classmethod
+    def fact(cls, name: str, fn: Callable | None = None):
+        return cls.__aggregate__.fact(name, fn)
+
+    @classmethod
+    def fold(cls, history: list[tuple], state: Any = _INITIAL) -> Any:
+        return cls.__aggregate__.fold(history, state)
+
+    @classmethod
+    def handle(cls, state: Any, command_type: str, data: Any, ctx: "CommandContext", *, aggregate_id: str = "", tenant: str = "") -> list[dict]:
+        return cls.__aggregate__.handle(state, command_type, data, ctx, aggregate_id=aggregate_id, tenant=tenant)
+
+    @classmethod
+    def index(cls, state: Any) -> "Index":
+        return cls.__aggregate__.index(state)
 
 
 def _register_wrapped(owner, table: dict, name: str, fn: Callable | None, wrap: Callable[[Callable], Callable]):
@@ -1601,9 +1673,10 @@ class Kernable:
             self._domains[d.name] = d
         return self
 
-    def worker(self, *aggregates: Aggregate) -> "Worker":
+    def worker(self, *aggregates: "AggregateType | type[Aggregate]") -> "Worker":
         """A worker that runs these aggregates' commands, in this client's service; see
         `Worker`. `run()` on it blocks until `stop()`: `k.worker(cart_aggregate).run()`."""
+        aggregates = tuple(getattr(a, "__aggregate__", a) for a in aggregates)
         return Worker(self._parts, self._key, aggregates, self._log, self._service)
 
     def app(self, *, domains: Iterable[Domain], service: str | None = None, version: str | None = None,
@@ -1634,7 +1707,7 @@ class Kernable:
         handles = [ListenerHandle(self._parts, self._key, l, self._log, service, self) for l in listeners]
         return App(self, manifest, worker, handles, [d.name for d in domains])
 
-    def apply(self, *, service: str | None = None, workers: Iterable[Aggregate] = (),
+    def apply(self, *, service: str | None = None, workers: Iterable[AggregateType] = (),
               listeners: Iterable["Listener"] = (), middlewares: Iterable["Listener"] = (),
               metadata: dict[str, str] | None = None) -> None:
         """Replaces the membership of a service (default: this client's `service`): the workers,
@@ -2026,7 +2099,7 @@ class Manifest:
     #: The service the membership is for.
     service: str
     #: The aggregates the service runs; the kernel waits for a worker of each.
-    workers: list[Aggregate] = field(default_factory=list)
+    workers: list[AggregateType] = field(default_factory=list)
     #: The listeners the kernel waits for.
     listeners: list["Listener"] = field(default_factory=list)
     #: The service's listeners that may check requests; they count like listeners.
@@ -2435,7 +2508,7 @@ class Worker(_Stream):
             history = [(e.event_type, e.schema, _unseal(_decode(e.payload), x.vault)[0],
                         _meta(e.event_type, e.version, cmd, e.command_id), ApplyContext(_from_wire_context(e.context)))
                        for e in x.history]
-            state = agg.fold(history, _decode(x.snapshot.state) if x.HasField("snapshot") else _INITIAL)
+            state = agg.fold(history, agg._from_json(_decode(x.snapshot.state)) if x.HasField("snapshot") else _INITIAL)
             meta = CommandMeta(cmd.command_id, cmd.command_type, cmd.domain, cmd.aggregate_type, cmd.aggregate_id,
                                cmd.tenant_id)
             ctx = CommandContext(_from_wire_context(cmd.context), _time(x.deadline), _time(x.received_at), cmd.command_id)
@@ -2484,7 +2557,7 @@ class Worker(_Stream):
         return pb.WorkerMessage(result=result)
 
     @staticmethod
-    def _requires(agg: Aggregate, cmd, data, state) -> list:
+    def _requires(agg: AggregateType, cmd, data, state) -> list:
         """The facts of other aggregates the command requires, from its data and the state before it."""
         fn = agg.requirements.get(cmd.command_type)
         if fn is None:
@@ -2500,7 +2573,7 @@ class Worker(_Stream):
         return wire
 
     @staticmethod
-    def _after(agg: Aggregate, cmd, before: int, state, events):
+    def _after(agg: AggregateType, cmd, before: int, state, events):
         """The state after the produced `events`, applied as they will be read back (a JSON round
         trip), so it equals a replay."""
         if not events:
@@ -2510,18 +2583,18 @@ class Worker(_Stream):
                  _meta(e["type"], before + i + 1, cmd, cmd.command_id), apply_ctx) for i, e in enumerate(events)]
         return agg.fold(read, state)
 
-    def _snapshot(self, agg: Aggregate, cmd, before: int, after, events):
+    def _snapshot(self, agg: AggregateType, cmd, before: int, after, events):
         """A snapshot of the state `after` the produced `events`, if they cross a multiple of
         `snapshot_every`."""
         if not _snapshot_due(agg, before, len(events)):
             return None
         version = before + len(events)
-        state_bytes = _encode(after)
+        state_bytes = _encode(agg._to_json(after))
         sig = self._key.sign(snapshot_message(cmd, version, agg.schema, state_bytes))
         return pb.Snapshot(version=version, schema=agg.schema, state=state_bytes, worker_sig=sig)
 
 
-def _snapshot_due(agg: Aggregate, before: int, produced: int) -> bool:
+def _snapshot_due(agg: AggregateType, before: int, produced: int) -> bool:
     """Whether `produced` events after version `before` cross a multiple of `snapshot_every`."""
     every = agg.snapshot_every
     return every > 0 and produced > 0 and (before + produced) // every != before // every
