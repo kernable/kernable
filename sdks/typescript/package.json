@@ -14,15 +14,16 @@
   },
   "files": [
     "dist",
-    "proto"
+    "proto",
+    "kit"
   ],
   "engines": {
     "node": ">=22.18"
   },
   "scripts": {
-    "build": "rm -rf dist proto && tsc -p tsconfig.build.json && mkdir -p proto/kernable/v1 && cp ../../proto/kernable/v1/kernable.proto proto/kernable/v1/",
+    "build": "rm -rf dist proto && tsc -p tsconfig.build.json && mkdir -p proto/kernable/v1 && cp ../../proto/kernable/v1/kernable.proto proto/kernable/v1/ && rm -rf kit && mkdir -p kit/test && cp -R ../../kits/typescript/src ../../kits/typescript/example ../../kits/typescript/README.md ../../kits/typescript/package.json kit/ && cp -R ../../kits/typescript/test/unit kit/test/ && cp -R ../../kits/fixtures kit/fixtures",
     "prepack": "npm run build",
-    "postpack": "rm -rf dist proto",
+    "postpack": "rm -rf dist proto kit",
     "test": "tsc && node --test test/unit/*.test.ts",
     "check": "tsc && KERNABLE_LOG=${KERNABLE_LOG:-warn} node --test test/unit/*.test.ts test/*.test.ts ../../examples/shop/*.test.ts"
   },
@@ -33,5 +34,8 @@
   "devDependencies": {
     "@types/node": "^22.20.5",
     "typescript": "~5.9.0"
+  },
+  "bin": {
+    "kernable-sdk": "dist/cli.js"
   }
 }

@@ -1,6 +1,6 @@
 # Kits: the event catalogue
 
-Status: decided, not built. The kits are the open set of tenancy, accounts, identities, groups, invitations and authorization that `kernable kits add` copies into a customer's project. Section by section, each decided before it was built. This catalogue is the contract the TypeScript, Python and Rust sets share: the shared fixture suite is generated from it.
+Status: decided, not built. The kits are the open set of tenancy, accounts, identities, groups, invitations and authorization that each SDK copies into a customer's project: `npx @kernable/sdk add kit`, `kernable-sdk add kit` for Python and Rust. Section by section, each decided before it was built. This catalogue is the contract the TypeScript, Python and Rust sets share: the shared fixture suite is generated from it.
 
 ## Conventions
 
@@ -441,7 +441,7 @@ The set's listeners take kernable's reserved orders: the authorization middlewar
 4. **The index is kept in a store** (the SDK's SQLite listener store), so a restart resumes instead of replaying the whole log while every request is refused.
 5. **Escalation is judged conservatively**: only the sender's permissions without scope and `when` count as held.
 
-## Found while building (to confirm)
+## Found while building (confirmed 2026-11-06)
 
 - **An account with TOTP on needs it in every session**, not only in tenants that require MFA; one line in `policy.ts` to narrow it.
 - **Owners are exempt from enforced SSO**, so a broken SSO can be mended; everyone else in the tenant needs an SSO session.

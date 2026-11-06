@@ -3,7 +3,7 @@
 // cases, so the kits write the same events.
 
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { test } from "node:test";
 
 import { CommandContext, Rejected, type Aggregate } from "@kernable/sdk";
@@ -23,7 +23,8 @@ interface Case {
   index?: { keys: unknown[]; facts: string[] };
 }
 
-const DIR = new URL("../../../fixtures/", import.meta.url);
+// The fixtures: next to the kit in a copy (`kernable-sdk add kit`), or in the repository.
+const DIR = [new URL("../../fixtures/", import.meta.url), new URL("../../../fixtures/", import.meta.url)].find((u) => existsSync(u))!;
 const files = readdirSync(DIR).filter((f) => f.endsWith(".json") && f !== "authorization.json");
 const aggregates = new Map(kitDomains().flatMap((d) => d.aggregates.map((a) => [`${d.name}.${a.name}`, a as Aggregate<unknown>])));
 

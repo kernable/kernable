@@ -3,7 +3,7 @@
 // kit decides the same way.
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import { Rejected, type Check, type StoredEventMeta } from "@kernable/sdk";
@@ -19,7 +19,9 @@ interface Fixtures {
   cases: { name: string; extra?: FixtureEvent[]; check: Omit<Check, "id">; expect: string }[];
 }
 
-const fixtures = JSON.parse(readFileSync(new URL("../../../fixtures/authorization.json", import.meta.url), "utf8")) as Fixtures;
+// The fixtures: next to the kit in a copy (`kernable-sdk add kit`), or in the repository.
+const file = [new URL("../../fixtures/authorization.json", import.meta.url), new URL("../../../fixtures/authorization.json", import.meta.url)].find((u) => existsSync(u))!;
+const fixtures = JSON.parse(readFileSync(file, "utf8")) as Fixtures;
 for (const r of fixtures.relations) relation(r.type, r.name).set(r.event, (e) => e.data[r.field]);
 kitDomains();
 
