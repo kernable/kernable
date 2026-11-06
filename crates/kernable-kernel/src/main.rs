@@ -1196,7 +1196,9 @@ fn restore(from: &str, flags: &[&str]) -> Result<ExitCode> {
     let target = backup::target::open(from).map_err(boxed)?;
     let flags = StoreFlags::parse(&rest, true)?;
     let stores = standby::Stores {
-        store: kernable_store::open(&flags.store)?,
+        // Nothing serves from it until it is filled: one flush at the end (`sync`), not one
+        // per batch.
+        store: kernable_store::open_with(&flags.store, kernable_store::Durability::Normal)?,
         vault: flags.open_vault()?,
         data: kernable_store::data::open(&flags.data)?,
         snapshots: kernable_store::snapshots::open("memory:")?,

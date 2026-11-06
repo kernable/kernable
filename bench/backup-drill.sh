@@ -59,7 +59,7 @@ t=$(now)
 pids+=($!)
 until grep -q "segment" backup.err 2>/dev/null || grep -qi "base.*written\|wrote the base\|base written" backup.err 2>/dev/null; do
   sleep 0.2
-  if [ "$(since "$t" | cut -d. -f1)" -gt 900 ]; then echo "  no base after 15 min"; tail -5 backup.err; exit 1; fi
+  if [ "$(printf '%.0f' "$(since "$t")")" -gt 900 ]; then echo "  no base after 15 min"; tail -5 backup.err; exit 1; fi
 done
 printf '  the base is in the bucket after %.1f s\n' "$(since "$t")"
 
@@ -81,6 +81,7 @@ t=$(now)
 "$BIN/kernable" restore "$RUN" --backup-key backup.key --store "sqlite:$DIR/r.db" \
   --data-store "file:$DIR/rdata" >restore.out 2>restore.err || { echo "  restore failed"; tail -5 restore.err; exit 1; }
 restored_s=$(since "$t")
+read -r restored restored_ms < <(head_of r.db)
 "$BIN/kernable" start --root root.pub --store "sqlite:$DIR/r.db" --listen "unix:$DIR/r.sock" \
   --kernel-key kernel.key --data-store "file:$DIR/rdata" 2>restored-kernel.err &
 pids+=($!)
@@ -92,13 +93,14 @@ pids+=($!)
 rto_s=$(since "$t")
 kill "${pids[@]}" 2>/dev/null || true
 pids=()
-read -r restored restored_ms < <(head_of r.db)
 missing=$((stored - restored))
 printf '  restored %s events in %.1f s (download, apply, verify); the kernel answered after %.1f s in all\n' \
   "$restored" "$restored_s" "$rto_s"
 echo "== RPO: $missing events missing, the newest restored $((stored_ms - restored_ms)) ms older than the newest stored (segments every ${SEG} s)"
 printf '== RTO: %.1f s for %s events (%s MB)\n' "$rto_s" "$restored" "$(du -m r.db | cut -f1)"
-grep -q "ok\|verified" restore.out && echo "  the restored store verifies" || { echo "  restore output:"; tail -3 restore.out; }
+tail -1 restore.out | grep -qx OK && echo "  the restored store verifies" || { echo "  restore output:"; tail -3 restore.out; }
+echo "  the restore's steps:"
+sed 's/\x1b\[[0-9;]*m//g' restore.err | cut -c12-23,40-180 | sed 's/^/    /' | tail -12
 
 echo "== a point in time: the store as it was 10 s before the loss"
 at_ms=$((lost - 10000))
