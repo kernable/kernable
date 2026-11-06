@@ -1,0 +1,145 @@
+"""An example API on http.server over the kit's API part: how a framework wires `KitApi` in.
+Carry the routes over to Flask, Django or FastAPI (with `AsyncKitApi`); the kit's functions stay.
+
+    KERNABLE_URL=... KERNABLE_KEY=kit.key python -m example.server      (port 3000, or PORT)
+
+Requests carry `Authorization: Bearer <access token>` (or `ApiKey <key>`) and, inside a tenant,
+`X-Tenant: <tenant ID>`; the server turns them into the request context the middleware decides on.
+"""
+
+import json
+import os
+import re
+import sys
+import threading
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from kernable import Kernable, Rejected, RequestContext
+
+from kit.api.api import KitApi
+
+COMMAND = re.compile(r"^/commands/([\w-]+)/([\w-]+)/(\w+)$")
+
+
+def example_server(api: KitApi, kernable: Kernable, port: int = 3000) -> ThreadingHTTPServer:
+    """The routes; `kernable` submits the app's own commands with the caller's context. Call
+    `serve_forever()` on the result (it listens on 127.0.0.1:`port`; 0 picks a free port)."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args) -> None:  # quiet; log the way your framework does
+            pass
+
+        def send(self, status: int, value=None) -> None:
+            raw = b"" if value is None else json.dumps(value).encode()
+            self.send_response(status)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def body(self) -> dict:
+            raw = self.rfile.read(int(self.headers.get("content-length") or 0))
+            try:
+                value = json.loads(raw) if raw else {}
+            except ValueError:
+                return {}
+            return value if isinstance(value, dict) else {}
+
+        def claims(self):
+            auth = self.headers.get("authorization") or ""
+            return api.check(auth[7:]) if auth.startswith("Bearer ") else None
+
+        def caller(self) -> RequestContext | None:
+            """The caller's request context, from the bearer token or API key and the tenant header; None if none."""
+            auth = self.headers.get("authorization") or ""
+            if auth.startswith("ApiKey "):
+                return api.check_api_key(auth[7:])
+            claims = self.claims()
+            if not claims:
+                return None
+            try:
+                return api.context_for(claims, self.headers.get("x-tenant"))
+            except Rejected:
+                return None  # no identity in that tenant
+
+        def do_POST(self) -> None:  # noqa: N802: http.server's name
+            try:
+                self.route(self.body())
+            except Exception as err:  # noqa: BLE001: an example; your framework answers 500 its way
+                self.send(500, {"error": str(err)})
+
+        def route(self, b: dict) -> None:
+            path, ip = self.path.split("?")[0], self.client_address[0]
+            if path == "/register":
+                api.register(b.get("email", ""), b.get("name", ""), b.get("password"))
+                return self.send(202, {"message": "Check your email"})  # the same whether or not the address was taken
+            if path == "/verify":
+                return self.send(200 if api.verify_email(b.get("token", "")) else 400, {})
+            if path == "/sign-in":
+                r = api.sign_in(b.get("email", ""), b.get("password", ""), ip=ip, user_agent=self.headers.get("user-agent"))
+                if not r["ok"]:
+                    return self.send(401, {"error": r["reason"]})
+                return self.send(200, {k: r[k] for k in ("access_token", "refresh_token", "second_factor")})
+            if path == "/refresh":
+                r = api.refresh(b.get("refresh_token", ""), ip)
+                return self.send(200 if r["ok"] else 401, r)
+            if path == "/password-reset":
+                api.request_password_reset(b.get("email", ""))
+                return self.send(202, {"message": "Check your email"})
+            if path == "/password-reset/confirm":
+                return self.send(200 if api.reset_password(b.get("token", ""), b.get("password", ""))["ok"] else 400, {})
+            if path == "/invitations/accept":
+                claims = self.claims()
+                r = (api.accept_invitation(b.get("token", ""), claims=claims) if claims
+                     else api.accept_invitation(b.get("token", ""), name=b.get("name"), password=b.get("password")))
+                return self.send(200 if r["ok"] else 400, r)
+            # Everything below needs a signed-in caller.
+            claims = self.claims()
+            if path == "/second-factor":
+                if not claims:
+                    return self.send(401, {"error": "unauthenticated"})
+                r = api.prove_second_factor(claims, b.get("code", ""))
+                return self.send(200 if r["ok"] else 401, r)
+            if path == "/sign-out":
+                if claims:
+                    api.sign_out(claims)
+                return self.send(204)
+            # POST /commands/<domain>/<aggregate_type>/<Type>: the app's commands, as the caller.
+            m = COMMAND.match(path)
+            if m:
+                context = self.caller()
+                if not context:
+                    return self.send(401, {"error": "unauthenticated"})
+                outcome = kernable.submit(m.group(1), m.group(2), b.get("aggregate_id") or str(uuid.uuid4()), m.group(3), b.get("data") or {},
+                                          tenant=context.sender_tenant, context=context)
+                if outcome.committed:
+                    return self.send(200, {"events": [e.type for e in outcome.events]})
+                return self.send(403, {"error": outcome.code})
+            self.send(404, {"error": "not_found"})
+
+    return ThreadingHTTPServer(("127.0.0.1", port), Handler)
+
+
+def main() -> None:
+    """The kit as one service, the bootstrap (it may run again), and the server."""
+    from kit import kit_domains
+    from kit.api.tokens import new_signing_keys, signing_keys_from
+    from kit.bootstrap import bootstrap
+
+    app = Kernable().app(service="kit", domains=kit_domains())
+    threading.Thread(target=app.run, daemon=True).start()
+    if not app.ready.wait(30):
+        sys.exit("the kit's service did not connect")
+    kernable = Kernable()
+    service = bootstrap(kernable, sign_up={"tenants": "active", "accounts": "open"})["api"]
+    # The access token key: a PEM file in production (KIT_SIGNING_KEY), new on every start otherwise.
+    keys = signing_keys_from(os.environ["KIT_SIGNING_KEY"]) if os.environ.get("KIT_SIGNING_KEY") else new_signing_keys()
+    port = int(os.environ.get("PORT", "3000"))
+    server = example_server(KitApi(kernable, keys, service), kernable, port)
+    print(f"example server on :{port}", file=sys.stderr)
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()
