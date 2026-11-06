@@ -543,13 +543,21 @@ async fn start(config: Config, dev_notes: Option<Vec<String>>) -> ExitCode {
     }
     // A standby follows until it is promoted, then runs as the kernel on what it holds.
     let ran = if config.replication.pair.is_some() {
+        let leaving = leave_on_sigterm();
         match node::become_primary(config).await {
-            Ok(primary) => run_kernel_on(primary.kernel, Some(primary.lease)).await,
+            Ok(primary) => {
+                leaving.abort();
+                run_kernel_on(primary.kernel, Some(primary.lease)).await
+            }
             Err(e) => Err(e),
         }
     } else if config.replication.follow.is_some() {
+        let leaving = leave_on_sigterm();
         match standby::run(config.clone()).await {
-            Ok(()) => run_kernel(config).await,
+            Ok(()) => {
+                leaving.abort();
+                run_kernel(config).await
+            }
             Err(e) => Err(e),
         }
     } else {
@@ -739,6 +747,26 @@ async fn run_kernel_on(
         server.abort();
         return kernel.shutdown();
     }
+}
+
+/// While the kernel follows a primary: SIGTERM tells the primary that it leaves, so a
+/// pair's primary commits alone at once, and ends the process. SIGUSR1 (a new binary takes the
+/// stores, P21) still ends it at once: that standby is back within moments.
+fn leave_on_sigterm() -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            let Ok(mut term) = signal(SignalKind::terminate()) else {
+                return;
+            };
+            if term.recv().await.is_some() {
+                tracing::info!("stopping: telling the primary that this standby leaves");
+                standby::leave().await;
+                std::process::exit(0);
+            }
+        }
+    })
 }
 
 /// SIGINT, SIGTERM, or SIGUSR1 (let the stores go to a new kernel binary).

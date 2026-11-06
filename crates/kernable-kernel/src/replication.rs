@@ -75,6 +75,8 @@ pub(crate) struct Primary {
     caught_up_marker: Option<PathBuf>,
     /// A switchover without a witness: the standby answered TookOver.
     took_over: Notify,
+    /// The standby said it leaves.
+    left: Notify,
 }
 
 #[derive(Default)]
@@ -104,6 +106,8 @@ struct State {
     take_over: Option<u64>,
     /// The record the standby took over at.
     took_over: Option<u64>,
+    /// The standby said it leaves; a new one connecting clears it.
+    left: bool,
 }
 
 impl State {
@@ -124,6 +128,7 @@ impl Primary {
             fixed: false,
             caught_up_marker: None,
             took_over: Notify::new(),
+            left: Notify::new(),
         }
     }
 
@@ -208,6 +213,16 @@ impl Primary {
     /// The key of the connected standby.
     pub(crate) fn standby(&self) -> Option<String> {
         self.state().standby.clone()
+    }
+
+    /// Whether the standby said it leaves, and none connected since.
+    pub(crate) fn standby_left(&self) -> bool {
+        self.state().left
+    }
+
+    /// Until the standby says it leaves.
+    pub(crate) async fn standby_leaves(&self) {
+        self.left.notified().await
     }
 
     /// Whether the primary commits alone.
@@ -313,6 +328,7 @@ impl Primary {
         }
         state.standby = Some(key_id.to_owned());
         state.in_sync = false;
+        state.left = false;
         Ok(Connected(Arc::clone(self)))
     }
 }
@@ -805,6 +821,14 @@ async fn run(
                     if let Some(p) = &primary {
                         p.state().took_over = Some(seq);
                         p.took_over.notify_waiters();
+                    }
+                    return Ok(());
+                }
+                Some(follow_request::Msg::Leaving(_)) => {
+                    if let Some(p) = &primary {
+                        tracing::info!("the standby leaves: the primary need not wait for it");
+                        p.state().left = true;
+                        p.left.notify_one();
                     }
                     return Ok(());
                 }

@@ -47,6 +47,7 @@ message FollowRequest {
     ChallengeResponse challenge_response = 2;
     FollowAck ack = 3;
     TookOver took_over = 4;
+    Leaving leaving = 5;
   }
 }
 
@@ -94,6 +95,10 @@ message TakeOver {
 message TookOver {
   uint64 seq = 1;
 }
+
+// The standby stops on purpose (SIGTERM): the primary of a pair need not wait for it and commits
+// alone at once. The primary ends the stream.
+message Leaving {}
 
 enum FollowMode {
   FOLLOW_MODE_UNSPECIFIED = 0;

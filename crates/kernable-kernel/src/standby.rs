@@ -21,8 +21,8 @@ use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
         ChallengeResponse, CheckpointRecord, FollowAck, FollowHello, FollowMode, FollowRequest,
-        FollowResponse, Grant, ImageBatch, ImageEnd, PromoteRequest, PromoteResult, RecordBatch,
-        StoredKey, TookOver, WitnessOp, follow_request, follow_response,
+        FollowResponse, Grant, ImageBatch, ImageEnd, Leaving, PromoteRequest, PromoteResult,
+        RecordBatch, StoredKey, TookOver, WitnessOp, follow_request, follow_response,
         log_record::Record,
         replication_service_client::ReplicationServiceClient,
         replication_service_server::{ReplicationService, ReplicationServiceServer},
@@ -332,6 +332,47 @@ pub(crate) async fn run_with(config: Config, link: Option<Arc<Link>>) -> Result<
     Ok(())
 }
 
+/// The stream to the primary while one is open: a planned stop says on it that it leaves.
+static GOODBYE: Mutex<Option<mpsc::Sender<FollowRequest>>> = Mutex::new(None);
+/// Wakes [`leave`] once the stream ended.
+static ENDED: std::sync::LazyLock<tokio::sync::Notify> =
+    std::sync::LazyLock::new(tokio::sync::Notify::new);
+
+/// A standby stopping on purpose (SIGTERM) tells its primary that it leaves, so a pair's primary
+/// commits alone at once instead of after `--standby-timeout-ms`; returns once the primary
+/// ended the stream, a second at most, or at once without one.
+pub async fn leave() {
+    let Some(tx) = GOODBYE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take()
+    else {
+        return;
+    };
+    let ended = ENDED.notified();
+    tokio::pin!(ended);
+    ended.as_mut().enable();
+    let goodbye = FollowRequest {
+        msg: Some(follow_request::Msg::Leaving(Leaving {})),
+    };
+    if tx.send(goodbye).await.is_ok() {
+        let _ = tokio::time::timeout(Duration::from_secs(1), ended).await;
+    }
+}
+
+/// Clears [`GOODBYE`] when a stream ends, however it does.
+struct Following;
+
+impl Drop for Following {
+    fn drop(&mut self) {
+        GOODBYE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        ENDED.notify_waiters();
+    }
+}
+
 /// One connection to the primary: catch up, then apply its records as they come.
 async fn follow_once(
     standby: &Arc<Standby>,
@@ -367,6 +408,8 @@ async fn follow_once(
     let Some(follow_response::Msg::Start(start)) = next(&mut inbound).await? else {
         return Err("the primary did not start the stream".into());
     };
+    *GOODBYE.lock().unwrap_or_else(PoisonError::into_inner) = Some(tx.clone());
+    let _following = Following;
     // Whether it is in sync now, the primary tells it again once it caught up.
     standby.forget_in_sync();
     match start.mode() {

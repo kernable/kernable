@@ -536,6 +536,32 @@ async fn a_planned_stop_of_a_pairs_primary_hands_over_without_waiting_for_the_le
     }
     tokio::time::sleep(Duration::from_millis(300)).await;
 
+    // SIGTERM to the standby: it says it leaves, and the primary commits alone at once, not
+    // after the standby timeout (the lease's length here).
+    let at = primary().expect("a primary");
+    let left = Instant::now();
+    signal(running[1 - at].as_ref().unwrap(), "TERM");
+    while !kept().in_sync.is_empty() {
+        assert!(
+            left.elapsed() < Duration::from_millis(LONG_LEASE_MS),
+            "the primary waited for the standby that left"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let alone_after = left.elapsed();
+    let status = running[1 - at].as_mut().unwrap().child.wait().unwrap();
+    assert!(status.success(), "the standby's SIGTERM: {status}");
+    running[1 - at] = Some(start(&dir, &nodes[1 - at].1));
+    let started = Instant::now();
+    while kept().in_sync.is_empty() {
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "the standby never got in sync again"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
     // SIGUSR1 lets the stores go and leaves the role where it is: the node starts it again.
     let at = primary().expect("a primary");
     signal(running[at].as_ref().unwrap(), "USR1");
@@ -586,7 +612,8 @@ async fn a_planned_stop_of_a_pairs_primary_hands_over_without_waiting_for_the_le
     let ids = [id(&key(3)), id(&key(8))];
     every_order_once(&addrs, &dir.store(nodes[now].0), &placed, &told, &ids).await;
     eprintln!(
-        "handed over {} ms after SIGTERM (lease {LONG_LEASE_MS} ms), {} orders",
+        "alone {} ms after the standby's SIGTERM; handed over {} ms after the primary's (lease {LONG_LEASE_MS} ms), {} orders",
+        alone_after.as_millis(),
         took.as_millis(),
         placed.len()
     );

@@ -290,6 +290,8 @@ async fn keep_lease(
         };
         tokio::select! {
             () = tokio::time::sleep(link.lease() / 3) => {}
+            // A standby that leaves on purpose: commit alone at once, not after the timeout.
+            () = primary.standby_leaves() => {}
             Some(reply) = asked.recv() => {
                 let standby = primary.standby();
                 if switching.is_some() {
@@ -389,7 +391,8 @@ async fn keep_lease(
         if revoked && primary.alone() {
             reported = String::new();
         }
-        if !primary.alone() && (progress.elapsed() >= timeout || revoked) {
+        if !primary.alone() && (progress.elapsed() >= timeout || revoked || primary.standby_left())
+        {
             match link.ask(WitnessOp::Alone, term, "").await {
                 Ok(a) if a.granted => {
                     reported = String::new();
