@@ -1091,3 +1091,166 @@ async fn a_pair_under_seeded_kills_and_pauses_keeps_p1_to_p4() {
         pair_model(seed, steps).await;
     }
 }
+
+/// A socket in front of another, in the test process; frozen, it passes nothing on and closes
+/// nothing: a network that drops packets silently.
+struct Plug {
+    frozen: Arc<AtomicBool>,
+}
+
+impl Plug {
+    fn new(front: &std::path::Path, back: &std::path::Path) -> Self {
+        let _ = std::fs::remove_file(front);
+        let listener = tokio::net::UnixListener::bind(front).unwrap();
+        let frozen: Arc<AtomicBool> = Arc::default();
+        let (back, ice) = (back.to_owned(), Arc::clone(&frozen));
+        tokio::spawn(async move {
+            while let Ok((client, _)) = listener.accept().await {
+                let (back, ice) = (back.clone(), Arc::clone(&ice));
+                tokio::spawn(async move {
+                    if let Ok(kernel) = tokio::net::UnixStream::connect(&back).await {
+                        let (cr, cw) = client.into_split();
+                        let (kr, kw) = kernel.into_split();
+                        tokio::join!(pass(cr, kw, &ice), pass(kr, cw, &ice));
+                    }
+                });
+            }
+        });
+        Plug { frozen }
+    }
+
+    fn freeze(&self) {
+        self.frozen.store(true, SeqCst);
+    }
+}
+
+async fn pass(
+    mut from: impl tokio::io::AsyncRead + Unpin,
+    mut to: impl tokio::io::AsyncWrite + Unpin,
+    frozen: &AtomicBool,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = match from.read(&mut buf).await {
+            Ok(0) | Err(_) => return,
+            Ok(n) => n,
+        };
+        if frozen.load(SeqCst) {
+            continue;
+        }
+        if to.write_all(&buf[..n]).await.is_err() {
+            return;
+        }
+    }
+}
+
+/// A partition: the primary's machine stays up and a client still reaches it, but
+/// the network drops what passes between it and the standby and the witness. Its writes are
+/// not told: a write in flight and a new one are answered UNAVAILABLE within about a lease, so
+/// the client turns to the other kernel, and the standby takes over.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_primary_cut_off_answers_unavailable_and_its_standby_takes_over() {
+    let dir = Dir::new("pair-partition");
+    let state = dir.0.join("witness.state");
+    let _witness = start(
+        &dir,
+        &[
+            "witness".into(),
+            "--listen".into(),
+            dir.sock("w"),
+            "--root".into(),
+            id(&root()),
+            "--state".into(),
+            state.display().to_string(),
+            "--lease-ms".into(),
+            LEASE_MS.to_string(),
+        ],
+    );
+    wait_for(&dir.sock("w")).await;
+    let plug = |front: &str, back: &str| {
+        Plug::new(
+            &dir.0.join(format!("{front}.sock")),
+            &dir.0.join(format!("{back}.sock")),
+        )
+    };
+    // A reaches the witness, and B reaches A, through plugs: frozen, A is cut off.
+    let (a_witness, a_front, _b_front) =
+        (plug("wa", "w"), plug("a-plug", "a"), plug("b-plug", "b"));
+    let node = |name: &str, kernel_seed: u8, node_seed: u8, witness: &str| {
+        let mut args = vec!["start".to_owned()];
+        args.extend(flags(&dir, name, kernel_seed));
+        let node_key = dir.key(&format!("{name}-node"), node_seed, &[("replicate", &["*"])]);
+        args.extend([
+            "--witness".into(),
+            dir.sock(witness),
+            "--advertise".into(),
+            dir.sock(&format!("{name}-plug")),
+            "--node-key".into(),
+            node_key.display().to_string(),
+            "--standby-timeout-ms".into(),
+            LEASE_MS.to_string(),
+            "--primary-kernel-key".into(),
+            id(&key(3)),
+            "--primary-kernel-key".into(),
+            id(&key(8)),
+        ]);
+        args
+    };
+    let _a = start(&dir, &node("a", 3, 11, "wa"));
+    wait_for(&dir.sock("a")).await;
+    let _b = start(&dir, &node("b", 8, 12, "w"));
+    wait_for(&dir.sock("b")).await;
+    let kept = || {
+        Witness::open(&state, Duration::from_millis(LEASE_MS))
+            .unwrap()
+            .state()
+    };
+    let started = Instant::now();
+    while kept().in_sync != id(&key(12)) {
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "B never got in sync"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let a = dir.sock("a");
+    worker(a.clone());
+    let order = |n: u32| {
+        signed(
+            command(&format!("p{n}"), "PlaceOrder", &format!("po{n}")),
+            &key(1),
+        )
+    };
+    let mut placed = None;
+    for _ in 0..100 {
+        if let Ok(r) = common::submit(&a, order(1)).await {
+            placed = Some(r);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(placed.is_some(), "A takes a write before the partition");
+
+    a_front.freeze();
+    a_witness.freeze();
+    let cut = Instant::now();
+    let in_flight = common::submit(&a, order(2)).await.unwrap_err();
+    let answered = cut.elapsed();
+    assert_eq!(in_flight.code(), tonic::Code::Unavailable, "{in_flight:?}");
+    assert!(
+        answered < Duration::from_millis(4 * LEASE_MS),
+        "{answered:?}"
+    );
+    let new = common::submit(&a, order(3)).await.unwrap_err();
+    assert_eq!(new.code(), tonic::Code::Unavailable, "{new:?}");
+    while kept().primary != id(&key(12)) {
+        assert!(cut.elapsed() < Duration::from_secs(10), "B never took over");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    eprintln!(
+        "cut off: a write in flight answered UNAVAILABLE after {} ms, B the primary after {} ms (lease {LEASE_MS} ms)",
+        answered.as_millis(),
+        cut.elapsed().as_millis()
+    );
+}

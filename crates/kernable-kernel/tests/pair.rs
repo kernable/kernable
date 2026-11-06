@@ -375,17 +375,31 @@ async fn a_primary_alone_tells_nothing_once_its_lease_runs_out() {
         let addr = addr.clone();
         async move { submit(&addr, place(1)).await }
     });
-    tokio::time::sleep(Duration::from_millis(3 * LEASE_MS)).await;
-    assert!(!waiting.is_finished(), "told without a lease");
+    // Not told: the client hears UNAVAILABLE and may turn to the other kernel.
+    let refused = tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .expect("answered within the lease's time, not left waiting")
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(refused.code(), tonic::Code::Unavailable, "{refused:?}");
     assert!(a.readiness().is_err(), "not ready without a lease");
 
-    // Back in reach, the lease is renewed and the write is told.
+    // Back in reach, the lease is renewed; the same command submitted again is told, once.
     let _back = witness_plug(&dir.0);
-    let told = tokio::time::timeout(Duration::from_secs(10), waiting)
-        .await
-        .expect("told once the lease is back")
-        .unwrap()
-        .unwrap();
+    let started = std::time::Instant::now();
+    let told = loop {
+        match submit(&addr, place(1)).await {
+            Ok(told) => break told,
+            Err(e) if e.code() == tonic::Code::Unavailable => {
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "the lease never came back"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(e) => panic!("{e:?}"),
+        }
+    };
     assert_eq!(committed_versions(&told), [1]);
 }
 

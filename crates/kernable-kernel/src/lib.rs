@@ -955,6 +955,22 @@ impl Kernel {
         Ok(slot)
     }
 
+    /// A pair's primary that lost its lease with no standby in sync: see
+    /// [`replication::Primary::fenced`].
+    pub(crate) fn fenced(&self) -> bool {
+        self.replication.as_ref().is_some_and(|p| p.fenced())
+    }
+
+    /// Returns once the kernel is fenced ([`Kernel::fenced`]); never without a pair.
+    async fn until_fenced(&self) {
+        if self.replication.is_none() {
+            return std::future::pending().await;
+        }
+        while !self.fenced() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     /// Claims a data or cache write, authorized already, so that it runs at most once.
     fn claim(&self, sig: Option<&Signature>, issued_at: i64) -> Result<replays::Claim<'_>, Status> {
         let sig = sig.map_or(&[][..], |s| s.sig.as_slice());
@@ -972,6 +988,9 @@ impl Kernel {
             return Err(Status::unavailable(
                 "the kernel hands its role over to its standby; retry",
             ));
+        }
+        if self.fenced() {
+            return Err(fenced());
         }
         Ok(running)
     }
@@ -1263,6 +1282,14 @@ pub(crate) fn taking_over<T>(
 /// Whether `e` says another process holds a store (its lock), as a kernel being replaced does.
 fn in_use(e: &BoxError) -> bool {
     e.to_string().contains("in use by another process")
+}
+
+/// UNAVAILABLE for a fenced primary: the SDKs turn to the other kernel and resubmit,
+/// which is safe, as commands are idempotent by ID.
+fn fenced() -> Status {
+    Status::unavailable(
+        "this kernel lost its lease at the witness and no standby holds its writes: ask the other kernel",
+    )
 }
 
 /// Serves the gRPC API on `config.listen` and writes checkpoints until dropped.
@@ -1694,6 +1721,10 @@ impl CommandService for Api {
                 return Err(internal(e));
             }
         };
+        // Told nothing while fenced: what it holds may never reach the standby.
+        if kernel.fenced() {
+            return Err(fenced());
+        }
         let done = match enqueued {
             Enqueued::Duplicate {
                 result: Some(result),
@@ -1733,13 +1764,18 @@ impl CommandService for Api {
             }
             None => {
                 let timeout = Duration::from_millis(kernel.config().submit_timeout_ms);
-                match tokio::time::timeout(timeout, rx).await {
-                    Ok(Ok(result)) => result,
-                    _ => {
-                        return Err(Status::deadline_exceeded(
-                            "command accepted but not completed yet; resubmit it to get the result",
-                        ));
-                    }
+                tokio::select! {
+                    waited = tokio::time::timeout(timeout, rx) => match waited {
+                        Ok(Ok(result)) => result,
+                        _ => {
+                            return Err(Status::deadline_exceeded(
+                                "command accepted but not completed yet; resubmit it to get the result",
+                            ));
+                        }
+                    },
+                    // Its result waits for a standby that is gone, under a lease that ran out:
+                    // the client turns to the other kernel instead of waiting with it.
+                    () = kernel.until_fenced() => return Err(fenced()),
                 }
             }
         };

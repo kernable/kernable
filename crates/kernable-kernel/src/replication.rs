@@ -210,6 +210,19 @@ impl Primary {
         state.standby.is_some() && state.in_sync && !state.catching_up && !state.alone
     }
 
+    /// A pair's primary whose lease at the witness ran out while no standby in sync holds its
+    /// writes: it may have been replaced, so nothing it writes now may be told.
+    pub(crate) fn fenced(&self) -> bool {
+        if self.fixed {
+            return false;
+        }
+        let state = self.state();
+        state
+            .lease_until
+            .is_some_and(|until| Instant::now() > until)
+            && !(state.standby.is_some() && state.in_sync && !state.alone)
+    }
+
     /// Where replication stands, for the usage file.
     pub(crate) fn state_name(&self) -> &'static str {
         if self.standby_in_sync() {
