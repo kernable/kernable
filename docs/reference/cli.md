@@ -227,7 +227,7 @@ Fills new, empty stores from an export, then checks the store like verify, with 
 kernable node <project.toml>
 ```
 
-Runs one node of a project: the kernel and, with a [backup] section, the backup follower, as child processes it restarts when they exit. It reads the file again every two seconds or on SIGHUP, and restarts a child whose command changed or whose binary was replaced. SIGTERM or SIGINT stops the children (SIGKILL after stop-seconds, default 30). The file has [kernel] (flags: the flags of kernable start without their dashes, env, binary, stop-seconds), [backup] (to, key, backup-key, follow, segment-seconds, base-hours, keep, env), [node] (instance, project, podman, metrics-listen: GET /metrics) and any number of [[service]] (name, build, file, command, key, env, secrets, cpus, memory, stop-seconds, writable, expose): containers built with podman on the node, rebuilt on SIGHUP, run after the kernel with `KERNABLE_URL`, `KERNABLE_INSTANCE` and their key. Every child's output comes out of the node prefixed with its name. Paths are relative to its directory. Exit 2 if the file is invalid at start.
+Runs one node of a project: the kernel and, with a [backup] section, the backup follower, as child processes it restarts when they exit. It reads the file again every two seconds or on SIGHUP, and restarts a child whose command changed or whose binary was replaced. SIGTERM or SIGINT stops the children (SIGKILL after stop-seconds, default 30). The file has [kernel] (flags: the flags of kernable start without their dashes, env, binary, stop-seconds), [backup] (to, key, backup-key, follow, segment-seconds, base-hours, keep, check-hours, env), [node] (instance, project, podman, metrics-listen: GET /metrics) and any number of [[service]] (name, build, file, command, key, env, secrets, cpus, memory, stop-seconds, writable, expose): containers built with podman on the node, rebuilt on SIGHUP, run after the kernel with `KERNABLE_URL`, `KERNABLE_INSTANCE` and their key. Every child's output comes out of the node prefixed with its name. Paths are relative to its directory. Exit 2 if the file is invalid at start.
 
 ### `kernable expose`
 
@@ -250,10 +250,10 @@ Writes a new backup key (32 random bytes in hex) to `<file>`, readable by its ow
 ### `kernable backup`
 
 ```text
-kernable backup --follow <addr>[,<addr>] --key <key> --to <target> --backup-key <file> [--segment-seconds <s>] [--base-hours <h>] [--keep <n>]
+kernable backup --follow <addr>[,<addr>] --key <key> --to <target> --backup-key <file> [--segment-seconds <s>] [--base-hours <h>] [--keep <n>] [--check-hours <h>]
 ```
 
-Follows the kernel at `<addr>` (started with `--backup` on; both kernels of a pair, comma-separated) and writes its records to `<target>`, encrypted with the backup key, until stopped: a base, then a segment every `--segment-seconds` (default 5) or 16 MiB, a new generation every `--base-hours` (default 24), the newest `--keep` (default 7) kept. `<key>` needs a grant for backup on `*`; the grant file next to it is sent along. `<target>` is `file:<dir>` or `s3://<bucket>/<prefix>`, with `KERNABLE_S3_ENDPOINT`, `KERNABLE_S3_REGION`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. Vault values stay encrypted with the kernel's vault key besides.
+Follows the kernel at `<addr>` (started with `--backup` on; both kernels of a pair, comma-separated) and writes its records to `<target>`, encrypted with the backup key, until stopped: a base, then a segment every `--segment-seconds` (default 5) or 16 MiB, a new generation every `--base-hours` (default 24), the newest `--keep` (default 7) kept. `<key>` needs a grant for backup on `*`; the grant file next to it is sent along. `<target>` is `file:<dir>` or `s3://<bucket>/<prefix>`, with `KERNABLE_S3_ENDPOINT`, `KERNABLE_S3_REGION`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. Vault values stay encrypted with the kernel's vault key besides. With `--check-hours`, it also checks the backup that often, as backup check does, and logs what it found.
 
 ### `kernable backup list`
 
@@ -262,6 +262,14 @@ kernable backup list <target> --backup-key <file>
 ```
 
 Prints the generations of a backup: each base's record and time, and how far its segments reach.
+
+### `kernable backup check`
+
+```text
+kernable backup check <target> --backup-key <file>
+```
+
+Reads the newest generation all through, without writing a store: every object opens with the key and decodes, and the records chain from the base to the last segment. Prints the record a restore reaches and how old it is; exits 1 if the backup does not check out.
 
 ### `kernable restore`
 
@@ -298,6 +306,14 @@ kernable vault rekey <vault> <old.key> <new.key>
 Re-encrypts every vault value with a new key; then start the kernel with `--vault-key <new.key>`. `<vault>` is the `--vault-store`, for example `sqlite:vault.db`. A key encrypts at most 2^32 values (each with a random nonce): the kernel warns at startup past half of that and refuses new values at the limit, until the vault is rekeyed.
 
 ## Scripting
+
+### `kernable`
+
+```text
+kernable --version
+```
+
+Prints the version, the system and the architecture.
 
 ### `kernable submit`
 

@@ -33,7 +33,6 @@ use tracing_subscriber::EnvFilter;
 use zeroize::Zeroizing;
 
 const USAGE: &str = "usage:
-  kernable --version                      Prints the version, the system and the architecture.
 
 Run the kernel:
   kernable start --root <root.pub> [<flag> <value>]...
@@ -294,6 +293,7 @@ Maintenance, with the kernel stopped:
                                           new values at the limit, until the vault is rekeyed.
 
 Scripting:
+  kernable --version                      Prints the version, the system and the architecture.
   kernable submit <addr> <client.key> <tenant> <domain> <aggregate_type> <aggregate_id> <command_type> <payload>
                                           Signs a command with a new ID and submits it, waiting
                                           until it has settled; the grant file next to the key is
