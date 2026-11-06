@@ -309,33 +309,11 @@ pub struct Kernel {
 
 impl Kernel {
     pub fn open(config: Config) -> Result<Arc<Self>, BoxError> {
-        // A kernel update on the same machine: the old kernel lets go of its stores once
-        // its running requests finished; this one opens them the moment it does.
-        let deadline = std::time::Instant::now() + Duration::from_millis(config.take_over_ms);
-        let mut waited = false;
-        loop {
-            let opened = kernable_store::open_with(&config.store, config.durability)
+        taking_over(config.take_over_ms, || {
+            kernable_store::open_with(&config.store, config.durability)
                 .map_err(BoxError::from)
-                .and_then(|store| Self::open_on(config.clone(), store));
-            match opened {
-                Err(e) if in_use(&e) && std::time::Instant::now() < deadline => {
-                    if !waited {
-                        tracing::info!(
-                            "another kernel holds the stores: waiting to take them over"
-                        );
-                        waited = true;
-                    }
-                    std::thread::sleep(Duration::from_millis(2));
-                }
-                Ok(kernel) => {
-                    if waited {
-                        tracing::warn!("took the stores over from the kernel before");
-                    }
-                    return Ok(kernel);
-                }
-                Err(e) => return Err(e),
-            }
-        }
+                .and_then(|store| Self::open_on(config.clone(), store))
+        })
     }
 
     /// Like [`Kernel::open`], on a store opened already (`config.store` is not opened): for
@@ -1240,6 +1218,35 @@ fn loopback(addr: &str) -> bool {
         || host
             .parse::<std::net::IpAddr>()
             .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Opens with `open`; while another process holds the stores, tries again for up to
+/// `take_over_ms`: a kernel update on the same machine, where the old kernel lets go of its
+/// stores once its running requests finished, and this one opens them the moment it does.
+pub(crate) fn taking_over<T>(
+    take_over_ms: u64,
+    mut open: impl FnMut() -> Result<T, BoxError>,
+) -> Result<T, BoxError> {
+    let deadline = std::time::Instant::now() + Duration::from_millis(take_over_ms);
+    let mut waited = false;
+    loop {
+        match open() {
+            Err(e) if in_use(&e) && std::time::Instant::now() < deadline => {
+                if !waited {
+                    tracing::info!("another kernel holds the stores: waiting to take them over");
+                    waited = true;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Ok(opened) => {
+                if waited {
+                    tracing::warn!("took the stores over from the kernel before");
+                }
+                return Ok(opened);
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// Whether `e` says another process holds a store (its lock), as a kernel being replaced does.

@@ -593,6 +593,133 @@ async fn a_planned_stop_of_a_pairs_primary_hands_over_without_waiting_for_the_le
     drop(running);
 }
 
+/// A kernel update of a pair: on each machine a new process starts beside the old one
+/// (`--take-over-ms`) and waits for the stores; SIGUSR1 makes the old one let them go. First the
+/// standby, then the primary: the roles stay, and nothing a client was told is lost.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pair_updates_both_kernels_by_handing_their_stores_over() {
+    let dir = Dir::new("pair-update");
+    let state = dir.0.join("witness.state");
+    let _witness = start(
+        &dir,
+        &[
+            "witness".into(),
+            "--listen".into(),
+            dir.sock("w"),
+            "--root".into(),
+            id(&root()),
+            "--state".into(),
+            state.display().to_string(),
+            "--lease-ms".into(),
+            "2000".into(),
+        ],
+    );
+    wait_for(&dir.sock("w")).await;
+    let node = |name: &str, kernel_seed: u8, node_seed: u8| {
+        let mut args = vec!["start".to_owned()];
+        args.extend(flags(&dir, name, kernel_seed));
+        let node_key = dir.key(&format!("{name}-node"), node_seed, &[("replicate", &["*"])]);
+        args.extend([
+            "--witness".into(),
+            dir.sock("w"),
+            "--node-key".into(),
+            node_key.display().to_string(),
+            "--standby-timeout-ms".into(),
+            "2000".into(),
+            "--primary-kernel-key".into(),
+            id(&key(3)),
+            "--primary-kernel-key".into(),
+            id(&key(8)),
+        ]);
+        args
+    };
+    let nodes = [("a", node("a", 3, 11), 11u8), ("b", node("b", 8, 12), 12u8)];
+    let mut running: Vec<KillOnDrop> = Vec::new();
+    for (name, args, _) in &nodes {
+        running.push(start(&dir, args));
+        wait_for(&dir.sock(name)).await;
+    }
+    let addrs: Vec<String> = nodes.iter().map(|(name, ..)| dir.sock(name)).collect();
+    for addr in &addrs {
+        worker(addr.clone());
+    }
+    let kept = || {
+        Witness::open(&state, Duration::from_millis(2000))
+            .unwrap()
+            .state()
+    };
+    let primary = || {
+        let kept = kept();
+        nodes
+            .iter()
+            .position(|(.., seed)| id(&key(*seed)) == kept.primary)
+            .expect("a primary")
+    };
+    let load = Load::start(&addrs);
+    let started = Instant::now();
+    while kept().in_sync.is_empty() {
+        assert!(started.elapsed() < Duration::from_secs(20), "never in sync");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let first = primary();
+    // The newest log is the process started last.
+    let newest_log = || {
+        std::fs::read_dir(&dir.0)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|x| x == "log"))
+            .max()
+            .unwrap()
+    };
+    let until_logged = |log: PathBuf, what: &'static str| async move {
+        let started = Instant::now();
+        while !std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .contains(what)
+        {
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "{}: never logged {what:?}",
+                log.display()
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    };
+    for at in [1 - first, first] {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let mut args = nodes[at].1.clone();
+        args.extend(["--take-over-ms".into(), "60000".into()]);
+        let new = start(&dir, &args);
+        let log = newest_log();
+        until_logged(log.clone(), "waiting to take them over").await;
+        signal(&running[at], "USR1");
+        until_logged(log.clone(), "took the stores over").await;
+        let _ = running[at].child.wait();
+        running[at] = new;
+        // In sync again before the next one.
+        let started = Instant::now();
+        loop {
+            let text = std::fs::read_to_string(&log).unwrap_or_default();
+            if text.contains("following the primary") || text.contains("a standby follows") {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "the pair never followed again"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(primary(), first, "the roles stay");
+    }
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    let (placed, told) = load.finish().await;
+    assert!(!told.is_empty());
+    let ids = [id(&key(3)), id(&key(8))];
+    every_order_once(&addrs, &dir.store(nodes[first].0), &placed, &told, &ids).await;
+    eprintln!("both kernels updated under {} orders", placed.len());
+    drop(running);
+}
+
 // ---- the model test of a pair (P1–P4) ----
 
 /// xorshift: the same seed picks the same faults.

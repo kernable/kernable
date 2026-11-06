@@ -59,7 +59,13 @@ pub struct Stores {
 
 impl Stores {
     fn open(config: &Config) -> Result<Self, BoxError> {
-        let store = kernable_store::open_with(&config.store, config.durability)?;
+        Self::open_on(
+            config,
+            kernable_store::open_with(&config.store, config.durability)?,
+        )
+    }
+
+    fn open_on(config: &Config, store: Box<dyn Store>) -> Result<Self, BoxError> {
         store.keep_record_log(true)?;
         let vault = match &config.vault {
             Some(v) => Some(Vault::open(&v.store, &*config.read_secret(&v.key)?)?),
@@ -226,14 +232,19 @@ pub(crate) async fn run_with(config: Config, link: Option<Arc<Link>>) -> Result<
         .map_err(|e| format!("the standby's grant {}: {e}", grant_path.display()))?
         .trim()
         .to_owned();
-    // Snapshots are a cache the primary does not send: they start empty.
-    for path in move_aside(&config.snapshots, 0)? {
-        std::fs::remove_file(path)?;
-    }
+    // A standby on a new binary waits for the old one to let go of the stores; only then
+    // are its snapshots, a cache the primary does not send, removed: they start empty.
+    let stores = crate::taking_over(config.take_over_ms, || {
+        let store = kernable_store::open_with(&config.store, config.durability)?;
+        for path in move_aside(&config.snapshots, 0)? {
+            std::fs::remove_file(path)?;
+        }
+        Stores::open_on(&config, store)
+    })?;
     let (promoted, promoted_rx) = oneshot::channel();
     let standby = Arc::new(Standby {
         follow: follow.clone(),
-        stores: Mutex::new(Some(Arc::new(Stores::open(&config)?))),
+        stores: Mutex::new(Some(Arc::new(stores))),
         promote: Mutex::new(Some(promoted)),
         applied: AtomicU64::new(0),
         primary_head: AtomicU64::new(0),
