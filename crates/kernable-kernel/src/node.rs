@@ -173,7 +173,17 @@ pub async fn become_primary(config: Config) -> Result<NodePrimary, BoxError> {
                 .clone()
                 .expect("a kernel of a pair runs with --replication sync");
             primary.set_lease(sent + link.lease() - link.margin());
-            tracing::warn!(term = answer.term, "this kernel is the primary");
+            // The witness names no standby in sync (a new pair, or a claim, which clears it):
+            // nobody else can claim, so writes need not wait for one. They wait again once
+            // a standby caught up.
+            if answer.in_sync.is_empty() {
+                primary.set_alone(true);
+            }
+            tracing::warn!(
+                term = answer.term,
+                alone = answer.in_sync.is_empty(),
+                "this kernel is the primary"
+            );
             let (asks, asked) = tokio::sync::mpsc::channel(1);
             *kernel
                 .switchover
