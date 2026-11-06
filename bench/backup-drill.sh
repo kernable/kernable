@@ -25,7 +25,7 @@ mkdir -p "${WORK:=${TMPDIR:-/tmp}}"
 DIR=$(mktemp -d "$WORK/drill.XXXXXX")
 RUN=$TO/drill-$(date +%s)
 pids=()
-trap 'kill -9 "${pids[@]}" 2>/dev/null; rm -rf "$DIR"' EXIT
+trap 'kill -9 "${pids[@]}" 2>/dev/null || true; rm -rf "$DIR"' EXIT
 now() { date +%s.%N; }
 since() { echo "$(now) - $1" | bc; }
 # Events in a store, and the newest one's time (ms).

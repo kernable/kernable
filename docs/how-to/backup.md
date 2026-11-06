@@ -101,6 +101,28 @@ kernable restore s3://acme-backups/shop --backup-key backup-encryption.key \
 
 It fills new, empty stores from the newest generation that begins before `--at` (or `--at-record <n>`; without either, everything), and stops before the first batch the follower took after that time. If the backup ends earlier, or holds nothing between the end of that generation and the base of the next, it says so in a `note:` line and restores up to there. Then it checks the store like `kernable verify`. `--vault-key` must be the source's vault key. Then start the kernel on the restored stores and rebuild the read models that have a store, as in steps 5 and 6 of [Restore](#restore); the note on erasure below applies too.
 
+### Check a backup
+
+A backup is only as good as its last restore. `kernable backup check` reads the newest generation all through without writing a store: every object opens with the backup key and decodes, the base holds the records its marker names, and the segments' records chain from the base's hash to the last one without a gap. It prints the record a restore would reach and how old it is, and exits 1 if the backup does not check out:
+
+```sh
+kernable backup check s3://acme-backups/shop --backup-key backup-encryption.key
+```
+
+The follower runs it by itself with `--check-hours <h>` (`check-hours` in a node's `[backup]`) and logs `the backup checks out` or, as an error, why not: alert on that line. Restore into scratch stores now and then as well (`bench/backup-drill.sh` does it end to end): a check proves the bytes, a restore also the time it takes.
+
+### What it loses, and how long the way back takes
+
+Measured with `bench/backup-drill.sh` on a 2-core cloud server (Hetzner, 2026-11-07), the backup in object storage in the same region: a kernel on a store of 200,000 commands takes 200 commands a second, and at a random moment the kernel, the follower and the clients are killed together.
+
+| | Segments every 5 s | Segments every 1 s |
+|---|---|---|
+| Commands stored but not in the backup | 126 (0.6 s); 759 (3.8 s) in another run | 127 (0.6 s) |
+| Restore of about 206,000 events, 250 MB, verify included | 63 s | 68 s |
+| From the restore's start until a kernel on it answers | 64 s | 69 s |
+
+A store five times as large (1,006,043 events, 1.17 GB) lost 559 commands (2.8 s) and was back after 319 s: the way back grows with the store, about linearly. So the point in time a restore reaches is at most `--segment-seconds` and an upload behind the loss. The restore's time grows with the store: most of it goes to applying the records and checking every signature (on every core). A [standby](./standby) loses nothing a client was told and takes over in seconds; the backup is for the machine and the standby lost together, for mistakes, and for keeping history elsewhere.
+
 ## Backups and erasure
 
 A backup keeps personal data that was erased after it was taken. Keep vault backups only as long as your retention rules allow.

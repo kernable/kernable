@@ -1,0 +1,45 @@
+# bench/backup-drill.sh on a 2-vCPU cloud server, backups in an S3-compatible bucket in the same region, 2026-11-07
+# before e04c5d7 (signatures on every core, one flush): 200k events restored in 76-88 s
+== a store of 200000 commands; a backup to s3://<bucket>/backup/drill-1793996909, a segment every 5 s
+  filled: 200000 events, 231 MB, in 86.7 s
+  the base is in the bucket after 7.4 s
+== 200 commands a second for at most 60 s; the machine is lost at a random moment
+  lost after 31 s: the kernel had stored 206200 events, the newest at 1793997034812
+== restore into new stores, then a kernel on them
+  restored 206074 events in 62.9 s (download, apply, verify); the kernel answered after 64.1 s in all
+== RPO: 126 events missing, the newest restored 632 ms older than the newest stored (segments every 5 s)
+== RTO: 64.1 s for 206074 events (250 MB)
+  the restored store verifies
+  the restore's steps:
+== a point in time: the store as it was 10 s before the loss
+  ok: 204034 events, the newest at 1793997023981, not after 2026-11-06T20:30:24Z
+RESULT size=200000 rate=200 seg=5 stored=206200 restored=206074 missing=126 rpo_ms=632 restore_s=62.863187824 rto_s=64.054591052
+== a store of 200000 commands; a backup to s3://<bucket>/backup/drill-1793997163, a segment every 1 s
+  filled: 200000 events, 231 MB, in 85.4 s
+  the base is in the bucket after 9.6 s
+== 200 commands a second for at most 60 s; the machine is lost at a random moment
+  lost after 49 s: the kernel had stored 209801 events, the newest at 1793997307206
+== restore into new stores, then a kernel on them
+  restored 209674 events in 68.0 s (download, apply, verify); the kernel answered after 69.2 s in all
+== RPO: 127 events missing, the newest restored 634 ms older than the newest stored (segments every 1 s)
+== RTO: 69.2 s for 209674 events (261 MB)
+  the restored store verifies
+  the restore's steps:
+== a point in time: the store as it was 10 s before the loss
+  ok: 207754 events, the newest at 1793997296971, not after 2026-11-06T20:34:57Z
+RESULT size=200000 rate=200 seg=1 stored=209801 restored=209674 missing=127 rpo_ms=634 restore_s=67.973498808 rto_s=69.169421418
+== a store of 1000000 commands; a backup to s3://<bucket>/backup/drill-1793997441, a segment every 5 s
+  filled: 1000000 events, 1152 MB, in 430.4 s
+  the base is in the bucket after 67.0 s
+== 200 commands a second for at most 60 s; the machine is lost at a random moment
+  lost after 33 s: the kernel had stored 1006602 events, the newest at 1793997972558
+== restore into new stores, then a kernel on them
+  restored 1006043 events in 314.8 s (download, apply, verify); the kernel answered after 318.5 s in all
+== RPO: 559 events missing, the newest restored 2795 ms older than the newest stored (segments every 5 s)
+== RTO: 318.5 s for 1006043 events (1170 MB)
+  the restored store verifies
+  the restore's steps:
+== a point in time: the store as it was 10 s before the loss
+  ok: 1004483 events, the newest at 1793997961962, not after 2026-11-06T20:46:02Z
+RESULT size=1000000 rate=200 seg=5 stored=1006602 restored=1006043 missing=559 rpo_ms=2795 restore_s=314.770483945 rto_s=318.507519900
+/dev/sda1        38G   34G  1.8G  96% /
