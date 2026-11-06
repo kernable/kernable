@@ -2,7 +2,8 @@
 //! the SDK (`kernable::event`), which documents them; this crate only generates the code.
 //!
 //! Each turns a braced struct into a message of a domain: it derives serde with camelCase field
-//! names (the log's), leaves unset `Option` fields out, implements the SDK's message traits, and
+//! names (the log's), writes an event's `None` as `null` and leaves a command's or query's out,
+//! implements the SDK's message traits, and
 //! declares a constant of the struct's name that stands for the type where the SDK takes one:
 //! `tenant.apply(TenantCreated, |s, d, _, _| ...)`.
 
@@ -224,10 +225,20 @@ fn generate(kind: Kind, args: &Args, item: &mut ItemStruct) -> syn::Result<Token
     }
     for field in &mut fields.named {
         let name = field.ident.as_ref().expect("named");
+        if field.attrs.iter().any(|a| a.path().is_ident("serde")) {
+            // The field says itself how it is read and written.
+            continue;
+        }
         if is_option(&field.ty) {
-            field.attrs.push(
-                syn::parse_quote!(#[serde(default, skip_serializing_if = "Option::is_none")]),
-            );
+            // In an event, `None` is part of the record (`"ip": null`); in a command or query,
+            // an unset option is left out. Either reads a missing field as `None`.
+            if kind == Kind::Event {
+                field.attrs.push(syn::parse_quote!(#[serde(default)]));
+            } else {
+                field.attrs.push(
+                    syn::parse_quote!(#[serde(default, skip_serializing_if = "Option::is_none")]),
+                );
+            }
         } else if vault.contains(&name) {
             // An erased vault value comes back as null: the field's default then.
             field.attrs.push(syn::parse_quote!(#[serde(default, deserialize_with = "::kernable::__private::null_as_default")]));

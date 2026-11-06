@@ -24,8 +24,11 @@
 //! ```
 //!
 //! Fields are snake_case in Rust and camelCase in the log (`customer_id` is `customerId`), so a
-//! Rust, a Python and a TypeScript process write and read the same events. An `Option` field
-//! that is `None` is left out. The struct's name is its type (`type = "..."` overrides it), and
+//! Rust, a Python and a TypeScript process write and read the same events. An event writes an
+//! `Option` field that is `None` as `null` (it is part of the record); a command or query leaves
+//! it out; a missing field reads as `None`. A field with its own `#[serde(...)]` attribute is left
+//! as it says (an event's optional field: `#[serde(default, skip_serializing_if =
+//! "Option::is_none")]`). The struct's name is its type (`type = "..."` overrides it), and
 //! also a constant of type [`Of`] that stands for the type where the SDK takes one: in
 //! `apply`, `command`, `requires`, a listener's `on` and `query`; with [`crate::Submit::command`]
 //! and [`crate::Query::of`] the value itself goes.
@@ -217,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn fields_are_camel_case_and_an_unset_option_is_left_out() {
+    fn fields_are_camel_case_and_an_event_writes_none_as_null() {
         let p = Placed {
             customer_id: "c1".into(),
             email_address: "a@b".into(),
@@ -226,7 +229,12 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_value(&p).unwrap(),
-            json!({ "customerId": "c1", "emailAddress": "a@b", "type": "x" })
+            json!({ "customerId": "c1", "emailAddress": "a@b", "note": null, "type": "x" })
+        );
+        // A query (or command) leaves an unset option out.
+        assert_eq!(
+            serde_json::to_value(ListOrders { status: None }).unwrap(),
+            json!({})
         );
         // An erased vault value is null: read as the field's default.
         let back: Placed = serde_json::from_value(
@@ -278,7 +286,7 @@ mod tests {
             events,
             vec![NewEvent::new(
                 "Placed",
-                json!({ "customerId": "c2", "emailAddress": "a@b", "type": "t" })
+                json!({ "customerId": "c2", "emailAddress": "a@b", "note": null, "type": "t" })
             )]
         );
         // The command's vault fields and the event's personal ones, declared on the domain.
