@@ -346,6 +346,9 @@ pub async fn run(config: WitnessConfig) -> Result<(), BoxError> {
                 std::fs::remove_file(path)?;
             }
             let listener = tokio::net::UnixListener::bind(path)?;
+            // Its owner and group connect, as to a kernel's socket: a proxy in front of it too,
+            // through an ACL.
+            crate::socket_mode(path)?;
             router
                 .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(listener))
                 .await?;
