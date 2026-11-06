@@ -463,6 +463,136 @@ async fn a_pair_under_random_kills_of_its_primary_loses_nothing_a_client_was_tol
     drop(running);
 }
 
+/// A planned stop (SIGTERM) of a pair's primary hands its role to the standby in sync first
+///: the standby serves well within the lease, the old primary ends cleanly, and nothing a
+/// client was told is lost. SIGUSR1 instead (a new kernel binary takes the stores) does not.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_planned_stop_of_a_pairs_primary_hands_over_without_waiting_for_the_lease() {
+    const LONG_LEASE_MS: u64 = 5000;
+    let dir = Dir::new("pair-stop");
+    let state = dir.0.join("witness.state");
+    let _witness = start(
+        &dir,
+        &[
+            "witness".into(),
+            "--listen".into(),
+            dir.sock("w"),
+            "--root".into(),
+            id(&root()),
+            "--state".into(),
+            state.display().to_string(),
+            "--lease-ms".into(),
+            LONG_LEASE_MS.to_string(),
+        ],
+    );
+    wait_for(&dir.sock("w")).await;
+    let node = |name: &str, kernel_seed: u8, node_seed: u8| {
+        let mut args = vec!["start".to_owned()];
+        args.extend(flags(&dir, name, kernel_seed));
+        let node_key = dir.key(&format!("{name}-node"), node_seed, &[("replicate", &["*"])]);
+        args.extend([
+            "--witness".into(),
+            dir.sock("w"),
+            "--node-key".into(),
+            node_key.display().to_string(),
+            "--standby-timeout-ms".into(),
+            LONG_LEASE_MS.to_string(),
+            "--primary-kernel-key".into(),
+            id(&key(3)),
+            "--primary-kernel-key".into(),
+            id(&key(8)),
+        ]);
+        args
+    };
+    let nodes = [("a", node("a", 3, 11), 11u8), ("b", node("b", 8, 12), 12u8)];
+    let mut running: Vec<Option<KillOnDrop>> = Vec::new();
+    for (name, args, _) in &nodes {
+        running.push(Some(start(&dir, args)));
+        wait_for(&dir.sock(name)).await;
+    }
+    let addrs: Vec<String> = nodes.iter().map(|(name, ..)| dir.sock(name)).collect();
+    for addr in &addrs {
+        worker(addr.clone());
+    }
+    let kept = || {
+        Witness::open(&state, Duration::from_millis(LONG_LEASE_MS))
+            .unwrap()
+            .state()
+    };
+    let primary = || {
+        let kept = kept();
+        nodes
+            .iter()
+            .position(|(.., seed)| id(&key(*seed)) == kept.primary)
+    };
+    let load = Load::start(&addrs);
+    let started = Instant::now();
+    while kept().in_sync.is_empty() {
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "the standby never got in sync"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // SIGUSR1 lets the stores go and leaves the role where it is: the node starts it again.
+    let at = primary().expect("a primary");
+    signal(running[at].as_ref().unwrap(), "USR1");
+    let status = running[at].as_mut().unwrap().child.wait().unwrap();
+    assert!(status.success(), "SIGUSR1: {status}");
+    assert_eq!(primary(), Some(at), "SIGUSR1 hands nothing over");
+    running[at] = Some(start(&dir, &nodes[at].1));
+    wait_for(&dir.sock(nodes[at].0)).await;
+    // The witness still names the standby in sync; wait until it follows the new process.
+    let log = std::fs::read_dir(&dir.0)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "log"))
+        .max()
+        .unwrap();
+    let started = Instant::now();
+    while !std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .contains("a standby follows")
+    {
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "the standby never followed again"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // SIGTERM: the standby serves at once.
+    let at = primary().expect("a primary");
+    let stopped = Instant::now();
+    signal(running[at].as_ref().unwrap(), "TERM");
+    while primary() == Some(at) {
+        assert!(
+            stopped.elapsed() < Duration::from_millis(LONG_LEASE_MS),
+            "the standby did not take over before the lease ran out"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let took = stopped.elapsed();
+    let status = running[at].as_mut().unwrap().child.wait().unwrap();
+    assert!(status.success(), "SIGTERM after handing over: {status}");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let (placed, told) = load.finish().await;
+    assert!(!told.is_empty());
+    let now = primary().expect("a primary");
+    assert_ne!(now, at);
+    let ids = [id(&key(3)), id(&key(8))];
+    every_order_once(&addrs, &dir.store(nodes[now].0), &placed, &told, &ids).await;
+    eprintln!(
+        "handed over {} ms after SIGTERM (lease {LONG_LEASE_MS} ms), {} orders",
+        took.as_millis(),
+        placed.len()
+    );
+    drop(running);
+}
+
 // ---- the model test of a pair (P1–P4) ----
 
 /// xorshift: the same seed picks the same faults.

@@ -200,6 +200,25 @@ pub async fn become_primary(config: Config) -> Result<NodePrimary, BoxError> {
     }
 }
 
+/// A planned stop of a pair's primary: it hands its role to its standby first, so the
+/// standby serves at once instead of after the lease. The answer comes once it handed over, or
+/// with why not (no standby in sync, say), and then the primary stops as usual. `None` for a
+/// kernel that is not a pair's primary.
+pub fn hand_over_on_stop(
+    kernel: &Arc<Kernel>,
+) -> Option<tokio::sync::oneshot::Receiver<Result<kernable_core::proto::SwitchoverResult, String>>>
+{
+    kernel.replication.as_ref().filter(|p| !p.is_fixed())?;
+    let asks = kernel
+        .switchover
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    asks.try_send(tx).ok()?;
+    Some(rx)
+}
+
 /// Gets a switchover ready: refuses new requests, lets running ones finish, and waits
 /// until the standby holds every record; the record it holds then, or why not. Runs next to the
 /// lease, which [`keep_lease`] goes on renewing meanwhile.

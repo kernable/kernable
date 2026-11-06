@@ -4,7 +4,7 @@
 
 - **A child that exits is started again**, after 1 s, backing off up to 30 s while it keeps failing at once. A kernel crash never takes the node down. A child being stopped for a restart stops in the background: the node looks after the others meanwhile, and starts it again once its old process ended.
 - **A change to the file is applied by itself.** The node reads it every two seconds (or at once on SIGHUP); a child whose command changed is stopped and started again with the new one, and the others run on.
-- **An update is a new binary.** Point `binary` at it, or replace the file it names: the node stops the child and starts it on the new binary.
+- **An update is a new binary.** Point `binary` at it, or replace the file it names: the node stops the child and starts it on the new binary. The kernel is not stopped first: the new kernel starts beside it and waits for the stores, the old one gets SIGUSR1, finishes its running requests and lets them go, and writes pause for a moment only.
 - **A new build of a service on SIGHUP.** Change your code, send the node SIGHUP: it builds every service again in the background, and restarts those whose image changed. The other children are looked after meanwhile.
 - **One log for everything.** Every line of every child comes out of the node, on stdout or stderr as the child wrote it, prefixed with its name (`worker | …`, `kernel | …`). Under systemd, journald keeps, rotates and searches them: `journalctl -u kernable-node | grep 'worker |'`.
 - **Metrics** with `metrics-listen` in `[node]`: see [below](#metrics).

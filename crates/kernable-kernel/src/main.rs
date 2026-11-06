@@ -41,7 +41,10 @@ Run the kernel:
                                           by the root keys; the flags are listed by kernable start
                                           --help. On Unix, SIGHUP reads the kernel key again.
                                           SIGTERM or SIGINT refuses new requests, lets running ones
-                                          finish and stops. --dev is for trying kernable out: it
+                                          finish and stops; SIGTERM to a pair's primary hands its
+                                          role to the standby in sync first. SIGUSR1 stops the same
+                                          way, never handing over (a new binary takes the stores
+                                          over). --dev is for trying kernable out: it
                                           creates root.key, kernel.key, vault.key, app.key and
                                           app.grant in the working directory if missing (app may do
                                           everything) and defaults to --root root.pub, --vault-key
@@ -665,7 +668,9 @@ async fn run_kernel(config: Config) -> std::result::Result<(), BoxError> {
 }
 
 /// Serves `kernel` until a signal; with `lease`, also until it ends: a primary of a pair the
-/// witness deposed, or one that handed its role over to its standby.
+/// witness deposed, or one that handed its role over to its standby. SIGTERM stops a pair's
+/// primary after it handed its role to its standby; SIGUSR1 (the node, when a new kernel
+/// binary waits for the stores, P21) lets the stores go without that.
 async fn run_kernel_on(
     kernel: Arc<Kernel>,
     lease: Option<std::pin::Pin<Box<dyn Future<Output = BoxError> + Send>>>,
@@ -673,38 +678,79 @@ async fn run_kernel_on(
     let mut lease = lease.unwrap_or_else(|| Box::pin(std::future::pending()));
     let mut server = tokio::spawn(serve(Arc::clone(&kernel)));
     let mut hangup = Hangup::new()?;
+    // A stop that waits for the switchover to the standby first.
+    let mut handing: Option<
+        tokio::sync::oneshot::Receiver<
+            std::result::Result<kernable_core::proto::SwitchoverResult, String>,
+        >,
+    > = None;
     loop {
-        tokio::select! {
+        let stopping = handing.is_some();
+        let handed = async {
+            match handing.as_mut() {
+                Some(rx) => rx
+                    .await
+                    .unwrap_or_else(|_| Err("the lease keeper ended".into())),
+                None => std::future::pending().await,
+            }
+        };
+        let signal = tokio::select! {
             result = &mut server => return result?.and_then(|()| kernel.shutdown()),
             why = &mut lease => {
                 server.abort();
                 let _ = kernel.shutdown();
-                return Err(why);
+                return if stopping { Ok(()) } else { Err(why) };
             }
-            _ = hangup.recv() => match kernel.reload() {
-                Ok(()) => tracing::info!("kernel key read again"),
-                Err(e) => tracing::error!(error = %e, "reading the kernel key failed; the previous key stays"),
-            },
-            signal = shutdown_signal() => {
-                // Workers and listeners stay connected, so running commands can finish and settle.
-                tracing::info!(signal = signal?, "shutting down: finishing running requests");
-                if !kernel.drain().await {
-                    tracing::warn!("drain timed out: unfinished commands run again after a restart");
+            _ = hangup.recv() => {
+                match kernel.reload() {
+                    Ok(()) => tracing::info!("kernel key read again"),
+                    Err(e) => tracing::error!(error = %e, "reading the kernel key failed; the previous key stays"),
                 }
-                server.abort();
-                return kernel.shutdown();
+                continue;
             }
+            result = handed => match result {
+                // The lease keeper ends next, with the handover.
+                Ok(r) => {
+                    tracing::warn!(standby = %r.standby, record = r.seq, "stopping: the standby serves now");
+                    continue;
+                }
+                Err(why) => {
+                    tracing::warn!(%why, "stopping without handing over");
+                    "SIGTERM"
+                }
+            },
+            signal = shutdown_signal(), if !stopping => {
+                let signal = signal?;
+                if signal == "SIGTERM"
+                    && let Some(rx) = kernable_kernel::node::hand_over_on_stop(&kernel)
+                {
+                    tracing::info!("shutting down: handing the primary role to the standby first");
+                    handing = Some(rx);
+                    continue;
+                }
+                signal
+            }
+        };
+        // Workers and listeners stay connected, so running commands can finish and settle.
+        tracing::info!(signal, "shutting down: finishing running requests");
+        if !kernel.drain().await {
+            tracing::warn!("drain timed out: unfinished commands run again after a restart");
         }
+        server.abort();
+        return kernel.shutdown();
     }
 }
 
+/// SIGINT, SIGTERM, or SIGUSR1 (let the stores go to a new kernel binary).
 #[cfg(unix)]
 async fn shutdown_signal() -> std::io::Result<&'static str> {
     use tokio::signal::unix::{SignalKind, signal};
     let mut term = signal(SignalKind::terminate())?;
+    let mut usr1 = signal(SignalKind::user_defined1())?;
     tokio::select! {
         _ = tokio::signal::ctrl_c() => Ok("SIGINT"),
         _ = term.recv() => Ok("SIGTERM"),
+        _ = usr1.recv() => Ok("SIGUSR1"),
     }
 }
 

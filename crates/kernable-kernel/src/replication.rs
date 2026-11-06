@@ -147,6 +147,11 @@ impl Primary {
     }
 
     /// Whether writes are told without a standby until one catches up.
+    /// A primary without a witness, whose switchover the operator asks for.
+    pub(crate) fn is_fixed(&self) -> bool {
+        self.fixed
+    }
+
     pub(crate) fn catching_up(&self) -> bool {
         self.state().catching_up
     }

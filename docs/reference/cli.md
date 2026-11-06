@@ -15,7 +15,7 @@ kernable start --root <root.pub> [<flag> <value>]...
 kernable start --dev [<flag> <value>]...
 ```
 
-Runs the kernel in the foreground, trusting grants signed by the root keys; the flags are listed by `kernable start --help`. On Unix, SIGHUP reads the kernel key again. SIGTERM or SIGINT refuses new requests, lets running ones finish and stops. `--dev` is for trying kernable out: it creates `root.key`, `kernel.key`, `vault.key`, `app.key` and `app.grant` in the working directory if missing (app may do everything) and defaults to `--root root.pub`, `--vault-key vault.key` and `--ui-listen 127.0.0.1:7234`. Exit 2 on invalid flags; exit 1 if the kernel stops on an error.
+Runs the kernel in the foreground, trusting grants signed by the root keys; the flags are listed by `kernable start --help`. On Unix, SIGHUP reads the kernel key again. SIGTERM or SIGINT refuses new requests, lets running ones finish and stops; SIGTERM to a pair's primary hands its role to the standby in sync first. SIGUSR1 stops the same way, never handing over (a new binary takes the stores over). `--dev` is for trying kernable out: it creates `root.key`, `kernel.key`, `vault.key`, `app.key` and `app.grant` in the working directory if missing (app may do everything) and defaults to `--root root.pub`, `--vault-key vault.key` and `--ui-listen 127.0.0.1:7234`. Exit 2 on invalid flags; exit 1 if the kernel stops on an error.
 
 ### `kernable demo`
 

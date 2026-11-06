@@ -72,6 +72,8 @@ With `kernable switchover`, the primary hands its role over to the standby at on
 
 If the standby is not in sync, or does not hold everything within 10 s, the switchover is refused and the primary serves on. Under [`kernable node`](./node), the stopped kernel is started again by itself.
 
+A **planned stop** does the same: SIGTERM to the primary of a pair (`systemctl stop`, a node stopping) hands its role to the standby in sync first, then the primary drains and stops. The standby serves at once instead of after the lease. Without a standby in sync, the primary stops as before. SIGUSR1 stops a kernel without handing over; [`kernable node`](./node) sends it when a new kernel binary on the same machine takes the stores over.
+
 ## A fixed primary and standby
 
 Without a witness, the roles stay as you start them: you promote the standby by hand when the primary is lost, or hand the role over with a [switchover](#switch-over) while both run.

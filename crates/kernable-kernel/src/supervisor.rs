@@ -6,7 +6,7 @@
 //! command changed, or whose binary was replaced, is stopped and started again, so an update is
 //! a new binary and nothing else. The kernel is not restarted for a new binary but hands its
 //! stores over: the new kernel starts at once and waits for them (`--take-over-ms`), the
-//! old one gets SIGTERM once it waits, finishes its running requests and lets them go, and the
+//! old one gets SIGUSR1 once it waits, finishes its running requests and lets them go, and the
 //! services run on and reconnect. SIGTERM or SIGINT stops the children in reverse order, each
 //! with SIGTERM, then SIGKILL after `stop-seconds`. A kernel crash never takes the node down.
 //!
@@ -1264,7 +1264,7 @@ fn stop(c: &mut Running) {
         if let Some(previous) = previous {
             let _ = previous.await;
         }
-        stopped(&name, &mut child, stop, &binary, container.as_deref()).await;
+        stopped(&name, &mut child, stop, &binary, container.as_deref(), STOP).await;
     }));
 }
 
@@ -1276,20 +1276,35 @@ async fn stop_now(c: &mut Running) {
     }
 }
 
+/// The signal that stops a child; a kernel of a pair hands its role to its standby first.
+#[cfg(unix)]
+const STOP: i32 = libc::SIGTERM;
+/// The signal that tells the old kernel to let its stores go to the new one beside it,
+/// without handing its role to its standby.
+#[cfg(unix)]
+const LET_GO: i32 = libc::SIGUSR1;
+#[cfg(not(unix))]
+const STOP: i32 = 15;
+#[cfg(not(unix))]
+const LET_GO: i32 = 10;
+
 async fn stopped(
     name: &str,
     child: &mut Child,
     stop: Duration,
     binary: &Path,
     container: Option<&str>,
+    signal: i32,
 ) {
     if let Some(pid) = child.id() {
         #[cfg(unix)]
         // SAFETY: kill(2) on our own child's pid; a pid that already exited is harmless.
         unsafe {
-            libc::kill(pid as libc::pid_t, libc::SIGTERM);
+            libc::kill(pid as libc::pid_t, signal);
         }
     }
+    #[cfg(not(unix))]
+    let _ = signal;
     match tokio::time::timeout(stop, child.wait()).await {
         Ok(status) => tracing::info!(child = %name, status = ?status.ok(), "stopped"),
         Err(_) => {
@@ -1713,7 +1728,7 @@ fn hand_over(c: &mut Running, dir: &Path) {
 }
 
 /// A handover under way: once the new kernel waits for the stores (or the old one ended), the
-/// old one gets SIGTERM and lets them go; a new kernel that ends first leaves the old serving.
+/// old one gets SIGUSR1 and lets them go; a new kernel that ends first leaves the old serving.
 async fn handing_over(c: &mut Running) {
     let Some(h) = c.handover.as_mut() else {
         return;
@@ -1739,7 +1754,15 @@ async fn handing_over(c: &mut Running) {
     tracing::info!(child = %c.spec.name, "the new kernel waits for the stores: the old one hands them over");
     let (name, stop, binary) = (c.spec.name.clone(), c.spec.stop, c.spec.binary.clone());
     tokio::spawn(async move {
-        stopped(&name, &mut h.old, stop, &binary, h.old_container.as_deref()).await;
+        stopped(
+            &name,
+            &mut h.old,
+            stop,
+            &binary,
+            h.old_container.as_deref(),
+            LET_GO,
+        )
+        .await;
     });
 }
 
