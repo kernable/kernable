@@ -10,7 +10,8 @@
 #   RTO  the restore (download, apply, verify) plus the kernel's start, until it answers
 # and a point-in-time restore (--at) holds nothing after its time.
 #
-#   TO=s3://<bucket>/<prefix> [SIZE=200000] [RATE=200] [SEG=5] [LOAD=60] bash bench/backup-drill.sh
+#   TO=s3://<bucket>/<prefix> [SIZE=200000] [RATE=200] [SEG=5] [LOAD=60] [WORK=<dir on a disk>] bash bench/backup-drill.sh
+#   (the stores take about 2.5 times the filled store's size in WORK: not a small tmpfs)
 #   (on Linux, kernable and kernable-bench in BIN; S3: KERNABLE_S3_ENDPOINT, KERNABLE_S3_REGION,
 #   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY; python3 for reading the stores)
 set -euo pipefail
@@ -20,7 +21,8 @@ SIZE=${SIZE:-200000}
 RATE=${RATE:-200}
 SEG=${SEG:-5}
 LOAD=${LOAD:-60}
-DIR=$(mktemp -d)
+mkdir -p "${WORK:=${TMPDIR:-/tmp}}"
+DIR=$(mktemp -d "$WORK/drill.XXXXXX")
 RUN=$TO/drill-$(date +%s)
 pids=()
 trap 'kill -9 "${pids[@]}" 2>/dev/null; rm -rf "$DIR"' EXIT
