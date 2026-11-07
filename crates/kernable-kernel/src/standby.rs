@@ -466,7 +466,10 @@ async fn follow_once(
             }
             Some(follow_response::Msg::TakeOver(take)) => {
                 let applied = standby.applied.load(SeqCst);
-                if applied != take.seq {
+                // It holds every record up to there, and may hold more: the primary's own
+                // writes after it chose the point (a checkpoint), all of them from that primary.
+                // It takes over at what it holds; only less would lose what was told.
+                if applied < take.seq {
                     return Err(format!(
                         "asked to take over at record {}, but this standby holds {applied}",
                         take.seq
@@ -474,7 +477,7 @@ async fn follow_once(
                     .into());
                 }
                 tx.send(say(follow_request::Msg::TookOver(TookOver {
-                    seq: take.seq,
+                    seq: applied,
                 })))
                 .await?;
                 crate::crash::point("standby.took_over");

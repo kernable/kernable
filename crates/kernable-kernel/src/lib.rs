@@ -1532,6 +1532,10 @@ async fn checkpoints(kernel: &Kernel) {
     ));
     loop {
         tick.tick().await;
+        // Handing its role over, it writes nothing more: the standby takes over at its head.
+        if kernel.switching.load(SeqCst) {
+            continue;
+        }
         match kernel.store.checkpoint(&kernel.key(), now_ms()) {
             Ok(Some(_)) => crash::point("checkpoint.stored"),
             Ok(None) => {}

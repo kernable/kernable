@@ -56,12 +56,16 @@ fn args(dir: &Path, name: &str) -> Vec<String> {
 }
 
 fn start(dir: &Path, args: &[String], crash_at: Option<&str>) -> KillOnDrop {
+    // Each process's log in the test's directory, for a run that fails.
+    static STARTED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = STARTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let log = std::fs::File::create(dir.join(format!("{n:03}.log"))).unwrap();
     let mut process = Process::new(env!("CARGO_BIN_EXE_kernable"));
     process
         .current_dir(dir)
         .args(args)
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::from(log));
     if let Some(point) = crash_at {
         process.env("KERNABLE_CRASH_AT", point);
     }
