@@ -108,6 +108,8 @@ struct State {
     took_over: Option<u64>,
     /// The standby said it leaves; a new one connecting clears it.
     left: bool,
+    /// Since when a write waits for the standby's acknowledgment, while one does.
+    stalled_since: Option<Instant>,
 }
 
 impl State {
@@ -173,6 +175,9 @@ impl Primary {
         let wait = || {
             let (started, mut warned) = (Instant::now(), Instant::now());
             let mut state = self.state();
+            if state.acked < seq && !state.alone_now() && !state.catching_up {
+                state.stalled_since.get_or_insert_with(Instant::now);
+            }
             while state.acked < seq && !state.alone_now() && !state.catching_up {
                 state = self
                     .acked
@@ -217,10 +222,19 @@ impl Primary {
             return false;
         }
         let state = self.state();
+        // A standby that holds every write keeps the primary safe without a lease (the witness
+        // down, say); one that has not acknowledged a write for a second is gone, even if its
+        // connection still looks open (a partition drops packets silently).
+        let standby_holds = state.standby.is_some()
+            && state.in_sync
+            && !state.alone
+            && state
+                .stalled_since
+                .is_none_or(|since| since.elapsed() < STALLED);
         state
             .lease_until
             .is_some_and(|until| Instant::now() > until)
-            && !(state.standby.is_some() && state.in_sync && !state.alone)
+            && !standby_holds
     }
 
     /// Where replication stands, for the usage file.
@@ -287,9 +301,14 @@ impl Primary {
 
     fn ack(&self, seq: u64, head: u64) {
         let mut state = self.state();
+        let progressed = seq > state.acked;
         state.acked = state.acked.max(seq);
         if seq >= head {
             state.in_sync = true;
+            state.stalled_since = None;
+        } else if progressed && state.stalled_since.is_some() {
+            // Writes still wait, but the standby moves on: the clock starts again.
+            state.stalled_since = Some(Instant::now());
         }
         // Caught up: it holds every write told without it. Writes from here wait for it, so
         // nothing is told it lacks. A write that passed `wait` alone after `head` was read
@@ -358,6 +377,10 @@ impl Primary {
         Ok(Connected(Arc::clone(self)))
     }
 }
+
+/// How long a write may wait for the standby's acknowledgment before a primary whose lease ran
+/// out counts the standby as gone: a healthy one answers within milliseconds.
+const STALLED: Duration = Duration::from_secs(1);
 
 /// How long a primary without a witness waits for its standby to confirm that it took over.
 const TAKE_OVER_TIMEOUT: Duration = Duration::from_secs(10);

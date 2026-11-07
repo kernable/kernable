@@ -1143,6 +1143,12 @@ async fn pass(
     let mut buf = vec![0u8; 64 * 1024];
     loop {
         let n = match from.read(&mut buf).await {
+            // Frozen, a close does not get through either: the other side keeps its end open,
+            // as across a partition that drops every packet.
+            Ok(0) | Err(_) if frozen.load(SeqCst) => {
+                let _keep = to;
+                return std::future::pending().await;
+            }
             Ok(0) | Err(_) => return,
             Ok(n) => n,
         };
