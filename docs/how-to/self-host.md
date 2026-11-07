@@ -23,6 +23,7 @@ The node runs as a user of its own, never as root:
 sudo useradd --system --create-home --home-dir /srv/kernable --shell /usr/sbin/nologin kernable
 sudo usermod --add-subuids 200000-265535 --add-subgids 200000-265535 kernable   # for rootless Podman
 sudo loginctl enable-linger kernable                                            # its units run without a login
+sudo systemctl start user@$(id -u kernable)                                     # its own systemd, now
 sudo -u kernable mkdir -p /srv/kernable/shop
 ```
 
@@ -57,6 +58,7 @@ flags = { root = "root.pub", kernel-key = "kernel.key", vault-key = "vault.key",
 
 [node]
 project = "shop"
+network = "host"     # the machine is the instance's alone: the kernel listens where listen says
 
 [[service]]
 name = "worker"
@@ -64,7 +66,7 @@ build = "./worker"
 key = "keys/worker.key"
 ```
 
-Services on the same machine reach the kernel through its socket. Clients on other machines reach it over TCP with mutual TLS only: plain TCP stays on the loopback address ([Mutual TLS with your own PKI](./tls)).
+With `network = "host"` the instance is on the machine's network, as on a machine of its own: the kernel listens where `listen` says, its services find it there, and `/ready` answers on the loopback address. Clients on other machines reach it over TCP with mutual TLS only (`listen = "0.0.0.0:7233"` with the `tls-*` flags): plain TCP stays on the loopback address ([Mutual TLS with your own PKI](./tls)). Several instances on one machine each get a pod network of their own instead, the kernel on `run/kernel.sock` and a reverse proxy in front ([Network](./node#network)).
 
 ## 5. Start it with the machine
 
