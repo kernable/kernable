@@ -1,6 +1,6 @@
 # Rewinding a diverged log instead of starting over
 
-Status: decided 2026-11-07 together: option A (undo changesets, after a spike), the log sealed while fenced (built the same day), vault values undone too. The rewind itself: being built.
+Status: decided 2026-11-07 together: option A (undo changesets, after a spike), the log sealed while fenced (built the same day), vault values undone too. **The spike missed the bar** (below): the rewind is not built; the next choice is the.
 
 ## The problem
 
@@ -60,8 +60,29 @@ A fenced primary answers nothing, but its background writes go on: checkpoints, 
 4. The rewind in both stores (file log: truncate; SQLite: undo rows), with its marker and crash points; data files of the undone tail fetched again.
 5. Tests: the store's replication tests with a diverged tail of every record kind (the rewound standby must equal the primary, as the existing comparison checks); crash points during a rewind; the model-based pair test with partitions; the soak on four servers, where every cut of the primary should then end without a start-over.
 
+## The spike (2026-11-07)
+
+`bench/undo-spike.patch` on `bench/replication.sh` (a primary and a standby on one machine, SQLite, 1 KB payloads, wait=committed), commits only; results in `bench/results-2026-11-07-m2max-undo-spike.txt`.
+
+| What the session holds | durability | concurrency 1 | concurrency 64 (saturated) |
+|---|---|---|---|
+| every table | normal | -15 % | -29 % |
+| every table | full | -4 % | -15 % |
+| all but events and the record log | normal | -7 % | -15 % |
+| all but events and the record log | full | 0 to -10 % (noisy) | -6 % to -14 % |
+
+Leaving out events and records (a rewind deletes them by position) halved the cost; deleting old undo rows in batches changed nothing: what remains is the session's capture itself, on the commands and index rows a commit changes. At the load customers will run (far below saturation) the cost is a few hundredths of a millisecond per commit; at saturation it is 6–15 % of throughput, above the 10 % agreed.
+
+### Ways on
+
+1. **Accept it**: 6–15 % at saturation, about nothing below it. Rewind as designed.
+2. **A hand-written inverse for the commit only** (the hot path, which is also what a tail holds: commits under way), the session for every other kind of record (rare). No cost on commits; one inverse to get exactly right, checked by the same tests (a rewound standby must equal its primary).
+3. **Keep starting over** (D) with the changes above and 3a: the tail is now only the commits under way, but any tail still costs a full copy.
+
+Recommendation: **2**. The commit's own writes are few and known (its events, its command's outcome, the stream's index entries), the tests compare whole stores, and the cost stays off the hot path.
+
 ## Questions, answered
 
-1. Option A (with a spike first), B, C or D?
-2. Seal the record log while fenced now, whatever the answer to 1?
-3. Vault values from a rewound tail: undone with a session of their own, or left behind (and a sweep for values without a reference built)?
+1. Answered: A, with a spike first. The spike missed the bar: accept the cost (1), an inverse for commits only with the session for the rest (2, recommended), or keep starting over (3)?
+2. Answered: yes; built.
+3. Answered: undone too.

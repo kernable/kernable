@@ -1,0 +1,169 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index caf1990..fb465a3 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -204,6 +204,23 @@ version = "1.8.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
+ 
++[[package]]
++name = "bindgen"
++version = "0.73.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "787ef8ef523575546b106a58213d6e6b06198a05c2f757258c68a74273670cfa"
++dependencies = [
++ "bitflags",
++ "cexpr",
++ "clang-sys",
++ "proc-macro2",
++ "quote",
++ "regex",
++ "rustc-hash",
++ "shlex",
++ "syn 2.0.119",
++]
++
+ [[package]]
+ name = "bit-set"
+ version = "0.11.1"
+@@ -302,6 +319,15 @@ dependencies = [
+  "shlex",
+ ]
+ 
++[[package]]
++name = "cexpr"
++version = "0.6.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6fac387a98bb7c37292057cffc56d62ecb629900026402633ae9160df93a8766"
++dependencies = [
++ "nom",
++]
++
+ [[package]]
+ name = "cfg-if"
+ version = "1.0.5"
+@@ -362,6 +388,17 @@ dependencies = [
+  "inout",
+ ]
+ 
++[[package]]
++name = "clang-sys"
++version = "1.9.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "157a8ba7b480713b56f4c09fd13fc3e0a22a5dfab8097ba61cbc5feef950788a"
++dependencies = [
++ "glob",
++ "libc",
++ "libloading",
++]
++
+ [[package]]
+ name = "combine"
+ version = "4.6.9"
+@@ -862,6 +899,12 @@ dependencies = [
+  "zeroize",
+ ]
+ 
++[[package]]
++name = "glob"
++version = "0.3.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
++
+ [[package]]
+ name = "group"
+ version = "0.13.0"
+@@ -1545,12 +1588,23 @@ version = "0.2.191"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+ 
++[[package]]
++name = "libloading"
++version = "0.8.9"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
++dependencies = [
++ "cfg-if",
++ "windows-link",
++]
++
+ [[package]]
+ name = "libsqlite3-sys"
+ version = "0.39.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "14a5f01b87b92705d07b433c06f96cbc764637d81a0bffb5734ce17cf0f9a2b3"
+ dependencies = [
++ "bindgen",
+  "cc",
+  "pkg-config",
+  "vcpkg",
+diff --git a/Cargo.toml b/Cargo.toml
+index bce1ffb..eb207e2 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -20,7 +20,7 @@ prost = "0.14"
+ tonic = { version = "0.14", features = ["tls-ring"] }
+ tonic-prost = "0.14"
+ tonic-prost-build = "0.14"
+-rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }
++rusqlite = { version = "0.41", features = ["bundled", "fallible_uint", "session"] }
+ ed25519-dalek = "2"
+ sha2 = "0.10"
+ getrandom = "0.3"
+diff --git a/crates/kernable-store/src/sqlite.rs b/crates/kernable-store/src/sqlite.rs
+index 6c5390f..c598d2b 100644
+--- a/crates/kernable-store/src/sqlite.rs
++++ b/crates/kernable-store/src/sqlite.rs
+@@ -524,6 +524,25 @@ impl Store for SqliteStore {
+     ) -> Result<Vec<Event>> {
+         let mut conn = self.conn();
+         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
++        // SPIKE (design/rewind.md): the commit's inverted changeset kept, to measure its cost.
++        let spike = std::env::var_os("KERNABLE_SPIKE_UNDO").is_some();
++        let session = if spike {
++            tx.execute_batch(
++                "CREATE TABLE IF NOT EXISTS undo (seq INTEGER PRIMARY KEY, changeset BLOB NOT NULL)",
++            )?;
++            let mut session = rusqlite::session::Session::new(&tx)?;
++            // Events and records only grow: a rewind deletes them by position, so their
++            // payloads need no before-picture.
++            if std::env::var_os("KERNABLE_SPIKE_UNDO_ALL").is_none() {
++                session.table_filter(Some(|table: &str| {
++                    !matches!(table, "events" | "replication" | "undo")
++                }));
++            }
++            session.attach::<&str>(None)?;
++            Some(session)
++        } else {
++            None
++        };
+         let (stored, logged) = commit_tx(
+             &tx,
+             command_id,
+@@ -540,6 +559,26 @@ impl Store for SqliteStore {
+                 index: index.cloned(),
+             })]
+         })?;
++        let inverted = session
++            .map(|mut session| -> Result<Vec<u8>> {
++                let mut changes = Vec::new();
++                session.changeset_strm(&mut changes)?;
++                let mut inverted = Vec::new();
++                rusqlite::session::invert_strm(&mut changes.as_slice(), &mut inverted)?;
++                Ok(inverted)
++            })
++            .transpose()?;
++        if let Some(inverted) = inverted {
++            let seq = head.as_ref().map_or(0, |h| h.seq) as i64;
++            tx.execute(
++                "INSERT OR REPLACE INTO undo (seq, changeset) VALUES (?1, ?2)",
++                params![seq, inverted],
++            )?;
++            // As if the standby acknowledged all but the newest 64.
++            if seq % 256 == 0 {
++                tx.execute("DELETE FROM undo WHERE seq <= ?1", [seq - 64])?;
++            }
++        }
+         tx.commit()?;
+         self.advance(head);
+         Ok(stored)

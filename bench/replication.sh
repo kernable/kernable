@@ -58,7 +58,7 @@ stop() {
 }
 
 echo "== $(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -m), $(date -u +%F), store=$STORE, durability=$DURABILITY, standby durability=$STANDBY_DURABILITY"
-for mode in alone standby; do
+for mode in ${MODES:-alone standby}; do
   for c in 1 64; do
     start "$mode"
     printf '%-28s ' "$mode, concurrency=$c"
