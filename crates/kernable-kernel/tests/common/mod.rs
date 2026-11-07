@@ -717,6 +717,21 @@ pub async fn start_worker(
     worker
 }
 
+/// Like [`start_worker`], an honest worker, but tried again until a kernel registered it: right
+/// after a failover the socket may still answer as a standby, which refuses workers.
+pub async fn start_worker_registered(addr: String) -> tokio::task::JoinHandle<tonic::Status> {
+    loop {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut w = TestWorker::honest();
+        w.registered = Some(tx);
+        let worker = tokio::spawn(run_worker(addr.clone(), w));
+        if rx.await.is_ok() {
+            return worker;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
 pub async fn spawn_worker(env: &Env) {
     start_worker(env.addr.clone(), TestWorker::honest()).await;
 }

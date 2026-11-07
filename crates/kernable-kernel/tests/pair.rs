@@ -300,7 +300,7 @@ async fn a_pair_fails_over_on_its_own_and_the_old_primary_comes_back_as_its_stan
     );
 
     // B has no standby: after --standby-timeout-ms it commits alone, and serves what A told.
-    start_worker(b_addr.clone(), TestWorker::honest()).await;
+    start_worker_registered(b_addr.clone()).await;
     let again = submit(&b_addr, place(3)).await.unwrap();
     assert_eq!(events(&again), events(&told[3]));
     let added = submit(&b_addr, signed(command("c10", "AddItem", "o3"), &key(1)))
