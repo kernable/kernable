@@ -58,7 +58,8 @@ Every code example in the documentation is a file that runs in `make check` agai
 
 ```sh
 make test           # the simple tier: fmt, clippy and in-process tests, no kernel processes (about a minute)
-make check          # Rust, TypeScript, Python, the SDKs and the documentation, against every storage backend
+make check          # Rust, TypeScript, Python, the SDKs and the documentation, against every storage backend,
+                    # and known vulnerable dependencies (cargo install cargo-audit)
                     # (Python ≥ 3.10; the first run installs the Python SDK's venv)
 make check-packages # builds the npm package and the Python wheel, installs and runs them
 make docs           # the documentation site; `npm run reference` in docs/ regenerates the reference

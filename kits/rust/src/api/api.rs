@@ -1386,17 +1386,24 @@ fn percent(s: &str) -> String {
 
 /// TXT records through the system's resolver; none on any failure.
 async fn system_txt(name: &str) -> Vec<String> {
-    let Ok(resolver) = hickory_resolver::Resolver::builder_tokio().map(|b| b.build()) else {
+    let Some(resolver) = hickory_resolver::Resolver::builder_tokio()
+        .ok()
+        .and_then(|b| b.build().ok())
+    else {
         return vec![];
     };
     match resolver.txt_lookup(name).await {
         Ok(found) => found
+            .answers()
             .iter()
-            .map(|txt| {
-                txt.txt_data()
-                    .iter()
-                    .map(|part| String::from_utf8_lossy(part).into_owned())
-                    .collect()
+            .filter_map(|record| match &record.data {
+                hickory_resolver::proto::rr::RData::TXT(txt) => Some(
+                    txt.txt_data
+                        .iter()
+                        .map(|part| String::from_utf8_lossy(part).into_owned())
+                        .collect(),
+                ),
+                _ => None,
             })
             .collect(),
         Err(_) => vec![],

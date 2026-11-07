@@ -1,0 +1,9 @@
+# cargo audit (make check): known vulnerable dependencies fail the check, unless listed here
+# with why they do not reach us.
+[advisories]
+ignore = [
+  # crypto-bigint 0.5 (via p256 0.13, kits/rust): timing variability in constant-time
+  # operations. The kit only verifies passkey signatures, over public data with public keys:
+  # no secret goes through it. The fix needs p256 0.14 (crypto-bigint 0.7). 2026-11-07.
+  "RUSTSEC-2026-0387",
+]

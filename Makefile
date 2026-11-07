@@ -12,6 +12,7 @@ test: py
 
 check: prune py
 	cargo fmt --all --check
+	cargo audit -q  # known vulnerable dependencies (cargo install cargo-audit; .cargo/audit.toml)
 	cargo clippy --workspace --all-targets -- -D warnings
 	CARGO_TARGET_DIR=target/crash cargo clippy -p kernable-kernel --all-targets --features crash-points -- -D warnings
 	cargo test --workspace

@@ -155,7 +155,9 @@ const SOCKETS_INSIDE: &str = "/run/kernable/kernel";
 /// The kernel's and the backup follower's base image, unless `[kernel] image` names another
 /// (one with your KMS's client for `--key-command`, say). Its C library is newer than any
 /// supported host's, so a binary built there runs in it.
-const BASE_IMAGE: &str = "docker.io/library/debian:trixie-slim";
+// Pinned by digest: a node runs what was tested, not what the tag points at today.
+// Update it on purpose: docker buildx imagetools inspect docker.io/library/debian:trixie-slim.
+const BASE_IMAGE: &str = "docker.io/library/debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
