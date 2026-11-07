@@ -3705,7 +3705,13 @@ fn last_position(result: &CommandResult) -> u64 {
 }
 
 fn internal(e: StoreError) -> Status {
-    Status::internal(e.to_string())
+    match e {
+        // Handing its role over: the standby serves in a moment, and the SDKs retry there.
+        StoreError::Sealed => {
+            Status::unavailable("the kernel hands its role over to its standby; retry")
+        }
+        e => Status::internal(e.to_string()),
+    }
 }
 
 fn now_ms() -> i64 {

@@ -261,8 +261,14 @@ impl Registry {
                 changed.push(e.record.clone());
             }
         }
-        if let Err(e) = kernel.store.save_workers(&changed) {
-            tracing::error!(error = %e, "saving worker registrations failed");
+        match kernel.store.save_workers(&changed) {
+            Ok(()) => {}
+            // Handing its role over: the new primary has the registrations as they were, and
+            // the workers register with it when they connect.
+            Err(kernable_store::Error::Sealed) => {
+                tracing::info!("worker registrations not saved: the kernel hands its role over")
+            }
+            Err(e) => tracing::error!(error = %e, "saving worker registrations failed"),
         }
     }
 
