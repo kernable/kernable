@@ -347,7 +347,7 @@ async fn draining_gives_up_after_its_timeout() {
     assert!(started.elapsed() < std::time::Duration::from_millis(500));
 }
 
-/// `<store>.usage`: the kernel goes on from the counts the file holds, and writes the
+/// `<store>.usage`, signed: the kernel goes on from the counts the file holds, and writes the
 /// sum at shutdown: committed commands across restarts, the store's head as its events.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_usage_beside_the_store_counts_on_across_restarts() {
@@ -358,8 +358,7 @@ async fn the_usage_beside_the_store_counts_on_across_restarts() {
             commands: 10,
             rejected: 1,
             queries: 5,
-            store_bytes: 0,
-            replication: String::new(),
+            ..Default::default()
         };
         let path = kernable_kernel::usage::path(&config.store).unwrap();
         std::fs::write(path, serde_json::to_vec(&before).unwrap()).unwrap();
@@ -380,4 +379,6 @@ async fn the_usage_beside_the_store_counts_on_across_restarts() {
         (13, 1, 5, 3)
     );
     assert!(usage.at > 1);
+    // Signed by the kernel key.
+    assert!(usage.verify(&env.kernel_key.verifying_key()));
 }

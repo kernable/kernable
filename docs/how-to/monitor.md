@@ -112,10 +112,10 @@ kernable listeners parked sqlite:shop.db   # each parked event: listener, positi
 The kernel writes `<store>.usage` beside its store (`kernable.db.usage`) every minute and when it stops, one line of JSON:
 
 ```json
-{"at":1793996832409,"events":205200,"commands":205211,"rejected":3,"queries":1200,"store_bytes":241172480}
+{"at":1793996832409,"events":205200,"commands":205211,"rejected":3,"queries":1200,"store_bytes":241172480,"sig":"9f3c…"}
 ```
 
-`events` is the store's head, `store_bytes` what its stores take on the disk; `commands` (committed), `rejected` and `queries` (answered) go on across restarts: a kernel starts from the counts in the file, so a crash loses at most a minute of them. For whoever bills or watches the machine without scraping metrics.
+`events` is the store's head, `store_bytes` what its stores take on the disk; `commands` (committed), `rejected` and `queries` (answered) go on across restarts: a kernel starts from the counts in the file, so a crash loses at most a minute of them. For whoever bills or watches the machine without scraping metrics. `sig` is the kernel key's signature (Ed25519, hex) over the other fields, one per line after the tag `kernable-usage-1`, in the order `at`, `events`, `commands`, `rejected`, `queries`, `store_bytes`, `replication` (empty without replication): checked with the kernel's public key, the counts are the kernel's, not another process's on the machine.
 
 ## Parked events
 
