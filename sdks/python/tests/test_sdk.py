@@ -167,7 +167,9 @@ class Reconnects(unittest.TestCase):
             return [l for l in stderr.getvalue().splitlines() if "reconnecting in" in l]
 
         def until(done):
-            for _ in range(250):
+            # Up to 30 s, done as soon as it is: under load a kernel's start takes its time.
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
                 if done():
                     return
                 time.sleep(0.02)
