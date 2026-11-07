@@ -242,9 +242,16 @@ pub(crate) async fn get_ready(kernel: Arc<Kernel>) -> Result<u64, String> {
     if !kernel.idle_within(drain).await {
         tracing::warn!("running requests did not finish in time; they run again on the standby");
     }
+    // Nothing is written from here on, not a checkpoint, a listener's position or a worker:
+    // the standby takes over at this head, and this kernel's log stays its beginning (else it
+    // would have to start over, empty, to follow). Whoever abandons the switchover unseals it.
+    let head = kernel
+        .store
+        .seal_records(true)
+        .map_err(|e| format!("sealing the record log failed: {e}"))?
+        .seq;
     let started = Instant::now();
     loop {
-        let head = kernel.store.record_head().map_or(0, |h| h.seq);
         if primary.acked_seq() >= head {
             return Ok(head);
         }
@@ -332,7 +339,7 @@ async fn keep_lease(
                         .into();
                     }
                     Err(why) => {
-                        kernel.switching.store(false, std::sync::atomic::Ordering::SeqCst);
+                        kernel.serve_on();
                         tracing::warn!(%why, "switchover abandoned: serving on");
                         let _ = reply.send(Err(why));
                     }

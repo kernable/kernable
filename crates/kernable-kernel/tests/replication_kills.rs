@@ -581,17 +581,7 @@ async fn a_planned_stop_of_a_pairs_primary_hands_over_without_waiting_for_the_le
     running[at] = Some(start(&dir, &nodes[at].1));
     wait_for(&dir.sock(nodes[at].0)).await;
     // The witness still names the standby in sync; wait until it follows the new process.
-    let log = std::fs::read_dir(&dir.0)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .filter(|p| {
-            // The processes' logs (`<n>-<command>.log`), not a file store (`<name>.log`).
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.ends_with(".log") && n.starts_with(|c: char| c.is_ascii_digit()))
-        })
-        .max()
-        .unwrap();
+    let log = newest_log(&dir.0);
     let started = Instant::now();
     while !std::fs::read_to_string(&log)
         .unwrap_or_default()
@@ -626,6 +616,27 @@ async fn a_planned_stop_of_a_pairs_primary_hands_over_without_waiting_for_the_le
     assert_ne!(now, at);
     let ids = [id(&key(3)), id(&key(8))];
     every_order_once(&addrs, &dir.store(nodes[now].0), &placed, &told, &ids).await;
+    // Started again, the old primary follows on from its own log: it wrote nothing after the
+    // head it handed over at (its log sealed), so it need not start over, empty.
+    running[at] = Some(start(&dir, &nodes[at].1));
+    let log = newest_log(&dir.0);
+    let started = Instant::now();
+    while !std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .contains("following the primary")
+    {
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "the old primary never followed"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let text = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        !text.contains("starts over"),
+        "the old primary's log diverged after it handed over:\n{text}"
+    );
     eprintln!(
         "alone {} ms after the standby's SIGTERM; handed over {} ms after the primary's (lease {LONG_LEASE_MS} ms), {} orders",
         alone_after.as_millis(),
@@ -633,6 +644,21 @@ async fn a_planned_stop_of_a_pairs_primary_hands_over_without_waiting_for_the_le
         placed.len()
     );
     drop(running);
+}
+
+/// The log of the process started last in `dir` (`<n>-<command>.log`), not a file store's
+/// (`<name>.log`).
+fn newest_log(dir: &std::path::Path) -> std::path::PathBuf {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".log") && n.starts_with(|c: char| c.is_ascii_digit()))
+        })
+        .max()
+        .unwrap()
 }
 
 /// A kernel update of a pair: on each machine a new process starts beside the old one

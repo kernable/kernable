@@ -1008,6 +1008,14 @@ impl Kernel {
         self.waiters.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Serves on after an abandoned switchover: requests are taken and records written again.
+    pub(crate) fn serve_on(&self) {
+        if let Err(e) = self.store.seal_records(false) {
+            tracing::warn!(error = %e, "unsealing the record log failed");
+        }
+        self.switching.store(false, SeqCst);
+    }
+
     /// Writes a final checkpoint and the listener positions. Leases are not persisted:
     /// after a restart, every unfinished command is delivered again right away.
     pub fn shutdown(&self) -> Result<(), BoxError> {
@@ -1458,6 +1466,11 @@ async fn flush_listeners(kernel: &Kernel) {
     let mut tick = tokio::time::interval(listeners::FLUSH);
     loop {
         tick.tick().await;
+        // Handing its role over, it writes nothing more: the new primary goes on from the
+        // positions it holds, and listeners get what came after again.
+        if kernel.switching.load(SeqCst) {
+            continue;
+        }
         if let Err(e) = listeners::flush(kernel) {
             tracing::error!(error = %e, "saving listener positions failed");
         }

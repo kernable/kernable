@@ -466,6 +466,52 @@ fn a_standby_takes_an_image_then_follows() {
     }
 }
 
+/// A sealed log (a kernel handing its role over) takes no record more, a commit, a checkpoint,
+/// a worker; nothing of a refused write stays. Unsealed, it goes on from the same head.
+#[test]
+fn a_sealed_record_log_takes_no_record_more() {
+    for kind in [File, Sqlite] {
+        let dir = Dir::new(&format!("sealed-{kind:?}"));
+        let store = dir.open(kind, "primary");
+        writes(&*store, 0);
+        let head = store.record_head().unwrap();
+        assert_eq!(store.seal_records(true).unwrap(), head, "{kind:?}");
+        let worker = WorkerRecord {
+            aggregate_type: "orders.Order".into(),
+            key_id: "sealed".into(),
+            command_types: vec!["orders.Place".into()],
+            service: "shop".into(),
+            last_seen: 1,
+            removed: false,
+        };
+        assert!(
+            matches!(store.save_workers(std::slice::from_ref(&worker)), Err(Error::Sealed)),
+            "{kind:?}"
+        );
+        // A checkpoint is refused, or the last one at this head comes back: none is added.
+        let _ = store.checkpoint(&kernel(), 9_999);
+        assert!(
+            matches!(
+                store.enqueue(&cmd("sealed", "x"), 9_999),
+                Err(Error::Sealed)
+            ),
+            "{kind:?}"
+        );
+        assert_eq!(store.record_head().unwrap(), head, "{kind:?}");
+        assert!(
+            store
+                .workers()
+                .unwrap()
+                .iter()
+                .all(|w| w.key_id != "sealed"),
+            "{kind:?}"
+        );
+        store.seal_records(false).unwrap();
+        store.save_workers(&[worker]).unwrap();
+        assert_eq!(store.record_head().unwrap().seq, head.seq + 1, "{kind:?}");
+    }
+}
+
 #[test]
 fn records_that_do_not_continue_the_log_are_refused() {
     for (p, s) in PAIRS {

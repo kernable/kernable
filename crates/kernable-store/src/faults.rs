@@ -418,6 +418,10 @@ impl Store for FaultyStore {
         self.inner.keep_record_log(on)
     }
 
+    fn seal_records(&self, sealed: bool) -> Result<Head> {
+        self.inner.seal_records(sealed)
+    }
+
     fn prune_records(&self, seq: u64) -> Result<()> {
         self.faults.write(|| self.inner.prune_records(seq))
     }

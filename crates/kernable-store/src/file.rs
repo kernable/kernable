@@ -482,6 +482,8 @@ struct Inner {
     len: u64,
     log: RecordLog,
     syncer: Arc<Syncer>,
+    /// No more records: see [`Store::seal_records`].
+    sealed: bool,
 }
 
 pub struct FileStore {
@@ -577,6 +579,7 @@ impl FileStore {
                 len,
                 log,
                 syncer: Arc::clone(&syncer),
+                sealed: false,
             }),
             syncer,
             flush: None,
@@ -600,6 +603,9 @@ impl FileStore {
 /// Writes one record, then applies it to the in-memory state.
 fn append(inner: &mut Inner, record: Record) -> Result<()> {
     inner.syncer.check()?;
+    if inner.sealed && !matches!(inner.sink, Sink::Memory) {
+        return Err(Error::Sealed);
+    }
     let file = match &mut inner.sink {
         Sink::File(file) => file,
         Sink::Memory => return inner.state.apply(record),
@@ -1171,6 +1177,11 @@ impl Store for FileStore {
             return Ok(());
         }
         append(&mut inner, Record::PartitionMap(map.clone()))
+    }
+
+    fn seal_records(&self, sealed: bool) -> Result<Head> {
+        self.inner().sealed = sealed;
+        self.record_head()
     }
 
     fn record_head(&self) -> Result<Head> {

@@ -425,7 +425,7 @@ async fn hand_over_when_asked(
         let head = match crate::node::get_ready(Arc::clone(&kernel)).await {
             Ok(head) => head,
             Err(why) => {
-                kernel.switching.store(false, SeqCst);
+                kernel.serve_on();
                 tracing::warn!(%why, "switchover abandoned: serving on");
                 let _ = reply.send(Err(why));
                 continue;
@@ -437,7 +437,7 @@ async fn hand_over_when_asked(
             let note =
                 format!("handed the primary role over to standby {standby} at record {head}\n");
             if let Err(e) = write_synced(&marker, note.as_bytes()) {
-                kernel.switching.store(false, SeqCst);
+                kernel.serve_on();
                 let why = format!("noting the switchover in {} failed: {e}", marker.display());
                 tracing::warn!(%why, "switchover abandoned: serving on");
                 let _ = reply.send(Err(why));

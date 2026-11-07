@@ -78,6 +78,9 @@ pub enum Error {
     Diverged(String),
     /// The store keeps no record log: SQLite with replication off, or `memory:`.
     NoRecordLog,
+    /// A write while the record log is sealed: its kernel hands its role over, and the standby
+    /// takes over at the sealed head ([`Store::seal_records`]).
+    Sealed,
     Io(std::io::Error),
     Sqlite(rusqlite::Error),
     Decode(prost::DecodeError),
@@ -107,6 +110,10 @@ impl fmt::Display for Error {
             Error::Vault(what) => write!(f, "vault: {what}"),
             Error::Diverged(what) => write!(f, "the record log diverged: {what}"),
             Error::NoRecordLog => write!(f, "the store keeps no record log"),
+            Error::Sealed => write!(
+                f,
+                "the record log is sealed: the kernel hands its role over"
+            ),
             Error::Io(e) => write!(f, "io: {e}"),
             Error::Sqlite(e) => write!(f, "sqlite: {e}"),
             Error::Decode(e) => write!(f, "decode: {e}"),
@@ -536,6 +543,15 @@ pub trait Store: Send + Sync {
     fn keep_record_log(&self, on: bool) -> Result<()> {
         let _ = on;
         Ok(())
+    }
+
+    /// Seals the record log (`true`): every write that would add a record fails with
+    /// [`Error::Sealed`] from now on, and the head returned is the last one; a write that was
+    /// under way is in it. For a kernel that hands its role over: the standby takes over at that
+    /// head, so the log stays the new primary's beginning. `false` unseals it again.
+    fn seal_records(&self, sealed: bool) -> Result<Head> {
+        let _ = sealed;
+        Err(Error::NoRecordLog)
     }
 
     /// Drops the records before `seq` from a log kept in a table (SQLite); record `seq` and

@@ -225,6 +225,8 @@ pub struct SqliteStore {
     syncer: Syncer,
     /// Locked only while `conn` is, so writes number their records in commit order.
     log: Mutex<RecordLog>,
+    /// No more records: see [`Store::seal_records`].
+    sealed: std::sync::atomic::AtomicBool,
 }
 
 impl SqliteStore {
@@ -320,6 +322,7 @@ impl SqliteStore {
             wal: None,
             syncer: Syncer::default(),
             log: Mutex::new(log),
+            sealed: Default::default(),
         })
     }
 
@@ -338,6 +341,9 @@ impl SqliteStore {
             let log = self.log();
             if !log.on {
                 return Ok(None);
+            }
+            if self.sealed.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(Error::Sealed);
             }
             log.head.clone()
         };
@@ -1036,6 +1042,15 @@ impl Store for SqliteStore {
     }
 
     // ---- the record log ----
+
+    fn seal_records(&self, sealed: bool) -> Result<Head> {
+        self.sealed
+            .store(sealed, std::sync::atomic::Ordering::SeqCst);
+        // Records are filed while `conn` is locked: once it is free, a write under way is done
+        // and every later one sees the seal.
+        let _writes = self.conn();
+        self.record_head()
+    }
 
     fn record_head(&self) -> Result<Head> {
         let log = self.log();
