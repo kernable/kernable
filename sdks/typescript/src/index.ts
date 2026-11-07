@@ -1657,7 +1657,8 @@ class Log {
     // A gRPC error by its details only (`Connection dropped`, not `14 UNAVAILABLE: …`).
     const e = err as Error & { details?: string; code?: number };
     const reason = e.details || e.message;
-    const delay = backoff(ms, attempt);
+    // A kernel of a pair that is not the primary right now may be in a moment.
+    const delay = switchingRoles(reason) ? Math.min(backoff(ms, attempt), PAIR_RETRY_MS) : backoff(ms, attempt);
     const refused = e.code !== undefined && REFUSALS.has(e.code);
     this.print(refused ? "error" : "warn", what, `${refused ? "refused" : "connection lost"} (${reason}), reconnecting in ${delay / 1000} s`);
     await stopped.sleep(delay);
@@ -1669,6 +1670,14 @@ class Log {
     this.print("error", what, `store: ${(err as Error).message}; trying again in ${delay / 1000} s`);
     await stopped.sleep(delay);
   }
+}
+
+/** The longest wait before trying a kernel of a pair again that was not the primary. */
+const PAIR_RETRY_MS = 1000;
+
+/** Whether `reason` says the kernel is one of a pair that is not the primary right now. */
+function switchingRoles(reason: string): boolean {
+  return reason.startsWith("not_primary") || reason.includes("lost its lease at the witness") || reason.includes("hands its role over");
 }
 
 /** The pause before try `attempt` (from 1): `ms`, doubled each time up to 30 s, ±20% jitter. */

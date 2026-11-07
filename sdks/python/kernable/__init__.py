@@ -2025,6 +2025,9 @@ class _Log:
         restart. A refusal that will not go away by itself is an error, not a warning. `stopped`
         cuts the wait short."""
         delay = _backoff(seconds, attempt)
+        # A kernel of a pair that is not the primary right now may be in a moment.
+        if _switching_roles(reason):
+            delay = min(delay, _PAIR_RETRY_S)
         self.print("error" if refused else "warn", what,
                    f"{'refused' if refused else 'connection lost'} ({reason}), reconnecting in {delay:.2f} s")
         stopped.wait(delay)
@@ -2036,6 +2039,17 @@ class _Log:
         delay = _backoff(seconds, attempt)
         self.print("error", what, f"store: {err}; trying again in {delay:.2f} s")
         stopped.wait(delay)
+
+
+_PAIR_RETRY_S = 1.0
+"""The longest wait before trying a kernel of a pair again that was not the primary."""
+
+
+def _switching_roles(reason: str) -> bool:
+    """Whether `reason` says the kernel is one of a pair that is not the primary right now: a
+    standby, one that lost its lease or hands its role over."""
+    return (reason.startswith("not_primary") or "lost its lease at the witness" in reason
+            or "hands its role over" in reason)
 
 
 def _backoff(seconds: float, attempt: int) -> float:

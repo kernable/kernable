@@ -1264,3 +1264,111 @@ async fn a_primary_cut_off_answers_unavailable_and_its_standby_takes_over() {
         cut.elapsed().as_millis()
     );
 }
+
+/// What a client of both kernels sees of a partition: an SDK client given both
+/// addresses, workers on both kernels that come back by themselves; the primary is cut off from
+/// the standby and the witness. The client's longest time without a commit.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_of_both_kernels_writes_again_soon_after_a_partition() {
+    let dir = Dir::new("pair-partition-sdk");
+    let state = dir.0.join("witness.state");
+    let _witness = start(
+        &dir,
+        &[
+            "witness".into(),
+            "--listen".into(),
+            dir.sock("w"),
+            "--root".into(),
+            id(&root()),
+            "--state".into(),
+            state.display().to_string(),
+            "--lease-ms".into(),
+            LEASE_MS.to_string(),
+        ],
+    );
+    wait_for(&dir.sock("w")).await;
+    let plug = |front: &str, back: &str| {
+        Plug::new(
+            &dir.0.join(format!("{front}.sock")),
+            &dir.0.join(format!("{back}.sock")),
+        )
+    };
+    let (a_witness, a_front, _b_front) =
+        (plug("wa", "w"), plug("a-plug", "a"), plug("b-plug", "b"));
+    let node = |name: &str, kernel_seed: u8, node_seed: u8, witness: &str| {
+        let mut args = vec!["start".to_owned()];
+        args.extend(flags(&dir, name, kernel_seed));
+        let node_key = dir.key(&format!("{name}-node"), node_seed, &[("replicate", &["*"])]);
+        args.extend([
+            "--witness".into(),
+            dir.sock(witness),
+            "--advertise".into(),
+            dir.sock(&format!("{name}-plug")),
+            "--node-key".into(),
+            node_key.display().to_string(),
+            "--standby-timeout-ms".into(),
+            LEASE_MS.to_string(),
+            "--primary-kernel-key".into(),
+            id(&key(3)),
+            "--primary-kernel-key".into(),
+            id(&key(8)),
+        ]);
+        args
+    };
+    let _a = start(&dir, &node("a", 3, 11, "wa"));
+    wait_for(&dir.sock("a")).await;
+    let _b = start(&dir, &node("b", 8, 12, "w"));
+    wait_for(&dir.sock("b")).await;
+    let kept = || {
+        Witness::open(&state, Duration::from_millis(LEASE_MS))
+            .unwrap()
+            .state()
+    };
+    let started = Instant::now();
+    while kept().in_sync != id(&key(12)) {
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "B never got in sync"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    worker(dir.sock("a"));
+    worker(dir.sock("b"));
+    let sdk_key = dir.key("sdk", 1, &[("submit", &["*"])]);
+    let sdk = kernable::Kernable::new(kernable::Options::new(&sdk_key).url(format!(
+        "{},{}",
+        dir.sock("a"),
+        dir.sock("b")
+    )))
+    .unwrap();
+    let (mut longest, mut last, mut n) = (Duration::ZERO, Instant::now(), 0u32);
+    let mut cut = None;
+    let begun = Instant::now();
+    while begun.elapsed() < Duration::from_secs(12) {
+        if cut.is_none() && begun.elapsed() >= Duration::from_secs(2) {
+            a_front.freeze();
+            a_witness.freeze();
+            cut = Some(Instant::now());
+        }
+        n += 1;
+        let placed = sdk
+            .submit(
+                kernable::Submit::new("orders", "Order", &format!("sdk-{n}"), "PlaceOrder")
+                    .data(serde_json::json!({}))
+                    .wait(kernable::Wait::Committed)
+                    .timeout(Duration::from_secs(30)),
+            )
+            .await;
+        if placed.is_ok() {
+            longest = longest.max(last.elapsed());
+            last = Instant::now();
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    longest = longest.max(last.elapsed());
+    eprintln!(
+        "a client of both kernels: {n} submits, the longest time without a commit {} ms (lease {LEASE_MS} ms)",
+        longest.as_millis()
+    );
+    assert!(longest < Duration::from_millis(8 * LEASE_MS), "{longest:?}");
+}

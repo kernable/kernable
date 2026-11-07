@@ -253,6 +253,16 @@ pub(crate) fn backoff(base: Duration, attempt: u32) -> Duration {
     Duration::from_millis(delay.as_millis() as u64) // readable in the log
 }
 
+/// The longest wait before trying a kernel of a pair again that was not the primary.
+pub(crate) const PAIR_RETRY: Duration = Duration::from_secs(1);
+
+/// Whether `reason` says the kernel is one of a pair that is not the primary right now.
+pub(crate) fn switching_roles(reason: &str) -> bool {
+    reason.starts_with("not_primary")
+        || reason.contains("lost its lease at the witness")
+        || reason.contains("hands its role over")
+}
+
 /// Logs the end of a session that was not stopped and says how long to wait before attempt
 /// `attempt` (1: the first after it ended): `base`, twice as long after each further failed
 /// attempt, at most 30 s, give or take a fifth, so processes do not reconnect in lockstep after
@@ -264,8 +274,14 @@ pub(crate) fn reconnecting(
     base: Duration,
     attempt: u32,
 ) -> Duration {
-    let delay = backoff(base, attempt);
     let reason = reason(error);
+    // A kernel of a pair that is not the primary right now (a standby, one that lost its lease or
+    // hands its role over) may be the primary in a moment: try again soon, not after up to 30 s.
+    let delay = if switching_roles(&reason) {
+        backoff(base, attempt).min(PAIR_RETRY)
+    } else {
+        backoff(base, attempt)
+    };
     if refused(error) {
         log.error(what, || {
             format!(
@@ -656,5 +672,27 @@ mod tests {
             tonic::Status::unauthenticated("unknown key"),
         ));
         assert!(refused(Some(&wrapped)));
+    }
+}
+
+#[cfg(test)]
+mod pair_retry_tests {
+    use super::*;
+
+    #[test]
+    fn a_kernel_of_a_pair_that_is_not_the_primary_is_tried_again_within_a_second() {
+        assert!(switching_roles(
+            "not_primary: this kernel is a standby of x; connect to the primary"
+        ));
+        assert!(switching_roles(
+            "this kernel lost its lease at the witness and no standby holds its writes: ask the other kernel"
+        ));
+        assert!(switching_roles(
+            "the kernel hands its role over to its standby; retry"
+        ));
+        assert!(!switching_roles("the key may not run orders.Order"));
+        for attempt in 1..20 {
+            assert!(backoff(Duration::from_millis(500), attempt).min(PAIR_RETRY) <= PAIR_RETRY);
+        }
     }
 }

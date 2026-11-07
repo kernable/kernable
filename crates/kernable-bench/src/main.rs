@@ -50,7 +50,7 @@ const USAGE: &str = "usage:
       [target=spread|new|existing|repeat|query] [filled=<n>]
   kernable-bench subscribe <addr> <client.key> <after> <count>
   kernable-bench history <addr> <client.key> <events>
-  kernable-bench probe <client.key> [seconds=60] [every-ms=50]
+  kernable-bench probe <client.key> [seconds=60] [every-ms=50] [timeout-ms=30000]
       one command after the other through the Rust SDK (KERNABLE_URL with several kernels, and
       KERNABLE_TLS_*, as for the SDKs): the longest time without a commit, as a client of a pair
       or of a moving instance sees it";
@@ -630,7 +630,11 @@ async fn probe(key: &str, opts: &[&str]) -> Result<(), BoxError> {
             .find_map(|o| o.strip_prefix(&format!("{name}="))?.parse().ok())
             .unwrap_or(default)
     };
-    let (seconds, every) = (opt("seconds", 60), opt("every-ms", 50));
+    let (seconds, every, timeout) = (
+        opt("seconds", 60),
+        opt("every-ms", 50),
+        opt("timeout-ms", 30_000),
+    );
     let client = kernable::Kernable::new(kernable::Options::new(key).tenant(tenant()))?;
     let start = Instant::now();
     let (mut last, mut n, mut committed, mut failed) = (Instant::now(), 0u64, 0u64, 0u64);
@@ -640,7 +644,8 @@ async fn probe(key: &str, opts: &[&str]) -> Result<(), BoxError> {
         let submit = kernable::Submit::new("bench", "Bench", &format!("p{}", n % 100), "Write")
             .data(serde_json::json!({ "probe": n }))
             .wait(kernable::Wait::Committed)
-            .timeout(Duration::from_secs(30));
+            .timeout(Duration::from_millis(timeout));
+        let tried = Instant::now();
         match client.submit(submit).await {
             Ok(kernable::Outcome::Committed(_)) => {
                 let gap = last.elapsed();
@@ -656,7 +661,11 @@ async fn probe(key: &str, opts: &[&str]) -> Result<(), BoxError> {
             }
             Err(e) => {
                 failed += 1;
-                eprintln!("probe {n}: {e}");
+                eprintln!(
+                    "probe {n} at {:.1}s after {} ms: {e}",
+                    start.elapsed().as_secs_f64(),
+                    tried.elapsed().as_millis()
+                );
             }
         }
         tokio::time::sleep(Duration::from_millis(every)).await;
