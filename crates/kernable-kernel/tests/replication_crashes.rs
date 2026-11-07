@@ -384,15 +384,20 @@ async fn switchover_crash(point: &str) {
         sig: Some(signing::sign(&key(1), &signing::promote_message(issued_at))),
         protocol: kernable_core::PROTOCOL,
     };
-    if let Ok(channel) = transport::connect(&s).await
-        && let Err(e) = ReplicationServiceClient::new(channel)
-            .promote(request)
-            .await
-    {
-        assert!(
-            e.message().contains("primary already"),
-            "{point}: promote: {e:?}"
-        );
+    if let Ok(channel) = transport::connect(&s).await {
+        // Bounded: a test fails, it does not hang.
+        let promoted = tokio::time::timeout(
+            Duration::from_secs(10),
+            ReplicationServiceClient::new(channel).promote(request),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{point}: promote did not answer within 10 s"));
+        if let Err(e) = promoted {
+            assert!(
+                e.message().contains("primary already"),
+                "{point}: promote: {e:?}"
+            );
+        }
     }
 
     // The standby serves everything that was told.
