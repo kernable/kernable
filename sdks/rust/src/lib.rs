@@ -512,6 +512,10 @@ impl Client {
         let timeout = timeout.unwrap_or(self.timeout);
         let deadline = Instant::now() + timeout;
         let mut pause = Duration::from_millis(50);
+        // Since when the request may have reached a kernel that then went away: from then on it
+        // is tried again for a short while only (a handover, a switchover), not until the
+        // deadline (a crash the caller should hear of).
+        let mut dropped_at: Option<Instant> = None;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             let mut request = self.request(message.clone());
@@ -532,8 +536,12 @@ impl Client {
                 }
                 Err(status)
                     if (not_connected(&status) || (idempotent && dropped(&status)))
-                        && Instant::now() + pause < deadline =>
+                        && Instant::now() + pause < deadline
+                        && dropped_at.is_none_or(|at| at.elapsed() < DROPPED_RETRY) =>
                 {
+                    if dropped(&status) {
+                        dropped_at.get_or_insert_with(Instant::now);
+                    }
                     tokio::time::sleep(pause).await;
                     pause = (pause * 2).min(MAX_PAUSE);
                 }
@@ -1453,6 +1461,11 @@ fn local(url: &str) -> bool {
 /// kernel update takes a few hundred milliseconds, and the client finds the kernel serving again
 /// within this much of it.
 const MAX_PAUSE: Duration = Duration::from_millis(200);
+
+/// How long a submit whose connection dropped under way is tried again: long enough for a
+/// kernel handing its stores to a new binary or its role to a standby (a few hundred
+/// milliseconds), short enough that a crash reaches the caller.
+const DROPPED_RETRY: Duration = Duration::from_secs(5);
 
 #[cfg(test)]
 mod dropped_tests {
