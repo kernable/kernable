@@ -344,6 +344,16 @@ async fn random_kills_of_primary_and_standby_lose_nothing_a_client_was_told() {
     }
     let (placed, told) = load.finish().await;
     assert!(!told.is_empty());
+    // A standby the last kill restarted is told it is in sync again once it caught up; before
+    // that, it refuses to be promoted, rightly. The primary is lost after that.
+    let started = Instant::now();
+    while !note.exists() {
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the standby never got in sync again"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     // The primary is lost for good. P1: the standby holds everything a client was told.
     drop(primary);
