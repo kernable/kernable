@@ -1403,4 +1403,15 @@ async fn a_client_of_both_kernels_writes_again_soon_after_a_partition() {
         longest.as_millis()
     );
     assert!(longest < Duration::from_millis(8 * LEASE_MS), "{longest:?}");
+    // Cut off, A was fenced and sealed its record log: nothing more it writes is lost to B.
+    let logs: String = std::fs::read_dir(&dir.0)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "log"))
+        .map(|p| std::fs::read_to_string(p).unwrap_or_default())
+        .collect();
+    assert!(
+        logs.contains("fenced: the record log is sealed"),
+        "the cut-off primary never sealed its record log"
+    );
 }

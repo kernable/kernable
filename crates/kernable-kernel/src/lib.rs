@@ -278,6 +278,8 @@ pub struct Kernel {
     draining: AtomicBool,
     /// A switchover is under way: new requests are refused, as while draining.
     pub(crate) switching: AtomicBool,
+    /// The record log sealed as the kernel is fenced ([`keep_sealed_while_fenced`]).
+    fence_sealed: AtomicBool,
     /// Submits and queries being handled, and a wake-up when one ends.
     requests: AtomicUsize,
     idle: Notify,
@@ -428,6 +430,7 @@ impl Kernel {
             cache,
             draining: Default::default(),
             switching: Default::default(),
+            fence_sealed: Default::default(),
             requests: Default::default(),
             idle: Notify::new(),
             requests_by_key: PerKey::default(),
@@ -1010,7 +1013,10 @@ impl Kernel {
 
     /// Serves on after an abandoned switchover: requests are taken and records written again.
     pub(crate) fn serve_on(&self) {
-        if let Err(e) = self.store.seal_records(false) {
+        // Fenced meanwhile, it stays sealed: [`keep_sealed_while_fenced`] lifts that seal.
+        if !self.fence_sealed.load(SeqCst)
+            && let Err(e) = self.store.seal_records(false)
+        {
             tracing::warn!(error = %e, "unsealing the record log failed");
         }
         self.switching.store(false, SeqCst);
@@ -1023,6 +1029,10 @@ impl Kernel {
         // Handed over, it writes nothing more: its log stays the new primary's beginning, so it
         // follows it without an image. The new primary holds every position acknowledged.
         if self.replication.as_ref().is_some_and(|p| p.handed_over()) {
+            return Ok(());
+        }
+        // Fenced, likewise: its standby may serve already (design/rewind.md).
+        if self.fence_sealed.load(SeqCst) {
             return Ok(());
         }
         self.store.checkpoint(&self.key(), now_ms())?;
@@ -1429,6 +1439,7 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
         _ = usage::keep(&kernel) => unreachable!(),
         _ = measure_stores(&kernel) => unreachable!(),
         _ = flush_listeners(&kernel) => unreachable!(),
+        () = keep_sealed_while_fenced(&kernel) => unreachable!(),
         _ = sample_trend(&kernel) => unreachable!(),
         () = partitions::follow_control(&kernel) => unreachable!(),
         () = moves::follow_moves(&kernel) => unreachable!(),
@@ -1462,13 +1473,54 @@ async fn serve_metrics(kernel: &Arc<Kernel>) -> Result<(), BoxError> {
     }
 }
 
+/// Seals the record log while the kernel is fenced, and unseals it once it is not: a primary
+/// cut off from its standby and the witness writes no checkpoint, listener position or worker
+/// it could not replicate, so the log it comes back with ends where its standby's did, but for
+/// the commits that were under way (design/rewind.md).
+async fn keep_sealed_while_fenced(kernel: &Kernel) {
+    if kernel.replication.is_none() {
+        return std::future::pending().await;
+    }
+    let mut tick = tokio::time::interval(Duration::from_millis(100));
+    loop {
+        tick.tick().await;
+        let fenced = kernel.fenced();
+        if fenced == kernel.fence_sealed.load(SeqCst) {
+            continue;
+        }
+        // A switchover holds its own seal: it is not lifted under it.
+        if !fenced && kernel.switching.load(SeqCst) {
+            continue;
+        }
+        match kernel.store.seal_records(fenced) {
+            Ok(head) => {
+                kernel.fence_sealed.store(fenced, SeqCst);
+                if fenced {
+                    tracing::warn!(record = head.seq, "fenced: the record log is sealed");
+                } else {
+                    tracing::info!(
+                        record = head.seq,
+                        "no longer fenced: the record log is open again"
+                    );
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "sealing the record log as fenced failed"),
+        }
+    }
+}
+
+/// Whether the kernel writes no record now: handing its role over, or fenced.
+fn sealed(kernel: &Kernel) -> bool {
+    kernel.switching.load(SeqCst) || kernel.fence_sealed.load(SeqCst)
+}
+
 async fn flush_listeners(kernel: &Kernel) {
     let mut tick = tokio::time::interval(listeners::FLUSH);
     loop {
         tick.tick().await;
-        // Handing its role over, it writes nothing more: the new primary goes on from the
-        // positions it holds, and listeners get what came after again.
-        if kernel.switching.load(SeqCst) {
+        // Handing its role over or fenced, it writes nothing more: the new primary goes on from
+        // the positions it holds, and listeners get what came after again.
+        if sealed(kernel) {
             continue;
         }
         if let Err(e) = listeners::flush(kernel) {
@@ -1545,8 +1597,9 @@ async fn checkpoints(kernel: &Kernel) {
     ));
     loop {
         tick.tick().await;
-        // Handing its role over, it writes nothing more: the standby takes over at its head.
-        if kernel.switching.load(SeqCst) {
+        // Handing its role over or fenced, it writes nothing more: the standby takes over at
+        // its head.
+        if sealed(kernel) {
             continue;
         }
         match kernel.store.checkpoint(&kernel.key(), now_ms()) {

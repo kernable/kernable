@@ -1,6 +1,6 @@
 # Rewinding a diverged log instead of starting over
 
-Status: proposal, 2026-11-07, open to choose. Nothing built.
+Status: decided 2026-11-07 together: option A (undo changesets, after a spike), the log sealed while fenced (built the same day), vault values undone too. The rewind itself: being built.
 
 ## The problem
 
