@@ -704,3 +704,41 @@ async fn a_key_beyond_its_rate_is_refused_and_another_key_is_not() {
     let again = signed(command("r9", "PlaceOrder", "o9"), &key(1));
     assert!(submit(&env.addr, again).await.is_ok());
 }
+
+/// A worker that goes while commands keep coming: every command it took or was about to
+/// take goes to the next worker at once, not after its lease ran out. The soak on four servers
+/// saw a client wait 10 s, a lease, once in about twenty kills of the workers: dispatch took a
+/// command in the moment the worker's in-flight commands were handed back.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_worker_that_goes_hands_back_every_command_at_once() {
+    let env = start_with("worker-goes", 30_000).await;
+    for round in 0..20u32 {
+        let gone = start_worker(env.addr.clone(), TestWorker::honest()).await;
+        let mut submits = Vec::new();
+        for i in 0..32u32 {
+            let addr = env.addr.clone();
+            submits.push(tokio::spawn(async move {
+                let cmd = signed(
+                    command(
+                        &format!("g{round}-{i}"),
+                        "PlaceOrder",
+                        &format!("g{round}-{i}"),
+                    ),
+                    &key(1),
+                );
+                submit(&addr, cmd).await
+            }));
+        }
+        tokio::time::sleep(Duration::from_millis(u64::from(round % 5))).await;
+        gone.abort();
+        let _next = start_worker(env.addr.clone(), TestWorker::honest()).await;
+        let started = Instant::now();
+        for s in submits {
+            let result = tokio::time::timeout(Duration::from_secs(10), s)
+                .await
+                .unwrap_or_else(|_| panic!("round {round}: a command waited for its lease"));
+            result.unwrap().unwrap();
+        }
+        assert!(started.elapsed() < Duration::from_secs(10), "round {round}");
+    }
+}

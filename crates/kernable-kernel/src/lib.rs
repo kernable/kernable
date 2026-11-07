@@ -2568,6 +2568,8 @@ struct Session {
     schemas: HashMap<String, u32>,
     out: Outbox,
     in_flight: Mutex<HashMap<String, InFlight>>,
+    /// The worker is gone: set before its in-flight commands are handed back.
+    gone: AtomicBool,
 }
 
 /// Hands the session's in-flight commands back to the queue when it ends, however it ends,
@@ -2576,6 +2578,8 @@ struct ReleaseOnDrop(Arc<Session>);
 
 impl Drop for ReleaseOnDrop {
     fn drop(&mut self) {
+        // From here a lease dispatch takes is handed back by itself (GiveBack).
+        self.0.gone.store(true, SeqCst);
         let leases: Vec<String> = self
             .0
             .in_flight()
@@ -2586,6 +2590,27 @@ impl Drop for ReleaseOnDrop {
             self.0.kernel.queue.release(&lease_id);
         }
         self.0.kernel.work.notify_waiters();
+    }
+}
+
+/// A lease dispatch took for its worker: handed back to the queue when dropped, unless the
+/// command reached a worker that is still there. Dispatch ends at its next await once the
+/// worker is gone, after [`ReleaseOnDrop`] handed back what was in flight: a command it took
+/// meanwhile would otherwise wait for its lease to run out (10 s by default; the soak saw it).
+struct GiveBack {
+    session: Arc<Session>,
+    lease_id: String,
+    armed: bool,
+}
+
+impl Drop for GiveBack {
+    fn drop(&mut self) {
+        if self.armed {
+            self.session.in_flight().remove(&self.lease_id);
+            // A lease already handed back or completed is not in the queue: nothing happens.
+            self.session.kernel.queue.release(&self.lease_id);
+            self.session.kernel.work.notify_waiters();
+        }
     }
 }
 
@@ -2788,6 +2813,7 @@ async fn run_session(
         schemas,
         out: out.clone(),
         in_flight: Mutex::default(),
+        gone: AtomicBool::new(false),
     });
     let permits = Arc::new(Semaphore::new(reg.max_concurrency.max(1) as usize));
     let mut changes = session.kernel.changes();
@@ -2862,6 +2888,9 @@ async fn dispatch(session: Arc<Session>, command_types: Vec<String>, permits: Ar
         let Ok(permit) = Arc::clone(&permits).acquire_owned().await else {
             return;
         };
+        if session.gone.load(SeqCst) {
+            return;
+        }
         let (lease_id, command, received_at) = loop {
             let notified = kernel.work.notified();
             // Not one it still runs itself: a lease that ran out under it goes to another
@@ -2879,12 +2908,18 @@ async fn dispatch(session: Arc<Session>, command_types: Vec<String>, permits: Ar
                 _ = tokio::time::sleep(POLL) => {}
             }
         };
-        if !session
+        let mut give_back = GiveBack {
+            session: Arc::clone(&session),
+            lease_id: lease_id.clone(),
+            armed: true,
+        };
+        let alive = session
             .execute(lease_id, command, received_at, 0, permit)
-            .await
-        {
+            .await;
+        if !alive || session.gone.load(SeqCst) {
             return;
         }
+        give_back.armed = false;
     }
 }
 
