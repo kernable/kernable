@@ -485,7 +485,10 @@ fn a_sealed_record_log_takes_no_record_more() {
             removed: false,
         };
         assert!(
-            matches!(store.save_workers(std::slice::from_ref(&worker)), Err(Error::Sealed)),
+            matches!(
+                store.save_workers(std::slice::from_ref(&worker)),
+                Err(Error::Sealed)
+            ),
             "{kind:?}"
         );
         // A checkpoint is refused, or the last one at this head comes back: none is added.
