@@ -51,9 +51,11 @@ const USAGE: &str = "usage:
   kernable-bench subscribe <addr> <client.key> <after> <count>
   kernable-bench history <addr> <client.key> <events>
   kernable-bench probe <client.key> [seconds=60] [every-ms=50] [timeout-ms=30000]
+      [committed-to=<file>]
       one command after the other through the Rust SDK (KERNABLE_URL with several kernels, and
       KERNABLE_TLS_*, as for the SDKs): the longest time without a commit, as a client of a pair
-      or of a moving instance sees it";
+      or of a moving instance sees it; each commit's events (position, aggregate, version)
+      appended to the file";
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -624,6 +626,8 @@ impl Opts {
 /// `probe`: commands one after the other through the Rust SDK, which turns to the other kernel
 /// in `KERNABLE_URL` when one answers `not_primary` or is gone. The longest time between two
 /// commits is how long such a client could not write: during a failover, a switchover or a move.
+/// With `committed-to=<file>`, each commit's events go to the file, a line each: position,
+/// aggregate, version; for a check that the store still holds every write it acknowledged.
 async fn probe(key: &str, opts: &[&str]) -> Result<(), BoxError> {
     let opt = |name: &str, default: u64| {
         opts.iter()
@@ -635,6 +639,15 @@ async fn probe(key: &str, opts: &[&str]) -> Result<(), BoxError> {
         opt("every-ms", 50),
         opt("timeout-ms", 30_000),
     );
+    let mut committed_to = match opts.iter().find_map(|o| o.strip_prefix("committed-to=")) {
+        Some(path) => Some(
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?,
+        ),
+        None => None,
+    };
     let client = kernable::Kernable::new(kernable::Options::new(key).tenant(tenant()))?;
     let start = Instant::now();
     let (mut last, mut n, mut committed, mut failed) = (Instant::now(), 0u64, 0u64, 0u64);
@@ -647,7 +660,13 @@ async fn probe(key: &str, opts: &[&str]) -> Result<(), BoxError> {
             .timeout(Duration::from_millis(timeout));
         let tried = Instant::now();
         match client.submit(submit).await {
-            Ok(kernable::Outcome::Committed(_)) => {
+            Ok(kernable::Outcome::Committed(events)) => {
+                if let Some(file) = &mut committed_to {
+                    use std::io::Write;
+                    for e in &events {
+                        writeln!(file, "{} {} {}", e.position, e.aggregate_id, e.version)?;
+                    }
+                }
                 let gap = last.elapsed();
                 if gap > longest {
                     (longest, at) = (gap, (start.elapsed() - gap).as_secs_f64());
