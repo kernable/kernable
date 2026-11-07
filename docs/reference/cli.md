@@ -250,10 +250,10 @@ Writes a new backup key (32 random bytes in hex) to `<file>`, readable by its ow
 ### `kernable backup`
 
 ```text
-kernable backup --follow <addr>[,<addr>] --key <key> --to <target> --backup-key <file> [--segment-seconds <s>] [--base-hours <h>] [--keep <n>] [--check-hours <h>]
+kernable backup --follow <addr>[,<addr>] --key <key> --to <target> --backup-key <file> [--segment-seconds <s>] [--base-hours <h>] [--keep <n>] [--check-hours <h>] [--status-file <file>]
 ```
 
-Follows the kernel at `<addr>` (started with `--backup` on; both kernels of a pair, comma-separated) and writes its records to `<target>`, encrypted with the backup key, until stopped: a base, then a segment every `--segment-seconds` (default 5) or 16 MiB, a new generation every `--base-hours` (default 24), the newest `--keep` (default 7) kept. `<key>` needs a grant for backup on `*`; the grant file next to it is sent along. `<target>` is `file:<dir>` or `s3://<bucket>/<prefix>`, with `KERNABLE_S3_ENDPOINT`, `KERNABLE_S3_REGION`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. Vault values stay encrypted with the kernel's vault key besides. With `--check-hours`, it also checks the backup that often, as backup check does, and logs what it found.
+Follows the kernel at `<addr>` (started with `--backup` on; both kernels of a pair, comma-separated) and writes its records to `<target>`, encrypted with the backup key, until stopped: a base, then a segment every `--segment-seconds` (default 5) or 16 MiB, a new generation every `--base-hours` (default 24), the newest `--keep` (default 7) kept. `<key>` needs a grant for backup on `*`; the grant file next to it is sent along. `<target>` is `file:<dir>` or `s3://<bucket>/<prefix>`, with `KERNABLE_S3_ENDPOINT`, `KERNABLE_S3_REGION`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. Vault values stay encrypted with the kernel's vault key besides. With `--check-hours`, it also checks the backup that often, as backup check does, and logs what it found. With `--status-file`, it notes there (JSON) when it last uploaded, up to which record, and when it last checked and what it found.
 
 ### `kernable backup list`
 
