@@ -160,6 +160,17 @@ impl Standby {
         let at = now_ms();
         let mut moved = Vec::new();
         for url in self.urls() {
+            // Only the newest copy stays: one store's size at most, however often it starts over.
+            for older in set_aside(&url) {
+                match std::fs::remove_file(&older) {
+                    Ok(()) => {
+                        tracing::info!(file = %older.display(), "an older set-aside copy was removed")
+                    }
+                    Err(e) => {
+                        tracing::warn!(file = %older.display(), error = %e, "removing an older set-aside copy failed")
+                    }
+                }
+            }
             moved.extend(move_aside(&url, at)?);
         }
         tracing::warn!(why, moved = ?moved, "the standby starts over, empty; its stores were moved aside");
@@ -734,6 +745,40 @@ pub(crate) fn marker(url: &str, name: &str) -> Option<PathBuf> {
 }
 
 /// Moves the files of the store at `url` to `<path>.diverged-<at>`; returns where they went.
+/// The copies of the store at `url` moved aside before (`<file>.diverged-<ms>`, also its
+/// `-wal`, `-shm`, `.lock` and `.image`).
+fn set_aside(url: &str) -> Vec<PathBuf> {
+    let path = match url.split_once(':') {
+        Some(("memory", _)) => return Vec::new(),
+        Some((_, path)) => PathBuf::from(path),
+        None => PathBuf::from(url),
+    };
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return Vec::new();
+    };
+    let dir = if dir.as_os_str().is_empty() {
+        std::path::Path::new(".")
+    } else {
+        dir
+    };
+    let name = name.to_string_lossy();
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| {
+            let file = e.file_name().to_string_lossy().into_owned();
+            ["", "-wal", "-shm", ".lock", ".image"]
+                .iter()
+                .any(|suffix| {
+                    file.strip_prefix(&format!("{name}{suffix}.diverged-"))
+                        .is_some_and(|at| !at.is_empty() && at.bytes().all(|b| b.is_ascii_digit()))
+                })
+        })
+        .map(|e| e.path())
+        .collect()
+}
+
 fn move_aside(url: &str, at: i64) -> Result<Vec<PathBuf>, BoxError> {
     let path = match url.split_once(':') {
         Some(("memory", _)) => return Ok(Vec::new()),

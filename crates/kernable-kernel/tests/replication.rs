@@ -365,6 +365,9 @@ async fn a_standby_whose_log_diverged_moves_its_stores_aside_and_starts_over() {
         store.keep_record_log(true).unwrap();
         store.enqueue(&place(77), 0).unwrap();
     }
+    // A copy set aside before: it goes, only the newest stays.
+    std::fs::write(dir.0.join("standby.db.diverged-1"), b"older").unwrap();
+    std::fs::write(dir.0.join("standby.db-wal.diverged-1"), b"older").unwrap();
     let _following = tokio::spawn(standby::run(standby_config.clone()));
     until("the standby is in sync", || in_sync(&standby_config)).await;
     for seed in [1, 2] {
@@ -391,6 +394,10 @@ async fn a_standby_whose_log_diverged_moves_its_stores_aside_and_starts_over() {
     assert!(
         aside.iter().any(|n| n.starts_with("standby.")),
         "the diverged store is kept aside: {aside:?}"
+    );
+    assert!(
+        !aside.iter().any(|n| n.ends_with(".diverged-1")),
+        "the older copy is gone: {aside:?}"
     );
 }
 
