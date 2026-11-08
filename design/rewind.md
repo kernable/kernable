@@ -1,6 +1,14 @@
 # Rewinding a diverged log instead of starting over
 
-Status: decided 2026-11-07 together: option A (undo changesets, after a spike), the log sealed while fenced (built the same day), vault values undone too. **The spike missed the bar** (below): the rewind is not built; the next choice is the.
+Status: **built 2026-11-08** as way on 2 below (chosen after the spike): a hand-written undo per frequent write, filed in the same transaction and dropped as the standby acknowledges; anything else is irreversible and still means starting over. Cost (bench/replication.sh, a primary and its standby on one machine): about 0 at full durability and one client, about -3 % saturated; -4 % and -8 % at normal durability. The log is sealed while fenced.
+
+## As built
+
+- **SQLite** (`kernable-store/src/undo.rs`): an `undo (first, last, steps)` table beside the record log. An enqueue undoes by deleting its command; a commit by deleting its events and putting back its command (pending), each event type's schema and the stream's index as they were; a rejection by putting its command back; a checkpoint by deleting it; a listener or a worker by saving it as it was. Every other write files `Irreversible`. Also irreversible: a commit or rejection of a command with vault values (its secrets are dropped once it completes) and a commit with an erasure. Steps go once the standby acknowledges the records (every 1,000), and beyond the newest 100,000 records without a standby.
+- **The file log** cuts the file back and replays it: everything in it can be taken back but data files, erasures, commands completed with vault values and the log's start.
+- **The protocol**: the standby's hello carries the records it could go back to (`rewind_points`, newest first, at most 1,000); a primary that holds one answers `REWIND` to the newest it holds. The standby takes back the records after it (one transaction), drops the vault values of the commands it took back, and follows on when it connects again. If it cannot after all, it starts over.
+- **Tests**: the store compares a rewound store with a standby that never had the tail, field by field, on both stores (`kernable-store/tests/replication.rs`); a standby with its own tail rewinds and sets nothing aside, one with an irreversible write starts over (`kernable-kernel/tests/replication.rs`); a real partition under a client ends with the old primary taking its tail back (`tests/replication_kills.rs`).
+- **A gap**: a crash after the store was rewound and before the vault values of the commands it took back were dropped leaves those values behind, encrypted, referred to by nothing.
 
 ## The problem
 
