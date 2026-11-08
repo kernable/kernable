@@ -337,6 +337,9 @@ pub(crate) async fn run_with(config: Config, link: Option<Arc<Link>>) -> Result<
     // Every handle on the stores closes before the kernel opens them, also one held by a
     // request still being answered (the promotion itself).
     standby.close_stores().await;
+    // A primary now, no standby in sync: the note would outlast it beside stores it may leave
+    // (a move away) and tell of a standby in sync when one starts on them again (a move back).
+    standby.forget_in_sync();
     tracing::warn!(
         record = standby.applied.load(SeqCst),
         "promoted: this kernel is the primary now"

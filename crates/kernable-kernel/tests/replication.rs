@@ -582,6 +582,12 @@ async fn a_primary_without_a_witness_serves_alone_until_its_standby_caught_up() 
     std::fs::write(format!("{path}.in-sync"), b"in sync\n").unwrap();
     promote(&alone.listen).await.unwrap();
     waiting.await.unwrap().unwrap();
+    // A primary now: no note of a standby in sync stays beside its stores (a move back to a
+    // server it left would otherwise read it as in sync at once).
+    assert!(
+        !Path::new(&format!("{path}.in-sync")).exists(),
+        "the note outlived the promotion"
+    );
 }
 
 /// A switchover without a witness: the primary hands its role to its standby in sync,
