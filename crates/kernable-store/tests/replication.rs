@@ -886,10 +886,12 @@ fn a_rewind_stops_before_a_write_it_cannot_take_back() {
         "a refused rewind changes nothing"
     );
 
-    // A commit of a command with vault values: its secrets are dropped, it is not taken back.
+    // A commit of a command with vault values is taken back if the vault still holds them:
+    // the plan names them, and the command whose enqueue goes too needs nothing.
     primary
         .forget_undo(primary.record_head().unwrap().seq)
         .unwrap();
+    let before = primary.record_head().unwrap();
     let mut secret = cmd("with-secret", "s1");
     secret.vault_refs = vec!["ref1".into()];
     primary.enqueue(&secret, 5_000).unwrap();
@@ -898,5 +900,14 @@ fn a_rewind_stops_before_a_write_it_cannot_take_back() {
         .commit("with-secret", 0, &[ev("Opened")], &sig(), None, 5_001)
         .unwrap();
     let points = primary.rewind_points().unwrap();
-    assert_eq!(points, [primary.record_head().unwrap()], "{enqueued:?}");
+    assert!(
+        points.contains(&enqueued) && points.contains(&before),
+        "{points:?}"
+    );
+    let plan = primary.rewind_plan(enqueued.seq).unwrap();
+    assert_eq!(plan.needs, ["ref1"]);
+    assert!(plan.deletes.is_empty());
+    let plan = primary.rewind_plan(before.seq).unwrap();
+    assert!(plan.needs.is_empty(), "{plan:?}");
+    assert_eq!(plan.deletes, ["with-secret"]);
 }

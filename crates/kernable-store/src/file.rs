@@ -587,11 +587,12 @@ impl FileStore {
         }
     }
 
-    /// Whether the command `id` carried vault values.
-    fn with_vault_values(&self, id: &str) -> Result<bool> {
+    /// The vault values the command `id` brought.
+    fn vault_refs_of(&self, id: &str) -> Result<Vec<String>> {
         Ok(self
             .command(id)?
-            .is_some_and(|c| !c.command.vault_refs.is_empty()))
+            .map(|c| c.command.vault_refs)
+            .unwrap_or_default())
     }
 
     /// The log's path and length, for reading records back; refused without a file.
@@ -1223,13 +1224,10 @@ impl Store for FileStore {
             let record = r.record.as_ref().and_then(|l| l.record.as_ref());
             let keeps_outside = match record {
                 Some(Record::DataChanged(_) | Record::ReplicationHead(_)) | None => true,
-                Some(Record::Committed(c)) => {
-                    c.events
-                        .iter()
-                        .any(|e| e.event.as_ref().is_some_and(|e| !e.erases.is_empty()))
-                        || self.with_vault_values(&c.command_id)?
-                }
-                Some(Record::Rejected(rj)) => self.with_vault_values(&rj.command_id)?,
+                Some(Record::Committed(c)) => c
+                    .events
+                    .iter()
+                    .any(|e| e.event.as_ref().is_some_and(|e| !e.erases.is_empty())),
                 Some(_) => false,
             };
             if keeps_outside {
@@ -1245,6 +1243,29 @@ impl Store for FileStore {
             });
         }
         Ok(points)
+    }
+
+    fn rewind_plan(&self, to: u64) -> Result<crate::RewindPlan> {
+        let mut plan = crate::RewindPlan::default();
+        let mut completed = Vec::new();
+        let records = self.records_after(to, usize::MAX)?.unwrap_or_default();
+        for r in records.iter().rev() {
+            match r.record.as_ref().and_then(|l| l.record.as_ref()) {
+                Some(Record::Enqueued(e)) => {
+                    if let Some(c) = &e.command {
+                        plan.deletes.push(c.command_id.clone());
+                    }
+                }
+                Some(Record::Committed(c)) => completed.push(c.command_id.clone()),
+                Some(Record::Rejected(rj)) => completed.push(rj.command_id.clone()),
+                _ => {}
+            }
+        }
+        // A command whose enqueue goes too needs nothing: it goes with its values.
+        for id in completed.iter().filter(|id| !plan.deletes.contains(id)) {
+            plan.needs.extend(self.vault_refs_of(id)?);
+        }
+        Ok(plan)
     }
 
     fn rewind(&self, to: u64) -> Result<Vec<String>> {

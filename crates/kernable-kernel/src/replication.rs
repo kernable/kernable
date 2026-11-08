@@ -489,7 +489,7 @@ pub fn refuse_if_handed_over(config: &crate::config::Config) -> Result<(), BoxEr
 }
 
 /// Writes `bytes` to `path` and syncs it.
-fn write_synced(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_synced(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let mut file = std::fs::File::create(path)?;
     file.write_all(bytes)?;
@@ -921,8 +921,16 @@ async fn run(
                         undone = seq;
                         let kernel = Arc::clone(&kernel);
                         tokio::task::spawn_blocking(move || {
-                            if let Err(e) = kernel.store.forget_undo(seq) {
-                                tracing::warn!(error = %e, "dropping undo the standby holds failed");
+                            // Confirmed now: the secrets of commands completed among them go.
+                            match kernel.store.forget_undo(seq) {
+                                Ok(completed) => {
+                                    for id in completed {
+                                        kernel.drop_secrets(&id);
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "dropping undo the standby holds failed")
+                                }
                             }
                         });
                     }

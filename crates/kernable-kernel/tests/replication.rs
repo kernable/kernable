@@ -740,3 +740,126 @@ async fn a_switchover_without_a_witness_hands_the_role_to_the_standby() {
     );
     drop(new);
 }
+
+/// A standby whose own tail completed a command that brought vault values (design/rewind.md):
+/// the command is put back to pending if the vault still holds its values, and the standby
+/// takes the tail back; with them gone (a crash dropped them), it starts over.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_completion_with_vault_values_is_taken_back_while_they_are_held() {
+    // The file log keeps no undo window: it cannot tell confirmed completions from others, so
+    // their secrets go when the stores open, and such a tail starts over.
+    if std::env::var("KERNABLE_TEST_STORE").as_deref() == Ok("file") {
+        return;
+    }
+    for values_held in [true, false] {
+        let dir = Dir::new(&format!("rewind-values-{values_held}"));
+        let mut primary_config = config(&dir.0, "primary", 3);
+        primary_config.replication.sync = true;
+        let mut standby_config = standby_config(&dir.0, &primary_config);
+        let vault_dir = dir.0.join("standby-vault");
+        std::fs::create_dir_all(&vault_dir).unwrap();
+        with_vault(&mut standby_config, &vault_dir);
+        // Both hold the command as enqueued (the same record); the standby, a former primary,
+        // also committed it, a record the primary never got.
+        let value = vault_value("", "4111-1111");
+        let mut command = place(88);
+        command.vault_refs = vec![value.r#ref.clone()];
+        for config in [&primary_config, &standby_config] {
+            let store = kernable_store::open(&config.store).unwrap();
+            store.keep_record_log(true).unwrap();
+            store.enqueue(&command, 1).unwrap();
+        }
+        {
+            let store = kernable_store::open(&standby_config.store).unwrap();
+            store.keep_record_log(true).unwrap();
+            store
+                .commit(&command.command_id, 0, &[], &worker_sig(), None, 2)
+                .unwrap();
+            let vault_config = standby_config.vault.as_ref().unwrap();
+            let vault = kernable_store::vault::Vault::open(&vault_config.store, &[6; 32]).unwrap();
+            if values_held {
+                vault
+                    .put(
+                        std::slice::from_ref(&value),
+                        &command.vault_refs,
+                        &kernable_store::vault::Owner {
+                            command_id: &command.command_id,
+                            tenant: &command.tenant_id,
+                            stream: None,
+                        },
+                        1,
+                    )
+                    .unwrap();
+            }
+        }
+        let _primary = open(&primary_config).await;
+        let _following = tokio::spawn(standby::run(standby_config.clone()));
+        until("the standby is in sync", || in_sync(&standby_config)).await;
+        let aside: Vec<String> = std::fs::read_dir(&dir.0)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".diverged-"))
+            .collect();
+        let standby = held(&standby_config);
+        if values_held {
+            assert!(aside.is_empty(), "taken back, nothing set aside: {aside:?}");
+            assert_eq!(
+                standby.result(&command.command_id).unwrap(),
+                None,
+                "pending again"
+            );
+        } else {
+            assert!(!aside.is_empty(), "its values gone, it started over");
+        }
+    }
+}
+
+/// A rewind cut short by a crash after the store and before the vault (design/rewind.md):
+/// when the stores open again, the values of the commands it took back go, those of commands
+/// the store still holds stay.
+#[test]
+fn a_rewind_a_crash_cut_short_is_finished_when_the_stores_open() {
+    let dir = Dir::new("rewind-note");
+    let mut config = config(&dir.0, "standby", 8);
+    with_vault(&mut config, &dir.0);
+    let (gone, kept) = (vault_value("", "gone"), vault_value("", "kept"));
+    let store = kernable_store::open(&config.store).unwrap();
+    store.keep_record_log(true).unwrap();
+    let mut held = place(2);
+    held.vault_refs = vec![kept.r#ref.clone()];
+    store.enqueue(&held, 1).unwrap();
+    let vault_config = config.vault.as_ref().unwrap();
+    let vault = kernable_store::vault::Vault::open(&vault_config.store, &[6; 32]).unwrap();
+    for (value, id) in [(&gone, "c1"), (&kept, "c2")] {
+        vault
+            .put(
+                std::slice::from_ref(value),
+                std::slice::from_ref(&value.r#ref),
+                &kernable_store::vault::Owner {
+                    command_id: id,
+                    tenant: "t1",
+                    stream: None,
+                },
+                1,
+            )
+            .unwrap();
+    }
+    let (_, path) = kernable_store::backend(&config.store);
+    std::fs::write(format!("{path}.rewinding"), "c1\nc2").unwrap();
+    standby::finish_rewind(&config.store, store.as_ref(), Some(&vault)).unwrap();
+    let left: Vec<String> = vault
+        .describe(&[gone.r#ref.clone(), kept.r#ref.clone()])
+        .unwrap()
+        .into_iter()
+        .map(|(r, ..)| r)
+        .collect();
+    assert_eq!(left, std::slice::from_ref(&kept.r#ref));
+    assert!(!Path::new(&format!("{path}.rewinding")).exists());
+}
+
+fn worker_sig() -> kernable_core::proto::Signature {
+    kernable_core::proto::Signature {
+        key_id: "worker".into(),
+        sig: vec![0; 64],
+    }
+}

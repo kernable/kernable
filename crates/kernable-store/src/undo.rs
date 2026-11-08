@@ -25,6 +25,9 @@ pub(crate) enum Step {
     DeleteCommand(String),
     /// A committed or rejected command: pending again.
     Pending(String),
+    /// The vault values the command brought: a rewind needs them still held (its secrets are
+    /// dropped once its completion is held by the standby, or after a crash).
+    Values(Vec<String>),
     /// A commit's events, from this position on.
     DeleteEventsFrom(u64),
     /// An event type's schema as it was; `None`: the type was new.
@@ -80,10 +83,33 @@ pub(crate) fn file(tx: &Connection, first: u64, last: u64, steps: &[Step]) -> Re
     Ok(())
 }
 
-/// Drops the steps of records up to `seq`: the standby holds them.
-pub(crate) fn forget(conn: &Connection, seq: u64) -> Result<()> {
+/// Drops the steps of records up to `seq`: the standby holds them. The commands among them
+/// that completed with vault values: their secrets may go now.
+pub(crate) fn forget(conn: &Connection, seq: u64) -> Result<Vec<String>> {
+    let completed = completions(conn, Some(seq))?;
     conn.execute("DELETE FROM undo WHERE last <= ?1", [seq])?;
-    Ok(())
+    Ok(completed)
+}
+
+/// The commands that completed with vault values in the writes still to be confirmed (up to
+/// `seq`, or all): their secrets stay until then, so that a rewind finds them.
+pub(crate) fn completions(conn: &Connection, seq: Option<u64>) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT steps FROM undo WHERE last <= ?1")?;
+    let rows = stmt
+        .query_map([seq.unwrap_or(u64::MAX >> 1)], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut ids = Vec::new();
+    for steps in rows {
+        let steps: Vec<Step> =
+            serde_json::from_str(&steps).map_err(|e| Error::Corrupt(e.to_string()))?;
+        if steps.iter().any(|s| matches!(s, Step::Values(_))) {
+            ids.extend(steps.iter().filter_map(|s| match s {
+                Step::Pending(id) => Some(id.clone()),
+                _ => None,
+            }));
+        }
+    }
+    Ok(ids)
 }
 
 /// The records a rewind may stop at, newest first, down to the oldest it can reach: `head`,
@@ -115,6 +141,40 @@ pub(crate) fn points(conn: &Connection, head: u64) -> Result<Vec<u64>> {
         next = first - 1;
     }
     Ok(points)
+}
+
+/// What taking back every write after record `to` needs and does, before it changes anything.
+pub(crate) fn plan(conn: &Connection, to: u64) -> Result<crate::RewindPlan> {
+    let mut stmt = conn.prepare("SELECT steps FROM undo WHERE last > ?1 ORDER BY first DESC")?;
+    let rows = stmt
+        .query_map([to], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut plan = crate::RewindPlan::default();
+    let mut needed: Vec<(String, Vec<String>)> = Vec::new();
+    for steps in rows {
+        let steps: Vec<Step> =
+            serde_json::from_str(&steps).map_err(|e| Error::Corrupt(e.to_string()))?;
+        let pending = steps.iter().find_map(|s| match s {
+            Step::Pending(id) => Some(id.clone()),
+            _ => None,
+        });
+        for step in steps.iter().rev() {
+            match step {
+                Step::DeleteCommand(id) => plan.deletes.push(id.clone()),
+                Step::Values(refs) => {
+                    needed.push((pending.clone().unwrap_or_default(), refs.clone()));
+                }
+                _ => {}
+            }
+        }
+    }
+    // A command whose enqueue goes too needs nothing: it goes with its values.
+    plan.needs = needed
+        .into_iter()
+        .filter(|(id, _)| !plan.deletes.contains(id))
+        .flat_map(|(_, refs)| refs)
+        .collect();
+    Ok(plan)
 }
 
 /// Takes back every write after record `to`, newest first; the commands it deleted (their vault
@@ -244,6 +304,7 @@ fn apply(tx: &Transaction<'_>, step: &Step) -> Result<()> {
                 )?;
             }
         },
+        Step::Values(_) => {}
         Step::Irreversible(what) => {
             return Err(Error::Diverged(format!("{what} cannot be taken back")));
         }
@@ -263,15 +324,13 @@ pub(crate) fn for_commit(
     events: &[NewEvent],
     index: bool,
 ) -> Result<Vec<Step>> {
-    if !command.vault_refs.is_empty() {
-        return Ok(vec![Step::Irreversible(
-            "a command with vault values completed".into(),
-        )]);
-    }
     if events.iter().any(|e| !e.erases.is_empty()) {
         return Ok(vec![Step::Irreversible("an erasure".into())]);
     }
     let mut steps = vec![Step::Pending(command.command_id.clone())];
+    if !command.vault_refs.is_empty() {
+        steps.push(Step::Values(command.vault_refs.clone()));
+    }
     for e in events {
         let before: Option<u32> = tx
             .query_row(
@@ -313,15 +372,13 @@ pub(crate) fn for_commit(
     Ok(steps)
 }
 
-/// For a rejection of `command`: pending again; irreversible if it carried vault values.
+/// For a rejection of `command`: pending again, with its vault values if it brought any.
 pub(crate) fn for_reject(command: &Command) -> Vec<Step> {
-    if command.vault_refs.is_empty() {
-        vec![Step::Pending(command.command_id.clone())]
-    } else {
-        vec![Step::Irreversible(
-            "a command with vault values completed".into(),
-        )]
+    let mut steps = vec![Step::Pending(command.command_id.clone())];
+    if !command.vault_refs.is_empty() {
+        steps.push(Step::Values(command.vault_refs.clone()));
     }
+    steps
 }
 
 /// For saving `listeners`: each as it was.

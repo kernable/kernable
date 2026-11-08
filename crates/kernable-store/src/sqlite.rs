@@ -1127,6 +1127,13 @@ impl Store for SqliteStore {
         Ok(heads)
     }
 
+    fn rewind_plan(&self, to: u64) -> Result<crate::RewindPlan> {
+        if !self.log().on {
+            return Err(Error::NoRecordLog);
+        }
+        crate::undo::plan(&self.conn(), to)
+    }
+
     fn rewind(&self, to: u64) -> Result<Vec<String>> {
         let mut conn = self.conn();
         let mut log = self.log();
@@ -1150,11 +1157,18 @@ impl Store for SqliteStore {
         Ok(deleted)
     }
 
-    fn forget_undo(&self, seq: u64) -> Result<()> {
+    fn forget_undo(&self, seq: u64) -> Result<Vec<String>> {
         if !self.log().on {
-            return Ok(());
+            return Ok(Vec::new());
         }
         crate::undo::forget(&self.conn(), seq)
+    }
+
+    fn unconfirmed_completions(&self) -> Result<Vec<String>> {
+        if !self.log().on {
+            return Ok(Vec::new());
+        }
+        crate::undo::completions(&self.conn(), None)
     }
 
     fn seal_records(&self, sealed: bool) -> Result<Head> {

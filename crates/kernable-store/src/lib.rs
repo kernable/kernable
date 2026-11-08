@@ -211,6 +211,17 @@ pub struct Checkpoint {
     pub created_at: i64,
 }
 
+/// What a rewind to a record ([`Store::rewind`]) needs and does, known before it changes
+/// anything (design/rewind.md).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RewindPlan {
+    /// Vault references the commands it puts back to pending brought: they must still be held,
+    /// or the commands could not run again.
+    pub needs: Vec<String>,
+    /// The commands whose enqueue it takes back, newest first: their vault values go too.
+    pub deletes: Vec<String>,
+}
+
 pub trait Store: Send + Sync {
     /// All events of one aggregate, ordered by version.
     fn read_stream(
@@ -553,6 +564,13 @@ pub trait Store: Send + Sync {
         Ok(self.record_head().into_iter().collect())
     }
 
+    /// What taking back every write after record `to` needs and does ([`RewindPlan`]), before
+    /// anything changes.
+    fn rewind_plan(&self, to: u64) -> Result<RewindPlan> {
+        let _ = to;
+        Err(Error::NoRecordLog)
+    }
+
     /// Takes back every write after record `to`, which becomes the head; the IDs of the commands
     /// whose enqueue it took back (their vault values go too). Refused past a write it cannot
     /// take back.
@@ -562,9 +580,16 @@ pub trait Store: Send + Sync {
     }
 
     /// The standby holds every record up to `seq`: nothing of them needs taking back any more.
-    fn forget_undo(&self, seq: u64) -> Result<()> {
+    /// The commands among them that completed with vault values: their secrets may go now.
+    fn forget_undo(&self, seq: u64) -> Result<Vec<String>> {
         let _ = seq;
-        Ok(())
+        Ok(Vec::new())
+    }
+
+    /// The commands that completed with vault values in writes not yet confirmed by a standby:
+    /// their secrets stay until then, so that a rewind finds them (design/rewind.md).
+    fn unconfirmed_completions(&self) -> Result<Vec<String>> {
+        Ok(Vec::new())
     }
 
     /// Seals the record log (`true`): every write that would add a record fails with

@@ -20,7 +20,8 @@ use kernable_core::proto::{
 };
 
 use crate::{
-    Checkpoint, Enqueued, Error, Head, Pending, Report, Result, Store, StreamId, StreamSummary,
+    Checkpoint, Enqueued, Error, Head, Pending, Report, Result, RewindPlan, Store, StreamId,
+    StreamSummary,
 };
 
 /// What fails, and how often.
@@ -423,12 +424,21 @@ impl Store for FaultyStore {
         self.inner.rewind_points()
     }
 
+    fn rewind_plan(&self, to: u64) -> Result<RewindPlan> {
+        self.faults.read()?;
+        self.inner.rewind_plan(to)
+    }
+
     fn rewind(&self, to: u64) -> Result<Vec<String>> {
         self.faults.write(|| self.inner.rewind(to))
     }
 
-    fn forget_undo(&self, seq: u64) -> Result<()> {
+    fn forget_undo(&self, seq: u64) -> Result<Vec<String>> {
         self.inner.forget_undo(seq)
+    }
+
+    fn unconfirmed_completions(&self) -> Result<Vec<String>> {
+        self.inner.unconfirmed_completions()
     }
 
     fn seal_records(&self, sealed: bool) -> Result<Head> {

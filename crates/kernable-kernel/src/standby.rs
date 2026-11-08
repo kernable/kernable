@@ -76,6 +76,7 @@ impl Stores {
         if let Some(vault) = &vault {
             recover_vault(store.as_ref(), vault, snapshots.as_ref())?;
         }
+        finish_rewind(&config.store, store.as_ref(), vault.as_ref())?;
         Ok(Stores {
             store,
             vault,
@@ -185,15 +186,37 @@ impl Standby {
         self.forget_in_sync();
         let stores = self.stores();
         let from = stores.store.record_head()?.seq;
+        let note = marker(&self.config.store, "rewinding");
         let taken = tokio::task::spawn_blocking({
             let stores = Arc::clone(&stores);
-            move || -> Result<Vec<String>, kernable_store::Error> {
+            move || -> Result<Vec<String>, BoxError> {
+                let plan = stores.store.rewind_plan(to)?;
+                // Commands it puts back to pending run again: the values they brought must
+                // still be here (secrets go once a completion is held, or after a crash).
+                if !plan.needs.is_empty() {
+                    let held = match &stores.vault {
+                        Some(vault) => vault.describe(&plan.needs)?.len(),
+                        None => 0,
+                    };
+                    if held < plan.needs.len() {
+                        return Err(
+                            "the vault values of a command it would put back are gone".into()
+                        );
+                    }
+                }
+                // The commands whose values go are noted first: a crash between the store and
+                // the vault is finished when the stores open again (finish_rewind).
+                if let Some(note) = &note {
+                    crate::replication::write_synced(note, plan.deletes.join("\n").as_bytes())?;
+                }
                 let deleted = stores.store.rewind(to)?;
-                // What the vault holds for the commands it took back goes with them.
                 if let Some(vault) = &stores.vault {
                     for id in &deleted {
                         vault.drop_command(id)?;
                     }
+                }
+                if let Some(note) = &note {
+                    std::fs::remove_file(note)?;
                 }
                 Ok(deleted)
             }
@@ -202,6 +225,7 @@ impl Standby {
         drop(stores);
         match taken {
             Ok(deleted) => {
+                confirmed(&self.stores(), to)?;
                 tracing::warn!(
                     from,
                     to,
@@ -505,6 +529,8 @@ async fn follow_once(
     match start.mode() {
         FollowMode::Follow => {
             tracing::info!(from = head.seq, "following the primary");
+            // Everything it holds the primary holds too: nothing of it is taken back any more.
+            confirmed(&standby.stores(), head.seq)?;
         }
         FollowMode::Image => {
             if !standby.stores().empty()? {
@@ -853,6 +879,38 @@ fn set_aside(url: &str) -> Vec<PathBuf> {
         })
         .map(|e| e.path())
         .collect()
+}
+
+/// The primary holds every record up to `seq`: none of them is taken back any more, and the
+/// secrets of commands completed among them go (design/rewind.md).
+fn confirmed(stores: &Stores, seq: u64) -> Result<(), BoxError> {
+    let completed = stores.store.forget_undo(seq)?;
+    if let Some(vault) = &stores.vault {
+        for id in completed {
+            if stores.store.result(&id)?.is_some() {
+                vault.drop_secrets(&id)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Finishes a rewind a crash cut short (design/rewind.md): the vault values of the commands it
+/// took back go, if the store no longer holds them. Run when stores open.
+pub fn finish_rewind(url: &str, store: &dyn Store, vault: Option<&Vault>) -> Result<(), BoxError> {
+    let Some(note) = marker(url, "rewinding").filter(|m| m.exists()) else {
+        return Ok(());
+    };
+    let ids = std::fs::read_to_string(&note)?;
+    if let Some(vault) = vault {
+        for id in ids.lines().filter(|l| !l.is_empty()) {
+            if store.command(id)?.is_none() {
+                vault.drop_command(id)?;
+            }
+        }
+    }
+    std::fs::remove_file(&note)?;
+    Ok(())
 }
 
 fn move_aside(url: &str, at: i64) -> Result<Vec<PathBuf>, BoxError> {

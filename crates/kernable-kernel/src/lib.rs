@@ -360,6 +360,7 @@ impl Kernel {
                     );
                 }
                 recover_vault(store.as_ref(), &vault, snapshots.as_ref())?;
+                standby::finish_rewind(&config.store, store.as_ref(), Some(&vault))?;
                 Some(vault)
             }
             None => None,
@@ -3713,9 +3714,11 @@ pub(crate) fn recover_vault(
     vault: &Vault,
     snapshots: &dyn SnapshotStore,
 ) -> Result<(), BoxError> {
-    // Secrets of commands that completed while the kernel was down.
+    // Secrets of commands that completed while the kernel was down; not those whose
+    // completion no standby confirmed yet: a rewind may put them back (design/rewind.md).
+    let unconfirmed = store.unconfirmed_completions()?;
     for command_id in vault.secret_commands()? {
-        if store.result(&command_id)?.is_some() {
+        if store.result(&command_id)?.is_some() && !unconfirmed.contains(&command_id) {
             vault.drop_secrets(&command_id)?;
         }
     }
