@@ -315,6 +315,9 @@ impl SqliteStore {
             (found, _) => return Err(Error::Format(found)),
         }
         let log = load_log(&conn)?;
+        if log.on {
+            conn.execute_batch(crate::undo::SCHEMA)?;
+        }
         Ok(Self {
             conn: Mutex::new(conn),
             readers: None,
@@ -336,7 +339,19 @@ impl SqliteStore {
 
     /// Files `records` in the record log within `tx`, if it is on; returns the head to take
     /// once `tx` commits ([`SqliteStore::advance`]). Call with `conn` locked.
+    /// Files `records`, which nothing takes back ([`crate::undo`]): a rewind stops before them.
     fn file(&self, tx: &Connection, records: impl FnOnce() -> Vec<Record>) -> Result<Option<Head>> {
+        self.file_with(tx, Vec::new, records)
+    }
+
+    /// Files `records` and how to take them back (`steps`, read before the write changed
+    /// anything; none: irreversible), in the same transaction.
+    fn file_with(
+        &self,
+        tx: &Connection,
+        steps: impl FnOnce() -> Vec<crate::undo::Step>,
+        records: impl FnOnce() -> Vec<Record>,
+    ) -> Result<Option<Head>> {
         let mut head = {
             let log = self.log();
             if !log.on {
@@ -347,9 +362,12 @@ impl SqliteStore {
             }
             log.head.clone()
         };
+        let first = head.seq;
         let mut insert =
             tx.prepare_cached("INSERT INTO replication (seq, hash, record) VALUES (?1, ?2, ?3)")?;
-        for record in records() {
+        let records = records();
+        let records_kind = records.first().map(crate::undo::record_kind);
+        for record in records {
             let body = LogRecord {
                 record: Some(record),
             }
@@ -361,6 +379,14 @@ impl SqliteStore {
                 seq,
                 hash: hash.to_vec(),
             };
+        }
+        if head.seq > first {
+            let mut steps = steps();
+            if steps.is_empty() {
+                let what = records_kind.unwrap_or("a write");
+                steps.push(crate::undo::Step::Irreversible(what.into()));
+            }
+            crate::undo::file(tx, first + 1, head.seq, &steps)?;
         }
         Ok(Some(head))
     }
@@ -481,7 +507,8 @@ impl Store for SqliteStore {
             let result = stored_result(&tx, &cmd.command_id)?;
             return Ok(Enqueued::Duplicate { result });
         }
-        let head = self.file(&tx, || {
+        let undo = || vec![crate::undo::Step::DeleteCommand(cmd.command_id.clone())];
+        let head = self.file_with(&tx, undo, || {
             vec![Record::Enqueued(EnqueuedRecord {
                 command: Some(cmd.clone()),
                 created_at: now_ms,
@@ -524,6 +551,13 @@ impl Store for SqliteStore {
     ) -> Result<Vec<Event>> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // How to take it back, read before it changes anything (only with the record log on).
+        let mut undo = if self.log().on {
+            let command = pending_command(&tx, command_id)?;
+            crate::undo::for_commit(&tx, &command, events, index.is_some())?
+        } else {
+            Vec::new()
+        };
         let (stored, logged) = commit_tx(
             &tx,
             command_id,
@@ -533,13 +567,22 @@ impl Store for SqliteStore {
             index,
             now_ms,
         )?;
-        let head = self.file(&tx, || {
-            vec![Record::Committed(CommittedRecord {
-                command_id: command_id.to_owned(),
-                events: logged,
-                index: index.cloned(),
-            })]
-        })?;
+        if let Some(first) = stored.first()
+            && !matches!(undo.first(), Some(crate::undo::Step::Irreversible(_)))
+        {
+            undo.push(crate::undo::Step::DeleteEventsFrom(first.global_position));
+        }
+        let head = self.file_with(
+            &tx,
+            || undo,
+            || {
+                vec![Record::Committed(CommittedRecord {
+                    command_id: command_id.to_owned(),
+                    events: logged,
+                    index: index.cloned(),
+                })]
+            },
+        )?;
         tx.commit()?;
         self.advance(head);
         Ok(stored)
@@ -816,13 +859,22 @@ impl Store for SqliteStore {
     fn reject(&self, command_id: &str, reason: Rejected) -> Result<()> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let undo = if self.log().on {
+            crate::undo::for_reject(&pending_command(&tx, command_id)?)
+        } else {
+            Vec::new()
+        };
         reject_tx(&tx, command_id, &reason)?;
-        let head = self.file(&tx, || {
-            vec![Record::Rejected(RejectedRecord {
-                command_id: command_id.to_owned(),
-                reason: Some(reason.clone()),
-            })]
-        })?;
+        let head = self.file_with(
+            &tx,
+            || undo,
+            || {
+                vec![Record::Rejected(RejectedRecord {
+                    command_id: command_id.to_owned(),
+                    reason: Some(reason.clone()),
+                })]
+            },
+        )?;
         tx.commit()?;
         self.advance(head);
         Ok(())
@@ -842,12 +894,19 @@ impl Store for SqliteStore {
     fn save_listeners(&self, listeners: &[ListenerRecord]) -> Result<()> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let undo = if self.log().on {
+            crate::undo::for_listeners(&tx, listeners)?
+        } else {
+            Vec::new()
+        };
         for l in listeners {
             save_listener_tx(&tx, l)?;
         }
-        let head = self.file(&tx, || {
-            listeners.iter().cloned().map(Record::Listener).collect()
-        })?;
+        let head = self.file_with(
+            &tx,
+            || undo,
+            || listeners.iter().cloned().map(Record::Listener).collect(),
+        )?;
         tx.commit()?;
         self.advance(head);
         Ok(())
@@ -862,12 +921,19 @@ impl Store for SqliteStore {
     fn save_workers(&self, workers: &[WorkerRecord]) -> Result<()> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let undo = if self.log().on {
+            crate::undo::for_workers(&tx, workers)?
+        } else {
+            Vec::new()
+        };
         for w in workers {
             save_worker_tx(&tx, w)?;
         }
-        let head = self.file(&tx, || {
-            workers.iter().cloned().map(Record::Worker).collect()
-        })?;
+        let head = self.file_with(
+            &tx,
+            || undo,
+            || workers.iter().cloned().map(Record::Worker).collect(),
+        )?;
         tx.commit()?;
         self.advance(head);
         Ok(())
@@ -916,7 +982,8 @@ impl Store for SqliteStore {
             created_at: now_ms,
         };
         insert_checkpoint(&tx, &record)?;
-        let filed = self.file(&tx, || vec![Record::Checkpoint(record.clone())])?;
+        let undo = || vec![crate::undo::Step::DeleteCheckpoint(global_position)];
+        let filed = self.file_with(&tx, undo, || vec![Record::Checkpoint(record.clone())])?;
         tx.commit()?;
         self.advance(filed);
         Ok(Some(Checkpoint {
@@ -1043,6 +1110,50 @@ impl Store for SqliteStore {
 
     // ---- the record log ----
 
+    fn rewind_points(&self) -> Result<Vec<Head>> {
+        let points = {
+            let conn = self.conn();
+            let head = self.record_head()?;
+            crate::undo::points(&conn, head.seq)?
+        };
+        let mut heads = Vec::new();
+        // A hello carries at most this many: a standby with more to undo starts over.
+        for seq in points.into_iter().take(1000) {
+            match self.record_hash_at(seq)? {
+                Some(hash) => heads.push(Head { seq, hash }),
+                None => break,
+            }
+        }
+        Ok(heads)
+    }
+
+    fn rewind(&self, to: u64) -> Result<Vec<String>> {
+        let mut conn = self.conn();
+        let mut log = self.log();
+        if !log.on {
+            return Err(Error::NoRecordLog);
+        }
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let deleted = crate::undo::rewind(&tx, to)?;
+        tx.execute("DELETE FROM replication WHERE seq > ?1", [to])?;
+        let hash: Vec<u8> = tx
+            .query_row("SELECT hash FROM replication WHERE seq = ?1", [to], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .ok_or_else(|| Error::Diverged(format!("record {to} is no longer in the log")))?;
+        tx.commit()?;
+        log.head = Head { seq: to, hash };
+        Ok(deleted)
+    }
+
+    fn forget_undo(&self, seq: u64) -> Result<()> {
+        if !self.log().on {
+            return Ok(());
+        }
+        crate::undo::forget(&self.conn(), seq)
+    }
+
     fn seal_records(&self, sealed: bool) -> Result<Head> {
         self.sealed
             .store(sealed, std::sync::atomic::Ordering::SeqCst);
@@ -1145,13 +1256,15 @@ impl Store for SqliteStore {
         }
         if !on {
             conn.execute_batch(
-                "DROP TABLE IF EXISTS replication; DROP TABLE IF EXISTS replication_state;",
+                "DROP TABLE IF EXISTS replication; DROP TABLE IF EXISTS replication_state;
+                 DROP TABLE IF EXISTS undo;",
             )?;
             *log = RecordLog::default();
             return Ok(());
         }
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute_batch(LOG_SCHEMA)?;
+        tx.execute_batch(crate::undo::SCHEMA)?;
         let empty: bool = tx.query_row(
             "SELECT NOT EXISTS (SELECT 1 FROM commands) AND NOT EXISTS (SELECT 1 FROM listeners)
                 AND NOT EXISTS (SELECT 1 FROM workers) AND NOT EXISTS (SELECT 1 FROM memberships)
@@ -1317,7 +1430,9 @@ impl Store for SqliteStore {
         let mut log = self.log();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute_batch(LOG_SCHEMA)?;
+        tx.execute_batch(crate::undo::SCHEMA)?;
         tx.execute("DELETE FROM replication", [])?;
+        tx.execute("DELETE FROM undo", [])?;
         insert_head(&tx, head)?;
         tx.execute(
             "INSERT OR REPLACE INTO replication_state (id, base) VALUES (1, ?1)",
@@ -1574,7 +1689,7 @@ fn parse_context(json: &str) -> std::result::Result<RequestContext, String> {
 }
 
 /// What the stream of `stream` (tenant, domain, type, ID) holds; `None` if nothing.
-fn stream_index(
+pub(crate) fn stream_index(
     conn: &Connection,
     stream: impl rusqlite::Params,
 ) -> Result<Option<AggregateIndex>> {
@@ -1926,7 +2041,7 @@ fn reject_tx(tx: &Transaction<'_>, command_id: &str, reason: &Rejected) -> Resul
 }
 
 /// Stores a listener's registration and position, or removes it.
-fn save_listener_tx(tx: &Connection, l: &ListenerRecord) -> Result<()> {
+pub(crate) fn save_listener_tx(tx: &Connection, l: &ListenerRecord) -> Result<()> {
     // Removing a listener removes its middlewares too (ON DELETE CASCADE).
     tx.execute("DELETE FROM middlewares WHERE listener = ?1", [&l.name])?;
     if l.removed {
@@ -1987,7 +2102,7 @@ fn save_listener_tx(tx: &Connection, l: &ListenerRecord) -> Result<()> {
 }
 
 /// Stores an aggregate's registration, or removes it.
-fn save_worker_tx(tx: &Connection, w: &WorkerRecord) -> Result<()> {
+pub(crate) fn save_worker_tx(tx: &Connection, w: &WorkerRecord) -> Result<()> {
     if w.removed {
         tx.execute(
             "DELETE FROM workers WHERE aggregate_type = ?1",
@@ -2098,7 +2213,7 @@ fn save_grant_tx(tx: &Connection, grant: &Grant) -> Result<bool> {
     Ok(changed == 1)
 }
 
-fn read_listeners(conn: &Connection) -> Result<Vec<ListenerRecord>> {
+pub(crate) fn read_listeners(conn: &Connection) -> Result<Vec<ListenerRecord>> {
     let mut stmt = conn.prepare(
         "SELECT name, key_id, ordering, event_types, position, service, last_seen
          FROM listeners
@@ -2163,7 +2278,7 @@ fn read_listeners(conn: &Connection) -> Result<Vec<ListenerRecord>> {
     Ok(listeners)
 }
 
-fn read_workers(conn: &Connection) -> Result<Vec<WorkerRecord>> {
+pub(crate) fn read_workers(conn: &Connection) -> Result<Vec<WorkerRecord>> {
     let mut stmt = conn.prepare(
         "SELECT aggregate_type, key_id, command_types, service, last_seen FROM workers
          ORDER BY aggregate_type",
@@ -2342,7 +2457,7 @@ fn read_imported(conn: &Connection, tenant: Option<&str>) -> Result<Vec<TenantIm
 /// Forgets the keys and facts `tenant`'s streams hold; how many streams held some.
 /// Files what `stream_id` holds now: the keys it held before are free, then its new ones are
 /// filed; a key another stream holds is `KeyTaken`.
-fn set_stream_index_tx(
+pub(crate) fn set_stream_index_tx(
     tx: &Connection,
     stream_id: &StreamId,
     index: &AggregateIndex,

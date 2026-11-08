@@ -31,6 +31,7 @@ pub mod replication;
 pub mod snapshots;
 mod sqlite;
 mod sync;
+mod undo;
 pub mod vault;
 mod verify;
 
@@ -542,6 +543,27 @@ pub trait Store: Send + Sync {
     /// image first. Turned off, the log is dropped.
     fn keep_record_log(&self, on: bool) -> Result<()> {
         let _ = on;
+        Ok(())
+    }
+
+    /// The records a diverged standby may rewind to, newest first, its head first, with their
+    /// hashes: the record before each newest write it can take back, down to the first that it
+    /// cannot (design/rewind.md). Only the head where nothing can be taken back.
+    fn rewind_points(&self) -> Result<Vec<Head>> {
+        Ok(self.record_head().into_iter().collect())
+    }
+
+    /// Takes back every write after record `to`, which becomes the head; the IDs of the commands
+    /// whose enqueue it took back (their vault values go too). Refused past a write it cannot
+    /// take back.
+    fn rewind(&self, to: u64) -> Result<Vec<String>> {
+        let _ = to;
+        Err(Error::NoRecordLog)
+    }
+
+    /// The standby holds every record up to `seq`: nothing of them needs taking back any more.
+    fn forget_undo(&self, seq: u64) -> Result<()> {
+        let _ = seq;
         Ok(())
     }
 

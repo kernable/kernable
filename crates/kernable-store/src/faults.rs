@@ -418,6 +418,19 @@ impl Store for FaultyStore {
         self.inner.keep_record_log(on)
     }
 
+    fn rewind_points(&self) -> Result<Vec<Head>> {
+        self.faults.read()?;
+        self.inner.rewind_points()
+    }
+
+    fn rewind(&self, to: u64) -> Result<Vec<String>> {
+        self.faults.write(|| self.inner.rewind(to))
+    }
+
+    fn forget_undo(&self, seq: u64) -> Result<()> {
+        self.inner.forget_undo(seq)
+    }
+
     fn seal_records(&self, sealed: bool) -> Result<Head> {
         self.inner.seal_records(sealed)
     }

@@ -743,3 +743,151 @@ fn a_tenant_is_exported_whole_or_after_a_position() {
         assert!(s.tenant_index("t1").unwrap().is_empty(), "{kind:?}");
     }
 }
+
+/// The writes a cut-off primary files most (design/rewind.md): commands enqueued, committed
+/// (with keys, a new event type and a newer schema) and rejected, a checkpoint, listeners
+/// (new, moved on, parked, removed) and workers (new, changed). Each can be taken back.
+fn hot_writes(s: &dyn Store, round: u8) {
+    let at = 1_000 + i64::from(round) * 100;
+    let id = |x: &str| format!("hot-{x}-{round}");
+    let (a, b) = (id("a"), id("b"));
+    s.enqueue(&cmd(&id("h1"), &a), at).unwrap();
+    s.enqueue(&cmd(&id("h2"), &b), at + 1).unwrap();
+    s.enqueue(&cmd(&id("h3"), &a), at + 2).unwrap();
+    s.enqueue(&cmd(&id("h4"), &b), at + 3).unwrap();
+    let mut newer = ev("Opened");
+    newer.schema = 2;
+    s.commit(
+        &id("h1"),
+        0,
+        &[newer, ev(&format!("Hot{round}"))],
+        &sig(),
+        Some(&holds(200 + round)),
+        at + 4,
+    )
+    .unwrap();
+    s.reject(
+        &id("h2"),
+        Rejected {
+            code: "closed".into(),
+            message: "closed".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    // A pending command of the rounds before completes in the tail.
+    s.commit(&id("h3"), 2, &[ev("Named")], &sig(), None, at + 5)
+        .unwrap();
+    s.checkpoint(&kernel(), at + 6).unwrap();
+    let mut reactor = listener("reactor", 5, at);
+    reactor.parked = Vec::new();
+    reactor.parked_changed = true;
+    let mut gone = listener("shop", 0, at);
+    gone.removed = true;
+    s.save_listeners(&[reactor, gone, listener(&id("new"), 7, at)])
+        .unwrap();
+    s.save_workers(&[
+        WorkerRecord {
+            aggregate_type: "orders.Order".into(),
+            key_id: "other-worker".into(),
+            command_types: vec!["orders.Place".into(), "orders.Close".into()],
+            service: "shop".into(),
+            last_seen: at,
+            removed: false,
+        },
+        WorkerRecord {
+            aggregate_type: id("Invoice"),
+            key_id: "worker".into(),
+            command_types: vec!["billing.Issue".into()],
+            service: "billing".into(),
+            last_seen: at,
+            removed: false,
+        },
+    ])
+    .unwrap();
+}
+
+/// A primary cut off from its standby comes back with a tail the new primary never had: it
+/// takes back exactly that tail and is then the same store as the standby, record for record,
+/// and follows on from there (design/rewind.md).
+#[test]
+fn a_store_takes_back_its_newest_writes_and_follows_on() {
+    let dir = Dir::new("rewind");
+    let (primary, standby) = (dir.open(Sqlite, "primary"), dir.open(Sqlite, "standby"));
+    writes(&*primary, 0);
+    follow(&*primary, &*standby, 1000);
+    same(&*primary, &*standby, "before");
+    let shared = standby.record_head().unwrap();
+
+    hot_writes(&*primary, 0);
+    let points = primary.rewind_points().unwrap();
+    assert_eq!(points[0], primary.record_head().unwrap(), "the head first");
+    assert!(
+        points.contains(&shared),
+        "the record both hold can be rewound to: {shared:?} not in {points:?}"
+    );
+    let deleted = primary.rewind(shared.seq).unwrap();
+    assert_eq!(
+        deleted,
+        ["hot-h4-0", "hot-h3-0", "hot-h2-0", "hot-h1-0"],
+        "the commands enqueued in the tail, newest first"
+    );
+    same(&*primary, &*standby, "rewound");
+
+    // It writes on, and the standby follows on from where both stood.
+    writes(&*primary, 1);
+    hot_writes(&*primary, 1);
+    follow(&*primary, &*standby, 1000);
+    same(&*primary, &*standby, "after");
+
+    // Acknowledged, nothing is to be taken back: only the head is a point.
+    primary
+        .forget_undo(primary.record_head().unwrap().seq)
+        .unwrap();
+    assert_eq!(
+        primary.rewind_points().unwrap(),
+        [primary.record_head().unwrap()]
+    );
+}
+
+/// A write that cannot be taken back (a grant, an erasure, a command whose secrets went) ends
+/// what a rewind can reach: past it, the store starts over instead.
+#[test]
+fn a_rewind_stops_before_a_write_it_cannot_take_back() {
+    let dir = Dir::new("rewind-stop");
+    let primary = dir.open(Sqlite, "primary");
+    writes(&*primary, 0);
+    primary
+        .forget_undo(primary.record_head().unwrap().seq)
+        .unwrap();
+    let before = primary.record_head().unwrap();
+    hot_writes(&*primary, 0);
+    let after_hot = primary.record_head().unwrap();
+    writes(&*primary, 1); // grants, memberships, data files, …
+    let points = primary.rewind_points().unwrap();
+    assert!(!points.contains(&before), "{points:?}");
+    assert!(!points.contains(&after_hot), "{points:?}");
+    assert!(matches!(
+        primary.rewind(before.seq),
+        Err(Error::Diverged(_))
+    ));
+    assert_eq!(
+        primary.record_head().unwrap().seq,
+        points[0].seq,
+        "a refused rewind changes nothing"
+    );
+
+    // A commit of a command with vault values: its secrets are dropped, it is not taken back.
+    primary
+        .forget_undo(primary.record_head().unwrap().seq)
+        .unwrap();
+    let mut secret = cmd("with-secret", "s1");
+    secret.vault_refs = vec!["ref1".into()];
+    primary.enqueue(&secret, 5_000).unwrap();
+    let enqueued = primary.record_head().unwrap();
+    primary
+        .commit("with-secret", 0, &[ev("Opened")], &sig(), None, 5_001)
+        .unwrap();
+    let points = primary.rewind_points().unwrap();
+    assert_eq!(points, [primary.record_head().unwrap()], "{enqueued:?}");
+}
