@@ -306,7 +306,8 @@ pub(crate) async fn run_with(config: Config, link: Option<Arc<Link>>) -> Result<
             match follow_once(&standby, &key, &grant).await {
                 Ok(()) => tracing::warn!("the primary ended the stream; connecting again"),
                 Err(e) => {
-                    tracing::warn!(error = %e, "following the primary failed; connecting again in {delay:?}")
+                    let why = with_causes(&*e);
+                    tracing::warn!(error = %why, "following the primary failed; connecting again in {delay:?}")
                 }
             }
             if let Some(link) = &standby.link {
@@ -382,6 +383,22 @@ impl Drop for Following {
             .take();
         ENDED.notify_waiters();
     }
+}
+
+/// `e` with its causes, `: `-separated: a transport error says what failed underneath (a
+/// certificate not trusted, a connection refused) instead of only "transport error".
+fn with_causes(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut text = e.to_string();
+    let mut cause = e.source();
+    while let Some(c) = cause {
+        let next = c.to_string();
+        if !text.contains(&next) {
+            text.push_str(": ");
+            text.push_str(&next);
+        }
+        cause = c.source();
+    }
+    text
 }
 
 /// One connection to the primary: catch up, then apply its records as they come.
@@ -1101,6 +1118,28 @@ where
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn an_error_is_told_with_its_causes() {
+        let inner = std::io::Error::other("invalid peer certificate: UnknownIssuer");
+        let outer = std::io::Error::other(OuterError(inner));
+        let text = with_causes(&outer);
+        assert!(text.starts_with("transport error"), "{text}");
+        assert!(text.contains("UnknownIssuer"), "{text}");
+    }
+
+    #[derive(Debug)]
+    struct OuterError(std::io::Error);
+    impl std::fmt::Display for OuterError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("transport error")
+        }
+    }
+    impl std::error::Error for OuterError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
     use std::path::Path;
 
     use super::*;
