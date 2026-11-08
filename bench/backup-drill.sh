@@ -25,7 +25,7 @@ mkdir -p "${WORK:=${TMPDIR:-/tmp}}"
 DIR=$(mktemp -d "$WORK/drill.XXXXXX")
 RUN=$TO/drill-$(date +%s)
 pids=()
-trap 'kill -9 "${pids[@]}" 2>/dev/null || true; rm -rf "$DIR"' EXIT
+trap 'kill -9 ${pids[@]+"${pids[@]}"} 2>/dev/null || true; rm -rf "$DIR"' EXIT
 now() { date +%s.%N; }
 since() { echo "$(now) - $1" | bc; }
 # Events in a store, and the newest one's time (ms).
@@ -71,8 +71,8 @@ echo "== $RATE commands a second for at most $LOAD s; the machine is lost at a r
 pids+=($!)
 lost_at=$((LOAD / 3 + RANDOM % (LOAD / 2)))
 sleep "$lost_at"
-kill -9 "${pids[@]}" 2>/dev/null || true
-lost=$(date +%s%3N)
+kill -9 ${pids[@]+"${pids[@]}"} 2>/dev/null || true
+lost=$(python3 -c 'import time; print(int(time.time() * 1000))') # not date +%s%3N: GNU only
 pids=()
 sleep 0.5
 read -r stored stored_ms < <(head_of k.db)
@@ -93,7 +93,7 @@ ready "$DIR/r.sock"
 pids+=($!)
 "$BIN/kernable-bench" load "unix:$DIR/r.sock" client.key rate=10 seconds=1 wait=committed >after.out 2>&1
 rto_s=$(since "$t")
-kill "${pids[@]}" 2>/dev/null || true
+kill ${pids[@]+"${pids[@]}"} 2>/dev/null || true
 pids=()
 missing=$((stored - restored))
 printf '  restored %s events in %.1f s (download, apply, verify); the kernel answered after %.1f s in all\n' \
@@ -106,7 +106,7 @@ sed 's/\x1b\[[0-9;]*m//g' restore.err | cut -c12-23,40-180 | sed 's/^/    /' | t
 
 echo "== a point in time: the store as it was 10 s before the loss"
 at_ms=$((lost - 10000))
-at=$(date -u -d "@$((at_ms / 1000))" +%Y-%m-%dT%H:%M:%SZ)
+at=$(python3 -c "import datetime; print(datetime.datetime.fromtimestamp($at_ms // 1000, datetime.UTC).strftime('%Y-%m-%dT%H:%M:%SZ'))")
 "$BIN/kernable" restore "$RUN" --backup-key backup.key --at "$at" --store "sqlite:$DIR/p.db" \
   --data-store "file:$DIR/pdata" >pit.out 2>pit.err || { echo "  restore --at failed"; tail -5 pit.err; exit 1; }
 read -r pit pit_ms < <(head_of p.db)
