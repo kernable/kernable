@@ -365,7 +365,9 @@ async fn a_primary_alone_tells_nothing_once_its_lease_runs_out() {
     for seed in [1, 2] {
         a.grant(default_grant(&key(seed)).unwrap()).unwrap();
     }
-    start_worker(addr.clone(), TestWorker::honest()).await;
+    // Tried again until registered, as an SDK's worker does: a lease renewed late under load
+    // fences the primary for a moment, and a registration then is refused.
+    start_worker_registered(addr.clone()).await;
     submit(&addr, place(0)).await.unwrap();
 
     // The witness is out of reach: once the lease ran out, a write is not told.
