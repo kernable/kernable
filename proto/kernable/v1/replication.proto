@@ -62,6 +62,15 @@ message FollowHello {
   // values sealed (VaultRow.sealed) as an export does, and one follows at a time. Its acks only
   // keep the records it still needs. Seq 0 asks for a full image.
   bool backup = 5;
+  // The records the standby could go back to, newest first after its head (seq, hash): the
+  // record before each of its newest writes it can take back (design/rewind.md). A primary that
+  // holds one of them answers REWIND to the newest it holds instead of DIVERGED.
+  repeated RecordPoint rewind_points = 6;
+}
+
+message RecordPoint {
+  uint64 seq = 1;
+  bytes hash = 2;
 }
 
 // Every record up to `seq` is applied and on the standby's disk.
@@ -105,11 +114,13 @@ enum FollowMode {
   FOLLOW = 1;   // records after the standby's head follow
   IMAGE = 2;    // the standby is empty or too far behind: a full image comes first
   DIVERGED = 3; // the standby holds records the primary does not: it moves its stores aside
+  REWIND = 4;   // it does, but can take them back to `rewind_to`, then follows on from there
 }
 
 message FollowStart {
   FollowMode mode = 1;
   string message = 2;
+  uint64 rewind_to = 3; // with REWIND
 }
 
 // Part of a full image: records in an order that applies (see Store::image), and the vault

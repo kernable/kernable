@@ -754,7 +754,7 @@ async fn run(
 
     // Where the standby stands against this log.
     let head = kernel.store.record_head().map_err(internal)?;
-    let (mode, message) = match kernel.store.record_hash_at(hello.seq).map_err(internal)? {
+    let (mut mode, mut message) = match kernel.store.record_hash_at(hello.seq).map_err(internal)? {
         Some(hash) if hash == hello.hash => (FollowMode::Follow, String::new()),
         Some(_) => (
             FollowMode::Diverged,
@@ -772,6 +772,27 @@ async fn run(
         ),
         None => (FollowMode::Image, String::new()),
     };
+    // Diverged, it may take its newest writes back to a record both hold (design/rewind.md).
+    let mut rewind_to = 0;
+    if mode == FollowMode::Diverged {
+        for point in &hello.rewind_points {
+            if point.seq <= head.seq
+                && kernel
+                    .store
+                    .record_hash_at(point.seq)
+                    .map_err(internal)?
+                    .as_ref()
+                    == Some(&point.hash)
+            {
+                (mode, rewind_to) = (FollowMode::Rewind, point.seq);
+                message = format!(
+                    "{message}: it takes its records after {} back and follows on",
+                    point.seq
+                );
+                break;
+            }
+        }
+    }
     if backup {
         tracing::info!(key = %hello.key_id, from = hello.seq, mode = ?mode, "a backup follower follows");
     } else {
@@ -782,6 +803,7 @@ async fn run(
         follow_response::Msg::Start(FollowStart {
             mode: mode.into(),
             message,
+            rewind_to,
         }),
     )
     .await?;
@@ -799,6 +821,7 @@ async fn run(
 
     let mut tick = tokio::time::interval(TICK);
     let mut pruned = 0;
+    let mut undone = 0;
     let handed_over = || {
         primary
             .as_ref()
@@ -891,6 +914,17 @@ async fn run(
                     match &primary {
                         Some(p) => p.ack(seq, head),
                         None => kernel.backup.ack(seq),
+                    }
+                    // What the standby holds is never to be taken back (design/rewind.md):
+                    // its undo goes, a thousand records at a time.
+                    if primary.is_some() && seq >= undone + 1000 {
+                        undone = seq;
+                        let kernel = Arc::clone(&kernel);
+                        tokio::task::spawn_blocking(move || {
+                            if let Err(e) = kernel.store.forget_undo(seq) {
+                                tracing::warn!(error = %e, "dropping undo the standby holds failed");
+                            }
+                        });
                     }
                     // SQLite keeps what a reconnecting standby or backup follower may need;
                     // the file log keeps all.

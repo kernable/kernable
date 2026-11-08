@@ -1136,12 +1136,15 @@ impl Store for SqliteStore {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let deleted = crate::undo::rewind(&tx, to)?;
         tx.execute("DELETE FROM replication WHERE seq > ?1", [to])?;
-        let hash: Vec<u8> = tx
-            .query_row("SELECT hash FROM replication WHERE seq = ?1", [to], |r| {
+        let hash: Vec<u8> = if to == 0 {
+            replication::ZERO.to_vec()
+        } else {
+            tx.query_row("SELECT hash FROM replication WHERE seq = ?1", [to], |r| {
                 r.get(0)
             })
             .optional()?
-            .ok_or_else(|| Error::Diverged(format!("record {to} is no longer in the log")))?;
+            .ok_or_else(|| Error::Diverged(format!("record {to} is no longer in the log")))?
+        };
         tx.commit()?;
         log.head = Head { seq: to, hash };
         Ok(deleted)

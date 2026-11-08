@@ -587,6 +587,13 @@ impl FileStore {
         }
     }
 
+    /// Whether the command `id` carried vault values.
+    fn with_vault_values(&self, id: &str) -> Result<bool> {
+        Ok(self
+            .command(id)?
+            .is_some_and(|c| !c.command.vault_refs.is_empty()))
+    }
+
     /// The log's path and length, for reading records back; refused without a file.
     fn readable(&self, inner: &Inner) -> Result<(PathBuf, u64)> {
         match (&inner.sink, &self.path) {
@@ -1190,6 +1197,95 @@ impl Store for FileStore {
             Sink::Memory => Err(Error::NoRecordLog),
             _ => Ok(inner.log.head.clone()),
         }
+    }
+
+    /// The file log takes back any record whose effect is in the log alone: the state is
+    /// replayed from it. Not past one with effects outside it (design/rewind.md): a data file,
+    /// an erasure, a command completed with vault values (its secrets dropped), the log's
+    /// start.
+    fn rewind_points(&self) -> Result<Vec<Head>> {
+        let (head, base) = {
+            let inner = self.inner();
+            if matches!(inner.sink, Sink::Memory) {
+                return Err(Error::NoRecordLog);
+            }
+            (inner.log.head.clone(), inner.log.base)
+        };
+        let from = head.seq.saturating_sub(1000).max(base);
+        let Some(records) = self.records_after(from, 1000)? else {
+            return Ok(vec![head]);
+        };
+        let Some(from_hash) = self.record_hash_at(from)? else {
+            return Ok(vec![head]);
+        };
+        let mut points = vec![head];
+        for (i, r) in records.iter().enumerate().rev() {
+            let record = r.record.as_ref().and_then(|l| l.record.as_ref());
+            let keeps_outside = match record {
+                Some(Record::DataChanged(_) | Record::ReplicationHead(_)) | None => true,
+                Some(Record::Committed(c)) => {
+                    c.events
+                        .iter()
+                        .any(|e| e.event.as_ref().is_some_and(|e| !e.erases.is_empty()))
+                        || self.with_vault_values(&c.command_id)?
+                }
+                Some(Record::Rejected(rj)) => self.with_vault_values(&rj.command_id)?,
+                Some(_) => false,
+            };
+            if keeps_outside {
+                break;
+            }
+            let hash = match i {
+                0 => from_hash.clone(),
+                i => records[i - 1].hash.clone(),
+            };
+            points.push(Head {
+                seq: r.seq - 1,
+                hash,
+            });
+        }
+        Ok(points)
+    }
+
+    fn rewind(&self, to: u64) -> Result<Vec<String>> {
+        let points = self.rewind_points()?;
+        if !points.iter().any(|p| p.seq == to) {
+            return Err(diverged(format!(
+                "record {to} is not one the log can go back to"
+            )));
+        }
+        let mut inner = self.inner();
+        if to == inner.log.head.seq {
+            return Ok(Vec::new());
+        }
+        let (path, end) = self.readable(&inner)?;
+        // Where record `to + 1` starts, and the commands enqueued from there on.
+        let (mut at, offset, _) = inner.log.mark(to);
+        let (mut cut, mut deleted) = (None, Vec::new());
+        scan(&path, offset, end, &mut |start, body| {
+            at += 1;
+            if at == to + 1 {
+                cut = Some(start);
+            }
+            if at > to
+                && let Record::Enqueued(e) = decode(body)?
+                && let Some(command) = e.command
+            {
+                deleted.push(command.command_id);
+            }
+            Ok(true)
+        })?;
+        let cut = cut.ok_or_else(|| corrupt(&format!("record {} not found", to + 1)))?;
+        let Sink::File(file) = &inner.sink else {
+            return Err(Error::ReadOnly);
+        };
+        file.set_len(cut)?;
+        file.sync_data()?;
+        let bytes = fs::read(&path)?;
+        let (state, log, valid) = replay(&bytes)?;
+        (inner.state, inner.log, inner.len) = (state, log, valid as u64);
+        deleted.reverse();
+        Ok(deleted)
     }
 
     fn record_hash_at(&self, seq: u64) -> Result<Option<Vec<u8>>> {

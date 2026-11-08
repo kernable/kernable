@@ -1158,6 +1158,11 @@ impl Plug {
     fn freeze(&self) {
         self.frozen.store(true, SeqCst);
     }
+
+    /// The network heals: new connections pass again (the frozen ones stay dead).
+    fn thaw(&self) {
+        self.frozen.store(false, SeqCst);
+    }
 }
 
 async fn pass(
@@ -1347,7 +1352,7 @@ async fn a_client_of_both_kernels_writes_again_soon_after_a_partition() {
         ]);
         args
     };
-    let _a = start(&dir, &node("a", 3, 11, "wa"));
+    let mut a = Some(start(&dir, &node("a", 3, 11, "wa")));
     wait_for(&dir.sock("a")).await;
     let _b = start(&dir, &node("b", 8, 12, "w"));
     wait_for(&dir.sock("b")).await;
@@ -1403,6 +1408,51 @@ async fn a_client_of_both_kernels_writes_again_soon_after_a_partition() {
         longest.as_millis()
     );
     assert!(longest < Duration::from_millis(8 * LEASE_MS), "{longest:?}");
+    // Healed, A follows B again: its own newest records, the commits under way when it was cut
+    // off, are taken back, not its whole store set aside (design/rewind.md).
+    a_front.thaw();
+    a_witness.thaw();
+    // Its connections died with the partition; on a server the operating system ends them and
+    // its node starts the kernel again: here the node is started again.
+    drop(a.take());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    a = Some(start(&dir, &node("a", 3, 11, "wa")));
+    let healed = Instant::now();
+    // A's node as started again: the newest `<n>-start.log`.
+    let mut nodes: Vec<_> = std::fs::read_dir(&dir.0)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with("-start.log"))
+        })
+        .collect();
+    nodes.sort();
+    let a_log = nodes.last().unwrap().clone();
+    let logs = || std::fs::read_to_string(&a_log).unwrap_or_default();
+    while !logs().contains("following the primary") {
+        assert!(
+            healed.elapsed() < Duration::from_secs(30),
+            "A never followed B after the partition healed"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let text = logs();
+    assert!(
+        !text.contains("starts over"),
+        "A set its stores aside instead of taking its tail back:\n{text}"
+    );
+    println!(
+        "healed: A {}",
+        if text.contains("took back its records") {
+            "took its tail back and follows on"
+        } else {
+            "had no tail and follows on"
+        }
+    );
+    drop(a);
     // Cut off, A was fenced and sealed its record log: nothing more it writes is lost to B.
     let logs: String = std::fs::read_dir(&dir.0)
         .unwrap()

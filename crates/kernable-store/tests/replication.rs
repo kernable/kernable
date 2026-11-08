@@ -812,8 +812,14 @@ fn hot_writes(s: &dyn Store, round: u8) {
 /// and follows on from there (design/rewind.md).
 #[test]
 fn a_store_takes_back_its_newest_writes_and_follows_on() {
-    let dir = Dir::new("rewind");
-    let (primary, standby) = (dir.open(Sqlite, "primary"), dir.open(Sqlite, "standby"));
+    for kind in [Sqlite, File] {
+        rewinds(kind);
+    }
+}
+
+fn rewinds(kind: Kind) {
+    let dir = Dir::new(&format!("rewind-{kind:?}"));
+    let (primary, standby) = (dir.open(kind, "primary"), dir.open(kind, "standby"));
     writes(&*primary, 0);
     follow(&*primary, &*standby, 1000);
     same(&*primary, &*standby, "before");
@@ -840,14 +846,17 @@ fn a_store_takes_back_its_newest_writes_and_follows_on() {
     follow(&*primary, &*standby, 1000);
     same(&*primary, &*standby, "after");
 
-    // Acknowledged, nothing is to be taken back: only the head is a point.
-    primary
-        .forget_undo(primary.record_head().unwrap().seq)
-        .unwrap();
-    assert_eq!(
-        primary.rewind_points().unwrap(),
-        [primary.record_head().unwrap()]
-    );
+    // Acknowledged, nothing is to be taken back (SQLite; the file log keeps every record):
+    // only the head is a point.
+    if let Sqlite = kind {
+        primary
+            .forget_undo(primary.record_head().unwrap().seq)
+            .unwrap();
+        assert_eq!(
+            primary.rewind_points().unwrap(),
+            [primary.record_head().unwrap()]
+        );
+    }
 }
 
 /// A write that cannot be taken back (a grant, an erasure, a command whose secrets went) ends

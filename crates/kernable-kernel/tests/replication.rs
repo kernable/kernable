@@ -352,9 +352,12 @@ async fn a_standby_without_a_grant_for_replicate_is_refused() {
     following.abort();
 }
 
+/// A standby whose newest records are its own, from when it was the primary (a command it
+/// enqueued), takes exactly those back and follows on, without setting its stores aside or
+/// copying everything again (design/rewind.md).
 #[tokio::test(flavor = "multi_thread")]
-async fn a_standby_whose_log_diverged_moves_its_stores_aside_and_starts_over() {
-    let dir = Dir::new("diverged");
+async fn a_standby_takes_back_its_own_newest_records_and_follows_on() {
+    let dir = Dir::new("rewound");
     let mut primary_config = config(&dir.0, "primary", 3);
     primary_config.replication.sync = true;
     let primary = open(&primary_config).await;
@@ -364,6 +367,47 @@ async fn a_standby_whose_log_diverged_moves_its_stores_aside_and_starts_over() {
         let store = kernable_store::open(&standby_config.store).unwrap();
         store.keep_record_log(true).unwrap();
         store.enqueue(&place(77), 0).unwrap();
+    }
+    let _following = tokio::spawn(standby::run(standby_config.clone()));
+    until("the standby is in sync", || in_sync(&standby_config)).await;
+    for seed in [1, 2] {
+        primary.grant(default_grant(&key(seed)).unwrap()).unwrap();
+    }
+    start_worker(primary_config.listen.clone(), TestWorker::honest()).await;
+    submit(&primary_config.listen, place(1)).await.unwrap();
+
+    let standby = held(&standby_config);
+    assert_eq!(
+        standby.command("c77").unwrap(),
+        None,
+        "its own tail is gone"
+    );
+    assert!(
+        standby.result("c1").unwrap().is_some(),
+        "it follows the primary"
+    );
+    let aside: Vec<String> = std::fs::read_dir(&dir.0)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".diverged-"))
+        .collect();
+    assert!(aside.is_empty(), "nothing set aside: {aside:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_standby_whose_log_diverged_moves_its_stores_aside_and_starts_over() {
+    let dir = Dir::new("diverged");
+    let mut primary_config = config(&dir.0, "primary", 3);
+    primary_config.replication.sync = true;
+    let primary = open(&primary_config).await;
+    let standby_config = standby_config(&dir.0, &primary_config);
+    // The standby holds a history the primary never had (a former primary's own tail), one
+    // it cannot take back: a data file's change (the file is outside the log).
+    {
+        let store = kernable_store::open(&standby_config.store).unwrap();
+        store.keep_record_log(true).unwrap();
+        store.enqueue(&place(77), 0).unwrap();
+        store.data_changed("t1", "orders", "invoice").unwrap();
     }
     // A copy set aside before: it goes, only the newest stays.
     let (_, store_path) = kernable_store::backend(&standby_config.store);

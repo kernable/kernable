@@ -423,6 +423,7 @@ async fn follow_once(
         hash: from.hash.clone(),
         protocol: kernable_core::PROTOCOL,
         backup: true,
+        rewind_points: Vec::new(),
     })))
     .await?;
     let mut request = Request::new(ReceiverStream::new(rx));
@@ -465,7 +466,8 @@ async fn follow_once(
             generation = Some(name);
             head
         }
-        FollowMode::Diverged | FollowMode::Unspecified => {
+        // It offers no records to go back to, so it is never told to rewind.
+        FollowMode::Diverged | FollowMode::Rewind | FollowMode::Unspecified => {
             tracing::warn!(message = %start.message, "the kernel's log differs from the backup's: a new generation begins");
             *fresh = true;
             return Ok(());

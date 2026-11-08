@@ -670,6 +670,14 @@ impl Vault {
         Ok(rows.len())
     }
 
+    /// Deletes every value `command_id` brought, secret or not: a command taken back
+    /// (design/rewind.md) that nothing else refers to.
+    pub fn drop_command(&self, command_id: &str) -> Result<()> {
+        self.conn()
+            .execute("DELETE FROM vault WHERE command_id = ?1", [command_id])?;
+        Ok(())
+    }
+
     /// Deletes the secrets of a completed command.
     pub fn drop_secrets(&self, command_id: &str) -> Result<()> {
         self.conn().execute(

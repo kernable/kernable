@@ -22,7 +22,7 @@ use kernable_core::{
     proto::{
         ChallengeResponse, CheckpointRecord, FollowAck, FollowHello, FollowMode, FollowRequest,
         FollowResponse, Grant, ImageBatch, ImageEnd, Leaving, PromoteRequest, PromoteResult,
-        RecordBatch, StoredKey, TookOver, WitnessOp, follow_request, follow_response,
+        RecordBatch, RecordPoint, StoredKey, TookOver, WitnessOp, follow_request, follow_response,
         log_record::Record,
         replication_service_client::ReplicationServiceClient,
         replication_service_server::{ReplicationService, ReplicationServiceServer},
@@ -176,6 +176,45 @@ impl Standby {
         tracing::warn!(why, moved = ?moved, "the standby starts over, empty; its stores were moved aside");
         *self.lock_stores() = Some(Arc::new(Stores::open(&self.config)?));
         Ok(())
+    }
+
+    /// Takes its records after `to` back (design/rewind.md): they are its own, from when it was
+    /// the primary, and the new primary never had them. It follows on from `to` when it
+    /// connects again. If they cannot be taken back after all, it starts over.
+    async fn rewind(&self, to: u64, why: &str) -> Result<(), BoxError> {
+        self.forget_in_sync();
+        let stores = self.stores();
+        let from = stores.store.record_head()?.seq;
+        let taken = tokio::task::spawn_blocking({
+            let stores = Arc::clone(&stores);
+            move || -> Result<Vec<String>, kernable_store::Error> {
+                let deleted = stores.store.rewind(to)?;
+                // What the vault holds for the commands it took back goes with them.
+                if let Some(vault) = &stores.vault {
+                    for id in &deleted {
+                        vault.drop_command(id)?;
+                    }
+                }
+                Ok(deleted)
+            }
+        })
+        .await?;
+        drop(stores);
+        match taken {
+            Ok(deleted) => {
+                tracing::warn!(
+                    from,
+                    to,
+                    commands = deleted.len(),
+                    "the standby took back its records the primary does not hold; it follows on"
+                );
+                Ok(())
+            }
+            Err(e) => {
+                self.start_over(&format!("{why}; taking them back failed: {e}"))
+                    .await
+            }
+        }
     }
 
     /// The stores a standby fills from its primary, as URLs.
@@ -422,6 +461,18 @@ async fn follow_once(
             .max_decoding_message_size(replication::MAX_MESSAGE_BYTES)
             .max_encoding_message_size(replication::MAX_MESSAGE_BYTES);
     let head = standby.stores().store.record_head()?;
+    // Where it could go back to, should its newest records be ones the primary lacks.
+    let rewind_points = standby
+        .stores()
+        .store
+        .rewind_points()?
+        .into_iter()
+        .skip(1)
+        .map(|p| RecordPoint {
+            seq: p.seq,
+            hash: p.hash,
+        })
+        .collect();
     let (tx, rx) = mpsc::channel(16);
     let say = |msg| FollowRequest { msg: Some(msg) };
     tx.send(say(follow_request::Msg::Hello(FollowHello {
@@ -430,6 +481,7 @@ async fn follow_once(
         hash: head.hash.clone(),
         protocol: kernable_core::PROTOCOL,
         backup: false,
+        rewind_points,
     })))
     .await?;
     let mut request = Request::new(ReceiverStream::new(rx));
@@ -465,6 +517,10 @@ async fn follow_once(
             let seq = take_image(standby, &mut inbound).await?;
             tx.send(say(follow_request::Msg::Ack(FollowAck { seq })))
                 .await?;
+        }
+        FollowMode::Rewind => {
+            standby.rewind(start.rewind_to, &start.message).await?;
+            return Ok(());
         }
         FollowMode::Diverged | FollowMode::Unspecified => {
             standby
