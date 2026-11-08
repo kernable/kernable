@@ -366,8 +366,9 @@ async fn a_standby_whose_log_diverged_moves_its_stores_aside_and_starts_over() {
         store.enqueue(&place(77), 0).unwrap();
     }
     // A copy set aside before: it goes, only the newest stays.
-    std::fs::write(dir.0.join("standby.db.diverged-1"), b"older").unwrap();
-    std::fs::write(dir.0.join("standby.db-wal.diverged-1"), b"older").unwrap();
+    let (_, store_path) = kernable_store::backend(&standby_config.store);
+    std::fs::write(format!("{store_path}.diverged-1"), b"older").unwrap();
+    std::fs::write(format!("{store_path}-wal.diverged-1"), b"older").unwrap();
     let _following = tokio::spawn(standby::run(standby_config.clone()));
     until("the standby is in sync", || in_sync(&standby_config)).await;
     for seed in [1, 2] {
