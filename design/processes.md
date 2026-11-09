@@ -257,6 +257,23 @@ Decided 2026-11-09:
   ended by each end, and running. Counted by the kernel from the case events; also as metrics
   (`kernable_process_cases`, `kernable_process_step_seconds`, `kernable_process_incidents`).
 
+## The engine (stage 2, decided 2026-11-09)
+
+- **One running case per key:** a start event for a key whose case still runs is ignored (and
+  logged); after the case ended, the next one starts a new case for that key, kept separately with
+  its own history.
+- **Early events are kept for the case:** an event of a case's key that a later wait of the case
+  may need, arriving before the case reaches that wait, counts as soon as it does. No race between
+  a fast payment and a slow confirmation.
+- **Tenants:** a case lives in the tenant of the event that started it; its commands, queries and
+  waits are in that tenant.
+- **Exactly once:** the engine's commands have IDs fixed by case, step and attempt, so a crash or
+  failover never sends one twice; a query step asks with the position of the event that moved the
+  case, so the read model has seen it.
+- **Timeouts** are scheduled commands of the case, cancelled when the awaited event comes.
+- **Partitions:** process models and their states travel to every partition like memberships;
+  each partition runs the cases of its own tenants.
+
 ## A case in the log
 
 Each case is an aggregate `<process>` of the domain `process`, its ID the case's key, under the
