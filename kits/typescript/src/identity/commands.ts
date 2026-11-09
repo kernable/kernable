@@ -29,7 +29,7 @@ export class CreateApiKey extends Command {
 
 identityAggregate.command(CreateApiKey, (s, d) => {
   active(s);
-  if (s.kind !== "service") throw new Rejected("Only a service has API keys", "not_a_service");
+  if (s.kind !== "service" && s.kind !== "process") throw new Rejected("Only a service or a process has API keys", "not_a_service");
   if (typeof d.keyId !== "string" || !/^[A-Za-z0-9]{8,32}$/.test(d.keyId) || typeof d.secret !== "string" || d.secret.length < 32) {
     throw new Rejected("A key ID of 8 to 32 letters and digits, and a secret of at least 32 characters", "invalid_key");
   }
@@ -46,6 +46,23 @@ identityAggregate.command(CreateServiceIdentity, (s, d) => {
   if (s.status !== "none") throw new Rejected("The identity exists", "exists");
   if (typeof d.displayName !== "string" || !d.displayName.trim()) throw new Rejected("A service needs a name", "invalid_name");
   return [IdentityCreated.new({ kind: "service", accountId: null, displayName: d.displayName.trim(), title: null, email: null })];
+});
+
+/**
+ * Internal: the identity of a business process (`shop.fulfilment`) the kernel runs, created by
+ * the `identity.processes` reactor in the platform tenant when the process is registered. It
+ * holds no permissions until a platform admin grants it groups.
+ */
+export class CreateProcessIdentity extends Command {
+  process!: string;
+}
+
+identityAggregate.command(CreateProcessIdentity, (s, d) => {
+  if (s.status !== "none") throw new Rejected("The identity exists", "exists");
+  if (typeof d.process !== "string" || !/^[A-Za-z][A-Za-z0-9_-]*\.[A-Za-z0-9_-]+$/.test(d.process)) {
+    throw new Rejected("A process is named <domain>.<name>", "invalid_process");
+  }
+  return [IdentityCreated.new({ kind: "process", accountId: null, displayName: d.process, title: null, email: null })];
 });
 
 /** Internal: from an accepted invitation or a self-service tenant. */

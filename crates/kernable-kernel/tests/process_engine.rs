@@ -811,4 +811,321 @@ async fn each_partition_runs_the_cases_of_its_tenants() {
     }
     assert!(follow_events(&p1.store, "acme", "o1#1").is_empty());
     assert!(follow_events(&p2.store, "t1", "o1#1").is_empty());
+
+    // As whom it acts is set on the control partition and taken by the others; the registry
+    // stream is the control partition's alone.
+    assert!(
+        act(
+            &p1.addr,
+            "orders.follow",
+            &acting("platform", "proc-1", "key-1")
+        )
+        .await
+        .unwrap()
+    );
+    let refused = act(
+        &p2.addr,
+        "orders.follow",
+        &acting("platform", "proc-2", "key-2"),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(refused.code(), Code::FailedPrecondition, "{refused:?}");
+    let mut taken = false;
+    for _ in 0..200 {
+        taken =
+            acting_of(&p2.store, "orders.follow").is_some_and(|a| a.sender_identity == "proc-1");
+        if taken {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(taken, "p2 took as whom the process acts");
+    assert_eq!(registry(&p1.store, "orders.follow").len(), 1);
+    assert!(registry(&p2.store, "orders.follow").is_empty());
+}
+
+fn acting(tenant: &str, identity: &str, session: &str) -> kernable_core::proto::RequestContext {
+    kernable_core::proto::RequestContext {
+        sender_tenant: tenant.into(),
+        sender_identity: identity.into(),
+        sender_session: session.into(),
+        ..Default::default()
+    }
+}
+
+async fn act_as(
+    addr: &str,
+    name: &str,
+    context: &kernable_core::proto::RequestContext,
+    signer: &SigningKey,
+    grant: &Grant,
+) -> Result<bool, tonic::Status> {
+    let issued_at = issued_now();
+    let request = kernable_core::proto::ProcessActing {
+        name: name.into(),
+        context: Some(context.clone()),
+        issued_at,
+        sig: Some(signing::sign(
+            signer,
+            &signing::process_act_message(name, Some(context), issued_at),
+        )),
+        protocol: kernable_core::PROTOCOL,
+    };
+    ProcessServiceClient::new(transport::connect(addr).await.unwrap())
+        .act(presenting(request, grant))
+        .await
+        .map(|r| r.into_inner().changed)
+}
+
+async fn act(
+    addr: &str,
+    name: &str,
+    context: &kernable_core::proto::RequestContext,
+) -> Result<bool, tonic::Status> {
+    act_as(addr, name, context, &app_key(), &app_grant()).await
+}
+
+/// As whom the store says the process acts.
+fn acting_of(store: &str, name: &str) -> Option<kernable_core::proto::RequestContext> {
+    kernable_store::open_read_only(store)
+        .unwrap()
+        .processes()
+        .unwrap()
+        .into_iter()
+        .find(|r| r.name == name && r.version == 0)
+        .and_then(|r| r.acting)
+}
+
+/// The process registry's events of `name`: type and version.
+fn registry(store: &str, name: &str) -> Vec<(String, Option<u64>)> {
+    kernable_store::open_read_only(store)
+        .unwrap()
+        .read_stream("", "process", "registry", name)
+        .unwrap()
+        .iter()
+        .map(|e| {
+            let p = payload(e);
+            assert_eq!(p["name"], name);
+            (e.event_type.clone(), p["version"].as_u64())
+        })
+        .collect()
+}
+
+async fn until_registry(store: &str, name: &str, n: usize) -> Vec<(String, Option<u64>)> {
+    for _ in 0..250 {
+        let events = registry(store, name);
+        if events.len() >= n {
+            return events;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    registry(store, name)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_registry_stream_announces_each_change_once() {
+    let env = start("pe-registry").await;
+    env.kernel.grant(app_grant()).unwrap();
+    spawn_worker(&env).await;
+    let registered = |v: u64| ("ProcessRegistered".to_owned(), Some(v));
+    let removed = ("ProcessRemoved".to_owned(), None);
+
+    register(&env.addr, &follow()).await.unwrap();
+    assert_eq!(
+        until_registry(&env.store, "orders.follow", 1).await,
+        [registered(1)]
+    );
+    // The same model again: nothing.
+    assert!(!register(&env.addr, &follow()).await.unwrap().new);
+    let mut v2 = follow();
+    v2["steps"][1]["data"] = json!({"x": {"value": 1}});
+    register(&env.addr, &v2).await.unwrap();
+    until_registry(&env.store, "orders.follow", 2).await;
+    // Removed by a membership that no longer lists it, then registered again (unchanged).
+    let mut listed = membership("orders", &["orders.Order"], &[], &[]);
+    listed.processes = vec!["orders.follow".into()];
+    apply(&env.addr, listed).await.unwrap();
+    apply(&env.addr, membership("orders", &["orders.Order"], &[], &[]))
+        .await
+        .unwrap();
+    until_registry(&env.store, "orders.follow", 3).await;
+    assert!(!register(&env.addr, &v2).await.unwrap().new);
+    let events = until_registry(&env.store, "orders.follow", 4).await;
+    assert_eq!(
+        events,
+        [registered(1), registered(2), removed.clone(), registered(2)]
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(registry(&env.store, "orders.follow").len(), 4, "once each");
+    let store = kernable_store::open_read_only(&env.store).unwrap();
+    let written = store
+        .read_stream("", "process", "registry", "orders.follow")
+        .unwrap();
+    assert!(
+        written
+            .iter()
+            .all(|e| e.producer_sig.as_ref().unwrap().key_id == id(&env.kernel_key))
+    );
+    assert!(store.verify(&[id(&env.kernel_key)]).unwrap().is_ok());
+    drop(store);
+
+    // After a restart: nothing written again.
+    let from = env.dir.clone();
+    let back = start_custom("pe-registry-back", move |_, dir| {
+        for file in ["k.db", "k.db-wal", "k.log"] {
+            if from.join(file).exists() {
+                std::fs::copy(from.join(file), dir.join(file)).unwrap();
+            }
+        }
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(registry(&back.store, "orders.follow"), events);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_process_acts_as_whom_act_says() {
+    use kernable_core::proto::{
+        Ack, ChallengeResponse, Hello, ListenerMessage, Middleware, Verdict, When,
+        listener_delivery::Msg as Out, listener_message::Msg as In,
+        listener_service_client::ListenerServiceClient, middleware_call::Request,
+    };
+    let env = start("pe-act").await;
+    env.kernel.grant(app_grant()).unwrap();
+    spawn_worker(&env).await;
+    register(&env.addr, &follow()).await.unwrap();
+
+    // A middleware that notes the context of every command the process sends.
+    let seen: Arc<Mutex<Vec<kernable_core::proto::RequestContext>>> = Arc::default();
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    let send = |m: In| ListenerMessage { msg: Some(m) };
+    tx.send(send(In::Hello(Hello {
+        protocol: kernable_core::PROTOCOL,
+        name: "guard".into(),
+        key_id: id(&key(5)),
+        event_types: vec!["orders.OrderPlaced".into()],
+        from_position: Some(0),
+        middlewares: vec![Middleware {
+            order: 0,
+            types: vec!["orders.AddItem".into()],
+            when: When::Before.into(),
+        }],
+        ..Default::default()
+    })))
+    .await
+    .unwrap();
+    let mut inbound = ListenerServiceClient::new(transport::connect(&env.addr).await.unwrap())
+        .listen(tokio_stream::wrappers::ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+    let log = Arc::clone(&seen);
+    tokio::spawn(async move {
+        while let Ok(Some(m)) = inbound.message().await {
+            let reply = match m.msg.unwrap() {
+                Out::Challenge(c) => In::ChallengeResponse(ChallengeResponse {
+                    sig: signing::sign(&key(5), &signing::challenge_message(&c.nonce)).sig,
+                }),
+                Out::Batch(b) => In::Ack(Ack {
+                    position: b.up_to,
+                    ..Default::default()
+                }),
+                Out::Check(call) => {
+                    if let Some(Request::Command(c)) = &call.request
+                        && c.command_id.starts_with("proc-")
+                    {
+                        log.lock()
+                            .unwrap()
+                            .push(c.context.clone().unwrap_or_default());
+                    }
+                    In::Verdict(Verdict {
+                        call_id: call.call_id,
+                        rejected: None,
+                    })
+                }
+                _ => continue,
+            };
+            if tx.send(send(reply)).await.is_err() {
+                return;
+            }
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Before Act: as itself.
+    let run = |order: &'static str, n: u32| {
+        let addr = env.addr.clone();
+        let store = env.store.clone();
+        async move {
+            submit(
+                &addr,
+                of_tenant(&format!("{order}-p"), "PlaceOrder", order, "t1"),
+            )
+            .await
+            .unwrap();
+            submit(
+                &addr,
+                of_tenant(&format!("{order}-a"), "AddItem", order, "t1"),
+            )
+            .await
+            .unwrap();
+            until_follow_ended(&store, "t1", &format!("{order}#1")).await;
+            let _ = n;
+        }
+    };
+    run("o1", 1).await;
+    let first = seen.lock().unwrap()[0].clone();
+    assert_eq!(first.sender_identity, "process:orders.follow");
+    assert_eq!(first.sender_tenant, "t1");
+    assert_eq!(first.correlation_id, "orders.follow/o1#1");
+
+    // Without the grant, refused; unknown, not found.
+    let narrow = grant(&key(31), &[("process", &["shop.*"])]);
+    env.kernel.grant(narrow.clone()).unwrap();
+    let ctx = acting("platform", "proc-77", "key-77");
+    let denied = act_as(&env.addr, "orders.follow", &ctx, &key(31), &narrow)
+        .await
+        .unwrap_err();
+    assert_eq!(denied.code(), Code::PermissionDenied, "{denied:?}");
+    let unknown = act(&env.addr, "orders.none", &ctx).await.unwrap_err();
+    assert_eq!(unknown.code(), Code::NotFound, "{unknown:?}");
+
+    // A case waiting while Act changes it: its next command goes as the new identity.
+    submit(&env.addr, of_tenant("o2-p", "PlaceOrder", "o2", "t1"))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(act(&env.addr, "orders.follow", &ctx).await.unwrap());
+    assert!(
+        !act(&env.addr, "orders.follow", &ctx).await.unwrap(),
+        "idempotent"
+    );
+    submit(&env.addr, of_tenant("o2-a", "AddItem", "o2", "t1"))
+        .await
+        .unwrap();
+    until_follow_ended(&env.store, "t1", "o2#1").await;
+    let second = seen.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(
+        (
+            second.sender_tenant.as_str(),
+            second.sender_identity.as_str(),
+            second.sender_session.as_str()
+        ),
+        ("platform", "proc-77", "key-77")
+    );
+    assert_eq!(second.correlation_id, "orders.follow/o2#1");
+
+    // The command line shows it.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_kernable"))
+        .args(["processes", "list", &env.store])
+        .output()
+        .unwrap();
+    let listed = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        listed.contains(
+            "orders.follow version 1 active acts as proc-77 of tenant platform, session key-77"
+        ),
+        "{listed}"
+    );
 }

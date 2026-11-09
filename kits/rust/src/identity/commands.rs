@@ -53,6 +53,13 @@ pub struct CreateServiceIdentity {
     pub display_name: String,
 }
 
+/// Internal: the identity of a business process (`shop.fulfilment`), made by the kit's
+/// `identity.processes` reactor when an app registers the process; one per process.
+#[command("identity", aggregate = "identity")]
+pub struct CreateProcessIdentity {
+    pub process: String,
+}
+
 #[command("identity", aggregate = "identity", personal(fields = [display_name, title, email], subject = own))]
 pub struct UpdateProfile {
     pub display_name: Option<String>,
@@ -166,6 +173,35 @@ pub fn handle(identity: &Aggregate<Identity>) {
             .into(),
         ])
     });
+    identity.command(CreateProcessIdentity, |s, d, _, _| {
+        if s.status != IdentityStatus::None {
+            return Err(rejected("The identity exists", "exists"));
+        }
+        let qualified = d.process.split_once('.').is_some_and(|(domain, name)| {
+            let part = |p: &str| {
+                !p.is_empty()
+                    && p.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            };
+            part(domain) && part(name)
+        });
+        if !qualified {
+            return Err(rejected(
+                "A qualified process name: domain.process",
+                "invalid_process",
+            ));
+        }
+        Ok(vec![
+            IdentityCreated {
+                kind: IdentityKind::Process,
+                account_id: None,
+                display_name: Some(d.process),
+                title: None,
+                email: None,
+            }
+            .into(),
+        ])
+    });
     identity.command(UpdateProfile, |s, d, _, _| {
         active(s)?;
         Ok(vec![
@@ -244,8 +280,11 @@ pub fn handle(identity: &Aggregate<Identity>) {
     });
     identity.command(CreateApiKey, |s, d, _, _| {
         active(s)?;
-        if s.kind != IdentityKind::Service {
-            return Err(rejected("Only a service has API keys", "not_a_service"));
+        if !matches!(s.kind, IdentityKind::Service | IdentityKind::Process) {
+            return Err(rejected(
+                "Only a service or a process has API keys",
+                "not_a_service",
+            ));
         }
         let id_ok = (8..=32).contains(&d.key_id.len())
             && d.key_id.bytes().all(|c| c.is_ascii_alphanumeric());

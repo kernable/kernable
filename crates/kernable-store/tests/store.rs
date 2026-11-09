@@ -275,6 +275,7 @@ fn process_versions_and_states_are_kept(store: &dyn Store) {
         }),
         recorded_at: 20,
         removed: false,
+        acting: None,
     };
     let state = |name: &str, removed: bool, at: i64| ProcessRecord {
         name: name.into(),
@@ -285,6 +286,12 @@ fn process_versions_and_states_are_kept(store: &dyn Store) {
         }),
         recorded_at: at,
         removed,
+        acting: (at == 31).then(|| RequestContext {
+            sender_tenant: "platform".into(),
+            sender_identity: "process-1".into(),
+            sender_session: "key-1".into(),
+            ..Default::default()
+        }),
         ..Default::default()
     };
     store.save_process(&version("shop.b", 1, "{}")).unwrap();

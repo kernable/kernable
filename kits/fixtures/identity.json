@@ -247,6 +247,96 @@
         "keys": [],
         "facts": []
       }
+    },
+    {
+      "name": "a process gets an identity of its own, which holds the process's name as a key",
+      "aggregate": "identity",
+      "aggregateId": "p1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateProcessIdentity",
+        "data": {
+          "process": "shop.fulfilment"
+        }
+      },
+      "then": [
+        {
+          "type": "IdentityCreated",
+          "data": {
+            "kind": "process",
+            "accountId": null,
+            "displayName": "shop.fulfilment",
+            "title": null,
+            "email": null
+          }
+        }
+      ],
+      "index": {
+        "keys": [
+          {
+            "name": "process",
+            "value": "shop.fulfilment",
+            "scope": "tenant"
+          }
+        ],
+        "facts": [
+          "active"
+        ]
+      }
+    },
+    {
+      "name": "a process identity needs a qualified process name",
+      "aggregate": "identity",
+      "aggregateId": "p1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateProcessIdentity",
+        "data": {
+          "process": "fulfilment"
+        }
+      },
+      "rejected": "invalid_process"
+    },
+    {
+      "name": "a process's API key keeps only its hash, like a service's",
+      "aggregate": "identity",
+      "aggregateId": "p1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "IdentityCreated",
+          "data": {
+            "kind": "process",
+            "accountId": null,
+            "displayName": "shop.fulfilment",
+            "title": null,
+            "email": null
+          }
+        }
+      ],
+      "when": {
+        "type": "CreateApiKey",
+        "data": {
+          "keyId": "key12345",
+          "secret": "0123456789abcdef0123456789abcdef"
+        }
+      },
+      "then": [
+        {
+          "type": "ApiKeyCreated",
+          "data": {
+            "keyId": "key12345",
+            "hash": "94e9ae63686e76ed4816b6d6f576019d39d2dedd3f6ccca9627275184573cde8",
+            "label": "",
+            "expiresAt": null
+          }
+        }
+      ]
     }
   ]
 }

@@ -43,6 +43,7 @@ Each message starts with a `str` **tag** for domain separation. Payloads are sig
 | Deploy tooling | `kernable.v1.membership` | `service`, then for `workers`, `listeners` and `middlewares` each `count: u64` and every entry, then `metadata_count: u64` and per attribute `key`, `value`, then `issued_at: i64`; then only with processes (`processes` not empty) the `str` `processes`, `count: u64` and every process name |
 | App (deploy) | `kernable.v1.process` | `model` (the model's JSON as sent, `bytes`), `issued_at: i64` (a key granted `process` for the process, see `ProcessService.Register`) |
 | Operator tooling | `kernable.v1.process_remove` | `name`, `issued_at: i64` (a key granted `process` for it) |
+| Identity kit, operator tooling | `kernable.v1.process_act` | `name`, `context` (as whom the process acts), `issued_at: i64` (a key granted `process` for it) |
 | Operator tooling | `kernable.v1.process_resolve` | `process`, `case_id`, `tenant_id`, `action` (`retry`, `skip` or `cancel`), `issued_at: i64` (a key granted `process` for the process) |
 | Kernel | `kernable.v1.checkpoint` | `global_position: u64`, `chain_hash`, `created_at: i64` |
 | Kernel | `kernable.v1.revocation` | `key_id`, `since: i64`, `created_at: i64` |
@@ -72,7 +73,7 @@ The kernel checks that a result, index, rejection or snapshot is signed by the k
 
 ## Time windows
 
-Queries, cancels, process registrations, removals and resolutions, subscribe requests, data and cache requests, memberships, retry requests and revoke requests are valid for 60 s around `issued_at` (ms since epoch), measured on the kernel's clock. Commands have no time window: a command ID runs once, so a replayed command only returns its stored result.
+Queries, cancels, process registrations, removals, resolutions and acting, subscribe requests, data and cache requests, memberships, retry requests and revoke requests are valid for 60 s around `issued_at` (ms since epoch), measured on the kernel's clock. Commands have no time window: a command ID runs once, so a replayed command only returns its stored result.
 
 Within the window a captured subscribe or query request could be replayed, but it only grants the read access the key already has. Transport encryption (mutual TLS over TCP) closes this gap. For data and cache requests the operation is part of the tag, so a signed get cannot be replayed as a delete.
 
@@ -184,6 +185,7 @@ An SDK must reproduce these entries byte for byte:
 | `membership_processes` | as `membership`, with the `processes` in `input` |
 | `process` | `message` and `signature` of `kernable.v1.process` over the bytes `model_hex` |
 | `process_remove` | `message` and `signature` of `kernable.v1.process_remove` |
+| `process_act` | `message` and `signature` of `kernable.v1.process_act`, with the context of `command` |
 | `process_resolve` | `message` and `signature` of `kernable.v1.process_resolve` |
 | `event_hash_origin` | `hash` from the input of `event_hash` plus `origin_partition` and `origin_position` |
 | `derived_id` | `ids[i]` for `command_id` and `n[i]` |

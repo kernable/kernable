@@ -203,7 +203,8 @@ CREATE TABLE IF NOT EXISTS process_states (
     issued_at   INTEGER NOT NULL, -- ms since epoch, signed with the change
     key_id      TEXT    NOT NULL, -- the key that changed it
     sig         BLOB    NOT NULL, -- over kernable.v1.process_remove, .process or .membership
-    recorded_at INTEGER NOT NULL  -- ms since epoch
+    recorded_at INTEGER NOT NULL, -- ms since epoch
+    acting      BLOB              -- as whom it acts: a RequestContext, protobuf; NULL: itself
 ) STRICT;
 CREATE TABLE IF NOT EXISTS grants (
     key_id    TEXT PRIMARY KEY, -- the grantee
@@ -2268,15 +2269,16 @@ fn save_process_tx(tx: &Connection, p: &ProcessRecord) -> Result<bool> {
     let changed = if p.version == 0 {
         tx.execute(
             "INSERT OR REPLACE INTO process_states
-                 (name, removed, issued_at, key_id, sig, recorded_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                 (name, removed, issued_at, key_id, sig, recorded_at, acting)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 p.name,
                 p.removed,
                 p.issued_at,
                 sig.key_id,
                 sig.sig,
-                p.recorded_at
+                p.recorded_at,
+                p.acting.as_ref().map(Message::encode_to_vec)
             ],
         )?
     } else {
@@ -2319,12 +2321,13 @@ fn read_processes(conn: &Connection) -> Result<Vec<ProcessRecord>> {
                 }),
                 recorded_at: r.get(7)?,
                 removed: false,
+                acting: None,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
     let states: Vec<ProcessRecord> = conn
         .prepare(
-            "SELECT name, removed, issued_at, key_id, sig, recorded_at
+            "SELECT name, removed, issued_at, key_id, sig, recorded_at, acting
              FROM process_states ORDER BY name",
         )?
         .query_map([], |r| {
@@ -2337,6 +2340,9 @@ fn read_processes(conn: &Connection) -> Result<Vec<ProcessRecord>> {
                     sig: r.get(4)?,
                 }),
                 recorded_at: r.get(5)?,
+                acting: r
+                    .get::<_, Option<Vec<u8>>>(6)?
+                    .and_then(|b| RequestContext::decode(b.as_slice()).ok()),
                 ..Default::default()
             })
         })?

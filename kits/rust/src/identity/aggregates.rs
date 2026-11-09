@@ -39,6 +39,9 @@ pub struct Identity {
     pub status: IdentityStatus,
     pub kind: IdentityKind,
     pub account_id: Option<String>,
+    /// A process identity's process: `shop.fulfilment`.
+    #[serde(default)]
+    pub process: Option<String>,
     pub memberships: Vec<Membership>,
     pub api_keys: Vec<Key>,
 }
@@ -58,6 +61,9 @@ pub fn identity(domain: &Domain) -> Aggregate<Identity> {
         s.status = IdentityStatus::Active;
         s.kind = d.kind;
         s.account_id = d.account_id;
+        if d.kind == IdentityKind::Process {
+            s.process = d.display_name;
+        }
     });
     a.apply(ProfileUpdated, |_, _, _, _| {});
     a.apply(MembershipGranted, |s, d, _, _| {
@@ -112,6 +118,16 @@ pub fn identity(domain: &Domain) -> Aggregate<Identity> {
         "account",
         |s| {
             s.account_id
+                .clone()
+                .filter(|_| !matches!(s.status, IdentityStatus::None | IdentityStatus::Deleted))
+        },
+        Unique::tenant(),
+    );
+    // One identity per process and tenant.
+    a.unique(
+        "process",
+        |s| {
+            s.process
                 .clone()
                 .filter(|_| !matches!(s.status, IdentityStatus::None | IdentityStatus::Deleted))
         },

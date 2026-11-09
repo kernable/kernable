@@ -279,6 +279,11 @@ export function membershipMessage(m: WireMembership): Buffer {
   return msg.done();
 }
 
+/** What a key granted `process` signs to set as whom a process acts (`ProcessService.Act`). */
+export function processActMessage(name: string, context: WireRequestContext | null | undefined, issuedAt: number): Buffer {
+  return new Msg("kernable.v1.process_act").str(name).context(context).i64(issuedAt).done();
+}
+
 /** What a key granted `process` signs to register a process model: the model's JSON as sent. */
 export function processMessage(model: Buffer, issuedAt: number): Buffer {
   return new Msg("kernable.v1.process").bytes(model).i64(issuedAt).done();

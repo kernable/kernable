@@ -47,7 +47,7 @@ first platform administrator. `example/server.ts` shows an HTTP API over `KitApi
 
 | Process | Needs |
 |---|---|
-| the kit's service | `run` on the kit's domains, `listen`, `answer`, `check` on `*`, `vault_read`, `vault_erase`, `reserved_order` (`*`: its listeners run before yours), `privileged` for `bypass_authorization` (its reactors) |
+| the kit's service | `run` on the kit's domains, `listen`, `answer`, `check` on `*`, `vault_read`, `vault_erase`, `reserved_order` (`*`: its listeners run before yours), `privileged` for `bypass_authorization` (its reactors), `process` on `*` (it sets as whom each process acts) |
 | your API | `submit` and `query` on what it sends, `cache` on `account` (passkey challenges, OIDC state) |
 
 ## Changing it

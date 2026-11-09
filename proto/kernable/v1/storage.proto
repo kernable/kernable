@@ -46,9 +46,12 @@ message ProcessRecord {
   bytes model = 3;        // the model as signed
   bytes canonical = 4;    // its canonical JSON (keys sorted, no whitespace): what versions compare
   int64 issued_at = 5;    // ms since epoch, signed: with the model, or with the removal
-  Signature sig = 6;      // over kernable.v1.process, kernable.v1.process_remove or the membership
+  Signature sig = 6;      // over kernable.v1.process, .process_remove, .process_act or the membership
   int64 recorded_at = 7;  // ms since epoch: when the kernel registered or changed it
   bool removed = 8;       // a change of state: removed (no new cases) or active again
+  // A change of state: as whom the process acts (ProcessService.Act), kept with each change;
+  // none: as `process:<name>`.
+  RequestContext acting = 9;
 }
 
 // What a tenant's streams hold here from now on, replacing what they held: on the source

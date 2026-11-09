@@ -156,8 +156,9 @@ Deploy and inspect:
                                           error's type; the listener's log has the rest).
   kernable schemas <store>                Lists the highest stored schema version per event type.
   kernable processes list <store>         Lists the registered business processes: name, newest
-                                          version, state (active or removed), and when and by which
-                                          key the newest version was registered.
+                                          version, state (active or removed), as whom it acts
+                                          (ProcessService.Act; else process:<name>), and when and
+                                          by which key the newest version was registered.
   kernable processes show <store> <name> [<version>]
                                           Prints a process's model as registered, the newest
                                           version or <version>, as indented JSON. Exit 1 if there
@@ -2184,14 +2185,22 @@ async fn retry(addr: &str, key_path: &str, name: &str, which: &str, dismiss: boo
 }
 
 /// The processes in `store`, each with its versions (oldest first) and whether it is removed.
-fn processes_of(
-    store: &str,
-) -> Result<std::collections::BTreeMap<String, (Vec<kernable_core::proto::ProcessRecord>, bool)>> {
-    let mut all = std::collections::BTreeMap::<String, (Vec<_>, bool)>::new();
+type Processes = std::collections::BTreeMap<
+    String,
+    (
+        Vec<kernable_core::proto::ProcessRecord>,
+        bool,
+        Option<kernable_core::proto::RequestContext>,
+    ),
+>;
+
+fn processes_of(store: &str) -> Result<Processes> {
+    let mut all = Processes::new();
     for r in kernable_store::open_read_only(store)?.processes()? {
         let entry = all.entry(r.name.clone()).or_default();
         if r.version == 0 {
             entry.1 = r.removed;
+            entry.2 = r.acting;
         } else {
             entry.0.push(r);
         }
@@ -2200,12 +2209,22 @@ fn processes_of(
 }
 
 fn processes_list(store: &str) -> Result<bool> {
-    for (name, (versions, removed)) in processes_of(store)? {
+    for (name, (versions, removed, acting)) in processes_of(store)? {
         let Some(newest) = versions.last() else {
             continue;
         };
+        let acts = match acting {
+            Some(a) if a.sender_session.is_empty() => {
+                format!("{} of tenant {}", a.sender_identity, a.sender_tenant)
+            }
+            Some(a) => format!(
+                "{} of tenant {}, session {}",
+                a.sender_identity, a.sender_tenant, a.sender_session
+            ),
+            None => format!("process:{name}"),
+        };
         println!(
-            "{name} version {} {} (registered {} by {})",
+            "{name} version {} {} acts as {acts} (registered {} by {})",
             newest.version,
             if removed { "removed" } else { "active" },
             config::utc(newest.recorded_at),
@@ -2226,7 +2245,7 @@ fn processes_show(store: &str, name: &str, version: Option<&str>) -> Result<bool
         ),
     };
     let all = processes_of(store)?;
-    let found = all.get(name).and_then(|(versions, _)| match version {
+    let found = all.get(name).and_then(|(versions, _, _)| match version {
         None => versions.last(),
         Some(v) => versions.iter().find(|r| r.version == v),
     });

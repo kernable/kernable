@@ -20,7 +20,7 @@ const COMMANDS: Record<string, string[]> = {
   "account.sso": ["CreateSso", "UpdateSso", "AddSsoDomain", "VerifySsoDomain", "RemoveSsoDomain", "EnforceSso", "DisableSso", "EnableSso", "DeleteSso"],
   "account.session": ["OpenSession", "RefreshSession", "AddSessionFactor", "EndSession"],
   "identity.identity": [
-    "CreateIdentity", "CreateServiceIdentity", "UpdateProfile", "GrantMembership", "SuspendMembership",
+    "CreateIdentity", "CreateServiceIdentity", "CreateProcessIdentity", "UpdateProfile", "GrantMembership", "SuspendMembership",
     "ResumeMembership", "RevokeMembership", "CreateApiKey", "RevokeApiKey", "SuspendIdentity",
     "ReactivateIdentity", "DeleteIdentity",
   ],

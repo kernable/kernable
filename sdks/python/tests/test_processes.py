@@ -12,7 +12,7 @@ from unittest import mock
 
 import grpc
 
-from kernable import Kernable, RegisteredProcess, domain
+from kernable import Kernable, RegisteredProcess, RequestContext, domain
 from tests.kernel import TestKernel
 
 
@@ -60,6 +60,11 @@ class Processes(unittest.TestCase):
         self.assertEqual(first, RegisteredProcess(name="shop.fulfilment", version=1, new=True))
         self.assertEqual(self.k.register_process(model("Confirm")), RegisteredProcess(name="shop.fulfilment", version=1, new=False))
         self.assertEqual(self.k.register_process(model("Cancel")), RegisteredProcess(name="shop.fulfilment", version=2, new=True))
+
+        # As whom it acts: set once, the same again changes nothing.
+        acting = RequestContext(sender_tenant="platform", sender_identity="process-shop.fulfilment", sender_session="k1")
+        self.assertTrue(self.k.process_act("shop.fulfilment", acting))
+        self.assertFalse(self.k.process_act("shop.fulfilment", acting))
 
         # The kernel checks what the builder cannot: a command type nobody runs.
         with self.assertRaises(grpc.RpcError) as refused:

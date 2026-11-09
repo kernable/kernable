@@ -2,11 +2,11 @@
 
 import { Event, type PersonalFields } from "@kernable/sdk";
 
-import { identityDomain, type Scope } from "./domain.ts";
+import { identityDomain, type IdentityKind, type Scope } from "./domain.ts";
 
 export class IdentityCreated extends Event {
   static personal: PersonalFields<IdentityCreated>[] = [{ fields: ["displayName", "title", "email"], subject: (_d, id) => `identity:${id}` }];
-  kind!: "person" | "service";
+  kind!: IdentityKind;
   accountId!: string | null;
   displayName!: string | null;
   title!: string | null;

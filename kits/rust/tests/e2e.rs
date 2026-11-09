@@ -19,6 +19,7 @@ mod server;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use kernable::process::{Send, Start};
 use kernable::{
     App, AppHandle, Error, Kernable, Options, Outcome, Query, RequestContext, Submit, command,
     event, query,
@@ -40,6 +41,7 @@ use kit::invitation::{
     CreateInvitation, EraseInvitation, InvitedGroup, ListInvitations, PeekedLink,
     RevokeInvitationLink,
 };
+use kit::shared::constants::PLATFORM_TENANT as PLATFORM;
 use kit::shared::mail::{MemoryMailer, Purpose, use_mailer};
 use kit::shared::secrets::{new_id, totp_code};
 use kit::tenancy::{
@@ -67,6 +69,13 @@ pub struct PlaceOrder {}
 
 #[command("shop", aggregate = "order")]
 pub struct CancelOrder {}
+
+/// Starts the shop's process, which cancels the order as the process.
+#[command("shop", aggregate = "order")]
+pub struct FlagOrder {}
+
+#[event("shop")]
+pub struct OrderFlagged {}
 
 #[query("shop", answer = Vec<String>)]
 pub struct ListOrders {}
@@ -104,6 +113,13 @@ fn shop() -> kernable::Domain {
             .into(),
         ])
     });
+    order.apply(OrderFlagged, |_, _, _, _| {});
+    order.command(FlagOrder, |_, _, _, _| Ok(vec![OrderFlagged {}.into()]));
+    // A flagged order is cancelled by the shop's process, acting as its own identity.
+    shop.process("flagged")
+        .start::<OrderFlagged>(Start::key("aggregate_id").data([("order_id", "aggregate_id")]))
+        .command::<CancelOrder>("cancel", Send::aggregate("case.order_id"))
+        .end("done");
     order.command(CancelOrder, |s, _, _, _| {
         if s.status != "placed" {
             return Err(kernable::Rejected::new("Not placed").code("invalid_state"));
@@ -332,6 +348,7 @@ async fn the_kit_end_to_end() {
         "manage",
         "reserved_order",
         "cache",
+        "process",
     ]
     .iter()
     .map(|a| format!("{a}=*"))
@@ -383,6 +400,7 @@ async fn the_kit_end_to_end() {
     lists_and_explain(&world).await;
     example_server(&world).await;
     invitation_links(&world).await;
+    a_process_acts_as_its_own_identity(&world).await;
     world.stop_app();
 }
 
@@ -1743,4 +1761,105 @@ async fn invitation_links(w: &World) {
         api.join_with_invitation_link(&rosa, &second).await,
         "invalid_token",
     );
+}
+
+/// A registered process gets an identity in the platform tenant and an API key, and acts as them:
+/// refused (an incident) until a platform group lets it, then a retry goes through.
+async fn a_process_acts_as_its_own_identity(w: &World) {
+    let kit = RequestContext {
+        bypass_authorization: true,
+        ..RequestContext::default()
+    };
+    let t = new_id();
+    let order = new_id();
+    // Settled: the reactors handled everything before it, the process's registration too.
+    committed(&w.send(PlaceOrder {}, &order, &t, kit.clone()).await);
+    committed(&w.send(FlagOrder {}, &order, &t, kit.clone()).await);
+    let case = format!("{order}#1");
+    let state = |state: &'static str| {
+        let case = case.clone();
+        async move {
+            for _ in 0..500 {
+                let (ok, out) = w.kernel.cli(&[
+                    "processes",
+                    "cases",
+                    "{store}",
+                    "shop.flagged",
+                    "--state",
+                    state,
+                ]);
+                if ok && out.contains(&case) {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            panic!("case {case} never {state}");
+        }
+    };
+    state("incident").await;
+    let (_, shown) = w
+        .kernel
+        .cli(&["processes", "case", "{store}", "shop.flagged", &case]);
+    assert!(
+        shown.contains("IncidentRaised") && shown.contains("forbidden"),
+        "refused by the kit's middleware, as the process's identity: {shown}"
+    );
+    // The identity the kit made, with its key.
+    let identity = "process-shop.flagged";
+    let row = w
+        .kit
+        .query::<Value>(
+            Query::of(GetIdentity {
+                identity_id: identity.into(),
+            })
+            .tenant(PLATFORM)
+            .context(kit.clone()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(row["kind"], "process", "{row}");
+    assert_eq!(row["apiKeys"].as_array().map(Vec::len), Some(1), "{row}");
+
+    // A platform group lets it cancel orders, in every tenant.
+    let group = new_id();
+    committed(
+        &w.send(
+            CreateGroup {
+                name: "Flagged orders".into(),
+                description: None,
+                permissions: vec![Permission {
+                    pattern: "shop.CancelOrder".into(),
+                    ..Permission::default()
+                }],
+            },
+            &group,
+            PLATFORM,
+            kit.clone(),
+        )
+        .await,
+    );
+    committed(
+        &w.send(
+            GrantMembership {
+                membership_id: new_id(),
+                group,
+                scope: None,
+                expires_at: None,
+            },
+            identity,
+            PLATFORM,
+            kit.clone(),
+        )
+        .await,
+    );
+    let (retried, out) = w.kernel.cli(&[
+        "processes",
+        "retry",
+        "{url}",
+        "kit.key",
+        "shop.flagged",
+        &case,
+    ]);
+    assert!(retried, "{out}");
+    state("ended").await;
 }

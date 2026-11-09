@@ -168,6 +168,11 @@ def process_message(model: bytes, issued_at: int) -> bytes:
     return bytes(Msg("kernable.v1.process").bytes(model).i64(issued_at).buf)
 
 
+def process_act_message(name: str, context, issued_at: int) -> bytes:
+    """What a key granted `process` for `name` signs to set as whom the process acts (`context`)."""
+    return bytes(Msg("kernable.v1.process_act").str(name).context(context).i64(issued_at).buf)
+
+
 def rejection_message(command_id: str, reason) -> bytes:
     return bytes(Msg("kernable.v1.rejection").str(command_id).str(reason.code).str(reason.message).buf)
 

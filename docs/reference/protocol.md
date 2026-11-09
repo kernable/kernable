@@ -260,6 +260,25 @@ Business processes, run by the kernel (design/processes.md).
 | `Register` | `ProcessRegistration` | `ProcessRegistered` | Registers a process model (JSON, see design/processes.md "The model format"). Signed over kernable.v1.process by a key granted `process` for the process's qualified name, and `submit` for each command, `query` for each query and `listen` for each event the model names; valid 60 s around issued_at. A model equal to the newest version registers nothing new; a different one becomes the next version. Running cases stay on their version. Errors: UNAUTHENTICATED, PERMISSION_DENIED, INVALID_ARGUMENT (the model is invalid: the message names the step and why; a command type no worker registered and no membership lists). |
 | `Remove` | `ProcessRemoval` | `ProcessRemoved` | Removes a process: it starts no new cases, its running cases finish (as when a membership no longer lists it). Signed over kernable.v1.process_remove by a key granted `process` for it; valid 60 s around issued_at. A later registration makes it active again. Errors: UNAUTHENTICATED, PERMISSION_DENIED, NOT_FOUND (no such process). |
 | `Resolve` | `ProcessResolution` | `ProcessResolved` | Resolves a case's incident (design/processes.md, "Incidents"): `retry` runs its step again (a new attempt), `skip` goes on to the step's `next` (refused for a step without a single next), `cancel` ends the case with the end `cancelled` (also a case without an incident). Signed over kernable.v1.process_resolve by a key granted `process` for the process; valid 60 s around issued_at. Errors: UNAUTHENTICATED, PERMISSION_DENIED, NOT_FOUND (no such running case), FAILED_PRECONDITION (no incident to retry or skip; a step without a single next; the case's ID names cases of several tenants: give the tenant). |
+| `Act` | `ProcessActing` | `ProcessActed` | Sets as whom the process acts (design/processes.md, "With the kit"): the sender tenant, identity and session of `context` go with every command and query the engine sends for the process from now on (its correlation and causation stay the engine's). Kept with the process's state, replicated to the standby and to every partition. Without it a process acts as `process:<name>`. Idempotent. Signed over kernable.v1.process_act by a key granted `process` for it; valid 60 s around issued_at. Errors: UNAUTHENTICATED, PERMISSION_DENIED, NOT_FOUND (no such process), FAILED_PRECONDITION (a partition that takes its processes from the control partition). |
+
+### ProcessActing
+
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `name` |  `string` | 1 | qualified: `shop.fulfilment` |
+| `context` |  `RequestContext` | 2 |  |
+| `issued_at` |  `int64` | 3 | ms since epoch |
+| `sig` |  `Signature` | 4 | over kernable.v1.process_act |
+| `protocol` |  `uint32` | 5 | not signed |
+
+### ProcessActed
+
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `changed` |  `bool` | 1 | false: it acted so already |
 
 ### ProcessResolution
 

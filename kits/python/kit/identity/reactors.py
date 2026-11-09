@@ -7,10 +7,11 @@ from kernable import Rejected
 from ..account.events import AccountDeleted
 from ..group.events import GroupDeleted
 from ..invitation.events import InvitationAccepted, InvitationLinkUsed
-from ..shared.constants import ORDERS, internal
+from ..shared.constants import ORDERS, PLATFORM_TENANT, internal
+from ..shared.secrets import random_secret
 from ..tenancy.commands import AddOwner
 from ..tenancy.events import TenantCreated, TenantDeleted
-from .commands import CreateIdentity, DeleteIdentity, GrantMembership, RevokeMembership
+from .commands import CreateApiKey, CreateIdentity, CreateProcessIdentity, DeleteIdentity, GrantMembership, RevokeMembership
 from .domain import identity_domain
 from .queries import FindIdentityByAccount, ListIdentities, ListMyIdentities
 
@@ -69,6 +70,28 @@ def _(d: InvitationAccepted, evt, ctx):
 def _(d: InvitationLinkUsed, evt, ctx):
     """A join through an invitation link becomes an identity with its groups, never as owner."""
     _join(ctx, evt.tenant, f"{evt.aggregate_id}-{d.account_id}", d.account_id, d.groups, False)
+
+
+processes_reactor = identity_domain.reactor("identity.processes", order=ORDERS.reactors)
+
+
+@processes_reactor.on("process.ProcessRegistered")
+def _(d, evt, ctx):
+    """A registered process acts as an identity of its own in the platform tenant (kind `process`,
+    no permissions: a platform admin grants it groups), with an API key whose secret nobody keeps;
+    the kernel learns it by `Act`. Fixed IDs make every step safe to repeat, also for a new version."""
+    from kernable import RequestContext
+
+    name = d["name"]
+    identity_id = f"process-{name}"
+    _tolerating("exists", lambda: ctx.submit(CreateProcessIdentity(process=name), aggregate_id=identity_id,
+                                             id=f"process-identity-{name}", tenant=PLATFORM_TENANT, context=internal(ctx)))
+    key_id = "".join(c if c.isalnum() else "x" for c in random_secret(12))
+    # A redelivered event gets the first outcome back, with the key ID it created.
+    created = ctx.submit(CreateApiKey(key_id=key_id, secret=random_secret(), label=f"process {name}"), aggregate_id=identity_id,
+                         id=f"process-key-{name}", tenant=PLATFORM_TENANT, context=internal(ctx))
+    key_id = next(e.data["keyId"] for e in created if e.type == "ApiKeyCreated")
+    ctx.process_act(name, RequestContext(sender_tenant=PLATFORM_TENANT, sender_identity=identity_id, sender_session=key_id))
 
 
 cleanup_reactor = identity_domain.reactor("identity.cleanup", order=ORDERS.cleanup)

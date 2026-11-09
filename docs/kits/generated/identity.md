@@ -5,6 +5,8 @@
 The types the tables below name, from `identity/domain.ts`:
 
 ```ts
+type IdentityKind = "person" | "service" | "process";
+
 type IdentityStatus = "none" | "active" | "suspended" | "deleted";
 
 interface Scope { type: string; id: string }
@@ -24,7 +26,7 @@ interface ApiKey { keyId: string; hash: string; label: string; expiresAt: number
 
 | Aggregate | Unique keys | Facts |
 |---|---|---|
-| `identity.identity` | `account` | `active` |
+| `identity.identity` | `account`, `process` | `active` |
 
 ### Commands
 
@@ -34,6 +36,7 @@ Secret fields leave the vault once the command completes; personal fields stay i
 |---|---|---|---|---|
 | `CreateApiKey`<br>on `identity` | `keyId: string`<br>`secret: string` (secret)<br>`label?: string`<br>`expiresAt?: number \| null` | `ApiKeyCreated` | a group permission | `exists`, `invalid_key`, `invalid_state`, `not_a_service` |
 | `CreateServiceIdentity`<br>on `identity` | `displayName: string` (personal) | `IdentityCreated` | a group permission | `exists`, `invalid_name` |
+| `CreateProcessIdentity`<br>on `identity` | `process: string` | `IdentityCreated` | only the kit's reactors | `exists`, `invalid_process` |
 | `CreateIdentity`<br>on `identity` | `accountId: string`<br>`displayName?: string` (personal)<br>`title?: string` (personal)<br>`email?: string` (personal) | `IdentityCreated` | only the kit's reactors | `exists`, `invalid_account` |
 | `DeleteIdentity`<br>on `identity` | — | `IdentityDeleted` | a group permission, or the sender itself | `not_found`; requires: no tenancy.tenant holds it as owner |
 | `GrantMembership`<br>on `identity` | `membershipId: string`<br>`group: string`<br>`scope?: Scope \| null`<br>`expiresAt?: number \| null` | `MembershipGranted` | a group permission; only with permissions the sender holds | `exists`, `invalid_membership`, `invalid_scope`, `invalid_state`; requires: group.group is active |
@@ -49,7 +52,7 @@ Secret fields leave the vault once the command completes; personal fields stay i
 
 | Event | Fields | Vault | Note |
 |---|---|---|---|
-| `IdentityCreated` | `kind: "person" \| "service"`<br>`accountId: string \| null`<br>`displayName: string \| null`<br>`title: string \| null`<br>`email: string \| null` | `displayName`, `title`, `email` under `identity:<id>` | — |
+| `IdentityCreated` | `kind: IdentityKind`<br>`accountId: string \| null`<br>`displayName: string \| null`<br>`title: string \| null`<br>`email: string \| null` | `displayName`, `title`, `email` under `identity:<id>` | — |
 | `ProfileUpdated` | `displayName: string \| null`<br>`title: string \| null`<br>`email: string \| null` | `displayName`, `title`, `email` under `identity:<id>` | — |
 | `MembershipGranted` | `membershipId: string`<br>`group: string`<br>`scope: Scope \| null`<br>`expiresAt: number \| null` | — | — |
 | `MembershipSuspended` | `membershipId: string` | — | — |

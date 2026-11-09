@@ -8,7 +8,8 @@ import os
 import unittest
 
 from kernable.signing import (Key, cache_message, cancel_message, challenge_message, command_message, data_message, derived_id,
-                              membership_message, query_message, rejection_message, result_message, snapshot_message, vault_ref)
+                              membership_message, process_act_message, process_message, query_message, rejection_message,
+                              result_message, snapshot_message, vault_ref)
 from kernable.v1 import kernable_pb2 as pb
 from tests.kernel import ROOT
 
@@ -43,6 +44,10 @@ class SigningVectors(unittest.TestCase):
         scheduled = vector_command(s)
         scheduled.deliver_at, scheduled.deliver_until = s["deliver_at"], s["deliver_until"]
         self.check("command_scheduled", command_message(scheduled))
+        p = VECTORS["process"]["input"]
+        self.check("process", process_message(bytes.fromhex(p["model_hex"]), p["issued_at"]))
+        a = VECTORS["process_act"]["input"]
+        self.check("process_act", process_act_message(a["name"], vector_context(a["context"]), a["issued_at"]))
         c = dict(VECTORS["cancel"]["input"])
         context = vector_context(c.pop("context"))
         self.check("cancel", cancel_message(pb.CancelRequest(**c, context=context)))

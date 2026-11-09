@@ -85,6 +85,7 @@ pub const RULES: &[(&str, Rule)] = &[
     ("account.GetAccount", me(Group)),
     ("account.ListSessions", me(Group)),
     ("identity.CreateIdentity", r(Internal)),
+    ("identity.CreateProcessIdentity", r(Internal)),
     ("identity.UpdateProfile", me(Group)),
     ("identity.GetIdentity", me(Group)),
     ("identity.DeleteIdentity", me(Group)),

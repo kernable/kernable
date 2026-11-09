@@ -1,13 +1,15 @@
 // The identity aggregates: state, how each event changes it, unique keys and facts.
 
-import { type ApiKey, identityDomain, type IdentityStatus, type Membership } from "./domain.ts";
+import { type ApiKey, identityDomain, type IdentityKind, type IdentityStatus, type Membership } from "./domain.ts";
 import { ApiKeyCreated, ApiKeyRevoked, IdentityCreated, IdentityDeleted, IdentityReactivated, IdentitySuspended, MembershipGranted, MembershipResumed, MembershipRevoked, MembershipSuspended, ProfileUpdated } from "./events.ts";
 
 export interface Identity {
   id?: string;
   status: IdentityStatus;
-  kind?: "person" | "service";
+  kind?: IdentityKind;
   accountId?: string;
+  /** A process identity's process: `shop.fulfilment`. */
+  process?: string;
   memberships: Membership[];
   apiKeys: ApiKey[];
 }
@@ -21,6 +23,7 @@ export const identityAggregate = identityDomain
     s.status = "active";
     s.kind = d.kind;
     if (d.accountId) s.accountId = d.accountId;
+    if (d.kind === "process" && d.displayName) s.process = d.displayName;
   })
   .apply(ProfileUpdated, () => {})
   .apply(MembershipGranted, (s, d) => void s.memberships.push({ ...d, status: "active" }))
@@ -47,4 +50,6 @@ export const identityAggregate = identityDomain
   })
   // One identity per account and tenant.
   .unique("account", (s) => (s.status !== "none" && s.status !== "deleted" ? s.accountId : null))
+  // One identity per process (in the platform tenant).
+  .unique("process", (s) => (s.status !== "none" && s.status !== "deleted" ? s.process : null))
   .fact("active", (s) => s.status === "active");

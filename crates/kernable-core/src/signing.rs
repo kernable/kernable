@@ -427,6 +427,19 @@ pub fn process_message(model: &[u8], issued_at: i64) -> Vec<u8> {
         .0
 }
 
+/// What a key granted `process` signs to set as whom a process acts (`ProcessService.Act`).
+pub fn process_act_message(
+    name: &str,
+    context: Option<&RequestContext>,
+    issued_at: i64,
+) -> Vec<u8> {
+    Msg::new("kernable.v1.process_act")
+        .str(name)
+        .context(context)
+        .i64(issued_at)
+        .0
+}
+
 /// What a key granted `process` signs to resolve a case's incident (`ProcessService.Resolve`).
 pub fn process_resolve_message(
     process: &str,

@@ -12,7 +12,7 @@ use std::{
 use kernable_core::{
     proto::{
         Membership, ProcessRecord, ProcessRegistered, ProcessRegistration, ProcessRemoval,
-        ProcessRemoved, Signature, process_service_server::ProcessService,
+        ProcessRemoved, RequestContext, Signature, process_service_server::ProcessService,
     },
     signing,
 };
@@ -30,6 +30,8 @@ pub(crate) struct Entry {
     /// Every version, oldest first.
     pub versions: Vec<ProcessRecord>,
     pub removed: bool,
+    /// As whom it acts (`ProcessService.Act`); none: as `process:<name>`.
+    pub acting: Option<RequestContext>,
 }
 
 #[derive(Default)]
@@ -46,6 +48,7 @@ impl Processes {
             let entry = all.entry(r.name.clone()).or_default();
             if r.version == 0 {
                 entry.removed = r.removed;
+                entry.acting = r.acting;
             } else {
                 entry.versions.push(r);
             }
@@ -125,6 +128,7 @@ impl Processes {
                 sig: Some(sig.clone()),
                 recorded_at: now,
                 removed: false,
+                acting: None,
             };
             kernel.store.save_process(&record).map_err(internal)?;
             entry.versions.push(record);
@@ -133,13 +137,14 @@ impl Processes {
         if revived {
             kernel
                 .store
-                .save_process(&state(name, false, issued_at, sig))
+                .save_process(&state(name, false, entry.acting.clone(), issued_at, sig))
                 .map_err(internal)?;
             entry.removed = false;
         }
         if new || revived {
             kernel.sync(0);
             self.set(name, entry);
+            announce(kernel, name);
         }
         if revived {
             tracing::info!(process = %name, version, "a removed process is active again");
@@ -165,11 +170,12 @@ impl Processes {
         }
         kernel
             .store
-            .save_process(&state(name, true, issued_at, sig))
+            .save_process(&state(name, true, entry.acting.clone(), issued_at, sig))
             .map_err(internal)?;
         kernel.sync(0);
         entry.removed = true;
         self.set(name, entry);
+        announce(kernel, name);
         tracing::info!(process = %name, "process removed: it starts no new cases");
         Ok(true)
     }
@@ -180,10 +186,11 @@ impl Processes {
         let _changing = self.changing();
         let mut entry = self.get(&record.name).unwrap_or_default();
         if record.version == 0 {
-            if entry.removed == record.removed {
+            if entry.removed == record.removed && entry.acting == record.acting {
                 return Ok(());
             }
             entry.removed = record.removed;
+            entry.acting = record.acting.clone();
         } else if entry.versions.iter().any(|v| v.version == record.version) {
             return Ok(());
         } else {
@@ -198,6 +205,40 @@ impl Processes {
         self.set(&name, entry);
         tracing::info!(process = %name, version = record.version, removed = record.removed, "process taken from the control partition");
         Ok(())
+    }
+
+    /// Sets as whom the process `name` acts. Returns false if it acted so already; NOT_FOUND if
+    /// it was never registered.
+    fn act(
+        &self,
+        kernel: &Kernel,
+        name: &str,
+        acting: RequestContext,
+        issued_at: i64,
+        sig: &Signature,
+    ) -> Result<bool, Status> {
+        let _changing = self.changing();
+        let Some(mut entry) = self.get(name) else {
+            return Err(Status::not_found(format!("no process {name}")));
+        };
+        if entry.acting.as_ref() == Some(&acting) {
+            return Ok(false);
+        }
+        kernel
+            .store
+            .save_process(&state(
+                name,
+                entry.removed,
+                Some(acting.clone()),
+                issued_at,
+                sig,
+            ))
+            .map_err(internal)?;
+        kernel.sync(0);
+        tracing::info!(process = %name, identity = %acting.sender_identity, tenant = %acting.sender_tenant, "the process acts as a new identity");
+        entry.acting = Some(acting);
+        self.set(name, entry);
+        Ok(true)
     }
 
     /// Removes the processes `before` listed that `after` (the membership of the same service
@@ -242,7 +283,13 @@ fn follows_control(kernel: &Kernel) -> bool {
 }
 
 /// A change of state of process `name`.
-fn state(name: &str, removed: bool, issued_at: i64, sig: &Signature) -> ProcessRecord {
+fn state(
+    name: &str,
+    removed: bool,
+    acting: Option<RequestContext>,
+    issued_at: i64,
+    sig: &Signature,
+) -> ProcessRecord {
     ProcessRecord {
         name: name.to_owned(),
         version: 0,
@@ -250,7 +297,18 @@ fn state(name: &str, removed: bool, issued_at: i64, sig: &Signature) -> ProcessR
         sig: Some(sig.clone()),
         recorded_at: now_ms(),
         removed,
+        acting,
         ..Default::default()
+    }
+}
+
+/// Tells the engine to announce the process's change in the registry stream (on the control
+/// partition, or the only kernel).
+fn announce(kernel: &Kernel, name: &str) {
+    if !follows_control(kernel) {
+        kernel
+            .engine
+            .send(crate::process_engine::Input::Announce(name.to_owned()));
     }
 }
 
@@ -439,6 +497,49 @@ impl ProcessService for Api {
             .processes
             .remove(kernel, &req.name, req.issued_at, sig)?;
         Ok(Response::new(ProcessRemoved { removed }))
+    }
+
+    async fn act(
+        &self,
+        request: Request<kernable_core::proto::ProcessActing>,
+    ) -> Result<Response<kernable_core::proto::ProcessActed>, Status> {
+        let kernel = &self.0;
+        let metadata = request.metadata().clone();
+        let req = request.into_inner();
+        protocol(req.protocol)?;
+        let _running = kernel.request()?;
+        let sig = signed(
+            kernel,
+            &metadata,
+            req.sig.as_ref(),
+            &signing::process_act_message(&req.name, req.context.as_ref(), req.issued_at),
+            req.issued_at,
+            "process acting",
+        )?;
+        if !config::allowed(&kernel.permissions().process, &sig.key_id, &req.name) {
+            return Err(Status::permission_denied(format!(
+                "key may not set as whom process {} acts: it needs a grant process for it",
+                req.name
+            )));
+        }
+        if follows_control(kernel) {
+            return Err(Status::failed_precondition(
+                "set as whom a process acts on the control partition; this partition takes it \
+                 from there",
+            ));
+        }
+        let acting = req.context.unwrap_or_default();
+        if acting.sender_identity.is_empty() {
+            return Err(Status::invalid_argument(
+                "the context names no sender identity",
+            ));
+        }
+        let changed = kernel
+            .processes
+            .act(kernel, &req.name, acting, req.issued_at, sig)?;
+        Ok(Response::new(kernable_core::proto::ProcessActed {
+            changed,
+        }))
     }
 
     async fn resolve(

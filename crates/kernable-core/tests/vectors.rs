@@ -393,6 +393,10 @@ fn vectors() -> Value {
             json!({"model_hex": hex::encode(process_model), "issued_at": 1_700_000_000_000i64}),
             signing::process_message(process_model, 1_700_000_000_000),
         ),
+        "process_act": entry(
+            json!({"name": "shop.fulfilment", "context": context_json, "issued_at": 1_700_000_000_000i64}),
+            signing::process_act_message("shop.fulfilment", Some(&context), 1_700_000_000_000),
+        ),
         "process_resolve": entry(
             json!({"process": "shop.fulfilment", "case_id": "o-1#1", "tenant_id": "t-1", "action": "retry", "issued_at": 1_700_000_000_000i64}),
             signing::process_resolve_message("shop.fulfilment", "o-1#1", "t-1", "retry", 1_700_000_000_000),

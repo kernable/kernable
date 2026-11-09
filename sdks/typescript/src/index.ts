@@ -43,6 +43,7 @@ import {
   derivedId,
   indexMessage,
   membershipMessage,
+  processActMessage,
   processMessage,
   queryMessage,
   cancelMessage,
@@ -368,6 +369,11 @@ export interface ListenerContext {
   request: RequestContext;
   /** The listener's store, if it has one (`ListenerOptions.store`). */
   store?: Store;
+  /**
+   * Sets as whom the process `name` acts (`Kernable.processAct`), on the listener's connection:
+   * how an authorization kit hands a process its identity.
+   */
+  processAct(name: string, context: RequestContext): Promise<{ changed: boolean }>;
   /**
    * Submits a command this event causes, on the listener's connection, and returns its events.
    * It needs a fixed `id` (`confirm-<order>`), so a redelivered event runs it once. The domain
@@ -1969,6 +1975,26 @@ export class Kernable {
   }
 
   /**
+   * Sets as whom the process `name` (qualified: `shop.fulfilment`) acts: the sender tenant,
+   * identity and session of `context` go with every command and query the kernel's engine sends
+   * for it from now on; its correlation and causation stay the engine's. Without it a process
+   * acts as `process:<name>`. The identity kit calls it for each process it gives an identity;
+   * operator tooling may too. Idempotent: `changed` is false if the process acted so already.
+   * The key needs `process` for the process. Rejects with `NOT_FOUND` for a process never
+   * registered.
+   *
+   * ```ts
+   * await kernable.processAct("shop.fulfilment", { senderTenant: "platform", senderIdentity, senderSession: keyId });
+   * ```
+   */
+  async processAct(name: string, context: RequestContext): Promise<{ changed: boolean }> {
+    const req = { name, context: toWireContext(context), issued_at: issuedNow() };
+    const sig = this.key.sign(processActMessage(req.name, req.context, req.issued_at));
+    const r = await (await this.clients.control()).processAct({ ...req, sig });
+    return { changed: r.changed };
+  }
+
+  /**
    * Runs a command and returns its outcome: `{ committed: true, events }`, or
    * `{ committed: false, code, message }` if it was rejected (a rejection does not throw). By
    * default it returns once the command settled, so a query right after it sees the events; see
@@ -3111,6 +3137,7 @@ export class ListenerHandle {
         const ctx: ListenerContext = {
           replaying: e.global_position <= this.replayUpTo,
           follow: () => follow(stored),
+          processAct: (name: string, context: RequestContext) => this.kernable.processAct(name, context),
           request,
           store: this.stored,
           submit: (command: FollowUp | Command, target?: CommandTarget & { id: string }) =>

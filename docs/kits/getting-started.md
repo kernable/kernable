@@ -119,7 +119,7 @@ reactor gets the event again, backing off; after 5 attempts it parks the event, 
 
 | Process | Grant |
 |---|---|
-| the kit's service | `run` on `tenancy.*`, `account.*`, `identity.*`, `group.*`, `invitation.*`; `listen`, `answer` and `check` on `*`; `vault_read` and `vault_erase`; `reserved_order=*` (its listeners run before yours); `privileged=bypass_authorization` (its own follow-up commands) |
+| the kit's service | `run` on `tenancy.*`, `account.*`, `identity.*`, `group.*`, `invitation.*`; `listen`, `answer` and `check` on `*`; `vault_read` and `vault_erase`; `reserved_order=*` (its listeners run before yours); `privileged=bypass_authorization` (its own follow-up commands); `process=*` (it sets as whom each process acts) |
 | your API | `submit` and `query` on what it sends; `cache` on `account` (passkey challenges and OIDC state live there for a few minutes) |
 
 See [Keys per service](../how-to/keys) for issuing them.

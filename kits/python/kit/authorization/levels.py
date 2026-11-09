@@ -53,6 +53,7 @@ RULES: dict[str, dict] = {
     "account.ListSessions": {"level": "group", "self": True},
 
     "identity.CreateIdentity": {"level": "internal"},
+    "identity.CreateProcessIdentity": {"level": "internal"},
     "identity.UpdateProfile": {"level": "group", "self": True},
     "identity.GetIdentity": {"level": "group", "self": True},
     "identity.DeleteIdentity": {"level": "group", "self": True},

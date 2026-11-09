@@ -7,6 +7,8 @@ import {
   Key,
   cacheMessage,
   membershipMessage,
+  processActMessage,
+  processMessage,
   challengeMessage,
   checkpointMessage,
   commandMessage,
@@ -75,6 +77,12 @@ test("data and cache messages match the test vectors", () => {
 
 test("membership messages match the test vectors", () => {
   check("membership", membershipMessage(v.membership.input));
+});
+
+test("process messages match the test vectors", () => {
+  check("process", processMessage(hex(v.process.input.model_hex), v.process.input.issued_at));
+  const act = v.process_act.input;
+  check("process_act", processActMessage(act.name, act.context, act.issued_at));
 });
 
 test("vault references and vault fields in signed messages match the test vectors", () => {

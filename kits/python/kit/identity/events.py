@@ -9,7 +9,7 @@ from .domain import Scope, identity_domain, own
 
 class IdentityCreated(Event):
     vault = {"personal": [{"fields": ["display_name", "title", "email"], "subject": own}]}
-    kind: Literal["person", "service"]
+    kind: Literal["person", "service", "process"]
     account_id: str | None
     display_name: str | None
     title: str | None

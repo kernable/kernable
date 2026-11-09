@@ -49,3 +49,35 @@ for (const c of fixtures.cases) {
     assert.equal(outcome, c.expect);
   });
 }
+
+// A process's identity (identity.processes) passes like a service's: in the platform tenant, with
+// its API key, and only with a platform group; before one, its commands are refused.
+test("a process identity signs in with its API key and acts only with a platform group", async () => {
+  const ev = (type: string, aggregateId: string, data: unknown, domain = "identity", aggregateType = "identity") =>
+    ({ domain, aggregateType, type, tenant: "platform", aggregateId, data });
+  const processIdentity = [
+    ev("IdentityCreated", "i-proc", { kind: "process", accountId: null, displayName: "shop.fulfilment", title: null, email: null }),
+    ev("ApiKeyCreated", "i-proc", { keyId: "kp", hash: "h", label: "process", expiresAt: null }),
+  ];
+  const granted = [
+    ev("GroupCreated", "g-fulfil", { name: "g-fulfil", description: "", permissions: [{ pattern: "shop.PlaceOrder" }] }, "group", "group"),
+    ev("MembershipGranted", "i-proc", { membershipId: "mp", group: "g-fulfil", scope: null, expiresAt: null }),
+  ];
+  const check = (request: Record<string, string>) =>
+    ({ id: "", kind: "command", tenant: "t1", domain: "shop", type: "PlaceOrder", aggregateType: "order", aggregateId: "o9", data: {}, request }) as unknown as Check;
+  const decide = async (events: FixtureEvent[], request = { senderTenant: "platform", senderIdentity: "i-proc", senderSession: "kp" }) => {
+    const store = new MemoryKeyValues();
+    learn(store, [...fixtures.world, ...events]);
+    try {
+      await authorizationListener.middlewares.get("before")!.handler(check(request), undefined, { store } as never);
+      return "allow";
+    } catch (err) {
+      if (!(err instanceof Rejected)) throw err;
+      return err.code;
+    }
+  };
+  assert.equal(await decide(processIdentity), "forbidden", "no permissions of its own");
+  assert.equal(await decide([...processIdentity, ...granted]), "allow");
+  assert.equal(await decide([...processIdentity, ...granted, ev("ApiKeyRevoked", "i-proc", { keyId: "kp" })]), "unauthenticated", "its key revoked");
+  assert.equal(await decide([...processIdentity, ...granted], { senderTenant: "platform", senderIdentity: "i-proc", senderSession: "k1" }), "unauthenticated", "another identity's key");
+});

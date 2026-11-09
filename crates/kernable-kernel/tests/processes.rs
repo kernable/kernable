@@ -518,7 +518,9 @@ async fn the_command_line_lists_shows_and_removes_processes() {
     assert_eq!(code, 0, "{printed}");
     let line = printed.trim();
     assert!(
-        line.starts_with("shop.fulfilment version 2 removed (registered "),
+        line.starts_with(
+            "shop.fulfilment version 2 removed acts as process:shop.fulfilment (registered "
+        ),
         "{line}"
     );
     assert!(

@@ -69,6 +69,7 @@ export const RULES: Record<string, Rule> = {
   "account.ListSessions": { level: "group", self: true },
 
   "identity.CreateIdentity": { level: "internal" },
+  "identity.CreateProcessIdentity": { level: "internal" },
   "identity.UpdateProfile": { level: "group", self: true },
   "identity.GetIdentity": { level: "group", self: true },
   "identity.DeleteIdentity": { level: "group", self: true },

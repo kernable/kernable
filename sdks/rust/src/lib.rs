@@ -51,8 +51,8 @@ use ed25519_dalek::SigningKey;
 use kernable_core::{
     PROTOCOL,
     proto::{
-        self, ApplyRequest, Attribute, CancelRequest, Membership, ProcessRegistration,
-        SubmitRequest, Wait as WireWait, cancel_result, command_result,
+        self, ApplyRequest, Attribute, CancelRequest, Membership, ProcessActing,
+        ProcessRegistration, SubmitRequest, Wait as WireWait, cancel_result, command_result,
         command_service_client::CommandServiceClient,
         membership_service_client::MembershipServiceClient,
         partition_service_client::PartitionServiceClient,
@@ -825,6 +825,38 @@ impl Kernable {
             version: registered.version,
             new: registered.new,
         })
+    }
+
+    /// Sets as whom the process `name` (qualified: `shop.fulfilment`) acts: the request context
+    /// its commands and queries carry (sender tenant, identity, session), instead of
+    /// `process:<name>`. The kernel keeps it with the process, replicated to every partition.
+    /// The kernable kit calls it for every process it gives an identity and an API key. Returns
+    /// whether it changed (`false`: it acted so already). The key needs the `process` grant for
+    /// the process; [`Error::Status`] if the kernel refuses (`NOT_FOUND`: no such process).
+    pub async fn process_act(&self, name: &str, context: RequestContext) -> Result<bool, Error> {
+        let context = context.to_wire();
+        let issued_at = issued_now();
+        let sig = self.client.sign(&signing::process_act_message(
+            name,
+            Some(&context),
+            issued_at,
+        ));
+        let request = ProcessActing {
+            name: name.to_owned(),
+            context: Some(context),
+            issued_at,
+            sig: Some(sig),
+            protocol: PROTOCOL,
+        };
+        let acted = self
+            .client
+            .control()
+            .await?
+            .call(None, request, |channel, r| async move {
+                ProcessServiceClient::new(channel).act(r).await
+            })
+            .await?;
+        Ok(acted.changed)
     }
 
     /// An app made of whole domains: [`AppHandle::run`] applies the service's membership (the

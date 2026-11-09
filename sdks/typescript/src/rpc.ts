@@ -362,6 +362,14 @@ export interface WireProcessRegistration {
   sig: WireSignature;
 }
 
+/** As whom a process acts; see `ProcessActing` in kernable.proto. */
+export interface WireProcessActing {
+  name: string;
+  context: WireRequestContext;
+  issued_at: number;
+  sig: WireSignature;
+}
+
 /** See `ProcessRegistered` in kernable.proto. */
 export interface WireProcessRegistered {
   name: string;
@@ -389,6 +397,8 @@ export interface Clients {
   apply(membership: WireMembership, sig: WireSignature): Promise<void>;
   /** Registers a process model (`ProcessService.Register`). */
   registerProcess(req: WireProcessRegistration): Promise<WireProcessRegistered>;
+  /** Sets as whom a process acts (`ProcessService.Act`). */
+  processAct(req: WireProcessActing): Promise<{ changed: boolean }>;
   /** The partition map the kernel holds; `null` if it serves every tenant (no `--partition`). */
   map(timeoutMs?: number): Promise<WirePartitionMap | null>;
   close(): void;
@@ -667,6 +677,7 @@ export function connect(url: string, tls?: TlsFiles, grant?: string, timeoutMs =
       await unary("memberships", "Apply", { membership, sig });
     },
     registerProcess: (req) => unary<WireProcessRegistered>("processes", "Register", req),
+    processAct: (req) => unary<{ changed: boolean }>("processes", "Act", req),
     map: async (ms) => {
       try {
         return await unary<WirePartitionMap>("partitions", "Map", {}, ms);

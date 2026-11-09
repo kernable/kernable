@@ -155,6 +155,12 @@ impl ListenerContext {
         };
         self.kernable.query(query).await
     }
+
+    /// Sets as whom a business process acts, on the listener's connection, like
+    /// [`Kernable::process_act`]: e.g. a reactor that gives each registered process an identity.
+    pub async fn process_act(&self, name: &str, context: RequestContext) -> Result<bool, Error> {
+        self.kernable.process_act(name, context).await
+    }
 }
 
 /// What a query handler gets about the query besides its data (the `qry` of

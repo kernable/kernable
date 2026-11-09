@@ -2,14 +2,16 @@
 
 import { randomUUID } from "node:crypto";
 
-import { INTERNAL, ORDERS } from "../shared/constants.ts";
+import { INTERNAL, ORDERS, PLATFORM_TENANT } from "../shared/constants.ts";
+import { randomSecret } from "../shared/secrets.ts";
 import type { ListenerContext } from "@kernable/sdk";
 
 import { AccountDeleted } from "../account/index.ts";
 import { GroupDeleted } from "../group/index.ts";
 import { InvitationAccepted, InvitationLinkUsed, type InvitedGroup } from "../invitation/index.ts";
 import { AddOwner, TenantCreated, TenantDeleted } from "../tenancy/index.ts";
-import { CreateIdentity, DeleteIdentity, GrantMembership, RevokeMembership } from "./commands.ts";
+import { CreateApiKey, CreateIdentity, CreateProcessIdentity, DeleteIdentity, GrantMembership, RevokeMembership } from "./commands.ts";
+import { ApiKeyCreated } from "./events.ts";
 import { FindIdentityByAccount, ListIdentities, ListMyIdentities } from "./queries.ts";
 import { identityDomain } from "./domain.ts";
 
@@ -98,4 +100,39 @@ export const identityFollowReactor = identityDomain
         });
       }
     }
+  });
+
+/** The ID of a process's identity in the platform tenant, `process-<name>`: every run, and every kit, finds the same. */
+export function processIdentityId(process: string): string {
+  return `process-${process}`;
+}
+
+/**
+ * Each process the kernel runs gets an identity (design/processes.md, "With the kit"): on
+ * `process.ProcessRegistered` (a first version, a new one, a re-activation), the process's
+ * identity in the platform tenant, kind `process`, without permissions; an API key for it, whose
+ * secret nobody keeps (only its ID travels); and the kernel told to act as both. Fixed command and
+ * aggregate IDs make every redelivery and every new version find the same identity and key.
+ * Until a platform admin grants the identity a group, the process's commands are refused.
+ */
+export const processesReactor = identityDomain
+  .reactor("identity.processes", { order: ORDERS.reactors })
+  .on("process.ProcessRegistered", async (d: { name: string; version: number }, _evt, ctx) => {
+    const process = d.name;
+    const identityId = processIdentityId(process);
+    const target = { tenant: PLATFORM_TENANT, context: internal(ctx) };
+    try {
+      await ctx.submit(CreateProcessIdentity.new({ process }), { ...target, id: `process-identity-${process}`, aggregateId: identityId });
+    } catch (err) {
+      if ((err as { code?: string }).code !== "exists") throw err; // kept
+    }
+    // A fixed command ID: a redelivery returns the first outcome, so the first key's ID.
+    const created = await ctx.submit(
+      CreateApiKey.new({ keyId: randomSecret(18).replace(/[^A-Za-z0-9]/g, "x"), secret: randomSecret(32), label: `process ${process}` }),
+      { ...target, id: `process-key-${process}`, aggregateId: identityId },
+    );
+    const key = created.find((e) => e.type === "ApiKeyCreated");
+    if (!key) throw new Error(`no API key for the process ${process}`);
+    const keyId = (key.data as ApiKeyCreated).keyId;
+    await ctx.processAct(process, { senderTenant: PLATFORM_TENANT, senderIdentity: identityId, senderSession: keyId });
   });

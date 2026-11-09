@@ -102,6 +102,8 @@ pub(crate) enum Input {
     },
     /// A tenant arrived by a move: its running cases run here from now on.
     Arrived(String),
+    /// A process changed: announce it in its registry stream.
+    Announce(String),
 }
 
 /// The engine's handle in the kernel.
@@ -224,17 +226,29 @@ pub(crate) fn render(kernel: &Kernel, out: &mut String) {
 
 /// The request context of everything the engine sends for `process` in `case`: its commands
 /// and queries. The one place that says as whom a process acts (design/processes.md, "As whom
-/// a process acts"): without the kit, the process's own identity, naming the case; the kit's
-/// process identity and API key (stage 3) go here.
+/// a process acts"): as `ProcessService.Act` set it (the sender tenant, identity and session:
+/// with the kit, the process's identity in the platform tenant and its API key), else as the
+/// process's own identity `process:<name>` in the case's tenant; naming the case either way.
 pub(crate) fn context(
+    kernel: &Kernel,
     process: &str,
     tenant: &str,
     case_id: &str,
     causation: &str,
 ) -> RequestContext {
+    let acting = kernel.processes.get(process).and_then(|e| e.acting);
+    let (sender_tenant, sender_identity, sender_session) = match acting {
+        Some(a) => (a.sender_tenant, a.sender_identity, a.sender_session),
+        None => (
+            tenant.to_owned(),
+            format!("process:{process}"),
+            String::new(),
+        ),
+    };
     RequestContext {
-        sender_tenant: tenant.to_owned(),
-        sender_identity: format!("process:{process}"),
+        sender_tenant,
+        sender_identity,
+        sender_session,
         correlation_id: format!("{process}/{case_id}"),
         causation_id: causation.to_owned(),
         attributes: vec![
@@ -548,6 +562,16 @@ impl<'a> State<'a> {
             }
         }
         state.load_cases(None)?;
+        let follows = kernel
+            .config
+            .partition
+            .as_ref()
+            .is_some_and(|p| p.control.is_some());
+        if !follows {
+            for name in kernel.processes.all().into_keys() {
+                state.announce(&name);
+            }
+        }
         tracing::info!(
             cases = state.cases.len(),
             position,
@@ -1189,45 +1213,6 @@ impl<'a> State<'a> {
     }
 
     fn write(&self, case: &Case, batch: &Batch, under: Option<Command>) -> Result<(), StoreError> {
-        let kernel = self.kernel;
-        let reference = case.reference();
-        let key = kernel.key();
-        let expected = batch.base;
-        let cmd = match under {
-            Some(cmd) => cmd,
-            None => {
-                // Not fixed: a write that failed half way is abandoned (see `State::load`), and
-                // the expected version keeps a case from being written twice.
-                let mut nonce = [0u8; 8];
-                getrandom::fill(&mut nonce).expect("the OS gives random bytes");
-                let nonce: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
-                let mut cmd = Command {
-                    command_id: format!("{}-{nonce}", engine_id("w", &reference, expected)),
-                    tenant_id: case.tenant.clone(),
-                    domain: DOMAIN.into(),
-                    aggregate_type: case.process.clone(),
-                    aggregate_id: case.id.clone(),
-                    command_type: "Advance".into(),
-                    payload: b"{}".to_vec(),
-                    context: Some(context(&case.process, &case.tenant, &case.id, "")),
-                    ..Default::default()
-                };
-                cmd.client_sig = Some(signing::sign(&key, &signing::command_message(&cmd)));
-                kernel.store.enqueue(&cmd, now_ms())?;
-                cmd
-            }
-        };
-        let events: Vec<NewEvent> = batch
-            .events
-            .iter()
-            .map(|(t, payload)| NewEvent {
-                event_type: (*t).into(),
-                payload: serde_json::to_vec(payload).expect("JSON serializes"),
-                schema: 1,
-                ..Default::default()
-            })
-            .collect();
-        let sig = signing::sign(&key, &signing::result_message(&cmd, expected, &events));
         let index = if case.ended {
             AggregateIndex::default()
         } else {
@@ -1236,29 +1221,87 @@ impl<'a> State<'a> {
                 ..Default::default()
             }
         };
-        let stored = {
-            let mut schemas = kernel.schemas();
-            let stored = kernel.store.commit(
-                &cmd.command_id,
-                expected,
-                &events,
-                &sig,
-                Some(&index),
-                now_ms(),
-            )?;
-            for t in batch
-                .events
-                .iter()
-                .map(|(t, _)| config::qualified(DOMAIN, t))
-            {
-                schemas.entry(t).or_insert(1);
-            }
-            stored
+        let stream = StreamId {
+            tenant_id: case.tenant.clone(),
+            domain: DOMAIN.into(),
+            aggregate_type: case.process.clone(),
+            aggregate_id: case.id.clone(),
         };
-        kernel.sync(stored.last().map_or(0, |e| e.global_position));
-        kernel.queue.forget(&cmd.command_id);
-        kernel.appended.notify_waiters();
-        Ok(())
+        let context = context(self.kernel, &case.process, &case.tenant, &case.id, "");
+        append(
+            self.kernel,
+            &stream,
+            batch.base,
+            &batch.events,
+            Some(&index),
+            under,
+            context,
+        )
+    }
+
+    /// Announces the process `name`'s change in the registry stream, if it lacks it: its first
+    /// or a new version, a re-activation (`ProcessRegistered`) or a removal (`ProcessRemoved`).
+    /// Compared with what the stream says last, so each change is written once, also when this
+    /// runs again after a restart or on a promoted standby.
+    fn announce(&mut self, name: &str) {
+        let Some(entry) = self.kernel.processes.get(name) else {
+            return;
+        };
+        let Some(newest) = entry.versions.last() else {
+            return;
+        };
+        let stream = registry_stream(name);
+        let events = match self.kernel.store.read_stream(
+            &stream.tenant_id,
+            DOMAIN,
+            &stream.aggregate_type,
+            &stream.aggregate_id,
+        ) {
+            Ok(events) => events,
+            Err(e) => {
+                tracing::error!(process = %name, error = %e, "reading the process registry failed");
+                return;
+            }
+        };
+        let said = events.last().map(|e| {
+            let p = payload_of(e);
+            (e.event_type.clone(), p["version"].as_u64().unwrap_or(0))
+        });
+        let wanted = if entry.removed {
+            ("ProcessRemoved", json!({"name": name}))
+        } else {
+            (
+                "ProcessRegistered",
+                json!({"name": name, "version": newest.version}),
+            )
+        };
+        let same = match &said {
+            Some((t, _)) if entry.removed => t == "ProcessRemoved",
+            Some((t, v)) => t == "ProcessRegistered" && *v == u64::from(newest.version),
+            None => false,
+        };
+        if same {
+            return;
+        }
+        let context = RequestContext {
+            sender_identity: "kernel".into(),
+            correlation_id: name.to_owned(),
+            ..Default::default()
+        };
+        match append(
+            self.kernel,
+            &stream,
+            events.len() as u64,
+            &[wanted],
+            None,
+            None,
+            context,
+        ) {
+            Ok(()) => tracing::info!(process = %name, "announced in the process registry"),
+            Err(e) => {
+                tracing::error!(process = %name, error = %e, "writing the process registry failed")
+            }
+        }
     }
 
     /// Reads a case again from the store, after a write that failed.
@@ -1336,6 +1379,7 @@ impl<'a> State<'a> {
             command_type: parts[2].into(),
             payload: serde_json::to_vec(&payload).expect("JSON serializes"),
             context: Some(context(
+                self.kernel,
                 &case.process,
                 &case.tenant,
                 &case.id,
@@ -1403,7 +1447,13 @@ impl<'a> State<'a> {
             aggregate_id: case.id.clone(),
             command_type: "Fire".into(),
             payload: serde_json::to_vec(&json!({"instance": instance})).expect("JSON"),
-            context: Some(context(&case.process, &case.tenant, &case.id, "")),
+            context: Some(context(
+                self.kernel,
+                &case.process,
+                &case.tenant,
+                &case.id,
+                "",
+            )),
             deliver_at: at,
             ..Default::default()
         };
@@ -1440,6 +1490,7 @@ impl<'a> State<'a> {
             payload: serde_json::to_vec(&Value::Object(map_case(data, &case.data)))
                 .expect("JSON serializes"),
             context: Some(context(
+                self.kernel,
                 &case.process,
                 &case.tenant,
                 &case.id,
@@ -1538,6 +1589,7 @@ impl<'a> State<'a> {
                     .await;
                 let _ = reply.send(result);
             }
+            Input::Announce(name) => self.announce(&name),
             Input::Arrived(tenant) => {
                 if let Err(e) = self.load_cases(Some(&tenant)) {
                     tracing::error!(%tenant, error = %e, "loading an arrived tenant's cases failed");
@@ -1859,6 +1911,93 @@ fn kind_name(kind: &Kind) -> &'static str {
         Kind::Query { .. } => "query",
         Kind::End => "end",
     }
+}
+
+/// The registry stream of process `name` (design/processes.md, "With the kit"): the aggregate
+/// `registry` of the domain `process`, its ID the process's name, under the empty tenant: a
+/// process belongs to no tenant (its cases do), as a global unique key has none. A listener
+/// granted `listen` for `process.ProcessRegistered` gets it like any event; it is written on
+/// the control partition only.
+pub(crate) fn registry_stream(name: &str) -> StreamId {
+    StreamId {
+        tenant_id: String::new(),
+        domain: DOMAIN.into(),
+        aggregate_type: "registry".into(),
+        aggregate_id: name.to_owned(),
+    }
+}
+
+/// Appends `events` to `stream` at `expected` (its version now), written and signed by the
+/// kernel: under the pending command `under` (a case's timer), or a write command of its own.
+/// `index`, if set, replaces what the stream holds.
+fn append(
+    kernel: &Kernel,
+    stream: &StreamId,
+    expected: u64,
+    events: &[(&'static str, Value)],
+    index: Option<&AggregateIndex>,
+    under: Option<Command>,
+    context: RequestContext,
+) -> Result<(), StoreError> {
+    let key = kernel.key();
+    let cmd = match under {
+        Some(cmd) => cmd,
+        None => {
+            // Not fixed: a write that failed half way is abandoned (see `State::load`), and the
+            // expected version keeps a stream from being written twice.
+            let mut nonce = [0u8; 8];
+            getrandom::fill(&mut nonce).expect("the OS gives random bytes");
+            let nonce: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
+            let reference = (
+                stream.tenant_id.clone(),
+                stream.aggregate_type.clone(),
+                stream.aggregate_id.clone(),
+            );
+            let mut cmd = Command {
+                command_id: format!("{}-{nonce}", engine_id("w", &reference, expected)),
+                tenant_id: stream.tenant_id.clone(),
+                domain: DOMAIN.into(),
+                aggregate_type: stream.aggregate_type.clone(),
+                aggregate_id: stream.aggregate_id.clone(),
+                command_type: "Advance".into(),
+                payload: b"{}".to_vec(),
+                context: Some(context),
+                ..Default::default()
+            };
+            cmd.client_sig = Some(signing::sign(&key, &signing::command_message(&cmd)));
+            kernel.store.enqueue(&cmd, now_ms())?;
+            cmd
+        }
+    };
+    let new_events: Vec<NewEvent> = events
+        .iter()
+        .map(|(t, payload)| NewEvent {
+            event_type: (*t).into(),
+            payload: serde_json::to_vec(payload).expect("JSON serializes"),
+            schema: 1,
+            ..Default::default()
+        })
+        .collect();
+    let sig = signing::sign(&key, &signing::result_message(&cmd, expected, &new_events));
+    let stored = {
+        let mut schemas = kernel.schemas();
+        let stored = kernel.store.commit(
+            &cmd.command_id,
+            expected,
+            &new_events,
+            &sig,
+            index,
+            now_ms(),
+        )?;
+        for (t, _) in events {
+            schemas.entry(config::qualified(DOMAIN, t)).or_insert(1);
+        }
+        stored
+    };
+    kernel.sync(stored.last().map_or(0, |e| e.global_position));
+    kernel.queue.forget(&cmd.command_id);
+    kernel.appended.notify_waiters();
+    Ok(())
 }
 
 /// Completes a scheduled command of a case whose step is over as rejected `stale`.

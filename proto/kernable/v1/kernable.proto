@@ -257,6 +257,27 @@ service ProcessService {
   // running case), FAILED_PRECONDITION (no incident to retry or skip; a step without a single
   // next; the case's ID names cases of several tenants: give the tenant).
   rpc Resolve(ProcessResolution) returns (ProcessResolved);
+  // Sets as whom the process acts (design/processes.md, "With the kit"): the sender tenant,
+  // identity and session of `context` go with every command and query the engine sends for
+  // the process from now on (its correlation and causation stay the engine's). Kept with the
+  // process's state, replicated to the standby and to every partition. Without it a process
+  // acts as `process:<name>`. Idempotent. Signed over kernable.v1.process_act by a key granted
+  // `process` for it; valid 60 s around issued_at. Errors: UNAUTHENTICATED, PERMISSION_DENIED,
+  // NOT_FOUND (no such process), FAILED_PRECONDITION (a partition that takes its processes
+  // from the control partition).
+  rpc Act(ProcessActing) returns (ProcessActed);
+}
+
+message ProcessActing {
+  string name = 1;          // qualified: `shop.fulfilment`
+  RequestContext context = 2;
+  int64 issued_at = 3;      // ms since epoch
+  Signature sig = 4;        // over kernable.v1.process_act
+  uint32 protocol = 5;      // not signed
+}
+
+message ProcessActed {
+  bool changed = 1;  // false: it acted so already
 }
 
 message ProcessResolution {

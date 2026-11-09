@@ -141,6 +141,55 @@ def _(d: GetOrder, qry):
     return {"customer": customer}
 
 
+# A business process: a reminder set is sent once, as the process's own identity.
+class ReminderSet(Event):
+    pass
+
+
+class Reminded(Event):
+    pass
+
+
+class SetReminder(Command):
+    pass
+
+
+class Remind(Command):
+    pass
+
+
+class Reminder(Aggregate, domain=shop):
+    status: str = "none"
+
+
+@Reminder.apply(ReminderSet)
+def _(s: Reminder):
+    s.status = "set"
+
+
+@Reminder.apply(Reminded)
+def _(s: Reminder):
+    s.status = "reminded"
+
+
+@Reminder.command(SetReminder)
+def _(s: Reminder):
+    return [ReminderSet()]
+
+
+@Reminder.command(Remind)
+def _(s: Reminder):
+    if s.status != "set":
+        raise Rejected("Not set", "invalid_state")
+    return [Reminded()]
+
+
+(shop.process("reminders")
+ .start(ReminderSet, key="aggregate_id", data={"reminder_id": "aggregate_id"})
+ .command("remind", Remind, aggregate="case.reminder_id")
+ .end("done"))
+
+
 # --- Setup -------------------------------------------------------------------------------------------
 
 mailer = MemoryMailer()
@@ -156,7 +205,7 @@ def setUpModule():
     for args in (["keys", "new", "kit"],
                  ["grant", "root.key", "kit.pub", "run=tenancy.*,account.*,identity.*,group.*,invitation.*,shop.*",
                   *(f"{a}=*" for a in ("submit", "listen", "query", "answer", "check", "vault_read", "vault_erase", "manage",
-                                       "reserved_order", "cache")),
+                                       "reserved_order", "cache", "process")),
                   "privileged=bypass_authorization"]):
         assert kernel.cli(*args).returncode == 0, args
     S["key"] = os.path.join(kernel.dir, "kit.key")
@@ -688,6 +737,50 @@ class SliceTest(unittest.TestCase):
         self.committed(submit(RevokeInvitationLink(), second["link_id"], shop_tenant, as_olga))
         self.assertIsNone(api.peek_invitation_link(second["token"]))
         self.assertEqual(api.join_with_invitation_link(rosa, second["token"]), {"ok": False, "reason": "invalid_token"})
+
+
+    def test_11_a_process_acts_as_its_own_identity_once_a_platform_group_holds(self):
+        """The kit gives a registered process an identity and an API key; its commands need a platform group."""
+        kernel: TestKernel = S["kernel"]
+        api: KitApi = S["api"]
+        identity = "process-shop.reminders"
+
+        def until(what: str, check, seconds: float = 10):
+            for _ in range(int(seconds * 50)):
+                if (found := check()):
+                    return found
+                time.sleep(0.02)
+            self.fail(f"no {what}")
+
+        def acting():
+            out = kernel.cli("processes", "list", kernel.store).stdout
+            line = next((l for l in out.splitlines() if "shop.reminders" in l), "")
+            return identity in line and line
+
+        def case_state(state: str):
+            out = kernel.cli("processes", "cases", kernel.store, "shop.reminders", "--state", state).stdout
+            return "r1#1" in out
+
+        # The app registered the process; the kit's reactor gave it an identity and a key, and told the kernel.
+        self.assertIn(identity, until("Act", acting))
+        as_admin = api.context_for(api.check(api.sign_in("admin@example.com", PASSWORD)["access_token"]), "platform")
+        row = S["kit"].query(GetIdentity(identity_id=identity), tenant="platform", context=as_admin)
+        self.assertEqual((row["kind"], row["display_name"]), ("process", "shop.reminders"))
+        self.assertEqual(len(row["api_keys"]), 1)
+        self.assertIn(row["api_keys"][0]["key_id"], acting(), "the kernel acts with the key's ID as the session")
+
+        # Without a group its command is refused: the case shows an incident.
+        tenant = new_id()
+        self.committed(submit(SetReminder(), "r1", tenant, RequestContext(bypass_authorization=True)))
+        until("incident", lambda: case_state("incident"))
+
+        # A platform admin grants it a platform group, which holds in every tenant; a retry succeeds.
+        reminders = new_id()
+        self.committed(submit(CreateGroup(name="Reminders", permissions=[{"pattern": "shop.Remind"}]), reminders, "platform", as_admin))
+        self.committed(submit(GrantMembership(membership_id="reminders", group=reminders), identity, "platform", as_admin))
+        retried = kernel.cli("processes", "retry", kernel.url, S["key"], "shop.reminders", "r1#1", "--tenant", tenant)
+        self.assertEqual(retried.returncode, 0, retried.stderr)
+        until("ended case", lambda: case_state("ended"))
 
 
 if __name__ == "__main__":

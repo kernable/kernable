@@ -1,4 +1,4 @@
-// identity: a person or service in one tenant, holding its group memberships
+// identity: a person, service or business process in one tenant, holding its group memberships
 // (design/kits.md "identity"). The domain object and the types its parts share; `index.ts`
 // registers the parts.
 
@@ -8,6 +8,8 @@ import { sha256 } from "../shared/secrets.ts";
 
 export const identityDomain = domain("identity");
 
+/** A person (with an account), a service, or a business process the kernel runs (in the platform tenant). */
+export type IdentityKind = "person" | "service" | "process";
 export type IdentityStatus = "none" | "active" | "suspended" | "deleted";
 export interface Scope { type: string; id: string }
 export interface Membership {

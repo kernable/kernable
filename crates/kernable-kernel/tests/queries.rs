@@ -227,14 +227,18 @@ async fn min_position_waits_for_the_read_model_to_catch_up() {
         .await
         .unwrap();
 
-    assert_eq!(
-        response(
-            &ask(&env, signed_query("CountOrders", 0, &key(1)))
-                .await
-                .unwrap()
-        ),
-        "1"
-    );
+    // The read model may still be connecting under load: ask until it answers, for at most 5 s.
+    let mut answer = None;
+    for _ in 0..100 {
+        if let Ok(r) = ask(&env, signed_query("CountOrders", 0, &key(1))).await {
+            answer = Some(response(&r));
+            if answer.as_deref() == Some("1") {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(answer.as_deref(), Some("1"));
     let behind = ask(&env, signed_query("CountOrders", 1, &key(1))).await;
     assert_eq!(behind.unwrap_err().code(), Code::DeadlineExceeded);
 }

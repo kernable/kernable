@@ -49,7 +49,7 @@ from typing import ClassVar, Any, Callable, Iterable
 import grpc
 
 from kernable.signing import (Key, cache_message, cancel_message, challenge_message, command_message, data_message, derived_id,
-                              index_message, membership_message, process_message, query_message, vault_ref, rejection_message,
+                              index_message, membership_message, process_act_message, process_message, query_message, vault_ref, rejection_message,
                               result_message, snapshot_message)
 from kernable.store import Store
 from kernable.v1 import kernable_pb2 as pb
@@ -391,6 +391,12 @@ class ListenerContext:
         return self._kernable.query(domain or self._domain, name, data, tenant=tenant or self._tenant,
                                     context=context, min_position=min_position,
                                     timeout_s=timeout_s)
+
+    def process_act(self, name: str, context: RequestContext) -> bool:
+        """Sets as whom the process `name` acts, with the listener's client; see
+        `Kernable.process_act`. Returns whether it changed."""
+        assert self._kernable is not None, "only a running listener's handlers set as whom a process acts"
+        return self._kernable.process_act(name, context)
 
     def follow(self) -> RequestContext:
         """A request context for commands caused by this event: same sender and correlation."""
@@ -1848,6 +1854,17 @@ class Kernable:
         rpc.MembershipServiceStub(self._parts.control()).Apply(
             pb.ApplyRequest(membership=membership, sig=self._key.sign(membership_message(membership)),
                             protocol=PROTOCOL))
+
+    def process_act(self, name: str, context: RequestContext) -> bool:
+        """Sets as whom the process `name` (qualified: `shop.fulfilment`) acts: the request context
+        its commands and queries carry (sender tenant, identity, session), signed with this
+        client's key, which needs the grant `process` for it. Without it, a process acts as
+        `process:<name>`. Returns whether it changed (False: it acted so already). The kit's
+        identity reactor calls it for every process it gives an identity. Raises `grpc.RpcError`
+        if the kernel refuses it (`NOT_FOUND` for a process never registered)."""
+        req = pb.ProcessActing(name=name, context=_to_wire_context(context, ""), issued_at=_issued_now(), protocol=PROTOCOL)
+        req.sig.CopyFrom(self._key.sign(process_act_message(req.name, req.context, req.issued_at)))
+        return rpc.ProcessServiceStub(self._parts.control()).Act(req).changed
 
     def register_process(self, process: "Process | dict") -> RegisteredProcess:
         """Registers a business process (a `Process`, or its model as a dict), signed with this

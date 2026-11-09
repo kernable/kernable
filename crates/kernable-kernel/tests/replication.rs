@@ -440,7 +440,41 @@ async fn processes_reach_the_standby() {
     };
     let registered = register(model.clone()).await.unwrap();
     assert_eq!((registered.version, registered.new), (1, true));
-    let on_standby = held(&standby_config).processes().unwrap();
+    // As whom it acts, too.
+    let acting = kernable_core::proto::RequestContext {
+        sender_tenant: "platform".into(),
+        sender_identity: "proc-1".into(),
+        sender_session: "key-1".into(),
+        ..Default::default()
+    };
+    let issued_at = issued_now();
+    let request = kernable_core::proto::ProcessActing {
+        name: "orders.follow".into(),
+        context: Some(acting.clone()),
+        issued_at,
+        sig: Some(signing::sign(
+            &key(21),
+            &signing::process_act_message("orders.follow", Some(&acting), issued_at),
+        )),
+        protocol: kernable_core::PROTOCOL,
+    };
+    ProcessServiceClient::new(transport::connect(&primary_config.listen).await.unwrap())
+        .act(presenting(request, &deployer))
+        .await
+        .unwrap();
+    let state = held(&standby_config)
+        .processes()
+        .unwrap()
+        .into_iter()
+        .find(|r| r.version == 0)
+        .expect("the state is on the standby");
+    assert_eq!(state.acting, Some(acting));
+    let on_standby: Vec<_> = held(&standby_config)
+        .processes()
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.version > 0)
+        .collect();
     assert_eq!(on_standby.len(), 1, "{on_standby:?}");
     assert_eq!(on_standby[0].model, model);
 

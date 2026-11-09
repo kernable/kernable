@@ -368,6 +368,36 @@
     "message": "000000136b65726e61626c652e76312e70726f636573730000007a7b226e616d65223a2273686f702e66756c66696c6d656e74222c227374617274223a7b226f6e223a2273686f702e4f726465725375626d6974746564222c226b6579223a226167677265676174654964227d2c227374657073223a5b7b226e616d65223a22646f6e65222c226b696e64223a22656e64227d5d7d0000018bcfe56800",
     "signature": "26bb47ddf18f6181f09bb72f9f32f292e1bca83e41be3bdae502bb53ab54c7d65e0cd76b952921baa775161c266a08ab69eba358a347cbdfe341792607274f09"
   },
+  "process_act": {
+    "input": {
+      "name": "shop.fulfilment",
+      "context": {
+        "attributes": [
+          {
+            "key": "channel",
+            "value": "web"
+          },
+          {
+            "key": "locale",
+            "value": "de-AT"
+          }
+        ],
+        "bypass_authorization": true,
+        "causation_id": "c-0",
+        "correlation_id": "r-1",
+        "expected_version": 3,
+        "on_behalf_of": "i-2",
+        "sender_account": "a-1",
+        "sender_identity": "i-1",
+        "sender_session": "s-1",
+        "sender_tenant": "t-0",
+        "trace_id": "tr-1"
+      },
+      "issued_at": 1700000000000
+    },
+    "message": "000000176b65726e61626c652e76312e70726f636573735f6163740000000f73686f702e66756c66696c6d656e7400000003742d3000000003692d3100000003612d3100000003732d3100000003692d320000000000000001000000000000000300000003722d3100000003632d300000000474722d3100000000000000010000000000000002000000076368616e6e656c00000003776562000000066c6f63616c650000000564652d41540000018bcfe56800",
+    "signature": "626a74937584c1235630f27ba55591867aeff6ee9b042b254a44c172ee6717fd6ab1068afe14da62d347ef338a03348515367fbaebfebf555001bc6cfa61cf03"
+  },
   "process_remove": {
     "input": {
       "name": "shop.fulfilment",

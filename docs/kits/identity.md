@@ -9,11 +9,11 @@ One aggregate, `identity.identity`, with a random ID, under its tenant.
 
 | Field | What it is |
 |---|---|
-| `kind` | `person` or `service` |
+| `kind` | `person`, `service`, or `process` (a business process run by the kernel) |
 | `accountId` | the account, for persons; at most one identity per account and tenant |
 | `profile` | `displayName`, `title`, `email`: personal data, in the vault under `identity:<id>` |
 | `memberships` | the groups it belongs to: each with an ID, the group, a scope and an optional expiry, `active` or `suspended` |
-| `apiKeys` | services only: the hashes of their keys, with label, expiry and whether revoked |
+| `apiKeys` | services and processes only: the hashes of their keys, with label, expiry and whether revoked |
 | `status` | `active`, `suspended` or `deleted` |
 
 ## How identities come to be
@@ -56,6 +56,20 @@ A service identity signs its requests with an API key instead of a session:
 
 Every command sent with a key carries the key's ID in `senderSession`, so the log shows each use;
 there is no separate event per use.
+
+## Processes
+
+A business process the kernel runs sends commands like a service
+does, so it needs an identity too. The kit creates one for each process on its first
+registration: in the platform tenant, kind `process`, named after the process
+(`shop.fulfilment`), with an API key, and tells the kernel to act as that identity.
+
+The new identity holds **no permissions**. A platform administrator grants it a group of the
+platform tenant with exactly what the process sends (`shop.Confirm`, `shop.Ship`, `shop.Cancel`);
+platform groups hold in every tenant. Until then its commands are refused and its cases stop as
+incidents, which `kernable processes retry` resumes once the group is granted. Revoking the
+process's API key stops the process at once, without a deploy. A later deploy does not give it a new key:
+resuming it is a deliberate step (a new key, then `processAct` with it).
 
 ## Leaving and deleting
 

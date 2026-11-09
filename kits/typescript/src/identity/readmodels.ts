@@ -2,13 +2,13 @@
 
 import { ORDERS } from "../shared/constants.ts";
 import { TenantDeleted } from "../tenancy/index.ts";
-import { type ApiKey, identityDomain, type IdentityStatus, type Membership } from "./domain.ts";
+import { type ApiKey, identityDomain, type IdentityKind, type IdentityStatus, type Membership } from "./domain.ts";
 import { ApiKeyCreated, ApiKeyRevoked, IdentityCreated, IdentityDeleted, IdentityReactivated, IdentitySuspended, MembershipGranted, MembershipResumed, MembershipRevoked, MembershipSuspended, ProfileUpdated } from "./events.ts";
 
 export interface IdentityRow {
   id: string;
   tenant: string;
-  kind: "person" | "service";
+  kind: IdentityKind;
   accountId: string | null;
   displayName: string | null;
   status: IdentityStatus;

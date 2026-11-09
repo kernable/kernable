@@ -15,9 +15,9 @@ import { newSigningKeys, type Claims } from "../src/api/tokens.ts";
 import { bootstrap } from "../src/bootstrap.ts";
 import { CreateGroup } from "../src/group/index.ts";
 import { AddSsoDomain, CreateSso, DeleteAccount, EnforceSso, GetSso, SuspendAccount } from "../src/account/index.ts";
-import { CreateServiceIdentity, DeleteIdentity, GetIdentity, GrantMembership, RevokeApiKey } from "../src/identity/index.ts";
+import { CreateServiceIdentity, DeleteIdentity, GetIdentity, GrantMembership, RevokeApiKey, processIdentityId } from "../src/identity/index.ts";
 import { CreateInvitation, EraseInvitation, ListInvitations, RevokeInvitationLink } from "../src/invitation/index.ts";
-import { Explain, kitDomains, kitSchemas, relation, useAuthorizationStore, visibility } from "../src/kit.ts";
+import { Explain, PLATFORM_TENANT, kitDomains, kitSchemas, relation, useAuthorizationStore, visibility } from "../src/kit.ts";
 import { MemoryMailer, useMailer } from "../src/shared/mail.ts";
 import { totpCode } from "../src/shared/secrets.ts";
 import { Authenticator } from "./authenticator.ts";
@@ -72,6 +72,25 @@ shop.readModel("shop.order-details")
     return { customer };
   });
 
+// A business process the kernel runs: a requested parcel is shipped, by the process's identity.
+class ParcelRequested extends Event {}
+class RequestParcel extends Command {}
+class ShipParcel extends Command {}
+/** As whom each ShipParcel came: what the kernel sent it as. */
+const shippedBy: RequestContext[] = [];
+shop
+  .aggregate("parcel", { requested: false })
+  .apply(ParcelRequested, (s) => void (s.requested = true))
+  .command(RequestParcel, () => [ParcelRequested.new()])
+  .command(ShipParcel, (_s, _d, _cmd, ctx) => {
+    shippedBy.push(ctx.request);
+    return [{ type: "ParcelShipped", data: {} }];
+  });
+shop.process("dispatch")
+  .start(ParcelRequested, { key: "aggregateId", data: { parcelId: "aggregateId" } })
+  .command("ship", ShipParcel, { aggregate: "case.parcelId" })
+  .end("done");
+
 // --- Setup ---------------------------------------------------------------------------------------
 
 const mailer = new MemoryMailer();
@@ -97,6 +116,7 @@ before(async () => {
     "run=tenancy.*,account.*,identity.*,group.*,invitation.*,shop.*",
     ...["submit", "listen", "query", "answer", "check", "vault_read", "vault_erase", "manage", "reserved_order", "cache"].map((a) => `${a}=*`),
     "privileged=bypass_authorization",
+    "process=*",
   );
   const options = { url: kernel.url, key: join(kernel.dir, "kit.key") };
   kit = new Kernable(options).use(...kitSchemas());
@@ -635,4 +655,45 @@ test("invitation links let people join with groups; a query about one order is d
   assert.ok((await kit.submit(RevokeInvitationLink.new(), { aggregateId: second.linkId, tenant: shopTenant, context: asOlga })).committed);
   assert.equal(await api.peekInvitationLink(second.token), null);
   assert.deepEqual(await api.joinWithInvitationLink(rosa.claims, second.token), { ok: false, reason: "invalid_token" });
+});
+
+test("a process gets an identity and a key from the kit, and acts only with a platform group", async () => {
+  const internal = { bypassAuthorization: true };
+  const process = "shop.dispatch";
+  const identityId = processIdentityId(process);
+  // The app registered the process; the kit's reactor gives it an identity and a key.
+  let keyId: string | undefined;
+  for (let i = 0; i < 200 && !keyId; i++) {
+    keyId = await kit.query(GetIdentity.new({ identityId }), { tenant: PLATFORM_TENANT, context: internal })
+      .then((r) => r.apiKeys[0]?.keyId, () => undefined);
+    if (!keyId) await new Promise((r) => setTimeout(r, 25));
+  }
+  assert.ok(keyId, "the process's identity and key");
+  const identity = await kit.query(GetIdentity.new({ identityId }), { tenant: PLATFORM_TENANT, context: internal });
+  assert.deepEqual([identity.kind, identity.displayName, identity.memberships], ["process", process, []]);
+
+  // Without a group its command is refused: the case stops with an incident.
+  assert.ok((await kit.submit(RequestParcel.new(), { aggregateId: "parcel-1", tenant, context: internal })).committed);
+  const cases = async (state: string) => {
+    for (let i = 0; i < 200; i++) {
+      const { out } = kernel.cli("processes", "cases", kernel.store, process, "--state", state);
+      const line = out.split("\n").find((l) => l.includes(" parcel-1#1 "));
+      if (line) return line;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    assert.fail(`no ${state} case parcel-1#1: ${kernel.cli("processes", "case", kernel.store, process, "parcel-1#1").out}`);
+  };
+  await cases("incident");
+  assert.equal(shippedBy.length, 0);
+
+  // A platform group with the command, granted to the process's identity: retried, it ships.
+  assert.ok((await kit.submit(CreateGroup.new({ name: "Dispatch", permissions: [{ pattern: "shop.ShipParcel" }] }), { aggregateId: "g-dispatch", tenant: PLATFORM_TENANT, context: internal })).committed);
+  assert.ok((await kit.submit(GrantMembership.new({ membershipId: "dispatch", group: "g-dispatch" }), { aggregateId: identityId, tenant: PLATFORM_TENANT, context: internal })).committed);
+  assert.ok(kernel.cli("processes", "retry", kernel.url, "kit.key", process, "parcel-1#1", "--tenant", tenant).ok);
+  assert.match(await cases("ended"), / ended done/);
+  assert.equal(shippedBy.length, 1);
+  const by = shippedBy[0] as RequestContext;
+  assert.deepEqual([by.senderTenant, by.senderIdentity, by.senderSession], [PLATFORM_TENANT, identityId, keyId]);
+  // The kernel acts so already.
+  assert.deepEqual(await kit.processAct(process, { senderTenant: PLATFORM_TENANT, senderIdentity: identityId, senderSession: keyId }), { changed: false });
 });

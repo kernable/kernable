@@ -58,6 +58,21 @@ def _(s: Identity, d: CreateServiceIdentity):
     return [IdentityCreated(kind="service", account_id=None, display_name=d.display_name.strip(), title=None, email=None)]
 
 
+class CreateProcessIdentity(Command):
+    """Internal: the identity a business process acts as (`process`: qualified, `shop.fulfilment`),
+    created by the `identity.processes` reactor in the platform tenant, without permissions."""
+    process: str
+
+
+@Identity.command(CreateProcessIdentity)
+def _(s: Identity, d: CreateProcessIdentity):
+    if s.status != "none":
+        raise Rejected("The identity exists", "exists")
+    if not isinstance(d.process, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*\.[A-Za-z0-9_-]+", d.process):
+        raise Rejected("A qualified process name: domain.process", "invalid_process")
+    return [IdentityCreated(kind="process", account_id=None, display_name=d.process, title=None, email=None)]
+
+
 class UpdateProfile(Command):
     vault = {"personal": [{"fields": ["display_name", "title", "email"], "subject": own}]}
     display_name: str | None = None
@@ -139,8 +154,8 @@ class CreateApiKey(Command):
 @Identity.command(CreateApiKey)
 def _(s: Identity, d: CreateApiKey):
     _active(s)
-    if s.kind != "service":
-        raise Rejected("Only a service has API keys", "not_a_service")
+    if s.kind not in ("service", "process"):
+        raise Rejected("Only a service or a process has API keys", "not_a_service")
     if not isinstance(d.key_id, str) or not re.fullmatch(r"[A-Za-z0-9]{8,32}", d.key_id) or not isinstance(d.secret, str) or len(d.secret) < 32:
         raise Rejected("A key ID of 8 to 32 letters and digits, and a secret of at least 32 characters", "invalid_key")
     if any(k["key_id"] == d.key_id for k in s.api_keys):

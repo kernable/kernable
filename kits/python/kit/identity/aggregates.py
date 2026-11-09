@@ -13,6 +13,8 @@ class Identity(Aggregate, domain=identity_domain, schema="py-1"):
     status: IdentityStatus = "none"
     kind: str | None = None
     account_id: str | None = None
+    #: A process identity's process (qualified: `shop.fulfilment`), its display name.
+    process: str | None = None
     memberships: list = []
     api_keys: list = []
 
@@ -23,7 +25,8 @@ def _membership(s: Identity, membership_id: str) -> dict | None:
 
 @Identity.apply(IdentityCreated)
 def _(s: Identity, d: IdentityCreated, evt):
-    s.update(id=evt.aggregate_id, status="active", kind=d.kind, account_id=d.account_id)
+    s.update(id=evt.aggregate_id, status="active", kind=d.kind, account_id=d.account_id,
+             process=d.display_name if d.kind == "process" else None)
 
 
 @Identity.apply(ProfileUpdated)
@@ -82,6 +85,8 @@ def _(s: Identity):
 
 # One identity per account and tenant.
 Identity.unique("account", lambda s: s.account_id if s.status not in ("none", "deleted") else None)
+# One identity per process and tenant (the platform tenant's, in practice).
+Identity.unique("process", lambda s: s.process if s.status not in ("none", "deleted") else None)
 Identity.fact("active", lambda s: s.status == "active")
 
 #: The aggregate type, for workers and `requires`.

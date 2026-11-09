@@ -36,6 +36,8 @@ pub enum IdentityKind {
     #[default]
     Person,
     Service,
+    /// A business process's (design/processes.md): created by the kit when an app registers it.
+    Process,
 }
 
 /// One aggregate a membership is limited to (or what has it as parent): `{type: "shop.order", id}`.

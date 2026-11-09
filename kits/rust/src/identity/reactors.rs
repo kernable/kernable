@@ -1,8 +1,12 @@
 //! The identity reactors: side effects and follow-up commands.
 
-use kernable::{BoxError, Domain, Error, ListenerContext, Query, Submit};
+use kernable::{BoxError, Domain, Error, ListenerContext, Query, RequestContext, Submit};
+use serde::Deserialize;
 
-use super::commands::{CreateIdentity, DeleteIdentity, GrantMembership, RevokeMembership};
+use super::commands::{
+    CreateApiKey, CreateIdentity, CreateProcessIdentity, DeleteIdentity, GrantMembership,
+    RevokeMembership,
+};
 use super::queries::{
     FindIdentityByAccount, FoundIdentity, ListIdentities, ListMyIdentities, MyIdentity,
 };
@@ -10,10 +14,16 @@ use super::readmodels::IdentityRow;
 use crate::account::AccountDeleted;
 use crate::group::GroupDeleted;
 use crate::invitation::{InvitationAccepted, InvitationLinkUsed, InvitedGroup};
-use crate::shared::constants::orders;
+use crate::shared::constants::{PLATFORM_TENANT, orders};
 use crate::shared::internal;
-use crate::shared::secrets::new_id;
+use crate::shared::secrets::{new_id, random_secret};
 use crate::tenancy::{AddOwner, TenantCreated, TenantDeleted};
+
+/// The kernel's announcement of a process version (domain `process`, aggregate `registry`).
+#[derive(Deserialize)]
+struct ProcessRegistered {
+    name: String,
+}
 
 /// A follow-up command of this event, in `tenant`, with a fixed ID.
 fn follow(ctx: &ListenerContext, submit: Submit, id: String, tenant: &str) -> Submit {
@@ -153,6 +163,64 @@ pub fn react(domain: &Domain) {
         let source = format!("{}-{}", evt.aggregate_id, d.account_id);
         join(&ctx, &evt.tenant, &source, d.account_id, d.groups, false).await
     });
+
+    let processes = domain.reactor("identity.processes").order(orders::REACTORS);
+    // A registered business process gets an identity in the platform tenant (no permissions: a
+    // platform admin grants it groups) and an API key, and acts as them (design/processes.md).
+    // Fixed IDs from the process's name: a new version or a redelivery changes nothing.
+    processes.on(
+        "process.ProcessRegistered",
+        |d: ProcessRegistered, _evt, ctx| async move {
+            let name = d.name;
+            let identity_id = format!("process-{name}");
+            let create = Submit::command(
+                CreateProcessIdentity {
+                    process: name.clone(),
+                },
+                &identity_id,
+            );
+            let submit = follow(
+                &ctx,
+                create,
+                format!("process-identity-{name}"),
+                PLATFORM_TENANT,
+            );
+            tolerating(&ctx, "exists", submit).await?;
+            // The key's secret is discarded: only its ID travels, as the commands' session. A
+            // redelivery gets the first outcome, and with it the first key's ID.
+            let key = CreateApiKey {
+                key_id: random_secret(9)
+                    .chars()
+                    .map(|c| if c.is_ascii_alphanumeric() { c } else { 'x' })
+                    .collect(),
+                secret: random_secret(32),
+                label: Some(format!("process {name}")),
+                expires_at: None,
+            };
+            let created = ctx
+                .submit(follow(
+                    &ctx,
+                    Submit::command(key, &identity_id),
+                    format!("process-key-{name}"),
+                    PLATFORM_TENANT,
+                ))
+                .await?;
+            let key_id = created
+                .iter()
+                .find(|e| e.event_type == "ApiKeyCreated")
+                .and_then(|e| e.data["keyId"].as_str())
+                .ok_or("no API key created")?
+                .to_owned();
+            let acting = RequestContext {
+                sender_tenant: PLATFORM_TENANT.into(),
+                sender_identity: identity_id,
+                sender_session: key_id,
+                ..RequestContext::default()
+            };
+            ctx.process_act(&name, acting).await?;
+            Ok(())
+        },
+    );
 
     let cleanup = domain.reactor("identity.cleanup").order(orders::CLEANUP);
     // A deleted tenant's identities are erased, before the read models drop the tenant.

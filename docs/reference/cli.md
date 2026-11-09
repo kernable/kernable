@@ -163,7 +163,7 @@ Lists the highest stored schema version per event type.
 kernable processes list <store>
 ```
 
-Lists the registered business processes: name, newest version, state (active or removed), and when and by which key the newest version was registered.
+Lists the registered business processes: name, newest version, state (active or removed), as whom it acts (ProcessService.Act; else `process:<name>`), and when and by which key the newest version was registered.
 
 ### `kernable processes show`
 
