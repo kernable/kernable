@@ -162,6 +162,41 @@ Decided 2026-11-09, usable without processes:
 - **Limits:** `at` at most `--schedule-max-days` (default 366) ahead; scheduled commands count
   towards the queue's limits like queued ones.
 
+## As whom a process acts
+
+Decided 2026-11-09:
+
+- **Without the kit:** the engine's commands carry `senderIdentity: "process:<domain>.<name>"`
+  and name the case (`causationId`: the event or timer that moved it); any middleware decides on
+  that.
+- **With the kit, created automatically:** when an app registers a process, the kit creates its
+  identity in the platform tenant (kind `process`), without permissions. A platform admin grants
+  it groups ("Fulfilment: shop.Confirm, shop.Ship, shop.Cancel"); platform groups hold in every
+  tenant. Until then its commands are refused, and the cases show incidents.
+- **An API key per process:** the process identity gets an API key, and the engine's commands
+  carry it (`senderSession`), as a service's do. Revoking the key in the kit stops the process at
+  once, without a deploy. The kit's middleware sees the key's ID, not its secret, so the trust in
+  the request itself still rests on the kernel's signature; how the key reaches the engine is
+  decided while building.
+
+## The UI's views (read-only)
+
+Decided 2026-11-09:
+
+- **The diagram:** a flow from left to right, laid out from the model: steps as boxes, paths as
+  arrows, decisions as diamonds, waits and timers with a clock. Each box shows how many cases are
+  there now; incidents in red. One diagram per version.
+- **Live cases:** per process and version, filtered by step and state (running, waiting,
+  incident, ended); a case's page shows its events as a timeline, with the commands it sent and the
+  events that moved it, linked to those aggregates' histories.
+- **Incidents:** shown with the step, the rejection and the exact command to resolve them:
+  `kernable processes retry|skip|cancel <process> <case>`, signed with an operator's key and
+  stored in the case's events. No buttons: the UI has no login.
+- **Statistics:** per step the cases there now, entered and left over the last hour, day and
+  week, the time spent (median and 95th percentile), timeouts and incidents; per process started,
+  ended by each end, and running. Counted by the kernel from the case events; also as metrics
+  (`kernable_process_cases`, `kernable_process_step_seconds`, `kernable_process_incidents`).
+
 ## A case in the log
 
 Each case is an aggregate `<process>` of the domain `process`, its ID the case's key, under the
