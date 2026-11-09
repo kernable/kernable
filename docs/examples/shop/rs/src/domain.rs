@@ -1,5 +1,6 @@
 //! The shop's domain: customers and their orders. Used by every process of the shop.
-use kernable::{Aggregate, Domain, NewEvent, Rejected, domain};
+use kernable::process::{Send, Start, Wait, value};
+use kernable::{Aggregate, Domain, NewEvent, Process, Rejected, domain};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -8,6 +9,7 @@ pub struct Shop {
     pub domain: Domain,
     pub customer_aggregate: Aggregate<Customer>,
     pub order_aggregate: Aggregate<Order>,
+    pub fulfilment: Process,
 }
 
 pub fn shop() -> Shop {
@@ -19,10 +21,13 @@ pub fn shop() -> Shop {
     confirm(&order_aggregate);
     vault(&shop_domain, &customer_aggregate);
     target(&shop_domain);
+    fulfil(&order_aggregate);
+    let fulfilment = process(&shop_domain);
     Shop {
         domain: shop_domain,
         customer_aggregate,
         order_aggregate,
+        fulfilment,
     }
 }
 
@@ -71,6 +76,7 @@ fn customer(shop_domain: &Domain) -> Aggregate<Customer> {
 // #region order
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Order {
+    /// none, draft, submitted, confirmed, paid, shipped or cancelled.
     status: String,
     items: i64,
 }
@@ -250,3 +256,75 @@ fn target(shop_domain: &Domain) {
     shop_domain.query("GetOrder").target("order", "id");
 }
 // #endregion target
+
+// #region fulfil
+// Part 10: a confirmed order is paid, then shipped; or cancelled when it is not paid in time.
+#[derive(Serialize, Deserialize)]
+struct Cancel {
+    reason: String,
+}
+
+fn fulfil(order_aggregate: &Aggregate<Order>) {
+    order_aggregate.apply("OrderPaid", |s, _: Value, _evt, _ctx| {
+        s.status = "paid".into()
+    });
+    order_aggregate.apply("OrderShipped", |s, _: Value, _evt, _ctx| {
+        s.status = "shipped".into()
+    });
+    order_aggregate.apply("OrderCancelled", |s, _: Value, _evt, _ctx| {
+        s.status = "cancelled".into()
+    });
+    order_aggregate.command("Pay", |s, _: Value, _cmd, _ctx| {
+        if s.status != "confirmed" {
+            let message = format!("Cannot pay a {} order", s.status);
+            return Err(Rejected::new(message).code("invalid_state"));
+        }
+        Ok(vec![NewEvent::new("OrderPaid", ())])
+    });
+    order_aggregate.command("Ship", |s, _: Value, _cmd, _ctx| {
+        if s.status != "paid" {
+            let message = format!("Cannot ship a {} order", s.status);
+            return Err(Rejected::new(message).code("invalid_state"));
+        }
+        Ok(vec![NewEvent::new("OrderShipped", ())])
+    });
+    order_aggregate.command("Cancel", |s, data: Cancel, _cmd, _ctx| {
+        if s.status != "confirmed" {
+            let message = format!("Cannot cancel a {} order", s.status);
+            return Err(Rejected::new(message).code("invalid_state"));
+        }
+        Ok(vec![NewEvent::new("OrderCancelled", data)])
+    });
+}
+// #endregion fulfil
+
+// #region process
+fn process(shop_domain: &Domain) -> Process {
+    // How long a customer has to pay; PAY_WITHIN=10s to try it.
+    let pay_within = std::env::var("PAY_WITHIN").unwrap_or_else(|_| "3d".into());
+
+    shop_domain
+        .process("fulfilment")
+        .start_named(
+            "OrderConfirmed",
+            Start::key("aggregate_id").data([("order_id", "aggregate_id")]),
+        )
+        .wait_named(
+            "paid",
+            "OrderPaid",
+            Wait::key("aggregate_id").timeout(&pay_within, "cancel"),
+        )
+        .command_named(
+            "ship",
+            "order.Ship",
+            Send::aggregate("case.order_id").next("shipped"),
+        )
+        .command_named(
+            "cancel",
+            "order.Cancel",
+            Send::aggregate("case.order_id").data([("reason", value("unpaid"))]),
+        )
+        .end("unpaid")
+        .end("shipped")
+}
+// #endregion process

@@ -171,3 +171,5 @@ token is refused before anything else:
 
 Every sign-in, failed attempt, membership and join is an event in the log. To see the domains in
 detail, continue with [the kit's documentation](../../kits/).
+
+Next: [10. A business process](./10-process).

@@ -19,7 +19,7 @@ const customersReadmodel = shopDomain.readModel("customers")
 // #endregion customers
 
 // #region orders
-type OrderRow = { id: string; customerId: string; status: string; items: Record<string, number>; confirmedTo?: string | null };
+type OrderRow = { id: string; customerId: string; status: string; items: Record<string, number>; confirmedTo?: string | null; cancelled?: string };
 const orders = new Map<string, OrderRow>();
 
 const ordersReadmodel = shopDomain.readModel("orders")
@@ -53,6 +53,17 @@ ordersReadmodel.on("CustomerErased", (_data, evt) => {
   for (const row of orders.values()) if (row.customerId === evt.aggregateId && row.confirmedTo) row.confirmedTo = null;
 });
 // #endregion erased
+
+// #region fulfilled
+ordersReadmodel
+  .on("OrderPaid", (_data, evt) => void (orders.get(evt.aggregateId)!.status = "paid"))
+  .on("OrderShipped", (_data, evt) => void (orders.get(evt.aggregateId)!.status = "shipped"))
+  .on("OrderCancelled", (data: { reason: string }, evt) => {
+    const row = orders.get(evt.aggregateId)!;
+    row.status = "cancelled";
+    row.cancelled = data.reason;
+  });
+// #endregion fulfilled
 
 // #region run
 const kernable = new Kernable();

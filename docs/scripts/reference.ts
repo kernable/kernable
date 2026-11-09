@@ -255,6 +255,14 @@ function metricsReference(): string {
     const kind = m[2] ?? (m[1].endsWith("_seconds") ? "summary" : "gauge");
     rows.push(`| \`${m[1]}\` | ${kind} | ${labels.map((l) => `\`${l}\``).join(", ")} | ${cell(m[3])} |`);
   });
+  // The process engine's metrics, written with their HELP and TYPE lines (process_engine.rs).
+  const engine = read("crates/kernable-kernel/src/process_engine.rs");
+  const helps = [...engine.matchAll(/# HELP (kernable_process_[a-z_]+) (.+?)\\n# TYPE \1 (\w+)/g)];
+  helps.forEach((m, i) => {
+    const segment = engine.slice(m.index, helps[i + 1]?.index ?? engine.length);
+    const labels = [...new Set([...segment.matchAll(/(\w+)=\\"/g)].map((l) => l[1]).filter((l) => l !== "le"))];
+    rows.push(`| \`${m[1]}\` | ${m[3]} | ${labels.map((l) => `\`${l}\``).join(", ")} | ${cell(m[2])} |`);
+  });
   const nodeRows = [...read("crates/kernable-kernel/src/supervisor.rs").matchAll(re)].map(
     (m) => `| \`${m[1]}\` | ${m[2]} | \`child\` | ${cell(m[3])} |`,
   );

@@ -168,8 +168,8 @@ Deploy and inspect:
                                           Lists the cases of a process: tenant, case ID, state
                                           (running: a command sent or a query asked; waiting: for an
                                           event or a time; incident; ended) and the step it is at
-                                          (or how it ended). Reads every event: an operator's tool
-                                          until the UI shows cases.
+                                          (or how it ended). Reads every event, also with the kernel
+                                          stopped; the UI's Processes view shows them live.
   kernable processes case <store> <process> <case>
                                           Prints a case's events as a timeline: when, version, event
                                           type and its data.

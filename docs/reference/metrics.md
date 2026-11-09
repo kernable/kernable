@@ -37,6 +37,9 @@ Counters and durations count since the kernel started and begin at 0 again after
 | `kernable_ready` | gauge |  | 1 while the kernel is ready: every aggregate that counts has a worker, every listener that counts is connected and caught up, and it is not shutting down. |
 | `kernable_standby_applied` | gauge |  | On a standby: the newest record of the primary's log it holds. |
 | `kernable_standby_lag` | gauge |  | On a standby: records it is behind the primary's head as last seen. |
+| `kernable_process_cases` | gauge | `process`, `state` | Cases per process and state: running (a command sent or a query asked), waiting (for an event or a time), incident (stopped until an operator resolves it) held now; ended since the kernel started. |
+| `kernable_process_incidents` | counter | `process` | Incidents raised since the kernel started, per process. |
+| `kernable_process_step_seconds` | histogram | `process`, `step` | Seconds from reaching a step until it completed, per process and step. |
 
 ## kernable node
 

@@ -1,7 +1,7 @@
 // The shop's domain: customers and their orders. Imported by every process of the shop.
 import { scryptSync } from "node:crypto";
 
-import { Rejected, domain } from "@kernable/sdk";
+import { Rejected, domain, value, type Duration } from "@kernable/sdk";
 
 // #region domain
 export const shopDomain = domain("shop");
@@ -20,7 +20,7 @@ export const customerAggregate = shopDomain.aggregate<Customer>("customer", { re
 // #endregion customer
 
 // #region order
-type Order = { status: "none" | "draft" | "submitted" | "confirmed"; items: number };
+type Order = { status: "none" | "draft" | "submitted" | "confirmed" | "paid" | "shipped" | "cancelled"; items: number };
 
 export const orderAggregate = shopDomain.aggregate<Order>("order", { status: "none", items: 0 })
   .apply("OrderPlaced", () => ({ status: "draft", items: 0 }))
@@ -88,3 +88,36 @@ customerAggregate
 // middleware decides on it as on a command's aggregate (part 9).
 shopDomain.query("GetOrder").target("order", "id");
 // #endregion target
+
+// #region fulfil
+// Part 10: a confirmed order is paid, then shipped; or cancelled when it is not paid in time.
+orderAggregate
+  .apply("OrderPaid", (s) => { s.status = "paid"; })
+  .apply("OrderShipped", (s) => { s.status = "shipped"; })
+  .apply("OrderCancelled", (s) => { s.status = "cancelled"; })
+  .command("Pay", (s) => {
+    if (s.status !== "confirmed") throw new Rejected(`Cannot pay a ${s.status} order`, "invalid_state");
+    return [{ type: "OrderPaid" }];
+  })
+  .command("Ship", (s) => {
+    if (s.status !== "paid") throw new Rejected(`Cannot ship a ${s.status} order`, "invalid_state");
+    return [{ type: "OrderShipped" }];
+  })
+  .command("Cancel", (s, data: { reason: string }) => {
+    if (s.status !== "confirmed") throw new Rejected(`Cannot cancel a ${s.status} order`, "invalid_state");
+    return [{ type: "OrderCancelled", data: { reason: data.reason } }];
+  });
+// #endregion fulfil
+
+// #region process
+// How long a customer has to pay; PAY_WITHIN=10s to try it.
+const payWithin = (process.env.PAY_WITHIN ?? "3d") as Duration;
+
+export const fulfilment = shopDomain.process("fulfilment")
+  .start("OrderConfirmed", { key: "aggregateId", data: { orderId: "aggregateId" } })
+  .wait("paid", "OrderPaid", { key: "aggregateId", timeout: payWithin, onTimeout: "cancel" })
+  .command("ship", "order.Ship", { aggregate: "case.orderId", next: "shipped" })
+  .command("cancel", "order.Cancel", { aggregate: "case.orderId", data: { reason: value("unpaid") } })
+  .end("unpaid")
+  .end("shipped");
+// #endregion process

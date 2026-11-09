@@ -12,6 +12,7 @@ How kernable works and why. Each page is short; the [tutorials](../tutorial/) sh
 | [Trust](./trust) | Keys, grants, signatures, the hash chain |
 | [Compliance](./compliance) | The technical controls kernable covers for ISO 27001, SOC 2, the GDPR and others, and where it stops |
 | [Queries and middleware](./queries-and-middleware) | Why every read goes through the kernel, and how checks fail closed |
+| [Business processes](./processes) | Flows across commands, events and queries, run by the kernel and shown in its UI |
 | [Data over time](./data) | Event versions, formats, the vault, snapshots |
 | [Failures and recovery](./failures) | What happens when something crashes |
 | [Compared with other systems](./comparison) | kernable next to event stores, frameworks and logs |

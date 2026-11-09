@@ -12,6 +12,8 @@ use shop::shop;
 async fn main() -> Result<(), BoxError> {
     // #region guard
     const SERVICES: [&str; 1] = ["svc-confirmations"];
+    // What a business process may send (part 10): it acts as `process:<name>`.
+    const PROCESSES: [(&str, &[&str]); 1] = [("process:shop.fulfilment", &["Ship", "Cancel"])];
     let registered = Arc::new(Mutex::new(HashSet::<String>::new()));
     let owner_of = Arc::new(Mutex::new(HashMap::<String, String>::new())); // order -> customer
 
@@ -38,6 +40,8 @@ async fn main() -> Result<(), BoxError> {
         let who = check.request.sender_identity.clone();
         let allowed = check.type_name == "Register" // anyone may sign up
             || (check.kind == CheckKind::Query && SERVICES.contains(&who.as_str())) // services may read
+            || (check.kind == CheckKind::Command
+                && PROCESSES.iter().any(|(process, types)| *process == who && types.contains(&check.type_name.as_str())))
             || {
                 let field = |name: &str| check.data[name].as_str().map(str::to_owned);
                 let target = match check.kind {

@@ -19,6 +19,7 @@
     }
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
   header { border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
   header .bar { display: flex; align-items: center; gap: 16px; padding: 10px 20px; flex-wrap: wrap; max-width: var(--max); margin: 0 auto; }
@@ -104,6 +105,37 @@
   .spark .say { color: var(--muted); font-size: 12px; white-space: nowrap; min-width: 150px; }
   .more { display: flex; gap: 12px; align-items: center; }
   .err { color: var(--bad); }
+  /* processes */
+  .procs li .n { float: right; color: var(--muted); font-size: 12px; }
+  .procs li .n .bad { color: var(--bad); font-weight: 600; }
+  .ptitle { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  .ptitle h3 { margin: 0; font-size: 16px; }
+  .ptitle select, .pfilter select, .pfilter input { padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); font: inherit; }
+  .flow { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; margin-bottom: 14px; }
+  .flow svg { display: block; }
+  .flow .step { cursor: pointer; }
+  .flow .step .shape { fill: var(--panel); stroke: var(--edge); stroke-width: 1.3; }
+  .flow .step.end .shape { stroke-width: 2.5; }
+  .flow .step.sel .shape { stroke: var(--accent); stroke-width: 2.2; }
+  .flow .step.bad .shape { stroke: var(--bad); stroke-width: 2.2; }
+  .flow .step .icon { fill: none; stroke: var(--muted); stroke-width: 1.3; }
+  .flow .start { fill: var(--panel); stroke: var(--ok); stroke-width: 2; }
+  .flow path.edge { fill: none; stroke: var(--edge); stroke-width: 1.3; }
+  .flow path.edge.back { stroke-dasharray: 4 4; }
+  .flow path.edge.alt { stroke: var(--warn); }
+  .flow .elabel { fill: var(--muted); font-size: 11px; paint-order: stroke; stroke: var(--panel); stroke-width: 4px; stroke-linejoin: round; }
+  .flow .badge rect { fill: var(--accent); } .flow .badge text { fill: #fff; font-size: 11px; font-weight: 600; }
+  .flow .badge.bad rect { fill: var(--bad); }
+  .flow marker path { fill: var(--edge); }
+  .tabs { display: flex; gap: 4px; margin-bottom: 10px; align-items: center; flex-wrap: wrap; }
+  .tabs button { background: none; border: 1px solid transparent; color: var(--muted); padding: 4px 12px; border-radius: 6px; cursor: pointer; font: inherit; }
+  .tabs button.on { color: var(--text); border-color: var(--line); background: var(--panel); }
+  .pfilter { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  .state { display: inline-flex; align-items: center; gap: 6px; }
+  #proc-main a { color: var(--accent); text-decoration: none; }
+  .resolve pre { margin: 4px 0 0; }
+  .card.incident { border-left: 3px solid var(--bad); }
+  .card.ended { border-left: 3px solid var(--ok); }
 </style>
 </head>
 <body>
@@ -118,6 +150,7 @@
     <button data-view="events">Events</button>
     <button data-view="rejected">Rejected</button>
     <button data-view="history">History</button>
+    <button data-view="processes">Processes</button>
     <a id="stage" href="/demo" hidden>Demo stage</a>
   </nav>
  </div>
@@ -166,6 +199,12 @@
       <div class="timeline" id="timeline"><div class="empty">Pick an aggregate.</div></div>
     </div>
   </section>
+  <section class="view" id="processes">
+    <div class="history">
+      <div class="streams procs"><ul id="proc-list"></ul></div>
+      <div class="timeline" id="proc-main"><div class="empty">Loading…</div></div>
+    </div>
+  </section>
 </main>
 <script>
 "use strict";
@@ -181,7 +220,7 @@ function el(tag, attrs = {}, ...children) {
     else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
     else if (v !== undefined && v !== null) e.setAttribute(k, v);
   }
-  for (const c of children.flat()) if (c !== null && c !== undefined) e.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  for (const c of children.flat(Infinity)) if (c !== null && c !== undefined) e.append(c instanceof Node ? c : document.createTextNode(String(c)));
   return e;
 }
 const covers = (pattern, name) => pattern === "*" || pattern === name || (pattern.endsWith(".*") && name.split(".")[0] === pattern.slice(0, -2));
@@ -663,6 +702,342 @@ function drawRejections() {
   $("rejected-meta").textContent = `${shown.length} of ${rejections.length}${capped}`;
 }
 
+// ---- processes: diagram, cases, incidents, statistics ----
+let procs = null, procSel = null, procVersion = null, procWindow = "day", procTab = "cases", procFrame = "";
+let caseFilter = { state: "open", step: "", text: "" }, caseList = null, openCase = null, caseData = null, incidents = null;
+
+const duration = (ms) => ms === null || ms === undefined ? "–"
+  : ms < 1000 ? `${ms} ms` : ms < 60_000 ? `${(ms / 1000).toFixed(1)} s` : ms < 3_600_000 ? `${(ms / 60_000).toFixed(1)} min`
+  : ms < 86_400_000 ? `${(ms / 3_600_000).toFixed(1)} h` : `${(ms / 86_400_000).toFixed(1)} d`;
+const stateColor = (s) => `var(--${{ running: "accent", waiting: "live", incident: "bad", ended: "ok" }[s] ?? "muted"})`;
+const stateView = (s) => el("span", { class: "state" }, el("i", { class: "dot", style: `background:${stateColor(s)}` }), s);
+
+async function loadProcesses() {
+  try { procs = await get(`/api/processes?window=${procWindow}`); } catch (e) { $("proc-main").replaceChildren(el("div", { class: "err" }, String(e))); return; }
+  if (!procSel || !procs.processes.some((p) => p.name === procSel)) procSel = procs.processes[0]?.name ?? null;
+  await Promise.all([loadCases(), loadIncidents(), openCase ? loadCase() : null]);
+  drawProcesses();
+}
+
+async function loadCases() {
+  if (!procSel) return;
+  const q = new URLSearchParams({ process: procSel, version: currentVersion()?.version ?? "", step: caseFilter.step, state: caseFilter.state === "all" ? "" : caseFilter.state, text: caseFilter.text });
+  try { caseList = await get(`/api/cases?${q}`); } catch { caseList = null; }
+}
+
+async function loadIncidents() {
+  try { incidents = await get("/api/cases?state=incident&limit=1000"); } catch { incidents = null; }
+}
+
+async function loadCase() {
+  const q = new URLSearchParams(openCase);
+  try { caseData = await get(`/api/case?${q}`); } catch (e) { caseData = { error: String(e) }; }
+}
+
+const currentProcess = () => procs?.processes.find((p) => p.name === procSel);
+function currentVersion() {
+  const p = currentProcess();
+  if (!p || !p.versions.length) return null;
+  return p.versions.find((v) => v.version === procVersion) ?? p.versions[p.versions.length - 1];
+}
+
+function drawProcesses() {
+  const list = procs.processes.map((p) => {
+    const open = p.versions.reduce((n, v) => n + Object.values(v.steps).reduce((m, s) => m + Object.values(s.now).reduce((a, b) => a + b, 0), 0), 0);
+    const bad = (incidents?.cases ?? []).filter((c) => c.process === p.name).length;
+    return el("li", { class: p.name === procSel ? "on" : "", onclick: () => { procSel = p.name; procVersion = null; caseFilter.step = ""; openCase = null; loadProcesses(); } },
+      el("span", { class: "n" }, `${open} open`, bad ? [" · ", el("span", { class: "bad" }, `${bad} incident${bad === 1 ? "" : "s"}`)] : null),
+      el("div", { class: "id" }, p.name),
+      el("div", { class: "of" }, `v${p.versions.length}${p.removed ? " · removed: no new cases" : ""}`));
+  });
+  $("proc-list").replaceChildren(...(list.length ? list : [el("li", { class: "of" }, "No process registered.")]));
+  const p = currentProcess(), v = currentVersion();
+  if (!p || !v) { procFrame = ""; $("proc-main").replaceChildren(el("div", { class: "empty" }, "No process registered. Define one in code next to your domain; the SDK registers it when the app starts.")); return; }
+
+  // The controls are built once per process, version and tab, so an open dropdown or the
+  // caret in the filter survives the refresh.
+  const key = `${p.name}|${p.versions.length}|${v.version}|${procTab}|${openCase ? "case" : ""}`;
+  if (key !== procFrame) {
+    procFrame = key;
+    const versions = el("select", { name: "version" }, [...p.versions].reverse().map((x) => {
+      const o = el("option", { value: x.version }, `version ${x.version}${x === p.versions[p.versions.length - 1] ? " (newest)" : ""}`);
+      o.selected = x.version === v.version;
+      return o;
+    }));
+    const windows = el("select", { name: "window" }, ["hour", "day", "week"].map((w) => { const o = el("option", { value: w }, `last ${w}`); o.selected = w === procWindow; return o; }));
+    const tab = (id, label) => el("button", { class: procTab === id && !openCase ? "on" : "", onclick: () => { procTab = id; openCase = null; drawProcesses(); } }, label);
+    const steps = v.model.steps.map((s) => s.name);
+    const filter = el("div", { class: "pfilter", id: "p-filter", hidden: procTab !== "cases" || openCase ? "" : null },
+      el("select", { name: "state" }, ["open", "running", "waiting", "incident", "ended", "all"].map((x) => { const o = el("option", { value: x }, x === "open" ? "not ended" : x); o.selected = x === caseFilter.state; return o; })),
+      el("select", { name: "step" }, ["", ...steps].map((x) => { const o = el("option", { value: x }, x || "every step"); o.selected = x === caseFilter.step; return o; })),
+      el("input", { name: "text", placeholder: "Case, key or tenant…", value: caseFilter.text }),
+      el("span", { class: "meta", id: "p-count" }));
+    $("proc-main").replaceChildren(
+      el("div", { class: "ptitle" }, el("h3", {}, p.name), versions, windows, el("span", { class: "meta", id: "p-meta" })),
+      el("div", { class: "flow", id: "p-flow" }),
+      el("div", { class: "tabs" }, tab("cases", "Cases"), tab("incidents", "Incidents"), tab("statistics", "Statistics")),
+      filter,
+      el("div", { id: "p-body" }));
+  }
+  const acting = p.acting?.senderIdentity ? `acts as ${p.acting.senderIdentity}` : `acts as process:${p.name}`;
+  const counting = procs.read < procs.head ? ` · counting the log: ${procs.read} of ${procs.head}` : "";
+  $("p-meta").textContent = `registered ${time(v.registeredAt)} by ${short(v.key)} · ${acting}${p.removed ? " · removed" : ""}${counting}`;
+  $("p-flow").replaceChildren(flow(v));
+  const body = openCase ? caseView() : procTab === "incidents" ? incidentsView(p) : procTab === "statistics" ? statisticsView(v) : casesView();
+  $("p-body").replaceChildren(...[body].flat());
+}
+
+function procChanged(ev) {
+  const t = ev.target;
+  if (t.name === "version") { procVersion = Number(t.value); caseFilter.step = ""; }
+  else if (t.name === "window") procWindow = t.value;
+  else if (t.name === "state") caseFilter.state = t.value;
+  else if (t.name === "step") caseFilter.step = t.value;
+  else return;
+  loadProcesses();
+}
+
+let typingTimer = null;
+function procTyped(ev) {
+  if (ev.target.name !== "text") return;
+  caseFilter.text = ev.target.value;
+  clearTimeout(typingTimer);
+  typingTimer = setTimeout(async () => { await loadCases(); drawProcesses(); }, 250);
+}
+
+// ---- the diagram, left to right ----
+const SW = 156, SH = 58, COL = 250, ROW = 96, PAD = 30;
+
+/** The paths out of a step: where to, and a label for all but the plain `next`. */
+function exits(s) {
+  const out = [];
+  const add = (to, label, alt) => to && out.push({ to, label, alt });
+  switch (s.kind) {
+    case "command": add(s.next); for (const [code, to] of Object.entries(s.rejected ?? {})) add(to, `rejected ${code}`, true); break;
+    case "wait": add(s.next); add(s.onTimeout, "timeout", true); break;
+    case "timer": add(s.next); break;
+    case "decide": for (const w of s.when ?? []) add(w.next, w.if); add(s.otherwise, "otherwise"); break;
+    case "query": for (const x of s.paths ?? []) add(x.next, `= ${JSON.stringify(x.value)}`); add(s.otherwise, "otherwise", true); break;
+  }
+  return out;
+}
+
+/** Ranks (columns) and rows: a longest-path layering from the start, back edges left out. */
+function layout(model) {
+  const steps = model.steps, index = new Map(steps.map((s, i) => [s.name, i]));
+  const out = new Map([["", steps.length ? [{ to: steps[0].name }] : []], ...steps.map((s) => [s.name, exits(s)])]);
+  const back = new Set(), order = [], seen = new Set(), stack = new Set();
+  const dfs = (n) => {
+    seen.add(n); stack.add(n);
+    for (const e of out.get(n) ?? []) {
+      if (!index.has(e.to)) continue;
+      if (stack.has(e.to)) back.add(`${n}>${e.to}`);
+      else if (!seen.has(e.to)) dfs(e.to);
+    }
+    stack.delete(n); order.push(n);
+  };
+  dfs("");
+  for (const s of steps) if (!seen.has(s.name)) dfs(s.name);
+  const rank = new Map([["", 0]]);
+  for (const n of order.reverse()) for (const e of out.get(n) ?? []) {
+    if (!index.has(e.to) || back.has(`${n}>${e.to}`)) continue;
+    rank.set(e.to, Math.max(rank.get(e.to) ?? 0, (rank.get(n) ?? 0) + 1));
+  }
+  const cols = [];
+  for (const s of steps) { const r = rank.get(s.name) ?? 1; (cols[r] ??= []).push(s.name); }
+  cols[0] = [""];
+  // Two sweeps: each step near the middle of the steps leading to it.
+  const preds = new Map();
+  for (const [n, es] of out) for (const e of es) if (!back.has(`${n}>${e.to}`)) (preds.get(e.to) ?? preds.set(e.to, []).get(e.to)).push(n);
+  const row = new Map();
+  for (let sweep = 0; sweep < 2; sweep++) for (const col of cols.filter(Boolean)) {
+    col.forEach((n, i) => row.set(n, row.has(n) ? row.get(n) : i));
+    const mean = (n) => { const ps = (preds.get(n) ?? []).filter((p) => row.has(p)); return ps.length ? ps.reduce((a, p) => a + row.get(p), 0) / ps.length : row.get(n); };
+    col.sort((a, b) => mean(a) - mean(b) || (index.get(a) ?? -1) - (index.get(b) ?? -1));
+    col.forEach((n, i) => row.set(n, i - (col.length - 1) / 2));
+  }
+  return { out, back, rank, row, cols: cols.length };
+}
+
+function flow(v) {
+  const model = v.model, { out, back, rank, row, cols } = layout(model);
+  const rows = [...row.values()];
+  const minRow = Math.min(0, ...rows), maxRow = Math.max(0, ...rows);
+  // Each edge: to the next column directly; over the top on a lane of its own when it skips
+  // columns; under the bottom when it goes back.
+  // A long edge between steps of the lower rows runs under the bottom, so it crosses no step.
+  const edgeList = [];
+  let over = 0, under = 0;
+  for (const [n, es] of out) for (const e of es) {
+    if (!model.steps.some((s) => s.name === e.to)) continue;
+    const isBack = back.has(`${n}>${e.to}`);
+    const long = (rank.get(e.to) ?? 0) - (rank.get(n) ?? 0) > 1;
+    const low = (row.get(n) ?? 0) + (row.get(e.to) ?? 0) > 0;
+    const kind = isBack || (long && low) ? "under" : long ? "over" : "next";
+    edgeList.push({ from: n, ...e, back: isBack, kind, lane: kind === "over" ? over++ : kind === "under" ? under++ : 0 });
+  }
+  const LANE = 16;
+  const width = PAD * 2 + (cols - 1) * COL + SW;
+  const top = PAD + 10 + over * LANE, bottom = top + (maxRow - minRow) * ROW + SH;
+  const height = bottom + 34 + under * LANE + 26;
+  const pos = (n) => ({ x: PAD + (rank.get(n) ?? 0) * COL, y: top + ((row.get(n) ?? 0) - minRow) * ROW });
+  const svg = el("svg:svg", { width, height, viewBox: `0 0 ${width} ${height}` },
+    el("svg:defs", {}, el("svg:marker", { id: "arrow", viewBox: "0 0 10 10", refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: "auto-start-reverse" }, el("svg:path", { d: "M0,0 L10,5 L0,10 z" }))));
+  const edges = el("svg:g"), labels = el("svg:g");
+  svg.append(edges);
+  const R = 8;
+  for (const e of edgeList) {
+    const a = pos(e.from), b = pos(e.to);
+    let d, lx, ly, anchor = "start", room = 15;
+    if (e.kind === "next") {
+      const fromX = e.from === "" ? a.x + 36 : a.x + SW;
+      const y1 = a.y + SH / 2, y2 = b.y + SH / 2, mid = (fromX + b.x) / 2;
+      d = `M${fromX},${y1} C${mid},${y1} ${mid},${y2} ${b.x},${y2}`;
+      lx = fromX + 6; ly = y1 - 6;
+    } else {
+      // Off the step's middle, a little apart per lane so lanes from one step do not overlap.
+      const shift = (e.lane % 4) * 8 - 12;
+      const x1 = a.x + SW / 2 + shift, x2 = b.x + SW / 2 + shift;
+      const [y1, y2, y] = e.kind === "over" ? [a.y, b.y, top - 12 - e.lane * LANE] : [a.y + SH, b.y + SH, bottom + 34 + e.lane * LANE];
+      const dy = e.kind === "over" ? R : -R, dir = x2 > x1 ? 1 : -1;
+      d = `M${x1},${y1} L${x1},${y + dy} Q${x1},${y} ${x1 + dir * R},${y} L${x2 - dir * R},${y} Q${x2},${y} ${x2},${y + dy} L${x2},${y2}`;
+      lx = x1 + dir * (R + 4); ly = y - 4; room = 32;
+      if (dir < 0) anchor = "end";
+    }
+    edges.append(el("svg:path", { class: `edge${e.back ? " back" : ""}${e.alt ? " alt" : ""}`, d, "marker-end": "url(#arrow)" }, el("svg:title", {}, `${e.from || "start"} → ${e.to}${e.label ? `: ${e.label}` : ""}`)));
+    if (e.label) labels.append(el("svg:text", { class: "elabel", x: lx, y: ly, "text-anchor": anchor }, el("svg:title", {}, e.label), fit(e.label, room)));
+  }
+  // The start: the event that starts a case.
+  const s0 = pos("");
+  svg.append(el("svg:g", {},
+    el("svg:circle", { class: "start", cx: s0.x + 18, cy: s0.y + SH / 2, r: 16 }),
+    el("svg:text", { x: s0.x, y: s0.y + SH / 2 + 32, class: "sub" }, fit(`on ${model.start.on}`, 30)),
+    el("svg:text", { x: s0.x, y: s0.y + SH / 2 + 48, class: "sub" }, `${v.started} started, last ${procWindow}`)));
+  for (const s of model.steps) {
+    const { x, y } = pos(s.name), st = v.steps[s.name] ?? { now: {} };
+    const open = (st.now.running ?? 0) + (st.now.waiting ?? 0), bad = st.now.incident ?? 0;
+    const cls = `step${s.kind === "end" ? " end" : ""}${bad ? " bad" : ""}${caseFilter.step === s.name ? " sel" : ""}`;
+    const g = el("svg:g", { class: cls, transform: `translate(${x},${y})`, onclick: () => { caseFilter.step = caseFilter.step === s.name ? "" : s.name; procTab = "cases"; openCase = null; procFrame = ""; loadProcesses(); } });
+    g.append(el("svg:title", {}, `${s.name} (${s.kind}): click to list its cases`));
+    if (s.kind === "decide") g.append(el("svg:polygon", { class: "shape", points: `${SW / 2},0 ${SW},${SH / 2} ${SW / 2},${SH} 0,${SH / 2}` }));
+    else g.append(el("svg:rect", { class: "shape", width: SW, height: SH, rx: s.kind === "end" ? SH / 2 : 8 }));
+    let sub = "";
+    if (s.kind === "command") sub = s.command;
+    else if (s.kind === "wait") sub = `${s.event}${s.timeoutMs ? ` · ${duration(s.timeoutMs)}` : ""}`;
+    else if (s.kind === "timer") sub = s.afterMs ? `after ${duration(s.afterMs)}` : `at ${s.at}`;
+    else if (s.kind === "query") sub = `? ${s.query}`;
+    else if (s.kind === "end") sub = `${v.ended[s.name] ?? 0} ended, last ${procWindow}`;
+    const clock = s.kind === "wait" || s.kind === "timer";
+    if (clock) g.append(el("svg:circle", { class: "icon", cx: 15, cy: 18, r: 6.5 }), el("svg:path", { class: "icon", d: "M15,14 L15,18 L18,20" }));
+    const tx = s.kind === "decide" ? SW / 2 : clock ? 27 : 10;
+    const anchor = s.kind === "decide" ? "middle" : "start";
+    g.append(el("svg:text", { x: tx, y: s.kind === "decide" ? SH / 2 + 4 : 22, "text-anchor": anchor, "font-weight": 600 }, fit(s.name, s.kind === "decide" ? 14 : 18)));
+    if (sub && s.kind !== "decide") g.append(el("svg:text", { class: "sub", x: 10, y: 42 }, fit(sub, 24)));
+    const badge = (n, x, cls, title) => el("svg:g", { class: `badge ${cls}`, transform: `translate(${x},-9)` }, el("svg:title", {}, title),
+      el("svg:rect", { width: 12 + String(n).length * 7, height: 18, rx: 9 }), el("svg:text", { x: 6, y: 13 }, n));
+    if (bad) g.append(badge(bad, SW - 22 - String(bad).length * 7, "bad", `${bad} with an incident`));
+    if (open) g.append(badge(open, SW - (bad ? 48 + String(bad).length * 7 : 18) - String(open).length * 7, "", `${open} here now`));
+    svg.append(g);
+  }
+  svg.append(labels);
+  const cancelled = v.ended.cancelled ?? 0;
+  if (cancelled) svg.append(el("svg:text", { class: "sub", x: PAD, y: height - 8 }, `${cancelled} cancelled by an operator, last ${procWindow}`));
+  return svg;
+}
+
+// ---- the tabs ----
+function casesView() {
+  if (!caseList) return el("div", { class: "meta" }, "Loading…");
+  $("p-count").textContent = `${caseList.cases.length} of ${caseList.total}${caseFilter.state === "ended" || caseFilter.state === "all" ? ` · the newest ${procs.endedKept} ended per process are kept` : ""}`;
+  const rows = [el("tr", {}, ["Case", "Tenant", "Version", "State", "Step", "There since", "Started"].map((h) => el("th", {}, h)))];
+  for (const c of caseList.cases) rows.push(el("tr", {},
+    el("td", {}, el("a", { href: "#", onclick: (ev) => { ev.preventDefault(); showCase(c); } }, c.id)),
+    el("td", {}, c.tenant), el("td", {}, `v${c.version}`), el("td", {}, stateView(c.state)),
+    el("td", {}, c.step, c.incident ? [" · ", el("span", { class: "code" }, c.incident.code)] : null),
+    el("td", {}, c.state === "ended" ? time(c.lastAt) : ago(c.reachedAt)), el("td", {}, time(c.startedAt))));
+  if (!caseList.cases.length) rows.push(el("tr", {}, el("td", { colspan: 7, class: "meta" }, "No case matches.")));
+  return el("table", {}, rows);
+}
+
+/** The CLI commands that resolve an incident, signed with an operator's key. */
+function resolving(c) {
+  const at = `${procs.addr} <key> ${c.process} ${c.id} --tenant ${c.tenant}`;
+  return el("div", { class: "resolve" },
+    el("pre", {}, `# run the step again\nkernable processes retry ${at}\n# go on to the step's next step\nkernable processes skip ${at}\n# end the case\nkernable processes cancel ${at}`));
+}
+
+function incidentsView(p) {
+  const shown = (incidents?.cases ?? []).filter((c) => c.process === p.name);
+  if (!shown.length) return el("div", { class: "empty" }, "No incidents.");
+  return shown.map((c) => el("div", { class: "card incident" },
+    el("div", { class: "top" }, el("a", { href: "#", class: "t", onclick: (ev) => { ev.preventDefault(); showCase(c); } }, c.id), el("span", { class: "meta" }, `${c.tenant} · v${c.version} · step ${c.step}`), el("span", { class: "when" }, ago(c.lastAt))),
+    el("div", {}, el("span", { class: "code" }, c.incident.code), " ", c.incident.message),
+    resolving(c)));
+}
+
+function statisticsView(v) {
+  const rows = [el("tr", {}, ["Step", "Kind", "Now", "Entered", "Left", "Median", "95th percentile", "Timeouts", "Incidents"].map((h) => el("th", {}, h)))];
+  for (const s of v.model.steps) {
+    const st = v.steps[s.name];
+    const now = Object.entries(st.now).map(([k, n]) => `${n} ${k}`).join(", ") || "0";
+    rows.push(el("tr", {}, el("td", {}, el("b", {}, s.name)), el("td", {}, s.kind), el("td", {}, now), el("td", {}, st.entered), el("td", {}, s.kind === "end" ? "–" : st.left),
+      el("td", {}, s.kind === "end" ? "–" : duration(st.medianMs)), el("td", {}, s.kind === "end" ? "–" : duration(st.p95Ms)), el("td", {}, st.timeouts || "–"), el("td", {}, st.incidents ? el("span", { class: "code" }, st.incidents) : "–")));
+  }
+  const ended = Object.entries(v.ended).map(([end, n]) => `${n} at ${end}`).join(", ") || "none";
+  const open = Object.values(v.steps).reduce((m, s) => m + Object.values(s.now).reduce((a, b) => a + b, 0), 0);
+  return [
+    el("p", { class: "meta" }, `Version ${v.version}, last ${procWindow}: ${v.started} started · ended ${ended} · ${open} not ended now. Durations are from reaching a step until it completed, exact to within 10%.`),
+    el("table", {}, rows)];
+}
+
+// ---- one case ----
+async function showCase(c) {
+  openCase = { tenant: c.tenant, process: c.process, id: c.id };
+  caseData = null;
+  if (c.process !== procSel) { procSel = c.process; procVersion = null; }
+  await loadCase();
+  drawProcesses();
+}
+
+function linkTo(l) {
+  const where = `${l.aggregateType} ${l.aggregateId}`;
+  return el("a", { href: "#", onclick: (ev) => { ev.preventDefault(); openStream({ tenant: l.tenant, domain: l.domain, aggregateType: l.aggregateType, aggregateId: l.aggregateId }); } }, `${l.domain}.${where}`);
+}
+
+/** One case event in a sentence, with what it links to. */
+function caseLine(e) {
+  let p = {};
+  try { p = JSON.parse(e.payload); } catch {}
+  const l = e.link;
+  switch (e.type) {
+    case "ProcessStarted": return ["started on version ", el("b", {}, p.version), " by ", el("b", {}, p.event), l ? [" of ", linkTo(l), ` (position ${l.position})`] : null];
+    case "StepReached": return ["reached ", el("b", {}, p.step), ` (${p.kind})`];
+    case "CommandSent": return ["sent ", el("b", {}, p.command), l ? [" to ", linkTo(l), " · ", l.outcome === "rejected" ? el("span", { class: "code" }, `rejected ${l.code}`) : l.outcome] : null];
+    case "StepCompleted": return ["completed ", el("b", {}, p.step), `: ${p.outcome}${p.code ? ` ${p.code}` : ""}${p.value !== undefined ? ` ${JSON.stringify(p.value)}` : ""}`, l ? [" by ", el("b", {}, l.type), " of ", linkTo(l)] : null, p.next ? [" → ", el("b", {}, p.next)] : null];
+    case "TimerSet": return ["timer for ", el("b", {}, p.step), ` set to ${time(p.at)}`];
+    case "TimerFired": return ["timer of ", el("b", {}, p.step), " fired"];
+    case "EventKept": return ["kept ", el("b", {}, p.event), " for a later wait", l ? [" from ", linkTo(l)] : null];
+    case "IncidentRaised": return [el("span", { class: "code" }, `incident ${p.code}`), " at ", el("b", {}, p.step), `: ${p.message}`];
+    case "IncidentResolved": return ["resolved: ", el("b", {}, p.action), " by ", el("span", { class: "mono" }, short(p.by))];
+    case "ProcessEnded": return ["ended at ", el("b", {}, p.end), p.by ? [" by ", el("span", { class: "mono" }, short(p.by))] : null];
+    default: return [e.type];
+  }
+}
+
+function caseView() {
+  const back = el("a", { href: "#", onclick: (ev) => { ev.preventDefault(); openCase = null; drawProcesses(); } }, "← all cases");
+  if (!caseData) return [back, el("div", { class: "meta" }, "Loading…")];
+  if (caseData.error) return [back, el("div", { class: "err" }, caseData.error)];
+  const shown = (caseList?.cases ?? []).concat(incidents?.cases ?? []).find((c) => c.id === caseData.id && c.tenant === caseData.tenant);
+  const head = el("div", { class: "ptitle" }, back, el("h3", {}, `case ${caseData.id}`), el("span", { class: "meta" }, `tenant ${caseData.tenant}`), shown ? stateView(shown.state) : null,
+    el("a", { href: "#", onclick: (ev) => { ev.preventDefault(); openStream({ tenant: caseData.tenant, domain: "process", aggregateType: caseData.process, aggregateId: caseData.id }); } }, "its stream in History"));
+  const cards = caseData.events.map((e) => el("div", { class: `card${e.type === "IncidentRaised" ? " incident" : e.type === "ProcessEnded" ? " ended" : ""}` },
+    el("div", { class: "top" }, el("span", { class: "v" }, `v${e.version}`), el("span", {}, caseLine(e)), el("span", { class: "when" }, time(e.createdAt))),
+    el("details", {}, el("summary", { class: "meta" }, e.type), payloadView(e.payload, null))));
+  const resolve = shown?.state === "incident" ? [el("h2", {}, "Resolve"), resolving({ ...shown })] : [];
+  return [head, ...resolve, ...cards];
+}
+
 // ---- refresh ----
 async function refresh() {
   try {
@@ -689,6 +1064,7 @@ document.querySelectorAll("nav button").forEach((b) => b.addEventListener("click
   if (b.dataset.view === "events" && tail === null) search();
   if (b.dataset.view === "rejected") loadRejections();
   if (b.dataset.view === "connections") { loadTrend(); loadParked(); }
+  if (b.dataset.view === "processes") loadProcesses();
   refresh();
 }));
 $("filter").addEventListener("input", drawStreams);
@@ -697,12 +1073,15 @@ $("older").addEventListener("click", loadOlder);
 $("reject-filter").addEventListener("input", drawRejections);
 $("live").addEventListener("change", () => ($("live").checked ? search() : drawFound()));
 window.addEventListener("resize", () => state && drawMap());
+$("proc-main").addEventListener("change", procChanged);
+$("proc-main").addEventListener("input", procTyped);
 refresh();
 setInterval(refresh, 1000);
 // Under `kernable demo` only: the way back to the Stage.
 fetch("/api/demo").then((r) => { if (r.ok) $("stage").hidden = false; }).catch(() => {});
 setInterval(() => document.querySelector("nav button.on").dataset.view === "history" && loadStreams(), 5000);
 setInterval(() => document.querySelector("nav button.on").dataset.view === "rejected" && loadRejections(), 5000);
+setInterval(() => document.querySelector("nav button.on").dataset.view === "processes" && loadProcesses(), 2000);
 setInterval(() => { if (document.querySelector("nav button.on").dataset.view === "connections") { loadTrend(); loadParked(); } }, 5000);
 </script>
 </body>

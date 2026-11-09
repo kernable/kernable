@@ -59,7 +59,7 @@ there is no separate event per use.
 
 ## Processes
 
-A business process the kernel runs sends commands like a service
+A [business process](../concepts/processes) the kernel runs sends commands like a service
 does, so it needs an identity too. The kit creates one for each process on its first
 registration: in the platform tenant, kind `process`, named after the process
 (`shop.fulfilment`), with an API key, and tells the kernel to act as that identity.

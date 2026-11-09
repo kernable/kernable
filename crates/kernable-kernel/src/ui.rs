@@ -11,7 +11,12 @@
 //! - `GET /api/rejections?limit=`: the most recently received rejected commands, with why;
 //! - `GET /api/parked?limit=`: every listener's parked events, not only the first few that
 //!   `/api/state` shows;
-//! - `GET /api/trend`: the head and every listener's position over the last hour.
+//! - `GET /api/trend`: the head and every listener's position over the last hour;
+//! - `GET /api/processes?window=hour|day|week`: the business processes, each version with its
+//!   model, the cases at each step now and the statistics over the window (`process_view.rs`);
+//! - `GET /api/cases?process=&version=&step=&state=&text=&limit=`: the cases that match;
+//! - `GET /api/case?tenant=&process=&id=`: one case's events, each with what it links to: the
+//!   command it sent (its aggregate and outcome) or the event that moved it.
 //!
 //! It never decrypts the vault: a vault field shows its subject, whether it is secret, or that
 //! it was erased. Snapshot states are not shown either, as they may hold personal values.
@@ -22,7 +27,13 @@ use kernable_core::proto::{Event, RequestContext};
 use kernable_store::StreamId;
 use serde_json::{Value, json};
 
-use crate::{BoxError, Kernel, http::reply, now_ms};
+use crate::{
+    BoxError, Kernel,
+    http::reply,
+    now_ms,
+    process_engine::DOMAIN,
+    process_view::{CaseFilter, ENDED, Window},
+};
 
 const PAGE: &str = include_str!("ui.html");
 /// The logo, for light and for dark backgrounds.
@@ -76,6 +87,9 @@ pub(crate) fn respond(kernel: &Kernel, request: &[u8]) -> Vec<u8> {
         "/api/rejections" => rejections(kernel, &params),
         "/api/parked" => parked(kernel, &params),
         "/api/trend" => Ok(kernel.trend.view()),
+        "/api/processes" => processes(kernel, &params),
+        "/api/cases" => cases(kernel, &params),
+        "/api/case" => case(kernel, &params),
         _ => return reply("404 Not Found", "text/plain", b"not found\n"),
     };
     match result {
@@ -458,6 +472,110 @@ fn parked(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, Bo
         }
     }
     Ok(json!({ "parked": shown, "total": total, "limit": limit }))
+}
+
+/// The processes with their statistics; `addr` is where the CLI reaches this kernel, for the
+/// commands that resolve incidents.
+fn processes(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, BoxError> {
+    let window = Window::parse(params.get("window").map_or("", String::as_str))?;
+    let mut out = kernel.process_view.processes(kernel, window)?;
+    out["addr"] = json!(kernel.config.listen);
+    out["endedKept"] = json!(ENDED);
+    Ok(out)
+}
+
+/// How many cases `/api/cases` returns at most, and by default.
+const CASES_MAX: usize = 1_000;
+const CASES_DEFAULT: usize = 200;
+
+fn cases(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, BoxError> {
+    let param = |name: &str| {
+        params
+            .get(name)
+            .map(|v| v.trim().to_owned())
+            .unwrap_or_default()
+    };
+    let version = match param("version") {
+        v if v.is_empty() => None,
+        v => Some(v.parse().map_err(|_| "version: not a number")?),
+    };
+    let limit = match param("limit") {
+        v if v.is_empty() => CASES_DEFAULT,
+        v => v.parse().map_err(|_| "limit: not a number")?,
+    }
+    .clamp(1, CASES_MAX);
+    let filter = CaseFilter {
+        process: param("process"),
+        version,
+        step: param("step"),
+        state: param("state"),
+        text: param("text"),
+    };
+    kernel.process_view.cases(kernel, &filter, limit)
+}
+
+/// One case's events, each with `link`: for `CommandSent` the command's aggregate and its
+/// outcome; for an event that names a log position (what started or moved the case, or an
+/// event kept for it) that event's type and aggregate.
+fn case(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, BoxError> {
+    let param = |name: &str| params.get(name).cloned().unwrap_or_default();
+    let (tenant, process, id) = (param("tenant"), param("process"), param("id"));
+    let events = kernel.store.read_stream(&tenant, DOMAIN, &process, &id)?;
+    let mut out = Vec::with_capacity(events.len());
+    for e in &events {
+        let payload: Value = serde_json::from_slice(&e.payload).unwrap_or(Value::Null);
+        let mut link = Value::Null;
+        if let Some(command_id) = payload["commandId"].as_str()
+            && e.event_type == "CommandSent"
+            && let Some(p) = kernel.store.command(command_id)?
+        {
+            let c = p.command;
+            let outcome = kernel.store.result(command_id)?.and_then(|r| r.outcome);
+            let (outcome, code) = match outcome {
+                Some(kernable_core::proto::command_result::Outcome::Committed(_)) => {
+                    ("committed", String::new())
+                }
+                Some(kernable_core::proto::command_result::Outcome::Rejected(r)) => {
+                    ("rejected", r.code)
+                }
+                _ => ("pending", String::new()),
+            };
+            link = json!({
+                "kind": "command",
+                "commandId": command_id,
+                "type": c.command_type,
+                "tenant": c.tenant_id,
+                "domain": c.domain,
+                "aggregateType": c.aggregate_type,
+                "aggregateId": c.aggregate_id,
+                "outcome": outcome,
+                "code": code,
+            });
+        } else if let Some(position) = payload["position"]
+            .as_u64()
+            .or_else(|| payload["committedAt"].as_u64())
+            .filter(|p| *p > 0)
+            && let Some(at) = kernel
+                .store
+                .read_all(position - 1, 1)?
+                .into_iter()
+                .find(|x| x.global_position == position)
+        {
+            link = json!({
+                "kind": "event",
+                "position": position,
+                "type": format!("{}.{}", at.domain, at.event_type),
+                "tenant": at.tenant_id,
+                "domain": at.domain,
+                "aggregateType": at.aggregate_type,
+                "aggregateId": at.aggregate_id,
+            });
+        }
+        let mut shown = event(e);
+        shown["link"] = link;
+        out.push(shown);
+    }
+    Ok(json!({ "tenant": tenant, "process": process, "id": id, "events": out }))
 }
 
 fn event(e: &Event) -> Value {

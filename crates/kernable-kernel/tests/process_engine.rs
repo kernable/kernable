@@ -1129,3 +1129,132 @@ async fn a_process_acts_as_whom_act_says() {
         "{listed}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_ui_shows_each_step_its_cases_their_history_and_incidents() {
+    let ui = free_addr();
+    let env = start_custom("pe-ui", |config, _| {
+        config.ui_listen = Some(ui.clone());
+    })
+    .await;
+    env.kernel.grant(app_grant()).unwrap();
+    let shop = shop();
+    let k = shop.connect(&env.dir, &env.addr).await;
+    register(&env.addr, &example(60_000)).await.unwrap();
+    let json = |response: String| -> Value {
+        let (head, body) = response.split_once("\r\n\r\n").unwrap();
+        assert!(head.starts_with("HTTP/1.1 200 OK"), "{head} {body}");
+        serde_json::from_str(body).unwrap()
+    };
+
+    // One case waits for its payment, one ended, one stopped at an incident.
+    submit_order(&k, "u1", 100).await;
+    until_reached(&env.store, "u1#1", "paid").await;
+    submit_order(&k, "u2", 100).await;
+    until_reached(&env.store, "u2#1", "paid").await;
+    pay(&k, "u2").await;
+    assert_eq!(until_ended(&env.store, "u2#1").await, "done");
+    *shop.ship_rejects.lock().unwrap() = Some("warehouse_closed".into());
+    submit_order(&k, "u3", 100).await;
+    until_reached(&env.store, "u3#1", "paid").await;
+    pay(&k, "u3").await;
+    until_case(&env.store, "u3#1", "an incident", |e| {
+        e.event_type == "IncidentRaised"
+    })
+    .await;
+
+    let all = json(get(&ui, "/api/processes?window=hour").await);
+    assert_eq!(all["window"], "hour");
+    assert_eq!(all["read"], all["head"], "{all}");
+    assert_eq!(all["addr"], env.addr.as_str());
+    let p = &all["processes"][0];
+    assert_eq!(p["name"], PROCESS);
+    let v = &p["versions"][0];
+    assert_eq!(v["version"], 1);
+    assert_eq!(v["model"]["steps"][0]["name"], "confirm");
+    assert_eq!(v["started"], 3);
+    assert_eq!(v["ended"], json!({"done": 1}));
+    assert_eq!(v["steps"]["paid"]["now"], json!({"waiting": 1}));
+    assert_eq!(v["steps"]["ship"]["now"], json!({"incident": 1}));
+    assert_eq!(v["steps"]["confirm"]["entered"], 3);
+    assert_eq!(v["steps"]["confirm"]["left"], 3);
+    assert!(v["steps"]["confirm"]["medianMs"].is_i64());
+    assert_eq!(v["steps"]["paid"]["left"], 2);
+    assert_eq!(v["steps"]["ship"]["incidents"], 1);
+    assert_eq!(v["steps"]["done"]["entered"], 1);
+    assert!(
+        json(
+            get(&ui, "/api/processes?window=month")
+                .await
+                .replace("500 Internal Server Error", "200 OK")
+        )["error"]
+            .as_str()
+            .unwrap()
+            .contains("not hour, day or week")
+    );
+
+    // The lists: open cases, the incidents, a step's cases.
+    let open = json(get(&ui, &format!("/api/cases?process={PROCESS}&state=open")).await);
+    assert_eq!(open["total"], 2);
+    let incidents = json(get(&ui, "/api/cases?state=incident").await);
+    assert_eq!(incidents["total"], 1);
+    let incident = &incidents["cases"][0];
+    assert_eq!(incident["id"], "u3#1");
+    assert_eq!(incident["step"], "ship");
+    assert_eq!(incident["incident"]["code"], "warehouse_closed");
+    let paid = json(
+        get(
+            &ui,
+            &format!("/api/cases?process={PROCESS}&step=paid&version=1"),
+        )
+        .await,
+    );
+    assert_eq!(paid["cases"][0]["id"], "u1#1");
+    assert_eq!(paid["total"], 1);
+    let ended = json(get(&ui, "/api/cases?state=ended&text=u2").await);
+    assert_eq!(ended["cases"][0]["step"], "done");
+
+    // A case's history links to the commands it sent and the events that moved it.
+    let case = json(
+        get(
+            &ui,
+            &format!("/api/case?tenant=t1&process={PROCESS}&id=u2%231"),
+        )
+        .await,
+    );
+    let events = case["events"].as_array().unwrap();
+    assert_eq!(events[0]["type"], "ProcessStarted");
+    assert_eq!(events[0]["link"]["kind"], "event");
+    assert_eq!(events[0]["link"]["aggregateId"], "u2");
+    let sent: Vec<&Value> = events
+        .iter()
+        .filter(|e| e["type"] == "CommandSent")
+        .map(|e| &e["link"])
+        .collect();
+    assert_eq!(sent.len(), 2, "confirm and ship");
+    assert_eq!(sent[0]["type"], "Confirm");
+    assert_eq!(sent[0]["aggregateId"], "u2");
+    assert_eq!(sent[0]["outcome"], "committed");
+    let paid = events
+        .iter()
+        .find(|e| {
+            e["type"] == "StepCompleted"
+                && serde_json::from_str::<Value>(e["payload"].as_str().unwrap()).unwrap()["step"]
+                    == "paid"
+        })
+        .unwrap();
+    assert_eq!(paid["link"]["type"], "payments.PaymentReceived");
+
+    // Resolved, the incident leaves the lists and the counts.
+    *shop.ship_rejects.lock().unwrap() = None;
+    resolve(&env.addr, "u3#1", "retry").await.unwrap();
+    assert_eq!(until_ended(&env.store, "u3#1").await, "done");
+    let all = json(get(&ui, "/api/processes?window=day").await);
+    let v = &all["processes"][0]["versions"][0];
+    assert_eq!(v["steps"]["ship"]["now"], json!({}));
+    assert_eq!(v["ended"], json!({"done": 2}));
+    assert_eq!(
+        json(get(&ui, "/api/cases?state=incident").await)["total"],
+        0
+    );
+}

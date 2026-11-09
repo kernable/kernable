@@ -78,6 +78,23 @@ def _(data, evt):
 # endregion erased
 
 
+# region fulfilled
+@orders_readmodel.on("OrderPaid")
+def _(data, evt):
+    orders[evt.aggregate_id]["status"] = "paid"
+
+
+@orders_readmodel.on("OrderShipped")
+def _(data, evt):
+    orders[evt.aggregate_id]["status"] = "shipped"
+
+
+@orders_readmodel.on("OrderCancelled")
+def _(data, evt):
+    orders[evt.aggregate_id].update(status="cancelled", cancelled=data["reason"])
+# endregion fulfilled
+
+
 # region run
 threading.Thread(target=k.listener(customers_readmodel).run, daemon=True).start()
 k.listener(orders_readmodel).run()

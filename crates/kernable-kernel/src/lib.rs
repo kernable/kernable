@@ -38,6 +38,7 @@ pub mod node;
 pub mod partitions;
 pub mod process_engine;
 mod process_model;
+mod process_view;
 mod processes;
 mod queue;
 mod replays;
@@ -266,6 +267,8 @@ pub struct Kernel {
     processes: processes::Processes,
     /// Runs the processes' cases (`process_engine.rs`).
     engine: process_engine::Engine,
+    /// What the UI shows of the cases (`process_view.rs`).
+    process_view: process_view::ProcessView,
     queue: queue::Queue,
     metrics: metrics::Metrics,
     /// Listener positions over the last hour, for the UI.
@@ -441,6 +444,7 @@ impl Kernel {
             memberships,
             processes,
             engine: Default::default(),
+            process_view: Default::default(),
             queue,
             metrics: metrics::Metrics::default(),
             trend: trend::Trend::default(),

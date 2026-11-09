@@ -5,6 +5,7 @@ Use this page to see what a running kernel is doing: in a browser while you deve
 | Want to | Use |
 |---|---|
 | see services, aggregates, listeners and their state, or one aggregate's history | the UI (`--ui-listen`) |
+| see where the cases of a business process stand, and resolve its incidents | the UI's **Processes**, `kernable processes` |
 | gate traffic and deploys | `GET /ready` (`--metrics-listen`) |
 | alert and graph | `GET /metrics` (`--metrics-listen`) |
 | list registrations with the kernel stopped or running | `kernable services`, `kernable workers`, `kernable listeners` |
@@ -18,6 +19,12 @@ With `--ui-listen` (on by default with `--dev`, at http://127.0.0.1:7234), the k
 - **Events:** the whole log, newest first, filtered by event type (any part, any case), tenant, aggregate id, command or correlation id, and text in the payload; **Older** goes on further back. With **live** on, new matching events appear at the top as they are committed. Click an event for its payload and context (vault fields show as `vault`), or its aggregate to open its history. One search reads at most 20,000 events, so on a large log it may stop early and say how far back it got.
 - **Rejected:** the 200 most recently received commands that were refused, newest first: the command, its aggregate, the code and the message, and for a kernel rejection the unique key that is taken or the requirement that did not hold. Filter them by any of these; click one for its payload and context. Commands the kernel refuses before it accepts them (a bad signature, a missing grant) are not stored and do not show here; the kernel's log has them.
 - **History:** any aggregate's events in order, each with the command that caused it, its sender and correlation. Vault fields show as `personal · <subject>`, `secret` or `erased`; the UI never decrypts the vault, and it does not show snapshot states, which may hold personal values.
+- **Processes:** each [business process](../concepts/processes) as a diagram from left to right, one per version: its steps with the cases there now on each (incidents in red), the paths between them, and how many cases started and ended at each end over the last hour, day or week. Click a step to list its cases. Below:
+  - **Cases**, filtered by state (running, waiting, incident, ended), step and case, key or tenant. A case opens as a timeline of its events: each step it reached, the commands it sent with their outcome, and the events that moved it, linked to those aggregates' histories.
+  - **Incidents**: every case that stopped, with its step, the rejection, and the commands that resolve it (`kernable processes retry|skip|cancel`). The UI only shows them: it has no login, so it changes nothing.
+  - **Statistics** per step: the cases there now, how many entered and left, the time spent (median and 95th percentile), timeouts and incidents.
+
+  The UI counts from the case events in the log, starting when you first open it: on a large log it says how far it has read until it has caught up. It keeps the running cases and the newest 1,000 ended ones per process, and its statistics for a week.
 
 The UI has no login, so it listens on a loopback address only; the kernel refuses to start with another address. Reach it on a server through an SSH tunnel:
 

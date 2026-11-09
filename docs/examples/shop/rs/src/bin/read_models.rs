@@ -65,6 +65,8 @@ async fn main() -> Result<(), BoxError> {
         items: serde_json::Map<String, serde_json::Value>,
         #[serde(skip_serializing_if = "Option::is_none")]
         confirmed_to: Option<Option<String>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cancelled: Option<String>,
     }
     let orders = Arc::new(Mutex::new(HashMap::<String, OrderRow>::new()));
 
@@ -81,6 +83,7 @@ async fn main() -> Result<(), BoxError> {
                     status: "draft".into(),
                     items: Default::default(),
                     confirmed_to: None,
+                    cancelled: None,
                 };
                 rows.lock().unwrap().insert(id, row);
                 async { Ok(()) }
@@ -144,6 +147,28 @@ async fn main() -> Result<(), BoxError> {
         async { Ok(()) }
     });
     // #endregion erased
+
+    // #region fulfilled
+    for (event_type, status) in [("OrderPaid", "paid"), ("OrderShipped", "shipped")] {
+        let rows = Arc::clone(&orders);
+        orders_readmodel.on(event_type, move |_: Value, evt, _ctx| {
+            rows.lock()
+                .unwrap()
+                .get_mut(&evt.aggregate_id)
+                .expect("placed")
+                .status = status.into();
+            async { Ok(()) }
+        });
+    }
+    let rows = Arc::clone(&orders);
+    orders_readmodel.on("OrderCancelled", move |data: Value, evt, _ctx| {
+        let mut rows = rows.lock().unwrap();
+        let row = rows.get_mut(&evt.aggregate_id).expect("placed");
+        row.status = "cancelled".into();
+        row.cancelled = data["reason"].as_str().map(str::to_owned);
+        async { Ok(()) }
+    });
+    // #endregion fulfilled
 
     // #region run
     let kernable = Kernable::new(Options::default())?;

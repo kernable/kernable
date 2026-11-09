@@ -179,7 +179,7 @@ Prints a process's model as registered, the newest version or `<version>`, as in
 kernable processes cases <store> <process> [--state running|waiting|incident|ended]
 ```
 
-Lists the cases of a process: tenant, case ID, state (running: a command sent or a query asked; waiting: for an event or a time; incident; ended) and the step it is at (or how it ended). Reads every event: an operator's tool until the UI shows cases.
+Lists the cases of a process: tenant, case ID, state (running: a command sent or a query asked; waiting: for an event or a time; incident; ended) and the step it is at (or how it ended). Reads every event, also with the kernel stopped; the UI's Processes view shows them live.
 
 ### `kernable processes case`
 

@@ -1,6 +1,6 @@
 # Processes
 
-Status: designed together 2026-11-09, not built. A business process is a flow across
+Status: v1 built 2026-11-09 (stages 1–4: models, engine, kit identities, UI views and docs). A business process is a flow across
 commands, events and queries ("an order is confirmed, paid within 3 days and shipped, else
 cancelled"), defined once, run by the kernel, and shown in the kernel's UI: its diagram, where
 each case stands, and statistics.
@@ -256,7 +256,10 @@ Decided 2026-11-09:
   with { senderTenant: platform, senderIdentity, senderSession: the key's ID }. Revoking that key
   stops the process at once: its commands are refused, the cases show incidents.
 
-## The UI's views (read-only)
+## The UI's views (read-only; built in stage 4)
+
+Built as the UI's Processes tab (`ui.html`), reading `/api/processes`, `/api/cases` and `/api/case` (`ui.rs`, `process_view.rs`): the view counts from the case events, following the log only while the UI is open, keeps the running cases and the newest 1,000 ended ones per process, and per-minute statistics for a week (durations in 10% buckets).
+
 
 Decided 2026-11-09:
 

@@ -1,6 +1,6 @@
 # Build a shop
 
-In nine parts you build a small shop on kernable: customers register and place orders, a service confirms every order by email, customers may only touch their own data, and a customer can have their personal data erased. Part 8 runs it as it would in production; part 9 adds accounts, sign-in and an HTTP API with kernable's kit.
+In ten parts you build a small shop on kernable: customers register and place orders, a service confirms every order by email, customers may only touch their own data, and a customer can have their personal data erased. Part 8 runs it as it would in production; part 9 adds accounts, sign-in and an HTTP API with kernable's kit, and part 10 a business process that ships paid orders and cancels unpaid ones.
 
 Every part shows the code in **TypeScript, Python and Rust**; pick one with the tabs, or mix them: part 5 is about exactly that.
 
@@ -17,6 +17,7 @@ Every part shows the code in **TypeScript, Python and Rust**; pick one with the 
 | [7. Personal data](./7-personal-data) | vault declarations, erasure | the vault, secrets, erasing a person |
 | [8. Operate](./8-operate) | a production setup | a key per service, an offline root key, rotation and revocation, mutual TLS, metrics, persistent read models, deploys |
 | [9. Accounts and sign-in](./9-sign-in) | `api`, the kit, a rule of the shop | accounts and sessions, tenants, groups, invitation links, a query's target, `Explain`, rules on data next to the kit |
+| [10. A business process](./10-process) | `fulfilment` | processes run by the kernel: cases, waits with a timeout, incidents, the UI's diagram and statistics |
 
 From part 2 on, the snippets show what a part adds to a file, without its imports. The complete files, as they are at the end, are in the repository under `docs/examples/shop/ts`, `docs/examples/shop/py` and `docs/examples/shop/rs`; kernable's tests run them for every part, in every language.
 

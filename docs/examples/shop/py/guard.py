@@ -6,6 +6,8 @@ from domain import shop_domain
 
 # region guard
 SERVICES = {"svc-confirmations"}
+# What a business process may send (part 10): it acts as `process:<name>`.
+PROCESSES = {"process:shop.fulfilment": {"Ship", "Cancel"}}
 registered: set[str] = set()
 owner_of: dict[str, str] = {}  # order -> customer
 
@@ -34,6 +36,8 @@ def _(check: Check):
         return  # anyone may sign up
     if check.kind == "query" and who in SERVICES:
         return  # services may read
+    if check.kind == "command" and check.type in PROCESSES.get(who, ()):
+        return
     target = check.aggregate_id if check.kind == "command" else check.data.get("id")
     if check.type == "Place":
         owner = check.data.get("customerId")

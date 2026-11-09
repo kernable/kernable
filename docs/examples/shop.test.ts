@@ -39,9 +39,10 @@ const PROCESSES: [part: number, name: string, listeners: string[]][] = [
 ];
 
 async function run(part: number, langs: Record<string, Lang>, client: Lang, expected = `${HERE}${client}/part${part}.out`) {
-  const kernel = new TestKernel(["shop.*"], [], { metrics: true });
+  const kernel = new TestKernel(["shop.*"], [], { metrics: true, processes: part >= 10 });
   await kernel.start();
-  const env = { ...ENV, KERNABLE_URL: kernel.url };
+  // Part 10: an unpaid order is cancelled after 2 seconds instead of 3 days.
+  const env = { ...ENV, KERNABLE_URL: kernel.url, PAY_WITHIN: "2s" };
   const running: ChildProcess[] = [];
   try {
     const listeners: string[] = [];
@@ -53,6 +54,11 @@ async function run(part: number, langs: Record<string, Lang>, client: Lang, expe
     }
     const up = (m: string) => m.includes("kernable_worker_sessions 1") && listeners.every((l) => m.includes(`kernable_listener_connected{listener="${l}"} 1`));
     for (let i = 0; i < 500 && !up(await fetch(kernel.metricsUrl!).then((r) => r.text())); i++) await new Promise((r) => setTimeout(r, 20));
+    if (part >= 10) {
+      // Registered once the worker is up, as a deploy would.
+      const [cmd, args] = command(langs.fulfilment ?? client, "fulfilment");
+      assert.equal(execFileSync(cmd, args, { cwd: kernel.dir, env, encoding: "utf8" }), "shop.fulfilment version 1\n");
+    }
     const [cmd, args] = command(client, `part${part}`);
     const out = execFileSync(cmd, args, { cwd: kernel.dir, env, encoding: "utf8" });
     assert.equal(out, readFileSync(expected, "utf8"));
@@ -64,7 +70,7 @@ async function run(part: number, langs: Record<string, Lang>, client: Lang, expe
 }
 
 for (const lang of ["ts", "py", "rs"] as const) {
-  for (const part of [2, 3, 4, 6, 7]) {
+  for (const part of [2, 3, 4, 6, 7, 10]) {
     test(`part ${part} in ${LANGUAGES[lang]}`, () => run(part, {}, lang));
   }
 }

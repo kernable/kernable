@@ -25,7 +25,15 @@ name = "customers_persistent"
 test = false
 
 [[bin]]
+name = "fulfilment"
+test = false
+
+[[bin]]
 name = "guard"
+test = false
+
+[[bin]]
+name = "part10"
 test = false
 
 [[bin]]
