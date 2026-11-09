@@ -1,13 +1,15 @@
 """The invitation commands: each class with its handler."""
 
+import re
+
 from kernable import Command, Rejected, Requirement
 
 from ..shared.constants import DAY, INVITATION_DAYS, now_ms
-from ..shared.secrets import equal_secrets, normal_email, parse_invitation_token, random_secret, valid_email
-from .aggregates import Invitation
-from .domain import InvitedGroup
-from .events import (InvitationAccepted, InvitationCreated, InvitationDeclined, InvitationErased, InvitationMailSent, InvitationResent,
-                     InvitationRevoked)
+from ..shared.secrets import equal_secrets, normal_email, parse_invitation_token, random_secret, sha256, valid_email
+from .aggregates import Invitation, InvitationLink
+from .domain import InvitedGroup, link_token, parse_link_token
+from .events import (InvitationAccepted, InvitationCreated, InvitationDeclined, InvitationErased, InvitationLinkCreated, InvitationLinkRevoked,
+                     InvitationLinkUsed, InvitationMailSent, InvitationResent, InvitationRevoked)
 
 
 def _groups(value) -> list[InvitedGroup]:
@@ -126,3 +128,73 @@ def _(s: Invitation):
     if s.status == "none" or s.erased:
         raise Rejected("Nothing to erase", "not_found")
     return [InvitationRevoked(token_id=s.token_id), InvitationErased()] if s.status == "open" else [InvitationErased()]
+
+
+_LINK_SECRET = re.compile(r"^[A-Za-z0-9_-]{32,}$")
+
+
+class CreateInvitationLink(Command):
+    """A reusable invitation link into `groups` (never as owner). The API generates the secret and
+    shows the token once; the event keeps its hash. The middleware lets the sender attach only
+    groups it could grant."""
+    vault = {"secret": ["secret"]}
+    secret: str
+    groups: list[InvitedGroup] | None = None
+    label: str | None = None
+    #: Until when it works (ms since epoch); None: until revoked.
+    expires_at: int | None = None
+    #: How many people may join through it; None: no limit.
+    max_uses: int | None = None
+
+
+@InvitationLink.command(CreateInvitationLink,
+                        requires=lambda d, s: [Requirement("group", "group", g["group"], "active") for g in _groups(d.groups)])
+def _(s: InvitationLink, d: CreateInvitationLink, cmd):
+    if s.status != "none":
+        raise Rejected("The link exists", "exists")
+    if not isinstance(d.secret, str) or not _LINK_SECRET.match(d.secret):
+        raise Rejected("A secret of at least 32 URL-safe characters", "invalid_secret")
+    max_uses = d.max_uses
+    if max_uses is not None and not (isinstance(max_uses, int) and not isinstance(max_uses, bool) and max_uses > 0):
+        raise Rejected("max_uses is a positive whole number", "invalid_max_uses")
+    expires_at = d.expires_at
+    if expires_at is not None and (not isinstance(expires_at, (int, float)) or isinstance(expires_at, bool)):
+        raise Rejected("expires_at is a time in ms", "invalid_expiry")
+    return [InvitationLinkCreated(groups=_groups(d.groups), hash=sha256(link_token(cmd.tenant, cmd.aggregate_id, d.secret)),
+                                  label=d.label if isinstance(d.label, str) else "", expires_at=expires_at, max_uses=max_uses)]
+
+
+class RevokeInvitationLink(Command):
+    pass
+
+
+@InvitationLink.command(RevokeInvitationLink)
+def _(s: InvitationLink):
+    if s.status != "open":
+        raise Rejected("Only an open link is revoked", "invalid_state")
+    return [InvitationLinkRevoked()]
+
+
+class JoinWithInvitationLink(Command):
+    """The API's: the signed-in account `account_id` joins the tenant through the link. Someone
+    without an account registers and verifies first: a link, unlike an emailed invitation, proves no email."""
+    vault = {"secret": ["token"]}
+    token: str
+    account_id: str
+
+
+@InvitationLink.command(JoinWithInvitationLink)
+def _(s: InvitationLink, d: JoinWithInvitationLink, cmd, ctx):
+    t = parse_link_token(d.token)
+    if s.status != "open" or not t or t["tenant"] != cmd.tenant or t["link_id"] != cmd.aggregate_id or not s.hash \
+            or not equal_secrets(s.hash, t["hash"]):
+        raise Rejected("The link is not valid", "invalid_token")
+    if s.expires_at is not None and now_ms(ctx) > s.expires_at:
+        raise Rejected("The link has expired", "expired_token")
+    if s.max_uses is not None and len(s.accounts) >= s.max_uses:
+        raise Rejected("The link is used up", "used_up")
+    if not isinstance(d.account_id, str) or not d.account_id:
+        raise Rejected("Which account?", "invalid_account")
+    if d.account_id in s.accounts:
+        raise Rejected("Joined through this link already", "exists")
+    return [InvitationLinkUsed(account_id=d.account_id, groups=list(s.groups))]

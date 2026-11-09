@@ -18,6 +18,7 @@ pub fn shop() -> Shop {
     let order_aggregate = order(&shop_domain);
     confirm(&order_aggregate);
     vault(&shop_domain, &customer_aggregate);
+    target(&shop_domain);
     Shop {
         domain: shop_domain,
         customer_aggregate,
@@ -241,3 +242,11 @@ fn hash(password: &str, salt: &str) -> String {
     out.iter().map(|b| format!("{b:02x}")).collect()
 }
 // #endregion vault
+
+// #region target
+// GetOrder { id } is about the order `id`: the SDK sends that order with the query, signed, and a
+// middleware decides on it as on a command's aggregate (part 9).
+fn target(shop_domain: &Domain) {
+    shop_domain.query("GetOrder").target("order", "id");
+}
+// #endregion target

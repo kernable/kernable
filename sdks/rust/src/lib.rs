@@ -67,7 +67,7 @@ pub use context::{RequestContext, Timestamp};
 pub use data::{Cache, Data, Files, Listed, Listing};
 pub use domain::{
     Aggregate, ApplyContext, CommandContext, CommandMeta, CommandSchema, Domain, EventMeta,
-    EventSchema, FoldEvent, NewEvent, State, domain,
+    EventSchema, FoldEvent, NewEvent, QuerySchema, QueryTarget, State, domain,
 };
 pub use error::{BoxError, Error, Rejected};
 pub use index::{Index, Reindex, Requirement, Unique, UniqueKey, reindex_type};
@@ -75,7 +75,7 @@ pub use kernable_core::transport::Tls;
 pub use kernable_sdk_macros::{command, event, query};
 pub use listener::{
     Check, CheckKind, CheckOutcome, Listener, ListenerContext, ListenerHandle, MiddlewareOptions,
-    QueryContext, QueryMeta, StoredEventMeta, SubscribeOptions, Subscription, When,
+    QueryContext, QueryMeta, StoredEventMeta, SubscribeOptions, Subscription, Target, When,
 };
 #[doc(hidden)]
 pub use messages::__private;
@@ -695,8 +695,9 @@ impl Kernable {
         })
     }
 
-    /// Seals the vault fields of this domain's commands when submitting them; see
-    /// [`Domain::command`]. Returns another handle to this connection, so it chains:
+    /// Seals the vault fields of this domain's commands when submitting them (see
+    /// [`Domain::command`]) and sends the target of its queries asked by name (see
+    /// [`Domain::query`]). Returns another handle to this connection, so it chains:
     /// `Kernable::new("app.key")?.with_domain(&shop_domain)`.
     pub fn with_domain(&self, domain: &Domain) -> Kernable {
         self.domains
@@ -900,7 +901,16 @@ impl Kernable {
     /// not a `T` is [`Error::Json`]. Example: `let cart: Value =
     /// kernable.query(Query::new("shop", "GetCart").data(json!({ "id": "c1" }))).await?;`
     pub async fn query<T: DeserializeOwned>(&self, query: Query) -> Result<T, Error> {
+        let declared = query.target.clone().or_else(|| {
+            self.domains
+                .read()
+                .unwrap()
+                .get(&query.domain)
+                .and_then(|d| d.query_target(&query.query_type))
+        });
+        let target = declared.and_then(|t| t.wire(&query.domain, &query.data));
         let mut request = proto::QueryRequest {
+            target,
             query_id: random_id(),
             tenant_id: query.tenant.unwrap_or_else(|| self.tenant.clone()),
             domain: query.domain,
@@ -1213,6 +1223,8 @@ pub struct Query {
     min_position: u64,
     timeout: Option<Duration>,
     all_partitions: bool,
+    /// A message type's target, from its declaration.
+    target: Option<QueryTarget>,
 }
 
 impl Query {
@@ -1227,17 +1239,22 @@ impl Query {
             min_position: 0,
             timeout: None,
             all_partitions: false,
+            target: None,
         }
     }
 
-    /// A query of a message type (see [`query`]); its type says the domain. Ask it with
-    /// [`Kernable::ask`] for its typed answer.
+    /// A query of a message type (see [`query`]); its type says the domain and the aggregate it
+    /// is about. Ask it with [`Kernable::ask`] for its typed answer.
     ///
     /// # Panics
     ///
     /// If `query` cannot be represented as JSON.
     pub fn of<Q: QueryType>(query: Q) -> Query {
-        Query::new(Q::DOMAIN, Q::TYPE).data(query)
+        let target = messages::domain_of::<Q>().query_target(Q::TYPE);
+        Query {
+            target,
+            ..Query::new(Q::DOMAIN, Q::TYPE).data(query)
+        }
     }
 
     /// The query's data.

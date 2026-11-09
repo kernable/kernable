@@ -170,10 +170,12 @@ fn aggregates() -> BTreeMap<String, Runner> {
         "identity.identity".into(),
         runner(kit::identity::identity().identity),
     );
+    let invitation = kit::invitation::invitation();
     all.insert(
         "invitation.invitation".into(),
-        runner(kit::invitation::invitation().invitation),
+        runner(invitation.invitation),
     );
+    all.insert("invitation.link".into(), runner(invitation.link));
     all
 }
 

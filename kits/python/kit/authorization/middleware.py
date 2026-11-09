@@ -3,7 +3,7 @@ checks every request before the kernel accepts or routes it. Its knowledge lives
 
 import time
 
-from kernable import Check, Query, Rejected
+from kernable import Check, Query, Rejected, Target
 
 from ..account.events import (AccountDeleted, AccountReactivated, AccountRegistered, AccountSuspended, EmailVerified, SessionEnded,
                               SessionFactorAdded, SessionOpened, SsoDeleted, SsoDisabled, SsoEnforcementChanged, TotpConfirmed, TotpDisabled)
@@ -224,10 +224,11 @@ def _(check: Check, outcome, ctx):
 class Explain(Query[dict]):
     """Why a request would be allowed or refused: the middleware's own steps. For oneself,
     with one's real session; for another identity of the tenant (needs `group.Explain`), sessions aside."""
+    target = {"aggregate_type": "identity.identity", "field": "identity_id"}
     identity_id: str
     #: The request type, qualified: `shop.CancelOrder`.
     type: str
-    #: For a command: its aggregate (the relation's target).
+    #: The aggregate the request is about: a command's, or a query's target. Unqualified: of the type's domain.
     aggregate_type: str | None = None
     aggregate_id: str | None = None
     data: dict | None = None
@@ -245,7 +246,10 @@ def _(d: Explain, qry, ctx):
     oneself = asker.sender_identity == d.identity_id and asker.sender_tenant == qry.tenant
     request = asker if oneself else RequestContext(sender_tenant=qry.tenant, sender_identity=d.identity_id)
     check = Check(kind="command" if d.aggregate_id else "query", id="", tenant=qry.tenant, domain=domain, type=name, data=d.data or {},
-                  request=request, aggregate_type=d.aggregate_type or "", aggregate_id=d.aggregate_id or "")
+                  request=request)
+    if d.aggregate_id and d.aggregate_type:
+        check.aggregate_type, check.aggregate_id = d.aggregate_type, d.aggregate_id
+        check.target = Target(d.aggregate_type if "." in d.aggregate_type else f"{domain}.{d.aggregate_type}", d.aggregate_id)
     steps: list[str] = []
     refusal = decide(k, check, _now(), trace=steps, assume_session=not oneself)
     return {"allowed": refusal is None, "code": refusal.code if refusal else None, "steps": steps}

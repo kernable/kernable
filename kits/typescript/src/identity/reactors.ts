@@ -7,7 +7,7 @@ import type { ListenerContext } from "@kernable/sdk";
 
 import { AccountDeleted } from "../account/index.ts";
 import { GroupDeleted } from "../group/index.ts";
-import { InvitationAccepted } from "../invitation/index.ts";
+import { InvitationAccepted, InvitationLinkUsed, type InvitedGroup } from "../invitation/index.ts";
 import { AddOwner, TenantCreated, TenantDeleted } from "../tenancy/index.ts";
 import { CreateIdentity, DeleteIdentity, GrantMembership, RevokeMembership } from "./commands.ts";
 import { FindIdentityByAccount, ListIdentities, ListMyIdentities } from "./queries.ts";
@@ -27,39 +27,46 @@ export const ownersReactor = identityDomain
 
 const internal = (ctx: ListenerContext) => ({ ...ctx.follow(), ...INTERNAL });
 
-/** An accepted invitation becomes an identity with its groups, and an owner for an owner invitation. */
+/**
+ * An account joins a tenant with groups (and as owner): its identity there is created, or kept if
+ * it has one, and gains the groups. `source` makes the follow-up command IDs unique per join.
+ */
+async function join(ctx: ListenerContext, tenant: string, source: string, accountId: string, groups: InvitedGroup[], owner: boolean) {
+  let identityId: string;
+  try {
+    identityId = (await ctx.query(FindIdentityByAccount.new({ accountId }), { tenant, context: INTERNAL })).identityId;
+  } catch {
+    const created = await ctx.submit(CreateIdentity.new({ accountId }), {
+      id: `invitation-identity-${source}`, aggregateId: randomUUID(), tenant, context: internal(ctx),
+    });
+    identityId = created[0].aggregateId;
+  }
+  for (const [i, g] of groups.entries()) {
+    try {
+      await ctx.submit(GrantMembership.new({ membershipId: `${source}-${i}`, group: g.group, scope: g.scope ?? null }), {
+        id: `invitation-membership-${source}-${i}`, aggregateId: identityId, tenant, context: internal(ctx),
+      });
+    } catch (err) {
+      if ((err as { code?: string }).code !== "exists") throw err; // a member already
+    }
+  }
+  if (owner) {
+    try {
+      await ctx.submit(AddOwner.new({ identityId }), { id: `invitation-owner-${source}`, aggregateId: tenant, tenant, context: internal(ctx) });
+    } catch (err) {
+      if ((err as { code?: string }).code !== "exists") throw err; // an owner already
+    }
+  }
+}
+
+/**
+ * An accepted invitation becomes an identity with its groups, and an owner for an owner invitation
+ *; so does a join through an invitation link, never as owner.
+ */
 export const invitationsReactor = identityDomain
   .reactor("identity.invitations", { order: ORDERS.reactors })
-  .on(InvitationAccepted, async (d, evt, ctx) => {
-    const tenant = evt.tenant;
-    const invitation = evt.aggregateId;
-    // An account with an identity here already keeps it and gains the groups.
-    let identityId: string;
-    try {
-      identityId = (await ctx.query(FindIdentityByAccount.new({ accountId: d.accountId }), { tenant, context: INTERNAL })).identityId;
-    } catch {
-      const created = await ctx.submit(CreateIdentity.new({ accountId: d.accountId }), {
-        id: `invitation-identity-${invitation}`, aggregateId: randomUUID(), tenant, context: internal(ctx),
-      });
-      identityId = created[0].aggregateId;
-    }
-    for (const [i, g] of d.groups.entries()) {
-      try {
-        await ctx.submit(GrantMembership.new({ membershipId: `${invitation}-${i}`, group: g.group, scope: g.scope ?? null }), {
-          id: `invitation-membership-${invitation}-${i}`, aggregateId: identityId, tenant, context: internal(ctx),
-        });
-      } catch (err) {
-        if ((err as { code?: string }).code !== "exists") throw err; // a member already
-      }
-    }
-    if (d.owner) {
-      try {
-        await ctx.submit(AddOwner.new({ identityId }), { id: `invitation-owner-${invitation}`, aggregateId: tenant, tenant, context: internal(ctx) });
-      } catch (err) {
-        if ((err as { code?: string }).code !== "exists") throw err; // an owner already
-      }
-    }
-  });
+  .on(InvitationAccepted, (d, evt, ctx) => join(ctx, evt.tenant, evt.aggregateId, d.accountId, d.groups, d.owner))
+  .on(InvitationLinkUsed, (d, evt, ctx) => join(ctx, evt.tenant, `${evt.aggregateId}-${d.accountId}`, d.accountId, d.groups, false));
 
 /** A deleted tenant's identities are erased, before the read models drop the tenant. */
 export const identityCleanupReactor = identityDomain

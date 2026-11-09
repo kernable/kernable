@@ -60,5 +60,29 @@ export class InvitationErased extends Event {
   static erases = (_d: unknown, id: string) => `invitation:${id}`;
 }
 
+/**
+ * A reusable invitation: anyone signed in who has its token may join the tenant with these groups,
+ * until it is revoked, expires or is used up. Only the token's hash is kept: the API shows the
+ * token once.
+ */
+export class InvitationLinkCreated extends Event {
+  groups!: InvitedGroup[];
+  hash!: string;
+  label!: string;
+  expiresAt!: number | null;
+  maxUses!: number | null;
+}
+
+export class InvitationLinkRevoked extends Event {}
+
+/** Someone joined through the link: the identity reactor creates their identity with these groups. */
+export class InvitationLinkUsed extends Event {
+  accountId!: string;
+  groups!: InvitedGroup[];
+}
+
 // Declared on the domain, so a process that only reads them knows them too.
-invitationDomain.event(InvitationCreated, InvitationResent, InvitationRevoked, InvitationDeclined, InvitationAccepted, InvitationMailSent, InvitationErased);
+invitationDomain.event(
+  InvitationCreated, InvitationResent, InvitationRevoked, InvitationDeclined, InvitationAccepted, InvitationMailSent, InvitationErased,
+  InvitationLinkCreated, InvitationLinkRevoked, InvitationLinkUsed,
+);

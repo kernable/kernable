@@ -6,7 +6,7 @@ from kernable import Rejected
 
 from ..account.events import AccountDeleted
 from ..group.events import GroupDeleted
-from ..invitation.events import InvitationAccepted
+from ..invitation.events import InvitationAccepted, InvitationLinkUsed
 from ..shared.constants import ORDERS, internal
 from ..tenancy.commands import AddOwner
 from ..tenancy.events import TenantCreated, TenantDeleted
@@ -41,24 +41,34 @@ def _tolerating(code: str, submit) -> None:
 invitations_reactor = identity_domain.reactor("identity.invitations", order=ORDERS.reactors)
 
 
+def _join(ctx, tenant: str, source: str, account_id: str, groups: list, owner: bool) -> None:
+    """An account joins a tenant with groups (and as owner): its identity there is created, or kept if
+    it has one, and gains the groups. `source` makes the follow-up command IDs unique per join."""
+    try:
+        identity_id = ctx.query(FindIdentityByAccount(account_id=account_id), tenant=tenant, context=internal())["identity_id"]
+    except Rejected:
+        created = ctx.submit(CreateIdentity(account_id=account_id), aggregate_id=str(uuid.uuid4()), id=f"invitation-identity-{source}",
+                             tenant=tenant, context=internal(ctx))
+        identity_id = created[0].aggregate_id
+    for i, g in enumerate(groups):
+        _tolerating("exists", lambda g=g, i=i: ctx.submit(
+            GrantMembership(membership_id=f"{source}-{i}", group=g["group"], scope=g.get("scope")), aggregate_id=identity_id,
+            id=f"invitation-membership-{source}-{i}", tenant=tenant, context=internal(ctx)))
+    if owner:
+        _tolerating("exists", lambda: ctx.submit(AddOwner(identity_id=identity_id), aggregate_id=tenant, id=f"invitation-owner-{source}",
+                                                 tenant=tenant, context=internal(ctx)))
+
+
 @invitations_reactor.on(InvitationAccepted)
 def _(d: InvitationAccepted, evt, ctx):
     """An accepted invitation becomes an identity with its groups, and an owner for an owner invitation."""
-    tenant, invitation = evt.tenant, evt.aggregate_id
-    try:
-        # An account with an identity here already keeps it and gains the groups.
-        identity_id = ctx.query(FindIdentityByAccount(account_id=d.account_id), tenant=tenant, context=internal())["identity_id"]
-    except Rejected:
-        created = ctx.submit(CreateIdentity(account_id=d.account_id), aggregate_id=str(uuid.uuid4()), id=f"invitation-identity-{invitation}",
-                             tenant=tenant, context=internal(ctx))
-        identity_id = created[0].aggregate_id
-    for i, g in enumerate(d.groups):
-        _tolerating("exists", lambda g=g, i=i: ctx.submit(
-            GrantMembership(membership_id=f"{invitation}-{i}", group=g["group"], scope=g.get("scope")), aggregate_id=identity_id,
-            id=f"invitation-membership-{invitation}-{i}", tenant=tenant, context=internal(ctx)))
-    if d.owner:
-        _tolerating("exists", lambda: ctx.submit(AddOwner(identity_id=identity_id), aggregate_id=tenant, id=f"invitation-owner-{invitation}",
-                                                 tenant=tenant, context=internal(ctx)))
+    _join(ctx, evt.tenant, evt.aggregate_id, d.account_id, d.groups, d.owner)
+
+
+@invitations_reactor.on(InvitationLinkUsed)
+def _(d: InvitationLinkUsed, evt, ctx):
+    """A join through an invitation link becomes an identity with its groups, never as owner."""
+    _join(ctx, evt.tenant, f"{evt.aggregate_id}-{d.account_id}", d.account_id, d.groups, False)
 
 
 cleanup_reactor = identity_domain.reactor("identity.cleanup", order=ORDERS.cleanup)

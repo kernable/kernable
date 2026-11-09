@@ -379,6 +379,18 @@ The API runs it, since the person may have no account yet:
 1. **Accepting as described**, run by the API in up to two commands.
 2. **Invitations keep the email until the tenant is deleted** (for the audit, who was invited when), unless the person asks to be erased (`EraseInvitation`).
 
+### Invitation links (2026-11-09)
+
+A second aggregate, `invitation.link`, random ID, under its tenant: `status` (`none` · `open` · `revoked`), `groups`, `hash` (sha256 of the whole token `link_<tenantId>.<linkId>.<secret>`; the API shows the token once), `label`, `expiresAt` and `maxUses` (null: none), `accounts` (who joined, each once).
+
+| Command | Fields | Allowed when | Events | Level |
+|---|---|---|---|---|
+| `CreateInvitationLink` | `secret` (secret), `groups`, `label`?, `expiresAt`?, `maxUses`? | `none`; groups active (required facts) | `InvitationLinkCreated` {`groups`, `hash`, `label`, `expiresAt`, `maxUses`} | group, only groups the sender could grant |
+| `RevokeInvitationLink` | — | `open` | `InvitationLinkRevoked` | group |
+| `JoinWithInvitationLink` | `token` (secret), `accountId` | `open`, this tenant's and link's, hash equal, not expired (`expired_token`), not used up (`used_up`), the account not yet joined (`exists`) | `InvitationLinkUsed` {`accountId`, `groups`} | `api` (for a signed-in account: a link proves no email) |
+
+Queries `ListInvitationLinks` (group) and `PeekInvitationLink` (`api`: tenant, label, usable). The identity reactor turns `InvitationLinkUsed` into an identity with the groups, never an owner.
+
 ## The authorization middleware
 
 One listener, `authorization`, in the `group` domain, at order **-30**, with a middleware **before** every request (`*`): commands, queries, files and cache values. Its key needs `listen` on the set's domains and on the app events that declare relations, and `check` on `*`. The kernel keeps it registered and refuses every request while it is away (fail closed).
@@ -418,7 +430,7 @@ A membership scoped to an aggregate counts as a relation set by hand. `self`, `o
 5. **Tenant**: the request's tenant is active (else `tenant_suspended`). `senderTenant` is the request's tenant, or the platform tenant (platform groups). Else `forbidden`.
 6. **Identity**: `senderIdentity` is active, in `senderTenant`, and of `senderAccount` (services: of the API key). The tenant's MFA requirement holds (two factors, or a passkey; else `mfa_required`), and so does its enforced SSO (else `sso_required`).
 7. **Owners** of the tenant: allow.
-8. **Memberships**: one that is active, not expired at the check, of an active group, with a permission whose pattern matches the type; its scope is the whole tenant or the target; its `when` relation holds on the target (or its parent with `viaParent`). The target is the command's aggregate, or a query's declared field; a permission with `when` never matches a request without a target. Else `forbidden`.
+8. **Memberships**: one that is active, not expired at the check, of an active group, with a permission whose pattern matches the type; its scope is the whole tenant or the target; its `when` relation holds on the target (or its parent with `viaParent`). The target is the command's aggregate, or the aggregate a query declares (`target`; it travels signed with the query); a permission with `when` never matches a request without a target. Else `forbidden`.
 9. **No escalation**, for `GrantMembership`, `CreateInvitation`, `CreateGroup` and `SetPermissions`: the sender holds every permission of the group concerned (owners and `platform` always do). Else `forbidden`.
 
 Refusals reach the client as `PERMISSION_DENIED` with the code. `group.Explain` runs the same steps and reports each.

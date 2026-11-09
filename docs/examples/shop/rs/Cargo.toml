@@ -13,6 +13,10 @@ test = false
 doctest = false
 
 [[bin]]
+name = "api"
+test = false
+
+[[bin]]
 name = "confirmations"
 test = false
 
@@ -45,6 +49,10 @@ name = "part7"
 test = false
 
 [[bin]]
+name = "part9"
+test = false
+
+[[bin]]
 name = "read_models"
 test = false
 
@@ -53,7 +61,10 @@ name = "worker"
 test = false
 
 [dependencies]
+axum = "0.8"
 kernable = { package = "kernable-sdk", path = "../../../../sdks/rust" }
+kernable-kit = { path = "../../../../kits/rust" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 scrypt = { version = "0.11", default-features = false }
 serde.workspace = true
 serde_json.workspace = true

@@ -5,8 +5,8 @@ use std::sync::Arc;
 use kernable::{Listener, Rejected, Timestamp, query};
 use serde::{Deserialize, Serialize};
 
-use super::InvitationStatus;
-use super::readmodels::{InvitationRow, Shared, row_key};
+use super::readmodels::{InvitationRow, LinkRow, Links, Shared, row_key};
+use super::{InvitationStatus, LinkStatus, parse_link_token};
 use crate::shared::secrets::parse_invitation_token;
 
 /// The tenant's invitations; the open ones appear in user lists.
@@ -29,7 +29,26 @@ pub struct PeekInvitation {
     pub token: String,
 }
 
-pub fn answer(invitations: &Listener, state: &Shared) {
+/// The tenant's invitation links, with how often each was used.
+#[query("invitation", answer = Vec<LinkRow>)]
+pub struct ListInvitationLinks {}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeekedLink {
+    pub tenant: String,
+    pub link_id: String,
+    pub label: String,
+    pub usable: bool,
+}
+
+/// The API's only: whether a link token can be used, for the join page (the token is checked on joining).
+#[query("invitation", answer = PeekedLink)]
+pub struct PeekInvitationLink {
+    pub token: String,
+}
+
+pub fn answer(invitations: &Listener, state: &Shared, links: &Links) {
     let s = Arc::clone(state);
     invitations.query(ListInvitations, move |_, qry, _| {
         let rows: Vec<InvitationRow> = s
@@ -59,6 +78,43 @@ pub fn answer(invitations: &Listener, state: &Shared) {
         async move {
             found.ok_or_else(|| {
                 Rejected::new("The invitation is not valid")
+                    .code("invalid_token")
+                    .into()
+            })
+        }
+    });
+    let l = Arc::clone(links);
+    invitations.query(ListInvitationLinks, move |_, qry, _| {
+        let rows: Vec<LinkRow> = l
+            .read()
+            .unwrap()
+            .values()
+            .filter(|r| r.tenant == qry.tenant)
+            .cloned()
+            .collect();
+        async move { Ok(rows) }
+    });
+    let l = Arc::clone(links);
+    invitations.query(PeekInvitationLink, move |d, _, _| {
+        let found = parse_link_token(&d.token).and_then(|t| {
+            l.read()
+                .unwrap()
+                .get(&row_key(&t.tenant, &t.link_id))
+                .filter(|r| r.status == LinkStatus::Open)
+                .map(|r| {
+                    let now = Timestamp::now().millis();
+                    PeekedLink {
+                        tenant: r.tenant.clone(),
+                        link_id: r.id.clone(),
+                        label: r.label.clone(),
+                        usable: r.expires_at.is_none_or(|e| now <= e)
+                            && r.max_uses.is_none_or(|m| r.uses < m),
+                    }
+                })
+        });
+        async move {
+            found.ok_or_else(|| {
+                Rejected::new("The link is not valid")
                     .code("invalid_token")
                     .into()
             })

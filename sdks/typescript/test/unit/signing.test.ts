@@ -50,6 +50,8 @@ test("message layouts and signatures match the test vectors", () => {
   check("query", queryMessage({ ...q, payload: hex(q.payload_hex) }));
   const qw = v.query_wait_only.input;
   check("query_wait_only", queryMessage({ ...qw, payload: hex(qw.payload_hex) }));
+  const qt = v.query_target.input;
+  check("query_target", queryMessage({ ...qt, payload: hex(qt.payload_hex) }));
   const snap = v.snapshot.input;
   check("snapshot", snapshotMessage(snap, snap.version, snap.schema, hex(snap.state_hex)));
   const sub = v.subscribe.input;

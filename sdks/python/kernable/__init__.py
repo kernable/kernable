@@ -57,11 +57,12 @@ from kernable.v1 import kernable_pb2_grpc as rpc
 
 from .messages import (  # noqa: E402
     Command, Event, Query, bind as _bind, binding as _binding, declare_command as _declare_command,
-    declare_event as _declare_event, from_wire as _from_wire, is_message_class as _is_message_class, to_wire as _to_wire,
+    declare_event as _declare_event, from_wire as _from_wire, is_message_class as _is_message_class,
+    query_target as _query_target, to_wire as _to_wire,
 )
 
 __all__ = ["PROTOCOL", "Event", "Command", "Query", "StoredEvent", "Aggregate", "AggregateType", "MiddlewareContext", "App", "ApplyContext", "CacheClient", "Check", "ClientClosed", "CommandContext", "CommandMeta",
-           "CommandSchema",
+           "CommandSchema", "QuerySchema", "Target",
            "Data", "DataClient", "Domain", "Listed", "Listing",
            "EventMeta", "EventSchema", "HeldKey", "Index", "Kernable", "Key", "Listener", "ListenerContext", "ListenerHandle", "Manifest", "NotSettled", "Outcome",
            "QueryContext", "QueryMeta", "QueryOutcome", "Rejected", "RequestContext", "Requirement", "Store", "StoredEventMeta", "Tls", "Worker",
@@ -227,6 +228,15 @@ class MiddlewareContext:
     store: "Store | None" = None
 
 
+@dataclass(frozen=True)
+class Target:
+    """The aggregate a request is about, as `Check.target` holds it."""
+
+    #: Qualified: `shop.order`.
+    type: str
+    id: str
+
+
 @dataclass
 class Check:
     """A command, query, file or cache request a middleware checks, before the kernel accepts,
@@ -255,6 +265,10 @@ class Check:
     aggregate_id: str = ""
     #: File and cache requests only: the file or cache key; empty otherwise.
     key: str = ""
+    #: The aggregate the request is about: a command's aggregate (`Target("shop.order", "o-17")`),
+    #: or the one a query declares (`Query.target`, `QuerySchema.target`). None for queries that
+    #: declare none, and for file and cache requests.
+    target: "Target | None" = None
 
 
 @dataclass
@@ -676,6 +690,41 @@ class CommandSchema:
         return self
 
 
+class QuerySchema:
+    """What a domain declares about a query type given by name: the aggregate it is about. Made
+    with `Domain.query`; query classes declare it as `target` instead (see `Query`):
+    `shop_domain.query("GetOrder").target("order", "id")` (`GetOrder {"id": "o-17"}` is about
+    order o-17)."""
+
+    def __init__(self, type: str):
+        """Use `Domain.query`. Raises `ValueError` if `type` is qualified."""
+        if not re.match(r"^[^.*]+$", type):
+            raise ValueError(f"query types are unqualified within their domain, not {type!r}")
+        self.type = type
+        #: The aggregate the query is about, `(aggregate_type, field)`; see `target`.
+        self.target_of: tuple[str, str] | None = None
+
+    def target(self, aggregate_type: str, field: str) -> "QuerySchema":
+        """The query is about one aggregate of `aggregate_type` (`order`, or qualified
+        `shop.order`), whose ID is in the data's `field` (as sent: `orderId`). The SDK sends it
+        with the query, signed, and a middleware decides on it as on a command's aggregate.
+        Clients that ask it need the domain: `kernable.use(domain)`."""
+        self.target_of = (aggregate_type, field)
+        return self
+
+
+def _query_target_of(declared: tuple[str, str] | None, domain: str, data: Any) -> "pb.Target | None":
+    """The wire target of a query: the declared aggregate type, qualified, and the ID from `data`."""
+    if declared is None:
+        return None
+    aggregate_type, field_ = declared
+    id = data.get(field_) if isinstance(data, dict) else None
+    if not isinstance(id, str) or not id:
+        return None  # no ID: no target, so a rule that needs one refuses
+    return pb.Target(aggregate_type=aggregate_type if "." in aggregate_type else f"{domain}.{aggregate_type}",
+                     aggregate_id=id)
+
+
 _issued_lock = threading.Lock()
 _issued_last = 0
 
@@ -774,6 +823,8 @@ class Domain:
         self.events: dict[str, EventSchema] = {}
         #: Vault fields per command type; see `command`.
         self.commands: dict[str, CommandSchema] = {}
+        #: What query types given by name are about; see `query`.
+        self.queries: dict[str, QuerySchema] = {}
         #: The aggregates defined on it, which `Kernable.app` runs.
         self.aggregates: list[AggregateType] = []
         #: The read models and reactors defined on it, which `Kernable.app` runs.
@@ -784,6 +835,14 @@ class Domain:
         `CommandSchema`. Clients that submit them need the domain: `kernable.use(domain)`."""
         spec = CommandSchema(type)
         self.commands[type] = spec
+        return spec
+
+    def query(self, type: str) -> QuerySchema:
+        """Declares what `type` queries (unqualified) are about: returns the `QuerySchema` to chain
+        `target` on. Query classes declare it as `target` instead. Clients that ask such queries
+        by name need the domain: `kernable.use(domain)`."""
+        spec = QuerySchema(type)
+        self.queries[type] = spec
         return spec
 
     def event(self, type, schema: int | None = None, *more) -> EventSchema | None:
@@ -1675,8 +1734,9 @@ class Kernable:
         self.cache = CacheClient(self)
 
     def use(self, *domains: Domain) -> "Kernable":
-        """Seals the vault fields of these domains' commands when submitting them; see
-        `Domain.command`. Returns this client, so it chains: `k = Kernable().use(shop_domain)`."""
+        """Seals the vault fields of these domains' commands when submitting them (see
+        `Domain.command`), and sends the targets of their queries given by name (see
+        `Domain.query`). Returns this client, so it chains: `k = Kernable().use(shop_domain)`."""
         for d in domains:
             self._domains[d.name] = d
         return self
@@ -1827,14 +1887,21 @@ class Kernable:
             asked = domain
             kind = asked.__class__
             b = _binding(kind, "answered by a read model")
-            answer = self.query(b.domain, kind.type_name(), asked.to_wire(), tenant=tenant, context=context,
-                                min_position=min_position, timeout_s=timeout_s, all_partitions=all_partitions)
-            return _from_wire(answer)
+            return _from_wire(self._ask(b.domain, kind.type_name(), asked.to_wire(), _query_target(kind), tenant,
+                                        context, min_position, timeout_s, all_partitions))
+        spec = self._domains.get(domain)
+        declared = spec.queries.get(type) if spec else None
+        return self._ask(domain, type, data, declared.target_of if declared else None, tenant, context,
+                         min_position, timeout_s, all_partitions)
+
+    def _ask(self, domain: str, type: str, data: Any, declared: tuple[str, str] | None, tenant: str | None,
+             context: RequestContext | None, min_position: int, timeout_s: float | None, all_partitions: bool) -> Any:
+        """`query`, with the target the query type declares: `(aggregate_type, field)`."""
         query_id = str(uuid.uuid4())
         q = pb.QueryRequest(query_id=query_id, tenant_id=tenant or self._tenant, domain=domain, query_type=type,
                             payload=_encode(data), context=_to_wire_context(context or self._context, query_id),
                             min_position=min_position, issued_at=_issued_now(), protocol=PROTOCOL,
-                            listener=_HANDLING.get())
+                            listener=_HANDLING.get(), target=_query_target_of(declared, domain, data))
         if all_partitions:
             self._caught_up_everywhere(q, timeout_s)
             q.issued_at = _issued_now()
@@ -2721,6 +2788,10 @@ class Listener:
             cls = query_type
             _bind(cls, self.domain.name, self.domain)
             qualified = f"{self.domain.name}.{cls.type_name()}"
+            # Its target counts also when the query is asked by name, by clients that `use` the domain.
+            target = _query_target(cls)
+            if target and cls.type_name() not in self.domain.queries:
+                self.domain.query(cls.type_name()).target(*target)
 
             def wrap(f: Callable) -> Callable:
                 return lambda data, qry=None, ctx=None: _to_wire(_call(f, cls.from_wire(data), qry, ctx))
@@ -3202,15 +3273,17 @@ def _to_check(call) -> Check:
         c = call.command
         return Check("command", c.command_id, c.tenant_id, c.domain, c.command_type,
                      _unseal(_decode(c.payload), call.vault)[0],
-                     _from_wire_context(c.context), c.aggregate_type, c.aggregate_id)
+                     _from_wire_context(c.context), c.aggregate_type, c.aggregate_id,
+                     target=Target(f"{c.domain}.{c.aggregate_type}", c.aggregate_id))
     kind = call.WhichOneof("request")
     if kind in ("data", "cache"):
         r = getattr(call, kind)
         type = call.type.rsplit(".", 1)[-1]  # qualified, e.g. `shop.PutData`
         return Check(kind, "", r.tenant_id, r.domain, type, None, _from_wire_context(r.context), key=r.key)
     q = call.query
+    target = Target(q.target.aggregate_type, q.target.aggregate_id) if q.target.aggregate_id else None
     return Check("query", q.query_id, q.tenant_id, q.domain, q.query_type, _decode(q.payload),
-                 _from_wire_context(q.context))
+                 _from_wire_context(q.context), target=target)
 
 
 def _rejected_outcome(r) -> Outcome:

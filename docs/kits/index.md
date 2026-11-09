@@ -16,7 +16,7 @@ test cases, so an API in TypeScript and a service in Rust work on one log.
 | `account` | A person's account, the same in every tenant: email, password, TOTP, passkeys, OAuth/OIDC logins; a session per sign-in; a tenant's single sign-on | [Accounts and sessions](./account) |
 | `identity` | A person or service inside one tenant: profile, group memberships, API keys | [Identities](./identity) |
 | `group` | Named sets of permissions per tenant | [Groups](./group) |
-| `invitation` | Invitations by email into a tenant, with groups or as owner | [Invitations](./invitation) |
+| `invitation` | Invitations by email into a tenant, with groups or as owner; invitation links many people join through | [Invitations](./invitation) |
 | authorization | The middleware that decides every request, relations, lists filtered by the same rules, `Explain` | [Authorization](./authorization) |
 | `KitApi` | What only your HTTP API does: sign-in, tokens, passkey challenges, OIDC, API keys | [Your API: KitApi](./api) |
 

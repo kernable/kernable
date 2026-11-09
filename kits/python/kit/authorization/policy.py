@@ -9,7 +9,7 @@ from typing import Any, Protocol
 from kernable.messages import from_wire
 
 from ..shared.constants import PLATFORM_TENANT
-from .levels import ESCALATION, QUERY_TARGETS, rule_of
+from .levels import ESCALATION, rule_of
 
 
 @dataclass
@@ -133,14 +133,11 @@ def _refuse(code: str, message: str) -> Refusal:
 
 
 def target_of(check) -> dict | None:
-    """The command's aggregate, or the field a query names as its target."""
+    """The aggregate the request is about: a command's, or the one a query declares (`target`)."""
+    if check.target:
+        return {"type": check.target.type, "id": check.target.id}
     if check.kind == "command" and check.aggregate_type and check.aggregate_id:
         return {"type": f"{check.domain}.{check.aggregate_type}", "id": check.aggregate_id}
-    if check.kind == "query":
-        t = QUERY_TARGETS.get(f"{check.domain}.{check.type}")
-        value = (check.data or {}).get(t["field"]) if t and isinstance(check.data, dict) else None
-        if t and isinstance(value, str) and value:
-            return {"type": t["type"], "id": value}
     return None
 
 
@@ -220,7 +217,7 @@ def _concerned(k: Knowledge, type_: str, check, data: dict) -> list[str]:
         return [p["pattern"] for p in (k.groups.get(f"{check.tenant}/{g}") or [])] if isinstance(g, str) else []
     if type_ == "identity.GrantMembership":
         return of_group(data.get("group"))
-    if type_ == "invitation.CreateInvitation":
+    if type_ in ("invitation.CreateInvitation", "invitation.CreateInvitationLink"):
         return [p for g in (data.get("groups") or []) for p in of_group((g or {}).get("group"))]
     return [str((p or {}).get("pattern")) for p in (data.get("permissions") or [])]
 

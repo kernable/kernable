@@ -73,6 +73,7 @@ impl Visibility {
             type_name: name.to_owned(),
             aggregate_type: target.r#type.split_once('.').map(|(_, a)| a.to_owned()),
             aggregate_id: Some(target.id.clone()),
+            target: None,
             key: None,
             data: Value::Object(Default::default()),
             request: request.clone(),

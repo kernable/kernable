@@ -98,5 +98,15 @@ class AsyncKitApi:
                                 password: str | None = None) -> dict:
         return await asyncio.to_thread(lambda: self.api.accept_invitation(invitation_token, claims=claims, name=name, password=password))
 
+    async def create_invitation_link(self, context: RequestContext, tenant: str, groups: list, label: str | None = None,
+                                     expires_at: int | None = None, max_uses: int | None = None) -> dict:
+        return await asyncio.to_thread(self.api.create_invitation_link, context, tenant, groups, label, expires_at, max_uses)
+
+    async def peek_invitation_link(self, link: str) -> dict | None:
+        return await asyncio.to_thread(self.api.peek_invitation_link, link)
+
+    async def join_with_invitation_link(self, claims: Claims, link: str) -> dict:
+        return await asyncio.to_thread(self.api.join_with_invitation_link, claims, link)
+
     async def sign_out(self, claims: Claims) -> None:
         await asyncio.to_thread(self.api.sign_out, claims)

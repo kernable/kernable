@@ -6,6 +6,7 @@ from .readmodels import IdentityRow, api_key_rows, identities_readmodel, identit
 
 
 class GetIdentity(Query[IdentityRow]):
+    target = {"aggregate_type": "identity.identity", "field": "identity_id"}
     identity_id: str
 
 
@@ -28,6 +29,7 @@ def _(d, qry):
 
 class ListMyIdentities(Query[list[dict]]):
     """Every tenant the account has an identity in (ask with all_partitions when tenants are partitioned)."""
+    target = {"aggregate_type": "account.account", "field": "account_id"}
     account_id: str
 
 

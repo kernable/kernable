@@ -26,6 +26,7 @@ use kernable::{
 use kit::account::{
     AddSsoDomain, CreateSso, DeleteAccount, EnforceSso, FindAccountByEmail, GetSso, SuspendAccount,
 };
+use kit::api::NewInvitationLink;
 use kit::api::{ApiError, Claims, KitApi, Provider, new_signing_keys};
 use kit::authorization::{
     Explain, Target, Visibility, ids, relation, use_authorization_store, visibility,
@@ -35,7 +36,10 @@ use kit::group::{CreateGroup, Permission};
 use kit::identity::{
     CreateServiceIdentity, DeleteIdentity, GetIdentity, GrantMembership, RevokeApiKey,
 };
-use kit::invitation::{CreateInvitation, EraseInvitation, InvitedGroup, ListInvitations};
+use kit::invitation::{
+    CreateInvitation, EraseInvitation, InvitedGroup, ListInvitations, PeekedLink,
+    RevokeInvitationLink,
+};
 use kit::shared::mail::{MemoryMailer, Purpose, use_mailer};
 use kit::shared::secrets::{new_id, totp_code};
 use kit::tenancy::{
@@ -66,6 +70,18 @@ pub struct CancelOrder {}
 
 #[query("shop", answer = Vec<String>)]
 pub struct ListOrders {}
+
+/// One order, for whoever may get it: the query names the order it is about (`target`), so the
+/// middleware decides on that order, as on a command's aggregate.
+#[query("shop", answer = OrderDetails, target(aggregate = "order", field = id))]
+pub struct GetOrder {
+    pub id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct OrderDetails {
+    pub customer: String,
+}
 
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 struct Order {
@@ -124,6 +140,31 @@ fn shop() -> kernable::Domain {
             .collect();
         mine.sort();
         async move { Ok(mine) }
+    });
+    let customers: Arc<Mutex<std::collections::HashMap<String, String>>> = Arc::default();
+    let details = shop.read_model("shop.order-details");
+    let c = Arc::clone(&customers);
+    details.on(OrderPlaced, move |d, evt, _| {
+        c.lock()
+            .unwrap()
+            .insert(format!("{}/{}", evt.tenant, evt.aggregate_id), d.customer);
+        async { Ok(()) }
+    });
+    details.query(GetOrder, move |d, qry, _| {
+        let customer = customers
+            .lock()
+            .unwrap()
+            .get(&format!("{}/{}", qry.tenant, d.id))
+            .cloned();
+        async move {
+            customer
+                .map(|customer| OrderDetails { customer })
+                .ok_or_else(|| {
+                    kernable::Rejected::new("No such order")
+                        .code("not_found")
+                        .into()
+                })
+        }
     });
     shop
 }
@@ -341,6 +382,7 @@ async fn the_kit_end_to_end() {
     oauth_and_sso(&world).await;
     lists_and_explain(&world).await;
     example_server(&world).await;
+    invitation_links(&world).await;
     world.stop_app();
 }
 
@@ -1507,4 +1549,198 @@ async fn example_server(w: &World) {
         "signed out"
     );
     task.abort();
+}
+
+/// Invitation links let people join with groups; a query about one order is decided on that order.
+async fn invitation_links(w: &World) {
+    let api = &w.api;
+    let (olga, olga_id) = w.person("link-olga@example.com").await;
+    let shop_tenant = new_id();
+    committed(
+        &w.send(
+            tenant(
+                "olgas-shop",
+                "Olga's shop",
+                &olga_id,
+                Some(TenantStatus::Active),
+            ),
+            &shop_tenant,
+            &shop_tenant,
+            w.context(&olga, None).await,
+        )
+        .await,
+    );
+    let as_olga = w.context(&olga, Some(&shop_tenant)).await;
+    let customers = new_id();
+    let permissions = vec![
+        Permission {
+            pattern: "shop.PlaceOrder".into(),
+            ..Permission::default()
+        },
+        Permission {
+            pattern: "shop.GetOrder".into(),
+            when: Some("owner".into()),
+            via_parent: None,
+        },
+    ];
+    committed(
+        &w.send(
+            CreateGroup {
+                name: "Customers".into(),
+                description: None,
+                permissions,
+            },
+            &customers,
+            &shop_tenant,
+            as_olga.clone(),
+        )
+        .await,
+    );
+
+    // Olga puts a link on her website: two people may join through it, as customers.
+    let into_customers = || {
+        vec![InvitedGroup {
+            group: customers.clone(),
+            scope: None,
+        }]
+    };
+    let (token, link_id) = api
+        .create_invitation_link(
+            as_olga.clone(),
+            &shop_tenant,
+            NewInvitationLink {
+                groups: into_customers(),
+                label: Some("website".into()),
+                max_uses: Some(2),
+                ..NewInvitationLink::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        api.peek_invitation_link(&token).await.unwrap(),
+        Some(PeekedLink {
+            tenant: shop_tenant.clone(),
+            link_id: link_id.clone(),
+            label: "website".into(),
+            usable: true,
+        })
+    );
+
+    let (pia, _) = w.person("link-pia@example.com").await;
+    let (quinn, _) = w.person("link-quinn@example.com").await;
+    let (rosa, _) = w.person("link-rosa@example.com").await;
+    assert_eq!(
+        api.join_with_invitation_link(&pia, &token).await.unwrap(),
+        shop_tenant
+    );
+    refused(api.join_with_invitation_link(&pia, &token).await, "exists");
+    assert_eq!(
+        api.join_with_invitation_link(&quinn, &token).await.unwrap(),
+        shop_tenant
+    );
+    refused(
+        api.join_with_invitation_link(&rosa, &token).await,
+        "used_up",
+    );
+    assert!(
+        !api.peek_invitation_link(&token)
+            .await
+            .unwrap()
+            .unwrap()
+            .usable
+    );
+    // A link's token is checked whole: another secret for the same link is refused.
+    let mut other = token.clone();
+    let last = other.pop().unwrap();
+    other.push(if last == 'A' { 'B' } else { 'A' });
+    refused(
+        api.join_with_invitation_link(&rosa, &other).await,
+        "invalid_token",
+    );
+
+    // Pia and Quinn are customers now (the reactor made their identities): Pia places an order
+    // and reads it; Quinn may not read it.
+    let as_pia = w.context(&pia, Some(&shop_tenant)).await;
+    let as_quinn = w.context(&quinn, Some(&shop_tenant)).await;
+    committed(
+        &w.send(PlaceOrder {}, "p1", &shop_tenant, as_pia.clone())
+            .await,
+    );
+    let get = |context: RequestContext| {
+        Query::of(GetOrder { id: "p1".into() })
+            .tenant(&shop_tenant)
+            .context(context)
+    };
+    assert_eq!(
+        w.kit
+            .query::<OrderDetails>(get(as_pia.clone()))
+            .await
+            .unwrap(),
+        OrderDetails {
+            customer: as_pia.sender_identity.clone()
+        }
+    );
+    assert_eq!(
+        query_code::<OrderDetails>(&w.kit, get(as_quinn.clone())).await,
+        "forbidden"
+    );
+
+    // Explain says the same for a query about one order.
+    let why = w
+        .kit
+        .ask(
+            Explain {
+                identity_id: as_quinn.sender_identity.clone(),
+                r#type: "shop.GetOrder".into(),
+                aggregate_type: Some("order".into()),
+                aggregate_id: Some("p1".into()),
+                data: None,
+            },
+            |q| q.tenant(&shop_tenant).context(as_olga.clone()),
+        )
+        .await
+        .unwrap();
+    assert!(!why.allowed);
+
+    // Customers may not hand out links: no permission for it, and no escalation either.
+    refused(
+        api.create_invitation_link(
+            as_pia.clone(),
+            &shop_tenant,
+            NewInvitationLink {
+                groups: into_customers(),
+                ..NewInvitationLink::default()
+            },
+        )
+        .await,
+        "forbidden",
+    );
+
+    // Revoked: the link is gone.
+    let (second, second_id) = api
+        .create_invitation_link(
+            as_olga.clone(),
+            &shop_tenant,
+            NewInvitationLink {
+                groups: into_customers(),
+                ..NewInvitationLink::default()
+            },
+        )
+        .await
+        .unwrap();
+    committed(
+        &w.send(
+            RevokeInvitationLink {},
+            &second_id,
+            &shop_tenant,
+            as_olga.clone(),
+        )
+        .await,
+    );
+    assert_eq!(api.peek_invitation_link(&second).await.unwrap(), None);
+    refused(
+        api.join_with_invitation_link(&rosa, &second).await,
+        "invalid_token",
+    );
 }

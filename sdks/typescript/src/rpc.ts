@@ -198,6 +198,8 @@ export interface WireQueryRequest {
   listener?: string;
   /** Signed when set: return once the read model has caught up here; see `QueryRequest.wait_only`. */
   wait_only?: boolean;
+  /** Signed when set: the aggregate the query is about; see `QueryRequest.target`. */
+  target?: { aggregate_type: string; aggregate_id: string } | null;
 }
 
 export interface WireQueryResult {

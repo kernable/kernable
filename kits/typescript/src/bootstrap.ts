@@ -36,6 +36,8 @@ export const API_PERMISSIONS = [
   { pattern: "tenancy.GetSignUpPolicy" },
   { pattern: "invitation.AcceptInvitation" },
   { pattern: "invitation.PeekInvitation" },
+  { pattern: "invitation.JoinWithInvitationLink" },
+  { pattern: "invitation.PeekInvitationLink" },
 ];
 
 export interface Bootstrapped {

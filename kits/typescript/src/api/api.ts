@@ -16,7 +16,9 @@ import {
   AddPasskey, FindAccountByLink, FindSsoByDomain, GetSsoSecret, LinkProvider, SignInWithProvider, VerifySsoDomain, ChangePassword, ConfirmEmailChange, ConfirmTotp, ProvePasskey, ProveSecondFactor, SignInWithPasskey, StartTotp, EndSession, FindAccountByEmail, GetAccount, NoteRegistrationAttempt, RefreshSession, RegisterAccount, RequestEmailChange,
   RequestPasswordReset, ResetPassword, SignIn, VerifyEmail, type SessionRefreshed, type SignInFailed, type SignedIn,
 } from "../account/index.ts";
-import { AcceptInvitation, PeekInvitation } from "../invitation/index.ts";
+import {
+  AcceptInvitation, CreateInvitationLink, JoinWithInvitationLink, PeekInvitation, PeekInvitationLink, linkToken, parseLinkToken, type InvitedGroup,
+} from "../invitation/index.ts";
 import { CreateApiKey, FindApiKey, FindIdentityByAccount, apiKey, parseApiKey } from "../identity/index.ts";
 import { CHALLENGE_SECONDS, PASSKEYS, PLATFORM_TENANT } from "../shared/constants.ts";
 import { equalSecrets, parseInvitationToken, parseToken, randomSecret, token, totpSecret } from "../shared/secrets.ts";
@@ -527,6 +529,45 @@ export class KitApi {
       if (!registered.committed) return { ok: false, reason: registered.code };
     }
     return { ok: true, accountId, tenant: peek.tenant };
+  }
+
+  /**
+   * A reusable invitation link into `groups` of the tenant, as `context` (whose groups the
+   * middleware checks): the token, shown this once, for a URL such as `/join?token=…`.
+   */
+  async createInvitationLink(
+    context: RequestContext,
+    tenant: string,
+    link: { groups: InvitedGroup[]; label?: string; expiresAt?: number | null; maxUses?: number | null },
+  ): Promise<{ ok: true; token: string; linkId: string } | { ok: false; reason: string }> {
+    const linkId = randomUUID();
+    const secret = randomSecret();
+    const outcome = await this.kernable.submit(CreateInvitationLink.new({ secret, ...link }), { aggregateId: linkId, tenant, context });
+    return outcome.committed ? { ok: true, token: linkToken(tenant, linkId, secret), linkId } : { ok: false, reason: outcome.code };
+  }
+
+  /** What the join page shows for a link token: the tenant, the link's label, whether it can be used. */
+  async peekInvitationLink(link: string) {
+    const t = parseLinkToken(link);
+    if (!t) return null;
+    try {
+      return await this.kernable.query(PeekInvitationLink.new({ token: link }), { tenant: t.tenant, context: this.serviceContext });
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * The signed-in account joins the link's tenant with its groups. Someone without an account
+   * registers and verifies first: a link proves no email.
+   */
+  async joinWithInvitationLink(claims: Claims, link: string): Promise<{ ok: true; tenant: string } | { ok: false; reason: string }> {
+    const t = parseLinkToken(link);
+    if (!t) return { ok: false, reason: "invalid_token" };
+    const outcome = await this.kernable.submit(JoinWithInvitationLink.new({ token: link, accountId: claims.sub }), {
+      aggregateId: t.linkId, tenant: t.tenant, context: this.serviceContext,
+    });
+    return outcome.committed ? { ok: true, tenant: t.tenant } : { ok: false, reason: outcome.code };
   }
 
   /** Signs out: ends the session. */

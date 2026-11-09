@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from kernable import Check, ListenerContext, MiddlewareContext, Rejected, RequestContext
+from kernable import Check, ListenerContext, MiddlewareContext, Rejected, RequestContext, Target
 from kernable.messages import from_wire
 
 from kit import kit_domains, relation
@@ -37,8 +37,9 @@ def learn(store, events) -> None:
 
 def check_of(c: dict) -> Check:
     request = RequestContext(**from_wire(c.get("request") or {}))
+    target = Target(c["target"]["type"], c["target"]["id"]) if c.get("target") else None
     return Check(kind=c["kind"], id="", tenant=c["tenant"], domain=c["domain"], type=c["type"], data=c.get("data"), request=request,
-                 aggregate_type=c.get("aggregateType", ""), aggregate_id=c.get("aggregateId", ""))
+                 aggregate_type=c.get("aggregateType", ""), aggregate_id=c.get("aggregateId", ""), target=target)
 
 
 class AuthorizationTest(unittest.TestCase):

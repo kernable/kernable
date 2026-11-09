@@ -53,14 +53,14 @@ import {
 } from "./signing.ts";
 import {
   Command, Event, Query, bind, boundOrThrow, dataOf, typeOf as messageType,
-  type AnswerOf, type CommandClass, type EventClass, type Fields, type MessageStatics, type QueryClass,
+  type AnswerOf, type CommandClass, type EventClass, type Fields, type MessageStatics, type QueryClass, type QueryTarget,
 } from "./messages.ts";
 import { Store } from "./store.ts";
 
 export { Key } from "./signing.ts";
 export { Store } from "./store.ts";
 export { Command, Event, Query } from "./messages.ts";
-export type { AnswerOf, CommandClass, EventClass, Fields, PersonalFields, QueryClass, SubjectOf } from "./messages.ts";
+export type { AnswerOf, CommandClass, EventClass, Fields, PersonalFields, QueryClass, QueryTarget, SubjectOf } from "./messages.ts";
 
 /**
  * A refusal with a business reason: throw it from a command handler, a query handler or a
@@ -289,6 +289,12 @@ export interface Check {
   aggregateType?: string;
   /** Commands only. */
   aggregateId?: string;
+  /**
+   * The aggregate the request is about, qualified: a command's aggregate (`shop.order`, `o-17`),
+   * or the one a query declares (`Query.target`, `QuerySchema.target`). Absent for queries that
+   * declare none, and for file and cache requests.
+   */
+  target?: { type: string; id: string };
   /** File and cache requests only: the file's or value's key. */
   key?: string;
   /**
@@ -780,6 +786,45 @@ export class CommandSchema {
 }
 
 /**
+ * What a domain declares about a query type given by name (`domain.query("GetOrder")`): the
+ * aggregate it is about. Query classes declare it as `static target` instead.
+ *
+ * ```ts
+ * shopDomain.query("GetOrder").target("order", "id"); // GetOrder { id: "o-17" } is about order o-17
+ * ```
+ */
+export class QuerySchema {
+  /** The query type within its domain, unqualified. */
+  readonly type: string;
+  /** The aggregate the query is about; see `target`. */
+  targetOf?: QueryTarget;
+
+  constructor(type: string) {
+    if (!/^[^.*]+$/.test(type)) throw new Error(`query types are unqualified within their domain, not ${JSON.stringify(type)}`);
+    this.type = type;
+  }
+
+  /**
+   * The query is about one aggregate of `aggregateType` (`order`, or qualified `shop.order`),
+   * whose ID is in the data's `field`. The SDK sends it with the query, signed, and a middleware
+   * decides on it as on a command's aggregate. Clients that ask it need the domain:
+   * `kernable.use(domain)`.
+   */
+  target(aggregateType: string, field: string): this {
+    this.targetOf = { aggregateType, field };
+    return this;
+  }
+}
+
+/** The wire target of a query: the declared aggregate type, qualified, and the ID from `data`. */
+function queryTarget(def: QueryTarget | undefined, domain: string, data: unknown): { aggregate_type: string; aggregate_id: string } | undefined {
+  if (!def) return undefined;
+  const id = data !== null && typeof data === "object" ? (data as Record<string, unknown>)[def.field] : undefined;
+  if (typeof id !== "string" || !id) return undefined; // no ID: no target, so a rule that needs one refuses
+  return { aggregate_type: def.aggregateType.includes(".") ? def.aggregateType : `${domain}.${def.aggregateType}`, aggregate_id: id };
+}
+
+/**
  * Moves the vault fields of `data` into vault values: the payload keeps `{"$vault": ref}`.
  * Absent and null fields stay as they are.
  */
@@ -874,6 +919,8 @@ export class Domain {
   readonly events = new Map<string, EventSchema>();
   /** Vault fields per command type; see `command`. */
   readonly commands = new Map<string, CommandSchema>();
+  /** What query types given by name are about; see `query`. */
+  readonly queries = new Map<string, QuerySchema>();
   /** The aggregates defined on it, which `Kernable.app` runs. */
   readonly aggregates: Aggregate<any>[] = [];
   /** The read models and reactors defined on it, which `Kernable.app` runs. */
@@ -916,6 +963,17 @@ export class Domain {
   command(type: string): CommandSchema {
     const def = new CommandSchema(type);
     this.commands.set(type, def);
+    return def;
+  }
+
+  /**
+   * Declares what `type` queries (unqualified) are about: returns the `QuerySchema` to chain
+   * `target` on. Query classes declare it as `static target` instead. Clients that ask such
+   * queries by name need the domain: `kernable.use(domain)`.
+   */
+  query(type: string): QuerySchema {
+    const def = new QuerySchema(type);
+    this.queries.set(type, def);
     return def;
   }
 
@@ -1904,12 +1962,16 @@ export class Kernable {
   async query<Q extends Query<any>>(query: Q, options?: Omit<QueryOptions, "domain" | "type" | "data">): Promise<AnswerOf<Q>>;
   async query(query: QueryOptions | Query<any>, more?: Omit<QueryOptions, "domain" | "type" | "data">): Promise<unknown> {
     let options: QueryOptions;
+    let declared: QueryTarget | undefined;
     if (query instanceof Query) {
       const cls = query.constructor as QueryClass<unknown>;
       options = { ...more, domain: boundOrThrow(cls, "answered by a read model").domain, type: messageType(cls), data: dataOf(query) };
+      declared = (cls as MessageStatics).target;
     } else {
       options = query;
+      declared = this.domains.get(options.domain)?.queries?.get(options.type)?.targetOf;
     }
+    const target = queryTarget(declared, options.domain, options.data);
     const request = {
       query_id: randomUUID(),
       tenant_id: options.tenant ?? this.tenant,
@@ -1919,6 +1981,7 @@ export class Kernable {
       context: toWireContext(options.context ?? this.context),
       min_position: options.minPosition ?? 0,
       issued_at: issuedNow(),
+      ...(target ? { target } : {}),
     };
     if (options.allPartitions) {
       // A wait-only query to every partition at once: each returns once the read model has
@@ -2489,6 +2552,9 @@ export class Listener {
     } else {
       bind(query, { domain: this.domain.name, schemas: this.domain });
       queryType = messageType(query);
+      // Its target counts also when the query is asked by name, by clients that `use` the domain.
+      const target = (query as MessageStatics).target;
+      if (target && !this.domain.queries.has(queryType)) this.domain.queries.set(queryType, new QuerySchema(queryType).target(target.aggregateType, target.field));
     }
     if (!UNQUALIFIED.test(queryType) && !/^[A-Za-z][A-Za-z0-9_-]*\.[^.*]+$/.test(queryType)) {
       throw new Error(`answer a query type (Query) or a qualified one (domain.Query), not ${JSON.stringify(queryType)}`);
@@ -3526,6 +3592,7 @@ function toCheck(c: NonNullable<ListenerDelivery["check"]>): Check {
       type: x.command_type,
       aggregateType: x.aggregate_type,
       aggregateId: x.aggregate_id,
+      target: { type: `${x.domain}.${x.aggregate_type}`, id: x.aggregate_id },
       data: unseal(decode(x.payload), c.vault).data,
       request: fromWireContext(x.context),
     };
@@ -3537,6 +3604,7 @@ function toCheck(c: NonNullable<ListenerDelivery["check"]>): Check {
     tenant: q.tenant_id,
     domain: q.domain,
     type: q.query_type,
+    ...(q.target?.aggregate_id ? { target: { type: q.target.aggregate_type, id: q.target.aggregate_id } } : {}),
     data: decode(q.payload),
     request: fromWireContext(q.context),
   };

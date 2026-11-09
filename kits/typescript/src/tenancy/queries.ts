@@ -21,6 +21,7 @@ export class GetSignUpPolicy extends Query<SignUpPolicy> {}
 tenantsReadModel.query(GetSignUpPolicy, () => policy.signUp);
 
 export class GetTenant extends Query<TenantRow> {
+  static target = { aggregateType: "tenancy.tenant", field: "tenantId" };
   tenantId!: string;
 }
 

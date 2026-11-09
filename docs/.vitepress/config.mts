@@ -24,6 +24,7 @@ const SIDEBAR = [
           { text: "6. Authorization", link: "/tutorial/shop/6-authorization" },
           { text: "7. Personal data", link: "/tutorial/shop/7-personal-data" },
           { text: "8. Operate", link: "/tutorial/shop/8-operate" },
+          { text: "9. Accounts and sign-in", link: "/tutorial/shop/9-sign-in" },
         ],
       },
     ],

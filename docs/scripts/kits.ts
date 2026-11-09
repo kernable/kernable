@@ -56,6 +56,8 @@ interface Message {
   secret: string[];
   erases: string;
   answer: string;
+  /** Queries: the aggregate it is about (`static target`). */
+  target: string;
   node: ts.ClassDeclaration;
 }
 
@@ -66,7 +68,7 @@ function messages(src: ts.SourceFile | null, base: "Event" | "Command" | "Query"
     if (!ts.isClassDeclaration(node) || !node.name) continue;
     const ext = node.heritageClauses?.find((h) => h.token === ts.SyntaxKind.ExtendsKeyword)?.types[0];
     if (!ext || ext.expression.getText(src) !== base) continue;
-    const m: Message = { name: node.name.text, doc: doc(node), fields: [], personal: [], secret: [], erases: "", answer: ext.typeArguments?.[0]?.getText(src) ?? "", node };
+    const m: Message = { name: node.name.text, doc: doc(node), fields: [], personal: [], secret: [], erases: "", answer: ext.typeArguments?.[0]?.getText(src) ?? "", target: "", node };
     for (const member of node.members) {
       if (!ts.isPropertyDeclaration(member) || !ts.isIdentifier(member.name)) continue;
       const isStatic = ts.getModifiers(member)?.some((x) => x.kind === ts.SyntaxKind.StaticKeyword);
@@ -86,6 +88,12 @@ function messages(src: ts.SourceFile | null, base: "Event" | "Command" | "Query"
         m.secret = member.initializer.elements.filter(ts.isStringLiteral).map((e) => e.text);
       } else if (name === "erases") {
         m.erases = subject(member.initializer, src);
+      }
+      else if (name === "target" && member.initializer && ts.isObjectLiteralExpression(member.initializer)) {
+        const get = (k: string) => (member.initializer as ts.ObjectLiteralExpression).properties.find((p): p is ts.PropertyAssignment => ts.isPropertyAssignment(p) && p.name.getText(src) === k)?.initializer;
+        const type = get("aggregateType");
+        const field = get("field");
+        if (type && field && ts.isStringLiteral(type) && ts.isStringLiteral(field)) m.target = `${type.text} in \`${field.text}\``;
       }
     }
     out.push(m);
@@ -328,8 +336,8 @@ export function kitReference(domain: string): string {
       });
     }
     const answeredBy = new Map(registrations(queries, "query").map((x) => [x.cls, models.get(x.receiver) ?? x.receiver]));
-    const rows = qs.map((m) => `| ${code(m.name)}${answeredBy.get(m.name) ? `<br>by ${code(answeredBy.get(m.name)!)}` : ""} | ${fieldList(m)} | ${answer(m.answer, types)} | ${who(`${domain}.${m.name}`, r)} |`);
-    out.push(`### Queries\n\n| Query | Fields | Answer | Who may ask |\n|---|---|---|---|\n${rows.join("\n")}\n`);
+    const rows = qs.map((m) => `| ${code(m.name)}${answeredBy.get(m.name) ? `<br>by ${code(answeredBy.get(m.name)!)}` : ""} | ${fieldList(m)} | ${m.target ? `\`${m.target.split(" in ")[0]}\` in ${m.target.split(" in ")[1]}` : "—"} | ${answer(m.answer, types)} | ${who(`${domain}.${m.name}`, r)} |`);
+    out.push(`### Queries\n\nA query about one aggregate names it (\`static target\`): the middleware decides on that aggregate as on a command's.\n\n| Query | Fields | About | Answer | Who may ask |\n|---|---|---|---|---|\n${rows.join("\n")}\n`);
   }
 
   // Listeners: read models and reactors, with the events they take and what reactors submit.

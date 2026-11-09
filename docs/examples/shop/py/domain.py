@@ -139,3 +139,10 @@ def _(state, data):
         raise Rejected("No such customer", "not_found")
     return [{"type": "CustomerErased"}]
 # endregion vault
+
+
+# region target
+# GetOrder {"id": ...} is about the order `id`: the SDK sends that order with the query, signed, and a
+# middleware decides on it as on a command's aggregate (part 9).
+shop_domain.query("GetOrder").target("order", "id")
+# endregion target

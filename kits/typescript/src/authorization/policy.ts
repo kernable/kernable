@@ -7,7 +7,7 @@ import type { Permission } from "../group/domain.ts";
 import type { Membership } from "../identity/domain.ts";
 import type { SignUpPolicy, TenantStatus } from "../tenancy/domain.ts";
 import { PLATFORM_TENANT } from "../shared/constants.ts";
-import { ESCALATION, QUERY_TARGETS, ruleOf } from "./levels.ts";
+import { ESCALATION, ruleOf } from "./levels.ts";
 
 export interface Refusal {
   code: "unauthenticated" | "forbidden" | "tenant_suspended" | "mfa_required" | "sso_required" | "sign_up_closed";
@@ -135,15 +135,11 @@ export function covers(pattern: string, name: string): boolean {
 
 const refuse = (code: Refusal["code"], message: string): Refusal => ({ code, message });
 
-/** The command's aggregate, or the field a query names as its target. */
+/** The aggregate the request is about: a command's, or the one a query declares (`static target`). */
 export function targetOf(check: Check): Target | null {
+  if (check.target) return check.target;
   if (check.kind === "command" && check.aggregateType && check.aggregateId) {
     return { type: `${check.domain}.${check.aggregateType}`, id: check.aggregateId };
-  }
-  if (check.kind === "query") {
-    const t = QUERY_TARGETS[`${check.domain}.${check.type}`];
-    const id = t && (check.data as Record<string, unknown> | undefined)?.[t.field];
-    if (t && typeof id === "string" && id) return { type: t.type, id };
   }
   return null;
 }
@@ -225,6 +221,7 @@ function concerned(k: Knowledge, type: string, check: Check): string[] {
     case "identity.GrantMembership":
       return ofGroup(d.group);
     case "invitation.CreateInvitation":
+    case "invitation.CreateInvitationLink":
       return Array.isArray(d.groups) ? d.groups.flatMap((g: { group: string }) => ofGroup(g?.group)) : [];
     default:
       return Array.isArray(d.permissions) ? d.permissions.map((p: Permission) => String(p?.pattern)) : [];

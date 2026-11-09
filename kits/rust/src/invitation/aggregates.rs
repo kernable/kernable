@@ -3,7 +3,7 @@
 use kernable::{Aggregate, Domain, Unique};
 use serde::{Deserialize, Serialize};
 
-use super::{InvitationStatus, InvitedGroup, events::*};
+use super::{InvitationStatus, InvitedGroup, LinkStatus, events::*};
 use crate::shared::constants::SNAPSHOT_SCHEMA;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -66,5 +66,39 @@ pub fn invitation(domain: &Domain) -> Aggregate<Invitation> {
         },
         Unique::tenant(),
     );
+    a
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct InvitationLink {
+    pub status: LinkStatus,
+    pub groups: Vec<InvitedGroup>,
+    /// The token's hash: the token itself is shown once, by the API.
+    pub hash: Option<String>,
+    pub label: String,
+    pub expires_at: Option<i64>,
+    pub max_uses: Option<i64>,
+    /// The accounts that joined through it: each once.
+    pub accounts: Vec<String>,
+}
+
+pub fn link(domain: &Domain) -> Aggregate<InvitationLink> {
+    let a = domain
+        .aggregate("link", InvitationLink::default())
+        .schema(SNAPSHOT_SCHEMA);
+    a.apply(InvitationLinkCreated, |s, d, _, _| {
+        s.status = LinkStatus::Open;
+        s.groups = d.groups;
+        s.hash = Some(d.hash);
+        s.label = d.label;
+        s.expires_at = d.expires_at;
+        s.max_uses = d.max_uses;
+    });
+    a.apply(InvitationLinkRevoked, |s, _, _, _| {
+        s.status = LinkStatus::Revoked
+    });
+    a.apply(InvitationLinkUsed, |s, d, _, _| {
+        s.accounts.push(d.account_id)
+    });
     a
 }

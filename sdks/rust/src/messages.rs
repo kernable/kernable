@@ -46,7 +46,7 @@ pub trait Message: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// Its type within the domain.
     const TYPE: &'static str;
     /// Declares its schema on `domain` (an event's version, upcasts and vault fields; a
-    /// command's vault fields). The SDK calls it once per domain.
+    /// command's vault fields; a query's target). The SDK calls it once per domain.
     fn declare(domain: &Domain);
 }
 
@@ -59,7 +59,12 @@ pub trait CommandType: Message {
     const AGGREGATE: &'static str;
 }
 
-/// A query and its answer: `#[query("domain", answer = Row)]`.
+/// A query and its answer: `#[query("domain", answer = Row)]`. A query about one aggregate
+/// names it, and the field with its ID: `#[query("shop", answer = OrderRow, target(aggregate =
+/// "order", field = order_id))]`. The SDK sends that aggregate with the query, and a middleware
+/// decides on it as on a command's aggregate ([`crate::Check::target`]): "only the order's
+/// owner may read it". The aggregate type is of the query's domain, or qualified:
+/// `shop.order`.
 pub trait QueryType: Message {
     /// What the read model answers.
     type Answer: Serialize + DeserializeOwned;
@@ -213,6 +218,11 @@ mod tests {
         pub status: Option<String>,
     }
 
+    #[query("shopt", answer = Vec<String>, target(aggregate = "order", field = order_id))]
+    pub struct GetOrder {
+        pub order_id: String,
+    }
+
     #[derive(Clone, Default, Serialize, Deserialize)]
     struct Order {
         customer: String,
@@ -347,6 +357,70 @@ mod tests {
         assert!(
             q.contains("query_type: \"ListOrders\"") && q.contains("data: Object {}"),
             "{q}"
+        );
+        assert!(q.contains("target: None"), "{q}");
+    }
+
+    #[test]
+    fn a_query_declares_its_target_and_sends_it_qualified_with_the_id_from_its_data() {
+        let target = crate::messages::domain_of::<GetOrder>()
+            .query_target("GetOrder")
+            .unwrap();
+        assert_eq!(
+            target,
+            crate::QueryTarget {
+                aggregate_type: "order".into(),
+                field: "orderId".into(),
+            }
+        );
+        let q = format!(
+            "{:?}",
+            Query::of(GetOrder {
+                order_id: "o1".into()
+            })
+        );
+        assert!(q.contains("field: \"orderId\""), "{q}");
+        let wire = target.wire("shopt", &json!({ "orderId": "o1" })).unwrap();
+        assert_eq!(
+            (wire.aggregate_type.as_str(), wire.aggregate_id.as_str()),
+            ("shopt.order", "o1")
+        );
+        // No ID, an empty one or one that is no string: no target.
+        for data in [json!({}), json!({ "orderId": "" }), json!({ "orderId": 7 })] {
+            assert!(target.wire("shopt", &data).is_none());
+        }
+        // Qualified, by name.
+        let shop = domain("shopt2");
+        shop.query("GetCustomer")
+            .target("crm.customer", "customerId");
+        let wire = shop
+            .query_target("GetCustomer")
+            .unwrap()
+            .wire("shopt2", &json!({ "customerId": "c1" }))
+            .unwrap();
+        assert_eq!(wire.aggregate_type, "crm.customer");
+        assert_eq!(shop.query_target("Other"), None);
+    }
+
+    #[test]
+    fn a_read_model_answering_a_query_type_declares_its_target_on_its_domain() {
+        // So a client that knows the domain (`with_domain`) sends it when it asks by name.
+        let shop = domain("shopt");
+        shop.read_model("orders")
+            .query(GetOrder, |_d, _q, _ctx| async move { Ok(()) });
+        assert_eq!(
+            shop.query_target("GetOrder").map(|t| t.field),
+            Some("orderId".to_owned())
+        );
+        // A declaration by name stays.
+        let other = domain("shopt");
+        other.query("GetOrder").target("customer", "customerId");
+        other
+            .read_model("orders")
+            .query(GetOrder, |_d, _q, _ctx| async move { Ok(()) });
+        assert_eq!(
+            other.query_target("GetOrder").map(|t| t.aggregate_type),
+            Some("customer".to_owned())
         );
     }
 }

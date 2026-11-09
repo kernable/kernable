@@ -6,7 +6,7 @@ use std::sync::{Arc, RwLock};
 use kernable::{Domain, Listener};
 use serde::{Deserialize, Serialize};
 
-use super::{InvitationStatus, InvitedGroup, events::*};
+use super::{InvitationStatus, InvitedGroup, LinkStatus, events::*};
 use crate::shared::constants::orders;
 use crate::tenancy::TenantDeleted;
 
@@ -27,22 +27,38 @@ pub struct InvitationRow {
 /// `tenant/invitationId` → the invitation.
 pub type Shared = Arc<RwLock<BTreeMap<String, InvitationRow>>>;
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkRow {
+    pub id: String,
+    pub tenant: String,
+    pub groups: Vec<InvitedGroup>,
+    pub label: String,
+    pub status: LinkStatus,
+    pub expires_at: Option<i64>,
+    pub max_uses: Option<i64>,
+    /// How many joined through it.
+    pub uses: i64,
+    pub created_by: Option<String>,
+    pub created_at: i64,
+}
+
+/// `tenant/linkId` → the invitation link.
+pub type Links = Arc<RwLock<BTreeMap<String, LinkRow>>>;
+
 pub fn row_key(tenant: &str, invitation_id: &str) -> String {
     format!("{tenant}/{invitation_id}")
 }
 
-fn update(
-    t: &mut BTreeMap<String, InvitationRow>,
-    evt: &kernable::StoredEventMeta,
-    f: impl FnOnce(&mut InvitationRow),
-) {
+fn update<R>(t: &mut BTreeMap<String, R>, evt: &kernable::StoredEventMeta, f: impl FnOnce(&mut R)) {
     if let Some(r) = t.get_mut(&row_key(&evt.tenant, &evt.aggregate_id)) {
         f(r);
     }
 }
 
-pub fn invitations(domain: &Domain) -> (Listener, Shared) {
+pub fn invitations(domain: &Domain) -> (Listener, Shared, Links) {
     let state: Shared = Arc::default();
+    let links: Links = Arc::default();
     let l = domain
         .read_model("invitation.invitations")
         .order(orders::READ_MODELS);
@@ -95,7 +111,52 @@ pub fn invitations(domain: &Domain) -> (Listener, Shared) {
         &evt,
         |r| r.email = None
     ));
-    on!(l, state, TenantDeleted, |t, _d, evt| t
-        .retain(|_, r| r.tenant != evt.aggregate_id));
-    (l, state)
+    {
+        let links = Arc::clone(&links);
+        l.on(InvitationLinkCreated, move |d, evt, ctx| {
+            let links = Arc::clone(&links);
+            async move {
+                let row = LinkRow {
+                    id: evt.aggregate_id.clone(),
+                    tenant: evt.tenant.clone(),
+                    groups: d.groups,
+                    label: d.label,
+                    status: LinkStatus::Open,
+                    expires_at: d.expires_at,
+                    max_uses: d.max_uses,
+                    uses: 0,
+                    created_by: Some(ctx.request.sender_identity.clone()).filter(|s| !s.is_empty()),
+                    created_at: evt.created_at.millis(),
+                };
+                links
+                    .write()
+                    .unwrap()
+                    .insert(row_key(&evt.tenant, &evt.aggregate_id), row);
+                Ok(())
+            }
+        });
+    }
+    on!(l, links, InvitationLinkRevoked, |t, _d, evt| update(
+        t,
+        &evt,
+        |r| r.status = LinkStatus::Revoked
+    ));
+    on!(l, links, InvitationLinkUsed, |t, _d, evt| update(
+        t,
+        &evt,
+        |r| r.uses += 1
+    ));
+    {
+        let (state, links) = (Arc::clone(&state), Arc::clone(&links));
+        l.on(TenantDeleted, move |_d, evt, _ctx| {
+            let (state, links) = (Arc::clone(&state), Arc::clone(&links));
+            async move {
+                let tenant = &evt.aggregate_id;
+                state.write().unwrap().retain(|_, r| &r.tenant != tenant);
+                links.write().unwrap().retain(|_, r| &r.tenant != tenant);
+                Ok(())
+            }
+        });
+    }
+    (l, state, links)
 }

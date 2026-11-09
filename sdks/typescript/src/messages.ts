@@ -73,10 +73,13 @@ export abstract class Command extends Message {}
 
 /**
  * A query: what is asked, with `R` its answer. Its class name is its type within the domain of
- * the read model that answers it.
+ * the read model that answers it. A query about one aggregate names it in `static target`: the
+ * SDK sends that aggregate with the query, and a middleware decides on it as on a command's
+ * aggregate ("only the tenant's members may read it").
  *
  * ```ts
  * export class GetTenant extends Query<TenantRow> {
+ *   static target = { aggregateType: "tenancy.tenant", field: "tenantId" };
  *   tenantId!: string;
  * }
  * tenants.query(GetTenant, (data) => rows.get(data.tenantId));
@@ -97,6 +100,19 @@ export interface MessageStatics {
   personal?: readonly { fields: readonly string[]; subject: (data: any, aggregateId: string) => string }[];
   erases?: (data: any, aggregateId: string) => string;
   secret?: readonly string[];
+  /**
+   * Queries: the aggregate a query is about, the field of its data that holds the aggregate's ID
+   * (`{ aggregateType: "order", field: "id" }`); an unqualified type is of the query's domain.
+   */
+  target?: QueryTarget;
+}
+
+/** The aggregate a query is about: its type, and the field of the query's data with its ID. */
+export interface QueryTarget {
+  /** `order` (the query's domain) or qualified: `shop.order`. */
+  aggregateType: string;
+  /** The field of the query's data that holds the aggregate's ID: `id`. */
+  field: string;
 }
 
 /** A message class, by its instances' type (its constructor is protected: create with `.new`). */

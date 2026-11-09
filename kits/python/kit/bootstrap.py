@@ -21,7 +21,7 @@ API_PERMISSIONS = [{"pattern": p} for p in [
     "account.SetCache", "account.GetCache", "account.DeleteCache",
     "identity.FindIdentityByAccount", "identity.FindApiKey",
     "tenancy.GetTenantBySlug", "tenancy.GetSignUpPolicy",
-    "invitation.AcceptInvitation", "invitation.PeekInvitation",
+    "invitation.AcceptInvitation", "invitation.PeekInvitation", "invitation.JoinWithInvitationLink", "invitation.PeekInvitationLink",
 ]]
 
 

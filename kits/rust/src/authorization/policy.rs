@@ -8,7 +8,7 @@ use kernable::{Check, CheckKind, RequestContext, Store};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
-use super::levels::{ESCALATION, Level, QUERY_TARGETS, rule_of};
+use super::levels::{ESCALATION, Level, rule_of};
 use super::relations::Target;
 use crate::group::Permission;
 use crate::identity::Scope;
@@ -268,25 +268,20 @@ pub fn covers(pattern: &str, name: &str) -> bool {
         .is_some_and(|domain| name != "*" && name.split('.').next() == Some(domain))
 }
 
-/// The command's aggregate, or the field a query names as its target.
+/// The aggregate the request is about: a command's, or the one a query declares (its
+/// `target(...)`).
 pub fn target_of(check: &Check) -> Option<Target> {
-    match check.kind {
-        CheckKind::Command => {
-            let (t, id) = (
-                check.aggregate_type.as_deref()?,
-                check.aggregate_id.as_deref()?,
-            );
-            (!t.is_empty() && !id.is_empty())
-                .then(|| Target::new(&format!("{}.{t}", check.domain), id))
-        }
-        CheckKind::Query => {
-            let name = format!("{}.{}", check.domain, check.type_name);
-            let (_, r#type, field) = QUERY_TARGETS.iter().find(|(q, _, _)| *q == name)?;
-            let id = check.data.get(*field)?.as_str().filter(|s| !s.is_empty())?;
-            Some(Target::new(r#type, id))
-        }
-        _ => None,
+    if let Some(t) = &check.target {
+        return Some(Target::new(&t.aggregate_type, &t.aggregate_id));
     }
+    if check.kind != CheckKind::Command {
+        return None;
+    }
+    let (t, id) = (
+        check.aggregate_type.as_deref()?,
+        check.aggregate_id.as_deref()?,
+    );
+    (!t.is_empty() && !id.is_empty()).then(|| Target::new(&format!("{}.{t}", check.domain), id))
 }
 
 /// Whether the target is the sender itself: its identity, account or session (built-in `self`).
@@ -442,7 +437,7 @@ fn concerned(k: &Knowledge, r#type: &str, tenant: &str, data: &Value) -> Vec<Str
     };
     match r#type {
         "identity.GrantMembership" => of_group(&data["group"]),
-        "invitation.CreateInvitation" => data["groups"]
+        "invitation.CreateInvitation" | "invitation.CreateInvitationLink" => data["groups"]
             .as_array()
             .into_iter()
             .flatten()

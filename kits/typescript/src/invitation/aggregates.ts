@@ -1,8 +1,9 @@
 // The invitation aggregates: state, how each event changes it, unique keys and facts.
 
-import { invitationDomain, type InvitationStatus, type InvitedGroup } from "./domain.ts";
+import { invitationDomain, type InvitationStatus, type InvitedGroup, type LinkStatus } from "./domain.ts";
 import {
-  InvitationAccepted, InvitationCreated, InvitationDeclined, InvitationErased, InvitationResent, InvitationRevoked,
+  InvitationAccepted, InvitationCreated, InvitationDeclined, InvitationErased, InvitationLinkCreated, InvitationLinkRevoked,
+  InvitationLinkUsed, InvitationResent, InvitationRevoked,
 } from "./events.ts";
 
 export interface Invitation {
@@ -53,3 +54,28 @@ export const invitationAggregate = invitationDomain
   })
   // One open invitation per email and tenant.
   .unique("email", (s) => (s.status === "open" && s.email ? s.email : null));
+
+export interface InvitationLink {
+  status: LinkStatus;
+  groups: InvitedGroup[];
+  /** The token's hash: the token itself is shown once, by the API. */
+  hash?: string;
+  label: string;
+  expiresAt: number | null;
+  maxUses: number | null;
+  /** The accounts that joined through it: each once. */
+  accounts: string[];
+}
+
+export const linkAggregate = invitationDomain
+  .aggregate<InvitationLink>("link", { status: "none", groups: [], label: "", expiresAt: null, maxUses: null, accounts: [] })
+  .apply(InvitationLinkCreated, (s, d) => {
+    s.status = "open";
+    s.groups = d.groups;
+    s.hash = d.hash;
+    s.label = d.label;
+    s.expiresAt = d.expiresAt;
+    s.maxUses = d.maxUses;
+  })
+  .apply(InvitationLinkRevoked, (s) => void (s.status = "revoked"))
+  .apply(InvitationLinkUsed, (s, d) => void s.accounts.push(d.accountId));

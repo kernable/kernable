@@ -505,6 +505,16 @@ Signed by the client over kernable.v1.query.
 | `protocol` |  `uint32` | 10 | not signed |
 | `listener` |  `string` | 11 | Set by SDKs when a listener's handler asks (not signed); see SubmitRequest.listener. The query is never routed to that listener, nor to one that could reach `min_position` only after that listener, and refused (FAILED_PRECONDITION) if no other read model answers it or if the listener itself checks the query as a middleware. |
 | `wait_only` |  `bool` | 12 | Signed, and only when set: answer nothing; return an empty response once a read model that answers `query_type` has processed this kernel's head (as of the request) and `min_position`. Not checked by middleware, and any partition takes it, whatever the tenant: the SDKs send it to every partition before a query across tenants (`allPartitions`), so that its answer holds every event committed before it. |
+| `target` |  `Target` | 13 | Signed, and only when set: the aggregate the query is about, as the query type declares it (the SDKs fill it from the query's data). A middleware decides on it as on a command's aggregate, e.g. "only the order's owner may read it"; the read model answers from the data. |
+
+### Target
+
+The aggregate a query is about; see QueryRequest.target.
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `aggregate_type` |  `string` | 1 | qualified: `shop.order` |
+| `aggregate_id` |  `string` | 2 |  |
 
 ### QueryResult
 

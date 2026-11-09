@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use kernable::{Check, CheckKind, RequestContext, Store};
+use kernable::{Check, CheckKind, RequestContext, Store, Target};
 use kit::authorization::middleware::{Seen, check, learn};
 use kit::authorization::policy::Knowledge;
 use kit::authorization::{ids, relation};
@@ -65,6 +65,10 @@ fn check_of(c: &Value) -> Check {
         type_name: text(c, "type"),
         aggregate_type: c["aggregateType"].as_str().map(str::to_owned),
         aggregate_id: c["aggregateId"].as_str().map(str::to_owned),
+        target: c.get("target").map(|t| Target {
+            aggregate_type: text(t, "type"),
+            aggregate_id: text(t, "id"),
+        }),
         key: None,
         data: c["data"].clone(),
         request,

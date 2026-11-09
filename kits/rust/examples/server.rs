@@ -11,10 +11,10 @@
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
-use kernable::{Kernable, Outcome, RequestContext, Submit};
-use kit::api::{ApiError, KitApi};
+use kernable::{Error, Kernable, Outcome, Query, RequestContext, Submit};
+use kit::api::{ApiError, KitApi, NewInvitationLink};
 use serde_json::{Value, json};
 
 #[derive(Clone)]
@@ -170,6 +170,129 @@ async fn sign_out(State(s): State<Server>, headers: HeaderMap) -> Response {
     StatusCode::NO_CONTENT.into_response()
 }
 
+fn unauthenticated() -> Response {
+    reply(
+        StatusCode::UNAUTHORIZED,
+        json!({ "error": "unauthenticated" }),
+    )
+}
+
+fn failed(e: impl std::fmt::Display) -> Response {
+    reply(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        json!({ "error": e.to_string() }),
+    )
+}
+
+/// The request's `data`, `{}` if it has none.
+fn data(b: &Value) -> Value {
+    if b["data"].is_null() {
+        json!({})
+    } else {
+        b["data"].clone()
+    }
+}
+
+/// POST /tenants: opens a tenant the caller owns (self-service, as the sign-up policy allows).
+async fn open_tenant(
+    State(s): State<Server>,
+    headers: HeaderMap,
+    Json(b): Json<Value>,
+) -> Response {
+    let Some(claims) = bearer(&s, &headers) else {
+        return unauthenticated();
+    };
+    let context = match s.api.context_for(&claims, None).await {
+        Ok(context) => context,
+        Err(e) => return refusal(e, StatusCode::FORBIDDEN),
+    };
+    let tenant = kit::shared::secrets::new_id();
+    let submit = Submit::new("tenancy", "tenant", &tenant, "CreateTenant")
+        .data(json!({ "slug": b["slug"], "name": b["name"], "owner": { "accountId": claims.sub } }))
+        .tenant(tenant.clone())
+        .context(context);
+    match s.kernable.submit(submit).await {
+        Ok(Outcome::Committed(_)) => reply(StatusCode::CREATED, json!({ "tenant": tenant })),
+        Ok(Outcome::Rejected(r)) => reply(StatusCode::FORBIDDEN, json!({ "error": r.code })),
+        Err(e) => failed(e),
+    }
+}
+
+/// POST /invitation-links/join: the signed-in caller joins a tenant through an invitation link.
+async fn join_link(State(s): State<Server>, headers: HeaderMap, Json(b): Json<Value>) -> Response {
+    let Some(claims) = bearer(&s, &headers) else {
+        return unauthenticated();
+    };
+    match s
+        .api
+        .join_with_invitation_link(&claims, text(&b, "token"))
+        .await
+    {
+        Ok(tenant) => reply(StatusCode::OK, json!({ "ok": true, "tenant": tenant })),
+        Err(ApiError::Refused(code)) => reply(
+            StatusCode::BAD_REQUEST,
+            json!({ "ok": false, "reason": code }),
+        ),
+        Err(e) => failed(e),
+    }
+}
+
+/// The request context as JSON: its fields that are set.
+fn context_json(c: &RequestContext) -> Value {
+    let mut out = serde_json::Map::new();
+    for (name, value) in [
+        ("senderAccount", &c.sender_account),
+        ("senderSession", &c.sender_session),
+        ("senderTenant", &c.sender_tenant),
+        ("senderIdentity", &c.sender_identity),
+        ("onBehalfOf", &c.on_behalf_of),
+    ] {
+        if !value.is_empty() {
+            out.insert(name.into(), json!(value));
+        }
+    }
+    if c.bypass_authorization {
+        out.insert("bypassAuthorization".into(), json!(true));
+    }
+    if !c.attributes.is_empty() {
+        out.insert("attributes".into(), json!(c.attributes));
+    }
+    Value::Object(out)
+}
+
+/// GET /me: the caller's request context in the tenant of `X-Tenant`.
+async fn me(State(s): State<Server>, headers: HeaderMap) -> Response {
+    match caller(&s, &headers).await {
+        Some(context) => reply(StatusCode::OK, context_json(&context)),
+        None => unauthenticated(),
+    }
+}
+
+/// POST /invitation-links: a reusable invitation link into groups of the caller's tenant.
+async fn create_link(
+    State(s): State<Server>,
+    headers: HeaderMap,
+    Json(b): Json<Value>,
+) -> Response {
+    let Some(context) = caller(&s, &headers).await else {
+        return unauthenticated();
+    };
+    let link = NewInvitationLink {
+        groups: serde_json::from_value(b["groups"].clone()).unwrap_or_default(),
+        label: b["label"].as_str().map(str::to_owned),
+        expires_at: b["expiresAt"].as_i64(),
+        max_uses: b["maxUses"].as_i64(),
+    };
+    let tenant = context.sender_tenant.clone();
+    match s.api.create_invitation_link(context, &tenant, link).await {
+        Ok((token, link_id)) => reply(
+            StatusCode::CREATED,
+            json!({ "token": token, "linkId": link_id }),
+        ),
+        Err(e) => refusal(e, StatusCode::FORBIDDEN),
+    }
+}
+
 /// POST /commands/{domain}/{aggregate}/{type}: the app's commands, as the caller.
 async fn command(
     State(s): State<Server>,
@@ -178,20 +301,13 @@ async fn command(
     Json(b): Json<Value>,
 ) -> Response {
     let Some(context) = caller(&s, &headers).await else {
-        return reply(
-            StatusCode::UNAUTHORIZED,
-            json!({ "error": "unauthenticated" }),
-        );
+        return unauthenticated();
     };
     let id = b["aggregateId"]
         .as_str()
         .map_or_else(kit::shared::secrets::new_id, str::to_owned);
     let submit = Submit::new(&domain, &aggregate, &id, &r#type)
-        .data(if b["data"].is_null() {
-            json!({})
-        } else {
-            b["data"].clone()
-        })
+        .data(data(&b))
         .tenant(context.sender_tenant.clone())
         .context(context);
     match s.kernable.submit(submit).await {
@@ -200,10 +316,32 @@ async fn command(
             json!({ "events": events.iter().map(|e| e.event_type.clone()).collect::<Vec<_>>() }),
         ),
         Ok(Outcome::Rejected(r)) => reply(StatusCode::FORBIDDEN, json!({ "error": r.code })),
-        Err(e) => reply(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            json!({ "error": e.to_string() }),
-        ),
+        Err(e) => failed(e),
+    }
+}
+
+/// POST /queries/{domain}/{type}: the app's queries, as the caller. A query given by name
+/// carries the aggregate it is about if `kernable` knows its domain (`with_domain`).
+async fn query(
+    State(s): State<Server>,
+    Path((domain, r#type)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(b): Json<Value>,
+) -> Response {
+    let Some(context) = caller(&s, &headers).await else {
+        return unauthenticated();
+    };
+    let q = Query::new(&domain, &r#type)
+        .data(data(&b))
+        .tenant(context.sender_tenant.clone())
+        .context(context);
+    match s.kernable.query::<Value>(q).await {
+        Ok(answer) => reply(StatusCode::OK, answer),
+        Err(Error::Rejected(r)) if r.code == "not_found" => {
+            reply(StatusCode::NOT_FOUND, json!({ "error": r.code }))
+        }
+        Err(Error::Rejected(r)) => reply(StatusCode::FORBIDDEN, json!({ "error": r.code })),
+        Err(e) => failed(e),
     }
 }
 
@@ -219,7 +357,13 @@ pub fn router(api: KitApi, kernable: Kernable) -> Router {
         .route("/invitations/accept", post(accept))
         .route("/second-factor", post(second_factor))
         .route("/sign-out", post(sign_out))
+        .route("/tenants", post(open_tenant))
+        .route("/invitation-links/join", post(join_link))
+        .route("/me", get(me))
+        .route("/invitation-links", post(create_link))
         .route("/commands/{domain}/{aggregate}/{type}", post(command))
+        .route("/queries/{domain}/{type}", post(query))
+        .fallback(|| async { reply(StatusCode::NOT_FOUND, json!({ "error": "not_found" })) })
         .with_state(Server { api, kernable })
 }
 
@@ -236,15 +380,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let app = kernable::Kernable::new(options())?;
+    let domains = kit::kit_domains();
     let mut definition = kernable::App::new().service("kit");
-    for d in kit::kit_domains() {
-        definition = definition.domain(&d);
+    for d in &domains {
+        definition = definition.domain(d);
     }
     let handle = app.app(definition)?;
     let running = handle.clone();
     tokio::spawn(async move { running.run().await });
     handle.ready().await;
+    // The API's client knows the kit's schemas: vault fields, and what queries asked by name are about.
     let kernable = Kernable::new(options())?;
+    for d in &domains {
+        kernable.with_domain(d);
+    }
     let policy = kit::tenancy::SignUpPolicy {
         tenants: kit::tenancy::TenantSignUp::Active,
         accounts: kit::tenancy::AccountSignUp::Open,

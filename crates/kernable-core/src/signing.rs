@@ -139,11 +139,16 @@ pub fn query_message(q: &QueryRequest) -> Vec<u8> {
         .context(q.context.as_ref())
         .u64(q.min_position)
         .i64(q.issued_at);
-    // Only when set, so a query signs as before.
-    if q.wait_only {
-        m.str("wait_only").0
-    } else {
-        m.0
+    // Each only when set, so a query without them signs as before.
+    let m = if q.wait_only { m.str("wait_only") } else { m };
+    match &q.target {
+        Some(t) => {
+            m.str("target")
+                .str(&t.aggregate_type)
+                .str(&t.aggregate_id)
+                .0
+        }
+        None => m.0,
     }
 }
 

@@ -95,20 +95,11 @@ pub const RULES: &[(&str, Rule)] = &[
     ("invitation.EraseInvitation", r(Platform)),
 ];
 
-/// Which field names a query's target: queries name no aggregate. Fields as on the wire.
-pub const QUERY_TARGETS: &[(&str, &str, &str)] = &[
-    ("tenancy.GetTenant", "tenancy.tenant", "tenantId"),
-    ("account.GetAccount", "account.account", "accountId"),
-    ("account.ListSessions", "account.account", "accountId"),
-    ("identity.GetIdentity", "identity.identity", "identityId"),
-    ("identity.ListMyIdentities", "account.account", "accountId"),
-    ("group.Explain", "identity.identity", "identityId"),
-];
-
 /// Requests for which the sender must hold every permission of the group concerned.
 pub const ESCALATION: &[&str] = &[
     "identity.GrantMembership",
     "invitation.CreateInvitation",
+    "invitation.CreateInvitationLink",
     "group.CreateGroup",
     "group.SetPermissions",
 ];

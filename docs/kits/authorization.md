@@ -66,7 +66,12 @@ relation("shop.order", "owner")
 ```
 :::
 
-Declare them **before** `kitDomains()`, which hands them to the middleware. The names `self` and
+For queries, the middleware needs to know which aggregate a query is about. Declare it on the
+query, once: `static target = { aggregateType: "order", field: "id" }` on a query class, or
+`shopDomain.query("GetOrder").target("order", "id")` for a query given by name. Then
+`{ pattern: "shop.GetOrder", when: "owner" }` lets each customer read only their own orders.
+
+Declare relations **before** `kitDomains()`, which hands them to the middleware. The names `self` and
 `owners` are built in. A group permission then uses the relation with `when: "owner"`
 ([Groups](./group#permissions)). A membership scoped to one aggregate counts as a relation set
 by hand.

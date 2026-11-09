@@ -17,7 +17,8 @@ from unittest import mock
 
 import grpc
 
-from kernable import ClientClosed, Data, Kernable, NotSettled, Outcome, QueryOutcome, Rejected, RequestContext, domain
+from kernable import (ClientClosed, Data, Kernable, NotSettled, Outcome, Query, QueryOutcome, Rejected, RequestContext, Target,
+                      domain)
 from kernable.signing import Key, derived_id
 from tests.kernel import TestKernel
 
@@ -704,6 +705,41 @@ class EndToEnd(unittest.TestCase):
         with self.assertRaises(grpc.RpcError) as away:
             self.increment(1)
         self.assertEqual(away.exception.code(), grpc.StatusCode.UNAVAILABLE)
+
+    def test_a_query_declares_the_aggregate_it_is_about_and_a_middleware_gets_it(self):
+        class GetCount(Query[int]):
+            target = {"aggregate_type": "Counter", "field": "counter_id"}
+            counter_id: str
+
+        counters = domain("counters")
+        counters.query("GetTotal").target("other.Counter", "id")
+        model = counters.read_model("totals")
+        model.query(GetCount, lambda d: 0)
+        model.query("GetTotal", lambda data: 0)
+        model.query("GetAll", lambda data: 0)
+        targets = []
+
+        @model.middleware(["counters.*"])
+        def _(check):
+            targets.append((check.type, check.target))
+
+        self.run_stream(self.k.worker(counter))
+        self.run_stream(self.k.listener(model))
+        self.k.use(counters)
+        self.k.query(GetCount(counter_id="c1"))
+        self.k.query("counters", "GetTotal", {"id": "c2"})
+        self.k.query("counters", "GetTotal", {})  # no ID: no target
+        self.k.query("counters", "GetAll", {"id": "c3"})  # declares none
+        self.k.query(GetCount(counter_id="c4"), all_partitions=True)  # the wait-only query carries it, signed
+        self.assertTrue(self.increment(1).committed)
+        self.assertEqual(targets, [
+            ("GetCount", Target("counters.Counter", "c1")),
+            ("GetTotal", Target("other.Counter", "c2")),
+            ("GetTotal", None),
+            ("GetAll", None),
+            ("GetCount", Target("counters.Counter", "c4")),
+            ("Increment", Target("counters.Counter", "c1")),
+        ])
 
     def test_a_middleware_after_requests_observes_commands_and_may_refuse_a_querys_response(self):
         self.k.close()  # this test needs other command types: start a kernel of its own

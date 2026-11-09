@@ -69,3 +69,25 @@ pub struct InvitationMailSent {
 /// Erases the invited email: when the tenant is deleted, or the person asks.
 #[event("invitation", erases = own)]
 pub struct InvitationErased {}
+
+/// A reusable invitation: anyone signed in who has its token may join the tenant with these
+/// groups, until it is revoked, expires or is used up. Only the token's hash is kept: the API shows
+/// the token once.
+#[event("invitation")]
+pub struct InvitationLinkCreated {
+    pub groups: Vec<InvitedGroup>,
+    pub hash: String,
+    pub label: String,
+    pub expires_at: Option<i64>,
+    pub max_uses: Option<i64>,
+}
+
+#[event("invitation")]
+pub struct InvitationLinkRevoked {}
+
+/// Someone joined through the link: the identity reactor creates their identity with these groups.
+#[event("invitation")]
+pub struct InvitationLinkUsed {
+    pub account_id: String,
+    pub groups: Vec<InvitedGroup>,
+}

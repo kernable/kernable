@@ -484,6 +484,16 @@ message QueryRequest {
   // tenant: the SDKs send it to every partition before a query across tenants
   // (`allPartitions`), so that its answer holds every event committed before it.
   bool wait_only = 12;
+  // Signed, and only when set: the aggregate the query is about, as the query type declares it
+  // (the SDKs fill it from the query's data). A middleware decides on it as on a command's
+  // aggregate, e.g. "only the order's owner may read it"; the read model answers from the data.
+  Target target = 13;
+}
+
+// The aggregate a query is about; see QueryRequest.target.
+message Target {
+  string aggregate_type = 1; // qualified: `shop.order`
+  string aggregate_id = 2;
 }
 
 message QueryResult {

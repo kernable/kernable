@@ -8,7 +8,11 @@ use serde::{Deserialize, Serialize};
 use super::readmodels::{Shared, TenantRow};
 use super::{SignUpPolicy, TenantStatus};
 
-#[query("tenancy", answer = TenantRow)]
+#[query(
+    "tenancy",
+    answer = TenantRow,
+    target(aggregate = "tenancy.tenant", field = tenant_id)
+)]
 pub struct GetTenant {
     pub tenant_id: String,
 }

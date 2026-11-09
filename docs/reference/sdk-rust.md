@@ -128,7 +128,7 @@ for `ready()`. Workers and listeners print connection lines to stderr up to the 
 kernable.submit(Submit::new("shop", "cart", "c1", "AddItem").data(json!({ "qty": 2 }))).await?;`
 
 - `fn new(options: impl Into<Options>) -> Result<Kernable, Error>`: A client for the kernel `options` names, or with only a key file's path, for the default kernel; `Options::default()` takes everything from the environment (see `Options`). It connects on first use and again after the connection drops. Needs a Tokio runtime. `Error::Config` if the key, grant or TLS files cannot be read, only some of the TLS variables are set, or the URL is invalid. Example: `Kernable::new("app.key")?`.
-- `fn with_domain(&self, domain: &Domain) -> Kernable`: Seals the vault fields of this domain's commands when submitting them; see `Domain::command`. Returns another handle to this connection, so it chains: `Kernable::new("app.key")?.with_domain(&shop_domain)`.
+- `fn with_domain(&self, domain: &Domain) -> Kernable`: Seals the vault fields of this domain's commands when submitting them (see `Domain::command`) and sends the target of its queries asked by name (see `Domain::query`). Returns another handle to this connection, so it chains: `Kernable::new("app.key")?.with_domain(&shop_domain)`.
 - `fn worker<S: State>(&self, aggregate: &Aggregate<S>) -> Worker`: A worker that runs the commands of `aggregate`; add more with `Worker::aggregate`. It belongs to this connection's service (see `Options::service`). Nothing runs until `Worker::run` is awaited: `kernable.worker(&cart_aggregate).run().await`.
 - `fn listener(&self, listener: &Listener) -> ListenerHandle`: Runs `listener` (a read model or reactor of a domain) on this connection: the handle processes its events with `run()`. Each call gives a new handle. The listener belongs to this connection's service (see `Options::service`). Example: `kernable.listener(&carts_readmodel).run().await`.
 - `fn data(&self) -> Files`: Files of the default tenant: bytes up to 16 MiB per key, kept by the kernel outside the signed event log; see `Files`. Example: `kernable.data().put("shop", "invoices/c1.pdf", bytes, "application/pdf").await?`.
@@ -185,7 +185,7 @@ query: `Query::new("shop", "GetCart").data(json!({ "id": "c1" }))`. Without `dat
 query's data is an empty object (`{}`).
 
 - `fn new(domain: &str, query_type: &str) -> Query`: A `query_type` query of `domain`.
-- `fn of<Q: QueryType>(query: Q) -> Query`: A query of a message type (see `query`); its type says the domain. Ask it with `Kernable::ask` for its typed answer. Panics if `query` cannot be represented as JSON.
+- `fn of<Q: QueryType>(query: Q) -> Query`: A query of a message type (see `query`); its type says the domain and the aggregate it is about. Ask it with `Kernable::ask` for its typed answer. Panics if `query` cannot be represented as JSON.
 - `fn data(self, data: impl Serialize) -> Query`: The query's data. Panics if `data` cannot be represented as JSON.
 - `fn tenant(self, tenant: impl Into<String>) -> Query`: The tenant to ask in. Default: the connection's (`Options::tenant`).
 - `fn context(self, context: RequestContext) -> Query`: Replaces the client's default context.
@@ -275,6 +275,7 @@ aggregates, read models and reactors created through it, so that an app runs all
 - `fn name(&self) -> &str`: The domain's name, e.g. `shop`.
 - `fn event(&self, event_type: &str, schema: u32) -> EventSchema`: Declares that this domain writes `event_type` events at version `schema`, with an `upcast` per older version, and which of their fields the vault keeps; see `EventSchema`. The domain's aggregates and listeners use it; other domains' listeners get it with `Listener::with_domain`. Types not declared are at version 1. Panics if `event_type` is qualified or `schema` is 0.
 - `fn command(&self, command_type: &str) -> CommandSchema`: Declares which fields of `command_type` commands the vault keeps (`personal`, `secret`); see `CommandSchema`. Clients that submit them need the domain: `kernable.with_domain(&domain)`. Panics if `command_type` is qualified.
+- `fn query(&self, query_type: &str) -> QuerySchema`: Declares what `query_type` queries are about (see `QuerySchema::target`): returns the `QuerySchema` to chain `target` on. A query type (see `crate::query`) declares it with `target(...)` instead. Clients that ask such queries by name need the domain: `kernable.with_domain(&domain)`. Panics if `query_type` is qualified.
 - `fn aggregate<S: State>(&self, name: &str, initial: S) -> Aggregate<S>`: An aggregate of this domain named `name` (lowercase by convention, like `cart`), whose state starts as `initial`; see `Aggregate`. Example: `let cart_aggregate = shop_domain.aggregate("cart", Cart::default());`. Panics if the domain has an aggregate named `name` already.
 - `fn read_model(&self, name: &str) -> Listener`: A read model of this domain named `name`: builds a view from events and answers queries from it; see `Listener`. Kept in memory and rebuilt from the first event on every start (order 0; `Listener::store` keeps it in a file instead). Run it with `crate::Kernable::listener` or in an app. Example: `let carts_readmodel = shop_domain.read_model("carts");`. Panics if the domain has a read model or reactor named `name` already.
 - `fn reactor(&self, name: &str) -> Listener`: A reactor of this domain named `name`: triggers side effects and follow-up commands; see `Listener`. It starts at the newest event when it is new, then resumes after the last acknowledged event (order 10). A settling submit from its handler waits for the listeners before it (the read models), not for the reactor itself, which handles one event at a time. Submit follow-ups with `ctx.submit` and a fixed ID, so a redelivered event does not run the command twice; a rejected one parks the event (see `Listener::park_after`). Run it with `crate::Kernable::listener` or in an app. Panics if the domain has a read model or reactor named `name` already.
@@ -314,6 +315,22 @@ Clients that submit these commands need the domain: `kernable.with_domain(&shop_
 
 - `fn personal(self, fields: &[&str], subject: impl Fn(&Value, &str) -> String + Send + Sync + 'static) -> Self`: Keeps these top-level fields in the vault as personal data of `subject`; see `EventSchema::personal`.
 - `fn secret(self, fields: &[&str]) -> Self`: Keeps these top-level fields (passwords, one-time tokens) in the vault only until the command completed. The handler gets them in clear; the stored command keeps a reference.
+
+### QuerySchema
+
+What a query type is about. Made with `Domain::query`:
+`shop_domain.query("GetOrder").target("order", "id");` (a `GetOrder` with `{"id": "o-17"}`
+is about order `o-17`). Clients that ask these queries by name need the domain:
+`kernable.with_domain(&shop_domain)`.
+
+- `fn target(self, aggregate_type: &str, field: &str) -> Self`: The query is about one aggregate of `aggregate_type` (`order`, of the query's domain, or qualified: `shop.order`), whose ID is in the data's field `field` (as on the wire: `orderId`). The SDK sends it with the query, signed, and a middleware decides on it as on a command's aggregate (`crate::Check::target`). Data without a non-empty string in `field` sends no target.
+
+### QueryTarget
+
+The aggregate a query is about, as its type declares it: `QuerySchema::target`.
+
+- `aggregate_type: String`: `order` (of the query's domain) or qualified: `shop.order`.
+- `field: String`: The field of the query's data that holds the aggregate's ID, as on the wire: `orderId`.
 
 ### NewEvent
 
@@ -530,11 +547,19 @@ routes it or after (file and cache requests: before only): what the handler of
 - `type_name: String`: The command or query type within the domain; for a file or cache request `PutData`, `GetData`, `DeleteData`, `SetCache`, `GetCache` or `DeleteCache`.
 - `aggregate_type: Option<String>`: Commands only.
 - `aggregate_id: Option<String>`: Commands only.
+- `target: Option<Target>`: The aggregate the request is about, its type qualified: a command's aggregate (`shop.order`, `o-17`), or the one a query declares (`crate::query`'s `target`, `crate::QuerySchema::target`). `None` for queries that declare none, and for file and cache requests.
 - `key: Option<String>`: File and cache requests only: the file's or value's key.
 - `data: Value`: The request's payload; vault fields are `null` unless the key is granted `vault_read`. `Value::Null` for a file or cache request: the middleware never sees the file or value.
 - `request: RequestContext`: Who sends it: check permissions here.
 - `outcome: Option<CheckOutcome>`: After it, what came of the request; before it, `None`.
 - `store: Option<Store>`: The listener's store, if it has one (`Listener::store`): what the middleware learned from events, to decide with.
+
+### Target
+
+The aggregate a request is about (`Check::target`).
+
+- `aggregate_type: String`: Qualified: `shop.order`.
+- `aggregate_id: String`
 
 ### When
 

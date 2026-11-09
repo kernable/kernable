@@ -16,7 +16,7 @@ use common::{TestKernel, eventually};
 use kernable::{
     Check, CheckKind, CheckOutcome, Error, Kernable, ListenerHandle, Manifest, MiddlewareOptions,
     NewEvent, Outcome, Query, QueryOutcome, Rejected, RequestContext, StoredEvent, StoredEventMeta,
-    Submit, SubscribeOptions, Timestamp, Wait, Worker, domain,
+    Submit, SubscribeOptions, Target, Timestamp, Wait, Worker, domain,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -534,6 +534,32 @@ async fn a_middleware_checks_commands_and_queries_from_its_own_state_and_fails_c
         checked.lock().unwrap().last().map(|c| c.kind),
         Some(CheckKind::Query)
     );
+    // A command's aggregate is its target, qualified.
+    assert_eq!(
+        checked.lock().unwrap()[0].target,
+        Some(Target {
+            aggregate_type: "support.Ticket".into(),
+            aggregate_id: "t1".into(),
+        })
+    );
+    // A query declares the aggregate it is about; the ID comes from its data, signed.
+    assert_eq!(checked.lock().unwrap().last().unwrap().target, None);
+    support.query("CountTickets").target("Ticket", "ticketId");
+    let asking = kernable.with_domain(&support);
+    let about = |data: serde_json::Value| {
+        asking.query::<usize>(Query::new("support", "CountTickets").data(data))
+    };
+    assert_eq!(about(json!({ "ticketId": "t1" })).await.unwrap(), 2);
+    assert_eq!(
+        checked.lock().unwrap().last().unwrap().target,
+        Some(Target {
+            aggregate_type: "support.Ticket".into(),
+            aggregate_id: "t1".into(),
+        })
+    );
+    // Without an ID in the data, no target.
+    assert_eq!(about(json!({ "ticketId": "" })).await.unwrap(), 2);
+    assert_eq!(checked.lock().unwrap().last().unwrap().target, None);
 
     // A failing middleware refuses, too.
     let crash = kernable

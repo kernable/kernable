@@ -40,10 +40,12 @@ Secret fields leave the vault once the command completes; personal fields stay i
 
 ### Queries
 
-| Query | Fields | Answer | Who may ask |
-|---|---|---|---|
-| `GetGroup`<br>by `group.groups` | `groupId: string` | `GroupRow { id, tenant, name, description, permissions }` | a group permission |
-| `ListGroups`<br>by `group.groups` | — | `(Omit<GroupRow, "tenant"> & { tenant?: string })[]` | a group permission |
+A query about one aggregate names it (`static target`): the middleware decides on that aggregate as on a command's.
+
+| Query | Fields | About | Answer | Who may ask |
+|---|---|---|---|---|
+| `GetGroup`<br>by `group.groups` | `groupId: string` | — | `GroupRow { id, tenant, name, description, permissions }` | a group permission |
+| `ListGroups`<br>by `group.groups` | — | — | `(Omit<GroupRow, "tenant"> & { tenant?: string })[]` | a group permission |
 
 ### Listeners
 

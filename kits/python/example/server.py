@@ -7,6 +7,7 @@ Requests carry `Authorization: Bearer <access token>` (or `ApiKey <key>`) and, i
 `X-Tenant: <tenant ID>`; the server turns them into the request context the middleware decides on.
 """
 
+import dataclasses
 import json
 import os
 import re
@@ -20,10 +21,11 @@ from kernable import Kernable, Rejected, RequestContext
 from kit.api.api import KitApi
 
 COMMAND = re.compile(r"^/commands/([\w-]+)/([\w-]+)/(\w+)$")
+QUERY = re.compile(r"^/queries/([\w-]+)/(\w+)$")
 
 
 def example_server(api: KitApi, kernable: Kernable, port: int = 3000) -> ThreadingHTTPServer:
-    """The routes; `kernable` submits the app's own commands with the caller's context. Call
+    """The routes; `kernable` submits the app's own commands and asks its queries with the caller's context. Call
     `serve_forever()` on the result (it listens on 127.0.0.1:`port`; 0 picks a free port)."""
 
     class Handler(BaseHTTPRequestHandler):
@@ -64,8 +66,17 @@ def example_server(api: KitApi, kernable: Kernable, port: int = 3000) -> Threadi
                 return None  # no identity in that tenant
 
         def do_POST(self) -> None:  # noqa: N802: http.server's name
+            self.handle_route("POST", self.body())
+
+        def do_GET(self) -> None:  # noqa: N802: http.server's name
+            self.handle_route("GET", {})
+
+        def handle_route(self, method: str, b: dict) -> None:
             try:
-                self.route(self.body())
+                if method == "POST":
+                    self.route(b)
+                else:
+                    self.in_tenant("GET", self.path.split("?")[0], b)
             except Exception as err:  # noqa: BLE001: an example; your framework answers 500 its way
                 self.send(500, {"error": str(err)})
 
@@ -105,17 +116,51 @@ def example_server(api: KitApi, kernable: Kernable, port: int = 3000) -> Threadi
                 if claims:
                     api.sign_out(claims)
                 return self.send(204)
-            # POST /commands/<domain>/<aggregate_type>/<Type>: the app's commands, as the caller.
-            m = COMMAND.match(path)
-            if m:
-                context = self.caller()
-                if not context:
+            if path == "/tenants":
+                # Opens a tenant the caller owns (self-service, as the sign-up policy allows).
+                if not claims:
                     return self.send(401, {"error": "unauthenticated"})
+                tenant = str(uuid.uuid4())
+                outcome = kernable.submit("tenancy", "tenant", tenant, "CreateTenant",
+                                          {"slug": b.get("slug"), "name": b.get("name"), "owner": {"accountId": claims.sub}},
+                                          tenant=tenant, context=api.context_for(claims))
+                return self.send(201, {"tenant": tenant}) if outcome.committed else self.send(403, {"error": outcome.code})
+            if path == "/invitation-links/join":
+                if not claims:
+                    return self.send(401, {"error": "unauthenticated"})
+                r = api.join_with_invitation_link(claims, b.get("token", ""))
+                return self.send(200 if r["ok"] else 400, r)
+            self.in_tenant("POST", path, b)
+
+        def in_tenant(self, method: str, path: str, b: dict) -> None:
+            """Below: as the caller, in the tenant of `X-Tenant`."""
+            context = self.caller()
+            if not context:
+                return self.send(401, {"error": "unauthenticated"})
+            route = f"{method} {path}"
+            if route == "GET /me":
+                return self.send(200, dataclasses.asdict(context))
+            if route == "POST /invitation-links":
+                r = api.create_invitation_link(context, context.sender_tenant, b.get("groups") or [], label=b.get("label"),
+                                               expires_at=b.get("expires_at"), max_uses=b.get("max_uses"))
+                if not r["ok"]:
+                    return self.send(403, {"error": r["reason"]})
+                return self.send(201, {"token": r["token"], "link_id": r["link_id"]})
+            # POST /commands/<domain>/<aggregate_type>/<Type>: the app's commands, as the caller.
+            m = COMMAND.match(path) if method == "POST" else None
+            if m:
                 outcome = kernable.submit(m.group(1), m.group(2), b.get("aggregate_id") or str(uuid.uuid4()), m.group(3), b.get("data") or {},
                                           tenant=context.sender_tenant, context=context)
                 if outcome.committed:
                     return self.send(200, {"events": [e.type for e in outcome.events]})
                 return self.send(403, {"error": outcome.code})
+            # POST /queries/<domain>/<Type>: the app's queries, as the caller.
+            m = QUERY.match(path) if method == "POST" else None
+            if m:
+                try:
+                    return self.send(200, kernable.query(m.group(1), m.group(2), b.get("data") or {}, tenant=context.sender_tenant, context=context))
+                except Rejected as err:
+                    return self.send(404 if err.code == "not_found" else 403, {"error": err.code})
             self.send(404, {"error": "not_found"})
 
     return ThreadingHTTPServer(("127.0.0.1", port), Handler)

@@ -36,9 +36,10 @@ check: prune py
 docs:
 	cd docs && npm install --no-audit --no-fund --silent && npm run -s reference && npx vitepress dev .
 
-# Python SDK: venv (needs network the first time) and generated stubs.
+# Python SDK: venv (needs network the first time; with the Python kit's dependencies, for the
+# tutorial's part 9) and generated stubs.
 py:
-	cd sdks/python && { test -d .venv || { python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt; }; } \
+	cd sdks/python && { test -d .venv || { python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt -r ../../kits/python/requirements.txt; }; } \
 		&& .venv/bin/python -m grpc_tools.protoc -I../../proto --python_out=. --grpc_python_out=. kernable/v1/kernable.proto
 
 # Builds the npm and Python packages and runs them, installed, against a kernel (needs network).

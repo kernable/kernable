@@ -37,6 +37,8 @@ pub const API_PERMISSIONS: &[&str] = &[
     "tenancy.GetSignUpPolicy",
     "invitation.AcceptInvitation",
     "invitation.PeekInvitation",
+    "invitation.JoinWithInvitationLink",
+    "invitation.PeekInvitationLink",
 ];
 
 /// The first platform administrator: an owner of the platform tenant.

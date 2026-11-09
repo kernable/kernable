@@ -82,3 +82,9 @@ customerAggregate
     return [{ type: "CustomerErased" }];
   });
 // #endregion vault
+
+// #region target
+// GetOrder { id } is about the order `id`: the SDK sends that order with the query, signed, and a
+// middleware decides on it as on a command's aggregate (part 9).
+shopDomain.query("GetOrder").target("order", "id");
+// #endregion target

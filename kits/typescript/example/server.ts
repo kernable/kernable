@@ -88,17 +88,52 @@ export function exampleServer(api: KitApi, kernable: Kernable): Server {
         case "POST /sign-out":
           if (claims) await api.signOut(claims);
           return send(res, 204, null);
+        case "POST /tenants": {
+          // Opens a tenant the caller owns (self-service, as the sign-up policy allows).
+          if (!claims) return send(res, 401, { error: "unauthenticated" });
+          const tenant = randomUUID();
+          const outcome = await kernable.submit(
+            { domain: "tenancy", aggregateType: "tenant", type: "CreateTenant", aggregateId: tenant, tenant,
+              data: { slug: b.slug, name: b.name, owner: { accountId: claims.sub } }, context: await api.contextFor(claims) },
+          );
+          return send(res, outcome.committed ? 201 : 403, outcome.committed ? { tenant } : { error: outcome.code });
+        }
+        case "POST /invitation-links/join": {
+          if (!claims) return send(res, 401, { error: "unauthenticated" });
+          const r = await api.joinWithInvitationLink(claims, b.token);
+          return send(res, r.ok ? 200 : 400, r);
+        }
+      }
+      // Below: as the caller, in the tenant of `X-Tenant`.
+      const context = await caller(req);
+      if (!context) return send(res, 401, { error: "unauthenticated" });
+      switch (route) {
+        case "GET /me":
+          return send(res, 200, context);
+        case "POST /invitation-links": {
+          const r = await api.createInvitationLink(context, context.senderTenant!, { groups: b.groups ?? [], label: b.label, maxUses: b.maxUses, expiresAt: b.expiresAt });
+          return send(res, r.ok ? 201 : 403, r.ok ? { token: r.token, linkId: r.linkId } : { error: r.reason });
+        }
       }
       // POST /commands/<domain>/<aggregateType>/<Type>: the app's commands, as the caller.
       const command = /^POST \/commands\/([\w-]+)\/([\w-]+)\/(\w+)$/.exec(route);
       if (command) {
-        const context = await caller(req);
-        if (!context) return send(res, 401, { error: "unauthenticated" });
         const outcome = await kernable.submit({
           domain: command[1], aggregateType: command[2], type: command[3], aggregateId: b.aggregateId ?? randomUUID(),
           tenant: context.senderTenant, data: b.data ?? {}, context,
         });
         return send(res, outcome.committed ? 200 : 403, outcome.committed ? { events: outcome.events.map((e) => e.type) } : { error: outcome.code });
+      }
+      // POST /queries/<domain>/<Type>: the app's queries, as the caller.
+      const query = /^POST \/queries\/([\w-]+)\/(\w+)$/.exec(route);
+      if (query) {
+        try {
+          return send(res, 200, await kernable.query({ domain: query[1], type: query[2], data: b.data ?? {}, tenant: context.senderTenant, context }));
+        } catch (err) {
+          const code = (err as { code?: string }).code;
+          if (!code) throw err;
+          return send(res, code === "not_found" ? 404 : 403, { error: code });
+        }
       }
       send(res, 404, { error: "not_found" });
     } catch (err) {

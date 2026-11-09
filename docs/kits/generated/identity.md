@@ -63,13 +63,15 @@ Secret fields leave the vault once the command completes; personal fields stay i
 
 ### Queries
 
-| Query | Fields | Answer | Who may ask |
-|---|---|---|---|
-| `FindIdentityByAccount`<br>by `identity.identities` | `accountId: string` | `{ identityId: string; status: IdentityStatus }` | the API (its `api` group) |
-| `GetIdentity`<br>by `identity.identities` | `identityId: string` | `IdentityRow { id, tenant, kind, accountId, displayName, status, memberships, apiKeys }` | a group permission, or the sender itself |
-| `ListMyIdentities`<br>by `identity.identities` | `accountId: string` | `{ tenant: string; identityId: string; status: IdentityStatus }[]` | any signed-in account, or the sender itself |
-| `ListIdentities`<br>by `identity.identities` | — | `IdentityRow[]` | a group permission |
-| `FindApiKey`<br>by `identity.identities` | `keyId: string` | `{ tenant: string; identityId: string; hash: string; expiresAt: number \| null; revoked: boolean }` | the API (its `api` group) |
+A query about one aggregate names it (`static target`): the middleware decides on that aggregate as on a command's.
+
+| Query | Fields | About | Answer | Who may ask |
+|---|---|---|---|---|
+| `FindIdentityByAccount`<br>by `identity.identities` | `accountId: string` | — | `{ identityId: string; status: IdentityStatus }` | the API (its `api` group) |
+| `GetIdentity`<br>by `identity.identities` | `identityId: string` | `identity.identity` in `identityId` | `IdentityRow { id, tenant, kind, accountId, displayName, status, memberships, apiKeys }` | a group permission, or the sender itself |
+| `ListMyIdentities`<br>by `identity.identities` | `accountId: string` | `account.account` in `accountId` | `{ tenant: string; identityId: string; status: IdentityStatus }[]` | any signed-in account, or the sender itself |
+| `ListIdentities`<br>by `identity.identities` | — | — | `IdentityRow[]` | a group permission |
+| `FindApiKey`<br>by `identity.identities` | `keyId: string` | — | `{ tenant: string; identityId: string; hash: string; expiresAt: number \| null; revoked: boolean }` | the API (its `api` group) |
 
 ### Listeners
 
@@ -77,7 +79,8 @@ Secret fields leave the vault once the command completes; personal fields stay i
 |---|---|---|
 | `identity.identities` (read model, order -20) | `IdentityCreated`, `ProfileUpdated`, `MembershipGranted`, `MembershipSuspended`, `MembershipResumed`, `MembershipRevoked`, `ApiKeyCreated`, `ApiKeyRevoked`, `IdentitySuspended`, `IdentityReactivated`, `IdentityDeleted`, `TenantDeleted` | — |
 | `identity.owners` (reactor, order -10) | `TenantCreated` | `CreateIdentity`, `AddOwner` |
-| `identity.invitations` (reactor, order -10) | `InvitationAccepted` | `CreateIdentity`, `GrantMembership`, `AddOwner` |
+| `identity.invitations` (reactor, order -10) | `InvitationAccepted` | side effects only |
+| `identity.invitations` (reactor, order -10) | `InvitationLinkUsed` | side effects only |
 | `identity.cleanup` (reactor, order -25) | `TenantDeleted` | `DeleteIdentity` |
 | `identity.follow` (reactor, order -10) | `AccountDeleted` | `DeleteIdentity` |
 | `identity.follow` (reactor, order -10) | `GroupDeleted` | `RevokeMembership` |

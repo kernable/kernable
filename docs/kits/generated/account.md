@@ -112,15 +112,17 @@ Secret fields leave the vault once the command completes; personal fields stay i
 
 ### Queries
 
-| Query | Fields | Answer | Who may ask |
-|---|---|---|---|
-| `FindAccountByEmail`<br>by `account.accounts` | `email: string` | `{ id: string; status: AccountStatus }` | the API (its `api` group) |
-| `GetAccount`<br>by `account.accounts` | `accountId: string` | `AccountRow { id, email, name, status }` | the API (its `api` group), or the sender itself |
-| `ListSessions`<br>by `account.accounts` | `accountId: string` | `SessionRow[]` | a group permission, or the sender itself |
-| `FindAccountByLink`<br>by `account.accounts` | `provider: string`<br>`subject: string` | `{ id: string; status: AccountStatus }` | the API (its `api` group) |
-| `FindSsoByDomain`<br>by `account.ssos` | `domain: string` | `{ tenant: string; ssoId: string; issuer: string; clientId: string; enforced: boolean }` | the API (its `api` group) |
-| `GetSsoSecret`<br>by `account.ssos` | `ssoId: string` | `{ issuer: string; clientId: string; clientSecret: string \| null }` | the API (its `api` group) |
-| `GetSso`<br>by `account.ssos` | `ssoId: string` | `Omit<SsoRow, "clientSecret">` | owners |
+A query about one aggregate names it (`static target`): the middleware decides on that aggregate as on a command's.
+
+| Query | Fields | About | Answer | Who may ask |
+|---|---|---|---|---|
+| `FindAccountByEmail`<br>by `account.accounts` | `email: string` | — | `{ id: string; status: AccountStatus }` | the API (its `api` group) |
+| `GetAccount`<br>by `account.accounts` | `accountId: string` | `account.account` in `accountId` | `AccountRow { id, email, name, status }` | the API (its `api` group), or the sender itself |
+| `ListSessions`<br>by `account.accounts` | `accountId: string` | `account.account` in `accountId` | `SessionRow[]` | a group permission, or the sender itself |
+| `FindAccountByLink`<br>by `account.accounts` | `provider: string`<br>`subject: string` | — | `{ id: string; status: AccountStatus }` | the API (its `api` group) |
+| `FindSsoByDomain`<br>by `account.ssos` | `domain: string` | — | `{ tenant: string; ssoId: string; issuer: string; clientId: string; enforced: boolean }` | the API (its `api` group) |
+| `GetSsoSecret`<br>by `account.ssos` | `ssoId: string` | — | `{ issuer: string; clientId: string; clientSecret: string \| null }` | the API (its `api` group) |
+| `GetSso`<br>by `account.ssos` | `ssoId: string` | — | `Omit<SsoRow, "clientSecret">` | owners |
 
 ### Listeners
 

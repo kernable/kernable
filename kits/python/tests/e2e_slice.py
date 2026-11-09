@@ -33,7 +33,7 @@ from kit.bootstrap import bootstrap  # noqa: E402
 from kit.group.commands import CreateGroup  # noqa: E402
 from kit.identity.commands import CreateServiceIdentity, DeleteIdentity, GrantMembership, RevokeApiKey  # noqa: E402
 from kit.identity.queries import GetIdentity  # noqa: E402
-from kit.invitation.commands import CreateInvitation, EraseInvitation  # noqa: E402
+from kit.invitation.commands import CreateInvitation, EraseInvitation, RevokeInvitationLink  # noqa: E402
 from kit.invitation.queries import ListInvitations  # noqa: E402
 from kit.shared.mail import MemoryMailer, use_mailer  # noqa: E402
 from kit.shared.secrets import totp_code  # noqa: E402
@@ -115,6 +115,30 @@ visible = visibility(orders_model)
 def _(d, qry, ctx):
     return sorted(o["id"] for o in order_rows.values()
                   if o["tenant"] == qry.tenant and visible(qry.tenant, ctx.request, "shop.GetOrder", {"type": "shop.order", "id": o["id"]}))
+
+
+# One order, for whoever may get it: the query names the order it is about (`target`), so the
+# middleware decides on that order, as on a command's aggregate.
+class GetOrder(Query[dict]):
+    target = {"aggregate_type": "order", "field": "id"}
+    id: str
+
+
+customer_of: dict[str, str] = {}
+order_details = shop.read_model("shop.order-details")
+
+
+@order_details.on(OrderPlaced)
+def _(d: OrderPlaced, evt):
+    customer_of[f"{evt.tenant}/{evt.aggregate_id}"] = d.customer
+
+
+@order_details.query(GetOrder)
+def _(d: GetOrder, qry):
+    customer = customer_of.get(f"{qry.tenant}/{d.id}")
+    if not customer:
+        raise Rejected("No such order", "not_found")
+    return {"customer": customer}
 
 
 # --- Setup -------------------------------------------------------------------------------------------
@@ -610,6 +634,60 @@ class SliceTest(unittest.TestCase):
         finally:
             server.shutdown()
             server.server_close()
+
+    def test_10_invitation_links_and_a_query_about_one_order(self):
+        """Invitation links let people join with groups; a query about one order is decided on that order."""
+        api: KitApi = S["api"]
+        kit: Kernable = S["kit"]
+        olga, olga_id = person("link-olga@example.com")
+        shop_tenant = new_id()
+        self.committed(submit(CreateTenant(slug="olgas-shop", name="Olga's shop", owner={"account_id": olga_id}, status="active"),
+                              shop_tenant, shop_tenant, api.context_for(olga)))
+        as_olga = api.context_for(olga, shop_tenant)
+        customers = new_id()
+        self.committed(submit(CreateGroup(name="Customers", permissions=[{"pattern": "shop.PlaceOrder"}, {"pattern": "shop.GetOrder", "when": "owner"}]),
+                              customers, shop_tenant, as_olga))
+
+        # Olga puts a link on her website: two people may join through it, as customers.
+        link = api.create_invitation_link(as_olga, shop_tenant, [{"group": customers}], label="website", max_uses=2)
+        self.assertTrue(link["ok"], link)
+        self.assertEqual(api.peek_invitation_link(link["token"]), {"tenant": shop_tenant, "link_id": link["link_id"], "label": "website", "usable": True})
+
+        pia, _ = person("link-pia@example.com")
+        quinn, _ = person("link-quinn@example.com")
+        rosa, _ = person("link-rosa@example.com")
+        self.assertEqual(api.join_with_invitation_link(pia, link["token"]), {"ok": True, "tenant": shop_tenant})
+        self.assertEqual(api.join_with_invitation_link(pia, link["token"]), {"ok": False, "reason": "exists"})
+        self.assertEqual(api.join_with_invitation_link(quinn, link["token"]), {"ok": True, "tenant": shop_tenant})
+        self.assertEqual(api.join_with_invitation_link(rosa, link["token"]), {"ok": False, "reason": "used_up"})
+        self.assertFalse(api.peek_invitation_link(link["token"])["usable"])
+        # A link's token is checked whole: another secret for the same link is refused.
+        forged = link["token"][:-1] + ("B" if link["token"][-1] == "A" else "A")
+        self.assertEqual(api.join_with_invitation_link(rosa, forged), {"ok": False, "reason": "invalid_token"})
+
+        # Pia and Quinn are customers now: Pia places an order and reads it; Quinn may not read it.
+        as_pia = api.context_for(pia, shop_tenant)
+        as_quinn = api.context_for(quinn, shop_tenant)
+        self.committed(submit(PlaceOrder(), "p1", shop_tenant, as_pia))
+        self.assertEqual(kit.query(GetOrder(id="p1"), tenant=shop_tenant, context=as_pia), {"customer": as_pia.sender_identity})
+        with self.assertRaises(Rejected) as refused:
+            kit.query(GetOrder(id="p1"), tenant=shop_tenant, context=as_quinn)
+        self.assertEqual(refused.exception.code, "forbidden")
+
+        # Explain says the same for a query about one order.
+        why = kit.query(Explain(identity_id=as_quinn.sender_identity, type="shop.GetOrder", aggregate_type="order", aggregate_id="p1"),
+                        tenant=shop_tenant, context=as_olga)
+        self.assertFalse(why["allowed"])
+
+        # Customers may not hand out links: no permission for it, and no escalation either.
+        self.assertEqual(api.create_invitation_link(as_pia, shop_tenant, [{"group": customers}]), {"ok": False, "reason": "forbidden"})
+
+        # Revoked: the link is gone.
+        second = api.create_invitation_link(as_olga, shop_tenant, [{"group": customers}])
+        self.assertTrue(second["ok"])
+        self.committed(submit(RevokeInvitationLink(), second["link_id"], shop_tenant, as_olga))
+        self.assertIsNone(api.peek_invitation_link(second["token"]))
+        self.assertEqual(api.join_with_invitation_link(rosa, second["token"]), {"ok": False, "reason": "invalid_token"})
 
 
 if __name__ == "__main__":

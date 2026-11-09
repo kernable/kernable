@@ -1,0 +1,15 @@
+Ann signs up and signs in: 200
+Ann opens her shop: 201
+Ann creates the group Customers: 200
+Ann creates an invitation link: 201
+Bob signs up and signs in: 200
+Cleo signs up and signs in: 200
+Bob joins through the link: 200
+Cleo joins through the link: 200
+Bob places o1: 200
+Bob adds two apples: 200
+Cleo adds to o1: 403 forbidden
+Bob reads o1: 200 draft, {"apple":2}
+Cleo reads o1: 403 forbidden
+Why not? allowed: false, forbidden
+Without signing in: 401 unauthenticated

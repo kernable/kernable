@@ -63,6 +63,27 @@ class InvitationErased(Event):
     vault = {"erases": _own}
 
 
+class InvitationLinkCreated(Event):
+    """A reusable invitation: anyone signed in who has its token may join the tenant with these groups,
+    until it is revoked, expires or is used up. Only the token's hash is kept: the API shows the
+    token once."""
+    groups: list[InvitedGroup]
+    hash: str
+    label: str
+    expires_at: int | None
+    max_uses: int | None
+
+
+class InvitationLinkRevoked(Event):
+    pass
+
+
+class InvitationLinkUsed(Event):
+    """Someone joined through the link: the identity reactor creates their identity with these groups."""
+    account_id: str
+    groups: list[InvitedGroup]
+
+
 # Declared on the domain, so a process that only reads them knows them too.
 invitation_domain.event(InvitationCreated, InvitationResent, InvitationRevoked, InvitationDeclined, InvitationAccepted,
-                        InvitationMailSent, InvitationErased)
+                        InvitationMailSent, InvitationErased, InvitationLinkCreated, InvitationLinkRevoked, InvitationLinkUsed)

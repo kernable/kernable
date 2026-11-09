@@ -58,6 +58,10 @@ class SigningVectors(unittest.TestCase):
         context = vector_context(q.pop("context"))
         payload = bytes.fromhex(q.pop("payload_hex"))
         self.check("query_wait_only", query_message(pb.QueryRequest(**q, payload=payload, context=context)))
+        q = dict(VECTORS["query_target"]["input"])
+        context = vector_context(q.pop("context"))
+        payload = bytes.fromhex(q.pop("payload_hex"))
+        self.check("query_target", query_message(pb.QueryRequest(**q, payload=payload, context=context)))
         refs = [vault_ref(bytes.fromhex(i["salt_hex"]), i["subject"], i["secret"], bytes.fromhex(i["value_hex"]))
                 for i in VECTORS["vault_ref"]["input"]]
         self.assertEqual(refs, VECTORS["vault_ref"]["refs"])

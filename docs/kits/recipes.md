@@ -21,6 +21,20 @@ await bootstrap(kernable, { signUp: { accounts: "off", tenants: "off" } });     
 
 Later: `ChangeSignUpPolicy.new({ accounts, tenants })` on the platform tenant.
 
+## Let people join with a link
+
+An owner creates a link with the groups newcomers get, and puts it on a website or in a chat:
+
+```ts
+const link = await api.createInvitationLink(ownerContext, tenant, { groups: [{ group: customersId }], label: "website", maxUses: 100 });
+// link.token, shown once: https://example.com/join?token=<token>
+```
+
+Your join page calls `api.peekInvitationLink(token)` to show the tenant and whether the link still
+works, asks the person to sign in (or sign up and verify), then calls
+`api.joinWithInvitationLink(claims, token)`. Part 9 of the [shop tutorial](../tutorial/shop/9-sign-in)
+does exactly this.
+
 ## Let support staff into every tenant
 
 Groups of the [platform tenant](./tenancy#the-platform-tenant) hold their permissions in every

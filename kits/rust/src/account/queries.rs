@@ -26,13 +26,17 @@ pub struct FindAccountByEmail {
     pub email: String,
 }
 
-#[query("account", answer = AccountRow)]
+#[query("account", answer = AccountRow, target(aggregate = "account.account", field = account_id))]
 pub struct GetAccount {
     pub account_id: String,
 }
 
 /// The account's sessions, the open ones first: "my devices".
-#[query("account", answer = Vec<SessionRow>)]
+#[query(
+    "account",
+    answer = Vec<SessionRow>,
+    target(aggregate = "account.account", field = account_id)
+)]
 pub struct ListSessions {
     pub account_id: String,
 }

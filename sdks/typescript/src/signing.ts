@@ -144,8 +144,9 @@ export function queryMessage(q: WireQueryRequest): Buffer {
     .context(q.context)
     .u64(q.min_position)
     .i64(q.issued_at);
-  // Only when set, so a query signs as before.
-  return (q.wait_only ? m.str("wait_only") : m).done();
+  // Each only when set, so a query without them signs as before.
+  const w = q.wait_only ? m.str("wait_only") : m;
+  return (q.target ? w.str("target").str(q.target.aggregate_type).str(q.target.aggregate_id) : w).done();
 }
 
 export function resultMessage(c: Stream, expectedVersion: number, events: WireNewEvent[]): Buffer {

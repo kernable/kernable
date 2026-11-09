@@ -19,6 +19,7 @@ accountsReadModel.query(FindAccountByEmail, (d) => {
 });
 
 export class GetAccount extends Query<AccountRow> {
+  static target = { aggregateType: "account.account", field: "accountId" };
   accountId!: string;
 }
 
@@ -30,6 +31,7 @@ accountsReadModel.query(GetAccount, (d) => {
 
 /** The account's sessions, the open ones first: "my devices". */
 export class ListSessions extends Query<SessionRow[]> {
+  static target = { aggregateType: "account.account", field: "accountId" };
   accountId!: string;
 }
 

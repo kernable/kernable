@@ -64,18 +64,8 @@ RULES: dict[str, dict] = {
     "invitation.EraseInvitation": {"level": "platform"},
 }
 
-#: Which field names a query's target: queries name no aggregate. Fields as on the wire.
-QUERY_TARGETS: dict[str, dict] = {
-    "tenancy.GetTenant": {"type": "tenancy.tenant", "field": "tenantId"},
-    "account.GetAccount": {"type": "account.account", "field": "accountId"},
-    "account.ListSessions": {"type": "account.account", "field": "accountId"},
-    "identity.GetIdentity": {"type": "identity.identity", "field": "identityId"},
-    "identity.ListMyIdentities": {"type": "account.account", "field": "accountId"},
-    "group.Explain": {"type": "identity.identity", "field": "identityId"},
-}
-
 #: Requests for which the sender must hold every permission of the group concerned.
-ESCALATION = ["identity.GrantMembership", "invitation.CreateInvitation", "group.CreateGroup", "group.SetPermissions"]
+ESCALATION = ["identity.GrantMembership", "invitation.CreateInvitation", "invitation.CreateInvitationLink", "group.CreateGroup", "group.SetPermissions"]
 
 
 def rule_of(type_: str) -> dict:

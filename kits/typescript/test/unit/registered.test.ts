@@ -28,6 +28,7 @@ const COMMANDS: Record<string, string[]> = {
   "invitation.invitation": [
     "CreateInvitation", "ResendInvitation", "RevokeInvitation", "DeclineInvitation", "AcceptInvitation", "RecordInvitationMailSent", "EraseInvitation",
   ],
+  "invitation.link": ["CreateInvitationLink", "RevokeInvitationLink", "JoinWithInvitationLink"],
 };
 
 const QUERIES: Record<string, string[]> = {
@@ -37,7 +38,7 @@ const QUERIES: Record<string, string[]> = {
   "identity.identities": ["GetIdentity", "ListIdentities", "ListMyIdentities", "FindIdentityByAccount", "FindApiKey"],
   "group.groups": ["ListGroups", "GetGroup"],
   "group.authorization": ["Explain"],
-  "invitation.invitations": ["ListInvitations", "PeekInvitation"],
+  "invitation.invitations": ["ListInvitations", "PeekInvitation", "ListInvitationLinks", "PeekInvitationLink"],
 };
 
 const domains: Domain[] = kitDomains();

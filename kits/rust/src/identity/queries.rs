@@ -12,7 +12,11 @@ fn not_found(message: &str) -> BoxError {
     Rejected::new(message).code("not_found").into()
 }
 
-#[query("identity", answer = IdentityRow)]
+#[query(
+    "identity",
+    answer = IdentityRow,
+    target(aggregate = "identity.identity", field = identity_id)
+)]
 pub struct GetIdentity {
     pub identity_id: String,
 }
@@ -29,7 +33,11 @@ pub struct MyIdentity {
 }
 
 /// Every tenant the account has an identity in (ask with all partitions when tenants are partitioned).
-#[query("identity", answer = Vec<MyIdentity>)]
+#[query(
+    "identity",
+    answer = Vec<MyIdentity>,
+    target(aggregate = "account.account", field = account_id)
+)]
 pub struct ListMyIdentities {
     pub account_id: String,
 }

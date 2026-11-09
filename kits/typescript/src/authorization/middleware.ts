@@ -186,10 +186,11 @@ export const authorizationListener: Listener = groupDomain
  * one's real session; for another identity of the tenant (needs `group.Explain`), sessions aside.
  */
 export class Explain extends Query<{ allowed: boolean; code: string | null; steps: string[] }> {
+  static target = { aggregateType: "identity.identity", field: "identityId" };
   identityId!: string;
   /** The request type, qualified: `shop.CancelOrder`. */
   type!: string;
-  /** For a command: its aggregate (the relation's target). */
+  /** The aggregate the request is about: a command's, or a query's target. Unqualified: of the type's domain. */
   aggregateType?: string;
   aggregateId?: string;
   data?: unknown;
@@ -204,7 +205,13 @@ authorizationListener.query(Explain, (d, qry, ctx) => {
   const request = oneself ? asker : { senderTenant: qry.tenant, senderIdentity: d.identityId };
   const check: Check = {
     kind: d.aggregateId ? "command" : "query", id: "", tenant: qry.tenant, domain, type, data: d.data ?? {}, request,
-    ...(d.aggregateId ? { aggregateType: d.aggregateType, aggregateId: d.aggregateId } : {}),
+    ...(d.aggregateId && d.aggregateType
+      ? {
+          aggregateType: d.aggregateType,
+          aggregateId: d.aggregateId,
+          target: { type: d.aggregateType.includes(".") ? d.aggregateType : `${domain}.${d.aggregateType}`, id: d.aggregateId },
+        }
+      : {}),
   };
   const steps: string[] = [];
   const refusal = decide(k, check, Date.now(), { trace: steps, assumeSession: !oneself });

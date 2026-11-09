@@ -60,12 +60,14 @@ Secret fields leave the vault once the command completes; personal fields stay i
 
 ### Queries
 
-| Query | Fields | Answer | Who may ask |
-|---|---|---|---|
-| `GetTenantBySlug`<br>by `tenancy.tenants` | `slug: string` | `{ id: string; name: string; status: TenantStatus }` | the API (its `api` group) |
-| `GetSignUpPolicy`<br>by `tenancy.tenants` | — | `SignUpPolicy { tenants, accounts }` | the API (its `api` group) |
-| `GetTenant`<br>by `tenancy.tenants` | `tenantId: string` | `TenantRow { id, slug, name, status, suspension, mfaRequired, owners }` | a group permission |
-| `ListTenants`<br>by `tenancy.tenants` | `status?: TenantStatus`<br>`after?: string`<br>`limit?: number` | `{ tenants: TenantRow[]; more: boolean }` | the platform |
+A query about one aggregate names it (`static target`): the middleware decides on that aggregate as on a command's.
+
+| Query | Fields | About | Answer | Who may ask |
+|---|---|---|---|---|
+| `GetTenantBySlug`<br>by `tenancy.tenants` | `slug: string` | — | `{ id: string; name: string; status: TenantStatus }` | the API (its `api` group) |
+| `GetSignUpPolicy`<br>by `tenancy.tenants` | — | — | `SignUpPolicy { tenants, accounts }` | the API (its `api` group) |
+| `GetTenant`<br>by `tenancy.tenants` | `tenantId: string` | `tenancy.tenant` in `tenantId` | `TenantRow { id, slug, name, status, suspension, mfaRequired, owners }` | a group permission |
+| `ListTenants`<br>by `tenancy.tenants` | `status?: TenantStatus`<br>`after?: string`<br>`limit?: number` | — | `{ tenants: TenantRow[]; more: boolean }` | the platform |
 
 ### Listeners
 

@@ -8,6 +8,8 @@ The types the tables below name, from `invitation/domain.ts`:
 type InvitationStatus = "none" | "open" | "accepted" | "declined" | "revoked";
 
 interface InvitedGroup { group: string; scope?: { type: string; id: string } | null }
+
+type LinkStatus = "none" | "open" | "revoked";
 ```
 
 ### Aggregates
@@ -15,6 +17,7 @@ interface InvitedGroup { group: string; scope?: { type: string; id: string } | n
 | Aggregate | Unique keys | Facts |
 |---|---|---|
 | `invitation.invitation` | `email` | — |
+| `invitation.link` | — | — |
 
 ### Commands
 
@@ -29,6 +32,9 @@ Secret fields leave the vault once the command completes; personal fields stay i
 | `AcceptInvitation`<br>on `invitation` | `token: string` (secret)<br>`accountId: string`<br>`email: string`<br>`newAccount: boolean` | `InvitationAccepted` | the API (its `api` group) | `expired_token`, `invalid_account`, `invalid_token`, `wrong_email` |
 | `RecordInvitationMailSent`<br>on `invitation` | `tokenId: string` | `InvitationMailSent` | only the kit's reactors | — |
 | `EraseInvitation`<br>on `invitation` | — | `InvitationRevoked`, `InvitationErased` | the platform | `not_found` |
+| `CreateInvitationLink`<br>on `link` | `secret: string` (secret)<br>`groups?: InvitedGroup[]`<br>`label?: string`<br>`expiresAt?: number \| null`<br>`maxUses?: number \| null` | `InvitationLinkCreated` | a group permission; only with permissions the sender holds | `exists`, `invalid_expiry`, `invalid_groups`, `invalid_max_uses`, `invalid_secret`; requires: group.group is active |
+| `RevokeInvitationLink`<br>on `link` | — | `InvitationLinkRevoked` | a group permission | `invalid_state` |
+| `JoinWithInvitationLink`<br>on `link` | `token: string` (secret)<br>`accountId: string` | `InvitationLinkUsed` | the API (its `api` group) | `exists`, `expired_token`, `invalid_account`, `invalid_token`, `used_up` |
 
 ### Events
 
@@ -41,19 +47,26 @@ Secret fields leave the vault once the command completes; personal fields stay i
 | `InvitationAccepted` | `tokenId: string`<br>`accountId: string`<br>`newAccount: boolean`<br>`groups: InvitedGroup[]`<br>`owner: boolean` | erases `usedToken` | The identity reactor creates the identity with these groups (and the owner) from it. |
 | `InvitationMailSent` | `tokenId: string` | — | — |
 | `InvitationErased` | — | erases `invitation:<id>` | Erases the invited email: when the tenant is deleted, or the person asks. |
+| `InvitationLinkCreated` | `groups: InvitedGroup[]`<br>`hash: string`<br>`label: string`<br>`expiresAt: number \| null`<br>`maxUses: number \| null` | — | A reusable invitation: anyone signed in who has its token may join the tenant with these groups, until it is revoked, expires or is used up. Only the token's hash is kept: the API shows the token once. |
+| `InvitationLinkRevoked` | — | — | — |
+| `InvitationLinkUsed` | `accountId: string`<br>`groups: InvitedGroup[]` | — | Someone joined through the link: the identity reactor creates their identity with these groups. |
 
 ### Queries
 
-| Query | Fields | Answer | Who may ask |
-|---|---|---|---|
-| `ListInvitations`<br>by `invitation.invitations` | — | `InvitationRow[]` | a group permission |
-| `PeekInvitation`<br>by `invitation.invitations` | `token: string` | `{ tenant: string; invitationId: string; email: string \| null; owner: boolean; expired: boolean }` | the API (its `api` group) |
+A query about one aggregate names it (`static target`): the middleware decides on that aggregate as on a command's.
+
+| Query | Fields | About | Answer | Who may ask |
+|---|---|---|---|---|
+| `ListInvitations`<br>by `invitation.invitations` | — | — | `InvitationRow[]` | a group permission |
+| `PeekInvitation`<br>by `invitation.invitations` | `token: string` | — | `{ tenant: string; invitationId: string; email: string \| null; owner: boolean; expired: boolean }` | the API (its `api` group) |
+| `ListInvitationLinks`<br>by `invitation.invitations` | — | — | `LinkRow[]` | a group permission |
+| `PeekInvitationLink`<br>by `invitation.invitations` | `token: string` | — | `{ tenant: string; linkId: string; label: string; usable: boolean }` | the API (its `api` group) |
 
 ### Listeners
 
 | Listener | On | Submits |
 |---|---|---|
-| `invitation.invitations` (read model, order -20) | `InvitationCreated`, `InvitationResent`, `InvitationRevoked`, `InvitationDeclined`, `InvitationAccepted`, `InvitationErased`, `TenantDeleted` | — |
+| `invitation.invitations` (read model, order -20) | `InvitationCreated`, `InvitationResent`, `InvitationRevoked`, `InvitationDeclined`, `InvitationAccepted`, `InvitationErased`, `InvitationLinkCreated`, `InvitationLinkRevoked`, `InvitationLinkUsed`, `TenantDeleted` | — |
 | `invitation.mail` (reactor, order -10) | `InvitationCreated` | side effects only |
 | `invitation.mail` (reactor, order -10) | `InvitationResent` | side effects only |
 | `invitation.owners` (reactor, order -10) | `TenantCreated` | `CreateInvitation` |

@@ -34,6 +34,8 @@ struct DomainInner {
     name: String,
     events: RwLock<HashMap<String, EventDef>>,
     commands: RwLock<HashMap<String, VaultFields>>,
+    /// What query types given by name are about: [`Domain::query`].
+    queries: RwLock<HashMap<String, Option<QueryTarget>>>,
     /// The aggregates created through it, in order, whatever their state type.
     aggregates: RwLock<Vec<Arc<dyn Runnable>>>,
     /// The read models and reactors created through it, in order.
@@ -73,6 +75,7 @@ pub fn domain(name: &str) -> Domain {
             name: name.to_owned(),
             events: RwLock::default(),
             commands: RwLock::default(),
+            queries: RwLock::default(),
             aggregates: RwLock::default(),
             listeners: RwLock::default(),
             declared: RwLock::default(),
@@ -133,6 +136,30 @@ impl Domain {
         CommandSchema {
             domain: self.clone(),
             command_type: command_type.to_owned(),
+        }
+    }
+
+    /// Declares what `query_type` queries are about (see [`QuerySchema::target`]): returns the
+    /// [`QuerySchema`] to chain `target` on. A query type (see [`crate::query`]) declares it
+    /// with `target(...)` instead. Clients that ask such queries by name need the domain:
+    /// `kernable.with_domain(&domain)`.
+    ///
+    /// # Panics
+    ///
+    /// If `query_type` is qualified.
+    pub fn query(&self, query_type: &str) -> QuerySchema {
+        assert!(
+            unqualified(query_type),
+            "query types are unqualified within their domain, not {query_type:?}"
+        );
+        self.inner
+            .queries
+            .write()
+            .unwrap()
+            .insert(query_type.to_owned(), None);
+        QuerySchema {
+            domain: self.clone(),
+            query_type: query_type.to_owned(),
         }
     }
 
@@ -245,11 +272,28 @@ impl Domain {
             .cloned()
     }
 
+    /// The aggregate `query_type` queries are about, as declared ([`Domain::query`]).
+    pub(crate) fn query_target(&self, query_type: &str) -> Option<QueryTarget> {
+        self.inner
+            .queries
+            .read()
+            .unwrap()
+            .get(query_type)
+            .cloned()
+            .flatten()
+    }
+
     /// Runs a message type's `declare` on this domain once, unless its schema was declared by
-    /// name already ([`Domain::event`], [`Domain::command`]).
+    /// name already ([`Domain::event`], [`Domain::command`], [`Domain::query`]).
     pub(crate) fn declare_once(&self, message_type: &str, declare: fn(&Domain)) {
-        let by_name =
-            self.event_def(message_type).is_some() || self.command_vault(message_type).is_some();
+        let by_name = self.event_def(message_type).is_some()
+            || self.command_vault(message_type).is_some()
+            || self
+                .inner
+                .queries
+                .read()
+                .unwrap()
+                .contains_key(message_type);
         if self
             .inner
             .declared
@@ -380,6 +424,62 @@ impl CommandSchema {
     pub fn secret(self, fields: &[&str]) -> Self {
         self.update(|v| v.secret.extend(fields.iter().map(|f| (*f).to_owned())));
         self
+    }
+}
+
+/// What a query type is about. Made with [`Domain::query`]:
+/// `shop_domain.query("GetOrder").target("order", "id");` (a `GetOrder` with `{"id": "o-17"}`
+/// is about order `o-17`). Clients that ask these queries by name need the domain:
+/// `kernable.with_domain(&shop_domain)`.
+pub struct QuerySchema {
+    domain: Domain,
+    query_type: String,
+}
+
+impl QuerySchema {
+    /// The query is about one aggregate of `aggregate_type` (`order`, of the query's domain, or
+    /// qualified: `shop.order`), whose ID is in the data's field `field` (as on the wire:
+    /// `orderId`). The SDK sends it with the query, signed, and a middleware decides on it as
+    /// on a command's aggregate ([`crate::Check::target`]). Data without a non-empty string in
+    /// `field` sends no target.
+    pub fn target(self, aggregate_type: &str, field: &str) -> Self {
+        self.domain.inner.queries.write().unwrap().insert(
+            self.query_type.clone(),
+            Some(QueryTarget {
+                aggregate_type: aggregate_type.to_owned(),
+                field: field.to_owned(),
+            }),
+        );
+        self
+    }
+}
+
+/// The aggregate a query is about, as its type declares it: [`QuerySchema::target`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueryTarget {
+    /// `order` (of the query's domain) or qualified: `shop.order`.
+    pub aggregate_type: String,
+    /// The field of the query's data that holds the aggregate's ID, as on the wire: `orderId`.
+    pub field: String,
+}
+
+impl QueryTarget {
+    /// The wire target of a `domain` query with `data`: the type qualified, the ID from
+    /// `data`; none without a non-empty string ID, so a rule that needs one refuses.
+    pub(crate) fn wire(&self, domain: &str, data: &Value) -> Option<proto::Target> {
+        let id = data
+            .get(&self.field)?
+            .as_str()
+            .filter(|id| !id.is_empty())?;
+        let aggregate_type = if self.aggregate_type.contains('.') {
+            self.aggregate_type.clone()
+        } else {
+            format!("{domain}.{}", self.aggregate_type)
+        };
+        Some(proto::Target {
+            aggregate_type,
+            aggregate_id: id.to_owned(),
+        })
     }
 }
 

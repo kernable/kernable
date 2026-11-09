@@ -9,7 +9,7 @@ use super::queries::{
 use super::readmodels::IdentityRow;
 use crate::account::AccountDeleted;
 use crate::group::GroupDeleted;
-use crate::invitation::InvitationAccepted;
+use crate::invitation::{InvitationAccepted, InvitationLinkUsed, InvitedGroup};
 use crate::shared::constants::orders;
 use crate::shared::internal;
 use crate::shared::secrets::new_id;
@@ -29,6 +29,75 @@ async fn tolerating(ctx: &ListenerContext, code: &str, submit: Submit) -> Result
         Err(Error::Rejected(r)) if r.code == code => Ok(()),
         r => r.map(|_| ()).map_err(Into::into),
     }
+}
+
+/// An account joins a tenant with groups (and as owner): its identity there is created, or kept
+/// if it has one, and gains the groups. `source` makes the follow-up command IDs unique per join.
+async fn join(
+    ctx: &ListenerContext,
+    tenant: &str,
+    source: &str,
+    account_id: String,
+    groups: Vec<InvitedGroup>,
+    owner: bool,
+) -> Result<(), BoxError> {
+    let ask = Query::of(FindIdentityByAccount {
+        account_id: account_id.clone(),
+    })
+    .tenant(tenant)
+    .context(internal(None));
+    let identity_id = match ctx.query::<FoundIdentity>(ask).await {
+        Ok(found) => found.identity_id,
+        Err(Error::Rejected(_)) => {
+            let create = Submit::command(
+                CreateIdentity {
+                    account_id,
+                    display_name: None,
+                    title: None,
+                    email: None,
+                },
+                &new_id(),
+            );
+            let created = ctx
+                .submit(follow(
+                    ctx,
+                    create,
+                    format!("invitation-identity-{source}"),
+                    tenant,
+                ))
+                .await?;
+            created
+                .first()
+                .map(|e| e.aggregate_id.clone())
+                .ok_or("no identity created")?
+        }
+        Err(e) => return Err(e.into()),
+    };
+    for (i, g) in groups.into_iter().enumerate() {
+        let grant = GrantMembership {
+            membership_id: format!("{source}-{i}"),
+            group: g.group,
+            scope: g.scope,
+            expires_at: None,
+        };
+        let submit = follow(
+            ctx,
+            Submit::command(grant, &identity_id),
+            format!("invitation-membership-{source}-{i}"),
+            tenant,
+        );
+        tolerating(ctx, "exists", submit).await?;
+    }
+    if owner {
+        let submit = follow(
+            ctx,
+            Submit::command(AddOwner { identity_id }, tenant),
+            format!("invitation-owner-{source}"),
+            tenant,
+        );
+        tolerating(ctx, "exists", submit).await?;
+    }
+    Ok(())
 }
 
 pub fn react(domain: &Domain) {
@@ -74,67 +143,15 @@ pub fn react(domain: &Domain) {
     let invitations = domain
         .reactor("identity.invitations")
         .order(orders::REACTORS);
-    // An accepted invitation becomes an identity with its groups, and an owner for an owner invitation.
+    // An accepted invitation becomes an identity with its groups, and an owner for an owner
+    // invitation; so does a join through an invitation link, never as owner.
     invitations.on(InvitationAccepted, |d, evt, ctx| async move {
-        let (tenant, invitation) = (evt.tenant.clone(), evt.aggregate_id.clone());
-        // An account with an identity here already keeps it and gains the groups.
-        let ask = Query::of(FindIdentityByAccount {
-            account_id: d.account_id.clone(),
-        })
-        .tenant(&tenant)
-        .context(internal(None));
-        let identity_id = match ctx.query::<FoundIdentity>(ask).await {
-            Ok(found) => found.identity_id,
-            Err(Error::Rejected(_)) => {
-                let create = Submit::command(
-                    CreateIdentity {
-                        account_id: d.account_id,
-                        display_name: None,
-                        title: None,
-                        email: None,
-                    },
-                    &new_id(),
-                );
-                let created = ctx
-                    .submit(follow(
-                        &ctx,
-                        create,
-                        format!("invitation-identity-{invitation}"),
-                        &tenant,
-                    ))
-                    .await?;
-                created
-                    .first()
-                    .map(|e| e.aggregate_id.clone())
-                    .ok_or("no identity created")?
-            }
-            Err(e) => return Err(e.into()),
-        };
-        for (i, g) in d.groups.into_iter().enumerate() {
-            let grant = GrantMembership {
-                membership_id: format!("{invitation}-{i}"),
-                group: g.group,
-                scope: g.scope,
-                expires_at: None,
-            };
-            let submit = follow(
-                &ctx,
-                Submit::command(grant, &identity_id),
-                format!("invitation-membership-{invitation}-{i}"),
-                &tenant,
-            );
-            tolerating(&ctx, "exists", submit).await?;
-        }
-        if d.owner {
-            let submit = follow(
-                &ctx,
-                Submit::command(AddOwner { identity_id }, &tenant),
-                format!("invitation-owner-{invitation}"),
-                &tenant,
-            );
-            tolerating(&ctx, "exists", submit).await?;
-        }
-        Ok(())
+        let source = evt.aggregate_id.clone();
+        join(&ctx, &evt.tenant, &source, d.account_id, d.groups, d.owner).await
+    });
+    invitations.on(InvitationLinkUsed, |d, evt, ctx| async move {
+        let source = format!("{}-{}", evt.aggregate_id, d.account_id);
+        join(&ctx, &evt.tenant, &source, d.account_id, d.groups, false).await
     });
 
     let cleanup = domain.reactor("identity.cleanup").order(orders::CLEANUP);

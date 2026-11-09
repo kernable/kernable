@@ -28,7 +28,10 @@ use crate::account::{
     SignInWithProvider, StartTotp, VerifyEmail, VerifySsoDomain,
 };
 use crate::identity::{CreateApiKey, FindApiKey, FindIdentityByAccount, api_key, parse_api_key};
-use crate::invitation::{AcceptInvitation, PeekInvitation, Peeked};
+use crate::invitation::{
+    AcceptInvitation, CreateInvitationLink, InvitedGroup, JoinWithInvitationLink, PeekInvitation,
+    PeekInvitationLink, Peeked, PeekedLink, link_token, parse_link_token,
+};
 use crate::shared::constants::{CHALLENGE_SECONDS, PLATFORM_TENANT, passkeys};
 use crate::shared::secrets::{
     equal_secrets, new_id, parse_invitation_token, parse_token, random_bytes, random_secret, token,
@@ -75,6 +78,18 @@ pub type ApiResult<T> = Result<T, ApiError>;
 
 fn refused<T>(code: &str) -> ApiResult<T> {
     Err(ApiError::Refused(code.to_owned()))
+}
+
+/// An invitation link to create: [`KitApi::create_invitation_link`].
+#[derive(Clone, Debug, Default)]
+pub struct NewInvitationLink {
+    /// The groups the people who join get.
+    pub groups: Vec<InvitedGroup>,
+    pub label: Option<String>,
+    /// Until when it works (ms since epoch); `None`: until revoked.
+    pub expires_at: Option<i64>,
+    /// How many people may join through it; `None`: no limit.
+    pub max_uses: Option<i64>,
 }
 
 /// A signed-in session: its tokens and who it is.
@@ -1354,6 +1369,59 @@ impl KitApi {
             )?;
         }
         Ok((account_id, peek.tenant))
+    }
+
+    /// A reusable invitation link into `groups` of the tenant, as `context` (whose groups the
+    /// middleware checks): the token, shown this once, for a URL such as `/join?token=…`, and the
+    /// link's ID.
+    pub async fn create_invitation_link(
+        &self,
+        context: RequestContext,
+        tenant: &str,
+        link: NewInvitationLink,
+    ) -> ApiResult<(String, String)> {
+        let link_id = new_id();
+        let secret = random_secret(32);
+        let command = CreateInvitationLink {
+            secret: secret.clone(),
+            groups: Some(link.groups),
+            label: link.label,
+            expires_at: link.expires_at,
+            max_uses: link.max_uses,
+        };
+        done(self.submit(command, &link_id, tenant, context).await?)?;
+        Ok((link_token(tenant, &link_id, &secret), link_id))
+    }
+
+    /// What the join page shows for a link token: the tenant, the link's label, whether it can be
+    /// used.
+    pub async fn peek_invitation_link(&self, link: &str) -> ApiResult<Option<PeekedLink>> {
+        let Some(t) = parse_link_token(link) else {
+            return Ok(None);
+        };
+        self.ask(PeekInvitationLink { token: link.into() }, &t.tenant, false)
+            .await
+    }
+
+    /// The signed-in account joins the link's tenant with its groups: the tenant. Someone without
+    /// an account registers and verifies first: a link proves no email.
+    pub async fn join_with_invitation_link(
+        &self,
+        claims: &Claims,
+        link: &str,
+    ) -> ApiResult<String> {
+        let Some(t) = parse_link_token(link) else {
+            return refused("invalid_token");
+        };
+        let join = JoinWithInvitationLink {
+            token: link.into(),
+            account_id: claims.sub.clone(),
+        };
+        done(
+            self.submit(join, &t.link_id, &t.tenant, self.service_context.clone())
+                .await?,
+        )?;
+        Ok(t.tenant)
     }
 
     /// Signs out: ends the session.

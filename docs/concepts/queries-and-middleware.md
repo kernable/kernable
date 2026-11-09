@@ -19,6 +19,7 @@ If several read models answer the same type, the kernel spreads queries over the
 - **After a `committed` submit, ask with `minPosition`**, the position of its events: the answer waits until the read model has them. After a settled submit, it is not needed.
 - **A listener cannot ask its own read model**: the answer would wait behind the event it is handling. The kernel refuses it at once; ask another read model, or keep what you need in the listener itself.
 - **No read model connected?** The query waits up to `--query-timeout-ms` (default 5 s) for one, then fails: run read models next to the clients that need them, or several of them.
+- **A query about one aggregate says so.** `GetOrder { id: "o-17" }` is about order `o-17`, but only your code knows that `id` names an order. Declare it once on the query, `static target = { aggregateType: "order", field: "id" }` on a query class, or `shopDomain.query("GetOrder").target("order", "id")` for a query given by name. The SDK then sends the aggregate with the query, signed, and a middleware sees it as `check.target`, the same as a command's aggregate. That is what lets a rule say "only the order's owner may read it".
 
 ## Middleware
 

@@ -102,6 +102,7 @@ fn now_ms() -> i64 {
 
 fn signed_query(query_type: &str, min_position: u64, key: &SigningKey) -> QueryRequest {
     let mut q = QueryRequest {
+        target: None,
         listener: String::new(),
         wait_only: false,
         protocol: kernable_core::PROTOCOL,

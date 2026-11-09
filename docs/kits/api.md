@@ -73,6 +73,9 @@ does not decide who may do what.
 | | `requestEmailChange(claims, email)`, `confirmEmailChange(token)` | the change, confirmed from the new address |
 | **Invitations** | `peekInvitation(token)` | tenant name, email, whether it expired |
 | | `acceptInvitation(token, { claims } \| { name, password })` | as the signed-in account, or as a new person ([Invitations](./invitation#the-flow)) |
+| **Invitation links** | `createInvitationLink(context, tenant, { groups, label?, expiresAt?, maxUses? })` | the link's token, shown this once |
+| | `peekInvitationLink(token)` | tenant, label, whether it can be used |
+| | `joinWithInvitationLink(claims, token)` | the signed-in account joins with the link's groups ([Invitation links](./invitation#invitation-links)) |
 | **Services** | `createApiKey(context, tenant, identityId, label?, expiresAt?)` | the key, shown this once |
 | | `checkApiKey(key)` | the request context of the key, or null |
 

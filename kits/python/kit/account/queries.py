@@ -21,6 +21,7 @@ def _(d: FindAccountByEmail):
 
 
 class GetAccount(Query[AccountRow]):
+    target = {"aggregate_type": "account.account", "field": "account_id"}
     account_id: str
 
 
@@ -33,6 +34,7 @@ def _(d: GetAccount):
 
 class ListSessions(Query[list[SessionRow]]):
     """The account's sessions, the open ones first: "my devices"."""
+    target = {"aggregate_type": "account.account", "field": "account_id"}
     account_id: str
 
 

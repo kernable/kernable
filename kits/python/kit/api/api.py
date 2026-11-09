@@ -28,8 +28,9 @@ from ..account.queries import FindAccountByEmail, FindAccountByLink, FindSsoByDo
 from ..identity.commands import CreateApiKey
 from ..identity.domain import api_key, parse_api_key
 from ..identity.queries import FindApiKey, FindIdentityByAccount
-from ..invitation.commands import AcceptInvitation
-from ..invitation.queries import PeekInvitation
+from ..invitation.commands import AcceptInvitation, CreateInvitationLink, JoinWithInvitationLink
+from ..invitation.domain import InvitedGroup, link_token, parse_link_token
+from ..invitation.queries import PeekInvitation, PeekInvitationLink
 from ..shared.constants import CHALLENGE_SECONDS, PASSKEYS, PLATFORM_TENANT
 from ..shared.secrets import equal_secrets, parse_invitation_token, parse_token, random_secret, token, totp_secret
 from .tokens import Claims, SigningKeys, check_access_token, issue_access_token
@@ -509,6 +510,36 @@ class KitApi:
             if not registered.committed:
                 return {"ok": False, "reason": registered.code}
         return {"ok": True, "account_id": account_id, "tenant": peek["tenant"]}
+
+    def create_invitation_link(self, context: RequestContext, tenant: str, groups: list[InvitedGroup], label: str | None = None,
+                               expires_at: int | None = None, max_uses: int | None = None) -> dict:
+        """A reusable invitation link into `groups` of the tenant, as `context` (whose groups the
+        middleware checks): the token, shown this once, for a URL such as `/join?token=…`."""
+        link_id, secret = str(uuid.uuid4()), random_secret()
+        outcome = self._submit(CreateInvitationLink(secret=secret, groups=groups, label=label, expires_at=expires_at, max_uses=max_uses),
+                               link_id, tenant, context)
+        if not outcome.committed:
+            return {"ok": False, "reason": outcome.code}
+        return {"ok": True, "token": link_token(tenant, link_id, secret), "link_id": link_id}
+
+    def peek_invitation_link(self, link: str) -> dict | None:
+        """What the join page shows for a link token: the tenant, the link's label, whether it can be used."""
+        t = parse_link_token(link)
+        if not t:
+            return None
+        try:
+            return self._ask(PeekInvitationLink(token=link), t["tenant"])
+        except Rejected:
+            return None
+
+    def join_with_invitation_link(self, claims: Claims, link: str) -> dict:
+        """The signed-in account joins the link's tenant with its groups. Someone without an account
+        registers and verifies first: a link proves no email."""
+        t = parse_link_token(link)
+        if not t:
+            return {"ok": False, "reason": "invalid_token"}
+        outcome = self._submit(JoinWithInvitationLink(token=link, account_id=claims.sub), t["link_id"], t["tenant"], self.service_context)
+        return {"ok": True, "tenant": t["tenant"]} if outcome.committed else {"ok": False, "reason": outcome.code}
 
     def sign_out(self, claims: Claims) -> None:
         """Signs out: ends the session."""

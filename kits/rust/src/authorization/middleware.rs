@@ -339,12 +339,17 @@ pub fn learned_events() -> Vec<String> {
 
 /// Why a request would be allowed or refused: the middleware's own steps. For oneself, with
 /// one's real session; for another identity of the tenant (needs `group.Explain`), sessions aside.
-#[query("group", answer = Explained)]
+#[query(
+    "group",
+    answer = Explained,
+    target(aggregate = "identity.identity", field = identity_id)
+)]
 pub struct Explain {
     pub identity_id: String,
     /// The request type, qualified: `shop.CancelOrder`.
     pub r#type: String,
-    /// For a command: its aggregate (the relation's target).
+    /// The aggregate the request is about: a command's, or a query's target. Unqualified: of the
+    /// type's domain.
     pub aggregate_type: Option<String>,
     pub aggregate_id: Option<String>,
     pub data: Option<Value>,
@@ -417,6 +422,17 @@ pub fn authorization(group_domain: &Domain) -> Listener {
                 ..RequestContext::default()
             }
         };
+        let target = match (&d.aggregate_type, &d.aggregate_id) {
+            (Some(t), Some(id)) if !t.is_empty() && !id.is_empty() => Some(kernable::Target {
+                aggregate_type: if t.contains('.') {
+                    t.clone()
+                } else {
+                    format!("{domain}.{t}")
+                },
+                aggregate_id: id.clone(),
+            }),
+            _ => None,
+        };
         let c = Check {
             kind: if d.aggregate_id.is_some() {
                 CheckKind::Command
@@ -429,6 +445,7 @@ pub fn authorization(group_domain: &Domain) -> Listener {
             type_name: name.to_owned(),
             aggregate_type: d.aggregate_type,
             aggregate_id: d.aggregate_id,
+            target,
             key: None,
             data: d.data.unwrap_or_else(|| Value::Object(Default::default())),
             request,

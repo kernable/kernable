@@ -222,6 +222,11 @@ pub struct Check {
     pub aggregate_type: Option<String>,
     /// Commands only.
     pub aggregate_id: Option<String>,
+    /// The aggregate the request is about, its type qualified: a command's aggregate
+    /// (`shop.order`, `o-17`), or the one a query declares ([`crate::query`]'s `target`,
+    /// [`crate::QuerySchema::target`]). `None` for queries that declare none, and for file and
+    /// cache requests.
+    pub target: Option<Target>,
     /// File and cache requests only: the file's or value's key.
     pub key: Option<String>,
     /// The request's payload; vault fields are `null` unless the key is granted `vault_read`.
@@ -234,6 +239,14 @@ pub struct Check {
     /// The listener's store, if it has one ([`Listener::store`]): what the middleware learned
     /// from events, to decide with.
     pub store: Option<Store>,
+}
+
+/// The aggregate a request is about ([`Check::target`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Target {
+    /// Qualified: `shop.order`.
+    pub aggregate_type: String,
+    pub aggregate_id: String,
 }
 
 /// When a middleware runs.
@@ -1650,6 +1663,10 @@ impl ListenerHandle {
                 kind: CheckKind::Command,
                 id: x.command_id,
                 tenant: x.tenant_id,
+                target: Some(Target {
+                    aggregate_type: format!("{}.{}", x.domain, x.aggregate_type),
+                    aggregate_id: x.aggregate_id.clone(),
+                }),
                 domain: x.domain,
                 type_name: x.command_type,
                 aggregate_type: Some(x.aggregate_type),
@@ -1666,6 +1683,13 @@ impl ListenerHandle {
                 tenant: q.tenant_id,
                 domain: q.domain,
                 type_name: q.query_type,
+                target: q
+                    .target
+                    .filter(|t| !t.aggregate_id.is_empty())
+                    .map(|t| Target {
+                        aggregate_type: t.aggregate_type,
+                        aggregate_id: t.aggregate_id,
+                    }),
                 aggregate_type: None,
                 aggregate_id: None,
                 key: None,
@@ -1682,6 +1706,7 @@ impl ListenerHandle {
                 domain: d.domain,
                 aggregate_type: None,
                 aggregate_id: None,
+                target: None,
                 key: Some(d.key),
                 data: Value::Null,
                 request: RequestContext::from_wire(d.context.as_ref()),
@@ -1696,6 +1721,7 @@ impl ListenerHandle {
                 domain: c.domain,
                 aggregate_type: None,
                 aggregate_id: None,
+                target: None,
                 key: Some(c.key),
                 data: Value::Null,
                 request: RequestContext::from_wire(c.context.as_ref()),

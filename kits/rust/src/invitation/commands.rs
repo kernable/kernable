@@ -2,10 +2,13 @@
 
 use kernable::{Aggregate, Rejected, Requirement, command};
 
-use super::{Invitation, InvitationStatus, InvitedGroup, events::*};
+use super::{
+    Invitation, InvitationLink, InvitationStatus, InvitedGroup, LinkStatus, events::*, link_token,
+    parse_link_token,
+};
 use crate::shared::constants::{DAY, INVITATION_DAYS};
 use crate::shared::secrets::{
-    equal_secrets, normal_email, parse_invitation_token, random_secret, valid_email,
+    equal_secrets, normal_email, parse_invitation_token, random_secret, sha256, valid_email,
 };
 
 fn rejected(message: &str, code: &str) -> Rejected {
@@ -210,5 +213,112 @@ pub fn handle(invitation: &Aggregate<Invitation>) {
         } else {
             vec![InvitationErased {}.into()]
         })
+    });
+}
+
+/// A reusable invitation link into `groups` (never as owner). The API generates the secret and
+/// shows the token once; the event keeps its hash. The middleware lets the sender attach only
+/// groups it could grant.
+#[command("invitation", aggregate = "link", secret = [secret])]
+pub struct CreateInvitationLink {
+    pub secret: String,
+    pub groups: Option<Vec<InvitedGroup>>,
+    pub label: Option<String>,
+    /// Until when it works (ms since epoch); `None`: until revoked.
+    pub expires_at: Option<i64>,
+    /// How many people may join through it; `None`: no limit.
+    pub max_uses: Option<i64>,
+}
+
+#[command("invitation", aggregate = "link")]
+pub struct RevokeInvitationLink {}
+
+/// The API's: the signed-in account `account_id` joins the tenant through the link. Someone
+/// without an account registers and verifies first: a link, unlike an emailed invitation, proves
+/// no email.
+#[command("invitation", aggregate = "link", secret = [token])]
+pub struct JoinWithInvitationLink {
+    pub token: String,
+    pub account_id: String,
+}
+
+/// A link's secret: at least 32 URL-safe characters.
+fn valid_link_secret(secret: &str) -> bool {
+    secret.len() >= 32
+        && secret
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+pub fn handle_links(link: &Aggregate<InvitationLink>) {
+    link.command(CreateInvitationLink, |s, d, cmd, _| {
+        if s.status != LinkStatus::None {
+            return Err(rejected("The link exists", "exists"));
+        }
+        if !valid_link_secret(&d.secret) {
+            return Err(rejected(
+                "A secret of at least 32 URL-safe characters",
+                "invalid_secret",
+            ));
+        }
+        if d.max_uses.is_some_and(|m| m <= 0) {
+            return Err(rejected(
+                "maxUses is a positive whole number",
+                "invalid_max_uses",
+            ));
+        }
+        Ok(vec![
+            InvitationLinkCreated {
+                groups: groups(d.groups)?,
+                hash: sha256(&link_token(&cmd.tenant, &cmd.aggregate_id, &d.secret)),
+                label: d.label.unwrap_or_default(),
+                expires_at: d.expires_at,
+                max_uses: d.max_uses,
+            }
+            .into(),
+        ])
+    });
+    link.requires(CreateInvitationLink, |_, d| {
+        d.groups
+            .unwrap_or_default()
+            .into_iter()
+            .map(|g| Requirement::new("group", "group", &g.group, "active"))
+            .collect::<Vec<_>>()
+    });
+    link.command(RevokeInvitationLink, |s, _, _, _| {
+        if s.status != LinkStatus::Open {
+            return Err(rejected("Only an open link is revoked", "invalid_state"));
+        }
+        Ok(vec![InvitationLinkRevoked {}.into()])
+    });
+    link.command(JoinWithInvitationLink, |s, d, cmd, ctx| {
+        let valid = parse_link_token(&d.token).is_some_and(|t| {
+            s.status == LinkStatus::Open
+                && t.tenant == cmd.tenant
+                && t.link_id == cmd.aggregate_id
+                && s.hash.as_deref().is_some_and(|h| equal_secrets(h, &t.hash))
+        });
+        if !valid {
+            return Err(rejected("The link is not valid", "invalid_token"));
+        }
+        if s.expires_at.is_some_and(|e| ctx.now().millis() > e) {
+            return Err(rejected("The link has expired", "expired_token"));
+        }
+        if s.max_uses.is_some_and(|m| s.accounts.len() as i64 >= m) {
+            return Err(rejected("The link is used up", "used_up"));
+        }
+        if d.account_id.is_empty() {
+            return Err(rejected("Which account?", "invalid_account"));
+        }
+        if s.accounts.contains(&d.account_id) {
+            return Err(rejected("Joined through this link already", "exists"));
+        }
+        Ok(vec![
+            InvitationLinkUsed {
+                account_id: d.account_id,
+                groups: s.groups.clone(),
+            }
+            .into(),
+        ])
     });
 }

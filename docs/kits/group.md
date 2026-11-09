@@ -31,8 +31,9 @@ CreateGroup.new({
 | `when` | a relation the identity must have to the target aggregate; you declare relations in code, from your events ([Authorization](./authorization#relations)) |
 | `viaParent` | the relation may hold on the target's parent instead, e.g. the fund a vehicle belongs to |
 
-A permission with `when` needs a target: for a command, its aggregate; for a query, the field the
-query names as its target. Without a target it never matches.
+A permission with `when` needs a target: for a command, its aggregate; for a query, the aggregate
+the query declares it is about ([`static target`](../concepts/queries-and-middleware#designing-queries)).
+Without a target it never matches.
 
 `SetPermissions` replaces the whole list in one event, which keeps the audit readable: each change
 shows the complete list before and after.

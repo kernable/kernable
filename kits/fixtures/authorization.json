@@ -1835,6 +1835,10 @@
         "tenant": "t1",
         "domain": "identity",
         "type": "GetIdentity",
+        "target": {
+          "type": "identity.identity",
+          "id": "i-mem"
+        },
         "data": {
           "identityId": "i-mem"
         },
@@ -1854,6 +1858,10 @@
         "tenant": "t1",
         "domain": "identity",
         "type": "GetIdentity",
+        "target": {
+          "type": "identity.identity",
+          "id": "i-two"
+        },
         "data": {
           "identityId": "i-two"
         },
@@ -2213,6 +2221,10 @@
         "tenant": "t1",
         "domain": "identity",
         "type": "GetIdentity",
+        "target": {
+          "type": "identity.identity",
+          "id": "i-mem"
+        },
         "data": {
           "identityId": "i-mem"
         },
@@ -2363,6 +2375,10 @@
         "tenant": "t1",
         "domain": "identity",
         "type": "GetIdentity",
+        "target": {
+          "type": "identity.identity",
+          "id": "i-mem"
+        },
         "data": {
           "identityId": "i-mem"
         },

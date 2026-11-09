@@ -2,7 +2,8 @@
 
 An invitation brings a person into a tenant by email: with some groups, or as an owner. It works
 for people who already have an account and for people who do not, and it is the only way in when
-the platform's sign-up policy keeps registration closed.
+the platform's sign-up policy keeps registration closed. An [invitation link](#invitation-links)
+lets many people in through one link instead.
 
 One aggregate, `invitation.invitation`, with a random ID, under the tenant it invites to. It is
 `open` until it is `accepted`, `declined` or `revoked`; it expires after `INVITATION_DAYS` (7),
@@ -46,6 +47,33 @@ sequenceDiagram
 
 The invited person may also **decline** (`DeclineInvitation` with the token). The tenant's admins
 may **revoke** an open invitation.
+
+## Invitation links
+
+An invitation link lets people in without an invitation per email: Ann puts a link on her shop's
+website, and whoever opens it, signs in and joins gets the link's groups. It is a second
+aggregate, `invitation.link`:
+
+| Command | What it does |
+|---|---|
+| `CreateInvitationLink` | a link into `groups` (never as owner), optionally with a `label`, an expiry (`expiresAt`) and a limit (`maxUses`) |
+| `JoinWithInvitationLink` | the signed-in account joins the tenant with the link's groups; sent by your API |
+| `RevokeInvitationLink` | the link stops working at once |
+
+- **Creating** goes through `KitApi.createInvitationLink(context, tenant, { groups, label?, expiresAt?, maxUses? })`.
+  It generates the token `link_<tenantId>.<linkId>.<secret>` and returns it **once**; only its
+  hash is stored, as for API keys. The creator may only hand out groups they could grant
+  themselves ([no escalation](./authorization#no-escalation)).
+- **Joining** goes through `KitApi.joinWithInvitationLink(claims, token)`. The person must be
+  signed in: unlike an emailed invitation, a link proves no email address, so someone new
+  registers and verifies first, then joins. Each account joins through a link once; a link that
+  expired, is used up or was revoked is refused (`expired_token`, `used_up`, `invalid_token`).
+- **Afterwards** the identity reactor creates the person's identity in the tenant (or keeps theirs)
+  with the link's groups, exactly as for an accepted invitation. Every join is an event
+  (`InvitationLinkUsed`), so the audit shows who came in through which link.
+- `peekInvitationLink(token)` gives the join page what it shows: the tenant, the link's label and
+  whether it can still be used. `ListInvitationLinks` lists a tenant's links with how often each
+  was used.
 
 ## Tenants created by the platform
 

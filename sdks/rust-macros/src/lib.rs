@@ -34,7 +34,9 @@ pub fn command(args: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// A query of a domain: `#[query("tenancy", answer = TenantRow)]` (default answer: any JSON),
-/// optionally with `type = "OtherName"`.
+/// optionally with `target(aggregate = "tenant", field = tenant_id)` (the aggregate it is about:
+/// of the query's domain, or qualified `tenancy.tenant`; its ID in that field) and
+/// `type = "OtherName"`.
 #[proc_macro_attribute]
 pub fn query(args: TokenStream, item: TokenStream) -> TokenStream {
     expand(Kind::Query, args, item)
@@ -52,6 +54,11 @@ struct Personal {
     subject: Path,
 }
 
+struct Target {
+    aggregate: LitStr,
+    field: Ident,
+}
+
 #[derive(Default)]
 struct Args {
     domain: Option<LitStr>,
@@ -63,6 +70,7 @@ struct Args {
     answer: Option<Type>,
     secret: Vec<Ident>,
     personal: Vec<Personal>,
+    target: Option<Target>,
 }
 
 fn idents(input: ParseStream) -> syn::Result<Vec<Ident>> {
@@ -107,6 +115,29 @@ impl Parse for Args {
                     ));
                 };
                 args.personal.push(Personal { fields, subject });
+                continue;
+            }
+            if key == "target" {
+                let content;
+                parenthesized!(content in input);
+                let (mut aggregate, mut field) = (None, None);
+                while !content.is_empty() {
+                    let k: Ident = content.parse()?;
+                    content.parse::<Token![=]>()?;
+                    match k.to_string().as_str() {
+                        "aggregate" => aggregate = Some(content.parse()?),
+                        "field" => field = Some(content.parse()?),
+                        _ => return Err(Error::new(k.span(), "target takes aggregate and field")),
+                    }
+                    content.parse::<Option<Token![,]>>()?;
+                }
+                let (Some(aggregate), Some(field)) = (aggregate, field) else {
+                    return Err(Error::new(
+                        key.span(),
+                        "target(aggregate = \"order\", field = order_id)",
+                    ));
+                };
+                args.target = Some(Target { aggregate, field });
                 continue;
             }
             input.parse::<Token![=]>()?;
@@ -174,8 +205,8 @@ fn allowed(kind: Kind, args: &Args) -> Result<(), Error> {
         "events and commands",
     )?;
     only(
-        kind != Kind::Query && args.answer.is_some(),
-        "answer",
+        kind != Kind::Query && (args.answer.is_some() || args.target.is_some()),
+        "answer and target",
         "queries",
     )?;
     if kind == Kind::Command && args.aggregate.is_none() {
@@ -215,7 +246,10 @@ fn generate(kind: Kind, args: &Args, item: &mut ItemStruct) -> syn::Result<Token
         .iter()
         .chain(args.personal.iter().flat_map(|p| &p.fields))
         .collect();
-    for name in &vault {
+    for name in vault
+        .iter()
+        .chain(args.target.as_ref().map(|t| &t.field).as_slice())
+    {
         if !fields.named.iter().any(|f| f.ident.as_ref() == Some(name)) {
             return Err(Error::new(
                 name.span(),
@@ -289,7 +323,15 @@ fn generate(kind: Kind, args: &Args, item: &mut ItemStruct) -> syn::Result<Token
                 let _ = schema;
             }
         }
-        Kind::Query => quote! { let _ = domain; },
+        Kind::Query => match &args.target {
+            Some(Target { aggregate, field }) => {
+                let field = camel(&field.to_string());
+                quote! {
+                    domain.query(<Self as ::kernable::Message>::TYPE).target(#aggregate, #field);
+                }
+            }
+            None => quote! { let _ = domain; },
+        },
     };
     let kind_impl = match kind {
         Kind::Event => quote! { impl ::kernable::EventType for #ident {} },

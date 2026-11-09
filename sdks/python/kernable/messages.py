@@ -5,7 +5,8 @@ Every subclass of `Event`, `Command` and `Query` is a keyword-only dataclass, wi
 without an annotation) declare what `Domain.event` and `Domain.command` declare: `version`,
 `upcasts`, `vault` (a dict with `personal`, `secret` and, for an event, `erases`: kept apart from
 the fields, so a field may be called `secret` too), `raw` (fields passed through as they are,
-e.g. a browser's WebAuthn answer), and `type` to override the name.
+e.g. a browser's WebAuthn answer), for a query `target` (what `Domain.query` declares), and
+`type` to override the name.
 
 Fields are snake_case in Python and camelCase in the log (`account_id` is `accountId`), so a
 Python and a TypeScript process write and read the same events. Nested dicts are converted too,
@@ -111,7 +112,19 @@ R = TypeVar("R")
 
 
 class Query(Message, Generic[R]):
-    """What is asked, with `R` its answer: `class GetTenant(Query[TenantRow])`."""
+    """What is asked, with `R` its answer: `class GetTenant(Query[TenantRow])`. A query about one
+    aggregate names it in `target`: the aggregate type (`tenant`, of the query's domain, or
+    qualified: `tenancy.tenant`) and the field that holds the aggregate's ID. The SDK sends that
+    aggregate with the query, and a middleware decides on it as on a command's aggregate ("only
+    the tenant's members may read it"):
+
+        class GetTenant(Query[TenantRow]):
+            target = {"aggregate_type": "tenancy.tenant", "field": "tenant_id"}
+            tenant_id: str
+    """
+
+    #: The aggregate the query is about: `{"aggregate_type": ..., "field": ...}`; None if none.
+    target: ClassVar[dict | None] = None
 
 
 # --- Where a class is used: its domain, and for a command its aggregate type --------------------
@@ -159,6 +172,16 @@ def declare_event(cls: type, events: dict, make_schema: Callable[[str, int], Any
             spec.erases(_snake_subject(erases))
         events[name] = spec
     return name
+
+
+def query_target(cls: type) -> tuple[str, str] | None:
+    """A query class's `target` as `(aggregate_type, field)`, the field as on the wire (camelCase)."""
+    t = getattr(cls, "target", None)
+    if not isinstance(t, dict):
+        return None
+    if not t.get("aggregate_type") or not t.get("field"):
+        raise ValueError(f"{cls.__name__}.target needs an aggregate_type and a field")
+    return t["aggregate_type"], camel(t["field"])
 
 
 def declare_command(cls: type, commands: dict, make_schema: Callable[[str], Any]) -> str:

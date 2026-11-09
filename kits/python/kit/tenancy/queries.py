@@ -7,6 +7,7 @@ from .readmodels import TenantRow, policy, tenant_rows, tenants_readmodel
 
 
 class GetTenant(Query[TenantRow]):
+    target = {"aggregate_type": "tenancy.tenant", "field": "tenant_id"}
     tenant_id: str
 
 

@@ -17,6 +17,7 @@ identitiesReadModel.query(FindIdentityByAccount, (d, qry) => {
 });
 
 export class GetIdentity extends Query<IdentityRow> {
+  static target = { aggregateType: "identity.identity", field: "identityId" };
   identityId!: string;
 }
 
@@ -28,6 +29,7 @@ identitiesReadModel.query(GetIdentity, (d, qry) => {
 
 /** Every tenant the account has an identity in (ask with allPartitions when tenants are partitioned). */
 export class ListMyIdentities extends Query<{ tenant: string; identityId: string; status: IdentityStatus }[]> {
+  static target = { aggregateType: "account.account", field: "accountId" };
   accountId!: string;
 }
 

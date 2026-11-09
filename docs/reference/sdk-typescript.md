@@ -205,6 +205,7 @@ middleware before the request whose key is granted `vault_read`; else they are `
 - `type: string`: The type within the domain: the command or query type, or for a file request `PutData`, `GetData` or `DeleteData`, for a cache request `SetCache`, `GetCache` or `DeleteCache`.
 - `aggregateType?: string`: Commands only.
 - `aggregateId?: string`: Commands only.
+- `target?: { type: string; id: string }`: The aggregate the request is about, qualified: a command's aggregate (`shop.order`, `o-17`), or the one a query declares (`Query.target`, `QuerySchema.target`). Absent for queries that declare none, and for file and cache requests.
 - `key?: string`: File and cache requests only: the file's or value's key.
 - `data: unknown`: The command's or query's data. `undefined` for a file or cache request: the middleware decides on who asks for which key, never sees the file or value.
 - `request: RequestContext`: Who sends it: check permissions here.
@@ -460,6 +461,19 @@ identityDomain.command("Register").personal(["name", "email"], (_d, id) => id).s
 - `personal<D = any>(fields: string[], subject: (data: D, aggregateId: string) => string): this`: Keeps these top-level fields in the vault as personal data of `subject`; see `EventSchema.personal`.
 - `secret(fields: string[]): this`: Keeps these top-level fields (passwords, one-time tokens) in the vault only until the command completed. The handler gets them in clear; the stored command keeps a reference.
 
+### QuerySchema
+
+What a domain declares about a query type given by name (`domain.query("GetOrder")`): the
+aggregate it is about. Query classes declare it as `static target` instead.
+
+```ts
+shopDomain.query("GetOrder").target("order", "id"); // GetOrder { id: "o-17" } is about order o-17
+```
+
+- `readonly type: string`: The query type within its domain, unqualified.
+- `targetOf?: QueryTarget`: The aggregate the query is about; see `target`.
+- `target(aggregateType: string, field: string): this`: The query is about one aggregate of `aggregateType` (`order`, or qualified `shop.order`), whose ID is in the data's `field`. The SDK sends it with the query, signed, and a middleware decides on it as on a command's aggregate. Clients that ask it need the domain: `kernable.use(domain)`.
+
 ### Domain
 
 A domain: a name that scopes its aggregates, commands and events, lowercase by convention
@@ -481,12 +495,14 @@ const mailer = shopDomain.reactor("mailer");
 - `readonly name: string`: The domain's name: `shop`.
 - `readonly events = new Map<string, EventSchema>()`: Payload versions and upcasts per event type; types not listed are at version 1.
 - `readonly commands = new Map<string, CommandSchema>()`: Vault fields per command type; see `command`.
+- `readonly queries = new Map<string, QuerySchema>()`: What query types given by name are about; see `query`.
 - `readonly aggregates: Aggregate<any>[] = []`: The aggregates defined on it, which `Kernable.app` runs.
 - `readonly listeners: Listener[] = []`: The read models and reactors defined on it, which `Kernable.app` runs.
 - `event(type: string, schema: number): EventSchema`: Declares the payload format of `type` events (unqualified): this domain writes them at version `schema` (from 1), with an `upcast` per older version, and may keep fields in the vault (`personal`) or erase a subject (`erases`). Returns the `EventSchema` to chain on. Types not declared are at version 1. The domain's aggregates and listeners use it; listeners of other domains get it with `use(domain)`. Throws for a qualified type or a version below 1.
 - `event(...classes: EventClass<unknown>[]): void`: Declares event classes of this domain (their statics: `version`, `upcasts`, `personal`, `erases`), e.g. in a process that only reads them. An aggregate's `apply` declares them too.
 - `event(type: string | EventClass<unknown>, ...rest: (number | EventClass<unknown>)[]): EventSchema | void`
 - `command(type: string): CommandSchema`: Declares which fields of `type` commands (unqualified) the vault keeps: returns the `CommandSchema` to chain `personal` and `secret` on. Only needed for commands with such fields. Clients that submit them need the domain: `kernable.use(domain)`.
+- `query(type: string): QuerySchema`: Declares what `type` queries (unqualified) are about: returns the `QuerySchema` to chain `target` on. Query classes declare it as `static target` instead. Clients that ask such queries by name need the domain: `kernable.use(domain)`.
 - `aggregate<S>(name: string, initial: S, options?: AggregateOptions): Aggregate<S>`: Defines an aggregate type `name` (`cart`) of this domain, with the state `initial` every aggregate of it starts from: `shopDomain.aggregate("cart", { items: 0 })`. Add its event appliers and command handlers with `apply` and `command`; run it with `kernable.worker(cart)` or `kernable.app`. `options`: snapshots, see `AggregateOptions`. Throws if the domain has an aggregate `name` already.
 - `readModel(name: string, options: ListenerOptions = {}): Listener`: Defines a read model named `name`: a listener that builds a view from events (`on`) and answers queries from it (`query`). Without a store it is kept in memory and rebuilt from the first event on every start (defaults: order 0, start 0); with `options.store` it continues where it left off. `options` override the defaults, see `ListenerOptions`. Run it with `kernable.listener(definition)` or `kernable.app`. Throws if the domain has a listener `name` already.
 - `reactor(name: string, options: ListenerOptions = {}): Listener`: Defines a reactor named `name`: a listener that triggers side effects and follow-up commands. It starts at the newest event when it is new, then resumes after the last acknowledged event (defaults: order 10, no start), so it never reacts to what happened before it existed. Submit follow-ups with `ctx.submit` and a fixed command `id`, so a redelivered event is harmless; a rejected one parks the event (see `ListenerOptions.parkAfter`). A settling submit from its handler waits for the listeners before it (the read models), not for the reactor itself, which handles one event at a time. Run it with `kernable.listener(definition)` or `kernable.app`. Throws if the domain has a listener `name` already.
@@ -976,10 +992,13 @@ await kernable.submit(SignIn.new({ email, password }), { aggregateId });
 ### Query
 
 A query: what is asked, with `R` its answer. Its class name is its type within the domain of
-the read model that answers it.
+the read model that answers it. A query about one aggregate names it in `static target`: the
+SDK sends that aggregate with the query, and a middleware decides on it as on a command's
+aggregate ("only the tenant's members may read it").
 
 ```ts
 export class GetTenant extends Query<TenantRow> {
+  static target = { aggregateType: "tenancy.tenant", field: "tenantId" };
   tenantId!: string;
 }
 tenants.query(GetTenant, (data) => rows.get(data.tenantId));
@@ -998,6 +1017,14 @@ The statics a message class may declare.
 - `personal?: readonly { fields: readonly string[]; subject: (data: any, aggregateId: string) => string }[]`
 - `erases?: (data: any, aggregateId: string) => string`
 - `secret?: readonly string[]`
+- `target?: QueryTarget`: Queries: the aggregate a query is about, the field of its data that holds the aggregate's ID (`{ aggregateType: "order", field: "id" }`); an unqualified type is of the query's domain.
+
+### QueryTarget
+
+The aggregate a query is about: its type, and the field of the query's data with its ID.
+
+- `aggregateType: string`: `order` (the query's domain) or qualified: `shop.order`.
+- `field: string`: The field of the query's data that holds the aggregate's ID: `id`.
 
 ### EventClass
 

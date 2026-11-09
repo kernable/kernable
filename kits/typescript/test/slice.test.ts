@@ -16,7 +16,7 @@ import { bootstrap } from "../src/bootstrap.ts";
 import { CreateGroup } from "../src/group/index.ts";
 import { AddSsoDomain, CreateSso, DeleteAccount, EnforceSso, GetSso, SuspendAccount } from "../src/account/index.ts";
 import { CreateServiceIdentity, DeleteIdentity, GetIdentity, GrantMembership, RevokeApiKey } from "../src/identity/index.ts";
-import { CreateInvitation, EraseInvitation, ListInvitations } from "../src/invitation/index.ts";
+import { CreateInvitation, EraseInvitation, ListInvitations, RevokeInvitationLink } from "../src/invitation/index.ts";
 import { Explain, kitDomains, kitSchemas, relation, useAuthorizationStore, visibility } from "../src/kit.ts";
 import { MemoryMailer, useMailer } from "../src/shared/mail.ts";
 import { totpCode } from "../src/shared/secrets.ts";
@@ -56,6 +56,21 @@ const ordersModel = shop.readModel("shop.orders").on(OrderPlaced, (_d, evt) => v
 const visible = visibility(ordersModel);
 ordersModel.query(ListOrders, (_d, qry, ctx) =>
   [...orderRows.values()].filter((o) => o.tenant === qry.tenant && visible(qry.tenant, ctx.request, "shop.GetOrder", { type: "shop.order", id: o.id })).map((o) => o.id).sort());
+
+// One order, for whoever may get it: the query names the order it is about (`static target`), so
+// the middleware decides on that order, as on a command's aggregate.
+class GetOrder extends Query<{ customer: string }> {
+  static target = { aggregateType: "order", field: "id" };
+  id!: string;
+}
+const customerOf = new Map<string, string>();
+shop.readModel("shop.order-details")
+  .on(OrderPlaced, (d, evt) => void customerOf.set(`${evt.tenant}/${evt.aggregateId}`, d.customer))
+  .query(GetOrder, (d, qry) => {
+    const customer = customerOf.get(`${qry.tenant}/${d.id}`);
+    if (!customer) throw new Rejected("No such order", "not_found");
+    return { customer };
+  });
 
 // --- Setup ---------------------------------------------------------------------------------------
 
@@ -565,4 +580,59 @@ test("the example server: register, verify, sign in, and a command as the caller
   } finally {
     server.close();
   }
+});
+
+test("invitation links let people join with groups; a query about one order is decided on that order", async () => {
+  const olga = await person("link-olga@example.com");
+  const shopTenant = crypto.randomUUID();
+  const opened = await kit.submit(CreateTenant.new({ slug: "olgas-shop", name: "Olga's shop", owner: { accountId: olga.accountId }, status: "active" }), {
+    aggregateId: shopTenant, tenant: shopTenant, context: await api.contextFor(olga.claims),
+  });
+  assert.ok(opened.committed, JSON.stringify(opened));
+  const asOlga = await api.contextFor(olga.claims, shopTenant);
+  const customers = crypto.randomUUID();
+  const group = await kit.submit(CreateGroup.new({
+    name: "Customers", permissions: [{ pattern: "shop.PlaceOrder" }, { pattern: "shop.GetOrder", when: "owner" }],
+  }), { aggregateId: customers, tenant: shopTenant, context: asOlga });
+  assert.ok(group.committed, JSON.stringify(group));
+
+  // Olga puts a link on her website: two people may join through it, as customers.
+  const link = await api.createInvitationLink(asOlga, shopTenant, { groups: [{ group: customers }], label: "website", maxUses: 2 });
+  assert.ok(link.ok, JSON.stringify(link));
+  assert.deepEqual(await api.peekInvitationLink(link.token), { tenant: shopTenant, linkId: link.linkId, label: "website", usable: true });
+
+  const pia = await person("link-pia@example.com");
+  const quinn = await person("link-quinn@example.com");
+  const rosa = await person("link-rosa@example.com");
+  assert.deepEqual(await api.joinWithInvitationLink(pia.claims, link.token), { ok: true, tenant: shopTenant });
+  assert.deepEqual(await api.joinWithInvitationLink(pia.claims, link.token), { ok: false, reason: "exists" });
+  assert.deepEqual(await api.joinWithInvitationLink(quinn.claims, link.token), { ok: true, tenant: shopTenant });
+  assert.deepEqual(await api.joinWithInvitationLink(rosa.claims, link.token), { ok: false, reason: "used_up" });
+  assert.equal((await api.peekInvitationLink(link.token))?.usable, false);
+  // A link's token is checked whole: another secret for the same link is refused.
+  assert.deepEqual(await api.joinWithInvitationLink(rosa.claims, link.token.replace(/.$/, (c) => (c === "A" ? "B" : "A"))), { ok: false, reason: "invalid_token" });
+
+  // Pia and Quinn are customers now: Pia places an order and reads it; Quinn may not read it.
+  const asPia = await api.contextFor(pia.claims, shopTenant);
+  const asQuinn = await api.contextFor(quinn.claims, shopTenant);
+  assert.ok((await kit.submit(PlaceOrder.new(), { aggregateId: "p1", tenant: shopTenant, context: asPia })).committed);
+  assert.deepEqual(await kit.query(GetOrder.new({ id: "p1" }), { tenant: shopTenant, context: asPia }), { customer: asPia.senderIdentity });
+  await assert.rejects(kit.query(GetOrder.new({ id: "p1" }), { tenant: shopTenant, context: asQuinn }), (err: Rejected) => err.code === "forbidden");
+
+  // Explain says the same for a query about one order.
+  const why = await kit.query(Explain.new({ identityId: asQuinn.senderIdentity!, type: "shop.GetOrder", aggregateType: "order", aggregateId: "p1" }), {
+    tenant: shopTenant, context: asOlga,
+  });
+  assert.equal(why.allowed, false);
+
+  // Customers may not hand out links: no permission for it, and no escalation either.
+  const byPia = await api.createInvitationLink(asPia, shopTenant, { groups: [{ group: customers }] });
+  assert.deepEqual(byPia, { ok: false, reason: "forbidden" });
+
+  // Revoked: the link is gone.
+  const second = await api.createInvitationLink(asOlga, shopTenant, { groups: [{ group: customers }] });
+  assert.ok(second.ok);
+  assert.ok((await kit.submit(RevokeInvitationLink.new(), { aggregateId: second.linkId, tenant: shopTenant, context: asOlga })).committed);
+  assert.equal(await api.peekInvitationLink(second.token), null);
+  assert.deepEqual(await api.joinWithInvitationLink(rosa.claims, second.token), { ok: false, reason: "invalid_token" });
 });

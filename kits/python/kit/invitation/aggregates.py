@@ -2,8 +2,9 @@
 
 from kernable import Aggregate
 
-from .domain import InvitationStatus, invitation_domain
-from .events import InvitationAccepted, InvitationCreated, InvitationDeclined, InvitationErased, InvitationResent, InvitationRevoked
+from .domain import InvitationStatus, LinkStatus, invitation_domain
+from .events import (InvitationAccepted, InvitationCreated, InvitationDeclined, InvitationErased, InvitationLinkCreated, InvitationLinkRevoked,
+                     InvitationLinkUsed, InvitationResent, InvitationRevoked)
 
 
 class Invitation(Aggregate, domain=invitation_domain, schema="py-1"):
@@ -54,3 +55,34 @@ Invitation.unique("email", lambda s: s.email if s.status == "open" and s.email e
 
 #: The aggregate type, for workers.
 invitation_aggregate = Invitation.__aggregate__
+
+
+class InvitationLink(Aggregate, domain=invitation_domain, name="link", schema="py-1"):
+    status: LinkStatus = "none"
+    groups: list = []
+    #: The token's hash: the token itself is shown once, by the API.
+    hash: str | None = None
+    label: str = ""
+    expires_at: int | None = None
+    max_uses: int | None = None
+    #: The accounts that joined through it: each once.
+    accounts: list = []
+
+
+@InvitationLink.apply(InvitationLinkCreated)
+def _(s: InvitationLink, d: InvitationLinkCreated):
+    s.update(status="open", groups=list(d.groups), hash=d.hash, label=d.label, expires_at=d.expires_at, max_uses=d.max_uses)
+
+
+@InvitationLink.apply(InvitationLinkRevoked)
+def _(s: InvitationLink):
+    s.update(status="revoked")
+
+
+@InvitationLink.apply(InvitationLinkUsed)
+def _(s: InvitationLink, d: InvitationLinkUsed):
+    s.update(accounts=[*s.accounts, d.account_id])
+
+
+#: The aggregate type, for workers.
+link_aggregate = InvitationLink.__aggregate__
