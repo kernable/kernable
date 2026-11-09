@@ -1,6 +1,6 @@
 # Kits: the event catalogue
 
-Status: decided, not built. The kits are the open set of tenancy, accounts, identities, groups, invitations and authorization that each SDK copies into a customer's project: `npx @kernable/sdk add kit`, `kernable-sdk add kit` for Python and Rust. Section by section, each decided before it was built. This catalogue is the contract the TypeScript, Python and Rust sets share: the shared fixture suite is generated from it.
+Status: decided, built in TypeScript, Python and Rust (merged 2026-11-06); where the build differs from the first catalogue, this file follows the build ("Found while building" at the end). The user documentation is `docs/kits/`, with tables generated from the TypeScript kit. The kits are the open set of tenancy, accounts, identities, groups, invitations and authorization that each SDK copies into a customer's project: `npx @kernable/sdk add kit`, `kernable-sdk add kit` for Python and Rust. Section by section, each decided before it was built. This catalogue is the contract the TypeScript, Python and Rust sets share: the shared fixture suite is generated from it.
 
 ## Conventions
 
@@ -143,7 +143,8 @@ Locked while `failures.count ≥ LOCKOUT_AFTER` and `now < lastAt + min(2^(count
 | `VerifyEmail` | `token` (secret) | the token is open and not expired | `EmailVerified` (pending → active; erases the token) | `public` (proof) |
 | `RequestVerification` | — | `pending` | `VerificationRequested` (erases the previous token) | `api` |
 | `SignIn` | `sessionId`, `password` (secret), `refreshToken` (secret), `ip`, `userAgent` | — | `SignedIn` {`sessionId`, `method`: `password`, `factors`, `refreshTokenHash`, `ip`, `userAgent`} or `SignInFailed` {`method`, `reason`: `wrong_password` · `locked` · `not_verified` · `not_active`, `ip`} | `public` (proof) |
-| `SignInWithPasskey` | `sessionId`, `challenge`, `assertion`, `refreshToken` (secret), `ip`, `userAgent` | the credential is the account's | `SignedIn` (`method`: `passkey`, `factors`: `passkey`, counter raised) or `SignInFailed` | `api` (it issued the challenge) |
+| `SignInWithPasskey` | `sessionId`, `challenge`, `assertion`, `refreshToken` (secret), `ip`, `userAgent` | the credential is the account's | `PasskeyUsed` {`credentialId`, `counter`}, `SignedIn` (`method`: `passkey`, `factors`: `passkey`) or `SignInFailed` | `api` (it issued the challenge) |
+| `ProvePasskey` | `sessionId`, `challenge`, `assertion` | the credential is the account's | `PasskeyUsed`, `SecondFactorProved` (`method`: `passkey`) or `SecondFactorFailed` | `api` (a passkey as the second factor of a password session) |
 | `SignInWithProvider` | `sessionId`, `provider`, `subject`, `email`, `emailVerified`, `refreshToken` (secret), `ip`, `userAgent` | linked, or the tenant's SSO with a verified domain (then linked first) | [`ProviderLinked`], `SignedIn` (`method`: the provider) or `SignInFailed` (`not_linked`) | `api` |
 | `ProveSecondFactor` | `sessionId`, `code` (secret) | TOTP confirmed | `SecondFactorProved` {`sessionId`, `method`: `totp` · `recovery`, `recoveryCodeHash`?} or `SecondFactorFailed` | `public` (proof) |
 | `ChangePassword` | `current`? (secret), `new` (secret) | `current` matches, if there is a password | `PasswordChanged` {`hash`} | own account |
@@ -151,7 +152,6 @@ Locked while `failures.count ≥ LOCKOUT_AFTER` and `now < lastAt + min(2^(count
 | `ResetPassword` | `token` (secret), `new` (secret) | the token is open | `PasswordReset` {`hash`} (erases the token) | `public` (proof) |
 | `RequestEmailChange` | `email` | the new email free | `EmailChangeRequested` {`tokenId`, `token`, `email`, `expiresAt`} | own account |
 | `ConfirmEmailChange` | `token` (secret) | the token is open | `EmailChanged` {`email`} (erases the token) | `public` (proof) |
-| `UpdateAccount` | `name` | `active` | `AccountUpdated` {`name`} | own account |
 | `StartTotp` | `secret` | no confirmed TOTP | `TotpStarted` {`secret`} | own account |
 | `ConfirmTotp` | `code` (secret), `recoveryCodes` (secret) | started | `TotpConfirmed`, `RecoveryCodesGenerated` {`hashes`} | own account |
 | `DisableTotp` | `code` (secret) | confirmed | `TotpDisabled` | own account |
@@ -160,7 +160,7 @@ Locked while `failures.count ≥ LOCKOUT_AFTER` and `now < lastAt + min(2^(count
 | `RemovePasskey` | `credentialId` | not the last sign-in method | `PasskeyRemoved` | own account |
 | `LinkProvider` | `provider`, `subject`, `email` | not linked to another account (unique key) | `ProviderLinked` | own account, through `api` |
 | `UnlinkProvider` | `provider`, `subject` | not the last sign-in method | `ProviderUnlinked` | own account |
-| `RecordMailSent` | `tokenId` | — | `MailSent` {`tokenId`} | the mail reactor |
+| `NoteRegistrationAttempt` | — | `active` or `suspended` | `RegistrationAttempted` {`email`, `at`} (the "you already have an account" mail) | `api` |
 | `SuspendAccount` | `reason` | `pending`, `active` | `AccountSuspended` {`reason`} | `platform`; own account with `owner_requested` |
 | `ReactivateAccount` | — | `suspended` | `AccountReactivated` | `platform` |
 | `DeleteAccount` | — | `suspended` | `AccountDeleted` (erases the account's subject) | `platform` |
@@ -208,7 +208,6 @@ Unique key `domain`: global, each verified domain, so one tenant per domain. Wit
 |---|---|---|
 | `FindAccountByEmail`, `FindAccountByLink` | `{ id, status }` | `api` |
 | `GetAccount` | profile, sign-in methods, MFA, links; target `data.accountId` | own account, `platform` |
-| `ListAccounts` | a page | `platform` |
 | `ListSessions` | the account's sessions (device, IP, last use); target `data.accountId` | own account, `platform` |
 | `FindSsoByDomain` | `{ tenantId, ssoId, issuer, clientId }` | `api` |
 | `GetSsoSecret` | the client secret | `api` |
@@ -218,14 +217,14 @@ Unique key `domain`: global, each verified domain, so one tenant per domain. Wit
 
 - `SignedIn` → `OpenSession`. `SecondFactorProved` → `AddSessionFactor`.
 - `AccountSuspended`, `AccountDeleted`, `PasswordChanged`, `PasswordReset` → `EndSession` for every open session of the account (for a password change, every session except the current one).
-- `VerificationRequested`, `PasswordResetRequested`, `EmailChangeRequested` → the mail reactor sends, then `RecordMailSent`; a failure is parked.
+- `VerificationRequested`, `PasswordResetRequested`, `EmailChangeRequested`, `RegistrationAttempted` → the mail reactor sends. No event records the mail; a failed send is retried and then parked.
 - `AccountDeleted` → `identity` erases the account's identities in every tenant.
 
 ### Decided
 
 All five as proposed (2026-11-06):
 
-1. **Registration does not reveal existing accounts.** `RegisterAccount` with a taken email is refused by the unique key; the API answers "check your email" either way and the existing account gets a "you already have an account" mail.
+1. **Registration does not reveal existing accounts.** `RegisterAccount` with a taken email is refused by the unique key; the API answers "check your email" either way and the existing account gets a "you already have an account" mail (`NoteRegistrationAttempt`).
 2. **A password change or reset ends the other sessions.**
 3. **Session lifetime**: 14 days idle, 90 days at most.
 4. **A passkey counts as two factors** (it verifies the user), so it satisfies a tenant's MFA requirement.
@@ -349,8 +348,8 @@ One aggregate, `invitation.invitation`, with a random ID, under its tenant's `te
 | `ResendInvitation` | — | `open` | `InvitationResent` {`tokenId`, `token`, `expiresAt`} (erases the old token) | group |
 | `RevokeInvitation` | — | `open` | `InvitationRevoked` (erases the token) | group; the invitation reactor (tenant deleted) |
 | `DeclineInvitation` | `token` (secret) | `open`, not expired | `InvitationDeclined` (erases the token) | `public` (proof) |
-| `AcceptInvitation` | `token` (secret), `accountId`, `email`, `newAccount` | `open`, not expired; `email` is the invited one, or of a domain the tenant's SSO verified | `InvitationAccepted` {`accountId`, `newAccount`} (erases the token) | `api` |
-| `RecordMailSent` | `tokenId` | — | `MailSent` | the mail reactor |
+| `AcceptInvitation` | `token` (secret), `accountId`, `email`, `newAccount` | `open`, not expired; `email` is the invited one (`wrong_email`) | `InvitationAccepted` {`accountId`, `newAccount`} (erases the token) | `api` |
+| `RecordInvitationMailSent` | `tokenId` | — | `InvitationMailSent` | the mail reactor |
 | `EraseInvitation` | — | not `open` | `InvitationErased` (erases `invitation:<id>`) | `platform`; the invitation reactor (tenant deleted) |
 
 The token is `<tenantId>.<invitationId>.<tokenId>.<secret>`, so the API knows the tenant to accept it in; it sits in the vault under `token:<tokenId>` until used.
@@ -448,3 +447,15 @@ The set's listeners take kernable's reserved orders: the authorization middlewar
 - **Oneself, for an identity, after the tenant's checks**: reading one's own identity in a suspended tenant, or with enforced SSO, is refused like anything else (found by the SSO test; the account and its sessions stay reachable).
 - **The API's key needs `cache` on `account`** (passkey challenges and OIDC state live a few minutes in the kernable cache).
 - **Every `events.ts` declares its events on its domain**, so an event without `apply` is known too.
+
+## Differences from the first catalogue (checked against the code 2026-11-09)
+
+Found while writing `docs/kits/`; the tables above now follow the code.
+
+- **No `UpdateAccount`** (and no `AccountUpdated`): an account has its name from registration; the name people see in a tenant is the identity's `displayName` (`UpdateProfile`).
+- **No `ListAccounts`**: not built; the platform finds accounts by email or link (`FindAccountByEmail`, `FindAccountByLink`) and lists identities per tenant.
+- **Account mail is not recorded as an event** (no `RecordMailSent`/`MailSent` in `account`); a failed send retries and parks like any reactor. Invitations record it as `InvitationMailSent` (`RecordInvitationMailSent`).
+- **`NoteRegistrationAttempt` / `RegistrationAttempted`**: how the existing account learns of a second registration (decision 1 of `account`).
+- **`ProvePasskey` and `PasskeyUsed`**: a passkey also proves the second factor of a password session; every use raises the stored counter.
+- **Accepting an invitation needs exactly the invited email**; an address in a domain the tenant's SSO verified does not count. A person whose email already has an account signs in first (`sign_in_first`, in `KitApi`).
+
