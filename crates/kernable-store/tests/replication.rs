@@ -87,6 +87,8 @@ fn kernel_ids() -> Vec<String> {
 
 fn cmd(id: &str, aggregate_id: &str) -> Command {
     Command {
+        deliver_at: 0,
+        deliver_until: 0,
         command_id: id.into(),
         tenant_id: "t1".into(),
         domain: "orders".into(),

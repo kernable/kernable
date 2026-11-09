@@ -10,6 +10,7 @@ import {
   challengeMessage,
   checkpointMessage,
   commandMessage,
+  cancelMessage,
   dataMessage,
   derivedId,
   queryMessage,
@@ -50,6 +51,9 @@ test("message layouts and signatures match the test vectors", () => {
   check("query", queryMessage({ ...q, payload: hex(q.payload_hex) }));
   const qw = v.query_wait_only.input;
   check("query_wait_only", queryMessage({ ...qw, payload: hex(qw.payload_hex) }));
+  const cs = v.command_scheduled.input;
+  check("command_scheduled", commandMessage(command(cs)));
+  check("cancel", cancelMessage(v.cancel.input));
   const qt = v.query_target.input;
   check("query_target", queryMessage({ ...qt, payload: hex(qt.payload_hex) }));
   const snap = v.snapshot.input;

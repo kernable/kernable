@@ -63,6 +63,8 @@ fn command() -> impl Strategy<Value = Command> {
                 refs,
             )| {
                 Command {
+                    deliver_at: 0,
+                    deliver_until: 0,
                     command_id: id,
                     tenant_id: tenant,
                     domain,

@@ -42,6 +42,7 @@ mod replication;
 pub use replication::{refuse_if_handed_over, switchover_keeper};
 pub mod standby;
 pub mod supervisor;
+mod timers;
 mod trend;
 mod ui;
 pub mod usage;
@@ -249,6 +250,8 @@ pub struct Kernel {
     waiters: Mutex<HashMap<String, Vec<oneshot::Sender<CommandResult>>>>,
     /// Wakes idle dispatch loops when new commands arrive.
     work: Notify,
+    /// Wakes the timer task when scheduled commands arrive ([`timers::run`]).
+    timers: Notify,
     /// Commits that failed in a row (a full disk): their commands wait longer each time.
     failed_commits: AtomicU32,
     /// Wakes subscriptions and listeners when events were committed.
@@ -385,7 +388,8 @@ impl Kernel {
         let maps = partitions::Maps::new(store.partition_map()?);
         let queue = queue::Queue::default();
         // Commands of a tenant moving here are copies a stopped copy left pending: the next
-        // copy completes them, no worker runs them (S4).
+        // copy completes them, no worker runs them (S4). Scheduled ones wait in the timer list
+        // all the same: they run here once the tenant is ([`timers::run`] asks the map when due).
         let arriving: Vec<String> = match (&config.partition, maps.get()) {
             (Some(p), Some(map)) => map
                 .moving
@@ -396,7 +400,9 @@ impl Kernel {
             _ => Vec::new(),
         };
         for pending in store.pending()? {
-            if !arriving.contains(&pending.command.tenant_id) {
+            if !arriving.contains(&pending.command.tenant_id)
+                || queue::scheduled(&pending.command, pending.received_at)
+            {
                 queue.push(pending.command, pending.received_at);
             }
         }
@@ -410,6 +416,7 @@ impl Kernel {
             changes: watch::channel(0).0,
             waiters: Mutex::default(),
             work: Notify::new(),
+            timers: Notify::new(),
             failed_commits: AtomicU32::new(0),
             appended: Notify::new(),
             backup: replication::Backup::default(),
@@ -1068,11 +1075,6 @@ impl Kernel {
         values: &[VaultValue],
         outcome: Option<middleware_call::Outcome>,
     ) -> Result<Option<Rejected>, Status> {
-        let chain = self.listeners.chain(name, when);
-        if chain.is_empty() {
-            return Ok(None);
-        }
-        let started = Instant::now();
         let call = MiddlewareCall {
             call_id: String::new(),
             request: Some(request),
@@ -1080,7 +1082,25 @@ impl Kernel {
             when: when.into(),
             outcome,
             r#type: name.to_owned(),
+            scheduled: None,
         };
+        self.check_call(name, id, call, values).await
+    }
+
+    /// Runs `call` (of the qualified type `name`) through the middleware chain of its `when`,
+    /// like [`Kernel::check`].
+    async fn check_call(
+        &self,
+        name: &str,
+        id: &str,
+        call: MiddlewareCall,
+        values: &[VaultValue],
+    ) -> Result<Option<Rejected>, Status> {
+        let chain = self.listeners.chain(name, call.when());
+        if chain.is_empty() {
+            return Ok(None);
+        }
+        let started = Instant::now();
         let outcome = self.run_chain(&chain, name, id, call, values).await;
         let counter = match &outcome {
             Ok(None) => &self.metrics.middleware_passed,
@@ -1444,6 +1464,7 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
         _ = sample_trend(&kernel) => unreachable!(),
         () = partitions::follow_control(&kernel) => unreachable!(),
         () = moves::follow_moves(&kernel) => unreachable!(),
+        () = timers::run(&kernel) => unreachable!(),
         result = serve_metrics(&kernel) => result,
         result = serve_ui(&kernel) => result,
     }
@@ -1676,6 +1697,7 @@ impl CommandService for Api {
                 "a command needs a domain name and a command type without dots",
             ));
         }
+        timers::check_times(&cmd, now_ms(), &kernel.config().limits)?;
         let name = config::qualified(&cmd.domain, &cmd.command_type);
         if !config::allowed(&permissions.submit, &sig.key_id, &name) {
             return Err(Status::permission_denied(format!(
@@ -1812,6 +1834,7 @@ impl CommandService for Api {
                     && kernel.queue.push(stored.command, stored.received_at)
                 {
                     kernel.work.notify_waiters();
+                    kernel.timers.notify_one();
                 }
                 None
             }
@@ -1819,12 +1842,15 @@ impl CommandService for Api {
                 crash::point("submit.enqueued");
                 kernel.queue.push(cmd.clone(), received_at);
                 kernel.work.notify_waiters();
+                kernel.timers.notify_one();
                 None
             }
         };
+        // A scheduled command is answered `accepted` at once: its result comes when it is due.
+        let later = cmd.deliver_at > received_at;
         let mut result = match done {
             Some(result) => result,
-            None if wait == Wait::Accepted => {
+            None if wait == Wait::Accepted || later => {
                 // Told it is accepted, the client may never send it again: on the disk first.
                 kernel.sync(0);
                 kernel.waiters().remove(&cmd.command_id);
@@ -1861,6 +1887,13 @@ impl CommandService for Api {
             }
         }
         Ok(Response::new(result))
+    }
+
+    async fn cancel(
+        &self,
+        request: Request<kernable_core::proto::CancelRequest>,
+    ) -> Result<Response<kernable_core::proto::CancelResult>, Status> {
+        timers::cancel(&self.0, request).await.map(Response::new)
     }
 }
 
@@ -2975,10 +3008,14 @@ impl Session {
             .or(snapshot.as_ref().map(|s| s.version))
             .unwrap_or(0);
         let client = command.client_sig.as_ref().map(|sig| sig.key_id.as_str());
+        // A scheduled command counts as sent when it is due: a key revoked before then does not
+        // run it.
+        let sent = received_at.max(command.deliver_at);
         if let Some(since) = client.and_then(|key| self.kernel.revoked_since(key))
-            && received_at >= since
+            && sent >= since
         {
-            // Accepted after its client's key was stolen, or before the kernel knew.
+            // Accepted after its client's key was stolen, or before the kernel knew; or due
+            // after it was revoked.
             let reason = Rejected {
                 code: "key_revoked".into(),
                 message: "the command was signed with a key revoked since then".into(),

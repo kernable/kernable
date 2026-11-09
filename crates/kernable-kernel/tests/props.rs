@@ -62,7 +62,7 @@ prop_compose! {
         bypass in any::<bool>(),
         sig in any::<u8>(),
     ) -> Command {
-        let mut cmd = Command {
+        let mut cmd = Command { deliver_at: 0, deliver_until: 0,
             vault_refs: Vec::new(),
             command_id: id, tenant_id: tenant, domain, aggregate_type, aggregate_id, command_type,
             payload, client_sig: None,

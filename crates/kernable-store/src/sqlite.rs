@@ -99,6 +99,8 @@ CREATE TABLE IF NOT EXISTS commands (
     client_sig       BLOB,
     context          TEXT,             -- RequestContext, as JSON
     vault_refs       TEXT    NOT NULL DEFAULT '', -- comma-separated
+    deliver_at       INTEGER NOT NULL DEFAULT 0, -- a scheduled command: due then (ms); 0: not
+    deliver_until    INTEGER NOT NULL DEFAULT 0, -- rejected `expired` if not run by then; 0: no limit
     status           TEXT    NOT NULL, -- pending | committed | rejected
     positions        TEXT    NOT NULL DEFAULT '', -- committed: its events' global positions, comma-separated
     rejected_code    TEXT,             -- rejected: why
@@ -209,7 +211,8 @@ const EVENT_COLUMNS: &str = "global_position, tenant_id, aggregate_type, aggrega
                              vault_refs, erases, origin_partition, origin_position";
 
 const COMMAND_COLUMNS: &str = "command_id, tenant_id, aggregate_type, aggregate_id, command_type, \
-                               payload, client_key_id, client_sig, context, domain, vault_refs";
+                               payload, client_key_id, client_sig, context, domain, vault_refs, \
+                               deliver_at, deliver_until";
 
 pub struct SqliteStore {
     conn: Mutex<Connection>,
@@ -529,7 +532,7 @@ impl Store for SqliteStore {
         let rows = stmt.query_map([], |r| {
             Ok(Pending {
                 command: command_from_row(r)?,
-                received_at: r.get(11)?,
+                received_at: r.get(13)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -721,12 +724,12 @@ impl Store for SqliteStore {
         let rows = stmt.query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |r| {
             let pending = Pending {
                 command: command_from_row(r)?,
-                received_at: r.get(11)?,
+                received_at: r.get(13)?,
             };
-            let code: Option<String> = r.get(12)?;
-            let message: Option<String> = r.get(13)?;
-            let key: Option<String> = r.get(14)?;
-            let requirement: Option<Vec<u8>> = r.get(15)?;
+            let code: Option<String> = r.get(14)?;
+            let message: Option<String> = r.get(15)?;
+            let key: Option<String> = r.get(16)?;
+            let requirement: Option<Vec<u8>> = r.get(17)?;
             Ok((pending, code, message, key, requirement))
         })?;
         let mut out = Vec::new();
@@ -758,7 +761,7 @@ impl Store for SqliteStore {
                 |r| {
                     Ok(Pending {
                         command: command_from_row(r)?,
-                        received_at: r.get(11)?,
+                        received_at: r.get(13)?,
                     })
                 },
             )
@@ -1542,7 +1545,7 @@ fn verify_tables(conn: &Connection, kernel_key_ids: &[String]) -> Result<Report>
     ))?;
     let mut rows = stmt.query([])?;
     while let Some(r) = rows.next()? {
-        v.command(&command_from_row(r)?, r.get(11)?);
+        v.command(&command_from_row(r)?, r.get(13)?);
     }
     Ok(v.finish())
 }
@@ -1604,6 +1607,8 @@ fn command_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Command> {
         context: context_from(r.get(8)?)?,
         domain: r.get(9)?,
         vault_refs: split_list(r.get(10)?),
+        deliver_at: r.get(11)?,
+        deliver_until: r.get(12)?,
     })
 }
 
@@ -1841,8 +1846,8 @@ fn enqueue_tx(tx: &Connection, cmd: &Command, now_ms: i64) -> Result<bool> {
     let inserted = tx.execute(
         "INSERT INTO commands (command_id, tenant_id, aggregate_type, aggregate_id, command_type,
                                payload, client_key_id, client_sig, context, domain, status,
-                               created_at, vault_refs)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'pending', ?11, ?12)
+                               created_at, vault_refs, deliver_at, deliver_until)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'pending', ?11, ?12, ?13, ?14)
          ON CONFLICT (command_id) DO NOTHING",
         params![
             cmd.command_id,
@@ -1856,7 +1861,9 @@ fn enqueue_tx(tx: &Connection, cmd: &Command, now_ms: i64) -> Result<bool> {
             cmd.context.as_ref().map(context_json),
             cmd.domain,
             now_ms,
-            cmd.vault_refs.join(",")
+            cmd.vault_refs.join(","),
+            cmd.deliver_at,
+            cmd.deliver_until
         ],
     )?;
     Ok(inserted == 1)
@@ -2746,7 +2753,7 @@ fn records_of(
         while let Some(r) = rows.next()? {
             f(Record::Enqueued(EnqueuedRecord {
                 command: Some(command_from_row(r)?),
-                created_at: r.get(11)?,
+                created_at: r.get(13)?,
             }))?;
         }
     }

@@ -252,6 +252,12 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "Bytes of commands in the queue at once (the queue lives in the kernel's memory). A new command beyond it is refused with `RESOURCE_EXHAUSTED`.",
     ),
     (
+        "--schedule-max-days",
+        "KERNABLE_SCHEDULE_MAX_DAYS",
+        "366",
+        "How far ahead, in days, a scheduled command (`Command.deliver_at`) may be due. One due later is refused with `INVALID_ARGUMENT`. Scheduled commands wait in the kernel's memory until due and count towards `--max-queued-commands`, `--max-queued-per-aggregate` and `--max-queued-bytes`.",
+    ),
+    (
         "--max-requests-per-key",
         "KERNABLE_MAX_REQUESTS_PER_KEY",
         "1000",
@@ -416,6 +422,8 @@ pub struct Limits {
     pub quota_exempt: Vec<String>,
     /// `--max-requests-per-second-per-key`; 0: no limit.
     pub requests_per_second_per_key: u64,
+    /// `--schedule-max-days`: how far ahead a scheduled command may be due.
+    pub schedule_max_days: u64,
 }
 
 /// The defaults of the `--max-*` flags and `--handshake-timeout-ms`.
@@ -437,6 +445,7 @@ impl Default for Limits {
             store_bytes: 0,
             quota_exempt: Vec::new(),
             requests_per_second_per_key: 0,
+            schedule_max_days: 366,
         }
     }
 }
@@ -659,6 +668,7 @@ impl Config {
                     list
                 },
                 requests_per_second_per_key: number("--max-requests-per-second-per-key")?,
+                schedule_max_days: positive("--schedule-max-days")?,
             },
             replication,
             key_command: get("--key-command")

@@ -65,6 +65,7 @@ const SIDEBAR = [
       { text: "Rebuild a read model", link: "/how-to/rebuild-read-model" },
       { text: "Remove a listener or aggregate", link: "/how-to/remove-listener" },
       { text: "Test your domain", link: "/how-to/test-domain" },
+      { text: "Schedule a command", link: "/how-to/schedule" },
       { text: "Handle an erasure request", link: "/how-to/erasure" },
       { text: "Passwords and other secrets", link: "/how-to/secrets" },
       { text: "Store files and cache values", link: "/how-to/data-and-cache" },

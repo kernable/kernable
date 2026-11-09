@@ -456,6 +456,8 @@ async fn main() -> ExitCode {
             payload,
         ] => {
             let cmd = Command {
+                deliver_at: 0,
+                deliver_until: 0,
                 command_id: random_id(),
                 tenant_id: tenant.to_string(),
                 domain: domain.to_string(),

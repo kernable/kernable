@@ -102,6 +102,9 @@ pub enum Error {
     /// committed events are attached. Submitting again with the same ID returns the same
     /// outcome.
     NotSettled(Vec<StoredEvent>),
+    /// The command with this ID is scheduled ([`crate::Submit::at`]) and not due yet: it has no
+    /// outcome to wait for. Submit it again by its ID after its time.
+    NotDue(String),
     /// The kernel refused the call or could not be reached: the gRPC status, e.g.
     /// `PERMISSION_DENIED` without a grant (see Errors in the reference).
     Status(tonic::Status),
@@ -120,6 +123,10 @@ impl fmt::Display for Error {
             Error::Rejected(r) => write!(f, "{} ({})", r.message, r.code),
             Error::NotSettled(_) => f.write_str(
                 "command committed, but not all listeners have processed its events yet",
+            ),
+            Error::NotDue(id) => write!(
+                f,
+                "command {id} is scheduled and not due yet: ask again after its time"
             ),
             Error::Status(s) => write!(f, "{}: {}", s.code(), s.message()),
             Error::Config(m) => f.write_str(m),

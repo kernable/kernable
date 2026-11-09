@@ -21,6 +21,8 @@ fn cmd(id: &str, command_type: &str) -> Command {
         payload: b"{}".to_vec(),
         client_sig: None,
         context: None,
+        deliver_at: 0,
+        deliver_until: 0,
     }
 }
 
@@ -130,6 +132,37 @@ fn pending_lists_open_commands_in_submission_order(store: &dyn Store) {
         .map(|p| (p.command.command_id, p.received_at))
         .collect();
     assert_eq!(pending, [("c1".into(), 0), ("c3".into(), 2)]);
+}
+
+/// A scheduled command keeps its delivery time and limit wherever the store hands it out.
+fn delivery_times_come_back_as_stored(store: &dyn Store) {
+    let scheduled = Command {
+        deliver_at: 1_000,
+        deliver_until: 2_000,
+        ..cmd("c1", "AddItem")
+    };
+    store.enqueue(&scheduled, 5).unwrap();
+    store.enqueue(&cmd("c2", "AddItem"), 6).unwrap();
+    let pending = store.pending().unwrap();
+    assert_eq!(pending[0].command, scheduled);
+    assert_eq!(
+        (
+            pending[1].command.deliver_at,
+            pending[1].command.deliver_until
+        ),
+        (0, 0)
+    );
+    assert_eq!(store.command("c1").unwrap().unwrap().command, scheduled);
+    let mut imaged = Vec::new();
+    let read = store.snapshot(&mut |record| {
+        if let kernable_core::proto::log_record::Record::Enqueued(e) = record {
+            imaged.extend(e.command);
+        }
+        Ok(())
+    });
+    if read.is_ok() {
+        assert_eq!(imaged[0], scheduled);
+    }
 }
 
 fn enqueue_is_idempotent(store: &dyn Store) {
@@ -956,6 +989,7 @@ for_each_backend!(
     stale_version_conflicts_and_command_stays_pending,
     a_command_completes_at_most_once,
     pending_lists_open_commands_in_submission_order,
+    delivery_times_come_back_as_stored,
     enqueue_is_idempotent,
     reject_completes_command_without_events,
     rejections_list_the_newest_first_with_why,

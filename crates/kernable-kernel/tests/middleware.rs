@@ -107,6 +107,7 @@ fn seen(name: &str, call: &MiddlewareCall) -> String {
         Some(Request::Query(q)) => &q.query_id,
         Some(Request::Data(d)) => &d.key,
         Some(Request::Cache(c)) => &c.key,
+        Some(Request::Cancel(c)) => &c.command_id,
         None => "",
     };
     format!("{name} after {id} {outcome}")

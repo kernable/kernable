@@ -56,6 +56,8 @@ fn kernel() -> SigningKey {
 fn run(store: &dyn Store, id: &str, agg: &str) {
     let client = SigningKey::from_bytes(&[1; 32]);
     let mut cmd = Command {
+        deliver_at: 0,
+        deliver_until: 0,
         vault_refs: Vec::new(),
         command_id: id.into(),
         tenant_id: "t1".into(),

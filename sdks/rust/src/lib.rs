@@ -43,15 +43,15 @@ use std::{
     future::Future,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     PROTOCOL,
     proto::{
-        self, ApplyRequest, Attribute, Membership, SubmitRequest, Wait as WireWait, command_result,
-        command_service_client::CommandServiceClient,
+        self, ApplyRequest, Attribute, CancelRequest, Membership, SubmitRequest, Wait as WireWait,
+        cancel_result, command_result, command_service_client::CommandServiceClient,
         membership_service_client::MembershipServiceClient,
         partition_service_client::PartitionServiceClient, query_result,
         query_service_client::QueryServiceClient,
@@ -808,7 +808,17 @@ impl Kernable {
     /// command is committed), [`Error::Status`] if the kernel refuses the call (no grant,
     /// unknown aggregate type, timeout). Example: `kernable.submit(Submit::new("shop", "cart",
     /// "c1", "AddItem").data(json!({ "sku": "apple", "qty": 2 }))).await?`.
+    ///
+    /// A scheduled command ([`Submit::at`]) has no outcome yet: enqueue it
+    /// ([`Kernable::enqueue`]); submitting it is [`Error::Config`]. Submitted again by its ID
+    /// without `at`, it waits for the scheduled command's outcome; [`Error::NotDue`] if the
+    /// kernel answers that it is not due yet.
     pub async fn submit(&self, submit: Submit) -> Result<Outcome, Error> {
+        if submit.at.is_some() {
+            return Err(Error::Config(
+                "a scheduled command (`at`) has no outcome yet: use `enqueue`".into(),
+            ));
+        }
         let wait = submit.wait;
         let res = self.send(submit, wait.wire()).await?;
         match res.outcome {
@@ -827,15 +837,65 @@ impl Kernable {
                 }
                 Ok(Outcome::Committed(events))
             }
-            _ => Err(Error::Status(tonic::Status::internal("no outcome"))),
+            Some(command_result::Outcome::Accepted(_)) => Err(Error::NotDue(res.command_id)),
+            None => Err(Error::Status(tonic::Status::internal("no outcome"))),
         }
     }
 
     /// Stores the command in the kernel's queue and returns its ID without waiting for it to
     /// run. Submit it again with the same `id` ([`Submit::id`]) to get the outcome; its `wait`
-    /// is ignored.
+    /// is ignored. With [`Submit::at`], a scheduled command: it runs at that time, e.g. a
+    /// reminder in 24 hours, `kernable.enqueue(Submit::command(Remind {}, "o1")
+    /// .at(SystemTime::now() + Duration::from_secs(86_400))).await?`; cancel it with
+    /// [`Kernable::cancel`].
     pub async fn enqueue(&self, submit: Submit) -> Result<String, Error> {
         Ok(self.send(submit, WireWait::Accepted).await?.command_id)
+    }
+
+    /// Cancels a scheduled command ([`Submit::at`]) before it is due: it completes as rejected
+    /// `cancelled`, which a submit of its ID answers from then on. Needs the `submit` grant for
+    /// the command's type; middlewares check it as a cancel of that type ([`CheckKind::Cancel`]).
+    /// Returns [`CancelOutcome::Cancelled`] (also when it was cancelled before), or
+    /// [`CancelOutcome::Rejected`] with `too_late` (due, running or done already), `not_found`,
+    /// or a middleware's code. Example: `kernable.cancel(Cancel::new(&id)).await?`.
+    pub async fn cancel(&self, cancel: Cancel) -> Result<CancelOutcome, Error> {
+        let mut request = CancelRequest {
+            command_id: cancel.command_id,
+            tenant_id: cancel.tenant.unwrap_or_else(|| self.tenant.clone()),
+            context: Some(
+                cancel
+                    .context
+                    .unwrap_or_else(|| self.context.clone())
+                    .to_wire(),
+            ),
+            issued_at: issued_now(),
+            client_sig: None,
+            protocol: PROTOCOL,
+        };
+        request.client_sig = Some(self.client.sign(&signing::cancel_message(&request)));
+        let tenant = request.tenant_id.clone();
+        let timeout = cancel.timeout;
+        let res = self
+            .client
+            .routed(&tenant, |client| {
+                let request = request.clone();
+                async move {
+                    // Cancelling twice answers the same: safe to send again.
+                    client
+                        .call_with(timeout, request, true, |channel, r| async move {
+                            CommandServiceClient::new(channel).cancel(r).await
+                        })
+                        .await
+                }
+            })
+            .await?;
+        match res.outcome {
+            Some(cancel_result::Outcome::Cancelled(_)) => Ok(CancelOutcome::Cancelled),
+            Some(cancel_result::Outcome::Rejected(r)) => {
+                Ok(CancelOutcome::Rejected(Rejected::from_wire(r)))
+            }
+            None => Err(Error::Status(tonic::Status::internal("no outcome"))),
+        }
     }
 
     async fn send(&self, s: Submit, wait: WireWait) -> Result<proto::CommandResult, Error> {
@@ -864,6 +924,8 @@ impl Kernable {
             client_sig: None,
             context: Some(context.to_wire()),
             vault_refs: sealed.refs,
+            deliver_at: s.at.unwrap_or(0),
+            deliver_until: s.until.unwrap_or(0),
         };
         cmd.client_sig = Some(self.client.sign(&signing::command_message(&cmd)));
         let request = SubmitRequest {
@@ -1127,6 +1189,9 @@ pub struct Submit {
     timeout: Option<Duration>,
     /// A message type's vault fields, from its declaration.
     vault: Option<vault::VaultFields>,
+    /// A scheduled command's delivery time and expiry, ms since epoch.
+    at: Option<i64>,
+    until: Option<i64>,
 }
 
 impl Submit {
@@ -1150,6 +1215,8 @@ impl Submit {
             wait: Wait::Settled,
             timeout: None,
             vault: None,
+            at: None,
+            until: None,
         }
     }
 
@@ -1197,6 +1264,22 @@ impl Submit {
         self
     }
 
+    /// [`Kernable::enqueue`] only: a scheduled command, run at `time` and not before. The kernel
+    /// stores it at once; the aggregate's other commands pass meanwhile, and middlewares check
+    /// it now and again when it is due. At most the kernel's `--schedule-max-days` (default 366)
+    /// ahead. Cancel it with [`Kernable::cancel`].
+    pub fn at(mut self, time: SystemTime) -> Submit {
+        self.at = Some(millis(time));
+        self
+    }
+
+    /// With [`Submit::at`]: if the command cannot run by `time` (after an outage, say), it is
+    /// rejected `expired` instead of running late.
+    pub fn until(mut self, time: SystemTime) -> Submit {
+        self.until = Some(millis(time));
+        self
+    }
+
     /// How long [`Kernable::submit`] waits: [`Wait::Settled`] (default) or [`Wait::Committed`].
     pub fn wait(mut self, wait: Wait) -> Submit {
         self.wait = wait;
@@ -1207,6 +1290,69 @@ impl Submit {
     pub fn timeout(mut self, timeout: Duration) -> Submit {
         self.timeout = Some(timeout);
         self
+    }
+}
+
+/// Milliseconds since the epoch; 0 before it.
+fn millis(time: SystemTime) -> i64 {
+    time.duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+}
+
+/// A cancel of a scheduled command for [`Kernable::cancel`], built with methods that each
+/// return the changed cancel: `Cancel::new(&id).tenant("t1")`.
+#[derive(Clone, Debug)]
+pub struct Cancel {
+    command_id: String,
+    tenant: Option<String>,
+    context: Option<RequestContext>,
+    timeout: Option<Duration>,
+}
+
+impl Cancel {
+    /// A cancel of the scheduled command `command_id` (the ID [`Kernable::enqueue`] returned).
+    pub fn new(command_id: &str) -> Cancel {
+        Cancel {
+            command_id: command_id.to_owned(),
+            tenant: None,
+            context: None,
+            timeout: None,
+        }
+    }
+
+    /// The command's tenant. Default: the connection's ([`Options::tenant`]).
+    pub fn tenant(mut self, tenant: impl Into<String>) -> Cancel {
+        self.tenant = Some(tenant.into());
+        self
+    }
+
+    /// Replaces the client's default context: who cancels, for the middlewares.
+    pub fn context(mut self, context: RequestContext) -> Cancel {
+        self.context = Some(context);
+        self
+    }
+
+    /// How long to wait for the connection and the answer; default [`Options::timeout`].
+    pub fn timeout(mut self, timeout: Duration) -> Cancel {
+        self.timeout = Some(timeout);
+        self
+    }
+}
+
+/// What became of a cancel, returned by [`Kernable::cancel`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum CancelOutcome {
+    /// The scheduled command will not run: it completed as rejected `cancelled`.
+    Cancelled,
+    /// Not cancelled: `too_late` (due, running or done already), `not_found`, or a
+    /// middleware's rejection.
+    Rejected(Rejected),
+}
+
+impl CancelOutcome {
+    /// Whether the command was cancelled.
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, CancelOutcome::Cancelled)
     }
 }
 

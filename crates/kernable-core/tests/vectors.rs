@@ -63,6 +63,14 @@ fn vectors() -> Value {
         payload: br#"{"customerId":"k-1"}"#.to_vec(),
         client_sig: None,
         context: Some(context.clone()),
+        deliver_at: 0,
+        deliver_until: 0,
+    };
+    // The same command scheduled: delivered at a time, rejected if not run by another.
+    let scheduled_cmd = Command {
+        deliver_at: 1_700_000_060_000,
+        deliver_until: 1_700_000_120_000,
+        ..cmd.clone()
     };
     let events = [
         NewEvent {
@@ -194,6 +202,9 @@ fn vectors() -> Value {
         "command_type": cmd.command_type, "payload_hex": hex::encode(&cmd.payload),
         "context": context_json,
     });
+    let mut scheduled_json = cmd_json.clone();
+    scheduled_json["deliver_at"] = json!(scheduled_cmd.deliver_at);
+    scheduled_json["deliver_until"] = json!(scheduled_cmd.deliver_until);
     let events_json: Vec<Value> = events
         .iter()
         .map(|e| json!({"event_type": e.event_type, "schema": e.schema, "payload_hex": hex::encode(&e.payload)}))
@@ -279,6 +290,18 @@ fn vectors() -> Value {
                 min_position: 7,
                 issued_at: 1_700_000_000_000,
                 client_sig: None,
+            }),
+        ),
+        "cancel": entry(
+            json!({"command_id": cmd.command_id, "tenant_id": cmd.tenant_id, "context": context_json,
+                   "issued_at": 1_700_000_000_000i64}),
+            signing::cancel_message(&kernable_core::proto::CancelRequest {
+                command_id: cmd.command_id.clone(),
+                tenant_id: cmd.tenant_id.clone(),
+                context: Some(context.clone()),
+                issued_at: 1_700_000_000_000,
+                client_sig: None,
+                protocol: kernable_core::PROTOCOL,
             }),
         ),
         "subscribe": entry(
@@ -368,6 +391,7 @@ fn vectors() -> Value {
             ],
             "refs": [vault_ref, secret_ref],
         },
+        "command_scheduled": entry(scheduled_json, signing::command_message(&scheduled_cmd)),
         "command_vault": entry(
             json!({"command": cmd_json, "vault_refs": vault_cmd.vault_refs}),
             signing::command_message(&vault_cmd),

@@ -72,6 +72,8 @@ impl Fixture {
 
     fn run(&self, id: &str, aggregate_id: &str, events: &[NewEvent]) {
         let mut cmd = Command {
+            deliver_at: 0,
+            deliver_until: 0,
             vault_refs: Vec::new(),
             command_id: id.into(),
             tenant_id: "t1".into(),
@@ -249,6 +251,8 @@ fn forged_checkpoint_is_detected() {
 fn unsigned_command_is_reported() {
     let f = Fixture::new("unsigned");
     let cmd = Command {
+        deliver_at: 0,
+        deliver_until: 0,
         vault_refs: Vec::new(),
         command_id: "c5".into(),
         tenant_id: "t1".into(),

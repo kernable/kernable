@@ -418,6 +418,8 @@ fn fill_command(client: &SigningKey, i: u64, payload: &[u8]) -> Command {
     signed(
         client,
         Command {
+            deliver_at: 0,
+            deliver_until: 0,
             vault_refs: Vec::new(),
             command_id: format!("fill-{i}"),
             tenant_id: "bench".into(),
@@ -929,6 +931,8 @@ fn tenant() -> String {
 
 fn command(run: &str, i: usize, aggregates: usize, payload: &[u8]) -> Command {
     Command {
+        deliver_at: 0,
+        deliver_until: 0,
         vault_refs: Vec::new(),
         command_id: format!("{run}-{i}"),
         tenant_id: tenant(),

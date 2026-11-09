@@ -738,6 +738,8 @@ pub async fn spawn_worker(env: &Env) {
 
 pub fn command(id: &str, command_type: &str, aggregate_id: &str) -> Command {
     Command {
+        deliver_at: 0,
+        deliver_until: 0,
         vault_refs: Vec::new(),
         command_id: id.into(),
         tenant_id: "t1".into(),

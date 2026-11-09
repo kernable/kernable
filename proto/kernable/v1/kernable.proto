@@ -55,6 +55,14 @@ message Command {
   RequestContext context = 9; // signed with the command, stored with its events
   // References to the values the payload keeps in the vault (see VaultValue), in payload order.
   repeated string vault_refs = 10;
+  // Signed, and only when set: a scheduled command, delivered at this time (ms since epoch) and
+  // not before. Submit answers `accepted` at once; until then the command waits beside its
+  // aggregate's queue, so the aggregate's other commands pass. Middlewares check it when it is
+  // submitted and again when it is due. At most the kernel's `--schedule-max-days` ahead.
+  int64 deliver_at = 11;
+  // Signed, and only when set: a scheduled command that cannot run by this time (ms since epoch),
+  // after an outage say, is rejected `expired` instead of running late.
+  int64 deliver_until = 12;
 }
 
 // Who sends a request and in which context. Signed by the client together with the request,
@@ -366,7 +374,32 @@ service CommandService {
   // UNAVAILABLE (a middleware is not connected, or the kernel shuts down), DEADLINE_EXCEEDED
   // (a middleware did not answer in time).
   rpc Submit(SubmitRequest) returns (CommandResult);
+  // Cancels a scheduled command (`Command.deliver_at`) before it is due: the command completes
+  // as rejected `cancelled`, so its ID answers that from then on. Needs `submit` for the
+  // command's type; middlewares check it as a cancel of that type (MiddlewareCall.cancel), and
+  // may reject it. A command that is due already, running or completed answers `too_late`; an
+  // unknown ID `not_found`.
+  rpc Cancel(CancelRequest) returns (CancelResult);
 }
+
+message CancelRequest {
+  string command_id = 1;
+  string tenant_id = 2;
+  RequestContext context = 3;
+  int64 issued_at = 4; // ms since epoch; must be within 60 s of the kernel's clock
+  Signature client_sig = 5; // over kernable.v1.cancel
+  uint32 protocol = 6; // not signed
+}
+
+message CancelResult {
+  string command_id = 1;
+  oneof outcome {
+    Cancelled cancelled = 2;
+    Rejected rejected = 3; // too_late, not_found, or by a middleware
+  }
+}
+
+message Cancelled {}
 
 message SubmitRequest {
   Command command = 1;
@@ -678,6 +711,8 @@ message MiddlewareCall {
     // A file or cache request, before it runs; without the file or value itself.
     DataRequest data = 4;
     CacheRequest cache = 5;
+    // A cancel of a scheduled command, as the client sent it; `scheduled` is that command.
+    CancelRequest cancel = 11;
   }
   // Before a command only: its vault values, if the key may read them (granted vault_read).
   repeated VaultValue vault = 6;
@@ -690,8 +725,10 @@ message MiddlewareCall {
   }
   // The qualified type being checked: `shop.AddItem`, `shop.GetCart`, or for files and the
   // cache `shop.PutData`, `shop.GetData`, `shop.DeleteData`, `shop.SetCache`, `shop.GetCache`,
-  // `shop.DeleteCache`.
+  // `shop.DeleteCache`; for a cancel the scheduled command's type.
   string type = 10;
+  // A cancel only: the scheduled command it cancels, as stored.
+  Command scheduled = 12;
 }
 
 message Verdict {

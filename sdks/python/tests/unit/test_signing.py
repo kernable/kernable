@@ -7,7 +7,7 @@ import json
 import os
 import unittest
 
-from kernable.signing import (Key, cache_message, challenge_message, command_message, data_message, derived_id,
+from kernable.signing import (Key, cache_message, cancel_message, challenge_message, command_message, data_message, derived_id,
                               membership_message, query_message, rejection_message, result_message, snapshot_message, vault_ref)
 from kernable.v1 import kernable_pb2 as pb
 from tests.kernel import ROOT
@@ -39,6 +39,13 @@ class SigningVectors(unittest.TestCase):
 
     def test_messages_and_signatures_match(self):
         self.check("command", command_message(vector_command(VECTORS["command"]["input"])))
+        s = VECTORS["command_scheduled"]["input"]
+        scheduled = vector_command(s)
+        scheduled.deliver_at, scheduled.deliver_until = s["deliver_at"], s["deliver_until"]
+        self.check("command_scheduled", command_message(scheduled))
+        c = dict(VECTORS["cancel"]["input"])
+        context = vector_context(c.pop("context"))
+        self.check("cancel", cancel_message(pb.CancelRequest(**c, context=context)))
         r = VECTORS["result"]["input"]
         events = [pb.NewEvent(event_type=e["event_type"], schema=e["schema"], payload=bytes.fromhex(e["payload_hex"])) for e in r["events"]]
         self.check("result", result_message(vector_command(r["command"]), r["expected_version"], events))

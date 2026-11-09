@@ -330,6 +330,61 @@ async fn a_standby_of_a_primary_that_ran_alone_takes_an_image_and_follows() {
     assert_eq!(p.results, s.results);
 }
 
+/// A scheduled command is a pending command like any other: on the standby before the client
+/// is told it is accepted, and run by the promoted standby when it is due.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scheduled_command_reaches_the_standby_and_runs_after_a_promotion() {
+    let dir = Dir::new("scheduled");
+    let mut primary_config = config(&dir.0, "primary", 3);
+    primary_config.replication.sync = true;
+    let primary = open(&primary_config).await;
+    let standby_config = standby_config(&dir.0, &primary_config);
+    let following = tokio::spawn(standby::run(standby_config.clone()));
+    until("the standby is in sync", || in_sync(&standby_config)).await;
+    for seed in [1, 2, 4, 5, 6] {
+        primary.grant(default_grant(&key(seed)).unwrap()).unwrap();
+    }
+    let worker = start_worker(primary_config.listen.clone(), TestWorker::honest()).await;
+    let placed = submit(&primary_config.listen, place(1)).await.unwrap();
+    assert_eq!(committed_versions(&placed), [1]);
+    let due = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+        + 1_500;
+    let mut later = command("s1", "AddItem", "o1");
+    later.deliver_at = due;
+    let accepted = submit(&primary_config.listen, signed(later, &key(1)))
+        .await
+        .unwrap();
+    assert!(
+        matches!(accepted.outcome, Some(Outcome::Accepted(_))),
+        "{accepted:?}"
+    );
+    // Nothing runs on the old primary any more.
+    worker.abort();
+    let pending = held(&standby_config).pending().unwrap();
+    assert!(
+        pending
+            .iter()
+            .any(|p| p.command.command_id == "s1" && p.command.deliver_at == due),
+        "{pending:?}"
+    );
+
+    promote(&standby_config.listen).await.unwrap();
+    following.await.unwrap().unwrap();
+    let _new = open(&standby_config).await;
+    start_worker(standby_config.listen.clone(), TestWorker::honest()).await;
+    until("the promoted standby ran it", || {
+        held(&standby_config).result("s1").unwrap().is_some()
+    })
+    .await;
+    let ran = held(&standby_config).result("s1").unwrap().unwrap();
+    assert_eq!(committed_versions(&ran), [2]);
+    let at = events(&ran)[0].created_at;
+    assert!(at >= due, "run at {at}, due at {due}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_standby_without_a_grant_for_replicate_is_refused() {
     let dir = Dir::new("refused");

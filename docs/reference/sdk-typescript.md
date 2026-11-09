@@ -198,7 +198,7 @@ kernel accepts or routes it, or after; or a file or cache request (`Kernable.dat
 `Kernable.cache`), before it runs. Vault fields of a command's data are filled in only for a
 middleware before the request whose key is granted `vault_read`; else they are `null`.
 
-- `kind: "command" | "query" | "data" | "cache"`: What is checked: a command, a query, a file request (`data`) or a cache request (`cache`); the fields below depend on it.
+- `kind: "command" | "query" | "data" | "cache" | "cancel"`: What is checked: a command, a query, a file request (`data`) or a cache request (`cache`); the fields below depend on it.
 - `id: string`: The command or query ID; empty for a file or cache request.
 - `tenant: string`
 - `domain: string`
@@ -650,6 +650,8 @@ await kernable.submit({ domain: "shop", aggregateType: "cart", aggregateId: "c1"
 - `context?: RequestContext`: Replaces the client's default context (`Options.context`); inside a listener, pass `ctx.follow()`. Its `correlationId` defaults to the command ID.
 - `wait?: "settled" | "committed"`: When `submit` returns. `"settled"` (default): once every listener that counts has processed the events, so the next query sees them; throws `NotSettled` after `--settle-timeout-ms`. From a listener's handler, only the listeners with a lower order count. `"committed"`: once the events are stored; read with `QueryOptions.minPosition` to see them. To return once the command is only queued, use `Kernable.enqueue`. See [Settling](../concepts/ordering#settling-reading-your-own-writes).
 - `timeoutMs?: number`: How long to wait for the connection and the outcome; default `Options.timeoutMs`.
+- `at?: Date | number`: `enqueue` only: a scheduled command, run at this time and not before (a `Date` or ms since epoch). The kernel stores it at once; the aggregate's other commands pass meanwhile, and middlewares check it now and again when it is due. Cancel it with `Kernable.cancel`.
+- `until?: Date | number`: `enqueue` only, with `at`: if it cannot run by this time (after an outage), it is rejected `expired`.
 
 ### ReindexOptions
 
@@ -692,7 +694,7 @@ differently: `submit` returns them in its `Outcome`, `query` throws `Rejected`.
 - `async submit(options: SubmitOptions): Promise<Outcome>`: Runs a command and returns its outcome: `{ committed: true, events }`, or `{ committed: false, code, message }` if it was rejected (a rejection does not throw). By default it returns once the command settled, so a query right after it sees the events; see `SubmitOptions.wait`. Throws `NotSettled` if the command committed but did not settle in time. Idempotent on `options.id`.
 - `async submit(command: Command, target: CommandTarget): Promise<Outcome>`: The same with a command class instance: `submit(new AddItem({ sku, qty }), { aggregateId })`. Its class says the domain, aggregate type, type and vault fields (no `use` needed).
 - `async submit(command: SubmitOptions | Command, target?: CommandTarget): Promise<Outcome>`
-- `async enqueue(options: Omit<SubmitOptions, "wait">): Promise<string>`: Stores the command in the kernel's queue and returns its ID without waiting for it to run (fire and forget). Submit it again with the same `id` to get the outcome.
+- `async enqueue(options: Omit<SubmitOptions, "wait">): Promise<string>`: Stores the command in the kernel's queue and returns its ID without waiting for it to run (fire and forget). Submit it again with the same `id` to get the outcome. With `at`, a scheduled command: it runs at that time, e.g. a reminder in 24 hours, `enqueue(Remind.new(), { aggregateId, at: new Date(Date.now() + 86_400_000) })`.
 - `async enqueue(command: Command, target: Omit<CommandTarget, "wait">): Promise<string>`
 - `async enqueue(command: Omit<SubmitOptions, "wait"> | Command, target?: Omit<CommandTarget, "wait">): Promise<string>`
 - `followUpOf(command: Command, target: CommandTarget & { id: string }): FollowUp`: A follow-up command (`ListenerContext.submit`) from a command class instance and its target.
@@ -701,6 +703,7 @@ differently: `submit` returns them in its `Outcome`, `query` throws `Rejected`.
 - `async query<Q extends Query<any>>(query: Q, options?: Omit<QueryOptions, "domain" | "type" | "data">): Promise<AnswerOf<Q>>`: The same with a query class instance, typed by its answer: `query(new GetCart({ id }), { tenant })`.
 - `async query(query: QueryOptions | Query<any>, more?: Omit<QueryOptions, "domain" | "type" | "data">): Promise<unknown>`
 - `listener(listener: Listener): ListenerHandle`: Runs a listener defined with `Domain.readModel` or `Domain.reactor` over this connection: `await kernable.listener(carts).run()`. Handlers added to the definition later still count until `run()` connects.
+- `async cancel(commandId: string, options: { tenant?: string; context?: RequestContext; timeoutMs?: number } = {}): Promise<{ cancelled: true } | { cancelled: false; code: string; message: string }>`: Cancels a scheduled command (`enqueue` with `at`) before it is due: it completes as rejected `cancelled`. Needs `submit` for the command's type; middlewares check it as a cancel of that type. Returns `{ cancelled: false, code }` with `too_late` (due, running or done already), `not_found`, or a middleware's code.
 - `subscribe(options: SubscribeOptions, handler: (event: StoredEvent) => void | Promise<void>): Subscription`: Streams committed events after `options.after` (backlog first, then live) to `handler`, one at a time, e.g. to export them: `kernable.subscribe({ types: ["shop.*"] }, (e) => ...)`. Reconnects and resumes after the last handled event; if the handler throws, that event is delivered again. Persist `position` yourself to resume across restarts. Unlike a listener, a subscription is not registered: the kernel keeps no position, nobody waits for it, and events arrive as stored (not upcast, vault fields `null`). The key needs `subscribe` for the types.
 - `close(): void`: Closes the connection now; only needed in a long-running process that discards the client.
 

@@ -833,6 +833,52 @@
       "expect": "forbidden"
     },
     {
+      "name": "cancelling another customer's scheduled CancelOrder is decided as the command: refused",
+      "check": {
+        "kind": "cancel",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "CancelOrder",
+        "aggregateType": "order",
+        "aggregateId": "o1",
+        "data": {},
+        "request": {
+          "senderAccount": "a-two",
+          "senderSession": "s-two",
+          "senderTenant": "t1",
+          "senderIdentity": "i-two"
+        },
+        "target": {
+          "type": "shop.order",
+          "id": "o1"
+        }
+      },
+      "expect": "forbidden"
+    },
+    {
+      "name": "cancelling one's own scheduled CancelOrder is decided as the command: allowed",
+      "check": {
+        "kind": "cancel",
+        "tenant": "t1",
+        "domain": "shop",
+        "type": "CancelOrder",
+        "aggregateType": "order",
+        "aggregateId": "o1",
+        "data": {},
+        "request": {
+          "senderAccount": "a-mem",
+          "senderSession": "s-mem",
+          "senderTenant": "t1",
+          "senderIdentity": "i-mem"
+        },
+        "target": {
+          "type": "shop.order",
+          "id": "o1"
+        }
+      },
+      "expect": "allow"
+    },
+    {
       "name": "a relation needs its target: no other order",
       "check": {
         "kind": "command",

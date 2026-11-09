@@ -193,6 +193,11 @@ pub enum CheckKind {
     /// A cache request ([`crate::Cache`]): [`Check::type_name`] is `SetCache`, `GetCache` or
     /// `DeleteCache`, [`Check::key`] is set.
     Cache,
+    /// A cancel of a scheduled command ([`crate::Kernable::cancel`]): [`Check::id`],
+    /// [`Check::type_name`], [`Check::aggregate_type`], [`Check::aggregate_id`],
+    /// [`Check::target`] and [`Check::data`] are the scheduled command's (vault fields `null`),
+    /// [`Check::request`] is who cancels it. Decide it as the command itself, typically.
+    Cancel,
 }
 
 /// What came of the request a middleware after it checks: an [`Outcome`] for a command, a
@@ -205,25 +210,27 @@ pub enum CheckOutcome {
     Query(QueryOutcome),
 }
 
-/// A command, query, file or cache request a middleware checks, before the kernel accepts or
-/// routes it or after (file and cache requests: before only): what the handler of
+/// A command, query, cancel, file or cache request a middleware checks, before the kernel accepts
+/// or routes it or after (cancels, file and cache requests: before only): what the handler of
 /// [`Listener::middleware`] gets.
 #[derive(Clone, Debug)]
 pub struct Check {
     pub kind: CheckKind,
-    /// The command or query ID; for a file or cache request, the kernel's call ID.
+    /// The command or query ID (a cancel: the scheduled command's); for a file or cache request,
+    /// the kernel's call ID.
     pub id: String,
     pub tenant: String,
     pub domain: String,
-    /// The command or query type within the domain; for a file or cache request `PutData`,
+    /// The command or query type within the domain (a cancel: the scheduled command's); for a
+    /// file or cache request `PutData`,
     /// `GetData`, `DeleteData`, `SetCache`, `GetCache` or `DeleteCache`.
     pub type_name: String,
-    /// Commands only.
+    /// Commands and cancels.
     pub aggregate_type: Option<String>,
-    /// Commands only.
+    /// Commands and cancels.
     pub aggregate_id: Option<String>,
     /// The aggregate the request is about, its type qualified: a command's aggregate
-    /// (`shop.order`, `o-17`), or the one a query declares ([`crate::query`]'s `target`,
+    /// (`shop.order`, `o-17`; a cancel: the scheduled command's), or the one a query declares ([`crate::query`]'s `target`,
     /// [`crate::QuerySchema::target`]). `None` for queries that declare none, and for file and
     /// cache requests.
     pub target: Option<Target>,
@@ -1728,6 +1735,35 @@ impl ListenerHandle {
                 outcome,
                 store: store.clone(),
             },
+            Some(middleware_call::Request::Cancel(c)) => {
+                // Its type, aggregate and data are the scheduled command's; the request context
+                // is the cancel's.
+                let Some(x) = call.scheduled else {
+                    return Some(
+                        Rejected::new("a cancel without its command")
+                            .code("middleware_error")
+                            .to_wire(),
+                    );
+                };
+                Check {
+                    kind: CheckKind::Cancel,
+                    id: x.command_id,
+                    tenant: c.tenant_id,
+                    target: Some(Target {
+                        aggregate_type: format!("{}.{}", x.domain, x.aggregate_type),
+                        aggregate_id: x.aggregate_id.clone(),
+                    }),
+                    domain: x.domain,
+                    type_name: x.command_type,
+                    aggregate_type: Some(x.aggregate_type),
+                    aggregate_id: Some(x.aggregate_id),
+                    key: None,
+                    data: vault::unseal(decode(&x.payload), &[]).0,
+                    request: RequestContext::from_wire(c.context.as_ref()),
+                    outcome,
+                    store: store.clone(),
+                }
+            }
             None => {
                 return Some(
                     Rejected::new("nothing to check")

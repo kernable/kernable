@@ -29,7 +29,8 @@ Each message starts with a `str` **tag** for domain separation. Payloads are sig
 
 | Signed by | Tag | Fields after the tag |
 |---|---|---|
-| Client | `kernable.v1.command` | `command_id`, `tenant_id`, `domain`, `aggregate_type`, `aggregate_id`, `command_type`, `payload`, `context`, then the vault fields (see [Vault references](#vault-references)) |
+| Client | `kernable.v1.command` | `command_id`, `tenant_id`, `domain`, `aggregate_type`, `aggregate_id`, `command_type`, `payload`, `context`, then the vault fields (see [Vault references](#vault-references)); then only for a scheduled command (`deliver_at` not 0) the `str` `deliver_at` and `deliver_at: i64`; then only with a delivery limit (`deliver_until` not 0) the `str` `deliver_until` and `deliver_until: i64` |
+| Client | `kernable.v1.cancel` | `command_id`, `tenant_id`, `context`, `issued_at: i64` (a key granted `submit` for the scheduled command's type) |
 | Client | `kernable.v1.query` | `query_id`, `tenant_id`, `domain`, `query_type`, `payload`, `context`, `min_position: u64`, `issued_at: i64`; then only for a wait-only query (`wait_only`) the `str` `wait_only`; then only for a query with a target (`target`) the `str` `target`, `target.aggregate_type` and `target.aggregate_id` |
 | Worker | `kernable.v1.result` | `command_id`, `tenant_id`, `domain`, `aggregate_type`, `aggregate_id` (all from the command), `expected_version: u64` (from `Execute`), `event_count: u64`, then per event `event_type`, `schema: u64`, `payload`, then the vault fields |
 | Worker | `kernable.v1.index` | `command_id`, `tenant_id`, `domain`, `aggregate_type`, `aggregate_id` (all from the command), `expected_version: u64` (from `Execute`), `key_count: u64`, then per key `name`, `global: bool`, `value_hash` (`bytes`), `subject`, then `fact_count: u64` and every fact, then `requirement_count: u64` and per requirement `domain`, `aggregate_type`, `aggregate_id`, `fact`, `key`, `value_hash` (`bytes`), `absent: bool` (see [Unique keys and facts](#unique-keys-and-facts)) |
@@ -68,7 +69,7 @@ The kernel checks that a result, index, rejection or snapshot is signed by the k
 
 ## Time windows
 
-Queries, subscribe requests, data and cache requests, memberships, retry requests and revoke requests are valid for 60 s around `issued_at` (ms since epoch), measured on the kernel's clock. Commands have no time window: a command ID runs once, so a replayed command only returns its stored result.
+Queries, cancels, subscribe requests, data and cache requests, memberships, retry requests and revoke requests are valid for 60 s around `issued_at` (ms since epoch), measured on the kernel's clock. Commands have no time window: a command ID runs once, so a replayed command only returns its stored result.
 
 Within the window a captured subscribe or query request could be replayed, but it only grants the read access the key already has. Transport encryption (mutual TLS over TCP) closes this gap. For data and cache requests the operation is part of the tag, so a signed get cannot be replayed as a delete.
 
@@ -175,6 +176,8 @@ An SDK must reproduce these entries byte for byte:
 | `event_hash_vault` | `hash` from the input of `event_hash` plus `vault_refs` and `erases` |
 | `query_wait_only` | `message` and `signature` of the `query` input with `wait_only: true` |
 | `query_target` | `message` and `signature` of the `query` input with a `target` (`account.account`, `a-1`) |
+| `command_scheduled` | `message` and `signature` of the `command` input with `deliver_at` and `deliver_until` |
+| `cancel` | `message` and `signature` of `kernable.v1.cancel` |
 | `event_hash_origin` | `hash` from the input of `event_hash` plus `origin_partition` and `origin_position` |
 | `derived_id` | `ids[i]` for `command_id` and `n[i]` |
 

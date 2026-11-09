@@ -76,6 +76,8 @@ queues it and hands it to a worker that registered its aggregate and command typ
 | `client_sig` |  `Signature` | 8 | Over kernable.v1.command, by a key granted `submit` for `domain.command_type`. |
 | `context` |  `RequestContext` | 9 | signed with the command, stored with its events |
 | `vault_refs` | repeated `string` | 10 | References to the values the payload keeps in the vault (see VaultValue), in payload order. |
+| `deliver_at` |  `int64` | 11 | Signed, and only when set: a scheduled command, delivered at this time (ms since epoch) and not before. Submit answers `accepted` at once; until then the command waits beside its aggregate's queue, so the aggregate's other commands pass. Middlewares check it when it is submitted and again when it is due. At most the kernel's `--schedule-max-days` ahead. |
+| `deliver_until` |  `int64` | 12 | Signed, and only when set: a scheduled command that cannot run by this time (ms since epoch), after an outage say, is rejected `expired` instead of running late. |
 
 ### RequestContext
 
@@ -400,6 +402,31 @@ Commands, sent by clients and by handlers of listeners.
 | RPC | Request | Response | Description |
 |---|---|---|---|
 | `Submit` | `SubmitRequest` | `CommandResult` | Submits a command and waits as `wait` says. Needs `submit` for the qualified command type, and a worker that registered it (or a membership that lists its aggregate), otherwise NOT_FOUND. Middlewares before the command may reject it; the outcome is then `rejected`. A command ID that was submitted before is not run again: Submit returns its stored result, or waits for it. If the command does not complete within the kernel's submit timeout, Submit fails with DEADLINE_EXCEEDED, but the command stays queued: resubmit it to get the result. Other errors: UNAUTHENTICATED (missing or invalid signature), PERMISSION_DENIED, INVALID_ARGUMENT, FAILED_PRECONDITION (see `listener`; vault values without a vault), UNAVAILABLE (a middleware is not connected, or the kernel shuts down), DEADLINE_EXCEEDED (a middleware did not answer in time). |
+| `Cancel` | `CancelRequest` | `CancelResult` | Cancels a scheduled command (`Command.deliver_at`) before it is due: the command completes as rejected `cancelled`, so its ID answers that from then on. Needs `submit` for the command's type; middlewares check it as a cancel of that type (MiddlewareCall.cancel), and may reject it. A command that is due already, running or completed answers `too_late`; an unknown ID `not_found`. |
+
+### CancelRequest
+
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `command_id` |  `string` | 1 |  |
+| `tenant_id` |  `string` | 2 |  |
+| `context` |  `RequestContext` | 3 |  |
+| `issued_at` |  `int64` | 4 | ms since epoch; must be within 60 s of the kernel's clock |
+| `client_sig` |  `Signature` | 5 | over kernable.v1.cancel |
+| `protocol` |  `uint32` | 6 | not signed |
+
+### CancelResult
+
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `command_id` |  `string` | 1 |  |
+| `cancelled` |  `Cancelled` | 2 |  |
+| `rejected` |  `Rejected` | 3 | too_late, not_found, or by a middleware |
+
+### Cancelled
+
 
 ### SubmitRequest
 
@@ -717,11 +744,13 @@ a Verdict of the same `call_id`, also after (where it may only count for a query
 | `query` |  `QueryRequest` | 3 | as the client sent it, with its signature |
 | `data` |  `DataRequest` | 4 | A file or cache request, before it runs; without the file or value itself. |
 | `cache` |  `CacheRequest` | 5 |  |
+| `cancel` |  `CancelRequest` | 11 | A cancel of a scheduled command, as the client sent it; `scheduled` is that command. |
 | `vault` | repeated `VaultValue` | 6 | Before a command only: its vault values, if the key may read them (granted vault_read). |
 | `when` |  `When` | 7 |  |
 | `command_result` |  `CommandResult` | 8 | After only: the command's result. The middleware only observes it; its verdict is ignored. |
 | `query_result` |  `QueryResult` | 9 | After only: the query's result. A verdict that rejects a response replaces it. |
-| `type` |  `string` | 10 | The qualified type being checked: `shop.AddItem`, `shop.GetCart`, or for files and the cache `shop.PutData`, `shop.GetData`, `shop.DeleteData`, `shop.SetCache`, `shop.GetCache`, `shop.DeleteCache`. |
+| `type` |  `string` | 10 | The qualified type being checked: `shop.AddItem`, `shop.GetCart`, or for files and the cache `shop.PutData`, `shop.GetData`, `shop.DeleteData`, `shop.SetCache`, `shop.GetCache`, `shop.DeleteCache`; for a cancel the scheduled command's type. |
+| `scheduled` |  `Command` | 12 | A cancel only: the scheduled command it cancels, as stored. |
 
 ### Verdict
 

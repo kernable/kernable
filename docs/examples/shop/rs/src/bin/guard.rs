@@ -41,7 +41,7 @@ async fn main() -> Result<(), BoxError> {
             || {
                 let field = |name: &str| check.data[name].as_str().map(str::to_owned);
                 let target = match check.kind {
-                    CheckKind::Command => check.aggregate_id.clone(),
+                    CheckKind::Command | CheckKind::Cancel => check.aggregate_id.clone(),
                     CheckKind::Query => field("id"),
                     // The shop keeps no files: no customer's to protect.
                     CheckKind::Data | CheckKind::Cache => None,

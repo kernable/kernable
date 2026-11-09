@@ -36,6 +36,25 @@ export interface WireCommand {
   client_sig?: WireSignature | null;
   context?: WireRequestContext | null;
   vault_refs?: string[];
+  /** Signed when set: a scheduled command's delivery time, ms; see `Command.deliver_at`. */
+  deliver_at?: number;
+  /** Signed when set: after this time (ms) a scheduled command is rejected `expired`. */
+  deliver_until?: number;
+}
+
+/** A cancel of a scheduled command; see `CancelRequest` in kernable.proto. */
+export interface WireCancelRequest {
+  command_id: string;
+  tenant_id: string;
+  context?: WireRequestContext | null;
+  issued_at: number;
+  client_sig?: WireSignature | null;
+}
+
+export interface WireCancelResult {
+  command_id: string;
+  outcome: "cancelled" | "rejected";
+  rejected?: WireRejected;
 }
 
 /** A value kept in the vault; see `VaultValue` in kernable.proto. */
@@ -219,8 +238,11 @@ export interface ListenerDelivery {
   query?: { call_id: string; query: WireQueryRequest } | null;
   check?: {
     call_id: string;
-    request: "command" | "query" | "data" | "cache";
+    request: "command" | "query" | "data" | "cache" | "cancel";
     command?: WireCommand | null;
+    /** A cancel of a scheduled command; `scheduled` is that command, as stored. */
+    cancel?: WireCancelRequest | null;
+    scheduled?: WireCommand | null;
     query?: WireQueryRequest | null;
     /** A file request, without its data. */
     data?: WireDataRequest | null;
@@ -342,6 +364,7 @@ export interface Clients {
   session(): SessionCall;
   listen(): ListenCall;
   query(req: WireQueryRequest, timeoutMs?: number): Promise<WireQueryResult>;
+  cancel(req: WireCancelRequest, timeoutMs?: number): Promise<WireCancelResult>;
   subscribe(req: WireSubscribeRequest): grpc.ClientReadableStream<WireEvent>;
   data(op: DataOp, req: WireDataRequest): Promise<WireDataResult>;
   listData(req: WireDataRequest): Promise<WireDataList>;
@@ -615,6 +638,7 @@ export function connect(url: string, tls?: TlsFiles, grant?: string, timeoutMs =
     session: () => stream((t) => t.workers.Session(metadata)),
     listen: () => stream((t) => t.listeners.Listen(metadata)),
     query: (req, ms) => unary<WireQueryResult>("queries", "Query", req, ms),
+    cancel: (req, ms) => unary<WireCancelResult>("commands", "Cancel", req, ms),
     subscribe: (req) => stream((t) => t.events.Subscribe({ ...req, protocol: PROTOCOL }, metadata)),
     data: (op, req) => unary("data", op, req),
     listData: (req) => unary("data", "ListData", req),

@@ -54,10 +54,10 @@ fn check_of(c: &Value) -> Check {
         ..RequestContext::default()
     };
     Check {
-        kind: if c["kind"] == "command" {
-            CheckKind::Command
-        } else {
-            CheckKind::Query
+        kind: match c["kind"].as_str() {
+            Some("command") => CheckKind::Command,
+            Some("cancel") => CheckKind::Cancel,
+            _ => CheckKind::Query,
         },
         id: String::new(),
         tenant: text(c, "tenant"),

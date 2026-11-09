@@ -59,8 +59,18 @@ def _stream(m: Msg, c) -> Msg:
 
 
 def command_message(c) -> bytes:
-    m = _stream(Msg("kernable.v1.command"), c).str(c.command_type).bytes(c.payload).context(c.context)
-    return bytes(m.refs(c.vault_refs).buf)
+    m = _stream(Msg("kernable.v1.command"), c).str(c.command_type).bytes(c.payload).context(c.context).refs(c.vault_refs)
+    # Each only when set, so a command without them signs as before.
+    if c.deliver_at:
+        m = m.str("deliver_at").i64(c.deliver_at)
+    if c.deliver_until:
+        m = m.str("deliver_until").i64(c.deliver_until)
+    return bytes(m.buf)
+
+
+def cancel_message(c) -> bytes:
+    """What a client signs to cancel a scheduled command (a key granted `submit` for its type)."""
+    return bytes(Msg("kernable.v1.cancel").str(c.command_id).str(c.tenant_id).context(c.context).i64(c.issued_at).buf)
 
 
 def vault_ref(salt: bytes, subject: str, secret: bool, value: bytes) -> str:

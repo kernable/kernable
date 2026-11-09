@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 
 import type {
   WireCacheRequest,
+  WireCancelRequest,
   WireCommand,
   WireDataRequest,
   WireEvent,
@@ -120,12 +121,19 @@ const stream = (m: Msg, c: Stream) =>
   m.str(c.command_id).str(c.tenant_id).str(c.domain).str(c.aggregate_type).str(c.aggregate_id);
 
 export function commandMessage(c: WireCommand): Buffer {
-  return stream(new Msg("kernable.v1.command"), c)
+  const m = stream(new Msg("kernable.v1.command"), c)
     .str(c.command_type)
     .bytes(c.payload)
     .context(c.context)
-    .refs(c.vault_refs)
-    .done();
+    .refs(c.vault_refs);
+  // Each only when set, so a command without them signs as before.
+  if (c.deliver_at) m.str("deliver_at").i64(c.deliver_at);
+  if (c.deliver_until) m.str("deliver_until").i64(c.deliver_until);
+  return m.done();
+}
+
+export function cancelMessage(c: WireCancelRequest): Buffer {
+  return new Msg("kernable.v1.cancel").str(c.command_id).str(c.tenant_id).context(c.context).i64(c.issued_at).done();
 }
 
 /** The reference of a value kept in the vault: it commits to salt, subject, kind and value. */

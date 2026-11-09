@@ -140,6 +140,28 @@ let fulfilment = shop
 
 Messages may also be given by name (`"shop.OrderSubmitted"`), like everywhere in the SDKs.
 
+## Timers: commands with a delivery time (built 2026-11-09)
+
+Decided 2026-11-09, usable without processes:
+
+- **A time on the command:** `submit(Cancel.new(), { aggregateId: "o1", at, until? })`. `at` and
+  `until` are part of the signed command (`Command.deliver_at`, `deliver_until`, ms). The kernel
+  answers `accepted` at once, whatever the wait, and stores the command as pending: durable,
+  replicated to the standby, carried along by moves and exports, rebuilt after a restart.
+- **Not in the aggregate's queue until due:** the queue is first in, first out per aggregate, so a
+  command due in 3 days waits in a timer list beside it and enters its aggregate's queue at `at`;
+  other commands of the aggregate pass meanwhile.
+- **Checked twice:** when scheduled (signature, grant, middleware: mistakes show at once), and
+  when due (the middleware again with what it knows then, and the key's revocation).
+- **Late runs late:** after an outage a due command runs as soon as the kernel is back, with its
+  scheduled time; past `until` it is rejected `expired` instead.
+- **Cancelling:** `kernable.cancel(commandId)`, signed by a key granted `submit` for the command's
+  type, checked by the middleware as a request of its own kind (the kit decides it as the command
+  itself). It completes the command as rejected `cancelled`; a command already running or done
+  answers `too_late`.
+- **Limits:** `at` at most `--schedule-max-days` (default 366) ahead; scheduled commands count
+  towards the queue's limits like queued ones.
+
 ## A case in the log
 
 Each case is an aggregate `<process>` of the domain `process`, its ID the case's key, under the

@@ -10,8 +10,8 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::proto::{
-    CacheRequest, Command, DataRequest, Event, Grant, Membership, NewEvent, Permission,
-    QueryRequest, Rejected, RequestContext, Requirement, Signature, UniqueKey,
+    CacheRequest, CancelRequest, Command, DataRequest, Event, Grant, Membership, NewEvent,
+    Permission, QueryRequest, Rejected, RequestContext, Requirement, Signature, UniqueKey,
 };
 
 /// Hash that precedes the first event of the chain.
@@ -115,7 +115,7 @@ pub fn vault_ref(salt: &[u8], subject: &str, secret: bool, value: &[u8]) -> Stri
 
 /// What a client signs when submitting a command.
 pub fn command_message(cmd: &Command) -> Vec<u8> {
-    Msg::new("kernable.v1.command")
+    let m = Msg::new("kernable.v1.command")
         .str(&cmd.command_id)
         .str(&cmd.tenant_id)
         .str(&cmd.domain)
@@ -124,7 +124,28 @@ pub fn command_message(cmd: &Command) -> Vec<u8> {
         .str(&cmd.command_type)
         .bytes(&cmd.payload)
         .context(cmd.context.as_ref())
-        .refs(&cmd.vault_refs)
+        .refs(&cmd.vault_refs);
+    // Each only when set, so a command without them signs as before.
+    let m = if cmd.deliver_at != 0 {
+        m.str("deliver_at").i64(cmd.deliver_at)
+    } else {
+        m
+    };
+    let m = if cmd.deliver_until != 0 {
+        m.str("deliver_until").i64(cmd.deliver_until)
+    } else {
+        m
+    };
+    m.0
+}
+
+/// What a client signs when cancelling a scheduled command.
+pub fn cancel_message(c: &CancelRequest) -> Vec<u8> {
+    Msg::new("kernable.v1.cancel")
+        .str(&c.command_id)
+        .str(&c.tenant_id)
+        .context(c.context.as_ref())
+        .i64(c.issued_at)
         .0
 }
 

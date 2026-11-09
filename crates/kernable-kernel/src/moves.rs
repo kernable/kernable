@@ -123,14 +123,15 @@ impl Kernel {
         }
     }
 
-    /// The tenant's commands still in the queue.
+    /// The tenant's commands still in the queue; scheduled ones waiting for their time are
+    /// not: they move along pending.
     fn queued(&self, tenant: &str) -> Result<usize, Status> {
         Ok(self
             .store
             .pending()
             .map_err(internal)?
             .iter()
-            .filter(|p| p.command.tenant_id == tenant)
+            .filter(|p| p.command.tenant_id == tenant && !self.queue.waiting(&p.command.command_id))
             .count())
     }
 
@@ -352,6 +353,24 @@ fn export(
             Ok(())
         })
         .map_err(internal)?;
+    // Scheduled commands still waiting for their time move along pending: the copy after a
+    // precopy sends only commands with an outcome. (The tenant is moving: none is due or
+    // cancelled here meanwhile.)
+    if after != Some(0) {
+        for p in kernel.store.pending().map_err(internal)? {
+            if p.command.tenant_id != tenant || commands.contains(&p.command.command_id) {
+                continue;
+            }
+            commands.insert(p.command.command_id.clone());
+            batch.push(Record::Enqueued(kernable_core::proto::EnqueuedRecord {
+                command: Some(p.command),
+                created_at: p.received_at,
+            }));
+            if batch.len() >= replication::BATCH {
+                flush(&mut batch).map_err(internal)?;
+            }
+        }
+    }
     flush(&mut batch).map_err(internal)?;
     let prefix = kernable_store::data::tenant_place(tenant);
     let (mut files, mut bytes) = (Vec::new(), 0);
@@ -604,7 +623,12 @@ async fn import(
     })
     .await??;
     kernel.appended.notify_waiters();
-    tracing::warn!(tenant = %m.tenant, from = %m.from, source_head, target_after, after, global_keys = keys, "a moving tenant is copied here");
+    // Its scheduled commands wait here from now on; they run once the map assigns it here.
+    let k = Arc::clone(kernel);
+    let tenant = m.tenant.clone();
+    let scheduled =
+        tokio::task::spawn_blocking(move || crate::timers::route_tenant(&k, &tenant)).await??;
+    tracing::warn!(tenant = %m.tenant, from = %m.from, source_head, target_after, after, global_keys = keys, scheduled, "a moving tenant is copied here");
     Ok(())
 }
 

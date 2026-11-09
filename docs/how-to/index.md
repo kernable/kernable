@@ -8,6 +8,7 @@ Short guides for tasks you meet once your application runs. They assume you know
 |---|---|
 | [Test your domain](./test-domain) | You want to test aggregates without a kernel, or against a real one. |
 | [Add tenants, accounts and authorization](../kits/getting-started) | Your application needs tenants, people who sign in, roles and invitations. |
+| [Schedule a command](./schedule) | A command should run later: a timeout, a reminder, a deadline. |
 | [Change an event's format](./event-versions) | An event must carry something new, but stored events stay as they are. |
 | [Rebuild a read model](./rebuild-read-model) | You fixed a handler bug, or a read model should hold something new. |
 | [Remove a listener, middleware or aggregate](./remove-listener) | You stop running something, and the kernel should stop waiting for it. Covers memberships. |

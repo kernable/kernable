@@ -135,8 +135,9 @@ kernable.submit(Submit::new("shop", "cart", "c1", "AddItem").data(json!({ "qty":
 - `fn cache(&self) -> Cache`: The kernel's cache for the default tenant: values up to 1 MiB per key, optionally with a TTL, lost when the kernel restarts; see `Cache`. Example: `kernable.cache().set("shop", "rate:c1", "3", Some(Duration::from_secs(60))).await?`.
 - `async fn apply(&self, manifest: Manifest) -> Result<(), Error>`: Replaces the membership of a service (default: this connection's, see `Options::service`): the workers, listeners and middlewares the kernel waits for, plus free metadata. Apply it once per deploy (e.g. from a deploy script), not from every process: the newest apply wins, and an older one that arrives late is refused. The key needs the `manage` grant for the service. A middleware the new membership no longer lists stops checking. Example: `kernable.apply(Manifest::new().service("shop").worker(&cart_aggregate).listener(&carts_readmodel)).await?`. `Error::Config` if neither the manifest nor the connection names a service, `Error::Status` if the kernel refuses it.
 - `fn app(&self, app: App) -> Result<AppHandle, Error>`: An app made of whole domains: `AppHandle::run` applies the service's membership (the domains' aggregates as workers, their read models and reactors as listeners, those that check requests as middlewares; live ones are not listed, and the metadata is `version` and `description`, when given, then the app's other metadata), then runs one worker for all the aggregates and every listener, live ones too, all in the app's service. Example: `kernable.app(App::new().service("shop").version("1.0.0").domain(&shop_domain))?.run().await?`. Every start applies the membership, so the key needs the `manage` grant for the service. One service is one app: two processes with the same service would replace each other's membership. `Error::Config` if neither the app nor the connection names a service.
-- `async fn submit(&self, submit: Submit) -> Result<Outcome, Error>`: Runs a command and returns its outcome: `Outcome::Committed` with the new events, or `Outcome::Rejected` if a handler or middleware rejected it (a rejection is `Ok`, not an error). By default it waits until every listener that counts has processed the events; see `Submit::wait`. `Error::NotSettled` if they did not in time (the command is committed), `Error::Status` if the kernel refuses the call (no grant, unknown aggregate type, timeout). Example: `kernable.submit(Submit::new("shop", "cart", "c1", "AddItem").data(json!({ "sku": "apple", "qty": 2 }))).await?`.
-- `async fn enqueue(&self, submit: Submit) -> Result<String, Error>`: Stores the command in the kernel's queue and returns its ID without waiting for it to run. Submit it again with the same `id` (`Submit::id`) to get the outcome; its `wait` is ignored.
+- `async fn submit(&self, submit: Submit) -> Result<Outcome, Error>`: Runs a command and returns its outcome: `Outcome::Committed` with the new events, or `Outcome::Rejected` if a handler or middleware rejected it (a rejection is `Ok`, not an error). By default it waits until every listener that counts has processed the events; see `Submit::wait`. `Error::NotSettled` if they did not in time (the command is committed), `Error::Status` if the kernel refuses the call (no grant, unknown aggregate type, timeout). Example: `kernable.submit(Submit::new("shop", "cart", "c1", "AddItem").data(json!({ "sku": "apple", "qty": 2 }))).await?`. A scheduled command (`Submit::at`) has no outcome yet: enqueue it (`Kernable::enqueue`); submitting it is `Error::Config`. Submitted again by its ID without `at`, it waits for the scheduled command's outcome; `Error::NotDue` if the kernel answers that it is not due yet.
+- `async fn enqueue(&self, submit: Submit) -> Result<String, Error>`: Stores the command in the kernel's queue and returns its ID without waiting for it to run. Submit it again with the same `id` (`Submit::id`) to get the outcome; its `wait` is ignored. With `Submit::at`, a scheduled command: it runs at that time, e.g. a reminder in 24 hours, `kernable.enqueue(Submit::command(Remind {}, "o1") .at(SystemTime::now() + Duration::from_secs(86_400))).await?`; cancel it with `Kernable::cancel`.
+- `async fn cancel(&self, cancel: Cancel) -> Result<CancelOutcome, Error>`: Cancels a scheduled command (`Submit::at`) before it is due: it completes as rejected `cancelled`, which a submit of its ID answers from then on. Needs the `submit` grant for the command's type; middlewares check it as a cancel of that type (`CheckKind::Cancel`). Returns `CancelOutcome::Cancelled` (also when it was cancelled before), or `CancelOutcome::Rejected` with `too_late` (due, running or done already), `not_found`, or a middleware's code. Example: `kernable.cancel(Cancel::new(&id)).await?`.
 - `async fn query<T: DeserializeOwned>(&self, query: Query) -> Result<T, Error>`: Asks the read model that answers `domain.type` and returns its answer, deserialized as `T` (`serde_json::Value` for any). Queries always go through the kernel, also within one process. A refusal by the read model or a middleware is `Error::Rejected`; the kernel's own (no grant, no read model connected) is `Error::Status`; an answer that is not a `T` is `Error::Json`. Example: `let cart: Value = kernable.query(Query::new("shop", "GetCart").data(json!({ "id": "c1" }))).await?;`
 - `async fn ask<Q: QueryType>(&self, query: Q, options: impl FnOnce(Query) -> Query) -> Result<Q::Answer, Error>`: Asks a query of a message type and returns its typed answer: `kernable.ask(GetOrder { id }, |q| q.tenant(t)).await?`; `options` sets what `Query`'s methods set.
 - `fn subscribe<F, Fut>(&self, options: SubscribeOptions, handler: F) -> Subscription where F: Fn(StoredEvent) -> Fut + Send + Sync + 'static, Fut: Future<Output = Result<(), BoxError>> + Send + 'static`: Streams committed events after `options.after` (backlog first, then live) to `handler`, one at a time. Reconnects and resumes after the last handled event; if the handler fails, that event is delivered again. Persist the position yourself to resume across restarts. Needs the `subscribe` grant for the types. Unlike a listener, a subscription is not registered with the kernel: nobody waits for it, and its events carry no vault values (vault fields are `null` and listed in `redacted`). It runs in a Tokio task from the call on; `Subscription::stop` ends it.
@@ -175,8 +176,28 @@ Without `data`, the payload is an empty object (`{}`).
 - `fn tenant(self, tenant: impl Into<String>) -> Submit`: The tenant to submit to. Default: the connection's (`Options::tenant`).
 - `fn id(self, id: impl Into<String>) -> Submit`: Idempotency key (default: a new UUID); resubmitting the same ID returns the original outcome without running the command again.
 - `fn context(self, context: RequestContext) -> Submit`: Replaces the client's default context; inside a listener, pass `ctx.follow()`.
+- `fn at(self, time: SystemTime) -> Submit`: `Kernable::enqueue` only: a scheduled command, run at `time` and not before. The kernel stores it at once; the aggregate's other commands pass meanwhile, and middlewares check it now and again when it is due. At most the kernel's `--schedule-max-days` (default 366) ahead. Cancel it with `Kernable::cancel`.
+- `fn until(self, time: SystemTime) -> Submit`: With `Submit::at`: if the command cannot run by `time` (after an outage, say), it is rejected `expired` instead of running late.
 - `fn wait(self, wait: Wait) -> Submit`: How long `Kernable::submit` waits: `Wait::Settled` (default) or `Wait::Committed`.
 - `fn timeout(self, timeout: Duration) -> Submit`: How long to wait for the connection and the outcome; default `Options::timeout`.
+
+### Cancel
+
+A cancel of a scheduled command for `Kernable::cancel`, built with methods that each
+return the changed cancel: `Cancel::new(&id).tenant("t1")`.
+
+- `fn new(command_id: &str) -> Cancel`: A cancel of the scheduled command `command_id` (the ID `Kernable::enqueue` returned).
+- `fn tenant(self, tenant: impl Into<String>) -> Cancel`: The command's tenant. Default: the connection's (`Options::tenant`).
+- `fn context(self, context: RequestContext) -> Cancel`: Replaces the client's default context: who cancels, for the middlewares.
+- `fn timeout(self, timeout: Duration) -> Cancel`: How long to wait for the connection and the answer; default `Options::timeout`.
+
+### CancelOutcome
+
+What became of a cancel, returned by `Kernable::cancel`.
+
+- `Cancelled`: The scheduled command will not run: it completed as rejected `cancelled`.
+- `Rejected(Rejected)`: Not cancelled: `too_late` (due, running or done already), `not_found`, or a middleware's rejection.
+- `fn is_cancelled(&self) -> bool`: Whether the command was cancelled.
 
 ### Query
 
@@ -525,6 +546,7 @@ Whether a middleware checks a command, a query, a file request or a cache reques
 - `Query`: A query.
 - `Data`: A file request (`crate::Files`): `Check::type_name` is `PutData`, `GetData` or `DeleteData`, `Check::key` is set.
 - `Cache`: A cache request (`crate::Cache`): `Check::type_name` is `SetCache`, `GetCache` or `DeleteCache`, `Check::key` is set.
+- `Cancel`: A cancel of a scheduled command (`crate::Kernable::cancel`): `Check::id`, `Check::type_name`, `Check::aggregate_type`, `Check::aggregate_id`, `Check::target` and `Check::data` are the scheduled command's (vault fields `null`), `Check::request` is who cancels it. Decide it as the command itself, typically.
 
 ### CheckOutcome
 
@@ -536,18 +558,18 @@ What came of the request a middleware after it checks: an `Outcome` for a comman
 
 ### Check
 
-A command, query, file or cache request a middleware checks, before the kernel accepts or
-routes it or after (file and cache requests: before only): what the handler of
+A command, query, cancel, file or cache request a middleware checks, before the kernel accepts
+or routes it or after (cancels, file and cache requests: before only): what the handler of
 `Listener::middleware` gets.
 
 - `kind: CheckKind`
-- `id: String`: The command or query ID; for a file or cache request, the kernel's call ID.
+- `id: String`: The command or query ID (a cancel: the scheduled command's); for a file or cache request, the kernel's call ID.
 - `tenant: String`
 - `domain: String`
-- `type_name: String`: The command or query type within the domain; for a file or cache request `PutData`, `GetData`, `DeleteData`, `SetCache`, `GetCache` or `DeleteCache`.
-- `aggregate_type: Option<String>`: Commands only.
-- `aggregate_id: Option<String>`: Commands only.
-- `target: Option<Target>`: The aggregate the request is about, its type qualified: a command's aggregate (`shop.order`, `o-17`), or the one a query declares (`crate::query`'s `target`, `crate::QuerySchema::target`). `None` for queries that declare none, and for file and cache requests.
+- `type_name: String`: The command or query type within the domain (a cancel: the scheduled command's); for a file or cache request `PutData`, `GetData`, `DeleteData`, `SetCache`, `GetCache` or `DeleteCache`.
+- `aggregate_type: Option<String>`: Commands and cancels.
+- `aggregate_id: Option<String>`: Commands and cancels.
+- `target: Option<Target>`: The aggregate the request is about, its type qualified: a command's aggregate (`shop.order`, `o-17`; a cancel: the scheduled command's), or the one a query declares (`crate::query`'s `target`, `crate::QuerySchema::target`). `None` for queries that declare none, and for file and cache requests.
 - `key: Option<String>`: File and cache requests only: the file's or value's key.
 - `data: Value`: The request's payload; vault fields are `null` unless the key is granted `vault_read`. `Value::Null` for a file or cache request: the middleware never sees the file or value.
 - `request: RequestContext`: Who sends it: check permissions here.
@@ -802,6 +824,7 @@ Why a call to the kernel failed. It implements `std::error::Error`, so `?` turns
 
 - `Rejected(Rejected)`: A rejection: the read model or a middleware refused the query (`crate::Kernable::query`), or a command handler refused the command in `crate::Aggregate::handle`. A rejected submit is not an error but `crate::Outcome::Rejected`.
 - `NotSettled(Vec<StoredEvent>)`: The command was committed, but not every listener that counts processed its events within the kernel's `--settle-timeout-ms`. Read models may not show the change yet; the committed events are attached. Submitting again with the same ID returns the same outcome.
+- `NotDue(String)`: The command with this ID is scheduled (`crate::Submit::at`) and not due yet: it has no outcome to wait for. Submit it again by its ID after its time.
 - `Status(tonic::Status)`: The kernel refused the call or could not be reached: the gRPC status, e.g. `PERMISSION_DENIED` without a grant (see Errors in the reference).
 - `Config(String)`: A key, grant or certificate could not be read, or an option is invalid; also a failing handler in `crate::Aggregate::fold` and `crate::Aggregate::handle`.
 - `Json(serde_json::Error)`: Data could not be encoded or decoded as JSON.

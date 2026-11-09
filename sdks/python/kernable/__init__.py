@@ -48,7 +48,7 @@ from typing import ClassVar, Any, Callable, Iterable
 
 import grpc
 
-from kernable.signing import (Key, cache_message, challenge_message, command_message, data_message, derived_id,
+from kernable.signing import (Key, cache_message, cancel_message, challenge_message, command_message, data_message, derived_id,
                               index_message, membership_message, query_message, vault_ref, rejection_message, result_message,
                               snapshot_message)
 from kernable.store import Store
@@ -61,7 +61,7 @@ from .messages import (  # noqa: E402
     query_target as _query_target, to_wire as _to_wire,
 )
 
-__all__ = ["PROTOCOL", "Event", "Command", "Query", "StoredEvent", "Aggregate", "AggregateType", "MiddlewareContext", "App", "ApplyContext", "CacheClient", "Check", "ClientClosed", "CommandContext", "CommandMeta",
+__all__ = ["PROTOCOL", "Event", "Command", "Query", "StoredEvent", "Aggregate", "AggregateType", "MiddlewareContext", "App", "ApplyContext", "CacheClient", "CancelOutcome", "Check", "ClientClosed", "CommandContext", "CommandMeta",
            "CommandSchema", "QuerySchema", "Target",
            "Data", "DataClient", "Domain", "Listed", "Listing",
            "EventMeta", "EventSchema", "HeldKey", "Index", "Kernable", "Key", "Listener", "ListenerContext", "ListenerHandle", "Manifest", "NotSettled", "Outcome",
@@ -243,8 +243,10 @@ class Check:
     routes or runs it (or, for commands and queries, after): the first parameter of a
     `Listener.middleware` handler."""
 
-    #: `"command"`, `"query"`, `"data"` (a file request of `k.data`) or `"cache"` (a cache
-    #: request of `k.cache`).
+    #: `"command"`, `"query"`, `"data"` (a file request of `k.data`), `"cache"` (a cache
+    #: request of `k.cache`) or `"cancel"` (`Kernable.cancel` of a scheduled command: `id`,
+    #: `domain`, `type`, the aggregate, `target` and `data` are the scheduled command's,
+    #: `request` the cancel's sender; decide it as the command).
     kind: str
     #: The command or query ID; empty for a file or cache request.
     id: str
@@ -482,6 +484,20 @@ class Index:
     keys: list[HeldKey] = field(default_factory=list)
     #: The names of the facts that are true, in the order they were declared.
     facts: list[str] = field(default_factory=list)
+
+
+@dataclass
+class CancelOutcome:
+    """What became of `Kernable.cancel`: cancelled, or rejected with a code and a message
+    (`too_late`, `not_found`, or a middleware's code)."""
+
+    #: Whether the scheduled command was cancelled (or had been already): it completes as
+    #: rejected `cancelled`.
+    cancelled: bool
+    #: The rejection code, if not cancelled.
+    code: str = ""
+    #: The rejection message, if not cancelled.
+    message: str = ""
 
 
 @dataclass
@@ -1810,7 +1826,7 @@ class Kernable:
 
     def submit(self, domain, aggregate_type: str | None = None, aggregate_id: str | None = None, type: str | None = None, data: Any = None, *,
                tenant: str | None = None, id: str | None = None, wait: str = "settled",
-               context: RequestContext | None = None, timeout_s: float | None = None) -> Outcome:
+               context: RequestContext | None = None, timeout_s: float | None = None, at: Any = None) -> Outcome:
         """Runs a `type` command of `domain` on the aggregate `aggregate_type` with ID
         `aggregate_id` and returns its `Outcome`. `data` is the command's payload (JSON-like; `None` sends `{}`).
 
@@ -1830,13 +1846,21 @@ class Kernable:
 
         With a command class instance: `k.submit(AddItem(sku="apple", qty=2), aggregate_id="c1")`;
         its class says the domain, aggregate type, type and vault fields (no `use` needed).
+
+        A scheduled command has no outcome yet: schedule it with `enqueue(..., at=...)` (`at`
+        here raises `ValueError`). Submitting its `id` again waits for its outcome, so ask once
+        it is due; until then the kernel holds the call.
         """
+        if at is not None:
+            raise ValueError("a scheduled command (`at`) has no outcome yet: use `enqueue`")
         if isinstance(domain, Command):
             domain, aggregate_type, type, data = self._command_of(domain)
         mode = pb.WAIT_COMMITTED if wait == "committed" else pb.WAIT_SETTLED
         res = self._send(domain, aggregate_type, aggregate_id, type, data, tenant, id, mode, context, timeout_s)
         if res.WhichOneof("outcome") == "rejected":
             return _rejected_outcome(res.rejected)
+        if res.WhichOneof("outcome") != "committed":
+            raise RuntimeError(f"command {res.command_id} is scheduled and not due yet: ask again after its time")
         outcome = Outcome(committed=True, events=[_to_event(e) for e in res.committed.events])
         if mode == pb.WAIT_SETTLED and not res.committed.settled:
             raise NotSettled(outcome)
@@ -1844,14 +1868,41 @@ class Kernable:
 
     def enqueue(self, domain, aggregate_type: str | None = None, aggregate_id: str | None = None, type: str | None = None, data: Any = None, *,
                 tenant: str | None = None, id: str | None = None, context: RequestContext | None = None,
-                timeout_s: float | None = None) -> str:
+                timeout_s: float | None = None, at: "datetime | int | None" = None,
+                until: "datetime | int | None" = None) -> str:
         """Stores the command in the kernel's queue and returns its ID without waiting for it to
         run (`wait="accepted"`). Submit it again with the same `id` to get the outcome. The
-        parameters are those of `submit`."""
+        parameters are those of `submit`.
+
+        With `at` (a `datetime`, or ms since epoch), a scheduled command: it runs at that time and
+        not before, e.g. a reminder in 24 hours, `k.enqueue(Remind(), aggregate_id="o1",
+        at=datetime.now(timezone.utc) + timedelta(days=1))`. The kernel stores it at once; the
+        aggregate's other commands pass meanwhile, and middlewares check it now and again when it
+        is due. `until`: if it cannot run by then (after an outage), it is rejected `expired`.
+        Both are signed with the command. Cancel it with `cancel`."""
+        if until is not None and at is None:
+            raise ValueError("`until` needs `at`")
         if isinstance(domain, Command):
             domain, aggregate_type, type, data = self._command_of(domain)
         return self._send(domain, aggregate_type, aggregate_id, type, data, tenant, id, pb.WAIT_ACCEPTED,
-                          context, timeout_s).command_id
+                          context, timeout_s, _ms(at), _ms(until)).command_id
+
+    def cancel(self, command_id: str, *, tenant: str | None = None, context: RequestContext | None = None,
+               timeout_s: float | None = None) -> CancelOutcome:
+        """Cancels a scheduled command (`enqueue` with `at`) before it is due: it completes as
+        rejected `cancelled`, and cancelling it again answers the same. Needs `submit` for the
+        command's type; middlewares check it as a cancel of that type (`Check.kind == "cancel"`).
+        Returns a `CancelOutcome`: not cancelled with `too_late` (due, running or done already),
+        `not_found`, or a middleware's code. `tenant` and `context` replace the client's;
+        `timeout_s` its deadline for this call. Example: `k.cancel(reminder_id)`."""
+        req = pb.CancelRequest(command_id=command_id, tenant_id=tenant or self._tenant,
+                               context=_to_wire_context(context or self._context, command_id),
+                               issued_at=_issued_now(), protocol=PROTOCOL)
+        req.client_sig.CopyFrom(self._key.sign(cancel_message(req)))
+        res = self._parts.route(req.tenant_id, lambda ch: rpc.CommandServiceStub(ch).Cancel(req, timeout=timeout_s))
+        if res.WhichOneof("outcome") == "cancelled":
+            return CancelOutcome(cancelled=True)
+        return CancelOutcome(cancelled=False, code=res.rejected.code, message=res.rejected.message)
 
     def _caught_up_everywhere(self, q: "pb.QueryRequest", timeout_s: float | None) -> None:
         """Returns once a read model that answers `q` has processed every partition's head, as
@@ -1937,7 +1988,8 @@ class Kernable:
         self._open.closed = True
         self._parts.close()
 
-    def _send(self, domain, aggregate_type, aggregate_id, command_type, data, tenant, id, wait, context, timeout_s):
+    def _send(self, domain, aggregate_type, aggregate_id, command_type, data, tenant, id, wait, context, timeout_s,
+              deliver_at: int = 0, deliver_until: int = 0):
         command_id = id or str(uuid.uuid4())
         context = context or self._context
         spec = self._domains[domain].commands.get(command_type) if domain in self._domains else None
@@ -1945,7 +1997,8 @@ class Kernable:
         cmd = pb.Command(command_id=command_id, tenant_id=tenant or self._tenant, domain=domain,
                          aggregate_type=aggregate_type, aggregate_id=aggregate_id,
                          command_type=command_type, payload=payload,
-                         context=_to_wire_context(context, command_id), vault_refs=refs)
+                         context=_to_wire_context(context, command_id), vault_refs=refs,
+                         deliver_at=deliver_at, deliver_until=deliver_until)
         cmd.client_sig.CopyFrom(self._key.sign(command_message(cmd)))
         request = pb.SubmitRequest(command=cmd, wait=wait, protocol=PROTOCOL, listener=_HANDLING.get(),
                                    vault=values)
@@ -3268,6 +3321,17 @@ def _from_wire_context(c) -> RequestContext:
         c.trace_id, c.bypass_authorization, {a.key: a.value for a in c.attributes})
 
 
+def _ms(when: "datetime | int | float | None") -> int:
+    """A time as ms since epoch; 0 for None. A naive `datetime` is local time, as Python reads it."""
+    if when is None:
+        return 0
+    if isinstance(when, datetime):
+        return int(when.timestamp() * 1000)
+    if isinstance(when, bool) or not isinstance(when, (int, float)):
+        raise TypeError(f"a time is a datetime or ms since epoch, not {when!r}")
+    return int(when)
+
+
 def _to_check(call) -> Check:
     if call.WhichOneof("request") == "command":
         c = call.command
@@ -3276,6 +3340,12 @@ def _to_check(call) -> Check:
                      _from_wire_context(c.context), c.aggregate_type, c.aggregate_id,
                      target=Target(f"{c.domain}.{c.aggregate_type}", c.aggregate_id))
     kind = call.WhichOneof("request")
+    if kind == "cancel":
+        # A cancel of a scheduled command: its type, aggregate and data are the scheduled command's.
+        x = call.scheduled
+        return Check("cancel", x.command_id, call.cancel.tenant_id, x.domain, x.command_type, _unseal(_decode(x.payload), None)[0],
+                     _from_wire_context(call.cancel.context), x.aggregate_type, x.aggregate_id,
+                     target=Target(f"{x.domain}.{x.aggregate_type}", x.aggregate_id))
     if kind in ("data", "cache"):
         r = getattr(call, kind)
         type = call.type.rsplit(".", 1)[-1]  # qualified, e.g. `shop.PutData`

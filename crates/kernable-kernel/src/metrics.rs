@@ -80,7 +80,7 @@ pub(crate) fn render(kernel: &Kernel) -> String {
     metric(
         "kernable_commands_total",
         "counter",
-        "Commands completed since the kernel started, by outcome: committed, or rejected by a worker or the kernel. Commands a middleware refused before the queue are not counted.",
+        "Commands completed since the kernel started, by outcome: committed, or rejected by a worker or the kernel (scheduled commands cancelled, expired, or refused by a middleware when due included). Commands a middleware refused before the queue are not counted.",
         &[
             ("{outcome=\"committed\"}".into(), m.committed.load(Relaxed)),
             ("{outcome=\"rejected\"}".into(), m.rejected.load(Relaxed)),
@@ -142,6 +142,12 @@ pub(crate) fn render(kernel: &Kernel) -> String {
         "gauge",
         "Commands stored in the queue and not completed yet: waiting for a worker or running.",
         &one(kernel.queue.len() as u64),
+    );
+    metric(
+        "kernable_scheduled_commands",
+        "gauge",
+        "Scheduled commands (deliver_at) not due yet, or due and being checked before they join their aggregate's queue; counted in kernable_queued_commands too.",
+        &one(kernel.queue.scheduled_len() as u64),
     );
     metric(
         "kernable_worker_sessions",

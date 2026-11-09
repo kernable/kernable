@@ -44,6 +44,7 @@ import {
   indexMessage,
   membershipMessage,
   queryMessage,
+  cancelMessage,
   rejectionMessage,
   resultMessage,
   snapshotMessage,
@@ -275,7 +276,7 @@ export interface Check {
    * What is checked: a command, a query, a file request (`data`) or a cache request (`cache`);
    * the fields below depend on it.
    */
-  kind: "command" | "query" | "data" | "cache";
+  kind: "command" | "query" | "data" | "cache" | "cancel";
   /** The command or query ID; empty for a file or cache request. */
   id: string;
   tenant: string;
@@ -1588,6 +1589,14 @@ export interface SubmitOptions {
   wait?: "settled" | "committed";
   /** How long to wait for the connection and the outcome; default `Options.timeoutMs`. */
   timeoutMs?: number;
+  /**
+   * `enqueue` only: a scheduled command, run at this time and not before (a `Date` or ms since
+   * epoch). The kernel stores it at once; the aggregate's other commands pass meanwhile, and
+   * middlewares check it now and again when it is due. Cancel it with `Kernable.cancel`.
+   */
+  at?: Date | number;
+  /** `enqueue` only, with `at`: if it cannot run by this time (after an outage), it is rejected `expired`. */
+  until?: Date | number;
 }
 
 /**
@@ -1884,11 +1893,13 @@ export class Kernable {
   async submit(command: Command, target: CommandTarget): Promise<Outcome>;
   async submit(command: SubmitOptions | Command, target?: CommandTarget): Promise<Outcome> {
     const options = this.commandOptions(command, target);
+    if (options.at !== undefined) throw new Error("a scheduled command (`at`) has no outcome yet: use `enqueue`");
     const wait = options.wait === "committed" ? "WAIT_COMMITTED" : "WAIT_SETTLED";
     const res = await this.send(options, wait);
     if (res.outcome === "rejected") {
       return rejectedOutcome(res.rejected!);
     }
+    if (res.outcome === "accepted") throw new Error(`command ${res.command_id} is scheduled and not due yet: ask again after its time`);
     // Events come back with references only: the submitter is no vault reader.
     const outcome = { committed: true as const, events: res.committed!.events.map((e) => toStored(e)) };
     if (wait === "WAIT_SETTLED" && !res.committed!.settled) throw new NotSettled(outcome);
@@ -1897,7 +1908,9 @@ export class Kernable {
 
   /**
    * Stores the command in the kernel's queue and returns its ID without waiting for it to run
-   * (fire and forget). Submit it again with the same `id` to get the outcome.
+   * (fire and forget). Submit it again with the same `id` to get the outcome. With `at`, a
+   * scheduled command: it runs at that time, e.g. a reminder in 24 hours,
+   * `enqueue(Remind.new(), { aggregateId, at: new Date(Date.now() + 86_400_000) })`.
    */
   async enqueue(options: Omit<SubmitOptions, "wait">): Promise<string>;
   async enqueue(command: Command, target: Omit<CommandTarget, "wait">): Promise<string>;
@@ -2026,10 +2039,25 @@ export class Kernable {
       payload: sealed.payload,
       context: toWireContext({ ...context, correlationId: context.correlationId || command_id }),
       vault_refs: sealed.refs,
+      ...(options.at !== undefined ? { deliver_at: new Date(options.at).getTime() } : {}),
+      ...(options.until !== undefined ? { deliver_until: new Date(options.until).getTime() } : {}),
     };
     const signed = { ...cmd, client_sig: this.key.sign(commandMessage(cmd)) };
     const listener = handling.getStore();
     return this.clients.route(signed.tenant_id, (c) => c.submit(signed, wait, listener, sealed.values, options.timeoutMs));
+  }
+
+  /**
+   * Cancels a scheduled command (`enqueue` with `at`) before it is due: it completes as rejected
+   * `cancelled`. Needs `submit` for the command's type; middlewares check it as a cancel of that
+   * type. Returns `{ cancelled: false, code }` with `too_late` (due, running or done already),
+   * `not_found`, or a middleware's code.
+   */
+  async cancel(commandId: string, options: { tenant?: string; context?: RequestContext; timeoutMs?: number } = {}): Promise<{ cancelled: true } | { cancelled: false; code: string; message: string }> {
+    const req = { command_id: commandId, tenant_id: options.tenant ?? this.tenant, context: toWireContext(options.context ?? this.context), issued_at: issuedNow() };
+    const signed = { ...req, client_sig: this.key.sign(cancelMessage(req)) };
+    const res = await this.clients.route(signed.tenant_id, (c) => c.cancel(signed, options.timeoutMs));
+    return res.outcome === "cancelled" ? { cancelled: true } : { cancelled: false, code: res.rejected!.code, message: res.rejected!.message };
   }
 
   /**
@@ -3595,6 +3623,22 @@ function toCheck(c: NonNullable<ListenerDelivery["check"]>): Check {
       target: { type: `${x.domain}.${x.aggregate_type}`, id: x.aggregate_id },
       data: unseal(decode(x.payload), c.vault).data,
       request: fromWireContext(x.context),
+    };
+  }
+  if (c.cancel) {
+    // A cancel of a scheduled command: its type, aggregate and data are the scheduled command's.
+    const x = c.scheduled!;
+    return {
+      kind: "cancel",
+      id: x.command_id,
+      tenant: c.cancel.tenant_id,
+      domain: x.domain,
+      type: x.command_type,
+      aggregateType: x.aggregate_type,
+      aggregateId: x.aggregate_id,
+      target: { type: `${x.domain}.${x.aggregate_type}`, id: x.aggregate_id },
+      data: unseal(decode(x.payload), []).data,
+      request: fromWireContext(c.cancel.context),
     };
   }
   const q = c.query!;
