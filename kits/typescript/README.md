@@ -54,4 +54,6 @@ first platform administrator. `example/server.ts` shows an HTTP API over `KitApi
 
 The events are the contract other processes read (`events.ts`); `kit/fixtures` holds the cases
 every language's kit passes. Change a rule and its fixture together, and the tests tell you what
-else moved. The design, with every decision: `design/kits.md` in the kernable repository.
+else moved. Every domain, flow and setting is documented at https://kernable.com/docs/kits/, with a
+reference of its commands, events and queries; the design with every decision is
+`design/kits.md` in the kernable repository.

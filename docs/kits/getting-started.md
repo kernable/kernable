@@ -1,27 +1,8 @@
-# Add tenants, accounts and authorization: the kit
+# Getting started with the kit
 
-Most applications need the same groundwork before their own domain: tenants, people who sign in,
-their roles in a tenant, invitations, and a middleware that decides every request. kernable's
-**kit** is that groundwork as source code you copy into your project. It is yours afterwards:
-change fields, rules and flows, or delete what you do not need. It is open source under the MIT license, like all of kernable; `add kit` copies the license next to it.
-
-The kit is available for **TypeScript**, **Python** and **Rust**. Every kit writes the same
-events, so a TypeScript API and a Rust service, say, work on one log.
-
-## What you get
-
-| Domain | What it does |
-|---|---|
-| `tenancy` | one tenant per customer organisation: pending, active, suspended, deleted; a slug unique across tenants; its owners; whether it requires a second factor; the sign-up policy |
-| `account` | a person's account, the same in every tenant: registration and email verification, password, TOTP and recovery codes, passkeys, OAuth/OIDC logins; a session per sign-in; a tenant's single sign-on |
-| `identity` | a person or service in one tenant: its profile, its group memberships (for the whole tenant or one aggregate, optionally expiring) and, for services, API keys |
-| `group` | named sets of permissions per tenant, in the same patterns as [grants](../concepts/trust#keys-and-grants) (`shop.PlaceOrder`, `shop.*`), optionally tied to a relation (`when owner`) |
-| `invitation` | invitations by email, accepted by a signed-in account or a new person |
-| authorization | a [middleware](../concepts/queries-and-middleware#middleware) that runs before every other one and decides each request from what it learned from events |
-
-Everything the kit does is events in your log: every sign-in, failed attempt, refresh, membership
-and invitation is audited, and personal data (emails, names, IP addresses, password hashes) lives
-in the [vault](../concepts/data), erased with the person.
+This page takes you from an empty directory to people signing in to your API: copy the kit, run
+its domains next to yours, grant its keys, send its mail, and turn a signed-in person into the
+request context of your own commands. [The kit](./) explains what each domain holds.
 
 ## 1. Copy it
 
@@ -96,16 +77,54 @@ Once, `bootstrap()` creates the platform tenant (where accounts and the platform
 administrators live), the sign-up policy, the identity and key your API uses for itself, and
 optionally the first administrator. It may run again; it skips what exists.
 
-## 3. Grant the keys
+## 3. Send its mail
+
+Registration, password resets, email changes and invitations send mail from the kit's reactors.
+Until you set a mailer they print to the console, which is enough to try the kit. In production,
+pass an object with a `send(mail)` method that hands the mail to your provider:
+
+::: code-group
+```ts [TypeScript]
+import { useMailer } from "./kit/src/shared/mail.ts";
+
+useMailer({ async send(mail) { await smtp.send({ to: mail.to, subject: mail.subject, text: mail.text }); } });
+```
+```python [Python]
+from kit.shared.mail import use_mailer
+
+class Smtp:
+    def send(self, mail):
+        smtp.send(to=mail.to, subject=mail.subject, text=mail.text)
+
+use_mailer(Smtp())
+```
+```rust [Rust]
+use kit::shared::mail::{use_mailer, Mail, Mailer};
+
+struct Smtp;
+impl Mailer for Smtp {
+    fn send(&self, mail: Mail) { /* hand mail.to, mail.subject, mail.text to your provider */ }
+}
+use_mailer(std::sync::Arc::new(Smtp));
+```
+:::
+
+The texts are in the `reactors` files of `account` and `invitation`. When `send` throws, the
+reactor gets the event again, backing off; after 5 attempts it parks the event, and
+`kernable listeners retry` sends it once your provider is back (see
+[Failures and recovery](../concepts/failures)). A sent invitation is recorded as
+`InvitationMailSent`.
+
+## 4. Grant the keys
 
 | Process | Grant |
 |---|---|
 | the kit's service | `run` on `tenancy.*`, `account.*`, `identity.*`, `group.*`, `invitation.*`; `listen`, `answer` and `check` on `*`; `vault_read` and `vault_erase`; `reserved_order=*` (its listeners run before yours); `privileged=bypass_authorization` (its own follow-up commands) |
 | your API | `submit` and `query` on what it sends; `cache` on `account` (passkey challenges and OIDC state live there for a few minutes) |
 
-See [Keys per service](./keys) for issuing them.
+See [Keys per service](../how-to/keys) for issuing them.
 
-## 4. Sign people in, in your API
+## 5. Sign people in, in your API
 
 Your API is the one process that sees passwords, tokens and provider answers. `KitApi` holds what
 only it can do; wire it into your HTTP framework (`kit/example/server.ts` shows `node:http`,
@@ -146,7 +165,7 @@ ended session, a suspended account or a revoked API key at once. Refresh tokens 
 one twice ends its session. `KitApi` also verifies emails, resets passwords, sets up TOTP and
 passkeys, runs OAuth/OIDC (`oidcStart`, `oidcFinish`), checks API keys and accepts invitations.
 
-## 5. Decide with groups and relations
+## 6. Decide with groups and relations
 
 A tenant's owners may do everything in it. Everyone else gets permissions through groups, for the
 whole tenant or one aggregate:
@@ -175,6 +194,12 @@ CreateGroup { name: "Customers".into(), description: None, permissions: vec![
 Nobody grants a group with permissions they do not hold. `Explain` answers why a request is
 allowed or refused, with the middleware's own steps. For lists, `visibility(readModel)` gives an
 app read model the same decision, so a list shows only what each asker may get.
+
+## Next
+
+- [Your API: KitApi](./api) covers every sign-in method, tokens and API keys.
+- [Authorization](./authorization) explains each step of the middleware's decision.
+- [Recipes](./recipes) for common changes.
 
 ## Changing the kit
 

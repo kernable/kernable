@@ -64,11 +64,25 @@ const SIDEBAR = [
       { text: "Rebuild a read model", link: "/how-to/rebuild-read-model" },
       { text: "Remove a listener or aggregate", link: "/how-to/remove-listener" },
       { text: "Test your domain", link: "/how-to/test-domain" },
-      { text: "Add tenants, accounts and authorization", link: "/how-to/kits" },
       { text: "Handle an erasure request", link: "/how-to/erasure" },
       { text: "Passwords and other secrets", link: "/how-to/secrets" },
       { text: "Store files and cache values", link: "/how-to/data-and-cache" },
       { text: "Write an SDK", link: "/how-to/new-sdk" },
+    ],
+  },
+  {
+    text: "Kits",
+    items: [
+      { text: "Overview", link: "/kits/" },
+      { text: "Getting started", link: "/kits/getting-started" },
+      { text: "Tenancy", link: "/kits/tenancy" },
+      { text: "Accounts and sessions", link: "/kits/account" },
+      { text: "Identities", link: "/kits/identity" },
+      { text: "Groups", link: "/kits/group" },
+      { text: "Invitations", link: "/kits/invitation" },
+      { text: "Authorization", link: "/kits/authorization" },
+      { text: "Your API: KitApi", link: "/kits/api" },
+      { text: "Recipes", link: "/kits/recipes" },
     ],
   },
   {
@@ -105,7 +119,7 @@ export default withMermaid(
     ],
     lastUpdated: false,
     // public/ holds files served as they are (kernable.AGENTS.md), not pages.
-    srcExclude: ["examples/**", "scripts/**", "public/**"],
+    srcExclude: ["examples/**", "scripts/**", "public/**", "kits/generated/**"],
     // The mermaid plugin pulls in CommonJS modules that the dev server must pre-bundle, or the
     // page stays blank in `make docs` (the production build is not affected).
     vite: { optimizeDeps: { include: ["mermaid", "fastdom"] }, plugins: [llmsPlugin(ROOT, SIDEBAR)] },
@@ -119,6 +133,7 @@ export default withMermaid(
         { text: "Tutorials", link: "/tutorial/" },
         { text: "Concepts", link: "/concepts/" },
         { text: "How-to", link: "/how-to/" },
+        { text: "Kits", link: "/kits/" },
         { text: "Reference", link: "/reference/" },
         // Back to the website; VitePress marks it as external.
         { text: "kernable.com", link: "https://kernable.com/" },

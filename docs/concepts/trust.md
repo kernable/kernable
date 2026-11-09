@@ -19,7 +19,7 @@ So two limits apply to every request, and both must allow it:
 - **The key's grant** limits what the process may do at all, whoever it claims to act for. A compromised API can impersonate its users, but only within its own grant: it cannot run commands it may not submit, or read events it may not listen to.
 - **The middleware** limits what each person may do. It builds its knowledge from events (who owns which cart, who is blocked) and fails closed while it is away.
 
-Signing in the people themselves (passwords, sessions, tokens) happens in your API. [Part 6 of the shop tutorial](../tutorial/shop/6-authorization) shows the pattern; the [kit](../how-to/kits) is a complete version of it as source you copy: accounts with passwords, second factors, passkeys and single sign-on, sessions, tenants, groups, and the middleware that decides on them.
+Signing in the people themselves (passwords, sessions, tokens) happens in your API. [Part 6 of the shop tutorial](../tutorial/shop/6-authorization) shows the pattern; the [kit](../kits/) is a complete version of it as source you copy: accounts with passwords, second factors, passkeys and single sign-on, sessions, tenants, groups, and the middleware that decides on them.
 
 ## Keys and grants
 

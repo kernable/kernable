@@ -58,5 +58,6 @@ optionally the first platform administrator. `example/server.py` shows an HTTP A
 
 The events are the contract other processes read (`events.py`), the same as the TypeScript kit's:
 fields are snake_case here and camelCase in the log. `fixtures/` holds the cases every language's
-kit passes. Change a rule and its fixture together, and the tests tell you what else moved. The
-design, with every decision: `design/kits.md` in the kernable repository.
+kit passes. Change a rule and its fixture together, and the tests tell you what else moved. Every domain, flow and setting is documented at https://kernable.com/docs/kits/, with a
+reference of its commands, events and queries; the design with every decision is
+`design/kits.md` in the kernable repository.
