@@ -215,6 +215,9 @@ message TrustSync {
   repeated RevocationRecord revocations = 2;  // signed by the control partition's kernel
   repeated MembershipRecord memberships = 3;
   PartitionMap map = 4;
+  // Every process version and the newest state of each process (design/processes.md): every
+  // partition knows every model, and runs the cases of its own tenants.
+  repeated ProcessRecord processes = 5;
 }
 
 // Unique keys with scope global across partitions (S3). The control partition owns them:

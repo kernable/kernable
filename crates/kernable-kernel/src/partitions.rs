@@ -328,6 +328,7 @@ impl TrustSyncService for Api {
             revocations: store.revocations().map_err(internal)?,
             memberships: store.memberships().map_err(internal)?,
             map: kernel.maps.get(),
+            processes: store.processes().map_err(internal)?,
         }))
     }
 }
@@ -432,6 +433,12 @@ fn take_trust(kernel: &Arc<Kernel>, records: TrustSync) {
         let service = m.service.clone();
         if let Err(e) = memberships::take(kernel, m, sig) {
             tracing::warn!(%service, error = %e.message(), "a membership of the control partition was not taken");
+        }
+    }
+    for record in records.processes {
+        let name = record.name.clone();
+        if let Err(e) = kernel.processes.take(kernel, record) {
+            tracing::warn!(process = %name, error = %e.message(), "a process of the control partition was not taken");
         }
     }
     if let Some(map) = records.map {

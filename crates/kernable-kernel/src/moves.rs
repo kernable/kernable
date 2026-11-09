@@ -628,6 +628,10 @@ async fn import(
     let tenant = m.tenant.clone();
     let scheduled =
         tokio::task::spawn_blocking(move || crate::timers::route_tenant(&k, &tenant)).await??;
+    // Its running cases too.
+    kernel
+        .engine
+        .send(crate::process_engine::Input::Arrived(m.tenant.clone()));
     tracing::warn!(tenant = %m.tenant, from = %m.from, source_head, target_after, after, global_keys = keys, scheduled, "a moving tenant is copied here");
     Ok(())
 }

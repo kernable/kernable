@@ -26,7 +26,14 @@ message LogRecord {
     TenantImportedRecord tenant_imported = 15;
     TenantIndexRecord tenant_index = 16;
     ProcessRecord process = 17;
+    ProcessPositionRecord process_position = 18;
   }
+}
+
+// How far the process engine has handled the log (design/processes.md, stage 2): after a
+// restart or a failover it goes on after this position. The newest record wins.
+message ProcessPositionRecord {
+  uint64 position = 1;
 }
 
 // A business process (design/processes.md). With a `version`: that version of its model, as

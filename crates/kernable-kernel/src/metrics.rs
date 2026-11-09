@@ -260,6 +260,7 @@ pub(crate) fn render(kernel: &Kernel) -> String {
         "1 while the kernel is ready: every aggregate that counts has a worker, every listener that counts is connected and caught up, and it is not shutting down.",
         vec![(String::new(), kernel.readiness().is_ok() as u64)],
     );
+    crate::process_engine::render(kernel, &mut out);
     out
 }
 

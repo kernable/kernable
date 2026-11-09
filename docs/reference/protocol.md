@@ -259,6 +259,27 @@ Business processes, run by the kernel (design/processes.md).
 |---|---|---|---|
 | `Register` | `ProcessRegistration` | `ProcessRegistered` | Registers a process model (JSON, see design/processes.md "The model format"). Signed over kernable.v1.process by a key granted `process` for the process's qualified name, and `submit` for each command, `query` for each query and `listen` for each event the model names; valid 60 s around issued_at. A model equal to the newest version registers nothing new; a different one becomes the next version. Running cases stay on their version. Errors: UNAUTHENTICATED, PERMISSION_DENIED, INVALID_ARGUMENT (the model is invalid: the message names the step and why; a command type no worker registered and no membership lists). |
 | `Remove` | `ProcessRemoval` | `ProcessRemoved` | Removes a process: it starts no new cases, its running cases finish (as when a membership no longer lists it). Signed over kernable.v1.process_remove by a key granted `process` for it; valid 60 s around issued_at. A later registration makes it active again. Errors: UNAUTHENTICATED, PERMISSION_DENIED, NOT_FOUND (no such process). |
+| `Resolve` | `ProcessResolution` | `ProcessResolved` | Resolves a case's incident (design/processes.md, "Incidents"): `retry` runs its step again (a new attempt), `skip` goes on to the step's `next` (refused for a step without a single next), `cancel` ends the case with the end `cancelled` (also a case without an incident). Signed over kernable.v1.process_resolve by a key granted `process` for the process; valid 60 s around issued_at. Errors: UNAUTHENTICATED, PERMISSION_DENIED, NOT_FOUND (no such running case), FAILED_PRECONDITION (no incident to retry or skip; a step without a single next; the case's ID names cases of several tenants: give the tenant). |
+
+### ProcessResolution
+
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `process` |  `string` | 1 | qualified: `shop.fulfilment` |
+| `case_id` |  `string` | 2 | the case's aggregate ID: its key and sequence, `o1#1` |
+| `tenant_id` |  `string` | 3 | the case's tenant; empty: the one tenant that has the case |
+| `action` |  `string` | 4 | retry \| skip \| cancel |
+| `issued_at` |  `int64` | 5 | ms since epoch |
+| `sig` |  `Signature` | 6 | over kernable.v1.process_resolve |
+| `protocol` |  `uint32` | 7 | not signed |
+
+### ProcessResolved
+
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `tenant_id` |  `string` | 1 | the case's tenant |
 
 ### ProcessRemoval
 

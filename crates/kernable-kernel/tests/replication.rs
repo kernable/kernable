@@ -471,6 +471,91 @@ async fn processes_reach_the_standby() {
     );
 }
 
+/// A case waiting on the primary goes on on the promoted standby: its events, the engine's
+/// position and the case's running fact are on the standby before anyone is told.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_case_goes_on_after_a_failover() {
+    use kernable_core::proto::{ProcessRegistration, process_service_client::ProcessServiceClient};
+    let dir = Dir::new("case-failover");
+    let mut primary_config = config(&dir.0, "primary", 3);
+    primary_config.replication.sync = true;
+    let primary = open(&primary_config).await;
+    let standby_config = standby_config(&dir.0, &primary_config);
+    let following = tokio::spawn(standby::run(standby_config.clone()));
+    until("the standby is in sync", || in_sync(&standby_config)).await;
+    for seed in [1, 2, 4, 5, 6] {
+        primary.grant(default_grant(&key(seed)).unwrap()).unwrap();
+    }
+    let deployer = grant(
+        &key(21),
+        &[
+            ("process", &["orders.*"]),
+            ("submit", &["orders.*"]),
+            ("listen", &["orders.*"]),
+        ],
+    );
+    primary.grant(deployer.clone()).unwrap();
+    let worker = start_worker(primary_config.listen.clone(), TestWorker::honest()).await;
+    let model = serde_json::to_vec(&serde_json::json!({
+        "name": "orders.follow",
+        "start": {"on": "orders.OrderPlaced", "key": "aggregateId", "data": {"order": "aggregateId"}},
+        "steps": [
+            {"name": "added", "kind": "wait", "event": "orders.ItemAdded", "key": "aggregateId", "next": "more"},
+            {"name": "more", "kind": "command", "command": "orders.Order.AddItem", "aggregate": "case.order", "next": "done"},
+            {"name": "done", "kind": "end"}
+        ]
+    }))
+    .unwrap();
+    let issued_at = issued_now();
+    let request = ProcessRegistration {
+        sig: Some(signing::sign(
+            &key(21),
+            &signing::process_message(&model, issued_at),
+        )),
+        model,
+        issued_at,
+        protocol: kernable_core::PROTOCOL,
+    };
+    ProcessServiceClient::new(transport::connect(&primary_config.listen).await.unwrap())
+        .register(presenting(request, &deployer))
+        .await
+        .unwrap();
+    submit(&primary_config.listen, place(1)).await.unwrap();
+    let waiting = || {
+        held(&standby_config)
+            .read_stream("t1", "process", "orders.follow", "o1#1")
+            .unwrap()
+            .iter()
+            .any(|e| e.event_type == "StepReached")
+    };
+    until("the case waits, on the standby too", waiting).await;
+    worker.abort();
+
+    promote(&standby_config.listen).await.unwrap();
+    following.await.unwrap().unwrap();
+    let _new = open(&standby_config).await;
+    start_worker(standby_config.listen.clone(), TestWorker::honest()).await;
+    let added = submit(
+        &standby_config.listen,
+        signed(command("c-add", "AddItem", "o1"), &key(1)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(committed_versions(&added), [2]);
+    let ended = || {
+        held(&standby_config)
+            .read_stream("t1", "process", "orders.follow", "o1#1")
+            .unwrap()
+            .iter()
+            .any(|e| e.event_type == "ProcessEnded")
+    };
+    until("the case ended on the promoted standby", ended).await;
+    let events = held(&standby_config)
+        .read_stream("t1", "orders", "Order", "o1")
+        .unwrap();
+    assert_eq!(events.len(), 3, "the process added one more item");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_standby_without_a_grant_for_replicate_is_refused() {
     let dir = Dir::new("refused");

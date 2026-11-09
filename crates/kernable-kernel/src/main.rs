@@ -163,7 +163,24 @@ Deploy and inspect:
                                           version or <version>, as indented JSON. Exit 1 if there
                                           is no such process or version.
 
+  kernable processes cases <store> <process> [--state running|waiting|incident|ended]
+                                          Lists the cases of a process: tenant, case ID, state
+                                          (running: a command sent or a query asked; waiting: for an
+                                          event or a time; incident; ended) and the step it is at
+                                          (or how it ended). Reads every event: an operator's tool
+                                          until the UI shows cases.
+  kernable processes case <store> <process> <case>
+                                          Prints a case's events as a timeline: when, version, event
+                                          type and its data.
+
 Processes, with the kernel running:
+  kernable processes retry|skip|cancel <addr> <key> <process> <case> [--tenant <tenant>]
+                                          Resolves a case's incident: retry runs its step again,
+                                          skip goes on to the step's next step, cancel ends the case
+                                          (also without an incident). Signed with <key>, whose grant
+                                          needs process=<process>; the grant file next to the key is
+                                          sent along. --tenant names the case's tenant when its ID is
+                                          used in several.
   kernable processes remove <addr> <key> <name>
                                           Removes a process: it starts no new cases, its running
                                           cases finish; registering it again makes it active.
@@ -462,6 +479,46 @@ async fn main() -> ExitCode {
         ["processes", "show", store, name] => processes_show(store, name, None),
         ["processes", "show", store, name, version] => processes_show(store, name, Some(version)),
         ["processes", "remove", addr, key, name] => processes_remove(addr, key, name).await,
+        [
+            "processes",
+            action @ ("retry" | "skip" | "cancel"),
+            addr,
+            key,
+            process,
+            case,
+            rest @ ..,
+        ] => {
+            let tenant = match rest {
+                [] => Some(""),
+                ["--tenant", tenant] => Some(*tenant),
+                _ => None,
+            };
+            match tenant {
+                Some(tenant) => processes_resolve(addr, key, process, case, tenant, action).await,
+                None => {
+                    eprintln!("{USAGE}");
+                    return ExitCode::from(2);
+                }
+            }
+        }
+        ["processes", "cases", store, process, rest @ ..] => {
+            let state = match rest {
+                [] => Some(None),
+                [
+                    "--state",
+                    s @ ("running" | "waiting" | "incident" | "ended"),
+                ] => Some(Some(*s)),
+                _ => None,
+            };
+            match state {
+                Some(state) => processes_cases(store, process, state),
+                None => {
+                    eprintln!("{USAGE}");
+                    return ExitCode::from(2);
+                }
+            }
+        }
+        ["processes", "case", store, process, case] => processes_case(store, process, case),
         ["services", store] => services(store),
         ["apply", addr, key, manifest] => apply(addr, key, manifest).await,
         ["workers", "remove", store, aggregate] => remove_worker(store, aggregate),
@@ -2183,6 +2240,90 @@ fn processes_show(store: &str, name: &str, version: Option<&str>) -> Result<bool
     let model: serde_json::Value = serde_json::from_slice(&record.model)?;
     println!("{}", serde_json::to_string_pretty(&model)?);
     Ok(true)
+}
+
+/// Resolves a case's incident, signed with `key_path` (granted `process` for the process).
+async fn processes_resolve(
+    addr: &str,
+    key_path: &str,
+    process: &str,
+    case: &str,
+    tenant: &str,
+    action: &str,
+) -> Result<bool> {
+    let key = signing::read_signing_key(key_path)?;
+    let issued_at = now_ms();
+    let mut request = tonic::Request::new(kernable_core::proto::ProcessResolution {
+        process: process.to_owned(),
+        case_id: case.to_owned(),
+        tenant_id: tenant.to_owned(),
+        action: action.to_owned(),
+        issued_at,
+        sig: Some(signing::sign(
+            &key,
+            &signing::process_resolve_message(process, case, tenant, action, issued_at),
+        )),
+        protocol: kernable_core::PROTOCOL,
+    });
+    with_key_grant(&mut request, key_path)?;
+    let resolved = kernable_core::proto::process_service_client::ProcessServiceClient::new(
+        connect(addr).await?,
+    )
+    .resolve(request)
+    .await?
+    .into_inner();
+    let done = match action {
+        "retry" => "retrying",
+        "skip" => "skipped the step of",
+        _ => "cancelled",
+    };
+    println!(
+        "{done} case {case} of {process} (tenant {})",
+        resolved.tenant_id
+    );
+    Ok(true)
+}
+
+fn processes_cases(store: &str, process: &str, state: Option<&str>) -> Result<bool> {
+    let store = kernable_store::open_read_only(store)?;
+    for ((tenant, case), events) in kernable_kernel::process_engine::cases_in(&*store, process)? {
+        let (now, step) = kernable_kernel::process_engine::case_state(&events);
+        if state.is_some_and(|s| s != now) {
+            continue;
+        }
+        let since = events.last().map_or(0, |e| e.created_at);
+        println!(
+            "{tenant} {case} {now} {step} (since {})",
+            config::utc(since)
+        );
+    }
+    Ok(true)
+}
+
+fn processes_case(store: &str, process: &str, case: &str) -> Result<bool> {
+    let store = kernable_store::open_read_only(store)?;
+    let cases = kernable_kernel::process_engine::cases_in(&*store, process)?;
+    let mut found = false;
+    for ((tenant, id), events) in cases {
+        if id != case {
+            continue;
+        }
+        found = true;
+        println!("tenant {tenant}");
+        for e in events {
+            println!(
+                "{} v{} {} {}",
+                config::utc(e.created_at),
+                e.version,
+                e.event_type,
+                String::from_utf8_lossy(&e.payload)
+            );
+        }
+    }
+    if !found {
+        println!("no case {case} of process {process}");
+    }
+    Ok(found)
 }
 
 /// Removes a process, signed with `key_path` (granted `process` for it).

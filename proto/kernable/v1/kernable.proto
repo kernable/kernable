@@ -249,6 +249,28 @@ service ProcessService {
   // it; valid 60 s around issued_at. A later registration makes it active again. Errors:
   // UNAUTHENTICATED, PERMISSION_DENIED, NOT_FOUND (no such process).
   rpc Remove(ProcessRemoval) returns (ProcessRemoved);
+  // Resolves a case's incident (design/processes.md, "Incidents"): `retry` runs its step again
+  // (a new attempt), `skip` goes on to the step's `next` (refused for a step without a single
+  // next), `cancel` ends the case with the end `cancelled` (also a case without an incident).
+  // Signed over kernable.v1.process_resolve by a key granted `process` for the process; valid
+  // 60 s around issued_at. Errors: UNAUTHENTICATED, PERMISSION_DENIED, NOT_FOUND (no such
+  // running case), FAILED_PRECONDITION (no incident to retry or skip; a step without a single
+  // next; the case's ID names cases of several tenants: give the tenant).
+  rpc Resolve(ProcessResolution) returns (ProcessResolved);
+}
+
+message ProcessResolution {
+  string process = 1;    // qualified: `shop.fulfilment`
+  string case_id = 2;    // the case's aggregate ID: its key and sequence, `o1#1`
+  string tenant_id = 3;  // the case's tenant; empty: the one tenant that has the case
+  string action = 4;     // retry | skip | cancel
+  int64 issued_at = 5;   // ms since epoch
+  Signature sig = 6;     // over kernable.v1.process_resolve
+  uint32 protocol = 7;   // not signed
+}
+
+message ProcessResolved {
+  string tenant_id = 1;  // the case's tenant
 }
 
 message ProcessRemoval {

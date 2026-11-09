@@ -239,6 +239,23 @@ Decided 2026-11-09:
   the request itself still rests on the kernel's signature; how the key reaches the engine is
   decided while building.
 
+### With the kit: mechanics (stage 3, decided 2026-11-09)
+
+- **The kernel announces processes in the log:** registering a process's first version, a new
+  version, removing it and re-activating it write `ProcessRegistered` {name, version} and
+  `ProcessRemoved` {name} to a registry stream of the domain `process`. The UI and the audit see
+  them too.
+- **The kernel learns as whom a process acts by a call:** `ProcessService.Act` {name, context},
+  signed by a key granted `process` for it, sets the request context the engine's commands and
+  queries carry (sender tenant, identity, session). Kept with the process's state, replicated to
+  every partition. Without it a process acts as `process:<name>`. The kernel knows nothing of the
+  kit.
+- **The kit reacts:** a reactor of the `identity` domain takes `ProcessRegistered` for a process it
+  has no identity for, creates its identity in the platform tenant (kind `process`, no
+  permissions) and an API key (the secret discarded: only the key's ID travels), and calls `Act`
+  with { senderTenant: platform, senderIdentity, senderSession: the key's ID }. Revoking that key
+  stops the process at once: its commands are refused, the cases show incidents.
+
 ## The UI's views (read-only)
 
 Decided 2026-11-09:
@@ -276,11 +293,11 @@ Decided 2026-11-09:
 
 ## A case in the log
 
-Each case is an aggregate `<process>` of the domain `process`, its ID the case's key, under the
-tenant of the event that started it. Its events: `ProcessStarted` {version, data},
+Each case is an aggregate `<process>` of the domain `process` (`shop.fulfilment`), its ID
+`<key>#<n>` (`o1#1`, then `o1#2` for the key's next case), under the tenant of the event that started it. Its events: `ProcessStarted` {version, data},
 `StepReached` {step}, `CommandSent` {step, commandId}, `StepCompleted` {step, outcome, data},
 `TimerSet` {step, at}, `TimerFired` {step}, `IncidentRaised` {step, code, message},
-`IncidentResolved` {action: retry · skip · cancel, by}, `ProcessEnded` {end}. The engine keeps an
+`IncidentResolved` {action: retry · skip · cancel, by}, `EventKept` {event, position} (an early event a later wait may need), `ProcessEnded` {end}. The kernel writes them itself, signed with its key (`kernable verify` refuses `process` events signed by another key); a running case holds the fact `running`, so a restart replays only running cases. The engine keeps an
 index of waiting cases by (event type, key), rebuilt from these events.
 
 ## Open, decided step by step while building

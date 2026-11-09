@@ -20,9 +20,9 @@ use kernable_core::{
         AggregateIndex, Attribute, CheckpointRecord, Command, CommandResult, Committed,
         CommittedRecord, DataChangedRecord, EnqueuedRecord, Event, GlobalKeyRecord, Grant,
         ListenerRecord, LogRecord, LoggedEvent, Membership, MembershipRecord, Middleware, NewEvent,
-        ParkedEvent, PartitionMap, ProcessRecord, Rejected, RejectedRecord, ReplicatedRecord,
-        ReplicationHeadRecord, RequestContext, Requirement, RevocationRecord, Signature,
-        StreamIndex, TenantImportedRecord, TenantIndexRecord, When, WorkerRecord,
+        ParkedEvent, PartitionMap, ProcessPositionRecord, ProcessRecord, Rejected, RejectedRecord,
+        ReplicatedRecord, ReplicationHeadRecord, RequestContext, Requirement, RevocationRecord,
+        Signature, StreamIndex, TenantImportedRecord, TenantIndexRecord, When, WorkerRecord,
         command_result::Outcome, log_record::Record,
     },
     signing::{self, GENESIS},
@@ -191,6 +191,11 @@ CREATE TABLE IF NOT EXISTS process_versions (
     recorded_at INTEGER NOT NULL, -- ms since epoch
     PRIMARY KEY (name, version)
 ) STRICT;
+-- How far the process engine has handled the log: one row.
+CREATE TABLE IF NOT EXISTS process_position (
+    id       INTEGER PRIMARY KEY CHECK (id = 1),
+    position INTEGER NOT NULL
+) STRICT;
 -- The newest change of state per process; a process without a row is active.
 CREATE TABLE IF NOT EXISTS process_states (
     name        TEXT PRIMARY KEY,
@@ -216,6 +221,8 @@ CREATE TABLE IF NOT EXISTS aggregate_index (
     PRIMARY KEY (tenant_id, domain, aggregate_type, aggregate_id)
 ) STRICT;
 CREATE INDEX IF NOT EXISTS aggregate_index_personal ON aggregate_index (personal) WHERE personal = 1;
+-- The streams of one domain that hold something: the process engine's running cases.
+CREATE INDEX IF NOT EXISTS aggregate_index_domain ON aggregate_index (domain);
 -- The holder of every unique key that is not personal, by the key's identity, kept with
 -- aggregate_index: a commit looks keys up here instead of keeping them all in memory.
 CREATE TABLE IF NOT EXISTS unique_keys (
@@ -657,6 +664,29 @@ impl Store for SqliteStore {
         })
     }
 
+    fn domain_index(&self, domain: &str) -> Result<Vec<(StreamId, AggregateIndex)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT tenant_id, domain, aggregate_type, aggregate_id, record FROM aggregate_index
+             WHERE domain = ?1 ORDER BY tenant_id, aggregate_type, aggregate_id",
+        )?;
+        let rows = stmt.query_map([domain], |r| {
+            let stream = StreamId {
+                tenant_id: r.get(0)?,
+                domain: r.get(1)?,
+                aggregate_type: r.get(2)?,
+                aggregate_id: r.get(3)?,
+            };
+            Ok((stream, r.get::<_, Vec<u8>>(4)?))
+        })?;
+        let mut index = Vec::new();
+        for row in rows {
+            let (stream, record) = row?;
+            index.push((stream, AggregateIndex::decode(record.as_slice())?));
+        }
+        Ok(index)
+    }
+
     fn index(&self) -> Result<Vec<(StreamId, AggregateIndex)>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
@@ -981,6 +1011,25 @@ impl Store for SqliteStore {
     }
 
     // ---- processes ----
+
+    fn process_position(&self) -> Result<u64> {
+        read_process_position(&self.conn())
+    }
+
+    fn save_process_position(&self, position: u64) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let before = read_process_position(&tx)?;
+        save_process_position_tx(&tx, position)?;
+        let head = self.file_with(
+            &tx,
+            || vec![crate::undo::Step::ProcessPosition(before)],
+            || vec![Record::ProcessPosition(ProcessPositionRecord { position })],
+        )?;
+        tx.commit()?;
+        self.advance(head);
+        Ok(())
+    }
 
     fn processes(&self) -> Result<Vec<ProcessRecord>> {
         read_processes(&self.conn())
@@ -2194,6 +2243,25 @@ pub(crate) fn save_worker_tx(tx: &Connection, w: &WorkerRecord) -> Result<()> {
 }
 
 /// Replaces the membership of the record's service.
+fn read_process_position(conn: &Connection) -> Result<u64> {
+    Ok(conn
+        .query_row(
+            "SELECT position FROM process_position WHERE id = 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(0))
+}
+
+pub(crate) fn save_process_position_tx(tx: &Connection, position: u64) -> Result<()> {
+    tx.execute(
+        "INSERT OR REPLACE INTO process_position (id, position) VALUES (1, ?1)",
+        [position],
+    )?;
+    Ok(())
+}
+
 /// Keeps a process version, or replaces a process's state; false if the version is kept already.
 fn save_process_tx(tx: &Connection, p: &ProcessRecord) -> Result<bool> {
     let sig = p.sig.clone().unwrap_or_default();
@@ -2548,6 +2616,7 @@ fn apply_record(tx: &Transaction<'_>, record: &Record) -> Result<()> {
         Record::Process(p) => {
             save_process_tx(tx, p)?;
         }
+        Record::ProcessPosition(p) => save_process_position_tx(tx, p.position)?,
         Record::Revocation(r) => {
             revoke_tx(tx, r)?;
         }
@@ -2988,6 +3057,10 @@ fn image_records(conn: &Connection, f: &mut dyn FnMut(Record) -> Result<()>) -> 
     }
     for p in read_processes(conn)? {
         f(Record::Process(p))?;
+    }
+    let position = read_process_position(conn)?;
+    if position > 0 {
+        f(Record::ProcessPosition(ProcessPositionRecord { position }))?;
     }
     for w in read_workers(conn)? {
         f(Record::Worker(w))?;

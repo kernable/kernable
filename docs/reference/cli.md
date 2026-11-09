@@ -173,7 +173,31 @@ kernable processes show <store> <name> [<version>]
 
 Prints a process's model as registered, the newest version or `<version>`, as indented JSON. Exit 1 if there is no such process or version.
 
+### `kernable processes cases`
+
+```text
+kernable processes cases <store> <process> [--state running|waiting|incident|ended]
+```
+
+Lists the cases of a process: tenant, case ID, state (running: a command sent or a query asked; waiting: for an event or a time; incident; ended) and the step it is at (or how it ended). Reads every event: an operator's tool until the UI shows cases.
+
+### `kernable processes case`
+
+```text
+kernable processes case <store> <process> <case>
+```
+
+Prints a case's events as a timeline: when, version, event type and its data.
+
 ## Processes, with the kernel running
+
+### `kernable processes retry|skip|cancel`
+
+```text
+kernable processes retry|skip|cancel <addr> <key> <process> <case> [--tenant <tenant>]
+```
+
+Resolves a case's incident: retry runs its step again, skip goes on to the step's next step, cancel ends the case (also without an incident). Signed with `<key>`, whose grant needs `process=<process>`; the grant file next to the key is sent along. `--tenant` names the case's tenant when its ID is used in several.
 
 ### `kernable processes remove`
 

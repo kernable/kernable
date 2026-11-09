@@ -36,6 +36,7 @@ mod metrics;
 pub mod moves;
 pub mod node;
 pub mod partitions;
+pub mod process_engine;
 mod process_model;
 mod processes;
 mod queue;
@@ -263,6 +264,8 @@ pub struct Kernel {
     memberships: memberships::Memberships,
     /// Registered business processes (design/processes.md).
     processes: processes::Processes,
+    /// Runs the processes' cases (`process_engine.rs`).
+    engine: process_engine::Engine,
     queue: queue::Queue,
     metrics: metrics::Metrics,
     /// Listener positions over the last hour, for the UI.
@@ -405,9 +408,13 @@ impl Kernel {
             _ => Vec::new(),
         };
         for pending in store.pending()? {
-            if !arriving.contains(&pending.command.tenant_id)
-                || queue::scheduled(&pending.command, pending.received_at)
-            {
+            let scheduled = queue::scheduled(&pending.command, pending.received_at);
+            // A write of the process engine a crash cut short: no worker runs it; the engine
+            // writes it again under the same ID.
+            if pending.command.domain == process_engine::DOMAIN && !scheduled {
+                continue;
+            }
+            if !arriving.contains(&pending.command.tenant_id) || scheduled {
                 queue.push(pending.command, pending.received_at);
             }
         }
@@ -433,6 +440,7 @@ impl Kernel {
             workers,
             memberships,
             processes,
+            engine: Default::default(),
             queue,
             metrics: metrics::Metrics::default(),
             trend: trend::Trend::default(),
@@ -1057,6 +1065,16 @@ impl Kernel {
     }
 
     fn complete(self: &Arc<Self>, command: &Command, result: CommandResult) {
+        // A command a process sent: its case goes on.
+        if command
+            .command_id
+            .starts_with(process_engine::COMMAND_PREFIX)
+        {
+            self.engine.send(process_engine::Input::Completed(
+                command.command_id.clone(),
+                result.clone(),
+            ));
+        }
         self.observe(command, &result);
         // The aggregate is free again: its next queued command can be leased now.
         self.work.notify_waiters();
@@ -1475,6 +1493,7 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
         () = partitions::follow_control(&kernel) => unreachable!(),
         () = moves::follow_moves(&kernel) => unreachable!(),
         () = timers::run(&kernel) => unreachable!(),
+        () = process_engine::run(&kernel) => unreachable!(),
         result = serve_metrics(&kernel) => result,
         result = serve_ui(&kernel) => result,
     }
@@ -2380,104 +2399,118 @@ impl QueryService for Api {
         if query.wait_only {
             return wait_only(kernel, &name, query, caller.as_ref()).await;
         }
-        let request = middleware_call::Request::Query(query.clone());
-        if let Some(reason) = kernel
-            .check(&name, &query.query_id, When::Before, request, &[], None)
-            .await?
-        {
-            kernel.metrics.queries_rejected.fetch_add(1, Relaxed);
-            kernel.observe_query(&name, &query, &reason);
-            return Ok(Response::new(QueryResult {
-                query_id: query.query_id,
-                outcome: Some(query_result::Outcome::Rejected(reason)),
-            }));
-        }
-        if !kernel.listeners.answers(&name, &query, caller.as_ref()) {
-            kernel.metrics.queries_failed.fetch_add(1, Relaxed);
-            if let Some(c) = &caller
-                && kernel.listeners.answers(&name, &query, None)
-            {
-                return Err(Status::failed_precondition(format!(
-                    "{name} is answered only by {} itself or by listeners after it: a query \
-                     from its handler would wait behind itself",
-                    c.name
-                )));
-            }
-            return Err(Status::unavailable(format!("no read model answers {name}")));
-        }
-
-        let started = Instant::now();
-        let timeout = Duration::from_millis(kernel.config().query_timeout_ms);
-        let answered = tokio::time::timeout(timeout, async {
-            // Wait until a read model that answers the query has caught up.
-            let dispatched = loop {
-                let progressed = kernel.listeners.progress.notified();
-                if let Some(d) = kernel.listeners.dispatch(&name, &query, caller.as_ref()) {
-                    break d;
-                }
-                progressed.await;
-            };
-            dispatched.call().await
-        })
-        .await;
-        let answer = match answered {
-            Ok(Ok(listeners::Reply::Answer(answer))) => answer,
-            Ok(Ok(listeners::Reply::Verdict(_))) => {
-                return Err(Status::internal(
-                    "the read model sent a verdict, not an answer",
-                ));
-            }
-            Ok(Err(status)) => {
-                kernel.metrics.queries_failed.fetch_add(1, Relaxed);
-                return Err(status);
-            }
-            Err(_) => {
-                kernel.metrics.queries_failed.fetch_add(1, Relaxed);
-                return Err(Status::deadline_exceeded(
-                    "no read model answered in time (or none has caught up to min_position)",
-                ));
-            }
-        };
-        kernel.metrics.query.record(started.elapsed());
-        let outcome = match answer.outcome {
-            Some(query_answer::Outcome::Response(r)) => {
-                // The middleware after it may still refuse the response; it fails closed.
-                let result = QueryResult {
-                    query_id: query.query_id.clone(),
-                    outcome: Some(query_result::Outcome::Response(r.clone())),
-                };
-                let request = middleware_call::Request::Query(query.clone());
-                let outcome = middleware_call::Outcome::QueryResult(result);
-                let checked = kernel
-                    .check(
-                        &name,
-                        &query.query_id,
-                        When::After,
-                        request,
-                        &[],
-                        Some(outcome),
-                    )
-                    .await?;
-                if let Some(reason) = checked {
-                    kernel.metrics.queries_rejected.fetch_add(1, Relaxed);
-                    query_result::Outcome::Rejected(reason)
-                } else {
-                    kernel.metrics.queries_answered.fetch_add(1, Relaxed);
-                    query_result::Outcome::Response(r)
-                }
-            }
-            Some(query_answer::Outcome::Rejected(r)) => {
-                kernel.metrics.queries_rejected.fetch_add(1, Relaxed);
-                kernel.observe_query(&name, &query, &r);
-                query_result::Outcome::Rejected(r)
-            }
-            None => return Err(Status::internal("empty answer")),
-        };
-        Ok(Response::new(QueryResult {
-            query_id: query.query_id,
-            outcome: Some(outcome),
-        }))
+        answer_query(kernel, &name, query, caller.as_ref())
+            .await
+            .map(Response::new)
     }
+}
+
+/// Runs `query` (of the qualified type `name`, authorized already) through the middleware
+/// chain and to a read model that answers it; for the Query RPC and the process engine.
+pub(crate) async fn answer_query(
+    kernel: &Arc<Kernel>,
+    name: &str,
+    query: QueryRequest,
+    caller: Option<&listeners::Caller>,
+) -> Result<QueryResult, Status> {
+    let name = name.to_owned();
+    let request = middleware_call::Request::Query(query.clone());
+    if let Some(reason) = kernel
+        .check(&name, &query.query_id, When::Before, request, &[], None)
+        .await?
+    {
+        kernel.metrics.queries_rejected.fetch_add(1, Relaxed);
+        kernel.observe_query(&name, &query, &reason);
+        return Ok(QueryResult {
+            query_id: query.query_id,
+            outcome: Some(query_result::Outcome::Rejected(reason)),
+        });
+    }
+    if !kernel.listeners.answers(&name, &query, caller) {
+        kernel.metrics.queries_failed.fetch_add(1, Relaxed);
+        if let Some(c) = caller
+            && kernel.listeners.answers(&name, &query, None)
+        {
+            return Err(Status::failed_precondition(format!(
+                "{name} is answered only by {} itself or by listeners after it: a query \
+                     from its handler would wait behind itself",
+                c.name
+            )));
+        }
+        return Err(Status::unavailable(format!("no read model answers {name}")));
+    }
+
+    let started = Instant::now();
+    let timeout = Duration::from_millis(kernel.config().query_timeout_ms);
+    let answered = tokio::time::timeout(timeout, async {
+        // Wait until a read model that answers the query has caught up.
+        let dispatched = loop {
+            let progressed = kernel.listeners.progress.notified();
+            if let Some(d) = kernel.listeners.dispatch(&name, &query, caller) {
+                break d;
+            }
+            progressed.await;
+        };
+        dispatched.call().await
+    })
+    .await;
+    let answer = match answered {
+        Ok(Ok(listeners::Reply::Answer(answer))) => answer,
+        Ok(Ok(listeners::Reply::Verdict(_))) => {
+            return Err(Status::internal(
+                "the read model sent a verdict, not an answer",
+            ));
+        }
+        Ok(Err(status)) => {
+            kernel.metrics.queries_failed.fetch_add(1, Relaxed);
+            return Err(status);
+        }
+        Err(_) => {
+            kernel.metrics.queries_failed.fetch_add(1, Relaxed);
+            return Err(Status::deadline_exceeded(
+                "no read model answered in time (or none has caught up to min_position)",
+            ));
+        }
+    };
+    kernel.metrics.query.record(started.elapsed());
+    let outcome = match answer.outcome {
+        Some(query_answer::Outcome::Response(r)) => {
+            // The middleware after it may still refuse the response; it fails closed.
+            let result = QueryResult {
+                query_id: query.query_id.clone(),
+                outcome: Some(query_result::Outcome::Response(r.clone())),
+            };
+            let request = middleware_call::Request::Query(query.clone());
+            let outcome = middleware_call::Outcome::QueryResult(result);
+            let checked = kernel
+                .check(
+                    &name,
+                    &query.query_id,
+                    When::After,
+                    request,
+                    &[],
+                    Some(outcome),
+                )
+                .await?;
+            if let Some(reason) = checked {
+                kernel.metrics.queries_rejected.fetch_add(1, Relaxed);
+                query_result::Outcome::Rejected(reason)
+            } else {
+                kernel.metrics.queries_answered.fetch_add(1, Relaxed);
+                query_result::Outcome::Response(r)
+            }
+        }
+        Some(query_answer::Outcome::Rejected(r)) => {
+            kernel.metrics.queries_rejected.fetch_add(1, Relaxed);
+            kernel.observe_query(&name, &query, &r);
+            query_result::Outcome::Rejected(r)
+        }
+        None => return Err(Status::internal("empty answer")),
+    };
+    Ok(QueryResult {
+        query_id: query.query_id,
+        outcome: Some(outcome),
+    })
 }
 
 #[tonic::async_trait]

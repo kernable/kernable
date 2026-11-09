@@ -46,6 +46,8 @@ pub(crate) struct Verifier {
     order: u64,
     /// Signatures still to check, on every core at once: they are most of a check's time.
     jobs: Vec<Job>,
+    /// Every key the kernel signed with: only these write the process engine's case events.
+    kernel_keys: Vec<String>,
 }
 
 /// A signature to check, and the problem it is if it does not hold.
@@ -109,6 +111,7 @@ impl Verifier {
             found: Vec::new(),
             order: 0,
             jobs: Vec::new(),
+            kernel_keys: kernel_key_ids.to_vec(),
         }
     }
 
@@ -270,6 +273,22 @@ impl Verifier {
                 first.global_position,
                 group.last().map_or(0, |e| e.global_position),
                 sig.key_id
+            ));
+        }
+        // The case events of the process engine (domain `process`) are the kernel's own.
+        // A moved tenant's copies keep the signatures of the kernel they were written on.
+        if first.domain == "process"
+            && first.origin_partition.is_empty()
+            && first
+                .producer_sig
+                .as_ref()
+                .is_none_or(|sig| !self.kernel_keys.contains(&sig.key_id))
+        {
+            self.problem(format!(
+                "command {}: events {}..={} of a process case not written by a kernel key",
+                first.command_id,
+                first.global_position,
+                group.last().map_or(0, |e| e.global_position)
             ));
         }
         let problem = format!(

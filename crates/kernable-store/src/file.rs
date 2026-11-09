@@ -44,9 +44,9 @@ use kernable_core::{
         AggregateIndex, CheckpointRecord, Command, CommandResult, Committed, CommittedRecord,
         DataChangedRecord, EnqueuedRecord, Event, FormatRecord, GlobalKeyRecord, Grant,
         ListenerRecord, LogRecord, LoggedEvent, MembershipRecord, NewEvent, PartitionMap,
-        ProcessRecord, Rejected, RejectedRecord, ReplicatedRecord, ReplicationHeadRecord,
-        RevocationRecord, Signature, StreamIndex, TenantImportedRecord, TenantIndexRecord,
-        WorkerRecord, command_result::Outcome, log_record::Record,
+        ProcessPositionRecord, ProcessRecord, Rejected, RejectedRecord, ReplicatedRecord,
+        ReplicationHeadRecord, RevocationRecord, Signature, StreamIndex, TenantImportedRecord,
+        TenantIndexRecord, WorkerRecord, command_result::Outcome, log_record::Record,
     },
     signing::{self, GENESIS},
 };
@@ -93,6 +93,8 @@ struct State {
     process_versions: BTreeMap<(String, u32), ProcessRecord>,
     /// The newest change of state per process.
     process_states: BTreeMap<String, ProcessRecord>,
+    /// How far the process engine has handled the log.
+    process_position: u64,
     revocations: Vec<RevocationRecord>,
     grants: BTreeMap<String, Grant>,
     /// What each stream holds, from its latest commit with an index; none if it holds nothing.
@@ -256,6 +258,7 @@ impl State {
                 let service = m.membership.as_ref().map(|m| m.service.clone());
                 self.memberships.insert(service.unwrap_or_default(), m);
             }
+            Record::ProcessPosition(p) => self.process_position = p.position,
             Record::Process(p) if p.version == 0 => {
                 self.process_states.insert(p.name.clone(), p);
             }
@@ -378,6 +381,7 @@ impl State {
             | Record::Worker(_)
             | Record::Membership(_)
             | Record::Process(_)
+            | Record::ProcessPosition(_)
             | Record::Grant(_)
             | Record::PartitionMap(_)
             | Record::GlobalKey(_)
@@ -1075,6 +1079,17 @@ impl Store for FileStore {
             .chain(state.process_states.values())
             .cloned()
             .collect())
+    }
+
+    fn process_position(&self) -> Result<u64> {
+        Ok(self.inner().state.process_position)
+    }
+
+    fn save_process_position(&self, position: u64) -> Result<()> {
+        append(
+            &mut self.inner(),
+            Record::ProcessPosition(ProcessPositionRecord { position }),
+        )
     }
 
     fn save_process(&self, process: &ProcessRecord) -> Result<()> {

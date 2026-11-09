@@ -69,6 +69,14 @@ impl Processes {
             .cloned()
     }
 
+    /// Every process.
+    pub(crate) fn all(&self) -> BTreeMap<String, Entry> {
+        self.all
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     /// Held while a process changes; a second change waits as a write waits for the standby.
     fn changing(&self) -> MutexGuard<'_, ()> {
         match self.changing.try_lock() {
@@ -166,6 +174,32 @@ impl Processes {
         Ok(true)
     }
 
+    /// Takes a process record of the control partition (S2): a version this kernel lacks, or a
+    /// state that differs from the one it holds.
+    pub(crate) fn take(&self, kernel: &Kernel, record: ProcessRecord) -> Result<(), Status> {
+        let _changing = self.changing();
+        let mut entry = self.get(&record.name).unwrap_or_default();
+        if record.version == 0 {
+            if entry.removed == record.removed {
+                return Ok(());
+            }
+            entry.removed = record.removed;
+        } else if entry.versions.iter().any(|v| v.version == record.version) {
+            return Ok(());
+        } else {
+            process_model::parse(&record.model)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            entry.versions.push(record.clone());
+            entry.versions.sort_by_key(|v| v.version);
+        }
+        kernel.store.save_process(&record).map_err(internal)?;
+        kernel.sync(0);
+        let name = record.name.clone();
+        self.set(&name, entry);
+        tracing::info!(process = %name, version = record.version, removed = record.removed, "process taken from the control partition");
+        Ok(())
+    }
+
     /// Removes the processes `before` listed that `after` (the membership of the same service
     /// applied now) no longer lists.
     pub(crate) fn unlisted(
@@ -178,6 +212,10 @@ impl Processes {
         let Some(before) = before else {
             return Ok(());
         };
+        // A partition takes the processes' states from the control partition.
+        if follows_control(kernel) {
+            return Ok(());
+        }
         for name in before
             .processes
             .iter()
@@ -192,6 +230,15 @@ impl Processes {
         }
         Ok(())
     }
+}
+
+/// Whether this kernel is a partition that takes its processes from the control partition.
+fn follows_control(kernel: &Kernel) -> bool {
+    kernel
+        .config
+        .partition
+        .as_ref()
+        .is_some_and(|p| p.control.is_some())
 }
 
 /// A change of state of process `name`.
@@ -297,6 +344,27 @@ pub(crate) fn register(
     let value: serde_json::Value = serde_json::from_slice(json)
         .map_err(|e| Status::invalid_argument(format!("the model is not JSON: {e}")))?;
     let canonical = process_model::canonical(&value);
+    // A partition holds the control partition's versions: it registers nothing of its own, but
+    // answers for a model the control partition has (an app connects to every partition).
+    if follows_control(kernel) {
+        let known = kernel.processes.get(&model.name).and_then(|e| {
+            e.versions
+                .iter()
+                .find(|v| v.canonical == canonical)
+                .cloned()
+        });
+        return match known {
+            Some(v) => Ok(ProcessRegistered {
+                name: model.name,
+                version: v.version,
+                new: false,
+            }),
+            None => Err(Status::failed_precondition(format!(
+                "process {}: register process models on the control partition; this partition                  takes them from there",
+                model.name
+            ))),
+        };
+    }
     let (version, new) =
         kernel
             .processes
@@ -362,9 +430,63 @@ impl ProcessService for Api {
                 req.name
             )));
         }
+        if follows_control(kernel) {
+            return Err(Status::failed_precondition(
+                "remove processes on the control partition; this partition takes them from there",
+            ));
+        }
         let removed = kernel
             .processes
             .remove(kernel, &req.name, req.issued_at, sig)?;
         Ok(Response::new(ProcessRemoved { removed }))
+    }
+
+    async fn resolve(
+        &self,
+        request: Request<kernable_core::proto::ProcessResolution>,
+    ) -> Result<Response<kernable_core::proto::ProcessResolved>, Status> {
+        let kernel = &self.0;
+        let metadata = request.metadata().clone();
+        let req = request.into_inner();
+        protocol(req.protocol)?;
+        let _running = kernel.request()?;
+        let sig = signed(
+            kernel,
+            &metadata,
+            req.sig.as_ref(),
+            &signing::process_resolve_message(
+                &req.process,
+                &req.case_id,
+                &req.tenant_id,
+                &req.action,
+                req.issued_at,
+            ),
+            req.issued_at,
+            "case resolution",
+        )?;
+        if !config::allowed(&kernel.permissions().process, &sig.key_id, &req.process) {
+            return Err(Status::permission_denied(format!(
+                "key may not resolve cases of process {}: it needs a grant process for it",
+                req.process
+            )));
+        }
+        if !req.tenant_id.is_empty() {
+            kernel.owns(&req.tenant_id)?;
+        }
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        kernel.engine.send(crate::process_engine::Input::Resolve {
+            process: req.process,
+            case_id: req.case_id,
+            tenant: req.tenant_id,
+            action: req.action,
+            by: sig.key_id.clone(),
+            reply,
+        });
+        let tenant_id = answer
+            .await
+            .map_err(|_| Status::unavailable("the process engine does not run; retry"))??;
+        Ok(Response::new(kernable_core::proto::ProcessResolved {
+            tenant_id,
+        }))
     }
 }

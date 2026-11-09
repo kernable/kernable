@@ -427,6 +427,23 @@ pub fn process_message(model: &[u8], issued_at: i64) -> Vec<u8> {
         .0
 }
 
+/// What a key granted `process` signs to resolve a case's incident (`ProcessService.Resolve`).
+pub fn process_resolve_message(
+    process: &str,
+    case_id: &str,
+    tenant_id: &str,
+    action: &str,
+    issued_at: i64,
+) -> Vec<u8> {
+    Msg::new("kernable.v1.process_resolve")
+        .str(process)
+        .str(case_id)
+        .str(tenant_id)
+        .str(action)
+        .i64(issued_at)
+        .0
+}
+
 /// What a key granted `process` signs to remove a process (`ProcessService.Remove`).
 pub fn process_remove_message(name: &str, issued_at: i64) -> Vec<u8> {
     Msg::new("kernable.v1.process_remove")

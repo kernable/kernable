@@ -277,6 +277,16 @@ pub trait Store: Send + Sync {
     /// The unique keys and facts every stream holds now; streams that hold nothing are left out.
     fn index(&self) -> Result<Vec<(StreamId, AggregateIndex)>>;
 
+    /// What the streams of `domain` hold, like [`Store::index`] for one domain: the process
+    /// engine finds its running cases with it (they hold the fact `running`).
+    fn domain_index(&self, domain: &str) -> Result<Vec<(StreamId, AggregateIndex)>> {
+        Ok(self
+            .index()?
+            .into_iter()
+            .filter(|(s, _)| s.domain == domain)
+            .collect())
+    }
+
     /// What `stream` holds now; `None` if it holds nothing.
     fn stream_index(&self, stream: &StreamId) -> Result<Option<AggregateIndex>>;
 
@@ -408,6 +418,12 @@ pub trait Store: Send + Sync {
     /// Keeps a version of a process (a version already kept stays as it was), or with version 0
     /// replaces the process's state.
     fn save_process(&self, process: &ProcessRecord) -> Result<()>;
+
+    /// How far the process engine has handled the log; 0 before it ever did.
+    fn process_position(&self) -> Result<u64>;
+
+    /// Keeps how far the process engine has handled the log.
+    fn save_process_position(&self, position: u64) -> Result<()>;
 
     /// Signs the current head of the hash chain. Returns `None` while there are no events.
     fn checkpoint(&self, kernel: &SigningKey, now_ms: i64) -> Result<Option<Checkpoint>>;

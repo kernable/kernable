@@ -314,6 +314,19 @@ impl Store for FaultyStore {
         self.faults.write(|| self.inner.save_process(process))
     }
 
+    fn process_position(&self) -> Result<u64> {
+        self.inner.process_position()
+    }
+
+    fn save_process_position(&self, position: u64) -> Result<()> {
+        self.faults
+            .write(|| self.inner.save_process_position(position))
+    }
+
+    fn domain_index(&self, domain: &str) -> Result<Vec<(StreamId, AggregateIndex)>> {
+        self.inner.domain_index(domain)
+    }
+
     fn checkpoint(&self, kernel: &SigningKey, now_ms: i64) -> Result<Option<Checkpoint>> {
         self.faults.write(|| self.inner.checkpoint(kernel, now_ms))
     }

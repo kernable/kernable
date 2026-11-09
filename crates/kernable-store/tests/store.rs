@@ -313,6 +313,51 @@ fn process_versions_and_states_are_kept(store: &dyn Store) {
     );
 }
 
+/// The process engine's position, and the streams of one domain that hold something.
+fn the_engine_position_and_a_domain_index_are_kept(store: &dyn Store) {
+    assert_eq!(store.process_position().unwrap(), 0);
+    store.save_process_position(7).unwrap();
+    store.save_process_position(9).unwrap();
+    assert_eq!(store.process_position().unwrap(), 9);
+    let in_domain = |domain: &str, id: &str| Command {
+        domain: domain.into(),
+        aggregate_type: "shop.fulfilment".into(),
+        aggregate_id: id.into(),
+        ..cmd(id, "Advance")
+    };
+    let running = AggregateIndex {
+        facts: vec!["running".into()],
+        ..Default::default()
+    };
+    for (domain, id) in [("process", "o1#1"), ("process", "o2#1"), ("orders", "x")] {
+        store.enqueue(&in_domain(domain, id), 0).unwrap();
+        store
+            .commit(id, 0, &[ev("StepReached")], &sig(), Some(&running), 1)
+            .unwrap();
+    }
+    // Ended: o1#1 holds nothing any more.
+    let mut end = in_domain("process", "o1#1");
+    end.command_id = "o1#1-end".into();
+    store.enqueue(&end, 0).unwrap();
+    store
+        .commit(
+            "o1#1-end",
+            1,
+            &[ev("ProcessEnded")],
+            &sig(),
+            Some(&AggregateIndex::default()),
+            2,
+        )
+        .unwrap();
+    let held: Vec<String> = store
+        .domain_index("process")
+        .unwrap()
+        .into_iter()
+        .map(|(s, _)| s.aggregate_id)
+        .collect();
+    assert_eq!(held, ["o2#1"]);
+}
+
 fn memberships_are_replaced_per_service(store: &dyn Store) {
     assert!(store.memberships().unwrap().is_empty());
     let membership = |service: &str, listeners: &[&str], at: i64| MembershipRecord {
@@ -1054,6 +1099,7 @@ for_each_backend!(
     workers_are_saved_replaced_and_removed,
     memberships_are_replaced_per_service,
     process_versions_and_states_are_kept,
+    the_engine_position_and_a_domain_index_are_kept,
     the_newest_grant_per_key_is_kept,
     reading_after_a_version_returns_only_later_events,
     contexts_come_back_as_stored,

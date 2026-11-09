@@ -57,6 +57,8 @@ pub(crate) enum Step {
         aggregate_type: String,
         before: Option<Vec<u8>>,
     },
+    /// The process engine's position as it was.
+    ProcessPosition(u64),
     /// A write that is not taken back: a rewind stops before it.
     Irreversible(String),
 }
@@ -304,6 +306,9 @@ fn apply(tx: &Transaction<'_>, step: &Step) -> Result<()> {
                 )?;
             }
         },
+        Step::ProcessPosition(position) => {
+            crate::sqlite::save_process_position_tx(tx, *position)?;
+        }
         Step::Values(_) => {}
         Step::Irreversible(what) => {
             return Err(Error::Diverged(format!("{what} cannot be taken back")));
@@ -432,5 +437,6 @@ pub(crate) fn record_kind(record: &kernable_core::proto::log_record::Record) -> 
         Record::TenantImported(_) => "an imported tenant",
         Record::TenantIndex(_) => "a tenant's index",
         Record::Process(_) => "a process",
+        Record::ProcessPosition(_) => "the process engine's position",
     }
 }

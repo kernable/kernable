@@ -146,6 +146,13 @@ async fn due(kernel: &Arc<Kernel>, command: Command) {
             return;
         }
     }
+    // The process engine's own (a wait's timeout, a timer): it completes them with the case.
+    if command.domain == crate::process_engine::DOMAIN {
+        kernel
+            .engine
+            .send(crate::process_engine::Input::Fired(Box::new(command)));
+        return;
+    }
     let now = now_ms();
     if command.deliver_until != 0 && now > command.deliver_until {
         let reason = Rejected {
@@ -217,6 +224,30 @@ fn reject(
     kernel.queue.forget(id);
     kernel.complete(command, result.clone());
     Ok(result)
+}
+
+/// Withdraws the process engine's scheduled command `command_id` if it still waits: rejected
+/// `cancelled` (the awaited event came first). One due already reaches the engine, which finds
+/// its step over.
+pub(crate) fn withdraw(kernel: &Kernel, command_id: &str) {
+    if !kernel.queue.take_waiting(command_id) {
+        return;
+    }
+    let reason = Rejected {
+        code: "cancelled".into(),
+        message: "the process went on before it was due".into(),
+        ..Default::default()
+    };
+    match kernel.store.reject(command_id, reason) {
+        Ok(()) | Err(StoreError::NotPending) => {
+            kernel.sync(0);
+            kernel.queue.forget(command_id);
+        }
+        Err(e) => {
+            tracing::error!(command = %command_id, error = %e, "withdrawing a process timer failed");
+            kernel.queue.defer(command_id, now_ms() + RETRY_MS);
+        }
+    }
 }
 
 /// Routes the pending scheduled commands of `tenant`, moved here, to the timer list.
