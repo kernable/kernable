@@ -17,4 +17,5 @@ for part in ("kit", "example", "tests"):
 for file in ("README.md", "requirements.txt"):
     shutil.copyfile(kits / "python" / file, target / file)
 shutil.copytree(kits / "fixtures", target / "fixtures")
+shutil.copyfile(kits / "LICENSE", target / "LICENSE")
 print(f"packed the kit into {target}")

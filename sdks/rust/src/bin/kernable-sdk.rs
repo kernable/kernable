@@ -82,7 +82,7 @@ fn add_kit(dir: &str, force: bool) -> ExitCode {
         return ExitCode::FAILURE;
     }
     let header =
-        format!("// From the kernable kit {VERSION} (Apache-2.0, see LICENSE): yours to change.\n");
+        format!("// From the kernable kit {VERSION} (MIT, see LICENSE): yours to change.\n");
     for (name, bytes) in FILES {
         let path = target.join(name);
         std::fs::create_dir_all(path.parent().unwrap()).expect("the directory can be created");

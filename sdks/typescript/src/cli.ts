@@ -12,11 +12,11 @@ const sdk = join(here, "..");
 const version = (JSON.parse(readFileSync(join(sdk, "package.json"), "utf8")) as { version: string }).version;
 
 /** The kit's files: packed into the SDK (`kit/`), or in the repository when run from a checkout. */
-function kitSource(): { kit: string; fixtures: string } | null {
+function kitSource(): { kit: string; fixtures: string; license: string } | null {
   const packed = join(sdk, "kit");
-  if (existsSync(join(packed, "src"))) return { kit: packed, fixtures: join(packed, "fixtures") };
+  if (existsSync(join(packed, "src"))) return { kit: packed, fixtures: join(packed, "fixtures"), license: join(packed, "LICENSE") };
   const repo = join(sdk, "..", "..", "kits");
-  if (existsSync(join(repo, "typescript", "src"))) return { kit: join(repo, "typescript"), fixtures: join(repo, "fixtures") };
+  if (existsSync(join(repo, "typescript", "src"))) return { kit: join(repo, "typescript"), fixtures: join(repo, "fixtures"), license: join(repo, "LICENSE") };
   return null;
 }
 
@@ -24,7 +24,7 @@ function kitSource(): { kit: string; fixtures: string } | null {
 const PARTS = ["src", "example", join("test", "unit"), "README.md"];
 
 function header(file: string): string {
-  return `// From the kernable kit ${version} (Apache-2.0, see LICENSE): yours to change.\n`;
+  return `// From the kernable kit ${version} (MIT, see LICENSE): yours to change.\n`;
 }
 
 function copyTree(from: string, to: string, written: string[]): void {
@@ -70,7 +70,7 @@ function addKit(dir: string, force: boolean): number {
   }
   mkdirSync(join(dir, "fixtures"), { recursive: true });
   copyTree(source.fixtures, join(dir, "fixtures"), written);
-  cpSync(join(sdk, "LICENSE"), join(dir, "LICENSE"));
+  cpSync(source.license, join(dir, "LICENSE"));
   const kitPackage = JSON.parse(readFileSync(join(source.kit, "package.json"), "utf8")) as { dependencies: Record<string, string> };
   const deps = Object.entries(kitPackage.dependencies)
     .filter(([name]) => name !== "@kernable/sdk")

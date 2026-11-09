@@ -2,8 +2,7 @@
 name = "kernable-soak"
 version.workspace = true
 edition.workspace = true
-# The kernel and its tools: Functional Source License, Apache-2.0 after two years (BUSINESS_MODEL §2).
-license = "FSL-1.1-ALv2"
+license.workspace = true
 publish.workspace = true
 
 [[bin]]

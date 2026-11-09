@@ -66,7 +66,13 @@ fn main() {
                 .map(|(name, path)| (format!("fixtures/{name}"), path)),
         );
     }
-    let license = manifest.join("LICENSE");
+    // The kit carries its own LICENSE, copied next to it.
+    let license = if packed.join("LICENSE").exists() {
+        packed.join("LICENSE")
+    } else {
+        manifest.join("../../kits/LICENSE")
+    };
+    println!("cargo:rerun-if-changed={}", license.display());
     if license.exists() {
         files.push(("LICENSE".into(), license));
     }

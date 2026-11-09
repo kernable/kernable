@@ -27,10 +27,10 @@ def kit_source() -> dict[str, Path] | None:
     """The kit's files: packed into the SDK (`kernable/_kit`), or in the repository when run from a checkout."""
     packed = HERE / "_kit"
     if (packed / "kit").is_dir():
-        return {"kit": packed / "kit", "extras": packed, "fixtures": packed / "fixtures"}
+        return {"kit": packed / "kit", "extras": packed, "fixtures": packed / "fixtures", "license": packed / "LICENSE"}
     repo = HERE.parents[2] / "kits"
     if (repo / "python" / "kit").is_dir():
-        return {"kit": repo / "python" / "kit", "extras": repo / "python", "fixtures": repo / "fixtures"}
+        return {"kit": repo / "python" / "kit", "extras": repo / "python", "fixtures": repo / "fixtures", "license": repo / "LICENSE"}
     return None
 
 
@@ -43,7 +43,7 @@ _IMPORT = re.compile(r"^(\s*)(from|import) kit(\.|\s|$)", re.M)
 def _write_py(source: Path, target: Path, package: str) -> None:
     text = source.read_text()
     text = _IMPORT.sub(lambda m: f"{m.group(1)}{m.group(2)} {package}{m.group(3)}", text)
-    head = f"# From the kernable kit {_version()} (Apache-2.0, see LICENSE): yours to change.\n"
+    head = f"# From the kernable kit {_version()} (MIT, see LICENSE): yours to change.\n"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(text if text.startswith("# From the kernable kit") else head + text)
 
@@ -81,7 +81,7 @@ def add_kit(directory: str, force: bool) -> int:
         if (source["extras"] / extra).exists():
             _copy(source["extras"] / extra, target / extra, package, written)
     _copy(source["fixtures"], target / "fixtures", package, written)
-    _copy(HERE.parent / "LICENSE" if (HERE.parent / "LICENSE").exists() else source["extras"] / "LICENSE", target / "LICENSE", package, written)
+    _copy(source["license"], target / "LICENSE", package, written)
     print(f"The kernable kit {_version()} is in {target} ({len(written)} files), yours to change.\n"
           f"Add its dependencies:  pip install -r {target / 'requirements.txt'}\n"
           f"Its contract:          python -m unittest discover -s {target / 'tests'} -t {target.parent}\n"

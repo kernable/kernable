@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "description": "kernable's kits for TypeScript: tenancy, accounts, identities, groups, invitations and authorization, copied into your project by `kernable kits add typescript`",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "engines": {
     "node": ">=22.18"
   },

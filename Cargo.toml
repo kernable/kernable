@@ -5,8 +5,7 @@ members = ["crates/*", "sdks/rust", "sdks/rust-macros", "kits/rust", "docs/examp
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-# The protocol, kernable-core and the SDKs; the kernel and its tools set the FSL themselves.
-license = "Apache-2.0"
+license = "MIT"
 publish = false
 
 [workspace.dependencies]

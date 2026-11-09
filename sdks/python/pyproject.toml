@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "kernable-sdk"
 version = "0.1.0"
 description = "kernable SDK for Python: event-sourced business logic in Python on the kernable kernel"
-license = "Apache-2.0"
+license = "MIT"
 requires-python = ">=3.10"
 # The generated stubs in kernable/v1 need at least the versions they were generated with.
 dependencies = ["grpcio>=1.85", "protobuf>=7.35.1,<8", "cryptography>=43"]

@@ -3,7 +3,7 @@
 Most applications need the same groundwork before their own domain: tenants, people who sign in,
 their roles in a tenant, invitations, and a middleware that decides every request. kernable's
 **kit** is that groundwork as source code you copy into your project. It is yours afterwards:
-change fields, rules and flows, or delete what you do not need. It is open source (Apache-2.0).
+change fields, rules and flows, or delete what you do not need. It is open source under the MIT license, like all of kernable; `add kit` copies the license next to it.
 
 The kit is available for **TypeScript**, **Python** and **Rust**. Every kit writes the same
 events, so a TypeScript API and a Rust service, say, work on one log.

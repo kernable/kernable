@@ -23,9 +23,8 @@ one before it held.
    - crates.io: `kernable-sdk` depends on `kernable-core` and `kernable-sdk-macros`, which go
      first; `publish = false` in `[workspace.package]` has to give way to `publish = true` in
      these three crates only. The kernel, the store and the tools stay off crates.io.
-7. **Licenses.** Each archive and package carries its license files (FSL-1.1-ALv2 for the kernel,
-   the store and the tools; Apache-2.0 for the protocol, kernable-core and the SDKs; see
-   `LICENSE.md`).
+7. **Licenses.** Each archive and package carries the MIT license (`LICENSE`); each SDK also carries it
+   for its kit, as `kit/LICENSE`.
 8. **Notes.** What changed, what an operator must do (none before 1.0: no migrations), the
    SHA-256 sums.
 

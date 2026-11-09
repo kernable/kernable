@@ -30,7 +30,7 @@ for target in "${TARGETS[@]}"; do
   stage=$(mktemp -d)
   name=kernable-$VERSION-$target
   mkdir "$stage/$name"
-  cp "target/$target/release/kernable" README.md LICENSE.md LICENSE-FSL.md LICENSE-APACHE "$stage/$name/"
+  cp "target/$target/release/kernable" README.md LICENSE "$stage/$name/"
   COPYFILE_DISABLE=1 tar --no-xattrs -czf "$DIST/$name.tar.gz" -C "$stage" "$name"
   rm -rf "$stage"
 done

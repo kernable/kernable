@@ -76,4 +76,6 @@ The repository is private.
 
 ## License
 
-The kernel, the store and their tools: [FSL-1.1-ALv2](LICENSE-FSL.md); the core types and the SDKs: [Apache-2.0](LICENSE-APACHE). See [LICENSE.md](LICENSE.md).
+kernable is open source under the [MIT license](LICENSE): the kernel, the store, the tools, the SDKs, the kits and the examples.
+
+"kernable" and "kernable Cloud" are trademarks of kernable (proprietor: Artur Susdorf); the license grants no rights to the names.
