@@ -162,6 +162,66 @@ Decided 2026-11-09, usable without processes:
 - **Limits:** `at` at most `--schedule-max-days` (default 366) ahead; scheduled commands count
   towards the queue's limits like queued ones.
 
+## The model format (stage 1, decided 2026-11-09)
+
+What every SDK's builder produces and the kernel registers (`ProcessService.Register`, the JSON as
+bytes, signed). `proto/test-vectors/process-model.json` holds the example above as the builders
+must produce it; each SDK's tests build the example and compare structurally.
+
+```json
+{ "name": "shop.fulfilment",
+  "start": { "on": "shop.OrderSubmitted", "key": "aggregateId", "data": { "orderId": "aggregateId" } },
+  "steps": [ { "name": "confirm", "kind": "command", … }, … ] }
+```
+
+- **`name`**: qualified, `<domain>.<process>`; the process's domain is the domain it is defined on.
+- **`steps`**: an array in the order written in code (the UI and the statistics keep it). Every
+  step has `name` (unique; letters, digits, `_`, `-`) and `kind`. The builder resolves the implicit
+  order: every step but `end` carries an explicit `next` (or its kind's own targets), so the model
+  never depends on order.
+- **Types are qualified:** events and queries `<domain>.<Type>`, commands
+  `<domain>.<aggregateType>.<Type>`.
+- **References** are strings: `aggregateId` and `data.<path>` (the event being handled, in `start`
+  and `wait`), `case.<path>` (the case's data), and in a query step `answer` / `answer.<path>`.
+  Paths are dotted wire names (camelCase). A **literal** is `{ "value": <json> }` (builders:
+  `value(…)`).
+- **Mappings** (`data` of `start`, `wait`, `command`, `query`): an object of field → reference or
+  literal. `start.data` and `wait.data` write into the case's data; `command.data` and
+  `query.data` build the request's data.
+- **Conditions** (`decide`): `expr := or; or := and ("or" and)*; and := not ("and" not)*;
+  not := "not" not | cmp; cmp := operand (("==" | "!=" | "<" | "<=" | ">" | ">=") operand)?;
+  operand := ref | number | 'string' | "string" | true | false | null | "(" expr ")"`, refs
+  `case.<path>` only. Parsed by the kernel when registering (the SDKs only convert field names).
+- **Durations** are milliseconds in the model (`timeoutMs`, `afterMs`); builders take `30s`,
+  `15m`, `12h`, `3d`.
+
+| `kind` | Fields |
+|---|---|
+| `command` | `command`, `aggregate` (ref), `data`?, `rejected`? (code → step), `next` |
+| `wait` | `event`, `key` (ref into the event), `data`?, `timeoutMs`? with `onTimeout`, `next` |
+| `timer` | `afterMs` or `at` (a ref to a time in ms), `next` |
+| `decide` | `when`: [{ `if`, `next` }], `otherwise` |
+| `query` | `query`, `data`?, `answer`? (a path in the answer to match; none: the answer itself), `paths`: [{ `value`, `next` }], `into`? (case field to keep the answer in), `otherwise`? |
+| `end` | — |
+
+**Checked when registered** (kernel; the SDK checks what it can earlier): names, kinds and fields;
+every target names a step; every step is reachable from the start; references well-formed and
+`case.` fields written by an earlier step or the start on every path (else a warning, not an
+error: a field may be absent); conditions parse; durations positive; each command type known (a
+worker registered it or a membership lists its aggregate); the key holds the grants. A failure is
+INVALID_ARGUMENT naming the process, the step and the reason.
+
+**Versions** are numbered by the kernel: it compares the canonical JSON (keys sorted, no
+whitespace) with the newest version's; equal registers nothing, different is the next version.
+Kept as signed records like memberships, with when and by which key each version was registered.
+
+**Removing:** a service's membership lists its processes (`Membership.processes`). One it no
+longer lists starts no new cases, its running cases finish; `kernable processes remove <name>`
+does the same without memberships. A later registration makes it active again.
+
+**SDKs:** `domain.process(name)` returns the builder; `kernable.app({ domains })` registers the
+domains' processes after its workers are registered, and lists them in the membership it applies.
+
 ## As whom a process acts
 
 Decided 2026-11-09:

@@ -1,0 +1,104 @@
+{
+  "description": "The model the process builders of every SDK produce for design/processes.md's example (see \"The model format\"), compared structurally.",
+  "model": {
+    "name": "shop.fulfilment",
+    "start": {
+      "on": "shop.OrderSubmitted",
+      "key": "aggregateId",
+      "data": {
+        "orderId": "aggregateId",
+        "total": "data.total"
+      }
+    },
+    "steps": [
+      {
+        "name": "confirm",
+        "kind": "command",
+        "command": "shop.order.Confirm",
+        "aggregate": "case.orderId",
+        "next": "large"
+      },
+      {
+        "name": "large",
+        "kind": "decide",
+        "when": [
+          {
+            "if": "case.total > 1000",
+            "next": "approval"
+          }
+        ],
+        "otherwise": "paid"
+      },
+      {
+        "name": "approval",
+        "kind": "query",
+        "query": "shop.NeedsApproval",
+        "data": {
+          "orderId": "case.orderId"
+        },
+        "paths": [
+          {
+            "value": true,
+            "next": "approved"
+          },
+          {
+            "value": false,
+            "next": "paid"
+          }
+        ]
+      },
+      {
+        "name": "approved",
+        "kind": "wait",
+        "event": "shop.OrderApproved",
+        "key": "aggregateId",
+        "next": "paid"
+      },
+      {
+        "name": "paid",
+        "kind": "wait",
+        "event": "payments.PaymentReceived",
+        "key": "data.orderId",
+        "data": {
+          "paidAt": "data.at"
+        },
+        "timeoutMs": 259200000,
+        "onTimeout": "cancel",
+        "next": "ship"
+      },
+      {
+        "name": "ship",
+        "kind": "command",
+        "command": "shop.order.Ship",
+        "aggregate": "case.orderId",
+        "rejected": {
+          "out_of_stock": "notify"
+        },
+        "next": "done"
+      },
+      {
+        "name": "notify",
+        "kind": "command",
+        "command": "shop.order.NotifyDelay",
+        "aggregate": "case.orderId",
+        "next": "done"
+      },
+      {
+        "name": "cancel",
+        "kind": "command",
+        "command": "shop.order.Cancel",
+        "aggregate": "case.orderId",
+        "data": {
+          "reason": {
+            "value": "unpaid"
+          }
+        },
+        "next": "done"
+      },
+      {
+        "name": "done",
+        "kind": "end"
+      }
+    ]
+  }
+}

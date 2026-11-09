@@ -408,7 +408,20 @@ pub fn membership_message(m: &Membership) -> Vec<u8> {
     for a in &m.metadata {
         msg = msg.str(&a.key).str(&a.value);
     }
-    msg.i64(m.issued_at).0
+    msg = msg.i64(m.issued_at);
+    // Only when there are any, so a membership without processes signs as before.
+    if !m.processes.is_empty() {
+        msg = msg.str("processes").u64(m.processes.len() as u64);
+        for p in &m.processes {
+            msg = msg.str(p);
+        }
+    }
+    msg.0
+}
+
+/// What a key granted `process` signs to register a process model (its JSON as sent).
+pub fn process_message(model: &[u8], issued_at: i64) -> Vec<u8> {
+    Msg::new("kernable.v1.process").bytes(model).i64(issued_at).0
 }
 
 /// What a key granted `manage` signs to deliver a listener's parked events again, or dismiss

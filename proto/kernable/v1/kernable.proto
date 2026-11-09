@@ -234,6 +234,31 @@ message RevokeResponse {}
 
 // ---- memberships ----
 
+// Business processes, run by the kernel (design/processes.md).
+service ProcessService {
+  // Registers a process model (JSON, see design/processes.md "The model format"). Signed over
+  // kernable.v1.process by a key granted `process` for the process's qualified name, and
+  // `submit` for each command, `query` for each query and `listen` for each event the model
+  // names; valid 60 s around issued_at. A model equal to the newest version registers nothing
+  // new; a different one becomes the next version. Running cases stay on their version.
+  // Errors: UNAUTHENTICATED, PERMISSION_DENIED, INVALID_ARGUMENT (the model is invalid: the
+  // message names the step and why; a command type no worker registered and no membership lists).
+  rpc Register(ProcessRegistration) returns (ProcessRegistered);
+}
+
+message ProcessRegistration {
+  bytes model = 1;      // the model as JSON
+  int64 issued_at = 2;  // ms since epoch
+  Signature sig = 3;    // over kernable.v1.process
+  uint32 protocol = 4;  // not signed
+}
+
+message ProcessRegistered {
+  string name = 1;     // qualified: `shop.fulfilment`
+  uint32 version = 2;  // from 1
+  bool new = 3;        // false: equal to the newest version, nothing registered
+}
+
 // What a service consists of, applied by deploy tooling.
 service MembershipService {
   // Replaces the membership of `membership.service`. Signed over kernable.v1.membership by a key
@@ -266,6 +291,9 @@ message Membership {
   repeated string middlewares = 4;
   repeated Attribute metadata = 5;  // free, e.g. version and description; signed in order
   int64 issued_at = 6;              // ms since epoch
+  // Qualified process names (`shop.fulfilment`); signed only when there are any. A process a
+  // membership no longer lists starts no new cases; its running cases finish.
+  repeated string processes = 7;
 }
 
 message ApplyRequest {
