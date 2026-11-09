@@ -542,7 +542,7 @@ fn requirements_are_declared_for_a_command_of_the_aggregate() {
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct Fund {
-    pmdx_id: String,
+    isin: String,
     open: bool,
     wound_up: bool,
 }
@@ -565,7 +565,7 @@ async fn a_requirement_names_its_aggregate_by_a_key_or_wants_a_fact_absent() {
     let vehicle = funds.aggregate("Vehicle", Fund::default());
     vehicle
         .apply("Launched", |s, d: Value, _evt, _ctx| {
-            s.pmdx_id = field(&d, "pmdxId");
+            s.isin = field(&d, "isin");
             s.open = true;
         })
         .apply("WoundUp", |s, _: Value, _evt, _ctx| {
@@ -579,8 +579,8 @@ async fn a_requirement_names_its_aggregate_by_a_key_or_wants_a_fact_absent() {
             Ok(vec![NewEvent::new("WoundUp", ())])
         })
         .unique(
-            "pmdxId",
-            |s| (!s.pmdx_id.is_empty()).then(|| s.pmdx_id.to_lowercase()),
+            "isin",
+            |s| (!s.isin.is_empty()).then(|| s.isin.to_lowercase()),
             Unique::tenant(),
         )
         .fact("open", |s| s.open)
@@ -594,11 +594,11 @@ async fn a_requirement_names_its_aggregate_by_a_key_or_wants_a_fact_absent() {
         .command("Note", |_, _: Value, _cmd, _ctx| {
             Ok(vec![NewEvent::new("Noted", ())])
         })
-        // By the vehicle's PMDX ID, normalised as its key is.
+        // By the vehicle's ISIN, normalised as its key is.
         .requires("Open", |_, d: Value| {
-            let pmdx = field(&d, "vehicle").to_lowercase();
+            let isin = field(&d, "vehicle").to_lowercase();
             Some(Requirement::by_key(
-                "funds", "Vehicle", "pmdxId", &pmdx, "open",
+                "funds", "Vehicle", "isin", &isin, "open",
             ))
         })
         // Of the own domain, and absent.
@@ -618,17 +618,17 @@ async fn a_requirement_names_its_aggregate_by_a_key_or_wants_a_fact_absent() {
 
     let open = || on("Account", "a1", "Open", json!({ "vehicle": "VEH-Lyra" }));
     let (message, named) = missing(&open().await);
-    assert_eq!(message, "funds.Vehicle with key pmdxId does not hold open");
+    assert_eq!(message, "funds.Vehicle with key isin does not hold open");
     assert_eq!(
         (
             named.key.as_deref(),
             named.value,
             named.aggregate_id.as_str()
         ),
-        (Some("pmdxId"), None, ""),
+        (Some("isin"), None, ""),
         "the key, never its value"
     );
-    let launch = json!({ "pmdxId": "VEH-lyra" });
+    let launch = json!({ "isin": "VEH-lyra" });
     assert!(on("Vehicle", "v1", "Launch", launch).await.is_committed());
     assert!(open().await.is_committed());
 

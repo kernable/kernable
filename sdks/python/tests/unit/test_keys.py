@@ -29,7 +29,7 @@ def order_aggregate():
     @order.command("PlaceOrder",
                    requires=lambda data, state: [
                        Requirement("identity", "Customer", data["customerId"], "active"),
-                       Requirement.by_key("Vehicle", "pmdxId", "VEH-lyra", "woundUp", domain="funds", absent=True),
+                       Requirement.by_key("Vehicle", "isin", "VEH-lyra", "woundUp", domain="funds", absent=True),
                    ])
     def _(state, data):
         return [{"type": "OrderPlaced", "data": {"number": "A-1001", "email": "max@firma.de",

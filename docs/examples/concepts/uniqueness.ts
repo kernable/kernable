@@ -3,21 +3,21 @@ import { Rejected, domain } from "@kernable/sdk";
 // #region fund
 export const fundsDomain = domain("funds");
 
-type Fund = { status: "none" | "open" | "wound_up"; pmdxId?: string; name?: string };
+type Fund = { status: "none" | "open" | "wound_up"; isin?: string; name?: string };
 
 export const fundAggregate = fundsDomain.aggregate<Fund>("fund", { status: "none" })
-  .apply("FundLaunched", (_s, data: { pmdxId: string; name: string }) => ({ status: "open", ...data }))
+  .apply("FundLaunched", (_s, data: { isin: string; name: string }) => ({ status: "open", ...data }))
   .apply("FundWoundUp", (s) => { s.status = "wound_up"; })
-  .command("Launch", (s, data: { pmdxId: string; name: string }) => {
+  .command("Launch", (s, data: { isin: string; name: string }) => {
     if (s.status !== "none") throw new Rejected("Fund already exists", "exists");
-    return [{ type: "FundLaunched", data: { pmdxId: data.pmdxId, name: data.name } }];
+    return [{ type: "FundLaunched", data: { isin: data.isin, name: data.name } }];
   })
   .command("WindUp", (s) => {
     if (s.status !== "open") throw new Rejected(`Cannot wind up a ${s.status} fund`, "invalid_state");
     return [{ type: "FundWoundUp" }];
   })
-  // One PMDX ID per fund in all tenants, kept after winding up.
-  .unique("pmdxId", (s) => s.pmdxId?.trim().toUpperCase(), { scope: "global" })
+  // One ISIN per fund in all tenants, kept after winding up.
+  .unique("isin", (s) => s.isin?.trim().toUpperCase(), { scope: "global" })
   // One name per open fund in each tenant: winding up frees it.
   .unique("name", (s) => (s.status === "open" ? s.name?.trim().toLowerCase() : null))
   .fact("open", (s) => s.status === "open");

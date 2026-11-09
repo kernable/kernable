@@ -547,8 +547,7 @@ mod tests {
                         d["customerId"].as_str().unwrap(),
                         "active",
                     ),
-                    Requirement::by_key("funds", "Vehicle", "pmdxId", "VEH-lyra", "woundUp")
-                        .absent(),
+                    Requirement::by_key("funds", "Vehicle", "isin", "VEH-lyra", "woundUp").absent(),
                 ]
             });
 

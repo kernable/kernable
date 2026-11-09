@@ -164,7 +164,7 @@ fn vectors() -> Value {
             domain: "funds".into(),
             aggregate_type: "Vehicle".into(),
             fact: "woundUp".into(),
-            key: "pmdxId".into(),
+            key: "isin".into(),
             value_hash: Sha256::digest(b"VEH-lyra").to_vec(),
             absent: true,
             ..Default::default()

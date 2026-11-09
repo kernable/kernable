@@ -555,7 +555,7 @@ function declareCommand(domain: string, aggregateType: string, events: Map<strin
  *
  * ```ts
  * { aggregateType: "Vehicle", aggregateId: data.vehicleId, fact: "open" }
- * { domain: "funds", aggregateType: "Vehicle", key: "pmdxId", value: normalize(data.vehicle), fact: "open" }
+ * { domain: "funds", aggregateType: "Vehicle", key: "isin", value: normalize(data.vehicle), fact: "open" }
  * { aggregateType: "Vehicle", aggregateId: data.vehicleId, fact: "woundUp", absent: true }
  * ```
  */

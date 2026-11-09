@@ -863,7 +863,7 @@ none holds the fact. An empty domain is the command's own (`Requirement::of`).
 - `absent: bool`: The aggregate must not hold the fact.
 - `fn new(domain: &str, aggregate_type: &str, aggregate_id: &str, fact: &str) -> Requirement`: The fact `fact` of the `domain.aggregate_type` aggregate with ID `aggregate_id`.
 - `fn of(aggregate_type: &str, aggregate_id: &str, fact: &str) -> Requirement`: As `Requirement::new`, of an aggregate type of the command's own domain: `Requirement::of("vehicle", &data.vehicle_id, "open")`.
-- `fn by_key(domain: &str, aggregate_type: &str, key: &str, value: &str, fact: &str) -> Requirement`: The fact `fact` of the `domain.aggregate_type` aggregate that holds the unique key `key` with `value` (not a personal key): `Requirement::by_key("funds", "vehicle", "pmdxId", &data.vehicle, "open")`. Normalise `value` as the aggregate type's key does.
+- `fn by_key(domain: &str, aggregate_type: &str, key: &str, value: &str, fact: &str) -> Requirement`: The fact `fact` of the `domain.aggregate_type` aggregate that holds the unique key `key` with `value` (not a personal key): `Requirement::by_key("funds", "vehicle", "isin", &data.vehicle, "open")`. Normalise `value` as the aggregate type's key does.
 - `fn absent(self) -> Requirement`: This requirement turned around: the aggregate must not hold the fact. One without events, or no holder of the key, holds none: `Requirement::of("vehicle", id, "woundUp").absent()`.
 
 ### Reindex

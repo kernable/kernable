@@ -442,7 +442,7 @@ A fact another aggregate of the command's tenant must hold (or, `absent`, must n
 - `value: str`: The key's value, normalised as the aggregate type's key function does: the kernel gets only its SHA-256. Empty in a rejection, which never carries the value.
 - `absent: bool`: The aggregate must not hold the fact.
 - `of(cls, aggregate_type: str, aggregate_id: str, fact: str, *, absent: bool=False) -> 'Requirement'`: A requirement of an aggregate type of the command's own domain: `Requirement.of("vehicle", data["vehicleId"], "woundUp", absent=True)`.
-- `by_key(cls, aggregate_type: str, key: str, value: str, fact: str, *, domain: str='', absent: bool=False) -> 'Requirement'`: The fact of the aggregate that holds the unique key `key` with `value`, normalised as its key function does: `Requirement.by_key("vehicle", "pmdxId", data["vehicle"], "open")`.
+- `by_key(cls, aggregate_type: str, key: str, value: str, fact: str, *, domain: str='', absent: bool=False) -> 'Requirement'`: The fact of the aggregate that holds the unique key `key` with `value`, normalised as its key function does: `Requirement.by_key("vehicle", "isin", data["vehicle"], "open")`.
 
 ### Store
 

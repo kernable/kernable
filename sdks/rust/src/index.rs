@@ -145,7 +145,7 @@ impl Requirement {
     }
 
     /// The fact `fact` of the `domain.aggregate_type` aggregate that holds the unique key `key`
-    /// with `value` (not a personal key): `Requirement::by_key("funds", "vehicle", "pmdxId",
+    /// with `value` (not a personal key): `Requirement::by_key("funds", "vehicle", "isin",
     /// &data.vehicle, "open")`. Normalise `value` as the aggregate type's key does.
     pub fn by_key(
         domain: &str,

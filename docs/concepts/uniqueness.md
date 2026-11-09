@@ -2,7 +2,7 @@
 
 An aggregate decides alone, on its own history ([Event sourcing](./event-sourcing#rules-across-aggregates)). Two kinds of rules still reach across aggregates, and the kernel checks both when a command commits:
 
-- **Uniqueness.** Every fund has its own PMDX ID, and no two open funds of a tenant share a name. Each fund decides alone, so two funds launched at the same moment with the same ID would both commit.
+- **Uniqueness.** Every fund has its own ISIN, and no two open funds of a tenant share a name. Each fund decides alone, so two funds launched at the same moment with the same ID would both commit.
 - **A condition on another aggregate.** An investor account opens only while its fund is open. A check against a read model before the submit leaves a gap: the fund can be wound up between the check and the commit.
 
 An aggregate declares **unique keys** and **facts**, both computed from its own state, and a command declares the facts it **requires** of other aggregates. Handlers and events do not change.
@@ -35,7 +35,7 @@ def _(state, data):
 def _(state, data):
     if state["status"] != "none":
         raise Rejected("Fund already exists", "exists")
-    return [{"type": "FundLaunched", "data": {"pmdxId": data["pmdxId"], "name": data["name"]}}]
+    return [{"type": "FundLaunched", "data": {"isin": data["isin"], "name": data["name"]}}]
 
 
 @fund_aggregate.command("WindUp")
@@ -45,8 +45,8 @@ def _(state, data):
     return [{"type": "FundWoundUp"}]
 
 
-# One PMDX ID per fund in all tenants, kept after winding up.
-fund_aggregate.unique("pmdxId", lambda s: s["pmdxId"].strip().upper() if "pmdxId" in s else None, scope="global")
+# One ISIN per fund in all tenants, kept after winding up.
+fund_aggregate.unique("isin", lambda s: s["isin"].strip().upper() if "isin" in s else None, scope="global")
 # One name per open fund in each tenant: winding up frees it.
 fund_aggregate.unique("name", lambda s: s["name"].strip().lower() if s["status"] == "open" else None)
 fund_aggregate.fact("open", lambda s: s["status"] == "open")
@@ -66,7 +66,7 @@ After every command, also one without events, the worker computes the keys from 
 
 - **Freeing cannot be forgotten.** A changed value frees the old one in the same commit; a value that becomes null frees it. There is no separate step to release a key.
 - **Scope.** `tenant` (the default) makes a value unique within the command's tenant; another tenant may hold the same value. `global` makes it unique across tenants, also when they live on [different partitions](../how-to/partitions): the control partition reserves each new global key before it is committed. A personal global key is unique within its partition only.
-- **Per aggregate type.** A key belongs to its domain, aggregate type and name: `pmdxId` of `funds.fund` never collides with a `pmdxId` of another aggregate type.
+- **Per aggregate type.** A key belongs to its domain, aggregate type and name: `isin` of `funds.fund` never collides with a `isin` of another aggregate type.
 - **Normalising is yours.** The kernel compares the SHA-256 of the value's UTF-8 bytes, so `LU0001` and `lu0001 ` are two values. Trim, lowercase or format the value in the function.
 - **Deterministic**, like `apply`: the function sees only the state. If it throws, the command is rejected as for a handler error (`handler_error`).
 
@@ -106,14 +106,14 @@ def _(state, data):
 
 ### By a key, or absent
 
-A requirement can name its aggregate by a **unique key** of its type instead of its ID: the fund whose `pmdxId` is `FND-lyra`. The kernel finds the aggregate that holds the key when the command commits, always in the command's tenant: a global key held in another tenant names no aggregate here, so a requirement never sees another tenant's facts. No aggregate holds it: then none holds the fact either. So a command needs no lookup of the ID first, and the check stays atomic. A requirement can also be **absent**: the aggregate must not hold the fact. An aggregate without events, or a key nobody holds, holds no fact, so "the vehicle is gone or wound up" is the fact `open` absent. Without a domain, a requirement is of the command's own domain.
+A requirement can name its aggregate by a **unique key** of its type instead of its ID: the fund whose `isin` is `FND-lyra`. The kernel finds the aggregate that holds the key when the command commits, always in the command's tenant: a global key held in another tenant names no aggregate here, so a requirement never sees another tenant's facts. No aggregate holds it: then none holds the fact either. So a command needs no lookup of the ID first, and the check stays atomic. A requirement can also be **absent**: the aggregate must not hold the fact. An aggregate without events, or a key nobody holds, holds no fact, so "the vehicle is gone or wound up" is the fact `open` absent. Without a domain, a requirement is of the command's own domain.
 
 ::: code-group
 
 ```ts [TypeScript]
 requires: (data) => [
-  // By the fund's PMDX ID, normalised as its key function does.
-  { domain: "funds", aggregateType: "fund", key: "pmdxId", value: data.fundPmdxId.toLowerCase(), fact: "open" },
+  // By the fund's ISIN, normalised as its key function does.
+  { domain: "funds", aggregateType: "fund", key: "isin", value: data.fundIsin.toLowerCase(), fact: "open" },
   // Only while the vehicle (own domain) is not wound up, or does not exist.
   { aggregateType: "vehicle", aggregateId: data.vehicleId, fact: "woundUp", absent: true },
 ],
@@ -121,14 +121,14 @@ requires: (data) => [
 
 ```python [Python]
 requires=lambda data, state: [
-    Requirement.by_key("fund", "pmdxId", data["fundPmdxId"].lower(), "open", domain="funds"),
+    Requirement.by_key("fund", "isin", data["fundIsin"].lower(), "open", domain="funds"),
     Requirement.of("vehicle", data["vehicleId"], "woundUp", absent=True),
 ]
 ```
 
 ```rust [Rust]
 .requires("OpenAccount", |_, d: Open| [
-    Requirement::by_key("funds", "fund", "pmdxId", &d.fund_pmdx_id.to_lowercase(), "open"),
+    Requirement::by_key("funds", "fund", "isin", &d.fund_isin.to_lowercase(), "open"),
     Requirement::of("vehicle", &d.vehicle_id, "woundUp").absent(),
 ])
 ```
@@ -137,7 +137,7 @@ requires=lambda data, state: [
 
 - **The value as the key has it.** The kernel compares the SHA-256 of the value: normalise it exactly as the aggregate type's key function does (`toLowerCase` above), or nobody holds it.
 - **Not personal keys.** A personal key lives in the vault and cannot name an aggregate.
-- **Never the value.** A rejection names the key (`funds.fund with key pmdxId does not hold open`), never its value; `requirement.key` says which, and `requirement.value` is empty.
+- **Never the value.** A rejection names the key (`funds.fund with key isin does not hold open`), never its value; `requirement.key` says which, and `requirement.value` is empty.
 
 ## Personal keys
 
@@ -190,11 +190,11 @@ The kernel checks keys and requirements while it commits, under the lock that or
 
 | Code | Message | Means |
 |---|---|---|
-| `unique_taken` | `funds.fund key pmdxId is taken` | Another aggregate holds a key the command would leave its aggregate with. |
-| `requirement_missing` | `funds.fund f1 does not hold open`, `funds.fund with key pmdxId does not hold open`, `funds.vehicle v1 holds woundUp` | An aggregate the command requires does not hold the fact, or holds one it must not. |
+| `unique_taken` | `funds.fund key isin is taken` | Another aggregate holds a key the command would leave its aggregate with. |
+| `requirement_missing` | `funds.fund f1 does not hold open`, `funds.fund with key isin does not hold open`, `funds.vehicle v1 holds woundUp` | An aggregate the command requires does not hold the fact, or holds one it must not. |
 | `invalid_index` | says which limit | Too many keys, facts or requirements, or a malformed name: a bug in the aggregate's definition. |
 
-A rejection also names what failed as data, so you need not parse the message: `key` is the name of the taken key (`pmdxId`), `requirement` the requirement that does not hold (domain, aggregate type, ID, fact). In TypeScript and Python they are `outcome.key` and `outcome.requirement`, in Rust `Rejected::key` and `Rejected::requirement`. Only the kernel sets them, and they are stored with the rejection, so the same command ID gets them back.
+A rejection also names what failed as data, so you need not parse the message: `key` is the name of the taken key (`isin`), `requirement` the requirement that does not hold (domain, aggregate type, ID, fact). In TypeScript and Python they are `outcome.key` and `outcome.requirement`, in Rust `Rejected::key` and `Rejected::requirement`. Only the kernel sets them, and they are stored with the rejection, so the same command ID gets them back.
 
 - **One reason at a time.** The kernel checks the requirements first, in the order `requires` returns them, then the keys. The rejection names the first requirement that does not hold, or else one taken key. Fix that one and submit again: another requirement or key may fail next.
 
@@ -232,7 +232,7 @@ for (id, outcome) in outcomes {
 - **A built-in command.** Every aggregate type with keys or facts handles `_reindex_<aggregateType>` (here `_reindex_fund`). It produces no events; the worker sends the set of the current state, and the kernel stores it. Command types starting with `_reindex_` are reserved for it.
 - **Grants.** The worker registers the command, so its key needs `run` for `funds._reindex_fund`, which `run=funds.*` covers; the client's key needs `submit` for it ([Keys per service](../how-to/keys)).
 - **An ID without events** holds nothing, and its reindex commits.
-- **Duplicates from before.** If two existing funds share a PMDX ID, the first to run a command takes the key. The second is rejected with `unique_taken`, for every command, until a command changes its value or makes it null. Find duplicates with a read model before you declare a key.
+- **Duplicates from before.** If two existing funds share a ISIN, the first to run a command takes the key. The second is rejected with `unique_taken`, for every command, until a command changes its value or makes it null. Find duplicates with a read model before you declare a key.
 
 ## Limits
 

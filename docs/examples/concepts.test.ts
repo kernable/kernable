@@ -39,16 +39,16 @@ test("the rbac middleware decides from the events it has seen", async () => {
 });
 
 test("a fund holds its keys and facts from its state, and frees its name when wound up", () => {
-  const launched = fundAggregate.fold([{ type: "FundLaunched", schema: 1, data: { pmdxId: "lu0001 ", name: " Alpha Fund" } }]);
+  const launched = fundAggregate.fold([{ type: "FundLaunched", schema: 1, data: { isin: "lu0001 ", name: " Alpha Fund" } }]);
   assert.deepEqual(fundAggregate.index(launched), {
     keys: [
-      { name: "pmdxId", value: "LU0001", scope: "global" },
+      { name: "isin", value: "LU0001", scope: "global" },
       { name: "name", value: "alpha fund", scope: "tenant" },
     ],
     facts: ["open"],
   });
   const woundUp = fundAggregate.fold([{ type: "FundWoundUp", schema: 1, data: {} }], launched);
-  assert.deepEqual(fundAggregate.index(woundUp), { keys: [{ name: "pmdxId", value: "LU0001", scope: "global" }], facts: [] });
+  assert.deepEqual(fundAggregate.index(woundUp), { keys: [{ name: "isin", value: "LU0001", scope: "global" }], facts: [] });
 });
 
 test("opening an account requires its fund to be open", () => {

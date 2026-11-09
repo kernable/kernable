@@ -191,7 +191,7 @@ Always:
 - Name events in the past tense (`ItemAdded`), commands in the imperative (`AddItem`), queries as questions (`GetCart`); domains and aggregates lowercase.
 - Keep aggregates small: one is the unit of consistency; rules across aggregates go through a reactor and follow-up commands.
 - Declare values that must be unique across aggregates as `unique` keys, and conditions on another aggregate as a `fact` it holds and a command `requires`: the kernel checks both at commit. Never build a registry of claims or check a read model before a submit for this.
-- A requirement names the other aggregate by its ID, or by a unique key and value (`{ aggregateType: "vehicle", key: "pmdxId", value, fact: "open" }`, normalised as the key is), so no lookup of the ID is needed first; `absent: true` requires the fact not to be held (an aggregate that does not exist holds none). Omit `domain` for the command's own.
+- A requirement names the other aggregate by its ID, or by a unique key and value (`{ aggregateType: "vehicle", key: "isin", value, fact: "open" }`, normalised as the key is), so no lookup of the ID is needed first; `absent: true` requires the fact not to be held (an aggregate that does not exist holds none). Omit `domain` for the command's own.
 - Give follow-up and retried commands a fixed ID; submit them from reactors with `ctx.submit`.
 - Mark personal data `personal` and passwords or tokens `secret`.
 - Run everything through `app()` (or apply the membership once per deploy) so the kernel knows what to wait for.

@@ -27,14 +27,14 @@ pub fn funds() -> Funds {
 #[serde(rename_all = "camelCase")]
 pub struct Fund {
     status: String, // "", "open" or "wound_up"
-    pmdx_id: Option<String>,
+    isin: Option<String>,
     name: Option<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Launch {
-    pmdx_id: String,
+    isin: String,
     name: String,
 }
 
@@ -42,7 +42,7 @@ fn fund(funds_domain: &Domain) -> Aggregate<Fund> {
     let fund_aggregate = funds_domain.aggregate("fund", Fund::default());
     fund_aggregate.apply("FundLaunched", |s, data: Launch, _evt, _ctx| {
         s.status = "open".into();
-        s.pmdx_id = Some(data.pmdx_id);
+        s.isin = Some(data.isin);
         s.name = Some(data.name);
     });
     fund_aggregate.apply("FundWoundUp", |s, _: Value, _evt, _ctx| {
@@ -54,7 +54,7 @@ fn fund(funds_domain: &Domain) -> Aggregate<Fund> {
         }
         Ok(vec![NewEvent::new(
             "FundLaunched",
-            json!({ "pmdxId": data.pmdx_id, "name": data.name }),
+            json!({ "isin": data.isin, "name": data.name }),
         )])
     });
     fund_aggregate.command("WindUp", |s, _: Value, _cmd, _ctx| {
@@ -63,10 +63,10 @@ fn fund(funds_domain: &Domain) -> Aggregate<Fund> {
         }
         Ok(vec![NewEvent::new("FundWoundUp", json!({}))])
     });
-    // One PMDX ID per fund in all tenants, kept after winding up.
+    // One ISIN per fund in all tenants, kept after winding up.
     fund_aggregate.unique(
-        "pmdxId",
-        |s| s.pmdx_id.as_ref().map(|id| id.trim().to_uppercase()),
+        "isin",
+        |s| s.isin.as_ref().map(|id| id.trim().to_uppercase()),
         Unique::global(),
     );
     // One name per open fund in each tenant: winding up frees it.

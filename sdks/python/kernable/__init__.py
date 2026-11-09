@@ -457,7 +457,7 @@ class Requirement:
     def by_key(cls, aggregate_type: str, key: str, value: str, fact: str, *, domain: str = "",
                absent: bool = False) -> "Requirement":
         """The fact of the aggregate that holds the unique key `key` with `value`, normalised as
-        its key function does: `Requirement.by_key("vehicle", "pmdxId", data["vehicle"], "open")`."""
+        its key function does: `Requirement.by_key("vehicle", "isin", data["vehicle"], "open")`."""
         return cls(domain, aggregate_type, "", fact, key=key, value=value, absent=absent)
 
 
