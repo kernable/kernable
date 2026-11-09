@@ -2,7 +2,7 @@
 //! example HTTP server. People sign in here; the kernel and the kit decide what they may do.
 use std::sync::Arc;
 
-use kernable::{App, BoxError, Kernable, Options};
+use kernable::{App, BoxError, Kernable, MiddlewareOptions, Options, Rejected};
 use kit::api::{KitApi, new_signing_keys};
 use kit::authorization::{ids, relation};
 use kit::bootstrap::bootstrap;
@@ -35,6 +35,25 @@ async fn main() -> Result<(), BoxError> {
 
     std::fs::create_dir_all("mail")?;
     use_mailer(Arc::new(FileMailer));
+
+    // #region rule
+    // A rule of the shop that no group expresses: a new order's customer is whoever places it. A
+    // middleware of the shop's own, after the kit's (order 0), so the sender is checked already.
+    let own_orders = shop().domain.read_model("own-orders");
+    own_orders.middleware(MiddlewareOptions::new(&["shop.Place"]), |check| {
+        let own = check.data["customerId"].as_str() == Some(check.request.sender_identity.as_str());
+        async move {
+            if !own {
+                return Err(Rejected::new("An order is placed by its own customer")
+                    .code("forbidden")
+                    .into());
+            }
+            Ok(())
+        }
+    });
+    let rules = Kernable::new(Options::default())?;
+    tokio::spawn(async move { rules.listener(&own_orders).run().await });
+    // #endregion rule
 
     // #region run
     // The kit's domains: its aggregates, read models, reactors and the authorization middleware.

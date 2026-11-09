@@ -85,13 +85,18 @@ cleo_reads, refused = call("POST", "/queries/shop/GetOrder", {"data": {"id": "o1
 print(f"Cleo reads o1: {cleo_reads} {refused['error']}")
 # endregion customers
 
-# region explain
+# region rule
 _, cleo_me = call("GET", "/me", None, cleo)
+for_cleo, for_cleo_body = call("POST", "/commands/shop/order/Place", {"aggregate_id": "o2", "data": {"customerId": cleo_me["sender_identity"]}}, bob)
+print(f"Bob places o2 in Cleo's name: {for_cleo} {for_cleo_body['error']}")
+# endregion rule
+
+# region explain
 _, why = call("POST", "/queries/group/Explain", {
     "data": {"identityId": cleo_me["sender_identity"], "type": "shop.GetOrder", "aggregateType": "order", "aggregateId": "o1"},
 }, cleo)
 print(f"Why not? allowed: {str(why['allowed']).lower()}, {why['code']}")
 
-anonymous, nobody = call("POST", "/commands/shop/order/Place", {"aggregate_id": "o2", "data": {}}, {"tenant": shop["tenant"]})
+anonymous, nobody = call("POST", "/commands/shop/order/Place", {"aggregate_id": "o3", "data": {}}, {"tenant": shop["tenant"]})
 print(f"Without signing in: {anonymous} {nobody['error']}")
 # endregion explain

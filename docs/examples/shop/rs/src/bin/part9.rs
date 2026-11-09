@@ -174,8 +174,20 @@ async fn main() -> Result<(), BoxError> {
     println!("Cleo reads o1: {cleo_reads} {}", text(&refused["error"]));
     // #endregion customers
 
-    // #region explain
+    // #region rule
     let (_, cleo_me) = client.call("GET", "/me", None, &cleo).await?;
+    let for_cleo =
+        json!({ "aggregateId": "o2", "data": { "customerId": cleo_me["senderIdentity"] } });
+    let (status, body) = client
+        .call("POST", "/commands/shop/order/Place", Some(for_cleo), &bob)
+        .await?;
+    println!(
+        "Bob places o2 in Cleo's name: {status} {}",
+        text(&body["error"])
+    );
+    // #endregion rule
+
+    // #region explain
     let explain = json!({
         "data": {
             "identityId": cleo_me["senderIdentity"],
@@ -197,7 +209,7 @@ async fn main() -> Result<(), BoxError> {
         token: None,
         tenant: tenant.clone(),
     };
-    let place = json!({ "aggregateId": "o2", "data": {} });
+    let place = json!({ "aggregateId": "o3", "data": {} });
     let (status, nobody) = client
         .call(
             "POST",

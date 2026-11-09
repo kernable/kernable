@@ -65,6 +65,19 @@ API writes each mail to a file in `mail/` instead:
 <<< @/examples/shop/rs/src/bin/api.rs#mail [api.rs]
 :::
 
+Groups say which *types* someone may send. One rule of the shop is about the data instead: a new
+order's customer is whoever places it, or a customer could order in someone else's name. The API
+runs a small middleware of the shop for it. It comes after the kit's (order 0 against the kit's
+-30), so the sender is already checked when it compares:
+
+::: code-group
+<<< @/examples/shop/ts/api.ts#rule [api.ts]
+<<< @/examples/shop/py/api.py#rule [api.py]
+<<< @/examples/shop/rs/src/bin/api.rs#rule [api.rs]
+:::
+
+Like the kit's middleware, it fails closed: while it is away, every `Place` is refused.
+
 Then it starts the kit, sets up the platform once (`bootstrap`: the platform tenant, open sign-up,
 the API's own identity and key) and serves HTTP on port 3000:
 
@@ -119,6 +132,14 @@ to touch it:
 <<< @/examples/shop/rs/src/bin/part9.rs#customers [part9.rs]
 :::
 
+Bob tries to place an order in Cleo's name:
+
+::: code-group
+<<< @/examples/shop/ts/part9.ts#rule [part9.ts]
+<<< @/examples/shop/py/part9.py#rule [part9.py]
+<<< @/examples/shop/rs/src/bin/part9.rs#rule [part9.rs]
+:::
+
 Finally, `Explain` tells Cleo why she may not read the order, and a request without an access
 token is refused before anything else:
 
@@ -143,13 +164,10 @@ token is refused before anything else:
   `OrderPlaced` event. The same holds for reading it, because `GetOrder` declares the order it is
   about.
 - **Cleo** is a customer too, but not `o1`'s owner: `forbidden`, for the command and the query.
+- **Bob's order in Cleo's name** passes the kit (customers may place orders) and is refused by the
+  shop's own middleware, which compares the order's customer with the sender.
 - Bob and Cleo got the group through the link, without Ann inviting each of them. Ann can limit a
   link (how many may join, until when) and revoke it at any time.
-
-One thing the kit does not decide: `Place` takes the customer from its data, so a customer could
-place an order in someone else's name. A rule like "the customer of a new order is the sender" is
-either a check in the command handler (`ctx.request.senderIdentity`) or
-[a middleware of your own](../../kits/authorization#your-own-rules), which runs after the kit's.
 
 Every sign-in, failed attempt, membership and join is an event in the log. To see the domains in
 detail, continue with [the kit's documentation](../../kits/).

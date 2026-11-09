@@ -93,7 +93,7 @@ async function part9(lang: Lang) {
     }
     const listening = () => fetch(`http://127.0.0.1:${port}/me`).then((r) => r.status === 401, () => false);
     for (let i = 0; i < 1000 && !(await listening()); i++) await new Promise((r) => setTimeout(r, 20));
-    const up = (m: string) => m.includes("kernable_worker_sessions") && ["orders", "authorization"].every((l) => m.includes(`kernable_listener_connected{listener="${l}"} 1`));
+    const up = (m: string) => m.includes("kernable_worker_sessions") && ["orders", "authorization", "own-orders"].every((l) => m.includes(`kernable_listener_connected{listener="${l}"} 1`));
     for (let i = 0; i < 500 && !up(await fetch(kernel.metricsUrl!).then((r) => r.text())); i++) await new Promise((r) => setTimeout(r, 20));
     const [cmd, args] = command(lang, "part9");
     const out = execFileSync(cmd, args, { cwd: kernel.dir, env, encoding: "utf8" });

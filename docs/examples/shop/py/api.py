@@ -5,7 +5,7 @@ import os
 import sys
 import threading
 
-from kernable import Kernable
+from kernable import Check, Kernable, Rejected
 
 # The kit's source, copied into the project with `kernable-sdk add kit`; here the repository's.
 from example.server import example_server
@@ -34,6 +34,21 @@ class FileMailer:
 os.makedirs("mail", exist_ok=True)
 use_mailer(FileMailer())
 # endregion mail
+
+# region rule
+# A rule of the shop that no group expresses: a new order's customer is whoever places it. A
+# middleware of the shop's own, after the kit's (order 0), so the sender is checked already.
+own_orders = shop_domain.read_model("own-orders")
+
+
+@own_orders.middleware(["shop.Place"])
+def _(check: Check):
+    if check.data.get("customerId") != check.request.sender_identity:
+        raise Rejected("An order is placed by its own customer", "forbidden")
+
+
+threading.Thread(target=Kernable().listener(own_orders).run, daemon=True).start()
+# endregion rule
 
 # region run
 # The kit's domains: its aggregates, read models, reactors and the authorization middleware.

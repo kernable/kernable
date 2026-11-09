@@ -73,13 +73,18 @@ const [cleoReads, refused] = await call("POST", "/queries/shop/GetOrder", { data
 console.log(`Cleo reads o1: ${cleoReads} ${refused.error}`);
 // #endregion customers
 
-// #region explain
+// #region rule
 const [, cleoMe] = await call("GET", "/me", null, cleo);
+const [forCleo, forCleoBody] = await call("POST", "/commands/shop/order/Place", { aggregateId: "o2", data: { customerId: cleoMe.senderIdentity } }, bob);
+console.log(`Bob places o2 in Cleo's name: ${forCleo} ${forCleoBody.error}`);
+// #endregion rule
+
+// #region explain
 const [, why] = await call("POST", "/queries/group/Explain", {
   data: { identityId: cleoMe.senderIdentity, type: "shop.GetOrder", aggregateType: "order", aggregateId: "o1" },
 }, cleo);
 console.log(`Why not? allowed: ${why.allowed}, ${why.code}`);
 
-const [anonymous, nobody] = await call("POST", "/commands/shop/order/Place", { aggregateId: "o2", data: {} }, { email: "", tenant: shop.tenant });
+const [anonymous, nobody] = await call("POST", "/commands/shop/order/Place", { aggregateId: "o3", data: {} }, { email: "", tenant: shop.tenant });
 console.log(`Without signing in: ${anonymous} ${nobody.error}`);
 // #endregion explain

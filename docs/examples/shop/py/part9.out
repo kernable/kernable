@@ -11,5 +11,6 @@ Bob adds two apples: 200
 Cleo adds to o1: 403 forbidden
 Bob reads o1: 200 draft, {"apple":2}
 Cleo reads o1: 403 forbidden
+Bob places o2 in Cleo's name: 403 forbidden
 Why not? allowed: false, forbidden
 Without signing in: 401 unauthenticated
