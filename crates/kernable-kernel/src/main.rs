@@ -132,7 +132,9 @@ Keys and trust:
 Deploy and inspect:
   kernable apply <addr> <key> <manifest.json>
                                           Applies a service's membership: a JSON manifest with
-                                          service, workers, listeners, middlewares and metadata.
+                                          service, workers, listeners, middlewares, processes and
+                                          metadata. A process the service's membership listed before
+                                          and no longer lists starts no new cases.
                                           Signed with <key>, whose grant needs manage=<service>; the
                                           grant file next to the key (app.grant for app.key) is sent
                                           along. The kernel must be running. Once per deploy.
@@ -153,6 +155,21 @@ Deploy and inspect:
                                           asked for, and the message (for a handler error only the
                                           error's type; the listener's log has the rest).
   kernable schemas <store>                Lists the highest stored schema version per event type.
+  kernable processes list <store>         Lists the registered business processes: name, newest
+                                          version, state (active or removed), and when and by which
+                                          key the newest version was registered.
+  kernable processes show <store> <name> [<version>]
+                                          Prints a process's model as registered, the newest
+                                          version or <version>, as indented JSON. Exit 1 if there
+                                          is no such process or version.
+
+Processes, with the kernel running:
+  kernable processes remove <addr> <key> <name>
+                                          Removes a process: it starts no new cases, its running
+                                          cases finish; registering it again makes it active.
+                                          Signed with <key>, whose grant needs process=<name>; the
+                                          grant file next to the key is sent along. Exit 1 if it was
+                                          removed already.
 
 Parked events, with the kernel running:
   kernable listeners retry <addr> <key> <listener> <position|--all>
@@ -441,6 +458,10 @@ async fn main() -> ExitCode {
             which,
         ] => retry(addr, key, name, which, *op == "dismiss").await,
         ["workers", store] => workers(store),
+        ["processes", "list", store] => processes_list(store),
+        ["processes", "show", store, name] => processes_show(store, name, None),
+        ["processes", "show", store, name, version] => processes_show(store, name, Some(version)),
+        ["processes", "remove", addr, key, name] => processes_remove(addr, key, name).await,
         ["services", store] => services(store),
         ["apply", addr, key, manifest] => apply(addr, key, manifest).await,
         ["workers", "remove", store, aggregate] => remove_worker(store, aggregate),
@@ -2105,6 +2126,94 @@ async fn retry(addr: &str, key_path: &str, name: &str, which: &str, dismiss: boo
     Ok(true)
 }
 
+/// The processes in `store`, each with its versions (oldest first) and whether it is removed.
+fn processes_of(
+    store: &str,
+) -> Result<std::collections::BTreeMap<String, (Vec<kernable_core::proto::ProcessRecord>, bool)>> {
+    let mut all = std::collections::BTreeMap::<String, (Vec<_>, bool)>::new();
+    for r in kernable_store::open_read_only(store)?.processes()? {
+        let entry = all.entry(r.name.clone()).or_default();
+        if r.version == 0 {
+            entry.1 = r.removed;
+        } else {
+            entry.0.push(r);
+        }
+    }
+    Ok(all)
+}
+
+fn processes_list(store: &str) -> Result<bool> {
+    for (name, (versions, removed)) in processes_of(store)? {
+        let Some(newest) = versions.last() else {
+            continue;
+        };
+        println!(
+            "{name} version {} {} (registered {} by {})",
+            newest.version,
+            if removed { "removed" } else { "active" },
+            config::utc(newest.recorded_at),
+            newest.sig.as_ref().map_or("", |s| s.key_id.as_str())
+        );
+    }
+    Ok(true)
+}
+
+fn processes_show(store: &str, name: &str, version: Option<&str>) -> Result<bool> {
+    let version = match version {
+        None => None,
+        Some(v) => Some(
+            v.parse::<u32>()
+                .ok()
+                .filter(|v| *v > 0)
+                .ok_or_else(|| format!("{v} is not a version (1, 2, …)"))?,
+        ),
+    };
+    let all = processes_of(store)?;
+    let found = all.get(name).and_then(|(versions, _)| match version {
+        None => versions.last(),
+        Some(v) => versions.iter().find(|r| r.version == v),
+    });
+    let Some(record) = found else {
+        match version {
+            None => println!("no process {name}"),
+            Some(v) => println!("no version {v} of process {name}"),
+        }
+        return Ok(false);
+    };
+    let model: serde_json::Value = serde_json::from_slice(&record.model)?;
+    println!("{}", serde_json::to_string_pretty(&model)?);
+    Ok(true)
+}
+
+/// Removes a process, signed with `key_path` (granted `process` for it).
+async fn processes_remove(addr: &str, key_path: &str, name: &str) -> Result<bool> {
+    let key = signing::read_signing_key(key_path)?;
+    let issued_at = now_ms();
+    let mut request = tonic::Request::new(kernable_core::proto::ProcessRemoval {
+        name: name.to_owned(),
+        issued_at,
+        sig: Some(signing::sign(
+            &key,
+            &signing::process_remove_message(name, issued_at),
+        )),
+        protocol: kernable_core::PROTOCOL,
+    });
+    with_key_grant(&mut request, key_path)?;
+    let removed = kernable_core::proto::process_service_client::ProcessServiceClient::new(
+        connect(addr).await?,
+    )
+    .remove(request)
+    .await?
+    .into_inner()
+    .removed;
+    if removed {
+        println!("removed {name}: it starts no new cases");
+    } else {
+        println!("{name} was removed already");
+    }
+    Ok(removed)
+}
+
 fn workers(store: &str) -> Result<bool> {
     for w in kernable_store::open_read_only(store)?.workers()? {
         let service = match w.service.as_str() {
@@ -2209,6 +2318,7 @@ async fn apply(addr: &str, key_path: &str, manifest: &str) -> Result<bool> {
         middlewares: strings("middlewares")?,
         metadata,
         issued_at: now_ms(),
+        processes: strings("processes")?,
     };
     let mut request = tonic::Request::new(ApplyRequest {
         sig: Some(signing::sign(

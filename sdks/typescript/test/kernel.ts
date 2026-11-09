@@ -21,6 +21,8 @@ export interface TestKernelOptions {
   vaultReaders?: string[];
   /** Domains (`shop.*`) whose files and cache the app key may use (default all). */
   stores?: string[];
+  /** Grant the app key `process` for every process (a kernel with `ProcessService`). */
+  processes?: boolean;
 }
 
 /** A free TCP port on 127.0.0.1. */
@@ -69,6 +71,7 @@ export class TestKernel {
       ...["submit", "subscribe", "listen", "query", "answer", "check", "vault_erase", "manage"].map((action) => `${action}=*`),
       `vault_read=${(options.vaultReaders ?? ["*"]).join(",")}`,
       ...["data_read", "data_write", "cache"].map((action) => `${action}=${(options.stores ?? ["*"]).join(",")}`),
+      ...(options.processes ? ["process=*"] : []),
     );
     writeFileSync(join(this.dir, "vault.key"), randomBytes(32).toString("hex"));
     this.flags = [

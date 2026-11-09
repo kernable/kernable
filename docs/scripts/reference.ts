@@ -285,7 +285,7 @@ ${nodeRows.join("\n")}
 // ---- TypeScript SDK ----
 
 function tsReference(): string {
-  const files = ["sdks/typescript/src/index.ts", "sdks/typescript/src/messages.ts", "sdks/typescript/src/store.ts"].map((f) => join(ROOT, f));
+  const files = ["sdks/typescript/src/index.ts", "sdks/typescript/src/messages.ts", "sdks/typescript/src/store.ts", "sdks/typescript/src/process.ts"].map((f) => join(ROOT, f));
   const program = ts.createProgram(files, { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.NodeNext, allowImportingTsExtensions: true, noEmit: true });
   const checker = program.getTypeChecker();
   const doc = (node: ts.Node) => ts.getJSDocCommentsAndTags(node).filter(ts.isJSDoc).map((d) => ts.getTextOfJSDocComment(d.comment) ?? "").join("\n").trim();

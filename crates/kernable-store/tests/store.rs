@@ -259,10 +259,65 @@ fn worker(aggregate_type: &str, command_types: &[&str]) -> WorkerRecord {
     }
 }
 
+/// Process versions are kept once each; the newest change of state per process wins.
+fn process_versions_and_states_are_kept(store: &dyn Store) {
+    use kernable_core::proto::ProcessRecord;
+    assert!(store.processes().unwrap().is_empty());
+    let version = |name: &str, version: u32, model: &str| ProcessRecord {
+        name: name.into(),
+        version,
+        model: model.as_bytes().to_vec(),
+        canonical: model.as_bytes().to_vec(),
+        issued_at: 10 + i64::from(version),
+        sig: Some(Signature {
+            key_id: "k".into(),
+            sig: vec![version as u8],
+        }),
+        recorded_at: 20,
+        removed: false,
+    };
+    let state = |name: &str, removed: bool, at: i64| ProcessRecord {
+        name: name.into(),
+        issued_at: at,
+        sig: Some(Signature {
+            key_id: "op".into(),
+            sig: vec![9],
+        }),
+        recorded_at: at,
+        removed,
+        ..Default::default()
+    };
+    store.save_process(&version("shop.b", 1, "{}")).unwrap();
+    store
+        .save_process(&version("shop.a", 2, "{\"v\":2}"))
+        .unwrap();
+    store
+        .save_process(&version("shop.a", 1, "{\"v\":1}"))
+        .unwrap();
+    // A version kept already stays as it was.
+    store
+        .save_process(&version("shop.a", 1, "{\"other\":1}"))
+        .unwrap();
+    store.save_process(&state("shop.a", true, 30)).unwrap();
+    store.save_process(&state("shop.a", false, 31)).unwrap();
+    store.save_process(&state("shop.b", true, 32)).unwrap();
+    assert_eq!(
+        store.processes().unwrap(),
+        [
+            version("shop.a", 1, "{\"v\":1}"),
+            version("shop.a", 2, "{\"v\":2}"),
+            version("shop.b", 1, "{}"),
+            state("shop.a", false, 31),
+            state("shop.b", true, 32),
+        ]
+    );
+}
+
 fn memberships_are_replaced_per_service(store: &dyn Store) {
     assert!(store.memberships().unwrap().is_empty());
     let membership = |service: &str, listeners: &[&str], at: i64| MembershipRecord {
         membership: Some(Membership {
+            processes: vec![format!("{service}.fulfilment")],
             service: service.into(),
             workers: vec!["shop.Cart".into()],
             listeners: listeners.iter().map(|l| l.to_string()).collect(),
@@ -998,6 +1053,7 @@ for_each_backend!(
     parked_events_change_only_with_their_flag,
     workers_are_saved_replaced_and_removed,
     memberships_are_replaced_per_service,
+    process_versions_and_states_are_kept,
     the_newest_grant_per_key_is_kept,
     reading_after_a_version_returns_only_later_events,
     contexts_come_back_as_stored,

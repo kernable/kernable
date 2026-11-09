@@ -74,6 +74,7 @@ impl TestKernel {
             "vault_erase",
             "vault_read",
             "manage",
+            "process",
         ]
         .iter()
         .map(|a| format!("{a}=*"))

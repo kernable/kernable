@@ -115,7 +115,7 @@ Writes a development CA (`ca.tls.crt`), a kernel certificate (`kernel.tls.crt`, 
 kernable apply <addr> <key> <manifest.json>
 ```
 
-Applies a service's membership: a JSON manifest with service, workers, listeners, middlewares and metadata. Signed with `<key>`, whose grant needs `manage=<service>`; the grant file next to the key (`app.grant` for `app.key`) is sent along. The kernel must be running. Once per deploy.
+Applies a service's membership: a JSON manifest with service, workers, listeners, middlewares, processes and metadata. A process the service's membership listed before and no longer lists starts no new cases. Signed with `<key>`, whose grant needs `manage=<service>`; the grant file next to the key (`app.grant` for `app.key`) is sent along. The kernel must be running. Once per deploy.
 
 ### `kernable services`
 
@@ -156,6 +156,32 @@ kernable schemas <store>
 ```
 
 Lists the highest stored schema version per event type.
+
+### `kernable processes list`
+
+```text
+kernable processes list <store>
+```
+
+Lists the registered business processes: name, newest version, state (active or removed), and when and by which key the newest version was registered.
+
+### `kernable processes show`
+
+```text
+kernable processes show <store> <name> [<version>]
+```
+
+Prints a process's model as registered, the newest version or `<version>`, as indented JSON. Exit 1 if there is no such process or version.
+
+## Processes, with the kernel running
+
+### `kernable processes remove`
+
+```text
+kernable processes remove <addr> <key> <name>
+```
+
+Removes a process: it starts no new cases, its running cases finish; registering it again makes it active. Signed with `<key>`, whose grant needs `process=<name>`; the grant file next to the key is sent along. Exit 1 if it was removed already.
 
 ## Parked events, with the kernel running
 

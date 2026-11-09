@@ -234,6 +234,7 @@ fn writes(s: &dyn Store, round: u8) {
     .unwrap();
     s.save_membership(&MembershipRecord {
         membership: Some(Membership {
+            processes: Vec::new(),
             service: "shop".into(),
             workers: vec!["orders.Order".into()],
             listeners: vec!["shop".into()],

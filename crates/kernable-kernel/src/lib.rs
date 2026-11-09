@@ -36,6 +36,8 @@ mod metrics;
 pub mod moves;
 pub mod node;
 pub mod partitions;
+mod process_model;
+mod processes;
 mod queue;
 mod replays;
 mod replication;
@@ -259,6 +261,8 @@ pub struct Kernel {
     listeners: listeners::Registry,
     workers: workers::Registry,
     memberships: memberships::Memberships,
+    /// Registered business processes (design/processes.md).
+    processes: processes::Processes,
     queue: queue::Queue,
     metrics: metrics::Metrics,
     /// Listener positions over the last hour, for the UI.
@@ -340,6 +344,7 @@ impl Kernel {
             .map(|r| (r.key_id, r.since))
             .collect();
         let memberships = memberships::Memberships::load(store.memberships()?);
+        let processes = processes::Processes::load(store.processes()?);
         let listeners = listeners::Registry::load(store.listeners()?, &memberships);
         let workers = workers::Registry::load(store.workers()?);
         let schemas = store.event_schemas()?.into_iter().collect();
@@ -427,6 +432,7 @@ impl Kernel {
             listeners,
             workers,
             memberships,
+            processes,
             queue,
             metrics: metrics::Metrics::default(),
             trend: trend::Trend::default(),
@@ -1415,6 +1421,10 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
                 .max_encoding_message_size(replication::MAX_MESSAGE_BYTES),
         )
         .add_service(TrustSyncServiceServer::new(api.clone()))
+        .add_service(
+            kernable_core::proto::process_service_server::ProcessServiceServer::new(api.clone())
+                .max_decoding_message_size(max),
+        )
         .add_service(
             ExportServiceServer::new(api.clone())
                 .max_encoding_message_size(replication::MAX_MESSAGE_BYTES),

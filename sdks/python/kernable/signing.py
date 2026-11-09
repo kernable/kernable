@@ -154,7 +154,18 @@ def membership_message(m) -> bytes:
     msg.u64(len(m.metadata))
     for a in m.metadata:
         msg.str(a.key).str(a.value)
-    return bytes(msg.i64(m.issued_at).buf)
+    msg.i64(m.issued_at)
+    # Only when there are any, so a membership without processes signs as before.
+    if m.processes:
+        msg.str("processes").u64(len(m.processes))
+        for p in m.processes:
+            msg.str(p)
+    return bytes(msg.buf)
+
+
+def process_message(model: bytes, issued_at: int) -> bytes:
+    """What a key granted `process` signs to register a process model (its JSON as sent)."""
+    return bytes(Msg("kernable.v1.process").bytes(model).i64(issued_at).buf)
 
 
 def rejection_message(command_id: str, reason) -> bytes:

@@ -25,7 +25,23 @@ message LogRecord {
     GlobalKeyRecord global_key = 14;
     TenantImportedRecord tenant_imported = 15;
     TenantIndexRecord tenant_index = 16;
+    ProcessRecord process = 17;
   }
+}
+
+// A business process (design/processes.md). With a `version`: that version of its model, as
+// registered (ProcessService.Register); versions are kept forever. Without (0): the process's
+// state from then on, removed or active again; the newest such record per process wins, and a
+// process without one is active.
+message ProcessRecord {
+  string name = 1;        // qualified: `shop.fulfilment`
+  uint32 version = 2;     // from 1; 0: a change of state
+  bytes model = 3;        // the model as signed
+  bytes canonical = 4;    // its canonical JSON (keys sorted, no whitespace): what versions compare
+  int64 issued_at = 5;    // ms since epoch, signed: with the model, or with the removal
+  Signature sig = 6;      // over kernable.v1.process, kernable.v1.process_remove or the membership
+  int64 recorded_at = 7;  // ms since epoch: when the kernel registered or changed it
+  bool removed = 8;       // a change of state: removed (no new cases) or active again
 }
 
 // What a tenant's streams hold here from now on, replacing what they held: on the source

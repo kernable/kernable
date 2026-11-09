@@ -20,7 +20,7 @@ use kernable_core::{
         AggregateIndex, Attribute, CheckpointRecord, Command, CommandResult, Committed,
         CommittedRecord, DataChangedRecord, EnqueuedRecord, Event, GlobalKeyRecord, Grant,
         ListenerRecord, LogRecord, LoggedEvent, Membership, MembershipRecord, Middleware, NewEvent,
-        ParkedEvent, PartitionMap, Rejected, RejectedRecord, ReplicatedRecord,
+        ParkedEvent, PartitionMap, ProcessRecord, Rejected, RejectedRecord, ReplicatedRecord,
         ReplicationHeadRecord, RequestContext, Requirement, RevocationRecord, Signature,
         StreamIndex, TenantImportedRecord, TenantIndexRecord, When, WorkerRecord,
         command_result::Outcome, log_record::Record,
@@ -176,7 +176,29 @@ CREATE TABLE IF NOT EXISTS memberships (
     issued_at   INTEGER NOT NULL, -- ms since epoch, signed
     key_id      TEXT    NOT NULL, -- the key that applied it (granted manage)
     sig         BLOB    NOT NULL, -- its signature over kernable.v1.membership
-    applied_at  INTEGER NOT NULL  -- ms since epoch
+    applied_at  INTEGER NOT NULL, -- ms since epoch
+    processes   TEXT    NOT NULL DEFAULT '' -- comma-separated qualified process names
+) STRICT;
+-- Every version of every process model, as registered (ProcessService.Register).
+CREATE TABLE IF NOT EXISTS process_versions (
+    name        TEXT    NOT NULL, -- qualified: shop.fulfilment
+    version     INTEGER NOT NULL, -- from 1
+    model       BLOB    NOT NULL, -- the model's JSON as signed
+    canonical   BLOB    NOT NULL, -- its canonical JSON: keys sorted, no whitespace
+    issued_at   INTEGER NOT NULL, -- ms since epoch, signed with the model
+    key_id      TEXT    NOT NULL, -- the key that registered it (granted process)
+    sig         BLOB    NOT NULL, -- its signature over kernable.v1.process
+    recorded_at INTEGER NOT NULL, -- ms since epoch
+    PRIMARY KEY (name, version)
+) STRICT;
+-- The newest change of state per process; a process without a row is active.
+CREATE TABLE IF NOT EXISTS process_states (
+    name        TEXT PRIMARY KEY,
+    removed     INTEGER NOT NULL, -- 1: starts no new cases
+    issued_at   INTEGER NOT NULL, -- ms since epoch, signed with the change
+    key_id      TEXT    NOT NULL, -- the key that changed it
+    sig         BLOB    NOT NULL, -- over kernable.v1.process_remove, .process or .membership
+    recorded_at INTEGER NOT NULL  -- ms since epoch
 ) STRICT;
 CREATE TABLE IF NOT EXISTS grants (
     key_id    TEXT PRIMARY KEY, -- the grantee
@@ -958,6 +980,24 @@ impl Store for SqliteStore {
         Ok(())
     }
 
+    // ---- processes ----
+
+    fn processes(&self) -> Result<Vec<ProcessRecord>> {
+        read_processes(&self.conn())
+    }
+
+    fn save_process(&self, record: &ProcessRecord) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if !save_process_tx(&tx, record)? {
+            return Ok(());
+        }
+        let head = self.file(&tx, || vec![Record::Process(record.clone())])?;
+        tx.commit()?;
+        self.advance(head);
+        Ok(())
+    }
+
     // ---- integrity ----
 
     /// Signs the current head of the hash chain. Returns `None` while there are no events.
@@ -1288,7 +1328,9 @@ impl Store for SqliteStore {
         let empty: bool = tx.query_row(
             "SELECT NOT EXISTS (SELECT 1 FROM commands) AND NOT EXISTS (SELECT 1 FROM listeners)
                 AND NOT EXISTS (SELECT 1 FROM workers) AND NOT EXISTS (SELECT 1 FROM memberships)
-                AND NOT EXISTS (SELECT 1 FROM grants) AND NOT EXISTS (SELECT 1 FROM revocations)",
+                AND NOT EXISTS (SELECT 1 FROM grants) AND NOT EXISTS (SELECT 1 FROM revocations)
+                AND NOT EXISTS (SELECT 1 FROM process_versions)
+                AND NOT EXISTS (SELECT 1 FROM process_states)",
             [],
             |r| r.get(0),
         )?;
@@ -2152,6 +2194,89 @@ pub(crate) fn save_worker_tx(tx: &Connection, w: &WorkerRecord) -> Result<()> {
 }
 
 /// Replaces the membership of the record's service.
+/// Keeps a process version, or replaces a process's state; false if the version is kept already.
+fn save_process_tx(tx: &Connection, p: &ProcessRecord) -> Result<bool> {
+    let sig = p.sig.clone().unwrap_or_default();
+    let changed = if p.version == 0 {
+        tx.execute(
+            "INSERT OR REPLACE INTO process_states
+                 (name, removed, issued_at, key_id, sig, recorded_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                p.name,
+                p.removed,
+                p.issued_at,
+                sig.key_id,
+                sig.sig,
+                p.recorded_at
+            ],
+        )?
+    } else {
+        tx.execute(
+            "INSERT INTO process_versions
+                 (name, version, model, canonical, issued_at, key_id, sig, recorded_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT (name, version) DO NOTHING",
+            params![
+                p.name,
+                p.version,
+                p.model,
+                p.canonical,
+                p.issued_at,
+                sig.key_id,
+                sig.sig,
+                p.recorded_at
+            ],
+        )?
+    };
+    Ok(changed == 1)
+}
+
+fn read_processes(conn: &Connection) -> Result<Vec<ProcessRecord>> {
+    let mut out: Vec<ProcessRecord> = conn
+        .prepare(
+            "SELECT name, version, model, canonical, issued_at, key_id, sig, recorded_at
+             FROM process_versions ORDER BY name, version",
+        )?
+        .query_map([], |r| {
+            Ok(ProcessRecord {
+                name: r.get(0)?,
+                version: r.get(1)?,
+                model: r.get(2)?,
+                canonical: r.get(3)?,
+                issued_at: r.get(4)?,
+                sig: Some(Signature {
+                    key_id: r.get(5)?,
+                    sig: r.get(6)?,
+                }),
+                recorded_at: r.get(7)?,
+                removed: false,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let states: Vec<ProcessRecord> = conn
+        .prepare(
+            "SELECT name, removed, issued_at, key_id, sig, recorded_at
+             FROM process_states ORDER BY name",
+        )?
+        .query_map([], |r| {
+            Ok(ProcessRecord {
+                name: r.get(0)?,
+                removed: r.get(1)?,
+                issued_at: r.get(2)?,
+                sig: Some(Signature {
+                    key_id: r.get(3)?,
+                    sig: r.get(4)?,
+                }),
+                recorded_at: r.get(5)?,
+                ..Default::default()
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    out.extend(states);
+    Ok(out)
+}
+
 fn save_membership_tx(tx: &Connection, record: &MembershipRecord) -> Result<()> {
     let m = record.membership.clone().unwrap_or_default();
     let sig = record.sig.clone().unwrap_or_default();
@@ -2163,8 +2288,8 @@ fn save_membership_tx(tx: &Connection, record: &MembershipRecord) -> Result<()> 
     tx.execute(
         "INSERT OR REPLACE INTO memberships
              (service, workers, listeners, middlewares, metadata, issued_at, key_id, sig,
-              applied_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+              applied_at, processes)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             m.service,
             m.workers.join(","),
@@ -2174,7 +2299,8 @@ fn save_membership_tx(tx: &Connection, record: &MembershipRecord) -> Result<()> 
             m.issued_at,
             sig.key_id,
             sig.sig,
-            record.applied_at
+            record.applied_at,
+            m.processes.join(",")
         ],
     )?;
     Ok(())
@@ -2325,7 +2451,7 @@ pub(crate) fn read_workers(conn: &Connection) -> Result<Vec<WorkerRecord>> {
 fn read_memberships(conn: &Connection) -> Result<Vec<MembershipRecord>> {
     let mut stmt = conn.prepare(
         "SELECT service, workers, listeners, middlewares, metadata, issued_at, key_id, sig,
-                applied_at
+                applied_at, processes
          FROM memberships ORDER BY service",
     )?;
     let memberships = stmt
@@ -2344,6 +2470,7 @@ fn read_memberships(conn: &Connection) -> Result<Vec<MembershipRecord>> {
                         .map(|(key, value)| Attribute { key, value })
                         .collect(),
                     issued_at: r.get(5)?,
+                    processes: split_list(r.get(9)?),
                 }),
                 sig: Some(Signature {
                     key_id: r.get(6)?,
@@ -2418,6 +2545,9 @@ fn apply_record(tx: &Transaction<'_>, record: &Record) -> Result<()> {
         Record::Listener(l) => save_listener_tx(tx, l)?,
         Record::Worker(w) => save_worker_tx(tx, w)?,
         Record::Membership(m) => save_membership_tx(tx, m)?,
+        Record::Process(p) => {
+            save_process_tx(tx, p)?;
+        }
         Record::Revocation(r) => {
             revoke_tx(tx, r)?;
         }
@@ -2855,6 +2985,9 @@ fn image_records(conn: &Connection, f: &mut dyn FnMut(Record) -> Result<()>) -> 
     }
     for m in read_memberships(conn)? {
         f(Record::Membership(m))?;
+    }
+    for p in read_processes(conn)? {
+        f(Record::Process(p))?;
     }
     for w in read_workers(conn)? {
         f(Record::Worker(w))?;

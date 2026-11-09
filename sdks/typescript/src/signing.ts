@@ -270,7 +270,18 @@ export function membershipMessage(m: WireMembership): Buffer {
   }
   msg.u64(m.metadata.length);
   for (const a of m.metadata) msg.str(a.key).str(a.value);
-  return msg.i64(m.issued_at).done();
+  msg.i64(m.issued_at);
+  // Only when there are any, so a membership without processes signs as before.
+  if (m.processes?.length) {
+    msg.str("processes").u64(m.processes.length);
+    for (const p of m.processes) msg.str(p);
+  }
+  return msg.done();
+}
+
+/** What a key granted `process` signs to register a process model: the model's JSON as sent. */
+export function processMessage(model: Buffer, issuedAt: number): Buffer {
+  return new Msg("kernable.v1.process").bytes(model).i64(issuedAt).done();
 }
 
 export function checkpointMessage(position: number, chainHash: Buffer, createdAt: number): Buffer {

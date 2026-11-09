@@ -131,6 +131,15 @@ pub(crate) fn validate(m: &Membership) -> Result<(), Status> {
             "list workers as qualified aggregate types: domain.AggregateType",
         ));
     }
+    if let Some(p) = m
+        .processes
+        .iter()
+        .find(|p| !crate::process_model::valid_process_name(p))
+    {
+        return Err(Status::invalid_argument(format!(
+            "list processes by qualified name (domain.process), not {p}"
+        )));
+    }
     if m.listeners
         .iter()
         .chain(&m.middlewares)
@@ -184,6 +193,13 @@ pub(crate) fn take(kernel: &Arc<Kernel>, m: Membership, sig: Signature) -> Resul
 
     let _applying = kernel.memberships.applying();
     kernel.memberships.admit(&m)?;
+    let before = kernel
+        .memberships
+        .all
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&m.service)
+        .cloned();
     let record = MembershipRecord {
         membership: Some(m.clone()),
         sig: Some(sig),
@@ -193,6 +209,10 @@ pub(crate) fn take(kernel: &Arc<Kernel>, m: Membership, sig: Signature) -> Resul
     kernel.sync(0);
     crate::crash::point("membership.stored");
     kernel.memberships.set(m.clone());
+    let sig = record.sig.clone().unwrap_or_default();
+    kernel
+        .processes
+        .unlisted(kernel, before.as_ref(), &m, &sig)?;
     let changed = kernel.listeners.apply(&m);
     kernel.store.save_listeners(&changed).map_err(internal)?;
     kernel.workers.apply(kernel, &m)?;

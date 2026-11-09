@@ -43,10 +43,10 @@ use kernable_core::{
     proto::{
         AggregateIndex, CheckpointRecord, Command, CommandResult, Committed, CommittedRecord,
         DataChangedRecord, EnqueuedRecord, Event, FormatRecord, GlobalKeyRecord, Grant,
-        ListenerRecord, LogRecord, LoggedEvent, MembershipRecord, NewEvent, PartitionMap, Rejected,
-        RejectedRecord, ReplicatedRecord, ReplicationHeadRecord, RevocationRecord, Signature,
-        StreamIndex, TenantImportedRecord, TenantIndexRecord, WorkerRecord,
-        command_result::Outcome, log_record::Record,
+        ListenerRecord, LogRecord, LoggedEvent, MembershipRecord, NewEvent, PartitionMap,
+        ProcessRecord, Rejected, RejectedRecord, ReplicatedRecord, ReplicationHeadRecord,
+        RevocationRecord, Signature, StreamIndex, TenantImportedRecord, TenantIndexRecord,
+        WorkerRecord, command_result::Outcome, log_record::Record,
     },
     signing::{self, GENESIS},
 };
@@ -89,6 +89,10 @@ struct State {
     listeners: BTreeMap<String, ListenerRecord>,
     workers: BTreeMap<String, WorkerRecord>,
     memberships: BTreeMap<String, MembershipRecord>,
+    /// Every version of every process, by name and version.
+    process_versions: BTreeMap<(String, u32), ProcessRecord>,
+    /// The newest change of state per process.
+    process_states: BTreeMap<String, ProcessRecord>,
     revocations: Vec<RevocationRecord>,
     grants: BTreeMap<String, Grant>,
     /// What each stream holds, from its latest commit with an index; none if it holds nothing.
@@ -252,6 +256,14 @@ impl State {
                 let service = m.membership.as_ref().map(|m| m.service.clone());
                 self.memberships.insert(service.unwrap_or_default(), m);
             }
+            Record::Process(p) if p.version == 0 => {
+                self.process_states.insert(p.name.clone(), p);
+            }
+            Record::Process(p) => {
+                self.process_versions
+                    .entry((p.name.clone(), p.version))
+                    .or_insert(p);
+            }
             Record::Grant(g) => {
                 if self
                     .grants
@@ -365,6 +377,7 @@ impl State {
             | Record::Revocation(_)
             | Record::Worker(_)
             | Record::Membership(_)
+            | Record::Process(_)
             | Record::Grant(_)
             | Record::PartitionMap(_)
             | Record::GlobalKey(_)
@@ -1051,6 +1064,30 @@ impl Store for FileStore {
 
     fn save_membership(&self, membership: &MembershipRecord) -> Result<()> {
         append(&mut self.inner(), Record::Membership(membership.clone()))
+    }
+
+    fn processes(&self) -> Result<Vec<ProcessRecord>> {
+        let inner = self.inner();
+        let state = &inner.state;
+        Ok(state
+            .process_versions
+            .values()
+            .chain(state.process_states.values())
+            .cloned()
+            .collect())
+    }
+
+    fn save_process(&self, process: &ProcessRecord) -> Result<()> {
+        let mut inner = self.inner();
+        if process.version > 0
+            && inner
+                .state
+                .process_versions
+                .contains_key(&(process.name.clone(), process.version))
+        {
+            return Ok(());
+        }
+        append(&mut inner, Record::Process(process.clone()))
     }
 
     fn checkpoint(&self, kernel: &SigningKey, now_ms: i64) -> Result<Option<Checkpoint>> {

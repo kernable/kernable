@@ -40,6 +40,8 @@ struct DomainInner {
     aggregates: RwLock<Vec<Arc<dyn Runnable>>>,
     /// The read models and reactors created through it, in order.
     listeners: RwLock<Vec<Listener>>,
+    /// The business processes defined on it, in order.
+    processes: RwLock<Vec<crate::process::Process>>,
     /// The message types whose schemas are declared from their type (see [`crate::Message`]).
     declared: RwLock<HashSet<String>>,
 }
@@ -78,6 +80,7 @@ pub fn domain(name: &str) -> Domain {
             queries: RwLock::default(),
             aggregates: RwLock::default(),
             listeners: RwLock::default(),
+            processes: RwLock::default(),
             declared: RwLock::default(),
         }),
     }
@@ -161,6 +164,38 @@ impl Domain {
             domain: self.clone(),
             query_type: query_type.to_owned(),
         }
+    }
+
+    /// A business process of this domain named `name` (`fulfilment`; qualified
+    /// `shop.fulfilment`): add its start and steps to the [`crate::process::Process`] it
+    /// returns. An app of the domain registers it with the kernel ([`crate::Kernable::app`]).
+    /// Example: `shop_domain.process("fulfilment").start::<OrderSubmitted>(Start::key("aggregate_id"))...`.
+    ///
+    /// # Panics
+    ///
+    /// If `name` is not letters, digits, `-` and `_`, or the domain has a process named `name`
+    /// already.
+    pub fn process(&self, name: &str) -> crate::process::Process {
+        let valid = !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        assert!(valid, "invalid process name {name:?}");
+        let process = crate::process::Process::new(self.name(), name);
+        let mut processes = self.inner.processes.write().unwrap();
+        let qualified = process.name();
+        assert!(
+            !processes.iter().any(|p| p.name() == qualified),
+            "{} has a process {name} already",
+            self.inner.name
+        );
+        processes.push(process.clone());
+        process
+    }
+
+    /// The business processes defined on this domain, in order.
+    pub(crate) fn processes(&self) -> Vec<crate::process::Process> {
+        self.inner.processes.read().unwrap().clone()
     }
 
     /// An aggregate of this domain named `name` (lowercase by convention, like `cart`), whose

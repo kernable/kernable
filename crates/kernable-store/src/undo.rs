@@ -431,5 +431,6 @@ pub(crate) fn record_kind(record: &kernable_core::proto::log_record::Record) -> 
         Record::GlobalKey(_) => "a global key",
         Record::TenantImported(_) => "an imported tenant",
         Record::TenantIndex(_) => "a tenant's index",
+        Record::Process(_) => "a process",
     }
 }

@@ -40,8 +40,9 @@ use std::fmt;
 use ed25519_dalek::SigningKey;
 use kernable_core::proto::{
     AggregateIndex, Command, CommandResult, EnqueuedRecord, Event, Grant, ListenerRecord,
-    MembershipRecord, NewEvent, PartitionMap, Rejected, ReplicatedRecord, RevocationRecord,
-    Signature, StreamIndex, TenantImportedRecord, WorkerRecord, log_record::Record,
+    MembershipRecord, NewEvent, PartitionMap, ProcessRecord, Rejected, ReplicatedRecord,
+    RevocationRecord, Signature, StreamIndex, TenantImportedRecord, WorkerRecord,
+    log_record::Record,
 };
 
 /// The version of the stored data format this build reads and writes; a store of another
@@ -399,6 +400,14 @@ pub trait Store: Send + Sync {
 
     /// Replaces the membership of the record's service.
     fn save_membership(&self, membership: &MembershipRecord) -> Result<()>;
+
+    /// Every version of every process, ordered by name and version; then, ordered by name, the
+    /// newest change of state (a record with version 0) of each process that has one.
+    fn processes(&self) -> Result<Vec<ProcessRecord>>;
+
+    /// Keeps a version of a process (a version already kept stays as it was), or with version 0
+    /// replaces the process's state.
+    fn save_process(&self, process: &ProcessRecord) -> Result<()>;
 
     /// Signs the current head of the hash chain. Returns `None` while there are no events.
     fn checkpoint(&self, kernel: &SigningKey, now_ms: i64) -> Result<Option<Checkpoint>>;

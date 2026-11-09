@@ -244,6 +244,22 @@ service ProcessService {
   // Errors: UNAUTHENTICATED, PERMISSION_DENIED, INVALID_ARGUMENT (the model is invalid: the
   // message names the step and why; a command type no worker registered and no membership lists).
   rpc Register(ProcessRegistration) returns (ProcessRegistered);
+  // Removes a process: it starts no new cases, its running cases finish (as when a membership
+  // no longer lists it). Signed over kernable.v1.process_remove by a key granted `process` for
+  // it; valid 60 s around issued_at. A later registration makes it active again. Errors:
+  // UNAUTHENTICATED, PERMISSION_DENIED, NOT_FOUND (no such process).
+  rpc Remove(ProcessRemoval) returns (ProcessRemoved);
+}
+
+message ProcessRemoval {
+  string name = 1;      // qualified: `shop.fulfilment`
+  int64 issued_at = 2;  // ms since epoch
+  Signature sig = 3;    // over kernable.v1.process_remove
+  uint32 protocol = 4;  // not signed
+}
+
+message ProcessRemoved {
+  bool removed = 1;  // false: it was removed already
 }
 
 message ProcessRegistration {

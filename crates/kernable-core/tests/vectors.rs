@@ -97,6 +97,8 @@ fn vectors() -> Value {
         message: "Order already exists".into(),
         ..Default::default()
     };
+    // A process model as an SDK sends it: its JSON bytes, signed as they are.
+    let process_model: &[u8] = br#"{"name":"shop.fulfilment","start":{"on":"shop.OrderSubmitted","key":"aggregateId"},"steps":[{"name":"done","kind":"end"}]}"#;
     let nonce = [1u8; 16];
     let chain_hash = [2u8; 32];
     let producer_msg = signing::result_message(&cmd, 0, &events[..1]);
@@ -370,7 +372,30 @@ fn vectors() -> Value {
                 middlewares: vec!["guard".into()],
                 metadata: vec![kernable_core::proto::Attribute { key: "version".into(), value: "1.0.0".into() }],
                 issued_at: 1_700_000_000_000,
+                processes: Vec::new(),
             }),
+        ),
+        "membership_processes": entry(
+            json!({"service": "shop", "workers": ["shop.Cart", "shop.Order"], "listeners": ["carts"],
+                   "middlewares": ["guard"], "metadata": [{"key": "version", "value": "1.0.0"}],
+                   "issued_at": 1_700_000_000_000i64, "processes": ["shop.fulfilment", "shop.returns"]}),
+            signing::membership_message(&kernable_core::proto::Membership {
+                service: "shop".into(),
+                workers: vec!["shop.Cart".into(), "shop.Order".into()],
+                listeners: vec!["carts".into()],
+                middlewares: vec!["guard".into()],
+                metadata: vec![kernable_core::proto::Attribute { key: "version".into(), value: "1.0.0".into() }],
+                issued_at: 1_700_000_000_000,
+                processes: vec!["shop.fulfilment".into(), "shop.returns".into()],
+            }),
+        ),
+        "process": entry(
+            json!({"model_hex": hex::encode(process_model), "issued_at": 1_700_000_000_000i64}),
+            signing::process_message(process_model, 1_700_000_000_000),
+        ),
+        "process_remove": entry(
+            json!({"name": "shop.fulfilment", "issued_at": 1_700_000_000_000i64}),
+            signing::process_remove_message("shop.fulfilment", 1_700_000_000_000),
         ),
         "revoke": entry(
             json!({"key_id": "8b84", "since": 1_700_000_000_000i64, "issued_at": 1_700_000_100_000i64}),

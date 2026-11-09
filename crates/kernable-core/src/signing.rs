@@ -421,7 +421,18 @@ pub fn membership_message(m: &Membership) -> Vec<u8> {
 
 /// What a key granted `process` signs to register a process model (its JSON as sent).
 pub fn process_message(model: &[u8], issued_at: i64) -> Vec<u8> {
-    Msg::new("kernable.v1.process").bytes(model).i64(issued_at).0
+    Msg::new("kernable.v1.process")
+        .bytes(model)
+        .i64(issued_at)
+        .0
+}
+
+/// What a key granted `process` signs to remove a process (`ProcessService.Remove`).
+pub fn process_remove_message(name: &str, issued_at: i64) -> Vec<u8> {
+    Msg::new("kernable.v1.process_remove")
+        .str(name)
+        .i64(issued_at)
+        .0
 }
 
 /// What a key granted `manage` signs to deliver a listener's parked events again, or dismiss

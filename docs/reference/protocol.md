@@ -251,6 +251,51 @@ Revocation of keys, by root-key tooling (`kernable revoke`).
 
 ## Memberships
 
+### ProcessService
+
+Business processes, run by the kernel (design/processes.md).
+
+| RPC | Request | Response | Description |
+|---|---|---|---|
+| `Register` | `ProcessRegistration` | `ProcessRegistered` | Registers a process model (JSON, see design/processes.md "The model format"). Signed over kernable.v1.process by a key granted `process` for the process's qualified name, and `submit` for each command, `query` for each query and `listen` for each event the model names; valid 60 s around issued_at. A model equal to the newest version registers nothing new; a different one becomes the next version. Running cases stay on their version. Errors: UNAUTHENTICATED, PERMISSION_DENIED, INVALID_ARGUMENT (the model is invalid: the message names the step and why; a command type no worker registered and no membership lists). |
+| `Remove` | `ProcessRemoval` | `ProcessRemoved` | Removes a process: it starts no new cases, its running cases finish (as when a membership no longer lists it). Signed over kernable.v1.process_remove by a key granted `process` for it; valid 60 s around issued_at. A later registration makes it active again. Errors: UNAUTHENTICATED, PERMISSION_DENIED, NOT_FOUND (no such process). |
+
+### ProcessRemoval
+
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `name` |  `string` | 1 | qualified: `shop.fulfilment` |
+| `issued_at` |  `int64` | 2 | ms since epoch |
+| `sig` |  `Signature` | 3 | over kernable.v1.process_remove |
+| `protocol` |  `uint32` | 4 | not signed |
+
+### ProcessRemoved
+
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `removed` |  `bool` | 1 | false: it was removed already |
+
+### ProcessRegistration
+
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `model` |  `bytes` | 1 | the model as JSON |
+| `issued_at` |  `int64` | 2 | ms since epoch |
+| `sig` |  `Signature` | 3 | over kernable.v1.process |
+| `protocol` |  `uint32` | 4 | not signed |
+
+### ProcessRegistered
+
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `name` |  `string` | 1 | qualified: `shop.fulfilment` |
+| `version` |  `uint32` | 2 | from 1 |
+| `new` |  `bool` | 3 | false: equal to the newest version, nothing registered |
+
 ### MembershipService
 
 What a service consists of, applied by deploy tooling.
@@ -283,6 +328,7 @@ without a membership, and a process without a service, count as listed.
 | `middlewares` | repeated `string` | 4 |  |
 | `metadata` | repeated `Attribute` | 5 | free, e.g. version and description; signed in order |
 | `issued_at` |  `int64` | 6 | ms since epoch |
+| `processes` | repeated `string` | 7 | Qualified process names (`shop.fulfilment`); signed only when there are any. A process a membership no longer lists starts no new cases; its running cases finish. |
 
 ### ApplyRequest
 

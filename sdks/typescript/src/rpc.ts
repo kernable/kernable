@@ -350,6 +350,23 @@ export interface WireMembership {
   middlewares: string[];
   metadata: { key: string; value: string }[];
   issued_at: number;
+  /** Qualified process names; signed only when there are any. */
+  processes?: string[];
+}
+
+/** A process model to register; see `ProcessRegistration` in kernable.proto. */
+export interface WireProcessRegistration {
+  /** The model as JSON. */
+  model: Buffer;
+  issued_at: number;
+  sig: WireSignature;
+}
+
+/** See `ProcessRegistered` in kernable.proto. */
+export interface WireProcessRegistered {
+  name: string;
+  version: number;
+  new: boolean;
 }
 
 export type DataOp = "PutData" | "GetData" | "DeleteData";
@@ -370,6 +387,8 @@ export interface Clients {
   listData(req: WireDataRequest): Promise<WireDataList>;
   cache(op: CacheOp, req: WireCacheRequest): Promise<WireCacheResult>;
   apply(membership: WireMembership, sig: WireSignature): Promise<void>;
+  /** Registers a process model (`ProcessService.Register`). */
+  registerProcess(req: WireProcessRegistration): Promise<WireProcessRegistered>;
   /** The partition map the kernel holds; `null` if it serves every tenant (no `--partition`). */
   map(timeoutMs?: number): Promise<WirePartitionMap | null>;
   close(): void;
@@ -584,6 +603,7 @@ export function connect(url: string, tls?: TlsFiles, grant?: string, timeoutMs =
     }),
     cache: new v1.CacheService(u, creds, KEEPALIVE),
     memberships: new v1.MembershipService(u, creds, KEEPALIVE),
+    processes: new v1.ProcessService(u, creds, KEEPALIVE),
     partitions: new v1.PartitionService(u, creds, KEEPALIVE),
   }));
   type Target = (typeof targets)[number];
@@ -646,6 +666,7 @@ export function connect(url: string, tls?: TlsFiles, grant?: string, timeoutMs =
     apply: async (membership, sig) => {
       await unary("memberships", "Apply", { membership, sig });
     },
+    registerProcess: (req) => unary<WireProcessRegistered>("processes", "Register", req),
     map: async (ms) => {
       try {
         return await unary<WirePartitionMap>("partitions", "Map", {}, ms);

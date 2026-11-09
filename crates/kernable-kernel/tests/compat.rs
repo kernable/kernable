@@ -279,6 +279,7 @@ fn fill(store: &dyn Store, vault: &Vault) {
         }])
         .unwrap();
     let shop = Membership {
+        processes: Vec::new(),
         service: "orders".into(),
         workers: vec!["orders.Order".into()],
         listeners: vec!["orders".into()],

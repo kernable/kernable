@@ -306,6 +306,14 @@ impl Store for FaultyStore {
         self.faults.write(|| self.inner.save_membership(membership))
     }
 
+    fn processes(&self) -> Result<Vec<kernable_core::proto::ProcessRecord>> {
+        self.inner.processes()
+    }
+
+    fn save_process(&self, process: &kernable_core::proto::ProcessRecord) -> Result<()> {
+        self.faults.write(|| self.inner.save_process(process))
+    }
+
     fn checkpoint(&self, kernel: &SigningKey, now_ms: i64) -> Result<Option<Checkpoint>> {
         self.faults.write(|| self.inner.checkpoint(kernel, now_ms))
     }

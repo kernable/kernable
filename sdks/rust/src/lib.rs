@@ -34,6 +34,7 @@ mod index;
 mod listener;
 mod log;
 mod messages;
+pub mod process;
 mod store;
 mod vault;
 mod worker;
@@ -50,10 +51,12 @@ use ed25519_dalek::SigningKey;
 use kernable_core::{
     PROTOCOL,
     proto::{
-        self, ApplyRequest, Attribute, CancelRequest, Membership, SubmitRequest, Wait as WireWait,
-        cancel_result, command_result, command_service_client::CommandServiceClient,
+        self, ApplyRequest, Attribute, CancelRequest, Membership, ProcessRegistration,
+        SubmitRequest, Wait as WireWait, cancel_result, command_result,
+        command_service_client::CommandServiceClient,
         membership_service_client::MembershipServiceClient,
-        partition_service_client::PartitionServiceClient, query_result,
+        partition_service_client::PartitionServiceClient,
+        process_service_client::ProcessServiceClient, query_result,
         query_service_client::QueryServiceClient,
     },
     signing, transport,
@@ -80,6 +83,7 @@ pub use listener::{
 #[doc(hidden)]
 pub use messages::__private;
 pub use messages::{CommandType, EventType, Message, Of, QueryType, TypeKey};
+pub use process::Process;
 pub use store::Store;
 
 // The attributes name the crate `::kernable`; within it too (its tests).
@@ -770,6 +774,7 @@ impl Kernable {
                 .map(|(key, value)| Attribute { key, value })
                 .collect(),
             issued_at: issued_now(),
+            processes: manifest.processes,
         };
         let sig = self.client.sign(&signing::membership_message(&membership));
         let request = ApplyRequest {
@@ -787,11 +792,48 @@ impl Kernable {
         Ok(())
     }
 
+    /// Registers a business process with the kernel (see [`process`]): its model, signed. The
+    /// kernel numbers the versions: a model equal to the newest version registers nothing
+    /// ([`process::Registered::new`] is `false`), a different one becomes the next version;
+    /// running cases finish on the version they started with. An app registers its domains'
+    /// processes itself ([`Kernable::app`]). The key needs the `process` grant for the process,
+    /// and `submit`, `query` and `listen` for the commands, queries and events it names.
+    /// [`Error::Config`] if the model is invalid ([`Process::model`]), [`Error::Status`] if the
+    /// kernel refuses it (`INVALID_ARGUMENT` names the step and why).
+    pub async fn register_process(&self, process: &Process) -> Result<process::Registered, Error> {
+        let model = serde_json::to_vec(&process.model()?)?;
+        let issued_at = issued_now();
+        let sig = self
+            .client
+            .sign(&signing::process_message(&model, issued_at));
+        let request = ProcessRegistration {
+            model,
+            issued_at,
+            sig: Some(sig),
+            protocol: PROTOCOL,
+        };
+        let registered = self
+            .client
+            .control()
+            .await?
+            .call(None, request, |channel, r| async move {
+                ProcessServiceClient::new(channel).register(r).await
+            })
+            .await?;
+        Ok(process::Registered {
+            name: registered.name,
+            version: registered.version,
+            new: registered.new,
+        })
+    }
+
     /// An app made of whole domains: [`AppHandle::run`] applies the service's membership (the
     /// domains' aggregates as workers, their read models and reactors as listeners, those that
     /// check requests as middlewares; live ones are not listed, and the metadata is `version`
-    /// and `description`, when given, then the app's other metadata), then runs one worker for
-    /// all the aggregates and every listener, live ones too, all in the app's service.
+    /// and `description`, when given, then the app's other metadata; the domains' business
+    /// processes), then runs one worker for all the aggregates and every listener, live ones
+    /// too, all in the app's service, and registers the processes once the worker is ready
+    /// ([`Kernable::register_process`]; the key then needs the `process` grant for them).
     ///
     /// Example: `kernable.app(App::new().service("shop").version("1.0.0").domain(&shop_domain))?.run().await?`.
     /// Every start applies the membership, so the key needs the `manage` grant for the service.
@@ -1127,6 +1169,7 @@ pub struct Manifest {
     listeners: Vec<String>,
     middlewares: Vec<String>,
     metadata: Vec<(String, String)>,
+    processes: Vec<String>,
 }
 
 impl Manifest {
@@ -1161,6 +1204,14 @@ impl Manifest {
     /// A listener of the service that may check requests; it counts like a listener.
     pub fn middleware(mut self, listener: &Listener) -> Manifest {
         self.middlewares.push(listener.name().to_owned());
+        self
+    }
+
+    /// A business process of the service ([`Domain::process`]): the kernel starts new cases of
+    /// it while a membership lists it; one no longer listed starts none, its running cases
+    /// finish. Register it too ([`Kernable::register_process`]); an app does both.
+    pub fn process(mut self, process: &Process) -> Manifest {
+        self.processes.push(process.name());
         self
     }
 

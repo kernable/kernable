@@ -162,6 +162,7 @@ fn membership() -> impl Strategy<Value = Membership> {
     );
     (text(), texts(), texts(), texts(), metadata, 0i64..2).prop_map(
         |(service, workers, listeners, middlewares, metadata, issued_at)| Membership {
+            processes: Vec::new(),
             service,
             workers,
             listeners,

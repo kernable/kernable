@@ -5,7 +5,7 @@ use std::{sync::Arc, time::Instant};
 use tokio::task::JoinSet;
 
 use crate::{
-    Domain, Error, Kernable, ListenerHandle, Manifest, Worker,
+    Domain, Error, Kernable, ListenerHandle, Manifest, Process, Worker,
     domain::Runnable,
     log::{self, Level, Overview, Row},
 };
@@ -73,6 +73,10 @@ struct AppInner {
     manifest: Manifest,
     worker: Option<Worker>,
     listeners: Vec<ListenerHandle>,
+    /// The domains' business processes, registered once the worker is ready.
+    processes: Vec<Process>,
+    /// Whether they are registered (also when there are none).
+    registered: tokio::sync::watch::Sender<bool>,
 }
 
 /// An [`App`] on a connection; see [`Kernable::app`]. Cloning gives another handle to the same
@@ -111,6 +115,12 @@ impl AppHandle {
             }
         }
         manifest.metadata.extend(app.metadata);
+        let processes: Vec<Process> = app.domains.iter().flat_map(Domain::processes).collect();
+        for process in &processes {
+            // A typo stops the start, not a case.
+            process.model()?;
+            manifest = manifest.process(process);
+        }
         let worker = (!aggregates.is_empty()).then(|| {
             let worker = Worker::new(kernable.client.clone(), service.clone());
             for aggregate in &aggregates {
@@ -136,6 +146,8 @@ impl AppHandle {
                 manifest,
                 worker,
                 listeners,
+                registered: tokio::sync::watch::Sender::new(processes.is_empty()),
+                processes,
             }),
         })
     }
@@ -155,8 +167,9 @@ impl AppHandle {
         &self.inner.listeners
     }
 
-    /// Returns once the worker and every listener of the app are connected; waits forever if
-    /// one never connects, so wrap it in `tokio::time::timeout` where that matters.
+    /// Returns once the worker and every listener of the app are connected, and the domains'
+    /// processes are registered; waits forever if one never connects, so wrap it in
+    /// `tokio::time::timeout` where that matters.
     pub async fn ready(&self) {
         if let Some(worker) = &self.inner.worker {
             worker.ready().await;
@@ -164,6 +177,8 @@ impl AppHandle {
         for listener in &self.inner.listeners {
             listener.ready().await;
         }
+        let mut registered = self.inner.registered.subscribe();
+        let _ = registered.wait_for(|done| *done).await;
     }
 
     /// Ends `run`: stops the worker and every listener.
@@ -176,13 +191,15 @@ impl AppHandle {
         }
     }
 
-    /// Applies the membership (see [`Kernable::apply`]), then runs the worker and every
-    /// listener until `stop()`. Once all are connected, it prints an overview of the app
+    /// Applies the membership (see [`Kernable::apply`]; it lists the domains' processes), then
+    /// runs the worker and every listener until `stop()`. Once the worker is ready, it registers
+    /// the domains' processes ([`Kernable::register_process`]): a process whose commands no
+    /// worker runs yet would be refused. Once all are connected, it prints an overview of the app
     /// (unless `KERNABLE_LOG` is below `info`) instead of their connection lines. Fails only if
     /// the kernel refuses the membership ([`Error::Status`]); a failing handler does not end
     /// it (a command handler's error rejects the command, a listener handler's error makes the
-    /// listener reconnect and get the event again). A panic in a worker or listener task is
-    /// passed on.
+    /// listener reconnect and get the event again), or the kernel refuses a process (then it
+    /// stops). A panic in a worker or listener task is passed on.
     pub async fn run(&self) -> Result<(), Error> {
         let started = Instant::now();
         self.inner
@@ -209,6 +226,20 @@ impl AppHandle {
         for listener in &self.inner.listeners {
             let listener = listener.clone();
             running.spawn(async move { listener.run().await });
+        }
+        if !self.inner.processes.is_empty() {
+            if let Some(worker) = &self.inner.worker {
+                worker.ready().await;
+            }
+            for process in &self.inner.processes {
+                if let Err(e) = self.inner.kernable.register_process(process).await {
+                    self.stop();
+                    while running.join_next().await.is_some() {}
+                    overview.abort();
+                    return Err(e);
+                }
+            }
+            self.inner.registered.send_replace(true);
         }
         while let Some(done) = running.join_next().await {
             if let Err(e) = done

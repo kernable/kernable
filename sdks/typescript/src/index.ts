@@ -43,6 +43,7 @@ import {
   derivedId,
   indexMessage,
   membershipMessage,
+  processMessage,
   queryMessage,
   cancelMessage,
   rejectionMessage,
@@ -57,11 +58,17 @@ import {
   type AnswerOf, type CommandClass, type EventClass, type Fields, type MessageStatics, type QueryClass, type QueryTarget,
 } from "./messages.ts";
 import { Store } from "./store.ts";
+import { ProcessBuilder, type ProcessModel, type ProcessVersion } from "./process.ts";
 
 export { Key } from "./signing.ts";
 export { Store } from "./store.ts";
 export { Command, Event, Query } from "./messages.ts";
 export type { AnswerOf, CommandClass, EventClass, Fields, PersonalFields, QueryClass, QueryTarget, SubjectOf } from "./messages.ts";
+export { ProcessBuilder, value } from "./process.ts";
+export type {
+  CommandStepOptions, DecideCase, DecideOptions, Duration, Literal, Mapping, ProcessModel, ProcessStep, ProcessVersion,
+  QueryStepOptions, StartOptions, TimerOptions, TimerWhen, WaitOptions,
+} from "./process.ts";
 
 /**
  * A refusal with a business reason: throw it from a command handler, a query handler or a
@@ -903,8 +910,9 @@ function upcast(events: Map<string, EventSchema> | undefined, domain: string, ty
  * are named `domain.Type`. Create it with `domain(name)`.
  *
  * Everything is defined on it: aggregates (`aggregate`), read models (`readModel`), reactors
- * (`reactor`), event versions and vault fields (`event`, `command`). `Kernable.app` runs all of
- * it; `Kernable.worker` and `Kernable.listener` run parts. See [Domains](../concepts/domains).
+ * (`reactor`), business processes (`process`), event versions and vault fields (`event`,
+ * `command`). `Kernable.app` runs all of it and registers its processes; `Kernable.worker` and
+ * `Kernable.listener` run parts. See [Domains](../concepts/domains).
  *
  * ```ts
  * const shopDomain = domain("shop");
@@ -926,6 +934,8 @@ export class Domain {
   readonly aggregates: Aggregate<any>[] = [];
   /** The read models and reactors defined on it, which `Kernable.app` runs. */
   readonly listeners: Listener[] = [];
+  /** The business processes defined on it, which `Kernable.app` registers. */
+  readonly processes: ProcessBuilder[] = [];
 
   constructor(name: string) {
     if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(name)) throw new Error(`invalid domain name ${JSON.stringify(name)}`);
@@ -1016,6 +1026,20 @@ export class Domain {
    */
   reactor(name: string, options: ListenerOptions = {}): Listener {
     return this.listen(new Listener(this, name, { order: 10, parkAfter: PARK_AFTER, single: true, ...options }));
+  }
+
+  /**
+   * Defines a business process `name` (`fulfilment`, qualified `shop.fulfilment`): returns the
+   * `ProcessBuilder` to chain its start and steps on. The kernel runs it once registered:
+   * `Kernable.app` registers the processes of its domains when its workers are connected, and
+   * lists them in its membership; `Kernable.registerProcess` registers one alone. Throws if the
+   * domain has a process `name` already, or for a name other than letters, digits, `_` and `-`.
+   */
+  process(name: string): ProcessBuilder {
+    if (this.processes.some((p) => p.name === name)) throw new Error(`${this.name} has a process ${name} already`);
+    const process = new ProcessBuilder(this.name, name);
+    this.processes.push(process);
+    return process;
   }
 
   /** Adds `listener`, unless the domain has one of its name: a read model or a reactor. */
@@ -1351,9 +1375,9 @@ function listenerDetails(l: Listener, position: number, name: (type: string) => 
 }
 
 /**
- * A service made of whole domains, ready to run: one worker for all their aggregates and one
- * `ListenerHandle` per read model and reactor. Create it with `Kernable.app`, start it with
- * `run()`.
+ * A service made of whole domains, ready to run: one worker for all their aggregates, one
+ * `ListenerHandle` per read model and reactor, and their business processes, registered once
+ * the worker and listeners are connected. Create it with `Kernable.app`, start it with `run()`.
  *
  * ```ts
  * const app = new Kernable({ key: "app.key" }).app({ service: "shop", version: "1.0.0", domains: [shopDomain] });
@@ -1361,8 +1385,13 @@ function listenerDetails(l: Listener, position: number, name: (type: string) => 
  * ```
  */
 export class App {
-  /** Resolves once every worker and listener of the app is connected. */
+  /**
+   * Resolves once every worker and listener of the app is connected and its processes are
+   * registered; rejects if a process cannot be registered (`run()` rejects then too).
+   */
   readonly ready: Promise<void>;
+  /** The app's processes as the kernel registered them (`version`, `new`); filled once `ready`. */
+  readonly registered: ProcessVersion[] = [];
   /** The membership `run()` applies. */
   readonly manifest: Manifest;
   /** The worker of all the app's aggregates; none if its domains define no aggregate. */
@@ -1373,30 +1402,56 @@ export class App {
   private readonly log: Log;
   /** The names of the app's domains. */
   private readonly domains: Set<string>;
+  /** The processes of the app's domains. */
+  private readonly processes: ProcessBuilder[];
+  /** Every worker and listener connected. */
+  private readonly connected: Promise<void>;
+  /** Hands `run()`'s registration to `ready`. */
+  private registering!: (done: Promise<void>) => void;
 
   constructor(kernable: Kernable, log: Log, domains: Domain[], manifest: Manifest, worker: Worker | undefined, listeners: ListenerHandle[]) {
     this.kernable = kernable;
     this.log = log;
     this.domains = new Set(domains.map((d) => d.name));
+    this.processes = domains.flatMap((d) => d.processes);
     this.manifest = manifest;
     this.worker = worker;
     this.listeners = listeners;
-    this.ready = Promise.all([worker?.ready, ...listeners.map((l) => l.ready)]).then(() => {});
+    this.connected = Promise.all([worker?.ready, ...listeners.map((l) => l.ready)]).then(() => {});
+    this.ready = new Promise<Promise<void>>((resolve) => (this.registering = resolve)).then((done) => done);
+    // Whoever awaits `ready` sees a failed registration; `run()` reports it anyway.
+    this.ready.catch(() => {});
   }
 
   /**
    * Applies the membership (see `Kernable.apply`; the key needs `manage` for the service), then
    * runs the worker and the listeners until `stop()`, reconnecting when a connection drops.
-   * `options` go to the worker. Once all are connected, it prints an overview of the app on
-   * stderr (unless `KERNABLE_LOG` is below `info`). Rejects if the membership cannot be applied.
+   * `options` go to the worker. Once all are connected, it registers the domains' processes
+   * (see `Kernable.registerProcess`; the key needs `process` for each, and `submit` for their
+   * commands) and prints an overview of the app on stderr (unless `KERNABLE_LOG` is below
+   * `info`). Rejects if the membership cannot be applied, or if a process cannot be registered
+   * (an invalid model, a missing grant): it stops the app then, so the deploy fails.
    */
   async run(options: WorkerOptions = {}): Promise<void> {
     const started = Date.now();
     await this.kernable.apply(this.manifest);
     if (this.worker) this.worker.announce = false;
     for (const l of this.listeners) l.announce = false;
-    void this.ready.then(() => this.overview(Date.now() - started));
-    await Promise.all([this.worker?.run(options), ...this.listeners.map((l) => l.run())]);
+    const running = Promise.all([this.worker?.run(options), ...this.listeners.map((l) => l.run())]);
+    // Once all are connected; not at all if the app stops before.
+    const registered = Promise.race([this.connected.then(() => true), running.then(() => false)]).then((go) => (go ? this.register() : undefined));
+    this.registering(this.connected.then(() => registered));
+    registered.then(
+      () => this.overview(Date.now() - started),
+      () => this.stop(),
+    );
+    await Promise.all([running, registered]);
+  }
+
+  /** Registers every process of the app's domains, in order. */
+  private async register(): Promise<void> {
+    this.registered.length = 0;
+    for (const p of this.processes) this.registered.push(await this.kernable.registerProcess(p));
   }
 
   private overview(ms: number): void {
@@ -1409,6 +1464,7 @@ export class App {
     const count = (n: number, what: string) => `${n} ${what}${n === 1 ? "" : "s"}`;
     const listed = [count(m.workers?.length ?? 0, "worker"), count(m.listeners?.length ?? 0, "listener")];
     if (m.middlewares?.length) listed.push(count(m.middlewares.length, "middleware"));
+    if (m.processes?.length) listed.push(`${m.processes.length} process${m.processes.length === 1 ? "" : "es"}`);
     const meta = m.metadata ?? {};
     const rows: [string, string, string[]][] = [];
     for (const a of m.workers ?? []) {
@@ -1419,6 +1475,10 @@ export class App {
       const l = h.listener;
       const kind = l.options.live ? "live" : "listener";
       rows.push([kind, short(l.domain.name, l.name), listenerDetails(l, h.startedAt, (t) => relative(t, domains))]);
+    }
+    for (const r of this.registered) {
+      const [domain, name] = [r.name.slice(0, r.name.indexOf(".")), r.name.slice(r.name.indexOf(".") + 1)];
+      rows.push(["process", short(domain, name), [`version ${r.version}${r.new ? " (new)" : ""}`]]);
     }
     const nameWidth = Math.max(0, ...rows.map(([, name]) => name.length));
     const lines = [
@@ -1467,6 +1527,11 @@ export interface Manifest {
   middlewares?: Listener[];
   /** Free metadata, e.g. `{ version: "1.0.0" }`. */
   metadata?: Record<string, string>;
+  /**
+   * The service's business processes, by builder or qualified name (`shop.fulfilment`). One the
+   * membership no longer lists starts no new cases; its running cases finish.
+   */
+  processes?: (ProcessBuilder | string)[];
 }
 
 /**
@@ -1482,7 +1547,7 @@ export interface AppOptions {
   description?: string;
   /** More metadata. */
   metadata?: Record<string, string>;
-  /** Every aggregate, read model and reactor defined on them runs in this app. */
+  /** Every aggregate, read model and reactor defined on them runs in this app; their processes are registered. */
   domains: Domain[];
 }
 
@@ -1827,7 +1892,8 @@ export class Kernable {
   /**
    * An app made of whole domains: `run()` applies the service's membership (its domains'
    * aggregates as workers, their read models and reactors as listeners, those that check
-   * requests as middlewares; live ones are not listed), then runs all of them:
+   * requests as middlewares, live ones not listed; and their processes), then runs all of them
+   * and, once they are connected, registers the processes:
    * `await kernable.app({ service: "shop", domains: [shopDomain] }).run()`. Throws if neither
    * `options.service` nor `Options.service` names a service. One service is one app: two
    * processes with the same service would replace each other's membership. To split a service
@@ -1844,6 +1910,7 @@ export class Kernable {
       workers: aggregates,
       listeners: durable.filter((l) => l.middlewares.size === 0),
       middlewares: durable.filter((l) => l.middlewares.size > 0),
+      processes: options.domains.flatMap((d) => d.processes),
       metadata: {
         ...(options.version === undefined ? {} : { version: options.version }),
         ...(options.description === undefined ? {} : { description: options.description }),
@@ -1857,7 +1924,7 @@ export class Kernable {
 
   /**
    * Replaces the membership of a service (default: this process's): the workers, listeners and
-   * middlewares the kernel waits for, and free metadata. Apply it once per deploy, e.g. from a
+   * middlewares the kernel waits for, its processes, and free metadata. Apply it once per deploy, e.g. from a
    * deploy script, not from every process: the newest apply wins, and an older one that arrives
    * late is refused. The key needs `manage` for
    * the service. A middleware the new membership no longer lists stops checking. Throws if
@@ -1874,8 +1941,31 @@ export class Kernable {
       middlewares: (manifest.middlewares ?? []).map((l) => l.name),
       metadata: Object.entries(manifest.metadata ?? {}).map(([key, value]) => ({ key, value })),
       issued_at: issuedNow(),
+      processes: (manifest.processes ?? []).map((p) => (typeof p === "string" ? p : p.qualified)),
     };
     await (await this.clients.control()).apply(membership, this.key.sign(membershipMessage(membership)));
+  }
+
+  /**
+   * Registers a business process with the kernel: its builder (`Domain.process`), whose
+   * `model()` it sends, or a model as is. Signed with this client's key, which needs a grant
+   * `process` for the process, `submit` for each command, `query` for each query and `listen`
+   * for each event the model names. A model equal to the newest version registers nothing
+   * (`new: false`); a different one becomes the next version, while running cases finish on
+   * theirs. `Kernable.app` registers the processes of its domains itself. Throws what
+   * `ProcessBuilder.model` throws, and the kernel's `INVALID_ARGUMENT` for a model it refuses,
+   * naming the process, the step and why.
+   *
+   * ```ts
+   * const { version, new: changed } = await kernable.registerProcess(fulfilment);
+   * ```
+   */
+  async registerProcess(process: ProcessBuilder | ProcessModel): Promise<ProcessVersion> {
+    const model = Buffer.from(JSON.stringify(process instanceof ProcessBuilder ? process.model() : process), "utf8");
+    const issued_at = issuedNow();
+    const sig = this.key.sign(processMessage(model, issued_at));
+    const r = await (await this.clients.control()).registerProcess({ model, issued_at, sig });
+    return { name: r.name, version: r.version, new: r.new };
   }
 
   /**

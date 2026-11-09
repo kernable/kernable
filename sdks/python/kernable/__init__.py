@@ -49,8 +49,8 @@ from typing import ClassVar, Any, Callable, Iterable
 import grpc
 
 from kernable.signing import (Key, cache_message, cancel_message, challenge_message, command_message, data_message, derived_id,
-                              index_message, membership_message, query_message, vault_ref, rejection_message, result_message,
-                              snapshot_message)
+                              index_message, membership_message, process_message, query_message, vault_ref, rejection_message,
+                              result_message, snapshot_message)
 from kernable.store import Store
 from kernable.v1 import kernable_pb2 as pb
 from kernable.v1 import kernable_pb2_grpc as rpc
@@ -60,13 +60,14 @@ from .messages import (  # noqa: E402
     declare_event as _declare_event, from_wire as _from_wire, is_message_class as _is_message_class,
     query_target as _query_target, to_wire as _to_wire,
 )
+from .processes import Process, Value, value  # noqa: E402
 
 __all__ = ["PROTOCOL", "Event", "Command", "Query", "StoredEvent", "Aggregate", "AggregateType", "MiddlewareContext", "App", "ApplyContext", "CacheClient", "CancelOutcome", "Check", "ClientClosed", "CommandContext", "CommandMeta",
            "CommandSchema", "QuerySchema", "Target",
            "Data", "DataClient", "Domain", "Listed", "Listing",
            "EventMeta", "EventSchema", "HeldKey", "Index", "Kernable", "Key", "Listener", "ListenerContext", "ListenerHandle", "Manifest", "NotSettled", "Outcome",
-           "QueryContext", "QueryMeta", "QueryOutcome", "Rejected", "RequestContext", "Requirement", "Store", "StoredEventMeta", "Tls", "Worker",
-           "domain", "reindex_type"]
+           "Process", "QueryContext", "QueryMeta", "QueryOutcome", "RegisteredProcess", "Rejected", "RequestContext", "Requirement", "Store", "StoredEventMeta", "Tls", "Worker",
+           "Value", "domain", "reindex_type", "value"]
 
 #: Time zero (UTC): the default of times not known.
 _EPOCH = datetime.fromtimestamp(0, timezone.utc)
@@ -487,6 +488,18 @@ class Index:
 
 
 @dataclass
+class RegisteredProcess:
+    """What became of `Kernable.register_process`: the process's version."""
+
+    #: Qualified: `shop.fulfilment`.
+    name: str
+    #: From 1; the newest version, whether registered now or before.
+    version: int
+    #: False if the model equals the newest version: nothing was registered.
+    new: bool
+
+
+@dataclass
 class CancelOutcome:
     """What became of `Kernable.cancel`: cancelled, or rejected with a code and a message
     (`too_late`, `not_found`, or a middleware's code)."""
@@ -845,6 +858,8 @@ class Domain:
         self.aggregates: list[AggregateType] = []
         #: The read models and reactors defined on it, which `Kernable.app` runs.
         self.listeners: list[Listener] = []
+        #: The business processes defined on it, which `Kernable.app` registers.
+        self.processes: list[Process] = []
 
     def command(self, type: str) -> CommandSchema:
         """Declares which fields of `type` commands the vault keeps (`personal`, `secret`); see
@@ -852,6 +867,18 @@ class Domain:
         spec = CommandSchema(type)
         self.commands[type] = spec
         return spec
+
+    def process(self, name: str) -> Process:
+        """Defines a business process `name` of this domain (`shop.fulfilment` for `fulfilment`):
+        returns the `Process` builder to chain its steps on (`start`, `command`, `wait`, `timer`,
+        `decide`, `query`, `end`). `Kernable.app` registers the domain's processes; see
+        `kernable.processes` for an example. Raises `ValueError` if the domain has a process of
+        that name already."""
+        if any(p.name == name for p in self.processes):
+            raise ValueError(f"{self.name} has a process {name!r} already")
+        p = Process(self.name, name)
+        self.processes.append(p)
+        return p
 
     def query(self, type: str) -> QuerySchema:
         """Declares what `type` queries (unqualified) are about: returns the `QuerySchema` to chain
@@ -1767,8 +1794,9 @@ class Kernable:
             description: str | None = None, metadata: dict[str, str] | None = None) -> "App":
         """An app made of whole domains: every aggregate, read model and reactor defined on them.
         `run()` on it applies the service's membership (the domains' aggregates as workers, their
-        read models and reactors as listeners, those with a middleware as middlewares; live ones
-        are not listed), then runs all of them. `service` defaults to this client's; `version`
+        read models and reactors as listeners, those with a middleware as middlewares, their
+        processes; live listeners are not listed), then runs all of them, and registers the
+        domains' processes once its worker is connected (see `register_process`). `service` defaults to this client's; `version`
         and `description` go into the membership's metadata, followed by `metadata`.
 
         Example: `k.app(service="shop", version="1.0.0", domains=[shop_domain]).run()`. Every
@@ -1786,20 +1814,22 @@ class Kernable:
         manifest = Manifest(service=service, workers=aggregates,
                             listeners=[l for l in durable if not l._middlewares],
                             middlewares=[l for l in durable if l._middlewares],
-                            metadata={**meta, **(metadata or {})})
+                            metadata={**meta, **(metadata or {})},
+                            processes=[p for d in domains for p in d.processes])
         worker = Worker(self._parts, self._key, aggregates, self._log, service) if aggregates else None
         handles = [ListenerHandle(self._parts, self._key, l, self._log, service, self) for l in listeners]
         return App(self, manifest, worker, handles, [d.name for d in domains])
 
     def apply(self, *, service: str | None = None, workers: Iterable[AggregateType] = (),
               listeners: Iterable["Listener"] = (), middlewares: Iterable["Listener"] = (),
-              metadata: dict[str, str] | None = None) -> None:
+              metadata: dict[str, str] | None = None, processes: Iterable["Process | str"] = ()) -> None:
         """Replaces the membership of a service (default: this client's `service`): the workers,
         listeners and middlewares the kernel waits for, plus free metadata such as
         `{"version": "1.0.0"}`. `workers` are the aggregates the service runs (the kernel waits
         for a worker of each), `listeners` the listeners it waits for (the service's others count
         for nobody), `middlewares` the service's listeners that may check requests (they count like
-        listeners).
+        listeners), `processes` its business processes (`Process`es or qualified names): one it no
+        longer lists starts no new cases, its running cases finish.
 
         Apply it once per deploy, e.g. from a deploy script, not from every process: the newest
         apply wins, and an older one that arrives late is refused. The key needs the `manage` grant for the service. A middleware the new
@@ -1813,10 +1843,27 @@ class Kernable:
                                    listeners=[l.name for l in listeners],
                                    middlewares=[l.name for l in middlewares],
                                    metadata=[pb.Attribute(key=k, value=v) for k, v in (metadata or {}).items()],
-                                   issued_at=_issued_now())
+                                   issued_at=_issued_now(),
+                                   processes=[p.qualified if isinstance(p, Process) else p for p in processes])
         rpc.MembershipServiceStub(self._parts.control()).Apply(
             pb.ApplyRequest(membership=membership, sig=self._key.sign(membership_message(membership)),
                             protocol=PROTOCOL))
+
+    def register_process(self, process: "Process | dict") -> RegisteredProcess:
+        """Registers a business process (a `Process`, or its model as a dict), signed with this
+        client's key: a model equal to the newest version registers nothing (`new` is False),
+        a different one becomes the next version; running cases stay on theirs. `Kernable.app`
+        does this for its domains' processes. The key needs the grant `process` for the
+        process, and `submit`, `query` and `listen` for the commands, queries and events the
+        model names. Raises `ValueError` if the builder finds the model invalid (see
+        `Process.model`), `grpc.RpcError` if the kernel refuses it (`INVALID_ARGUMENT` names the
+        step and why)."""
+        model = process.model() if isinstance(process, Process) else process
+        raw = json.dumps(model, separators=(",", ":"), ensure_ascii=False).encode()
+        req = pb.ProcessRegistration(model=raw, issued_at=_issued_now(), protocol=PROTOCOL)
+        req.sig.CopyFrom(self._key.sign(process_message(req.model, req.issued_at)))
+        res = rpc.ProcessServiceStub(self._parts.control()).Register(req)
+        return RegisteredProcess(name=res.name, version=res.version, new=res.new)
 
     def _command_of(self, command: Command) -> tuple:
         """Domain, aggregate type, type and payload of a command class instance; its domain's vault fields known."""
@@ -2248,6 +2295,8 @@ class Manifest:
     middlewares: list["Listener"] = field(default_factory=list)
     #: Free metadata, e.g. `{"version": "1.0.0"}`.
     metadata: dict[str, str] = field(default_factory=dict)
+    #: The service's business processes; `Kernable.app` registers them.
+    processes: list[Process] = field(default_factory=list)
 
 
 class _AllReady:
@@ -2279,7 +2328,8 @@ class App:
     `app.ready.wait(5)`, which returns whether everything connected within 5 seconds. Call
     `app.stop()` from another thread or a handler to end `run()`. Attributes: `manifest` (a
     `Manifest`), `worker` (a `Worker`, or `None` without aggregates), `listeners` (a
-    `ListenerHandle` per read model and reactor, live ones too) and `ready`.
+    `ListenerHandle` per read model and reactor, live ones too), `ready` and `processes` (a
+    `RegisteredProcess` per process of its domains, once registered).
 
     One service is one app: two processes with the same service would replace each other's
     membership."""
@@ -2298,6 +2348,8 @@ class App:
         self.worker = worker
         #: A running listener per read model and reactor, live ones too.
         self.listeners = listeners
+        #: The `RegisteredProcess` per process (qualified name), once registered by `run()`.
+        self.processes: dict[str, RegisteredProcess] = {}
         streams = [s for s in (worker, *listeners) if s is not None]
         #: Set once every worker and listener of the app is connected.
         self.ready = _AllReady([s.ready for s in streams])
@@ -2314,8 +2366,9 @@ class App:
         membership."""
         started = time.monotonic()
         m = self.manifest
+        models = [p.model() for p in m.processes]  # an invalid one stops the app before it starts
         self._kernable.apply(service=m.service, workers=m.workers, listeners=m.listeners,
-                             middlewares=m.middlewares, metadata=m.metadata)
+                             middlewares=m.middlewares, metadata=m.metadata, processes=m.processes)
         for s in self._streams:
             s.announce = False
         errors: list[BaseException] = []
@@ -2333,9 +2386,24 @@ class App:
                 errors.append(err)
                 self.stop()
 
+        def register() -> None:
+            # Once the worker is connected, so the kernel knows the commands the models send.
+            while self.worker is not None and not self.worker.ready.wait(0.1):
+                if self._stopped:
+                    return
+            try:
+                for model in models:
+                    r = self._kernable.register_process(model)
+                    self.processes[r.name] = r
+            except BaseException as err:
+                errors.append(err)
+                self.stop()
+
         threads = [threading.Thread(target=run, args=(s,), name=f"kernable {s._what}", daemon=True)
                    for s in self._streams]
         threading.Thread(target=overview, name="kernable overview", daemon=True).start()
+        if models:
+            threads.append(threading.Thread(target=register, name="kernable processes", daemon=True))
         for t in threads:
             t.start()
         try:

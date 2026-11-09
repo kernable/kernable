@@ -10,7 +10,7 @@ use kernable_core::proto::Grant;
 use crate::config;
 
 /// The actions a grant names; `*` stands for all of them.
-pub const ACTIONS: [&str; 18] = [
+pub const ACTIONS: [&str; 19] = [
     "submit",
     "run",
     "subscribe",
@@ -29,6 +29,7 @@ pub const ACTIONS: [&str; 18] = [
     "export",
     "backup",
     "reserved_order",
+    "process",
 ];
 
 /// Key ID -> the type patterns it may use for one action.
@@ -77,6 +78,9 @@ pub struct Permissions {
     /// Keys whose listeners and middlewares may take negative orders (`*`), which are
     /// reserved for kernable's own kits: they run before every app listener.
     pub reserved_order: Rules,
+    /// Business processes a key may register and remove (qualified process names,
+    /// `shop.fulfilment`, or `shop.*`).
+    pub process: Rules,
     /// Old key ID -> new key ID: a listener registered with the old key may connect with the
     /// new one and keeps its position, order and middleware registration.
     pub successors: HashMap<String, String>,
@@ -138,6 +142,7 @@ impl Permissions {
             "export" => &mut self.export,
             "backup" => &mut self.backup,
             "reserved_order" => &mut self.reserved_order,
+            "process" => &mut self.process,
             _ => unreachable!("not an action: {action}"),
         }
     }

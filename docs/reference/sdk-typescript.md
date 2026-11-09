@@ -482,8 +482,9 @@ cases are valid; names are case-sensitive. Types are unique within a domain; els
 are named `domain.Type`. Create it with `domain(name)`.
 
 Everything is defined on it: aggregates (`aggregate`), read models (`readModel`), reactors
-(`reactor`), event versions and vault fields (`event`, `command`). `Kernable.app` runs all of
-it; `Kernable.worker` and `Kernable.listener` run parts. See [Domains](../concepts/domains).
+(`reactor`), business processes (`process`), event versions and vault fields (`event`,
+`command`). `Kernable.app` runs all of it and registers its processes; `Kernable.worker` and
+`Kernable.listener` run parts. See [Domains](../concepts/domains).
 
 ```ts
 const shopDomain = domain("shop");
@@ -498,6 +499,7 @@ const mailer = shopDomain.reactor("mailer");
 - `readonly queries = new Map<string, QuerySchema>()`: What query types given by name are about; see `query`.
 - `readonly aggregates: Aggregate<any>[] = []`: The aggregates defined on it, which `Kernable.app` runs.
 - `readonly listeners: Listener[] = []`: The read models and reactors defined on it, which `Kernable.app` runs.
+- `readonly processes: ProcessBuilder[] = []`: The business processes defined on it, which `Kernable.app` registers.
 - `event(type: string, schema: number): EventSchema`: Declares the payload format of `type` events (unqualified): this domain writes them at version `schema` (from 1), with an `upcast` per older version, and may keep fields in the vault (`personal`) or erase a subject (`erases`). Returns the `EventSchema` to chain on. Types not declared are at version 1. The domain's aggregates and listeners use it; listeners of other domains get it with `use(domain)`. Throws for a qualified type or a version below 1.
 - `event(...classes: EventClass<unknown>[]): void`: Declares event classes of this domain (their statics: `version`, `upcasts`, `personal`, `erases`), e.g. in a process that only reads them. An aggregate's `apply` declares them too.
 - `event(type: string | EventClass<unknown>, ...rest: (number | EventClass<unknown>)[]): EventSchema | void`
@@ -506,6 +508,7 @@ const mailer = shopDomain.reactor("mailer");
 - `aggregate<S>(name: string, initial: S, options?: AggregateOptions): Aggregate<S>`: Defines an aggregate type `name` (`cart`) of this domain, with the state `initial` every aggregate of it starts from: `shopDomain.aggregate("cart", { items: 0 })`. Add its event appliers and command handlers with `apply` and `command`; run it with `kernable.worker(cart)` or `kernable.app`. `options`: snapshots, see `AggregateOptions`. Throws if the domain has an aggregate `name` already.
 - `readModel(name: string, options: ListenerOptions = {}): Listener`: Defines a read model named `name`: a listener that builds a view from events (`on`) and answers queries from it (`query`). Without a store it is kept in memory and rebuilt from the first event on every start (defaults: order 0, start 0); with `options.store` it continues where it left off. `options` override the defaults, see `ListenerOptions`. Run it with `kernable.listener(definition)` or `kernable.app`. Throws if the domain has a listener `name` already.
 - `reactor(name: string, options: ListenerOptions = {}): Listener`: Defines a reactor named `name`: a listener that triggers side effects and follow-up commands. It starts at the newest event when it is new, then resumes after the last acknowledged event (defaults: order 10, no start), so it never reacts to what happened before it existed. Submit follow-ups with `ctx.submit` and a fixed command `id`, so a redelivered event is harmless; a rejected one parks the event (see `ListenerOptions.parkAfter`). A settling submit from its handler waits for the listeners before it (the read models), not for the reactor itself, which handles one event at a time. Run it with `kernable.listener(definition)` or `kernable.app`. Throws if the domain has a listener `name` already.
+- `process(name: string): ProcessBuilder`: Defines a business process `name` (`fulfilment`, qualified `shop.fulfilment`): returns the `ProcessBuilder` to chain its start and steps on. The kernel runs it once registered: `Kernable.app` registers the processes of its domains when its workers are connected, and lists them in its membership; `Kernable.registerProcess` registers one alone. Throws if the domain has a process `name` already, or for a name other than letters, digits, `_` and `-`.
 
 ### domain()
 
@@ -570,20 +573,21 @@ cart.command("AddItem", (state, data: { sku: string; qty: number }) => {
 
 ### App
 
-A service made of whole domains, ready to run: one worker for all their aggregates and one
-`ListenerHandle` per read model and reactor. Create it with `Kernable.app`, start it with
-`run()`.
+A service made of whole domains, ready to run: one worker for all their aggregates, one
+`ListenerHandle` per read model and reactor, and their business processes, registered once
+the worker and listeners are connected. Create it with `Kernable.app`, start it with `run()`.
 
 ```ts
 const app = new Kernable({ key: "app.key" }).app({ service: "shop", version: "1.0.0", domains: [shopDomain] });
 await app.run(); // until app.stop()
 ```
 
-- `readonly ready: Promise<void>`: Resolves once every worker and listener of the app is connected.
+- `readonly ready: Promise<void>`: Resolves once every worker and listener of the app is connected and its processes are registered; rejects if a process cannot be registered (`run()` rejects then too).
+- `readonly registered: ProcessVersion[] = []`: The app's processes as the kernel registered them (`version`, `new`); filled once `ready`.
 - `readonly manifest: Manifest`: The membership `run()` applies.
 - `readonly worker?: Worker`: The worker of all the app's aggregates; none if its domains define no aggregate.
 - `readonly listeners: ListenerHandle[]`: One handle per read model and reactor of the app's domains, live ones included.
-- `async run(options: WorkerOptions = {}): Promise<void>`: Applies the membership (see `Kernable.apply`; the key needs `manage` for the service), then runs the worker and the listeners until `stop()`, reconnecting when a connection drops. `options` go to the worker. Once all are connected, it prints an overview of the app on stderr (unless `KERNABLE_LOG` is below `info`). Rejects if the membership cannot be applied.
+- `async run(options: WorkerOptions = {}): Promise<void>`: Applies the membership (see `Kernable.apply`; the key needs `manage` for the service), then runs the worker and the listeners until `stop()`, reconnecting when a connection drops. `options` go to the worker. Once all are connected, it registers the domains' processes (see `Kernable.registerProcess`; the key needs `process` for each, and `submit` for their commands) and prints an overview of the app on stderr (unless `KERNABLE_LOG` is below `info`). Rejects if the membership cannot be applied, or if a process cannot be registered (an invalid model, a missing grant): it stops the app then, so the deploy fails.
 - `stop(): void`: Stops the worker and every listener of the app, so `run()` resolves.
 
 ### Manifest
@@ -602,6 +606,7 @@ await kernable.apply({ service: "shop", workers: [cart], listeners: [carts], mid
 - `listeners?: Listener[]`: The listeners the kernel waits for, by name; the service's others are dynamic.
 - `middlewares?: Listener[]`: The service's listeners that may check requests (`Listener.middleware`); they count like listeners. Only middlewares listed here check requests.
 - `metadata?: Record<string, string>`: Free metadata, e.g. `{ version: "1.0.0" }`.
+- `processes?: (ProcessBuilder | string)[]`: The service's business processes, by builder or qualified name (`shop.fulfilment`). One the membership no longer lists starts no new cases; its running cases finish.
 
 ### AppOptions
 
@@ -612,7 +617,7 @@ An app: one service made of whole domains, for `Kernable.app`. `version`, `descr
 - `version?: string`: The app's version, e.g. `1.0.0`.
 - `description?: string`: One line about the app.
 - `metadata?: Record<string, string>`: More metadata.
-- `domains: Domain[]`: Every aggregate, read model and reactor defined on them runs in this app.
+- `domains: Domain[]`: Every aggregate, read model and reactor defined on them runs in this app; their processes are registered.
 
 ### Options
 
@@ -689,8 +694,9 @@ differently: `submit` returns them in its `Outcome`, `query` throws `Rejected`.
 - `readonly cache: Cache`: The shared cache of a domain; see `Cache`.
 - `use(...domains: Domain[]): this`: Seals the vault fields of these domains' commands when submitting them (see `Domain.command`); without it, those fields go into the signed log in clear. Returns the client: `new Kernable().use(identityDomain)`.
 - `worker(...aggregates: Aggregate<any>[]): Worker`: A worker for these aggregates: `await kernable.worker(cart).run()` executes their commands until `stop()`. The kernel registers the aggregates when it connects: commands for an aggregate or command type no worker registered are refused. Start as many workers as you like; the kernel spreads commands over them, one at a time per aggregate. Without `Options.service` or a membership, the aggregates count as soon as they are registered.
-- `app(options: AppOptions): App`: An app made of whole domains: `run()` applies the service's membership (its domains' aggregates as workers, their read models and reactors as listeners, those that check requests as middlewares; live ones are not listed), then runs all of them: `await kernable.app({ service: "shop", domains: [shopDomain] }).run()`. Throws if neither `options.service` nor `Options.service` names a service. One service is one app: two processes with the same service would replace each other's membership. To split a service over several processes, run `worker` and `listener` and `apply` the membership yourself.
-- `async apply(manifest: Manifest): Promise<void>`: Replaces the membership of a service (default: this process's): the workers, listeners and middlewares the kernel waits for, and free metadata. Apply it once per deploy, e.g. from a deploy script, not from every process: the newest apply wins, and an older one that arrives late is refused. The key needs `manage` for the service. A middleware the new membership no longer lists stops checking. Throws if neither `manifest.service` nor `Options.service` names a service. See [Remove a listener](../how-to/remove-listener).
+- `app(options: AppOptions): App`: An app made of whole domains: `run()` applies the service's membership (its domains' aggregates as workers, their read models and reactors as listeners, those that check requests as middlewares, live ones not listed; and their processes), then runs all of them and, once they are connected, registers the processes: `await kernable.app({ service: "shop", domains: [shopDomain] }).run()`. Throws if neither `options.service` nor `Options.service` names a service. One service is one app: two processes with the same service would replace each other's membership. To split a service over several processes, run `worker` and `listener` and `apply` the membership yourself.
+- `async apply(manifest: Manifest): Promise<void>`: Replaces the membership of a service (default: this process's): the workers, listeners and middlewares the kernel waits for, its processes, and free metadata. Apply it once per deploy, e.g. from a deploy script, not from every process: the newest apply wins, and an older one that arrives late is refused. The key needs `manage` for the service. A middleware the new membership no longer lists stops checking. Throws if neither `manifest.service` nor `Options.service` names a service. See [Remove a listener](../how-to/remove-listener).
+- `async registerProcess(process: ProcessBuilder | ProcessModel): Promise<ProcessVersion>`: Registers a business process with the kernel: its builder (`Domain.process`), whose `model()` it sends, or a model as is. Signed with this client's key, which needs a grant `process` for the process, `submit` for each command, `query` for each query and `listen` for each event the model names. A model equal to the newest version registers nothing (`new: false`); a different one becomes the next version, while running cases finish on theirs. `Kernable.app` registers the processes of its domains itself. Throws what `ProcessBuilder.model` throws, and the kernel's `INVALID_ARGUMENT` for a model it refuses, naming the process, the step and why. ```ts const { version, new: changed } = await kernable.registerProcess(fulfilment); ```
 - `async submit(options: SubmitOptions): Promise<Outcome>`: Runs a command and returns its outcome: `{ committed: true, events }`, or `{ committed: false, code, message }` if it was rejected (a rejection does not throw). By default it returns once the command settled, so a query right after it sees the events; see `SubmitOptions.wait`. Throws `NotSettled` if the command committed but did not settle in time. Idempotent on `options.id`.
 - `async submit(command: Command, target: CommandTarget): Promise<Outcome>`: The same with a command class instance: `submit(new AddItem({ sku, qty }), { aggregateId })`. Its class says the domain, aggregate type, type and vault fields (no `use` needed).
 - `async submit(command: SubmitOptions | Command, target?: CommandTarget): Promise<Outcome>`
@@ -1132,3 +1138,185 @@ carts.query("GetCart", (data: { id: string }, _qry, ctx) => ctx.store!.get("cart
 - `all<T = unknown>(ns: string): [string, T][]`: Every key and value of a namespace, ordered by key.
 - `reset(ns?: string): void`: Clears a namespace, or all data.
 - `close(): void`: Closes the database, leaving no old pages behind.
+
+### Literal
+
+A literal in a mapping or a model: `{ value: <json> }`; build it with `value(…)`.
+
+- `value: unknown`
+
+### value()
+
+`export function value(x: unknown): Literal`
+
+A literal for a mapping, where a plain string would be a reference:
+`data: { reason: value("unpaid") }` sends the string `unpaid`, while `"case.reason"` sends
+the case's field. Any JSON value; throws for `undefined`.
+
+### Mapping
+
+```ts
+export type Mapping = Record<string, string | Literal>;
+```
+
+Field → reference or literal: `{ orderId: "case.orderId", reason: value("unpaid") }`. A
+reference is `aggregateId` or `data.<path>` (the event being handled, in `start` and `wait`),
+`case.<path>` (the case's data), or in a query step `answer` / `answer.<path>`. Paths are wire
+names (camelCase), as the messages' fields.
+
+### Duration
+
+```ts
+export type Duration = `${number}${"s" | "m" | "h" | "d"}`;
+```
+
+A duration: a positive whole number of seconds, minutes, hours or days: `30s`, `15m`, `12h`, `3d`.
+
+### StartOptions
+
+The options of `ProcessBuilder.start`.
+
+- `key: string`: Where the case's key is in the event: `aggregateId` or `data.<field>`. One case per key.
+- `data?: Mapping`: The case's data, from the event: `{ orderId: "aggregateId", total: "data.total" }`.
+
+### CommandStepOptions
+
+The options of `ProcessBuilder.command`.
+
+- `aggregate: string`: The aggregate the command goes to, a reference: `case.orderId`.
+- `data?: Mapping`: The command's data, from the case: `{ orderId: "case.orderId", reason: value("unpaid") }`.
+- `rejected?: Record<string, string>`: The step to go to per rejection code: `{ out_of_stock: "notify" }`. Any other rejection is an incident.
+- `next?: string`: The step after the command committed. Default: the next step written.
+
+### WaitOptions
+
+The options of `ProcessBuilder.wait`.
+
+- `key: string`: Where the case's key is in the awaited event: `aggregateId` or `data.<field>`.
+- `data?: Mapping`: Merged into the case's data, from the event: `{ paidAt: "data.at" }`.
+- `timeout?: Duration`: How long to wait (`3d`); with `onTimeout`, the step to go to then.
+- `onTimeout?: string`: The step after `timeout`; required with it.
+- `next?: string`: The step after the event came. Default: the next step written.
+
+### TimerWhen
+
+```ts
+export type TimerWhen = { after: Duration; at?: never } | { at: string; after?: never };
+```
+
+When a timer step fires: `{ after: "1d" }`, or `{ at: "case.dueAt" }` (a reference to a time in ms since epoch).
+
+### TimerOptions
+
+The options of `ProcessBuilder.timer`.
+
+- `next?: string`: The step after the timer fired. Default: the next step written.
+
+### DecideCase
+
+One case of a decision: if the condition `when` holds, go to `then`.
+
+- `when: string`: A condition on the case's data: `case.total > 1000`.
+- `then: string`: The step to go to if it holds.
+
+### DecideOptions
+
+```ts
+export type DecideOptions =
+  | { when: string; then: string; otherwise?: string; cases?: never }
+  | { cases: DecideCase[]; otherwise?: string; when?: never; then?: never };
+```
+
+The options of `ProcessBuilder.decide`: one condition (`when`, `then`) or several in order
+(`cases`, the first that holds wins); `otherwise` if none holds, by default the step written next.
+
+### QueryStepOptions
+
+The options of `ProcessBuilder.query`.
+
+- `data?: Mapping`: The query's data, from the case: `{ orderId: "case.orderId" }`.
+- `answer?: string`: For an answer that is an object: the path of the field to match `paths` against. Default: the answer itself.
+- `paths: Record<string, string> | [unknown, string][]`: The step per answer: `{ true: "approved", false: "paid" }`. Keys `true` and `false` stand for the booleans, numeric keys for numbers, others for strings. For a string answer that looks like a boolean or a number, give pairs instead: `[["true", "approved"], ["1", "paid"]]`.
+- `into?: string`: A case field to keep the answer in: `approval` (read as `case.approval` later).
+- `otherwise?: string`: The step for an answer no path matches. Without it, such an answer is an incident.
+
+### ProcessModel
+
+A process model, as the kernel registers it; see "The model format" in design/processes.md.
+
+- `name: string`: Qualified: `shop.fulfilment`.
+- `start: { on: string; key: string; data?: Mapping }`
+- `steps: ProcessStep[]`: In the order written.
+
+### ProcessStep
+
+```ts
+export type ProcessStep =
+  | { name: string; kind: "command"; command: string; aggregate: string; data?: Mapping; rejected?: Record<string, string>; next: string }
+  | { name: string; kind: "wait"; event: string; key: string; data?: Mapping; timeoutMs?: number; onTimeout?: string; next: string }
+  | { name: string; kind: "timer"; afterMs?: number; at?: string; next: string }
+  | { name: string; kind: "decide"; when: { if: string; next: string }[]; otherwise: string }
+  | { name: string; kind: "query"; query: string; data?: Mapping; answer?: string; paths: { value: unknown; next: string }[]; into?: string; otherwise?: string }
+  | { name: string; kind: "end" };
+```
+
+One step of a `ProcessModel`; every step but `end` names what comes next.
+
+### ProcessVersion
+
+What the kernel answered to a registration: `version` from 1; `new` false if the model equals the newest version.
+
+- `name: string`: Qualified: `shop.fulfilment`.
+- `version: number`
+- `new: boolean`: False: the model equals the newest version, nothing was registered.
+
+### ProcessBuilder
+
+A business process of a domain, built in code and run by the kernel: a case starts when an
+event commits, and moves through steps (commands, waits for events, timers, decisions by the
+case's data or by a query) to an end. Create it with `Domain.process(name)`; `Kernable.app`
+registers the processes of its domains.
+
+Steps run in the order written, unless a step names `next`; branching steps (`decide`,
+`query`) and error paths (`rejected`, `onTimeout`) name their targets. Step names are
+required and stable: versions, the UI and the statistics know steps by them. References are
+strings (`aggregateId`, `data.total`, `case.orderId`, `answer.approved`), literals `value(…)`,
+conditions short expressions (`case.total > 1000`) that the kernel parses when registering.
+
+Messages are classes or names. A command class gives `<domain>.<aggregateType>.<Type>` from
+the aggregate that handles it, an event or query class `<domain>.<Type>`; by name, an
+unqualified one is of the process's domain (`OrderApproved`, `order.Ship`), others qualified
+(`payments.PaymentReceived`, `shop.order.Ship`). Classes are resolved by `model()`, so they
+may be bound to their aggregates and read models after the process is defined.
+
+```ts
+export const fulfilment = shop.process("fulfilment")
+  .start(OrderSubmitted, { key: "aggregateId", data: { orderId: "aggregateId", total: "data.total" } })
+  .command("confirm", Confirm, { aggregate: "case.orderId" })
+  .decide("large", { when: "case.total > 1000", then: "approval", otherwise: "paid" })
+  .query("approval", NeedsApproval, { data: { orderId: "case.orderId" }, paths: { true: "approved", false: "paid" } })
+  .wait("approved", OrderApproved, { key: "aggregateId" })
+  .wait("paid", "payments.PaymentReceived", { key: "data.orderId", timeout: "3d", onTimeout: "cancel" })
+  .command("ship", Ship, { aggregate: "case.orderId", rejected: { out_of_stock: "notify" }, next: "done" })
+  .command("notify", NotifyDelay, { aggregate: "case.orderId", next: "done" })
+  .command("cancel", Cancel, { aggregate: "case.orderId", data: { reason: value("unpaid") } })
+  .end("done");
+```
+
+- `readonly domain: string`: The name of the domain it belongs to: `shop`.
+- `readonly name: string`: The process's name within its domain: `fulfilment`.
+- `get qualified(): string`: The qualified name, as the kernel knows it: `shop.fulfilment`.
+- `start<E>(event: EventClass<E> | string, options: StartOptions): this`: Starts a case when an `event` commits: `key` says where the case's key is in the event (`aggregateId`, or `data.orderId`; one case per key), `data` maps the event to the case's first data. A process has one start; it goes to the first step written.
+- `command<C>(name: string, command: CommandClass<C> | string, options: CommandStepOptions): this`: Sends a `command` as the process, to the aggregate `options.aggregate` names, with `options.data` built from the case. A rejection goes to the step `options.rejected` names for its code; any other rejection is an incident. Then `options.next`, else the next step written.
+- `wait<E>(name: string, event: EventClass<E> | string, options: WaitOptions): this`: Waits for an `event` of this case (`options.key` says where the case's key is in it) and merges `options.data` from it into the case's data. With `timeout`, goes to `onTimeout` if it does not come in time. Then `options.next`, else the next step written.
+- `timer(name: string, when: TimerWhen, options: TimerOptions = {}): this`: Waits for a time: `{ after: "1d" }` from when the case reached the step, or `{ at: "case.dueAt" }` (a reference to a time in ms since epoch). Then `options.next`, else the next step written.
+- `decide(name: string, options: DecideOptions): this`: Picks a path by the case's data: `{ when: "case.total > 1000", then: "approval", otherwise: "paid" }`, or several conditions in order, `{ cases: [{ when, then }, …], otherwise }`. Conditions are references to the case (`case.<field>`), literals, `== != < <= > >=`, `and`, `or`, `not` and parentheses; anything more is a query.
+- `query<Q>(name: string, query: QueryClass<Q> | string, options: QueryStepOptions): this`: Asks a read model a `query` with `options.data` built from the case; the answer (or its field `options.answer`) picks the step in `options.paths`, else `options.otherwise`. `options.into` keeps the answer in the case's data.
+- `end(name: string): this`: Ends the case. A process may have several ends, e.g. `shipped` and `cancelled`.
+- `model(): ProcessModel`: The model the kernel registers (see "The model format"): types qualified, durations in ms, the order written resolved into explicit `next`s. Checks what it can before the kernel does, and throws naming the process and the step: no start, no steps, a malformed or repeated step name, a target that names no step, a step other than `end` without a successor, a malformed duration, `timeout` without `onTimeout` or the other way round. Conditions and references are the kernel's to check.
+
+### durationMs()
+
+`export function durationMs(duration: string, fail: (reason: string) => never = (r) => { throw new Error(r); }): number`
+
+`30s`, `15m`, `12h`, `3d` in ms; `fail` with the reason otherwise.

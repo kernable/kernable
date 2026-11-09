@@ -385,6 +385,92 @@ async fn a_scheduled_command_reaches_the_standby_and_runs_after_a_promotion() {
     assert!(at >= due, "run at {at}, due at {due}");
 }
 
+/// A process registered on the primary is on the standby, versions and state, and the promoted
+/// standby knows it.
+#[tokio::test(flavor = "multi_thread")]
+async fn processes_reach_the_standby() {
+    use kernable_core::proto::{ProcessRegistration, process_service_client::ProcessServiceClient};
+    let dir = Dir::new("processes");
+    let mut primary_config = config(&dir.0, "primary", 3);
+    primary_config.replication.sync = true;
+    let primary = open(&primary_config).await;
+    let standby_config = standby_config(&dir.0, &primary_config);
+    let following = tokio::spawn(standby::run(standby_config.clone()));
+    until("the standby is in sync", || in_sync(&standby_config)).await;
+    for seed in [1, 2, 4, 5, 6] {
+        primary.grant(default_grant(&key(seed)).unwrap()).unwrap();
+    }
+    let deployer = grant(
+        &key(21),
+        &[
+            ("process", &["orders.*"]),
+            ("submit", &["orders.*"]),
+            ("listen", &["orders.*"]),
+        ],
+    );
+    primary.grant(deployer.clone()).unwrap();
+    start_worker(primary_config.listen.clone(), TestWorker::honest()).await;
+    let model = serde_json::to_vec(&serde_json::json!({
+        "name": "orders.follow",
+        "start": {"on": "orders.OrderPlaced", "key": "aggregateId", "data": {"order": "aggregateId"}},
+        "steps": [
+            {"name": "add", "kind": "command", "command": "orders.Order.AddItem", "aggregate": "case.order", "next": "done"},
+            {"name": "done", "kind": "end"}
+        ]
+    }))
+    .unwrap();
+    let register = |model: Vec<u8>| {
+        let (addr, deployer) = (primary_config.listen.clone(), deployer.clone());
+        async move {
+            let issued_at = issued_now();
+            let request = ProcessRegistration {
+                sig: Some(signing::sign(
+                    &key(21),
+                    &signing::process_message(&model, issued_at),
+                )),
+                model,
+                issued_at,
+                protocol: kernable_core::PROTOCOL,
+            };
+            ProcessServiceClient::new(transport::connect(&addr).await.unwrap())
+                .register(presenting(request, &deployer))
+                .await
+                .map(tonic::Response::into_inner)
+        }
+    };
+    let registered = register(model.clone()).await.unwrap();
+    assert_eq!((registered.version, registered.new), (1, true));
+    let on_standby = held(&standby_config).processes().unwrap();
+    assert_eq!(on_standby.len(), 1, "{on_standby:?}");
+    assert_eq!(on_standby[0].model, model);
+
+    promote(&standby_config.listen).await.unwrap();
+    following.await.unwrap().unwrap();
+    let _new = open(&standby_config).await;
+    start_worker(standby_config.listen.clone(), TestWorker::honest()).await;
+    let issued_at = issued_now();
+    let request = ProcessRegistration {
+        sig: Some(signing::sign(
+            &key(21),
+            &signing::process_message(&model, issued_at),
+        )),
+        model: model.clone(),
+        issued_at,
+        protocol: kernable_core::PROTOCOL,
+    };
+    let again =
+        ProcessServiceClient::new(transport::connect(&standby_config.listen).await.unwrap())
+            .register(presenting(request, &deployer))
+            .await
+            .unwrap()
+            .into_inner();
+    assert_eq!(
+        (again.version, again.new),
+        (1, false),
+        "the promoted standby holds version 1"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_standby_without_a_grant_for_replicate_is_refused() {
     let dir = Dir::new("refused");
