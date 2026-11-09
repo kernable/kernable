@@ -78,8 +78,8 @@ impl Store {
         self.committed.load(Ordering::SeqCst)
     }
 
-    /// The position up to which the data is complete for the events of partition `part`
-    ///: every partition has its own positions. `""`: a kernel without partitions.
+    /// The position up to which the data is complete for the events of partition `part`: every
+    /// partition has its own positions. `""`: a kernel without partitions.
     pub fn committed_for(&self, part: &str) -> Result<u64, Error> {
         if part.is_empty() {
             return Ok(self.committed());

@@ -62,8 +62,8 @@ async function join(ctx: ListenerContext, tenant: string, source: string, accoun
 }
 
 /**
- * An accepted invitation becomes an identity with its groups, and an owner for an owner invitation
- *; so does a join through an invitation link, never as owner.
+ * An accepted invitation becomes an identity with its groups, and an owner for an owner invitation;
+ * so does a join through an invitation link, never as owner.
  */
 export const invitationsReactor = identityDomain
   .reactor("identity.invitations", { order: ORDERS.reactors })

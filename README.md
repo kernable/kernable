@@ -72,7 +72,17 @@ make fuzz           # fuzzes the file log and the wire messages (nightly Rust, c
 
 `crates/kernable-kernel/tests/fixtures/format-<n>` holds a frozen store of the current data format; `make check` verifies and runs it. There are no migrations before the first release: a format change bumps `kernable_store::FORMAT`, and the fixture is regenerated in a new directory (`KERNABLE_WRITE_FIXTURES=1` fills only missing ones).
 
-The repository is private.
+## Status
+
+kernable is before 1.0. The protocol, the store formats and the SDKs' APIs may still change between
+0.x releases, and there are no migrations between them: a store written by one 0.x version is not
+guaranteed to open in the next. Pin the version you run, and read the release notes before you
+update.
+
+## Contributing
+
+Issues and pull requests are welcome: see [CONTRIBUTING.md](.github/CONTRIBUTING.md). Report
+security issues privately, as [SECURITY.md](.github/SECURITY.md) describes.
 
 ## License
 

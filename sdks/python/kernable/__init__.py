@@ -3178,8 +3178,7 @@ class ListenerHandle(_Stream):
                 self._moves.notify_all()
 
     def _in_order(self, events) -> None:
-        """Before a batch of a partition's stream: the events of a tenant that moved here
-        (S4) after its move wait until the stream of the partition it came from has passed the
+        """Before a batch of a partition's stream: the events of a tenant that moved here after its move wait until the stream of the partition it came from has passed the
         tenant's last event there, so a tenant's events keep their order across the move. Waits
         at most 30 s (a partition that is down), then goes on with a warning."""
         parent = self._parent

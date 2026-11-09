@@ -168,7 +168,7 @@ impl Primary {
     }
 
     /// Returns once the standby holds record `seq` (P1). Waits as long as it takes: without a
-    /// standby, nothing written may be told (S1b lets the witness decide otherwise). Blocks the
+    /// standby, nothing written may be told (with a witness, the witness decides otherwise). Blocks the
     /// thread, [`blocking`]: the other tasks move on meanwhile.
     pub(crate) fn wait(&self, seq: u64) {
         self.wrote.notify_one();

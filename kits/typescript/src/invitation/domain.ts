@@ -1,4 +1,4 @@
-// invitation: one Invitation per invitation, under its tenant's ID (A77, design/kits.md
+// invitation: one Invitation per invitation, under its tenant's ID (design/kits.md
 // "invitation"). The domain object and the types its parts share; `index.ts` registers the parts.
 
 import { domain } from "@kernable/sdk";

@@ -539,8 +539,8 @@ impl Kernel {
     }
 
     /// Takes a grant into effect: checks its root signature and keeps it if it is the newest
-    /// for its key, in the store too, so that an older grant stays refused after a restart
-    ///. Sessions are checked again when it replaces another grant.
+    /// for its key, in the store too, so that an older grant stays refused after a restart.
+    /// Sessions are checked again when it replaces another grant.
     pub fn grant(&self, grant: Grant) -> Result<(), Status> {
         self.check_grant(&grant)?;
         self.keep(grant, true)

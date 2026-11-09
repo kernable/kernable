@@ -1,4 +1,4 @@
-//! tenancy: one Tenant per tenant, living under its own tenant ID (A73, design/kits.md
+//! tenancy: one Tenant per tenant, living under its own tenant ID (design/kits.md
 //! "tenancy"). The domain, the types its parts share, and `tenancy()`, which registers the parts.
 
 pub mod aggregates;

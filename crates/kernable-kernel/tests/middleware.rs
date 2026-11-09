@@ -322,7 +322,7 @@ async fn the_chain_runs_in_order_and_the_first_rejection_refuses() {
     );
 }
 
-/// F8: `listener` in a submit or query is not signed, so anyone may set it. It only narrows
+/// `listener` in a submit or query is not signed, so anyone may set it. It only narrows
 /// what the request itself waits for and where its query may go; every middleware still checks
 /// the request, whichever listener it names.
 #[tokio::test(flavor = "multi_thread")]

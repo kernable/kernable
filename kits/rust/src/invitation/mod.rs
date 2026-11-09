@@ -1,4 +1,4 @@
-//! invitation: one Invitation per invitation, under its tenant's ID (A77, design/kits.md
+//! invitation: one Invitation per invitation, under its tenant's ID (design/kits.md
 //! "invitation"). `invitation()` registers the parts.
 
 pub mod aggregates;

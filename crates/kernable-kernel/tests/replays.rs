@@ -33,7 +33,7 @@ fn issued(mut m: Membership, issued_at: i64) -> Membership {
     m
 }
 
-/// F1: a deploy added a middleware; the membership before it, replayed within its 60 s, would
+/// A deploy added a middleware; the membership before it, replayed within its 60 s, would
 /// remove the middleware's check again.
 #[tokio::test]
 async fn an_older_membership_never_undoes_a_newer_one() {
@@ -62,7 +62,7 @@ async fn an_older_membership_never_undoes_a_newer_one() {
     assert_eq!(stored_middlewares(&env, "shop"), ["guard"]);
 }
 
-/// F1: two deploys race; whatever order their memberships arrive in, the newer one holds.
+/// Two deploys race; whatever order their memberships arrive in, the newer one holds.
 #[tokio::test(flavor = "multi_thread")]
 async fn racing_deploys_end_with_the_newer_membership() {
     let env = start("replay-race").await;
@@ -83,7 +83,7 @@ async fn racing_deploys_end_with_the_newer_membership() {
     }
 }
 
-/// F7: a narrower grant replaced a broader one. After a restart, the broader one, presented
+/// A narrower grant replaced a broader one. After a restart, the broader one, presented
 /// again by a key that kept it, stays refused.
 #[tokio::test]
 async fn an_older_grant_stays_refused_after_a_restart() {
@@ -161,7 +161,7 @@ async fn start_with_writer(name: &str) -> Env {
     env
 }
 
-/// F2: a captured write, sent again within its 60 s, would undo the newer write after it.
+/// A captured write, sent again within its 60 s, would undo the newer write after it.
 #[tokio::test]
 async fn a_replayed_data_write_never_undoes_a_newer_one() {
     let env = start_with_writer("replay-data").await;
@@ -202,7 +202,7 @@ async fn a_replayed_data_write_never_undoes_a_newer_one() {
     files.get_data(get).await.unwrap();
 }
 
-/// F2, for the cache.
+/// The same, for the cache.
 #[tokio::test]
 async fn a_replayed_cache_write_never_undoes_a_newer_one() {
     let env = start_with_writer("replay-cache").await;
@@ -222,7 +222,7 @@ async fn a_replayed_cache_write_never_undoes_a_newer_one() {
     assert_eq!(read.into_inner().value, b"12");
 }
 
-/// F2 across a restart: the kernel cannot know which writes ran before it started, so it
+/// Across a restart: the kernel cannot know which writes ran before it started, so it
 /// refuses writes signed before then, though they are still within their 60 s.
 #[tokio::test]
 async fn a_write_signed_before_the_kernel_started_is_refused() {

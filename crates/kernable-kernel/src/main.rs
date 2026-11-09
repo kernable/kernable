@@ -783,7 +783,7 @@ async fn run_kernel(config: Config) -> std::result::Result<(), BoxError> {
 /// Serves `kernel` until a signal; with `lease`, also until it ends: a primary of a pair the
 /// witness deposed, or one that handed its role over to its standby. SIGTERM stops a pair's
 /// primary after it handed its role to its standby; SIGUSR1 (the node, when a new kernel
-/// binary waits for the stores, P21) lets the stores go without that.
+/// binary waits for the stores) lets the stores go without that.
 async fn run_kernel_on(
     kernel: Arc<Kernel>,
     lease: Option<std::pin::Pin<Box<dyn Future<Output = BoxError> + Send>>>,
@@ -856,7 +856,7 @@ async fn run_kernel_on(
 
 /// While the kernel follows a primary: SIGTERM tells the primary that it leaves, so a
 /// pair's primary commits alone at once, and ends the process. SIGUSR1 (a new binary takes the
-/// stores, P21) still ends it at once: that standby is back within moments.
+/// stores) still ends it at once: that standby is back within moments.
 fn leave_on_sigterm() -> tokio::task::JoinHandle<()> {
     tokio::spawn(async {
         #[cfg(unix)]

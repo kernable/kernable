@@ -94,8 +94,8 @@ export class Store {
   }
 
   /**
-   * @internal The position up to which the data is complete for the events of partition `part`
-   *: every partition has its own positions. `""`: a kernel without partitions.
+   * @internal The position up to which the data is complete for the events of partition `part`:
+   * every partition has its own positions. `""`: a kernel without partitions.
    */
   committedFor(part: string): number {
     if (part === "") return this.committed;

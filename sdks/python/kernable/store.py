@@ -91,8 +91,8 @@ class Store:
             raise
 
     def committed_for(self, part: str) -> int:
-        """The position up to which the data is complete for the events of partition `part`
-       : every partition has its own positions. `""`: a kernel without partitions."""
+        """The position up to which the data is complete for the events of partition `part`: every
+        partition has its own positions. `""`: a kernel without partitions."""
         if part == "":
             return self.committed
         with self._lock:

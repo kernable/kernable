@@ -7,7 +7,7 @@
 //!   is not revoked; a refused command is never stored;
 //! - X7: a membership changes only by a newer apply;
 //! - X8: the unsigned `listener` field never widens anything;
-//! - F2: a replayed data write is refused;
+//! - A replayed data write is refused;
 //! - O5: a settled submit was processed by every listener it waited for;
 //! - O6: an event reaches order 1 only after order 0 acknowledged it;
 //! - O7: one execution per aggregate at a time;
@@ -512,7 +512,7 @@ impl Run {
         );
     }
 
-    /// F2: data writes, new or replayed, and a read that must match the model.
+    /// Data writes, new or replayed, and a read that must match the model.
     async fn data(&mut self) {
         let seed = self.seed;
         let mut files = DataServiceClient::new(transport::connect(&self.env.addr).await.unwrap());

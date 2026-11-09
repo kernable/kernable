@@ -473,8 +473,8 @@ async fn a_pair_under_random_kills_of_its_primary_loses_nothing_a_client_was_tol
     drop(running);
 }
 
-/// A planned stop (SIGTERM) of a pair's primary hands its role to the standby in sync first
-///: the standby serves well within the lease, the old primary ends cleanly, and nothing a
+/// A planned stop (SIGTERM) of a pair's primary hands its role to the standby in sync first: the
+/// standby serves well within the lease, the old primary ends cleanly, and nothing a
 /// client was told is lost. SIGUSR1 instead (a new kernel binary takes the stores) does not.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_planned_stop_of_a_pairs_primary_hands_over_without_waiting_for_the_lease() {
