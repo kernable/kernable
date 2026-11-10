@@ -16,7 +16,6 @@ kernable-core = { path = "../crates/kernable-core" }
 kernable-store = { path = "../crates/kernable-store" }
 kernable-kernel = { path = "../crates/kernable-kernel", features = ["fuzzing"] }
 prost = "0.14"
-sha2 = "0.10"
 
 [workspace]
 members = ["."]

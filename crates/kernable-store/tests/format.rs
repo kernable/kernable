@@ -6,7 +6,6 @@ use std::{fs, path::PathBuf};
 use kernable_core::proto::{Command, EnqueuedRecord, FormatRecord, LogRecord, log_record::Record};
 use kernable_store::{Error, FORMAT, FileStore, SqliteStore, Store};
 use prost::Message;
-use sha2::{Digest, Sha256};
 
 struct Temp(PathBuf);
 
@@ -35,9 +34,7 @@ fn log(path: &PathBuf, records: Vec<Record>) {
             record: Some(record),
         }
         .encode_to_vec();
-        out.extend((body.len() as u32).to_be_bytes());
-        out.extend(&Sha256::digest(&body)[..4]);
-        out.extend(&body);
+        out.extend(FileStore::frame(&body));
     }
     fs::write(path, out).unwrap();
 }
@@ -69,7 +66,7 @@ fn a_new_file_log_starts_with_its_format() {
     let path = Temp::new("file-new");
     drop(FileStore::open(&path.0).unwrap());
     let bytes = fs::read(&path.0).unwrap();
-    let first = LogRecord::decode(&bytes[8..]).unwrap().record;
+    let first = LogRecord::decode(&bytes[12..]).unwrap().record;
     assert_eq!(first, Some(format(FORMAT)));
     // Reopening and writing keeps it the only format record.
     let store = FileStore::open(&path.0).unwrap();

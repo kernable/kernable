@@ -11,7 +11,6 @@ use kernable_core::{
 };
 use kernable_store::{Enqueued, Error, FileStore, Store};
 use prost::Message;
-use sha2::{Digest, Sha256};
 
 struct TempLog(PathBuf);
 
@@ -175,10 +174,10 @@ fn torn_last_record_is_cut_off_and_kept_aside() {
         run(&store, "c1", "o1");
     }
     let intact = fs::metadata(&log.0).unwrap().len();
-    // A crash in the middle of a write: header promises 100 bytes, 10 arrived.
+    // A crash in the middle of a write: the header promises 100 bytes, 10 arrived.
     let mut f = fs::OpenOptions::new().append(true).open(&log.0).unwrap();
-    f.write_all(&100u32.to_be_bytes()).unwrap();
-    f.write_all(&[0u8; 14]).unwrap();
+    f.write_all(&FileStore::frame(&[7; 100])[..12 + 10])
+        .unwrap();
     drop(f);
 
     let store = FileStore::open(&log.0).unwrap();
@@ -257,9 +256,83 @@ fn damaged_record_in_the_middle_refuses_to_open() {
         run(&store, "c2", "o1");
     }
     let mut bytes = fs::read(&log.0).unwrap();
-    bytes[20] ^= 0xff; // inside the first record's body
+    let second = 12 + len_at(&bytes, 0);
+    bytes[second + 12] ^= 0xff; // inside the second record's body
     fs::write(&log.0, bytes).unwrap();
     assert!(matches!(FileStore::open(&log.0), Err(Error::Corrupt(_))));
+    assert!(log.torn_files().is_empty());
+}
+
+/// The length of the record at byte `at`.
+fn len_at(bytes: &[u8], at: usize) -> usize {
+    u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize
+}
+
+/// A damaged length in the middle of the log that points past its end is not a torn tail:
+/// the records after it were committed, so the log refuses to open and keeps every byte.
+#[test]
+fn a_damaged_length_in_the_middle_refuses_to_open() {
+    let log = TempLog::new("damaged-length");
+    {
+        let store = FileStore::open(&log.0).unwrap();
+        run(&store, "c1", "o1");
+        run(&store, "c2", "o1");
+    }
+    let mut bytes = fs::read(&log.0).unwrap();
+    let second = 12 + len_at(&bytes, 0);
+    bytes[second..second + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+    fs::write(&log.0, &bytes).unwrap();
+
+    assert!(matches!(FileStore::open(&log.0), Err(Error::Corrupt(_))));
+    assert!(matches!(
+        FileStore::open_read_only(&log.0),
+        Err(Error::Corrupt(_))
+    ));
+    assert_eq!(fs::read(&log.0).unwrap(), bytes);
+    assert!(log.torn_files().is_empty());
+}
+
+/// A crash can leave zeros where a write did not reach the disk: a header of zeros at the end
+/// is a torn tail.
+#[test]
+fn a_zeroed_tail_is_cut_off_as_torn() {
+    let log = TempLog::new("torn-zeros");
+    {
+        let store = FileStore::open(&log.0).unwrap();
+        run(&store, "c1", "o1");
+    }
+    let intact = fs::metadata(&log.0).unwrap().len();
+    let mut f = fs::OpenOptions::new().append(true).open(&log.0).unwrap();
+    f.write_all(&[0u8; 40]).unwrap();
+    drop(f);
+
+    let store = FileStore::open(&log.0).unwrap();
+    assert_eq!(fs::metadata(&log.0).unwrap().len(), intact);
+    assert_eq!(log.torn_files().len(), 1);
+    assert_eq!(store.read_all(0, 10).unwrap().len(), 1);
+}
+
+/// A log torn before its first record ended starts again, and keeps the torn bytes aside.
+#[test]
+fn a_torn_first_record_is_kept_aside() {
+    let log = TempLog::new("torn-first");
+    fs::write(&log.0, &FileStore::frame(&[7; 100])[..12 + 10]).unwrap();
+
+    let store = FileStore::open(&log.0).unwrap();
+    assert_eq!(store.head_position().unwrap(), 0);
+    let torn = log.torn_files();
+    assert_eq!(torn.len(), 1);
+    assert_eq!(fs::read(&torn[0]).unwrap().len(), 22);
+    run(&store, "c1", "o1");
+    drop(store);
+    assert_eq!(
+        FileStore::open(&log.0)
+            .unwrap()
+            .read_all(0, 10)
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 /// An attacker rewrites the log with valid framing but a changed event payload:
@@ -277,18 +350,15 @@ fn consistently_reframed_tampering_is_caught_by_verify() {
     let mut out = Vec::new();
     let mut at = 0;
     while at < bytes.len() {
-        let len = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
-        let mut record = LogRecord::decode(&bytes[at + 8..at + 8 + len]).unwrap();
+        let len = len_at(&bytes, at);
+        let mut record = LogRecord::decode(&bytes[at + 12..at + 12 + len]).unwrap();
         if let Some(Record::Committed(c)) = &mut record.record
             && c.command_id == "c1"
         {
             c.events[0].event.as_mut().unwrap().payload = br#"{"id":"forged"}"#.to_vec();
         }
-        let body = record.encode_to_vec();
-        out.extend((body.len() as u32).to_be_bytes());
-        out.extend(&Sha256::digest(&body)[..4]);
-        out.extend(&body);
-        at += 8 + len;
+        out.extend(FileStore::frame(&record.encode_to_vec()));
+        at += 12 + len;
     }
     fs::write(&log.0, out).unwrap();
 

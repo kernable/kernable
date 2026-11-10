@@ -145,7 +145,7 @@ impl From<prost::DecodeError> for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// A write of a moving tenant's copy on the target (S4), for [`Store::import`].
+/// A write of a moving tenant's copy on the target, for [`Store::import`].
 // Held only for one batch of a copy: boxing the commit would buy nothing.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
@@ -483,7 +483,7 @@ pub trait Store: Send + Sync {
         Ok(None)
     }
 
-    /// On the target of a move (S4): writes `copies` in order, as few writes as the backend
+    /// On the target of a move: writes `copies` in order, as few writes as the backend
     /// allows; a command stored already is left as it is (one of another tenant under the same
     /// ID is refused, `Corrupt`), a commit or rejection of a command
     /// with a result is skipped, and a commit without events stands at its stream's version.
@@ -544,13 +544,13 @@ pub trait Store: Send + Sync {
         Ok(())
     }
 
-    /// On the target of a move (S4): that `tenant` was copied here, if it was.
+    /// On the target of a move: that `tenant` was copied here, if it was.
     fn tenant_imported(&self, tenant: &str) -> Result<Option<TenantImportedRecord>> {
         let _ = tenant;
         Ok(None)
     }
 
-    /// On the source of a move (S4): `tenant`'s streams hold no unique keys or facts here any
+    /// On the source of a move: `tenant`'s streams hold no unique keys or facts here any
     /// more; returns how many streams held some.
     fn drop_tenant_index(&self, tenant: &str) -> Result<usize> {
         self.set_tenant_index(tenant, &[])
@@ -569,7 +569,7 @@ pub trait Store: Send + Sync {
         Err(Error::ReadOnly)
     }
 
-    /// On the key owner (S3): the partition that may hold global key `id`, if any.
+    /// On the owner of global keys: the partition that may hold global key `id`, if any.
     fn global_key(&self, id: &[u8]) -> Result<Option<String>> {
         let _ = id;
         Ok(None)
@@ -691,7 +691,7 @@ pub trait Store: Send + Sync {
         self.image(f).map(|_| ())
     }
 
-    /// Calls `f` with the records of `tenant` (S4, moving a tenant), in one consistent view, in
+    /// Calls `f` with the records of `tenant` (to move it), in one consistent view, in
     /// an order that applies (each command as enqueued before its outcome, commits in log
     /// order, the index with each stream's last commit). With `after` (a copy while the tenant
     /// runs, and the rest after it): only commands with an outcome, and of those only commits

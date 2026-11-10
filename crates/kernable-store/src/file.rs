@@ -4,9 +4,11 @@
 //! the data format (see [`crate::FORMAT`]); then come enqueued
 //! commands, commits (all events of one command in a single record, hence atomic, with the
 //! keys and facts the command's stream holds from then on if they changed),
-//! rejections, checkpoints and listener positions. Each record is framed as `u32 BE length || first 4 bytes of
-//! SHA-256(body) || body`. Opening replays the log into memory. A torn last record from a
-//! crash is moved to `<path>.torn-<offset>` and cut off; damage anywhere else refuses to open.
+//! rejections, checkpoints and listener positions. Each record is framed as
+//! `u32 BE length || first 4 bytes of SHA-256(length) || first 4 bytes of SHA-256(body) || body`;
+//! the check of the length tells a damaged length apart from a record that was cut short.
+//! Opening replays the log into memory. A torn last record from a crash is moved to
+//! `<path>.torn-<offset>` and cut off; damage anywhere else refuses to open.
 //!
 //! One process writes (exclusive file lock); others may open the log read-only.
 //! A write returns once its record has reached the OS, which survives a crash of the process.
@@ -52,7 +54,26 @@ use kernable_core::{
 };
 use prost::Message;
 
-const HEADER: usize = 8;
+/// The bytes in front of each record body: its length, a check of the length, a check of the
+/// body.
+const HEADER: usize = 12;
+
+/// The check of a record's length field.
+fn length_check(len: &[u8]) -> [u8; 4] {
+    let hash = replication::digest(len);
+    hash[..4].try_into().expect("4 bytes")
+}
+
+/// One record as the log holds it: its header, then `body`, whose SHA-256 is `digest`.
+fn frame(body: &[u8], digest: &[u8]) -> Vec<u8> {
+    let len = (body.len() as u32).to_be_bytes();
+    let mut buf = Vec::with_capacity(HEADER + body.len());
+    buf.extend(len);
+    buf.extend(length_check(&len));
+    buf.extend(&digest[..4]);
+    buf.extend(body);
+    buf
+}
 
 /// Tenant, domain, aggregate type, aggregate ID.
 type StreamKey = (String, String, String, String);
@@ -514,6 +535,12 @@ pub struct FileStore {
 }
 
 impl FileStore {
+    /// One record body framed as the log holds it: for tools, tests and fuzzing that write
+    /// logs by hand.
+    pub fn frame(body: &[u8]) -> Vec<u8> {
+        frame(body, &replication::digest(body))
+    }
+
     /// Opens the log with [`Durability::Full`].
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_with(path, Durability::Full)
@@ -530,9 +557,24 @@ impl FileStore {
             .map_err(|_| Error::Io(std::io::Error::other("store is in use by another process")))?;
         let bytes = fs::read(path)?;
         let (state, log, valid) = replay(&bytes)?;
+        if valid < bytes.len() {
+            // Kept aside, on the disk, before the log lets go of them.
+            let aside = PathBuf::from(format!("{}.torn-{valid}", path.display()));
+            let mut kept = File::create(&aside)?;
+            kept.write_all(&bytes[valid..])?;
+            kept.sync_all()?;
+            sync_directory(&aside)?;
+            file.set_len(valid as u64)?;
+            if durability == Durability::Full {
+                file.sync_data()?;
+            }
+            eprintln!(
+                "file store: cut off a torn record at byte {valid}, saved to {}",
+                aside.display()
+            );
+        }
         if valid == 0 {
             // A new log (or one torn before its first record ended) starts with its format.
-            file.set_len(0)?;
             let flush = flush_handle(&file, durability)?;
             let mut store = Self::new(state, log, Sink::File(file), 0);
             store.flush = flush;
@@ -547,18 +589,6 @@ impl FileStore {
                 sync_directory(path)?;
             }
             return Ok(store);
-        }
-        if valid < bytes.len() {
-            let aside = PathBuf::from(format!("{}.torn-{valid}", path.display()));
-            fs::write(&aside, &bytes[valid..])?;
-            file.set_len(valid as u64)?;
-            if durability == Durability::Full {
-                file.sync_data()?;
-            }
-            eprintln!(
-                "file store: cut off a torn record at byte {valid}, saved to {}",
-                aside.display()
-            );
         }
         let flush = flush_handle(&file, durability)?;
         let mut store = Self::new(state, log, Sink::File(file), valid as u64);
@@ -641,10 +671,7 @@ fn append(inner: &mut Inner, record: Record) -> Result<()> {
     }
     .encode_to_vec();
     let digest = replication::digest(&body);
-    let mut buf = Vec::with_capacity(HEADER + body.len());
-    buf.extend((body.len() as u32).to_be_bytes());
-    buf.extend(&digest[..4]);
-    buf.extend(&body);
+    let buf = frame(&body, &digest);
     if let Err(e) = file.write_all(&buf) {
         // Never leave a partial record in front of the next one.
         let _ = file.set_len(inner.len);
@@ -700,12 +727,20 @@ fn replay(bytes: &[u8]) -> Result<(State, RecordLog, usize)> {
         let Some(header) = bytes.get(at..at + HEADER) else {
             break; // torn header
         };
+        if length_check(&header[..4]) != header[4..8] {
+            // A crash can leave zeros where a write did not reach the disk; anything else
+            // after a damaged length is a record that must not be lost.
+            if bytes[at + HEADER..].iter().all(|&b| b == 0) {
+                break; // torn header
+            }
+            return Err(corrupt(&format!("record at byte {at}: damaged length")));
+        }
         let len = u32::from_be_bytes(header[..4].try_into().expect("4 bytes")) as usize;
         let Some(body) = bytes.get(at + HEADER..at + HEADER + len) else {
             break; // torn body
         };
         let digest = replication::digest(body);
-        if digest[..4] != header[4..] {
+        if digest[..4] != header[8..] {
             if at + HEADER + len == bytes.len() {
                 break; // torn last record
             }

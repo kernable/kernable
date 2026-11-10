@@ -587,7 +587,7 @@ impl Vault {
         })
     }
 
-    /// Deletes every value of `tenant`, for a tenant that moved to another partition (S4);
+    /// Deletes every value of `tenant`, for a tenant that moved to another partition;
     /// returns how many.
     pub fn drop_tenant(&self, tenant: &str) -> Result<usize> {
         Ok(self

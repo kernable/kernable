@@ -40,7 +40,7 @@ impl Default for Head {
 
 /// The hash of record `seq`, whose encoded body has the SHA-256 `digest`, after a record with
 /// hash `prev`.
-pub fn record_hash(prev: &[u8], seq: u64, digest: &[u8]) -> [u8; 32] {
+pub(crate) fn record_hash(prev: &[u8], seq: u64, digest: &[u8]) -> [u8; 32] {
     Sha256::new()
         .chain_update(b"kernable.v1.replication")
         .chain_update(prev)
@@ -121,7 +121,7 @@ pub fn chained<'a>(
 /// Checks that the events of a commit continue the chain after an event with hash `prev` at
 /// position `position`: positions without gaps, each hash over its content and predecessor.
 /// Returns the hash and position of the last event.
-pub fn check_events(
+pub(crate) fn check_events(
     mut prev: Vec<u8>,
     mut position: u64,
     events: &[LoggedEvent],

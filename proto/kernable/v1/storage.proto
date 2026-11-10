@@ -70,7 +70,7 @@ message StreamIndex {
   AggregateIndex index = 4;
 }
 
-// On the target of a move (S4): the tenant was copied, so a restart does not copy it again.
+// On the target of a move: the tenant was copied, so a restart does not copy it again.
 message TenantImportedRecord {
   string tenant = 1;
   string from = 2;

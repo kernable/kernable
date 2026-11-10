@@ -49,7 +49,7 @@ pub trait DataStore: Send + Sync {
     /// Keeps a file of another store's [`DataStore::dump`] at its place.
     fn restore(&self, place: &str, stored: &[u8]) -> Result<()>;
 
-    /// Deletes every file of `tenant`, for a tenant that moved to another partition (S4);
+    /// Deletes every file of `tenant`, for a tenant that moved to another partition;
     /// returns how many.
     fn drop_tenant(&self, tenant: &str) -> Result<usize>;
 

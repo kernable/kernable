@@ -103,37 +103,60 @@ mod tests {
         sync::{
             Arc,
             atomic::{AtomicU32, Ordering::SeqCst},
+            mpsc,
         },
         thread,
-        time::Duration,
     };
 
     use super::*;
 
+    /// Writers that arrive while a flush runs share the next one, whatever the timing: the
+    /// first flush covers the first write only, the second every other.
     #[test]
     fn concurrent_callers_share_flushes() {
         let syncer = Arc::new(Syncer::default());
         let flushes = Arc::new(AtomicU32::new(0));
-        let threads: Vec<_> = (0..16)
+        let flush = |flushes: &AtomicU32| {
+            flushes.fetch_add(1, SeqCst);
+            Ok(())
+        };
+        let (flushing, flush_started) = mpsc::channel();
+        let (release, released) = mpsc::channel::<()>();
+        let first = {
+            let (syncer, flushes) = (Arc::clone(&syncer), Arc::clone(&flushes));
+            thread::spawn(move || {
+                syncer.wrote();
+                syncer
+                    .sync(|| {
+                        flushing.send(()).unwrap();
+                        released.recv().unwrap();
+                        flush(&flushes)
+                    })
+                    .unwrap();
+            })
+        };
+        flush_started.recv().unwrap();
+        let (wrote, written) = mpsc::channel();
+        let others: Vec<_> = (0..15)
             .map(|_| {
-                let (syncer, flushes) = (Arc::clone(&syncer), Arc::clone(&flushes));
+                let (syncer, flushes, wrote) =
+                    (Arc::clone(&syncer), Arc::clone(&flushes), wrote.clone());
                 thread::spawn(move || {
                     syncer.wrote();
-                    syncer
-                        .sync(|| {
-                            flushes.fetch_add(1, SeqCst);
-                            thread::sleep(Duration::from_millis(20));
-                            Ok(())
-                        })
-                        .unwrap();
+                    wrote.send(()).unwrap();
+                    syncer.sync(|| flush(&flushes)).unwrap();
                 })
             })
             .collect();
-        for t in threads {
+        for _ in 0..15 {
+            written.recv().unwrap();
+        }
+        release.send(()).unwrap();
+        first.join().unwrap();
+        for t in others {
             t.join().unwrap();
         }
-        let n = flushes.load(SeqCst);
-        assert!((1..16).contains(&n), "{n} flushes for 16 writers");
+        assert_eq!(flushes.load(SeqCst), 2);
         assert!(syncer.sync(|| panic!("nothing new to flush")).is_ok());
     }
 

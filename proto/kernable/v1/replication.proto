@@ -196,7 +196,7 @@ message PromoteResult {
 // lease with it, and a standby claims the primary's place through it once the lease expired.
 // The witness also records whether the primary has a standby in sync or commits alone, so a
 // standby that lacks writes is never made the primary.
-// The trust records a partition takes from the control partition (S2): every grant,
+// The trust records a partition takes from the control partition: every grant,
 // revocation and membership, and the partition map. Asked every second by every other
 // partition's primary, signed by its node key (granted `replicate`).
 service TrustSyncService {
@@ -220,7 +220,7 @@ message TrustSync {
   repeated ProcessRecord processes = 5;
 }
 
-// Unique keys with scope global across partitions (S3). The control partition owns them:
+// Unique keys with scope global across partitions. The control partition owns them:
 // before a partition commits a new global key, it reserves it there (Reserve); the owner grants
 // it unless another partition still holds it, or is about to commit it (Holds). Signed by the
 // partition's node key (granted `replicate`) over kernable.v1.global-keys.
@@ -243,7 +243,7 @@ message GlobalKeyAnswer {
   repeated bool granted = 1;
 }
 
-// Moving a tenant (S4): the target partition copies it from the source (Export, once the
+// Moving a tenant: the target partition copies it from the source (Export, once the
 // source's queue holds none of its commands), then tells the control partition (Done), which
 // hands it the tenant's global keys. Signed by the partition's node key (granted `replicate`)
 // over kernable.v1.move (op, tenant, from, to, issued_at).

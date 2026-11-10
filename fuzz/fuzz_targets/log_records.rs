@@ -4,7 +4,6 @@
 
 use kernable_store::{FileStore, Store};
 use libfuzzer_sys::fuzz_target;
-use sha2::{Digest, Sha256};
 
 fuzz_target!(|data: &[u8]| {
     // The input is a sequence of `u8 length || body`, framed like the real log.
@@ -13,9 +12,7 @@ fuzz_target!(|data: &[u8]| {
     while let Some((&len, tail)) = rest.split_first() {
         let body = &tail[..(len as usize).min(tail.len())];
         rest = &tail[body.len()..];
-        log.extend((body.len() as u32).to_be_bytes());
-        log.extend(&Sha256::digest(body)[..4]);
-        log.extend(body);
+        log.extend(FileStore::frame(body));
     }
     if let Ok(store) = FileStore::open_bytes(&log) {
         let _ = store.read_all(0, 10_000);

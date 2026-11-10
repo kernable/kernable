@@ -2683,7 +2683,7 @@ CREATE TABLE IF NOT EXISTS partition_map (
 ) STRICT;
 ";
 
-/// On the target of a move, created with the first tenant copied here (S4).
+/// On the target of a move, created with the first tenant copied here.
 const IMPORTED_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS tenants_imported (
     tenant TEXT PRIMARY KEY,
@@ -2811,7 +2811,7 @@ fn save_imported_tx(tx: &Connection, record: &TenantImportedRecord) -> Result<()
     Ok(())
 }
 
-/// On the key owner, created with the first global key it keeps (S3).
+/// On the owner of global keys, created with the first one it keeps.
 const GLOBAL_KEYS_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS global_keys (
     id        BLOB PRIMARY KEY,

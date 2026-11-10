@@ -88,8 +88,7 @@ impl Msg {
         m
     }
 
-    /// Vault references, appended only when there are any, so that signatures and hashes
-    /// from before the vault stay valid.
+    /// Vault references, appended only when there are any.
     fn refs(self, refs: &[String]) -> Self {
         if refs.is_empty() {
             return self;
@@ -125,7 +124,7 @@ pub fn command_message(cmd: &Command) -> Vec<u8> {
         .bytes(&cmd.payload)
         .context(cmd.context.as_ref())
         .refs(&cmd.vault_refs);
-    // Each only when set, so a command without them signs as before.
+    // Optional fields: each is appended only when set, after its name.
     let m = if cmd.deliver_at != 0 {
         m.str("deliver_at").i64(cmd.deliver_at)
     } else {
@@ -160,7 +159,7 @@ pub fn query_message(q: &QueryRequest) -> Vec<u8> {
         .context(q.context.as_ref())
         .u64(q.min_position)
         .i64(q.issued_at);
-    // Each only when set, so a query without them signs as before.
+    // Optional fields: each is appended only when set, after its name.
     let m = if q.wait_only { m.str("wait_only") } else { m };
     match &q.target {
         Some(t) => {
@@ -409,7 +408,7 @@ pub fn membership_message(m: &Membership) -> Vec<u8> {
         msg = msg.str(&a.key).str(&a.value);
     }
     msg = msg.i64(m.issued_at);
-    // Only when there are any, so a membership without processes signs as before.
+    // Processes: appended only when there are any, after their name.
     if !m.processes.is_empty() {
         msg = msg.str("processes").u64(m.processes.len() as u64);
         for p in &m.processes {
@@ -502,7 +501,7 @@ pub fn partitions_message(map: &crate::proto::PartitionMap) -> Vec<u8> {
         msg = msg.str(&t.tenant).str(&t.partition);
     }
     msg = msg.str(&map.default).str(&map.control).i64(map.issued_at);
-    // Moves (S4), appended only when there are any: a map without them signs as before.
+    // Moves: appended only when there are any.
     if !map.moving.is_empty() || !map.moved.is_empty() {
         for list in [&map.moving, &map.moved] {
             msg = msg.u64(list.len() as u64);
@@ -651,7 +650,7 @@ pub fn event_hash(prev: &[u8], event: &Event) -> [u8; 32] {
         }
         m.str(&event.erases)
     };
-    // Where a moved event was first committed (S4), appended only when set.
+    // Where a moved event was first committed, appended only when set.
     let msg = if event.origin_partition.is_empty() {
         msg
     } else {

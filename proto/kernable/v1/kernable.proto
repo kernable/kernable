@@ -114,8 +114,8 @@ message Event {
   uint32 schema = 14;              // version of the payload format of `event_type`, from 1
   repeated string vault_refs = 15; // see NewEvent
   string erases = 16;              // see NewEvent
-  // An event its tenant brought along when it moved here from another partition (S4): where it
-  // was first committed. Listeners do not get these; the original is delivered where it is.
+  // An event its tenant brought along when it moved here from another partition: where it was
+  // first committed. Listeners do not get these; the original is delivered where it is.
   string origin_partition = 17;
   uint64 origin_position = 18;
 }
@@ -401,7 +401,7 @@ message TenantPartition {
   string partition = 2;
 }
 
-// A tenant moving between partitions, or moved (S4). While it moves, both partitions answer its
+// A tenant moving between partitions, or moved. While it moves, both partitions answer its
 // requests with UNAVAILABLE. Once moved, `source_head` is the source's head when it was copied
 // (every original event of the tenant is at or before it) and `target_after` the target's head
 // after the copies: an SDK delivers the target's events after it only once the source's stream
@@ -655,7 +655,7 @@ message DataRequest {
   Signature client_sig = 7;
   uint32 protocol = 8;     // not signed
   // Who asks and in which context, as for a command; signed. Middlewares checking
-  // `<domain>.PutData`, `.GetData` or `.DeleteData` decide on it.
+  // `<domain>.PutData`, `.GetData`, `.DeleteData` or `.ListData` decide on it.
   RequestContext context = 9;
   string after = 10;       // list only: the `next` of the page before; signed
 }
@@ -811,7 +811,7 @@ message MiddlewareCall {
     QueryResult query_result = 9;
   }
   // The qualified type being checked: `shop.AddItem`, `shop.GetCart`, or for files and the
-  // cache `shop.PutData`, `shop.GetData`, `shop.DeleteData`, `shop.SetCache`, `shop.GetCache`,
+  // cache `shop.PutData`, `shop.GetData`, `shop.DeleteData`, `shop.ListData`, `shop.SetCache`, `shop.GetCache`,
   // `shop.DeleteCache`; for a cancel the scheduled command's type.
   string type = 10;
   // A cancel only: the scheduled command it cancels, as stored.
