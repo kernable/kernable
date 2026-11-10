@@ -1193,6 +1193,8 @@ fn rejections(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value
 /// What `/api/commands` matches on; empty fields match everything, set ones must all match.
 struct CommandFilter {
     tenant: String,
+    /// The domain, exactly.
+    domain: String,
     /// Part of `domain.Command`, any case.
     command_type: String,
     /// The aggregate id, exactly.
@@ -1217,6 +1219,7 @@ impl CommandFilter {
         };
         CommandFilter {
             tenant: param("tenant"),
+            domain: param("domain"),
             command_type: param("type").to_lowercase(),
             id: param("id"),
             command: param("command"),
@@ -1235,6 +1238,7 @@ impl CommandFilter {
             .unwrap_or_default();
         !(self.business && c.domain == "process")
             && (self.tenant.is_empty() || c.tenant_id == self.tenant)
+            && (self.domain.is_empty() || c.domain == self.domain)
             && (self.command_type.is_empty()
                 || format!("{}.{}", c.domain, c.command_type)
                     .to_lowercase()

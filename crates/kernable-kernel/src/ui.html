@@ -182,6 +182,9 @@
   .tbl.sticky { overflow: visible; }
   .tbl.sticky th { position: sticky; top: 53px; z-index: 2; }
   .tbl.sticky tr:first-child th:first-child { border-top-left-radius: 10px; } .tbl.sticky tr:first-child th:last-child { border-top-right-radius: 10px; }
+  #cfound td.time { white-space: nowrap; font-variant-numeric: tabular-nums; width: 1%; }
+  #cfound tr.batch td:first-child { box-shadow: inset 3px 0 0 var(--violet); }
+  #cfound tr.fresh td { animation: fresh 2.5s ease-out; }
   #found td.pos { color: var(--faint); text-align: right; font-variant-numeric: tabular-nums; width: 1%; }
   #found td.time { white-space: nowrap; font-variant-numeric: tabular-nums; width: 1%; }
   #found tr.batch td:first-child { box-shadow: inset 3px 0 0 var(--violet); }
@@ -311,19 +314,24 @@
       <div class="controls" style="margin-top:10px"><button class="btn" id="older" hidden>Older</button><span class="note" id="older-meta"></span></div>
     </div>
     <div id="x-commands" hidden>
-      <form class="controls" id="csearch" style="margin-bottom:10px">
-        <input class="ctl" name="type" placeholder="Command type, e.g. shop.Place">
-        <input class="ctl" name="tenant" placeholder="Tenant">
-        <input class="ctl" name="id" placeholder="Aggregate ID">
-        <input class="ctl" name="sender" placeholder="Sent by (identity)">
-        <input class="ctl" name="command" placeholder="Command or correlation ID">
-        <select class="ctl" name="status"><option value="">every outcome</option><option value="committed">committed</option><option value="rejected">rejected</option><option value="waiting">waiting</option><option value="scheduled">scheduled</option></select>
+      <form class="controls evbar" id="csearch">
+        <select class="ctl" name="domain" aria-label="Domain"><option value="">All domains</option></select>
+        <input class="ctl" name="type" list="command-types" placeholder="Command type" style="width:160px" autocomplete="off">
+        <datalist id="command-types"></datalist>
+        <input class="ctl" name="id" placeholder="Aggregate ID" style="width:140px">
+        <input class="ctl" name="sender" placeholder="Sent by" style="width:120px">
+        <input class="ctl" name="command" placeholder="Command or correlation" style="width:180px">
+        <select class="ctl" name="status" aria-label="Outcome"><option value="">Every outcome</option><option value="committed">Committed</option><option value="rejected">Rejected</option><option value="waiting">Waiting</option><option value="scheduled">Scheduled</option></select>
+        <input class="ctl" name="tenant" placeholder="Tenant" style="width:100px">
         <button class="btn" type="submit">Search</button>
-        <label><input type="checkbox" id="cengine"> process engine's commands</label>
-        <label><input type="checkbox" id="clive"> follow</label>
+        <label title="The process engine's own commands: moving its cases on"><input type="checkbox" id="cengine"> engine commands</label>
+        <span class="grow"></span>
         <span class="note" id="cfound-meta"></span>
+        <button class="livebtn" type="button" id="clive-btn" aria-pressed="false" title="Show new commands as they come in">● Live</button>
+        <input type="checkbox" id="clive" hidden>
       </form>
-      <div class="tbl"><table id="cfound"></table></div>
+      <div class="chips fchips" id="cfound-chips"></div>
+      <div class="tbl sticky"><table id="cfound"></table></div>
       <div class="controls" style="margin-top:10px"><button class="btn" id="colder" hidden>Older</button><span class="note" id="colder-meta"></span></div>
     </div>
     <div id="x-aggregates" class="split" hidden>
@@ -584,6 +592,7 @@ function draw() {
   if (top === "explore" && exploreTab === "domains") drawDomains();
   if (top === "explore" && exploreTab === "catalog") drawCatalog();
   if (top === "explore" && exploreTab === "events") fillEventChoices();
+  if (top === "explore" && exploreTab === "commands") fillCommandChoices();
 }
 
 // ================= Overview =================
@@ -1407,6 +1416,9 @@ function enterExplore() {
   if (exploreTab === "commands" && route.query) {
     const form = $("csearch");
     let changed = false;
+    const domain = route.query.get("domain") ?? "";
+    if (domain !== commandDomain) { commandDomain = domain; changed = true; }
+    fillCommandChoices();
     for (const name of ["type", "tenant", "id", "sender", "command", "status"]) {
       const value = route.query.get(name) ?? "";
       if (form.elements[name].value !== value) { form.elements[name].value = value; changed = true; }
@@ -1935,15 +1947,13 @@ function fillEventChoices() {
   const list = $("event-types");
   if (list.children.length !== types.length) list.replaceChildren(...types.map((t) => el("option", { value: t })));
 }
-/** The filters in use, each as a chip that removes it. */
-function drawFilterChips() {
-  const names = { domain: "domain", type: "event", id: "aggregate", command: "command", text: "payload", tenant: "tenant" };
-  const form = $("search");
+/** The filters in use, each as a chip that removes it: of the event log, or of another form. */
+function drawFilterChips(form = $("search"), box = $("found-chips"), names = { domain: "domain", type: "event", id: "aggregate", command: "command", text: "payload", tenant: "tenant" }, clearDomain = () => (eventDomain = "")) {
   const chips = Object.entries(names).filter(([k]) => form.elements[k].value.trim()).map(([k, label]) =>
     el("span", { class: "fchip" }, el("b", {}, label), form.elements[k].value.trim(),
-      el("button", { type: "button", title: `Remove the ${label} filter`, onclick: () => { form.elements[k].value = ""; if (k === "domain") eventDomain = ""; form.requestSubmit(); } }, "×")));
-  if (chips.length > 1) chips.push(el("button", { class: "copy", type: "button", onclick: () => { for (const k of Object.keys(names)) form.elements[k].value = ""; eventDomain = ""; form.requestSubmit(); } }, "clear all"));
-  $("found-chips").replaceChildren(...chips);
+      el("button", { type: "button", title: `Remove the ${label} filter`, onclick: () => { form.elements[k].value = ""; if (k === "domain") clearDomain(); form.requestSubmit(); } }, "×")));
+  if (chips.length > 1) chips.push(el("button", { class: "copy", type: "button", onclick: () => { for (const k of Object.keys(names)) form.elements[k].value = ""; clearDomain(); form.requestSubmit(); } }, "clear all"));
+  box.replaceChildren(...chips);
 }
 /** The event log: a heading per day; events one command wrote together marked on the left. */
 function drawFound() {
@@ -2063,37 +2073,102 @@ async function cfollow() {
   const bySeq = new Map(r.commands.map((c) => [c.seq, c]));
   cfound = cfound.map((c) => bySeq.get(c.seq) ?? c);
   const fresh = r.commands.filter((c) => c.seq > cnewest);
+  markFreshCommands(fresh);
   cfound.unshift(...fresh);
   if (cfound.length > FOUND_MAX) cfound.length = FOUND_MAX;
   cnewest = Math.max(cnewest, r.newest ?? 0);
   drawCommands();
 }
+/** The command log's domain filter, as the event log's. */
+let commandDomain = "", freshCommands = new Set();
+function markFreshCommands(commands) {
+  for (const c of commands) freshCommands.add(c.seq);
+  setTimeout(() => { for (const c of commands) freshCommands.delete(c.seq); }, 3000);
+}
+/** The domains and command types the workers registered, for the filter's choices. */
+function fillCommandChoices() {
+  const types = [...new Set((state?.aggregates ?? []).flatMap((a) => a.commands))].sort();
+  const domains = [...new Set([...types.map(domainOf), commandDomain].filter(Boolean))].sort();
+  const sel = $("csearch").elements.domain;
+  if (sel.options.length !== domains.length + 1) sel.replaceChildren(el("option", { value: "" }, "All domains"), domains.map((d) => el("option", { value: d }, d)));
+  if (sel.value !== commandDomain) sel.value = commandDomain;
+  const list = $("command-types");
+  if (list.children.length !== types.length) list.replaceChildren(...types.map((t) => el("option", { value: t })));
+}
 function outcomeView(c) {
-  if (c.status === "committed") return el("span", {}, el("span", { class: "chip ok" }, "committed"), c.tookMs !== null && c.tookMs !== undefined ? el("span", { class: "faint", title: `received ${iso(c.receivedAt)}, committed ${iso(c.committedAt)}` }, ` in ${duration(Math.max(0, c.tookMs))} `) : " ",
+  if (c.status === "committed") return el("span", {}, el("span", { class: "chip ok" }, "committed"), " ",
     c.events.length ? c.events.map((e, i) => [i ? " " : "", el("a", { class: "t tev", href: `/explore/events?command=${encodeURIComponent(c.commandId)}`, title: `position ${e.position}`, onclick: (ev) => ev.stopPropagation() }, e.type)]) : el("span", { class: "faint" }, "no events"));
   if (c.status === "rejected") return el("span", {}, el("span", { class: "chip bad" }, "rejected"), " ", el("span", { class: "code" }, c.rejection?.code ?? ""), el("span", { class: "muted" }, ` ${fit(c.rejection?.message ?? "", 60)}`));
   if (c.status === "scheduled") return el("span", {}, el("span", { class: "chip run" }, "scheduled"), " for ", el("span", { title: iso(c.deliverAt) }, iso(c.deliverAt)));
   return el("span", { class: "chip idle" }, "waiting");
 }
+/** The command log: a heading per day; commands of one correlation next to each other marked on the left. */
 function drawCommands() {
-  const rows = [el("tr", {}, ["Received", "Command", "Aggregate", "Sent by", "Outcome", "Tenant"].map((h) => el("th", {}, h)))];
-  for (const c of cfound) {
+  fillCommandChoices();
+  drawFilterChips($("csearch"), $("cfound-chips"), { domain: "domain", type: "command", id: "aggregate", sender: "sent by", command: "command", status: "outcome", tenant: "tenant" }, () => (commandDomain = ""));
+  const live = $("clive").checked;
+  $("clive-btn").classList.toggle("on", live);
+  $("clive-btn").setAttribute("aria-pressed", String(live));
+  const tenants = new Set(cfound.map((c) => c.tenant));
+  const showTenant = tenants.size > 1 || (tenants.size === 1 && !tenants.has("default")) || !!$("csearch").elements.tenant.value.trim();
+  const heads = ["Received", "Command", "Aggregate", "Sent by", "Outcome", "Took", ...(showTenant ? ["Tenant"] : [])];
+  const cols = heads.length;
+  const rows = [el("tr", {}, heads.map((h) => el("th", { class: h === "Took" ? "n" : "" }, h)))];
+  const corr = (c) => c?.context?.correlationId || null;
+  let day = null;
+  cfound.forEach((c, i) => {
+    const d = dayLabel(c.receivedAt);
+    if (d !== day) { day = d; rows.push(el("tr", { class: "group" }, el("td", { colspan: cols }, el("b", {}, d)))); }
     const open = copened.has(c.seq);
-    rows.push(el("tr", { class: `click${open ? " open" : ""}`, onclick: () => { open ? copened.delete(c.seq) : copened.add(c.seq); drawCommands(); } },
-      el("td", {}, el("span", { title: iso(c.receivedAt) }, iso(c.receivedAt))),
-      el("td", {}, el("b", {}, `${c.domain}.${c.type}`)),
-      el("td", {}, el("a", { href: historyHref({ tenant: c.tenant, domain: c.domain, type: c.aggregateType, id: c.aggregateId }), onclick: (ev) => ev.stopPropagation() }, `${c.aggregateType} ${c.aggregateId}`)),
+    const together = corr(c) && (corr(cfound[i - 1]) === corr(c) || corr(cfound[i + 1]) === corr(c));
+    const cls = ["click", open ? "open" : "", together ? "batch" : "", freshCommands.has(c.seq) ? "fresh" : ""].filter(Boolean).join(" ");
+    rows.push(el("tr", { class: cls, title: together ? `Same correlation as the commands beside it: ${corr(c)}` : null, onclick: () => { open ? copened.delete(c.seq) : copened.add(c.seq); drawCommands(); } },
+      el("td", { class: "time", title: iso(c.receivedAt) }, timeOfDay(c.receivedAt)),
+      el("td", {}, el("span", { class: "faint" }, `${c.domain}.`), el("b", {}, c.type)),
+      el("td", {}, el("span", { class: "faint" }, `${c.aggregateType} `), el("a", { class: "mono", href: historyHref({ tenant: c.tenant, domain: c.domain, type: c.aggregateType, id: c.aggregateId }), onclick: (ev) => ev.stopPropagation() }, c.aggregateId)),
       el("td", {}, sender(c.context)),
       el("td", {}, outcomeView(c)),
-      el("td", {}, c.tenant)));
-    if (open) rows.push(el("tr", {}, el("td", { colspan: 6, class: "wide" }, payloadView(c.payload, null), contextView(c.context),
-      el("div", { class: "note mono" }, `command ${c.commandId} · signed by `, keyView(c.key), c.rejection?.uniqueKey ? ` · taken key ${c.rejection.uniqueKey}` : ""))));
-  }
-  if (!cfound.length) rows.push(el("tr", {}, el("td", { colspan: 6, class: "note" }, "No matching commands.")));
+      el("td", { class: "n", title: c.committedAt ? `received ${iso(c.receivedAt)}, committed ${iso(c.committedAt)}` : null }, c.tookMs !== null && c.tookMs !== undefined ? duration(Math.max(0, c.tookMs)) : el("span", { class: "faint" }, "–")),
+      showTenant ? el("td", {}, c.tenant) : null));
+    if (open) rows.push(el("tr", { class: "open" }, el("td", { colspan: cols, class: "wide" }, commandDetail(c))));
+  });
+  if (!cfound.length) rows.push(el("tr", {}, el("td", { colspan: cols, class: "note" }, "No matching commands.")));
   $("cfound").replaceChildren(...rows);
-  $("cfound-meta").textContent = `${cfound.length} shown${$("clive").checked ? " · following" : ""}`;
+  $("cfound-meta").textContent = `${num(cfound.length)} shown`;
   $("colder").hidden = colder === null;
   $("colder-meta").textContent = colder === null ? (cfound.length ? "the first stored command reached" : "") : "";
+}
+/** One command opened: its payload on the left; who sent it and what came of it on the right; then where to go. */
+function commandDetail(c) {
+  const ctx = c.context ?? {}, attrs = ctx.attributes ?? {};
+  const row = (k, v, cls = "mono") => v === undefined || v === null || v === "" ? null : [el("dt", {}, k), el("dd", { class: cls }, v)];
+  const caseOf = c.domain === "process" ? { tenant: c.tenant, process: c.aggregateType, id: c.aggregateId } : attrs.process && attrs.case ? { tenant: c.tenant, process: attrs.process, id: attrs.case } : null;
+  const known = new Set(["process", "case"]);
+  return el("div", { class: "evdetail", onclick: (ev) => ev.stopPropagation() },
+    el("div", {},
+      el("div", { class: "boxhead" }, el("span", { class: "kind" }, "Payload"), copyButton(c.payload, "copy JSON")),
+      payloadView(c.payload, null)),
+    el("div", {},
+      el("div", { class: "boxhead" }, el("span", { class: "kind" }, "Who sent it, and what came of it")),
+      el("dl", {},
+        row("sent by", ctx.senderIdentity), row("on behalf of", ctx.onBehalfOf), row("account", ctx.senderAccount), row("session", ctx.senderSession),
+        row("correlation", ctx.correlationId), row("caused by", ctx.causationId), row("expected version", ctx.expectedVersion),
+        Object.entries(attrs).filter(([k]) => !known.has(k)).map(([k, v]) => row(k, String(v))),
+        caseOf ? row("case", `${caseOf.process} · ${caseOf.id}`) : null,
+        row("command", [el("span", {}, `${c.commandId} `), copyButton(c.commandId)]),
+        row("received", iso(c.receivedAt), ""),
+        c.deliverAt ? row("due", iso(c.deliverAt), "") : null,
+        c.committedAt ? row("committed", `${iso(c.committedAt)} · took ${duration(Math.max(0, c.tookMs ?? 0))}`, "") : null,
+        c.events?.length ? row("events", c.events.map((e) => `${e.type} (${e.position})`).join(", ")) : null,
+        c.rejection ? row("rejected", [el("span", { class: "code" }, c.rejection.code), ` ${c.rejection.message ?? ""}`], "") : null,
+        c.rejection?.uniqueKey ? row("taken key", c.rejection.uniqueKey) : null,
+        row("tenant", c.tenant),
+        [el("dt", {}, "signed by"), el("dd", {}, keyView(c.key))]),
+      el("div", { class: "actions" },
+        el("a", { href: historyHref({ tenant: c.tenant, domain: c.domain, type: c.aggregateType, id: c.aggregateId }) }, "Aggregate history →"),
+        c.events?.length ? el("a", { href: `/explore/events?command=${encodeURIComponent(c.commandId)}` }, "Its events →") : null,
+        ctx.correlationId ? el("a", { href: `/explore/commands?command=${encodeURIComponent(ctx.correlationId)}` }, "Same correlation →") : null,
+        caseOf ? el("a", { href: caseHref(caseOf) }, "The case →") : null)));
 }
 
 // ================= Search =================
@@ -2152,7 +2227,11 @@ $("csearch").addEventListener("submit", (ev) => {
   history.replaceState(null, "", `/explore/commands${cfilters().size ? `?${cfilters()}` : ""}`);
   csearch();
 });
-$("csearch").addEventListener("change", (ev) => { if (ev.target.name === "status") $("csearch").requestSubmit(); });
+$("csearch").addEventListener("change", (ev) => {
+  if (ev.target.name === "domain") commandDomain = ev.target.value;
+  if (["status", "domain"].includes(ev.target.name)) $("csearch").requestSubmit();
+});
+$("clive-btn").addEventListener("click", () => { $("clive").checked = !$("clive").checked; $("clive").dispatchEvent(new Event("change")); });
 $("cengine").addEventListener("change", csearch);
 $("colder").addEventListener("click", colderPage);
 $("clive").addEventListener("change", () => { ($("clive").checked ? csearch() : drawCommands()); watch(); });
@@ -2222,7 +2301,7 @@ function streamUrl() {
     }
     if (exploreTab === "commands" && $("clive").checked) {
       topics.push("commands");
-      form("csearch", { type: "type", tenant: "tenant", id: "id", sender: "sender", command: "command", status: "status" });
+      form("csearch", { domain: "domain", type: "type", tenant: "tenant", id: "id", sender: "sender", command: "command", status: "status" });
       if ($("cengine").checked) q.set("engine", "1"); else q.set("business", "1");
     }
   }
@@ -2261,7 +2340,7 @@ function watch() {
   on("commands", (data) => {
     for (const c of data ?? []) {
       const at = cfound.findIndex((x) => x.commandId === c.commandId);
-      if (at >= 0) cfound[at] = { ...c, seq: cfound[at].seq }; else cfound.unshift(c);
+      if (at >= 0) cfound[at] = { ...c, seq: cfound[at].seq }; else { markFreshCommands([c]); cfound.unshift(c); }
     }
     if (cfound.length > FOUND_MAX) cfound.length = FOUND_MAX;
     drawCommands();
