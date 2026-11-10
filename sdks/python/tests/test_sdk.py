@@ -933,17 +933,17 @@ class EndToEnd(unittest.TestCase):
         def send(type, data):
             return self.k.submit("identity", "Account", "a1", type, data)
 
-        registered = send("RegisterAccount", {"id": "a1", "email": "max@firma.de", "password": "correct horse"})
+        registered = send("RegisterAccount", {"id": "a1", "email": "max@example.com", "password": "correct horse"})
         self.assertEqual(registered.events[0].data,
                          {"accountId": "a1", "email": None, "passwordHash": sha("correct horse")})
         self.assertEqual(registered.events[0].redacted, ["email"])
-        self.assertEqual(emails, {"a1": "max@firma.de"})
+        self.assertEqual(emails, {"a1": "max@example.com"})
         for name in os.listdir(self.kernel.dir):
             path = os.path.join(self.kernel.dir, name)
             if os.path.isfile(path):
                 with open(path, "rb") as f:
                     content = f.read()
-                self.assertNotIn(b"max@firma.de", content, name)
+                self.assertNotIn(b"max@example.com", content, name)
                 self.assertNotIn(b"correct horse", content, name)
 
         self.assertTrue(send("EraseAccount", {"id": "a1"}).committed)
@@ -1232,13 +1232,13 @@ class EndToEnd(unittest.TestCase):
             found = []
             for name in os.listdir(directory):
                 with open(os.path.join(directory, name), "rb") as f:
-                    if b"max@firma.de" in f.read():
+                    if b"max@example.com" in f.read():
                         found.append(name)
             return found
 
         send = lambda type, data: self.k.submit("identity", "Account", "a1", type, data)  # noqa: E731
-        self.assertTrue(send("RegisterAccount", {"id": "a1", "email": "max@firma.de"}).committed)
-        self.assertEqual(handle.store.get("accounts", "a1")["email"], "max@firma.de")
+        self.assertTrue(send("RegisterAccount", {"id": "a1", "email": "max@example.com"}).committed)
+        self.assertEqual(handle.store.get("accounts", "a1")["email"], "max@example.com")
         self.assertTrue(on_disk(), "the store holds the value")
         # Settled: the read model acknowledged the erasing event's batch.
         self.assertTrue(send("EraseAccount", {"id": "a1"}).committed)
@@ -1270,7 +1270,7 @@ class EndToEnd(unittest.TestCase):
 
         handle = self.run_stream(self.k.listener(model))
         send = lambda type, data: self.k.submit("identity", "Account", "a1", type, data)  # noqa: E731
-        self.assertTrue(send("RegisterAccount", {"id": "a1", "email": "max@firma.de"}).committed)
+        self.assertTrue(send("RegisterAccount", {"id": "a1", "email": "max@example.com"}).committed)
         self.assertTrue(send("EraseAccount", {"id": "a1"}).committed)
         self.assertEqual(failures[0], 3, "tried until it got through")
         self.assertIsNone(handle.store.get("accounts", "a1"))
@@ -1289,7 +1289,7 @@ class EndToEnd(unittest.TestCase):
         self.identity_kernel(identity)
         self.run_stream(self.k.worker(account))
 
-        def send(type: str, email: str | None = "max@firma.de"):
+        def send(type: str, email: str | None = "max@example.com"):
             return self.k.submit("identity", "Account", "a1", type, {"id": "a1", "email": email})
 
         refused = send("NoteAccount")
@@ -1304,7 +1304,7 @@ class EndToEnd(unittest.TestCase):
             path = os.path.join(self.kernel.dir, name)
             if os.path.isfile(path):
                 with open(path, "rb") as f:
-                    self.assertNotIn(b"max@firma.de", f.read(), name)
+                    self.assertNotIn(b"max@example.com", f.read(), name)
 
 
 if __name__ == "__main__":

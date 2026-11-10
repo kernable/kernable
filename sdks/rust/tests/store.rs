@@ -35,7 +35,7 @@ fn opening_a_store_empties_the_log_a_crash_left_behind() {
     let db = rusqlite::Connection::open(&path).unwrap();
     db.execute_batch(
         "PRAGMA journal_mode = WAL; PRAGMA secure_delete = ON; PRAGMA wal_autocheckpoint = 0;
-         INSERT INTO data VALUES ('emails', 'a1', '\"max@firma.de\"');
+         INSERT INTO data VALUES ('emails', 'a1', '\"max@example.com\"');
          DELETE FROM data;",
     )
     .unwrap();
@@ -43,7 +43,7 @@ fn opening_a_store_empties_the_log_a_crash_left_behind() {
     let found = || {
         ["", "-wal"].into_iter().any(|suffix| {
             let bytes = std::fs::read(format!("{}{suffix}", path.display())).unwrap_or_default();
-            bytes.windows(12).any(|w| w == b"max@firma.de")
+            bytes.windows(15).any(|w| w == b"max@example.com")
         })
     };
     assert!(found(), "the log holds the removed value");

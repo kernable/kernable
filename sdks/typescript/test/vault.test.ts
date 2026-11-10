@@ -30,12 +30,12 @@ test("personal fields and secrets live in the vault and an erasing event deletes
     kernable.submit({ domain: "identity", aggregateType: "Account", aggregateId: "a1", type, data });
   try {
     await Promise.all([worker.ready, accounts.ready]);
-    const registered = await send("RegisterAccount", { id: "a1", email: "max@firma.de", password: "correct horse" });
+    const registered = await send("RegisterAccount", { id: "a1", email: "max@example.com", password: "correct horse" });
     assert.ok(registered.committed);
     // The submitter is no reader of what the vault keeps: it gets references only.
     assert.deepEqual(registered.events[0].data, { accountId: "a1", email: null, passwordHash: sha256("correct horse") });
     assert.deepEqual(registered.events[0].redacted, ["email"]);
-    assert.equal(await kernable.query({ domain: "identity", type: "GetEmail", data: { id: "a1" } }), "max@firma.de");
+    assert.equal(await kernable.query({ domain: "identity", type: "GetEmail", data: { id: "a1" } }), "max@example.com");
     assert.deepEqual(await send("Login", { password: "wrong" }), { committed: false, code: "denied", message: "wrong password" });
     assert.ok((await send("Login", { password: "correct horse" })).committed);
 
@@ -43,7 +43,7 @@ test("personal fields and secrets live in the vault and an erasing event deletes
     const files = readdirSync(kernel.dir, { withFileTypes: true })
       .filter((f) => f.isFile())
       .map((f) => readFileSync(join(kernel.dir, f.name)));
-    for (const secret of ["max@firma.de", "correct horse"]) {
+    for (const secret of ["max@example.com", "correct horse"]) {
       assert.ok(!files.some((b) => b.includes(secret)), `${secret} is stored in clear`);
     }
 

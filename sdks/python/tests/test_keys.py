@@ -82,21 +82,21 @@ class Keys(unittest.TestCase):
 
     def test_a_key_is_unique_in_its_tenant_or_across_tenants(self):
         self.run_worker(*shop_domain().aggregates)
-        self.assertTrue(self.register("c1", "max@firma.de", "max").committed)
-        taken = self.register("c2", "max@firma.de", "moritz")
+        self.assertTrue(self.register("c1", "max@example.com", "max").committed)
+        taken = self.register("c2", "max@example.com", "moritz")
         self.assertEqual((taken.committed, taken.code, taken.message, taken.key, taken.requirement),
                          (False, "unique_taken", "shop.Customer key email is taken", "email", None))
-        self.assertTrue(self.register("c2", "max@firma.de", "moritz", tenant="t2").committed, "another tenant")
-        global_ = self.register("c3", "erika@firma.de", "max", tenant="t2")
+        self.assertTrue(self.register("c2", "max@example.com", "moritz", tenant="t2").committed, "another tenant")
+        global_ = self.register("c3", "erika@example.com", "max", tenant="t2")
         self.assertEqual((global_.code, global_.message, global_.key),
                          ("unique_taken", "shop.Customer key handle is taken", "handle"))
 
     def test_a_new_value_frees_the_old_one(self):
         self.run_worker(*shop_domain().aggregates)
-        self.assertTrue(self.register("c1", "max@firma.de", "max").committed)
-        self.assertEqual(self.register("c2", "max@firma.de", "moritz").code, "unique_taken")
+        self.assertTrue(self.register("c1", "max@example.com", "max").committed)
+        self.assertEqual(self.register("c2", "max@example.com", "moritz").code, "unique_taken")
         self.assertTrue(self.register("c1", "max@example.com", "max").committed, "its own key is no conflict")
-        self.assertTrue(self.register("c2", "max@firma.de", "moritz").committed)
+        self.assertTrue(self.register("c2", "max@example.com", "moritz").committed)
         self.assertEqual(self.register("c3", "max@example.com", "erika").code, "unique_taken")
 
     def test_a_command_commits_only_while_the_fact_it_requires_is_held(self):
@@ -123,13 +123,13 @@ class Keys(unittest.TestCase):
         def order(order: str, type: str, data: dict):
             return self.k.submit("shop", "Order", order, type, data, wait="committed")
 
-        missing = order("o1", "PlaceFor", {"email": "max@firma.de"})
+        missing = order("o1", "PlaceFor", {"email": "max@example.com"})
         self.assertEqual((missing.code, missing.message), ("requirement_missing",
                                                           "shop.Customer with key email does not hold registered"))
         self.assertEqual(missing.requirement, Requirement("shop", "Customer", "", "registered", key="email"),
                          "the key, never its value")
-        self.assertTrue(self.register("c1", "max@firma.de", "max").committed)
-        self.assertTrue(order("o1", "PlaceFor", {"email": "max@firma.de"}).committed)
+        self.assertTrue(self.register("c1", "max@example.com", "max").committed)
+        self.assertTrue(order("o1", "PlaceFor", {"email": "max@example.com"}).committed)
 
         self.assertTrue(order("o2", "Plan", {"store": "s1"}).committed, "s1 holds nothing")
         self.assertTrue(self.k.submit("shop", "Store", "s1", "Open").committed)
@@ -151,7 +151,7 @@ class Keys(unittest.TestCase):
         self.k.use(identity)
 
         def open_(id: str, who: str):
-            return self.k.submit("identity", "Account", id, "Open", {"email": "max@firma.de", "person": who},
+            return self.k.submit("identity", "Account", id, "Open", {"email": "max@example.com", "person": who},
                                  wait="committed")
 
         self.assertTrue(open_("a1", "p-1").committed)
@@ -161,7 +161,7 @@ class Keys(unittest.TestCase):
             if os.path.isfile(path):
                 with open(path, "rb") as f:
                     content = f.read()
-                self.assertFalse(b"max@firma.de" in content or hashlib.sha256(b"max@firma.de").digest() in content, name)
+                self.assertFalse(b"max@example.com" in content or hashlib.sha256(b"max@example.com").digest() in content, name)
         self.assertTrue(self.k.submit("identity", "Person", "p-1", "Erase", {"id": "p-1"}).committed)
         self.assertTrue(open_("a2", "p-2").committed, "the erased subject's key is free")
 
@@ -170,22 +170,22 @@ class Keys(unittest.TestCase):
         v1.apply("Registered", lambda state, data: {**state, **data})
         v1.command("Register", lambda state, data: [{"type": "Registered", "data": data}])
         old = self.run_worker(v1)
-        for id, email in (("c1", "max@firma.de"), ("c2", "erika@firma.de"), ("c3", "max@firma.de")):
+        for id, email in (("c1", "max@example.com"), ("c2", "erika@example.com"), ("c3", "max@example.com")):
             self.assertTrue(self.register(id, email, id).committed)
         old.stop()
         time.sleep(0.1)
 
         v2 = shop_domain().aggregates[0]
         self.run_worker(v2)
-        self.assertTrue(self.register("c4", "max@firma.de", "c4").committed, "not reindexed yet")
-        self.assertTrue(self.register("c4", "moritz@firma.de", "c4").committed)
+        self.assertTrue(self.register("c4", "max@example.com", "c4").committed, "not reindexed yet")
+        self.assertTrue(self.register("c4", "moritz@example.com", "c4").committed)
         outcomes = self.k.reindex("shop", "Customer", ["c1", "c2", "c3", "never"])
         self.assertEqual({id: (o.committed, o.code, o.events) for id, o in outcomes.items()},
                          {"c1": (True, "", []), "c2": (True, "", []), "c3": (False, "unique_taken", []),
                           "never": (True, "", [])})
-        self.assertEqual(self.register("c5", "max@firma.de", "c5").code, "unique_taken")
-        self.assertEqual(self.register("c5", "erika@firma.de", "c5").code, "unique_taken")
-        self.assertEqual(self.register("c5", "c1@firma.de", "c1").code, "unique_taken", "the handle, global")
+        self.assertEqual(self.register("c5", "max@example.com", "c5").code, "unique_taken")
+        self.assertEqual(self.register("c5", "erika@example.com", "c5").code, "unique_taken")
+        self.assertEqual(self.register("c5", "c1@example.com", "c1").code, "unique_taken", "the handle, global")
 
 
     def test_aggregates_of_one_domain_in_separate_workers_reindex_each_their_own(self):
@@ -201,13 +201,13 @@ class Keys(unittest.TestCase):
         ids = [f"x{i}" for i in range(6)]
         for name in aggregates:
             for id in ids:
-                self.assertTrue(self.k.submit("shop", name, id, f"Register{name}", {"email": f"{id}@firma.de"},
+                self.assertTrue(self.k.submit("shop", name, id, f"Register{name}", {"email": f"{id}@example.com"},
                                               wait="committed").committed)
         for name in aggregates:
             outcomes = self.k.reindex("shop", name, ids)
             self.assertEqual({id: (o.committed, o.code) for id, o in outcomes.items()},
                              {id: (True, "") for id in ids}, name)
-        taken = self.k.submit("shop", "Supplier", "y", "RegisterSupplier", {"email": "x0@firma.de"})
+        taken = self.k.submit("shop", "Supplier", "y", "RegisterSupplier", {"email": "x0@example.com"})
         self.assertEqual(taken.code, "unique_taken")
 
 

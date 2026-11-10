@@ -132,7 +132,7 @@ test("index messages and unique key IDs match the test vectors", () => {
   const requires = i.requires.map((r: any) => ({ ...r, value_hash: hex(r.value_hash_hex) }));
   check("result_index", indexMessage(command(i.command), i.expected_version, keys, i.facts, requires));
   // The values behind the vectors' hashes.
-  assert.deepEqual([valueHash("A-1001"), valueHash("max@firma.de")].map((h) => h.toString("hex")), i.keys.map((k: any) => k.value_hash_hex));
+  assert.deepEqual([valueHash("A-1001"), valueHash("max@example.com")].map((h) => h.toString("hex")), i.keys.map((k: any) => k.value_hash_hex));
   const u = v.unique_key_id.input;
   const ids = u.keys.map((k: any) => uniqueKeyId(u.tenant_id, u.domain, u.aggregate_type, { ...k, value_hash: hex(k.value_hash_hex) }).toString("hex"));
   assert.deepEqual(ids, v.unique_key_id.ids);

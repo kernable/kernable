@@ -498,7 +498,7 @@ async fn vault_worker(addr: &str) {
                 let field = |f: &str| payload[f].as_str().unwrap_or_default().to_owned();
                 match cmd.command_type.as_str() {
                     "PlaceOrder" => (
-                        vec![vault_value(&field("customer"), r#""x@firma.de""#)],
+                        vec![vault_value(&field("customer"), r#""x@example.com""#)],
                         String::new(),
                     ),
                     _ => (Vec::new(), field("erase")),
@@ -622,7 +622,7 @@ async fn state_crash_and_recover(point: &str, round: u32) {
 
     match point {
         "vault.stored" => {
-            let value = vault_value("k-9", r#""k9@firma.de""#);
+            let value = vault_value("k-9", r#""k9@example.com""#);
             let mut cmd = command("cv", "PlaceOrder", "ov");
             cmd.payload = format!(r#"{{"email":{{"$vault":"{}"}}}}"#, value.r#ref).into_bytes();
             cmd.vault_refs = vec![value.r#ref.clone()];

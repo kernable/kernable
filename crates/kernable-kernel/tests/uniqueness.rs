@@ -430,7 +430,7 @@ async fn a_personal_key_lives_in_the_vault_and_erasing_its_subject_frees_it() {
         },
     )
     .await;
-    let personal = payload(&[("email", "max@firma.de", false, "k-1")], &[], &[]);
+    let personal = payload(&[("email", "max@example.com", false, "k-1")], &[], &[]);
     let take = |id: &str, o: &str| order(id, "PlaceOrder", o, "t1", personal.clone());
 
     let placed = take("c1", "o1");
@@ -509,7 +509,7 @@ async fn a_personal_key_keeps_its_vault_value_while_held_across_a_restart() {
         }
     };
     start_worker(env.addr.clone(), erasing_worker()).await;
-    let email = ("email", "max@firma.de", false, "k-1");
+    let email = ("email", "max@example.com", false, "k-1");
     let with = |facts: &[&str]| payload(&[email], facts, &[]);
     let o1 = stream("t1", "o1");
 
@@ -560,7 +560,7 @@ async fn a_personal_key_keeps_its_vault_value_while_held_across_a_restart() {
 async fn a_kernel_needs_a_vault_for_personal_keys() {
     let env = start_custom("unique-personal-vault", with_vault).await;
     start_worker(env.addr.clone(), indexing_worker()).await;
-    let personal = payload(&[("email", "max@firma.de", false, "k-1")], &[], &[]);
+    let personal = payload(&[("email", "max@example.com", false, "k-1")], &[], &[]);
     assert_eq!(
         outcome(
             &env,

@@ -158,7 +158,7 @@ async fn personal_fields_and_secrets_live_in_the_vault_and_an_erasing_event_dele
 
     let registered = send(
         "RegisterAccount",
-        json!({ "id": "a1", "email": "max@firma.de", "password": "correct horse" }),
+        json!({ "id": "a1", "email": "max@example.com", "password": "correct horse" }),
     )
     .await
     .unwrap();
@@ -169,7 +169,7 @@ async fn personal_fields_and_secrets_live_in_the_vault_and_an_erasing_event_dele
         json!({ "accountId": "a1", "email": null, "passwordHash": sha256("correct horse") })
     );
     assert_eq!(event.redacted, ["email"]);
-    assert_eq!(get_email().await.unwrap(), "max@firma.de");
+    assert_eq!(get_email().await.unwrap(), "max@example.com");
     assert_eq!(
         send("Login", json!({ "password": "wrong" })).await.unwrap(),
         Outcome::Rejected(Rejected::new("wrong password").code("denied"))
@@ -188,7 +188,7 @@ async fn personal_fields_and_secrets_live_in_the_vault_and_an_erasing_event_dele
             continue;
         }
         let bytes = std::fs::read(&path).unwrap();
-        for secret in ["max@firma.de", "correct horse"] {
+        for secret in ["max@example.com", "correct horse"] {
             let found = bytes.windows(secret.len()).any(|w| w == secret.as_bytes());
             assert!(!found, "{secret} is stored in clear in {}", path.display());
         }
@@ -274,11 +274,11 @@ async fn an_erased_value_is_in_no_file_of_a_read_models_store() {
     let stored = || {
         ["", "-wal", "-shm"].into_iter().any(|suffix| {
             let bytes = std::fs::read(format!("{}{suffix}", path.display())).unwrap_or_default();
-            bytes.windows(12).any(|w| w == b"max@firma.de")
+            bytes.windows(15).any(|w| w == b"max@example.com")
         })
     };
 
-    let registered = json!({ "id": "a1", "email": "max@firma.de", "password": "pw" });
+    let registered = json!({ "id": "a1", "email": "max@example.com", "password": "pw" });
     assert!(
         send("RegisterAccount", registered)
             .await
@@ -327,14 +327,14 @@ async fn a_personal_command_field_in_an_event_that_does_not_declare_it_is_reject
     };
 
     // Declared on the command and on its event: committed.
-    let registered = json!({ "id": "a1", "email": "max@firma.de", "password": "pw" });
+    let registered = json!({ "id": "a1", "email": "max@example.com", "password": "pw" });
     assert!(
         send("RegisterAccount", registered)
             .await
             .unwrap()
             .is_committed()
     );
-    let changed = send("ChangeEmail", json!({ "email": "moritz@firma.de" }))
+    let changed = send("ChangeEmail", json!({ "email": "moritz@example.com" }))
         .await
         .unwrap();
     assert_eq!(
@@ -408,7 +408,7 @@ async fn an_erasing_event_is_never_parked() {
     let send = |command_type: &str, data: Value| {
         kernable.submit(Submit::new("identity", "Account", "a1", command_type).data(data))
     };
-    let registered = json!({ "id": "a1", "email": "max@firma.de", "password": "pw" });
+    let registered = json!({ "id": "a1", "email": "max@example.com", "password": "pw" });
     assert!(
         send("RegisterAccount", registered)
             .await

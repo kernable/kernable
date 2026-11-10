@@ -79,7 +79,7 @@ async fn commands_keep_personal_and_secret_values_in_the_vault() {
     )
     .await;
 
-    let email = vault_value("k-1", "max@firma.de");
+    let email = vault_value("k-1", "max@example.com");
     let password = vault_value("", "correct horse");
     let cmd = with_values("c1", "PlaceOrder", "o1", &[&email, &password]);
     let placed = submit_values(&env.addr, cmd, &[&email, &password]).await;
@@ -88,7 +88,7 @@ async fn commands_keep_personal_and_secret_values_in_the_vault() {
     let sent = vaults.recv().await.unwrap();
     let mut got: Vec<&[u8]> = sent.iter().map(|v| v.value.as_slice()).collect();
     got.sort();
-    assert_eq!(got, [&b"\"correct horse\""[..], b"\"max@firma.de\""]);
+    assert_eq!(got, [&b"\"correct horse\""[..], b"\"max@example.com\""]);
 
     // The secret is gone once the command completed; the personal value stays, encrypted.
     let vault = open_vault(&env);
@@ -103,7 +103,10 @@ async fn commands_keep_personal_and_secret_values_in_the_vault() {
         1
     );
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(!on_disk(&env, "max@firma.de"), "no plain value in any file");
+    assert!(
+        !on_disk(&env, "max@example.com"),
+        "no plain value in any file"
+    );
     assert!(!on_disk(&env, "correct horse"));
 
     // Resubmitting the completed command, without values, returns its stored outcome.
@@ -119,7 +122,7 @@ async fn commands_keep_personal_and_secret_values_in_the_vault() {
     let cmd = with_values("c2", "PlaceOrder", "o2", &[&email]);
     let status = submit_values(&env.addr, cmd, &[&forged]).await.unwrap_err();
     assert_eq!(status.code(), Code::InvalidArgument, "{status:?}");
-    let other = vault_value("k-2", "erika@firma.de");
+    let other = vault_value("k-2", "erika@example.com");
     let cmd = with_values("c3", "PlaceOrder", "o3", &[&other]);
     let status = submit_values(&env.addr, cmd, &[]).await.unwrap_err();
     assert_eq!(status.code(), Code::InvalidArgument, "{status:?}");
@@ -182,7 +185,7 @@ fn customer_worker(vaults: Option<mpsc::UnboundedSender<Vec<VaultValue>>>) -> Te
         let field = |f: &str| payload[f].as_str().unwrap_or_default().to_owned();
         match cmd.command_type.as_str() {
             "PlaceOrder" => (
-                vec![vault_value(&field("customer"), "x@firma.de")],
+                vec![vault_value(&field("customer"), "x@example.com")],
                 String::new(),
             ),
             _ => (Vec::new(), field("erase")),

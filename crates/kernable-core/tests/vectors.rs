@@ -124,7 +124,7 @@ fn vectors() -> Value {
     };
     // The same command and events with vault references, and an event that erases a subject.
     let salt = [9u8; 16];
-    let email = br#""max@firma.de""#;
+    let email = br#""max@example.com""#;
     let vault_ref = signing::vault_ref(&salt, "k-1", false, email);
     let secret_ref = signing::vault_ref(&salt, "", true, br#""geheim""#);
     let vault_cmd = Command {
@@ -156,7 +156,7 @@ fn vectors() -> Value {
         UniqueKey {
             name: "email".into(),
             global: true,
-            value_hash: Sha256::digest(b"max@firma.de").to_vec(),
+            value_hash: Sha256::digest(b"max@example.com").to_vec(),
             subject: "k-1".into(),
         },
     ];

@@ -526,7 +526,7 @@ mod tests {
             }
         });
         order.command("PlaceOrder", |_, d: Value, _cmd, _ctx| {
-            let placed = json!({ "number": "A-1001", "email": "max@firma.de", "customerId": d["customerId"] });
+            let placed = json!({ "number": "A-1001", "email": "max@example.com", "customerId": d["customerId"] });
             Ok(vec![NewEvent::new("OrderPlaced", placed)])
         });
         order

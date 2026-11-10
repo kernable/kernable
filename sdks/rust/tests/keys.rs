@@ -112,7 +112,7 @@ fn an_aggregate_computes_its_keys_and_facts_for_a_state() {
     );
     let state = Customer {
         id: "k1".into(),
-        email: Some("Max@Firma.de".into()),
+        email: Some("Max@Example.com".into()),
         number: None,
         tags: vec!["a".into(), "b".into(), "a".into()],
     };
@@ -126,7 +126,7 @@ fn an_aggregate_computes_its_keys_and_facts_for_a_state() {
         customer.index(&state).unwrap(),
         Index {
             keys: vec![
-                key("email", "max@firma.de", false),
+                key("email", "max@example.com", false),
                 key("tag", "a", false),
                 key("tag", "b", false),
             ],
@@ -142,7 +142,7 @@ fn an_aggregate_computes_its_keys_and_facts_for_a_state() {
         Unique::global().personal(|s: &Customer| Some(s.id.clone())),
     );
     let nobody = Customer {
-        email: Some("max@firma.de".into()),
+        email: Some("max@example.com".into()),
         ..Customer::default()
     };
     assert_eq!(people.index(&nobody).unwrap().keys, []);
@@ -154,7 +154,7 @@ fn an_aggregate_computes_its_keys_and_facts_for_a_state() {
         people.index(&max).unwrap().keys,
         [UniqueKey {
             subject: Some("k1".into()),
-            ..key("email", "max@firma.de", true)
+            ..key("email", "max@example.com", true)
         }]
     );
 
@@ -206,21 +206,21 @@ async fn a_key_is_unique_in_its_tenant_or_across_tenants_and_a_change_frees_the_
     let email_taken = rejected("unique_taken", "crm.Customer key email is taken");
 
     assert_eq!(
-        result(&register("t1", "k1", "max@firma.de", "1").await),
+        result(&register("t1", "k1", "max@example.com", "1").await),
         committed()
     );
     // Normalized by the key function: the same email in another case is taken.
     assert_eq!(
-        result(&register("t1", "k2", "MAX@firma.de", "2").await),
+        result(&register("t1", "k2", "MAX@example.com", "2").await),
         email_taken
     );
     // Another tenant may hold the same email, but not the same global number.
     assert_eq!(
-        result(&register("t2", "k2", "max@firma.de", "2").await),
+        result(&register("t2", "k2", "max@example.com", "2").await),
         committed()
     );
     assert_eq!(
-        result(&register("t2", "k3", "eva@firma.de", "1").await),
+        result(&register("t2", "k3", "eva@example.com", "1").await),
         rejected("unique_taken", "crm.Customer key number is taken")
     );
 
@@ -235,24 +235,24 @@ async fn a_key_is_unique_in_its_tenant_or_across_tenants_and_a_change_frees_the_
         committed()
     );
     assert_eq!(
-        result(&register("t1", "k4", "max@firma.de", "4").await),
+        result(&register("t1", "k4", "max@example.com", "4").await),
         email_taken
     );
     let changed = send(
         &kernable,
-        k1("ChangeEmail", json!({ "email": "m@firma.de" })),
+        k1("ChangeEmail", json!({ "email": "m@example.com" })),
     )
     .await;
     assert_eq!(result(&changed), committed());
     assert_eq!(
-        result(&register("t1", "k4", "max@firma.de", "4").await),
+        result(&register("t1", "k4", "max@example.com", "4").await),
         committed()
     );
     // None frees it too.
     let changed = send(&kernable, k1("ChangeEmail", json!({ "email": null }))).await;
     assert_eq!(result(&changed), committed());
     assert_eq!(
-        result(&register("t1", "k5", "m@firma.de", "5").await),
+        result(&register("t1", "k5", "m@example.com", "5").await),
         committed()
     );
 }
@@ -354,7 +354,7 @@ async fn erasing_its_subject_frees_a_personal_key() {
     spawn(&worker);
     worker.ready().await;
     let register = |id: &str| {
-        let data = json!({ "email": "max@firma.de" });
+        let data = json!({ "email": "max@example.com" });
         send(
             &kernable,
             Submit::new("identity", "Person", id, "Register").data(data),

@@ -337,12 +337,12 @@ fn vault_rekey_moves_every_value_to_the_new_key() {
     assert_eq!(code, 0, "{printed}");
     assert!(printed.starts_with("re-encrypted "), "{printed}");
     // The customer's email in c1, as compat.rs seals it.
-    let email = signing::vault_ref(&[1; 16], "k-1", false, b"\"max@firma.de\"");
+    let email = signing::vault_ref(&[1; 16], "k-1", false, b"\"max@example.com\"");
     let values = Vault::open(&vault, &[7; 32])
         .unwrap()
         .get(&[email])
         .unwrap();
-    assert_eq!(values[0].value, b"\"max@firma.de\"");
+    assert_eq!(values[0].value, b"\"max@example.com\"");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -466,7 +466,7 @@ fn an_export_of_stopped_stores_imports_into_new_ones() {
     let (_, verified) = kernable(&dir, &["verify", &new_store, "kernel.pub"]);
     assert!(has_line(&verified, "OK, 1 suspect"), "{verified}");
     // The values are readable with the target's vault key, which is the source's.
-    let email = signing::vault_ref(&[1; 16], "k-1", false, b"\"max@firma.de\"");
+    let email = signing::vault_ref(&[1; 16], "k-1", false, b"\"max@example.com\"");
     let key: [u8; 32] = hex::decode(
         std::fs::read_to_string(dir.join("vault.key"))
             .unwrap()
@@ -479,7 +479,7 @@ fn an_export_of_stopped_stores_imports_into_new_ones() {
         .unwrap()
         .get(&[email])
         .unwrap();
-    assert_eq!(values[0].value, b"\"max@firma.de\"");
+    assert_eq!(values[0].value, b"\"max@example.com\"");
     let copied = kernable_store::data::open(&new_data).unwrap();
     assert_eq!(copied.get(&invoice).unwrap(), Some(pdf));
 

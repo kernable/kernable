@@ -32,7 +32,7 @@ def order_aggregate():
                        Requirement.by_key("Vehicle", "isin", "VEH-lyra", "woundUp", domain="funds", absent=True),
                    ])
     def _(state, data):
-        return [{"type": "OrderPlaced", "data": {"number": "A-1001", "email": "max@firma.de",
+        return [{"type": "OrderPlaced", "data": {"number": "A-1001", "email": "max@example.com",
                                                  "customerId": data["customerId"]}}]
 
     return order
@@ -69,7 +69,7 @@ class IndexSigning(unittest.TestCase):
     def test_reindex_sends_the_set_of_the_current_state_without_events(self):
         order = order_aggregate()
         placed = pb.Event(event_type="OrderPlaced", schema=1, version=1,
-                          payload=b'{"number": "A-1001", "email": "max@firma.de", "customerId": "k-1"}')
+                          payload=b'{"number": "A-1001", "email": "max@example.com", "customerId": "k-1"}')
         cmd = pb.Command(command_id="c-2", tenant_id="t-1", domain="orders", aggregate_type="Order",
                          aggregate_id="o-1", command_type="_reindex_Order", payload=b"{}")
         result = worker(order)._execute(pb.Execute(lease_id="l-2", command=cmd, history=[placed],
@@ -119,12 +119,12 @@ class IndexDefinition(unittest.TestCase):
             return state.get("status") == "active"
 
         self.assertEqual(account.index({}), Index([], []))
-        state = {"id": "a1", "email": "max@firma.de", "aliases": ["max", "mm", "max"], "status": "active"}
-        self.assertEqual(account.index(state), Index([HeldKey("email", "max@firma.de", "tenant", "a1"),
+        state = {"id": "a1", "email": "max@example.com", "aliases": ["max", "mm", "max"], "status": "active"}
+        self.assertEqual(account.index(state), Index([HeldKey("email", "max@example.com", "tenant", "a1"),
                                                       HeldKey("alias", "max", "global"), HeldKey("alias", "mm", "global")],
                                                      ["active"]))
         # A personal key without a subject is not held.
-        self.assertEqual(account.index({"email": "max@firma.de"}).keys, [])
+        self.assertEqual(account.index({"email": "max@example.com"}).keys, [])
         with self.assertRaises(TypeError):
             account.index({"aliases": [7]})
 

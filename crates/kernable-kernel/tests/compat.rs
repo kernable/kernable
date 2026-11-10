@@ -89,7 +89,7 @@ fn keys() -> [UniqueKey; 2] {
     };
     [
         key("number", "A-1001", ""),
-        key("email", "max@firma.de", "k-1"),
+        key("email", "max@example.com", "k-1"),
     ]
 }
 
@@ -157,8 +157,8 @@ fn fill(store: &dyn Store, vault: &Vault) {
         erases: String::new(),
         ..Default::default()
     };
-    let email = value(1, "k-1", "max@firma.de");
-    let placed_email = value(2, "k-1", "max@firma.de");
+    let email = value(1, "k-1", "max@example.com");
+    let placed_email = value(2, "k-1", "max@example.com");
     let c1 = cmd("c1", "PlaceOrder", "o1", &[&email]);
     let payload = format!(
         r#"{{"customer":"k-1","email":{{"$vault":"{}"}}}}"#,
@@ -216,7 +216,7 @@ fn fill(store: &dyn Store, vault: &Vault) {
     let coupon = value(3, "", "SAVE10");
     let c4 = cmd("c4", "PlaceOrder", "o2", &[&coupon]);
     store.enqueue(&c4, AT).unwrap();
-    let other = value(4, "k-2", "erika@firma.de");
+    let other = value(4, "k-2", "erika@example.com");
     let c6 = cmd("c6", "PlaceOrder", "o3", &[]);
     let payload = format!(
         r#"{{"customer":"k-2","email":{{"$vault":"{}"}}}}"#,
