@@ -107,7 +107,7 @@ impl Load {
             // The newest event of this client's commands, and its refusals still without
             // `before`.
             let (mut last, mut open) = (0, Vec::<usize>::new());
-            for i in 0.. {
+            for i in 0..u64::MAX {
                 while !load.running.load(Ordering::SeqCst) {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
@@ -254,7 +254,7 @@ impl Load {
         tokio::spawn(async move {
             // A pair's addresses in turn: the standby refuses, the primary takes it.
             let addresses: Vec<String> = addr.split(',').map(str::to_owned).collect();
-            for turn in 0.. {
+            for turn in 0..usize::MAX {
                 let _ = listen_once(&addresses[turn % addresses.len()], &me, &observed).await;
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }

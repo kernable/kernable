@@ -678,7 +678,7 @@ pub fn issued_now() -> i64 {
         .unwrap()
         .as_millis() as i64;
     let previous = LAST
-        .fetch_update(
+        .try_update(
             std::sync::atomic::Ordering::SeqCst,
             std::sync::atomic::Ordering::SeqCst,
             |last| Some(now.max(last + 1)),

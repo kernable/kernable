@@ -317,7 +317,7 @@ pub trait Store: Send + Sync {
             );
         })?;
         let mut all: Vec<StreamSummary> = latest.into_values().collect();
-        all.sort_by(|a, b| b.last_at.cmp(&a.last_at));
+        all.sort_by_key(|a| std::cmp::Reverse(a.last_at));
         all.truncate(limit);
         Ok(all)
     }

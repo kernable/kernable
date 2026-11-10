@@ -107,7 +107,7 @@ impl Fixture {
 
     fn verify(&self) -> Report {
         let kernel_id = signing::key_id(&self.kernel.verifying_key());
-        self.store.verify(&[kernel_id.to_string()]).unwrap()
+        self.store.verify(std::slice::from_ref(&kernel_id)).unwrap()
     }
 }
 
@@ -242,7 +242,7 @@ fn forged_checkpoint_is_detected() {
 
     let other = signing::key_id(&SigningKey::from_bytes(&[4; 32]).verifying_key());
     assert_problem(
-        &f.store.verify(&[other.to_string()]).unwrap(),
+        &f.store.verify(std::slice::from_ref(&other)).unwrap(),
         "signed by unknown key",
     );
 }

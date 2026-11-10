@@ -196,7 +196,7 @@ impl Store for FaultyStore {
     ) -> Result<Vec<Event>> {
         let conflicts = &self.faults.conflicts;
         if conflicts
-            .fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1))
+            .try_update(SeqCst, SeqCst, |n| n.checked_sub(1))
             .is_ok()
         {
             return Err(Error::VersionConflict {

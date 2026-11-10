@@ -1,0 +1,5 @@
+[toolchain]
+# Pinned so CI and every machine lint with the same clippy; update it on purpose.
+channel = "1.99.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

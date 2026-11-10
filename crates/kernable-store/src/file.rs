@@ -862,10 +862,9 @@ impl Store for FileStore {
             .events
             .last()
             .map_or(GENESIS.to_vec(), |e| e.hash.clone());
-        let mut position = inner.state.events.len() as u64;
+        let first = inner.state.events.len() as u64 + 1;
         let mut logged = Vec::with_capacity(events.len());
-        for (version, e) in (expected_version + 1..).zip(events) {
-            position += 1;
+        for (position, (version, e)) in (first..).zip((expected_version + 1..).zip(events)) {
             let mut event = Event {
                 global_position: position,
                 tenant_id: cmd.tenant_id.clone(),
