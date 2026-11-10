@@ -185,6 +185,9 @@
   .flow .badge rect { fill: var(--accent); } .flow .badge text { fill: #fff; font-size: 11px; font-weight: 600; }
   .flow .badge.bad rect { fill: var(--bad); }
   .flow marker path { fill: var(--edge); }
+  .flow .faded { opacity: .35; }
+  .flow .step.here .shape { stroke: var(--accent); stroke-width: 2.4; fill: var(--accent-soft); }
+  .flow .step.done-end .shape { stroke: var(--ok); stroke-width: 2.5; fill: var(--ok-soft); }
   /* a case as a story */
   .story { display: grid; }
   .ev { display: grid; grid-template-columns: 76px 18px 1fr; gap: 10px; }
@@ -491,7 +494,7 @@ function onRoute() {
   document.querySelectorAll(".view").forEach((v) => (v.hidden = v.id !== `v-${top}`));
   if (route.view === "search") $("q").value = route.args[0] ?? "";
   if (route.view === "explore" || route.view === "history") enterExplore();
-  if (route.view === "case") { caseData = null; caseRef = null; loadCaseRoute(); }
+  if (route.view === "case") { caseData = null; caseRef = null; rawOpen = false; loadCaseRoute(); }
   if (route.view === "search") runSearch(route.args[0] ?? "");
   if (route.view === "processes") { procFrame = ""; caseList = null; }
   render();
@@ -910,10 +913,15 @@ function layout(model) {
   return { out, back, rank, row, cols: cols.length };
 }
 
-function flow(v) {
+/**
+ * The process diagram. With `one` (a case's path: the steps it reached with their time there,
+ * the paths it took, where it is now) that case's way is drawn and the rest faded; without, the
+ * whole version with how many cases took each path.
+ */
+function flow(v, one = null) {
   const model = v.model, { out, back, rank, row, cols } = layout(model);
   // Columns as wide as the panel allows, between 230 and 320 px.
-  const room = ($("p-flow")?.clientWidth ?? 1100) - 2 * PAD - SW - 4;
+  const room = ($(one ? "c-flow" : "p-flow")?.clientWidth ?? 1100) - 2 * PAD - SW - 4;
   COL = cols > 1 ? Math.max(230, Math.min(320, Math.floor(room / (cols - 1)))) : 300;
   const rows = [...row.values()];
   const minRow = Math.min(0, ...rows), maxRow = Math.max(0, ...rows);
@@ -960,6 +968,13 @@ function flow(v) {
       d = `M${x1},${y1} L${x1},${y + dy} Q${x1},${y} ${x1 + dir * R},${y} L${x2 - dir * R},${y} Q${x2},${y} ${x2},${y + dy} L${x2},${y2}`;
       lx = (x1 + x2) / 2; ly = y - 5;
     }
+    if (one) {
+      const taken = one.edges.has(`${e.from}>${e.to}`);
+      edges.append(el("svg:path", { class: `edge${taken ? " used" : " faded"}${e.back ? " back" : ""}${e.alt ? " alt" : ""}`, d, "stroke-width": taken ? 5 : 1.3, "marker-end": taken ? null : "url(#arrow)" },
+        el("svg:title", {}, `${e.from || "start"} → ${e.to}${e.label ? ` (${e.label})` : ""}${taken ? ": this case went this way" : ""}`)));
+      if (e.label) labels.append(el("svg:text", { class: `elabel${taken ? "" : " faded"}`, x: lx, y: ly, "text-anchor": anchor }, fit(e.label, 34)));
+      continue;
+    }
     const w = e.count ? 1.5 + (e.count / most) * 12 : 1.3;
     edges.append(el("svg:path", { class: `edge${e.count ? " used" : ""}${e.back ? " back" : ""}${e.alt ? " alt" : ""}`, d, "stroke-width": w, "marker-end": e.count ? null : "url(#arrow)" },
       el("svg:title", {}, `${e.from || "start"} → ${e.to}${e.label ? ` (${e.label})` : ""}: ${e.count} in the last ${procWindow}`)));
@@ -971,13 +986,17 @@ function flow(v) {
   svg.append(el("svg:g", {},
     el("svg:circle", { class: "start", cx: s0.x + 18, cy: s0.y + SH / 2, r: 16 }),
     el("svg:text", { x: s0.x, y: s0.y + SH / 2 + 34, class: "sub" }, fit(`on ${model.start.on}`, 32)),
-    el("svg:text", { x: s0.x, y: s0.y + SH / 2 + 50, class: "sub" }, `${num(v.started)} started`)));
+    el("svg:text", { x: s0.x, y: s0.y + SH / 2 + 50, class: "sub" }, one ? `started ${iso(one.startedAt).slice(11)}` : `${num(v.started)} started`)));
   for (const s of model.steps) {
     const { x, y } = pos(s.name), st = v.steps[s.name] ?? { now: {} };
     const open = (st.now.running ?? 0) + (st.now.waiting ?? 0), bad = st.now.incident ?? 0;
-    const cls = `step${s.kind === "end" ? " end" : ""}${bad ? " bad" : ""}${caseFilter.step === s.name ? " sel" : ""}`;
-    const g = el("svg:g", { class: cls, transform: `translate(${x},${y})`, onclick: () => { caseFilter.step = caseFilter.step === s.name ? "" : s.name; procFrame = ""; drawProcesses(); } });
-    g.append(el("svg:title", {}, `${s.name} (${s.kind}): click to list its cases`));
+    const mine = one?.steps.get(s.name);
+    const cls = one
+      ? `step${s.kind === "end" ? " end" : ""}${!mine ? " faded" : ""}${mine && one.at === s.name ? (s.kind === "end" ? " done-end" : one.incident ? " bad" : " here") : ""}`
+      : `step${s.kind === "end" ? " end" : ""}${bad ? " bad" : ""}${caseFilter.step === s.name ? " sel" : ""}`;
+    const g = el("svg:g", { class: cls, transform: `translate(${x},${y})`, onclick: one ? null : () => { caseFilter.step = caseFilter.step === s.name ? "" : s.name; procFrame = ""; drawProcesses(); } });
+    g.append(el("svg:title", {}, one ? `${s.name} (${s.kind})${mine ? `: ${duration(mine.ms)} here${one.at === s.name && s.kind !== "end" ? ", now" : ""}` : ": not reached"}` : `${s.name} (${s.kind}): click to list its cases`));
+    if (one) g.style.cursor = "default";
     if (s.kind === "decide") g.append(el("svg:polygon", { class: "shape", points: `${SW / 2},0 ${SW},${SH / 2} ${SW / 2},${SH} 0,${SH / 2}` }));
     else g.append(el("svg:rect", { class: "shape", width: SW, height: SH, rx: s.kind === "end" ? SH / 2 : 9 }));
     let sub = "";
@@ -985,9 +1004,12 @@ function flow(v) {
     else if (s.kind === "wait") sub = s.event;
     else if (s.kind === "timer") sub = s.afterMs ? `after ${duration(s.afterMs)}` : `at ${s.at}`;
     else if (s.kind === "query") sub = `? ${s.query}`;
-    else if (s.kind === "end") sub = `${num(v.ended[s.name] ?? 0)} ended`;
+    else if (s.kind === "end") sub = one ? (mine ? "ended here" : "") : `${num(v.ended[s.name] ?? 0)} ended`;
+    if (one && s.kind === "command") sub = s.command;
     const median = st.medianMs !== null && st.medianMs !== undefined ? `median ${duration(st.medianMs)}` : "";
-    const third = s.kind === "wait" ? [median, s.timeoutMs ? `max ${duration(s.timeoutMs)}` : ""].filter(Boolean).join(" · ") : (s.kind === "timer" || s.kind === "query") ? median : "";
+    const third = one
+      ? (mine && s.kind !== "end" ? `${one.at === s.name ? "here for " : "took "}${duration(mine.ms)}${s.kind === "wait" && s.timeoutMs ? ` · max ${duration(s.timeoutMs)}` : ""}` : "")
+      : s.kind === "wait" ? [median, s.timeoutMs ? `max ${duration(s.timeoutMs)}` : ""].filter(Boolean).join(" · ") : (s.kind === "timer" || s.kind === "query") ? median : "";
     const clockIcon = s.kind === "wait" || s.kind === "timer";
     if (clockIcon) g.append(el("svg:circle", { class: "icon", cx: 15, cy: 18, r: 6.5 }), el("svg:path", { class: "icon", d: "M15,14 L15,18 L18,20" }));
     const tx = s.kind === "decide" ? SW / 2 : clockIcon ? 27 : 11;
@@ -995,12 +1017,12 @@ function flow(v) {
     if (sub && s.kind !== "decide") g.append(el("svg:text", { class: "sub", x: 11, y: third ? 37 : 42 }, fit(sub, 27)));
     if (third) g.append(el("svg:text", { class: "sub", x: 11, y: 52 }, fit(third, 27)));
     const badge = (n, bx, c, title) => el("svg:g", { class: `badge ${c}`, transform: `translate(${bx},-9)` }, el("svg:title", {}, title), el("svg:rect", { width: 12 + String(n).length * 7, height: 18, rx: 9 }), el("svg:text", { x: 6, y: 13 }, n));
-    if (bad) g.append(badge(bad, SW - 22 - String(bad).length * 7, "bad", `${bad} with an incident`));
-    if (open) g.append(badge(open, SW - (bad ? 48 + String(bad).length * 7 : 18) - String(open).length * 7, "", `${open} here now`));
+    if (!one && bad) g.append(badge(bad, SW - 22 - String(bad).length * 7, "bad", `${bad} with an incident`));
+    if (!one && open) g.append(badge(open, SW - (bad ? 48 + String(bad).length * 7 : 18) - String(open).length * 7, "", `${open} here now`));
     svg.append(g);
   }
   svg.append(labels);
-  const cancelled = v.ended.cancelled ?? 0;
+  const cancelled = one ? 0 : v.ended.cancelled ?? 0;
   if (cancelled) svg.append(el("svg:text", { class: "sub", x: PAD, y: height - 8 }, `${cancelled} cancelled by an operator`));
   return svg;
 }
@@ -1056,6 +1078,26 @@ function storyLine(e, model) {
   }
 }
 
+/** A case's way through its process: the steps it reached, how long it stayed, where it is. */
+function casePath(events, incident) {
+  const steps = new Map(), edges = new Set();
+  let prev = "", at = null, since = events[0]?.createdAt ?? 0;
+  for (const e of events) {
+    let p = {};
+    try { p = JSON.parse(e.payload); } catch {}
+    if (e.type === "StepReached") {
+      if (at) steps.get(at).ms = e.createdAt - since;
+      edges.add(`${prev}>${p.step}`);
+      prev = p.step; at = p.step; since = e.createdAt;
+      steps.set(p.step, { ms: 0 });
+    }
+  }
+  const ended = events.some((e) => e.type === "ProcessEnded");
+  if (at && !ended) steps.get(at).ms = now() - since;
+  return { steps, edges, at, incident: !!incident, startedAt: events[0]?.createdAt ?? 0 };
+}
+
+let rawOpen = false;
 function drawCase() {
   const box = $("v-processes");
   procFrame = "";
@@ -1090,17 +1132,21 @@ function drawCase() {
     el("dt", {}, "Took"), el("dd", {}, duration((endedAt ? last.createdAt : now()) - events[0].createdAt)),
     el("dt", {}, "Data"), el("dd", { class: "mono" }, Object.entries(started.data ?? {}).map(([k, v]) => `${k}: ${JSON.stringify(v)}`).join("\n") || "–"),
     el("dt", {}, "Touched"), el("dd", {}, [...touched.values()].map((l, i) => [i ? ", " : "", aggLink(l)])));
-  const raw = el("details", {}, el("summary", { class: "note" }, `Technical: the case's ${events.length} events`),
+  // Its open state is kept: the page redraws every few seconds while the case runs.
+  const raw = el("details", { open: rawOpen, ontoggle: (ev) => (rawOpen = ev.currentTarget.open) }, el("summary", { class: "note" }, `Technical: the case's ${events.length} events`),
     events.map((e) => el("div", { class: "card", style: "margin-top:8px" }, el("div", { class: "top" }, el("span", { class: "v" }, `v${e.version}`), el("span", { class: "t" }, e.type), el("span", { class: "when" }, iso(e.createdAt))), payloadView(e.payload, null))),
     el("div", { style: "margin-top:8px" }, el("a", { href: historyHref({ tenant, domain: "process", type: process, id }) }, "Its stream in Explore →")));
+  const version = p?.versions.find((x) => x.version === started.version);
   box.replaceChildren(
     el("div", { class: "title" }, back, el("h3", {}, `${process}: ${started.key ?? id}`), stateChip(status)),
+    version ? el("div", { class: "flow", id: "c-flow" }) : null,
     el("div", { class: "grid cols-2" },
       el("div", { class: "panel" }, el("h2", {}, "What happened"), story),
       el("div", { class: "grid", style: "align-content:start" },
         el("div", { class: "panel" }, el("h2", {}, "Case"), facts),
         incident ? el("div", { class: "panel" }, el("h2", {}, "Resolve"), el("div", {}, el("span", { class: "code" }, incident.incident?.code), ` at ${incident.step}: ${incident.incident?.message ?? ""}`), el("div", { class: "note" }, "Fix the cause first, then:"), resolving(incident)) : null,
         el("div", { class: "panel" }, raw))));
+  if (version) $("c-flow").replaceChildren(flow(version, casePath(events, incident)));
 }
 
 // ================= Operations =================
