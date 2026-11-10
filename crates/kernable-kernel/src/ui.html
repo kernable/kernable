@@ -203,12 +203,12 @@
 <body>
 <header>
  <div class="bar">
-  <a href="#overview"><img class="logo light" src="/logo.png" alt="kernable" width="95" height="24"><img class="logo dark" src="/logo-dark.png" alt="kernable" width="95" height="24"></a>
+  <a href="/"><img class="logo light" src="/logo.png" alt="kernable" width="95" height="24"><img class="logo dark" src="/logo-dark.png" alt="kernable" width="95" height="24"></a>
   <nav>
-    <a href="#overview" data-view="overview">Overview</a>
-    <a href="#processes" data-view="processes">Processes<span class="count" id="nav-incidents" hidden></span></a>
-    <a href="#operations" data-view="operations">Operations</a>
-    <a href="#explore" data-view="explore">Explore</a>
+    <a href="/" data-view="overview">Overview</a>
+    <a href="/processes" data-view="processes">Processes<span class="count" id="nav-incidents" hidden></span></a>
+    <a href="/operations" data-view="operations">Operations</a>
+    <a href="/explore" data-view="explore">Explore</a>
     <a id="stage" href="/demo" hidden>Demo stage</a>
   </nav>
   <form id="searchform"><input id="q" placeholder="Search an order, case, command or correlation ID…" autocomplete="off"></form>
@@ -221,9 +221,9 @@
   <section class="view" id="v-operations"></section>
   <section class="view" id="v-explore">
     <div class="sub" id="explore-tabs">
-      <a href="#explore/map" data-tab="map">Domain map</a>
-      <a href="#explore/events" data-tab="events">Event log</a>
-      <a href="#explore/aggregates" data-tab="aggregates">Aggregates</a>
+      <a href="/explore/map" data-tab="map">Domain map</a>
+      <a href="/explore/events" data-tab="events">Event log</a>
+      <a href="/explore/aggregates" data-tab="aggregates">Aggregates</a>
     </div>
     <div id="x-map">
       <div class="controls" style="margin-bottom:10px">
@@ -409,8 +409,8 @@ function issues() {
   if (k.ready !== "ready" && !missing) out.push({ level: "warn", text: "Not ready", sub: k.ready });
   for (const l of state.listeners) {
     if (l.live) continue;
-    if (l.counts && !l.connected) out.push({ level: "bad", text: `${l.middlewares.length ? "Middleware" : "Listener"} ${l.name} is missing`, sub: l.middlewares.length ? "The commands it checks are refused until it is back; the kernel is not ready." : "The kernel waits for it: it is not ready, and commands that settle wait too.", href: "#operations" });
-    else if (l.connected && head - l.position >= 100) out.push({ level: "warn", text: `Listener ${l.name} is ${num(head - l.position)} events behind`, sub: "Queries to its read model answer from older data.", href: "#operations" });
+    if (l.counts && !l.connected) out.push({ level: "bad", text: `${l.middlewares.length ? "Middleware" : "Listener"} ${l.name} is missing`, sub: l.middlewares.length ? "The commands it checks are refused until it is back; the kernel is not ready." : "The kernel waits for it: it is not ready, and commands that settle wait too.", href: "/operations" });
+    else if (l.connected && head - l.position >= 100) out.push({ level: "warn", text: `Listener ${l.name} is ${num(head - l.position)} events behind`, sub: "Queries to its read model answer from older data.", href: "/operations" });
   }
   if (parked?.total) {
     const by = {};
@@ -427,7 +427,7 @@ function issues() {
     if (used >= 0.8) out.push({ level: used >= 1 ? "bad" : "warn", text: `Store at ${Math.round(used * 100)} % of its quota`, sub: `${bytes(system.store.bytes)} of ${bytes(system.store.maxBytes)}: at the limit new commands are refused.` });
   }
   const spike = rejectedRecently();
-  if (spike.business >= 5 && spike.business > spike.commands * 0.05) out.push({ level: "warn", text: `${spike.business} commands rejected in the last 10 min`, sub: `${pct(spike.business, spike.commands)} of the commands`, href: "#operations" });
+  if (spike.business >= 5 && spike.business > spike.commands * 0.05) out.push({ level: "warn", text: `${spike.business} commands rejected in the last 10 min`, sub: `${pct(spike.business, spike.commands)} of the commands`, href: "/operations" });
   return out;
 }
 function verdict() {
@@ -445,25 +445,53 @@ function rejectedRecently() {
 }
 
 // ---- routing: every view has a URL ----
+// Paths, not fragments: /processes/<process>/cases/<key>[/<n>], /explore/aggregates/<domain>/
+// <type>/<id>, a tenant other than `default` as ?tenant=. The kernel serves the page for each.
 let route = { view: "overview", args: [] };
-function parseHash() {
-  const parts = location.hash.slice(1).split("/").map(decodeURIComponent);
-  const view = ["overview", "processes", "case", "operations", "explore", "history", "search"].includes(parts[0]) ? parts[0] : "overview";
-  return { view, args: parts.slice(1) };
+function parseRoute() {
+  const parts = location.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+  const q = new URLSearchParams(location.search);
+  const tenant = q.get("tenant") || "default";
+  if (parts[0] === "processes" && parts[2] === "cases" && parts[3]) return { view: "case", args: [tenant, parts[1], parts[3], parts[4] ?? null] };
+  if (parts[0] === "processes") return { view: "processes", args: parts.slice(1, 2) };
+  if (parts[0] === "operations") return { view: "operations", args: [] };
+  if (parts[0] === "explore" && parts[1] === "aggregates" && parts[4]) return { view: "history", args: [tenant, parts[2], parts[3], parts.slice(4).join("/")] };
+  if (parts[0] === "explore") return { view: "explore", args: parts.slice(1, 2), query: q };
+  if (parts[0] === "search") return { view: "search", args: [q.get("q") ?? ""] };
+  return { view: "overview", args: [] };
 }
 const enc = (...xs) => xs.map((x) => encodeURIComponent(x)).join("/");
-const caseHref = (c) => `#case/${enc(c.tenant, c.process, c.id)}`;
-const historyHref = (s) => `#history/${enc(s.tenant, s.domain, s.type ?? s.aggregateType, s.id ?? s.aggregateId)}`;
-const procHref = (name) => `#processes/${enc(name)}`;
+const withTenant = (path, tenant) => (tenant && tenant !== "default" ? `${path}?tenant=${encodeURIComponent(tenant)}` : path);
+/** A case's key and number: `o-1#2` is key `o-1`, case 2. */
+const splitCase = (id) => { const i = id.lastIndexOf("#"); return i < 0 ? [id, null] : [id.slice(0, i), id.slice(i + 1)]; };
+const caseHref = (c) => { const [key, n] = splitCase(c.id); return withTenant(`/processes/${enc(c.process)}/cases/${enc(key)}${n ? `/${enc(n)}` : ""}`, c.tenant); };
+const historyHref = (s) => withTenant(`/explore/aggregates/${enc(s.domain, s.type ?? s.aggregateType, s.id ?? s.aggregateId)}`, s.tenant);
+const procHref = (name) => `/processes/${enc(name)}`;
+const searchHref = (q) => `/search?q=${encodeURIComponent(q)}`;
+/** Goes to `url` within the page; `replace` keeps the browser's history as it is. */
+function go(url, replace = false) {
+  if (url === location.pathname + location.search) return;
+  history[replace ? "replaceState" : "pushState"](null, "", url);
+  onRoute();
+}
+// Links within the UI change the view without loading the page again.
+document.addEventListener("click", (ev) => {
+  const a = ev.target.closest?.("a[href]");
+  if (!a || ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey || a.target) return;
+  const href = a.getAttribute("href");
+  if (!href.startsWith("/") || href.startsWith("/api/") || href.startsWith("/demo")) return;
+  ev.preventDefault();
+  go(href);
+});
 
 function onRoute() {
-  route = parseHash();
+  route = parseRoute();
   const top = { case: "processes", history: "explore", search: "search" }[route.view] ?? route.view;
   document.querySelectorAll("nav a[data-view]").forEach((a) => a.classList.toggle("on", a.dataset.view === top));
   document.querySelectorAll(".view").forEach((v) => (v.hidden = v.id !== `v-${top}`));
   if (route.view === "search") $("q").value = route.args[0] ?? "";
   if (route.view === "explore" || route.view === "history") enterExplore();
-  if (route.view === "case") { caseData = null; loadCaseRoute(); }
+  if (route.view === "case") { caseData = null; caseRef = null; loadCaseRoute(); }
   if (route.view === "search") runSearch(route.args[0] ?? "");
   if (route.view === "processes") { procFrame = ""; caseList = null; }
   render();
@@ -590,7 +618,7 @@ function processesPanel() {
     const bad = (incidents?.cases ?? []).filter((c) => c.process === p.name).length;
     const newest = all[all.length - 1];
     const w = firstWait(newest);
-    return el("tr", { class: "click", onclick: () => (location.hash = procHref(p.name)) },
+    return el("tr", { class: "click", onclick: () => (go(procHref(p.name))) },
       el("td", {}, el("b", {}, p.name), p.removed ? el("span", { class: "faint" }, " · removed") : null),
       el("td", { class: "num" }, num(sum.started)), el("td", { class: "num" }, num(open)),
       el("td", { class: `num ${bad ? "bad" : ""}` }, num(bad)),
@@ -617,7 +645,7 @@ function systemPanel() {
     rows.push(line(s.store.maxBytes && s.store.bytes > 0.8 * s.store.maxBytes ? "warn" : "ok", "Store", s.store.maxBytes ? `${bytes(s.store.bytes)} of ${bytes(s.store.maxBytes)}` : bytes(s.store.bytes)));
     rows.push(line("ok", "Queued · scheduled", `${num(s.queue.queued)} · ${num(s.queue.scheduled)}`));
   }
-  return el("div", { class: "panel" }, el("h2", {}, "System", el("a", { class: "aside", href: "#operations" }, "Operations →")), rows);
+  return el("div", { class: "panel" }, el("h2", {}, "System", el("a", { class: "aside", href: "/operations" }, "Operations →")), rows);
 }
 
 // ================= Processes =================
@@ -642,7 +670,7 @@ function drawProcesses() {
   const list = el("div", { class: "list" }, el("div", { class: "lhead" }, el("span", { class: "note" }, `${procs.processes.length} process${procs.processes.length === 1 ? "" : "es"}`), sideToggle("processes")), el("ul", {}, procs.processes.length ? procs.processes.map((x) => {
     const open = x.versions.reduce((n, y) => n + openCount(y), 0);
     const bad = (incidents?.cases ?? []).filter((c) => c.process === x.name).length;
-    return el("li", { class: x === p ? "on" : "", onclick: () => { procVersion = null; caseFilter.step = ""; location.hash = procHref(x.name); } },
+    return el("li", { class: x === p ? "on" : "", onclick: () => { procVersion = null; caseFilter.step = ""; go(procHref(x.name)); } },
       el("span", { class: "n" }, `${open} open`, bad ? [" · ", el("span", { class: "bad" }, `${bad} incident${bad === 1 ? "" : "s"}`)] : null),
       el("div", { class: "id" }, x.name), el("div", { class: "of" }, `version ${x.versions.length}${x.removed ? " · removed: no new cases" : ""}`));
   }) : el("li", { class: "of" }, "No process registered.")));
@@ -781,7 +809,7 @@ function casesTable() {
   if (!caseList) return el("div", { class: "note", style: "padding:10px" }, "Loading…");
   const cases = [...caseList.cases].sort((a, b) => b.lastAt - a.lastAt);
   $("p-count") && ($("p-count").textContent = `${cases.length} of ${num(caseList.total)}${caseList.total > cases.length ? " shown" : ""} · the newest ${procs.endedKept} ended cases per process are kept`);
-  const rows = cases.map((c) => el("tr", { class: "click", onclick: () => (location.hash = caseHref(c)) },
+  const rows = cases.map((c) => el("tr", { class: "click", onclick: () => go(caseHref(c)) },
     el("td", {}, el("a", { href: caseHref(c) }, c.key), el("span", { class: "faint" }, ` #${c.id.split("#")[1] ?? ""}`)),
     el("td", {}, stateChip(c.state)), el("td", {}, c.step, c.incident ? [" · ", el("span", { class: "code" }, c.incident.code)] : null),
     el("td", { class: "num" }, duration((c.state === "ended" ? c.lastAt : now()) - c.startedAt)),
@@ -979,11 +1007,21 @@ function flow(v) {
 
 // ================= one case, as a story =================
 let caseData = null;
-let caseMeta = null;
+let caseMeta = null, caseRef = null;
+/** The case's id from the route; without a number, the key's newest case. */
+async function caseId() {
+  const [tenant, process, key, n] = route.args;
+  let mine = [];
+  try { mine = (await get(`/api/cases?${new URLSearchParams({ process, text: key, limit: 200 })}`)).cases.filter((c) => c.tenant === tenant && splitCase(c.id)[0] === key); } catch {}
+  const number = (c) => Number(splitCase(c.id)[1]);
+  const id = n ? `${key}#${n}` : mine.sort((a, b) => number(b) - number(a))[0]?.id ?? `${key}#1`;
+  caseMeta = mine.find((c) => c.id === id) ?? null;
+  return { tenant, process, id };
+}
 async function loadCaseRoute() {
-  const [tenant, process, id] = route.args;
+  const { tenant, process, id } = await caseId();
+  caseRef = { tenant, process, id };
   try { caseData = await get(`/api/case?${new URLSearchParams({ tenant, process, id })}`); } catch (e) { caseData = { error: String(e) }; }
-  try { caseMeta = (await get(`/api/cases?${new URLSearchParams({ process, text: id.split("#")[0], limit: 50 })}`)).cases.find((c) => c.id === id && c.tenant === tenant) ?? null; } catch { caseMeta = null; }
   render();
 }
 
@@ -1021,8 +1059,10 @@ function storyLine(e, model) {
 function drawCase() {
   const box = $("v-processes");
   procFrame = "";
-  const [tenant, process, id] = route.args;
+  const process = route.args[1];
   const back = el("a", { href: procHref(process) }, `← ${process}`);
+  if (!caseRef) { box.replaceChildren(back, el("div", { class: "empty" }, "Loading…")); return; }
+  const { tenant, id } = caseRef;
   if (!caseData) { box.replaceChildren(back, el("div", { class: "empty" }, "Loading…")); return; }
   if (caseData.error) { box.replaceChildren(back, el("div", { class: "err" }, caseData.error)); return; }
   const p = procs?.processes.find((x) => x.name === process);
@@ -1196,6 +1236,16 @@ let exploreTab = "map";
 function enterExplore() {
   if (route.view === "history") { exploreTab = "aggregates"; stream = { tenant: route.args[0], domain: route.args[1], type: route.args[2], id: route.args[3] }; if (stream.domain === "process") $("streams-engine").checked = true; }
   else exploreTab = ["map", "events", "aggregates"].includes(route.args[0]) ? route.args[0] : "map";
+  // The event log's filters come from the address: /explore/events?type=shop.Order&tenant=t1
+  if (exploreTab === "events" && route.query) {
+    const form = $("search");
+    let changed = false;
+    for (const name of ["type", "tenant", "id", "command", "text"]) {
+      const value = route.query.get(name) ?? "";
+      if (form.elements[name].value !== value) { form.elements[name].value = value; changed = true; }
+    }
+    if (changed) tail = null;
+  }
   document.querySelectorAll("#explore-tabs a").forEach((a) => a.classList.toggle("on", a.dataset.tab === exploreTab));
   for (const t of ["map", "events", "aggregates"]) $(`x-${t}`).hidden = t !== exploreTab;
   if (exploreTab === "events" && tail === null) search();
@@ -1316,7 +1366,7 @@ function details(n) {
     row("key", keyView(i.key)); row("last seen", i.lastSeen ? when(i.lastSeen) : undefined);
   } else if (i.kind === "event type") {
     row("schema", i.schema); row("written by", i.writers.join(", "));
-    row("events", el("a", { href: "#explore/events", onclick: () => { document.querySelector('#search [name="type"]').value = n.label; tail = null; } }, "search them →"));
+    row("events", el("a", { href: `/explore/events?type=${encodeURIComponent(n.label)}` }, "search them →"));
   } else if (i.kind === "query") {
     row("type", i.type);
   } else if (i.kind !== "event types") {
@@ -1328,7 +1378,7 @@ function details(n) {
     if (i.instances?.length) row(`instances · ${i.single ? "single" : "replicated"}`, i.instances.map((x) => `${x.id}: position ${x.position}`).join("\n"));
     row("counts", i.counts === undefined ? undefined : i.counts ? "yes: others wait for it" : "no");
     row("key", keyView(i.key));
-    if (i.parked) row(`parked · ${i.parked}`, el("a", { href: "#operations" }, "see Operations →"));
+    if (i.parked) row(`parked · ${i.parked}`, el("a", { href: "/operations" }, "see Operations →"));
   }
   box.replaceChildren(el("div", { class: "kind" }, i.kind), el("h4", {}, n.label), el("dl", {}, rows));
 }
@@ -1344,7 +1394,7 @@ function drawStreams() {
   const key = (s) => `${s.tenant}/${s.domain}/${s.type}/${s.id}`;
   const shown = streams.filter((s) => (engine || s.domain !== "process") && key(s).toLowerCase().includes(f));
   $("streams").replaceChildren(...(shown.length ? shown.map((s) =>
-    el("li", { class: stream && key(stream) === key(s) ? "on" : "", onclick: () => (location.hash = historyHref(s)) },
+    el("li", { class: stream && key(stream) === key(s) ? "on" : "", onclick: () => go(historyHref(s)) },
       el("div", { class: "id" }, s.id), el("div", { class: "of" }, `${s.domain}.${s.type} · v${s.version} · ${s.tenant} · `, when(s.lastAt)))) : [el("li", { class: "of" }, "No aggregate matches.")]));
 }
 
@@ -1397,7 +1447,7 @@ async function loadHistory() {
         e.erases ? el("span", { class: "tag erased" }, `erases ${e.erases}`) : null, el("span", { class: "when", title: iso(e.createdAt) }, iso(e.createdAt))),
       el("div", { class: "line" }, oneLine(e.payload)),
       el("div", { class: "line" }, "by command ", el("b", {}, c ? c.type : "–"), " from ", el("b", {}, ctx.senderIdentity ?? "–"),
-        ctx.correlationId ? [" · correlation ", el("a", { href: `#search/${encodeURIComponent(ctx.correlationId)}` }, fit(ctx.correlationId, 40))] : null),
+        ctx.correlationId ? [" · correlation ", el("a", { href: searchHref(ctx.correlationId) }, fit(ctx.correlationId, 40))] : null),
       el("details", {}, el("summary", {}, "Payload, command and signatures"),
         payloadView(e.payload, h.vault),
         c ? [el("div", { class: "note", style: "margin-top:6px" }, "command ", el("b", {}, c.type), " · received ", iso(c.receivedAt), " · signed by ", keyView(c.key)), payloadView(c.payload, h.vault), el("pre", {}, JSON.stringify(c.context, null, 2))] : null,
@@ -1502,17 +1552,23 @@ function drawSearch() {
 // ---- wiring ----
 $("agg-head").append(sideToggle("aggregates"));
 $("x-aggregates").classList.toggle("collapsed", collapsed.aggregates);
-$("searchform").addEventListener("submit", (ev) => { ev.preventDefault(); location.hash = `#search/${encodeURIComponent($("q").value.trim())}`; });
-$("verdict").addEventListener("click", () => (location.hash = "#overview"));
+$("searchform").addEventListener("submit", (ev) => { ev.preventDefault(); go(searchHref($("q").value.trim())); });
+$("verdict").addEventListener("click", () => go("/"));
 $("filter").addEventListener("input", drawStreams);
 $("streams-engine").addEventListener("change", drawStreams);
 $("map-engine").addEventListener("change", drawMap);
-$("search").addEventListener("submit", (ev) => { ev.preventDefault(); search(); });
+$("search").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const q = new URLSearchParams();
+  for (const [k, v] of new FormData($("search"))) if (v.trim()) q.set(k, v.trim());
+  history.replaceState(null, "", `/explore/events${q.size ? `?${q}` : ""}`);
+  search();
+});
 $("engine").addEventListener("change", search);
 $("older").addEventListener("click", loadOlder);
 $("live").addEventListener("change", () => ($("live").checked ? search() : drawFound()));
 window.addEventListener("resize", () => exploreTab === "map" && drawMap());
-window.addEventListener("hashchange", onRoute);
+window.addEventListener("popstate", onRoute);
 
 async function tick() {
   await loadState();

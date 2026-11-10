@@ -1,5 +1,6 @@
-//! The kernel's UI in a browser, on `ui_listen` (loopback only): one page (`ui.html`), its logo
-//! (`/logo.png`, `/logo-dark.png`) and the JSON it reads.
+//! The kernel's UI in a browser, on `ui_listen` (loopback only): one page (`ui.html`), served at
+//! `/` and at each of its views' addresses, its logo (`/logo.png`, `/logo-dark.png`) and the
+//! JSON it reads.
 //!
 //! - `GET /api/state`: the kernel, the services' memberships, the registered aggregates and the
 //!   connected workers, the listeners, and which aggregate writes which event type;
@@ -80,8 +81,10 @@ pub(crate) fn respond(kernel: &Kernel, request: &[u8]) -> Vec<u8> {
         .unwrap_or("");
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
     let params = parse_query(query);
+    if is_page(path) {
+        return reply("200 OK", "text/html; charset=utf-8", PAGE.as_bytes());
+    }
     let result = match path {
-        "/" => return reply("200 OK", "text/html; charset=utf-8", PAGE.as_bytes()),
         "/logo.png" => return reply("200 OK", "image/png", LOGO),
         "/logo-dark.png" => return reply("200 OK", "image/png", LOGO_DARK),
         "/api/state" => state(kernel),
@@ -105,6 +108,20 @@ pub(crate) fn respond(kernel: &Kernel, request: &[u8]) -> Vec<u8> {
             json!({ "error": e.to_string() }).to_string().as_bytes(),
         ),
     }
+}
+
+/// The page's own addresses: the page decides from the path what to show (`/processes/<process>`,
+/// `/processes/<process>/cases/<key>`, `/operations`, `/explore/…`, `/search?q=`).
+fn is_page(path: &str) -> bool {
+    path == "/"
+        || ["/processes", "/operations", "/explore", "/search"]
+            .iter()
+            .any(|p| {
+                path == *p
+                    || path
+                        .strip_prefix(p)
+                        .is_some_and(|rest| rest.starts_with('/'))
+            })
 }
 
 /// `a=1&b=x%20y` as a map, percent-decoded.

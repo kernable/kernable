@@ -192,6 +192,20 @@ async fn the_ui_shows_the_map_the_connections_and_an_aggregate_history() {
     assert_eq!(history["events"][0]["type"], "OrderPlaced");
     assert_eq!(history["commands"]["c1"]["type"], "PlaceOrder");
     assert!(get(&ui, "/nope").await.starts_with("HTTP/1.1 404"));
+    // Each view has its own address, served the same page.
+    for view in [
+        "/processes/shop.fulfilment/cases/o-1/2?tenant=t2",
+        "/operations",
+        "/explore/events?type=x",
+        "/search?q=o-1",
+    ] {
+        let page = get(&ui, view).await;
+        assert!(
+            page.starts_with("HTTP/1.1 200 OK") && page.contains("<title>kernable</title>"),
+            "{view}"
+        );
+    }
+    assert!(get(&ui, "/processesx").await.starts_with("HTTP/1.1 404"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
