@@ -7,8 +7,8 @@ Look things up here; the [concepts](../concepts/) explain why they are so. Most 
 | [kernable start](./configuration) | Every flag and environment variable of the kernel, with defaults, by topic: trust, stores, network, timeouts; `--dev` |
 | [CLI](./cli) | The `kernable` command: run the kernel; keys, grants, revocation and certificates; apply a membership and list services, workers, listeners and schemas; verify and checkpoint a store; remove registrations, rekey the vault; submit a command |
 | [TypeScript SDK](./sdk-typescript) | `@kernable/sdk` |
-| [Python SDK](./sdk-python) | `kernable` for Python |
-| [Rust SDK](./sdk-rust) | `kernable` for Rust |
+| [Python SDK](./sdk-python) | `kernable-sdk` on PyPI (`import kernable`) |
+| [Rust SDK](./sdk-rust) | `kernable-sdk` on crates.io (`use kernable`) |
 | [Protocol](./protocol) | The gRPC services and messages (`kernable.v1`), for writing an SDK |
 | [Signatures](./signing) | Signed byte layouts, the hash chain, vault references, test vectors |
 | [Errors](./errors) | Rejection codes and gRPC statuses, and what a client should do about each |

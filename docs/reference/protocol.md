@@ -130,7 +130,7 @@ A stored event: a NewEvent of a worker, completed by the kernel when it committe
 | `schema` |  `uint32` | 14 | version of the payload format of `event_type`, from 1 |
 | `vault_refs` | repeated `string` | 15 | see NewEvent |
 | `erases` |  `string` | 16 | see NewEvent |
-| `origin_partition` |  `string` | 17 | An event its tenant brought along when it moved here from another partition (S4): where it was first committed. Listeners do not get these; the original is delivered where it is. |
+| `origin_partition` |  `string` | 17 | An event its tenant brought along when it moved here from another partition: where it was first committed. Listeners do not get these; the original is delivered where it is. |
 | `origin_position` |  `uint64` | 18 |  |
 
 ### Snapshot
@@ -426,7 +426,7 @@ A partition: its name and the addresses of its kernels (two for a pair with a st
 
 ### TenantMove
 
-A tenant moving between partitions, or moved (S4). While it moves, both partitions answer its
+A tenant moving between partitions, or moved. While it moves, both partitions answer its
 requests with UNAVAILABLE. Once moved, `source_head` is the source's head when it was copied
 (every original event of the tenant is at or before it) and `target_after` the target's head
 after the copies: an SDK delivers the target's events after it only once the source's stream
@@ -672,7 +672,7 @@ put or delete signed before the kernel started: sign it again).
 | `issued_at` |  `int64` | 6 | ms since epoch |
 | `client_sig` |  `Signature` | 7 |  |
 | `protocol` |  `uint32` | 8 | not signed |
-| `context` |  `RequestContext` | 9 | Who asks and in which context, as for a command; signed. Middlewares checking `<domain>.PutData`, `.GetData` or `.DeleteData` decide on it. |
+| `context` |  `RequestContext` | 9 | Who asks and in which context, as for a command; signed. Middlewares checking `<domain>.PutData`, `.GetData`, `.DeleteData` or `.ListData` decide on it. |
 | `after` |  `string` | 10 | list only: the `next` of the page before; signed |
 
 ### DataResult
@@ -835,7 +835,7 @@ a Verdict of the same `call_id`, also after (where it may only count for a query
 | `when` |  `When` | 7 |  |
 | `command_result` |  `CommandResult` | 8 | After only: the command's result. The middleware only observes it; its verdict is ignored. |
 | `query_result` |  `QueryResult` | 9 | After only: the query's result. A verdict that rejects a response replaces it. |
-| `type` |  `string` | 10 | The qualified type being checked: `shop.AddItem`, `shop.GetCart`, or for files and the cache `shop.PutData`, `shop.GetData`, `shop.DeleteData`, `shop.SetCache`, `shop.GetCache`, `shop.DeleteCache`; for a cancel the scheduled command's type. |
+| `type` |  `string` | 10 | The qualified type being checked: `shop.AddItem`, `shop.GetCart`, or for files and the cache `shop.PutData`, `shop.GetData`, `shop.DeleteData`, `shop.ListData`, `shop.SetCache`, `shop.GetCache`, `shop.DeleteCache`; for a cancel the scheduled command's type. |
 | `scheduled` |  `Command` | 12 | A cancel only: the scheduled command it cancels, as stored. |
 
 ### Verdict

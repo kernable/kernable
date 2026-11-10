@@ -5,22 +5,16 @@ kernable splits an application in two. The **kernel** stores commands and events
 ## Install
 
 ::: warning Not released yet
-kernable is in private preview: the install scripts and the SDK packages (`@kernable/sdk` on npm, `kernable` on PyPI and crates.io) are not public yet, so the commands below do not work for everyone yet. [Request early access](https://kernable.com/#access) to get the binaries and the SDKs.
+kernable is in private preview: the install scripts and the SDK packages (`@kernable/sdk` on npm, `kernable-sdk` on PyPI and crates.io) are not public yet, so the commands below do not work for everyone yet. [Request early access](https://kernable.com/#access) to get the binaries and the SDKs.
 :::
 
 Install the kernel as in [Getting started](../getting-started#_1-install-the-kernel):
 
-::: code-group
-
-```sh [macOS, Linux]
+```sh
 curl -fsSL https://kernable.com/install.sh | sh
 ```
 
-```powershell [Windows]
-irm https://kernable.com/install.ps1 | iex
-```
-
-:::
+The script installs the kernel on macOS and Linux; on Windows, run it in WSL.
 
 ## Start the kernel
 
@@ -44,12 +38,12 @@ npm install @kernable/sdk
 ```
 ```sh [Python]
 cd ~/shop
-python3 -m venv .venv && .venv/bin/pip install -q kernable
+python3 -m venv .venv && .venv/bin/pip install -q kernable-sdk
 ```
 ```sh [Rust]
 cd ~/shop
 cargo init -q --lib --name shop
-cargo add -q kernable serde_json scrypt
+cargo add -q kernable-sdk serde_json scrypt
 cargo add -q serde --features derive
 cargo add -q tokio --features macros,rt-multi-thread
 ```

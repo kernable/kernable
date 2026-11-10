@@ -30,12 +30,19 @@ for _ in $(seq 50); do [ -S k.sock ] && break; sleep 0.1; done
 python3 -m venv py && py/bin/pip install -q --disable-pip-version-check kernable_sdk-*.whl
 cat > model.py <<'PY'
 import sys
-from kernable import Kernable
+from kernable import Kernable, domain
 totals = {}
-model = Kernable(sys.argv[1], "app.key").read_model("totals")
-model.on("demo.Incremented", lambda e: totals.__setitem__(e.aggregate_id, totals.get(e.aggregate_id, 0) + e.data["by"]))
-model.query("demo.GetTotal", lambda data: totals.get(data["id"], 0))
-model.run()
+model = domain("demo").read_model("totals")
+
+@model.on("Incremented")
+def _(data, evt):
+    totals[evt.aggregate_id] = totals.get(evt.aggregate_id, 0) + data["by"]
+
+@model.query("GetTotal")
+def _(data):
+    return totals.get(data["id"], 0)
+
+Kernable(sys.argv[1], "app.key").listener(model).run()
 PY
 py/bin/python model.py "unix:$DIR/k.sock" 2>model.log &
 MODEL_PID=$!

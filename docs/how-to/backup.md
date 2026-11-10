@@ -113,7 +113,7 @@ The follower runs it by itself with `--check-hours <h>` (`check-hours` in a node
 
 ### What it loses, and how long the way back takes
 
-Measured with `bench/backup-drill.sh` on a 2-core cloud server (Hetzner, 2026-11-07), the backup in object storage in the same region: a kernel on a store of 200,000 commands takes 200 commands a second, and at a random moment the kernel, the follower and the clients are killed together.
+Measured with `bench/backup-drill.sh` on a 2-core cloud server, the backup in object storage in the same region (results in `bench/results-2026-11-07-backup-drill.txt`): a kernel on a store of 200,000 commands takes 200 commands a second, and at a random moment the kernel, the follower and the clients are killed together.
 
 | | Segments every 5 s | Segments every 1 s |
 |---|---|---|

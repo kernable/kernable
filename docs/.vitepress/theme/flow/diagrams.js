@@ -591,16 +591,18 @@ diagrams.vault = {
    shop — the shop tutorial's overview: what each part adds
 ------------------------------------------------------------------ */
 diagrams.shop = {
-  w: 740, h: 350,
-  intro: 'The shop you build in eight parts. Each step adds what one part builds and shows it at work.',
+  w: 740, h: 410,
+  intro: 'The shop you build in ten parts. Each step adds what one part builds and shows it at work.',
   legend: ['cmd', 'evt', 'qry', 'ok', 'pii', 'err'],
   build (g) {
-    g.zone(10, 12, 400, 326, 'Yours', null, { id: 'yours', hidden: true })
+    g.zone(10, 12, 400, 386, 'Yours', null, { id: 'yours', hidden: true })
     g.node('client', { x: 40, y: 40, w: 340, h: 46, label: 'Your scripts', sub: 'client', kind: 'cmd', hidden: true })
     g.node('guard', { x: 40, y: 100, w: 340, h: 46, label: 'Guard', sub: 'middleware', kind: 'ok', hidden: true })
     g.node('worker', { x: 40, y: 160, w: 340, h: 46, label: 'Worker', sub: 'customer, order', kind: 'cmd', hidden: true })
     g.node('rm', { x: 40, y: 220, w: 340, h: 46, label: 'Read models', sub: 'customers, orders', kind: 'qry', hidden: true })
     g.node('reactor', { x: 40, y: 280, w: 340, h: 46, label: 'Reactor', sub: 'confirmations', kind: 'evt', hidden: true })
+    g.node('api', { x: 40, y: 340, w: 340, h: 46, label: 'API', sub: 'the kit: accounts, sign-in', kind: 'ok', hidden: true })
+    g.node('processes', { x: 510, y: 40, w: 190, h: 50, label: 'Processes', sub: 'fulfilment, run by the kernel', kind: 'cmd', hidden: true })
     g.node('kernel', { x: 510, y: 140, w: 190, h: 76, label: 'Kernel', sub: 'checks, orders, stores', kind: 'kern' })
     g.node('commands', { x: 495, y: 268, w: 76, h: 62, label: 'Commands', sub: 'queued', kind: 'cmd', shape: 'store' })
     g.node('events', { x: 577, y: 268, w: 76, h: 62, label: 'Events', sub: 'signed log', kind: 'evt', shape: 'store' })
@@ -610,6 +612,8 @@ diagrams.shop = {
     g.wire('worker', [g.port('kernel', 'left'), [430, 178], [430, 183], g.port('worker', 'right')], { hidden: true })
     g.wire('rm', [g.port('kernel', 'left', 14), [450, 192], [450, 243], g.port('rm', 'right')], { hidden: true })
     g.wire('reactor', [g.port('kernel', 'left', 28), [470, 206], [470, 303], g.port('reactor', 'right')], { hidden: true })
+    g.wire('api', [g.port('kernel', 'left', 35), [485, 213], [485, 363], g.port('api', 'right')], { hidden: true })
+    g.wire('proc', [g.port('processes', 'bottom'), g.port('kernel', 'top')], { hidden: true })
     g.wire('commands', [[533, 216], g.port('commands', 'top')])
     g.wire('events', [[615, 216], g.port('events', 'top')])
     g.wire('vault', [[697, 216], g.port('vault', 'top')], { hidden: true })
@@ -679,6 +683,18 @@ diagrams.shop = {
         after: (g) => g.setSub('vault', 'erased') },
       { say: 'Part 8, operate. Each service has its own key, the root key stays offline, connections use mutual TLS, read models survive restarts.',
         hot: ['kernel', 'worker', 'rm', 'reactor'], run: production, pause: 2200, after: production },
+      { say: 'Part 9, accounts and sign-in. An HTTP API built with the kit gives customers accounts and sessions, and the kit decides every request instead of the guard.',
+        show: ['api'], hot: ['api', 'kernel'],
+        packets: [
+          ['api', { kind: 'cmd', label: 'SignIn', dur: 800, reverse: true }],
+          ['api', { kind: 'ok', label: 'session', dur: 800, delay: 1000 }]
+        ] },
+      { say: 'Part 10, a business process. The kernel runs fulfilment: a paid order is shipped, an order not paid within three days is cancelled.',
+        show: ['processes', 'proc'], hot: ['processes', 'kernel', 'events'],
+        packets: [
+          ['proc', { kind: 'evt', label: 'OrderPaid', dur: 800, reverse: true }],
+          ['proc', { kind: 'cmd', label: 'Ship', dur: 800, delay: 1000 }]
+        ] },
       { say: 'That is the whole shop: commands in, events out, every read up to date.', hot: [], pause: 1400 }
     ]
   }

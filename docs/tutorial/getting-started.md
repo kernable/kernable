@@ -10,17 +10,11 @@ You need Node.js ≥ 22.18 (step 5 submits from TypeScript), and Python ≥ 3.10
 kernable is in private preview: the install scripts and the SDK packages (`@kernable/sdk` on npm, `kernable-sdk` on PyPI and crates.io) are not public yet, so the commands below do not work for everyone yet. [Request early access](https://kernable.com/#access) to get the binaries and the SDKs.
 :::
 
-::: code-group
-
-```sh [macOS, Linux]
+```sh
 curl -fsSL https://kernable.com/install.sh | sh
 ```
 
-```powershell [Windows]
-irm https://kernable.com/install.ps1 | iex
-```
-
-:::
+The script installs the kernel on macOS and Linux; on Windows, run it in WSL.
 
 This puts `kernable` on your `PATH`: `kernable start` runs the kernel, the other commands create keys and grants and verify a log (`kernable` alone lists them).
 

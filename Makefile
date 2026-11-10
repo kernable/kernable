@@ -7,8 +7,11 @@ test: py
 	cargo test --workspace --lib
 	cargo test -p kernable-core -p kernable-store --tests
 	cargo test -p kernable-sdk --test store
+	cargo test -p kernable-kit --tests
 	cd sdks/typescript && npm install --no-audit --no-fund --silent && npm test
 	cd sdks/python && .venv/bin/python -m unittest discover -s tests/unit -t .
+	cd kits/typescript && npm install --no-audit --no-fund --silent && npm test
+	cd kits/python && PYTHONPATH=../../sdks/python ../../sdks/python/.venv/bin/python -m unittest discover -s tests -t .
 
 # Everything, in four parts that CI runs as parallel jobs.
 check: check-rust check-crash check-sdks check-docs
@@ -32,14 +35,17 @@ check-crash: prune
 	CARGO_TARGET_DIR=target/crash cargo test -p kernable-kernel --features crash-points --test move_crashes
 	CARGO_TARGET_DIR=target/crash KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --features crash-points --test move_crashes
 
-# The TypeScript and Python SDKs against a real kernel, on both backends.
+# The TypeScript and Python SDKs against a real kernel, on both backends; then the kits' tests
+# that need a kernel (the TypeScript kit's `npm run check`, the Python kit's tests/e2e_*.py).
 check-sdks: prune py
 	cargo build --workspace
+	cargo test -p kernable-kit --test e2e -- --ignored
 	cd sdks/typescript && npm install --no-audit --no-fund --silent && npm run -s check \
 		&& KERNABLE_TEST_STORE=file npm run -s check
 	cd sdks/python && .venv/bin/python -m unittest discover tests \
-		&& KERNABLE_TEST_STORE=file .venv/bin/python -m unittest discover tests \
-		&& .venv/bin/python -m unittest discover -s ../../docs/examples/how-to -t ../../docs/examples/how-to
+		&& KERNABLE_TEST_STORE=file .venv/bin/python -m unittest discover tests
+	cd kits/typescript && npm install --no-audit --no-fund --silent && npm run -s check
+	cd kits/python && PYTHONPATH=../../sdks/python ../../sdks/python/.venv/bin/python -m unittest discover -s tests -t . -p 'e2e_*.py'
 
 # The documentation: generated reference up to date, the site builds, every example runs.
 check-docs: prune py
@@ -75,6 +81,7 @@ torture:
 	CARGO_TARGET_DIR=target/crash KERNABLE_CRASH_ROUNDS=$(ROUNDS) KERNABLE_KILLS=$(KILLS) cargo test -p kernable-kernel --features crash-points --test crashes
 	CARGO_TARGET_DIR=target/crash KERNABLE_CRASH_ROUNDS=$(ROUNDS) KERNABLE_KILLS=$(KILLS) KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --features crash-points --test crashes
 	CARGO_TARGET_DIR=target/crash KERNABLE_CRASH_ROUNDS=$(ROUNDS) cargo test -p kernable-kernel --features crash-points --test replication_crashes
+	CARGO_TARGET_DIR=target/crash KERNABLE_CRASH_ROUNDS=$(ROUNDS) KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --features crash-points --test replication_crashes
 	KERNABLE_KILLS=$(KILLS) cargo test -p kernable-kernel --test replication_kills
 	KERNABLE_KILLS=$(KILLS) KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --test replication_kills
 	KERNABLE_FAULT_SEEDS=$(SEEDS) cargo test -p kernable-kernel --test storage
@@ -89,6 +96,7 @@ torture:
 # The soak: the kernel and an app per SDK under load and random faults for SOAK_MINUTES, every
 # invariant checked every 10 minutes (crates/kernable-soak; more options in its main.rs).
 # SOAK_PAIR=yes runs a pair with a witness instead of one kernel, and fails it over.
+# scripts/soak-server.sh runs it on a Linux server, with disk-full and power-loss faults.
 SOAK_MINUTES ?= 60
 SOAK_BACKEND ?= sqlite
 SOAK_PAIR ?= no

@@ -9,26 +9,34 @@ For building on kernable with an agent, start with the guide: [kernable.AGENTS.m
 ## Tutorials
 
 - [Getting started](https://kernable.com/docs/tutorial/getting-started): a kernel, an aggregate, a read model and a client in TypeScript, Python or Rust; one app
-- [Build a shop](https://kernable.com/docs/tutorial/shop/): a complete application in eight parts: aggregates, read models, a reactor, a second language, authorization, personal data, operation
+- [Build a shop](https://kernable.com/docs/tutorial/shop/): a complete application in ten parts: aggregates, read models, a reactor, a second language, authorization, personal data, operation, accounts and sign-in with the kit, a business process
 
 ## Concepts
 
 - [Architecture](https://kernable.com/docs/concepts/architecture): what the kernel does and what your processes do; a command's way and a query's way
 - [Event sourcing in kernable](https://kernable.com/docs/concepts/event-sourcing): decide and fold, streams and the log, write and read side, rules across aggregates
 - [Domains](https://kernable.com/docs/concepts/domains): what a domain holds, its rules, services and apps, a code layout
+- [How the pieces fit](https://kernable.com/docs/concepts/pieces): aggregates, read models, reactors, middleware and processes together, on one example
 - [Order and consistency](https://kernable.com/docs/concepts/ordering): one command per aggregate, listener order, who counts, settling
 - [Trust](https://kernable.com/docs/concepts/trust): keys, grants, signatures, the hash chain, what if something is compromised
 - [Compliance](https://kernable.com/docs/concepts/compliance): the technical controls kernable covers for ISO 27001, SOC 2, PCI DSS, HIPAA, GoBD, the GDPR, NIS2 and DORA, and where it stops
 - [Queries and middleware](https://kernable.com/docs/concepts/queries-and-middleware): every read through the kernel, middleware before and after, the request context
 - [Unique keys and conditions](https://kernable.com/docs/concepts/uniqueness): unique keys and facts an aggregate holds, requirements by ID or by key (also absent), checked by the kernel at commit
+- [Business processes](https://kernable.com/docs/concepts/processes): flows across commands, events and queries, run by the kernel: cases, waits, timeouts, incidents
 - [Data over time](https://kernable.com/docs/concepts/data): where kernable keeps what, event versions, the vault, snapshots
 - [Failures and recovery](https://kernable.com/docs/concepts/failures): what happens when something fails, guarantees, finding the cause
+- [Compared with other systems](https://kernable.com/docs/concepts/comparison): kernable next to event stores, event sourcing frameworks, logs and a database with an outbox
 
 ## How-to guides
 
-- [Deploy and upgrade](https://kernable.com/docs/how-to/deploy), [Back up and restore](https://kernable.com/docs/how-to/backup), [Monitor kernable](https://kernable.com/docs/how-to/monitor), [Mutual TLS](https://kernable.com/docs/how-to/tls), [Keys per service](https://kernable.com/docs/how-to/keys)
-- [Change an event's format](https://kernable.com/docs/how-to/event-versions), [Rebuild a read model](https://kernable.com/docs/how-to/rebuild-read-model), [Remove a listener or aggregate](https://kernable.com/docs/how-to/remove-listener), [Test your domain](https://kernable.com/docs/how-to/test-domain)
+- [Deploy and upgrade](https://kernable.com/docs/how-to/deploy), [Back up and restore](https://kernable.com/docs/how-to/backup), [Move a kernel](https://kernable.com/docs/how-to/export), [Run a standby](https://kernable.com/docs/how-to/standby), [Run a listener on several machines](https://kernable.com/docs/how-to/instances), [Run a node from one file](https://kernable.com/docs/how-to/node), [Run kernable on your own servers](https://kernable.com/docs/how-to/self-host), [Share tenants across kernels](https://kernable.com/docs/how-to/partitions), [Monitor kernable](https://kernable.com/docs/how-to/monitor), [Mutual TLS](https://kernable.com/docs/how-to/tls), [Keys per service](https://kernable.com/docs/how-to/keys)
+- [Change an event's format](https://kernable.com/docs/how-to/event-versions), [Rebuild a read model](https://kernable.com/docs/how-to/rebuild-read-model), [Remove a listener or aggregate](https://kernable.com/docs/how-to/remove-listener), [Test your domain](https://kernable.com/docs/how-to/test-domain), [Schedule a command](https://kernable.com/docs/how-to/schedule)
 - [Handle an erasure request](https://kernable.com/docs/how-to/erasure), [Passwords and other secrets](https://kernable.com/docs/how-to/secrets), [Store files and cache values](https://kernable.com/docs/how-to/data-and-cache), [Write an SDK](https://kernable.com/docs/how-to/new-sdk)
+
+## Kits
+
+- [The kit](https://kernable.com/docs/kits/): tenants, accounts and sessions, identities, groups, invitations and authorization, ready to use; [Getting started](https://kernable.com/docs/kits/getting-started), [Your API: KitApi](https://kernable.com/docs/kits/api), [Recipes](https://kernable.com/docs/kits/recipes)
+- [Tenancy](https://kernable.com/docs/kits/tenancy), [Accounts and sessions](https://kernable.com/docs/kits/account), [Identities](https://kernable.com/docs/kits/identity), [Groups](https://kernable.com/docs/kits/group), [Invitations](https://kernable.com/docs/kits/invitation), [Authorization](https://kernable.com/docs/kits/authorization)
 
 ## Reference
 

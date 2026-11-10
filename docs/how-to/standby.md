@@ -108,7 +108,7 @@ Until a standby has caught up once, the primary serves alone, and the standby ta
 On the second machine, with its own stores:
 
 ```sh
-KERNABLE_TLS_CA=ca.crt KERNABLE_TLS_CERT=standby.crt KERNABLE_TLS_KEY=standby.tls.key \
+KERNABLE_TLS_CA=ca.tls.crt KERNABLE_TLS_CERT=standby.tls.crt KERNABLE_TLS_KEY=standby.tls.key \
 kernable start --root root.pub \
   --follow 10.0.0.1:7233 --follow-key standby.key --primary-kernel-key kernel.pub \
   --kernel-key standby-kernel.key --vault-key standby-vault.key \
@@ -174,7 +174,7 @@ A primary that still ran when you promoted its standby tells nobody of anything 
 
 ## What it costs
 
-Every write waits for one more round trip: to the standby, its own flush, and back. Measured on one Apple M2 Max with both kernels on the same machine and disk, a Rust worker, 1 KB payloads, `wait: committed` (`bench/replication.sh`, results in `bench/`):
+Every write waits for one more round trip: to the standby, its own flush, and back. Measured on one Apple M2 Max with both kernels on the same machine and disk, a Rust worker, 1 KB payloads, `wait: committed` (`bench/replication.sh`, results in `bench/results-2026-11-03-m2max-replication.txt`):
 
 | Store, durability | Alone, 1 client | With a standby, 1 client | Alone, 64 clients | With a standby, 64 clients |
 |---|---|---|---|---|

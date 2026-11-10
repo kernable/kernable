@@ -1,5 +1,5 @@
-# bench/backup-drill.sh against a bucket with object lock (COMPLIANCE, 30 days; kernable-backups-locked), 2026-11-08: backups, pruning (delete markers) and restores work as on any bucket
-== a store of 2000 commands; a backup to s3://kernable-backups-locked/drill-2026-11-08//drill-1794172897, a segment every 5 s
+# bench/backup-drill.sh against a bucket with object lock (COMPLIANCE, 30 days), 2026-11-08: backups, pruning (delete markers) and restores work as on any bucket
+== a store of 2000 commands; a backup to s3://<locked-bucket>/drill-2026-11-08//drill-1794172897, a segment every 5 s
   filled: 2000 events, 3 MB, in 0.2 s
   the base is in the bucket after 1.4 s
 == 50 commands a second for at most 25 s; the machine is lost at a random moment

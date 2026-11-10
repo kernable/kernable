@@ -1,6 +1,6 @@
 # Processes
 
-Status: v1 built 2026-11-09 (stages 1–4: models, engine, kit identities, UI views and docs). A business process is a flow across
+Status: v1 built: models, engine, kit identities, the UI's views and docs. A business process is a flow across
 commands, events and queries ("an order is confirmed, paid within 3 days and shipped, else
 cancelled"), defined once, run by the kernel, and shown in the kernel's UI: its diagram, where
 each case stands, and statistics.
@@ -28,24 +28,23 @@ each case stands, and statistics.
 
 ## Example
 
-The shop's fulfilment, as the model the SDK builds (the code API is designed next):
+The shop's fulfilment, as the model every SDK's builder produces (`proto/test-vectors/process-model.json`; [the model format](#the-model-format) describes it):
 
 ```json
 {
   "name": "shop.fulfilment",
-  "version": 3,
-  "start": { "on": "shop.OrderSubmitted", "key": "aggregateId", "data": { "orderId": "aggregateId", "total": "data.total" } },
-  "steps": {
-    "confirm": { "command": "shop.order.Confirm", "aggregate": "case.orderId", "next": "large" },
-    "large":   { "decide": [{ "if": "case.total > 1000", "next": "approval" }], "else": "paid" },
-    "approval": { "query": "shop.NeedsApproval", "data": { "orderId": "case.orderId" }, "paths": { "true": "approved", "false": "paid" } },
-    "approved": { "wait": "shop.OrderApproved", "key": "aggregateId", "next": "paid" },
-    "paid":    { "wait": "payments.PaymentReceived", "key": "data.orderId", "timeout": "P3D", "next": "ship", "onTimeout": "cancel" },
-    "ship":    { "command": "shop.order.Ship", "aggregate": "case.orderId", "rejected": { "out_of_stock": "notify" }, "next": "done" },
-    "notify":  { "command": "shop.order.NotifyDelay", "aggregate": "case.orderId", "next": "done" },
-    "cancel":  { "command": "shop.order.Cancel", "aggregate": "case.orderId", "next": "done" },
-    "done":    { "end": true }
-  }
+  "start": {"on": "shop.OrderSubmitted", "key": "aggregateId", "data": {"orderId": "aggregateId", "total": "data.total"}},
+  "steps": [
+    {"name": "confirm", "kind": "command", "command": "shop.order.Confirm", "aggregate": "case.orderId", "next": "large"},
+    {"name": "large", "kind": "decide", "when": [{"if": "case.total > 1000", "next": "approval"}], "otherwise": "paid"},
+    {"name": "approval", "kind": "query", "query": "shop.NeedsApproval", "data": {"orderId": "case.orderId"}, "paths": [{"value": true, "next": "approved"}, {"value": false, "next": "paid"}]},
+    {"name": "approved", "kind": "wait", "event": "shop.OrderApproved", "key": "aggregateId", "next": "paid"},
+    {"name": "paid", "kind": "wait", "event": "payments.PaymentReceived", "key": "data.orderId", "data": {"paidAt": "data.at"}, "timeoutMs": 259200000, "onTimeout": "cancel", "next": "ship"},
+    {"name": "ship", "kind": "command", "command": "shop.order.Ship", "aggregate": "case.orderId", "rejected": {"out_of_stock": "notify"}, "next": "done"},
+    {"name": "notify", "kind": "command", "command": "shop.order.NotifyDelay", "aggregate": "case.orderId", "next": "done"},
+    {"name": "cancel", "kind": "command", "command": "shop.order.Cancel", "aggregate": "case.orderId", "data": {"reason": {"value": "unpaid"}}, "next": "done"},
+    {"name": "done", "kind": "end"}
+  ]
 }
 ```
 
@@ -162,7 +161,7 @@ Decided 2026-11-09, usable without processes:
 - **Limits:** `at` at most `--schedule-max-days` (default 366) ahead; scheduled commands count
   towards the queue's limits like queued ones.
 
-## The model format (stage 1, decided 2026-11-09)
+## The model format
 
 What every SDK's builder produces and the kernel registers (`ProcessService.Register`, the JSON as
 bytes, signed). `proto/test-vectors/process-model.json` holds the example above as the builders
@@ -175,7 +174,7 @@ must produce it; each SDK's tests build the example and compare structurally.
 ```
 
 - **`name`**: qualified, `<domain>.<process>`; the process's domain is the domain it is defined on.
-- **`cancelOn`** (optional, added 2026-11-10): an array of `{ "event", "key", "end" }`: an event
+- **`cancelOn`** (optional): an array of `{ "event", "key", "end" }`: an event
   (qualified) that ends a running case of its key at once, whatever step it is at, at the `end`
   step named (which must be of kind `end`; an end reached only this way counts as reachable).
   The engine writes `CaseCancelled` (step, event, position, end), then the end. Events whose
@@ -245,7 +244,7 @@ Decided 2026-11-09:
   the request itself still rests on the kernel's signature; how the key reaches the engine is
   decided while building.
 
-### With the kit: mechanics (stage 3, decided 2026-11-09)
+### With the kit: mechanics
 
 - **The kernel announces processes in the log:** registering a process's first version, a new
   version, removing it and re-activating it write `ProcessRegistered` {name, version} and
@@ -262,12 +261,9 @@ Decided 2026-11-09:
   with { senderTenant: platform, senderIdentity, senderSession: the key's ID }. Revoking that key
   stops the process at once: its commands are refused, the cases show incidents.
 
-## The UI's views (read-only; built in stage 4)
+## The UI's views (read-only)
 
-Built as the UI's Processes tab (`ui.html`), reading `/api/processes`, `/api/cases` and `/api/case` (`ui.rs`, `process_view.rs`): the view counts from the case events, following the log only while the UI is open, keeps the running cases and the newest 1,000 ended ones per process, and per-minute statistics for a week (durations in 10% buckets).
-
-
-Decided 2026-11-09:
+Built as the UI's Processes tab (`ui.html`), reading `/api/processes`, `/api/cases` and `/api/case` (`ui.rs`, `process_view.rs`): the view counts from the case events, following the log only while the UI is open, keeps the running cases and the newest 1,000 ended ones per process, and per-minute statistics for a week (durations in 10% buckets). What they show:
 
 - **The diagram:** a flow from left to right, laid out from the model: steps as boxes, paths as
   arrows, decisions as diamonds, waits and timers with a clock. Each box shows how many cases are
@@ -276,14 +272,14 @@ Decided 2026-11-09:
   incident, ended); a case's page shows its events as a timeline, with the commands it sent and the
   events that moved it, linked to those aggregates' histories.
 - **Incidents:** shown with the step, the rejection and the exact command to resolve them:
-  `kernable processes retry|skip|cancel <process> <case>`, signed with an operator's key and
+  `kernable processes retry|skip|cancel <addr> <key> <process> <case> [--tenant <tenant>]`, signed with an operator's key and
   stored in the case's events. No buttons: the UI has no login.
 - **Statistics:** per step the cases there now, entered and left over the last hour, day and
   week, the time spent (median and 95th percentile), timeouts and incidents; per process started,
   ended by each end, and running. Counted by the kernel from the case events; also as metrics
   (`kernable_process_cases`, `kernable_process_step_seconds`, `kernable_process_incidents`).
 
-## The engine (stage 2, decided 2026-11-09)
+## The engine
 
 - **One running case per key:** a start event for a key whose case still runs is ignored (and
   logged); after the case ended, the next one starts a new case for that key, kept separately with
@@ -308,10 +304,3 @@ Each case is an aggregate `<process>` of the domain `process` (`shop.fulfilment`
 `TimerSet` {step, at}, `TimerFired` {step}, `IncidentRaised` {step, code, message},
 `IncidentResolved` {action: retry · skip · cancel, by}, `EventKept` {event, position} (an early event a later wait may need), `ProcessEnded` {end}. The kernel writes them itself, signed with its key (`kernable verify` refuses `process` events signed by another key); a running case holds the fact `running`, so a restart replays only running cases. The engine keeps an
 index of waiting cases by (event type, key), rebuilt from these events.
-
-## Open, decided step by step while building
-
-- The timer protocol: a command with a delivery time, and cancelling one.
-- The process's service identity with the kit (an identity of the platform tenant, whose groups
-  hold in every tenant), and without it.
-- The UI: the diagram's layout, the live view, the statistics (cases per step, durations, incidents).

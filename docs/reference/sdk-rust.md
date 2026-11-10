@@ -180,7 +180,7 @@ Without `data`, the payload is an empty object (`{}`).
 - `fn id(self, id: impl Into<String>) -> Submit`: Idempotency key (default: a new UUID); resubmitting the same ID returns the original outcome without running the command again.
 - `fn context(self, context: RequestContext) -> Submit`: Replaces the client's default context; inside a listener, pass `ctx.follow()`.
 - `fn at(self, time: SystemTime) -> Submit`: `Kernable::enqueue` only: a scheduled command, run at `time` and not before. The kernel stores it at once; the aggregate's other commands pass meanwhile, and middlewares check it now and again when it is due. At most the kernel's `--schedule-max-days` (default 366) ahead. Cancel it with `Kernable::cancel`.
-- `fn until(self, time: SystemTime) -> Submit`: With `Submit::at`: if the command cannot run by `time` (after an outage, say), it is rejected `expired` instead of running late.
+- `fn until(self, time: SystemTime) -> Submit`: With `Submit::at`: if the command cannot run by `time` (after an outage, say), it is rejected `expired` instead of running late. Without `at`, submitting or enqueueing it is `Error::Config`.
 - `fn wait(self, wait: Wait) -> Submit`: How long `Kernable::submit` waits: `Wait::Settled` (default) or `Wait::Committed`.
 - `fn timeout(self, timeout: Duration) -> Submit`: How long to wait for the connection and the outcome; default `Options::timeout`.
 
@@ -549,7 +549,7 @@ Whether a middleware checks a command, a query, a file request or a cache reques
 
 - `Command`: A command: `Check::aggregate_type` and `Check::aggregate_id` are set.
 - `Query`: A query.
-- `Data`: A file request (`crate::Files`): `Check::type_name` is `PutData`, `GetData` or `DeleteData`, `Check::key` is set.
+- `Data`: A file request (`crate::Files`): `Check::type_name` is `PutData`, `GetData`, `DeleteData` or `ListData`, `Check::key` is set.
 - `Cache`: A cache request (`crate::Cache`): `Check::type_name` is `SetCache`, `GetCache` or `DeleteCache`, `Check::key` is set.
 - `Cancel`: A cancel of a scheduled command (`crate::Kernable::cancel`): `Check::id`, `Check::type_name`, `Check::aggregate_type`, `Check::aggregate_id`, `Check::target` and `Check::data` are the scheduled command's (vault fields `null`), `Check::request` is who cancels it. Decide it as the command itself, typically.
 
@@ -571,7 +571,7 @@ or routes it or after (cancels, file and cache requests: before only): what the 
 - `id: String`: The command or query ID (a cancel: the scheduled command's); for a file or cache request, the kernel's call ID.
 - `tenant: String`
 - `domain: String`
-- `type_name: String`: The command or query type within the domain (a cancel: the scheduled command's); for a file or cache request `PutData`, `GetData`, `DeleteData`, `SetCache`, `GetCache` or `DeleteCache`.
+- `type_name: String`: The command or query type within the domain (a cancel: the scheduled command's); for a file or cache request `PutData`, `GetData`, `DeleteData`, `ListData`, `SetCache`, `GetCache` or `DeleteCache`.
 - `aggregate_type: Option<String>`: Commands and cancels.
 - `aggregate_id: Option<String>`: Commands and cancels.
 - `target: Option<Target>`: The aggregate the request is about, its type qualified: a command's aggregate (`shop.order`, `o-17`; a cancel: the scheduled command's), or the one a query declares (`crate::query`'s `target`, `crate::QuerySchema::target`). `None` for queries that declare none, and for file and cache requests.
@@ -601,7 +601,7 @@ What a middleware checks: `MiddlewareOptions::new(&["shop.*"])`, with
 `MiddlewareOptions { order: 5, ..MiddlewareOptions::new(&["*"]) }` for another order and
 `.after()` to run after requests.
 
-- `types: Vec<String>`: Command and query types: `*` (all), a type of the listener's domain (`Place`), of another domain (`orders.Place`) or a whole domain (`orders.*`). File and cache requests are types too: `PutData`, `GetData`, `DeleteData`, `SetCache`, `GetCache`, `DeleteCache` (e.g. `shop.PutData`); `*` and `orders.*` cover them.
+- `types: Vec<String>`: Command and query types: `*` (all), a type of the listener's domain (`Place`), of another domain (`orders.Place`) or a whole domain (`orders.*`). File and cache requests are types too: `PutData`, `GetData`, `DeleteData`, `ListData`, `SetCache`, `GetCache`, `DeleteCache` (e.g. `shop.PutData`); `*` and `orders.*` cover them.
 - `order: i32`: Position in the chain: lower runs first, equal orders by listener name (default 0). Negative orders are reserved for kernable's kits (a grant of `reserved_order`).
 - `when: When`: Before (default) or after requests; see `When`.
 - `fn new(types: &[&str]) -> MiddlewareOptions`: Checks `types` (see `MiddlewareOptions::types`) before requests, at order 0.
@@ -732,11 +732,12 @@ Files of up to 16 MiB (the kernel's `--max-data-bytes`) under keys of 1 to 512 b
 `crate::Kernable::data`. Files are not part of the signed event log, and erasing a vault
 subject does not delete them, so keep personal data in vault fields instead. A refused or
 invalid request is `Error::Status`; a middleware that refuses it (checking `PutData`,
-`GetData` or `DeleteData` of the domain) makes it `PERMISSION_DENIED` with
+`GetData`, `DeleteData` or `ListData` of the domain) makes it `PERMISSION_DENIED` with
 `"<code>: <message>"`. Example:
 `kernable.data().put("shop", "invoices/c1.pdf", pdf, "application/pdf").await?`, then
 `kernable.data().get("shop", "invoices/c1.pdf").await?` returns `Some(Data { .. })`.
 
+- `fn tenant(self, tenant: impl Into<String>) -> Files`: The tenant to keep files under. Default: the connection's (`crate::Options::tenant`).
 - `fn context(self, context: RequestContext) -> Files`: Replaces the client's default context for the requests of this handle (signed with each; middlewares decide on it); inside a listener, pass `ctx.follow()`. Example: `kernable.data().context(alice).get("shop", "k").await?`.
 - `async fn put(&self, domain: &str, key: &str, data: impl Into<Vec<u8>>, content_type: &str) -> Result<String, Error>`: Stores `data` as `key` of `domain` (granted `data_write`), replacing any file there. Returns the SHA-256 of `data` (hex) as the kernel computed it: for an event to name.
 - `async fn get(&self, domain: &str, key: &str) -> Result<Option<Data>, Error>`: The file `key` of `domain` (granted `data_read`); `None` if there is none.

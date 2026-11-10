@@ -83,7 +83,7 @@ Every code example in the documentation is a file that runs in `make check` agai
 ## Develop
 
 ```sh
-make test           # the simple tier: fmt, clippy and in-process tests, no kernel processes (a few minutes)
+make test           # the simple tier: fmt, clippy and in-process tests, no kernel processes (about a minute)
 make check          # everything, in four parts CI runs in parallel (Python ≥ 3.10, cargo-audit):
                     #   check-rust   lints, known vulnerable dependencies, every test on every storage backend
                     #   check-crash  the real kernel aborted at every crash point

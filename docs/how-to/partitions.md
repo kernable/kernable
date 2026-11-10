@@ -99,11 +99,11 @@ A listener (with the SDK) keeps a tenant's order across the move: it handles `ac
 
 If the command stops (or a partition does), run it again: it continues the move, and p3 keeps what it copied already. Moving a tenant back works the same way; only what happened since it left is copied.
 
-The tenant is unavailable only for the second part. Measured on one Apple M2 Max with both partitions on it (`bench/move.sh`, a command per event, 1 KB each): with SQLite about a second, whatever the tenant's size (1 s for 268,000 events); with the file log, which reads its whole log for the rest, it grows with the log (2 s for 422,000 events, 1 GB). The move as a whole takes about 60 seconds per million events with SQLite and 30 with the file log, nearly all of it in the first part. Files go along in both parts, so a tenant with many large files stops longer.
+The tenant is unavailable only for the second part. Measured on one Apple M2 Max with both partitions on it (`bench/move.sh`, a command per event, 1 KB each; results in `bench/results-2026-11-04-m2max-move.txt`): with SQLite about a second, whatever the tenant's size (1 s for 268,000 events); with the file log, which reads its whole log for the rest, it grows with the log (2 s for 422,000 events, 1 GB). The move as a whole takes about 60 seconds per million events with SQLite and 30 with the file log, nearly all of it in the first part. Files go along in both parts, so a tenant with many large files stops longer.
 
 ## What it gains
 
-Every partition commits on its own, so throughput grows with partitions on machines of their own. Measured on one Apple M2 Max (12 CPUs, one SSD), where every partition also brings its worker and a load generator of 64 clients, so all of them share the same CPUs and disk (`bench/partitions.sh`, results in `bench/`):
+Every partition commits on its own, so throughput grows with partitions on machines of their own. Measured on one Apple M2 Max (12 CPUs, one SSD), where every partition also brings its worker and a load generator of 64 clients, so all of them share the same CPUs and disk (`bench/partitions.sh`, results in `bench/results-2026-11-03-m2max-partitions.txt`):
 
 | Store, durability | 1 partition | 2 | 3 | 4 |
 |---|---|---|---|---|

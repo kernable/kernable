@@ -1,6 +1,6 @@
 <script setup>
 /* Animated kernable mark for the home hero.
-   The "K" is redrawn as SVG from public/logo-mark.png: a slanted stem and two
+   The "K" is redrawn as SVG from the kernable logo mark: a slanted stem and two
    arms that meet at a point inside it, separated from the stem by a gap in the
    page background. On load the stem rises and the arms slide in; afterwards
    the mark floats gently and a sheen crosses it now and then. Pure CSS, so it

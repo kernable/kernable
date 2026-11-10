@@ -12,7 +12,7 @@ Implement the byte layouts in [Signatures](../reference/signing) before anything
 - Messages: a `str` tag, then length-prefixed strings and bytes and big-endian integers. Payloads are signed as the exact bytes sent, with no JSON canonicalization.
 - Also implement **derived IDs** (`kernable.v1.id`, for `ctx.id()`) and **vault references** (`kernable.v1.vault`).
 
-Test against `proto/test-vectors/signing.json` (see `sdks/typescript/test/signing.test.ts`). Every message and signature must come out byte for byte: `command`, `command_vault`, `query`, `result`, `result_vault`, `rejection`, `snapshot`, `challenge`, `subscribe`, `data_put`, `cache_set`, `membership`, `checkpoint`, `revocation`, `event_hash`, `event_hash_vault`, `derived_id` and `vault_ref`. Skip `grant` and `revoke`: only root-key tooling makes them.
+Test against `proto/test-vectors/signing.json` (see `sdks/typescript/test/unit/signing.test.ts`). Every message and signature must come out byte for byte: `command`, `command_vault`, `query`, `result`, `result_vault`, `rejection`, `snapshot`, `challenge`, `subscribe`, `data_put`, `cache_set`, `membership`, `checkpoint`, `revocation`, `event_hash`, `event_hash_vault`, `derived_id` and `vault_ref`. Skip `grant` and `revoke`: only root-key tooling makes them.
 
 ## 2. Connect
 

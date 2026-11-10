@@ -36,8 +36,8 @@ Run `make test` before every push, and `make check` before you open a pull reque
 ## License of contributions
 
 kernable is under the [MIT license](../LICENSE). Before we can merge your first pull request, you
-sign our [Contributor License Agreement](CLA.md) once: the CLA check on the pull request shows
-how. You keep the copyright in your contributions; you grant kernable the right to use and
+agree to our [Contributor License Agreement](CLA.md) once: before merging, the maintainer asks
+you in the pull request to confirm in a comment that you agree to it. You keep the copyright in your contributions; you grant kernable the right to use and
 license them, and kernable keeps every contribution it includes available under the project's
 open source license.
 

@@ -33,4 +33,11 @@ one before it held.
    SHA-256 sums.
 
 Open before the first public release: the container registry, a Windows build, signing the
-archives (beyond SHA256SUMS over HTTPS), the docs' "not released yet" notes.
+archives (beyond SHA256SUMS over HTTPS), and removing the "not released yet" notes, which are in:
+
+- `docs/.vitepress/theme/Layout.vue`: the banner on every page, with its link to request early access;
+- `docs/index.md`: the "Request early access" button;
+- `docs/tutorial/getting-started.md` and `docs/tutorial/shop/1-kernel.md`: the "Not released yet"
+  warning above the install command;
+- `docs/.vitepress/llms.ts`: the status line at the top of `llms-full.txt`;
+- `docs/public/llms.txt` and `docs/public/kernable.AGENTS.md`: their status lines.

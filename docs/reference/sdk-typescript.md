@@ -105,6 +105,13 @@ try {
 
 - `readonly outcome: { committed: true; events: StoredEvent[] }`: The committed outcome, with the stored events.
 
+### NotDue
+
+Thrown by `submit` for the ID of a scheduled command (`enqueue` with `at`) that is not due
+yet: it has no outcome to wait for. Submit its ID again after its time.
+
+- `readonly commandId: string`: The scheduled command's ID.
+
 ### NewEvent
 
 An event a command handler returns: `{ type: "ItemAdded", data: { sku, qty } }`. The worker
@@ -202,7 +209,7 @@ middleware before the request whose key is granted `vault_read`; else they are `
 - `id: string`: The command or query ID; empty for a file or cache request.
 - `tenant: string`
 - `domain: string`
-- `type: string`: The type within the domain: the command or query type, or for a file request `PutData`, `GetData` or `DeleteData`, for a cache request `SetCache`, `GetCache` or `DeleteCache`.
+- `type: string`: The type within the domain: the command or query type, or for a file request `PutData`, `GetData`, `DeleteData` or `ListData`, for a cache request `SetCache`, `GetCache` or `DeleteCache`.
 - `aggregateType?: string`: Commands only.
 - `aggregateId?: string`: Commands only.
 - `target?: { type: string; id: string }`: The aggregate the request is about, qualified: a command's aggregate (`shop.order`, `o-17`), or the one a query declares (`Query.target`, `QuerySchema.target`). Absent for queries that declare none, and for file and cache requests.
@@ -221,7 +228,7 @@ policy.middleware({ types: ["shop.*"] }, (check) => {
 });
 ```
 
-- `types: string[]`: Request types it checks: `*` (all), a type of the listener's own domain (`Type`), another domain's type (`domain.Type`) or a whole domain (`domain.*`). Besides command and query types, these cover the file and cache requests of a domain (`Kernable.data`, `Kernable.cache`) under the types `PutData`, `GetData`, `DeleteData`, `SetCache`, `GetCache` and `DeleteCache`, checked before they run: `shop.*` includes `shop.PutData`.
+- `types: string[]`: Request types it checks: `*` (all), a type of the listener's own domain (`Type`), another domain's type (`domain.Type`) or a whole domain (`domain.*`). Besides command and query types, these cover the file and cache requests of a domain (`Kernable.data`, `Kernable.cache`) under the types `PutData`, `GetData`, `DeleteData`, `ListData`, `SetCache`, `GetCache` and `DeleteCache`, checked before they run: `shop.*` includes `shop.PutData`.
 - `when?: "before" | "after"`: `before` (default): checks a request before the kernel accepts it; throwing refuses it. `after`: gets the request's outcome too. Throwing refuses a query's response; a command's outcome, and a rejected query, it only observes, best effort (it misses what happens while it is away, and nobody waits for it). File and cache requests are checked only before.
 - `order?: number`: Position in the chain: lower runs first, equal orders by listener name (default 0). Negative orders are reserved for kernable's kits (a grant of `reserved_order`).
 
@@ -657,7 +664,7 @@ await kernable.submit({ domain: "shop", aggregateType: "cart", aggregateId: "c1"
 - `wait?: "settled" | "committed"`: When `submit` returns. `"settled"` (default): once every listener that counts has processed the events, so the next query sees them; throws `NotSettled` after `--settle-timeout-ms`. From a listener's handler, only the listeners with a lower order count. `"committed"`: once the events are stored; read with `QueryOptions.minPosition` to see them. To return once the command is only queued, use `Kernable.enqueue`. See [Settling](../concepts/ordering#settling-reading-your-own-writes).
 - `timeoutMs?: number`: How long to wait for the connection and the outcome; default `Options.timeoutMs`.
 - `at?: Date | number`: `enqueue` only: a scheduled command, run at this time and not before (a `Date` or ms since epoch). The kernel stores it at once; the aggregate's other commands pass meanwhile, and middlewares check it now and again when it is due. Cancel it with `Kernable.cancel`.
-- `until?: Date | number`: `enqueue` only, with `at`: if it cannot run by this time (after an outage), it is rejected `expired`.
+- `until?: Date | number`: `enqueue` only, with `at`: if it cannot run by this time (after an outage), it is rejected `expired`. Without `at`, the call throws.
 
 ### ReindexOptions
 
@@ -699,7 +706,7 @@ differently: `submit` returns them in its `Outcome`, `query` throws `Rejected`.
 - `async apply(manifest: Manifest): Promise<void>`: Replaces the membership of a service (default: this process's): the workers, listeners and middlewares the kernel waits for, its processes, and free metadata. Apply it once per deploy, e.g. from a deploy script, not from every process: the newest apply wins, and an older one that arrives late is refused. The key needs `manage` for the service. A middleware the new membership no longer lists stops checking. Throws if neither `manifest.service` nor `Options.service` names a service. See [Remove a listener](../how-to/remove-listener).
 - `async registerProcess(process: ProcessBuilder | ProcessModel): Promise<ProcessVersion>`: Registers a business process with the kernel: its builder (`Domain.process`), whose `model()` it sends, or a model as is. Signed with this client's key, which needs a grant `process` for the process, `submit` for each command, `query` for each query and `listen` for each event the model names. A model equal to the newest version registers nothing (`new: false`); a different one becomes the next version, while running cases finish on theirs. `Kernable.app` registers the processes of its domains itself. Throws what `ProcessBuilder.model` throws, and the kernel's `INVALID_ARGUMENT` for a model it refuses, naming the process, the step and why. ```ts const { version, new: changed } = await kernable.registerProcess(fulfilment); ```
 - `async processAct(name: string, context: RequestContext): Promise<{ changed: boolean }>`: Sets as whom the process `name` (qualified: `shop.fulfilment`) acts: the sender tenant, identity and session of `context` go with every command and query the kernel's engine sends for it from now on; its correlation and causation stay the engine's. Without it a process acts as `process:<name>`. The identity kit calls it for each process it gives an identity; operator tooling may too. Idempotent: `changed` is false if the process acted so already. The key needs `process` for the process. Rejects with `NOT_FOUND` for a process never registered. ```ts await kernable.processAct("shop.fulfilment", { senderTenant: "platform", senderIdentity, senderSession: keyId }); ```
-- `async submit(options: SubmitOptions): Promise<Outcome>`: Runs a command and returns its outcome: `{ committed: true, events }`, or `{ committed: false, code, message }` if it was rejected (a rejection does not throw). By default it returns once the command settled, so a query right after it sees the events; see `SubmitOptions.wait`. Throws `NotSettled` if the command committed but did not settle in time. Idempotent on `options.id`.
+- `async submit(options: SubmitOptions): Promise<Outcome>`: Runs a command and returns its outcome: `{ committed: true, events }`, or `{ committed: false, code, message }` if it was rejected (a rejection does not throw). By default it returns once the command settled, so a query right after it sees the events; see `SubmitOptions.wait`. Throws `NotSettled` if the command committed but did not settle in time. Idempotent on `options.id`. A scheduled command (`at`) has no outcome yet: enqueue it. Submitted again by its ID without `at`, it waits for the scheduled command's outcome; throws `NotDue` if the kernel answers that it is not due yet.
 - `async submit(command: Command, target: CommandTarget): Promise<Outcome>`: The same with a command class instance: `submit(new AddItem({ sku, qty }), { aggregateId })`. Its class says the domain, aggregate type, type and vault fields (no `use` needed).
 - `async submit(command: SubmitOptions | Command, target?: CommandTarget): Promise<Outcome>`
 - `async enqueue(options: Omit<SubmitOptions, "wait">): Promise<string>`: Stores the command in the kernel's queue and returns its ID without waiting for it to run (fire and forget). Submit it again with the same `id` to get the outcome. With `at`, a scheduled command: it runs at that time, e.g. a reminder in 24 hours, `enqueue(Remind.new(), { aggregateId, at: new Date(Date.now() + 86_400_000) })`.
@@ -737,8 +744,8 @@ deleting one of `data_write`. Files are not part of the signed event log and are
 with the vault: delete a person's files yourself when erasing them. Use it as `kernable.data`.
 
 Each request carries a request context (`DataOptions.context`, default `Options.context`) and
-passes the middleware chain first, as `<domain>.PutData`, `.GetData` or `.DeleteData` (see
-`Check`). A middleware that refuses it makes the call throw a gRPC error with code
+passes the middleware chain first, as `<domain>.PutData`, `.GetData`, `.DeleteData` or
+`.ListData` (see `Check`). A middleware that refuses it makes the call throw a gRPC error with code
 `PERMISSION_DENIED` and the message `<code>: <message>`.
 
 ```ts
@@ -1076,12 +1083,6 @@ Where a class was put to use: its domain, and for a command its aggregate type.
 - `domain: string`
 - `aggregateType?: string`
 - `schemas?: unknown`: The domain's event and command schemas: what upcasts and seals its messages.
-
-### isMessageClass()
-
-`export function isMessageClass(value: unknown): value is EventClass<unknown>`
-
-Whether `value` is a message class rather than a type name.
 
 ### typeOf()
 

@@ -1,12 +1,12 @@
 # Replication and the standby
 
-Status: S1a built 2026-11-03: the store's record log (increment 1), the primary and the standby (2, 3), `kernable promote` and the docs (4, [Run a standby](../docs/how-to/standby.md)). Tests: `crates/kernable-store/tests/replication.rs`, `crates/kernable-kernel/tests/replication.rs`. S1b built the same day: the witness and pairs (below). S1c and S1d followed: address lists in the SDKs, crash points during replication, `kill -9` tests, soak runs with failover faults (2026-11-04) and the model-based test of a pair under seeded kills and pauses (2026-11-04). Invariants P1–P4 are in [invariants.md](invariants.md). 2026-11-07: a handing-over primary and a fenced one seal their record log, so a handover leaves no tail; a diverged standby keeps only its newest set-aside copy; a diverged standby takes its own newest records back instead of starting over (2026-11-08, [rewind.md](rewind.md)).
+Status: built. The store's record log, the primary and the standby, `kernable promote` and the docs ([Run a standby](../docs/how-to/standby.md)); the witness and pairs (below); address lists in the SDKs, crash points during replication, `kill -9` tests, soak runs with failover faults and a model-based test of a pair under seeded kills and pauses. Tests: `crates/kernable-store/tests/replication.rs`, `crates/kernable-kernel/tests/replication.rs`, `pair.rs`, `replication_crashes.rs`, `replication_kills.rs`. Invariants P1–P4 are in [invariants.md](invariants.md). A handing-over primary and a fenced one seal their record log, so a handover leaves no tail; a diverged standby keeps only its newest set-aside copy, and takes its own newest records back instead of starting over ([rewind.md](rewind.md)).
 
 ## Goal
 
-A second kernel, the **standby**, holds every write the primary acknowledged. If the primary dies, an operator promotes the standby (`kernable promote <address> <key>`); it starts like a restarted kernel and loses nothing. Automatic failover through a witness is S1b, the SDKs' address lists are S1c.
+A second kernel, the **standby**, holds every write the primary acknowledged. If the primary dies, an operator promotes the standby (`kernable promote <address> <key>`); it starts like a restarted kernel and loses nothing. Automatic failover goes through a witness ([below](#the-witness-and-pairs)); the SDKs take a list of addresses and try the next one after a failure.
 
-## Decisions (2026-11-03)
+## Decisions
 
 | Question | Choice |
 |---|---|
@@ -32,7 +32,7 @@ Two stores at the same sequence number with the same hash hold the same history.
 The record log lives in the store, written in the same transaction as the write itself:
 
 - **file log:** it is the log. The sequence number is the record's index after the format record; the offset and hash of every 1,024th record are kept in memory, so a record is found without reading the whole file.
-- **SQLite:** a table `replication (seq INTEGER PRIMARY KEY, hash BLOB, record BLOB)`, written only while replication is on (`--sync-standby` on a primary, always on a standby). It is pruned to what the standby has not acknowledged plus the newest 100,000 records, so it does not double the store. A standby that falls further behind gets a full image. Turned on in a store that already holds data, the log starts with a `ReplicationHead` record of a random hash: no standby continues it, each takes an image first. Turned off, the table is dropped.
+- **SQLite:** a table `replication (seq INTEGER PRIMARY KEY, hash BLOB, record BLOB)`, written only while replication is on (`--replication sync` on a primary, always on a standby). It is pruned to what the standby has not acknowledged plus the newest 100,000 records, so it does not double the store. A standby that falls further behind gets a full image. Turned on in a store that already holds data, the log starts with a `ReplicationHead` record of a random hash: no standby continues it, each takes an image first. Turned off, the table is dropped.
 
 A standby's record log is a copy of its primary's: it files each record it applies with the primary's sequence number and hash, in the same transaction (SQLite) or as the same bytes (file log). After an image, a `ReplicationHead { seq, hash }` record starts its log where the image stands.
 
@@ -55,21 +55,21 @@ A new kernel service, `Replication.Follow`, a bidirectional stream from the stan
 
 The standby's own grant, presented on this stream, is stored without waiting for a standby: it arrives before the standby follows, and reaches it with the records.
 
-**Full image.** From one consistent view of the store. From SQLite, one read transaction gives the records in an order that applies: grants, revocations, memberships, workers, every command as enqueued, every commit in log order (each stream's newest keys and facts filed with the commit of its last event), commits without events, rejections, listeners with their parked events, checkpoints. The file log only grows, so its records up to an offset are its image. Either way it ends with the sequence number and hash it stands for, which the standby takes as the start of its own record log. The files of the data store follow from the kernel (increment 2). The primary keeps records from that point until the standby has acknowledged them.
+**Full image.** From one consistent view of the store. From SQLite, one read transaction gives the records in an order that applies: grants, revocations, memberships, workers, every command as enqueued, every commit in log order (each stream's newest keys and facts filed with the commit of its last event), commits without events, rejections, listeners with their parked events, checkpoints. The file log only grows, so its records up to an offset are its image. Either way it ends with the sequence number and hash it stands for, which the standby takes as the start of its own record log. The files of the data store follow from the kernel. The primary keeps records from that point until the standby has acknowledged them.
 
 ## Applying records on the standby
 
-`Store::apply(records)` does what the writes did on the primary and checks each record before it writes it: it follows the standby's head and its hash chains; a command is enqueued once; a commit completes a pending command, its event positions follow without gaps, every event hash matches its content and its predecessor, and committing them through the store's own commit gives exactly them (SQLite) or they continue the command's stream (file log); a checkpoint names an event the standby holds. A record that fails is refused as diverged and nothing of it is written (SQLite refuses the whole batch). The kernel checks the checkpoints' signatures against the primary's kernel key (`--primary-kernel-pub`, increment 3). A record the standby holds already has a sequence number at or below its head, so a resend after a crash between applying and acknowledging is refused as not following, and the standby asks again from its head.
+`Store::apply(records)` does what the writes did on the primary and checks each record before it writes it: it follows the standby's head and its hash chains; a command is enqueued once; a commit completes a pending command, its event positions follow without gaps, every event hash matches its content and its predecessor, and committing them through the store's own commit gives exactly them (SQLite) or they continue the command's stream (file log); a checkpoint names an event the standby holds. A record that fails is refused as diverged and nothing of it is written (SQLite refuses the whole batch). The kernel checks the checkpoints' signatures against the primary's kernel key (`--primary-kernel-key`). A record the standby holds already has a sequence number at or below its head, so a resend after a crash between applying and acknowledging is refused as not following, and the standby asks again from its head.
 
 ## When a write counts (P1)
 
-`Kernel::sync` already runs before anyone is told of a write, and the `durable` position keeps listeners, subscribers and workers from getting an event before it is on the disk. With `--sync-standby`, `sync` also waits until the standby has acknowledged every record written so far; `durable` advances only then. So no client, listener or worker hears of a write the standby does not hold.
+`Kernel::sync` already runs before anyone is told of a write, and the `durable` position keeps listeners, subscribers and workers from getting an event before it is on the disk. With `--replication sync`, `sync` also waits until the standby has acknowledged every record written so far; `durable` advances only then. So no client, listener or worker hears of a write the standby does not hold.
 
-Without a standby in sync, the primary waits: commits stay queued, submits time out (`--submit-timeout-ms`, the command still runs later), `/ready` answers 503, and the log says why every 10 s. The wait blocks its thread (`block_in_place` on the multi-threaded runtime, so other tasks go on), and so does a request that waits for a lock held across it (the one that keeps memberships in order). In S1a the primary never commits alone; restarting it without `--replication sync` is the operator's explicit choice, after which that standby must not be promoted. This also means a standby that takes an image holds up the primary's writes for as long as the image takes. S1b replaces both with the witness's in-sync set: a primary registered alone commits alone, and a standby catches up outside it. Without a witness, the kernel does the same for a primary's first standby (below).
+Without a standby in sync, the primary waits: commits stay queued, submits time out (`--submit-timeout-ms`, the command still runs later), `/ready` answers 503, and the log says why every 10 s. The wait blocks its thread (`block_in_place` on the multi-threaded runtime, so other tasks go on), and so does a request that waits for a lock held across it (the one that keeps memberships in order). With a witness, its in-sync set decides instead: a primary registered alone commits alone, and a standby catches up outside it. Without a witness, the kernel lets a primary's first standby catch up while it serves alone (below); once caught up, restarting the primary without `--replication sync` is the operator's explicit choice, after which that standby must not be promoted.
 
 ## Without a witness: catching up and switching over
 
-Decided (2026-11-06), so that a single kernel can be moved to another machine without a witness and without its writes waiting while the new standby takes its image.
+So that a single kernel can be moved to another machine without a witness and without its writes waiting while the new standby takes its image.
 
 **Catching up.** A primary without a witness starts *catching up* unless `<store>.standby-caught-up` exists: `Primary::wait` lets writes through without the standby, and raises `told_alone` to the newest one it let through. `ack` ends catching up, under the same lock, once the standby is connected, acknowledged the head it was sent, and holds `told_alone`: a write that passed `wait` alone after that head was read raised `told_alone` above it, so no write told alone is missing. Every write from then on waits. The stream notes it (`<store>.standby-caught-up`, synced) and only then sends the standby `StandbyInSync`, which notes `<store>.in-sync` beside its own store. A crash between the two leaves the standby without the note: not promotable, never wrong.
 
@@ -91,7 +91,7 @@ The old primary, if it still runs, gets no more acknowledgements, so it tells no
 
 ## The witness and pairs
 
-Decided (2026-11-03): the witness assigns the roles (both kernels start with the same flags), and a primary whose standby is away or behind goes alone after `--standby-timeout-ms`.
+The witness assigns the roles (both kernels start with the same flags), and a primary whose standby is away or behind goes alone after `--standby-timeout-ms`.
 
 **The witness** (`kernable witness`, `crates/kernable-kernel/src/witness.rs`) keeps `WitnessState { term, primary, primary_address, in_sync }` in one file, written atomically and flushed before it answers. It decides four requests (`WitnessService.Ask`), each signed by the node's key and presenting its grant (`replicate`); it keeps no grants, and does not see revocations.
 
@@ -119,26 +119,13 @@ A restarted witness grants no claim for a lease and the margin.
 Found and fixed on the way:
 
 - **A deadlock under load.** A grant was stored and waited for the standby under the grant lock; under load, every runtime thread blocked on that lock, and with them the stream to the standby. The lock is now taken only to look and to insert.
-- **A primary that stopped answering at start** (found by the soak's pair, 2026-11-04). A second membership waited for the lock that keeps memberships in order, blocking its runtime thread in place, while the first held the lock and waited for the standby. Was that thread the last to poll the network, the others asleep, nobody read the standby's acknowledgement: the primary answered nothing more, for good. Under CPU and disk load about one start of the soak in five hung. A request that waits for that lock now hands its thread's tasks over first, as the wait for the standby does (`replication::blocking`); `tests/replication.rs` reproduces it on a primary of one runtime thread.
+- **A primary that stopped answering at start** (found by the soak's pair). A second membership waited for the lock that keeps memberships in order, blocking its runtime thread in place, while the first held the lock and waited for the standby. Was that thread the last to poll the network, the others asleep, nobody read the standby's acknowledgement: the primary answered nothing more, for good. Under CPU and disk load about one start of the soak in five hung. A request that waits for that lock now hands its thread's tasks over first, as the wait for the standby does (`replication::blocking`); `tests/replication.rs` reproduces it on a primary of one runtime thread.
 - **Streams ended by a race in SQLite.** A reader could see a record committed a moment before the head in memory moved past it; the next request then looked like one beyond the log, and the stream ended (with a reconnecting standby it could even be judged diverged). The rows decide now.
 - **No failover under load.** The primary reported its standby in sync only when it had acknowledged the very head, which under steady load never happens: the witness never named it, and a claim was always refused. It now reports it once the standby holds everything that may have been told without it (the head when the primary stopped committing alone, or when it started); a primary alone waits for its standby again once it holds what existed at the last look.
 - **Slow lookups in the file log.** Each read of the records after a standby's head read forward from the last mark, up to 1,023 records; the newest records' places are now kept as well.
 
-Crash points (`replication.sent` on the primary, `standby.applied` and `standby.imaging` on the standby; `tests/replication_crashes.rs`, 8 rounds each without a loss) built the same evening. Revocations: a standby whose key is revoked loses its stream, and a primary whose in-sync standby is revoked commits alone first, so the witness never lets a revoked key take over (the witness itself keeps no revocations). Not built: replication in the model-based test and the soak, a second standby.
+Crash points cover both sides: `replication.sent` on the primary, `standby.applied` and `standby.imaging` on the standby (`tests/replication_crashes.rs`, 8 rounds each without a loss). Revocations: a standby whose key is revoked loses its stream, and a primary whose in-sync standby is revoked commits alone first, so the witness never lets a revoked key take over (the witness itself keeps no revocations). The model test of a pair (`replication_kills.rs`) runs seeded kills and pauses of either kernel and checks P1–P4. Not built: a second standby.
 
 ## Cost
 
-Measured in `bench/results-2026-11-03-m2max-replication.txt` (both kernels on one machine and disk); the summary is in [Run a standby](../docs/how-to/standby.md#what-it-costs). Overlapping the primary's flush with the standby's was tried and dropped: on one disk it halved throughput, and it would send a standby to an image after an unlucky crash.
-
-## Building it
-
-| Increment | Content |
-|---|---|
-| 1 | Store: record log and hashes for both backends, `DataChanged`, `Store::apply`, records after a sequence number, the full image, `DataStore::keys`. In-process tests: random writes on one store, applied to another of each backend, give equal stores (`Log::check` and a comparison), also through an image |
-| 2 | Proto and the primary: `Replication.Follow`, the `replicate` permission, vault values and files attached, `sync` waiting for acknowledgements, retention, metrics, `/ready` |
-| 3 | The standby: `kernable standby`, applying and acknowledging, derived vault deletions, `not_primary`, divergence moved aside |
-| 4 | `kernable promote`, the docs (a how-to, failures, architecture limits, compliance), the first P1–P4 tests |
-
-## Cost
-
-With `--sync-standby`, each commit waits for one more round trip; group commit shares it among concurrent commits, as it shares the flush. SQLite writes each record a second time into the record log while replication is on. Both are to be measured after increment 2.
+With `--replication sync`, each commit waits for one more round trip; group commit shares it among concurrent commits, as it shares the flush. SQLite writes each record a second time into the record log while replication is on. Measured in `bench/results-2026-11-03-m2max-replication.txt` (both kernels on one machine and disk); the summary is in [Run a standby](../docs/how-to/standby.md#what-it-costs). Overlapping the primary's flush with the standby's was tried and dropped: on one disk it halved throughput, and it would send a standby to an image after an unlucky crash.

@@ -47,7 +47,7 @@ Besides TLS and the keys, four things differ from part 1:
 - **No UI.** `--dev` turned on the kernel's UI at http://127.0.0.1:7234; in production it is off unless you set `--ui-listen`. It has no login and listens on loopback only, so reach it through an SSH tunnel ([Monitor](../../how-to/monitor#the-ui)).
 - Paths point into `data/` and `keys/`. Back up `data/` (the log, the vault) and `keys/`, and keep a copy of the root key, offline too; `kernable verify` checks a log and its signatures at any time.
 
-Every flag can also be set as an environment variable (`KERNABLE_STORE`, `KERNABLE_TLS_CERT`, …), which suits a service manager or a container better than a long command line.
+Every flag can also be set as an environment variable (`KERNABLE_STORE`, `KERNABLE_KERNEL_TLS_CERT`, …), which suits a service manager or a container better than a long command line.
 
 ## Connect the processes
 

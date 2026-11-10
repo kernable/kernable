@@ -32,7 +32,7 @@ kernable start --root keys/root.pub --listen 0.0.0.0:7233 \
   --tls-client-ca certs/clients-ca.crt
 ```
 
-The three flags go together, and apply to TCP only; a kernel on a Unix socket refuses them. Each has an environment variable (`KERNABLE_KERNEL_TLS_CERT`, `KERNABLE_KERNEL_TLS_KEY`, `KERNABLE_TLS_CLIENT_CA`), see [kernable start](../reference/configuration). The start banner shows `Listen ... 0.0.0.0:7233 (mutual TLS)`.
+The three flags go together, and apply to TCP only; a kernel on a Unix socket refuses them. Each has an environment variable (`KERNABLE_KERNEL_TLS_CERT`, `KERNABLE_KERNEL_TLS_KEY`, `KERNABLE_KERNEL_TLS_CLIENT_CA`), see [kernable start](../reference/configuration). The start banner shows `Listen ... 0.0.0.0:7233 (mutual TLS)`.
 
 Without them, a non-loopback address fails at start: `0.0.0.0:7233 is reachable from other machines: plain TCP only on a loopback address (127.0.0.1:7233); elsewhere, use mutual TLS (--tls-cert, --tls-key, --tls-client-ca)`.
 

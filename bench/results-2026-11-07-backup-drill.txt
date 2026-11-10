@@ -1,5 +1,5 @@
 # bench/backup-drill.sh on a 2-vCPU cloud server, backups in an S3-compatible bucket in the same region, 2026-11-07
-# before e04c5d7 (signatures on every core, one flush): 200k events restored in 76-88 s
+# before restores checked signatures on every core and flushed once: 200k events restored in 76-88 s
 == a store of 200000 commands; a backup to s3://<bucket>/backup/drill-1793996909, a segment every 5 s
   filled: 200000 events, 231 MB, in 86.7 s
   the base is in the bucket after 7.4 s
