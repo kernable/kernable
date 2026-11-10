@@ -108,8 +108,16 @@
   svg text { fill: var(--muted); font: 11px system-ui, sans-serif; }
   svg .gridline { stroke: var(--line); stroke-width: 1; }
   /* lists beside a main area */
-  .split { display: grid; grid-template-columns: 290px minmax(0, 1fr); gap: 16px; align-items: start; }
-  @media (max-width: 900px) { .split { grid-template-columns: 1fr; } }
+  .split { display: grid; grid-template-columns: 290px minmax(0, 1fr); gap: 16px; align-items: start; transition: grid-template-columns .25s ease; }
+  .split.collapsed { grid-template-columns: 42px minmax(0, 1fr); }
+  @media (max-width: 900px) { .split, .split.collapsed { grid-template-columns: 1fr; } }
+  @media (prefers-reduced-motion: reduce) { .split { transition: none; } }
+  .lhead { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 6px 6px 12px; border-bottom: 1px solid var(--line); min-height: 40px; }
+  .lhead .note { white-space: nowrap; overflow: hidden; }
+  .side-toggle { flex: none; width: 28px; height: 28px; border-radius: 7px; border: 1px solid var(--line); background: var(--panel); color: var(--muted); cursor: pointer; font-size: 15px; line-height: 1; display: grid; place-items: center; }
+  .side-toggle:hover { color: var(--accent); border-color: var(--accent); }
+  .split.collapsed .lhead { padding: 6px; justify-content: center; }
+  .split.collapsed .lhead .note, .split.collapsed .list ul, .split.collapsed .list .head { display: none; }
   .list { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; max-height: calc(100vh - 150px); display: flex; flex-direction: column; position: sticky; top: 70px; overflow: hidden; }
   .list .head { padding: 10px; display: grid; gap: 8px; border-bottom: 1px solid var(--line); }
   .list ul { list-style: none; margin: 0; padding: 0 0 6px; overflow: auto; }
@@ -247,7 +255,7 @@
       <div class="controls" style="margin-top:10px"><button class="btn" id="older" hidden>Older</button><span class="note" id="older-meta"></span></div>
     </div>
     <div id="x-aggregates" class="split" hidden>
-      <div class="list"><div class="head"><input class="ctl" id="filter" placeholder="Filter aggregates…"><label class="note"><input type="checkbox" id="streams-engine"> process cases too</label></div><ul id="streams"></ul></div>
+      <div class="list"><div class="lhead" id="agg-head"><span class="note">Aggregates</span></div><div class="head"><input class="ctl" id="filter" placeholder="Filter aggregates…"><label class="note"><input type="checkbox" id="streams-engine"> process cases too</label></div><ul id="streams"></ul></div>
       <div class="grid" id="timeline"><div class="empty">Pick an aggregate.</div></div>
     </div>
   </section>
@@ -309,6 +317,22 @@ function copyButton(text, label = "Copy") {
   return b;
 }
 const command = (text) => el("div", { class: "cmd" }, el("code", {}, text), copyButton(text));
+
+// ---- side lists that fold away, remembered in this browser ----
+let collapsed = { processes: false, aggregates: false };
+try { collapsed = { ...collapsed, ...JSON.parse(localStorage.getItem("kernable.collapsed") ?? "{}") }; } catch {}
+function sideToggle(which) {
+  const folded = collapsed[which];
+  return el("button", { class: "side-toggle", type: "button", "aria-expanded": String(!folded), title: folded ? "Show the list" : "Hide the list", onclick: (ev) => {
+    collapsed[which] = !collapsed[which];
+    try { localStorage.setItem("kernable.collapsed", JSON.stringify(collapsed)); } catch {}
+    const split = ev.currentTarget.closest(".split");
+    split?.classList.toggle("collapsed", collapsed[which]);
+    ev.currentTarget.replaceWith(sideToggle(which));
+    // The diagram and the map fit their width: redraw once the panel has moved.
+    setTimeout(render, 280);
+  } }, folded ? "»" : "«");
+}
 
 // ---- key names, kept in this browser: the kernel knows keys only by their ID ----
 let keyNames = {};
@@ -615,14 +639,14 @@ function drawProcesses() {
   const box = $("v-processes");
   if (!procs) { box.replaceChildren(el("div", { class: "empty" }, "Loading…")); return; }
   const p = currentProcess(), v = currentVersion(p);
-  const list = el("div", { class: "list" }, el("ul", {}, procs.processes.length ? procs.processes.map((x) => {
+  const list = el("div", { class: "list" }, el("div", { class: "lhead" }, el("span", { class: "note" }, `${procs.processes.length} process${procs.processes.length === 1 ? "" : "es"}`), sideToggle("processes")), el("ul", {}, procs.processes.length ? procs.processes.map((x) => {
     const open = x.versions.reduce((n, y) => n + openCount(y), 0);
     const bad = (incidents?.cases ?? []).filter((c) => c.process === x.name).length;
     return el("li", { class: x === p ? "on" : "", onclick: () => { procVersion = null; caseFilter.step = ""; location.hash = procHref(x.name); } },
       el("span", { class: "n" }, `${open} open`, bad ? [" · ", el("span", { class: "bad" }, `${bad} incident${bad === 1 ? "" : "s"}`)] : null),
       el("div", { class: "id" }, x.name), el("div", { class: "of" }, `version ${x.versions.length}${x.removed ? " · removed: no new cases" : ""}`));
   }) : el("li", { class: "of" }, "No process registered.")));
-  if (!p || !v) { procFrame = ""; box.replaceChildren(el("div", { class: "split" }, list, el("div", { class: "empty" }, "No process registered. Define one in code next to your domain; the SDK registers it when the app starts."))); return; }
+  if (!p || !v) { procFrame = ""; box.replaceChildren(el("div", { class: `split${collapsed.processes ? " collapsed" : ""}` }, list, el("div", { class: "empty" }, "No process registered. Define one in code next to your domain; the SDK registers it when the app starts."))); return; }
 
   // The frame (controls) is built once per process and version, so an open dropdown or the
   // caret in the filter survives the refresh; the parts inside are redrawn.
@@ -639,7 +663,7 @@ function drawProcesses() {
       el("span", { class: "note", id: "p-count" }));
     filter.addEventListener("change", procChanged); filter.addEventListener("input", procTyped);
     const head = el("div", { class: "controls" }, versions, windows); head.addEventListener("change", procChanged);
-    box.replaceChildren(el("div", { class: "split" }, list,
+    box.replaceChildren(el("div", { class: `split${collapsed.processes ? " collapsed" : ""}` }, list,
       el("div", { class: "grid", id: "p-main" },
         el("div", { class: "title" }, el("h3", {}, p.name), head, el("span", { class: "meta", id: "p-meta" })),
         el("div", { class: "grid cols-kpi", id: "p-kpis" }),
@@ -1476,6 +1500,8 @@ function drawSearch() {
 }
 
 // ---- wiring ----
+$("agg-head").append(sideToggle("aggregates"));
+$("x-aggregates").classList.toggle("collapsed", collapsed.aggregates);
 $("searchform").addEventListener("submit", (ev) => { ev.preventDefault(); location.hash = `#search/${encodeURIComponent($("q").value.trim())}`; });
 $("verdict").addEventListener("click", () => (location.hash = "#overview"));
 $("filter").addEventListener("input", drawStreams);
