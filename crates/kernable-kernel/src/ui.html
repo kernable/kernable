@@ -176,6 +176,10 @@
   .seg a { padding: 4px 10px; font-size: 12.5px; color: var(--muted); }
   .seg a.on { background: var(--accent-soft); color: var(--accent); }
   .seg a:hover { text-decoration: none; color: var(--accent); }
+  .meter { height: 6px; border-radius: 3px; background: var(--sunk); overflow: hidden; min-width: 60px; align-self: center; }
+  .meter span { display: block; height: 100%; background: var(--accent); }
+  .meter.warn span { background: var(--warn); }
+  .tiles .kpi .meter { grid-column: 1 / -1; margin: 4px 0 2px; }
   .dcard:hover { border-color: var(--accent); }
   .dcard .dhead { display: flex; align-items: baseline; gap: 8px; justify-content: space-between; }
   .dcard .dhead b { font-size: 16px; }
@@ -330,9 +334,11 @@
       <a href="/explore/events" data-tab="events">Event log</a>
       <a href="/explore/commands" data-tab="commands">Command log</a>
       <a href="/explore/aggregates" data-tab="aggregates">Aggregates</a>
+      <a href="/explore/data" data-tab="data">Data</a>
     </div>
     <div id="x-domains" class="grid"></div>
     <div id="x-catalog" class="grid" hidden></div>
+    <div id="x-data" class="grid" hidden></div>
     <div id="x-events" hidden>
       <form class="controls evbar" id="search">
         <select class="ctl" name="domain" aria-label="Domain"><option value="">All domains</option></select>
@@ -633,6 +639,7 @@ function draw() {
   if (top === "explore" && exploreTab === "catalog") drawCatalog();
   if (top === "explore" && exploreTab === "events") fillEventChoices();
   if (top === "explore" && exploreTab === "commands") fillCommandChoices();
+  if (top === "explore" && exploreTab === "data") drawData();
 }
 
 // ================= Overview =================
@@ -1453,7 +1460,12 @@ let catalogDomain = "", catalogSort = "", catalogDir = "desc";
 let domainsSort = "name";
 function enterExplore() {
   if (route.view === "history") { exploreTab = "aggregates"; stream = { tenant: route.args[0], domain: route.args[1], type: route.args[2], id: route.args[3] }; if (stream.domain === "process") $("streams-engine").checked = true; }
-  else exploreTab = ["domains", "catalog", "events", "commands", "aggregates"].includes(route.args[0]) ? route.args[0] : "domains";
+  else exploreTab = ["domains", "catalog", "events", "commands", "aggregates", "data"].includes(route.args[0]) ? route.args[0] : "domains";
+  if (exploreTab === "data") {
+    dataTab = DATA_TABS.some(([k]) => k === route.args[1]) ? route.args[1] : "vault";
+    fileAt = { tenant: route.query?.get("tenant") ?? "", domain: route.query?.get("domain") ?? "", prefix: route.query?.get("prefix") ?? "" };
+    filesList = null;
+  }
   if (route.view === "explore" && exploreTab === "aggregates") stream = null;
   // The command log's filters come from the address too: /explore/commands?sender=c1&status=rejected
   if (exploreTab === "commands" && route.query) {
@@ -1484,7 +1496,7 @@ function enterExplore() {
     if (changed) tail = null;
   }
   document.querySelectorAll("#explore-tabs a").forEach((a) => a.classList.toggle("on", a.dataset.tab === exploreTab));
-  for (const t of ["domains", "catalog", "events", "commands", "aggregates"]) $(`x-${t}`).hidden = t !== exploreTab;
+  for (const t of ["domains", "catalog", "events", "commands", "aggregates", "data"]) $(`x-${t}`).hidden = t !== exploreTab;
   if (exploreTab === "commands" && cnewest === null) csearch();
   if (exploreTab === "events" && tail === null) search();
   if (exploreTab === "aggregates") { loadStreams(); loadHistory(); }
@@ -2360,6 +2372,177 @@ function commandDetail(c) {
         caseOf ? el("a", { href: caseHref(caseOf) }, "The case →") : null)));
 }
 
+// ---- Data: the stores beside the log (vault, snapshots, files, cache), counted, never a value ----
+let dataTab = "vault", vaultView = null, subjectView = null, snapView = null, filesView = null, filesList = null, cacheView = null, cacheKeys = null;
+let fileAt = { tenant: "", domain: "", prefix: "" }, cacheFilter = { domain: "", text: "" };
+const DATA_TABS = [["vault", "Vault"], ["snapshots", "Snapshots"], ["files", "Files"], ["cache", "Cache"]];
+async function loadData() {
+  try {
+    if (dataTab === "vault") vaultView = await get("/api/vault");
+    if (dataTab === "snapshots") snapView = await get("/api/snapshots");
+    if (dataTab === "files") {
+      filesView = await get("/api/files");
+      if (fileAt.domain) filesList = await get(`/api/files?${new URLSearchParams({ tenant: fileAt.tenant || "default", domain: fileAt.domain, prefix: fileAt.prefix })}`);
+    }
+    if (dataTab === "cache") {
+      cacheView = await get("/api/cache");
+      cacheKeys = await get(`/api/cache?${new URLSearchParams({ keys: 1, domain: cacheFilter.domain, text: cacheFilter.text })}`);
+    }
+  } catch {}
+}
+/** A bar of `n` against `of`, in the warning color past `warn` (a share). */
+function meter(n, of, warn = 0.8) {
+  const share = of ? Math.min(1, n / of) : 0;
+  return el("div", { class: `meter${share >= warn ? " warn" : ""}`, title: pct(n, of) }, el("span", { style: `width:${Math.max(share * 100, n ? 0.5 : 0)}%` }));
+}
+function drawData() {
+  const box = $("x-data");
+  const tabs = el("div", { class: "seg" }, DATA_TABS.map(([k, label]) => el("a", { href: `/explore/data/${k}`, class: dataTab === k ? "on" : "" }, label)));
+  const view = { vault: drawVault, snapshots: drawSnapshots, files: drawFiles, cache: drawCacheView }[dataTab]();
+  box.replaceChildren(el("div", { class: "controls", style: "justify-content:space-between" }, tabs, el("span", { class: "note" }, "Counted and listed, never a value: the UI does not decrypt the vault, show snapshot states or open files.")), ...view);
+}
+const dataKpi = (label, value, sub, extra) => el("div", { class: "panel kpi" }, el("span", { class: "l" }, label), el("span", { class: "n" }, value), extra ?? el("span"), el("span", { class: "s" }, sub ?? ""));
+
+function drawVault() {
+  const v = vaultView;
+  if (!v) return [el("div", { class: "empty" }, "…")];
+  if (!v.enabled) return [el("div", { class: "empty" }, "This kernel runs without a vault: commands cannot carry personal or secret values.")];
+  const share = v.sealed / v.limit;
+  const typeRows = v.types.map((t) => el("tr", {},
+    el("td", {}, t.domain ? [el("span", { class: "faint" }, `${t.domain}.`), t.type] : el("span", { class: "muted" }, "held by commands only")),
+    el("td", { class: "n" }, num(t.count)),
+    el("td", { style: "width:40%" }, meter(t.count, v.personal, 2))));
+  const form = el("form", { class: "controls" },
+    el("input", { class: "ctl", name: "tenant", placeholder: "Tenant (default)", style: "width:140px", value: subjectView?.tenant && subjectView.tenant !== "default" ? subjectView.tenant : "" }),
+    el("input", { class: "ctl", name: "subject", placeholder: "Subject, exactly (e.g. a customer ID)", style: "width:280px", value: subjectView?.subject ?? "" }),
+    el("button", { class: "btn", type: "submit" }, "Look up"));
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const f = new FormData(form), subject = String(f.get("subject")).trim();
+    if (!subject) { subjectView = null; drawData(); return; }
+    try { subjectView = await get(`/api/vault?${new URLSearchParams({ tenant: String(f.get("tenant")).trim() || "default", subject })}`); } catch (e) { subjectView = { error: String(e) }; }
+    drawData();
+  });
+  const s = subjectView;
+  const subject = !s ? null : s.error ? el("div", { class: "err" }, s.error) : el("div", { class: "grid", style: "gap:8px" },
+    el("div", {}, el("b", { class: "mono" }, s.subject), el("span", { class: "note" }, ` in ${s.tenant}: `),
+      s.held.length ? `${num(sum(s.held.map((h) => h.count)))} personal values` : "no personal values",
+      s.erased.length ? el("span", { class: "bad" }, ` · erased ${s.erased.length === 1 ? "once" : `${s.erased.length} times`}, last `, when(s.erased[s.erased.length - 1].at)) : "",
+      s.pending ? el("span", { class: "warn" }, " · an erasure is being carried out") : ""),
+    s.held.length ? el("div", { class: "chips" }, s.held.map((h) => el("span", { class: "t" }, h.domain ? `${h.domain}.${h.type}` : "commands", el("span", { class: "faint" }, ` ${num(h.count)}`)))) : null);
+  return [
+    el("div", { class: "tiles" },
+      dataKpi("Personal values", num(v.personal), `of ${plural(v.subjects, "subject")}`),
+      dataKpi("Secret values", num(v.secret), "kept until their command completes"),
+      dataKpi("Erasures", num(v.erasures), v.pending ? el("span", { class: "warn" }, `${num(v.pending)} not carried out yet`) : "none pending"),
+      dataKpi("Vault key", `${share < 0.0001 ? "< 0.01" : (share * 100).toFixed(2)} %`, `${num(v.sealed)} of ${num(v.limit)} values it may encrypt`, meter(v.sealed, v.limit, 0.5))),
+    share > 0.5 ? el("div", { class: "panel warn" }, "The vault key has encrypted more than half the values one key may. Plan a ", el("code", {}, "kernable vault rekey"), ".") : null,
+    el("div", { class: "grid cols-2" },
+      el("div", { class: "panel" }, el("h2", {}, "Personal values per aggregate type", el("span", { class: "aside" }, "the events that refer to them")),
+        v.types.length ? el("div", { class: "tbl flat" }, el("table", {}, el("tr", {}, el("th", {}, "Aggregate type"), el("th", { class: "n" }, "Values"), el("th", {}, "Share")), typeRows)) : el("div", { class: "note" }, "None.")),
+      el("div", { class: "panel" }, el("h2", {}, "Look up a subject", el("span", { class: "aside" }, "by its exact ID; subjects are not listed")), form, subject)),
+    el("div", { class: "panel" }, el("h2", {}, "Erasures", el("span", { class: "aside" }, "the vault keeps only a hash of the subject")),
+      v.recent.length ? el("div", { class: "tbl flat" }, el("table", {}, el("tr", {}, el("th", {}, "When"), el("th", {}, "Tenant"), el("th", { class: "n" }, "Values erased")),
+        v.recent.map((r) => el("tr", {}, el("td", {}, when(r.at), el("span", { class: "faint" }, ` · ${iso(r.at)}`)), el("td", {}, r.tenant), el("td", { class: "n" }, num(r.erased)))))) : el("div", { class: "note" }, "No erasures yet.")),
+  ].filter(Boolean);
+}
+
+function drawSnapshots() {
+  const v = snapView;
+  if (!v) return [el("div", { class: "empty" }, "…")];
+  const totalBytes = sum(v.types.map((t) => t.bytes)), behind = sum(v.types.map((t) => t.behind));
+  return [
+    el("div", { class: "tiles" },
+      dataKpi("Snapshots", num(v.count), `of ${plural(v.types.length, "aggregate type")}`),
+      dataKpi("Size", bytes(totalBytes), v.count ? `${bytes(Math.round(totalBytes / v.count))} on average` : ""),
+      dataKpi("Events since", num(behind), "that workers fold on top of the snapshots"),
+      dataKpi("Furthest behind", num(Math.max(0, ...v.types.map((t) => t.maxBehind))), "events since one aggregate's snapshot")),
+    el("div", { class: "panel" }, el("h2", {}, "Per aggregate type", el("span", { class: "aside" }, "a worker sends one every so many events (snapshotEvery)")),
+      v.types.length ? el("div", { class: "tbl flat" }, el("table", {},
+        el("tr", {}, el("th", {}, "Aggregate type"), el("th", { class: "n" }, "Snapshots"), el("th", { class: "n" }, "Size"), el("th", {}, "Schemas"), el("th", { class: "n" }, "Events since"), el("th", { class: "n" }, "Most behind"), el("th", {}, "Last taken")),
+        v.types.map((t) => el("tr", {},
+          el("td", {}, el("span", { class: "faint" }, `${domainOf(t.type)}.`), short(t.type)),
+          el("td", { class: "n" }, num(t.count)), el("td", { class: "n" }, bytes(t.bytes)),
+          el("td", { class: "mono" }, t.schemas.join(", ")),
+          el("td", { class: "n" }, num(t.behind)), el("td", { class: "n" }, num(t.maxBehind)),
+          el("td", {}, t.newest ? when(t.newest) : el("span", { class: "faint" }, "–")))))) : el("div", { class: "note" }, "No snapshots: aggregates are folded from their events alone.")),
+    v.furthest.length ? el("div", { class: "panel" }, el("h2", {}, "Furthest from their snapshot", el("span", { class: "aside" }, "the events a worker folds on top of it")),
+      el("div", { class: "tbl flat" }, el("table", {}, el("tr", {}, el("th", {}, "Aggregate"), el("th", { class: "n" }, "Snapshot at"), el("th", { class: "n" }, "Events since"), el("th", {}, "Taken")),
+        v.furthest.map((f) => el("tr", {},
+          el("td", {}, el("span", { class: "faint" }, `${f.domain}.${f.type} `), el("a", { class: "mono", href: historyHref(f) }, f.id), f.tenant !== "default" ? el("span", { class: "faint" }, ` · ${f.tenant}`) : null),
+          el("td", { class: "n" }, `v${f.version}`), el("td", { class: "n" }, num(f.behind)), el("td", {}, f.createdAt ? when(f.createdAt) : "–")))))) : null,
+  ];
+}
+
+function drawFiles() {
+  const v = filesView;
+  if (!v) return [el("div", { class: "empty" }, "…")];
+  const open = (tenant, domain, prefix = "") => `/explore/data/files?${new URLSearchParams({ ...(tenant !== "default" ? { tenant } : {}), domain, ...(prefix ? { prefix } : {}) })}`;
+  const out = [
+    el("div", { class: "tiles" },
+      dataKpi("Files", num(sum(v.domains.map((d) => d.files))), `in ${plural(v.domains.length, "domain")}`),
+      dataKpi("Size", bytes(sum(v.domains.map((d) => d.bytes))), "in the store")),
+  ];
+  if (!fileAt.domain) {
+    out.push(el("div", { class: "panel" }, el("h2", {}, "Per tenant and domain", el("span", { class: "aside" }, "not erased with the vault: a domain deletes a person's files itself")),
+      v.domains.length ? el("div", { class: "tbl flat" }, el("table", {}, el("tr", {}, el("th", {}, "Domain"), el("th", {}, "Tenant"), el("th", { class: "n" }, "Files"), el("th", { class: "n" }, "Size")),
+        v.domains.map((d) => el("tr", { class: "link", onclick: () => go(open(d.tenant, d.domain)) }, el("td", {}, el("a", { href: open(d.tenant, d.domain) }, d.domain)), el("td", {}, d.tenant), el("td", { class: "n" }, num(d.files)), el("td", { class: "n" }, bytes(d.bytes)))))) : el("div", { class: "note" }, "No files yet.")));
+    return out;
+  }
+  // One domain: its keys as folders by "/".
+  const tenant = fileAt.tenant || "default", files = filesList?.files ?? [];
+  const parts = fileAt.prefix.split("/").filter(Boolean);
+  const crumbs = [el("a", { href: "/explore/data/files" }, "All files"), " / ", el("a", { href: open(tenant, fileAt.domain) }, fileAt.domain),
+    tenant !== "default" ? el("span", { class: "faint" }, ` (${tenant})`) : null,
+    parts.map((p, i) => [" / ", el("a", { href: open(tenant, fileAt.domain, `${parts.slice(0, i + 1).join("/")}/`) }, p)])];
+  const folders = new Map(), here = [];
+  for (const f of files) {
+    const rest = f.key.slice(fileAt.prefix.length), slash = rest.indexOf("/");
+    if (slash >= 0) { const name = rest.slice(0, slash); const x = folders.get(name) ?? { files: 0, size: 0 }; x.files++; x.size += f.size; folders.set(name, x); }
+    else here.push(f);
+  }
+  out.push(el("div", { class: "panel" }, el("div", { class: "note", style: "font-size:13px" }, crumbs),
+    el("div", { class: "tbl flat" }, el("table", {}, el("tr", {}, el("th", {}, "Name"), el("th", {}, "Type"), el("th", { class: "n" }, "Size")),
+      [...folders].map(([name, x]) => el("tr", { class: "link", onclick: () => go(open(tenant, fileAt.domain, `${fileAt.prefix}${name}/`)) },
+        el("td", {}, el("span", { class: "faint" }, "▸ "), el("a", { href: open(tenant, fileAt.domain, `${fileAt.prefix}${name}/`) }, `${name}/`)), el("td", { class: "faint" }, plural(x.files, "file")), el("td", { class: "n" }, bytes(x.size)))),
+      here.map((f) => el("tr", {}, el("td", { class: "mono" }, f.key.slice(fileAt.prefix.length)), el("td", { class: "muted" }, f.contentType), el("td", { class: "n" }, bytes(f.size)))),
+      files.length ? null : el("tr", {}, el("td", { colspan: 3, class: "note" }, "No files here.")))),
+    filesList?.next ? el("div", { class: "note" }, `The first ${num(files.length)} files are shown.`) : null));
+  return out;
+}
+
+function drawCacheView() {
+  const v = cacheView;
+  if (!v) return [el("div", { class: "empty" }, "…")];
+  const reads = v.hits + v.misses;
+  const domains = [...new Set(v.domains.map((d) => d.domain))].sort();
+  const sel = el("select", { class: "ctl", "aria-label": "Domain" }, el("option", { value: "" }, "All domains"), domains.map((d) => el("option", { value: d, selected: d === cacheFilter.domain }, d)));
+  const text = el("input", { class: "ctl", id: "cache-text", placeholder: "Key contains…", value: cacheFilter.text, style: "width:220px" });
+  const refresh = async () => { await loadData(); drawData(); };
+  sel.addEventListener("change", () => { cacheFilter.domain = sel.value; refresh(); });
+  let t = null;
+  text.addEventListener("input", () => { cacheFilter.text = text.value; clearTimeout(t); t = setTimeout(async () => { await refresh(); const i = $("cache-text"); i?.focus(); i?.setSelectionRange(i.value.length, i.value.length); }, 250); });
+  const keys = cacheKeys?.keys ?? [];
+  return [
+    el("div", { class: "tiles" },
+      dataKpi("Entries", num(v.entries), `in ${plural(v.domains.length, "domain")}`),
+      dataKpi("Memory", bytes(v.bytes), `of ${bytes(v.maxBytes)} (--max-cache-bytes)`, meter(v.bytes, v.maxBytes)),
+      dataKpi("Hit rate", reads ? pct(v.hits, reads) : "–", `${num(v.hits)} hits · ${num(v.misses)} misses`),
+      dataKpi("Dropped", num(v.expired + v.evicted), v.evicted ? el("span", { class: "warn" }, `${num(v.evicted)} evicted when full · ${num(v.expired)} expired`) : `${num(v.expired)} expired · none evicted`)),
+    el("div", { class: "note" }, "Kept in memory: everything here started with the kernel, ", when(v.startedAt), "."),
+    el("div", { class: "grid cols-2e" },
+      el("div", { class: "panel" }, el("h2", {}, "Per domain"),
+        v.domains.length ? el("div", { class: "tbl flat" }, el("table", {}, el("tr", {}, el("th", {}, "Domain"), el("th", {}, "Tenant"), el("th", { class: "n" }, "Entries"), el("th", { class: "n" }, "Size")),
+          v.domains.map((d) => el("tr", { class: "link", onclick: () => { cacheFilter.domain = d.domain; refresh(); } }, el("td", {}, d.domain), el("td", {}, d.tenant), el("td", { class: "n" }, num(d.entries)), el("td", { class: "n" }, bytes(d.bytes)))))) : el("div", { class: "note" }, "Empty.")),
+      el("div", { class: "panel" }, el("h2", {}, "Keys", el("span", { class: "aside" }, "without their values")),
+        el("div", { class: "controls" }, sel, text),
+        el("div", { class: "tbl flat" }, el("table", {}, el("tr", {}, el("th", {}, "Key"), el("th", {}, "Domain"), el("th", { class: "n" }, "Size"), el("th", { class: "n" }, "Expires in")),
+          keys.map((k) => el("tr", {}, el("td", { class: "mono" }, k.key), el("td", {}, k.domain, k.tenant !== "default" ? el("span", { class: "faint" }, ` · ${k.tenant}`) : null), el("td", { class: "n" }, bytes(k.bytes)), el("td", { class: "n" }, k.expiresInMs === null || k.expiresInMs === undefined ? el("span", { class: "faint" }, "never") : duration(k.expiresInMs)))),
+          keys.length ? null : el("tr", {}, el("td", { colspan: 4, class: "note" }, "No key matches.")))),
+        keys.length >= (cacheKeys?.limit ?? Infinity) ? el("div", { class: "note" }, `The first ${num(keys.length)} keys are shown.`) : null)),
+  ];
+}
+
 // ================= Search =================
 let searchResult = null, searchRun = 0;
 async function runSearch(q) {
@@ -2456,6 +2639,7 @@ async function load() {
     if (exploreTab === "events" && !live) jobs.push(follow());
     if (exploreTab === "commands" && !live) jobs.push(cfollow());
     if (exploreTab === "aggregates") jobs.push(loadStreams(), stream ? loadHistory() : null);
+    if (exploreTab === "data") jobs.push(loadData());
   }
   await Promise.all(jobs);
   render();
@@ -2482,7 +2666,7 @@ function streamUrl() {
     if (route.view === "case" && caseRef) q.set("case", caseRef.id);
   }
   if (top === "explore") {
-    if (["domains", "catalog"].includes(exploreTab)) topics.push("pulse");
+    if (["domains", "catalog", "data"].includes(exploreTab)) topics.push("pulse");
     if (exploreTab === "aggregates") topics.push("head");
     if (exploreTab === "events" && $("live").checked) {
       topics.push("events");

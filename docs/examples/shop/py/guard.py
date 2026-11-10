@@ -38,7 +38,8 @@ def _(check: Check):
         return  # services may read
     if check.kind == "command" and check.type in PROCESSES.get(who, ()):
         return
-    target = check.aggregate_id if check.kind == "command" else check.data.get("id")
+    data = check.data or {}  # files and cache requests carry none: they have no owner
+    target = check.aggregate_id if check.kind == "command" else data.get("id")
     if check.type == "Place":
         owner = check.data.get("customerId")
     elif check.type == "GetCustomer" or check.aggregate_type == "customer":

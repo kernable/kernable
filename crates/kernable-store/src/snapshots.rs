@@ -33,6 +33,22 @@ pub trait SnapshotStore: Send + Sync {
 
     /// Deletes the aggregate's snapshot, if any.
     fn remove(&self, stream: &StreamId) -> Result<()>;
+
+    /// Every snapshot without its state, for the UI.
+    fn infos(&self) -> Result<Vec<SnapshotInfo>>;
+}
+
+/// A snapshot as the UI shows it: never its state, which may hold personal values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotInfo {
+    pub stream: StreamId,
+    /// The aggregate's version it was taken at.
+    pub version: u64,
+    pub schema: String,
+    /// The state's length.
+    pub bytes: u64,
+    /// When it was taken (ms); 0 when the store does not keep it.
+    pub created_at: i64,
 }
 
 /// Opens a snapshot store: `sqlite:<path>`, a bare SQLite path, or `memory:`.
@@ -79,6 +95,23 @@ impl SnapshotStore for MemorySnapshots {
     fn remove(&self, stream: &StreamId) -> Result<()> {
         self.map().remove(stream);
         Ok(())
+    }
+
+    fn infos(&self) -> Result<Vec<SnapshotInfo>> {
+        Ok(self
+            .map()
+            .iter()
+            .filter_map(|(stream, r)| {
+                let s = r.snapshot.as_ref()?;
+                Some(SnapshotInfo {
+                    stream: stream.clone(),
+                    version: s.version,
+                    schema: s.schema.clone(),
+                    bytes: s.state.len() as u64,
+                    created_at: 0,
+                })
+            })
+            .collect())
     }
 }
 
@@ -183,5 +216,28 @@ impl SnapshotStore for SqliteSnapshots {
             params![s.tenant_id, s.domain, s.aggregate_type, s.aggregate_id],
         )?;
         Ok(())
+    }
+
+    fn infos(&self) -> Result<Vec<SnapshotInfo>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT tenant_id, domain, aggregate_type, aggregate_id, version, schema,
+                    length(state), created_at FROM snapshots",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(SnapshotInfo {
+                stream: StreamId {
+                    tenant_id: r.get(0)?,
+                    domain: r.get(1)?,
+                    aggregate_type: r.get(2)?,
+                    aggregate_id: r.get(3)?,
+                },
+                version: r.get::<_, i64>(4)? as u64,
+                schema: r.get(5)?,
+                bytes: r.get::<_, i64>(6)? as u64,
+                created_at: r.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 }

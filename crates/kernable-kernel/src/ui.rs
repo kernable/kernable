@@ -39,7 +39,16 @@
 //! - `GET /api/counts?domain=`: per event type of the domain (without: of every domain), how
 //!   many the log holds, the newest's time and the last hour per minute; per command type, how
 //!   many came in the last hour, and how many of them were rejected; per query type, how many
-//!   were asked in the last hour, answered, rejected or failed, and how long they took.
+//!   were asked in the last hour, answered, rejected or failed, and how long they took;
+//! - `GET /api/vault` (or `?tenant=&subject=`: one subject): what the vault holds, counted,
+//!   never a value: personal and secret values, subjects, per aggregate type, erasures and
+//!   those not carried out yet, and how many values the key encrypted against its limit;
+//! - `GET /api/snapshots`: per aggregate type, its snapshots (never their state): how many,
+//!   their size and schemas, and how many events the aggregates have gained since;
+//! - `GET /api/files` (or `?tenant=&domain=&prefix=&after=`: the files there): per tenant and
+//!   domain, how many files and their size; never their contents;
+//! - `GET /api/cache` (or `?keys=1&tenant=&domain=&text=`: the keys): what the cache holds,
+//!   its hits, misses, expired and evicted values since the kernel started; never a value.
 //!
 //! It never decrypts the vault: a vault field shows its subject, whether it is secret, or that
 //! it was erased. Snapshot states are not shown either, as they may hold personal values.
@@ -142,6 +151,10 @@ pub(crate) fn respond(kernel: &Kernel, request: &[u8]) -> Vec<u8> {
         "/api/cases" => cases(kernel, &params),
         "/api/case" => case(kernel, &params),
         "/api/counts" => counts(kernel, &params),
+        "/api/vault" => vault(kernel, &params),
+        "/api/snapshots" => snapshots(kernel),
+        "/api/files" => files(kernel, &params),
+        "/api/cache" => cache(kernel, &params),
         _ => return reply("404 Not Found", "text/plain", b"not found\n"),
     };
     match result {
@@ -533,6 +546,19 @@ fn health(kernel: &Kernel) -> Result<Value, BoxError> {
             format!("{held} of {max} bytes: at the limit new commands are refused."),
             Value::Null,
         );
+    }
+    // The vault key past half of what one key may encrypt: time for `kernable vault rekey`.
+    if let Some(vault) = &kernel.vault {
+        let sealed = vault.sealed()?;
+        let limit = kernable_store::vault::MAX_SEALED;
+        if sealed > limit / 2 {
+            add(
+                if sealed * 10 >= limit * 9 { "bad" } else { "warn" },
+                format!("Vault key at {} % of its limit", sealed * 100 / limit),
+                "It has encrypted more than half the values one key may: plan a `kernable vault rekey`.".into(),
+                json!({ "href": "/explore/data/vault" }),
+            );
+        }
     }
     // A burst of rejections: of the business (not the process engine's own), 5 or more and
     // more than 5 % of the commands in the last 10 minutes.
@@ -1081,6 +1107,191 @@ fn events(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, Bo
 
 /// The newest rejected commands: what was sent, by whom, and why it was refused. The rejection
 /// itself carries no time; `receivedAt` is when the kernel accepted the command.
+/// How many erasures `/api/vault` lists.
+const VAULT_ERASURES: usize = 50;
+
+/// How many aggregates furthest from their snapshot `/api/snapshots` lists.
+const SNAPSHOTS_BEHIND: usize = 20;
+
+/// How many files `/api/files` lists at most at once.
+const FILES_PAGE: usize = 500;
+
+/// How many cache keys `/api/cache` lists at most.
+const CACHE_KEYS: usize = 500;
+
+fn vault(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, BoxError> {
+    let Some(vault) = &kernel.vault else {
+        return Ok(json!({ "enabled": false }));
+    };
+    let subject = params.get("subject").map_or("", |v| v.trim());
+    if !subject.is_empty() {
+        let tenant = params.get("tenant").map_or("default", |v| v.trim());
+        let v = vault.subject(tenant, subject)?;
+        return Ok(json!({
+            "tenant": tenant,
+            "subject": subject,
+            "held": v.held.iter().map(|(d, t, n)| json!({ "domain": d, "type": t, "count": n })).collect::<Vec<_>>(),
+            "erased": v.erased.iter().map(|(n, at)| json!({ "erased": n, "at": at })).collect::<Vec<_>>(),
+            "pending": v.pending,
+        }));
+    }
+    let o = vault.overview(VAULT_ERASURES)?;
+    Ok(json!({
+        "enabled": true,
+        "personal": o.personal,
+        "secret": o.secret,
+        "subjects": o.subjects,
+        "types": o.types.iter().map(|(d, t, n)| json!({ "domain": d, "type": t, "count": n })).collect::<Vec<_>>(),
+        "erasures": o.erasures,
+        "recent": o.recent.iter().map(|(t, n, at)| json!({ "tenant": t, "erased": n, "at": at })).collect::<Vec<_>>(),
+        "pending": o.intents,
+        "sealed": o.sealed,
+        "limit": kernable_store::vault::MAX_SEALED,
+    }))
+}
+
+fn snapshots(kernel: &Kernel) -> Result<Value, BoxError> {
+    let infos = kernel.snapshots.infos()?;
+    // The aggregates' versions now, of the most recently changed ones.
+    let versions: HashMap<StreamId, u64> = kernel
+        .store
+        .streams(STREAMS_SEARCH)?
+        .into_iter()
+        .map(|s| (s.stream, s.version))
+        .collect();
+    struct Type {
+        count: u64,
+        bytes: u64,
+        schemas: std::collections::BTreeSet<String>,
+        oldest: i64,
+        newest: i64,
+        behind: u64,
+        max_behind: u64,
+    }
+    let mut types: BTreeMap<String, Type> = BTreeMap::new();
+    let mut furthest: Vec<(u64, &kernable_store::snapshots::SnapshotInfo)> = Vec::new();
+    for i in &infos {
+        let t = types
+            .entry(format!("{}.{}", i.stream.domain, i.stream.aggregate_type))
+            .or_insert(Type {
+                count: 0,
+                bytes: 0,
+                schemas: Default::default(),
+                oldest: i64::MAX,
+                newest: 0,
+                behind: 0,
+                max_behind: 0,
+            });
+        let behind = versions
+            .get(&i.stream)
+            .map_or(0, |v| v.saturating_sub(i.version));
+        t.count += 1;
+        t.bytes += i.bytes;
+        t.schemas.insert(i.schema.clone());
+        if i.created_at > 0 {
+            t.oldest = t.oldest.min(i.created_at);
+            t.newest = t.newest.max(i.created_at);
+        }
+        t.behind += behind;
+        t.max_behind = t.max_behind.max(behind);
+        furthest.push((behind, i));
+    }
+    furthest.sort_by_key(|a| std::cmp::Reverse(a.0));
+    let types: Vec<Value> = types
+        .into_iter()
+        .map(|(name, t)| {
+            json!({
+                "type": name,
+                "count": t.count,
+                "bytes": t.bytes,
+                "schemas": t.schemas,
+                "oldest": if t.oldest == i64::MAX { 0 } else { t.oldest },
+                "newest": t.newest,
+                "behind": t.behind,
+                "maxBehind": t.max_behind,
+            })
+        })
+        .collect();
+    let furthest: Vec<Value> = furthest
+        .iter()
+        .filter(|(b, _)| *b > 0)
+        .take(SNAPSHOTS_BEHIND)
+        .map(|(behind, i)| {
+            json!({
+                "tenant": i.stream.tenant_id,
+                "domain": i.stream.domain,
+                "type": i.stream.aggregate_type,
+                "id": i.stream.aggregate_id,
+                "version": i.version,
+                "behind": behind,
+                "createdAt": i.created_at,
+            })
+        })
+        .collect();
+    Ok(json!({ "count": infos.len(), "types": types, "furthest": furthest }))
+}
+
+fn files(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, BoxError> {
+    let param = |name: &str| params.get(name).map_or("", |v| v.trim());
+    if !param("domain").is_empty() {
+        let tenant = if param("tenant").is_empty() {
+            "default"
+        } else {
+            param("tenant")
+        };
+        let mut files = kernel.data.list(
+            tenant,
+            param("domain"),
+            param("prefix"),
+            param("after"),
+            FILES_PAGE + 1,
+        )?;
+        let more = files.len() > FILES_PAGE;
+        files.truncate(FILES_PAGE);
+        let next = if more {
+            files.last().map(|f| f.key.clone())
+        } else {
+            None
+        };
+        return Ok(json!({
+            "tenant": tenant,
+            "domain": param("domain"),
+            "files": files.iter().map(|f| json!({ "key": f.key, "contentType": f.content_type, "size": f.size })).collect::<Vec<_>>(),
+            "next": next,
+        }));
+    }
+    let summary = kernel.data.summary()?;
+    Ok(json!({
+        "domains": summary.iter().map(|d| json!({ "tenant": d.tenant, "domain": d.domain, "files": d.files, "bytes": d.bytes })).collect::<Vec<_>>(),
+    }))
+}
+
+fn cache(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, BoxError> {
+    let param = |name: &str| params.get(name).map_or("", |v| v.trim());
+    if param("keys") == "1" {
+        let keys = kernel
+            .cache
+            .keys(param("tenant"), param("domain"), param("text"), CACHE_KEYS);
+        return Ok(json!({
+            "keys": keys.iter().map(|k| json!({ "tenant": k.tenant, "domain": k.domain, "key": k.key, "bytes": k.bytes, "expiresInMs": k.expires_in_ms })).collect::<Vec<_>>(),
+            "limit": CACHE_KEYS,
+        }));
+    }
+    let s = kernel.cache.stats();
+    Ok(json!({
+        "entries": s.entries,
+        "bytes": s.bytes,
+        "maxBytes": s.max_bytes,
+        "sets": s.sets,
+        "hits": s.hits,
+        "misses": s.misses,
+        "expired": s.expired,
+        "evicted": s.evicted,
+        "domains": s.domains.iter().map(|(t, d, n, b)| json!({ "tenant": t, "domain": d, "entries": n, "bytes": b })).collect::<Vec<_>>(),
+        "startedAt": kernel.started_at,
+    }))
+}
+
 /// How many events one `/api/counts` request counts at most: a long log is counted over
 /// several, and the answer says how far it got.
 const COUNT_BUDGET: u64 = 200_000;

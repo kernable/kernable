@@ -63,6 +63,20 @@ pub trait DataStore: Send + Sync {
         after: &str,
         limit: usize,
     ) -> Result<Vec<Listed>>;
+
+    /// Per tenant and domain, how many files and how many bytes they take, for the UI;
+    /// sorted by tenant and domain.
+    fn summary(&self) -> Result<Vec<DataSummary>>;
+}
+
+/// The files of one tenant's domain, counted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataSummary {
+    pub tenant: String,
+    pub domain: String,
+    pub files: u64,
+    /// What they take in the store (with each file's header, in a file store).
+    pub bytes: u64,
 }
 
 /// A file as [`DataStore::list`] names it.
@@ -268,6 +282,26 @@ impl DataStore for MemoryData {
         Ok(files)
     }
 
+    fn summary(&self) -> Result<Vec<DataSummary>> {
+        let mut by: std::collections::BTreeMap<(String, String), (u64, u64)> = Default::default();
+        for (k, d) in self.map().iter() {
+            let e = by
+                .entry((k.tenant_id.clone(), k.domain.clone()))
+                .or_default();
+            e.0 += 1;
+            e.1 += d.data.len() as u64;
+        }
+        Ok(by
+            .into_iter()
+            .map(|((tenant, domain), (files, bytes))| DataSummary {
+                tenant,
+                domain,
+                files,
+                bytes,
+            })
+            .collect())
+    }
+
     fn drop_tenant(&self, tenant: &str) -> Result<usize> {
         let mut map = self.map();
         let before = map.len();
@@ -385,6 +419,57 @@ impl DataStore for FileData {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
             Err(e) => Err(e.into()),
         }
+    }
+
+    fn summary(&self) -> Result<Vec<DataSummary>> {
+        // Tenants and domains are spelled as hex (their names are short); the files are
+        // counted from the directory, their sizes from the file system.
+        let name = |n: &std::ffi::OsStr| -> Option<String> {
+            hex::decode(n.to_string_lossy().as_bytes())
+                .ok()
+                .and_then(|b| String::from_utf8(b).ok())
+        };
+        let tenants = match fs::read_dir(&self.0) {
+            Ok(read) => read,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        let mut out = Vec::new();
+        for t in tenants {
+            let t = t?;
+            let Some(tenant) = name(&t.file_name()) else {
+                continue;
+            };
+            if !t.file_type()?.is_dir() {
+                continue;
+            }
+            for d in fs::read_dir(t.path())? {
+                let d = d?;
+                let Some(domain) = name(&d.file_name()) else {
+                    continue;
+                };
+                if !d.file_type()?.is_dir() {
+                    continue;
+                }
+                let (mut files, mut bytes) = (0, 0);
+                for f in fs::read_dir(d.path())? {
+                    let f = f?;
+                    if f.file_name().to_string_lossy().contains('.') {
+                        continue; // half-written
+                    }
+                    files += 1;
+                    bytes += f.metadata()?.len();
+                }
+                out.push(DataSummary {
+                    tenant: tenant.clone(),
+                    domain,
+                    files,
+                    bytes,
+                });
+            }
+        }
+        out.sort_by(|a, b| (&a.tenant, &a.domain).cmp(&(&b.tenant, &b.domain)));
+        Ok(out)
     }
 
     fn drop_tenant(&self, tenant: &str) -> Result<usize> {

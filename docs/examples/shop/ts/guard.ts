@@ -19,7 +19,8 @@ const guardReadmodel = shopDomain.readModel("guard")
     if (check.type === "Register") return; // anyone may sign up
     if (check.kind === "query" && SERVICES.has(who)) return; // services may read
     if (check.kind === "command" && PROCESSES[who]?.includes(check.type)) return;
-    const data = check.data as { id?: string; customerId?: string };
+    // Files and cache requests carry no data: they have no owner, so only the rules above pass them.
+    const data = (check.data ?? {}) as { id?: string; customerId?: string };
     const target = check.kind === "command" ? check.aggregateId! : data.id!;
     const owner =
       check.type === "Place" ? data.customerId

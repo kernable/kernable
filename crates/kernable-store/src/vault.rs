@@ -143,6 +143,37 @@ fn key_id_of(value: &[u8]) -> Option<[u8; 32]> {
     Some(id)
 }
 
+/// What the vault holds, counted without reading a value: see [`Vault::overview`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VaultOverview {
+    /// Personal values (of a subject).
+    pub personal: u64,
+    /// Secret values, kept until their command completes.
+    pub secret: u64,
+    /// Subjects with personal values, per tenant.
+    pub subjects: u64,
+    /// Personal values per aggregate type: domain, aggregate type (both empty for values
+    /// only a command holds), count.
+    pub types: Vec<(String, String, u64)>,
+    /// Erasures carried out.
+    pub erasures: u64,
+    /// The latest erasures, newest first: tenant, values erased, when (ms).
+    pub recent: Vec<(String, u64, i64)>,
+    /// Erasures not carried out yet.
+    pub intents: u64,
+    /// Values encrypted with the current key; see [`MAX_SEALED`].
+    pub sealed: u64,
+}
+
+/// One subject: see [`Vault::subject`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SubjectView {
+    pub held: Vec<(String, String, u64)>,
+    pub erased: Vec<(u64, i64)>,
+    /// An erasure of it is about to be carried out.
+    pub pending: bool,
+}
+
 impl Vault {
     /// Opens the vault at `url` (`sqlite:<path>`, a bare path, or `memory:`), encrypted with
     /// the 32-byte `key`.
@@ -696,6 +727,89 @@ impl Vault {
             [tenant, subject, command_id],
         )?;
         Ok(())
+    }
+
+    /// What the vault holds, without a value or a subject: for the UI. `recent` erasures,
+    /// newest first.
+    pub fn overview(&self, recent: usize) -> Result<VaultOverview> {
+        let conn = self.conn();
+        let count = |sql: &str| -> Result<u64> {
+            Ok(conn.query_row(sql, [], |r| r.get::<_, i64>(0))? as u64)
+        };
+        let personal = count("SELECT COUNT(*) FROM vault WHERE secret = 0")?;
+        let secret = count("SELECT COUNT(*) FROM vault WHERE secret = 1")?;
+        let subjects = count(
+            "SELECT COUNT(*) FROM (SELECT DISTINCT tenant, subject FROM vault WHERE secret = 0)",
+        )?;
+        let erasures = count("SELECT COUNT(*) FROM erasures")?;
+        let intents = count("SELECT COUNT(*) FROM intents")?;
+        let sealed = count("SELECT count FROM sealed")?;
+        let domains = {
+            let mut stmt = conn.prepare(
+                "SELECT COALESCE(domain, ''), COALESCE(aggregate_type, ''), COUNT(*) FROM vault
+                 WHERE secret = 0 GROUP BY 1, 2 ORDER BY 1, 2",
+            )?;
+            stmt.query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? as u64))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let latest = {
+            let mut stmt = conn.prepare(
+                "SELECT tenant, erased, at FROM erasures ORDER BY at DESC, rowid DESC LIMIT ?1",
+            )?;
+            stmt.query_map([recent as i64], |r| {
+                Ok((r.get(0)?, r.get::<_, i64>(1)? as u64, r.get(2)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        Ok(VaultOverview {
+            personal,
+            secret,
+            subjects,
+            types: domains,
+            erasures,
+            recent: latest,
+            intents,
+            sealed,
+        })
+    }
+
+    /// One subject of one tenant: how many personal values it has per aggregate type
+    /// (`domain`, `aggregate type`, count; empty for values only commands hold), and its
+    /// erasures (values erased, when), found by the subject's hash.
+    pub fn subject(&self, tenant: &str, subject: &str) -> Result<SubjectView> {
+        let conn = self.conn();
+        let held = {
+            let mut stmt = conn.prepare(
+                "SELECT COALESCE(domain, ''), COALESCE(aggregate_type, ''), COUNT(*) FROM vault
+                 WHERE tenant = ?1 AND subject = ?2 AND secret = 0 GROUP BY 1, 2 ORDER BY 1, 2",
+            )?;
+            stmt.query_map([tenant, subject], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? as u64))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let hash = hex::encode(Sha256::digest(subject.as_bytes()));
+        let erased = {
+            let mut stmt = conn.prepare(
+                "SELECT erased, at FROM erasures WHERE tenant = ?1 AND subject_hash = ?2 ORDER BY at",
+            )?;
+            stmt.query_map([tenant, hash.as_str()], |r| {
+                Ok((r.get::<_, i64>(0)? as u64, r.get(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let pending: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM intents WHERE tenant = ?1 AND subject = ?2",
+            [tenant, subject],
+            |r| r.get(0),
+        )?;
+        Ok(SubjectView {
+            held,
+            erased,
+            pending: pending > 0,
+        })
     }
 
     /// Erasures not carried out yet: (tenant, subject, command ID).

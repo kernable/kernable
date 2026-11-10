@@ -29,6 +29,38 @@ struct Values {
     /// Bytes of all keys and values.
     bytes: usize,
     sets: u64,
+    /// Since the kernel started: reads that found a live value, and those that did not;
+    /// values dropped because they expired, and the oldest dropped to make room.
+    hits: u64,
+    misses: u64,
+    expired: u64,
+    evicted: u64,
+}
+
+/// What the cache holds and did since the kernel started, for the UI.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CacheStats {
+    pub entries: u64,
+    pub bytes: u64,
+    pub max_bytes: u64,
+    pub sets: u64,
+    pub hits: u64,
+    pub misses: u64,
+    pub expired: u64,
+    pub evicted: u64,
+    /// Per tenant and domain: entries and bytes.
+    pub domains: Vec<(String, String, u64, u64)>,
+}
+
+/// A cache key as the UI lists it: never its value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheKey {
+    pub tenant: String,
+    pub domain: String,
+    pub key: String,
+    pub bytes: u64,
+    /// Milliseconds until it expires; `None`: kept until deleted.
+    pub expires_in_ms: Option<u64>,
 }
 
 /// What a value takes up in the cache.
@@ -52,7 +84,9 @@ impl Values {
             .map(|(k, _)| k.clone())
             .collect();
         for key in expired {
-            self.remove(&key);
+            if self.remove(&key).is_some() {
+                self.expired += 1;
+            }
         }
     }
 }
@@ -82,15 +116,22 @@ impl Cache {
 
     pub fn get(&self, key: Key) -> Option<Vec<u8>> {
         let mut values = self.values();
-        match values.entries.get(&key) {
+        let found = match values.entries.get(&key) {
             Some(Entry {
                 until: Some(until), ..
             }) if *until <= Instant::now() => {
                 values.remove(&key);
+                values.expired += 1;
                 None
             }
             other => other.map(|e| e.value.clone()),
+        };
+        if found.is_some() {
+            values.hits += 1;
+        } else {
+            values.misses += 1;
         }
+        found
     }
 
     /// Sets the value; `ttl_ms` 0 keeps it until it is deleted. The oldest values make room
@@ -113,6 +154,7 @@ impl Cache {
             };
             if let Some(entry) = values.entries.remove(&oldest) {
                 values.bytes -= size(&oldest, &entry.value);
+                values.evicted += 1;
             }
         }
         let seq = values.sets;
@@ -120,6 +162,58 @@ impl Cache {
         values.order.insert(seq, key.clone());
         values.entries.insert(key, Entry { value, until, seq });
         true
+    }
+
+    /// The counts, and per tenant and domain what is held.
+    pub fn stats(&self) -> CacheStats {
+        let values = self.values();
+        let mut domains: BTreeMap<(String, String), (u64, u64)> = BTreeMap::new();
+        for (k, e) in &values.entries {
+            let d = domains.entry((k.0.clone(), k.1.clone())).or_default();
+            d.0 += 1;
+            d.1 += size(k, &e.value) as u64;
+        }
+        CacheStats {
+            entries: values.entries.len() as u64,
+            bytes: values.bytes as u64,
+            max_bytes: self.max_bytes as u64,
+            sets: values.sets,
+            hits: values.hits,
+            misses: values.misses,
+            expired: values.expired,
+            evicted: values.evicted,
+            domains: domains
+                .into_iter()
+                .map(|((t, d), (n, b))| (t, d, n, b))
+                .collect(),
+        }
+    }
+
+    /// Up to `limit` live keys of `tenant` and `domain` (empty: any) that contain `text`,
+    /// sorted; without their values.
+    pub fn keys(&self, tenant: &str, domain: &str, text: &str, limit: usize) -> Vec<CacheKey> {
+        let now = Instant::now();
+        let values = self.values();
+        let mut keys: Vec<CacheKey> = values
+            .entries
+            .iter()
+            .filter(|(k, e)| {
+                (tenant.is_empty() || k.0 == tenant)
+                    && (domain.is_empty() || k.1 == domain)
+                    && (text.is_empty() || k.2.contains(text))
+                    && e.until.is_none_or(|u| u > now)
+            })
+            .map(|(k, e)| CacheKey {
+                tenant: k.0.clone(),
+                domain: k.1.clone(),
+                key: k.2.clone(),
+                bytes: e.value.len() as u64,
+                expires_in_ms: e.until.map(|u| u.duration_since(now).as_millis() as u64),
+            })
+            .collect();
+        keys.sort_by(|a, b| (&a.tenant, &a.domain, &a.key).cmp(&(&b.tenant, &b.domain, &b.key)));
+        keys.truncate(limit);
+        keys
     }
 
     /// Deletes the value; whether there was a live one.
@@ -184,5 +278,47 @@ mod tests {
         for k in ["b", "c", "d"] {
             assert!(cache.get(key(k)).is_some(), "{k} is live and stays");
         }
+    }
+
+    #[test]
+    fn counts_hits_misses_and_lists_keys_without_values() {
+        let cache = Cache::open("memory:", 1_000).unwrap();
+        cache.set(
+            ("t".into(), "shop".into(), "rate:c1".into()),
+            b"7".to_vec(),
+            0,
+        );
+        cache.set(
+            ("t".into(), "billing".into(), "x".into()),
+            b"12".to_vec(),
+            60_000,
+        );
+        assert!(
+            cache
+                .get(("t".into(), "shop".into(), "rate:c1".into()))
+                .is_some()
+        );
+        assert!(
+            cache
+                .get(("t".into(), "shop".into(), "gone".into()))
+                .is_none()
+        );
+        let stats = cache.stats();
+        assert_eq!(
+            (stats.entries, stats.hits, stats.misses, stats.sets),
+            (2, 1, 1, 2)
+        );
+        assert_eq!(stats.domains.len(), 2);
+        let keys = cache.keys("", "shop", "", 10);
+        assert_eq!(keys.len(), 1);
+        assert_eq!(
+            (keys[0].key.as_str(), keys[0].bytes, keys[0].expires_in_ms),
+            ("rate:c1", 1, None)
+        );
+        assert!(
+            cache.keys("t", "billing", "", 10)[0]
+                .expires_in_ms
+                .is_some()
+        );
     }
 }
