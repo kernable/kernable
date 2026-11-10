@@ -1,4 +1,4 @@
-# M13: MVP state (domains, request context, snapshots, in-memory queue), plus the cost of settling with two listeners. Same machine and harness as before.
+# MVP state (domains, request context, snapshots, in-memory queue), plus the cost of settling with two listeners. Same machine and harness as before.
 
 == Apple M2 Max, 2026-10-26, store=memory:
 crypto: sign=17.6us verify=37.0us per-command(2 sign + 2 verify)=109.2us

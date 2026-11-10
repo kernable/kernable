@@ -1,4 +1,4 @@
-# H2: cost of --durability full (fsync with F_FULLFSYNC per write) against normal. Rust worker over
+# Cost of --durability full (fsync with F_FULLFSYNC per write) against normal. Rust worker over
 # a Unix socket, 1 KB payloads, 5 s per run, release build, Apple M2 Max (internal SSD), macOS.
 
 == store=sqlite:k.db, durability=normal

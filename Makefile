@@ -1,6 +1,6 @@
-.PHONY: test check prune py check-packages torture fuzz docs soak
+.PHONY: test check check-rust check-crash check-sdks check-docs prune py check-packages torture fuzz docs soak
 # The simple tier: syntax, types and in-process tests, with no kernel or worker process and no
-# real waiting (W6). Runs in about a minute; `make check` runs everything.
+# real waiting. Runs in about a minute; `make check` runs everything.
 test: py
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets -- -D warnings
@@ -10,25 +10,40 @@ test: py
 	cd sdks/typescript && npm install --no-audit --no-fund --silent && npm test
 	cd sdks/python && .venv/bin/python -m unittest discover -s tests/unit -t .
 
-check: prune py
+# Everything, in four parts that CI runs as parallel jobs.
+check: check-rust check-crash check-sdks check-docs
+
+# Rust: format, known vulnerable dependencies (cargo install cargo-audit; .cargo/audit.toml),
+# lints, and every test on both storage backends.
+check-rust: prune
 	cargo fmt --all --check
-	cargo audit -q  # known vulnerable dependencies (cargo install cargo-audit; .cargo/audit.toml)
+	cargo audit -q
 	cargo clippy --workspace --all-targets -- -D warnings
-	CARGO_TARGET_DIR=target/crash cargo clippy -p kernable-kernel --all-targets --features crash-points -- -D warnings
 	cargo test --workspace
 	KERNABLE_TEST_STORE=file cargo test --workspace --lib --tests
+
+# The real kernel aborted at every crash point (--features crash-points), on both backends.
+check-crash: prune
+	CARGO_TARGET_DIR=target/crash cargo clippy -p kernable-kernel --all-targets --features crash-points -- -D warnings
 	CARGO_TARGET_DIR=target/crash cargo test -p kernable-kernel --features crash-points --test crashes
 	CARGO_TARGET_DIR=target/crash KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --features crash-points --test crashes
 	CARGO_TARGET_DIR=target/crash cargo test -p kernable-kernel --features crash-points --test replication_crashes
 	CARGO_TARGET_DIR=target/crash KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --features crash-points --test replication_crashes
 	CARGO_TARGET_DIR=target/crash cargo test -p kernable-kernel --features crash-points --test move_crashes
 	CARGO_TARGET_DIR=target/crash KERNABLE_TEST_STORE=file cargo test -p kernable-kernel --features crash-points --test move_crashes
+
+# The TypeScript and Python SDKs against a real kernel, on both backends.
+check-sdks: prune py
 	cargo build --workspace
 	cd sdks/typescript && npm install --no-audit --no-fund --silent && npm run -s check \
 		&& KERNABLE_TEST_STORE=file npm run -s check
 	cd sdks/python && .venv/bin/python -m unittest discover tests \
 		&& KERNABLE_TEST_STORE=file .venv/bin/python -m unittest discover tests \
 		&& .venv/bin/python -m unittest discover -s ../../docs/examples/how-to -t ../../docs/examples/how-to
+
+# The documentation: generated reference up to date, the site builds, every example runs.
+check-docs: prune py
+	cargo build --workspace
 	cd docs && npm install --no-audit --no-fund --silent && npm run -s check
 
 # The documentation site at http://localhost:5173; `npm run reference` in docs/ regenerates the

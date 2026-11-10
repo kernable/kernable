@@ -35,14 +35,22 @@ jobs:
       - run: make test
 
   check:
-    name: make check
+    name: make ${{ matrix.part }}
     needs: test
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [check-rust, check-crash, check-sdks, check-docs]
     steps:
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
       - uses: actions/checkout@v5
       - run: rustup toolchain install  # the toolchain pinned in rust-toolchain.toml
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.part }}
       - uses: actions/setup-node@v5
         with:
           node-version: "22"
@@ -50,5 +58,6 @@ jobs:
         with:
           python-version: "3.12"
       - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - run: cargo install cargo-audit --locked
-      - run: make check
+      - if: matrix.part == 'check-rust'
+        run: cargo install cargo-audit --locked
+      - run: make ${{ matrix.part }}
