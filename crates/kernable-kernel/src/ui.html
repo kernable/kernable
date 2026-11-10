@@ -595,7 +595,7 @@ function drawProcesses() {
     const steps = v.model.steps.map((s) => s.name);
     const filter = el("div", { class: "controls" },
       el("select", { class: "ctl", name: "state" }, [["", "every state"], ["open", "not ended"], ["running", "running"], ["waiting", "waiting"], ["incident", "incident"], ["ended", "ended"]].map(([x, l]) => { const o = el("option", { value: x }, l); o.selected = x === caseFilter.state; return o; })),
-      el("select", { class: "ctl", name: "step" }, ["", ...steps].map((x) => { const o = el("option", { value: x }, x || "every step"); o.selected = x === caseFilter.step; return o; })),
+      el("select", { class: "ctl", name: "step", title: "The step a case is at now; an ended case is at its end" }, ["", ...steps].map((x) => { const o = el("option", { value: x }, x ? `now at ${x}` : "at any step"); o.selected = x === caseFilter.step; return o; })),
       el("input", { class: "ctl", name: "text", placeholder: "Case, key or tenant…", value: caseFilter.text }),
       el("span", { class: "note", id: "p-count" }));
     filter.addEventListener("change", procChanged); filter.addEventListener("input", procTyped);
@@ -723,8 +723,21 @@ function casesTable() {
     el("td", {}, stateChip(c.state)), el("td", {}, c.step, c.incident ? [" · ", el("span", { class: "code" }, c.incident.code)] : null),
     el("td", { class: "num" }, duration((c.state === "ended" ? c.lastAt : now()) - c.startedAt)),
     el("td", {}, when(c.startedAt)), el("td", {}, c.tenant), el("td", { class: "num" }, `v${c.version}`)));
-  if (!rows.length) rows.push(el("tr", {}, el("td", { colspan: 7, class: "note" }, caseList.total === 0 && !caseFilter.state && !caseFilter.step && !caseFilter.text ? "No case yet: one starts when the start event commits." : "No case matches the filter.")));
+  if (!rows.length) rows.push(el("tr", {}, el("td", { colspan: 7, class: "note" }, emptyCases())));
   return el("table", {}, el("tr", {}, ["Case", "State", "Step · end", "Took", "Started", "Tenant", "Version"].map((h, i) => el("th", { class: i === 3 || i === 6 ? "num" : "" }, h))), rows);
+}
+
+/** Why the case list is empty: nothing yet, or no case at that step now and where they went. */
+function emptyCases() {
+  const p = currentProcess(), v = currentVersion(p);
+  if (!caseFilter.state && !caseFilter.step && !caseFilter.text) return "No case yet: one starts when the start event commits.";
+  const step = v?.model.steps.find((s) => s.name === caseFilter.step);
+  if (step && step.kind !== "end") {
+    const st = v.steps[step.name] ?? {};
+    const ends = Object.entries(v.ended).filter(([, n]) => n).map(([e]) => e);
+    return `No case is at ${step.name} now. ${num(st.left ?? 0)} went through it in the last ${procWindow}${ends.length ? `; ended ones are listed at their end (${ends.join(", ")})` : ""}.`;
+  }
+  return "No case matches the filter.";
 }
 
 function statisticsTable(v) {
