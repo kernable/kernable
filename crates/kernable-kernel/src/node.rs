@@ -117,7 +117,10 @@ impl Link {
                 }
             }
         };
-        match WitnessServiceClient::new(channel).ask(request).await {
+        let mut client = WitnessServiceClient::new(channel)
+            .max_decoding_message_size(crate::replication::MAX_MESSAGE_BYTES)
+            .max_encoding_message_size(crate::replication::MAX_MESSAGE_BYTES);
+        match client.ask(request).await {
             Ok(answer) => {
                 let answer = answer.into_inner();
                 if answer.lease_ms > 0 {

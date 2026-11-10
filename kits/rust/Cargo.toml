@@ -27,6 +27,7 @@ ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 jsonwebtoken = "9"
 hickory-resolver = "0.26"
+tokio = { version = "1", features = ["rt"] }
 
 [dev-dependencies]
 axum = "0.8"

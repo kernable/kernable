@@ -43,7 +43,8 @@ sequenceDiagram
      is checked as for every signed-in request: an ended one is refused (`unauthenticated`), and
      one that has not proved the account's second factor too (`mfa_required`). It is checked
      against the invitation's tenant as well: a suspended tenant takes nobody in
-     (`tenant_suspended`), one that requires a second factor wants a session that proved one
+     (`tenant_suspended`), nor does a pending one that the platform has not activated yet
+     (`tenant_not_active`), one that requires a second factor wants a session that proved one
      (`mfa_required`), and one that enforces single sign-on a session signed in through it
      (`sso_required`), except for an owner invitation: owners are exempt from enforced SSO, so a
      new owner accepts with any session and can mend a broken configuration.
@@ -51,10 +52,12 @@ sequenceDiagram
      active, since the token proved the email. The name and password are checked first
      (`invalid_name`, `weak_password`), so a refused registration leaves the invitation open.
      Someone whose email already has an account must sign in first (`sign_in_first`), so nobody
-     ends up with an account they cannot use. A suspended tenant takes nobody new in either
-     (`tenant_suspended`): nobody is registered and the invitation stays open.
+     ends up with an account they cannot use. A tenant that is not active (pending or suspended)
+     takes nobody new in either (`tenant_not_active`): nobody is registered and the invitation
+     stays open.
    - Either way, `AcceptInvitation` requires the tenant's `active` fact when it commits, so a
-     tenant suspended in between takes nobody in.
+     tenant suspended in between takes nobody in (`tenant_not_active`: the requirement does not
+     tell pending from suspended).
 5. **Afterwards**, the identity reactor creates the person's identity in the tenant (or keeps the
    one they have), grants the invitation's groups, and adds them as owner for an owner invitation.
 

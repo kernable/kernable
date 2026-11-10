@@ -826,7 +826,7 @@ class SliceTest(unittest.TestCase):
         self.committed(submit(SuspendTenant(reason="owner_requested"), taras, taras, as_tara))
         self.assertEqual(api.join_with_invitation_link(ugo, link["token"]), {"ok": False, "reason": "tenant_suspended"})
         self.assertEqual(api.accept_invitation(invitation, claims=ugo), {"ok": False, "reason": "tenant_suspended"})
-        self.assertEqual(api.accept_invitation(vera, name="Vera", password=PASSWORD), {"ok": False, "reason": "tenant_suspended"})
+        self.assertEqual(api.accept_invitation(vera, name="Vera", password=PASSWORD), {"ok": False, "reason": "tenant_not_active"})
         with self.assertRaises(Rejected) as caught:
             S["kit"].query(FindAccountByEmail(email="join-vera@example.com"), tenant="platform", context=api.service_context)
         self.assertEqual(caught.exception.code, "not_found", "nobody registered")

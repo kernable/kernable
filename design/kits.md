@@ -361,7 +361,7 @@ The token is `<tenantId>.<invitationId>.<tokenId>.<secret>`, so the API knows th
 The API runs it, since the person may have no account yet:
 
 1. It checks who is signed in. Signed in: `accountId` and `email` are the session's account, read with the session's own context, so the middleware checks the session as for every signed-in request. Not signed in: the person enters a name and password, which the API checks first (`invalid_name`, `weak_password`) so a refused registration does not spend the invitation; it picks a new account ID and sets `newAccount`.
-2. `AcceptInvitation` checks the token and the email, and requires the tenant `active` at commit (the `tenancy.tenant` fact), so a tenant that is not active takes nobody in, new or signed in; the API answers `requirement_missing` as `tenant_suspended`. A signed-in account is checked against the tenant first (its second factor, its enforced SSO), except that an owner invitation skips enforced SSO, as owners do.
+2. `AcceptInvitation` checks the token and the email, and requires the tenant `active` at commit (the `tenancy.tenant` fact), so a tenant that is not active takes nobody in, new or signed in; the API answers `requirement_missing` as `tenant_not_active` (the fact does not tell pending from suspended). A signed-in account is checked against the tenant first (its second factor, its enforced SSO), except that an owner invitation skips enforced SSO, as owners do.
 3. For a new person, the API then submits `account.RegisterAccount` with that ID (level `api`, active at once: the token proved the email).
 4. The identity reactor creates the identity with its memberships, and the owner for an owner invitation.
 
@@ -429,7 +429,7 @@ A membership scoped to an aggregate counts as a relation set by hand. `self`, `o
 2. **`public`** types: allow, unless the sign-up policy forbids it (`RegisterAccount`, self-service `CreateTenant`) or the tenant is suspended or deleted.
 3. **Who is asking**: the session in `senderSession` is active and belongs to `senderAccount`, whose account is active; or `senderSession` names an API key that is neither revoked nor expired. Else `unauthenticated`.
 4. **`authenticated`** types: allow.
-5. **Tenant**: the request's tenant is active (else `tenant_suspended`). `senderTenant` is the request's tenant, or the platform tenant (platform groups). Else `forbidden`.
+5. **Tenant**: the request's tenant is active (else `tenant_suspended`, or `tenant_not_active` while it is pending). `senderTenant` is the request's tenant, or the platform tenant (platform groups). Else `forbidden`.
 6. **Identity**: `senderIdentity` is active, in `senderTenant`, and of `senderAccount` (services: of the API key). The tenant's MFA requirement holds (two factors, or a passkey; else `mfa_required`), and so does its enforced SSO (else `sso_required`).
 7. **Owners** of the tenant: allow.
 8. **Memberships**: one that is active, not expired at the check, of an active group, with a permission whose pattern matches the type; its scope is the whole tenant or the target; its `when` relation holds on the target (or its parent with `viaParent`). The target is the command's aggregate, or the aggregate a query declares (`target`; it travels signed with the query); a permission with `when` never matches a request without a target. Else `forbidden`.

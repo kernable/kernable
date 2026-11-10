@@ -735,7 +735,7 @@ test("accepting and joining check the tenant joined too: suspended, a second fac
   assert.ok((await kit.submit(SuspendTenant.new({ reason: "owner_requested" }), { aggregateId: taras, tenant: taras, context: asTara })).committed);
   assert.deepEqual(await api.joinWithInvitationLink(ugo.claims, link.token), { ok: false, reason: "tenant_suspended" });
   assert.deepEqual(await api.acceptInvitation(invitation, { claims: ugo.claims }), { ok: false, reason: "tenant_suspended" });
-  assert.deepEqual(await api.acceptInvitation(vera, { name: "Vera", password: PASSWORD }), { ok: false, reason: "tenant_suspended" });
+  assert.deepEqual(await api.acceptInvitation(vera, { name: "Vera", password: PASSWORD }), { ok: false, reason: "tenant_not_active" });
   await assert.rejects(kit.query(FindAccountByEmail.new({ email: "join-vera@example.com" }), { tenant: PLATFORM_TENANT, context: api.serviceContext }),
     (e: Rejected) => e.code === "not_found", "nobody registered");
   assert.ok((await kit.submit(ReactivateTenant.new(), { aggregateId: taras, tenant: taras, context: asTara })).committed);

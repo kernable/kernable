@@ -10,7 +10,7 @@ import { PLATFORM_TENANT } from "../shared/constants.ts";
 import { ESCALATION, ruleOf } from "./levels.ts";
 
 export interface Refusal {
-  code: "unauthenticated" | "forbidden" | "tenant_suspended" | "mfa_required" | "sso_required" | "sign_up_closed";
+  code: "unauthenticated" | "forbidden" | "tenant_suspended" | "tenant_not_active" | "mfa_required" | "sso_required" | "sign_up_closed";
   message: string;
 }
 
@@ -134,6 +134,8 @@ export function covers(pattern: string, name: string): boolean {
 }
 
 const refuse = (code: Refusal["code"], message: string): Refusal => ({ code, message });
+/** The refusal code for a tenant that is not active: `tenant_not_active` while it is pending (not yet activated), `tenant_suspended` otherwise. */
+const inactive = (status: string | undefined): Refusal["code"] => (status === "pending" ? "tenant_not_active" : "tenant_suspended");
 
 /** The aggregate the request is about: a command's, or the one a query declares (`static target`). */
 export function targetOf(check: Check): Target | null {
@@ -290,7 +292,7 @@ export function decide(k: Knowledge, check: Check, now: number, options: DecideO
     if (check.domain === "account" && check.tenant !== PLATFORM_TENANT) {
       const t = k.tenants.get(check.tenant);
       if (!t || t.status === "deleted") return no("forbidden", "No such tenant");
-      if (t.status !== "active") return no("tenant_suspended", `The tenant is ${t.status}`);
+      if (t.status !== "active") return no(inactive(t.status), `The tenant is ${t.status}`);
       if (t.mfaRequired && sender.factors.length < 2 && !sender.factors.includes("passkey")) return no("mfa_required", "This tenant requires a second factor");
       if (t.ssoEnforced && !options.assumeSession && sender.method !== `sso:${t.ssoEnforced}`) return no("sso_required", "Sign in through the tenant's single sign-on");
     }
@@ -317,7 +319,7 @@ export function decide(k: Knowledge, check: Check, now: number, options: DecideO
   if (!platform) {
     if (!tenant || tenant.status === "deleted") return no("forbidden", "No such tenant");
     // An owner may undo their own suspension (owner_requested), decided in step 7.
-    if (tenant.status !== "active" && type !== "tenancy.ReactivateTenant") return no("tenant_suspended", `The tenant is ${tenant.status}`);
+    if (tenant.status !== "active" && type !== "tenancy.ReactivateTenant") return no(inactive(tenant.status), `The tenant is ${tenant.status}`);
   }
 
   // 6. The identity, and the tenant's MFA requirement.
@@ -350,7 +352,7 @@ export function decide(k: Knowledge, check: Check, now: number, options: DecideO
   }
   if (owner) return allow(platform ? "an owner of the platform" : "an owner of the tenant (every permission)");
   if (type === "invitation.CreateInvitation" && data.owner === true && !platform) return no("forbidden", "Owner invitations are the owners'");
-  if (!platform && tenant?.status !== "active") return no("tenant_suspended", `The tenant is ${tenant?.status}`);
+  if (!platform && tenant?.status !== "active") return no(inactive(tenant?.status), `The tenant is ${tenant?.status}`);
   if (rule.level === "owners") return no("forbidden", `${type} is for the tenant's owners`);
 
   // 8. Memberships: pattern, scope, relation, expiry.

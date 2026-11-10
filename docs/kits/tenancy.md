@@ -34,6 +34,8 @@ stateDiagram-v2
   deleted --> [*]
 ```
 
+- A **pending** tenant waits for the platform's `ActivateTenant`; until then the middleware refuses
+  its requests (`tenant_not_active`).
 - A **suspended** tenant keeps its data, but the middleware refuses its requests (`tenant_suspended`).
   The platform can still act on it; its owners can reactivate it only if they suspended it
   themselves (`owner_requested`).

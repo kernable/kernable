@@ -1799,7 +1799,7 @@ async fn joining_checks_the_tenant(w: &World) {
     refused(
         api.accept_invitation(&vera, None, Some(("Vera", PASSWORD)))
             .await,
-        "tenant_suspended",
+        "tenant_not_active",
     );
     let nobody = Query::of(FindAccountByEmail {
         email: "join-vera@example.com".into(),

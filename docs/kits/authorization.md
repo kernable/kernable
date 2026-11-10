@@ -17,9 +17,9 @@ Each request passes these steps in order. The first one that decides, decides.
 |---|---|---|
 | 1. Privileged request | requests marked `bypassAuthorization`, which only keys granted `privileged` may send: the kit's reactors and `bootstrap()` | — |
 | 2. Public types | `SignIn`, `VerifyEmail`, `ResetPassword` and others that carry their own proof (a password, a token) | `sign_up_closed`: `RegisterAccount` while registration is by invitation only |
-| 3. Who is asking | an account acting on itself (its account and sessions); in another tenant than the platform's (how the API checks someone joining a tenant), only past that tenant's checks | `unauthenticated`: no active session of an active account, and no valid API key. An account with a second factor on may only sign out until the session proved it. For oneself in another tenant: `tenant_suspended`, `mfa_required`, `sso_required` as in steps 5 to 7 |
+| 3. Who is asking | an account acting on itself (its account and sessions); in another tenant than the platform's (how the API checks someone joining a tenant), only past that tenant's checks | `unauthenticated`: no active session of an active account, and no valid API key. An account with a second factor on may only sign out until the session proved it. For oneself in another tenant: `tenant_suspended`, `tenant_not_active`, `mfa_required`, `sso_required` as in steps 5 to 7 |
 | 4. Signed in is enough | e.g. `ListMyIdentities`; `CreateTenant` for oneself when the sign-up policy allows it | — |
-| 5. The tenant | — | `forbidden`: not a member; `tenant_suspended`: the tenant is suspended |
+| 5. The tenant | — | `forbidden`: not a member; `tenant_suspended`: the tenant is suspended; `tenant_not_active`: it is pending (not yet activated) |
 | 6. The identity | — | `forbidden`: no active identity of this account in the tenant; `mfa_required`: the tenant requires a second factor |
 | 7. Owners | everything in their tenant | `sso_required`: the tenant enforces SSO and the session did not use it (owners exempt) |
 | 8. Memberships | an active, unexpired membership of an active group with a permission that matches the type, in scope, with its relation holding | `forbidden` |

@@ -1522,6 +1522,7 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
         )
         .add_service(
             MoveServiceServer::new(api.clone())
+                .max_decoding_message_size(max)
                 .max_encoding_message_size(replication::MAX_MESSAGE_BYTES),
         )
         .add_service(

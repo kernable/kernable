@@ -89,8 +89,8 @@ invitationAggregate.command(DeclineInvitation, (s, d, cmd, ctx) => {
 /**
  * The API's: it says which account accepts, and its email, which must be the invited one.
  * For a new person it picks the account ID and registers the account right after. The tenant
- * must be active when it commits (its `active` fact), so a suspended tenant takes nobody in,
- * whoever accepts: `requirement_missing` otherwise.
+ * must be active when it commits (its `active` fact), so a pending or suspended tenant takes
+ * nobody in, whoever accepts: `requirement_missing` otherwise.
  */
 export class AcceptInvitation extends Command {
   static secret: (keyof AcceptInvitation)[] = ["token"];

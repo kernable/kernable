@@ -2507,6 +2507,44 @@
       ]
     },
     {
+      "name": "... refused with tenant_not_active while the tenant is pending (not yet activated)",
+      "check": {
+        "kind": "query",
+        "tenant": "t-new",
+        "domain": "account",
+        "type": "ListSessions",
+        "target": {
+          "type": "account.account",
+          "id": "a-out"
+        },
+        "data": {
+          "accountId": "a-out"
+        },
+        "request": {
+          "senderAccount": "a-out",
+          "senderSession": "s-out"
+        }
+      },
+      "expect": "tenant_not_active",
+      "extra": [
+        {
+          "domain": "tenancy",
+          "aggregateType": "tenant",
+          "type": "TenantCreated",
+          "tenant": "t-new",
+          "aggregateId": "t-new",
+          "data": {
+            "slug": "newco",
+            "name": "Newco",
+            "owner": {
+              "accountId": "a-out"
+            },
+            "status": "pending"
+          }
+        }
+      ]
+    },
+    {
       "name": "... refused with one factor where the tenant requires a second",
       "check": {
         "kind": "query",

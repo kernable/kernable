@@ -959,6 +959,8 @@ async fn revoke(addr: &str, root: &str, key: &str, since: &str) -> Result<bool> 
         protocol: kernable_core::PROTOCOL,
     };
     TrustServiceClient::new(connect(addr).await?)
+        .max_decoding_message_size(MAX_MESSAGE_BYTES)
+        .max_encoding_message_size(MAX_MESSAGE_BYTES)
         .revoke(request)
         .await?;
     println!("revoked {key_id}");
@@ -1695,6 +1697,8 @@ async fn promote(addr: &str, key_path: &str) -> Result<bool> {
     });
     with_key_grant(&mut request, key_path)?;
     let result = ReplicationServiceClient::new(connect(addr).await?)
+        .max_decoding_message_size(MAX_MESSAGE_BYTES)
+        .max_encoding_message_size(MAX_MESSAGE_BYTES)
         .promote(request)
         .await?
         .into_inner();
@@ -1716,6 +1720,8 @@ async fn switchover(addr: &str, key_path: &str) -> Result<bool> {
     });
     with_key_grant(&mut request, key_path)?;
     let result = ReplicationServiceClient::new(connect(addr).await?)
+        .max_decoding_message_size(MAX_MESSAGE_BYTES)
+        .max_encoding_message_size(MAX_MESSAGE_BYTES)
         .switchover(request)
         .await?
         .into_inner();
@@ -1949,6 +1955,7 @@ async fn export_running(addr: &str, key_path: &str, file: &str) -> Result<bool> 
     with_key_grant(&mut request, key_path)?;
     let mut stream = ExportServiceClient::new(connect(addr).await?)
         .max_decoding_message_size(MAX_MESSAGE_BYTES)
+        .max_encoding_message_size(MAX_MESSAGE_BYTES)
         .export(request)
         .await?
         .into_inner();
@@ -2156,6 +2163,8 @@ async fn retry(addr: &str, key_path: &str, name: &str, which: &str, dismiss: boo
     });
     with_key_grant(&mut request, key_path)?;
     let applied = ListenerServiceClient::new(connect(addr).await?)
+        .max_decoding_message_size(MAX_MESSAGE_BYTES)
+        .max_encoding_message_size(MAX_MESSAGE_BYTES)
         .retry(request)
         .await?
         .into_inner()
@@ -2484,6 +2493,8 @@ async fn apply(addr: &str, key_path: &str, manifest: &str) -> Result<bool> {
     });
     with_key_grant(&mut request, key_path)?;
     MembershipServiceClient::new(connect(addr).await?)
+        .max_decoding_message_size(MAX_MESSAGE_BYTES)
+        .max_encoding_message_size(MAX_MESSAGE_BYTES)
         .apply(request)
         .await?;
     println!(
@@ -2560,7 +2571,9 @@ async fn submit(addr: &str, key_path: &str, mut cmd: Command) -> Result<bool> {
     let key = signing::read_signing_key(key_path)?;
     cmd.client_sig = Some(signing::sign(&key, &signing::command_message(&cmd)));
     println!("command {}", cmd.command_id);
-    let mut client = CommandServiceClient::new(connect(addr).await?);
+    let mut client = CommandServiceClient::new(connect(addr).await?)
+        .max_decoding_message_size(MAX_MESSAGE_BYTES)
+        .max_encoding_message_size(MAX_MESSAGE_BYTES);
     let mut request = tonic::Request::new(SubmitRequest {
         command: Some(cmd),
         protocol: kernable_core::PROTOCOL,

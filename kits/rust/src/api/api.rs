@@ -167,10 +167,10 @@ fn failed_reason(outcome: &Outcome) -> String {
 }
 
 /// A refusal of a command that requires the tenant active (its fact): missing, the tenant is
-/// suspended or gone.
+/// pending, suspended or gone, which the requirement does not tell apart.
 fn joined(outcome: Outcome) -> ApiResult<()> {
     match outcome {
-        Outcome::Rejected(r) if r.code == "requirement_missing" => refused("tenant_suspended"),
+        Outcome::Rejected(r) if r.code == "requirement_missing" => refused("tenant_not_active"),
         outcome => done(outcome),
     }
 }
@@ -457,7 +457,10 @@ impl KitApi {
             )
             .await?
         else {
-            check_password(None, password); // as slow as a wrong password
+            // As slow as a wrong password; argon2 runs off the async workers, like the
+            // handlers' own checks (the SDK runs command handlers on blocking threads).
+            let password = password.to_owned();
+            let _ = tokio::task::spawn_blocking(move || check_password(None, &password)).await;
             return refused("wrong_password");
         };
         let session_id = new_id();
@@ -1375,8 +1378,10 @@ impl KitApi {
     /// new person with a name and password (`new_person`), registered in the same step (active:
     /// the token proved the email). The accepting account's email must be the invited one. A new
     /// person's name and password are checked before the invitation is used, so a refused
-    /// registration does not spend it. Either way a suspended tenant takes nobody in
-    /// (`tenant_suspended`). The account and tenant.
+    /// registration does not spend it. Either way a tenant that is not active takes nobody in:
+    /// `tenant_suspended` or `tenant_not_active` (pending) from the middleware's check of a
+    /// signed-in account, else `tenant_not_active` (the command's requirement cannot tell
+    /// suspended from pending). The account and tenant.
     pub async fn accept_invitation(
         &self,
         invitation_token: &str,

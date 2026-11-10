@@ -45,11 +45,17 @@ case ":$PATH:" in
   *":$DEST:"*) ;;
   *)
     # The file the user's login shell reads: zsh and bash do not read ~/.profile when they have
-    # their own, and bash on Linux reads ~/.bashrc in each terminal.
+    # their own, and bash on Linux reads ~/.bashrc in each terminal. fish reads no profile file
+    # of that kind and keeps its own path (fish_add_path, saved across sessions).
     case "$(basename "${SHELL:-sh}")" in
+      fish) profile= ;;
       zsh) profile="~/.zprofile" ;;
       bash) if [ "$(uname -s)" = Darwin ]; then profile="~/.bash_profile"; else profile="~/.bashrc"; fi ;;
       *) profile="~/.profile" ;;
     esac
-    echo "add $DEST to your PATH, e.g. echo 'export PATH=\"$DEST:\$PATH\"' >> $profile" ;;
+    if [ -z "$profile" ]; then
+      echo "add $DEST to your PATH, e.g. fish_add_path $DEST"
+    else
+      echo "add $DEST to your PATH, e.g. echo 'export PATH=\"$DEST:\$PATH\"' >> $profile"
+    fi ;;
 esac

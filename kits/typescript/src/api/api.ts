@@ -549,7 +549,9 @@ export class KitApi {
    * new person with a name and password, registered in the same step (active: the token proved
    * the email). The accepting account's email must be the invited one. A new person's name and
    * password are checked before the invitation is used, so a refused registration does not spend
-   * it. Either way a suspended tenant takes nobody in (`tenant_suspended`).
+   * it. Either way a tenant that is not active takes nobody in: `tenant_suspended` or
+   * `tenant_not_active` (pending) from the middleware's check of a signed-in account, else
+   * `tenant_not_active` (the command's requirement cannot tell suspended from pending).
    */
   async acceptInvitation(
     invitationToken: string,
@@ -583,8 +585,8 @@ export class KitApi {
     const accepted = await this.kernable.submit(AcceptInvitation.new({ token: invitationToken, accountId, email, newAccount: !("claims" in as) }), {
       aggregateId: peek.invitationId, tenant: peek.tenant, context: this.serviceContext,
     });
-    // The command requires the tenant active (its fact): missing, the tenant is suspended or gone.
-    if (!accepted.committed) return { ok: false, reason: accepted.code === "requirement_missing" ? "tenant_suspended" : accepted.code };
+    // The command requires the tenant active (its fact): missing, the tenant is pending, suspended or gone.
+    if (!accepted.committed) return { ok: false, reason: accepted.code === "requirement_missing" ? "tenant_not_active" : accepted.code };
     if (!("claims" in as)) {
       const registered = await this.kernable.submit(RegisterAccount.new({ email, name: as.name, password: as.password, verified: true }), {
         aggregateId: accountId, tenant: PLATFORM_TENANT, context: this.serviceContext,
@@ -637,7 +639,7 @@ export class KitApi {
       aggregateId: t.linkId, tenant: t.tenant, context: this.serviceContext,
     });
     if (outcome.committed) return { ok: true, tenant: t.tenant };
-    return { ok: false, reason: outcome.code === "requirement_missing" ? "tenant_suspended" : outcome.code };
+    return { ok: false, reason: outcome.code === "requirement_missing" ? "tenant_not_active" : outcome.code };
   }
 
   /** Signs out: ends the session. */

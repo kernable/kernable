@@ -207,7 +207,8 @@ impl Kernel {
                 }
             };
             let client = MoveServiceClient::new(channel)
-                .max_decoding_message_size(replication::MAX_MESSAGE_BYTES);
+                .max_decoding_message_size(replication::MAX_MESSAGE_BYTES)
+                .max_encoding_message_size(replication::MAX_MESSAGE_BYTES);
             match call(client, request).await {
                 Ok(t) => return Ok(t),
                 Err(s) if s.code() == tonic::Code::Unavailable => last = s,

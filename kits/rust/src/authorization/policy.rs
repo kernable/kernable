@@ -15,10 +15,21 @@ use crate::identity::Scope;
 use crate::shared::constants::PLATFORM_TENANT;
 use crate::tenancy::{AccountSignUp, SignUpPolicy, TenantSignUp};
 
+/// The refusal code for a tenant that is not active: `tenant_not_active` while it is pending
+/// (not yet activated), `tenant_suspended` otherwise.
+fn inactive(status: &str) -> &'static str {
+    if status == "pending" {
+        "tenant_not_active"
+    } else {
+        "tenant_suspended"
+    }
+}
+
 /// Why a request is refused.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Refusal {
-    /// `unauthenticated`, `forbidden`, `tenant_suspended`, `mfa_required`, `sso_required`, `sign_up_closed`.
+    /// `unauthenticated`, `forbidden`, `tenant_suspended`, `tenant_not_active`, `mfa_required`,
+    /// `sso_required`, `sign_up_closed`.
     pub code: String,
     pub message: String,
 }
@@ -560,7 +571,7 @@ pub fn decide(
                 None => no!("forbidden", "No such tenant"),
                 Some(t) if t.status == "deleted" => no!("forbidden", "No such tenant"),
                 Some(t) if t.status != "active" => {
-                    no!("tenant_suspended", "The tenant is {}", t.status)
+                    no!(inactive(&t.status), "The tenant is {}", t.status)
                 }
                 Some(t) if t.mfa_required && !two => {
                     no!("mfa_required", "This tenant requires a second factor")
@@ -618,7 +629,7 @@ pub fn decide(
             None => no!("forbidden", "No such tenant"),
             Some(t) if t.status == "deleted" => no!("forbidden", "No such tenant"),
             Some(t) if t.status != "active" && r#type != "tenancy.ReactivateTenant" => {
-                no!("tenant_suspended", "The tenant is {}", t.status)
+                no!(inactive(&t.status), "The tenant is {}", t.status)
             }
             _ => {}
         }
@@ -699,7 +710,7 @@ pub fn decide(
         .map(|t| t.status.clone())
         .unwrap_or_default();
     if !platform && status != "active" {
-        no!("tenant_suspended", "The tenant is {status}");
+        no!(inactive(&status), "The tenant is {status}");
     }
     if rule.level == Level::Owners {
         no!("forbidden", "{type} is for the tenant's owners");

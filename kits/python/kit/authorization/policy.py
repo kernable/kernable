@@ -14,7 +14,7 @@ from .levels import ESCALATION, rule_of
 
 @dataclass
 class Refusal:
-    code: str  # unauthenticated, forbidden, tenant_suspended, mfa_required, sso_required, sign_up_closed
+    code: str  # unauthenticated, forbidden, tenant_suspended, tenant_not_active, mfa_required, sso_required, sign_up_closed
     message: str
 
 
@@ -139,6 +139,12 @@ def target_of(check) -> dict | None:
     if check.kind == "command" and check.aggregate_type and check.aggregate_id:
         return {"type": f"{check.domain}.{check.aggregate_type}", "id": check.aggregate_id}
     return None
+
+
+def _inactive(status: str | None) -> str:
+    """The refusal code for a tenant that is not active: `tenant_not_active` while it is pending (not yet
+    activated), `tenant_suspended` otherwise."""
+    return "tenant_not_active" if status == "pending" else "tenant_suspended"
 
 
 def _is_self(k: Knowledge, check, r, target) -> bool:
@@ -284,7 +290,7 @@ def decide(k: Knowledge, check, now: int, trace: list[str] | None = None, assume
             if not t or t["status"] == "deleted":
                 return no("forbidden", "No such tenant")
             if t["status"] != "active":
-                return no("tenant_suspended", f"The tenant is {t['status']}")
+                return no(_inactive(t["status"]), f"The tenant is {t['status']}")
             if t["mfa_required"] and not two:
                 return no("mfa_required", "This tenant requires a second factor")
             sso = t.get("sso_enforced")
@@ -312,7 +318,7 @@ def decide(k: Knowledge, check, now: int, trace: list[str] | None = None, assume
         if not tenant or tenant["status"] == "deleted":
             return no("forbidden", "No such tenant")
         if tenant["status"] != "active" and type_ != "tenancy.ReactivateTenant":
-            return no("tenant_suspended", f"The tenant is {tenant['status']}")
+            return no(_inactive(tenant["status"]), f"The tenant is {tenant['status']}")
 
     # 6. The identity, and the tenant's MFA requirement.
     if r.on_behalf_of:
@@ -344,7 +350,7 @@ def decide(k: Knowledge, check, now: int, trace: list[str] | None = None, assume
     if type_ == "invitation.CreateInvitation" and data.get("owner") is True and not platform:
         return no("forbidden", "Owner invitations are the owners'")
     if not platform and (tenant or {}).get("status") != "active":
-        return no("tenant_suspended", f"The tenant is {(tenant or {}).get('status')}")
+        return no(_inactive((tenant or {}).get("status")), f"The tenant is {(tenant or {}).get('status')}")
     if rule["level"] == "owners":
         return no("forbidden", f"{type_} is for the tenant's owners")
 

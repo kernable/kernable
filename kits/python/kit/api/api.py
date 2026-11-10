@@ -532,7 +532,9 @@ class KitApi:
         new person with a name and password, registered in the same step (active: the token proved
         the email). The accepting account's email must be the invited one. A new person's name and
         password are checked before the invitation is used, so a refused registration does not spend
-        it. Either way a suspended tenant takes nobody in (`tenant_suspended`)."""
+        it. Either way a tenant that is not active takes nobody in: `tenant_suspended` or
+        `tenant_not_active` (pending) from the middleware's check of a signed-in account, else
+        `tenant_not_active` (the command's requirement cannot tell suspended from pending)."""
         peek = self.peek_invitation(invitation_token)
         if not peek or not peek.get("email"):
             return {"ok": False, "reason": "invalid_token"}
@@ -558,9 +560,9 @@ class KitApi:
             account_id, email = str(uuid.uuid4()), peek["email"]
         accepted = self._submit(AcceptInvitation(token=invitation_token, account_id=account_id, email=email, new_account=claims is None),
                                 peek["invitation_id"], peek["tenant"], self.service_context)
-        # The command requires the tenant active (its fact): missing, the tenant is suspended or gone.
+        # The command requires the tenant active (its fact): missing, the tenant is pending, suspended or gone.
         if not accepted.committed:
-            return {"ok": False, "reason": "tenant_suspended" if accepted.code == "requirement_missing" else accepted.code}
+            return {"ok": False, "reason": "tenant_not_active" if accepted.code == "requirement_missing" else accepted.code}
         if claims is None:
             registered = self._submit(RegisterAccount(email=email, name=name, password=password, verified=True), account_id,
                                       context=self.service_context)
@@ -606,7 +608,7 @@ class KitApi:
         outcome = self._submit(JoinWithInvitationLink(token=link, account_id=claims.sub), t["link_id"], t["tenant"], self.service_context)
         if outcome.committed:
             return {"ok": True, "tenant": t["tenant"]}
-        return {"ok": False, "reason": "tenant_suspended" if outcome.code == "requirement_missing" else outcome.code}
+        return {"ok": False, "reason": "tenant_not_active" if outcome.code == "requirement_missing" else outcome.code}
 
     def sign_out(self, claims: Claims) -> None:
         """Signs out: ends the session."""
