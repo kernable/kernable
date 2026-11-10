@@ -1098,6 +1098,9 @@ class EndToEnd(unittest.TestCase):
     def test_a_request_waits_for_the_kernel_to_come_back_until_its_deadline(self):
         self.run_stream(self.k.worker(counter))
         self.kernel.kill()
+        # Until the client has seen the connection close, a request still goes out on it and
+        # ends UNAVAILABLE (it may have reached the kernel); this test is about the time after.
+        time.sleep(0.3)
         started = time.monotonic()
         with self.assertRaises(grpc.RpcError) as refused:
             self.increment(1, wait="committed", id="i0", timeout_s=0.3)

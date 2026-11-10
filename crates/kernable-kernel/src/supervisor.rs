@@ -1511,6 +1511,29 @@ pub async fn run(path: &Path) -> Result<(), BoxError> {
     Ok(())
 }
 
+/// Podman's `--network` for a pod of its own: pasta without `host.containers.internal`. Older
+/// pasta (Ubuntu 24.04's) does not know the option; the pod then gets plain pasta, said once in
+/// the log, and the firewall keeps the machine's other addresses out (docs/how-to/node.md).
+fn pasta_network() -> &'static str {
+    static NETWORK: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    NETWORK.get_or_init(|| {
+        let help = std::process::Command::new("pasta")
+            .arg("--help")
+            .stdin(Stdio::null())
+            .output();
+        let knows = help.is_ok_and(|o| {
+            let text = [o.stdout, o.stderr].concat();
+            String::from_utf8_lossy(&text).contains("--map-guest-addr")
+        });
+        if knows {
+            "pasta:--map-guest-addr,none"
+        } else {
+            tracing::warn!("pasta does not know --map-guest-addr: pods get plain pasta");
+            "pasta"
+        }
+    })
+}
+
 /// Makes the instance's pod, replacing one a node before left: the host's network, and the
 /// instance's total limits.
 async fn make_pod(podman: &Path, pod: &Pod) -> Result<(), String> {
@@ -1530,7 +1553,7 @@ async fn make_pod(podman: &Path, pod: &Pod) -> Result<(), String> {
             // which pasta does not support, Podman's bridge.
             // SAFETY: geteuid(2) cannot fail.
             if unsafe { libc::geteuid() } != 0 {
-                args.extend(["--network".into(), "pasta:--map-guest-addr,none".into()]);
+                args.extend(["--network".into(), pasta_network().into()]);
             }
         }
         Network::Host => args.extend(["--network".into(), "host".into()]),
