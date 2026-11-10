@@ -492,8 +492,8 @@ function onRoute() {
   if (route.view === "processes") { procFrame = ""; caseList = null; }
   render();
   window.scrollTo(0, 0);
-  // What this view needs may not be loaded yet.
-  if (started) reload(true);
+  // What this view needs may not be loaded yet, and the stream follows the view.
+  if (started) { reload(true); watch(); }
 }
 let started = false;
 
@@ -1096,6 +1096,7 @@ async function loadCaseRoute() {
   caseRef = { tenant, process, id };
   try { caseData = await get(`/api/case?${new URLSearchParams({ tenant, process, id })}`); } catch (e) { caseData = { error: String(e) }; }
   render();
+  if (started) watch();
 }
 
 const aggLink = (l) => el("a", { href: historyHref({ tenant: l.tenant, domain: l.domain, type: l.aggregateType, id: l.aggregateId }) }, `${l.aggregateType} ${l.aggregateId}`);
@@ -1633,6 +1634,7 @@ async function search() {
   if (run !== searching) return;
   found = r.events; older = r.next; tail = r.head; opened = new Set();
   drawFound();
+  if (started) watch();
 }
 async function loadOlder() {
   if (older === null) return;
@@ -1707,6 +1709,7 @@ async function csearch() {
   if (run !== csearching) return;
   cfound = r.commands; colder = r.next; cnewest = r.newest ?? 0; copened = new Set();
   drawCommands();
+  if (started) watch();
 }
 async function colderPage() {
   if (colder === null) return;
@@ -1818,8 +1821,8 @@ $("csearch").addEventListener("submit", (ev) => {
 $("csearch").addEventListener("change", (ev) => { if (ev.target.name === "status") $("csearch").requestSubmit(); });
 $("cengine").addEventListener("change", csearch);
 $("colder").addEventListener("click", colderPage);
-$("clive").addEventListener("change", () => ($("clive").checked ? csearch() : drawCommands()));
-$("live").addEventListener("change", () => ($("live").checked ? search() : drawFound()));
+$("clive").addEventListener("change", () => { ($("clive").checked ? csearch() : drawCommands()); watch(); });
+$("live").addEventListener("change", () => { ($("live").checked ? search() : drawFound()); watch(); });
 window.addEventListener("popstate", onRoute);
 
 // ---- keeping the view current: told by the kernel when something changed (/api/watch) ----
@@ -1833,7 +1836,9 @@ async function load() {
   if (heavy) lastHeavy = Date.now();
   const jobs = [];
   if (top === "overview") jobs.push(loadState(), loadSystem(), heavy ? loadProcs() : null, heavy ? loadTrend() : null, heavy ? loadRejectedDay() : null);
-  if (top === "operations") jobs.push(loadState(), loadSystem(), loadParked(), heavy ? loadTrend() : null, heavy ? loadRejections() : null);
+  // The rejection list (the heavy part) only when the pulse's count of them moved.
+  const rejectionsMoved = rejectionsSeen === null || pulseRejected !== rejectionsSeen;
+  if (top === "operations") jobs.push(loadState(), loadSystem(), loadParked(), heavy ? loadTrend() : null, heavy && rejectionsMoved ? loadRejections().then(() => (rejectionsSeen = pulseRejected)) : null);
   if (top === "processes") {
     jobs.push(loadProcs());
     if (route.view === "processes" && procFrame) { const p = currentProcess(); if (p) jobs.push(loadCases(p, currentVersion(p))); }
@@ -1841,12 +1846,14 @@ async function load() {
   }
   if (top === "explore") {
     if (["domains", "catalog"].includes(exploreTab)) jobs.push(loadState(), loadProcs());
-    if (exploreTab === "events") jobs.push(follow());
-    if (exploreTab === "commands") jobs.push(cfollow());
+    if (exploreTab === "events" && !live) jobs.push(follow());
+    if (exploreTab === "commands" && !live) jobs.push(cfollow());
     if (exploreTab === "aggregates") jobs.push(loadStreams(), stream ? loadHistory() : null);
   }
   await Promise.all(jobs);
   render();
+  // Its filters may need what just loaded (the process shown, the case).
+  if (started) watch();
 }
 /** Loads what the view shows: now (`soon` false) or within 2 s of the last load. */
 function reload(now = false) {
@@ -1854,18 +1861,89 @@ function reload(now = false) {
   const wait = now ? 0 : Math.max(0, lastLoad + 2000 - Date.now());
   pendingLoad = setTimeout(() => { pendingLoad = null; load(); }, wait);
 }
+// ---- the view's stream: /api/watch with the topics and filters of what the view shows ----
+let source = null, sourceUrl = "", dirty = false, pulseRejected = null, rejectionsSeen = null;
+function streamUrl() {
+  const top = document.querySelector("nav a.on")?.dataset.view;
+  const topics = ["health"], q = new URLSearchParams();
+  const form = (id, names) => { for (const [k, v] of new FormData($(id))) if (names[k] && String(v).trim()) q.set(names[k], String(v).trim()); };
+  if (top === "overview" || top === "operations") topics.push("pulse");
+  if (top === "processes") {
+    topics.push("cases");
+    const process = route.view === "case" ? route.args[1] : currentProcess()?.name;
+    if (process) q.set("process", process);
+    if (route.view === "case" && caseRef) q.set("case", caseRef.id);
+  }
+  if (top === "explore") {
+    if (["domains", "catalog"].includes(exploreTab)) topics.push("pulse");
+    if (exploreTab === "aggregates") topics.push("head");
+    if (exploreTab === "events" && $("live").checked) {
+      topics.push("events");
+      form("search", { type: "event", tenant: "tenant", id: "id", command: "command" });
+      if ($("engine").checked) q.set("engine", "1");
+    }
+    if (exploreTab === "commands" && $("clive").checked) {
+      topics.push("commands");
+      form("csearch", { type: "type", tenant: "tenant", id: "id", sender: "sender", command: "command", status: "status" });
+      if ($("cengine").checked) q.set("engine", "1"); else q.set("business", "1");
+    }
+  }
+  q.set("topics", topics.join(","));
+  return `/api/watch?${q}`;
+}
+/** Opens the stream for what the view shows now; the same one stays open. */
 function watch() {
-  const source = new EventSource("/api/watch");
-  source.addEventListener("open", () => { live = true; });
-  source.addEventListener("head", (ev) => {
+  const url = streamUrl();
+  if (url === sourceUrl && source) return;
+  source?.close();
+  sourceUrl = url;
+  source = new EventSource(url);
+  const on = (topic, f) => source.addEventListener(topic, (ev) => {
     live = true;
-    let told = {};
-    try { told = JSON.parse(ev.data); } catch {}
-    // The aggregates view updates from what the kernel says changed; every other view reloads.
-    if (told.streams && document.querySelector("nav a.on")?.dataset.view === "explore" && exploreTab === "aggregates") changedStreams(told.streams);
+    let data = null;
+    try { data = JSON.parse(ev.data); } catch {}
+    f(data);
+  });
+  source.addEventListener("open", () => { live = true; });
+  on("health", (data) => { if (data) { health = { ...data, now: Date.now(), head: health?.head }; misses = 0; render(); } });
+  on("head", (data) => {
+    if (data?.streams && exploreTab === "aggregates") changedStreams(data.streams);
     else reload();
   });
-  source.addEventListener("health", async () => { live = true; await loadHealth(); render(); });
+  on("events", (data) => {
+    // Newest on top, as the log shows them; the payload filter is the page's own.
+    const text = new FormData($("search")).get("text")?.toString().trim() ?? "";
+    const known = new Set(found.map((f) => f.position));
+    const fresh = (data ?? []).filter((e) => (!text || e.payload.includes(text)) && !known.has(e.position));
+    found.unshift(...fresh.reverse());
+    if (found.length > FOUND_MAX) found.length = FOUND_MAX;
+    drawFound();
+  });
+  on("commands", (data) => {
+    for (const c of data ?? []) {
+      const at = cfound.findIndex((x) => x.commandId === c.commandId);
+      if (at >= 0) cfound[at] = { ...c, seq: cfound[at].seq }; else cfound.unshift(c);
+    }
+    if (cfound.length > FOUND_MAX) cfound.length = FOUND_MAX;
+    drawCommands();
+  });
+  on("cases", () => reload());
+  on("pulse", (data) => {
+    if (!data) return;
+    if (health) health.head = data.head;
+    pulseRejected = data.rejected;
+    // Positions and counts straight from the pulse; the full state only when a listener came or went.
+    if (state) {
+      state.kernel.head = data.head;
+      const known = new Map(state.listeners.map((l) => [l.name, l]));
+      const changed = data.listeners.length !== state.listeners.length || data.listeners.some((l) => !known.has(l.name) || known.get(l.name).connected !== l.connected);
+      for (const l of data.listeners) Object.assign(known.get(l.name) ?? {}, { position: l.position, parked: l.parked });
+      if (changed) loadState().then(render);
+    }
+    dirty = true;
+    render();
+  });
+  on("gap", () => reload(true));
   // EventSource connects again by itself; meanwhile the page asks every 5 s.
   source.addEventListener("error", () => { live = false; });
 }
@@ -1878,8 +1956,11 @@ setInterval(async () => {
   await loadHealth();
   reload(true);
 }, 5000);
+// Totals and statistics (activity, processes, rejections) are not in the stream: at most every
+// 10 s, and only when the pulse said something happened.
+setInterval(() => { if (live && dirty) { dirty = false; reload(true); } }, 10_000);
 // A safety net while live: the verdict once in a while even if nothing changed.
-setInterval(() => live && loadHealth().then(render), 30_000);
+setInterval(() => live && loadHealth().then(render), 60_000);
 // Under `kernable demo` only: the way back to the Stage.
 fetch("/api/demo").then((r) => { if (r.ok) $("stage").hidden = false; }).catch(() => {});
 </script>

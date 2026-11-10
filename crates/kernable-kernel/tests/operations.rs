@@ -297,6 +297,74 @@ async fn the_ui_shows_the_map_the_connections_and_an_aggregate_history() {
     assert!(get(&ui, "/processesx").await.starts_with("HTTP/1.1 404"));
 }
 
+/// Reads a server-sent event stream until `until` is in what it said, within 5 s.
+async fn read_until(watch: &mut tokio::net::TcpStream, said: &mut String, until: &str) {
+    use tokio::io::AsyncReadExt;
+    let mut buf = [0u8; 8192];
+    while !said.contains(until) {
+        let n = tokio::time::timeout(Duration::from_secs(5), watch.read(&mut buf))
+            .await
+            .unwrap_or_else(|_| panic!("no {until} in {said}"))
+            .unwrap();
+        assert!(n > 0, "{said}");
+        said.push_str(&String::from_utf8_lossy(&buf[..n]));
+    }
+}
+
+async fn open_watch(ui: &str, path: &str, headers: &str) -> tokio::net::TcpStream {
+    use tokio::io::AsyncWriteExt;
+    let mut watch = tokio::net::TcpStream::connect(ui).await.unwrap();
+    watch
+        .write_all(format!("GET {path} HTTP/1.1\r\nhost: localhost\r\n{headers}\r\n").as_bytes())
+        .await
+        .unwrap();
+    watch
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_watch_streams_what_its_filters_ask_for_and_resumes() {
+    let ui = free_addr();
+    let env = start_custom("ui-watch", |config, _| {
+        config.ui_listen = Some(ui.clone());
+    })
+    .await;
+    spawn_worker(&env).await;
+    submit(
+        &env.addr,
+        signed(command("c1", "PlaceOrder", "o1"), &key(1)),
+    )
+    .await
+    .unwrap();
+
+    // Events of one aggregate, and the commands of the orders.
+    let mut events = open_watch(&ui, "/api/watch?topics=events&id=o3", "").await;
+    let mut commands = open_watch(&ui, "/api/watch?topics=commands&type=orders.place", "").await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    for (c, o) in [("c2", "o2"), ("c3", "o3")] {
+        submit(&env.addr, signed(command(c, "PlaceOrder", o), &key(1)))
+            .await
+            .unwrap();
+    }
+    let mut said = String::new();
+    read_until(&mut events, &mut said, "event: events").await;
+    read_until(&mut events, &mut said, "\"aggregateId\":\"o3\"").await;
+    assert!(!said.contains("\"aggregateId\":\"o2\""), "only o3: {said}");
+    let mut told = String::new();
+    read_until(&mut commands, &mut told, "\"commandId\":\"c3\"").await;
+    assert!(told.contains("\"commandId\":\"c2\""), "{told}");
+    assert!(
+        !told.contains("\"commandId\":\"c1\""),
+        "only those after it connected: {told}"
+    );
+
+    // Connected again from position 1, it gets what came after, at once.
+    let mut again = open_watch(&ui, "/api/watch?topics=events", "last-event-id: 1\r\n").await;
+    let mut resumed = String::new();
+    read_until(&mut again, &mut resumed, "\"aggregateId\":\"o3\"").await;
+    assert!(resumed.contains("\"aggregateId\":\"o2\""), "{resumed}");
+    assert!(resumed.contains("id: 3\n"), "{resumed}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_ui_searches_and_tails_the_log() {
     let ui = free_addr();

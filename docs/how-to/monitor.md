@@ -43,6 +43,28 @@ ssh -L 7234:127.0.0.1:7234 host   # then open http://127.0.0.1:7234
 
 If the address is taken (another kernel in development), the kernel runs on without the UI and logs the warning `the UI is off`.
 
+### Watching from a script
+
+The UI's own stream is open to anything on the machine, like the UI: server-sent events at `/api/watch`, read-only and without login, on the loopback address only. Choose what to get with `topics` and narrow it with filters:
+
+```sh
+curl -N 'http://127.0.0.1:7234/api/watch?topics=events&domain=shop&type=order&id=o-1'   # one order's events
+curl -N 'http://127.0.0.1:7234/api/watch?topics=commands&status=rejected'               # rejected commands
+curl -N 'http://127.0.0.1:7234/api/watch?topics=cases&process=shop.fulfilment'          # a process's cases
+curl -N 'http://127.0.0.1:7234/api/watch?topics=health,pulse'                           # the verdict, counts, listener positions
+```
+
+| Topic | Each message |
+|---|---|
+| `events` | the new events that match, with their sender and data (vault fields as references only) |
+| `commands` | commands that match when stored, and again when they complete: committed with their events and duration, rejected with why |
+| `cases` | the case events of a process (`process=`, `case=`) |
+| `head` | the log moved on, with the aggregates the new events changed |
+| `health` | the verdict, when it changed |
+| `pulse` | the head, the counts and each listener's position, when any changed |
+
+Filters: `tenant`, `domain`, `type` (aggregate type), `id` (aggregate ID), `event` (part of `domain.EventType`), `command` (command or correlation ID), `sender` (part of the identity), `process`, `case`, `status` (of commands); the process engine's own events and commands only with `engine=1`. Messages come at most once a second per topic. `events` and `cases` carry the log position as their id: connected again with `Last-Event-ID` (browsers do it by themselves) or `from=<position>`, the stream goes on from there. More than 500 events behind, it sends `gap` instead: read what you missed from `/api/events`. For services elsewhere, subscribe through the SDKs instead: they are signed and checked against grants.
+
 ## Health checks
 
 Set `--metrics-listen` (for example `127.0.0.1:9233`). It serves plain HTTP with no login: bind it to a private address. On a loopback address it answers only requests whose `Host` is a loopback name (`localhost`, `127.0.0.1`, `[::1]`), as the UI does, so a web page cannot read it through DNS rebinding; health checks and Prometheus on the same machine send one anyway.

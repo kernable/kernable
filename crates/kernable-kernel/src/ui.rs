@@ -6,11 +6,10 @@
 //!   connected workers, the listeners, and which aggregate writes which event type;
 //! - `GET /api/health`: the verdict (ok, warn, bad) and every problem behind it, with what
 //!   fixes it, as the UI's top bar shows it; and the counts it shows beside (incidents, parked);
-//! - `GET /api/watch`: server-sent events while the page is open: `head` when the log moved on
-//!   (`{"head": position, "streams": [the aggregates the new events changed, newest first]}`,
-//!   without `streams` after many events), `health` when the verdict changed, at most once a
-//!   second, and a comment every 15 s; the page reloads what it shows only then, or not at all
-//!   when what changed is not on it;
+//! - `GET /api/watch?topics=&<filters>`: server-sent events, at most one message per topic a
+//!   second: the log moved on with the aggregates it changed (`head`), new events, case
+//!   changes, commands stored and completed, the verdict, the counts and listener positions
+//!   (`pulse`), each filtered; resumes from `Last-Event-ID`; see [`Watch`];
 //! - `GET /api/streams?q=&engine=&limit=`: the aggregates with events, the most recently
 //!   changed first, those whose tenant, domain, type or ID contains `q`;
 //! - `GET /api/history?tenant=&domain=&type=&id=`: one aggregate's events with their commands,
@@ -61,10 +60,6 @@ const LOGO_DARK: &[u8] = include_bytes!("logo-dark.png");
 /// How many aggregates `/api/streams` lists.
 const STREAMS: usize = 500;
 
-/// The most events `/api/watch` looks at to tell which aggregates changed; more since the last
-/// message, and it tells only that the log moved on.
-const WATCH_STREAMS: usize = 200;
-
 /// How many of the most recently changed aggregates a search in `/api/streams` looks through.
 const STREAMS_SEARCH: usize = 20_000;
 
@@ -91,10 +86,15 @@ const PARKED_DEFAULT: usize = 1_000;
 pub(crate) async fn serve(kernel: Arc<Kernel>, addr: &str) -> Result<(), BoxError> {
     tracing::info!(%addr, "serving the UI");
     crate::http::serve(kernel, addr, respond, |kernel, request| {
-        request.starts_with(b"GET /api/watch ").then(|| {
-            let kernel = Arc::clone(kernel);
-            crate::http::Answer::Stream(Box::new(move |conn| Box::pin(watch(kernel, conn))))
-        })
+        (request.starts_with(b"GET /api/watch ") || request.starts_with(b"GET /api/watch?")).then(
+            || {
+                let kernel = Arc::clone(kernel);
+                let watch = Watch::new(request);
+                crate::http::Answer::Stream(Box::new(move |conn| {
+                    Box::pin(watch.serve(kernel, conn))
+                }))
+            },
+        )
     })
     .await
 }
@@ -524,96 +524,299 @@ fn health(kernel: &Kernel) -> Result<Value, BoxError> {
     }))
 }
 
-/// `/api/watch`: tells the page when the log moved on (`head`) and when the verdict changed
-/// (`health`), checked every second and said at most once a second; a comment every 15 s keeps
-/// the connection and finds one that is gone.
-async fn watch(kernel: Arc<Kernel>, mut conn: tokio::net::TcpStream) {
-    use tokio::io::AsyncWriteExt;
-    let start =
-        b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-store\r\n\
-                  connection: close\r\n\r\nretry: 2000\n\n";
-    if conn.write_all(start).await.is_err() {
-        return;
+/// The most events one message of `/api/watch` covers; more since the last, and it says `gap`.
+const WATCH_BATCH: u64 = 500;
+
+/// The most commands `/api/watch` follows until they complete.
+const WATCH_PENDING: usize = 1_000;
+
+/// `/api/watch?topics=…&<filters>`: server-sent events, checked every second, at most one
+/// message per topic a second. Topics (default `head,health`):
+///
+/// - `head`: the log moved on: `{head, streams}` with the aggregates the new events changed;
+/// - `events`: the new events that match, as `/api/events` gives them;
+/// - `cases`: the process engine's case events that match (`process=`, `case=`);
+/// - `commands`: commands that match, when stored and again when they complete;
+/// - `health`: the verdict, when it changed;
+/// - `pulse`: the head, the counts and each listener's position, when any changed.
+///
+/// Filters: `tenant`, `domain`, `type` (aggregate type), `id` (aggregate ID), `event` (part of
+/// `domain.EventType`), `command` (command or correlation ID), `sender` (part of the identity),
+/// `process`, `case`, `status` (for commands); `engine=1` includes the process engine's own
+/// events and commands. `events` and `cases` carry the log position as their id: a client
+/// that connects again with `Last-Event-ID` (or `from=`) goes on from there; more than
+/// [`WATCH_BATCH`] events behind, it gets `gap` and should reload.
+struct Watch {
+    topics: Vec<String>,
+    params: HashMap<String, String>,
+    /// The last log position looked at; `None` until the first look.
+    pos: Option<u64>,
+    verdict: Option<String>,
+    pulse: Option<String>,
+    /// The newest stored command already told.
+    command_seq: Option<u64>,
+    /// Commands told while waiting: told again when they complete.
+    pending: Vec<String>,
+}
+
+impl Watch {
+    fn new(request: &[u8]) -> Self {
+        let text = String::from_utf8_lossy(request);
+        let target = text
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .unwrap_or("");
+        let params = parse_query(target.split_once('?').map_or("", |(_, q)| q));
+        let resume = text
+            .lines()
+            .find_map(|l| {
+                l.split_once(':')
+                    .filter(|(k, _)| k.trim().eq_ignore_ascii_case("last-event-id"))
+            })
+            .and_then(|(_, v)| v.trim().parse::<u64>().ok())
+            .or_else(|| params.get("from").and_then(|v| v.parse().ok()));
+        let topics: Vec<String> = params
+            .get("topics")
+            .filter(|v| !v.is_empty())
+            .map_or("head,health", String::as_str)
+            .split(',')
+            .map(|t| t.trim().to_owned())
+            .collect();
+        Watch {
+            topics,
+            params,
+            pos: resume,
+            verdict: None,
+            pulse: None,
+            command_seq: None,
+            pending: Vec::new(),
+        }
     }
-    let (mut head, mut verdict, mut quiet) = (None::<u64>, None, 0u32);
-    loop {
-        let k = Arc::clone(&kernel);
-        let before = head;
-        let now = tokio::task::spawn_blocking(move || {
-            let head = k.store.head_position().ok();
-            // The aggregates the new events changed, so the page updates its list itself and
-            // reloads an aggregate only if it changed; beyond WATCH_STREAMS, only "many".
-            let changed = match (before, head) {
-                (Some(from), Some(to)) if to > from => {
-                    if to - from > WATCH_STREAMS as u64 {
-                        None
-                    } else {
-                        let events = k
-                            .store
-                            .read_all(from, WATCH_STREAMS as u32)
-                            .unwrap_or_default();
-                        let mut latest: Vec<Value> = Vec::new();
-                        for e in events.iter().rev() {
-                            let same = |s: &Value| {
-                                s["tenant"] == e.tenant_id.as_str()
-                                    && s["domain"] == e.domain.as_str()
-                                    && s["type"] == e.aggregate_type.as_str()
-                                    && s["id"] == e.aggregate_id.as_str()
-                            };
-                            if !latest.iter().any(same) {
-                                latest.push(json!({
-                                    "tenant": e.tenant_id,
-                                    "domain": e.domain,
-                                    "type": e.aggregate_type,
-                                    "id": e.aggregate_id,
-                                    "version": e.version,
-                                    "lastAt": e.created_at,
-                                }));
-                            }
+
+    fn wants(&self, topic: &str) -> bool {
+        self.topics.iter().any(|t| t == topic)
+    }
+
+    fn param(&self, name: &str) -> &str {
+        self.params.get(name).map_or("", |v| v.trim())
+    }
+
+    /// Whether an event passes the filters (`cases` without the aggregate filters, which name
+    /// the case's process and ID instead).
+    fn matches(&self, e: &Event, case: bool) -> bool {
+        let engine = self.param("engine") == "1";
+        let has =
+            |name: &str, value: &str| self.param(name).is_empty() || self.param(name) == value;
+        let part = |name: &str, value: &str| {
+            self.param(name).is_empty()
+                || value
+                    .to_lowercase()
+                    .contains(&self.param(name).to_lowercase())
+        };
+        let ctx = e.context.as_ref();
+        if case {
+            return e.domain == "process"
+                && has("tenant", &e.tenant_id)
+                && has("process", &e.aggregate_type)
+                && has("case", &e.aggregate_id);
+        }
+        (engine || e.domain != "process")
+            && has("tenant", &e.tenant_id)
+            && has("domain", &e.domain)
+            && has("type", &e.aggregate_type)
+            && has("id", &e.aggregate_id)
+            && part("event", &format!("{}.{}", e.domain, e.event_type))
+            && part("sender", ctx.map_or("", |c| c.sender_identity.as_str()))
+            && (self.param("command").is_empty()
+                || e.command_id == self.param("command")
+                || ctx.is_some_and(|c| c.correlation_id == self.param("command")))
+    }
+
+    /// One look at the kernel: what to tell, as server-sent events.
+    fn look(&mut self, kernel: &Kernel) -> String {
+        let mut out = String::new();
+        let head = kernel.store.head_position().unwrap_or(0);
+        let from = self.pos.unwrap_or(head);
+        if head > from {
+            if head - from > WATCH_BATCH {
+                out += &format!(
+                    "id: {head}\nevent: gap\ndata: {}\n\n",
+                    json!({ "from": from, "to": head })
+                );
+                if self.wants("head") {
+                    out += &format!("event: head\ndata: {}\n\n", json!({ "head": head }));
+                }
+            } else {
+                let events = kernel
+                    .store
+                    .read_all(from, (head - from) as u32)
+                    .unwrap_or_default();
+                if self.wants("head") {
+                    // The aggregates the new events changed, newest first.
+                    let mut streams: Vec<Value> = Vec::new();
+                    for e in events.iter().rev() {
+                        let same = |s: &Value| {
+                            s["tenant"] == e.tenant_id.as_str()
+                                && s["domain"] == e.domain.as_str()
+                                && s["type"] == e.aggregate_type.as_str()
+                                && s["id"] == e.aggregate_id.as_str()
+                        };
+                        if !streams.iter().any(same) {
+                            streams.push(json!({
+                                "tenant": e.tenant_id, "domain": e.domain, "type": e.aggregate_type,
+                                "id": e.aggregate_id, "version": e.version, "lastAt": e.created_at,
+                            }));
                         }
-                        Some(latest)
+                    }
+                    out += &format!(
+                        "event: head\ndata: {}\n\n",
+                        json!({ "head": head, "streams": streams })
+                    );
+                }
+                for (topic, case) in [("events", false), ("cases", true)] {
+                    if self.wants(topic) {
+                        let found: Vec<Value> = events
+                            .iter()
+                            .filter(|e| self.matches(e, case))
+                            .map(event)
+                            .collect();
+                        if !found.is_empty() {
+                            out += &format!(
+                                "id: {head}\nevent: {topic}\ndata: {}\n\n",
+                                Value::Array(found)
+                            );
+                        }
                     }
                 }
-                _ => None,
-            };
-            // What the top bar shows, without the time: changes only when the verdict does.
-            let verdict = health(&k).ok().map(|mut h| {
-                if let Some(o) = h.as_object_mut() {
-                    o.remove("now");
-                    o.remove("head");
-                }
-                h.to_string()
-            });
-            (head, verdict, changed)
-        })
-        .await;
-        let Ok((new_head, new_verdict, changed)) = now else {
-            return;
-        };
-        let mut said = String::new();
-        if new_head.is_some() && new_head != head {
-            // Newest first; without `streams` the page reloads what it shows.
-            let data = match changed {
-                Some(streams) => json!({ "head": new_head, "streams": streams }),
-                None => json!({ "head": new_head }),
-            };
-            said += &format!("event: head\ndata: {data}\n\n");
+            }
+        } else if self.pos.is_none() && self.wants("head") {
+            out += &format!("event: head\ndata: {}\n\n", json!({ "head": head }));
         }
-        if new_verdict.is_some() && new_verdict != verdict {
-            said += "event: health\ndata: changed\n\n";
+        self.pos = Some(head);
+
+        if self.wants("commands") {
+            out += &self.commands(kernel);
         }
-        (head, verdict) = (new_head, new_verdict);
-        quiet += 1;
-        if said.is_empty() && quiet >= 15 {
-            said = ": still here\n\n".into();
-        }
-        if !said.is_empty() {
-            quiet = 0;
-            if conn.write_all(said.as_bytes()).await.is_err() {
-                return;
+        if self.wants("health")
+            && let Ok(mut h) = health(kernel)
+        {
+            // Without the time and head: told only when the verdict itself changed.
+            if let Some(o) = h.as_object_mut() {
+                o.remove("now");
+                o.remove("head");
+            }
+            let verdict = h.to_string();
+            if self.verdict.as_ref() != Some(&verdict) {
+                out += &format!("event: health\ndata: {verdict}\n\n");
+                self.verdict = Some(verdict);
             }
         }
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        if self.wants("pulse") {
+            let usage = crate::usage::now(kernel);
+            let listeners: Vec<Value> = kernel
+                .listeners
+                .view()
+                .iter()
+                .map(|l| json!({ "name": l["name"], "position": l["position"], "connected": l["connected"], "parked": l["parked"] }))
+                .collect();
+            let pulse = json!({
+                "head": head,
+                "commands": usage.commands,
+                "rejected": usage.rejected,
+                "queries": usage.queries,
+                "queued": kernel.queue.len(),
+                "listeners": listeners,
+            })
+            .to_string();
+            if self.pulse.as_ref() != Some(&pulse) {
+                out += &format!("event: pulse\ndata: {pulse}\n\n");
+                self.pulse = Some(pulse);
+            }
+        }
+        out
+    }
+
+    /// The commands stored since the last look, and those told while waiting that completed.
+    fn commands(&mut self, kernel: &Kernel) -> String {
+        let f = CommandFilter::new(&self.params);
+        let now = now_ms();
+        let mut told: Vec<Value> = Vec::new();
+        let newest = kernel
+            .store
+            .commands(None, WATCH_BATCH as usize)
+            .unwrap_or_default();
+        let since = self
+            .command_seq
+            .unwrap_or_else(|| newest.first().map_or(0, |s| s.seq));
+        for s in newest.iter().rev().filter(|s| s.seq > since) {
+            let status = command_status(s, now);
+            if f.matches(s, status) {
+                if matches!(status, "waiting" | "scheduled") && self.pending.len() < WATCH_PENDING {
+                    self.pending.push(s.pending.command.command_id.clone());
+                }
+                told.push(command_json(s, status));
+            }
+        }
+        self.command_seq = Some(newest.first().map_or(since, |s| s.seq.max(since)));
+        // Those told while waiting: again once they completed.
+        let mut still = Vec::new();
+        for id in std::mem::take(&mut self.pending) {
+            match (kernel.store.command(&id), kernel.store.result(&id)) {
+                (Ok(Some(pending)), Ok(Some(result))) => {
+                    let s = kernable_store::StoredCommand {
+                        seq: 0,
+                        pending,
+                        result: Some(result),
+                    };
+                    let status = command_status(&s, now);
+                    told.push(command_json(&s, status));
+                }
+                (Ok(Some(_)), _) => still.push(id),
+                _ => {}
+            }
+        }
+        self.pending = still;
+        if told.is_empty() {
+            return String::new();
+        }
+        format!("event: commands\ndata: {}\n\n", Value::Array(told))
+    }
+
+    /// Writes what the looks find, once a second; a comment after 15 quiet seconds keeps the
+    /// connection and finds one that is gone.
+    async fn serve(mut self, kernel: Arc<Kernel>, mut conn: tokio::net::TcpStream) {
+        use tokio::io::AsyncWriteExt;
+        let start =
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-store\r\n\
+                      connection: close\r\n\r\nretry: 2000\n\n";
+        if conn.write_all(start).await.is_err() {
+            return;
+        }
+        let mut quiet = 0u32;
+        loop {
+            let k = Arc::clone(&kernel);
+            let Ok((watch, mut said)) = tokio::task::spawn_blocking(move || {
+                let said = self.look(&k);
+                (self, said)
+            })
+            .await
+            else {
+                return;
+            };
+            self = watch;
+            quiet += 1;
+            if said.is_empty() && quiet >= 15 {
+                said = ": still here\n\n".into();
+            }
+            if !said.is_empty() {
+                quiet = 0;
+                if conn.write_all(said.as_bytes()).await.is_err() {
+                    return;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
     }
 }
 
@@ -898,24 +1101,108 @@ struct CommandFilter {
     business: bool,
 }
 
+impl CommandFilter {
+    fn new(params: &HashMap<String, String>) -> Self {
+        let param = |name: &str| {
+            params
+                .get(name)
+                .map(|v| v.trim().to_owned())
+                .unwrap_or_default()
+        };
+        CommandFilter {
+            tenant: param("tenant"),
+            command_type: param("type").to_lowercase(),
+            id: param("id"),
+            command: param("command"),
+            sender: param("sender").to_lowercase(),
+            status: param("status"),
+            business: param("business") == "1",
+        }
+    }
+
+    fn matches(&self, s: &kernable_store::StoredCommand, status: &str) -> bool {
+        let c = &s.pending.command;
+        let ctx = c.context.as_ref();
+        let correlation = ctx.map(|x| x.correlation_id.as_str());
+        let sender = ctx
+            .map(|x| x.sender_identity.to_lowercase())
+            .unwrap_or_default();
+        !(self.business && c.domain == "process")
+            && (self.tenant.is_empty() || c.tenant_id == self.tenant)
+            && (self.command_type.is_empty()
+                || format!("{}.{}", c.domain, c.command_type)
+                    .to_lowercase()
+                    .contains(&self.command_type))
+            && (self.id.is_empty() || c.aggregate_id == self.id)
+            && (self.command.is_empty()
+                || c.command_id == self.command
+                || correlation == Some(self.command.as_str()))
+            && (self.sender.is_empty() || sender.contains(&self.sender))
+            && (self.status.is_empty() || self.status == status)
+    }
+}
+
+/// `committed`, `rejected`, `scheduled` (due later) or `waiting`.
+fn command_status(s: &kernable_store::StoredCommand, now: i64) -> &'static str {
+    use kernable_core::proto::command_result::Outcome;
+    match s.result.as_ref().and_then(|r| r.outcome.as_ref()) {
+        Some(Outcome::Committed(_)) => "committed",
+        Some(Outcome::Rejected(_)) => "rejected",
+        _ if s.pending.command.deliver_at > now => "scheduled",
+        _ => "waiting",
+    }
+}
+
+/// A stored command as the UI shows it: who sent it, and what came of it.
+fn command_json(s: &kernable_store::StoredCommand, status: &str) -> Value {
+    use kernable_core::proto::command_result::Outcome;
+    let c = &s.pending.command;
+    let outcome = s.result.as_ref().and_then(|r| r.outcome.as_ref());
+    // An event's time is when the kernel committed it: the command took from when it was
+    // received (or due, if scheduled) until then. Rejections keep no time.
+    let committed_at = match outcome {
+        Some(Outcome::Committed(done)) => done.events.first().map(|e| e.created_at),
+        _ => None,
+    };
+    let (events, rejection) = match outcome {
+        Some(Outcome::Committed(done)) => (
+            done.events
+                .iter()
+                .map(|e| json!({ "position": e.global_position, "type": e.event_type }))
+                .collect::<Vec<_>>(),
+            Value::Null,
+        ),
+        Some(Outcome::Rejected(r)) => (
+            Vec::new(),
+            json!({ "code": r.code, "message": r.message, "uniqueKey": r.key }),
+        ),
+        _ => (Vec::new(), Value::Null),
+    };
+    json!({
+        "seq": s.seq,
+        "commandId": c.command_id,
+        "tenant": c.tenant_id,
+        "domain": c.domain,
+        "aggregateType": c.aggregate_type,
+        "aggregateId": c.aggregate_id,
+        "type": c.command_type,
+        "payload": String::from_utf8_lossy(&c.payload),
+        "context": context(c.context.as_ref()),
+        "key": c.client_sig.as_ref().map(|s| s.key_id.clone()).unwrap_or_default(),
+        "receivedAt": s.pending.received_at,
+        "deliverAt": c.deliver_at,
+        "status": status,
+        "committedAt": committed_at,
+        "tookMs": committed_at.map(|at| at - s.pending.received_at.max(c.deliver_at)),
+        "events": events,
+        "rejection": rejection,
+    })
+}
+
 /// Stored commands that match a [`CommandFilter`], newest first, reading at most [`SCAN`]: `next`
 /// is the `before` that continues with older ones, null once the first stored was read.
 fn commands(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, BoxError> {
-    let param = |name: &str| {
-        params
-            .get(name)
-            .map(|v| v.trim().to_owned())
-            .unwrap_or_default()
-    };
-    let f = CommandFilter {
-        tenant: param("tenant"),
-        command_type: param("type").to_lowercase(),
-        id: param("id"),
-        command: param("command"),
-        sender: param("sender").to_lowercase(),
-        status: param("status"),
-        business: param("business") == "1",
-    };
+    let f = CommandFilter::new(params);
     let limit = match params.get("limit").filter(|v| !v.is_empty()) {
         Some(v) => v.parse::<usize>().map_err(|_| "limit: not a number")?,
         None => EVENTS_DEFAULT,
@@ -937,74 +1224,11 @@ fn commands(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, 
         before = Some(last.seq);
         for s in &page {
             read += 1;
-            let c = &s.pending.command;
-            let ctx = c.context.as_ref();
-            let correlation = ctx.map(|x| x.correlation_id.as_str());
-            let sender = ctx
-                .map(|x| x.sender_identity.to_lowercase())
-                .unwrap_or_default();
-            use kernable_core::proto::command_result::Outcome;
-            let outcome = s.result.as_ref().and_then(|r| r.outcome.as_ref());
-            let status = match outcome {
-                Some(Outcome::Committed(_)) => "committed",
-                Some(Outcome::Rejected(_)) => "rejected",
-                _ if c.deliver_at > now => "scheduled",
-                _ => "waiting",
-            };
-            let matches = !(f.business && c.domain == "process")
-                && (f.tenant.is_empty() || c.tenant_id == f.tenant)
-                && (f.command_type.is_empty()
-                    || format!("{}.{}", c.domain, c.command_type)
-                        .to_lowercase()
-                        .contains(&f.command_type))
-                && (f.id.is_empty() || c.aggregate_id == f.id)
-                && (f.command.is_empty()
-                    || c.command_id == f.command
-                    || correlation == Some(f.command.as_str()))
-                && (f.sender.is_empty() || sender.contains(&f.sender))
-                && (f.status.is_empty() || f.status == status);
-            if !matches {
+            let status = command_status(s, now);
+            if !f.matches(s, status) {
                 continue;
             }
-            // An event's time is when the kernel committed it: the command took from when it
-            // was received (or due, if scheduled) until then. Rejections keep no time.
-            let committed_at = match outcome {
-                Some(Outcome::Committed(done)) => done.events.first().map(|e| e.created_at),
-                _ => None,
-            };
-            let (events, rejection) = match outcome {
-                Some(Outcome::Committed(done)) => (
-                    done.events
-                        .iter()
-                        .map(|e| json!({ "position": e.global_position, "type": e.event_type }))
-                        .collect::<Vec<_>>(),
-                    Value::Null,
-                ),
-                Some(Outcome::Rejected(r)) => (
-                    Vec::new(),
-                    json!({ "code": r.code, "message": r.message, "uniqueKey": r.key }),
-                ),
-                _ => (Vec::new(), Value::Null),
-            };
-            found.push(json!({
-                "seq": s.seq,
-                "commandId": c.command_id,
-                "tenant": c.tenant_id,
-                "domain": c.domain,
-                "aggregateType": c.aggregate_type,
-                "aggregateId": c.aggregate_id,
-                "type": c.command_type,
-                "payload": String::from_utf8_lossy(&c.payload),
-                "context": context(ctx),
-                "key": c.client_sig.as_ref().map(|s| s.key_id.clone()).unwrap_or_default(),
-                "receivedAt": s.pending.received_at,
-                "deliverAt": c.deliver_at,
-                "status": status,
-                "committedAt": committed_at,
-                "tookMs": committed_at.map(|at| at - s.pending.received_at.max(c.deliver_at)),
-                "events": events,
-                "rejection": rejection,
-            }));
+            found.push(command_json(s, status));
             if found.len() == limit {
                 // The next page starts right after the last one returned.
                 cut = Some(s.seq);
