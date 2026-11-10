@@ -925,6 +925,8 @@ fn history(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, B
 /// What `/api/events` matches on; empty fields match everything, set ones must all match.
 struct Filter {
     tenant: String,
+    /// The domain, exactly.
+    domain: String,
     /// Part of `domain.EventType`, any case.
     event_type: String,
     /// The aggregate id, exactly.
@@ -947,6 +949,7 @@ impl Filter {
         };
         Self {
             tenant: param("tenant"),
+            domain: param("domain"),
             event_type: param("type").to_lowercase(),
             id: param("id"),
             command: param("command"),
@@ -959,6 +962,7 @@ impl Filter {
         let correlation = e.context.as_ref().map(|c| c.correlation_id.as_str());
         !(self.business && e.domain == "process")
             && (self.tenant.is_empty() || e.tenant_id == self.tenant)
+            && (self.domain.is_empty() || e.domain == self.domain)
             && (self.event_type.is_empty()
                 || format!("{}.{}", e.domain, e.event_type)
                     .to_lowercase()

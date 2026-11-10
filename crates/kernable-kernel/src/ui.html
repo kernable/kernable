@@ -168,6 +168,33 @@
   tr.group td { background: var(--sunk); padding-top: 9px; padding-bottom: 7px; font-size: 12.5px; color: var(--muted); }
   tr.group td b { color: var(--text); font-size: 13.5px; margin-right: 8px; }
   tr.link { cursor: pointer; }
+  /* event log */
+  .evbar { margin-bottom: 8px; }
+  .evbar .grow { flex: 1; }
+  .livebtn { border: 1px solid var(--line); background: var(--panel); color: var(--muted); border-radius: 7px; padding: 4px 11px; font: inherit; font-size: 12.5px; font-weight: 500; cursor: pointer; }
+  .livebtn:hover { border-color: var(--accent); }
+  .livebtn.on { background: var(--ok-soft); border-color: transparent; color: var(--ok); }
+  .fchips { margin-bottom: 8px; min-height: 0; }
+  .fchips:empty { display: none; }
+  .fchip { display: inline-flex; gap: 6px; align-items: center; padding: 2px 4px 2px 9px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 12px; }
+  .fchip b { font-weight: 500; color: var(--muted); }
+  .fchip button { border: none; background: none; color: inherit; cursor: pointer; font-size: 13px; line-height: 1; padding: 0 4px; }
+  .tbl.sticky { overflow: visible; }
+  .tbl.sticky th { position: sticky; top: 53px; z-index: 2; }
+  .tbl.sticky tr:first-child th:first-child { border-top-left-radius: 10px; } .tbl.sticky tr:first-child th:last-child { border-top-right-radius: 10px; }
+  #found td.pos { color: var(--faint); text-align: right; font-variant-numeric: tabular-nums; width: 1%; }
+  #found td.time { white-space: nowrap; font-variant-numeric: tabular-nums; width: 1%; }
+  #found tr.batch td:first-child { box-shadow: inset 3px 0 0 var(--violet); }
+  @keyframes fresh { from { background: var(--accent-soft); } to { background: transparent; } }
+  #found tr.fresh td { animation: fresh 2.5s ease-out; }
+  .evdetail { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 18px; padding: 4px 0 10px; }
+  @media (max-width: 900px) { .evdetail { grid-template-columns: 1fr; } }
+  .evdetail pre { margin: 0; }
+  .evdetail .boxhead { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+  .evdetail dl { margin: 0; }
+  .evdetail .actions { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 10px; font-size: 13px; }
+  .copy { border: 1px solid var(--line); background: var(--panel); color: var(--muted); border-radius: 6px; font-size: 11.5px; padding: 1px 7px; cursor: pointer; }
+  .copy:hover { color: var(--accent); border-color: var(--accent); }
   th.sort a { color: inherit; } th.sort a:hover { color: var(--accent); text-decoration: none; } th.on { color: var(--text); }
   tr.link:hover td { background: var(--sunk); }
   .t.all { background: none; border-style: dashed; color: var(--muted); }
@@ -264,18 +291,23 @@
     <div id="x-domains" class="grid"></div>
     <div id="x-catalog" class="grid" hidden></div>
     <div id="x-events" hidden>
-      <form class="controls" id="search" style="margin-bottom:10px">
-        <input class="ctl" name="type" placeholder="Event type, e.g. shop.Order">
-        <input class="ctl" name="tenant" placeholder="Tenant">
-        <input class="ctl" name="id" placeholder="Aggregate ID">
-        <input class="ctl" name="command" placeholder="Command or correlation ID">
-        <input class="ctl" name="text" placeholder="Payload contains…">
+      <form class="controls evbar" id="search">
+        <select class="ctl" name="domain" aria-label="Domain"><option value="">All domains</option></select>
+        <input class="ctl" name="type" list="event-types" placeholder="Event type" style="width:170px" autocomplete="off">
+        <datalist id="event-types"></datalist>
+        <input class="ctl" name="id" placeholder="Aggregate ID" style="width:150px">
+        <input class="ctl" name="command" placeholder="Command or correlation" style="width:190px">
+        <input class="ctl" name="text" placeholder="Payload contains…" style="width:160px">
+        <input class="ctl" name="tenant" placeholder="Tenant" style="width:100px">
         <button class="btn" type="submit">Search</button>
-        <label><input type="checkbox" id="engine"> process engine's events</label>
-        <label><input type="checkbox" id="live"> follow</label>
+        <label title="The process engine's own events: cases starting, moving and ending"><input type="checkbox" id="engine"> engine events</label>
+        <span class="grow"></span>
         <span class="note" id="found-meta"></span>
+        <button class="livebtn" type="button" id="live-btn" aria-pressed="false" title="Show new events as they are written">● Live</button>
+        <input type="checkbox" id="live" hidden>
       </form>
-      <div class="tbl"><table id="found"></table></div>
+      <div class="chips fchips" id="found-chips"></div>
+      <div class="tbl sticky"><table id="found"></table></div>
       <div class="controls" style="margin-top:10px"><button class="btn" id="older" hidden>Older</button><span class="note" id="older-meta"></span></div>
     </div>
     <div id="x-commands" hidden>
@@ -551,6 +583,7 @@ function draw() {
   if (top === "operations") drawOperations(v);
   if (top === "explore" && exploreTab === "domains") drawDomains();
   if (top === "explore" && exploreTab === "catalog") drawCatalog();
+  if (top === "explore" && exploreTab === "events") fillEventChoices();
 }
 
 // ================= Overview =================
@@ -1386,6 +1419,9 @@ function enterExplore() {
   if (exploreTab === "events" && route.query) {
     const form = $("search");
     let changed = false;
+    const domain = route.query.get("domain") ?? "";
+    if (domain !== eventDomain) { eventDomain = domain; changed = true; }
+    fillEventChoices();
     for (const name of ["type", "tenant", "id", "command", "text"]) {
       const value = route.query.get(name) ?? "";
       if (form.elements[name].value !== value) { form.elements[name].value = value; changed = true; }
@@ -1862,28 +1898,116 @@ async function follow() {
   if (run !== searching) return;
   tail = r.last;
   if (!r.events.length) return;
+  markFresh(r.events);
   found.unshift(...r.events.reverse());
   if (found.length > FOUND_MAX) { found.length = FOUND_MAX; older = found[found.length - 1].position; }
   drawFound();
 }
+/** Positions that came in live, shown highlighted once. */
+let freshEvents = new Set();
+/** The event log's domain filter: kept here, as its dropdown is filled only once the domains are known. */
+let eventDomain = "";
+function markFresh(events) {
+  for (const e of events) freshEvents.add(e.position);
+  setTimeout(() => { for (const e of events) freshEvents.delete(e.position); }, 3000);
+}
+const DAY_MS = 86_400_000;
+/** "Today · 10 Nov 2026", "Yesterday · …", else the weekday. */
+function dayLabel(ms) {
+  const d = new Date(ms), today = new Date(now());
+  const start = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diff = Math.round((start(today) - start(d)) / DAY_MS);
+  const date = d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+  return diff === 0 ? `Today · ${date}` : diff === 1 ? `Yesterday · ${date}` : `${d.toLocaleDateString("en-GB", { weekday: "long" })} · ${date}`;
+}
+const timeOfDay = (ms) => { const d = new Date(ms); return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3, "0")}`; };
+function copyButton(text, label = "copy") {
+  return el("button", { class: "copy", type: "button", onclick: (ev) => { ev.stopPropagation(); navigator.clipboard?.writeText(text).then(() => { ev.target.textContent = "copied"; setTimeout(() => (ev.target.textContent = label), 1200); }); } }, label);
+}
+/** The domains and event types the log knows, for the filter's choices. */
+function fillEventChoices() {
+  const types = (state?.events ?? []).map((e) => e.type).sort();
+  // The domain asked for stays a choice even before the log's domains are known.
+  const domains = [...new Set([...types.map(domainOf), eventDomain].filter(Boolean))].sort();
+  const sel = $("search").elements.domain;
+  if (sel.options.length !== domains.length + 1) sel.replaceChildren(el("option", { value: "" }, "All domains"), domains.map((d) => el("option", { value: d }, d)));
+  if (sel.value !== eventDomain) sel.value = eventDomain;
+  const list = $("event-types");
+  if (list.children.length !== types.length) list.replaceChildren(...types.map((t) => el("option", { value: t })));
+}
+/** The filters in use, each as a chip that removes it. */
+function drawFilterChips() {
+  const names = { domain: "domain", type: "event", id: "aggregate", command: "command", text: "payload", tenant: "tenant" };
+  const form = $("search");
+  const chips = Object.entries(names).filter(([k]) => form.elements[k].value.trim()).map(([k, label]) =>
+    el("span", { class: "fchip" }, el("b", {}, label), form.elements[k].value.trim(),
+      el("button", { type: "button", title: `Remove the ${label} filter`, onclick: () => { form.elements[k].value = ""; if (k === "domain") eventDomain = ""; form.requestSubmit(); } }, "×")));
+  if (chips.length > 1) chips.push(el("button", { class: "copy", type: "button", onclick: () => { for (const k of Object.keys(names)) form.elements[k].value = ""; eventDomain = ""; form.requestSubmit(); } }, "clear all"));
+  $("found-chips").replaceChildren(...chips);
+}
+/** The event log: a heading per day; events one command wrote together marked on the left. */
 function drawFound() {
-  const rows = [el("tr", {}, ["Position", "Time", "Event", "Aggregate", "Sent by", "Data", "Tenant"].map((h) => el("th", {}, h)))];
-  for (const e of found) {
+  fillEventChoices();
+  drawFilterChips();
+  const live = $("live").checked;
+  $("live-btn").classList.toggle("on", live);
+  $("live-btn").setAttribute("aria-pressed", String(live));
+  const tenants = new Set(found.map((e) => e.tenant));
+  const showTenant = tenants.size > 1 || !tenants.has("default") || !!$("search").elements.tenant.value.trim();
+  const heads = ["Position", "Time", "Event", "Aggregate", "Sent by", "Data", ...(showTenant ? ["Tenant"] : [])];
+  const cols = heads.length;
+  const rows = [el("tr", {}, heads.map((h) => el("th", { class: h === "Position" ? "n" : "" }, h)))];
+  let day = null;
+  found.forEach((e, i) => {
+    const d = dayLabel(e.createdAt);
+    if (d !== day) { day = d; rows.push(el("tr", { class: "group" }, el("td", { colspan: cols }, el("b", {}, d)))); }
     const open = opened.has(e.position);
-    rows.push(el("tr", { class: `click${open ? " open" : ""}`, onclick: () => { open ? opened.delete(e.position) : opened.add(e.position); drawFound(); } },
-      el("td", { class: "mono" }, e.position), el("td", {}, el("span", { title: iso(e.createdAt) }, iso(e.createdAt))),
-      el("td", {}, el("b", {}, `${e.domain}.${e.type}`), e.erases ? [" ", el("span", { class: "tag erased" }, "erases")] : null),
-      el("td", {}, el("a", { href: historyHref({ tenant: e.tenant, domain: e.domain, type: e.aggregateType, id: e.aggregateId }), onclick: (ev) => ev.stopPropagation() }, `${e.aggregateType} ${e.aggregateId}`), el("span", { class: "faint" }, ` · v${e.version}`)),
+    const together = found[i - 1]?.commandId === e.commandId || found[i + 1]?.commandId === e.commandId;
+    const cls = ["click", open ? "open" : "", together ? "batch" : "", freshEvents.has(e.position) ? "fresh" : ""].filter(Boolean).join(" ");
+    const data = oneLine(e.payload);
+    rows.push(el("tr", { class: cls, title: together ? "Written together with the events beside it, by one command" : null, onclick: () => { open ? opened.delete(e.position) : opened.add(e.position); drawFound(); } },
+      el("td", { class: "pos" }, e.position),
+      el("td", { class: "time", title: iso(e.createdAt) }, timeOfDay(e.createdAt)),
+      el("td", {}, el("span", { class: "faint" }, `${e.domain}.`), el("b", {}, e.type), e.erases ? [" ", el("span", { class: "tag erased" }, "erases")] : null),
+      el("td", {}, el("span", { class: "faint" }, `${e.aggregateType} `), el("a", { class: "mono", href: historyHref({ tenant: e.tenant, domain: e.domain, type: e.aggregateType, id: e.aggregateId }), onclick: (ev) => ev.stopPropagation() }, e.aggregateId), el("span", { class: "faint" }, ` · v${e.version}`)),
       el("td", {}, sender(e.context)),
-      el("td", { class: "muted" }, fit(oneLine(e.payload), 60)), el("td", {}, e.tenant)));
-    if (open) rows.push(el("tr", {}, el("td", { colspan: 7, class: "wide" }, payloadView(e.payload, null), contextView(e.context),
-      el("div", { class: "note mono" }, "command ", el("a", { href: `/explore/commands?command=${encodeURIComponent(e.commandId)}` }, e.commandId), ` · schema ${e.schema} · worker `, keyView(e.key), ` · hash ${e.hash.slice(0, 16)}…`))));
-  }
-  if (!found.length) rows.push(el("tr", {}, el("td", { colspan: 7, class: "note" }, "No matching events.")));
+      el("td", { class: "muted" }, data === "no data" ? el("span", { class: "faint" }, "–") : fit(data, 60)),
+      showTenant ? el("td", {}, e.tenant) : null));
+    if (open) rows.push(el("tr", { class: "open" }, el("td", { colspan: cols, class: "wide" }, eventDetail(e))));
+  });
+  if (!found.length) rows.push(el("tr", {}, el("td", { colspan: cols, class: "note" }, "No matching events.")));
   $("found").replaceChildren(...rows);
-  $("found-meta").textContent = `${found.length} shown${$("live").checked ? " · following" : ""}`;
+  $("found-meta").textContent = `${num(found.length)} shown`;
   $("older").hidden = older === null;
   $("older-meta").textContent = older === null ? (found.length ? "start of the log reached" : "") : `searched down to position ${num(older)}`;
+}
+/** One event opened: its payload on the left; where it came from on the right; then where to go. */
+function eventDetail(e) {
+  const ctx = e.context ?? {}, attrs = ctx.attributes ?? {};
+  const row = (k, v) => v === undefined || v === null || v === "" ? null : [el("dt", {}, k), el("dd", { class: "mono" }, v)];
+  const caseOf = e.domain === "process" ? { tenant: e.tenant, process: e.aggregateType, id: e.aggregateId } : attrs.process && attrs.case ? { tenant: e.tenant, process: attrs.process, id: attrs.case } : null;
+  const known = new Set(["process", "case"]);
+  return el("div", { class: "evdetail", onclick: (ev) => ev.stopPropagation() },
+    el("div", {},
+      el("div", { class: "boxhead" }, el("span", { class: "kind" }, `Payload · schema ${e.schema}`), copyButton(e.payload, "copy JSON")),
+      payloadView(e.payload, null)),
+    el("div", {},
+      el("div", { class: "boxhead" }, el("span", { class: "kind" }, "Where it came from")),
+      el("dl", {},
+        row("sent by", ctx.senderIdentity), row("on behalf of", ctx.onBehalfOf), row("account", ctx.senderAccount), row("session", ctx.senderSession),
+        row("correlation", ctx.correlationId), row("caused by", ctx.causationId),
+        Object.entries(attrs).filter(([k]) => !known.has(k)).map(([k, v]) => row(k, String(v))),
+        caseOf ? row("case", `${caseOf.process} · ${caseOf.id}`) : null,
+        row("command", e.commandId),
+        row("position", `${e.position} · version ${e.version}`),
+        row("tenant", e.tenant),
+        [el("dt", {}, "worker key"), el("dd", {}, keyView(e.key))],
+        [el("dt", {}, "hash"), el("dd", { class: "mono" }, `${e.hash.slice(0, 16)}… `, copyButton(e.hash))]),
+      el("div", { class: "actions" },
+        el("a", { href: historyHref({ tenant: e.tenant, domain: e.domain, type: e.aggregateType, id: e.aggregateId }) }, "Aggregate history →"),
+        ctx.correlationId ? el("a", { href: `/explore/events?command=${encodeURIComponent(ctx.correlationId)}` }, "Same correlation →") : null,
+        el("a", { href: `/explore/commands?command=${encodeURIComponent(e.commandId)}` }, "The command →"),
+        caseOf ? el("a", { href: caseHref(caseOf) }, "The case →") : null)));
 }
 
 /** Who sent a request, from its context: the identity, and on whose behalf. */
@@ -2033,6 +2157,8 @@ $("cengine").addEventListener("change", csearch);
 $("colder").addEventListener("click", colderPage);
 $("clive").addEventListener("change", () => { ($("clive").checked ? csearch() : drawCommands()); watch(); });
 $("live").addEventListener("change", () => { ($("live").checked ? search() : drawFound()); watch(); });
+$("live-btn").addEventListener("click", () => { $("live").checked = !$("live").checked; $("live").dispatchEvent(new Event("change")); });
+$("search").elements.domain.addEventListener("change", (ev) => { eventDomain = ev.target.value; $("search").requestSubmit(); });
 window.addEventListener("popstate", onRoute);
 
 // ---- keeping the view current: told by the kernel when something changed (/api/watch) ----
@@ -2091,7 +2217,7 @@ function streamUrl() {
     if (exploreTab === "aggregates") topics.push("head");
     if (exploreTab === "events" && $("live").checked) {
       topics.push("events");
-      form("search", { type: "event", tenant: "tenant", id: "id", command: "command" });
+      form("search", { domain: "domain", type: "event", tenant: "tenant", id: "id", command: "command" });
       if ($("engine").checked) q.set("engine", "1");
     }
     if (exploreTab === "commands" && $("clive").checked) {
@@ -2127,6 +2253,7 @@ function watch() {
     const text = new FormData($("search")).get("text")?.toString().trim() ?? "";
     const known = new Set(found.map((f) => f.position));
     const fresh = (data ?? []).filter((e) => (!text || e.payload.includes(text)) && !known.has(e.position));
+    markFresh(fresh);
     found.unshift(...fresh.reverse());
     if (found.length > FOUND_MAX) found.length = FOUND_MAX;
     drawFound();
