@@ -101,8 +101,10 @@ printf '  restored %s events in %.1f s (download, apply, verify); the kernel ans
 echo "== RPO: $missing events missing, the newest restored $((stored_ms - restored_ms)) ms older than the newest stored (segments every ${SEG} s)"
 printf '== RTO: %.1f s for %s events (%s MB)\n' "$rto_s" "$restored" "$(du -m r.db | cut -f1)"
 tail -1 restore.out | grep -qx OK && echo "  the restored store verifies" || { echo "  restore output:"; tail -3 restore.out; }
-echo "  the restore's steps:"
-sed 's/\x1b\[[0-9;]*m//g' restore.err | cut -c12-23,40-180 | sed 's/^/    /' | tail -12
+if [[ -s restore.err ]]; then
+  echo "  the restore's steps:"
+  sed 's/\x1b\[[0-9;]*m//g' restore.err | cut -c12-23,40-180 | sed 's/^/    /' | tail -12
+fi
 
 echo "== a point in time: the store as it was 10 s before the loss"
 at_ms=$((lost - 10000))

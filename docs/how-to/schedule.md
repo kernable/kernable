@@ -76,6 +76,8 @@ let outcome = kernable.cancel(Cancel::new(&id)).await?;
 - **Afterwards** the command's ID answers `cancelled`, also to a resubmit.
 - **Too late:** a command that is due already, running or done answers `too_late`. Undo its
   effect with another command if you need to.
+- **A process case's timers** are the engine's: cancelling one answers `not_allowed`. The case
+  withdraws its own timers when it moves on or ends.
 
 ## Its result
 

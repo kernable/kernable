@@ -30,6 +30,8 @@ The kernel stores commands and events, signs and checks every message, runs comm
 
 ## Quickstart
 
+> **Not released yet.** kernable is in private preview: the install script and the SDK packages (`@kernable/sdk` on npm, `kernable-sdk` on PyPI and crates.io) are not public yet, so the install commands below and the package badges above do not work for everyone yet. [Request early access](https://kernable.com/#access) to get the binaries and the SDKs.
+
 ```sh
 curl -fsSL https://kernable.com/install.sh | sh     # macOS and Linux, x86_64 and arm64
 mkdir demo && cd demo
@@ -74,11 +76,14 @@ Every code example in the documentation is a file that runs in `make check` agai
 | `crates/kernable-store` | The event store (`sqlite:`, `file:`, `memory:`), the snapshot store and the vault |
 | `crates/kernable-kernel` | The kernel and the `kernable` command: `kernable start --root <root.pub>`, keys, grants, revocation, certificates, verify, listeners, vault |
 | `crates/kernable-bench`, `bench/` | Load generator, benchmark matrix and results |
+| `crates/kernable-soak` | The soak: the kernel and an app per SDK under load and random faults (`make soak`) |
 | `sdks/typescript`, `sdks/python`, `sdks/rust` | The SDKs |
 | `kits/` | The kits in TypeScript, Python and Rust, and the fixtures all three are tested against |
 | `examples/shop` | Reference application: identity in Python, orders and an HTTP API in TypeScript, with kill tests |
 | `docs/` | The documentation site and its runnable examples |
 | `fuzz/` | Fuzz targets (cargo-fuzz) |
+| `design/` | Design notes: decisions and the reasons behind them, for contributors |
+| `scripts/` | The install script, release builds, the package check and the soak on a server |
 
 ## Develop
 
@@ -92,7 +97,8 @@ make check          # everything, in four parts CI runs in parallel (Python ≥ 
 make check-packages # builds the npm package and the Python wheel, installs and runs them
 make docs           # the documentation site; `npm run reference` in docs/ regenerates the reference
 make torture        # crash points and property tests, many rounds (ROUNDS=20 CASES=10000)
-make fuzz           # fuzzes the file log and the wire messages (nightly Rust, cargo-fuzz)
+make fuzz           # 8 targets: the store's files and log, the wire messages, config, grants,
+                    #   the HTTP endpoints and registrations (nightly Rust, cargo-fuzz)
 ./bench/run.sh      # benchmark matrix; STORE=file:k.log or STORE=memory: picks the backend
 ```
 

@@ -249,6 +249,8 @@ Revocation of keys, by root-key tooling (`kernable revoke`).
 ### RevokeResponse
 
 
+No fields.
+
 ## Memberships
 
 ### ProcessService
@@ -382,6 +384,8 @@ without a membership, and a process without a service, count as listed.
 ### ApplyResult
 
 
+No fields.
+
 ## Partitions
 
 ### PartitionService
@@ -406,6 +410,8 @@ request to its tenant's partition.
 
 ### MapResult
 
+
+No fields.
 
 ### Partition
 
@@ -514,6 +520,8 @@ Commands, sent by clients and by handlers of listeners.
 ### Cancelled
 
 
+No fields.
+
 ### SubmitRequest
 
 
@@ -556,6 +564,8 @@ The outcome of a command; exactly one of `committed`, `rejected` or `accepted` i
 
 ### Accepted
 
+
+No fields.
 
 ### Rejected
 

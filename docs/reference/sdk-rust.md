@@ -8,7 +8,7 @@ cargo add serde --features derive
 cargo add tokio --features macros,rt-multi-thread
 ```
 
-Rust 1.88 or newer (edition 2024), on Tokio. A kernel to connect to: `kernable start --dev` (see [Getting started](../tutorial/getting-started)).
+Rust 1.93 or newer (edition 2024), on Tokio. A kernel to connect to: `kernable start --dev` (see [Getting started](../tutorial/getting-started)).
 
 A cart aggregate, a read model that answers a query, and a client that submits and reads back, in one process:
 

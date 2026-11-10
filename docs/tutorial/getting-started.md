@@ -14,9 +14,9 @@ kernable is in private preview: the install scripts and the SDK packages (`@kern
 curl -fsSL https://kernable.com/install.sh | sh
 ```
 
-The script installs the kernel on macOS and Linux; on Windows, run it in WSL.
+The script installs the kernel on macOS and Linux; on Windows, run it and all the steps below in WSL, with the Linux commands.
 
-This puts `kernable` on your `PATH`: `kernable start` runs the kernel, the other commands create keys and grants and verify a log (`kernable` alone lists them).
+It installs `kernable` into `~/.local/bin`; if that is not on your `PATH` yet, the script says so and how to add it. `kernable start` runs the kernel, the other commands create keys and grants and verify a log (`kernable` alone lists them).
 
 ## 2. Start a kernel
 
@@ -85,10 +85,10 @@ node cart.ts
 ```
 
 ```sh [Python]
-python3 -m venv py                # Windows: python -m venv py
-py/bin/pip install kernable-sdk       # Windows: py\Scripts\pip install kernable-sdk
+python3 -m venv py
+py/bin/pip install kernable-sdk
 # save cart.py, then:
-py/bin/python cart.py             # Windows: py\Scripts\python cart.py
+py/bin/python cart.py
 ```
 
 ```sh [Rust]
@@ -161,7 +161,7 @@ node carts.ts
 ```
 
 ```sh [Python]
-py/bin/python carts.py            # Windows: py\Scripts\python carts.py
+py/bin/python carts.py
 ```
 
 ```sh [Rust]
@@ -197,7 +197,7 @@ node submit.ts
 ```
 
 ```sh [Python]
-py/bin/python submit.py           # Windows: py\Scripts\python submit.py
+py/bin/python submit.py
 ```
 
 ```sh [Rust]

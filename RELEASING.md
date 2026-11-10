@@ -40,4 +40,6 @@ archives (beyond SHA256SUMS over HTTPS), and removing the "not released yet" not
 - `docs/tutorial/getting-started.md` and `docs/tutorial/shop/1-kernel.md`: the "Not released yet"
   warning above the install command;
 - `docs/.vitepress/llms.ts`: the status line at the top of `llms-full.txt`;
-- `docs/public/llms.txt` and `docs/public/kernable.AGENTS.md`: their status lines.
+- `docs/public/llms.txt` and `docs/public/kernable.AGENTS.md`: their status lines;
+- `README.md`: the "Not released yet" note above the quickstart (its npm, PyPI and crates.io
+  badges then work as they are).

@@ -14,4 +14,6 @@ WORKDIR /data
 VOLUME /data
 EXPOSE 7233
 ENTRYPOINT ["/usr/local/bin/kernable"]
-CMD ["--help"]
+# Without arguments the image prints the start flags and exits 0 (`kernable --help` is no command
+# and exits 2); give `start ...` or another command as above.
+CMD ["start", "--help"]

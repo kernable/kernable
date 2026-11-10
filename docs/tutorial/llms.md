@@ -5,7 +5,7 @@ Starting a project on kernable with an AI assistant or a coding agent? Give it k
 | File | What it is | Use it |
 |---|---|---|
 | <a href="/docs/kernable.AGENTS.md" target="_blank"><code>kernable.AGENTS.md</code></a> | a compact guide written as instructions: the mental model, project layout, every pattern with code, the rules, the typical errors and how to verify | copy it into your project as `AGENTS.md`, `CLAUDE.md` or your tool's context file |
-| [`/llms.txt`](/llms.txt) | a short index of this documentation, following the [llms.txt](https://llmstxt.org) convention | tools that look for it find it at the site's root |
+| [`/llms.txt`](/llms.txt) | a short index of this documentation, following the [llms.txt](https://llmstxt.org) convention | tools that look for it find it under the documentation, at `kernable.com/docs/llms.txt`, not at the site's root |
 | [`/llms-full.txt`](/llms-full.txt) | the whole documentation in one Markdown file, with all code examples inlined | give it to an assistant that should know everything, or that answers questions about kernable |
 
 ## Start a project with an agent

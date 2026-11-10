@@ -43,5 +43,9 @@ install -m 755 "$tmp/$name/kernable" "$DEST/kernable"
 echo "installed $("$DEST/kernable" --version) to $DEST/kernable"
 case ":$PATH:" in
   *":$DEST:"*) ;;
-  *) echo "add $DEST to your PATH, e.g. echo 'export PATH=\"$DEST:\$PATH\"' >> ~/.profile" ;;
+  *)
+    # zsh is the default shell on macOS and does not read ~/.profile.
+    profile="~/.profile"
+    [ "$(uname -s)" = Darwin ] && profile="~/.zprofile"
+    echo "add $DEST to your PATH, e.g. echo 'export PATH=\"$DEST:\$PATH\"' >> $profile" ;;
 esac
