@@ -100,6 +100,11 @@
   .title .meta { color: var(--muted); font-size: 13px; }
   .key { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; border-bottom: 1px dashed var(--faint); cursor: pointer; }
   .key.named { font-family: inherit; font-size: inherit; }
+  .pop { position: absolute; z-index: 10; width: 360px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; display: grid; gap: 10px; box-shadow: 0 10px 30px -12px rgba(10, 20, 60, .35); font-size: 13px; }
+  .pop h4 { margin: 0; font-size: 12px; color: var(--faint); text-transform: uppercase; letter-spacing: .06em; font-weight: 600; }
+  .pop code { word-break: break-all; }
+  .pop ul { margin: 0; padding-left: 16px; color: var(--muted); display: grid; gap: 2px; }
+  .pop .controls input { flex: 1; }
   svg text { fill: var(--muted); font: 11px system-ui, sans-serif; }
   svg .gridline { stroke: var(--line); stroke-width: 1; }
   /* lists beside a main area */
@@ -311,15 +316,49 @@ try { keyNames = JSON.parse(localStorage.getItem("kernable.keys") ?? "{}"); } ca
 function keyView(id) {
   if (!id) return el("span", { class: "faint" }, "–");
   const name = keyNames[id];
-  return el("span", { class: `key${name ? " named" : ""}`, title: `${id}\nClick to name this key (kept in this browser).`, onclick: (ev) => {
-    ev.stopPropagation();
-    const given = prompt(`A name for key ${id.slice(0, 16)}…`, name ?? "");
-    if (given === null) return;
-    if (given.trim()) keyNames[id] = given.trim(); else delete keyNames[id];
-    try { localStorage.setItem("kernable.keys", JSON.stringify(keyNames)); } catch {}
-    render();
-  } }, name ? `key ${name}` : `${id.slice(0, 10)}…`);
+  return el("span", { class: `key${name ? " named" : ""}`, title: `${id}: click for details`, onclick: (ev) => { ev.preventDefault(); ev.stopPropagation(); openKey(id, ev.currentTarget); } }, name ? `key ${name}` : `${id.slice(0, 10)}…`);
 }
+
+/** Where the kernel sees a key now: the workers, listeners, processes and memberships it signs. */
+function keyUses(id) {
+  const uses = [];
+  if (!state) return uses;
+  for (const w of state.instances) if (w.key === id) uses.push(`runs worker ${w.worker} (${w.aggregates.join(", ")})`);
+  for (const l of state.listeners) if (l.key === id) uses.push(`${l.middlewares.length ? "middleware" : l.queries.length ? "read model" : "listener"} ${l.name}`);
+  for (const m of state.services) if (m.key === id) uses.push(`applied the membership of ${m.service}`);
+  for (const p of procs?.processes ?? []) for (const v of p.versions) if (v.key === id) uses.push(`registered ${p.name} version ${v.version}`);
+  if (system?.replication.primary?.standby === id) uses.push("the standby");
+  if (system?.backup.connected === id) uses.push("the backup follower");
+  return uses;
+}
+
+/** The key's popover: its full ID, where it is used, and a name kept in this browser. */
+function openKey(id, anchor) {
+  $("keypop")?.remove();
+  const name = keyNames[id] ?? "";
+  const input = el("input", { class: "ctl", id: "keyname", value: name, placeholder: "e.g. app, operator, billing worker" });
+  const save = (value) => {
+    if (value.trim()) keyNames[id] = value.trim(); else delete keyNames[id];
+    try { localStorage.setItem("kernable.keys", JSON.stringify(keyNames)); } catch {}
+    $("keypop")?.remove();
+    render();
+  };
+  input.addEventListener("keydown", (ev) => { if (ev.key === "Enter") save(input.value); if (ev.key === "Escape") $("keypop")?.remove(); });
+  const uses = keyUses(id);
+  const pop = el("div", { class: "pop", id: "keypop", role: "dialog", "aria-label": "Key", onclick: (ev) => ev.stopPropagation() },
+    el("h4", {}, name ? `Key ${name}` : "Key"),
+    el("div", { class: "cmd" }, el("code", {}, id), copyButton(id)),
+    el("div", {}, el("div", { class: "note" }, "Used now for"), uses.length ? el("ul", {}, uses.map((u) => el("li", {}, u))) : el("div", { class: "muted" }, "nothing connected right now")),
+    el("div", { class: "grid", style: "gap:6px" }, el("label", { class: "note", for: "keyname" }, "Name (kept in this browser only; the kernel knows keys by their ID)"),
+      el("div", { class: "controls" }, input, el("button", { class: "btn", type: "button", onclick: () => save(input.value) }, "Save"), name ? el("button", { class: "btn", type: "button", onclick: () => save("") }, "Remove") : null)));
+  document.body.append(pop);
+  const r = anchor.getBoundingClientRect();
+  pop.style.top = `${window.scrollY + r.bottom + 6}px`;
+  pop.style.left = `${Math.max(8, Math.min(window.scrollX + r.left, window.scrollX + document.documentElement.clientWidth - pop.offsetWidth - 8))}px`;
+  input.focus();
+}
+document.addEventListener("click", () => $("keypop")?.remove());
+document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") $("keypop")?.remove(); });
 
 // ---- data, refreshed in the background ----
 let state = null, system = null, trend = null, parked = null, rejections = null, procs = null, incidents = null;

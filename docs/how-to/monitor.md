@@ -31,7 +31,7 @@ With `--ui-listen` (on by default with `--dev`, at http://127.0.0.1:7234), the k
   - **Aggregates:** any aggregate's events in order, each in one line with the command and sender that caused it, its payload and signatures one click away. Vault fields show as `personal · <subject>`, `secret` or `erased`; the UI never decrypts the vault, and it does not show snapshot states, which may hold personal values.
 - **Search:** an order, case, command or correlation ID finds its aggregates, its cases and its events.
 
-Keys show by their ID; click one to give it a name ("app", "operator"), kept in your browser only.
+Keys show by their ID. Click one for its full ID (to copy), what it is used for now (the workers, listeners and processes it signs), and a name such as "app" or "operator" to show instead, kept in your browser only.
 
 The UI has no login, so it listens on a loopback address only; the kernel refuses to start with another address. Reach it on a server through an SSH tunnel:
 
