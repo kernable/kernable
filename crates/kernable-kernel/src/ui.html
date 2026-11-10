@@ -165,6 +165,11 @@
   .bars { display: block; }
   .bars rect { fill: var(--accent); opacity: .75; }
   .bars .base { stroke: var(--line); }
+  tr.group td { background: var(--sunk); padding-top: 9px; padding-bottom: 7px; font-size: 12.5px; color: var(--muted); }
+  tr.group td b { color: var(--text); font-size: 13.5px; margin-right: 8px; }
+  tr.link { cursor: pointer; }
+  tr.link:hover td { background: var(--sunk); }
+  .t.all { background: none; border-style: dashed; color: var(--muted); }
   .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
   .tiles .kpi { display: grid; grid-template-columns: 1fr auto; align-items: end; column-gap: 10px; }
   .tiles .kpi .l, .tiles .kpi .s { grid-column: 1 / -1; }
@@ -449,10 +454,9 @@ async function loadProcs() {
 /** The counts of the domain shown: events per type, commands of the last hour. A long log is
  *  counted over several requests: until it caught up, the page asks again soon. */
 let counts = null;
-async function loadCounts() {
-  if (!domainSel) return;
+async function loadCounts(domain = domainSel ?? "") {
   try {
-    counts = { ...(await get(`/api/counts?domain=${encodeURIComponent(domainSel)}`)), domain: domainSel };
+    counts = { ...(await get(`/api/counts${domain ? `?domain=${encodeURIComponent(domain)}` : ""}`)), domain };
     if (counts.counted < counts.head) setTimeout(() => reload(true), 300);
   } catch {}
 }
@@ -1374,7 +1378,7 @@ function enterExplore() {
     if (changed) cnewest = null;
   }
   if (exploreTab === "domains") domainSel = route.args[1] ?? null;
-  if (exploreTab === "catalog") { catalogKind = ["events", "commands", "queries"].includes(route.query?.get("kind")) ? route.query.get("kind") : "events"; catalogText = route.query?.get("q") ?? ""; }
+  if (exploreTab === "catalog") { catalogKind = ["events", "commands", "queries", "processes"].includes(route.query?.get("kind")) ? route.query.get("kind") : "events"; catalogText = route.query?.get("q") ?? ""; }
   // The event log's filters come from the address: /explore/events?type=shop.Order&tenant=t1
   if (exploreTab === "events" && route.query) {
     const form = $("search");
@@ -1584,37 +1588,106 @@ function drawDomain(box, data, d) {
   ].filter(Boolean));
 }
 
-// ---- Catalog: every event, command and query in one searchable table ----
+// ---- Catalog: every event, command, query and process, grouped by domain ----
 function drawCatalog() {
   const box = $("x-catalog");
   if (!state) return;
   const data = catalogData();
+  const c = counts?.domain === "" ? counts : null;
   const f = catalogText.toLowerCase();
-  const tab = (kind, label, n) => el("a", { href: `/explore/catalog?kind=${kind}${catalogText ? `&q=${encodeURIComponent(catalogText)}` : ""}`, class: catalogKind === kind ? "on" : "" }, `${label} · ${n}`);
+  const dash = () => el("span", { class: "faint" }, c ? "–" : "…");
+  const href = (kind) => `/explore/catalog?kind=${kind}${catalogText ? `&q=${encodeURIComponent(catalogText)}` : ""}`;
+  const processes = data.models.map((p) => {
+    const info = (procs?.processes ?? []).find((x) => x.name === p.name);
+    const versions = info?.versions ?? [];
+    return { ...p, domain: domainOf(p.name), open: sum(versions.map(openCount)), started: sum(versions.map((v) => v.started ?? 0)),
+      incidents: (incidents?.cases ?? []).filter((x) => x.process === p.name).length };
+  });
+  const tab = (kind, label, n) => el("a", { href: href(kind), class: catalogKind === kind ? "on" : "" }, label, el("span", { class: "faint" }, ` ${n}`));
   const input = el("input", { class: "ctl", id: "catalog-q", placeholder: "Filter by name, domain, reader…", value: catalogText, style: "width:300px" });
-  input.addEventListener("input", () => { catalogText = input.value; history.replaceState(null, "", `/explore/catalog?kind=${catalogKind}${catalogText ? `&q=${encodeURIComponent(catalogText)}` : ""}`); const at = input.selectionStart; drawCatalog(); $("catalog-q").focus(); $("catalog-q").setSelectionRange(at, at); });
-  let table;
+  input.addEventListener("input", () => { catalogText = input.value; history.replaceState(null, "", href(catalogKind)); const at = input.selectionStart; drawCatalog(); $("catalog-q").focus(); $("catalog-q").setSelectionRange(at, at); });
+  // Listeners that read every event: named once per domain, in its heading.
+  const everything = () => data.wildcards.length ? [" · also read by ", data.wildcards.map((l) => el("a", { class: "t all", href: "/operations", title: `${l.name} reads every event its key may read` }, dotOf(l.status), l.name, " (all events)"))] : null;
+  /** Rows of `items` under one heading row per domain; a row opens `open(item)`. */
+  const grouped = (items, cols, head, row, open) => {
+    const byDomain = new Map();
+    for (const x of items) byDomain.set(x.domain, [...(byDomain.get(x.domain) ?? []), x]);
+    return [...byDomain.keys()].sort().flatMap((d) => [
+      el("tr", { class: "group" }, el("td", { colspan: cols }, el("a", { href: `/explore/domains/${encodeURIComponent(d)}` }, el("b", {}, d)), head(byDomain.get(d)))),
+      byDomain.get(d).map((x) => el("tr", { class: "link", onclick: (ev) => { if (!ev.target.closest("a")) go(open(x)); } }, row(x))),
+    ]);
+  };
+  const started = `Started, last ${procs?.window ?? "day"}`;
+  const th = (h) => el("th", { class: ["Count", "Rejected", "Open", "Incidents", started].includes(h) || (h === "Last hour" && catalogKind === "commands") ? "n" : "" }, h);
+  const position = (l) => l.live ? el("span", { class: "faint" }, "live") : !l.connected ? el("span", { class: "bad" }, "away") : state.kernel.head - l.position > 0 ? el("span", { class: state.kernel.head - l.position >= 100 ? "warn" : "muted" }, `${num(state.kernel.head - l.position)} behind`) : el("span", { class: "ok" }, "caught up");
+  let headers, rows;
   if (catalogKind === "events") {
-    const rows = data.events.filter((e) => `${e.type} ${e.writers.join(" ")} ${e.readers.map((l) => l.name).join(" ")} ${e.processes.map((p) => p.name).join(" ")}`.toLowerCase().includes(f))
-      .map((e) => el("tr", {}, el("td", {}, evChip(e.type, e.type)), el("td", {}, `v${e.schema}`), el("td", {}, e.writers.join(", ") || "–"),
-        el("td", {}, e.readers.length || e.processes.length ? some([...e.readers.map(listenerChip), ...e.processes.map(procChip)], 12) : el("span", { class: "note" }, data.wildcards.length ? "only listeners that read everything" : "nobody reads it"))));
-    table = [el("tr", {}, ["Event type", "Schema", "Written by", "Read by"].map((h) => el("th", {}, h))), rows];
+    const items = data.events.filter((e) => `${e.type} ${e.writers.join(" ")} ${e.readers.map((l) => l.name).join(" ")} ${e.processes.map((p) => p.name).join(" ")}`.toLowerCase().includes(f));
+    headers = ["Event", "Written by", "Count", "Last hour", "Last", "Read by"];
+    rows = grouped(items, 6, (xs) => [`${plural(xs.length, "type")}${c ? ` · ${num(sum(xs.map((e) => c.events[e.type]?.count ?? 0)))} events` : ""}`, everything()], (e) => {
+      const n = c?.events[e.type];
+      return [
+        el("td", {}, el("a", { class: "mono", href: `/explore/events?type=${encodeURIComponent(e.type)}` }, short(e.type)), e.schema > 1 ? el("span", { class: "ver", title: `schema version ${e.schema}` }, `v${e.schema}`) : null),
+        el("td", {}, e.writers.map(short).join(", ") || "–"),
+        el("td", { class: "n" }, n ? num(n.count) : dash()),
+        el("td", {}, n ? bars(n.perMinute, `${short(e.type)} per minute, last hour: ${num(sum(n.perMinute))}`) : dash()),
+        el("td", { style: "white-space:nowrap" }, n ? when(n.lastAt) : dash()),
+        el("td", {}, e.readers.length || e.processes.length ? some([...e.readers.map(listenerChip), ...e.processes.map(procChip)], 8) : el("span", { class: "faint" }, "–")),
+      ];
+    }, (e) => `/explore/events?type=${encodeURIComponent(e.type)}`);
   } else if (catalogKind === "commands") {
-    const rows = data.commands.filter((c) => `${c.type} ${c.aggregate.aggregate} ${c.checkedBy.map((l) => l.name).join(" ")} ${c.sentBy.map((p) => p.name).join(" ")}`.toLowerCase().includes(f))
-      .map((c) => el("tr", {}, el("td", {}, el("b", {}, c.type)), el("td", {}, c.aggregate.aggregate),
-        el("td", {}, c.aggregate.ok ? el("span", { class: "ok" }, c.aggregate.workers ? `${c.aggregate.workers} connected` : "dynamic") : el("span", { class: "bad" }, "none: commands wait")),
-        el("td", {}, some(c.checkedBy.map(listenerChip))), el("td", {}, some(c.sentBy.map(procChip)))));
-    table = [el("tr", {}, ["Command", "Aggregate", "Worker", "Checked by", "Sent by processes"].map((h) => el("th", {}, h))), rows];
+    const items = data.commands.filter((x) => `${x.type} ${x.aggregate.aggregate} ${x.checkedBy.map((l) => l.name).join(" ")} ${x.sentBy.map((p) => p.name).join(" ")}`.toLowerCase().includes(f));
+    headers = ["Command", "Aggregate", "Last hour", "Rejected", "Checked by", "Sent by"];
+    rows = grouped(items, 6, (xs) => {
+      const aggs = [...new Set(xs.map((x) => x.aggregate))];
+      const down = aggs.filter((a) => !a.ok);
+      return [`${plural(xs.length, "command")} · `, down.length ? el("span", { class: "bad" }, `no worker for ${down.map((a) => a.name).join(", ")}: its commands wait`) : aggs.every((a) => a.dynamic && !a.workers) ? "dynamic workers" : `${plural(sum(aggs.map((a) => a.workers)), "worker")} connected`];
+    }, (x) => {
+      const n = c?.commands[`${x.aggregate.aggregate}.${short(x.type)}`];
+      return [
+        el("td", {}, el("a", { class: "mono", href: `/explore/commands?type=${encodeURIComponent(x.type)}` }, short(x.type))),
+        el("td", {}, x.aggregate.name, x.aggregate.ok ? null : el("span", { class: "bad" }, " · no worker")),
+        el("td", { class: "n" }, n ? num(n.count) : dash()),
+        el("td", { class: "n" }, n ? share(n.rejected, n.count) : dash()),
+        el("td", {}, x.checkedBy.length ? x.checkedBy.map((l) => l.name).join(", ") : el("span", { class: "faint" }, "–")),
+        el("td", {}, x.sentBy.length ? x.sentBy.map((p, i) => [i ? ", " : "", el("a", { href: procHref(p.name) }, short(p.name))]) : el("span", { class: "faint" }, "–")),
+      ];
+    }, (x) => `/explore/commands?type=${encodeURIComponent(x.type)}`);
+  } else if (catalogKind === "queries") {
+    const items = data.queries.filter((q) => `${q.type} ${q.answeredBy.name} ${q.askedBy.map((p) => p.name).join(" ")}`.toLowerCase().includes(f));
+    headers = ["Query", "Answered by", "Its read model reads", "Position", "Asked by"];
+    rows = grouped(items, 5, (xs) => plural(xs.length, "query", "queries"), (q) => {
+      const l = q.answeredBy;
+      return [
+        el("td", {}, el("span", { class: "mono" }, short(q.type))),
+        el("td", {}, listenerChip(l)),
+        el("td", {}, l.everything ? el("span", { class: "muted" }, "every event its key may read") : some(l.events.map((t) => t.endsWith("*") ? plain(t) : evChip(t, t)), 5)),
+        el("td", { style: "white-space:nowrap" }, position(l)),
+        el("td", {}, q.askedBy.length ? q.askedBy.map((p, i) => [i ? ", " : "", el("a", { href: procHref(p.name) }, p.name)]) : el("span", { class: "faint" }, "–")),
+      ];
+    }, () => "/operations");
   } else {
-    const rows = data.queries.filter((q) => `${q.type} ${q.answeredBy.name} ${q.askedBy.map((p) => p.name).join(" ")}`.toLowerCase().includes(f))
-      .map((q) => el("tr", {}, el("td", {}, el("b", {}, q.type)), el("td", {}, listenerChip(q.answeredBy)), el("td", {}, some(q.askedBy.map(procChip)))));
-    table = [el("tr", {}, ["Query", "Answered by", "Asked by processes"].map((h) => el("th", {}, h))), rows];
+    const items = processes.filter((p) => `${p.name} ${p.events.join(" ")} ${p.commands.join(" ")} ${p.queries.join(" ")}`.toLowerCase().includes(f));
+    headers = ["Process", "Starts on", "Waits for", "Sends", "Asks", "Open", "Incidents", started];
+    const list = (xs, cls = "mono") => xs.length ? [...new Set(xs)].map((x, i) => [i ? ", " : "", el("span", { class: cls, title: x }, domainOf(x) === domainOf(xs[0]) ? short(x) : x)]) : el("span", { class: "faint" }, "–");
+    rows = grouped(items, 8, (xs) => plural(xs.length, "process", "processes"), (p) => [
+      el("td", { style: "white-space:nowrap" }, el("a", { href: procHref(p.name) }, short(p.name)), el("span", { class: "faint" }, ` v${p.versions}`), p.removed ? el("span", { class: "note" }, " · removed") : null),
+      el("td", {}, el("a", { class: "mono", href: `/explore/events?type=${encodeURIComponent(p.model.start.on)}` }, p.model.start.on)),
+      el("td", {}, list(p.events.slice(1))),
+      el("td", {}, list(p.commands)),
+      el("td", {}, list(p.queries)),
+      el("td", { class: "n" }, num(p.open)),
+      el("td", { class: "n" }, p.incidents ? el("a", { class: "bad", href: procHref(p.name) }, num(p.incidents)) : el("span", { class: "faint" }, "–")),
+      el("td", { class: "n" }, num(p.started)),
+    ], (p) => procHref(p.name));
   }
-  const empty = table[1].length ? null : el("tr", {}, el("td", { colspan: 5, class: "note" }, "Nothing matches."));
+  const empty = rows.length ? null : el("tr", {}, el("td", { colspan: headers.length, class: "note" }, catalogText ? "Nothing matches." : "Nothing registered yet."));
   box.replaceChildren(...[
-    el("div", { class: "controls" }, el("div", { class: "sub", style: "border:none" }, tab("events", "Events", data.events.length), tab("commands", "Commands", data.commands.length), tab("queries", "Queries", data.queries.length)), input),
-    el("div", { class: "tbl" }, el("table", {}, table, empty)),
-    wildcardNote(data)].filter(Boolean));
+    el("div", { class: "controls" }, el("div", { class: "sub", style: "border:none" },
+      tab("events", "Events", data.events.length), tab("commands", "Commands", data.commands.length), tab("queries", "Queries", data.queries.length), tab("processes", "Processes", processes.length)), input,
+      c && c.counted < c.head ? el("span", { class: "note" }, `counting events… ${pct(c.counted, c.head)}`) : null),
+    el("div", { class: "tbl" }, el("table", {}, el("tr", {}, headers.map(th)), rows, empty)),
+  ].filter(Boolean));
 }
 
 // ---- aggregates and their history ----
@@ -1938,6 +2011,7 @@ async function load() {
   if (top === "explore") {
     if (["domains", "catalog"].includes(exploreTab)) jobs.push(loadState(), loadProcs());
     if (exploreTab === "domains" && domainSel) jobs.push(loadCounts());
+    if (exploreTab === "catalog") jobs.push(loadCounts(""));
     if (exploreTab === "events" && !live) jobs.push(follow());
     if (exploreTab === "commands" && !live) jobs.push(cfollow());
     if (exploreTab === "aggregates") jobs.push(loadStreams(), stream ? loadHistory() : null);

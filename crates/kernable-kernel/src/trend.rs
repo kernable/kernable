@@ -166,7 +166,8 @@ impl Tally {
         Ok(st.position)
     }
 
-    /// The counts of the types in `domain`: `{type: {count, lastAt, perMinute}}`, with
+    /// The counts of the types in `domain` (empty: every domain): `{type: {count, lastAt,
+    /// perMinute}}`, with
     /// `perMinute` the last [`TALLY_MINUTES`] minutes, oldest first, the current one last.
     pub(crate) fn view(&self, domain: &str, now: i64) -> Value {
         let st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
@@ -175,7 +176,7 @@ impl Tally {
         let types: serde_json::Map<String, Value> = st
             .types
             .iter()
-            .filter(|(t, _)| t.starts_with(&prefix))
+            .filter(|(t, _)| domain.is_empty() || t.starts_with(&prefix))
             .map(|(t, c)| {
                 let per_minute: Vec<u64> = (minute - TALLY_MINUTES + 1..=minute)
                     .map(|m| {
@@ -296,5 +297,10 @@ mod tests {
             "an hour back only"
         );
         assert!(view.get("billing.InvoiceIssued").is_none());
+        assert_eq!(
+            tally.view("", now).as_object().unwrap().len(),
+            2,
+            "every domain"
+        );
     }
 }

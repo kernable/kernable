@@ -34,9 +34,9 @@
 //! - `GET /api/cases?process=&version=&step=&state=&text=&limit=`: the cases that match;
 //! - `GET /api/case?tenant=&process=&id=`: one case's events, each with what it links to: the
 //!   command it sent (its aggregate and outcome) or the event that moved it;
-//! - `GET /api/counts?domain=`: per event type of the domain, how many the log holds, the
-//!   newest's time and the last hour per minute; per command type, how many came in the last
-//!   hour, and how many of them were rejected.
+//! - `GET /api/counts?domain=`: per event type of the domain (without: of every domain), how
+//!   many the log holds, the newest's time and the last hour per minute; per command type, how
+//!   many came in the last hour, and how many of them were rejected.
 //!
 //! It never decrypts the vault: a vault field shows its subject, whether it is secret, or that
 //! it was erased. Snapshot states are not shown either, as they may hold personal values.
@@ -1052,9 +1052,6 @@ const COUNT_COMMANDS: usize = 5_000;
 
 fn counts(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, BoxError> {
     let domain = params.get("domain").map_or("", |v| v.trim());
-    if domain.is_empty() {
-        return Err("domain: missing".into());
-    }
     let now = now_ms();
     let head = kernel.store.head_position()?;
     let counted = kernel
@@ -1080,7 +1077,7 @@ fn counts(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, Bo
                 break 'pages;
             }
             let c = &s.pending.command;
-            if c.domain != domain {
+            if !domain.is_empty() && c.domain != domain {
                 continue;
             }
             let entry = commands
