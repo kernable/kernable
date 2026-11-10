@@ -5,114 +5,158 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>kernable</title>
 <style>
+  /* Four places (Overview, Processes, Operations, Explore) under one top bar: navigation,
+     search, the verdict. Colors: the logo's blue as the accent; green, amber, red for state. */
   :root {
-    --bg: #f7f7f5; --panel: #ffffff; --line: #e3e3de; --text: #1d1d1b; --muted: #6d6d68;
-    --accent: #3b5bdb; --ok: #2f9e44; --warn: #e8890c; --bad: #e03131; --dyn: #8f8f88; --live: #1c9bb8;
-    --edge: #b9b9b2; --check: #c2255c; --code: #f1f1ed;
-    --max: 1600px;
+    --bg: #f5f6fa; --panel: #ffffff; --sunk: #eef0f6; --line: #dfe3ee; --text: #151a30; --muted: #5c6480; --faint: #8b92ab;
+    --accent: #2457f5; --accent-soft: #e5ecff; --violet: #6d45f0;
+    --ok: #1f9a5c; --ok-soft: #e1f4e9; --warn: #c27400; --warn-soft: #fcefd6; --bad: #d23a4a; --bad-soft: #fbe2e5;
+    --dyn: #8f95a8; --live: #138fb0; --edge: #b6bccd; --check: #c2255c; --code: #f1f3f8;
+    --max: 1560px;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #151515; --panel: #1d1d1d; --line: #2f2f2f; --text: #e9e9e6; --muted: #9a9a95;
-      --accent: #7b93ff; --ok: #51cf66; --warn: #fcc419; --bad: #ff6b6b; --dyn: #77776f; --live: #3bc9db;
-      --edge: #4a4a46; --check: #f06595; --code: #262626;
+      --bg: #0d1120; --panel: #151b2f; --sunk: #10162a; --line: #27304f; --text: #e7eaf6; --muted: #a0a7c4; --faint: #6e7696;
+      --accent: #6f93ff; --accent-soft: #1d2b56; --violet: #a58bff;
+      --ok: #4cc98a; --ok-soft: #13301f; --warn: #f0a93a; --warn-soft: #33260c; --bad: #ff6b78; --bad-soft: #3a1820;
+      --dyn: #777e98; --live: #3bc9db; --edge: #485274; --check: #f06595; --code: #1b2238;
     }
   }
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }
   body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  header { border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
-  header .bar { display: flex; align-items: center; gap: 16px; padding: 10px 20px; flex-wrap: wrap; max-width: var(--max); margin: 0 auto; }
-  header h1 { font-size: 16px; margin: 0; letter-spacing: .02em; }
-  .logo { display: block; height: 26px; width: auto; }
+  a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+  header { border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 3; }
+  header .bar { display: flex; align-items: center; gap: 14px; padding: 9px 20px; flex-wrap: wrap; max-width: var(--max); margin: 0 auto; }
+  .logo { display: block; height: 24px; width: auto; }
   .logo.dark { display: none; }
   @media (prefers-color-scheme: dark) { .logo.light { display: none; } .logo.dark { display: block; } }
-  header .meta { color: var(--muted); font-size: 13px; }
-  nav { display: flex; gap: 4px; margin-left: auto; }
-  nav button { background: none; border: 1px solid transparent; color: var(--muted); padding: 5px 12px; border-radius: 6px; cursor: pointer; font: inherit; }
-  nav a { color: var(--accent); padding: 5px 12px; text-decoration: none; }
-  nav button.on { color: var(--text); border-color: var(--line); background: var(--bg); }
-  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--line); font-size: 13px; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
-  main { padding: 16px 20px; max-width: var(--max); margin: 0 auto; }
-  .view { display: none; } .view.on { display: block; }
-  .legend { display: flex; gap: 16px; flex-wrap: wrap; color: var(--muted); font-size: 12px; margin-bottom: 10px; }
-  .legend span { display: inline-flex; align-items: center; gap: 6px; }
-  .mapwrap { display: flex; gap: 16px; align-items: flex-start; }
-  .map { flex: 1; overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
-  svg text { fill: var(--text); font: 12px system-ui, sans-serif; }
-  svg .head { fill: var(--muted); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; }
-  svg .node rect { fill: var(--panel); stroke: var(--line); }
-  svg .node.sel rect { stroke: var(--accent); stroke-width: 2; }
-  svg .node { cursor: pointer; }
-  svg .sub { fill: var(--muted); font-size: 11px; }
-  svg path.edge { fill: none; stroke: var(--edge); stroke-width: 1.3; }
-  svg path.edge.own { stroke-dasharray: 3 4; }
-  svg path.edge.check { stroke: var(--check); stroke-dasharray: 5 4; }
-  svg path.edge.hi { stroke: var(--accent); stroke-width: 2; }
-  svg path.edge.check.hi { stroke: var(--check); stroke-width: 2; }
-  svg .dim { opacity: .25; }
-  aside { width: 320px; flex: none; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; position: sticky; top: 70px; max-height: calc(100vh - 90px); overflow: auto; }
-  aside h3 { margin: 0 0 4px; font-size: 15px; word-break: break-all; }
-  aside .kind { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
-  dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 12px 0 0; font-size: 13px; }
-  dt { color: var(--muted); } dd { margin: 0; word-break: break-word; }
-  table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; margin-bottom: 20px; }
+  nav { display: flex; gap: 2px; }
+  nav a { color: var(--muted); padding: 6px 12px; border-radius: 7px; font-weight: 500; }
+  nav a:hover { text-decoration: none; color: var(--text); }
+  nav a.on { color: var(--accent); background: var(--accent-soft); }
+  nav .count { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 5px; border-radius: 9px; background: var(--bad); color: #fff; font-size: 11px; text-align: center; }
+  #searchform { flex: 1; max-width: 380px; margin-left: auto; }
+  #q { width: 100%; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--sunk); color: var(--text); font: inherit; }
+  .verdict { display: inline-flex; align-items: center; gap: 7px; padding: 5px 11px; border-radius: 999px; font-size: 13px; font-weight: 500; white-space: nowrap; cursor: pointer; }
+  .verdict.ok { background: var(--ok-soft); color: var(--ok); } .verdict.warn { background: var(--warn-soft); color: var(--warn); } .verdict.bad { background: var(--bad-soft); color: var(--bad); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; background: currentColor; }
+  main { padding: 18px 20px 40px; max-width: var(--max); margin: 0 auto; }
+  footer { max-width: var(--max); margin: 0 auto; padding: 0 20px 24px; color: var(--faint); font-size: 12px; }
+  .view { display: grid; gap: 16px; }
+  h2 { font-size: 12px; color: var(--faint); text-transform: uppercase; letter-spacing: .06em; margin: 0; font-weight: 600; display: flex; gap: 8px; align-items: baseline; justify-content: space-between; }
+  h2 .aside { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--muted); font-size: 12px; }
+  h3 { margin: 0; font-size: 18px; }
+  .grid { display: grid; gap: 14px; }
+  .cols-kpi { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  .cols-2 { grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); }
+  .cols-2e { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cols-3 { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+  @media (max-width: 960px) { .cols-2, .cols-2e { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; display: grid; gap: 10px; align-content: start; min-width: 0; }
+  .kpi { display: grid; gap: 2px; }
+  .kpi .l { color: var(--muted); font-size: 12px; }
+  .kpi .n { font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.15; }
+  .kpi .s { color: var(--faint); font-size: 12px; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); } .muted { color: var(--muted); } .faint { color: var(--faint); }
+  .row { display: grid; grid-template-columns: auto 1fr auto; gap: 9px; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--line); }
+  .row:last-child { border-bottom: none; }
+  .row .v { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 13px; text-align: right; }
+  .attn { display: grid; grid-template-columns: 4px 1fr auto; gap: 10px; align-items: center; padding: 9px 10px; border-radius: 8px; background: var(--sunk); }
+  .attn .bar { align-self: stretch; border-radius: 3px; }
+  .attn small { display: block; color: var(--muted); }
+  .attn.calm { opacity: .7; }
+  table { width: 100%; border-collapse: collapse; background: var(--panel); }
+  .tbl { border: 1px solid var(--line); border-radius: 10px; overflow: auto; background: var(--panel); }
   th, td { text-align: left; padding: 7px 12px; border-bottom: 1px solid var(--line); vertical-align: top; font-size: 13px; }
-  th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
+  th { color: var(--faint); font-weight: 500; font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em; background: var(--sunk); }
   tr:last-child td { border-bottom: none; }
-  h2 { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin: 4px 0 8px; font-weight: 600; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr.click { cursor: pointer; } tr.click:hover td, tr.open td { background: var(--sunk); }
+  td.wide { padding-top: 0; }
   code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
-  .history { display: flex; gap: 16px; align-items: flex-start; }
-  .streams { width: 300px; flex: none; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; max-height: calc(100vh - 110px); display: flex; flex-direction: column; position: sticky; top: 70px; }
-  .streams input { margin: 10px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }
-  .streams ul { list-style: none; margin: 0; padding: 0 0 6px; overflow: auto; }
-  .streams li { padding: 6px 12px; cursor: pointer; border-left: 3px solid transparent; }
-  .streams li:hover { background: var(--bg); }
-  .streams li.on { border-left-color: var(--accent); background: var(--bg); }
-  .streams .id { font-weight: 500; } .streams .of { color: var(--muted); font-size: 12px; }
-  .timeline { flex: 1; min-width: 0; }
-  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-bottom: 10px; }
+  pre { background: var(--code); border-radius: 6px; padding: 8px 10px; margin: 6px 0 0; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+  .chip { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; padding: 1px 8px; border-radius: 999px; font-weight: 500; white-space: nowrap; }
+  .chip.ok { background: var(--ok-soft); } .chip.warn { background: var(--warn-soft); } .chip.bad { background: var(--bad-soft); } .chip.run { background: var(--accent-soft); color: var(--accent); } .chip.idle { background: var(--sunk); color: var(--muted); }
+  .tag { display: inline-block; padding: 0 6px; border-radius: 4px; font-size: 11px; border: 1px solid currentColor; }
+  .tag.personal { color: var(--live); } .tag.secret { color: var(--warn); } .tag.erased { color: var(--bad); } .tag.ref { color: var(--muted); }
+  .code { color: var(--bad); font-weight: 600; }
+  .empty { color: var(--muted); padding: 28px; text-align: center; }
+  .err { color: var(--bad); }
+  .note { color: var(--faint); font-size: 12px; }
+  button, select, input { font: inherit; }
+  .btn { background: var(--panel); border: 1px solid var(--line); color: var(--accent); padding: 4px 10px; border-radius: 7px; cursor: pointer; font-size: 12.5px; font-weight: 500; white-space: nowrap; }
+  .btn:hover { border-color: var(--accent); }
+  .ctl { padding: 5px 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--text); }
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .controls label { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); font-size: 13px; }
+  .cmd { display: flex; gap: 10px; align-items: center; justify-content: space-between; background: var(--code); border: 1px solid var(--line); border-radius: 7px; padding: 6px 6px 6px 10px; }
+  .cmd code { white-space: pre-wrap; word-break: break-all; }
+  .sub { display: flex; gap: 2px; border-bottom: 1px solid var(--line); }
+  .sub a { color: var(--muted); padding: 7px 12px; border-bottom: 2px solid transparent; margin-bottom: -1px; font-weight: 500; }
+  .sub a:hover { text-decoration: none; color: var(--text); }
+  .sub a.on { color: var(--text); border-bottom-color: var(--accent); }
+  .title { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+  .title .meta { color: var(--muted); font-size: 13px; }
+  .key { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; border-bottom: 1px dashed var(--faint); cursor: pointer; }
+  .key.named { font-family: inherit; font-size: inherit; }
+  svg text { fill: var(--muted); font: 11px system-ui, sans-serif; }
+  svg .gridline { stroke: var(--line); stroke-width: 1; }
+  /* lists beside a main area */
+  .split { display: grid; grid-template-columns: 290px minmax(0, 1fr); gap: 16px; align-items: start; }
+  @media (max-width: 900px) { .split { grid-template-columns: 1fr; } }
+  .list { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; max-height: calc(100vh - 150px); display: flex; flex-direction: column; position: sticky; top: 70px; overflow: hidden; }
+  .list .head { padding: 10px; display: grid; gap: 8px; border-bottom: 1px solid var(--line); }
+  .list ul { list-style: none; margin: 0; padding: 0 0 6px; overflow: auto; }
+  .list li { padding: 7px 12px; cursor: pointer; border-left: 3px solid transparent; }
+  .list li:hover { background: var(--sunk); }
+  .list li.on { border-left-color: var(--accent); background: var(--sunk); }
+  .list .id { font-weight: 500; word-break: break-all; } .list .of { color: var(--muted); font-size: 12px; }
+  .list .n { float: right; color: var(--muted); font-size: 12px; }
+  /* map */
+  .map { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+  .mapwrap { display: flex; gap: 16px; align-items: flex-start; }
+  aside.details { width: 320px; flex: none; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; position: sticky; top: 70px; max-height: calc(100vh - 90px); overflow: auto; }
+  aside.details h4 { margin: 2px 0 4px; font-size: 15px; word-break: break-all; }
+  .kind { color: var(--faint); font-size: 11.5px; text-transform: uppercase; letter-spacing: .06em; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 8px 0 0; font-size: 13px; }
+  dt { color: var(--muted); } dd { margin: 0; word-break: break-word; white-space: pre-line; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 12px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .map svg text { fill: var(--text); font-size: 12px; }
+  .map svg .colhead { fill: var(--faint); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; }
+  .map svg .node rect { fill: var(--panel); stroke: var(--line); }
+  .map svg .node.sel rect { stroke: var(--accent); stroke-width: 2; }
+  .map svg .node { cursor: pointer; }
+  .map svg .sub { fill: var(--muted); font-size: 11px; }
+  .map svg path.edge { fill: none; stroke: var(--edge); stroke-width: 1.3; }
+  .map svg path.edge.own { stroke-dasharray: 3 4; }
+  .map svg path.edge.check { stroke: var(--check); stroke-dasharray: 5 4; }
+  .map svg path.edge.hi { stroke: var(--accent); stroke-width: 2; }
+  .map svg path.edge.check.hi { stroke: var(--check); stroke-width: 2; }
+  .map svg .dim { opacity: .25; }
+  /* history cards */
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 11px 14px; }
   .card .top { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
   .card .v { font-weight: 600; color: var(--accent); } .card .t { font-weight: 600; }
   .card .when { color: var(--muted); font-size: 12px; margin-left: auto; }
-  pre { background: var(--code); border-radius: 6px; padding: 8px 10px; margin: 8px 0 0; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
-  .tag { display: inline-block; padding: 0 6px; border-radius: 4px; font-size: 11px; border: 1px solid currentColor; }
-  .tag.personal { color: var(--live); } .tag.secret { color: var(--warn); } .tag.erased { color: var(--bad); }
-  .cmd { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line); font-size: 13px; color: var(--muted); }
-  .cmd b { color: var(--text); font-weight: 500; }
-  .snap { border-left: 3px solid var(--accent); background: var(--panel); padding: 8px 12px; border-radius: 6px; margin-bottom: 10px; font-size: 13px; }
-  .empty { color: var(--muted); padding: 40px; text-align: center; }
-  .tag.ref { color: var(--muted); }
-  .search { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
-  .search input { padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); font: inherit; width: 170px; }
-  .search label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
-  .search .meta, .more .meta { color: var(--muted); font-size: 13px; }
-  button.plain { background: var(--panel); border: 1px solid var(--line); color: var(--text); padding: 5px 12px; border-radius: 6px; cursor: pointer; font: inherit; }
-  #found tr.row { cursor: pointer; } #found tr.row:hover td { background: var(--bg); }
-  #found tr.open td { background: var(--bg); }
-  #found td.wide { padding-top: 0; }
-  #found a, #rejections a { color: var(--accent); text-decoration: none; }
-  #rejections tr.row { cursor: pointer; } #rejections tr.row:hover td, #rejections tr.open td { background: var(--bg); }
-  #rejections td.wide { padding-top: 0; }
-  .code { color: var(--bad); font-weight: 600; }
+  .card .line { color: var(--muted); font-size: 13px; margin-top: 4px; }
+  .card details { margin-top: 6px; } .card summary { color: var(--muted); font-size: 12.5px; cursor: pointer; }
+  .snap { border-left: 3px solid var(--accent); background: var(--panel); padding: 8px 12px; border-radius: 6px; font-size: 13px; }
+  /* sparklines */
   .spark { display: flex; align-items: center; gap: 8px; }
   .spark svg { display: block; overflow: visible; }
   .spark .line { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .spark.warn .line { stroke: var(--warn); }
   .spark .base { stroke: var(--line); stroke-width: 1; }
   .spark .mark { fill: var(--accent); stroke: var(--panel); stroke-width: 2; }
-  .spark .rule { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 2 2; }
-  .spark .say { color: var(--muted); font-size: 12px; white-space: nowrap; min-width: 150px; }
-  .more { display: flex; gap: 12px; align-items: center; }
-  .err { color: var(--bad); }
-  /* processes */
-  .procs li .n { float: right; color: var(--muted); font-size: 12px; }
-  .procs li .n .bad { color: var(--bad); font-weight: 600; }
-  .ptitle { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
-  .ptitle h3 { margin: 0; font-size: 16px; }
-  .ptitle select, .pfilter select, .pfilter input { padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); font: inherit; }
-  .flow { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; margin-bottom: 14px; }
+  .spark.warn .mark { fill: var(--warn); }
+  .spark .say { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  /* process diagram */
+  .flow { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
   .flow svg { display: block; }
+  .flow svg text { fill: var(--text); font-size: 12px; }
+  .flow .sub { fill: var(--muted); font-size: 11px; }
   .flow .step { cursor: pointer; }
   .flow .step .shape { fill: var(--panel); stroke: var(--edge); stroke-width: 1.3; }
   .flow .step.end .shape { stroke-width: 2.5; }
@@ -120,97 +164,95 @@
   .flow .step.bad .shape { stroke: var(--bad); stroke-width: 2.2; }
   .flow .step .icon { fill: none; stroke: var(--muted); stroke-width: 1.3; }
   .flow .start { fill: var(--panel); stroke: var(--ok); stroke-width: 2; }
-  .flow path.edge { fill: none; stroke: var(--edge); stroke-width: 1.3; }
+  .flow path.edge { fill: none; stroke: var(--edge); stroke-linecap: round; }
+  .flow path.edge.used { stroke: var(--accent); stroke-opacity: .45; }
+  .flow path.edge.alt.used { stroke: var(--warn); stroke-opacity: .55; }
   .flow path.edge.back { stroke-dasharray: 4 4; }
-  .flow path.edge.alt { stroke: var(--warn); }
   .flow .elabel { fill: var(--muted); font-size: 11px; paint-order: stroke; stroke: var(--panel); stroke-width: 4px; stroke-linejoin: round; }
   .flow .badge rect { fill: var(--accent); } .flow .badge text { fill: #fff; font-size: 11px; font-weight: 600; }
   .flow .badge.bad rect { fill: var(--bad); }
   .flow marker path { fill: var(--edge); }
-  .tabs { display: flex; gap: 4px; margin-bottom: 10px; align-items: center; flex-wrap: wrap; }
-  .tabs button { background: none; border: 1px solid transparent; color: var(--muted); padding: 4px 12px; border-radius: 6px; cursor: pointer; font: inherit; }
-  .tabs button.on { color: var(--text); border-color: var(--line); background: var(--panel); }
-  .pfilter { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
-  .state { display: inline-flex; align-items: center; gap: 6px; }
-  #proc-main a { color: var(--accent); text-decoration: none; }
-  .resolve pre { margin: 4px 0 0; }
-  .card.incident { border-left: 3px solid var(--bad); }
-  .card.ended { border-left: 3px solid var(--ok); }
+  /* a case as a story */
+  .story { display: grid; }
+  .ev { display: grid; grid-template-columns: 76px 18px 1fr; gap: 10px; }
+  .ev .t { color: var(--faint); font-size: 12px; text-align: right; padding-top: 2px; font-variant-numeric: tabular-nums; }
+  .ev .rail { display: flex; flex-direction: column; align-items: center; }
+  .ev .rail i { width: 11px; height: 11px; border-radius: 50%; border: 2px solid var(--accent); background: var(--panel); margin-top: 4px; flex: none; }
+  .ev .rail i.warn { border-color: var(--warn); } .ev .rail i.bad { border-color: var(--bad); background: var(--bad-soft); } .ev .rail i.end { border-color: var(--ok); background: var(--ok-soft); }
+  .ev .rail u { width: 2px; flex: 1; background: var(--line); min-height: 14px; }
+  .ev .c { padding-bottom: 14px; } .ev .c small { display: block; color: var(--muted); }
+  .bars { display: grid; gap: 6px; }
+  .hbar { display: grid; grid-template-columns: 150px 1fr 60px; gap: 10px; align-items: center; font-size: 13px; }
+  .hbar .track { height: 10px; border-radius: 5px; background: var(--sunk); overflow: hidden; display: flex; }
+  .hbar .v { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
 <header>
  <div class="bar">
-  <h1><img class="logo light" src="/logo.png" alt="kernable" width="103" height="26"><img class="logo dark" src="/logo-dark.png" alt="kernable" width="103" height="26"></h1>
-  <span class="meta" id="meta"></span>
-  <span class="pill" id="ready"><span class="dot"></span><span></span></span>
+  <a href="#overview"><img class="logo light" src="/logo.png" alt="kernable" width="95" height="24"><img class="logo dark" src="/logo-dark.png" alt="kernable" width="95" height="24"></a>
   <nav>
-    <button data-view="map" class="on">Map</button>
-    <button data-view="connections">Connections</button>
-    <button data-view="events">Events</button>
-    <button data-view="rejected">Rejected</button>
-    <button data-view="history">History</button>
-    <button data-view="processes">Processes</button>
+    <a href="#overview" data-view="overview">Overview</a>
+    <a href="#processes" data-view="processes">Processes<span class="count" id="nav-incidents" hidden></span></a>
+    <a href="#operations" data-view="operations">Operations</a>
+    <a href="#explore" data-view="explore">Explore</a>
     <a id="stage" href="/demo" hidden>Demo stage</a>
   </nav>
+  <form id="searchform"><input id="q" placeholder="Search an order, case, command or correlation ID…" autocomplete="off"></form>
+  <span class="verdict ok" id="verdict" title=""><span class="dot"></span><span>…</span></span>
  </div>
 </header>
 <main>
-  <section class="view on" id="map">
-    <div class="legend">
-      <span><i class="dot" style="background:var(--ok)"></i>connected</span>
-      <span><i class="dot" style="background:var(--warn)"></i>behind</span>
-      <span><i class="dot" style="background:var(--bad)"></i>missing (the kernel waits for it)</span>
-      <span><i class="dot" style="background:var(--dyn)"></i>dynamic or away, counts for nobody</span>
-      <span><i class="dot" style="background:var(--live)"></i>live</span>
-      <span>— produces · reacts</span>
-      <span style="color:var(--check)">- - checks commands</span>
+  <section class="view" id="v-overview"></section>
+  <section class="view" id="v-processes"></section>
+  <section class="view" id="v-operations"></section>
+  <section class="view" id="v-explore">
+    <div class="sub" id="explore-tabs">
+      <a href="#explore/map" data-tab="map">Domain map</a>
+      <a href="#explore/events" data-tab="events">Event log</a>
+      <a href="#explore/aggregates" data-tab="aggregates">Aggregates</a>
     </div>
-    <div class="mapwrap">
-      <div class="map" id="graph"></div>
-      <aside id="details"><div class="kind">Details</div><p class="meta">Click a node.</p></aside>
+    <div id="x-map">
+      <div class="controls" style="margin-bottom:10px">
+        <label><input type="checkbox" id="map-engine"> Show the process engine's event types</label>
+        <span class="legend">
+          <span><i class="dot" style="color:var(--ok)"></i>connected</span>
+          <span><i class="dot" style="color:var(--warn)"></i>behind</span>
+          <span><i class="dot" style="color:var(--bad)"></i>missing (the kernel waits for it)</span>
+          <span><i class="dot" style="color:var(--dyn)"></i>dynamic or away</span>
+          <span><i class="dot" style="color:var(--live)"></i>live</span>
+          <span>— produces · reacts</span><span style="color:var(--check)">- - checks commands</span>
+        </span>
+      </div>
+      <div class="mapwrap"><div class="map" id="graph"></div><aside class="details" id="details"></aside></div>
     </div>
-  </section>
-  <section class="view" id="connections"></section>
-  <section class="view" id="events">
-    <form class="search" id="search">
-      <input name="type" placeholder="Event type, e.g. orders.Order">
-      <input name="tenant" placeholder="Tenant">
-      <input name="id" placeholder="Aggregate id">
-      <input name="command" placeholder="Command or correlation id">
-      <input name="text" placeholder="Payload contains…">
-      <button class="plain" type="submit">Search</button>
-      <label><input type="checkbox" id="live" style="width:auto"> live</label>
-      <span class="meta" id="found-meta"></span>
-    </form>
-    <table id="found"></table>
-    <div class="more"><button class="plain" id="older" hidden>Older</button><span class="meta" id="older-meta"></span></div>
-  </section>
-  <section class="view" id="rejected">
-    <div class="search">
-      <input id="reject-filter" placeholder="Filter: type, code, aggregate, tenant, message…" style="width:340px">
-      <span class="meta" id="rejected-meta"></span>
+    <div id="x-events" hidden>
+      <form class="controls" id="search" style="margin-bottom:10px">
+        <input class="ctl" name="type" placeholder="Event type, e.g. shop.Order">
+        <input class="ctl" name="tenant" placeholder="Tenant">
+        <input class="ctl" name="id" placeholder="Aggregate ID">
+        <input class="ctl" name="command" placeholder="Command or correlation ID">
+        <input class="ctl" name="text" placeholder="Payload contains…">
+        <button class="btn" type="submit">Search</button>
+        <label><input type="checkbox" id="engine"> process engine's events</label>
+        <label><input type="checkbox" id="live"> follow</label>
+        <span class="note" id="found-meta"></span>
+      </form>
+      <div class="tbl"><table id="found"></table></div>
+      <div class="controls" style="margin-top:10px"><button class="btn" id="older" hidden>Older</button><span class="note" id="older-meta"></span></div>
     </div>
-    <table id="rejections"></table>
-  </section>
-  <section class="view" id="history">
-    <div class="history">
-      <div class="streams"><input id="filter" placeholder="Filter aggregates…"><ul id="streams"></ul></div>
-      <div class="timeline" id="timeline"><div class="empty">Pick an aggregate.</div></div>
-    </div>
-  </section>
-  <section class="view" id="processes">
-    <div class="history">
-      <div class="streams procs"><ul id="proc-list"></ul></div>
-      <div class="timeline" id="proc-main"><div class="empty">Loading…</div></div>
+    <div id="x-aggregates" class="split" hidden>
+      <div class="list"><div class="head"><input class="ctl" id="filter" placeholder="Filter aggregates…"><label class="note"><input type="checkbox" id="streams-engine"> process cases too</label></div><ul id="streams"></ul></div>
+      <div class="grid" id="timeline"><div class="empty">Pick an aggregate.</div></div>
     </div>
   </section>
+  <section class="view" id="v-search"></section>
 </main>
+<footer id="footer"></footer>
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
 const NS = "http://www.w3.org/2000/svg";
-let state = null, selected = null, stream = null, streams = [];
 
 // ---- helpers ----
 function el(tag, attrs = {}, ...children) {
@@ -218,595 +260,501 @@ function el(tag, attrs = {}, ...children) {
   for (const [k, v] of Object.entries(attrs)) {
     if (k === "class") e.setAttribute("class", v);
     else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
-    else if (v !== undefined && v !== null) e.setAttribute(k, v);
+    else if (v !== undefined && v !== null && v !== false) e.setAttribute(k, v === true ? "" : v);
   }
-  for (const c of children.flat(Infinity)) if (c !== null && c !== undefined) e.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  for (const c of children.flat(Infinity)) if (c !== null && c !== undefined && c !== false) e.append(c instanceof Node ? c : document.createTextNode(String(c)));
   return e;
 }
-const covers = (pattern, name) => pattern === "*" || pattern === name || (pattern.endsWith(".*") && name.split(".")[0] === pattern.slice(0, -2));
-const ago = (ms) => {
-  if (!ms) return "never";
-  const s = Math.max(0, Math.round((state.kernel.now - ms) / 1000));
-  return s < 60 ? `${s} s ago` : s < 3600 ? `${Math.round(s / 60)} min ago` : s < 86400 ? `${Math.round(s / 3600)} h ago` : new Date(ms).toLocaleString();
-};
-const time = (ms) => new Date(ms).toLocaleString();
-const short = (key) => (key ? key.slice(0, 12) + "…" : "");
-const color = (status) => `var(--${{ connected: "ok", behind: "warn", missing: "bad", dynamic: "dyn", away: "dyn", live: "live" }[status]})`;
-
 async function get(path) {
   const res = await fetch(path, { cache: "no-store" });
   if (!res.ok) throw new Error(`${path}: ${res.status}`);
   return res.json();
 }
-
-// ---- the model behind the map ----
-function model(s) {
-  const head = s.kernel.head;
-  const nodes = new Map(), edges = [];
-  const add = (id, col, label, sub, status, info) => { if (!nodes.has(id)) nodes.set(id, { id, col, label, sub, status, info }); return nodes.get(id); };
-  const services = new Map(s.services.map((m) => [m.service, m]));
-  for (const m of s.services) {
-    const meta = Object.entries(m.metadata).map(([k, v]) => `${k} ${v}`).join(" · ");
-    add(`s:${m.service}`, 0, m.service, meta || "membership applied", "connected", { kind: "service", ...m });
-  }
-  const serviceNode = (name) => name ? add(`s:${name}`, 0, name, "no membership", "dynamic", { kind: "service", service: name, note: "No membership applied: everything it registers counts." }) : null;
-
-  for (const a of s.aggregates) {
-    const m = services.get(a.service);
-    const status = a.workers > 0 ? "connected" : a.dynamic ? "dynamic" : "missing";
-    add(`a:${a.aggregate}`, 1, a.aggregate, `${a.workers} worker${a.workers === 1 ? "" : "s"} · ${a.commands.length} commands`, status, { kind: "aggregate", ...a, listed: m ? m.workers.includes(a.aggregate) : null });
-    const owner = serviceNode(a.service);
-    if (owner) edges.push({ from: owner.id, to: `a:${a.aggregate}`, kind: "own" });
-  }
-  for (const m of s.services) for (const a of m.workers) {
-    if (!nodes.has(`a:${a}`)) add(`a:${a}`, 1, a, "listed, never registered", "missing", { kind: "aggregate", aggregate: a, service: m.service, note: "Listed in the membership; no worker ever registered it. Its commands wait in the queue." });
-    edges.push({ from: `s:${m.service}`, to: `a:${a}`, kind: "own" });
-  }
-
-  for (const e of s.events) {
-    add(`e:${e.type}`, 2, e.type, `schema ${e.schema}`, "connected", { kind: "event type", ...e });
-    for (const w of e.writers) if (nodes.has(`a:${w}`)) edges.push({ from: `a:${w}`, to: `e:${e.type}` });
-  }
-
-  for (const l of s.listeners) {
-    const behind = l.connected && l.position < head;
-    const status = l.live ? "live" : !l.counts ? (l.connected ? "dynamic" : "away") : !l.connected ? "missing" : behind ? "behind" : "connected";
-    const what = l.live ? "live" : l.middlewares.length ? "middleware" : "listener";
-    const parked = l.parked ? ` · ${l.parked} parked` : "";
-    const sub = `${what} · order ${l.order} · ${l.connected ? (behind ? `${head - l.position} behind` : "up to date") : "away"}${parked}`;
-    const node = add(`l:${l.name}`, 3, l.name, sub, status, { kind: what, ...l });
-    const owner = serviceNode(l.service);
-    if (owner) edges.push({ from: owner.id, to: node.id, kind: "own" });
-    const types = l.events.length ? l.events : ["*"];
-    for (const e of s.events) if (types.some((p) => covers(p, e.type))) edges.push({ from: `e:${e.type}`, to: node.id });
-    for (const q of l.queries) {
-      add(`q:${q}`, 4, q, "query", "connected", { kind: "query", type: q });
-      edges.push({ from: node.id, to: `q:${q}` });
-    }
-    for (const mw of l.middlewares) for (const a of s.aggregates) {
-      if (a.commands.some((c) => mw.types.some((p) => covers(p, c)))) edges.push({ from: node.id, to: `a:${a.aggregate}`, kind: "check" });
-    }
-  }
-  for (const m of s.services) for (const name of [...m.listeners, ...m.middlewares]) {
-    if (!nodes.has(`l:${name}`)) add(`l:${name}`, 3, name, "listed, never registered", "missing", { kind: "listener", name, service: m.service, note: "Listed in the membership; it never connected. The kernel is not ready until it does." });
-    edges.push({ from: `s:${m.service}`, to: `l:${name}`, kind: "own" });
-  }
-  return { nodes: [...nodes.values()], edges };
-}
-
-// ---- map ----
-const COLS = ["Services", "Aggregates", "Event types", "Listeners", "Queries"];
-const NODE_H = 40, GAP = 10, TOP = 40, W = 200;
-
-function drawMap() {
-  const { nodes, edges } = model(state);
-  const box = $("graph");
-  const width = Math.max(box.clientWidth, 5 * (W + 40) + 40);
-  const step = (width - 40 - W) / 4;
-  const counts = [0, 0, 0, 0, 0];
-  for (const n of nodes.sort((a, b) => a.label.localeCompare(b.label))) {
-    n.x = 20 + n.col * step;
-    n.y = TOP + counts[n.col]++ * (NODE_H + GAP);
-  }
-  const height = TOP + Math.max(1, ...counts) * (NODE_H + GAP) + 10;
-  const svg = el("svg:svg", { width, height, viewBox: `0 0 ${width} ${height}` });
-  COLS.forEach((c, i) => svg.append(el("svg:text", { class: "head", x: 20 + i * step, y: 22 }, c)));
-  const byId = new Map(nodes.map((n) => [n.id, n]));
-  const lines = el("svg:g");
-  svg.append(lines);
-  for (const e of edges) {
-    const a = byId.get(e.from), b = byId.get(e.to);
-    if (!a || !b) continue;
-    let d;
-    if (e.kind === "check") {
-      // From a middleware back to the aggregate whose commands it checks.
-      const x1 = a.x, y1 = a.y + NODE_H / 2, x2 = b.x + W, y2 = b.y + NODE_H / 2;
-      d = `M${x1},${y1} C${x1 - 60},${y1 + 30} ${x2 + 60},${y2 + 30} ${x2},${y2}`;
-    } else {
-      const x1 = a.x + W, y1 = a.y + NODE_H / 2, x2 = b.x, y2 = b.y + NODE_H / 2, mid = (x1 + x2) / 2;
-      d = `M${x1},${y1} C${mid},${y1} ${mid},${y2} ${x2},${y2}`;
-    }
-    const path = el("svg:path", { class: `edge ${e.kind ?? ""}`, d });
-    path.dataset.from = e.from;
-    path.dataset.to = e.to;
-    lines.append(path);
-  }
-  for (const n of nodes) {
-    const g = el("svg:g", { class: `node${selected === n.id ? " sel" : ""}`, transform: `translate(${n.x},${n.y})`, onclick: () => select(n.id) });
-    g.dataset.id = n.id;
-    g.append(
-      el("svg:rect", { width: W, height: NODE_H, rx: 7 }),
-      el("svg:circle", { cx: 12, cy: 14, r: 4.5, fill: color(n.status) }),
-      el("svg:text", { x: 23, y: 18 }, fit(n.label, 26)),
-      el("svg:text", { class: "sub", x: 12, y: 33 }, fit(n.sub, 32)),
-    );
-    g.addEventListener("mouseenter", () => highlight(n.id, true));
-    g.addEventListener("mouseleave", () => highlight(n.id, false));
-    svg.append(g);
-  }
-  box.replaceChildren(svg);
-  if (selected) details(byId.get(selected));
-}
+const num = (n) => (n ?? 0).toLocaleString("en-US");
+const pct = (a, b) => (b ? `${Math.round((a / b) * 1000) / 10} %` : "–");
 const fit = (s, n) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
-
-function highlight(id, on) {
-  const svg = $("graph").firstChild;
-  if (!svg) return;
-  const near = new Set([id]);
-  svg.querySelectorAll("path.edge").forEach((p) => {
-    const hit = on && (p.dataset.from === id || p.dataset.to === id);
-    p.classList.toggle("hi", hit);
-    if (hit) { near.add(p.dataset.from); near.add(p.dataset.to); }
-  });
-  svg.querySelectorAll("g.node").forEach((g) => g.classList.toggle("dim", on && !near.has(g.dataset.id)));
-  svg.querySelectorAll("path.edge").forEach((p) => p.classList.toggle("dim", on && !p.classList.contains("hi")));
+const covers = (pattern, name) => pattern === "*" || pattern === name || (pattern.endsWith(".*") && name.split(".")[0] === pattern.slice(0, -2));
+const now = () => state?.kernel.now ?? Date.now();
+const pad = (n) => String(n).padStart(2, "0");
+/** Local time as 2026-11-10 10:09:45 (with `seconds`) or 2026-11-10 10:09. */
+function iso(ms, seconds = true) {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}${seconds ? `:${pad(d.getSeconds())}` : ""}`;
 }
-
-function select(id) {
-  selected = id;
-  drawMap();
+/** Within a day "4 min ago", else the local date and time; the exact time on hover. */
+function when(ms) {
+  if (!ms) return el("span", {}, "never");
+  const s = Math.max(0, Math.round((now() - ms) / 1000));
+  const text = s < 60 ? `${s} s ago` : s < 3600 ? `${Math.round(s / 60)} min ago` : s < 86400 ? `${Math.round(s / 3600)} h ago` : iso(ms, false);
+  return el("span", { title: iso(ms) }, text);
 }
-
-function details(n) {
-  const box = $("details");
-  if (!n) { box.replaceChildren(el("div", { class: "kind" }, "Details"), el("p", { class: "meta" }, "Click a node.")); return; }
-  const i = n.info, rows = [];
-  const row = (k, v) => v !== undefined && v !== null && v !== "" && rows.push(el("dt", {}, k), el("dd", {}, v));
-  row("status", el("span", {}, el("i", { class: "dot", style: `background:${color(n.status)};margin-right:6px` }), n.status));
-  if (i.note) row("note", i.note);
-  if (i.kind === "service") {
-    for (const [k, v] of Object.entries(i.metadata ?? {})) row(k, v);
-    row("workers", (i.workers ?? []).join(", "));
-    row("listeners", (i.listeners ?? []).join(", "));
-    row("middlewares", (i.middlewares ?? []).join(", "));
-    if (i.appliedAt) row("applied", `${time(i.appliedAt)} by ${short(i.key)}`);
-  } else if (i.kind === "aggregate") {
-    row("service", i.service || "none");
-    row("commands", (i.commands ?? []).join(", "));
-    row("workers", i.workers);
-    row("in membership", i.listed === null || i.listed === undefined ? "no membership" : i.listed ? "listed" : "not listed (dynamic)");
-    row("key", short(i.key));
-    row("last seen", i.lastSeen ? ago(i.lastSeen) : undefined);
-    const inst = state.instances.filter((w) => w.aggregates.includes(i.aggregate));
-    if (inst.length) row("instances", inst.map((w) => `${w.worker} since ${ago(w.since)}`).join("\n"));
-  } else if (i.kind === "event type") {
-    row("schema", i.schema);
-    row("written by", i.writers.join(", "));
-  } else if (i.kind === "query") {
-    row("type", i.type);
-  } else {
-    row("service", i.service || "none");
-    row("order", i.order);
-    row("reads", i.events?.length ? i.events.join(", ") : "everything its key may read");
-    row("answers", i.queries?.join(", "));
-    for (const m of i.middlewares ?? []) row(`checks ${m.when}`, `${m.types.join(", ")} (order ${m.order})`);
-    if (i.position !== undefined) row("position", `${i.position} of ${state.kernel.head}`);
-    row("connected", i.connected ? `since ${ago(i.since)}` : i.lastSeen ? `no, last seen ${ago(i.lastSeen)}` : "no");
-    if (i.instances?.length) row(`instances · ${i.single ? "single" : "replicated"}`, i.instances.map((n) => `${n.id}: position ${n.position}, since ${ago(n.since)}`).join("\n"));
-    row("counts", i.counts === undefined ? undefined : i.counts ? "yes: others wait for it" : "no");
-    row("key", short(i.key));
-    if (i.parked) {
-      const shown = i.parkedEvents.map((p) => `${p.position} ${p.type}: ${p.code}${p.message ? ` (${p.message})` : ""}, ${p.attempts}×, ${ago(p.parkedAt)}${p.retry ? ", retrying" : ""}`);
-      if (i.parked > shown.length) shown.push(`… ${i.parked - shown.length} more: Connections, Parked events`);
-      row(`parked · ${i.parked}`, shown.join("\n"));
-    }
-  }
-  box.replaceChildren(el("div", { class: "kind" }, i.kind), el("h3", {}, n.label), el("dl", {}, rows));
-}
-
-// ---- connections ----
-function drawConnections() {
-  const s = state, head = s.kernel.head;
-  const workers = el("table", {}, el("tr", {}, ["Worker", "Service", "Aggregates", "Key", "Connected"].map((h) => el("th", {}, h))),
-    s.instances.length ? s.instances.map((w) => el("tr", {}, el("td", { class: "mono" }, w.worker), el("td", {}, w.service || "–"), el("td", {}, w.aggregates.join(", ")), el("td", { class: "mono" }, short(w.key)), el("td", {}, ago(w.since))))
-      : el("tr", {}, el("td", { colspan: 5, class: "meta" }, "No worker connected.")));
-  const listeners = el("table", {}, el("tr", {}, ["Listener", "Service", "Kind", "Position", "Behind, last hour", "Key", "Connected"].map((h) => el("th", {}, h))),
-    s.listeners.map((l) => el("tr", {},
-      el("td", {}, el("i", { class: "dot", style: `background:${color(l.live ? "live" : !l.counts ? "dynamic" : !l.connected ? "missing" : l.position < head ? "behind" : "connected")};margin-right:8px` }), l.name),
-      el("td", {}, l.service || "–"),
-      el("td", {}, l.live ? "live" : l.middlewares.length ? `middleware (${l.middlewares.map((m) => m.when).join(", ")})` : "listener"),
-      el("td", {}, `${l.position} / ${head}${l.connected && l.position < head ? ` · ${head - l.position} behind` : ""}${l.parked ? ` · ${l.parked} parked` : ""}`),
-      el("td", {}, spark(l.name)),
-      el("td", { class: "mono" }, short(l.key)),
-      el("td", {}, l.connected ? ago(l.since) : `no · last seen ${ago(l.lastSeen)}`))));
-  // Redrawn every second: the parked filter keeps its focus and caret.
-  const typing = document.activeElement?.id === "parked-filter" ? document.activeElement.selectionStart : null;
-  $("connections").replaceChildren(el("h2", {}, `Workers · ${s.instances.length}`), workers, el("h2", {}, `Listeners · ${s.listeners.length}`), listeners, parkedView());
-  if (typing !== null && $("parked-filter")) { $("parked-filter").focus(); $("parked-filter").setSelectionRange(typing, typing); }
-}
-
-// ---- lag over the last hour ----
-let trend = null, hover = null;
-const SPARK_W = 180, SPARK_H = 28;
-
-async function loadTrend() {
-  try { trend = await get("/api/trend"); } catch { return; }
-  if (document.querySelector("nav button.on").dataset.view === "connections") drawConnections();
-}
-
-/** Events processed per minute over the last minute of samples, or null with too few. */
-function rate(rows) {
-  const last = rows[rows.length - 1];
-  const from = rows.find((r) => r[0] >= last[0] - 60_000);
-  if (!from || from === last) return null;
-  return Math.round(((last[2] - from[2]) * 60_000) / (last[0] - from[0]));
-}
-
-/** How far a listener was behind (head − position), one line over the samples kept. */
-function spark(name) {
-  const rows = trend?.listeners?.[name];
-  if (!rows || rows.length < 2) return el("span", { class: "meta" }, "collecting…");
-  const lag = rows.map((r) => Math.max(0, r[1] - r[2]));
-  const max = Math.max(1, ...lag);
-  const t0 = rows[0][0], span = Math.max(1, rows[rows.length - 1][0] - t0);
-  const x = (i) => ((rows[i][0] - t0) / span) * SPARK_W;
-  const y = (v) => SPARK_H - 2 - (v / max) * (SPARK_H - 4);
-  const d = lag.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join("");
-  const at = hover && hover.name === name ? hover.index : lag.length - 1;
-  const svg = el("svg:svg", { width: SPARK_W, height: SPARK_H, viewBox: `0 0 ${SPARK_W} ${SPARK_H}`, role: "img", "aria-label": `${name}: behind by up to ${max} events in the last ${Math.round(span / 60_000)} min` },
-    el("svg:line", { class: "base", x1: 0, x2: SPARK_W, y1: SPARK_H - 2, y2: SPARK_H - 2 }),
-    el("svg:path", { class: "line", d }),
-    hover && hover.name === name ? el("svg:line", { class: "rule", x1: x(at), x2: x(at), y1: 0, y2: SPARK_H }) : null,
-    el("svg:circle", { class: "mark", cx: x(at), cy: y(lag[at]), r: 4 }),
-    // A hit area over the whole chart: the nearest sample to the pointer.
-    el("svg:rect", { x: -4, y: -4, width: SPARK_W + 8, height: SPARK_H + 8, fill: "transparent",
-      onmousemove: (ev) => {
-        const px = ((ev.clientX - ev.currentTarget.getBoundingClientRect().left - 4) / SPARK_W) * span + t0;
-        let best = 0;
-        rows.forEach((r, i) => { if (Math.abs(r[0] - px) < Math.abs(rows[best][0] - px)) best = i; });
-        if (!hover || hover.name !== name || hover.index !== best) { hover = { name, index: best }; drawConnections(); }
-      },
-      onmouseleave: () => { hover = null; drawConnections(); } }));
-  const r = rate(rows);
-  const say = hover && hover.name === name
-    ? `${lag[at]} behind · ${new Date(rows[at][0]).toLocaleTimeString()}`
-    : `max ${max === 1 && !lag.some((v) => v) ? 0 : max}${r === null ? "" : ` · ${r} events/min`}`;
-  return el("div", { class: "spark" }, svg, el("span", { class: "say" }, say));
-}
-
-// ---- parked events, all of them ----
-let parked = null;
-
-async function loadParked() {
-  try { parked = await get("/api/parked"); } catch { return; }
-  if (document.querySelector("nav button.on").dataset.view === "connections") drawConnections();
-}
-
-function parkedView() {
-  if (!parked) return null;
-  const input = $("parked-filter");
-  const typed = input ? input.value : "";
-  const f = typed.toLowerCase();
-  const text = (p) => `${p.listener} ${p.position} ${p.type} ${p.code} ${p.message}`.toLowerCase();
-  const shown = parked.parked.filter((p) => text(p).includes(f));
-  const capped = parked.total > parked.parked.length ? `, the first ${parked.parked.length}` : "";
-  const filter = el("input", { id: "parked-filter", placeholder: "Filter: listener, type, code, message…", value: typed, style: "width:340px" });
-  filter.addEventListener("input", drawConnections);
-  const rows = [el("tr", {}, ["Listener", "Position", "Event", "Code", "Message", "Attempts", "Parked", ""].map((h) => el("th", {}, h)))];
-  for (const p of shown) rows.push(el("tr", {},
-    el("td", {}, p.listener), el("td", { class: "mono" }, p.position), el("td", {}, p.type), el("td", {}, el("span", { class: "code" }, p.code)),
-    el("td", {}, p.message || "–"), el("td", {}, `${p.attempts}×`), el("td", {}, ago(p.parkedAt)), el("td", { class: "meta" }, p.retry ? "retrying" : "")));
-  if (!shown.length) rows.push(el("tr", {}, el("td", { colspan: 8, class: "meta" }, parked.total ? "None matches the filter." : "Nothing is parked.")));
-  return el("div", {},
-    el("h2", {}, `Parked events · ${parked.total}${capped}`),
-    el("div", { class: "search" }, filter, el("span", { class: "meta" }, "Deliver again or dismiss: kernable listeners parked")),
-    el("table", {}, rows));
-}
-
-// ---- history ----
-async function loadStreams() {
-  try {
-    streams = (await get("/api/streams")).streams;
-  } catch { return; }
-  drawStreams();
-}
-
-function drawStreams() {
-  const f = $("filter").value.toLowerCase();
-  const key = (s) => `${s.tenant}/${s.domain}/${s.type}/${s.id}`;
-  $("streams").replaceChildren(...streams.filter((s) => key(s).toLowerCase().includes(f)).map((s) =>
-    el("li", { class: stream && key(stream) === key(s) ? "on" : "", onclick: () => { stream = s; drawStreams(); loadHistory(); } },
-      el("div", { class: "id" }, s.id), el("div", { class: "of" }, `${s.domain}.${s.type} · v${s.version} · ${s.tenant}`))));
-}
-
-/** A payload with its vault references as tags: personal (subject), secret, or erased. */
-function payloadView(text, vault) {
-  let data;
-  try { data = JSON.parse(text); } catch { return el("pre", {}, text); }
-  const pre = el("pre");
-  const walk = (v, indent) => {
-    const pad = "  ".repeat(indent);
-    if (v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).length === 1 && typeof v.$vault === "string") {
-      const held = vault?.[v.$vault];
-      // Without the vault's view (the events search), only that it is a reference.
-      pre.append(!vault ? el("span", { class: "tag ref", title: v.$vault }, "vault")
-        : held ? el("span", { class: `tag ${held.secret ? "secret" : "personal"}`, title: v.$vault }, held.secret ? "secret" : `personal · ${held.subject}`)
-        : el("span", { class: "tag erased", title: v.$vault }, "erased"));
-    } else if (Array.isArray(v)) {
-      pre.append("[");
-      v.forEach((x, i) => { pre.append(`\n${pad}  `); walk(x, indent + 1); if (i < v.length - 1) pre.append(","); });
-      pre.append(v.length ? `\n${pad}]` : "]");
-    } else if (v && typeof v === "object") {
-      const keys = Object.keys(v);
-      pre.append("{");
-      keys.forEach((k, i) => { pre.append(`\n${pad}  ${JSON.stringify(k)}: `); walk(v[k], indent + 1); if (i < keys.length - 1) pre.append(","); });
-      pre.append(keys.length ? `\n${pad}}` : "}");
-    } else pre.append(JSON.stringify(v));
-  };
-  walk(data, 0);
-  return pre;
-}
-
-async function loadHistory() {
-  if (!stream) return;
-  const q = new URLSearchParams({ tenant: stream.tenant, domain: stream.domain, type: stream.type, id: stream.id });
-  let h;
-  try { h = await get(`/api/history?${q}`); } catch (e) { $("timeline").replaceChildren(el("div", { class: "err" }, String(e))); return; }
-  const cards = [el("h2", {}, `${stream.domain}.${stream.type} ${stream.id} · ${h.events.length} events`)];
-  if (h.snapshot) cards.push(el("div", { class: "snap" }, `Snapshot at version ${h.snapshot.version} · state schema ${h.snapshot.schema} · ${h.snapshot.bytes} bytes (not shown: it may hold personal values)`));
-  for (const e of h.events) {
-    const c = h.commands[e.commandId];
-    const ctx = e.context;
-    cards.push(el("div", { class: "card" },
-      el("div", { class: "top" }, el("span", { class: "v" }, `v${e.version}`), el("span", { class: "t" }, e.type), el("span", { class: "meta" }, `schema ${e.schema} · position ${e.position}`),
-        e.erases ? el("span", { class: "tag erased" }, `erases ${e.erases}`) : null, el("span", { class: "when" }, time(e.createdAt))),
-      payloadView(e.payload, h.vault),
-      el("div", { class: "cmd" },
-        el("div", {}, "command ", el("b", {}, c ? c.type : e.commandId), c ? ` · received ${time(c.receivedAt)} · signed by ${short(c.key)}` : ""),
-        el("div", {}, "sender ", el("b", {}, ctx.senderIdentity ?? "–"), " · correlation ", el("b", { class: "mono" }, ctx.correlationId ?? e.commandId), ctx.causationId ? [" · caused by ", el("b", { class: "mono" }, ctx.causationId)] : null),
-        c ? el("details", {}, el("summary", {}, "command payload and context"), payloadView(c.payload, h.vault), el("pre", {}, JSON.stringify(c.context, null, 2))) : null,
-        el("div", { class: "mono", title: "hash of this event in the chain" }, `worker ${short(e.key)} · hash ${e.hash.slice(0, 16)}…`))));
-    if (h.snapshot && h.snapshot.version === e.version) cards.push(el("div", { class: "snap" }, `▲ snapshot taken here (version ${e.version})`));
-  }
-  if (!h.events.length) cards.push(el("div", { class: "empty" }, "No events."));
-  $("timeline").replaceChildren(...cards);
-}
-
-// ---- events: search and live tail ----
-const FOUND_MAX = 1000;
-let found = [], older = null, tail = null, opened = new Set(), searching = 0;
-
-function filters() {
-  const q = new URLSearchParams();
-  for (const [k, v] of new FormData($("search"))) if (v.trim()) q.set(k, v.trim());
-  return q;
-}
-
-/** A new search: newest first. Its head is where the live tail starts. */
-async function search() {
-  const run = ++searching;
-  let r;
-  try { r = await get(`/api/events?${filters()}`); } catch (e) { $("found-meta").textContent = String(e); return; }
-  if (run !== searching) return;
-  found = r.events; older = r.next; tail = r.head; opened = new Set();
-  drawFound();
-}
-
-async function loadOlder() {
-  if (older === null) return;
-  const q = filters();
-  q.set("before", older);
-  const run = searching;
-  let r;
-  try { r = await get(`/api/events?${q}`); } catch (e) { $("older-meta").textContent = String(e); return; }
-  if (run !== searching) return;
-  found.push(...r.events); older = r.next;
-  drawFound();
-}
-
-async function follow() {
-  if (!$("live").checked || tail === null) return;
-  const q = filters();
-  q.set("after", tail);
-  q.set("limit", 500);
-  const run = searching;
-  let r;
-  try { r = await get(`/api/events?${q}`); } catch { return; }
-  if (run !== searching) return;
-  tail = r.last;
-  if (!r.events.length) return;
-  found.unshift(...r.events.reverse());
-  if (found.length > FOUND_MAX) { found.length = FOUND_MAX; older = found[found.length - 1].position; }
-  drawFound();
-}
-
-/** Opens an aggregate in the History view. */
-function openStream(e) {
-  stream = { tenant: e.tenant, domain: e.domain, type: e.aggregateType, id: e.aggregateId };
-  document.querySelector('nav button[data-view="history"]').click();
-}
-
-function drawFound() {
-  const rows = [el("tr", {}, ["Position", "Time", "Event", "Aggregate", "Tenant", "Command"].map((h) => el("th", {}, h)))];
-  for (const e of found) {
-    const open = opened.has(e.position);
-    rows.push(el("tr", { class: `row${open ? " open" : ""}`, onclick: () => { open ? opened.delete(e.position) : opened.add(e.position); drawFound(); } },
-      el("td", { class: "mono" }, e.position),
-      el("td", {}, time(e.createdAt)),
-      el("td", {}, el("b", {}, `${e.domain}.${e.type}`), e.erases ? [" ", el("span", { class: "tag erased" }, "erases")] : null),
-      el("td", {}, el("a", { href: "#", onclick: (ev) => { ev.preventDefault(); ev.stopPropagation(); openStream(e); } }, `${e.aggregateType} ${e.aggregateId}`), el("span", { class: "meta" }, ` · v${e.version}`)),
-      el("td", {}, e.tenant),
-      el("td", { class: "mono", title: e.commandId }, fit(e.commandId, 24))));
-    if (open) rows.push(el("tr", {}, el("td", { colspan: 6, class: "wide" },
-      payloadView(e.payload, null),
-      el("pre", {}, JSON.stringify(e.context, null, 2)),
-      el("div", { class: "mono meta" }, `schema ${e.schema} · worker ${short(e.key)} · hash ${e.hash.slice(0, 16)}…`))));
-  }
-  if (!found.length) rows.push(el("tr", {}, el("td", { colspan: 6, class: "meta" }, "No matching events.")));
-  $("found").replaceChildren(...rows);
-  $("found-meta").textContent = `${found.length} shown${$("live").checked ? " · following" : ""}`;
-  $("older").hidden = older === null;
-  $("older-meta").textContent = older === null ? (found.length ? "start of the log reached" : "") : `searched down to position ${older}`;
-}
-
-// ---- rejected commands ----
-let rejections = [], rejectionsLimit = 0, openedRejections = new Set();
-
-async function loadRejections() {
-  try {
-    const r = await get("/api/rejections");
-    rejections = r.rejections; rejectionsLimit = r.limit;
-  } catch (e) { $("rejected-meta").textContent = String(e); return; }
-  drawRejections();
-}
-
-/** Why the command was refused, in one line: the unique key or the requirement that did not hold. */
-function why(r) {
-  const q = r.requirement;
-  const need = q ? ` · requires ${q.domain}.${q.aggregateType} ${q.aggregateId || `by key ${q.key}`} ${q.absent ? "not " : ""}${q.fact}` : "";
-  return `${r.message}${r.uniqueKey ? ` · key ${r.uniqueKey}` : ""}${need}`;
-}
-
-function drawRejections() {
-  const f = $("reject-filter").value.toLowerCase();
-  const text = (r) => `${r.domain}.${r.type} ${r.code} ${r.domain}.${r.aggregateType} ${r.aggregateId} ${r.tenant} ${r.message} ${r.commandId}`.toLowerCase();
-  const shown = rejections.filter((r) => text(r).includes(f));
-  const rows = [el("tr", {}, ["Received", "Command", "Aggregate", "Tenant", "Code", "Why"].map((h) => el("th", {}, h)))];
-  for (const r of shown) {
-    const open = openedRejections.has(r.commandId);
-    rows.push(el("tr", { class: `row${open ? " open" : ""}`, onclick: () => { open ? openedRejections.delete(r.commandId) : openedRejections.add(r.commandId); drawRejections(); } },
-      el("td", {}, time(r.receivedAt)),
-      el("td", {}, el("b", {}, `${r.domain}.${r.type}`)),
-      el("td", {}, el("a", { href: "#", onclick: (ev) => { ev.preventDefault(); ev.stopPropagation(); openStream(r); } }, `${r.aggregateType} ${r.aggregateId}`)),
-      el("td", {}, r.tenant),
-      el("td", {}, el("span", { class: "code" }, r.code)),
-      el("td", {}, why(r))));
-    if (open) rows.push(el("tr", {}, el("td", { colspan: 6, class: "wide" },
-      payloadView(r.payload, null),
-      el("pre", {}, JSON.stringify(r.context, null, 2)),
-      el("div", { class: "mono meta" }, `command ${r.commandId} · signed by ${short(r.key)}`))));
-  }
-  if (!shown.length) rows.push(el("tr", {}, el("td", { colspan: 6, class: "meta" }, rejections.length ? "None matches the filter." : "No rejected commands.")));
-  $("rejections").replaceChildren(...rows);
-  const capped = rejections.length === rejectionsLimit ? ` (the newest ${rejectionsLimit})` : "";
-  $("rejected-meta").textContent = `${shown.length} of ${rejections.length}${capped}`;
-}
-
-// ---- processes: diagram, cases, incidents, statistics ----
-let procs = null, procSel = null, procVersion = null, procWindow = "day", procTab = "cases", procFrame = "";
-let caseFilter = { state: "open", step: "", text: "" }, caseList = null, openCase = null, caseData = null, incidents = null;
-
+const clock = (ms) => el("span", { title: iso(ms) }, iso(ms).slice(11));
 const duration = (ms) => ms === null || ms === undefined ? "–"
-  : ms < 1000 ? `${ms} ms` : ms < 60_000 ? `${(ms / 1000).toFixed(1)} s` : ms < 3_600_000 ? `${(ms / 60_000).toFixed(1)} min`
+  : ms < 1000 ? `${ms} ms` : ms < 60_000 ? `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)} s` : ms < 3_600_000 ? `${(ms / 60_000).toFixed(1)} min`
   : ms < 86_400_000 ? `${(ms / 3_600_000).toFixed(1)} h` : `${(ms / 86_400_000).toFixed(1)} d`;
-const stateColor = (s) => `var(--${{ running: "accent", waiting: "live", incident: "bad", ended: "ok" }[s] ?? "muted"})`;
-const stateView = (s) => el("span", { class: "state" }, el("i", { class: "dot", style: `background:${stateColor(s)}` }), s);
+const bytes = (n) => n < 1024 ? `${n} B` : n < 1 << 20 ? `${(n / 1024).toFixed(0)} KB` : n < 1 << 30 ? `${(n / (1 << 20)).toFixed(1)} MB` : `${(n / (1 << 30)).toFixed(2)} GB`;
+const color = (status) => `var(--${{ connected: "ok", behind: "warn", missing: "bad", dynamic: "dyn", away: "dyn", live: "live" }[status]})`;
 
-async function loadProcesses() {
-  try { procs = await get(`/api/processes?window=${procWindow}`); } catch (e) { $("proc-main").replaceChildren(el("div", { class: "err" }, String(e))); return; }
-  if (!procSel || !procs.processes.some((p) => p.name === procSel)) procSel = procs.processes[0]?.name ?? null;
-  await Promise.all([loadCases(), loadIncidents(), openCase ? loadCase() : null]);
-  drawProcesses();
+/** Copies `text`, and says so on the button for a moment. */
+function copyButton(text, label = "Copy") {
+  const b = el("button", { class: "btn", type: "button", onclick: async () => {
+    try { await navigator.clipboard.writeText(text); b.textContent = "Copied"; } catch { b.textContent = "Select and copy"; }
+    setTimeout(() => (b.textContent = label), 1500);
+  } }, label);
+  return b;
+}
+const command = (text) => el("div", { class: "cmd" }, el("code", {}, text), copyButton(text));
+
+// ---- key names, kept in this browser: the kernel knows keys only by their ID ----
+let keyNames = {};
+try { keyNames = JSON.parse(localStorage.getItem("kernable.keys") ?? "{}"); } catch {}
+function keyView(id) {
+  if (!id) return el("span", { class: "faint" }, "–");
+  const name = keyNames[id];
+  return el("span", { class: `key${name ? " named" : ""}`, title: `${id}\nClick to name this key (kept in this browser).`, onclick: (ev) => {
+    ev.stopPropagation();
+    const given = prompt(`A name for key ${id.slice(0, 16)}…`, name ?? "");
+    if (given === null) return;
+    if (given.trim()) keyNames[id] = given.trim(); else delete keyNames[id];
+    try { localStorage.setItem("kernable.keys", JSON.stringify(keyNames)); } catch {}
+    render();
+  } }, name ? `key ${name}` : `${id.slice(0, 10)}…`);
 }
 
-async function loadCases() {
-  if (!procSel) return;
-  const q = new URLSearchParams({ process: procSel, version: currentVersion()?.version ?? "", step: caseFilter.step, state: caseFilter.state === "all" ? "" : caseFilter.state, text: caseFilter.text });
-  try { caseList = await get(`/api/cases?${q}`); } catch { caseList = null; }
+// ---- data, refreshed in the background ----
+let state = null, system = null, trend = null, parked = null, rejections = null, procs = null, incidents = null;
+let unreachable = false;
+
+async function loadState() {
+  try { state = await get("/api/state"); unreachable = false; } catch { unreachable = true; }
+}
+async function loadSystem() { try { system = await get("/api/system"); } catch {} }
+async function loadTrend() { try { trend = await get("/api/trend"); } catch {} }
+async function loadParked() { try { parked = await get("/api/parked"); } catch {} }
+async function loadRejections() { try { rejections = await get("/api/rejections?limit=500"); } catch {} }
+async function loadProcs() {
+  try { procs = await get(`/api/processes?window=${procWindow}`); } catch {}
+  try { incidents = await get("/api/cases?state=incident&limit=1000"); } catch {}
 }
 
-async function loadIncidents() {
-  try { incidents = await get("/api/cases?state=incident&limit=1000"); } catch { incidents = null; }
+// ---- the verdict: healthy, degraded or down, and why ----
+function issues() {
+  const out = [];
+  if (unreachable || !state) return [{ level: "bad", text: "The kernel does not answer", sub: "The UI cannot reach /api/state." }];
+  const k = state.kernel, head = k.head;
+  const missing = state.listeners.some((l) => !l.live && l.counts && !l.connected);
+  if (k.ready !== "ready" && !missing) out.push({ level: "warn", text: "Not ready", sub: k.ready });
+  for (const l of state.listeners) {
+    if (l.live) continue;
+    if (l.counts && !l.connected) out.push({ level: "bad", text: `${l.middlewares.length ? "Middleware" : "Listener"} ${l.name} is missing`, sub: l.middlewares.length ? "The commands it checks are refused until it is back; the kernel is not ready." : "The kernel waits for it: it is not ready, and commands that settle wait too.", href: "#operations" });
+    else if (l.connected && head - l.position >= 100) out.push({ level: "warn", text: `Listener ${l.name} is ${num(head - l.position)} events behind`, sub: "Queries to its read model answer from older data.", href: "#operations" });
+  }
+  if (parked?.total) {
+    const by = {};
+    for (const p of parked.parked) by[p.listener] = (by[p.listener] ?? 0) + 1;
+    for (const [listener, n] of Object.entries(by)) out.push({ level: "bad", text: `${n} event${n === 1 ? "" : "s"} parked in ${listener}`, sub: parked.parked.find((p) => p.listener === listener)?.message || "a handler gave up on them",
+      cmd: `kernable listeners retry ${system?.addr ?? "<addr>"} <key> ${listener} --all` });
+  }
+  for (const c of incidents?.cases ?? []) out.push({ level: "bad", text: `Incident in ${c.process}: ${c.key}`, sub: `${c.incident?.code}: ${c.incident?.message ?? ""} · at step ${c.step}`, href: caseHref(c) });
+  const r = system?.replication;
+  if (r?.sync && r.primary && r.primary.state !== "in-sync") out.push({ level: r.primary.state === "waiting" ? "bad" : "warn", text: `Standby ${r.primary.state}`, sub: r.primary.state === "waiting" ? "Writes wait for a standby that is away." : "Writes are told without a standby holding them." });
+  if (system?.backup.enabled && !system.backup.connected) out.push({ level: "warn", text: "No backup follower connected", sub: "--backup on, but nothing follows the kernel now." });
+  if (system?.store.maxBytes) {
+    const used = system.store.bytes / system.store.maxBytes;
+    if (used >= 0.8) out.push({ level: used >= 1 ? "bad" : "warn", text: `Store at ${Math.round(used * 100)} % of its quota`, sub: `${bytes(system.store.bytes)} of ${bytes(system.store.maxBytes)}: at the limit new commands are refused.` });
+  }
+  const spike = rejectedRecently();
+  if (spike.business >= 5 && spike.business > spike.commands * 0.05) out.push({ level: "warn", text: `${spike.business} commands rejected in the last 10 min`, sub: `${pct(spike.business, spike.commands)} of the commands`, href: "#operations" });
+  return out;
+}
+function verdict() {
+  const list = issues();
+  const level = list.some((i) => i.level === "bad") ? "bad" : list.length ? "warn" : "ok";
+  return { level, list, text: unreachable ? "Down" : level === "ok" ? "Healthy" : level === "bad" ? `${list.length} problem${list.length === 1 ? "" : "s"}` : "Degraded" };
+}
+/** Business rejections (not the process engine's own) and commands, last 10 minutes. */
+function rejectedRecently() {
+  const since = now() - 600_000;
+  const business = (rejections?.rejections ?? []).filter((r) => r.domain !== "process" && r.receivedAt >= since).length;
+  const a = trend?.activity ?? [];
+  const from = a.find((x) => x[0] >= since), last = a[a.length - 1];
+  return { business, commands: from && last ? last[2] - from[2] : 0 };
 }
 
-async function loadCase() {
-  const q = new URLSearchParams(openCase);
-  try { caseData = await get(`/api/case?${q}`); } catch (e) { caseData = { error: String(e) }; }
+// ---- routing: every view has a URL ----
+let route = { view: "overview", args: [] };
+function parseHash() {
+  const parts = location.hash.slice(1).split("/").map(decodeURIComponent);
+  const view = ["overview", "processes", "case", "operations", "explore", "history", "search"].includes(parts[0]) ? parts[0] : "overview";
+  return { view, args: parts.slice(1) };
+}
+const enc = (...xs) => xs.map((x) => encodeURIComponent(x)).join("/");
+const caseHref = (c) => `#case/${enc(c.tenant, c.process, c.id)}`;
+const historyHref = (s) => `#history/${enc(s.tenant, s.domain, s.type ?? s.aggregateType, s.id ?? s.aggregateId)}`;
+const procHref = (name) => `#processes/${enc(name)}`;
+
+function onRoute() {
+  route = parseHash();
+  const top = { case: "processes", history: "explore", search: "search" }[route.view] ?? route.view;
+  document.querySelectorAll("nav a[data-view]").forEach((a) => a.classList.toggle("on", a.dataset.view === top));
+  document.querySelectorAll(".view").forEach((v) => (v.hidden = v.id !== `v-${top}`));
+  if (route.view === "search") $("q").value = route.args[0] ?? "";
+  if (route.view === "explore" || route.view === "history") enterExplore();
+  if (route.view === "case") { caseData = null; loadCaseRoute(); }
+  if (route.view === "search") runSearch(route.args[0] ?? "");
+  if (route.view === "processes") { procFrame = ""; caseList = null; }
+  render();
+  window.scrollTo(0, 0);
 }
 
-const currentProcess = () => procs?.processes.find((p) => p.name === procSel);
-function currentVersion() {
-  const p = currentProcess();
+// ---- drawing whatever view is open ----
+function render() {
+  // Redrawing replaces inputs: a focused one gets its focus and caret back.
+  const focused = document.activeElement?.id, caret = document.activeElement?.selectionStart;
+  draw();
+  if (focused && document.activeElement?.id !== focused && $(focused)) { $(focused).focus(); try { $(focused).setSelectionRange(caret, caret); } catch {} }
+}
+function draw() {
+  const v = verdict();
+  const pill = $("verdict");
+  pill.className = `verdict ${unreachable ? "bad" : v.level}`;
+  pill.lastChild.textContent = v.text;
+  pill.title = v.list.map((i) => `• ${i.text}`).join("\n") || "Nothing needs attention.";
+  const nInc = incidents?.cases?.length ?? 0;
+  $("nav-incidents").hidden = !nInc; $("nav-incidents").textContent = nInc;
+  if (state) $("footer").textContent = `kernable ${state.kernel.version} · times in ${Intl.DateTimeFormat().resolvedOptions().timeZone} · read-only, on loopback`;
+  const top = document.querySelector("nav a.on")?.dataset.view;
+  if (top === "overview") drawOverview(v);
+  if (top === "processes") route.view === "case" ? drawCase() : drawProcesses();
+  if (top === "operations") drawOperations(v);
+  if (top === "explore" && exploreTab === "map") drawMap();
+}
+
+// ================= Overview =================
+function activityWindow(minutes) {
+  const a = trend?.activity ?? [];
+  if (a.length < 2) return null;
+  const last = a[a.length - 1];
+  const from = a.find((x) => x[0] >= last[0] - minutes * 60_000) ?? a[0];
+  return { events: last[1] - from[1], commands: last[2] - from[2], rejected: last[3] - from[3], queries: last[4] - from[4], minutes: Math.round((last[0] - from[0]) / 60_000) };
+}
+
+function drawOverview(v) {
+  const box = $("v-overview");
+  if (!state) { box.replaceChildren(el("div", { class: "empty" }, unreachable ? "The kernel does not answer." : "Loading…")); return; }
+  const day = activityWindow(24 * 60);
+  const span = !day ? "since the kernel started" : day.minutes >= 1440 ? "last 24 h" : day.minutes < 2 ? "since the kernel started" : `last ${duration(day.minutes * 60_000)}, since the kernel started`;
+  const versions = (procs?.processes ?? []).flatMap((p) => p.versions.map((x) => ({ p, x })));
+  const started = versions.reduce((n, { x }) => n + x.started, 0);
+  const open = versions.reduce((n, { x }) => n + openCount(x), 0);
+  const nInc = incidents?.cases?.length ?? 0;
+  const businessRejected = (rejections?.rejections ?? []).filter((r) => r.domain !== "process" && r.receivedAt >= now() - 86_400_000).length;
+  const kpi = (l, n, s, cls = "") => el("div", { class: "panel kpi" }, el("span", { class: "l" }, l), el("span", { class: `n ${cls}` }, n), el("span", { class: "s" }, s));
+  box.replaceChildren(
+    el("div", { class: "grid cols-kpi" },
+      kpi("Commands", day ? num(day.commands) : num(system ? system.counts.commands : 0), span),
+      kpi("Events", day ? num(day.events) : "–", `${num(state.kernel.head)} in the log`),
+      kpi("Cases started", num(started), `last ${procWindow} · ${procs?.processes.length ?? 0} process${procs?.processes.length === 1 ? "" : "es"}`),
+      kpi("Cases open", num(open), open ? "running or waiting" : "none"),
+      kpi("Incidents", num(nInc), nInc ? "cases stopped" : "none open", nInc ? "bad" : "ok"),
+      kpi("Rejected", num(businessRejected), "commands, last 24 h", businessRejected ? "" : "")),
+    el("div", { class: "grid cols-2" },
+      el("div", { class: "panel" }, el("h2", {}, "Activity", el("span", { class: "aside" }, "events and commands per 10 minutes")), activityChart()),
+      attentionPanel(v)),
+    el("div", { class: "grid cols-2" }, processesPanel(), systemPanel()));
+}
+
+function attentionPanel(v) {
+  const items = v.list.map((i) => el("div", { class: "attn" },
+    el("span", { class: "bar", style: `background:var(--${i.level})` }),
+    el("div", {}, i.text, el("small", {}, i.sub)),
+    i.cmd ? copyButton(i.cmd, "Copy fix") : i.href ? el("a", { class: "btn", href: i.href }, "Open") : el("span")));
+  if (!items.length) items.push(el("div", { class: "attn calm" }, el("span", { class: "bar", style: "background:var(--ok)" }), el("div", {}, "Nothing needs attention", el("small", {}, "No incidents, nothing parked, every listener caught up.")), el("span")));
+  return el("div", { class: "panel" }, el("h2", {}, "Needs attention", el("span", { class: "aside" }, String(v.list.length))), items);
+}
+
+/** Events and commands per 10 minutes, as far back as the kernel kept (a day). */
+function activityChart() {
+  const a = trend?.activity ?? [];
+  if (a.length < 3) return el("div", { class: "note" }, "Collecting: the kernel counts once a minute since it started.");
+  const BUCKET = 600_000, first = Math.floor(a[0][0] / BUCKET) * BUCKET;
+  const buckets = new Map();
+  for (let i = 1; i < a.length; i++) {
+    const b = Math.floor(a[i][0] / BUCKET) * BUCKET;
+    const x = buckets.get(b) ?? [0, 0];
+    x[0] += a[i][1] - a[i - 1][1]; x[1] += a[i][2] - a[i - 1][2];
+    buckets.set(b, x);
+  }
+  const keys = []; for (let t = first; t <= a[a.length - 1][0]; t += BUCKET) keys.push(t);
+  const ev = keys.map((k) => buckets.get(k)?.[0] ?? 0), cm = keys.map((k) => buckets.get(k)?.[1] ?? 0);
+  const W = 640, H = 170, L = 44, B = 22, T = 10;
+  const max = niceMax(Math.max(1, ...ev, ...cm));
+  const x = (i) => L + (keys.length < 2 ? 0 : (i / (keys.length - 1)) * (W - L - 8));
+  const y = (v) => T + (1 - v / max) * (H - T - B);
+  const line = (vals) => vals.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join("");
+  const svg = el("svg:svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", role: "img", "aria-label": "Events and commands per 10 minutes" });
+  for (const f of [0, 0.5, 1]) svg.append(el("svg:line", { class: "gridline", x1: L, x2: W - 8, y1: y(max * f), y2: y(max * f) }), el("svg:text", { x: L - 6, y: y(max * f) + 4, "text-anchor": "end" }, num(Math.round(max * f))));
+  svg.append(el("svg:path", { d: `${line(ev)}L${x(ev.length - 1)},${y(0)}L${x(0)},${y(0)}Z`, fill: "var(--accent-soft)" }),
+    el("svg:path", { d: line(ev), fill: "none", stroke: "var(--accent)", "stroke-width": 2 }),
+    el("svg:path", { d: line(cm), fill: "none", stroke: "var(--violet)", "stroke-width": 1.6, "stroke-dasharray": "4 3" }),
+    el("svg:circle", { cx: x(ev.length - 1), cy: y(ev[ev.length - 1]), r: 3.5, fill: "var(--accent)" }));
+  const labels = [0, Math.floor((keys.length - 1) / 2), keys.length - 1].filter((v, i, s) => s.indexOf(v) === i);
+  for (const i of labels) svg.append(el("svg:text", { x: x(i), y: H - 5, "text-anchor": i === 0 ? "start" : i === keys.length - 1 ? "end" : "middle" }, iso(keys[i], false).slice(11)));
+  return el("div", {}, svg, el("div", { class: "note" }, el("span", { style: "color:var(--accent)" }, "━"), " events · ", el("span", { style: "color:var(--violet)" }, "╌"), " commands"));
+}
+function niceMax(v) { const p = 10 ** Math.floor(Math.log10(v)); for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= v) return m * p; return 10 * p; }
+
+/** A bar of the ends a version reached, in shares. */
+function outcomeBar(x, width = 140) {
+  const ends = Object.entries(x.ended).filter(([, n]) => n);
+  const total = ends.reduce((a, [, n]) => a + n, 0);
+  if (!total) return el("span", { class: "faint" }, "–");
+  const palette = ["var(--ok)", "var(--warn)", "var(--accent)", "var(--violet)", "var(--live)", "var(--dyn)"];
+  let at = 0;
+  const svg = el("svg:svg", { width, height: 10, viewBox: `0 0 ${width} 10`, role: "img", "aria-label": ends.map(([e, n]) => `${e} ${pct(n, total)}`).join(", ") });
+  ends.forEach(([e, n], i) => { const w = (n / total) * width; svg.append(el("svg:rect", { x: at, width: Math.max(0, w - 1), height: 10, rx: 2, fill: e === "cancelled" ? "var(--bad)" : palette[i % palette.length] }, el("svg:title", {}, `${e}: ${n} (${pct(n, total)})`))); at += w; });
+  return svg;
+}
+const openCount = (x) => Object.values(x.steps).reduce((m, s) => m + Object.values(s.now).reduce((a, b) => a + b, 0), 0);
+const firstWait = (x) => x.model.steps.find((s) => s.kind === "wait" || s.kind === "timer");
+
+function processesPanel() {
+  const rows = (procs?.processes ?? []).map((p) => {
+    const all = p.versions;
+    const sum = { started: 0, ended: {}, steps: {} };
+    for (const x of all) { sum.started += x.started; for (const [e, n] of Object.entries(x.ended)) sum.ended[e] = (sum.ended[e] ?? 0) + n; }
+    const open = all.reduce((n, x) => n + openCount(x), 0);
+    const bad = (incidents?.cases ?? []).filter((c) => c.process === p.name).length;
+    const newest = all[all.length - 1];
+    const w = firstWait(newest);
+    return el("tr", { class: "click", onclick: () => (location.hash = procHref(p.name)) },
+      el("td", {}, el("b", {}, p.name), p.removed ? el("span", { class: "faint" }, " · removed") : null),
+      el("td", { class: "num" }, num(sum.started)), el("td", { class: "num" }, num(open)),
+      el("td", { class: `num ${bad ? "bad" : ""}` }, num(bad)),
+      el("td", { class: "num" }, w ? duration(newest.steps[w.name]?.medianMs) : "–"),
+      el("td", {}, outcomeBar(sum)));
+  });
+  return el("div", { class: "panel" }, el("h2", {}, "Processes", el("span", { class: "aside" }, `last ${procWindow}`)),
+    rows.length ? el("div", { class: "tbl" }, el("table", {}, el("tr", {}, el("th", {}, "Process"), el("th", { class: "num" }, "Started"), el("th", { class: "num" }, "Open"), el("th", { class: "num" }, "Incidents"), el("th", { class: "num", title: "median time in the first wait or timer step" }, "Median wait"), el("th", {}, "Outcome")), rows))
+      : el("div", { class: "note" }, "No process registered. Define one in code next to your domain; the SDK registers it when the app starts."));
+}
+
+function systemPanel() {
+  const s = system, k = state.kernel;
+  const line = (level, what, val) => el("div", { class: "row" }, el("span", { class: `dot ${level}` }), el("span", {}, what), el("span", { class: "v" }, val));
+  const conn = state.listeners.filter((l) => l.connected).length;
+  const rows = [
+    line(k.ready === "ready" ? "ok" : "warn", `Kernel ${k.version}${s ? ` · up ${duration(s.now - s.startedAt)}` : ""}`, k.ready === "ready" ? "ready" : "not ready"),
+    line(conn === state.listeners.length ? "ok" : "warn", "Workers · listeners", `${state.instances.length} · ${conn} of ${state.listeners.length} connected`),
+  ];
+  if (s) {
+    const r = s.replication;
+    rows.push(line(r.sync ? (r.primary?.state === "in-sync" ? "ok" : "warn") : "faint", "Standby", r.sync ? (r.primary?.state ?? s.role) : s.role === "standby" ? "this kernel is the standby" : "none (--replication off)"));
+    rows.push(line(s.backup.enabled ? (s.backup.connected ? "ok" : "warn") : "faint", "Backup follower", s.backup.enabled ? (s.backup.connected ? "connected" : "not connected") : "off"));
+    rows.push(line(s.store.maxBytes && s.store.bytes > 0.8 * s.store.maxBytes ? "warn" : "ok", "Store", s.store.maxBytes ? `${bytes(s.store.bytes)} of ${bytes(s.store.maxBytes)}` : bytes(s.store.bytes)));
+    rows.push(line("ok", "Queued · scheduled", `${num(s.queue.queued)} · ${num(s.queue.scheduled)}`));
+  }
+  return el("div", { class: "panel" }, el("h2", {}, "System", el("a", { class: "aside", href: "#operations" }, "Operations →")), rows);
+}
+
+// ================= Processes =================
+let procWindow = "day", procVersion = null, procFrame = "", caseFilter = { state: "", step: "", text: "" }, caseList = null, openList = null, typingTimer = null;
+let showStats = false;
+
+const currentProcess = () => procs?.processes.find((p) => p.name === (route.args[0] ?? procs.processes[0]?.name));
+function currentVersion(p) {
   if (!p || !p.versions.length) return null;
   return p.versions.find((v) => v.version === procVersion) ?? p.versions[p.versions.length - 1];
 }
+async function loadCases(p, v) {
+  const q = new URLSearchParams({ process: p.name, version: v.version, step: caseFilter.step, state: caseFilter.state, text: caseFilter.text, limit: 100 });
+  try { caseList = await get(`/api/cases?${q}`); } catch { caseList = null; }
+  try { openList = await get(`/api/cases?${new URLSearchParams({ process: p.name, version: v.version, state: "open", limit: 1000 })}`); } catch { openList = null; }
+}
 
 function drawProcesses() {
-  const list = procs.processes.map((p) => {
-    const open = p.versions.reduce((n, v) => n + Object.values(v.steps).reduce((m, s) => m + Object.values(s.now).reduce((a, b) => a + b, 0), 0), 0);
-    const bad = (incidents?.cases ?? []).filter((c) => c.process === p.name).length;
-    return el("li", { class: p.name === procSel ? "on" : "", onclick: () => { procSel = p.name; procVersion = null; caseFilter.step = ""; openCase = null; loadProcesses(); } },
+  const box = $("v-processes");
+  if (!procs) { box.replaceChildren(el("div", { class: "empty" }, "Loading…")); return; }
+  const p = currentProcess(), v = currentVersion(p);
+  const list = el("div", { class: "list" }, el("ul", {}, procs.processes.length ? procs.processes.map((x) => {
+    const open = x.versions.reduce((n, y) => n + openCount(y), 0);
+    const bad = (incidents?.cases ?? []).filter((c) => c.process === x.name).length;
+    return el("li", { class: x === p ? "on" : "", onclick: () => { procVersion = null; caseFilter.step = ""; location.hash = procHref(x.name); } },
       el("span", { class: "n" }, `${open} open`, bad ? [" · ", el("span", { class: "bad" }, `${bad} incident${bad === 1 ? "" : "s"}`)] : null),
-      el("div", { class: "id" }, p.name),
-      el("div", { class: "of" }, `v${p.versions.length}${p.removed ? " · removed: no new cases" : ""}`));
-  });
-  $("proc-list").replaceChildren(...(list.length ? list : [el("li", { class: "of" }, "No process registered.")]));
-  const p = currentProcess(), v = currentVersion();
-  if (!p || !v) { procFrame = ""; $("proc-main").replaceChildren(el("div", { class: "empty" }, "No process registered. Define one in code next to your domain; the SDK registers it when the app starts.")); return; }
+      el("div", { class: "id" }, x.name), el("div", { class: "of" }, `version ${x.versions.length}${x.removed ? " · removed: no new cases" : ""}`));
+  }) : el("li", { class: "of" }, "No process registered.")));
+  if (!p || !v) { procFrame = ""; box.replaceChildren(el("div", { class: "split" }, list, el("div", { class: "empty" }, "No process registered. Define one in code next to your domain; the SDK registers it when the app starts."))); return; }
 
-  // The controls are built once per process, version and tab, so an open dropdown or the
-  // caret in the filter survives the refresh.
-  const key = `${p.name}|${p.versions.length}|${v.version}|${procTab}|${openCase ? "case" : ""}`;
+  // The frame (controls) is built once per process and version, so an open dropdown or the
+  // caret in the filter survives the refresh; the parts inside are redrawn.
+  const key = `${p.name}|${p.versions.length}|${v.version}`;
   if (key !== procFrame) {
     procFrame = key;
-    const versions = el("select", { name: "version" }, [...p.versions].reverse().map((x) => {
-      const o = el("option", { value: x.version }, `version ${x.version}${x === p.versions[p.versions.length - 1] ? " (newest)" : ""}`);
-      o.selected = x.version === v.version;
-      return o;
-    }));
-    const windows = el("select", { name: "window" }, ["hour", "day", "week"].map((w) => { const o = el("option", { value: w }, `last ${w}`); o.selected = w === procWindow; return o; }));
-    const tab = (id, label) => el("button", { class: procTab === id && !openCase ? "on" : "", onclick: () => { procTab = id; openCase = null; drawProcesses(); } }, label);
+    const versions = el("select", { class: "ctl", name: "version" }, [...p.versions].reverse().map((x) => { const o = el("option", { value: x.version }, `version ${x.version}${x === p.versions[p.versions.length - 1] ? " (newest)" : ""}`); o.selected = x.version === v.version; return o; }));
+    const windows = el("select", { class: "ctl", name: "window" }, ["hour", "day", "week"].map((w) => { const o = el("option", { value: w }, `last ${w}`); o.selected = w === procWindow; return o; }));
     const steps = v.model.steps.map((s) => s.name);
-    const filter = el("div", { class: "pfilter", id: "p-filter", hidden: procTab !== "cases" || openCase ? "" : null },
-      el("select", { name: "state" }, ["open", "running", "waiting", "incident", "ended", "all"].map((x) => { const o = el("option", { value: x }, x === "open" ? "not ended" : x); o.selected = x === caseFilter.state; return o; })),
-      el("select", { name: "step" }, ["", ...steps].map((x) => { const o = el("option", { value: x }, x || "every step"); o.selected = x === caseFilter.step; return o; })),
-      el("input", { name: "text", placeholder: "Case, key or tenant…", value: caseFilter.text }),
-      el("span", { class: "meta", id: "p-count" }));
-    $("proc-main").replaceChildren(
-      el("div", { class: "ptitle" }, el("h3", {}, p.name), versions, windows, el("span", { class: "meta", id: "p-meta" })),
-      el("div", { class: "flow", id: "p-flow" }),
-      el("div", { class: "tabs" }, tab("cases", "Cases"), tab("incidents", "Incidents"), tab("statistics", "Statistics")),
-      filter,
-      el("div", { id: "p-body" }));
+    const filter = el("div", { class: "controls" },
+      el("select", { class: "ctl", name: "state" }, [["", "every state"], ["open", "not ended"], ["running", "running"], ["waiting", "waiting"], ["incident", "incident"], ["ended", "ended"]].map(([x, l]) => { const o = el("option", { value: x }, l); o.selected = x === caseFilter.state; return o; })),
+      el("select", { class: "ctl", name: "step" }, ["", ...steps].map((x) => { const o = el("option", { value: x }, x || "every step"); o.selected = x === caseFilter.step; return o; })),
+      el("input", { class: "ctl", name: "text", placeholder: "Case, key or tenant…", value: caseFilter.text }),
+      el("span", { class: "note", id: "p-count" }));
+    filter.addEventListener("change", procChanged); filter.addEventListener("input", procTyped);
+    const head = el("div", { class: "controls" }, versions, windows); head.addEventListener("change", procChanged);
+    box.replaceChildren(el("div", { class: "split" }, list,
+      el("div", { class: "grid", id: "p-main" },
+        el("div", { class: "title" }, el("h3", {}, p.name), head, el("span", { class: "meta", id: "p-meta" })),
+        el("div", { class: "grid cols-kpi", id: "p-kpis" }),
+        el("div", { class: "flow", id: "p-flow" }),
+        el("div", { class: "grid cols-2e" }, el("div", { class: "panel", id: "p-series" }), el("div", { class: "panel", id: "p-ageing" })),
+        el("div", { class: "panel", id: "p-incidents", hidden: true }),
+        el("div", { class: "panel" }, el("h2", {}, "Cases", el("span", { class: "aside" }, "newest first")), filter, el("div", { class: "tbl", id: "p-cases" })),
+        el("div", { class: "panel", id: "p-stats" }))));
+    caseList = null; openList = null;
+    loadCases(p, v).then(() => drawProcesses());
   }
+  box.querySelector(".list").replaceWith(list);
   const acting = p.acting?.senderIdentity ? `acts as ${p.acting.senderIdentity}` : `acts as process:${p.name}`;
-  const counting = procs.read < procs.head ? ` · counting the log: ${procs.read} of ${procs.head}` : "";
-  $("p-meta").textContent = `registered ${time(v.registeredAt)} by ${short(v.key)} · ${acting}${p.removed ? " · removed" : ""}${counting}`;
+  const counting = procs.read < procs.head ? ` · counting the log: ${num(procs.read)} of ${num(procs.head)}` : "";
+  $("p-meta").replaceChildren(`registered `, when(v.registeredAt), " by ", keyView(v.key), ` · ${acting}${p.removed ? " · removed" : ""}${counting}`);
+  $("p-kpis").replaceChildren(...processKpis(v));
   $("p-flow").replaceChildren(flow(v));
-  const body = openCase ? caseView() : procTab === "incidents" ? incidentsView(p) : procTab === "statistics" ? statisticsView(v) : casesView();
-  $("p-body").replaceChildren(...[body].flat());
+  $("p-series").replaceChildren(el("h2", {}, "Outcomes over time", el("span", { class: "aside" }, `per ${duration(v.everyMs)}`)), seriesChart(v));
+  $("p-ageing").replaceChildren(el("h2", {}, "Open cases by age", el("span", { class: "aside" }, "where they wait")), ageing(v));
+  const mine = (incidents?.cases ?? []).filter((c) => c.process === p.name);
+  $("p-incidents").hidden = !mine.length;
+  $("p-incidents").replaceChildren(el("h2", {}, `Incidents · ${mine.length}`, el("span", { class: "aside" }, "fix the cause, then resolve")), mine.map(incidentRow));
+  $("p-cases").replaceChildren(casesTable());
+  $("p-stats").replaceChildren(el("h2", {}, "Step statistics", el("a", { class: "aside", href: "#", onclick: (ev) => { ev.preventDefault(); showStats = !showStats; drawProcesses(); } }, showStats ? "hide" : "show")), showStats ? statisticsTable(v) : null);
 }
 
 function procChanged(ev) {
   const t = ev.target;
-  if (t.name === "version") { procVersion = Number(t.value); caseFilter.step = ""; }
-  else if (t.name === "window") procWindow = t.value;
+  if (t.name === "version") { procVersion = Number(t.value); caseFilter.step = ""; procFrame = ""; }
+  else if (t.name === "window") { procWindow = t.value; loadProcs().then(render); return; }
   else if (t.name === "state") caseFilter.state = t.value;
   else if (t.name === "step") caseFilter.step = t.value;
   else return;
-  loadProcesses();
+  const p = currentProcess(), v = currentVersion(p);
+  if (procFrame) loadCases(p, v).then(drawProcesses); else drawProcesses();
 }
-
-let typingTimer = null;
 function procTyped(ev) {
   if (ev.target.name !== "text") return;
   caseFilter.text = ev.target.value;
   clearTimeout(typingTimer);
-  typingTimer = setTimeout(async () => { await loadCases(); drawProcesses(); }, 250);
+  typingTimer = setTimeout(async () => { const p = currentProcess(); await loadCases(p, currentVersion(p)); drawProcesses(); }, 250);
 }
 
-// ---- the diagram, left to right ----
-const SW = 156, SH = 58, COL = 250, ROW = 96, PAD = 30;
+function processKpis(v) {
+  const ends = Object.entries(v.ended);
+  const total = ends.reduce((a, [, n]) => a + n, 0);
+  const open = openCount(v);
+  const bad = Object.values(v.steps).reduce((m, s) => m + (s.now.incident ?? 0), 0);
+  const kpi = (l, n, s, cls = "") => el("div", { class: "panel kpi" }, el("span", { class: "l" }, l), el("span", { class: `n ${cls}` }, n), el("span", { class: "s" }, s));
+  const w = firstWait(v);
+  return [
+    kpi("Started", num(v.started), `last ${procWindow}`),
+    ...ends.filter(([e, n]) => n || e !== "cancelled").map(([e, n]) => kpi(`Ended: ${e}`, num(n), pct(n, total), e === "cancelled" ? "bad" : "")),
+    w ? kpi(`Median at ${w.name}`, duration(v.steps[w.name]?.medianMs), `p95 ${duration(v.steps[w.name]?.p95Ms)}`) : null,
+    kpi("Open · incidents", el("span", {}, num(open), " · ", el("span", { class: bad ? "bad" : "ok" }, num(bad))), open ? "running or waiting now" : "none open"),
+  ];
+}
+
+/** Started and ended per bucket of the window, as stacked bars per end. */
+function seriesChart(v) {
+  const s = v.series ?? [];
+  if (!s.length) return el("div", { class: "note" }, "No data.");
+  const ends = [...new Set(s.flatMap((b) => Object.keys(b.ended)))];
+  const palette = ["var(--ok)", "var(--warn)", "var(--accent)", "var(--violet)", "var(--live)"];
+  const colorOf = (e, i) => (e === "cancelled" ? "var(--bad)" : palette[i % palette.length]);
+  const W = 520, H = 150, L = 34, B = 20, T = 8;
+  const max = niceMax(Math.max(1, ...s.map((b) => Math.max(b.started, Object.values(b.ended).reduce((a, n) => a + n, 0)))));
+  const bw = (W - L - 6) / s.length;
+  const y = (n) => T + (1 - n / max) * (H - T - B);
+  const svg = el("svg:svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", role: "img", "aria-label": "Ended cases per bucket" });
+  for (const f of [0, 0.5, 1]) svg.append(el("svg:line", { class: "gridline", x1: L, x2: W - 6, y1: y(max * f), y2: y(max * f) }), el("svg:text", { x: L - 5, y: y(max * f) + 4, "text-anchor": "end" }, num(Math.round(max * f))));
+  s.forEach((b, i) => {
+    let base = 0;
+    ends.forEach((e, j) => {
+      const n = b.ended[e] ?? 0;
+      if (!n) return;
+      svg.append(el("svg:rect", { x: L + i * bw + 1, y: y(base + n), width: Math.max(1, bw - 2), height: y(base) - y(base + n), fill: colorOf(e, j) }, el("svg:title", {}, `${iso(b.at, false)}: ${n} ${e}`)));
+      base += n;
+    });
+  });
+  const pts = s.map((b, i) => `${i ? "L" : "M"}${(L + i * bw + bw / 2).toFixed(1)},${y(b.started).toFixed(1)}`).join("");
+  svg.append(el("svg:path", { d: pts, fill: "none", stroke: "var(--text)", "stroke-width": 1.3, "stroke-dasharray": "3 3", opacity: 0.6 }));
+  const label = (at) => procWindow === "hour" ? iso(at, false).slice(11) : iso(at, false).slice(5).replace("-", "/");
+  for (const i of [0, s.length - 1]) svg.append(el("svg:text", { x: L + i * bw + (i ? bw : 0), y: H - 4, "text-anchor": i ? "end" : "start" }, i ? "now" : label(s[i].at)));
+  return el("div", {}, svg, el("div", { class: "note" }, ends.map((e, j) => [el("span", { style: `color:${colorOf(e, j)}` }, "■"), ` ${e}  `]), el("span", {}, "╌ started")));
+}
+
+/** The open cases per step, split by how long they have waited there. */
+function ageing(v) {
+  const cases = openList?.cases ?? [];
+  if (!cases.length) return el("div", { class: "note" }, `No case is open now. ${num(Object.values(v.ended).reduce((a, n) => a + n, 0))} ended in the last ${procWindow}.`);
+  const BANDS = [["< 1 min", 60_000, "var(--ok)"], ["< 1 h", 3_600_000, "var(--accent)"], ["< 1 day", 86_400_000, "var(--warn)"], ["older", Infinity, "var(--bad)"]];
+  const by = new Map();
+  for (const c of cases) {
+    const age = now() - c.reachedAt;
+    const band = BANDS.findIndex(([, max]) => age < max);
+    const row = by.get(c.step) ?? [0, 0, 0, 0, null];
+    row[band]++;
+    if (!row[4] || c.reachedAt < row[4].reachedAt) row[4] = c;
+    by.set(c.step, row);
+  }
+  const max = Math.max(...[...by.values()].map((r) => r[0] + r[1] + r[2] + r[3]));
+  return el("div", { class: "bars" },
+    [...by.entries()].map(([step, r]) => el("div", { class: "hbar" },
+      el("span", {}, el("a", { href: "#", onclick: (ev) => { ev.preventDefault(); caseFilter.step = step; caseFilter.state = "open"; procFrame = ""; drawProcesses(); } }, step)),
+      el("div", { class: "track", style: `width:${Math.max(8, ((r[0] + r[1] + r[2] + r[3]) / max) * 100)}%` }, BANDS.map(([l, , c], i) => r[i] ? el("span", { style: `flex:${r[i]};background:${c}`, title: `${r[i]} waiting ${l}` }) : null)),
+      el("span", { class: "v" }, num(r[0] + r[1] + r[2] + r[3])))),
+    el("div", { class: "note" }, BANDS.map(([l, , c]) => [el("span", { style: `color:${c}` }, "■"), ` ${l}  `]), " · oldest: ",
+      ...[...by.values()].map((r) => r[4]).sort((a, b) => a.reachedAt - b.reachedAt).slice(0, 1).map((c) => el("a", { href: caseHref(c) }, `${c.key}`, " (", when(c.reachedAt), ")"))));
+}
+
+const stateChip = (s) => el("span", { class: `chip ${{ running: "run", waiting: "run", incident: "bad", ended: "ok" }[s] ?? "idle"}` }, s);
+
+function casesTable() {
+  if (!caseList) return el("div", { class: "note", style: "padding:10px" }, "Loading…");
+  const cases = [...caseList.cases].sort((a, b) => b.lastAt - a.lastAt);
+  $("p-count") && ($("p-count").textContent = `${cases.length} of ${num(caseList.total)}${caseList.total > cases.length ? " shown" : ""} · the newest ${procs.endedKept} ended cases per process are kept`);
+  const rows = cases.map((c) => el("tr", { class: "click", onclick: () => (location.hash = caseHref(c)) },
+    el("td", {}, el("a", { href: caseHref(c) }, c.key), el("span", { class: "faint" }, ` #${c.id.split("#")[1] ?? ""}`)),
+    el("td", {}, stateChip(c.state)), el("td", {}, c.step, c.incident ? [" · ", el("span", { class: "code" }, c.incident.code)] : null),
+    el("td", { class: "num" }, duration((c.state === "ended" ? c.lastAt : now()) - c.startedAt)),
+    el("td", {}, when(c.startedAt)), el("td", {}, c.tenant), el("td", { class: "num" }, `v${c.version}`)));
+  if (!rows.length) rows.push(el("tr", {}, el("td", { colspan: 7, class: "note" }, caseList.total === 0 && !caseFilter.state && !caseFilter.step && !caseFilter.text ? "No case yet: one starts when the start event commits." : "No case matches the filter.")));
+  return el("table", {}, el("tr", {}, ["Case", "State", "Step · end", "Took", "Started", "Tenant", "Version"].map((h, i) => el("th", { class: i === 3 || i === 6 ? "num" : "" }, h))), rows);
+}
+
+function statisticsTable(v) {
+  const rows = v.model.steps.map((s) => {
+    const st = v.steps[s.name];
+    const now = Object.entries(st.now).map(([k, n]) => `${n} ${k}`).join(", ") || "0";
+    const end = s.kind === "end";
+    return el("tr", {}, el("td", {}, el("b", {}, s.name)), el("td", {}, s.kind), el("td", {}, now), el("td", { class: "num" }, num(st.entered)), el("td", { class: "num" }, end ? "–" : num(st.left)),
+      el("td", { class: "num" }, end ? "–" : duration(st.medianMs)), el("td", { class: "num" }, end ? "–" : duration(st.p95Ms)), el("td", { class: "num" }, st.timeouts || "–"), el("td", { class: "num" }, st.incidents ? el("span", { class: "code" }, st.incidents) : "–"));
+  });
+  return [el("div", { class: "tbl" }, el("table", {}, el("tr", {}, ["Step", "Kind", "Now", "Entered", "Left", "Median", "95th pct.", "Timeouts", "Incidents"].map((h, i) => el("th", { class: i >= 3 ? "num" : "" }, h))), rows)),
+    el("div", { class: "note" }, "Durations from reaching a step until it completed, exact to within 10 %.")];
+}
+
+/** The commands that resolve an incident, signed with an operator's key. */
+function resolving(c) {
+  const at = `${system?.addr ?? procs?.addr ?? "<addr>"} <key> ${c.process} ${c.id} --tenant ${c.tenant}`;
+  return el("div", { class: "grid", style: "gap:6px" },
+    el("div", { class: "note" }, "Run the step again, go on to its next step, or end the case:"),
+    command(`kernable processes retry ${at}`), command(`kernable processes skip ${at}`), command(`kernable processes cancel ${at}`));
+}
+function incidentRow(c) {
+  return el("div", { class: "attn" }, el("span", { class: "bar", style: "background:var(--bad)" }),
+    el("div", {}, el("a", { href: caseHref(c) }, c.key), ` at ${c.step}: `, el("span", { class: "code" }, c.incident?.code), ` ${c.incident?.message ?? ""}`, el("small", {}, c.tenant, " · ", when(c.lastAt))),
+    el("a", { class: "btn", href: caseHref(c) }, "Resolve"));
+}
+
+// ---- the diagram, left to right, with how many cases took each path ----
+const SW = 172, SH = 60, ROW = 104, PAD = 34;
+let COL = 300;
 
 /** The paths out of a step: where to, and a label for all but the plain `next`. */
 function exits(s) {
@@ -846,7 +794,6 @@ function layout(model) {
   const cols = [];
   for (const s of steps) { const r = rank.get(s.name) ?? 1; (cols[r] ??= []).push(s.name); }
   cols[0] = [""];
-  // Two sweeps: each step near the middle of the steps leading to it.
   const preds = new Map();
   for (const [n, es] of out) for (const e of es) if (!back.has(`${n}>${e.to}`)) (preds.get(e.to) ?? preds.set(e.to, []).get(e.to)).push(n);
   const row = new Map();
@@ -861,25 +808,32 @@ function layout(model) {
 
 function flow(v) {
   const model = v.model, { out, back, rank, row, cols } = layout(model);
+  // Columns as wide as the panel allows, between 230 and 320 px.
+  const room = ($("p-flow")?.clientWidth ?? 1100) - 2 * PAD - SW - 4;
+  COL = cols > 1 ? Math.max(230, Math.min(320, Math.floor(room / (cols - 1)))) : 300;
   const rows = [...row.values()];
   const minRow = Math.min(0, ...rows), maxRow = Math.max(0, ...rows);
-  // Each edge: to the next column directly; over the top on a lane of its own when it skips
-  // columns; under the bottom when it goes back.
-  // A long edge between steps of the lower rows runs under the bottom, so it crosses no step.
+  // How many cases took each path in the window: from the start all started ones, from a step
+  // what its completions named as next.
+  const taken = (from, to) => from === "" ? v.started : v.steps[from]?.next?.[to] ?? 0;
   const edgeList = [];
-  let over = 0, under = 0;
+  let over = 0, under = 0, most = 1;
   for (const [n, es] of out) for (const e of es) {
     if (!model.steps.some((s) => s.name === e.to)) continue;
     const isBack = back.has(`${n}>${e.to}`);
     const long = (rank.get(e.to) ?? 0) - (rank.get(n) ?? 0) > 1;
     const low = (row.get(n) ?? 0) + (row.get(e.to) ?? 0) > 0;
     const kind = isBack || (long && low) ? "under" : long ? "over" : "next";
-    edgeList.push({ from: n, ...e, back: isBack, kind, lane: kind === "over" ? over++ : kind === "under" ? under++ : 0 });
+    const count = taken(n, e.to);
+    most = Math.max(most, count);
+    edgeList.push({ from: n, ...e, back: isBack, kind, count, lane: kind === "over" ? over++ : kind === "under" ? under++ : 0 });
   }
-  const LANE = 16;
+  const leaving = new Map();
+  for (const e of edgeList) leaving.set(e.from, (leaving.get(e.from) ?? 0) + e.count);
+  const LANE = 18;
   const width = PAD * 2 + (cols - 1) * COL + SW;
-  const top = PAD + 10 + over * LANE, bottom = top + (maxRow - minRow) * ROW + SH;
-  const height = bottom + 34 + under * LANE + 26;
+  const top = PAD + 12 + over * LANE, bottom = top + (maxRow - minRow) * ROW + SH;
+  const height = bottom + 36 + under * LANE + 28;
   const pos = (n) => ({ x: PAD + (rank.get(n) ?? 0) * COL, y: top + ((row.get(n) ?? 0) - minRow) * ROW });
   const svg = el("svg:svg", { width, height, viewBox: `0 0 ${width} ${height}` },
     el("svg:defs", {}, el("svg:marker", { id: "arrow", viewBox: "0 0 10 10", refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: "auto-start-reverse" }, el("svg:path", { d: "M0,0 L10,5 L0,10 z" }))));
@@ -888,201 +842,620 @@ function flow(v) {
   const R = 8;
   for (const e of edgeList) {
     const a = pos(e.from), b = pos(e.to);
-    let d, lx, ly, anchor = "start", room = 15;
+    let d, lx, ly, anchor = "middle";
     if (e.kind === "next") {
       const fromX = e.from === "" ? a.x + 36 : a.x + SW;
       const y1 = a.y + SH / 2, y2 = b.y + SH / 2, mid = (fromX + b.x) / 2;
       d = `M${fromX},${y1} C${mid},${y1} ${mid},${y2} ${b.x},${y2}`;
-      lx = fromX + 6; ly = y1 - 6;
+      lx = mid; ly = (y1 + y2) / 2 - 8;
     } else {
-      // Off the step's middle, a little apart per lane so lanes from one step do not overlap.
       const shift = (e.lane % 4) * 8 - 12;
       const x1 = a.x + SW / 2 + shift, x2 = b.x + SW / 2 + shift;
-      const [y1, y2, y] = e.kind === "over" ? [a.y, b.y, top - 12 - e.lane * LANE] : [a.y + SH, b.y + SH, bottom + 34 + e.lane * LANE];
+      const [y1, y2, y] = e.kind === "over" ? [a.y, b.y, top - 12 - e.lane * LANE] : [a.y + SH, b.y + SH, bottom + 36 + e.lane * LANE];
       const dy = e.kind === "over" ? R : -R, dir = x2 > x1 ? 1 : -1;
       d = `M${x1},${y1} L${x1},${y + dy} Q${x1},${y} ${x1 + dir * R},${y} L${x2 - dir * R},${y} Q${x2},${y} ${x2},${y + dy} L${x2},${y2}`;
-      lx = x1 + dir * (R + 4); ly = y - 4; room = 32;
-      if (dir < 0) anchor = "end";
+      lx = (x1 + x2) / 2; ly = y - 5;
     }
-    edges.append(el("svg:path", { class: `edge${e.back ? " back" : ""}${e.alt ? " alt" : ""}`, d, "marker-end": "url(#arrow)" }, el("svg:title", {}, `${e.from || "start"} → ${e.to}${e.label ? `: ${e.label}` : ""}`)));
-    if (e.label) labels.append(el("svg:text", { class: "elabel", x: lx, y: ly, "text-anchor": anchor }, el("svg:title", {}, e.label), fit(e.label, room)));
+    const w = e.count ? 1.5 + (e.count / most) * 12 : 1.3;
+    edges.append(el("svg:path", { class: `edge${e.count ? " used" : ""}${e.back ? " back" : ""}${e.alt ? " alt" : ""}`, d, "stroke-width": w, "marker-end": e.count ? null : "url(#arrow)" },
+      el("svg:title", {}, `${e.from || "start"} → ${e.to}${e.label ? ` (${e.label})` : ""}: ${e.count} in the last ${procWindow}`)));
+    const share = e.from !== "" && (leaving.get(e.from) ?? 0) > 0 && out.get(e.from).length > 1 ? ` (${Math.round((e.count / leaving.get(e.from)) * 100)} %)` : "";
+    const text = [e.label, e.count || e.label ? `${num(e.count)}${share}` : ""].filter(Boolean).join(" · ");
+    if (text) labels.append(el("svg:text", { class: "elabel", x: lx, y: ly, "text-anchor": anchor }, fit(text, 34)));
   }
-  // The start: the event that starts a case.
   const s0 = pos("");
   svg.append(el("svg:g", {},
     el("svg:circle", { class: "start", cx: s0.x + 18, cy: s0.y + SH / 2, r: 16 }),
-    el("svg:text", { x: s0.x, y: s0.y + SH / 2 + 32, class: "sub" }, fit(`on ${model.start.on}`, 30)),
-    el("svg:text", { x: s0.x, y: s0.y + SH / 2 + 48, class: "sub" }, `${v.started} started, last ${procWindow}`)));
+    el("svg:text", { x: s0.x, y: s0.y + SH / 2 + 34, class: "sub" }, fit(`on ${model.start.on}`, 32)),
+    el("svg:text", { x: s0.x, y: s0.y + SH / 2 + 50, class: "sub" }, `${num(v.started)} started`)));
   for (const s of model.steps) {
     const { x, y } = pos(s.name), st = v.steps[s.name] ?? { now: {} };
     const open = (st.now.running ?? 0) + (st.now.waiting ?? 0), bad = st.now.incident ?? 0;
     const cls = `step${s.kind === "end" ? " end" : ""}${bad ? " bad" : ""}${caseFilter.step === s.name ? " sel" : ""}`;
-    const g = el("svg:g", { class: cls, transform: `translate(${x},${y})`, onclick: () => { caseFilter.step = caseFilter.step === s.name ? "" : s.name; procTab = "cases"; openCase = null; procFrame = ""; loadProcesses(); } });
+    const g = el("svg:g", { class: cls, transform: `translate(${x},${y})`, onclick: () => { caseFilter.step = caseFilter.step === s.name ? "" : s.name; procFrame = ""; drawProcesses(); } });
     g.append(el("svg:title", {}, `${s.name} (${s.kind}): click to list its cases`));
     if (s.kind === "decide") g.append(el("svg:polygon", { class: "shape", points: `${SW / 2},0 ${SW},${SH / 2} ${SW / 2},${SH} 0,${SH / 2}` }));
-    else g.append(el("svg:rect", { class: "shape", width: SW, height: SH, rx: s.kind === "end" ? SH / 2 : 8 }));
+    else g.append(el("svg:rect", { class: "shape", width: SW, height: SH, rx: s.kind === "end" ? SH / 2 : 9 }));
     let sub = "";
-    if (s.kind === "command") sub = s.command;
-    else if (s.kind === "wait") sub = `${s.event}${s.timeoutMs ? ` · ${duration(s.timeoutMs)}` : ""}`;
+    if (s.kind === "command") sub = `${s.command}${st.medianMs !== null && st.medianMs !== undefined ? ` · ${duration(st.medianMs)}` : ""}`;
+    else if (s.kind === "wait") sub = s.event;
     else if (s.kind === "timer") sub = s.afterMs ? `after ${duration(s.afterMs)}` : `at ${s.at}`;
     else if (s.kind === "query") sub = `? ${s.query}`;
-    else if (s.kind === "end") sub = `${v.ended[s.name] ?? 0} ended, last ${procWindow}`;
-    const clock = s.kind === "wait" || s.kind === "timer";
-    if (clock) g.append(el("svg:circle", { class: "icon", cx: 15, cy: 18, r: 6.5 }), el("svg:path", { class: "icon", d: "M15,14 L15,18 L18,20" }));
-    const tx = s.kind === "decide" ? SW / 2 : clock ? 27 : 10;
-    const anchor = s.kind === "decide" ? "middle" : "start";
-    g.append(el("svg:text", { x: tx, y: s.kind === "decide" ? SH / 2 + 4 : 22, "text-anchor": anchor, "font-weight": 600 }, fit(s.name, s.kind === "decide" ? 14 : 18)));
-    if (sub && s.kind !== "decide") g.append(el("svg:text", { class: "sub", x: 10, y: 42 }, fit(sub, 24)));
-    const badge = (n, x, cls, title) => el("svg:g", { class: `badge ${cls}`, transform: `translate(${x},-9)` }, el("svg:title", {}, title),
-      el("svg:rect", { width: 12 + String(n).length * 7, height: 18, rx: 9 }), el("svg:text", { x: 6, y: 13 }, n));
+    else if (s.kind === "end") sub = `${num(v.ended[s.name] ?? 0)} ended`;
+    const median = st.medianMs !== null && st.medianMs !== undefined ? `median ${duration(st.medianMs)}` : "";
+    const third = s.kind === "wait" ? [median, s.timeoutMs ? `max ${duration(s.timeoutMs)}` : ""].filter(Boolean).join(" · ") : (s.kind === "timer" || s.kind === "query") ? median : "";
+    const clockIcon = s.kind === "wait" || s.kind === "timer";
+    if (clockIcon) g.append(el("svg:circle", { class: "icon", cx: 15, cy: 18, r: 6.5 }), el("svg:path", { class: "icon", d: "M15,14 L15,18 L18,20" }));
+    const tx = s.kind === "decide" ? SW / 2 : clockIcon ? 27 : 11;
+    g.append(el("svg:text", { x: tx, y: s.kind === "decide" ? SH / 2 + 4 : 21, "text-anchor": s.kind === "decide" ? "middle" : "start", "font-weight": 600 }, fit(s.name, s.kind === "decide" ? 14 : 20)));
+    if (sub && s.kind !== "decide") g.append(el("svg:text", { class: "sub", x: 11, y: third ? 37 : 42 }, fit(sub, 27)));
+    if (third) g.append(el("svg:text", { class: "sub", x: 11, y: 52 }, fit(third, 27)));
+    const badge = (n, bx, c, title) => el("svg:g", { class: `badge ${c}`, transform: `translate(${bx},-9)` }, el("svg:title", {}, title), el("svg:rect", { width: 12 + String(n).length * 7, height: 18, rx: 9 }), el("svg:text", { x: 6, y: 13 }, n));
     if (bad) g.append(badge(bad, SW - 22 - String(bad).length * 7, "bad", `${bad} with an incident`));
     if (open) g.append(badge(open, SW - (bad ? 48 + String(bad).length * 7 : 18) - String(open).length * 7, "", `${open} here now`));
     svg.append(g);
   }
   svg.append(labels);
   const cancelled = v.ended.cancelled ?? 0;
-  if (cancelled) svg.append(el("svg:text", { class: "sub", x: PAD, y: height - 8 }, `${cancelled} cancelled by an operator, last ${procWindow}`));
+  if (cancelled) svg.append(el("svg:text", { class: "sub", x: PAD, y: height - 8 }, `${cancelled} cancelled by an operator`));
   return svg;
 }
 
-// ---- the tabs ----
-function casesView() {
-  if (!caseList) return el("div", { class: "meta" }, "Loading…");
-  $("p-count").textContent = `${caseList.cases.length} of ${caseList.total}${caseFilter.state === "ended" || caseFilter.state === "all" ? ` · the newest ${procs.endedKept} ended per process are kept` : ""}`;
-  const rows = [el("tr", {}, ["Case", "Tenant", "Version", "State", "Step", "There since", "Started"].map((h) => el("th", {}, h)))];
-  for (const c of caseList.cases) rows.push(el("tr", {},
-    el("td", {}, el("a", { href: "#", onclick: (ev) => { ev.preventDefault(); showCase(c); } }, c.id)),
-    el("td", {}, c.tenant), el("td", {}, `v${c.version}`), el("td", {}, stateView(c.state)),
-    el("td", {}, c.step, c.incident ? [" · ", el("span", { class: "code" }, c.incident.code)] : null),
-    el("td", {}, c.state === "ended" ? time(c.lastAt) : ago(c.reachedAt)), el("td", {}, time(c.startedAt))));
-  if (!caseList.cases.length) rows.push(el("tr", {}, el("td", { colspan: 7, class: "meta" }, "No case matches.")));
-  return el("table", {}, rows);
+// ================= one case, as a story =================
+let caseData = null;
+let caseMeta = null;
+async function loadCaseRoute() {
+  const [tenant, process, id] = route.args;
+  try { caseData = await get(`/api/case?${new URLSearchParams({ tenant, process, id })}`); } catch (e) { caseData = { error: String(e) }; }
+  try { caseMeta = (await get(`/api/cases?${new URLSearchParams({ process, text: id.split("#")[0], limit: 50 })}`)).cases.find((c) => c.id === id && c.tenant === tenant) ?? null; } catch { caseMeta = null; }
+  render();
 }
 
-/** The CLI commands that resolve an incident, signed with an operator's key. */
-function resolving(c) {
-  const at = `${procs.addr} <key> ${c.process} ${c.id} --tenant ${c.tenant}`;
-  return el("div", { class: "resolve" },
-    el("pre", {}, `# run the step again\nkernable processes retry ${at}\n# go on to the step's next step\nkernable processes skip ${at}\n# end the case\nkernable processes cancel ${at}`));
-}
+const aggLink = (l) => el("a", { href: historyHref({ tenant: l.tenant, domain: l.domain, type: l.aggregateType, id: l.aggregateId }) }, `${l.aggregateType} ${l.aggregateId}`);
 
-function incidentsView(p) {
-  const shown = (incidents?.cases ?? []).filter((c) => c.process === p.name);
-  if (!shown.length) return el("div", { class: "empty" }, "No incidents.");
-  return shown.map((c) => el("div", { class: "card incident" },
-    el("div", { class: "top" }, el("a", { href: "#", class: "t", onclick: (ev) => { ev.preventDefault(); showCase(c); } }, c.id), el("span", { class: "meta" }, `${c.tenant} · v${c.version} · step ${c.step}`), el("span", { class: "when" }, ago(c.lastAt))),
-    el("div", {}, el("span", { class: "code" }, c.incident.code), " ", c.incident.message),
-    resolving(c)));
-}
-
-function statisticsView(v) {
-  const rows = [el("tr", {}, ["Step", "Kind", "Now", "Entered", "Left", "Median", "95th percentile", "Timeouts", "Incidents"].map((h) => el("th", {}, h)))];
-  for (const s of v.model.steps) {
-    const st = v.steps[s.name];
-    const now = Object.entries(st.now).map(([k, n]) => `${n} ${k}`).join(", ") || "0";
-    rows.push(el("tr", {}, el("td", {}, el("b", {}, s.name)), el("td", {}, s.kind), el("td", {}, now), el("td", {}, st.entered), el("td", {}, s.kind === "end" ? "–" : st.left),
-      el("td", {}, s.kind === "end" ? "–" : duration(st.medianMs)), el("td", {}, s.kind === "end" ? "–" : duration(st.p95Ms)), el("td", {}, st.timeouts || "–"), el("td", {}, st.incidents ? el("span", { class: "code" }, st.incidents) : "–")));
-  }
-  const ended = Object.entries(v.ended).map(([end, n]) => `${n} at ${end}`).join(", ") || "none";
-  const open = Object.values(v.steps).reduce((m, s) => m + Object.values(s.now).reduce((a, b) => a + b, 0), 0);
-  return [
-    el("p", { class: "meta" }, `Version ${v.version}, last ${procWindow}: ${v.started} started · ended ${ended} · ${open} not ended now. Durations are from reaching a step until it completed, exact to within 10%.`),
-    el("table", {}, rows)];
-}
-
-// ---- one case ----
-async function showCase(c) {
-  openCase = { tenant: c.tenant, process: c.process, id: c.id };
-  caseData = null;
-  if (c.process !== procSel) { procSel = c.process; procVersion = null; }
-  await loadCase();
-  drawProcesses();
-}
-
-function linkTo(l) {
-  const where = `${l.aggregateType} ${l.aggregateId}`;
-  return el("a", { href: "#", onclick: (ev) => { ev.preventDefault(); openStream({ tenant: l.tenant, domain: l.domain, aggregateType: l.aggregateType, aggregateId: l.aggregateId }); } }, `${l.domain}.${where}`);
-}
-
-/** One case event in a sentence, with what it links to. */
-function caseLine(e) {
+/** One case event in plain words, with the dot's color; `model` names what a step does. */
+function storyLine(e, model) {
   let p = {};
   try { p = JSON.parse(e.payload); } catch {}
-  const l = e.link;
+  const l = e.link, step = model?.steps.find((s) => s.name === p.step);
   switch (e.type) {
-    case "ProcessStarted": return ["started on version ", el("b", {}, p.version), " by ", el("b", {}, p.event), l ? [" of ", linkTo(l), ` (position ${l.position})`] : null];
-    case "StepReached": return ["reached ", el("b", {}, p.step), ` (${p.kind})`];
-    case "CommandSent": return ["sent ", el("b", {}, p.command), l ? [" to ", linkTo(l), " · ", l.outcome === "rejected" ? el("span", { class: "code" }, `rejected ${l.code}`) : l.outcome] : null];
-    case "StepCompleted": return ["completed ", el("b", {}, p.step), `: ${p.outcome}${p.code ? ` ${p.code}` : ""}${p.value !== undefined ? ` ${JSON.stringify(p.value)}` : ""}`, l ? [" by ", el("b", {}, l.type), " of ", linkTo(l)] : null, p.next ? [" → ", el("b", {}, p.next)] : null];
-    case "TimerSet": return ["timer for ", el("b", {}, p.step), ` set to ${time(p.at)}`];
-    case "TimerFired": return ["timer of ", el("b", {}, p.step), " fired"];
-    case "EventKept": return ["kept ", el("b", {}, p.event), " for a later wait", l ? [" from ", linkTo(l)] : null];
-    case "IncidentRaised": return [el("span", { class: "code" }, `incident ${p.code}`), " at ", el("b", {}, p.step), `: ${p.message}`];
-    case "IncidentResolved": return ["resolved: ", el("b", {}, p.action), " by ", el("span", { class: "mono" }, short(p.by))];
-    case "ProcessEnded": return ["ended at ", el("b", {}, p.end), p.by ? [" by ", el("span", { class: "mono" }, short(p.by))] : null];
-    default: return [e.type];
+    case "ProcessStarted": return ["", ["Started when ", el("b", {}, p.event), l ? [" of ", aggLink(l)] : null, " committed"], `version ${p.version} · key ${p.key}`];
+    case "StepReached":
+      if (p.kind === "wait") return ["", ["Waiting at ", el("b", {}, p.step), " for ", el("b", {}, step?.event ?? "an event")], step?.timeoutMs ? `at most ${duration(step.timeoutMs)}, then ${step.onTimeout}` : null];
+      if (p.kind === "timer") return ["", ["Timer ", el("b", {}, p.step)], step?.afterMs ? `for ${duration(step.afterMs)}` : null];
+      if (p.kind === "end" || p.kind === "command") return null;
+      return ["", ["Reached ", el("b", {}, p.step)], p.kind];
+    case "CommandSent": return ["", ["Sent ", el("b", {}, (p.command ?? "").split(".").pop()), " at ", el("b", {}, p.step), l ? [" to ", aggLink(l)] : null],
+      !l || l.outcome === "pending" ? "not committed yet: the kernel tries again until it can send it (its log says why)" : l.outcome === "rejected" ? el("span", { class: "code" }, `rejected: ${l.code}`) : l.outcome];
+    case "StepCompleted": {
+      if (p.outcome === "committed") return null;
+      const how = p.outcome === "timeout" ? "Time ran out" : p.outcome === "event" ? [l ? ["", el("b", {}, l.type), " of ", aggLink(l), " came"] : "The event came"] : p.outcome === "committed" ? "Committed" : p.outcome === "answer" ? `Answered ${JSON.stringify(p.value)}` : p.outcome === "skipped" ? "Skipped by an operator" : `Rejected: ${p.code ?? p.outcome}`;
+      return [p.outcome === "timeout" ? "warn" : "", [how, " at ", el("b", {}, p.step), p.next ? [", went on to ", el("b", {}, p.next)] : null], null];
+    }
+    case "TimerSet": return null;
+    case "TimerFired": return null;
+    case "EventKept": return ["", ["Kept ", el("b", {}, p.event), " that came early", l ? [" from ", aggLink(l)] : null], "it counts once the case waits for it"];
+    case "IncidentRaised": return ["bad", [el("span", { class: "code" }, `Incident: ${p.code}`), " at ", el("b", {}, p.step)], p.message];
+    case "IncidentResolved": return ["", ["Resolved: ", el("b", {}, p.action)], ["by ", keyView(p.by)]];
+    case "ProcessEnded": return ["end", ["Ended: ", el("b", {}, p.end)], p.by ? ["by ", keyView(p.by)] : null];
+    default: return ["", [e.type], null];
   }
 }
 
-function caseView() {
-  const back = el("a", { href: "#", onclick: (ev) => { ev.preventDefault(); openCase = null; drawProcesses(); } }, "← all cases");
-  if (!caseData) return [back, el("div", { class: "meta" }, "Loading…")];
-  if (caseData.error) return [back, el("div", { class: "err" }, caseData.error)];
-  const shown = (caseList?.cases ?? []).concat(incidents?.cases ?? []).find((c) => c.id === caseData.id && c.tenant === caseData.tenant);
-  const head = el("div", { class: "ptitle" }, back, el("h3", {}, `case ${caseData.id}`), el("span", { class: "meta" }, `tenant ${caseData.tenant}`), shown ? stateView(shown.state) : null,
-    el("a", { href: "#", onclick: (ev) => { ev.preventDefault(); openStream({ tenant: caseData.tenant, domain: "process", aggregateType: caseData.process, aggregateId: caseData.id }); } }, "its stream in History"));
-  const cards = caseData.events.map((e) => el("div", { class: `card${e.type === "IncidentRaised" ? " incident" : e.type === "ProcessEnded" ? " ended" : ""}` },
-    el("div", { class: "top" }, el("span", { class: "v" }, `v${e.version}`), el("span", {}, caseLine(e)), el("span", { class: "when" }, time(e.createdAt))),
-    el("details", {}, el("summary", { class: "meta" }, e.type), payloadView(e.payload, null))));
-  const resolve = shown?.state === "incident" ? [el("h2", {}, "Resolve"), resolving({ ...shown })] : [];
-  return [head, ...resolve, ...cards];
+function drawCase() {
+  const box = $("v-processes");
+  procFrame = "";
+  const [tenant, process, id] = route.args;
+  const back = el("a", { href: procHref(process) }, `← ${process}`);
+  if (!caseData) { box.replaceChildren(back, el("div", { class: "empty" }, "Loading…")); return; }
+  if (caseData.error) { box.replaceChildren(back, el("div", { class: "err" }, caseData.error)); return; }
+  const p = procs?.processes.find((x) => x.name === process);
+  const events = caseData.events;
+  let started = {};
+  try { started = JSON.parse(events[0]?.payload ?? "{}"); } catch {}
+  const model = p?.versions.find((x) => x.version === started.version)?.model;
+  const last = events[events.length - 1];
+  const endedAt = events.find((e) => e.type === "ProcessEnded");
+  const incident = (incidents?.cases ?? []).find((c) => c.process === process && c.id === id && c.tenant === tenant);
+  const status = incident ? "incident" : endedAt ? "ended" : caseMeta?.state ?? "running";
+  let endName = ""; try { endName = endedAt ? JSON.parse(endedAt.payload).end : ""; } catch {}
+  const lines = events.map((e) => [e, storyLine(e, model)]).filter(([, s]) => s);
+  const story = el("div", { class: "story" }, lines.map(([e, [dot, text, small]], i) => el("div", { class: "ev" },
+    el("span", { class: "t" }, clock(e.createdAt)),
+    el("span", { class: "rail" }, el("i", { class: dot }), i < lines.length - 1 ? el("u") : null),
+    el("div", { class: "c" }, text, small ? el("small", {}, small) : null))));
+  const touched = new Map();
+  for (const e of events) if (e.link?.aggregateId) touched.set(`${e.link.domain}/${e.link.aggregateType}/${e.link.aggregateId}`, e.link);
+  const facts = el("dl", {},
+    el("dt", {}, "Process"), el("dd", {}, el("a", { href: procHref(process) }, process), ` v${started.version ?? "?"}`),
+    el("dt", {}, "Key"), el("dd", {}, started.key ?? "–", ` · case ${id.split("#")[1] ?? ""}`),
+    el("dt", {}, "Tenant"), el("dd", {}, tenant),
+    el("dt", {}, "State"), el("dd", {}, stateChip(status), endName ? ` at ${endName}` : caseMeta && !endedAt ? ` at ${caseMeta.step}, since ` : "", caseMeta && !endedAt ? when(caseMeta.reachedAt) : null),
+    el("dt", {}, "Took"), el("dd", {}, duration((endedAt ? last.createdAt : now()) - events[0].createdAt)),
+    el("dt", {}, "Data"), el("dd", { class: "mono" }, Object.entries(started.data ?? {}).map(([k, v]) => `${k}: ${JSON.stringify(v)}`).join("\n") || "–"),
+    el("dt", {}, "Touched"), el("dd", {}, [...touched.values()].map((l, i) => [i ? ", " : "", aggLink(l)])));
+  const raw = el("details", {}, el("summary", { class: "note" }, `Technical: the case's ${events.length} events`),
+    events.map((e) => el("div", { class: "card", style: "margin-top:8px" }, el("div", { class: "top" }, el("span", { class: "v" }, `v${e.version}`), el("span", { class: "t" }, e.type), el("span", { class: "when" }, iso(e.createdAt))), payloadView(e.payload, null))),
+    el("div", { style: "margin-top:8px" }, el("a", { href: historyHref({ tenant, domain: "process", type: process, id }) }, "Its stream in Explore →")));
+  box.replaceChildren(
+    el("div", { class: "title" }, back, el("h3", {}, `${process}: ${started.key ?? id}`), stateChip(status)),
+    el("div", { class: "grid cols-2" },
+      el("div", { class: "panel" }, el("h2", {}, "What happened"), story),
+      el("div", { class: "grid", style: "align-content:start" },
+        el("div", { class: "panel" }, el("h2", {}, "Case"), facts),
+        incident ? el("div", { class: "panel" }, el("h2", {}, "Resolve"), el("div", {}, el("span", { class: "code" }, incident.incident?.code), ` at ${incident.step}: ${incident.incident?.message ?? ""}`), el("div", { class: "note" }, "Fix the cause first, then:"), resolving(incident)) : null,
+        el("div", { class: "panel" }, raw))));
 }
 
-// ---- refresh ----
-async function refresh() {
+// ================= Operations =================
+let showEngineRejections = false, openedRejections = new Set(), parkedFilter = "";
+
+function drawOperations(v) {
+  const box = $("v-operations");
+  if (!state) { box.replaceChildren(el("div", { class: "empty" }, "Loading…")); return; }
+  const s = system;
+  const line = (level, what, val) => el("div", { class: "row" }, el("span", { class: `dot ${level}` }), el("span", {}, what), el("span", { class: "v" }, val));
+  const panels = [];
+  if (s) {
+    const r = s.replication;
+    panels.push(el("div", { class: "panel" }, el("h2", {}, "Kernel"),
+      line(state.kernel.ready === "ready" ? "ok" : "warn", `Version ${state.kernel.version}`, state.kernel.ready === "ready" ? "ready" : state.kernel.ready),
+      line("ok", "Started", el("span", {}, when(s.startedAt), ` · up ${duration(s.now - s.startedAt)}`)),
+      line("ok", "Listens on", s.addr),
+      line(s.queue.queued > 1000 ? "warn" : "ok", "Queued · scheduled", `${num(s.queue.queued)} · ${num(s.queue.scheduled)}`)));
+    panels.push(el("div", { class: "panel" }, el("h2", {}, "Standby and failover"),
+      line(s.role === "standby" ? "ok" : "ok", "This kernel", s.role),
+      line(r.sync ? (r.primary?.state === "in-sync" ? "ok" : "warn") : "faint", "Replication", r.sync ? (r.primary?.state ?? "–") : "off"),
+      r.sync ? line(r.primary?.standby ? "ok" : "warn", "Standby", r.primary?.standby ? keyView(r.primary.standby) : r.primary?.standbyLeft ? "left" : "none connected") : null,
+      line(r.witness ? "ok" : "faint", "Witness", r.witness ?? "none")));
+    panels.push(el("div", { class: "panel" }, el("h2", {}, "Backup"),
+      line(s.backup.enabled ? (s.backup.connected ? "ok" : "warn") : "faint", "Follower", s.backup.enabled ? (s.backup.connected ? keyView(s.backup.connected) : "not connected") : "off (--backup)"),
+      s.backup.enabled ? line("ok", "Acknowledged", `record ${num(s.backup.acked)}`) : null,
+      el("div", { class: "note" }, "Uploads and checks: the follower's --status-file.")));
+    const used = s.store.maxBytes ? s.store.bytes / s.store.maxBytes : 0;
+    panels.push(el("div", { class: "panel" }, el("h2", {}, "Store"),
+      el("div", { class: "kpi" }, el("span", { class: "n" }, bytes(s.store.bytes)), el("span", { class: "s" }, s.store.maxBytes ? `of ${bytes(s.store.maxBytes)} (--max-store-bytes)` : "no quota set")),
+      s.store.maxBytes ? el("div", { class: "hbar", style: "grid-template-columns:1fr" }, el("div", { class: "track" }, el("span", { style: `flex:${used};background:var(--${used >= 0.8 ? "warn" : "accent"})` }), el("span", { style: `flex:${Math.max(0, 1 - used)}` }))) : null,
+      line("ok", "Events in the log", num(s.store.head)),
+      s.partition ? line("ok", "Partition", `${s.partition.name}${s.partition.control ? " (control)" : ""}`) : null));
+    const refused = Object.entries(s.limits.refused);
+    panels.push(el("div", { class: "panel" }, el("h2", {}, "Limits", el("span", { class: "aside" }, "refused since the start")),
+      refused.length ? refused.map(([why, n]) => line("warn", why, num(n))) : line("ok", "Nothing refused", "0"),
+      line("ok", "Requests per second per key", s.limits.requestsPerSecondPerKey ? num(s.limits.requestsPerSecondPerKey) : "no limit")));
+  }
+  box.replaceChildren(
+    el("div", { class: "grid cols-3" }, panels),
+    servicesPanel(),
+    parkedPanel(),
+    rejectionsPanel());
+}
+
+function servicesPanel() {
+  const head = state.kernel.head;
+  const rows = [];
+  for (const w of state.instances) rows.push(el("tr", {},
+    el("td", {}, el("span", { class: "dot ok", style: "margin-right:8px" }), el("b", {}, w.worker)),
+    el("td", {}, `worker · ${w.aggregates.join(", ")}`), el("td", {}, w.service || "–"), el("td", {}, keyView(w.key)), el("td", {}, "–"), el("td", { class: "num" }, "–"), el("td", {}, when(w.since))));
+  for (const l of state.listeners) {
+    const status = l.live ? "live" : !l.counts ? (l.connected ? "dynamic" : "away") : !l.connected ? "missing" : l.position < head ? "behind" : "connected";
+    const kind = l.live ? "live subscription" : l.middlewares.length ? `middleware (${l.middlewares.map((m) => m.when).join(", ")})` : l.queries.length ? `read model · order ${l.order}` : `listener · order ${l.order}`;
+    rows.push(el("tr", {},
+      el("td", {}, el("span", { class: "dot", style: `color:${color(status)};margin-right:8px` }), el("b", {}, l.name)),
+      el("td", {}, kind), el("td", {}, l.service || "–"), el("td", {}, keyView(l.key)),
+      el("td", {}, spark(l.name, head - l.position)),
+      el("td", { class: `num ${l.parked ? "bad" : ""}` }, l.parked ? num(l.parked) : "–"),
+      el("td", {}, l.connected ? when(l.since) : el("span", { class: "bad" }, "away · last seen ", when(l.lastSeen)))));
+  }
+  if (!rows.length) rows.push(el("tr", {}, el("td", { colspan: 7, class: "note" }, "Nothing connected.")));
+  return el("div", { class: "panel" }, el("h2", {}, "Services", el("span", { class: "aside" }, `${state.instances.length} worker${state.instances.length === 1 ? "" : "s"} · ${state.listeners.length} listeners`)),
+    el("div", { class: "tbl" }, el("table", {}, el("tr", {}, ["Name", "Kind", "Service", "Key", "Behind, last hour", "Parked", "Connected"].map((h, i) => el("th", { class: i === 5 ? "num" : "" }, h))), rows)));
+}
+
+/** How far a listener was behind (head − position) over the hour the kernel kept. */
+function spark(name, behindNow) {
+  const rows = trend?.listeners?.[name];
+  const SW_ = 150, SH_ = 24;
+  if (!rows || rows.length < 2) return el("span", { class: "note" }, "collecting…");
+  const lag = rows.map((r) => Math.max(0, r[1] - r[2]));
+  const max = Math.max(1, ...lag);
+  const t0 = rows[0][0], span = Math.max(1, rows[rows.length - 1][0] - t0);
+  const x = (i) => ((rows[i][0] - t0) / span) * SW_;
+  const y = (v) => SH_ - 2 - (v / max) * (SH_ - 4);
+  const d = lag.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join("");
+  const svg = el("svg:svg", { width: SW_, height: SH_, viewBox: `0 0 ${SW_} ${SH_}`, role: "img", "aria-label": `${name}: behind by up to ${max} events` },
+    el("svg:line", { class: "base", x1: 0, x2: SW_, y1: SH_ - 2, y2: SH_ - 2 }), el("svg:path", { class: "line", d }), el("svg:circle", { class: "mark", cx: x(lag.length - 1), cy: y(lag[lag.length - 1]), r: 3.5 }));
+  return el("div", { class: `spark${behindNow >= 100 ? " warn" : ""}` }, svg, el("span", { class: "say" }, behindNow > 0 ? `${num(behindNow)} behind` : "caught up", ` · max ${num(Math.max(...lag))}`));
+}
+
+function parkedPanel() {
+  const all = parked?.parked ?? [];
+  const f = parkedFilter.toLowerCase();
+  const shown = all.filter((p) => `${p.listener} ${p.position} ${p.type} ${p.code} ${p.message}`.toLowerCase().includes(f));
+  const addr = system?.addr ?? "<addr>";
+  const input = el("input", { class: "ctl", id: "parked-filter", placeholder: "Filter: listener, type, code, message…", value: parkedFilter, style: "width:320px" });
+  input.addEventListener("input", () => { parkedFilter = input.value; render(); });
+  const rows = shown.map((p) => el("tr", {},
+    el("td", {}, p.listener), el("td", { class: "mono" }, p.position), el("td", {}, p.type), el("td", {}, el("span", { class: "code" }, p.code)),
+    el("td", {}, p.message || "–"), el("td", { class: "num" }, `${p.attempts}×`), el("td", {}, when(p.parkedAt)),
+    el("td", {}, p.retry ? el("span", { class: "note" }, "retrying") : copyButton(`kernable listeners retry ${addr} <key> ${p.listener} ${p.position}`, "Copy retry"))));
+  if (!rows.length) rows.push(el("tr", {}, el("td", { colspan: 8, class: "note" }, parked?.total ? "None matches the filter." : "Nothing is parked: every listener handled every event.")));
+  return el("div", { class: "panel" },
+    el("h2", {}, `Parked events · ${parked?.total ?? 0}`, el("span", { class: "aside" }, "events a listener gave up on; nothing is lost")),
+    all.length ? el("div", { class: "controls" }, input, el("span", { class: "note" }, "All of a listener: "), el("code", {}, `kernable listeners retry|dismiss ${addr} <key> <listener> --all`)) : null,
+    el("div", { class: "tbl" }, el("table", {}, el("tr", {}, ["Listener", "Position", "Event", "Code", "Message", "Attempts", "Parked", ""].map((h, i) => el("th", { class: i === 5 ? "num" : "" }, h))), rows)));
+}
+
+/** Why the command was refused, in one line: the unique key or the requirement that did not hold. */
+function why(r) {
+  const q = r.requirement;
+  const need = q ? ` · requires ${q.domain}.${q.aggregateType} ${q.aggregateId || `by key ${q.key}`} ${q.absent ? "not " : ""}${q.fact}` : "";
+  return `${r.message}${r.uniqueKey ? ` · key ${r.uniqueKey}` : ""}${need}`;
+}
+
+function rejectionsPanel() {
+  const all = rejections?.rejections ?? [];
+  const engine = all.filter((r) => r.domain === "process").length;
+  const shown = all.filter((r) => showEngineRejections || r.domain !== "process");
+  const byCode = new Map();
+  for (const r of shown) byCode.set(r.code, (byCode.get(r.code) ?? 0) + 1);
+  const toggle = el("label", { class: "note" }, el("input", { type: "checkbox", checked: showEngineRejections || null, onchange: (ev) => { showEngineRejections = ev.target.checked; render(); } }), ` the process engine's own (${engine}: timers no longer needed and the like)`);
+  const rows = [];
+  for (const r of shown.slice(0, 200)) {
+    const open = openedRejections.has(r.commandId);
+    rows.push(el("tr", { class: `click${open ? " open" : ""}`, onclick: () => { open ? openedRejections.delete(r.commandId) : openedRejections.add(r.commandId); render(); } },
+      el("td", {}, when(r.receivedAt)), el("td", {}, el("b", {}, `${r.domain}.${r.aggregateType}.${r.type}`)),
+      el("td", {}, el("a", { href: historyHref({ tenant: r.tenant, domain: r.domain, type: r.aggregateType, id: r.aggregateId }), onclick: (ev) => ev.stopPropagation() }, r.aggregateId)),
+      el("td", {}, r.tenant), el("td", {}, el("span", { class: "code" }, r.code)), el("td", {}, why(r))));
+    if (open) rows.push(el("tr", {}, el("td", { colspan: 6, class: "wide" }, payloadView(r.payload, null), el("pre", {}, JSON.stringify(r.context, null, 2)), el("div", { class: "note" }, "command ", el("span", { class: "mono" }, r.commandId), " · signed by ", keyView(r.key)))));
+  }
+  if (!rows.length) rows.push(el("tr", {}, el("td", { colspan: 6, class: "note" }, "No rejected commands.")));
+  return el("div", { class: "panel" },
+    el("h2", {}, `Rejected commands · ${shown.length}`, el("span", { class: "aside" }, `the newest ${rejections?.limit ?? ""} received`)),
+    el("div", { class: "controls" }, [...byCode.entries()].sort((a, b) => b[1] - a[1]).map(([code, n]) => el("span", { class: "chip warn" }, `${code} · ${n}`)), toggle),
+    el("div", { class: "tbl" }, el("table", {}, el("tr", {}, ["Received", "Command", "Aggregate", "Tenant", "Code", "Why"].map((h) => el("th", {}, h))), rows)));
+}
+
+// ================= Explore =================
+let exploreTab = "map";
+function enterExplore() {
+  if (route.view === "history") { exploreTab = "aggregates"; stream = { tenant: route.args[0], domain: route.args[1], type: route.args[2], id: route.args[3] }; if (stream.domain === "process") $("streams-engine").checked = true; }
+  else exploreTab = ["map", "events", "aggregates"].includes(route.args[0]) ? route.args[0] : "map";
+  document.querySelectorAll("#explore-tabs a").forEach((a) => a.classList.toggle("on", a.dataset.tab === exploreTab));
+  for (const t of ["map", "events", "aggregates"]) $(`x-${t}`).hidden = t !== exploreTab;
+  if (exploreTab === "events" && tail === null) search();
+  if (exploreTab === "aggregates") { loadStreams(); loadHistory(); }
+}
+
+// ---- the domain map ----
+let selected = null;
+function model(s) {
+  const head = s.kernel.head, engine = $("map-engine").checked;
+  const nodes = new Map(), edges = [];
+  const add = (id, col, label, sub, status, info) => { if (!nodes.has(id)) nodes.set(id, { id, col, label, sub, status, info }); return nodes.get(id); };
+  const services = new Map(s.services.map((m) => [m.service, m]));
+  for (const m of s.services) {
+    const meta = Object.entries(m.metadata).map(([k, v]) => `${k} ${v}`).join(" · ");
+    add(`s:${m.service}`, 0, m.service, meta || "membership applied", "connected", { kind: "service", ...m });
+  }
+  const serviceNode = (name) => name ? add(`s:${name}`, 0, name, "no membership", "dynamic", { kind: "service", service: name, note: "No membership applied: everything it registers counts." }) : null;
+  for (const a of s.aggregates) {
+    const m = services.get(a.service);
+    const status = a.workers > 0 ? "connected" : a.dynamic ? "dynamic" : "missing";
+    add(`a:${a.aggregate}`, 1, a.aggregate, `${a.workers} worker${a.workers === 1 ? "" : "s"} · ${a.commands.length} commands`, status, { kind: "aggregate", ...a, listed: m ? m.workers.includes(a.aggregate) : null });
+    const owner = serviceNode(a.service);
+    if (owner) edges.push({ from: owner.id, to: `a:${a.aggregate}`, kind: "own" });
+  }
+  for (const m of s.services) for (const a of m.workers) {
+    if (!nodes.has(`a:${a}`)) add(`a:${a}`, 1, a, "listed, never registered", "missing", { kind: "aggregate", aggregate: a, service: m.service, note: "Listed in the membership; no worker ever registered it. Its commands wait in the queue." });
+    edges.push({ from: `s:${m.service}`, to: `a:${a}`, kind: "own" });
+  }
+  const shownEvents = s.events.filter((e) => engine || !e.type.startsWith("process."));
+  const hiddenEngine = s.events.length - shownEvents.length;
+  if (hiddenEngine) add("e:process.*", 2, "process engine", `${hiddenEngine} event types, hidden`, "dynamic", { kind: "event types", note: "The process engine's own events (cases, steps, timers). Show them with the switch above." });
+  for (const e of shownEvents) {
+    add(`e:${e.type}`, 2, e.type, `schema ${e.schema}`, "connected", { kind: "event type", ...e });
+    for (const w of e.writers) if (nodes.has(`a:${w}`)) edges.push({ from: `a:${w}`, to: `e:${e.type}` });
+  }
+  for (const l of s.listeners) {
+    const behind = l.connected && l.position < head;
+    const status = l.live ? "live" : !l.counts ? (l.connected ? "dynamic" : "away") : !l.connected ? "missing" : behind ? "behind" : "connected";
+    const what = l.live ? "live" : l.middlewares.length ? "middleware" : "listener";
+    const parkedN = l.parked ? ` · ${l.parked} parked` : "";
+    const sub = `${what} · order ${l.order} · ${l.connected ? (behind ? `${head - l.position} behind` : "up to date") : "away"}${parkedN}`;
+    const node = add(`l:${l.name}`, 3, l.name, sub, status, { kind: what, ...l });
+    const owner = serviceNode(l.service);
+    if (owner) edges.push({ from: owner.id, to: node.id, kind: "own" });
+    const types = l.events.length ? l.events : ["*"];
+    for (const e of shownEvents) if (types.some((p) => covers(p, e.type))) edges.push({ from: `e:${e.type}`, to: node.id });
+    for (const q of l.queries) { add(`q:${q}`, 4, q, "query", "connected", { kind: "query", type: q }); edges.push({ from: node.id, to: `q:${q}` }); }
+    for (const mw of l.middlewares) for (const a of s.aggregates) if (a.commands.some((c) => mw.types.some((p) => covers(p, c)))) edges.push({ from: node.id, to: `a:${a.aggregate}`, kind: "check" });
+  }
+  for (const m of s.services) for (const name of [...m.listeners, ...m.middlewares]) {
+    if (!nodes.has(`l:${name}`)) add(`l:${name}`, 3, name, "listed, never registered", "missing", { kind: "listener", name, service: m.service, note: "Listed in the membership; it never connected. The kernel is not ready until it does." });
+    edges.push({ from: `s:${m.service}`, to: `l:${name}`, kind: "own" });
+  }
+  return { nodes: [...nodes.values()], edges };
+}
+
+const COLS = ["Services", "Aggregates", "Event types", "Listeners", "Queries"];
+const NODE_H = 40, GAP = 10, TOP = 40, NW = 196;
+function drawMap() {
+  if (!state) return;
+  const { nodes, edges } = model(state);
+  const used = COLS.map((_, i) => nodes.some((n) => n.col === i));
+  const colIndex = []; let k = 0; used.forEach((u, i) => (colIndex[i] = u ? k++ : -1));
+  const box = $("graph");
+  const ncols = Math.max(1, k);
+  const width = Math.max(box.clientWidth - 2, ncols * (NW + 36) + 30);
+  const step = ncols > 1 ? (width - 40 - NW) / (ncols - 1) : 0;
+  const counts = new Array(ncols).fill(0);
+  for (const n of nodes.sort((a, b) => a.label.localeCompare(b.label))) {
+    const c = colIndex[n.col];
+    n.x = 20 + c * step; n.y = TOP + counts[c]++ * (NODE_H + GAP);
+  }
+  const height = TOP + Math.max(1, ...counts) * (NODE_H + GAP) + 10;
+  const svg = el("svg:svg", { width, height, viewBox: `0 0 ${width} ${height}` });
+  COLS.forEach((c, i) => colIndex[i] >= 0 && svg.append(el("svg:text", { class: "colhead", x: 20 + colIndex[i] * step, y: 22 }, c)));
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const lines = el("svg:g"); svg.append(lines);
+  for (const e of edges) {
+    const a = byId.get(e.from), b = byId.get(e.to);
+    if (!a || !b) continue;
+    let d;
+    if (e.kind === "check") { const x1 = a.x, y1 = a.y + NODE_H / 2, x2 = b.x + NW, y2 = b.y + NODE_H / 2; d = `M${x1},${y1} C${x1 - 60},${y1 + 30} ${x2 + 60},${y2 + 30} ${x2},${y2}`; }
+    else { const x1 = a.x + NW, y1 = a.y + NODE_H / 2, x2 = b.x, y2 = b.y + NODE_H / 2, mid = (x1 + x2) / 2; d = `M${x1},${y1} C${mid},${y1} ${mid},${y2} ${x2},${y2}`; }
+    const path = el("svg:path", { class: `edge ${e.kind ?? ""}`, d }); path.dataset.from = e.from; path.dataset.to = e.to; lines.append(path);
+  }
+  for (const n of nodes) {
+    const g = el("svg:g", { class: `node${selected === n.id ? " sel" : ""}`, transform: `translate(${n.x},${n.y})`, onclick: () => { selected = n.id; drawMap(); } });
+    g.dataset.id = n.id;
+    g.append(el("svg:rect", { width: NW, height: NODE_H, rx: 7 }), el("svg:circle", { cx: 12, cy: 14, r: 4.5, fill: color(n.status) }), el("svg:text", { x: 23, y: 18 }, fit(n.label, 26)), el("svg:text", { class: "sub", x: 12, y: 33 }, fit(n.sub, 32)));
+    g.addEventListener("mouseenter", () => highlight(n.id, true)); g.addEventListener("mouseleave", () => highlight(n.id, false));
+    svg.append(g);
+  }
+  box.replaceChildren(svg);
+  details(byId.get(selected));
+}
+function highlight(id, on) {
+  const svg = $("graph").firstChild; if (!svg) return;
+  const near = new Set([id]);
+  svg.querySelectorAll("path.edge").forEach((p) => { const hit = on && (p.dataset.from === id || p.dataset.to === id); p.classList.toggle("hi", hit); if (hit) { near.add(p.dataset.from); near.add(p.dataset.to); } });
+  svg.querySelectorAll("g.node").forEach((g) => g.classList.toggle("dim", on && !near.has(g.dataset.id)));
+  svg.querySelectorAll("path.edge").forEach((p) => p.classList.toggle("dim", on && !p.classList.contains("hi")));
+}
+function details(n) {
+  const box = $("details");
+  if (!n) { box.replaceChildren(el("div", { class: "kind" }, "Details"), el("p", { class: "note" }, "Click a node: a service, an aggregate, an event type, a listener or a query.")); return; }
+  const i = n.info, rows = [];
+  const row = (k, v) => v !== undefined && v !== null && v !== "" && rows.push(el("dt", {}, k), el("dd", {}, v));
+  row("status", el("span", {}, el("i", { class: "dot", style: `color:${color(n.status)};margin-right:6px` }), n.status));
+  if (i.note) row("note", i.note);
+  if (i.kind === "service") {
+    for (const [k, v] of Object.entries(i.metadata ?? {})) row(k, v);
+    row("workers", (i.workers ?? []).join(", ")); row("listeners", (i.listeners ?? []).join(", ")); row("middlewares", (i.middlewares ?? []).join(", "));
+    if (i.appliedAt) row("applied", el("span", {}, when(i.appliedAt), " by ", keyView(i.key)));
+  } else if (i.kind === "aggregate") {
+    row("service", i.service || "none"); row("commands", (i.commands ?? []).join(", ")); row("workers", i.workers);
+    row("in membership", i.listed === null || i.listed === undefined ? "no membership" : i.listed ? "listed" : "not listed (dynamic)");
+    row("key", keyView(i.key)); row("last seen", i.lastSeen ? when(i.lastSeen) : undefined);
+  } else if (i.kind === "event type") {
+    row("schema", i.schema); row("written by", i.writers.join(", "));
+    row("events", el("a", { href: "#explore/events", onclick: () => { document.querySelector('#search [name="type"]').value = n.label; tail = null; } }, "search them →"));
+  } else if (i.kind === "query") {
+    row("type", i.type);
+  } else if (i.kind !== "event types") {
+    row("service", i.service || "none"); row("order", i.order);
+    row("reads", i.events?.length ? i.events.join(", ") : "everything its key may read"); row("answers", i.queries?.join(", "));
+    for (const m of i.middlewares ?? []) row(`checks ${m.when}`, `${m.types.join(", ")} (order ${m.order})`);
+    if (i.position !== undefined) row("position", `${num(i.position)} of ${num(state.kernel.head)}`);
+    row("connected", i.connected ? el("span", {}, "since ", when(i.since)) : i.lastSeen ? el("span", {}, "no, last seen ", when(i.lastSeen)) : "no");
+    if (i.instances?.length) row(`instances · ${i.single ? "single" : "replicated"}`, i.instances.map((x) => `${x.id}: position ${x.position}`).join("\n"));
+    row("counts", i.counts === undefined ? undefined : i.counts ? "yes: others wait for it" : "no");
+    row("key", keyView(i.key));
+    if (i.parked) row(`parked · ${i.parked}`, el("a", { href: "#operations" }, "see Operations →"));
+  }
+  box.replaceChildren(el("div", { class: "kind" }, i.kind), el("h4", {}, n.label), el("dl", {}, rows));
+}
+
+// ---- aggregates and their history ----
+let stream = null, streams = [];
+async function loadStreams() {
+  try { streams = (await get("/api/streams")).streams; } catch { return; }
+  drawStreams();
+}
+function drawStreams() {
+  const f = $("filter").value.toLowerCase(), engine = $("streams-engine").checked;
+  const key = (s) => `${s.tenant}/${s.domain}/${s.type}/${s.id}`;
+  const shown = streams.filter((s) => (engine || s.domain !== "process") && key(s).toLowerCase().includes(f));
+  $("streams").replaceChildren(...(shown.length ? shown.map((s) =>
+    el("li", { class: stream && key(stream) === key(s) ? "on" : "", onclick: () => (location.hash = historyHref(s)) },
+      el("div", { class: "id" }, s.id), el("div", { class: "of" }, `${s.domain}.${s.type} · v${s.version} · ${s.tenant} · `, when(s.lastAt)))) : [el("li", { class: "of" }, "No aggregate matches.")]));
+}
+
+/** A payload with its vault references as tags: personal (subject), secret, or erased. */
+function payloadView(text, vault) {
+  let data;
+  try { data = JSON.parse(text); } catch { return el("pre", {}, text); }
+  const pre = el("pre");
+  const walk = (v, indent) => {
+    const p = "  ".repeat(indent);
+    if (v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).length === 1 && typeof v.$vault === "string") {
+      const held = vault?.[v.$vault];
+      pre.append(!vault ? el("span", { class: "tag ref", title: v.$vault }, "vault")
+        : held ? el("span", { class: `tag ${held.secret ? "secret" : "personal"}`, title: v.$vault }, held.secret ? "secret" : `personal · ${held.subject}`)
+        : el("span", { class: "tag erased", title: v.$vault }, "erased"));
+    } else if (Array.isArray(v)) {
+      pre.append("["); v.forEach((x, i) => { pre.append(`\n${p}  `); walk(x, indent + 1); if (i < v.length - 1) pre.append(","); }); pre.append(v.length ? `\n${p}]` : "]");
+    } else if (v && typeof v === "object") {
+      const keys = Object.keys(v);
+      pre.append("{"); keys.forEach((k, i) => { pre.append(`\n${p}  ${JSON.stringify(k)}: `); walk(v[k], indent + 1); if (i < keys.length - 1) pre.append(","); }); pre.append(keys.length ? `\n${p}}` : "}");
+    } else pre.append(JSON.stringify(v));
+  };
+  walk(data, 0);
+  return pre;
+}
+/** A payload in one line: its top-level fields, values shortened. */
+function oneLine(text) {
   try {
-    state = await get("/api/state");
-  } catch {
-    $("ready").lastChild.textContent = "kernel unreachable";
-    $("ready").firstChild.style.background = "var(--bad)";
-    return;
-  }
-  const k = state.kernel;
-  $("meta").textContent = `${k.version} · ${k.head} events · ${k.queued} queued`;
-  $("ready").lastChild.textContent = k.ready;
-  $("ready").firstChild.style.background = k.ready === "ready" ? "var(--ok)" : "var(--warn)";
-  const view = document.querySelector("nav button.on").dataset.view;
-  if (view === "map") drawMap();
-  if (view === "connections") drawConnections();
-  if (view === "events") follow();
+    const d = JSON.parse(text);
+    if (!d || typeof d !== "object") return String(d);
+    return Object.entries(d).map(([k, v]) => `${k}: ${v && typeof v === "object" ? (v.$vault ? "‹vault›" : "{…}") : fit(JSON.stringify(v), 40)}`).join(" · ") || "no data";
+  } catch { return fit(text, 80); }
 }
 
-document.querySelectorAll("nav button").forEach((b) => b.addEventListener("click", () => {
-  document.querySelectorAll("nav button").forEach((x) => x.classList.toggle("on", x === b));
-  document.querySelectorAll(".view").forEach((v) => v.classList.toggle("on", v.id === b.dataset.view));
-  if (b.dataset.view === "history") { loadStreams(); loadHistory(); }
-  if (b.dataset.view === "events" && tail === null) search();
-  if (b.dataset.view === "rejected") loadRejections();
-  if (b.dataset.view === "connections") { loadTrend(); loadParked(); }
-  if (b.dataset.view === "processes") loadProcesses();
-  refresh();
-}));
+async function loadHistory() {
+  if (!stream || !stream.id) return;
+  const q = new URLSearchParams({ tenant: stream.tenant, domain: stream.domain, type: stream.type, id: stream.id });
+  let h;
+  try { h = await get(`/api/history?${q}`); } catch (e) { $("timeline").replaceChildren(el("div", { class: "err" }, String(e))); return; }
+  const cards = [el("div", { class: "title" }, el("h3", {}, `${stream.type} ${stream.id}`), el("span", { class: "meta" }, `${stream.domain} · ${stream.tenant} · ${h.events.length} events`),
+    stream.domain === "process" ? el("a", { href: caseHref({ tenant: stream.tenant, process: stream.type, id: stream.id }) }, "as a case →") : null)];
+  const ix = h.index;
+  if (ix && (ix.keys?.length || ix.facts?.length)) cards.push(el("div", { class: "snap" }, ix.keys?.length ? `Holds unique keys: ${ix.keys.map((k) => `${k.name}${k.global ? " (global)" : ""}${k.personal ? " (personal)" : ""}`).join(", ")}. ` : "", ix.facts?.length ? `Facts: ${ix.facts.join(", ")}.` : ""));
+  if (h.snapshot) cards.push(el("div", { class: "snap" }, `Snapshot at version ${h.snapshot.version} · state schema ${h.snapshot.schema} · ${h.snapshot.bytes} bytes (not shown: it may hold personal values)`));
+  for (const e of h.events) {
+    const c = h.commands[e.commandId];
+    const ctx = e.context ?? {};
+    cards.push(el("div", { class: "card" },
+      el("div", { class: "top" }, el("span", { class: "v" }, `v${e.version}`), el("span", { class: "t" }, e.type),
+        e.erases ? el("span", { class: "tag erased" }, `erases ${e.erases}`) : null, el("span", { class: "when", title: iso(e.createdAt) }, iso(e.createdAt))),
+      el("div", { class: "line" }, oneLine(e.payload)),
+      el("div", { class: "line" }, "by command ", el("b", {}, c ? c.type : "–"), " from ", el("b", {}, ctx.senderIdentity ?? "–"),
+        ctx.correlationId ? [" · correlation ", el("a", { href: `#search/${encodeURIComponent(ctx.correlationId)}` }, fit(ctx.correlationId, 40))] : null),
+      el("details", {}, el("summary", {}, "Payload, command and signatures"),
+        payloadView(e.payload, h.vault),
+        c ? [el("div", { class: "note", style: "margin-top:6px" }, "command ", el("b", {}, c.type), " · received ", iso(c.receivedAt), " · signed by ", keyView(c.key)), payloadView(c.payload, h.vault), el("pre", {}, JSON.stringify(c.context, null, 2))] : null,
+        el("div", { class: "note mono" }, `schema ${e.schema} · position ${e.position} · worker `, keyView(e.key), ` · hash ${e.hash.slice(0, 16)}…`))));
+    if (h.snapshot && h.snapshot.version === e.version) cards.push(el("div", { class: "snap" }, `▲ snapshot taken here (version ${e.version})`));
+  }
+  if (!h.events.length) cards.push(el("div", { class: "empty" }, "No events."));
+  $("timeline").replaceChildren(...cards);
+}
+
+// ---- the event log: search and live tail ----
+const FOUND_MAX = 1000;
+let found = [], older = null, tail = null, opened = new Set(), searching = 0;
+function filters() {
+  const q = new URLSearchParams();
+  for (const [k, v] of new FormData($("search"))) if (v.trim()) q.set(k, v.trim());
+  if (!$("engine").checked) q.set("business", "1");
+  return q;
+}
+async function search() {
+  const run = ++searching;
+  let r;
+  try { r = await get(`/api/events?${filters()}`); } catch (e) { $("found-meta").textContent = String(e); return; }
+  if (run !== searching) return;
+  found = r.events; older = r.next; tail = r.head; opened = new Set();
+  drawFound();
+}
+async function loadOlder() {
+  if (older === null) return;
+  const q = filters(); q.set("before", older);
+  const run = searching; let r;
+  try { r = await get(`/api/events?${q}`); } catch (e) { $("older-meta").textContent = String(e); return; }
+  if (run !== searching) return;
+  found.push(...r.events); older = r.next; drawFound();
+}
+async function follow() {
+  if (!$("live").checked || tail === null) return;
+  const q = filters(); q.set("after", tail); q.set("limit", 500);
+  const run = searching; let r;
+  try { r = await get(`/api/events?${q}`); } catch { return; }
+  if (run !== searching) return;
+  tail = r.last;
+  if (!r.events.length) return;
+  found.unshift(...r.events.reverse());
+  if (found.length > FOUND_MAX) { found.length = FOUND_MAX; older = found[found.length - 1].position; }
+  drawFound();
+}
+function drawFound() {
+  const rows = [el("tr", {}, ["Position", "Time", "Event", "Aggregate", "Data", "Tenant"].map((h) => el("th", {}, h)))];
+  for (const e of found) {
+    const open = opened.has(e.position);
+    rows.push(el("tr", { class: `click${open ? " open" : ""}`, onclick: () => { open ? opened.delete(e.position) : opened.add(e.position); drawFound(); } },
+      el("td", { class: "mono" }, e.position), el("td", {}, el("span", { title: iso(e.createdAt) }, iso(e.createdAt))),
+      el("td", {}, el("b", {}, `${e.domain}.${e.type}`), e.erases ? [" ", el("span", { class: "tag erased" }, "erases")] : null),
+      el("td", {}, el("a", { href: historyHref({ tenant: e.tenant, domain: e.domain, type: e.aggregateType, id: e.aggregateId }), onclick: (ev) => ev.stopPropagation() }, `${e.aggregateType} ${e.aggregateId}`), el("span", { class: "faint" }, ` · v${e.version}`)),
+      el("td", { class: "muted" }, fit(oneLine(e.payload), 70)), el("td", {}, e.tenant)));
+    if (open) rows.push(el("tr", {}, el("td", { colspan: 6, class: "wide" }, payloadView(e.payload, null), el("pre", {}, JSON.stringify(e.context, null, 2)),
+      el("div", { class: "note mono" }, `command ${e.commandId} · schema ${e.schema} · worker `, keyView(e.key), ` · hash ${e.hash.slice(0, 16)}…`))));
+  }
+  if (!found.length) rows.push(el("tr", {}, el("td", { colspan: 6, class: "note" }, "No matching events.")));
+  $("found").replaceChildren(...rows);
+  $("found-meta").textContent = `${found.length} shown${$("live").checked ? " · following" : ""}`;
+  $("older").hidden = older === null;
+  $("older-meta").textContent = older === null ? (found.length ? "start of the log reached" : "") : `searched down to position ${num(older)}`;
+}
+
+// ================= Search =================
+let searchResult = null, searchRun = 0;
+async function runSearch(q) {
+  const run = ++searchRun;
+  searchResult = { q, loading: true };
+  render();
+  if (!q.trim()) { searchResult = { q, empty: true }; drawSearch(); return; }
+  const t = q.trim();
+  const [byId, byCommand, cases, history] = await Promise.all([
+    get(`/api/events?${new URLSearchParams({ id: t, limit: 200 })}`).catch(() => null),
+    get(`/api/events?${new URLSearchParams({ command: t, limit: 200 })}`).catch(() => null),
+    get(`/api/cases?${new URLSearchParams({ text: t, limit: 50 })}`).catch(() => null),
+    get(`/api/events?${new URLSearchParams({ text: t, limit: 50, business: "1" })}`).catch(() => null),
+  ]);
+  if (run !== searchRun) return;
+  const streamsOf = (evs) => { const m = new Map(); for (const e of evs ?? []) { const k = `${e.tenant}/${e.domain}/${e.aggregateType}/${e.aggregateId}`; if (!m.has(k)) m.set(k, { tenant: e.tenant, domain: e.domain, type: e.aggregateType, id: e.aggregateId, last: e }); } return [...m.values()]; };
+  searchResult = { q: t, aggregates: streamsOf(byId?.events), commands: byCommand?.events ?? [], cases: cases?.cases ?? [], mentions: streamsOf(history?.events).filter((s) => s.id !== t), partial: [byId, byCommand, history].some((r) => r && r.next !== null) };
+  drawSearch();
+}
+function drawSearch() {
+  const box = $("v-search"), r = searchResult;
+  if (!r) return;
+  if (r.loading) { box.replaceChildren(el("div", { class: "empty" }, `Searching for “${r.q}”…`)); return; }
+  if (r.empty) { box.replaceChildren(el("div", { class: "empty" }, "Type an order, case, command or correlation ID in the search box.")); return; }
+  const section = (title, items) => items.length ? el("div", { class: "panel" }, el("h2", {}, title, el("span", { class: "aside" }, String(items.length))), items) : null;
+  const parts = [
+    section("Aggregates with this ID", r.aggregates.map((s) => el("div", { class: "row" }, el("span", { class: "dot ok" }), el("a", { href: historyHref(s) }, `${s.domain}.${s.type} ${s.id}`), el("span", { class: "v" }, s.tenant, " · last ", when(s.last.createdAt))))),
+    section("Process cases", r.cases.map((c) => el("div", { class: "row" }, stateChip(c.state), el("a", { href: caseHref(c) }, `${c.process}: ${c.key}`, el("span", { class: "faint" }, ` #${c.id.split("#")[1] ?? ""}`)), el("span", { class: "v" }, `${c.step} · `, when(c.lastAt))))),
+    section("Events of this command or correlation", r.commands.slice(0, 50).map((e) => el("div", { class: "row" }, el("span", { class: "mono faint" }, e.position), el("span", {}, el("b", {}, `${e.domain}.${e.type}`), " on ", el("a", { href: historyHref({ tenant: e.tenant, domain: e.domain, type: e.aggregateType, id: e.aggregateId }) }, `${e.aggregateType} ${e.aggregateId}`)), el("span", { class: "v" }, when(e.createdAt))))),
+    section("Aggregates whose data mentions it", r.mentions.slice(0, 30).map((s) => el("div", { class: "row" }, el("span", { class: "dot", style: "color:var(--dyn)" }), el("a", { href: historyHref(s) }, `${s.domain}.${s.type} ${s.id}`), el("span", { class: "v" }, s.tenant)))),
+  ].filter(Boolean);
+  box.replaceChildren(el("div", { class: "title" }, el("h3", {}, `“${r.q}”`), el("span", { class: "meta" }, r.partial ? "searched the newest part of the log; Explore › Event log goes further" : "searched the whole log")),
+    ...(parts.length ? parts : [el("div", { class: "empty" }, "Nothing found: no aggregate, case, command or correlation with this ID.")]));
+}
+
+// ---- wiring ----
+$("searchform").addEventListener("submit", (ev) => { ev.preventDefault(); location.hash = `#search/${encodeURIComponent($("q").value.trim())}`; });
+$("verdict").addEventListener("click", () => (location.hash = "#overview"));
 $("filter").addEventListener("input", drawStreams);
+$("streams-engine").addEventListener("change", drawStreams);
+$("map-engine").addEventListener("change", drawMap);
 $("search").addEventListener("submit", (ev) => { ev.preventDefault(); search(); });
+$("engine").addEventListener("change", search);
 $("older").addEventListener("click", loadOlder);
-$("reject-filter").addEventListener("input", drawRejections);
 $("live").addEventListener("change", () => ($("live").checked ? search() : drawFound()));
-window.addEventListener("resize", () => state && drawMap());
-$("proc-main").addEventListener("change", procChanged);
-$("proc-main").addEventListener("input", procTyped);
-refresh();
-setInterval(refresh, 1000);
+window.addEventListener("resize", () => exploreTab === "map" && drawMap());
+window.addEventListener("hashchange", onRoute);
+
+async function tick() {
+  await loadState();
+  const top = document.querySelector("nav a.on")?.dataset.view;
+  if (top === "explore" && exploreTab === "events") follow();
+  if (top === "processes" && route.view === "case" && caseData && !caseData.events?.some((e) => e.type === "ProcessEnded")) loadCaseRoute();
+  render();
+}
+async function slow() {
+  await Promise.all([loadSystem(), loadTrend(), loadParked(), loadRejections(), loadProcs()]);
+  const top = document.querySelector("nav a.on")?.dataset.view;
+  if (top === "processes" && route.view === "processes" && procFrame) { const p = currentProcess(); if (p) await loadCases(p, currentVersion(p)); }
+  if (top === "explore" && exploreTab === "aggregates") loadStreams();
+  render();
+}
+onRoute();
+tick(); slow();
+setInterval(tick, 2000);
+setInterval(slow, 5000);
 // Under `kernable demo` only: the way back to the Stage.
 fetch("/api/demo").then((r) => { if (r.ok) $("stage").hidden = false; }).catch(() => {});
-setInterval(() => document.querySelector("nav button.on").dataset.view === "history" && loadStreams(), 5000);
-setInterval(() => document.querySelector("nav button.on").dataset.view === "rejected" && loadRejections(), 5000);
-setInterval(() => document.querySelector("nav button.on").dataset.view === "processes" && loadProcesses(), 2000);
-setInterval(() => { if (document.querySelector("nav button.on").dataset.view === "connections") { loadTrend(); loadParked(); } }, 5000);
 </script>
 </body>
 </html>

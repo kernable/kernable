@@ -64,6 +64,8 @@ struct Minute {
     incidents: u64,
     /// Durations from reaching the step until it completed: bucket → count.
     durations: BTreeMap<u16, u64>,
+    /// Where cases went on to when the step completed: next step → count.
+    next: BTreeMap<String, u64>,
 }
 
 /// What happened to one process in one minute.
@@ -116,6 +118,16 @@ impl Window {
             Window::Hour => 60,
             Window::Day => 24 * 60,
             Window::Week => WEEK,
+        }
+    }
+
+    /// The minutes in one bucket of the outcome series: 12 for an hour, 24 for a day, 28 for
+    /// a week.
+    fn bucket_minutes(self) -> i64 {
+        match self {
+            Window::Hour => 5,
+            Window::Day => 60,
+            Window::Week => 360,
         }
     }
 
@@ -235,6 +247,9 @@ impl ProcessView {
                             for (b, n) in &m.durations {
                                 *total.durations.entry(*b).or_default() += n;
                             }
+                            for (next, n) in &m.next {
+                                *total.next.entry(next.clone()).or_default() += n;
+                            }
                         }
                     }
                     let now_here = here
@@ -251,19 +266,46 @@ impl ProcessView {
                             "incidents": total.incidents,
                             "medianMs": quantile(&total.durations, 0.5),
                             "p95Ms": quantile(&total.durations, 0.95),
+                            "next": total.next,
                         }),
                     );
                 }
                 let mut started = 0;
                 let mut ended: BTreeMap<String, u64> = BTreeMap::new();
+                // The same per bucket of the window, oldest first: started and ended per end.
+                let every = window.bucket_minutes();
+                let buckets = (window.minutes() / every) as usize;
+                let first = (now / 60_000 / every - buckets as i64 + 1) * every;
+                let mut series: Vec<ProcessMinute> = vec![ProcessMinute::default(); buckets];
                 if let Some(minutes) = view.processes.get(&(name.clone(), record.version)) {
-                    for (_, m) in minutes.range(from + 1..) {
+                    for (minute, m) in minutes.range(from + 1..) {
                         started += m.started;
                         for (end, n) in &m.ended {
                             *ended.entry(end.clone()).or_default() += n;
                         }
+                        if let Some(b) = usize::try_from((minute - first) / every)
+                            .ok()
+                            .filter(|_| *minute >= first)
+                            .and_then(|i| series.get_mut(i))
+                        {
+                            b.started += m.started;
+                            for (end, n) in &m.ended {
+                                *b.ended.entry(end.clone()).or_default() += n;
+                            }
+                        }
                     }
                 }
+                let series: Vec<Value> = series
+                    .iter()
+                    .enumerate()
+                    .map(|(i, b)| {
+                        json!({
+                            "at": (first + i as i64 * every) * 60_000,
+                            "started": b.started,
+                            "ended": b.ended,
+                        })
+                    })
+                    .collect();
                 versions.push(json!({
                     "version": record.version,
                     "model": model,
@@ -272,6 +314,8 @@ impl ProcessView {
                     "steps": steps,
                     "started": started,
                     "ended": ended,
+                    "everyMs": every * 60_000,
+                    "series": series,
                 }));
             }
             let acting = entry.acting.as_ref().map(|a| {
@@ -435,6 +479,9 @@ impl View {
                     m.timeouts += 1;
                 }
                 *m.durations.entry(bucket(took)).or_default() += 1;
+                if let Some(next) = p["next"].as_str() {
+                    *m.next.entry(next.to_owned()).or_default() += 1;
+                }
             }
             "IncidentRaised" => {
                 case.state = "incident";

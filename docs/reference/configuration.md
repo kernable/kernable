@@ -48,7 +48,7 @@ Where the kernel listens. Plain TCP only on a loopback address; anything else ne
 | `--tls-key` | `KERNABLE_KERNEL_TLS_KEY` | — | Mutual TLS: the private key of `--tls-cert` (PEM). |
 | `--tls-client-ca` | `KERNABLE_TLS_CLIENT_CA` | — | Mutual TLS: the CA certificate (PEM) that must have signed every client's certificate. A client without one is refused. |
 | `--metrics-listen` | `KERNABLE_METRICS_LISTEN` | — | A TCP `host:port` for plain HTTP with no login: Prometheus metrics at `GET /metrics`, `GET /health` and `GET /ready`. Bind it to a private address. Off when empty. If the address cannot be bound, the kernel stops. |
-| `--ui-listen` | `KERNABLE_UI_LISTEN` | — | A TCP `host:port` for the kernel's UI in a browser: the map of services, aggregates and listeners, the live connections, and every aggregate's history. It has no login, so the address must be loopback, or the kernel does not start. If the address is taken, the kernel runs on without the UI and logs `the UI is off`. Off when empty; `--dev` sets `127.0.0.1:7234` unless it is given. |
+| `--ui-listen` | `KERNABLE_UI_LISTEN` | — | A TCP `host:port` for the kernel's UI in a browser: an overview of health and activity, the business processes and their cases, operations (services, lag, parked events, rejections, standby, store), and the domain map, the log and every aggregate's history. It has no login, so the address must be loopback, or the kernel does not start. If the address is taken, the kernel runs on without the UI and logs `the UI is off`. Off when empty; `--dev` sets `127.0.0.1:7234` unless it is given. |
 
 ## Timeouts and intervals
 

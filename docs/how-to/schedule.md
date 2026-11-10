@@ -86,5 +86,5 @@ any command.
 ## Watch it
 
 `kernable_scheduled_commands` counts the scheduled commands waiting. Cancelled and expired ones
-count as rejected in `kernable_commands_total`, and appear in the UI's list of rejections with
-their code.
+count as rejected in `kernable_commands_total`, and appear in the UI's rejected commands
+(Operations) with their code.

@@ -535,6 +535,11 @@ impl Backup {
     pub(crate) fn acked(&self) -> u64 {
         self.state().acked
     }
+
+    /// The key of the backup follower connected now.
+    pub(crate) fn connected(&self) -> Option<String> {
+        self.state().connected.clone()
+    }
 }
 
 struct BackupConnected<'a>(&'a Backup);

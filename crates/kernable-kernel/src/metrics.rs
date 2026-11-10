@@ -55,6 +55,14 @@ impl Metrics {
         let mut refused = self.refused.lock().unwrap_or_else(PoisonError::into_inner);
         *refused.entry(reason).or_default() += 1;
     }
+
+    /// What limits refused since the start, by reason.
+    pub(crate) fn refused(&self) -> BTreeMap<&'static str, u64> {
+        self.refused
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
 }
 
 /// A Prometheus label value: backslash, quote and newline escaped.

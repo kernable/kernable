@@ -273,6 +273,8 @@ pub struct Kernel {
     metrics: metrics::Metrics,
     /// Listener positions over the last hour, for the UI.
     trend: trend::Trend,
+    /// When this kernel started, ms since epoch, for the UI.
+    started_at: i64,
     /// The highest payload version stored per qualified event type; never goes down. Held
     /// through every commit.
     schemas: Mutex<HashMap<String, u32>>,
@@ -448,6 +450,7 @@ impl Kernel {
             queue,
             metrics: metrics::Metrics::default(),
             trend: trend::Trend::default(),
+            started_at: now_ms(),
             schemas: Mutex::new(schemas),
             index: Mutex::new(index),
             snapshots,
@@ -1594,6 +1597,10 @@ async fn sample_trend(kernel: &Kernel) {
                 .record(now_ms(), head, &kernel.listeners.snapshot()),
             Err(e) => tracing::warn!(error = %e, "sampling listener positions failed"),
         }
+        let u = usage::now(kernel);
+        kernel
+            .trend
+            .record_activity(u.at, [u.events, u.commands, u.rejected, u.queries]);
     }
 }
 

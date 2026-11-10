@@ -111,10 +111,11 @@ The script ends after ten seconds: `o2` waited for its payment until its time wa
 ## Watch it
 
 Open the UI (http://127.0.0.1:7234) and **Processes**: the fulfilment as a diagram, from the
-confirmed order on the left to its two ends on the right, with how many cases are at each step now
-and how many ended where. Click `paid` to list the orders waiting for their payment, and a case to
-see its timeline: the step it reached, the command it sent and the order's events that moved it,
-each linked to the order's history. **Statistics** shows how long orders waited for their payment.
+confirmed order on the left to its two ends on the right, each path as wide as the orders that
+took it, with how many are at each step now. Above it: how many ended shipped and unpaid, and how
+long orders waited for their payment. Click `paid` to list the orders waiting for it, and a case
+to read its story: what it waited for, what it sent and how it ended, each linked to the order's
+history. Searching for `o1` in the top bar finds the order and its case.
 
 The case's events are in the log like any other, written and signed by the kernel:
 

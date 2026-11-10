@@ -167,6 +167,25 @@ async fn the_ui_shows_the_map_the_connections_and_an_aggregate_history() {
     assert_eq!(state["events"][0]["type"], "orders.OrderPlaced");
     assert_eq!(state["events"][0]["writers"][0], "orders.Order");
 
+    // What an operator checks besides the services.
+    let system = json(get(&ui, "/api/system").await);
+    assert_eq!(system["role"], "primary");
+    assert_eq!(system["addr"], env.addr.as_str());
+    assert_eq!(system["store"]["head"], 1);
+    assert_eq!(system["store"]["maxBytes"], 0);
+    assert_eq!(system["counts"]["commands"], 1);
+    assert_eq!(system["queue"]["queued"], 0);
+    assert_eq!(system["replication"]["sync"], false);
+    assert_eq!(system["backup"]["enabled"], false);
+    assert!(system["partition"].is_null(), "{system}");
+    assert!(system["startedAt"].as_i64().unwrap() <= system["now"].as_i64().unwrap());
+    // The activity is sampled from the start, once a minute.
+    let trend = json(get(&ui, "/api/trend").await);
+    assert!(!trend["activity"].as_array().unwrap().is_empty(), "{trend}");
+    // Without the process engine's events: the order's event stays.
+    let business = json(get(&ui, "/api/events?business=1").await);
+    assert_eq!(business["events"][0]["type"], "OrderPlaced");
+
     let streams = json(get(&ui, "/api/streams").await);
     assert_eq!(streams["streams"][0]["id"], "o1");
     let history = json(get(&ui, "/api/history?tenant=t1&domain=orders&type=Order&id=o1").await);

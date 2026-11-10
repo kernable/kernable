@@ -11,7 +11,11 @@
 //! - `GET /api/rejections?limit=`: the most recently received rejected commands, with why;
 //! - `GET /api/parked?limit=`: every listener's parked events, not only the first few that
 //!   `/api/state` shows;
-//! - `GET /api/trend`: the head and every listener's position over the last hour;
+//! - `GET /api/trend`: the head and every listener's position over the last hour, and the
+//!   kernel's counts (events, commands, rejected, queries) once a minute over the last day;
+//! - `GET /api/system`: what an operator checks besides the services: replication and the
+//!   standby, the backup follower, the stores' size against the quota, the partition, what
+//!   limits refused, queued and scheduled commands, and when the kernel started;
 //! - `GET /api/processes?window=hour|day|week`: the business processes, each version with its
 //!   model, the cases at each step now and the statistics over the window (`process_view.rs`);
 //! - `GET /api/cases?process=&version=&step=&state=&text=&limit=`: the cases that match;
@@ -87,6 +91,7 @@ pub(crate) fn respond(kernel: &Kernel, request: &[u8]) -> Vec<u8> {
         "/api/rejections" => rejections(kernel, &params),
         "/api/parked" => parked(kernel, &params),
         "/api/trend" => Ok(kernel.trend.view()),
+        "/api/system" => Ok(system(kernel)),
         "/api/processes" => processes(kernel, &params),
         "/api/cases" => cases(kernel, &params),
         "/api/case" => case(kernel, &params),
@@ -185,6 +190,53 @@ fn state(kernel: &Kernel) -> Result<Value, BoxError> {
         "listeners": kernel.listeners.view(),
         "events": events,
     }))
+}
+
+fn system(kernel: &Kernel) -> Value {
+    let c = &kernel.config;
+    let usage = crate::usage::now(kernel);
+    let replication = kernel.replication.as_ref().map(|p| {
+        json!({
+            "state": p.state_name(),
+            "standby": p.standby(),
+            "standbyLeft": p.standby_left(),
+        })
+    });
+    json!({
+        "now": now_ms(),
+        "addr": c.listen,
+        "startedAt": kernel.started_at,
+        "role": if c.replication.follow.is_some() { "standby" } else { "primary" },
+        "replication": {
+            "sync": c.replication.sync,
+            "witness": c.replication.pair.as_ref().map(|p| p.witness.clone()),
+            "primary": replication,
+        },
+        "backup": {
+            "enabled": c.replication.backup,
+            "connected": kernel.backup.connected(),
+            "acked": kernel.backup.acked(),
+        },
+        "store": {
+            "head": usage.events,
+            "bytes": usage.store_bytes,
+            "maxBytes": c.limits.store_bytes,
+        },
+        "counts": {
+            "commands": usage.commands,
+            "rejected": usage.rejected,
+            "queries": usage.queries,
+        },
+        "queue": {
+            "queued": kernel.queue.len(),
+            "scheduled": kernel.queue.scheduled_len(),
+        },
+        "partition": c.partition.as_ref().map(|p| json!({ "name": p.name, "control": p.control.is_none() })),
+        "limits": {
+            "refused": kernel.metrics.refused(),
+            "requestsPerSecondPerKey": c.limits.requests_per_second_per_key,
+        },
+    })
 }
 
 fn streams(kernel: &Kernel) -> Result<Value, BoxError> {
@@ -294,6 +346,8 @@ struct Filter {
     command: String,
     /// Part of the payload as stored (vault fields are references, never values).
     text: String,
+    /// `business=1`: leaves out the process engine's own events (domain `process`).
+    business: bool,
 }
 
 impl Filter {
@@ -310,12 +364,14 @@ impl Filter {
             id: param("id"),
             command: param("command"),
             text: param("text"),
+            business: param("business") == "1",
         }
     }
 
     fn matches(&self, e: &Event) -> bool {
         let correlation = e.context.as_ref().map(|c| c.correlation_id.as_str());
-        (self.tenant.is_empty() || e.tenant_id == self.tenant)
+        !(self.business && e.domain == "process")
+            && (self.tenant.is_empty() || e.tenant_id == self.tenant)
             && (self.event_type.is_empty()
                 || format!("{}.{}", e.domain, e.event_type)
                     .to_lowercase()

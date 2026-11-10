@@ -84,7 +84,7 @@ Its events say what happened, in order:
 | `ProcessEnded` | the case ended, at which end |
 
 The kernel writes and signs them itself; `kernable verify` refuses case events signed by any other
-key. Because they are ordinary events, backups, the standby, exports and the History view cover
+key. Because they are ordinary events, backups, the standby, exports and the UI's Explore cover
 cases like everything else, and you can read them like any other events.
 
 ## As whom a process acts
@@ -129,10 +129,11 @@ The resolution is an event of the case (`IncidentResolved`, with the key that si
 
 ## Watching processes
 
-- **The UI's Processes view** draws each version as a diagram from left to right, with the cases
-  at each step now and incidents in red; lists the cases and opens one as a timeline linked to the
-  aggregates it touched; lists the incidents with the commands that resolve them; and counts per
-  step over the last hour, day or week ([Monitor kernable](../how-to/monitor#the-ui)).
+- **The UI's Processes** draw each version as a diagram from left to right, each path as wide
+  as the cases that took it, with the cases at each step now and incidents in red; show outcomes
+  over time and how long open cases have waited; list the cases and tell one as a story linked to
+  the aggregates it touched; and list the incidents with the commands that resolve them, over the
+  last hour, day or week ([Monitor kernable](../how-to/monitor#the-ui)).
 - **Metrics:** `kernable_process_cases` by process and state, `kernable_process_incidents` and
   `kernable_process_step_seconds` per step ([Metrics](../reference/metrics)).
 - **The command line:** `kernable processes list`, `show`, `cases` and `case` read the store, also

@@ -225,7 +225,7 @@ Never:
    // then call the command handler on that state and assert the events or the rejection
    ```
 2. **Run against a real kernel**: `kernable start --dev --store memory: --listen 127.0.0.1:17233` in a temporary directory, point `KERNABLE_URL` and `KERNABLE_KEY` at it, start the app, `await app.ready`, then submit and query. Settled submits mean the next query must see the change.
-3. **Look**: the UI at http://127.0.0.1:7234 shows the map of services, aggregates, events and listeners, the connections, and every aggregate's history with its commands.
+3. **Look**: the UI at http://127.0.0.1:7234 says whether anything needs attention (Overview), shows the services and their lag (Operations), the domain map, the log and every aggregate's history with its commands (Explore), and the business processes with their cases (Processes).
 4. **Check the log**: `kernable verify kernable.db kernel.pub` recomputes the hash chain and every signature.
 
 ## 8. Where to read more

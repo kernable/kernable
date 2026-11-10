@@ -1182,6 +1182,30 @@ async fn the_ui_shows_each_step_its_cases_their_history_and_incidents() {
     assert_eq!(v["steps"]["paid"]["left"], 2);
     assert_eq!(v["steps"]["ship"]["incidents"], 1);
     assert_eq!(v["steps"]["done"]["entered"], 1);
+    // Where cases went on to from each step: the diagram's path widths.
+    assert_eq!(v["steps"]["confirm"]["next"], json!({"large": 3}));
+    assert_eq!(v["steps"]["large"]["next"], json!({"paid": 3}));
+    assert_eq!(v["steps"]["paid"]["next"], json!({"ship": 2}));
+    // Per 5 minutes over the hour, the newest last: every case started in it.
+    let series = v["series"].as_array().unwrap();
+    assert_eq!((series.len(), &v["everyMs"]), (12, &json!(300_000)));
+    let started: u64 = series.iter().map(|b| b["started"].as_u64().unwrap()).sum();
+    assert_eq!(started, 3);
+    let done: u64 = series
+        .iter()
+        .filter_map(|b| b["ended"]["done"].as_u64())
+        .sum();
+    assert_eq!(done, 1, "{series:?}");
+    // The event log without the engine's own events holds none of the process domain.
+    let business = json(get(&ui, "/api/events?business=1&limit=1000").await);
+    assert!(
+        business["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["domain"] != "process"),
+        "{business}"
+    );
     assert!(
         json(
             get(&ui, "/api/processes?window=month")

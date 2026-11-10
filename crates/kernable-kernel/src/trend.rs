@@ -1,5 +1,6 @@
 //! How far each listener was behind over the last hour, for the UI: the head and every
-//! listener's position, sampled every [`EVERY`], kept in memory only (a restart starts over).
+//! listener's position, sampled every [`EVERY`]; and the kernel's activity per minute over the
+//! last day. Kept in memory only (a restart starts over).
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -17,6 +18,9 @@ pub(crate) const EVERY: Duration = Duration::from_secs(5);
 /// Samples kept per listener: one hour.
 const KEEP: usize = 720;
 
+/// Activity samples kept, one per minute: a day, and the minute before it.
+const ACTIVITY_KEEP: usize = 24 * 60 + 1;
+
 /// One sample: when (ms since epoch), the head, and the listener's acknowledged position.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Sample {
@@ -28,6 +32,9 @@ struct Sample {
 #[derive(Default)]
 pub(crate) struct Trend {
     samples: Mutex<HashMap<String, VecDeque<Sample>>>,
+    /// At the first sample of each minute: when, and the counts so far (events, committed
+    /// commands, rejected commands, answered queries).
+    activity: Mutex<VecDeque<[i64; 5]>>,
 }
 
 impl Trend {
@@ -48,7 +55,24 @@ impl Trend {
         }
     }
 
-    /// Per listener, its samples oldest first as `[at, head, position]`.
+    /// The counts so far, kept once per minute: the UI shows their differences.
+    pub(crate) fn record_activity(&self, at: i64, counts: [u64; 4]) {
+        let mut kept = self.activity.lock().unwrap_or_else(PoisonError::into_inner);
+        if kept
+            .back()
+            .is_some_and(|last| last[0] / 60_000 == at / 60_000)
+        {
+            return;
+        }
+        if kept.len() == ACTIVITY_KEEP {
+            kept.pop_front();
+        }
+        let [events, commands, rejected, queries] = counts.map(|n| n as i64);
+        kept.push_back([at, events, commands, rejected, queries]);
+    }
+
+    /// Per listener, its samples oldest first as `[at, head, position]`; and the activity,
+    /// oldest first as `[at, events, commands, rejected, queries]`, counted since the start.
     pub(crate) fn view(&self) -> Value {
         let samples = self.samples.lock().unwrap_or_else(PoisonError::into_inner);
         let listeners: serde_json::Map<String, Value> = samples
@@ -61,7 +85,14 @@ impl Trend {
                 (name.clone(), Value::Array(rows))
             })
             .collect();
-        json!({ "everyMs": EVERY.as_millis() as u64, "listeners": listeners })
+        let activity: Vec<Value> = self
+            .activity
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|row| json!(row))
+            .collect();
+        json!({ "everyMs": EVERY.as_millis() as u64, "listeners": listeners, "activity": activity })
     }
 }
 
@@ -96,6 +127,26 @@ mod tests {
         assert_eq!(
             view["listeners"]["b"].as_array().unwrap().last().unwrap(),
             &json!([1_000, 1_000, 900])
+        );
+    }
+
+    #[test]
+    fn activity_is_kept_once_a_minute_for_a_day() {
+        let trend = Trend::default();
+        trend.record_activity(60_000, [1, 1, 0, 0]);
+        trend.record_activity(61_000, [2, 2, 0, 0]);
+        trend.record_activity(120_000, [5, 4, 1, 2]);
+        let view = trend.view();
+        assert_eq!(
+            view["activity"],
+            serde_json::json!([[60_000, 1, 1, 0, 0], [120_000, 5, 4, 1, 2]])
+        );
+        for minute in 3..(ACTIVITY_KEEP as i64 + 10) {
+            trend.record_activity(minute * 60_000, [0; 4]);
+        }
+        assert_eq!(
+            trend.view()["activity"].as_array().unwrap().len(),
+            ACTIVITY_KEEP
         );
     }
 }

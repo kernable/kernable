@@ -71,9 +71,9 @@ The tests prove it, with both stores, in three ways, and check the same invarian
 
 | What you see | Where to look |
 |---|---|
-| submits end in `NotSettled` | the UI's map or connections: which listener is *behind*, and by how many events; `/ready` names it |
-| commands wait and never run | the UI: an aggregate without a worker (red); `kernable_queued_commands` in the metrics |
-| requests refused with `UNAVAILABLE` | a middleware is away: the UI shows it as missing |
+| submits end in `NotSettled` | the UI's Overview and Operations: which listener is *behind*, and by how many events; `/ready` names it |
+| commands wait and never run | the UI's domain map (Explore): an aggregate without a worker (red); `kernable_queued_commands` in the metrics |
+| requests refused with `UNAVAILABLE` | a middleware is away: the UI's Overview names it as missing |
 | commands refused with `NOT_FOUND` | no worker registered the aggregate or command type, and no membership lists it: often a typo |
 | commands rejected with `handler_error` | the rejection names the error's type; the worker's log has the whole error, with its stack |
 | a listener restarts again and again | its log: `connection lost (…)` with the handler's error, then `connected again at position N`; it is stuck at the event after N |
