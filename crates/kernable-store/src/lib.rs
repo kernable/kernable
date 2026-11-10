@@ -203,6 +203,15 @@ pub struct Pending {
     pub received_at: i64,
 }
 
+/// A stored command for the UI's command log: its place in the order commands were stored
+/// (`seq`, increasing; gaps are possible), the command, and its result once it completed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredCommand {
+    pub seq: u64,
+    pub pending: Pending,
+    pub result: Option<CommandResult>,
+}
+
 /// A kernel-signed anchor of the hash chain.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Checkpoint {
@@ -357,6 +366,31 @@ pub trait Store: Send + Sync {
 
     /// The `limit` most recently received rejected commands, newest first, each with why.
     fn rejections(&self, limit: usize) -> Result<Vec<(Pending, Rejected)>>;
+
+    /// Stored commands, newest first: up to `limit` of those stored before `before` (a
+    /// [`StoredCommand::seq`]; `None`: the newest), each with its result once it completed.
+    fn commands(&self, before: Option<u64>, limit: usize) -> Result<Vec<StoredCommand>> {
+        let ids = self.command_ids()?;
+        let end = before.map_or(ids.len(), |b| {
+            usize::try_from(b.saturating_sub(1))
+                .unwrap_or(usize::MAX)
+                .min(ids.len())
+        });
+        let mut out = Vec::new();
+        for i in (0..end).rev() {
+            if out.len() == limit {
+                break;
+            }
+            if let Some(pending) = self.command(&ids[i])? {
+                out.push(StoredCommand {
+                    seq: i as u64 + 1,
+                    result: self.result(&ids[i])?,
+                    pending,
+                });
+            }
+        }
+        Ok(out)
+    }
 
     /// Puts every write that returned before this call on the disk, if the store was opened
     /// with [`Durability::Full`]; concurrent calls share one flush (group commit). Call it

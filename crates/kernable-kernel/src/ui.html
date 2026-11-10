@@ -235,6 +235,7 @@
       <a href="/explore/domains" data-tab="domains">Domains</a>
       <a href="/explore/catalog" data-tab="catalog">Catalog</a>
       <a href="/explore/events" data-tab="events">Event log</a>
+      <a href="/explore/commands" data-tab="commands">Command log</a>
       <a href="/explore/aggregates" data-tab="aggregates">Aggregates</a>
     </div>
     <div id="x-domains" class="grid"></div>
@@ -253,6 +254,22 @@
       </form>
       <div class="tbl"><table id="found"></table></div>
       <div class="controls" style="margin-top:10px"><button class="btn" id="older" hidden>Older</button><span class="note" id="older-meta"></span></div>
+    </div>
+    <div id="x-commands" hidden>
+      <form class="controls" id="csearch" style="margin-bottom:10px">
+        <input class="ctl" name="type" placeholder="Command type, e.g. shop.Place">
+        <input class="ctl" name="tenant" placeholder="Tenant">
+        <input class="ctl" name="id" placeholder="Aggregate ID">
+        <input class="ctl" name="sender" placeholder="Sent by (identity)">
+        <input class="ctl" name="command" placeholder="Command or correlation ID">
+        <select class="ctl" name="status"><option value="">every outcome</option><option value="committed">committed</option><option value="rejected">rejected</option><option value="waiting">waiting</option><option value="scheduled">scheduled</option></select>
+        <button class="btn" type="submit">Search</button>
+        <label><input type="checkbox" id="cengine"> process engine's commands</label>
+        <label><input type="checkbox" id="clive"> follow</label>
+        <span class="note" id="cfound-meta"></span>
+      </form>
+      <div class="tbl"><table id="cfound"></table></div>
+      <div class="controls" style="margin-top:10px"><button class="btn" id="colder" hidden>Older</button><span class="note" id="colder-meta"></span></div>
     </div>
     <div id="x-aggregates" class="split" hidden>
       <div class="list"><div class="lhead" id="agg-head"><span class="note">Aggregates</span></div><div class="head"><input class="ctl" id="filter" placeholder="Filter aggregates…"><label class="note"><input type="checkbox" id="streams-engine"> process cases too</label></div><ul id="streams"></ul></div>
@@ -1339,7 +1356,17 @@ function rejectionsPanel() {
 let exploreTab = "domains", domainSel = null, catalogKind = "events", catalogText = "";
 function enterExplore() {
   if (route.view === "history") { exploreTab = "aggregates"; stream = { tenant: route.args[0], domain: route.args[1], type: route.args[2], id: route.args[3] }; if (stream.domain === "process") $("streams-engine").checked = true; }
-  else exploreTab = ["domains", "catalog", "events", "aggregates"].includes(route.args[0]) ? route.args[0] : "domains";
+  else exploreTab = ["domains", "catalog", "events", "commands", "aggregates"].includes(route.args[0]) ? route.args[0] : "domains";
+  // The command log's filters come from the address too: /explore/commands?sender=c1&status=rejected
+  if (exploreTab === "commands" && route.query) {
+    const form = $("csearch");
+    let changed = false;
+    for (const name of ["type", "tenant", "id", "sender", "command", "status"]) {
+      const value = route.query.get(name) ?? "";
+      if (form.elements[name].value !== value) { form.elements[name].value = value; changed = true; }
+    }
+    if (changed) cnewest = null;
+  }
   if (exploreTab === "domains") domainSel = route.args[1] ?? null;
   if (exploreTab === "catalog") { catalogKind = ["events", "commands", "queries"].includes(route.query?.get("kind")) ? route.query.get("kind") : "events"; catalogText = route.query?.get("q") ?? ""; }
   // The event log's filters come from the address: /explore/events?type=shop.Order&tenant=t1
@@ -1353,7 +1380,8 @@ function enterExplore() {
     if (changed) tail = null;
   }
   document.querySelectorAll("#explore-tabs a").forEach((a) => a.classList.toggle("on", a.dataset.tab === exploreTab));
-  for (const t of ["domains", "catalog", "events", "aggregates"]) $(`x-${t}`).hidden = t !== exploreTab;
+  for (const t of ["domains", "catalog", "events", "commands", "aggregates"]) $(`x-${t}`).hidden = t !== exploreTab;
+  if (exploreTab === "commands" && cnewest === null) csearch();
   if (exploreTab === "events" && tail === null) search();
   if (exploreTab === "aggregates") { loadStreams(); loadHistory(); }
 }
@@ -1632,22 +1660,108 @@ async function follow() {
   drawFound();
 }
 function drawFound() {
-  const rows = [el("tr", {}, ["Position", "Time", "Event", "Aggregate", "Data", "Tenant"].map((h) => el("th", {}, h)))];
+  const rows = [el("tr", {}, ["Position", "Time", "Event", "Aggregate", "Sent by", "Data", "Tenant"].map((h) => el("th", {}, h)))];
   for (const e of found) {
     const open = opened.has(e.position);
     rows.push(el("tr", { class: `click${open ? " open" : ""}`, onclick: () => { open ? opened.delete(e.position) : opened.add(e.position); drawFound(); } },
       el("td", { class: "mono" }, e.position), el("td", {}, el("span", { title: iso(e.createdAt) }, iso(e.createdAt))),
       el("td", {}, el("b", {}, `${e.domain}.${e.type}`), e.erases ? [" ", el("span", { class: "tag erased" }, "erases")] : null),
       el("td", {}, el("a", { href: historyHref({ tenant: e.tenant, domain: e.domain, type: e.aggregateType, id: e.aggregateId }), onclick: (ev) => ev.stopPropagation() }, `${e.aggregateType} ${e.aggregateId}`), el("span", { class: "faint" }, ` · v${e.version}`)),
-      el("td", { class: "muted" }, fit(oneLine(e.payload), 70)), el("td", {}, e.tenant)));
-    if (open) rows.push(el("tr", {}, el("td", { colspan: 6, class: "wide" }, payloadView(e.payload, null), el("pre", {}, JSON.stringify(e.context, null, 2)),
-      el("div", { class: "note mono" }, `command ${e.commandId} · schema ${e.schema} · worker `, keyView(e.key), ` · hash ${e.hash.slice(0, 16)}…`))));
+      el("td", {}, sender(e.context)),
+      el("td", { class: "muted" }, fit(oneLine(e.payload), 60)), el("td", {}, e.tenant)));
+    if (open) rows.push(el("tr", {}, el("td", { colspan: 7, class: "wide" }, payloadView(e.payload, null), contextView(e.context),
+      el("div", { class: "note mono" }, "command ", el("a", { href: `/explore/commands?command=${encodeURIComponent(e.commandId)}` }, e.commandId), ` · schema ${e.schema} · worker `, keyView(e.key), ` · hash ${e.hash.slice(0, 16)}…`))));
   }
-  if (!found.length) rows.push(el("tr", {}, el("td", { colspan: 6, class: "note" }, "No matching events.")));
+  if (!found.length) rows.push(el("tr", {}, el("td", { colspan: 7, class: "note" }, "No matching events.")));
   $("found").replaceChildren(...rows);
   $("found-meta").textContent = `${found.length} shown${$("live").checked ? " · following" : ""}`;
   $("older").hidden = older === null;
   $("older-meta").textContent = older === null ? (found.length ? "start of the log reached" : "") : `searched down to position ${num(older)}`;
+}
+
+/** Who sent a request, from its context: the identity, and on whose behalf. */
+function sender(ctx) {
+  if (!ctx?.senderIdentity) return el("span", { class: "faint" }, "–");
+  const who = ctx.senderIdentity;
+  const link = el("a", { href: `/explore/commands?sender=${encodeURIComponent(who)}`, title: "Their commands", onclick: (ev) => ev.stopPropagation() }, who.startsWith("process:") ? `⟳ ${who.slice(8)}` : who);
+  return el("span", {}, link, ctx.onBehalfOf ? el("span", { class: "faint" }, ` for ${ctx.onBehalfOf}`) : null);
+}
+/** The request context as a short list instead of raw JSON. */
+function contextView(ctx) {
+  if (!ctx) return null;
+  const rows = [["sent by", ctx.senderIdentity], ["on behalf of", ctx.onBehalfOf], ["tenant", ctx.senderTenant], ["account", ctx.senderAccount], ["session", ctx.senderSession],
+    ["correlation", ctx.correlationId], ["caused by", ctx.causationId], ["expected version", ctx.expectedVersion]].filter(([, v]) => v !== undefined && v !== null && v !== "");
+  const attrs = Object.entries(ctx.attributes ?? {});
+  return el("dl", { style: "margin:6px 0" }, rows.map(([k, v]) => [el("dt", {}, k), el("dd", { class: "mono" }, k === "correlation" ? el("a", { href: searchHref(String(v)) }, String(v)) : String(v))]),
+    attrs.map(([k, v]) => [el("dt", {}, k), el("dd", { class: "mono" }, String(v))]));
+}
+
+// ---- the command log: what was asked, by whom, and what came of it ----
+let cfound = [], colder = null, cnewest = null, copened = new Set(), csearching = 0;
+function cfilters() {
+  const q = new URLSearchParams();
+  for (const [k, v] of new FormData($("csearch"))) if (String(v).trim()) q.set(k, String(v).trim());
+  return q;
+}
+async function csearch() {
+  const run = ++csearching;
+  const q = cfilters();
+  if (!$("cengine").checked) q.set("business", "1");
+  let r;
+  try { r = await get(`/api/commands?${q}`); } catch (e) { $("cfound-meta").textContent = String(e); return; }
+  if (run !== csearching) return;
+  cfound = r.commands; colder = r.next; cnewest = r.newest ?? 0; copened = new Set();
+  drawCommands();
+}
+async function colderPage() {
+  if (colder === null) return;
+  const q = cfilters(); if (!$("cengine").checked) q.set("business", "1"); q.set("before", colder);
+  const run = csearching; let r;
+  try { r = await get(`/api/commands?${q}`); } catch (e) { $("colder-meta").textContent = String(e); return; }
+  if (run !== csearching) return;
+  cfound.push(...r.commands); colder = r.next; drawCommands();
+}
+/** Following: the newest page again; the commands not shown yet go on top, and waiting ones get their outcome. */
+async function cfollow() {
+  if (!$("clive").checked || cnewest === null) return;
+  const q = cfilters(); if (!$("cengine").checked) q.set("business", "1");
+  const run = csearching; let r;
+  try { r = await get(`/api/commands?${q}`); } catch { return; }
+  if (run !== csearching) return;
+  const bySeq = new Map(r.commands.map((c) => [c.seq, c]));
+  cfound = cfound.map((c) => bySeq.get(c.seq) ?? c);
+  const fresh = r.commands.filter((c) => c.seq > cnewest);
+  cfound.unshift(...fresh);
+  if (cfound.length > FOUND_MAX) cfound.length = FOUND_MAX;
+  cnewest = Math.max(cnewest, r.newest ?? 0);
+  drawCommands();
+}
+function outcomeView(c) {
+  if (c.status === "committed") return el("span", {}, el("span", { class: "chip ok" }, "committed"), " ",
+    c.events.length ? c.events.map((e, i) => [i ? " " : "", el("a", { class: "t tev", href: `/explore/events?command=${encodeURIComponent(c.commandId)}`, title: `position ${e.position}`, onclick: (ev) => ev.stopPropagation() }, e.type)]) : el("span", { class: "faint" }, "no events"));
+  if (c.status === "rejected") return el("span", {}, el("span", { class: "chip bad" }, "rejected"), " ", el("span", { class: "code" }, c.rejection?.code ?? ""), el("span", { class: "muted" }, ` ${fit(c.rejection?.message ?? "", 60)}`));
+  if (c.status === "scheduled") return el("span", {}, el("span", { class: "chip run" }, "scheduled"), " for ", el("span", { title: iso(c.deliverAt) }, iso(c.deliverAt)));
+  return el("span", { class: "chip idle" }, "waiting");
+}
+function drawCommands() {
+  const rows = [el("tr", {}, ["Received", "Command", "Aggregate", "Sent by", "Outcome", "Tenant"].map((h) => el("th", {}, h)))];
+  for (const c of cfound) {
+    const open = copened.has(c.seq);
+    rows.push(el("tr", { class: `click${open ? " open" : ""}`, onclick: () => { open ? copened.delete(c.seq) : copened.add(c.seq); drawCommands(); } },
+      el("td", {}, el("span", { title: iso(c.receivedAt) }, iso(c.receivedAt))),
+      el("td", {}, el("b", {}, `${c.domain}.${c.type}`)),
+      el("td", {}, el("a", { href: historyHref({ tenant: c.tenant, domain: c.domain, type: c.aggregateType, id: c.aggregateId }), onclick: (ev) => ev.stopPropagation() }, `${c.aggregateType} ${c.aggregateId}`)),
+      el("td", {}, sender(c.context)),
+      el("td", {}, outcomeView(c)),
+      el("td", {}, c.tenant)));
+    if (open) rows.push(el("tr", {}, el("td", { colspan: 6, class: "wide" }, payloadView(c.payload, null), contextView(c.context),
+      el("div", { class: "note mono" }, `command ${c.commandId} · signed by `, keyView(c.key), c.rejection?.uniqueKey ? ` · taken key ${c.rejection.uniqueKey}` : ""))));
+  }
+  if (!cfound.length) rows.push(el("tr", {}, el("td", { colspan: 6, class: "note" }, "No matching commands.")));
+  $("cfound").replaceChildren(...rows);
+  $("cfound-meta").textContent = `${cfound.length} shown${$("clive").checked ? " · following" : ""}`;
+  $("colder").hidden = colder === null;
+  $("colder-meta").textContent = colder === null ? (cfound.length ? "the first stored command reached" : "") : "";
 }
 
 // ================= Search =================
@@ -1701,6 +1815,15 @@ $("search").addEventListener("submit", (ev) => {
 });
 $("engine").addEventListener("change", search);
 $("older").addEventListener("click", loadOlder);
+$("csearch").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  history.replaceState(null, "", `/explore/commands${cfilters().size ? `?${cfilters()}` : ""}`);
+  csearch();
+});
+$("csearch").addEventListener("change", (ev) => { if (ev.target.name === "status") $("csearch").requestSubmit(); });
+$("cengine").addEventListener("change", csearch);
+$("colder").addEventListener("click", colderPage);
+$("clive").addEventListener("change", () => ($("clive").checked ? csearch() : drawCommands()));
 $("live").addEventListener("change", () => ($("live").checked ? search() : drawFound()));
 window.addEventListener("popstate", onRoute);
 
@@ -1708,6 +1831,7 @@ async function tick() {
   await loadState();
   const top = document.querySelector("nav a.on")?.dataset.view;
   if (top === "explore" && exploreTab === "events") follow();
+  if (top === "explore" && exploreTab === "commands") cfollow();
   if (top === "processes" && route.view === "case" && caseData && !caseData.events?.some((e) => e.type === "ProcessEnded")) loadCaseRoute();
   render();
 }

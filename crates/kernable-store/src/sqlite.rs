@@ -766,6 +766,35 @@ impl Store for SqliteStore {
         Ok(ids)
     }
 
+    fn commands(&self, before: Option<u64>, limit: usize) -> Result<Vec<crate::StoredCommand>> {
+        let rows: Vec<(u64, Pending)> = {
+            let conn = self.conn();
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {COMMAND_COLUMNS}, created_at, rowid FROM commands
+                 WHERE rowid < ?1 ORDER BY rowid DESC LIMIT ?2"
+            ))?;
+            let before = before.map_or(i64::MAX, |b| i64::try_from(b).unwrap_or(i64::MAX));
+            let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+            stmt.query_map(rusqlite::params![before, limit], |r| {
+                let pending = Pending {
+                    command: command_from_row(r)?,
+                    received_at: r.get(13)?,
+                };
+                Ok((r.get::<_, i64>(14)? as u64, pending))
+            })?
+            .collect::<rusqlite::Result<_>>()?
+        };
+        rows.into_iter()
+            .map(|(seq, pending)| {
+                Ok(crate::StoredCommand {
+                    seq,
+                    result: self.result(&pending.command.command_id)?,
+                    pending,
+                })
+            })
+            .collect()
+    }
+
     fn rejections(&self, limit: usize) -> Result<Vec<(Pending, Rejected)>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(&format!(

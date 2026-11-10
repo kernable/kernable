@@ -10,6 +10,9 @@
 //! - `GET /api/events?…`: events of the whole log that match a filter, newest first, or the
 //!   ones after a position (the live tail); see [`events`];
 //! - `GET /api/rejections?limit=`: the most recently received rejected commands, with why;
+//! - `GET /api/commands?…`: stored commands that match a filter, newest first, each with its
+//!   request context and outcome (committed with its events, rejected with why, waiting,
+//!   scheduled); see [`commands`];
 //! - `GET /api/parked?limit=`: every listener's parked events, not only the first few that
 //!   `/api/state` shows;
 //! - `GET /api/trend`: the head and every listener's position over the last hour, and the
@@ -92,6 +95,7 @@ pub(crate) fn respond(kernel: &Kernel, request: &[u8]) -> Vec<u8> {
         "/api/history" => history(kernel, &params),
         "/api/events" => events(kernel, &params),
         "/api/rejections" => rejections(kernel, &params),
+        "/api/commands" => commands(kernel, &params),
         "/api/parked" => parked(kernel, &params),
         "/api/trend" => Ok(kernel.trend.view()),
         "/api/system" => Ok(system(kernel)),
@@ -516,6 +520,138 @@ fn rejections(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value
         })
         .collect();
     Ok(json!({ "rejections": rejected, "limit": limit }))
+}
+
+/// What `/api/commands` matches on; empty fields match everything, set ones must all match.
+struct CommandFilter {
+    tenant: String,
+    /// Part of `domain.Command`, any case.
+    command_type: String,
+    /// The aggregate id, exactly.
+    id: String,
+    /// The command id or the correlation id, exactly.
+    command: String,
+    /// Part of the sender's identity, any case.
+    sender: String,
+    /// `committed`, `rejected`, `waiting` or `scheduled`.
+    status: String,
+    /// `business=1`: leaves out the process engine's own commands (domain `process`).
+    business: bool,
+}
+
+/// Stored commands that match a [`CommandFilter`], newest first, reading at most [`SCAN`]: `next`
+/// is the `before` that continues with older ones, null once the first stored was read.
+fn commands(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, BoxError> {
+    let param = |name: &str| {
+        params
+            .get(name)
+            .map(|v| v.trim().to_owned())
+            .unwrap_or_default()
+    };
+    let f = CommandFilter {
+        tenant: param("tenant"),
+        command_type: param("type").to_lowercase(),
+        id: param("id"),
+        command: param("command"),
+        sender: param("sender").to_lowercase(),
+        status: param("status"),
+        business: param("business") == "1",
+    };
+    let limit = match params.get("limit").filter(|v| !v.is_empty()) {
+        Some(v) => v.parse::<usize>().map_err(|_| "limit: not a number")?,
+        None => EVENTS_DEFAULT,
+    }
+    .clamp(1, EVENTS_MAX);
+    let mut before = match params.get("before").filter(|v| !v.is_empty()) {
+        Some(v) => Some(v.parse::<u64>().map_err(|_| "before: not a number")?),
+        None => None,
+    };
+    let now = now_ms();
+    let mut found = Vec::new();
+    let mut read = 0u64;
+    let mut newest = None;
+    let mut cut = None;
+    let next = loop {
+        let page = kernel.store.commands(before, 500)?;
+        let Some(last) = page.last() else { break None };
+        newest = newest.or(page.first().map(|c| c.seq));
+        before = Some(last.seq);
+        for s in &page {
+            read += 1;
+            let c = &s.pending.command;
+            let ctx = c.context.as_ref();
+            let correlation = ctx.map(|x| x.correlation_id.as_str());
+            let sender = ctx
+                .map(|x| x.sender_identity.to_lowercase())
+                .unwrap_or_default();
+            use kernable_core::proto::command_result::Outcome;
+            let outcome = s.result.as_ref().and_then(|r| r.outcome.as_ref());
+            let status = match outcome {
+                Some(Outcome::Committed(_)) => "committed",
+                Some(Outcome::Rejected(_)) => "rejected",
+                _ if c.deliver_at > now => "scheduled",
+                _ => "waiting",
+            };
+            let matches = !(f.business && c.domain == "process")
+                && (f.tenant.is_empty() || c.tenant_id == f.tenant)
+                && (f.command_type.is_empty()
+                    || format!("{}.{}", c.domain, c.command_type)
+                        .to_lowercase()
+                        .contains(&f.command_type))
+                && (f.id.is_empty() || c.aggregate_id == f.id)
+                && (f.command.is_empty()
+                    || c.command_id == f.command
+                    || correlation == Some(f.command.as_str()))
+                && (f.sender.is_empty() || sender.contains(&f.sender))
+                && (f.status.is_empty() || f.status == status);
+            if !matches {
+                continue;
+            }
+            let (events, rejection) = match outcome {
+                Some(Outcome::Committed(done)) => (
+                    done.events
+                        .iter()
+                        .map(|e| json!({ "position": e.global_position, "type": e.event_type }))
+                        .collect::<Vec<_>>(),
+                    Value::Null,
+                ),
+                Some(Outcome::Rejected(r)) => (
+                    Vec::new(),
+                    json!({ "code": r.code, "message": r.message, "uniqueKey": r.key }),
+                ),
+                _ => (Vec::new(), Value::Null),
+            };
+            found.push(json!({
+                "seq": s.seq,
+                "commandId": c.command_id,
+                "tenant": c.tenant_id,
+                "domain": c.domain,
+                "aggregateType": c.aggregate_type,
+                "aggregateId": c.aggregate_id,
+                "type": c.command_type,
+                "payload": String::from_utf8_lossy(&c.payload),
+                "context": context(ctx),
+                "key": c.client_sig.as_ref().map(|s| s.key_id.clone()).unwrap_or_default(),
+                "receivedAt": s.pending.received_at,
+                "deliverAt": c.deliver_at,
+                "status": status,
+                "events": events,
+                "rejection": rejection,
+            }));
+            if found.len() == limit {
+                // The next page starts right after the last one returned.
+                cut = Some(s.seq);
+                break;
+            }
+        }
+        if cut.is_some() {
+            break cut;
+        }
+        if read >= SCAN {
+            break before;
+        }
+    };
+    Ok(json!({ "commands": found, "next": next, "newest": newest }))
 }
 
 /// Parked events of all listeners, by listener and position, up to `limit`; `total` counts

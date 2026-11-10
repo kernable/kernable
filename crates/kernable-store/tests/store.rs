@@ -7,7 +7,7 @@ use kernable_core::proto::{
     Middleware, NewEvent, ParkedEvent, Permission, Rejected, RequestContext, Requirement,
     RevocationRecord, Signature, StoredKey, When, WorkerRecord, command_result::Outcome,
 };
-use kernable_store::{Enqueued, Error, FileStore, SqliteStore, Store, StreamId};
+use kernable_store::{Enqueued, Error, FileStore, SqliteStore, Store, StoredCommand, StreamId};
 
 fn cmd(id: &str, command_type: &str) -> Command {
     Command {
@@ -230,6 +230,38 @@ fn rejections_list_the_newest_first_with_why(store: &dyn Store) {
     let newest = store.rejections(1).unwrap();
     assert_eq!(newest.len(), 1);
     assert_eq!(newest[0].0.command.command_id, "c3");
+}
+
+fn commands_list_the_newest_first_with_their_results(store: &dyn Store) {
+    for (id, at) in [("c1", 10), ("c2", 20), ("c3", 30), ("c4", 40)] {
+        store.enqueue(&cmd(id, "PlaceOrder"), at).unwrap();
+    }
+    store
+        .reject(
+            "c2",
+            Rejected {
+                code: "invalid_state".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let ids = |list: &[StoredCommand]| -> Vec<String> {
+        list.iter()
+            .map(|c| c.pending.command.command_id.clone())
+            .collect()
+    };
+    let all = store.commands(None, 10).unwrap();
+    assert_eq!(ids(&all), ["c4", "c3", "c2", "c1"]);
+    assert_eq!(all[0].pending.received_at, 40);
+    assert!(all[0].result.is_none(), "c4 is pending");
+    assert!(all[2].result.is_some(), "c2 completed, rejected");
+    assert!(all.windows(2).all(|w| w[0].seq > w[1].seq), "{all:?}");
+    // Page by page, from where the last one ended.
+    let first = store.commands(None, 2).unwrap();
+    assert_eq!(ids(&first), ["c4", "c3"]);
+    let rest = store.commands(Some(first[1].seq), 2).unwrap();
+    assert_eq!(ids(&rest), ["c2", "c1"]);
+    assert!(store.commands(Some(rest[1].seq), 2).unwrap().is_empty());
 }
 
 fn listener(name: &str, order: i32, position: u64) -> ListenerRecord {
@@ -1100,6 +1132,7 @@ for_each_backend!(
     enqueue_is_idempotent,
     reject_completes_command_without_events,
     rejections_list_the_newest_first_with_why,
+    commands_list_the_newest_first_with_their_results,
     concurrent_threads_lose_no_updates,
     listeners_are_saved_replaced_and_removed,
     parked_events_change_only_with_their_flag,

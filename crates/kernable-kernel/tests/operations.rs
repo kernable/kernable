@@ -186,6 +186,28 @@ async fn the_ui_shows_the_map_the_connections_and_an_aggregate_history() {
     let business = json(get(&ui, "/api/events?business=1").await);
     assert_eq!(business["events"][0]["type"], "OrderPlaced");
 
+    // The command log: the command, who sent it, and what came of it.
+    let commands = json(get(&ui, "/api/commands").await);
+    let c = &commands["commands"][0];
+    assert_eq!(
+        (&c["commandId"], &c["type"], &c["status"]),
+        (
+            &serde_json::json!("c1"),
+            &serde_json::json!("PlaceOrder"),
+            &serde_json::json!("committed")
+        )
+    );
+    assert_eq!(c["events"][0]["type"], "OrderPlaced");
+    assert!(commands["next"].is_null(), "{commands}");
+    assert_eq!(
+        json(get(&ui, "/api/commands?status=rejected").await)["commands"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        json(get(&ui, "/api/commands?command=c1&type=placeorder").await)["commands"][0]["commandId"],
+        "c1"
+    );
+
     let streams = json(get(&ui, "/api/streams").await);
     assert_eq!(streams["streams"][0]["id"], "o1");
     let history = json(get(&ui, "/api/history?tenant=t1&domain=orders&type=Order&id=o1").await);
