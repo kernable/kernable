@@ -23,7 +23,7 @@ function kitSource(): { kit: string; fixtures: string; license: string } | null 
 /** What the copy takes along, relative to the kit: the sources, the example, the contract and its runners. */
 const PARTS = ["src", "example", join("test", "unit"), "README.md"];
 
-function header(file: string): string {
+function header(): string {
   return `// From the kernable kit ${version} (MIT, see LICENSE): yours to change.\n`;
 }
 
@@ -36,7 +36,7 @@ function copyTree(from: string, to: string, written: string[]): void {
       copyTree(source, target, written);
     } else if (name.endsWith(".ts")) {
       const text = readFileSync(source, "utf8");
-      writeFileSync(target, text.startsWith("// From the kernable kit") ? text : header(name) + text);
+      writeFileSync(target, text.startsWith("// From the kernable kit") ? text : header() + text);
       written.push(target);
     } else {
       cpSync(source, target);

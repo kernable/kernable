@@ -1,3 +1,5 @@
 dist/
 proto/
 *.tgz
+# packed by `npm run build` for a release
+/kit/

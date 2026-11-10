@@ -60,7 +60,7 @@ def _stream(m: Msg, c) -> Msg:
 
 def command_message(c) -> bytes:
     m = _stream(Msg("kernable.v1.command"), c).str(c.command_type).bytes(c.payload).context(c.context).refs(c.vault_refs)
-    # Each only when set, so a command without them signs as before.
+    # Optional fields, each appended only when set.
     if c.deliver_at:
         m = m.str("deliver_at").i64(c.deliver_at)
     if c.deliver_until:
@@ -118,7 +118,7 @@ def snapshot_message(c, version: int, schema: str, state: bytes) -> bytes:
 def query_message(q) -> bytes:
     m = Msg("kernable.v1.query").str(q.query_id).str(q.tenant_id).str(q.domain).str(q.query_type).bytes(q.payload)
     m = m.context(q.context).u64(q.min_position).i64(q.issued_at)
-    # Each only when set, so a query without them signs as before.
+    # Optional fields, each appended only when set.
     if q.wait_only:
         m = m.str("wait_only")
     if q.HasField("target"):
@@ -155,7 +155,7 @@ def membership_message(m) -> bytes:
     for a in m.metadata:
         msg.str(a.key).str(a.value)
     msg.i64(m.issued_at)
-    # Only when there are any, so a membership without processes signs as before.
+    # Optional: appended only when there are any.
     if m.processes:
         msg.str("processes").u64(len(m.processes))
         for p in m.processes:
@@ -175,6 +175,14 @@ def process_act_message(name: str, context, issued_at: int) -> bytes:
 
 def rejection_message(command_id: str, reason) -> bytes:
     return bytes(Msg("kernable.v1.rejection").str(command_id).str(reason.code).str(reason.message).buf)
+
+
+def subscribe_message(after_position: int, event_types, issued_at: int) -> bytes:
+    """What a key granted `subscribe` signs to stream events after `after_position`."""
+    m = Msg("kernable.v1.subscribe").u64(after_position).i64(issued_at).u64(len(event_types))
+    for t in event_types:
+        m.str(t)
+    return bytes(m.buf)
 
 
 def challenge_message(nonce: bytes) -> bytes:

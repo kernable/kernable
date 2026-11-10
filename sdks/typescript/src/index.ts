@@ -130,6 +130,20 @@ export class NotSettled extends Error {
 }
 
 /**
+ * Thrown by `submit` for the ID of a scheduled command (`enqueue` with `at`) that is not due
+ * yet: it has no outcome to wait for. Submit its ID again after its time.
+ */
+export class NotDue extends Error {
+  /** The scheduled command's ID. */
+  readonly commandId: string;
+
+  constructor(commandId: string) {
+    super(`command ${commandId} is scheduled and not due yet: ask again after its time`);
+    this.commandId = commandId;
+  }
+}
+
+/**
  * An event a command handler returns: `{ type: "ItemAdded", data: { sku, qty } }`. The worker
  * stores it at the payload version declared with `Domain.event` (1 if not declared) and moves
  * fields declared `personal` to the vault.
@@ -291,7 +305,8 @@ export interface Check {
   domain: string;
   /**
    * The type within the domain: the command or query type, or for a file request `PutData`,
-   * `GetData` or `DeleteData`, for a cache request `SetCache`, `GetCache` or `DeleteCache`.
+   * `GetData`, `DeleteData` or `ListData`, for a cache request `SetCache`, `GetCache` or
+   * `DeleteCache`.
    */
   type: string;
   /** Commands only. */
@@ -330,8 +345,9 @@ export interface MiddlewareOptions {
    * Request types it checks: `*` (all), a type of the listener's own domain (`Type`), another
    * domain's type (`domain.Type`) or a whole domain (`domain.*`). Besides command and query
    * types, these cover the file and cache requests of a domain (`Kernable.data`,
-   * `Kernable.cache`) under the types `PutData`, `GetData`, `DeleteData`, `SetCache`, `GetCache`
-   * and `DeleteCache`, checked before they run: `shop.*` includes `shop.PutData`.
+   * `Kernable.cache`) under the types `PutData`, `GetData`, `DeleteData`, `ListData`,
+   * `SetCache`, `GetCache` and `DeleteCache`, checked before they run: `shop.*` includes
+   * `shop.PutData`.
    */
   types: string[];
   /**
@@ -1666,7 +1682,10 @@ export interface SubmitOptions {
    * middlewares check it now and again when it is due. Cancel it with `Kernable.cancel`.
    */
   at?: Date | number;
-  /** `enqueue` only, with `at`: if it cannot run by this time (after an outage), it is rejected `expired`. */
+  /**
+   * `enqueue` only, with `at`: if it cannot run by this time (after an outage), it is rejected
+   * `expired`. Without `at`, the call throws.
+   */
   until?: Date | number;
 }
 
@@ -1999,7 +2018,9 @@ export class Kernable {
    * `{ committed: false, code, message }` if it was rejected (a rejection does not throw). By
    * default it returns once the command settled, so a query right after it sees the events; see
    * `SubmitOptions.wait`. Throws `NotSettled` if the command committed but did not settle in time.
-   * Idempotent on `options.id`.
+   * Idempotent on `options.id`. A scheduled command (`at`) has no outcome yet: enqueue it.
+   * Submitted again by its ID without `at`, it waits for the scheduled command's outcome;
+   * throws `NotDue` if the kernel answers that it is not due yet.
    */
   async submit(options: SubmitOptions): Promise<Outcome>;
   /**
@@ -2015,7 +2036,7 @@ export class Kernable {
     if (res.outcome === "rejected") {
       return rejectedOutcome(res.rejected!);
     }
-    if (res.outcome === "accepted") throw new Error(`command ${res.command_id} is scheduled and not due yet: ask again after its time`);
+    if (res.outcome === "accepted") throw new NotDue(res.command_id);
     // Events come back with references only: the submitter is no vault reader.
     const outcome = { committed: true as const, events: res.committed!.events.map((e) => toStored(e)) };
     if (wait === "WAIT_SETTLED" && !res.committed!.settled) throw new NotSettled(outcome);
@@ -2141,6 +2162,7 @@ export class Kernable {
   }
 
   private send(options: SubmitOptions, wait: WireWait) {
+    if (options.until !== undefined && options.at === undefined) throw new Error("`until` needs `at`");
     const command_id = options.id ?? randomUUID();
     const schema = this.domains.get(options.domain)?.commands.get(options.type);
     const sealed = seal(options.data, schema?.vault, options.aggregateId);
@@ -2219,8 +2241,8 @@ export interface PutDataOptions extends DataOptions {
  * with the vault: delete a person's files yourself when erasing them. Use it as `kernable.data`.
  *
  * Each request carries a request context (`DataOptions.context`, default `Options.context`) and
- * passes the middleware chain first, as `<domain>.PutData`, `.GetData` or `.DeleteData` (see
- * `Check`). A middleware that refuses it makes the call throw a gRPC error with code
+ * passes the middleware chain first, as `<domain>.PutData`, `.GetData`, `.DeleteData` or
+ * `.ListData` (see `Check`). A middleware that refuses it makes the call throw a gRPC error with code
  * `PERMISSION_DENIED` and the message `<code>: <message>`.
  *
  * ```ts
@@ -2418,7 +2440,11 @@ export class Subscription {
 
   constructor(clients: Partitioned | Clients, key: Key, options: SubscribeOptions, handler: (event: StoredEvent) => void | Promise<void>, log: Log) {
     this.position = options.after ?? 0;
-    this.done = this.start(clients, key, options, handler, log);
+    // A failing stream or handler reconnects; anything else ends the subscription with an
+    // error line, so `done` never rejects (nobody needs to wait for it).
+    this.done = this.start(clients, key, options, handler, log).catch((err: unknown) => {
+      log.print("error", "subscription", `ended: ${(err as Error)?.message ?? String(err)}`);
+    });
   }
 
   /** Stops the subscription: ends its stream; `done` then resolves. */
@@ -2453,13 +2479,16 @@ export class Subscription {
     let attempt = 0;
     while (!this.stopped) {
       const from = position;
-      const issued_at = issuedNow();
-      const client_sig = key.sign(subscribeMessage(position, event_types, issued_at));
-      const call = clients.subscribe({ after_position: position, event_types, issued_at, client_sig });
-      if (part === "") this.call = call;
-      else this.calls.add(call);
       let error: unknown = new Error("stream ended");
+      let call: ClientReadableStream<WireEvent> | undefined;
       try {
+        // Opening the stream may throw too (a client closed meanwhile): that is reconnected
+        // like a dropped stream.
+        const issued_at = issuedNow();
+        const client_sig = key.sign(subscribeMessage(position, event_types, issued_at));
+        call = clients.subscribe({ after_position: position, event_types, issued_at, client_sig });
+        if (part === "") this.call = call;
+        else this.calls.add(call);
         for await (const e of call as AsyncIterable<WireEvent>) {
           await handler(toStored(e));
           position = e.global_position;
@@ -2468,7 +2497,7 @@ export class Subscription {
       } catch (err) {
         error = err;
       }
-      this.calls.delete(call);
+      if (call) this.calls.delete(call);
       attempt = position > from ? 1 : attempt + 1;
       if (!this.stopped) await log.reconnect(part === "" ? "subscription" : `subscription ${part}`, error, options.reconnectMs ?? 1000, attempt, this.wake);
     }

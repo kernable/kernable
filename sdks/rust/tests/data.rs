@@ -72,6 +72,22 @@ async fn files_are_put_read_and_deleted() {
     assert_eq!(docs.files[0].key, long);
     assert_eq!(docs.files[0].content_type, "text/plain");
 
+    // Each tenant has files of its own.
+    let other = files.clone().tenant("other");
+    assert_eq!(other.get("shop", "a.txt").await.unwrap(), None);
+    other
+        .put("shop", "a.txt", "theirs", "text/plain")
+        .await
+        .unwrap();
+    assert_eq!(
+        other.get("shop", "a.txt").await.unwrap().unwrap().data,
+        b"theirs"
+    );
+    assert_eq!(
+        files.get("shop", "a.txt").await.unwrap().unwrap().data,
+        b"hello"
+    );
+
     assert!(files.delete("shop", "a.txt").await.unwrap());
     assert!(!files.delete("shop", "a.txt").await.unwrap());
     assert_eq!(files.get("shop", "a.txt").await.unwrap(), None);

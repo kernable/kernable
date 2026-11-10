@@ -9,7 +9,7 @@ import unittest
 
 from kernable.signing import (Key, cache_message, cancel_message, challenge_message, command_message, data_message, derived_id,
                               membership_message, process_act_message, process_message, query_message, rejection_message,
-                              result_message, snapshot_message, vault_ref)
+                              result_message, snapshot_message, subscribe_message, vault_ref)
 from kernable.v1 import kernable_pb2 as pb
 from tests.kernel import ROOT
 
@@ -57,6 +57,8 @@ class SigningVectors(unittest.TestCase):
         j = VECTORS["rejection"]["input"]
         self.check("rejection", rejection_message(j["command_id"], pb.Rejected(code=j["code"], message=j["message"])))
         self.check("challenge", challenge_message(bytes.fromhex(VECTORS["challenge"]["input"]["nonce_hex"])))
+        u = VECTORS["subscribe"]["input"]
+        self.check("subscribe", subscribe_message(u["after_position"], u["event_types"], u["issued_at"]))
         n = VECTORS["snapshot"]["input"]
         stream = pb.Command(tenant_id=n["tenant_id"], domain=n["domain"], aggregate_type=n["aggregate_type"],
                             aggregate_id=n["aggregate_id"])

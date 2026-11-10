@@ -88,6 +88,12 @@ async fn a_scheduled_command_runs_at_its_time_others_pass_meanwhile_and_a_cancel
         matches!(&submitted, Err(Error::Config(m)) if m.contains("enqueue")),
         "{submitted:?}"
     );
+    // A deadline without a time to run is refused before it is sent.
+    let enqueued = kernable.enqueue(remind("o1").until(at)).await;
+    assert!(
+        matches!(&enqueued, Err(Error::Config(m)) if m.contains("`until` needs `at`")),
+        "{enqueued:?}"
+    );
 
     let second = kernable
         .enqueue(remind("o2").at(SystemTime::now() + Duration::from_secs(60)))

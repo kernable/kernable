@@ -69,6 +69,9 @@ class Scheduled(unittest.TestCase):
         self.assertEqual(ran, [])
         with self.assertRaisesRegex(ValueError, "enqueue"):
             self.k.submit("shop", "order", "o1", "Remind", at=at)
+        # A deadline without a time to run is refused before it is sent.
+        with self.assertRaisesRegex(ValueError, "`until` needs `at`"):
+            self.k.enqueue("shop", "order", "o1", "Remind", until=at)
 
         second = self.k.enqueue("shop", "order", "o2", "Remind", at=datetime.now(timezone.utc) + timedelta(seconds=60))
         self.assertEqual(self.k.cancel(second, context=RequestContext(sender_identity="mallory")),

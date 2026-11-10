@@ -126,7 +126,7 @@ export function commandMessage(c: WireCommand): Buffer {
     .bytes(c.payload)
     .context(c.context)
     .refs(c.vault_refs);
-  // Each only when set, so a command without them signs as before.
+  // Optional fields, each appended only when set.
   if (c.deliver_at) m.str("deliver_at").i64(c.deliver_at);
   if (c.deliver_until) m.str("deliver_until").i64(c.deliver_until);
   return m.done();
@@ -152,7 +152,7 @@ export function queryMessage(q: WireQueryRequest): Buffer {
     .context(q.context)
     .u64(q.min_position)
     .i64(q.issued_at);
-  // Each only when set, so a query without them signs as before.
+  // Optional fields, each appended only when set.
   const w = q.wait_only ? m.str("wait_only") : m;
   return (q.target ? w.str("target").str(q.target.aggregate_type).str(q.target.aggregate_id) : w).done();
 }
@@ -197,6 +197,8 @@ export function valueHash(value: string): Buffer {
  * The identity of a unique key in the kernel's index, from the command's tenant (none for a
  * global key), domain and aggregate type. The kernel computes it; workers send only the value's
  * hash. Here for the test vectors.
+ *
+ * @internal
  */
 export function uniqueKeyId(tenant: string, domain: string, aggregateType: string, key: WireUniqueKey): Buffer {
   const m = new Msg("kernable.v1.key").str(key.global ? "" : tenant).str(domain).str(aggregateType).str(key.name).bytes(key.value_hash);
@@ -271,7 +273,7 @@ export function membershipMessage(m: WireMembership): Buffer {
   msg.u64(m.metadata.length);
   for (const a of m.metadata) msg.str(a.key).str(a.value);
   msg.i64(m.issued_at);
-  // Only when there are any, so a membership without processes signs as before.
+  // Optional: appended only when there are any.
   if (m.processes?.length) {
     msg.str("processes").u64(m.processes.length);
     for (const p of m.processes) msg.str(p);
@@ -289,6 +291,11 @@ export function processMessage(model: Buffer, issuedAt: number): Buffer {
   return new Msg("kernable.v1.process").bytes(model).i64(issuedAt).done();
 }
 
+/**
+ * What the kernel signs for a checkpoint of its log. Here for the test vectors.
+ *
+ * @internal
+ */
 export function checkpointMessage(position: number, chainHash: Buffer, createdAt: number): Buffer {
   return new Msg("kernable.v1.checkpoint").u64(position).bytes(chainHash).i64(createdAt).done();
 }
@@ -302,6 +309,11 @@ export function derivedId(commandId: string, n: number): string {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
 }
 
+/**
+ * The hash chaining a stored event to the one before it. Here for the test vectors.
+ *
+ * @internal
+ */
 export function eventHash(prev: Buffer, e: WireEvent): Buffer {
   const sig = e.producer_sig ?? { key_id: "", sig: Buffer.alloc(0) };
   const m = new Msg("kernable.v1.event")

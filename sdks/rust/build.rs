@@ -48,6 +48,9 @@ fn main() {
     };
     let mut files: Vec<(String, PathBuf)> = vec![];
     if kit.join("src").is_dir() {
+        // The kit's whole directory, which cargo scans recursively: a file added to or removed
+        // from it builds the SDK anew, not only a change to a file already embedded.
+        println!("cargo:rerun-if-changed={}", kit.display());
         for part in PARTS {
             // Packed, the kit's manifest is `Cargo.toml.kit`: cargo leaves out any directory
             // with a `Cargo.toml` when it packages the SDK.
@@ -55,7 +58,6 @@ fn main() {
                 "Cargo.toml" if kit == packed => kit.join("Cargo.toml.kit"),
                 _ => kit.join(part),
             };
-            println!("cargo:rerun-if-changed={}", path.display());
             if path.is_dir() {
                 walk(&path, &kit, &mut files);
             } else if path.exists() {

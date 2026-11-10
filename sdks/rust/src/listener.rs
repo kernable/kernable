@@ -193,8 +193,8 @@ pub enum CheckKind {
     Command,
     /// A query.
     Query,
-    /// A file request ([`crate::Files`]): [`Check::type_name`] is `PutData`, `GetData` or
-    /// `DeleteData`, [`Check::key`] is set.
+    /// A file request ([`crate::Files`]): [`Check::type_name`] is `PutData`, `GetData`,
+    /// `DeleteData` or `ListData`, [`Check::key`] is set.
     Data,
     /// A cache request ([`crate::Cache`]): [`Check::type_name`] is `SetCache`, `GetCache` or
     /// `DeleteCache`, [`Check::key`] is set.
@@ -228,8 +228,8 @@ pub struct Check {
     pub tenant: String,
     pub domain: String,
     /// The command or query type within the domain (a cancel: the scheduled command's); for a
-    /// file or cache request `PutData`,
-    /// `GetData`, `DeleteData`, `SetCache`, `GetCache` or `DeleteCache`.
+    /// file or cache request `PutData`, `GetData`, `DeleteData`, `ListData`, `SetCache`,
+    /// `GetCache` or `DeleteCache`.
     pub type_name: String,
     /// Commands and cancels.
     pub aggregate_type: Option<String>,
@@ -300,7 +300,8 @@ impl fmt::Display for When {
 pub struct MiddlewareOptions {
     /// Command and query types: `*` (all), a type of the listener's domain (`Place`), of another
     /// domain (`orders.Place`) or a whole domain (`orders.*`). File and cache requests are
-    /// types too: `PutData`, `GetData`, `DeleteData`, `SetCache`, `GetCache`, `DeleteCache`
+    /// types too: `PutData`, `GetData`, `DeleteData`, `ListData`, `SetCache`, `GetCache`,
+    /// `DeleteCache`
     /// (e.g. `shop.PutData`); `*` and `orders.*` cover them.
     pub types: Vec<String>,
     /// Position in the chain: lower runs first, equal orders by listener name (default 0).
@@ -1892,7 +1893,7 @@ impl Subscription {
 
 /// With partitions: a stream per partition, each from the start (`after` names a
 /// position of one kernel); the handler takes one event at a time, in order within each
-/// partition. Without: one stream, as before.
+/// partition. Without: one stream.
 async fn subscriptions<F, Fut>(
     client: Client,
     options: SubscribeOptions,

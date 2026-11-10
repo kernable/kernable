@@ -448,12 +448,14 @@ export function wrongPartition(err: unknown): boolean {
  * The clients of every partition, found by the map the first kernel at `url` holds: a
  * request goes to its tenant's partition; refused there as `wrong_partition` (the map
  * changed), the map is read again and the request sent anew. A kernel without partitions holds
- * no map: everything goes to `url`, as before.
+ * no map: everything goes to `url`.
  */
 export class Partitioned {
   readonly entry: Clients;
   private map?: WirePartitionMap | null;
   private loading?: Promise<WirePartitionMap | null>;
+  /** Counts the reads forced by `refresh`: an older read finishing later keeps nothing. */
+  private reads = 0;
   private readonly parts = new Map<string, Clients>();
 
   private readonly make: (url: string) => Clients;
@@ -468,12 +470,27 @@ export class Partitioned {
    * long to wait for the kernel (default: the client's).
    */
   async current(refresh = false, timeoutMs?: number): Promise<WirePartitionMap | null> {
-    if (refresh) this.map = undefined;
+    if (refresh) {
+      // A read already under way may have started before the map changed: read anew, and keep
+      // only what this read finds.
+      this.map = undefined;
+      this.loading = undefined;
+      this.reads++;
+    }
     if (this.map !== undefined) return this.map;
-    this.loading ??= this.entry
-      .map(timeoutMs)
-      .then((m) => (this.map = m))
-      .finally(() => (this.loading = undefined));
+    if (!this.loading) {
+      const read = this.reads;
+      const loading: Promise<WirePartitionMap | null> = this.entry
+        .map(timeoutMs)
+        .then((m) => {
+          if (read === this.reads) this.map = m;
+          return m;
+        })
+        .finally(() => {
+          if (this.loading === loading) this.loading = undefined;
+        });
+      this.loading = loading;
+    }
     return this.loading;
   }
 

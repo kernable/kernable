@@ -973,6 +973,9 @@ impl Kernable {
     }
 
     async fn send(&self, s: Submit, wait: WireWait) -> Result<proto::CommandResult, Error> {
+        if s.until.is_some() && s.at.is_none() {
+            return Err(Error::Config("`until` needs `at`".into()));
+        }
         let command_id = s.id.unwrap_or_else(random_id);
         let vault = s.vault.clone().or_else(|| {
             self.domains
@@ -1357,7 +1360,8 @@ impl Submit {
     }
 
     /// With [`Submit::at`]: if the command cannot run by `time` (after an outage, say), it is
-    /// rejected `expired` instead of running late.
+    /// rejected `expired` instead of running late. Without `at`, submitting or enqueueing it is
+    /// [`Error::Config`].
     pub fn until(mut self, time: SystemTime) -> Submit {
         self.until = Some(millis(time));
         self

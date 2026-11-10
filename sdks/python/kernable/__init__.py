@@ -50,7 +50,7 @@ import grpc
 
 from kernable.signing import (Key, cache_message, cancel_message, challenge_message, command_message, data_message, derived_id,
                               index_message, membership_message, process_act_message, process_message, query_message, vault_ref, rejection_message,
-                              result_message, snapshot_message)
+                              result_message, snapshot_message, subscribe_message)
 from kernable.store import Store
 from kernable.v1 import kernable_pb2 as pb
 from kernable.v1 import kernable_pb2_grpc as rpc
@@ -65,8 +65,8 @@ from .processes import Process, Value, value  # noqa: E402
 __all__ = ["PROTOCOL", "Event", "Command", "Query", "StoredEvent", "Aggregate", "AggregateType", "MiddlewareContext", "App", "ApplyContext", "CacheClient", "CancelOutcome", "Check", "ClientClosed", "CommandContext", "CommandMeta",
            "CommandSchema", "QuerySchema", "Target",
            "Data", "DataClient", "Domain", "Listed", "Listing",
-           "EventMeta", "EventSchema", "HeldKey", "Index", "Kernable", "Key", "Listener", "ListenerContext", "ListenerHandle", "Manifest", "NotSettled", "Outcome",
-           "Process", "QueryContext", "QueryMeta", "QueryOutcome", "RegisteredProcess", "Rejected", "RequestContext", "Requirement", "Store", "StoredEventMeta", "Tls", "Worker",
+           "EventMeta", "EventSchema", "HeldKey", "Index", "Kernable", "Key", "Listener", "ListenerContext", "ListenerHandle", "Manifest", "NotDue", "NotSettled", "Outcome",
+           "Process", "QueryContext", "QueryMeta", "QueryOutcome", "RegisteredProcess", "Rejected", "RequestContext", "Requirement", "Store", "StoredEventMeta", "Subscription", "Tls", "Worker",
            "Value", "domain", "reindex_type", "value"]
 
 #: Time zero (UTC): the default of times not known.
@@ -254,7 +254,8 @@ class Check:
     tenant: str
     domain: str
     #: The type within the domain: the command or query type, or for a file request `PutData`,
-    #: `GetData` or `DeleteData`, for a cache request `SetCache`, `GetCache` or `DeleteCache`.
+    #: `GetData`, `DeleteData` or `ListData`, for a cache request `SetCache`, `GetCache` or
+    #: `DeleteCache`.
     type: str
     #: The request's payload; vault fields are `None` unless the key is granted `vault_read`.
     #: Always `None` for a file or cache request: the middleware decides on who asks for which
@@ -597,6 +598,16 @@ class NotSettled(Exception):
     def __init__(self, outcome: Outcome):
         super().__init__("command committed, but not all listeners have processed its events yet")
         self.outcome = outcome
+
+
+class NotDue(Exception):
+    """Raised by `Kernable.submit` for the `id` of a scheduled command (`enqueue` with `at`) that
+    is not due yet: it has no outcome to wait for. Submit its `id` again after its time;
+    `command_id` is the scheduled command's ID."""
+
+    def __init__(self, command_id: str):
+        super().__init__(f"command {command_id} is scheduled and not due yet: ask again after its time")
+        self.command_id = command_id
 
 
 #: The protocol version this SDK speaks; see "Protocol versions" in `kernable.proto`.
@@ -1596,7 +1607,7 @@ class _Partitioned:
     """The channels of every partition, found by the map the first kernel holds: a request
     goes to its tenant's partition; refused there as `wrong_partition` (the map changed), the
     map is read again and the request sent anew. A kernel without partitions holds no map:
-    everything goes to the first kernel, as before."""
+    everything goes to the first kernel."""
 
     _UNREAD = object()
 
@@ -1912,8 +1923,9 @@ class Kernable:
         its class says the domain, aggregate type, type and vault fields (no `use` needed).
 
         A scheduled command has no outcome yet: schedule it with `enqueue(..., at=...)` (`at`
-        here raises `ValueError`). Submitting its `id` again waits for its outcome, so ask once
-        it is due; until then the kernel holds the call.
+        here raises `ValueError`). Submitted again by its `id`, it waits for the scheduled
+        command's outcome, as long as the kernel holds the call; raises `NotDue` if the kernel
+        answers that it is not due yet.
         """
         if at is not None:
             raise ValueError("a scheduled command (`at`) has no outcome yet: use `enqueue`")
@@ -1924,7 +1936,7 @@ class Kernable:
         if res.WhichOneof("outcome") == "rejected":
             return _rejected_outcome(res.rejected)
         if res.WhichOneof("outcome") != "committed":
-            raise RuntimeError(f"command {res.command_id} is scheduled and not due yet: ask again after its time")
+            raise NotDue(res.command_id)
         outcome = Outcome(committed=True, events=[_to_event(e) for e in res.committed.events])
         if mode == pb.WAIT_SETTLED and not res.committed.settled:
             raise NotSettled(outcome)
@@ -2046,6 +2058,26 @@ class Kernable:
         `k.listener(carts_readmodel).run()`. Each call gives a new handle."""
         return ListenerHandle(self._parts, self._key, listener, self._log, self._service, self)
 
+    def subscribe(self, handler: Callable[["StoredEvent"], None], *, after: int = 0,
+                  types: Iterable[str] = (), reconnect_s: float = 1.0) -> "Subscription":
+        """Streams committed events after `after` (backlog first, then live) to `handler`, one at
+        a time, in a thread of its own from the call on, e.g. to export them:
+        `k.subscribe(export, types=["shop.*"])`. Returns a `Subscription`; `stop()` ends it.
+
+        `after`: global position of the last event already handled (0: from the beginning).
+        `types`: qualified event types (`orders.OrderPlaced`) or domains (`orders.*`); empty: all
+        the key may read. Reconnects and resumes after the last handled event, waiting
+        `reconnect_s` after the stream ends, twice as long after each further failed attempt, at
+        most 30 s; if the handler raises, that event is delivered again. Persist `position`
+        yourself to resume across restarts. Unlike a listener, a subscription is not registered:
+        the kernel keeps no position, nobody waits for it, and events arrive as stored (not
+        upcast, vault fields `None` and listed in `redacted`). The key needs `subscribe` for the
+        types. With partitions, a stream per partition, each from the beginning (`after` names a
+        position of one kernel); events are in order within a partition, not across them."""
+        sub = Subscription(self._parts, self._key, handler, after, list(types), reconnect_s, self._log)
+        threading.Thread(target=sub.run, name="kernable subscription", daemon=True).start()
+        return sub
+
     def close(self) -> None:
         """Closes the connection now; only needed in a long-running process that discards the
         client. Requests afterwards raise `ClientClosed`, and its workers and listeners end."""
@@ -2073,9 +2105,9 @@ class Kernable:
 class DataClient:
     """Files of a domain, kept by the kernel under (tenant, domain, key): invoices, uploads,
     exports. They are not part of the signed event log and not erased with the vault; keep
-    personal data in vault fields instead. Needs a grant of `data_read` (get) or `data_write`
+    personal data in vault fields instead. Needs a grant of `data_read` (get, list) or `data_write`
     (put, delete) for the domain; a refused or invalid request raises `grpc.RpcError`. Each
-    request runs the middleware chain first, as `<domain>.PutData`, `.GetData` or `.DeleteData`
+    request runs the middleware chain first, as `<domain>.PutData`, `.GetData`, `.DeleteData` or `.ListData`
     (the middleware sees the key and the request context, never the file); a middleware's
     refusal raises `grpc.RpcError` with code `PERMISSION_DENIED` and details `"<code>:
     <message>"`. Keys are 1 to 512 bytes, files at most 16 MiB (the kernel's `--max-data-bytes`).
@@ -2949,7 +2981,7 @@ class Listener:
 `MiddlewareContext` with the listener's store (both optional): an
         `Outcome` for a command, a `QueryOutcome` for a query (`check.kind` tells which); before,
         None. `types` cover file and cache requests too, before they run: `domain.PutData`,
-        `.GetData`, `.DeleteData`, `.SetCache`, `.GetCache` and `.DeleteCache` (and `domain.*` or
+        `.GetData`, `.DeleteData`, `.ListData`, `.SetCache`, `.GetCache` and `.DeleteCache` (and `domain.*` or
         `*` include them); `check.kind` is then `"data"` or `"cache"`, `check.key` the key and
         `check.data` None, and a refusal reaches the client as `PERMISSION_DENIED`. Return False or
         raise `Rejected` to refuse; any other error refuses too, and so does a return value other
@@ -3333,6 +3365,83 @@ class ListenerHandle(_Stream):
             reason = (pb.Rejected(code=err.code, message=str(err)) if isinstance(err, Rejected)
                       else pb.Rejected(code="handler_error", message=repr(err)))
             return pb.QueryAnswer(call_id=call_id, rejected=reason)
+
+
+class Subscription(_Stream):
+    """A running subscription, from `Kernable.subscribe`: it streams until `stop()`, reconnecting
+    after `position` when the stream drops. Attributes: `position` (global position of the last
+    handled event) and `done` (a `threading.Event`, set once the subscription has ended:
+    `sub.stop(); sub.done.wait(5)`)."""
+
+    def __init__(self, source: "grpc.Channel | _Partitioned", key: Key, handler: Callable, after: int,
+                 types: list[str], reconnect_s: float, log: _Log, part: str = "",
+                 turns: "threading.Lock | None" = None):
+        """Use `Kernable.subscribe`. `part` and `turns`: a partition's stream, taking turns with
+        the other partitions' streams for the handler."""
+        super().__init__(f"subscription {part}" if part else "subscription", reconnect_s, log)
+        #: Global position of the last handled event.
+        self.position = after
+        #: Set once the subscription has ended.
+        self.done = threading.Event()
+        self._source = source
+        self._key = key
+        self._handler = handler
+        self._types = types
+        self._turns = turns
+
+    def run(self) -> None:
+        """Streams events to the handler until `stop()`; `Kernable.subscribe` runs it in a thread."""
+        try:
+            parts = self._partitions(self._source)
+            if parts is None:
+                return
+            if len(parts) == 1 and parts[0][0] == "":
+                self._read(parts[0][1])
+                return
+            turns = threading.Lock()
+            self._run_children([Subscription(channel, self._key, self._handler, 0, self._types, self._reconnect_s,
+                                             self._log, part=name, turns=turns)
+                                for name, channel in parts])
+        finally:
+            self.done.set()
+
+    def _read(self, channel: grpc.Channel) -> None:
+        stub = rpc.EventServiceStub(channel)
+        attempt = 0
+        while not self._stopped:
+            start = self.position
+            refused = False
+            try:
+                issued_at = _issued_now()
+                request = pb.SubscribeRequest(after_position=self.position, event_types=self._types,
+                                              issued_at=issued_at, protocol=PROTOCOL)
+                request.client_sig.CopyFrom(self._key.sign(subscribe_message(self.position, self._types, issued_at)))
+                self._call = None
+                self._call = stub.Subscribe(request)
+                if self._stopped:  # stopped while it opened: stop() missed this call
+                    self._call.cancel()
+                self.ready.set()
+                for e in self._call:
+                    event = _to_event(e)
+                    if self._turns is None:
+                        self._handler(event)
+                    else:
+                        with self._turns:
+                            self._handler(event)
+                    self.position = e.global_position
+                reason = "stream ended"
+            except ClientClosed:
+                return
+            except grpc.RpcError as err:
+                reason = err.details() or str(err.code())
+                refused = err.code() in _REFUSALS
+            except Exception as err:  # a failing handler: reconnect and get the event again
+                reason = str(err) or type(err).__name__
+                if self._call is not None:
+                    self._call.cancel()
+            attempt = 1 if self.position > start else attempt + 1
+            if not self._stopped:
+                self._log.reconnect(self._what, reason, self._reconnect_s, attempt, refused, self._wake)
 
 
 def _encode(data: Any) -> bytes:

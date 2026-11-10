@@ -4,7 +4,7 @@
 //! Each request carries a signed request context (the client's default, see
 //! [`crate::Options::context`], or one set with [`Files::context`] or [`Cache::context`]), and
 //! the kernel runs the domain's middlewares before it (types `<domain>.PutData`, `.GetData`,
-//! `.DeleteData`, `.SetCache`, `.GetCache`, `.DeleteCache`).
+//! `.DeleteData`, `.ListData`, `.SetCache`, `.GetCache`, `.DeleteCache`).
 
 use std::time::Duration;
 
@@ -55,7 +55,7 @@ pub struct Listing {
 /// [`crate::Kernable::data`]. Files are not part of the signed event log, and erasing a vault
 /// subject does not delete them, so keep personal data in vault fields instead. A refused or
 /// invalid request is [`Error::Status`]; a middleware that refuses it (checking `PutData`,
-/// `GetData` or `DeleteData` of the domain) makes it `PERMISSION_DENIED` with
+/// `GetData`, `DeleteData` or `ListData` of the domain) makes it `PERMISSION_DENIED` with
 /// `"<code>: <message>"`. Example:
 /// `kernable.data().put("shop", "invoices/c1.pdf", pdf, "application/pdf").await?`, then
 /// `kernable.data().get("shop", "invoices/c1.pdf").await?` returns `Some(Data { .. })`.
@@ -73,6 +73,13 @@ impl Files {
             tenant,
             context,
         }
+    }
+
+    /// The tenant to keep files under. Default: the connection's ([`crate::Options::tenant`]).
+    #[must_use]
+    pub fn tenant(mut self, tenant: impl Into<String>) -> Files {
+        self.tenant = tenant.into();
+        self
     }
 
     /// Replaces the client's default context for the requests of this handle (signed with

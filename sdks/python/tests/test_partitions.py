@@ -49,6 +49,9 @@ class Partitions(unittest.TestCase):
 
         worker = k.worker(counter)
         listener = k.listener(totals)
+        seen: list[str] = []
+        subscription = k.subscribe(lambda e: seen.append(e.tenant), types=["counters.Incremented"], reconnect_s=0.05)
+        self.addCleanup(subscription.stop)
         for stream in (worker, listener):
             threading.Thread(target=stream.run, daemon=True).start()
             self.addCleanup(stream.stop)
@@ -72,6 +75,12 @@ class Partitions(unittest.TestCase):
             time.sleep(0.02)
         else:
             self.fail("the read model did not see both partitions")
+        for _ in range(250):
+            if "acme" in seen and "t1" in seen:
+                break
+            time.sleep(0.02)
+        else:
+            self.fail("the subscription did not see both partitions")
         self.assertGreater(listener.store.committed_for("p1"), 0)
         self.assertGreater(listener.store.committed_for("p2"), 0)
 

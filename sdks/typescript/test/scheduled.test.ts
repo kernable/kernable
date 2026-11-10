@@ -35,6 +35,8 @@ test("a scheduled command runs at its time; others of its aggregate pass meanwhi
     assert.ok((await kernable.submit({ domain: "shop", aggregateType: "order", aggregateId: "o1", type: "Note" })).committed);
     assert.deepEqual(ran, []);
     await assert.rejects(kernable.submit({ domain: "shop", aggregateType: "order", aggregateId: "o1", type: "Remind", at }), /enqueue/);
+    // A deadline without a time to run is refused before it is sent.
+    await assert.rejects(kernable.enqueue({ domain: "shop", aggregateType: "order", aggregateId: "o1", type: "Remind", until: at }), /`until` needs `at`/);
 
     const second = await kernable.enqueue({ domain: "shop", aggregateType: "order", aggregateId: "o2", type: "Remind", at: new Date(Date.now() + 60_000) });
     assert.deepEqual(await kernable.cancel(second, { context: { senderIdentity: "mallory" } }), { cancelled: false, code: "forbidden", message: "Not yours" });

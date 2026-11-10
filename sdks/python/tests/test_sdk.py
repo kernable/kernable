@@ -134,12 +134,14 @@ class DataAndCache(unittest.TestCase):
         self.addCleanup(as_alice.close)
         self.assertEqual(as_alice.data.get("shop", "notes/n-1.txt").data, b"hi")  # the client's default context
         self.assertEqual(as_alice.cache.get("shop", "rate/c-1"), b"1")
+        self.assertEqual([f.key for f in as_alice.data.list("shop", "notes/").files], ["notes/n-1.txt"])
 
         self.assertEqual(checks[0], ("data", "PutData", "shop", "t1", "notes/n-1.txt", None, ""))
         self.assertEqual(checks[1], ("cache", "SetCache", "shop", "t1", "rate/c-1", None, ""))
         self.assertEqual([(c[0], c[1], c[6]) for c in checks[2:]],
                          [("data", "PutData", "alice"), ("cache", "SetCache", "alice"),
-                          ("data", "GetData", "alice"), ("cache", "GetCache", "alice")])
+                          ("data", "GetData", "alice"), ("cache", "GetCache", "alice"),
+                          ("data", "ListData", "alice")])
         stream.stop()  # before tearDown stops the kernel: no reconnect warning
 
 
@@ -1177,6 +1179,44 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(len(seen), 1)
         self.assertLess(abs(datetime.now(timezone.utc) - seen[0]), timedelta(seconds=5))
         self.assertEqual(seen[0], outcome.events[0].created_at)
+
+    def test_a_subscription_streams_backlog_and_live_events_and_gets_a_failed_one_again(self):
+        self.run_stream(self.k.worker(counter))
+        first = self.increment(1)
+        seen: list[tuple[int, str, int]] = []
+        failed = []
+
+        def handle(event):
+            if event.data["by"] == 2 and not failed:
+                failed.append(event.position)
+                raise RuntimeError("once")
+            seen.append((event.position, event.type, event.data["by"]))
+
+        sub = self.k.subscribe(handle, types=["counters.*"], reconnect_s=0.05)
+        self.addCleanup(sub.stop)
+        self.increment(2)
+        self.increment(3)
+        for _ in range(250):
+            if len(seen) >= 3:
+                break
+            time.sleep(0.02)
+        self.assertEqual([(t, by) for _, t, by in seen], [("Incremented", 1), ("Incremented", 2), ("Incremented", 3)])
+        self.assertEqual(seen[0][0], first.events[0].position)
+        self.assertEqual(failed, [seen[1][0]], "the failed event came again")
+        self.assertEqual(sub.position, seen[2][0])
+        sub.stop()
+        self.assertTrue(sub.done.wait(5), "the subscription ended")
+
+        # From a position on: only what came after it.
+        later: list[int] = []
+        resumed = self.k.subscribe(lambda e: later.append(e.data["by"]), after=seen[1][0])
+        self.addCleanup(resumed.stop)
+        for _ in range(250):
+            if later:
+                break
+            time.sleep(0.02)
+        time.sleep(0.1)
+        self.assertEqual(later, [3])
 
     def test_a_listener_closes_its_store_when_it_stops_and_a_later_run_opens_it_again(self):
         self.run_stream(self.k.worker(counter))

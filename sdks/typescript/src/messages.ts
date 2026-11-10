@@ -132,11 +132,6 @@ export interface Binding {
 
 const BINDING = Symbol.for("kernable.binding");
 
-/** Whether `value` is a message class rather than a type name. */
-export function isMessageClass(value: unknown): value is EventClass<unknown> {
-  return typeof value === "function";
-}
-
 /**
  * The type a class stands for: `static type`, else its name. A name that is no type (a bundler
  * renamed the class) throws, so a renamed class never writes events under a wrong type.
