@@ -90,7 +90,22 @@ where
     R::Output: Into<Answer>,
 {
     let listener = TcpListener::bind(addr).await?;
-    let check_host = crate::loopback(addr);
+    serve_on(listener, crate::loopback(addr), limited, respond).await
+}
+
+/// Like [`serve_with`], on a listener bound already. `check_host`: it listens on a loopback
+/// address, so a request must name a loopback host.
+pub(crate) async fn serve_on<F, R>(
+    listener: TcpListener,
+    check_host: bool,
+    limited: impl Fn(&'static str) + Send + Sync + 'static,
+    respond: F,
+) -> Result<(), BoxError>
+where
+    F: Fn(Vec<u8>) -> R + Send + Sync + 'static,
+    R: Future + Send + 'static,
+    R::Output: Into<Answer>,
+{
     let permits = Arc::new(Semaphore::new(CONNECTIONS));
     let (limited, respond) = (Arc::new(limited), Arc::new(respond));
     loop {

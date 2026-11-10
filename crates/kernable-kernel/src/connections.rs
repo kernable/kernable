@@ -36,7 +36,6 @@ impl Accept for tokio::net::TcpListener {
     }
 }
 
-#[cfg(unix)]
 impl Accept for tokio::net::UnixListener {
     type Io = tokio::net::UnixStream;
     async fn accept(&self) -> io::Result<Self::Io> {

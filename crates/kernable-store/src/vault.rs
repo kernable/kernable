@@ -612,6 +612,12 @@ impl Vault {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// The streams whose events refer to a value of `subject` in `tenant`: their snapshots may
+    /// hold it too.
+    pub fn streams_of(&self, tenant: &str, subject: &str) -> Result<Vec<StreamId>> {
+        streams_of(&self.conn(), tenant, subject)
+    }
+
     /// Deletes every value of `subject` in `tenant` and returns the streams whose events
     /// referred to them, whose snapshots may hold them too. Another tenant's subject of the
     /// same name keeps its values. Logs the erasure without the subject itself.
@@ -624,21 +630,7 @@ impl Vault {
     ) -> Result<Vec<StreamId>> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
-        let streams = {
-            let mut stmt = tx.prepare(
-                "SELECT DISTINCT tenant_id, domain, aggregate_type, aggregate_id FROM vault
-                 WHERE tenant = ?1 AND subject = ?2 AND tenant_id IS NOT NULL",
-            )?;
-            stmt.query_map([tenant, subject], |r| {
-                Ok(StreamId {
-                    tenant_id: r.get(0)?,
-                    domain: r.get(1)?,
-                    aggregate_type: r.get(2)?,
-                    aggregate_id: r.get(3)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-        };
+        let streams = streams_of(&tx, tenant, subject)?;
         let erased = tx.execute(
             "DELETE FROM vault WHERE tenant = ?1 AND subject = ?2 AND secret = 0",
             [tenant, subject],
@@ -849,6 +841,22 @@ impl Vault {
         let rows = stmt.query_map([], |r| r.get(0))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
+}
+
+fn streams_of(conn: &Connection, tenant: &str, subject: &str) -> Result<Vec<StreamId>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT tenant_id, domain, aggregate_type, aggregate_id FROM vault
+         WHERE tenant = ?1 AND subject = ?2 AND tenant_id IS NOT NULL",
+    )?;
+    let rows = stmt.query_map([tenant, subject], |r| {
+        Ok(StreamId {
+            tenant_id: r.get(0)?,
+            domain: r.get(1)?,
+            aggregate_type: r.get(2)?,
+            aggregate_id: r.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 /// The nonce a value was stored with. A damaged vault may hold one of another length, which

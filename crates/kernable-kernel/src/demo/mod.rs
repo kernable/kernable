@@ -206,6 +206,10 @@ pub async fn run(ui: &str) -> Result<(), BoxError> {
             format!("--ui-listen {ui}: the demo listens on a loopback address only").into(),
         );
     }
+    // Bound before the kernel starts, which takes a while: no one else takes the address meanwhile.
+    let listener = tokio::net::TcpListener::bind(ui)
+        .await
+        .map_err(|e| format!("--ui-listen {ui}: {e}"))?;
     let base = std::env::temp_dir().join(format!("kernable-demo-{}", std::process::id()));
     std::fs::create_dir_all(&base)?;
     let demo = Arc::new(Demo {
@@ -223,8 +227,9 @@ pub async fn run(ui: &str) -> Result<(), BoxError> {
     );
     let server = {
         let demo = Arc::clone(&demo);
-        crate::http::serve_with(
-            ui,
+        crate::http::serve_on(
+            listener,
+            true,
             |_| {},
             move |request| {
                 let demo = Arc::clone(&demo);
@@ -465,29 +470,80 @@ fn kernel_command(dir: &Path, grpc: &str, ui: &str) -> Result<Command, BoxError>
     Ok(command)
 }
 
-/// Starts the kernel in `dir` and waits until it listens on `grpc`.
-async fn start_kernel(dir: &Path, grpc: &str, ui: &str) -> Result<Process, BoxError> {
+/// How often the demo starts its kernel on other addresses when it exits at once.
+const KERNEL_STARTS: usize = 3;
+
+/// Why the kernel did not start.
+pub(super) enum NotStarted {
+    /// It exited: another process may have taken one of its addresses; worth another try.
+    Exited(String),
+    Failed(BoxError),
+}
+
+impl NotStarted {
+    pub(super) fn into_error(self) -> BoxError {
+        match self {
+            NotStarted::Exited(why) => why.into(),
+            NotStarted::Failed(e) => e,
+        }
+    }
+}
+
+impl<E: Into<BoxError>> From<E> for NotStarted {
+    fn from(e: E) -> Self {
+        NotStarted::Failed(e.into())
+    }
+}
+
+/// Starts the kernel in `dir` and waits until it listens on `grpc` and `ui`.
+async fn start_kernel(dir: &Path, grpc: &str, ui: &str) -> Result<Process, NotStarted> {
     let mut kernel = Process::spawn(&mut kernel_command(dir, grpc, ui)?)?;
     let deadline = Instant::now() + START_TIMEOUT;
-    while TcpStream::connect(grpc).await.is_err() {
+    loop {
+        // Checked first: what answers on an address may be another process that took it.
         if let Some(status) = kernel.0.try_wait()? {
             let log = std::fs::read_to_string(dir.join("kernel.log")).unwrap_or_default();
-            return Err(format!("the kernel exited ({status}): {}", log.trim()).into());
+            return Err(NotStarted::Exited(format!(
+                "the kernel exited ({status}): {}",
+                log.trim()
+            )));
+        }
+        if TcpStream::connect(grpc).await.is_ok() && TcpStream::connect(ui).await.is_ok() {
+            return Ok(kernel);
         }
         if Instant::now() > deadline {
             return Err("the kernel did not listen within 30 s".into());
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    Ok(kernel)
 }
 
 /// Starts a kernel on a new store in its own directory, and the scene's bank on it.
 async fn start(demo: &Demo, generation: u64, scene: &Scene) -> Result<Run, BoxError> {
     let dir = Dir(demo.base.join(format!("run-{generation}")));
     std::fs::create_dir_all(&dir.0)?;
-    let (grpc, ui) = (free_address()?, free_address()?);
-    let kernel = start_kernel(&dir.0, &grpc, &ui).await?;
+    // The addresses are free when picked, but another process may take one before the kernel
+    // binds it: then the kernel exits, and starts again on others.
+    let mut tries = 0;
+    let (kernel, grpc, ui) = loop {
+        let (grpc, ui) = (free_address()?, free_address()?);
+        match start_kernel(&dir.0, &grpc, &ui).await {
+            Ok(kernel) => break (kernel, grpc, ui),
+            Err(NotStarted::Exited(why)) if tries + 1 < KERNEL_STARTS => {
+                tries += 1;
+                tracing::warn!("{why}; starting it again on other addresses");
+                for file in std::fs::read_dir(&dir.0)? {
+                    let path = file?.path();
+                    let _ = if path.is_dir() {
+                        std::fs::remove_dir_all(&path)
+                    } else {
+                        std::fs::remove_file(&path)
+                    };
+                }
+            }
+            Err(e) => return Err(e.into_error()),
+        }
+    };
     let (stage, rows, switches) = (
         Recorder::default(),
         bank::Rows::default(),

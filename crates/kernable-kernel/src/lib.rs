@@ -1381,7 +1381,6 @@ impl Kernel {
 /// A kernel's socket: its owner and group may connect, others only through an ACL that grants
 /// them (the default mode would let others read it but not connect, and leave an ACL's write
 /// masked off).
-#[cfg(unix)]
 pub fn socket_mode(path: &str) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
@@ -1539,7 +1538,6 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
 
     let server = async {
         match transport::unix_path(&listen) {
-            #[cfg(unix)]
             Some(path) => {
                 use std::os::unix::fs::FileTypeExt;
                 // Replace a stale socket from a previous run, but never any other file.
@@ -1551,8 +1549,6 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
                 let incoming = connections::limited(Arc::clone(&kernel), listener);
                 router.serve_with_incoming(incoming).await?;
             }
-            #[cfg(not(unix))]
-            Some(_) => return Err("unix: sockets need Unix; listen on host:port".into()),
             None => {
                 let listener = TcpListener::bind(&listen).await?;
                 let incoming = connections::limited(Arc::clone(&kernel), listener);
@@ -3911,10 +3907,11 @@ pub(crate) fn recover_vault(
     Ok(())
 }
 
-/// Erases `subjects` of `tenant` for the committed command `command_id`: their vault values,
-/// and the snapshots of every stream that used them and of `own`, the command's stream, whose
-/// worker state may hold them. Returns those streams. A failure is logged and leaves the
-/// intent in the vault: the next start carries it out.
+/// Erases `subjects` of `tenant` for the committed command `command_id`: the snapshots of
+/// every stream that used their vault values and of `own`, the command's stream, whose worker
+/// state may hold them, then the values themselves. Returns those streams. A failure is logged
+/// and leaves the intent in the vault: the next start carries it out. The snapshots go first:
+/// erasing the values drops the intent, and afterwards nothing says which snapshots held them.
 fn erase_subjects(
     vault: &Vault,
     snapshots: &dyn SnapshotStore,
@@ -3924,20 +3921,42 @@ fn erase_subjects(
     own: &StreamId,
 ) -> Vec<StreamId> {
     let mut erased = Vec::new();
+    let drop_snapshots = |streams: &[StreamId], erased: &mut Vec<StreamId>| {
+        let mut all = true;
+        for s in streams.iter().chain([own]) {
+            if let Err(e) = snapshots.remove(s) {
+                tracing::error!(error = %e, "dropping a snapshot failed");
+                all = false;
+            }
+            if !erased.contains(s) {
+                erased.push(s.clone());
+            }
+        }
+        all
+    };
     for subject in subjects {
-        let streams = match vault.erase(tenant, subject, command_id, now_ms()) {
+        let streams = match vault.streams_of(tenant, subject) {
             Ok(streams) => streams,
             Err(e) => {
                 tracing::error!(error = %e, command = %command_id, "erasing a subject failed; the next start tries again");
                 continue;
             }
         };
-        for s in streams.into_iter().chain([own.clone()]) {
-            if let Err(e) = snapshots.remove(&s) {
-                tracing::error!(error = %e, "dropping a snapshot failed");
+        if !drop_snapshots(&streams, &mut erased) {
+            tracing::error!(command = %command_id, "erasing a subject failed; the next start tries again");
+            continue;
+        }
+        match vault.erase(tenant, subject, command_id, now_ms()) {
+            // Streams that used the subject since: their snapshots go as well.
+            Ok(now) => {
+                let new: Vec<StreamId> = now.into_iter().filter(|s| !streams.contains(s)).collect();
+                if !new.is_empty() {
+                    drop_snapshots(&new, &mut erased);
+                }
             }
-            if !erased.contains(&s) {
-                erased.push(s);
+            Err(e) => {
+                tracing::error!(error = %e, command = %command_id, "erasing a subject failed; the next start tries again");
+                continue;
             }
         }
         tracing::info!(command = %command_id, "erased a subject's vault values");
@@ -4112,7 +4131,85 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    fn an_erasure_whose_snapshots_cannot_go_keeps_its_intent() {
+        use kernable_core::proto::{SnapshotRecord, VaultValue};
+        use kernable_store::snapshots::{MemorySnapshots, SnapshotInfo};
+
+        struct Failing;
+        impl SnapshotStore for Failing {
+            fn get(&self, _: &StreamId) -> kernable_store::Result<Option<SnapshotRecord>> {
+                Ok(None)
+            }
+            fn save(&self, _: &SnapshotRecord) -> kernable_store::Result<()> {
+                Ok(())
+            }
+            fn remove(&self, _: &StreamId) -> kernable_store::Result<()> {
+                Err(std::io::Error::other("the disk is gone").into())
+            }
+            fn infos(&self) -> kernable_store::Result<Vec<SnapshotInfo>> {
+                Ok(Vec::new())
+            }
+        }
+
+        let stream = |id: &str| StreamId {
+            tenant_id: "t1".into(),
+            domain: "shop".into(),
+            aggregate_type: "customer".into(),
+            aggregate_id: id.into(),
+        };
+        let (used, own) = (stream("c1"), stream("c2"));
+        let vault = Vault::open("memory:", &[1; 32]).unwrap();
+        let salt = vec![3; 16];
+        let value = VaultValue {
+            r#ref: signing::vault_ref(&salt, "alice", false, b"\"a@x\""),
+            salt,
+            subject: "alice".into(),
+            value: b"\"a@x\"".to_vec(),
+            ..Default::default()
+        };
+        let owner = Owner {
+            command_id: "c-put",
+            tenant: "t1",
+            stream: Some(&used),
+        };
+        vault
+            .put(
+                std::slice::from_ref(&value),
+                std::slice::from_ref(&value.r#ref),
+                &owner,
+                0,
+            )
+            .unwrap();
+        vault.intend_erase("t1", "alice", "c-erase").unwrap();
+        let subjects = ["alice".to_owned()];
+
+        // The snapshots cannot be dropped: the values stay, and so does the intent.
+        erase_subjects(&vault, &Failing, "t1", "c-erase", &subjects, &own);
+        assert_eq!(vault.intents().unwrap().len(), 1);
+        assert_eq!(
+            vault.streams_of("t1", "alice").unwrap(),
+            std::slice::from_ref(&used)
+        );
+
+        // The next try drops the snapshot that used them, then the values and the intent.
+        let snapshots = MemorySnapshots::default();
+        snapshots
+            .save(&SnapshotRecord {
+                tenant_id: used.tenant_id.clone(),
+                domain: used.domain.clone(),
+                aggregate_type: used.aggregate_type.clone(),
+                aggregate_id: used.aggregate_id.clone(),
+                ..Default::default()
+            })
+            .unwrap();
+        let erased = erase_subjects(&vault, &snapshots, "t1", "c-erase", &subjects, &own);
+        assert_eq!(erased, [used.clone(), own]);
+        assert!(snapshots.get(&used).unwrap().is_none());
+        assert!(vault.intents().unwrap().is_empty());
+        assert!(vault.streams_of("t1", "alice").unwrap().is_empty());
+    }
+
+    #[test]
     fn a_kernel_socket_lets_its_owner_and_group_connect() {
         use std::os::unix::fs::PermissionsExt;
         let path = std::env::temp_dir().join(format!("kn-mode-{}.sock", std::process::id()));

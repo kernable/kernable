@@ -308,12 +308,6 @@ pub(crate) async fn cancel(
         return Ok(refused("not_found", "no command with this ID"));
     };
     let command = stored.command;
-    // A case's timers are the engine's: only it withdraws them, or the case would wait forever.
-    if command.domain == crate::process_engine::DOMAIN {
-        return Err(Status::permission_denied(
-            "a process case's scheduled commands are the engine's: it cancels them itself",
-        ));
-    }
     let name = config::qualified(&command.domain, &command.command_type);
     let permissions = kernel.permissions();
     if !config::allowed(&permissions.submit, &sig.key_id, &name) {
@@ -325,6 +319,13 @@ pub(crate) async fn cancel(
     if bypass && !config::allowed(&permissions.privileged, &sig.key_id, "bypass_authorization") {
         return Err(Status::permission_denied(
             "key may not set bypass_authorization",
+        ));
+    }
+    // A case's timers are the engine's: only it withdraws them, or the case would wait forever.
+    if command.domain == crate::process_engine::DOMAIN {
+        return Ok(refused(
+            "not_allowed",
+            "a process case's scheduled commands are the engine's: it cancels them itself",
         ));
     }
     let was_cancelled = |result: &CommandResult| matches!(&result.outcome, Some(Outcome::Rejected(r)) if r.code == "cancelled");

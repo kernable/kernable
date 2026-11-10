@@ -346,7 +346,9 @@ async fn crash(
     let acknowledged = done.load(SeqCst);
     let killed_ms = started.elapsed().as_millis() as u64;
     let restarted = Instant::now();
-    let kernel = start_kernel(&run.dir, &run.grpc, &run.ui).await?;
+    let kernel = start_kernel(&run.dir, &run.grpc, &run.ui)
+        .await
+        .map_err(super::NotStarted::into_error)?;
     *lock(&run.kernel) = kernel;
     let restart = restarted.elapsed();
     let listening_ms = started.elapsed().as_millis() as u64;

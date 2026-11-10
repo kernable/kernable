@@ -1756,8 +1756,7 @@ fn write_key(name: &str) -> Result<String> {
     let key_id = signing::key_id(&key.verifying_key());
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
-    // Readable by the owner only; on other systems the directory's permissions apply.
-    #[cfg(unix)]
+    // Readable by the owner only.
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     options
         .open(format!("{name}.key"))?
@@ -1881,7 +1880,6 @@ fn boxed(e: BoxError) -> Box<dyn std::error::Error> {
 fn create_export(file: &str) -> Result<export::Writer<io::BufWriter<fs::File>>> {
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
-    #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     let out = options.open(file).map_err(|e| format!("{file}: {e}"))?;
     Ok(export::Writer::new(io::BufWriter::new(out))?)

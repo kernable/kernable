@@ -53,6 +53,9 @@ use crate::{
 /// How often a partition looks for moves to copy or to clean up after.
 const EVERY: Duration = Duration::from_secs(1);
 
+/// The longest wait before deleting a moved tenant's data again after a failure.
+const CLEANUP_BACKOFF: Duration = Duration::from_secs(60);
+
 /// How long the source waits for the tenant's queued commands to complete.
 const DRAIN: Duration = Duration::from_secs(30);
 
@@ -648,6 +651,8 @@ pub(crate) async fn follow_moves(kernel: &Arc<Kernel>) {
     };
     let mut tick = tokio::time::interval(EVERY);
     let mut cleaned = None;
+    // After a failed cleanup: the map's epoch, when to try again and the delay before that.
+    let mut retry: Option<(u64, Instant, Duration)> = None;
     let mut failing: HashSet<String> = HashSet::new();
     loop {
         tokio::select! {
@@ -682,8 +687,10 @@ pub(crate) async fn follow_moves(kernel: &Arc<Kernel>) {
                 }
             }
         }
-        if cleaned != Some(map.epoch) {
-            // Noted as cleaned once every tenant's data is gone; a failure tries again.
+        let waiting = retry.is_some_and(|(epoch, at, _)| epoch == map.epoch && Instant::now() < at);
+        if cleaned != Some(map.epoch) && !waiting {
+            // Noted as cleaned once every tenant's data is gone; a failure tries again later,
+            // twice as late each time up to a minute.
             let mut all = true;
             let gone: HashSet<&str> = map
                 .moved
@@ -729,6 +736,16 @@ pub(crate) async fn follow_moves(kernel: &Arc<Kernel>) {
             }
             if all {
                 cleaned = Some(map.epoch);
+                retry = None;
+            } else {
+                let delay = match retry {
+                    Some((epoch, _, delay)) if epoch == map.epoch => {
+                        (delay * 2).min(CLEANUP_BACKOFF)
+                    }
+                    _ => EVERY,
+                };
+                tracing::info!("deleting moved tenants' data again in {delay:?}");
+                retry = Some((map.epoch, Instant::now() + delay, delay));
             }
         }
     }

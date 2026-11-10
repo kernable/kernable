@@ -1,4 +1,4 @@
-//! Business processes, stage 1 (design/processes.md): models registered signed, checked and
+//! Registering business processes (design/processes.md): models registered signed, checked and
 //! versioned; removed by a membership that no longer lists them or by `Remove`; active again
 //! when registered again.
 

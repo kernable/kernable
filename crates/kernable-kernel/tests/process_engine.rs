@@ -1,5 +1,6 @@
-//! The process engine (design/processes.md, stage 2): the design's example run end to end, with
-//! a shop and a payment service written with the Rust SDK against an in-process kernel.
+//! The process engine (design/processes.md): the design's example run end to end, with
+//! a shop and a payment service written with the Rust SDK against an in-process kernel; cases
+//! across restarts, partitions and tenant moves; as whom a process acts; the UI's views.
 
 mod common;
 
@@ -547,6 +548,54 @@ async fn an_event_named_in_cancel_on_ends_the_case_at_any_step() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_case_timer_is_cancelled_by_the_engine_only() {
+    use kernable_core::proto::{
+        CancelRequest, cancel_result::Outcome as CancelOutcome,
+        command_service_client::CommandServiceClient,
+    };
+    let (env, _shop, k) = shop_kernel("pe-timer-cancel", 60_000).await;
+    submit_order(&k, "c1", 100).await;
+    until_reached(&env.store, "c1#1", "paid").await;
+    let events = case_events(&env.store, "c1#1");
+    let timer = events.iter().find(|e| e.event_type == "TimerSet").unwrap();
+    let timer_id = payload(timer)["commandId"].as_str().unwrap().to_owned();
+    let cancel = async |signer: &SigningKey, grant: &Grant| {
+        let mut r = CancelRequest {
+            command_id: timer_id.clone(),
+            tenant_id: "t1".into(),
+            issued_at: issued_now(),
+            protocol: kernable_core::PROTOCOL,
+            ..Default::default()
+        };
+        r.client_sig = Some(signing::sign(signer, &signing::cancel_message(&r)));
+        CommandServiceClient::new(transport::connect(&env.addr).await.unwrap())
+            .cancel(presenting(r, grant))
+            .await
+            .map(tonic::Response::into_inner)
+    };
+
+    // A key that may not submit the engine's commands learns nothing more.
+    let narrow = grant(&key(32), &[("submit", &["shop.*"])]);
+    env.kernel.grant(narrow.clone()).unwrap();
+    let denied = cancel(&key(32), &narrow).await.unwrap_err();
+    assert_eq!(denied.code(), Code::PermissionDenied, "{denied:?}");
+    // One that may is refused: the timer is the engine's.
+    let refused = cancel(&app_key(), &app_grant()).await.unwrap();
+    assert!(
+        matches!(&refused.outcome, Some(CancelOutcome::Rejected(r)) if r.code == "not_allowed"),
+        "{refused:?}"
+    );
+    assert!(
+        kernable_store::open_read_only(&env.store)
+            .unwrap()
+            .result(&timer_id)
+            .unwrap()
+            .is_none(),
+        "the timer still waits"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_rejection_with_a_path_takes_it_and_another_is_an_incident() {
     let (env, shop, k) = shop_kernel("pe-rejections", 60_000).await;
     *shop.ship_rejects.lock().unwrap() = Some("out_of_stock".into());
@@ -938,6 +987,251 @@ async fn each_partition_runs_the_cases_of_its_tenants() {
     assert!(taken, "p2 took as whom the process acts");
     assert_eq!(registry(&p1.store, "orders.follow").len(), 1);
     assert!(registry(&p2.store, "orders.follow").is_empty());
+}
+
+/// A process that counts the items added: each `ItemAdded` starts a case of its order's key,
+/// which ends at once.
+fn tally() -> Value {
+    json!({
+        "name": "orders.tally",
+        "start": {"on": "orders.ItemAdded", "key": "aggregateId"},
+        "steps": [{"name": "done", "kind": "end"}]
+    })
+}
+
+/// The case IDs of `orders.tally` in `tenant` for `order`, ended or not, in order.
+fn tallies(store: &str, tenant: &str, order: &str) -> Vec<String> {
+    let store = kernable_store::open_read_only(store).unwrap();
+    (1..)
+        .map(|n| format!("{order}#{n}"))
+        .take_while(|id| {
+            !store
+                .read_stream(tenant, "process", "orders.tally", id)
+                .unwrap()
+                .is_empty()
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_event_handled_again_after_a_crash_starts_no_case_twice() {
+    let env = start("pe-again").await;
+    env.kernel.grant(app_grant()).unwrap();
+    spawn_worker(&env).await;
+    register(&env.addr, &follow()).await.unwrap();
+    register(&env.addr, &tally()).await.unwrap();
+    submit(&env.addr, of_tenant("a1", "PlaceOrder", "o1", "t1"))
+        .await
+        .unwrap();
+    submit(&env.addr, of_tenant("a2", "AddItem", "o1", "t1"))
+        .await
+        .unwrap();
+    until_follow_ended(&env.store, "t1", "o1#1").await;
+    // Two items: the one added, and the one the follow case added.
+    until("both tallies ran", || {
+        tallies(&env.store, "t1", "o1").len() == 2
+    })
+    .await;
+    until_engine_caught_up(&env.store).await;
+
+    // A copy of the store whose engine handled nothing yet, as after a crash before it saved
+    // its position: every event comes again, and no case starts twice.
+    let from = env.dir.clone();
+    let back = start_wrapped(
+        "pe-again-back",
+        move |_, dir| copy_store(&from, dir),
+        |store| {
+            store.save_process_position(0).unwrap();
+            store
+        },
+    )
+    .await;
+    back.kernel.grant(app_grant()).unwrap();
+    spawn_worker(&back).await;
+    until_engine_caught_up(&back.store).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(tallies(&back.store, "t1", "o1"), ["o1#1", "o1#2"]);
+    assert!(follow_events(&back.store, "t1", "o1#2").is_empty());
+
+    // A new item starts the next case.
+    submit(&back.addr, of_tenant("a3", "AddItem", "o1", "t1"))
+        .await
+        .unwrap();
+    until("the third tally ran", || {
+        tallies(&back.store, "t1", "o1").len() == 3
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cases_go_on_with_a_tenant_that_moved_to_a_shorter_log() {
+    use kernable_core::proto::partition_service_client::PartitionServiceClient;
+    use kernable_core::proto::{MoveStatusRequest, Partition, PartitionMap, TenantMove};
+    let p1 = start_custom("pe-mv-p1", |config, dir| {
+        config.partition = Some(kernable_kernel::config::PartitionConfig {
+            name: "p1".into(),
+            control: None,
+            node_key: node_key(dir),
+        });
+    })
+    .await;
+    let p1_addr = p1.addr.clone();
+    let p2 = start_custom("pe-mv-p2", |config, dir| {
+        config.partition = Some(kernable_kernel::config::PartitionConfig {
+            name: "p2".into(),
+            control: Some(p1_addr.clone()),
+            node_key: node_key(dir),
+        });
+    })
+    .await;
+    for env in [&p1, &p2] {
+        env.kernel
+            .grant(grant(&key(13), &[("replicate", &["*"])]))
+            .unwrap();
+        env.kernel.grant(app_grant()).unwrap();
+    }
+    let map = PartitionMap {
+        epoch: 1,
+        partitions: vec![
+            Partition {
+                name: "p1".into(),
+                addresses: vec![p1.addr.clone()],
+            },
+            Partition {
+                name: "p2".into(),
+                addresses: vec![p2.addr.clone()],
+            },
+        ],
+        default: "p1".into(),
+        control: "p1".into(),
+        ..Default::default()
+    };
+    apply_map(&p1.addr, map.clone()).await.unwrap();
+    for env in [&p1, &p2] {
+        start_worker_registered(env.addr.clone()).await;
+    }
+    for model in [follow(), tally()] {
+        register(&p1.addr, &model).await.unwrap();
+        until_async("p2 took the process", async || {
+            register(&p2.addr, &model).await.is_ok()
+        })
+        .await;
+    }
+
+    // p1's log grows long with another tenant's orders, then t1's: a case of o1 waits for an
+    // item, o2's ended and its two items were tallied.
+    for n in 0..30 {
+        submit(
+            &p1.addr,
+            of_tenant(&format!("t9-{n}"), "PlaceOrder", &format!("o{n}"), "t9"),
+        )
+        .await
+        .unwrap();
+    }
+    for (id, command, order) in [
+        ("m1", "PlaceOrder", "o1"),
+        ("m2", "PlaceOrder", "o2"),
+        ("m3", "AddItem", "o2"),
+    ] {
+        submit(&p1.addr, of_tenant(id, command, order, "t1"))
+            .await
+            .unwrap();
+    }
+    until_follow_ended(&p1.store, "t1", "o2#1").await;
+    until("both tallies of o2 ran", || {
+        tallies(&p1.store, "t1", "o2").len() == 2
+    })
+    .await;
+    until_engine_caught_up(&p1.store).await;
+
+    // t1 moves to p2, whose log is far shorter.
+    let mut moving = map.clone();
+    moving.epoch = 2;
+    moving.moving.push(TenantMove {
+        tenant: "t1".into(),
+        from: "p1".into(),
+        to: "p2".into(),
+        epoch: 2,
+        ..Default::default()
+    });
+    apply_map(&p1.addr, moving.clone()).await.unwrap();
+    let status = async || {
+        PartitionServiceClient::new(transport::connect(&p2.addr).await.unwrap())
+            .moving(with_grant(
+                MoveStatusRequest {
+                    tenant: "t1".into(),
+                    protocol: kernable_core::PROTOCOL,
+                },
+                &key(1),
+            ))
+            .await
+            .unwrap()
+            .into_inner()
+    };
+    until_async("p2 copied t1", async || {
+        let s = status().await;
+        s.done && s.epoch == 2
+    })
+    .await;
+    let done = status().await;
+    let mut moved = moving;
+    moved.epoch = 3;
+    let m = moved.moving.remove(0);
+    moved.tenants.push(kernable_core::proto::TenantPartition {
+        tenant: "t1".into(),
+        partition: "p2".into(),
+    });
+    moved.moved.push(TenantMove {
+        source_head: done.source_head,
+        target_after: done.target_after,
+        ..m
+    });
+    apply_map(&p1.addr, moved).await.unwrap();
+    let p2_head = || {
+        kernable_store::open_read_only(&p2.store)
+            .unwrap()
+            .head_position()
+            .unwrap()
+    };
+    let p1_head = kernable_store::open_read_only(&p1.store)
+        .unwrap()
+        .head_position()
+        .unwrap();
+    assert!(p2_head() + 20 < p1_head, "p2's log is the shorter one");
+
+    // On p2: o1's item moves the waiting case on, and o2's next item starts its next tally,
+    // though both come at positions p1 had passed long before.
+    let mut next = None;
+    for _ in 0..200 {
+        match submit(&p2.addr, of_tenant("m4", "AddItem", "o1", "t1")).await {
+            Ok(r) => {
+                next = Some(r);
+                break;
+            }
+            Err(s) if s.code() == Code::Unavailable || s.code() == Code::FailedPrecondition => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(s) => panic!("{s:?}"),
+        }
+    }
+    assert_eq!(committed_versions(&next.expect("p2 serves t1")), [2]);
+    until_follow_ended(&p2.store, "t1", "o1#1").await;
+    submit(&p2.addr, of_tenant("m5", "AddItem", "o2", "t1"))
+        .await
+        .unwrap();
+    until("o2's third tally ran on p2", || {
+        tallies(&p2.store, "t1", "o2") == ["o2#1", "o2#2", "o2#3"]
+    })
+    .await;
+    assert!(
+        p2_head() < p1_head,
+        "the new events came at positions p1 had passed"
+    );
+    // o1's items: the one sent, and the one its case added.
+    until("o1's tallies ran on p2", || {
+        tallies(&p2.store, "t1", "o1").len() == 2
+    })
+    .await;
 }
 
 fn acting(tenant: &str, identity: &str, session: &str) -> kernable_core::proto::RequestContext {

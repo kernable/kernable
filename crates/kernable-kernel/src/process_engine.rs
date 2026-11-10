@@ -304,7 +304,9 @@ struct Case {
     timer_at: Option<i64>,
     incident: Option<(String, String)>,
     ended: bool,
-    /// The position of the event that started it.
+    /// The position of the event that started it. Like `seen` and `min_position`, a position
+    /// in this partition's log: a case that came with a moved tenant counts at the positions of
+    /// its copied events (see [`State::replay`]).
     started_at: u64,
     /// The newest log position it was moved by or kept: older ones are handled already.
     seen: u64,
@@ -663,9 +665,18 @@ impl<'a> State<'a> {
             min_position: 0,
             kept: Vec::new(),
         };
+        let mut kept_there: Vec<u64> = Vec::new();
         for e in events {
             let p = payload_of(e);
-            let position = p["position"].as_u64().unwrap_or(0);
+            // The positions an event names are those of the partition that wrote it. A copy a
+            // moved tenant brought along names the source's: here it counts at its own position,
+            // which comes after everything it names and before the tenant's first event here.
+            let copy = !e.origin_partition.is_empty();
+            let position = if copy {
+                e.global_position
+            } else {
+                p["position"].as_u64().unwrap_or(0)
+            };
             match e.event_type.as_str() {
                 "ProcessStarted" => {
                     if let Value::Object(data) = &p["data"] {
@@ -684,11 +695,18 @@ impl<'a> State<'a> {
                     if let Value::Object(data) = &p["data"] {
                         case.data.extend(data.clone());
                     }
-                    case.kept.retain(|(_, k)| *k != position);
-                    case.min_position = case
-                        .min_position
-                        .max(p["committedAt"].as_u64().unwrap_or(0));
+                    if copy {
+                        let named = p["position"].as_u64().unwrap_or(0);
+                        kept_there.retain(|k| *k != named);
+                    } else {
+                        case.kept.retain(|(_, k)| *k != position);
+                        case.min_position = case
+                            .min_position
+                            .max(p["committedAt"].as_u64().unwrap_or(0));
+                    }
                 }
+                // Kept before the tenant moved: its position is the source's, not found here.
+                "EventKept" if copy => kept_there.push(p["position"].as_u64().unwrap_or(0)),
                 "EventKept" => case
                     .kept
                     .push((p["event"].as_str().unwrap_or_default().to_owned(), position)),
@@ -705,6 +723,9 @@ impl<'a> State<'a> {
             case.seen = case.seen.max(position);
             case.min_position = case.min_position.max(position);
             case.version = e.version;
+        }
+        if !kept_there.is_empty() && !case.ended {
+            tracing::warn!(case = %case.id, process = %case.process, events = kept_there.len(), "events the case kept before its tenant moved are not kept here");
         }
         Some(case)
     }
@@ -1280,7 +1301,7 @@ impl<'a> State<'a> {
                 .ok()?
                 .into_iter()
                 .next()
-                .filter(|e| e.global_position == *position)?;
+                .filter(|e| e.global_position == *position && e.tenant_id == case.tenant)?;
             let payload = payload_of(&e);
             if key_of(key, &e, &payload).as_deref() == Some(case.key.as_str()) {
                 return Some((e, payload));

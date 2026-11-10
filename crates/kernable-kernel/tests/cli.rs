@@ -789,11 +789,13 @@ fn start_explains_its_flags_and_logs_json_if_asked() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// One request to the demo's UI: the status code and the body.
+/// One request to the demo's UI: the status code and the body; `None` if no answer came.
 #[cfg(unix)]
-fn demo_http(addr: &str, method: &str, path: &str, from_stage: bool) -> (u16, String) {
+fn try_demo_http(addr: &str, method: &str, path: &str, from_stage: bool) -> Option<(u16, String)> {
     use std::io::{Read, Write};
-    let mut conn = std::net::TcpStream::connect(addr).unwrap();
+    let mut conn = std::net::TcpStream::connect(addr).ok()?;
+    conn.set_read_timeout(Some(std::time::Duration::from_secs(150)))
+        .unwrap();
     let header = if from_stage {
         "x-kernable-demo: 1\r\n"
     } else {
@@ -802,12 +804,26 @@ fn demo_http(addr: &str, method: &str, path: &str, from_stage: bool) -> (u16, St
     // In one write: the server reads the request with one read.
     let request =
         format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\n{header}content-length: 0\r\n\r\n");
-    conn.write_all(request.as_bytes()).unwrap();
+    conn.write_all(request.as_bytes()).ok()?;
     let mut response = String::new();
-    conn.read_to_string(&mut response).unwrap();
-    let status = response[9..12].parse().unwrap();
-    let body = response.split_once("\r\n\r\n").unwrap().1.to_owned();
-    (status, body)
+    conn.read_to_string(&mut response).ok()?;
+    let status = response.get(9..12)?.parse().ok()?;
+    let body = response.split_once("\r\n\r\n")?.1.to_owned();
+    Some((status, body))
+}
+
+/// One request to the demo's UI: the status code and the body. A GET is asked again if no
+/// answer came; anything else is not, it may have been done.
+#[cfg(unix)]
+fn demo_http(addr: &str, method: &str, path: &str, from_stage: bool) -> (u16, String) {
+    let tries = if method == "GET" { 5 } else { 1 };
+    for _ in 0..tries {
+        if let Some(answer) = try_demo_http(addr, method, path, from_stage) {
+            return answer;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    panic!("the demo did not answer {method} {path}");
 }
 
 #[cfg(unix)]
@@ -816,14 +832,52 @@ fn demo_state(addr: &str) -> serde_json::Value {
     serde_json::from_str(&body).unwrap_or_else(|e| panic!("{status} {body:?}: {e}"))
 }
 
+/// A demo in `dir`, its UI on a free address: on another one if the demo could not bind the
+/// first (another process took it meanwhile). What it logs goes to `dir/demo.log`.
+#[cfg(unix)]
+fn spawn_demo(dir: &std::path::Path) -> (KillOnDrop, String) {
+    for _ in 0..5 {
+        let addr = free_addr();
+        let log = std::fs::File::create(dir.join("demo.log")).unwrap();
+        let mut demo = KillOnDrop::spawn(
+            Process::new(env!("CARGO_BIN_EXE_kernable"))
+                .current_dir(dir)
+                .args(["demo", "--ui-listen", &addr])
+                .stdout(std::process::Stdio::null())
+                .stderr(log),
+        );
+        // The demo binds its address before anything else.
+        let started = std::time::Instant::now();
+        while std::net::TcpStream::connect(&addr).is_err()
+            && demo.child.try_wait().unwrap().is_none()
+            && started.elapsed() < std::time::Duration::from_secs(10)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        match demo.child.try_wait().unwrap() {
+            None => return (demo, addr),
+            Some(_) => {
+                let log = std::fs::read_to_string(dir.join("demo.log")).unwrap_or_default();
+                assert!(log.contains(&addr), "the demo exited: {log}");
+            }
+        }
+    }
+    panic!("the demo found no free address");
+}
+
 /// Waits until the demo is ready and idle; returns its state.
 #[cfg(unix)]
-fn demo_idle(addr: &str) -> serde_json::Value {
+fn demo_idle(addr: &str, demo: &mut KillOnDrop, dir: &std::path::Path) -> serde_json::Value {
     let started = std::time::Instant::now();
     loop {
-        if let Ok(conn) = std::net::TcpStream::connect(addr) {
-            drop(conn);
-            let state = demo_state(addr);
+        if let Some(status) = demo.child.try_wait().unwrap() {
+            let log = std::fs::read_to_string(dir.join("demo.log")).unwrap_or_default();
+            panic!("the demo exited ({status}): {log}");
+        }
+        if let Some((_, body)) = try_demo_http(addr, "GET", "/api/demo", false)
+            && let Ok(state) = serde_json::from_str::<serde_json::Value>(&body)
+        {
             assert!(state["error"].is_null(), "{state}");
             if state["ready"] == true && state["busy"].is_null() {
                 return state;
@@ -833,7 +887,8 @@ fn demo_idle(addr: &str) -> serde_json::Value {
         // hundreds of commands (a release build there: under 2 s).
         assert!(
             started.elapsed() < std::time::Duration::from_secs(120),
-            "the demo did not become ready"
+            "the demo did not become ready: {}",
+            std::fs::read_to_string(dir.join("demo.log")).unwrap_or_default()
         );
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
@@ -843,16 +898,9 @@ fn demo_idle(addr: &str) -> serde_json::Value {
 #[test]
 fn the_demo_tells_its_story_resets_on_a_new_store_and_leaves_nothing_behind() {
     let dir = temp_dir("demo");
-    let addr = free_addr();
-    let demo = KillOnDrop::spawn(
-        Process::new(env!("CARGO_BIN_EXE_kernable"))
-            .current_dir(&dir)
-            .args(["demo", "--ui-listen", &addr])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null()),
-    );
+    let (mut demo, addr) = spawn_demo(&dir);
     let base = std::env::temp_dir().join(format!("kernable-demo-{}", demo.child.id()));
-    let state = demo_idle(&addr);
+    let state = demo_idle(&addr, &mut demo, &dir);
     assert_eq!(state["generation"], 1);
     assert!(base.join("run-1").join("kernable.db").exists());
     assert!(state["scene"]["chapters"].as_array().unwrap().len() > 5);
@@ -864,7 +912,7 @@ fn the_demo_tells_its_story_resets_on_a_new_store_and_leaves_nothing_behind() {
     for _ in 0..3 {
         let (status, body) = demo_http(&addr, "POST", "/api/demo/next", true);
         assert_eq!(status, 200, "{body}");
-        demo_idle(&addr);
+        demo_idle(&addr, &mut demo, &dir);
     }
     let state = demo_state(&addr);
     let outcomes: Vec<Vec<String>> = state["traces"]
@@ -911,14 +959,13 @@ fn the_demo_tells_its_story_resets_on_a_new_store_and_leaves_nothing_behind() {
     // Reset: a new kernel on a new, empty store; the old one is gone.
     let (status, _) = demo_http(&addr, "POST", "/api/demo/reset", true);
     assert_eq!(status, 200);
-    let state = demo_idle(&addr);
+    let state = demo_idle(&addr, &mut demo, &dir);
     assert_eq!(state["generation"], 2);
     assert_eq!(state["traces"].as_array().unwrap().len(), 0);
     assert!(!base.join("run-1").exists());
     assert!(base.join("run-2").join("kernable.db").exists());
 
     // Ctrl-C ends it and removes everything.
-    let mut demo = demo;
     Process::new("kill")
         .args(["-INT", &demo.child.id().to_string()])
         .status()
@@ -964,15 +1011,8 @@ fn demo_badges(trace: &serde_json::Value) -> Vec<String> {
 #[test]
 fn every_chapter_of_the_demo_shows_what_it_says() {
     let dir = temp_dir("demo-story");
-    let addr = free_addr();
-    let _demo = KillOnDrop::spawn(
-        Process::new(env!("CARGO_BIN_EXE_kernable"))
-            .current_dir(&dir)
-            .args(["demo", "--ui-listen", &addr])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null()),
-    );
-    let state = demo_idle(&addr);
+    let (mut demo, addr) = spawn_demo(&dir);
+    let state = demo_idle(&addr, &mut demo, &dir);
     let steps = state["scene"]["steps"].as_array().unwrap().clone();
     let mut traces = Vec::new();
     // The step of the story whose title starts with `title`, run.
@@ -981,7 +1021,7 @@ fn every_chapter_of_the_demo_shows_what_it_says() {
             let i = traces.len();
             let (status, body) = demo_http(&addr, "POST", "/api/demo/next", true);
             assert_eq!(status, 200, "{body}");
-            let state = demo_idle(&addr);
+            let state = demo_idle(&addr, &mut demo, &dir);
             let trace = state["traces"][i].clone();
             traces.push(trace.clone());
             if steps[i]["title"].as_str().unwrap().starts_with(title) {

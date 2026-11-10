@@ -30,7 +30,7 @@ message LogRecord {
   }
 }
 
-// How far the process engine has handled the log (design/processes.md, stage 2): after a
+// How far the process engine has handled the log (design/processes.md, "The engine"): after a
 // restart or a failover it goes on after this position. The newest record wins.
 message ProcessPositionRecord {
   uint64 position = 1;

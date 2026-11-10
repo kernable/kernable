@@ -231,14 +231,11 @@ fn write_state(path: &Path, state: &WitnessState) -> Result<(), BoxError> {
     file.write_all(&state.encode_to_vec())?;
     file.sync_all()?;
     std::fs::rename(&partial, path)?;
-    #[cfg(unix)]
-    {
-        let dir = match path.parent() {
-            Some(p) if !p.as_os_str().is_empty() => p,
-            _ => Path::new("."),
-        };
-        std::fs::File::open(dir)?.sync_all()?;
-    }
+    let dir = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    std::fs::File::open(dir)?.sync_all()?;
     Ok(())
 }
 
@@ -339,7 +336,6 @@ pub async fn run(config: WitnessConfig) -> Result<(), BoxError> {
     }
     let router = builder.add_service(WitnessServiceServer::new(api));
     match transport::unix_path(&listen) {
-        #[cfg(unix)]
         Some(path) => {
             use std::os::unix::fs::FileTypeExt;
             if std::fs::metadata(path).is_ok_and(|m| m.file_type().is_socket()) {
@@ -353,8 +349,6 @@ pub async fn run(config: WitnessConfig) -> Result<(), BoxError> {
                 .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(listener))
                 .await?;
         }
-        #[cfg(not(unix))]
-        Some(_) => return Err("unix: sockets need Unix; listen on host:port".into()),
         None => {
             let addr = tokio::net::lookup_host(&listen)
                 .await?

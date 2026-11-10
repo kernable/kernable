@@ -1144,7 +1144,6 @@ async fn serve(standby: Arc<Standby>, stop: oneshot::Receiver<()>) -> Result<(),
         let _ = stop.await;
     };
     match transport::unix_path(&listen) {
-        #[cfg(unix)]
         Some(path) => {
             use std::os::unix::fs::FileTypeExt;
             if std::fs::metadata(path).is_ok_and(|m| m.file_type().is_socket()) {
@@ -1158,8 +1157,6 @@ async fn serve(standby: Arc<Standby>, stop: oneshot::Receiver<()>) -> Result<(),
                 .await?;
             let _ = std::fs::remove_file(path);
         }
-        #[cfg(not(unix))]
-        Some(_) => return Err("unix: sockets need Unix; listen on host:port".into()),
         None => {
             let addr = tokio::net::lookup_host(&listen)
                 .await?

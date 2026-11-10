@@ -357,16 +357,20 @@ pub fn generations(target: &dyn Target, crypt: &BackupKey) -> Result<Vec<Generat
     Ok(gens)
 }
 
-/// An error if a generation's base marker exists but cannot be read with `crypt`. The follower
-/// never writes into or deletes from a backup it cannot read: with the wrong key every base
-/// looks unfinished, and pruning would delete the whole backup.
+/// An error if generations were finished but none of them can be read with `crypt`: the
+/// backup was written with another key, every base looks unfinished, and pruning would delete
+/// the whole backup. The follower then never writes into or deletes from it. Some unreadable
+/// generations beside readable ones (a damaged object) are left out, kept and never pruned.
 fn refuse_unreadable(gens: &[Generation], crypt: &BackupKey) -> Result<(), BoxError> {
+    if gens.iter().any(|g| g.base.is_some()) {
+        return Ok(());
+    }
     match gens.iter().find(|g| g.unreadable.is_some()) {
         Some(g) => Err(format!(
-            "generation {} of the backup cannot be read with the backup key {}: {}; \
-             give the key the backup was written with, or move the generation away",
-            g.name,
+            "no generation of the backup can be read with the backup key {} \
+             (generation {}: {}); give the key the backup was written with",
             crypt.id(),
+            g.name,
             g.unreadable.as_deref().unwrap_or_default()
         )
         .into()),
@@ -375,7 +379,7 @@ fn refuse_unreadable(gens: &[Generation], crypt: &BackupKey) -> Result<(), BoxEr
 }
 
 /// Runs the follower until it fails to start; reconnects whenever the stream ends. Refuses to
-/// start when a generation already in the target cannot be read with its key.
+/// start when the target holds finished generations but none can be read with its key.
 pub async fn run(follower: Follower) -> Result<(), BoxError> {
     let follower = Arc::new(follower);
     let (target, crypt) = (Arc::clone(&follower.target), Arc::clone(&follower.crypt));
@@ -653,8 +657,9 @@ async fn write_base(
 }
 
 /// Deletes the generations beyond `--keep` (oldest first) and unfinished ones before
-/// `current`; deletes nothing while a generation cannot be read with the key. Logs what fails,
-/// and tries again with the next generation.
+/// `current`; deletes nothing while no generation can be read with the key, and never a
+/// generation whose base cannot be read. Logs what fails, and tries again with the next
+/// generation.
 async fn prune(follower: &Arc<Follower>, current: &str) {
     let (target, crypt, keep) = (
         Arc::clone(&follower.target),
@@ -665,19 +670,7 @@ async fn prune(follower: &Arc<Follower>, current: &str) {
     let pruned = blocking(move || {
         let gens = generations(target.as_ref(), &crypt)?;
         refuse_unreadable(&gens, &crypt)?;
-        let finished: Vec<&Generation> = gens.iter().filter(|g| g.base.is_some()).collect();
-        let mut doomed: HashSet<&str> = finished
-            .iter()
-            .take(finished.len().saturating_sub(keep))
-            .map(|g| g.name.as_str())
-            .collect();
-        doomed.extend(
-            gens.iter()
-                .filter(|g| g.base.is_none() && g.name.as_str() < current.as_str())
-                .map(|g| g.name.as_str()),
-        );
-        doomed.remove(current.as_str());
-        for name in &doomed {
+        for name in &doomed(&gens, keep, &current) {
             // The marker first: a generation half deleted is never taken for a whole one.
             target.delete(&format!("{name}/base.done"))?;
             for object in target.list(&format!("{name}/"))? {
@@ -691,6 +684,24 @@ async fn prune(follower: &Arc<Follower>, current: &str) {
     if let Err(e) = pruned {
         tracing::warn!(error = %e, "deleting old backup generations failed");
     }
+}
+
+/// The generations [`prune`] deletes: the finished ones beyond the newest `keep`, and the
+/// unfinished ones before `current`; never `current`, and never one whose base cannot be read.
+fn doomed<'a>(gens: &'a [Generation], keep: usize, current: &str) -> HashSet<&'a str> {
+    let finished: Vec<&Generation> = gens.iter().filter(|g| g.base.is_some()).collect();
+    let mut doomed: HashSet<&str> = finished
+        .iter()
+        .take(finished.len().saturating_sub(keep))
+        .map(|g| g.name.as_str())
+        .collect();
+    doomed.extend(
+        gens.iter()
+            .filter(|g| g.base.is_none() && g.unreadable.is_none() && g.name.as_str() < current)
+            .map(|g| g.name.as_str()),
+    );
+    doomed.remove(current);
+    doomed
 }
 
 /// How far [`restore`] goes.
@@ -953,9 +964,42 @@ mod tests {
         );
         let refused = refuse_unreadable(&gens, &wrong).unwrap_err().to_string();
         assert!(
-            refused.contains("cannot be read with the backup key"),
+            refused.contains("can be read with the backup key"),
             "{refused}"
         );
+        assert!(doomed(&gens, 1, &generation_name(3_000)).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn one_damaged_generation_is_left_out_and_kept_not_refused() {
+        let dir = std::env::temp_dir().join(format!("kn-backup-damaged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let target = target::open(&format!("file:{}", dir.display())).unwrap();
+        let key = BackupKey::new(&[7; 32]);
+        for at in [1_000, 2_000, 3_000] {
+            let name = format!("{}/base.done", generation_name(at));
+            let base = BackupBase {
+                seq: 0,
+                hash: vec![0; 32],
+                ..Default::default()
+            };
+            let mut sealed = key.seal(&name, &base.encode_to_vec()).unwrap();
+            if at == 1_000 {
+                // Bit rot in the oldest generation's marker.
+                let last = sealed.len() - 1;
+                sealed[last] ^= 0x01;
+            }
+            target.put(&name, &sealed).unwrap();
+        }
+        let gens = generations(target.as_ref(), &key).unwrap();
+        assert!(gens[0].base.is_none() && gens[0].unreadable.is_some());
+        assert!(gens[1..].iter().all(|g| g.base.is_some()));
+        refuse_unreadable(&gens, &key).unwrap();
+        // Pruned to one: the older readable generation goes, the damaged one stays.
+        let current = generation_name(4_000);
+        let doomed = doomed(&gens, 1, &current);
+        assert_eq!(doomed, HashSet::from([generation_name(2_000).as_str()]));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
