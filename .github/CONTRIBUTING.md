@@ -33,7 +33,13 @@ Run `make test` before every push, and `make check` before you open a pull reque
   reference pages are regenerated with `npm run reference` in `docs/`.
 - The commit message says what changed and why, in one short line and, if needed, a paragraph.
 
-## License
+## License of contributions
 
-kernable is under the [MIT license](../LICENSE). By contributing, you agree that your
-contribution is licensed under it too.
+kernable is under the [MIT license](../LICENSE). Before we can merge your first pull request, you
+sign our [Contributor License Agreement](CLA.md) once: the CLA check on the pull request shows
+how. You keep the copyright in your contributions; you grant kernable the right to use and
+license them, and kernable keeps every contribution it includes available under the project's
+open source license.
+
+If you contribute on behalf of your employer, or your employer has rights to what you write,
+say so in your pull request: we then need an agreement from your employer as well.
