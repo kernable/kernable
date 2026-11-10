@@ -365,6 +365,8 @@ struct Def {
     domain: String,
     start: Option<(String, Start)>,
     steps: Vec<(String, Step)>,
+    /// Events that end a running case: event type, key reference, end step.
+    cancels: Vec<(String, String, String)>,
 }
 
 /// A business process of a domain, made with [`crate::Domain::process`]: its start and steps,
@@ -402,6 +404,7 @@ impl Process {
                 domain: domain.to_owned(),
                 start: None,
                 steps: Vec::new(),
+                cancels: Vec::new(),
             })),
         }
     }
@@ -486,6 +489,23 @@ impl Process {
     /// A step `name` that ends the case.
     pub fn end(&self, name: &str) -> Process {
         self.step(name, Step::End)
+    }
+
+    /// Ends a running case at once when an `E` event of its key commits, whatever step it is
+    /// at: `key` is where the case's key is in the event (`aggregate_id` or `data.<field>`),
+    /// `end` an `end` step. Its timer is withdrawn, an outcome it still awaits is ignored, an
+    /// incident ends with it. Events the case's own commands cause do not count.
+    pub fn cancel_on<E: EventType>(&self, key: &str, end: &str) -> Process {
+        self.cancel_on_named(&format!("{}.{}", E::DOMAIN, E::TYPE), key, end)
+    }
+
+    /// [`Process::cancel_on`] with the event type by name: `accounts.AccountClosed`, or a type
+    /// of the process's domain.
+    pub fn cancel_on_named(&self, event_type: &str, key: &str, end: &str) -> Process {
+        self.with(|d| {
+            let event = qualify(&d.domain, event_type, 1);
+            d.cancels.push((event, key.to_owned(), end.to_owned()));
+        })
     }
 
     /// The model the kernel registers (design/processes.md "The model format"): steps in the
@@ -660,7 +680,22 @@ impl Process {
             }
             steps.push(Value::Object(m));
         }
-        Ok(json!({ "name": d.name, "start": start_model, "steps": steps }))
+        let mut model = json!({ "name": d.name, "start": start_model, "steps": steps });
+        if !d.cancels.is_empty() {
+            let mut cancels = Vec::new();
+            for (event, key, end) in &d.cancels {
+                match d.steps.iter().find(|(n, _)| n == end) {
+                    Some((_, Step::End)) => {}
+                    Some(_) => return Err(fail(None, format!("cancel_on: {end} is no end step"))),
+                    None => return Err(fail(None, format!("cancel_on: {end} names no step"))),
+                }
+                let key =
+                    reference(key, EVENT).map_err(|e| fail(None, format!("cancel_on: {e}")))?;
+                cancels.push(json!({ "event": event, "key": key, "end": end }));
+            }
+            model["cancelOn"] = Value::Array(cancels);
+        }
+        Ok(model)
     }
 }
 
@@ -883,6 +918,40 @@ mod tests {
         assert_eq!(fulfilment.name(), "shop.fulfilment");
         // The domain remembers it, for apps.
         assert_eq!(shop.processes().len(), 1);
+    }
+
+    #[test]
+    fn cancel_on_ends_at_an_end_step() {
+        let build = |end: &str| {
+            domain("accounts")
+                .process("onboarding")
+                .start_named("AccountOpened", Start::key("aggregate_id"))
+                .wait_named(
+                    "email",
+                    "EmailConfirmed",
+                    Wait::key("aggregate_id").next("onboarded"),
+                )
+                .end("onboarded")
+                .end("closed")
+                .cancel_on_named("AccountClosed", "aggregate_id", end)
+                .model()
+        };
+        assert_eq!(
+            build("closed").unwrap()["cancelOn"],
+            json!([{"event": "accounts.AccountClosed", "key": "aggregateId", "end": "closed"}])
+        );
+        assert!(
+            build("email")
+                .unwrap_err()
+                .to_string()
+                .contains("no end step")
+        );
+        assert!(
+            build("nowhere")
+                .unwrap_err()
+                .to_string()
+                .contains("names no step")
+        );
     }
 
     #[test]

@@ -67,7 +67,7 @@ export { Command, Event, Query } from "./messages.ts";
 export type { AnswerOf, CommandClass, EventClass, Fields, PersonalFields, QueryClass, QueryTarget, SubjectOf } from "./messages.ts";
 export { ProcessBuilder, value } from "./process.ts";
 export type {
-  CommandStepOptions, DecideCase, DecideOptions, Duration, Literal, Mapping, ProcessModel, ProcessStep, ProcessVersion,
+  CancelOnOptions, CommandStepOptions, DecideCase, DecideOptions, Duration, Literal, Mapping, ProcessModel, ProcessStep, ProcessVersion,
   QueryStepOptions, StartOptions, TimerOptions, TimerWhen, WaitOptions,
 } from "./process.ts";
 

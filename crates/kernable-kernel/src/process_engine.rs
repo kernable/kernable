@@ -795,7 +795,80 @@ impl<'a> State<'a> {
         let event_type = config::qualified(&e.domain, &e.event_type);
         let payload = payload_of(&e);
         self.start_cases(&event_type, &e, &payload).await;
+        self.cancel_cases(&event_type, &e, &payload).await;
         self.move_waiting(&event_type, &e, &payload).await;
+    }
+
+    /// Ends the running cases an event cancels (`cancelOn`), whatever step they are at: their
+    /// timer is withdrawn, an outcome they await is ignored once it comes, an incident goes.
+    /// Events the case's own commands caused do not count.
+    async fn cancel_cases(&mut self, event_type: &str, e: &Event, payload: &Value) {
+        let mut matched: Vec<(CaseRef, String)> = Vec::new();
+        let models: Vec<((String, u32), Arc<Model>)> = self
+            .models
+            .iter()
+            .map(|(k, m)| (k.clone(), Arc::clone(m)))
+            .collect();
+        for ((process, version), model) in models {
+            for c in model.cancel_on.iter().filter(|c| c.event == event_type) {
+                let Some(k) = key_of(&c.key, e, payload) else {
+                    continue;
+                };
+                let Some(id) = self
+                    .by_key
+                    .get(&(e.tenant_id.clone(), process.clone(), k))
+                    .cloned()
+                else {
+                    continue;
+                };
+                let reference = (e.tenant_id.clone(), process.clone(), id);
+                if self
+                    .cases
+                    .get(&reference)
+                    .is_some_and(|case| case.version_of_model == version)
+                    && !matched.iter().any(|(r, _)| *r == reference)
+                {
+                    matched.push((reference, c.end.clone()));
+                }
+            }
+        }
+        for (reference, end) in matched {
+            let Some(mut case) = self.cases.remove(&reference) else {
+                continue;
+            };
+            // Handled already, ended, older than the case, or caused by the case's own commands
+            // (its correlation): a case does not cancel itself.
+            let own = e
+                .context
+                .as_ref()
+                .is_some_and(|c| c.correlation_id == format!("{}/{}", case.process, case.id));
+            if case.seen >= e.global_position
+                || case.ended
+                || e.global_position <= case.started_at
+                || own
+            {
+                self.cases.insert(reference, case);
+                continue;
+            }
+            let mut batch = Batch::new(&case);
+            batch.cancel = case
+                .timer_at
+                .map(|_| engine_id("t", &reference, case.instance()));
+            let step = case.at.as_ref().map(|(s, _)| s.clone()).unwrap_or_default();
+            if case.incident.is_some() {
+                tracing::info!(case = %case.id, %step, "the incident ends with the case");
+            }
+            self.record_step(&case, &step);
+            batch.push(
+                "CaseCancelled",
+                json!({"step": step, "event": event_type, "position": e.global_position, "end": end}),
+            );
+            tracing::info!(process = %case.process, case = %case.id, %step, event = %event_type, "case cancelled");
+            case.seen = e.global_position;
+            case.min_position = case.min_position.max(e.global_position);
+            self.enter(&mut case, &mut batch, &end);
+            self.commit(case, batch, None).await;
+        }
     }
 
     async fn start_cases(&mut self, event_type: &str, e: &Event, payload: &Value) {

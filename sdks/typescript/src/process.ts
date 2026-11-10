@@ -41,6 +41,14 @@ export interface StartOptions {
   data?: Mapping;
 }
 
+/** The options of `ProcessBuilder.cancelOn`. */
+export interface CancelOnOptions {
+  /** Where the case's key is in the event: `aggregateId` or `data.<field>`. */
+  key: string;
+  /** The end step the case ends at: `closed`. */
+  end: string;
+}
+
 /** The options of `ProcessBuilder.command`. */
 export interface CommandStepOptions {
   /** The aggregate the command goes to, a reference: `case.orderId`. */
@@ -117,6 +125,8 @@ export interface ProcessModel {
   start: { on: string; key: string; data?: Mapping };
   /** In the order written. */
   steps: ProcessStep[];
+  /** Events that end a running case at once, whatever step it is at. */
+  cancelOn?: { event: string; key: string; end: string }[];
 }
 
 /** One step of a `ProcessModel`; every step but `end` names what comes next. */
@@ -190,6 +200,7 @@ export class ProcessBuilder {
   readonly name: string;
   private started?: { event: Named<EventClass<unknown>>; options: StartOptions };
   private readonly written: Written[] = [];
+  private readonly cancels: { event: Named<EventClass<unknown>>; options: CancelOnOptions }[] = [];
 
   /** Use `Domain.process(name)`. Throws for a name other than letters, digits, `_` and `-`. */
   constructor(domain: string, name: string) {
@@ -258,6 +269,17 @@ export class ProcessBuilder {
    */
   query<Q>(name: string, query: QueryClass<Q> | string, options: QueryStepOptions): this {
     return this.add({ name, kind: "query", query, options });
+  }
+
+  /**
+   * Ends a running case at once when an `event` of its key commits, whatever step it is at:
+   * `.cancelOn("AccountClosed", { key: "aggregateId", end: "closed" })`. Its timer is withdrawn, an
+   * outcome it still awaits is ignored, an incident ends with it. Events the case's own commands
+   * cause do not count. `end` must be an `end` step.
+   */
+  cancelOn<E>(event: EventClass<E> | string, options: CancelOnOptions): this {
+    this.cancels.push({ event, options });
+    return this;
   }
 
   /** Ends the case. A process may have several ends, e.g. `shipped` and `cancelled`. */
@@ -380,6 +402,14 @@ export class ProcessBuilder {
         ...(start.options.data && { data: start.options.data }),
       },
       steps,
+      ...(this.cancels.length > 0 && {
+        cancelOn: this.cancels.map((c) => {
+          const end = this.written.find((s) => s.name === c.options.end);
+          if (!end) fail(undefined, `cancelOn names an unknown step ${JSON.stringify(c.options.end)}`);
+          if (end!.kind !== "end") fail(undefined, `cancelOn ends at ${JSON.stringify(c.options.end)}, which is no end step`);
+          return { event: this.messageName(undefined, c.event, "declared (an aggregate's apply, or Domain.event)"), key: c.options.key, end: c.options.end };
+        }),
+      }),
     };
   }
 

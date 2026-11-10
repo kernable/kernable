@@ -172,3 +172,24 @@ test("a decision without otherwise goes on to the step written next", () => {
   const decide = (p.model().steps as { name: string; otherwise?: string }[]).find((s) => s.name === "big");
   assert.equal(decide?.otherwise, "note");
 });
+
+test("cancelOn ends a case at an end step, whatever step it is at", () => {
+  const model = domain("accounts").process("onboarding")
+    .start("AccountOpened", { key: "aggregateId" })
+    .wait("email", "EmailConfirmed", { key: "aggregateId", next: "onboarded" })
+    .end("onboarded")
+    .end("closed")
+    .cancelOn("AccountClosed", { key: "aggregateId", end: "closed" })
+    .model();
+  assert.deepEqual(model.cancelOn, [{ event: "accounts.AccountClosed", key: "aggregateId", end: "closed" }]);
+  // Without cancelOn, the model has no such field.
+  assert.equal("cancelOn" in fulfilment.model(), false);
+  const to = (end: string) => () => domain("accounts").process("p")
+    .start("AccountOpened", { key: "aggregateId" })
+    .wait("email", "EmailConfirmed", { key: "aggregateId", next: "done" })
+    .end("done")
+    .cancelOn("AccountClosed", { key: "aggregateId", end })
+    .model();
+  assert.throws(to("nowhere"), /unknown step "nowhere"/);
+  assert.throws(to("email"), /"email", which is no end step/);
+});

@@ -16,6 +16,20 @@ pub(crate) struct Model {
     pub start: Start,
     /// In the order written; a case starts at the first.
     pub steps: Vec<Step>,
+    /// Events that end a running case at once, whatever step it is at.
+    pub cancel_on: Vec<CancelOn>,
+}
+
+/// An event that ends a running case of its key at the end step `end`: the case's timer is
+/// withdrawn, an outcome it still awaits is ignored, an incident is resolved by it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CancelOn {
+    /// The qualified event type.
+    pub event: String,
+    /// Where the case's key is in that event.
+    pub key: Ref,
+    /// The end step the case ends at.
+    pub end: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -145,14 +159,14 @@ impl Model {
         })
     }
 
-    /// The start event, then every waited event.
+    /// The start event, then every waited event, then every event that cancels a case.
     pub(crate) fn events(&self) -> impl Iterator<Item = &str> {
-        std::iter::once(self.start.on.as_str()).chain(self.steps.iter().filter_map(
-            |s| match &s.kind {
+        std::iter::once(self.start.on.as_str())
+            .chain(self.steps.iter().filter_map(|s| match &s.kind {
                 Kind::Wait { event, .. } => Some(event.as_str()),
                 _ => None,
-            },
-        ))
+            }))
+            .chain(self.cancel_on.iter().map(|c| c.event.as_str()))
     }
 }
 
@@ -218,7 +232,7 @@ pub(crate) fn parse(json: &[u8]) -> Result<(Model, Vec<String>), Invalid> {
         ));
     }
     let at_model = |reason: String| invalid(&name, "", reason);
-    only(&top, &["name", "start", "steps"]).map_err(at_model)?;
+    only(&top, &["name", "start", "steps", "cancelOn"]).map_err(at_model)?;
     let start = match top.get("start") {
         Some(Value::Object(o)) => parse_start(o).map_err(|r| invalid(&name, "start", r))?,
         _ => return Err(at_model("no start (an object)".into())),
@@ -255,7 +269,44 @@ pub(crate) fn parse(json: &[u8]) -> Result<(Model, Vec<String>), Invalid> {
             kind,
         });
     }
-    let model = Model { name, start, steps };
+    let cancel_on = match top.get("cancelOn") {
+        None => Vec::new(),
+        Some(Value::Array(list)) => {
+            let mut out = Vec::with_capacity(list.len());
+            for (i, raw) in list.iter().enumerate() {
+                let at = format!("cancelOn {}", i + 1);
+                let Value::Object(o) = raw else {
+                    return Err(invalid(&name, &at, "not an object".into()));
+                };
+                let c = parse_cancel(o).map_err(|r| invalid(&name, &at, r))?;
+                match steps.iter().find(|s| s.name == c.end) {
+                    Some(Step {
+                        kind: Kind::End, ..
+                    }) => {}
+                    Some(_) => {
+                        return Err(invalid(&name, &at, format!("{} is no end step", c.end)));
+                    }
+                    None => return Err(invalid(&name, &at, format!("{} is no step", c.end))),
+                }
+                if out.iter().any(|o: &CancelOn| o.event == c.event) {
+                    return Err(invalid(
+                        &name,
+                        &at,
+                        format!("a second cancelOn for {}", c.event),
+                    ));
+                }
+                out.push(c);
+            }
+            out
+        }
+        Some(_) => return Err(at_model("cancelOn is not an array".into())),
+    };
+    let model = Model {
+        name,
+        start,
+        steps,
+        cancel_on,
+    };
     for step in &model.steps {
         if let Some(t) = step
             .kind
@@ -433,6 +484,15 @@ fn parse_start(o: &Map<String, Value>) -> Checked<Start> {
         on: qualified_type(o, "on")?,
         key: parse_ref(string(o, "key")?, FROM_EVENT)?,
         data: mapping(o, "data", FROM_EVENT)?,
+    })
+}
+
+fn parse_cancel(o: &Map<String, Value>) -> Checked<CancelOn> {
+    only(o, &["event", "key", "end"])?;
+    Ok(CancelOn {
+        event: qualified_type(o, "event")?,
+        key: parse_ref(string(o, "key")?, FROM_EVENT)?,
+        end: string(o, "end")?.to_owned(),
     })
 }
 
@@ -643,7 +703,9 @@ fn parse_step(o: &Map<String, Value>) -> Checked<Kind> {
 fn reachable(model: &Model) -> HashSet<String> {
     let by_name: HashMap<&str, &Step> = model.steps.iter().map(|s| (s.name.as_str(), s)).collect();
     let mut seen = HashSet::new();
+    // The first step, and the ends a cancelling event leads to.
     let mut todo = vec![model.steps[0].name.as_str()];
+    todo.extend(model.cancel_on.iter().map(|c| c.end.as_str()));
     while let Some(name) = todo.pop() {
         if !seen.insert(name.to_owned()) {
             continue;
@@ -1438,5 +1500,44 @@ mod tests {
         assert!(holds("case.vip == true or case.total < 0"));
         assert!(!holds("not (case.vip or false)"));
         assert!(holds("0 == 0 and not 0 and not ''"));
+    }
+
+    #[test]
+    fn cancel_on_names_an_end_step_and_makes_it_reachable() {
+        let model = |cancel: Value| {
+            json!({"name": "shop.f", "start": {"on": "shop.OrderPlaced", "key": "aggregateId"},
+                   "steps": [
+                       {"name": "w", "kind": "wait", "event": "shop.OrderPaid", "key": "aggregateId", "next": "done"},
+                       {"name": "done", "kind": "end"},
+                       {"name": "withdrawn", "kind": "end"}],
+                   "cancelOn": cancel})
+        };
+        let ok = model(
+            json!([{"event": "shop.OrderCancelled", "key": "aggregateId", "end": "withdrawn"}]),
+        );
+        let (m, _) = parse(&serde_json::to_vec(&ok).unwrap()).unwrap();
+        assert_eq!(m.cancel_on[0].end, "withdrawn");
+        assert!(m.events().any(|e| e == "shop.OrderCancelled"));
+        let not_end =
+            model(json!([{"event": "shop.OrderCancelled", "key": "aggregateId", "end": "w"}]));
+        assert!(
+            parse(&serde_json::to_vec(&not_end).unwrap())
+                .unwrap_err()
+                .reason
+                .contains("no end step")
+        );
+        let twice = model(json!([
+            {"event": "shop.OrderCancelled", "key": "aggregateId", "end": "withdrawn"},
+            {"event": "shop.OrderCancelled", "key": "aggregateId", "end": "done"}]));
+        assert!(parse(&serde_json::to_vec(&twice).unwrap()).is_err());
+        // Without cancelOn, `withdrawn` is reached by nothing.
+        let mut none = ok.clone();
+        none.as_object_mut().unwrap().remove("cancelOn");
+        assert!(
+            parse(&serde_json::to_vec(&none).unwrap())
+                .unwrap_err()
+                .reason
+                .contains("no path")
+        );
     }
 }

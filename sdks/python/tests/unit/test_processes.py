@@ -77,6 +77,24 @@ def fulfilment(d=None):
     )
 
 
+
+class CancelOnTest(unittest.TestCase):
+    def test_cancel_on_ends_at_an_end_step(self):
+        def build(end):
+            return (domain("accounts").process("onboarding")
+                    .start("AccountOpened", key="aggregate_id")
+                    .wait("email", "EmailConfirmed", key="aggregate_id", next="onboarded")
+                    .end("onboarded").end("closed")
+                    .cancel_on("AccountClosed", key="aggregate_id", end=end))
+        self.assertEqual(build("closed").model()["cancelOn"],
+                         [{"event": "accounts.AccountClosed", "key": "aggregateId", "end": "closed"}])
+        self.assertNotIn("cancelOn", fulfilment().model())
+        with self.assertRaisesRegex(ValueError, "no end step"):
+            build("email").model()
+        with self.assertRaisesRegex(ValueError, "names no step"):
+            build("nowhere").model()
+
+
 def small():
     """A process with its start, to add steps to."""
     return domain("shop").process("small").start("shop.OrderSubmitted", key="aggregate_id")

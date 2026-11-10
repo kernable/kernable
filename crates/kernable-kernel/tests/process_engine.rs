@@ -479,6 +479,55 @@ async fn an_unpaid_order_is_cancelled_when_its_time_is_up() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_event_named_in_cancel_on_ends_the_case_at_any_step() {
+    let env = start("pe-cancel-on").await;
+    env.kernel.grant(app_grant()).unwrap();
+    let shop = shop();
+    let k = shop.connect(&env.dir, &env.addr).await;
+    // The example, ended at `withdrawn` when the order is cancelled from outside.
+    let mut model = example(60_000);
+    model["steps"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name": "withdrawn", "kind": "end"}));
+    model["cancelOn"] =
+        json!([{"event": "shop.OrderCancelled", "key": "aggregateId", "end": "withdrawn"}]);
+    register(&env.addr, &model).await.unwrap();
+
+    // Waiting for the payment, with its timeout set: the customer withdraws the order.
+    submit_order(&k, "o9", 100).await;
+    until_reached(&env.store, "o9#1", "paid").await;
+    k.submit(Submit::new("shop", "order", "o9", "Cancel").data(json!({"reason": "customer"})))
+        .await
+        .unwrap();
+    assert_eq!(until_ended(&env.store, "o9#1").await, "withdrawn");
+    let events = case_events(&env.store, "o9#1");
+    let cancelled = events
+        .iter()
+        .find(|e| e.event_type == "CaseCancelled")
+        .expect("the cancellation is in the case");
+    assert_eq!(payload(cancelled)["step"], "paid");
+    assert_eq!(payload(cancelled)["event"], "shop.OrderCancelled");
+    // A payment after it moves nothing, and the timeout was withdrawn.
+    pay(&k, "o9").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(case_events(&env.store, "o9#1").len(), events.len());
+    assert!(events.iter().all(|e| e.event_type != "TimerFired"));
+
+    // The case's own Cancel (its timeout path) does not cancel it: it ends at `done`.
+    let mut quick = model.clone();
+    quick["steps"][4]["timeoutMs"] = json!(300);
+    register(&env.addr, &quick).await.unwrap();
+    submit_order(&k, "o10", 100).await;
+    assert_eq!(until_ended(&env.store, "o10#1").await, "done");
+    assert!(
+        case_events(&env.store, "o10#1")
+            .iter()
+            .all(|e| e.event_type != "CaseCancelled")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_rejection_with_a_path_takes_it_and_another_is_an_incident() {
     let (env, shop, k) = shop_kernel("pe-rejections", 60_000).await;
     *shop.ship_rejects.lock().unwrap() = Some("out_of_stock".into());

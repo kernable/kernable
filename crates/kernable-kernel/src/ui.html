@@ -1026,6 +1026,9 @@ function layout(model) {
     if (!index.has(e.to) || back.has(`${n}>${e.to}`)) continue;
     rank.set(e.to, Math.max(rank.get(e.to) ?? 0, (rank.get(n) ?? 0) + 1));
   }
+  // Ends only an event reaches (cancelOn), at any step: in the last column, with the others.
+  const last = Math.max(1, ...rank.values());
+  for (const c of model.cancelOn ?? []) if (!rank.has(c.end)) rank.set(c.end, last);
   const cols = [];
   for (const s of steps) { const r = rank.get(s.name) ?? 1; (cols[r] ??= []).push(s.name); }
   cols[0] = [""];
@@ -1192,6 +1195,8 @@ function flow(v, one = null) {
     if (s.kind === "decide") conds.push(el("span", {}, el("b", {}, s.name), ": ", (s.when ?? []).map((w, i) => [i ? "; " : "", el("code", {}, w.if), ` → ${w.next}`]), s.otherwise ? `; otherwise → ${s.otherwise}` : ""));
     if (s.kind === "query") conds.push(el("span", {}, el("b", {}, s.name), `: asks ${s.query}; `, (s.paths ?? []).map((x, i) => [i ? ", " : "", el("code", {}, JSON.stringify(x.value)), ` → ${x.next}`]), s.otherwise ? `; otherwise → ${s.otherwise}` : ""));
   }
+  // Events that end a case at any step.
+  for (const c of model.cancelOn ?? []) conds.push(el("span", {}, el("b", {}, "at any step"), ": ", el("code", {}, c.event), ` → ${c.end}`));
   const dirLink = (value, label) => flowDir === value ? el("b", {}, label) : el("a", { href: "#", onclick: (ev) => { ev.preventDefault(); flowDir = value; try { localStorage.setItem("kernable.flow", value); } catch {} render(); } }, label);
   return el("div", {}, svg,
     conds.length ? el("div", { class: "conds" }, conds) : null,
@@ -1246,6 +1251,7 @@ function storyLine(e, model) {
     case "EventKept": return ["", ["Kept ", el("b", {}, p.event), " that came early", l ? [" from ", aggLink(l)] : null], "it counts once the case waits for it"];
     case "IncidentRaised": return ["bad", [el("span", { class: "code" }, `Incident: ${p.code}`), " at ", el("b", {}, p.step)], p.message];
     case "IncidentResolved": return ["", ["Resolved: ", el("b", {}, p.action)], ["by ", keyView(p.by)]];
+    case "CaseCancelled": return ["warn", ["Cancelled by ", el("b", {}, l?.type ?? p.event), l ? [" of ", aggLink(l)] : null, " at ", el("b", {}, p.step)], `cancelOn: ends at ${p.end}`];
     case "ProcessEnded": return ["end", ["Ended: ", el("b", {}, p.end)], p.by ? ["by ", keyView(p.by)] : null];
     default: return ["", [e.type], null];
   }
@@ -1516,7 +1522,9 @@ function catalogData() {
   const models = (procs?.processes ?? []).map((p) => ({ name: p.name, removed: p.removed, versions: p.versions.length, model: p.versions[p.versions.length - 1]?.model })).filter((p) => p.model);
   const commandType = (c) => { const [d, , name] = c.split("."); return name ? `${d}.${name}` : c; };
   for (const p of models) {
-    p.events = [p.model.start.on, ...p.model.steps.filter((x) => x.kind === "wait").map((x) => x.event)];
+    p.waits = p.model.steps.filter((x) => x.kind === "wait").map((x) => x.event);
+    p.cancels = (p.model.cancelOn ?? []).map((c) => c.event);
+    p.events = [p.model.start.on, ...p.waits, ...p.cancels];
     p.commands = p.model.steps.filter((x) => x.kind === "command").map((x) => commandType(x.command));
     p.queries = p.model.steps.filter((x) => x.kind === "query").map((x) => x.query);
   }
@@ -1863,7 +1871,7 @@ function drawCatalog() {
     rows = grouped(items, 8, (xs) => plural(xs.length, "process", "processes"), (p) => [
       el("td", { style: "white-space:nowrap" }, el("a", { href: procHref(p.name) }, short(p.name)), el("span", { class: "faint" }, ` v${p.versions}`), p.removed ? el("span", { class: "note" }, " · removed") : null),
       el("td", {}, el("a", { class: "mono", href: `/explore/events?type=${encodeURIComponent(p.model.start.on)}` }, p.model.start.on)),
-      el("td", {}, list(p.events.slice(1))),
+      el("td", {}, list(p.waits), p.cancels.length ? el("div", { class: "note" }, "cancelled by ", list(p.cancels)) : null),
       el("td", {}, list(p.commands)),
       el("td", {}, list(p.queries)),
       el("td", { class: "n" }, num(p.open)),

@@ -143,6 +143,7 @@ class Process:
         self.name = name
         self._start: tuple | None = None
         self._steps: list[tuple[str, str, dict]] = []
+        self._cancels: list[tuple[Any, str, str]] = []
 
     @property
     def qualified(self) -> str:
@@ -224,6 +225,14 @@ class Process:
     def end(self, name: str) -> "Process":
         """Ends the case."""
         return self._add(name, "end")
+
+    def cancel_on(self, event: type[Event] | str, *, key: str, end: str) -> "Process":
+        """Ends a running case at once when an `event` of its key commits, whatever step it is
+        at: `.cancel_on(AccountClosed, key="aggregate_id", end="closed")`. Its timer is withdrawn,
+        an outcome it still awaits is ignored, an incident ends with it. Events the case's own
+        commands cause do not count. `end` must be an `end` step."""
+        self._cancels.append((event, key, end))
+        return self
 
     def model(self) -> dict:
         """The model the kernel registers (design/processes.md "The model format"): types
@@ -318,7 +327,19 @@ class Process:
                 if o["otherwise"] is not None:
                     step["otherwise"] = target(o["otherwise"], where)
             steps.append(step)
-        return {"name": p, "start": start, "steps": steps}
+        model = {"name": p, "start": start, "steps": steps}
+        if self._cancels:
+            kinds = {name: kind for name, kind, _ in self._steps}
+            model["cancelOn"] = []
+            for event, key, end in self._cancels:
+                where = f"process {p}, cancel_on"
+                if end not in kinds:
+                    raise ValueError(f"{where}: {end!r} names no step")
+                if kinds[end] != "end":
+                    raise ValueError(f"{where}: {end!r} is no end step")
+                model["cancelOn"].append({"event": _type(event, Event, "event", where, self.domain),
+                                          "key": _reference(key, where, ("aggregate_id", "data")), "end": end})
+        return model
 
 
 def _duration(d: Any, where: str) -> int:
