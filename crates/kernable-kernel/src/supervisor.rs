@@ -47,9 +47,12 @@
 //!
 //! The node builds each service's image at start, when the service changes and on SIGHUP (a
 //! service whose image changed restarts), then runs it with `podman run --rm` in the
-//! foreground, a child like the kernel: started after the kernel, stopped before it. It runs on
-//! the host's network with `KERNABLE_URL` (the kernel's `--listen`), `KERNABLE_INSTANCE`, and,
-//! with a key, `KERNABLE_KEY` and `KERNABLE_GRANT` naming the files mounted read-only.
+//! foreground, a child like the kernel: started after the kernel, stopped before it. It runs
+//! with `KERNABLE_URL` (where it reaches the kernel), `KERNABLE_INSTANCE`, and, with a key,
+//! `KERNABLE_KEY` and `KERNABLE_GRANT` naming the files mounted read-only. In the instance's
+//! pod (Linux) it shares the pod's network: one of its own by default, reaching the kernel
+//! through its socket, or the machine's with `[node] network = "host"`; without a pod, the
+//! machine's.
 //!
 //! On Linux every part runs in Podman, in one pod per instance (`kernable-<project>`): the
 //! kernel and the backup follower in a base image with the kernable binary mounted, the project
@@ -305,12 +308,6 @@ struct BackupSection {
     memory: Option<String>,
     #[serde(default)]
     env: BTreeMap<String, String>,
-}
-
-/// The children `text` (a `project.toml` in `dir`) asks for, in start order; `this` is the
-/// running binary.
-pub fn specs(text: &str, dir: &Path, this: &Path) -> Result<Vec<Spec>, BoxError> {
-    Ok(plan(text, dir, this)?.children)
 }
 
 /// What `text` (a `project.toml` in `dir`) asks for; `this` is the running binary. On Linux
@@ -1259,9 +1256,13 @@ fn spawn_with(
 /// SIGKILL after its stop time; a killed service's container is removed too. The node looks
 /// after the other children meanwhile; this one starts again only once its process ended.
 fn stop(c: &mut Running) {
-    let Some(mut child) = c.child.take() else {
+    // A kernel handing over: the old process still serves, and stops like any kernel (it
+    // drains), after the new one waiting for its stores.
+    let handover = c.handover.take();
+    let child = c.child.take();
+    if child.is_none() && handover.is_none() {
         return;
-    };
+    }
     let (name, stop, binary) = (c.spec.name.clone(), c.spec.stop, c.spec.binary.clone());
     let container = c
         .container_name
@@ -1272,7 +1273,13 @@ fn stop(c: &mut Running) {
         if let Some(previous) = previous {
             let _ = previous.await;
         }
-        stopped(&name, &mut child, stop, &binary, container.as_deref(), STOP).await;
+        if let Some(mut child) = child {
+            stopped(&name, &mut child, stop, &binary, container.as_deref(), STOP).await;
+        }
+        if let Some(mut h) = handover {
+            let container = h.old_container.as_deref();
+            stopped(&name, &mut h.old, stop, &binary, container, STOP).await;
+        }
     }));
 }
 
@@ -1285,16 +1292,10 @@ async fn stop_now(c: &mut Running) {
 }
 
 /// The signal that stops a child; a kernel of a pair hands its role to its standby first.
-#[cfg(unix)]
 const STOP: i32 = libc::SIGTERM;
 /// The signal that tells the old kernel to let its stores go to the new one beside it,
 /// without handing its role to its standby.
-#[cfg(unix)]
 const LET_GO: i32 = libc::SIGUSR1;
-#[cfg(not(unix))]
-const STOP: i32 = 15;
-#[cfg(not(unix))]
-const LET_GO: i32 = 10;
 
 async fn stopped(
     name: &str,
@@ -1305,14 +1306,11 @@ async fn stopped(
     signal: i32,
 ) {
     if let Some(pid) = child.id() {
-        #[cfg(unix)]
         // SAFETY: kill(2) on our own child's pid; a pid that already exited is harmless.
         unsafe {
             libc::kill(pid as libc::pid_t, signal);
         }
     }
-    #[cfg(not(unix))]
-    let _ = signal;
     match tokio::time::timeout(stop, child.wait()).await {
         Ok(status) => tracing::info!(child = %name, status = ?status.ok(), "stopped"),
         Err(_) => {
@@ -1534,8 +1532,8 @@ fn pasta_network() -> &'static str {
     })
 }
 
-/// Makes the instance's pod, replacing one a node before left: the host's network, and the
-/// instance's total limits.
+/// Makes the instance's pod, replacing one a node before left: its network (its own, or the
+/// machine's with `[node] network = "host"`), and the instance's total limits.
 async fn make_pod(podman: &Path, pod: &Pod) -> Result<(), String> {
     write_seccomp(&pod.seccomp)?;
     let mut args = vec![
@@ -1990,8 +1988,15 @@ fn metrics_text(shown: &[Shown]) -> String {
 /// Answers `GET /metrics` with the board; anything else with 404.
 async fn serve_metrics(listener: tokio::net::TcpListener, board: Board) {
     loop {
-        let Ok((mut stream, _)) = listener.accept().await else {
-            continue;
+        let mut stream = match listener.accept().await {
+            Ok((stream, _)) => stream,
+            Err(e) => {
+                // Out of file descriptors, or a connection reset while waiting: retry after a
+                // pause instead of spinning.
+                tracing::warn!(error = %e, "accepting a metrics connection failed");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
         };
         let board = Arc::clone(&board);
         tokio::spawn(async move {

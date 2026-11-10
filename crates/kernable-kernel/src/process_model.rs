@@ -377,12 +377,12 @@ fn optional_string(o: &Map<String, Value>, field: &str) -> Checked<Option<String
     }
 }
 
-/// A duration in ms: a positive integer.
+/// A duration in ms: a positive integer, at most `i64::MAX` (times are `i64` ms).
 fn duration(o: &Map<String, Value>, field: &str) -> Checked<Option<u64>> {
     match o.get(field) {
         None => Ok(None),
         Some(v) => match v.as_u64() {
-            Some(ms) if ms > 0 => Ok(Some(ms)),
+            Some(ms) if ms > 0 && i64::try_from(ms).is_ok() => Ok(Some(ms)),
             _ => Err(format!("{field} is not a positive number of milliseconds")),
         },
     }
@@ -400,7 +400,7 @@ fn qualified_type(o: &Map<String, Value>, field: &str) -> Checked<String> {
 
 /// Parses a reference; `allowed` lists the kinds this place takes (`aggregateId`, `data`,
 /// `case`, `answer`).
-pub(crate) fn parse_ref(s: &str, allowed: &[&str]) -> Checked<Ref> {
+fn parse_ref(s: &str, allowed: &[&str]) -> Checked<Ref> {
     let (head, path) = match s.split_once('.') {
         Some((head, rest)) => (head, rest.split('.').map(str::to_owned).collect::<Vec<_>>()),
         None => (s, Vec::new()),
@@ -822,6 +822,7 @@ fn unwritten(model: &Model) -> Vec<String> {
             .into_iter()
             .filter(|f| !known.contains(f))
             .collect();
+        missing.sort();
         missing.dedup();
         for field in missing {
             warnings.push(format!(
@@ -907,7 +908,6 @@ impl Expr {
     }
 
     /// Whether the condition holds on the case's data `case`.
-    #[allow(dead_code)] // the engine (stage 2) evaluates conditions; the tests do now
     pub(crate) fn holds(&self, case: &Value) -> bool {
         truthy(&self.eval(case))
     }
@@ -1083,14 +1083,34 @@ fn tokens(s: &str) -> Checked<Vec<Token>> {
     Ok(out)
 }
 
+/// The most tokens a condition may have, and how deep `not` and `(` may nest in it: parsing and
+/// evaluating recurse, and a registration must not be able to overflow the stack.
+const MAX_CONDITION_TOKENS: usize = 256;
+const MAX_CONDITION_NESTING: usize = 32;
+
 struct Parser {
     tokens: Vec<Token>,
     at: usize,
+    /// How deep the parser is in `not` and `(`.
+    depth: usize,
 }
 
 impl Parser {
     fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.at)
+    }
+
+    /// Runs `f` one level deeper; an error beyond [`MAX_CONDITION_NESTING`].
+    fn nested(&mut self, f: impl FnOnce(&mut Self) -> Checked<Expr>) -> Checked<Expr> {
+        if self.depth >= MAX_CONDITION_NESTING {
+            return Err(format!(
+                "the condition nests deeper than {MAX_CONDITION_NESTING} levels"
+            ));
+        }
+        self.depth += 1;
+        let out = f(self);
+        self.depth -= 1;
+        out
     }
 
     fn take(&mut self) -> Option<Token> {
@@ -1120,7 +1140,7 @@ impl Parser {
     fn not(&mut self) -> Checked<Expr> {
         if self.peek() == Some(&Token::Not) {
             self.at += 1;
-            return Ok(Expr::Not(Box::new(self.not()?)));
+            return Ok(Expr::Not(Box::new(self.nested(Self::not)?)));
         }
         self.cmp()
     }
@@ -1140,7 +1160,7 @@ impl Parser {
             Some(Token::Ref(path)) => Ok(Expr::Ref(path)),
             Some(Token::Lit(v)) => Ok(Expr::Lit(v)),
             Some(Token::Open) => {
-                let inner = self.or()?;
+                let inner = self.nested(Self::or)?;
                 match self.take() {
                     Some(Token::Close) => Ok(inner),
                     _ => Err("a ( is not closed".into()),
@@ -1171,13 +1191,19 @@ fn describe(t: &Token) -> String {
 /// Parses a condition: `expr := or; or := and ("or" and)*; and := not ("and" not)*;
 /// not := "not" not | cmp; cmp := operand (op operand)?; operand := case.<path> | number |
 /// 'string' | "string" | true | false | null | "(" expr ")"`.
-pub(crate) fn parse_condition(s: &str) -> Checked<Expr> {
+fn parse_condition(s: &str) -> Checked<Expr> {
     let mut parser = Parser {
         tokens: tokens(s)?,
         at: 0,
+        depth: 0,
     };
     if parser.tokens.is_empty() {
         return Err("the condition is empty".into());
+    }
+    if parser.tokens.len() > MAX_CONDITION_TOKENS {
+        return Err(format!(
+            "the condition is longer than {MAX_CONDITION_TOKENS} tokens"
+        ));
     }
     let expr = parser.or()?;
     match parser.peek() {
@@ -1470,6 +1496,20 @@ mod tests {
             let e = parse_condition(bad).unwrap_err();
             assert!(e.contains(why), "{bad:?}: {e}");
         }
+    }
+
+    #[test]
+    fn deeply_nested_or_long_conditions_are_refused_not_overflowing() {
+        let deep = format!("{}case.a{}", "(".repeat(40), ")".repeat(40));
+        assert!(parse_condition(&deep).unwrap_err().contains("nests deeper"));
+        let nots = format!("{}case.a", "not ".repeat(40));
+        assert!(parse_condition(&nots).unwrap_err().contains("nests deeper"));
+        let long = vec!["case.a"; 1000].join(" or ");
+        assert!(parse_condition(&long).unwrap_err().contains("longer than"));
+        let huge = format!("{}case.a{}", "(".repeat(100_000), ")".repeat(100_000));
+        assert!(parse_condition(&huge).is_err());
+        let ok = format!("{}case.a{}", "(".repeat(30), ")".repeat(30));
+        assert!(parse_condition(&ok).is_ok());
     }
 
     #[test]

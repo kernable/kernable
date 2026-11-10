@@ -37,13 +37,22 @@ use crate::{
 /// How often a partition asks the control partition for its trust records.
 const EVERY: Duration = Duration::from_secs(1);
 
-/// The partition map a kernel holds.
+/// The partition map a kernel holds; the mutex keeps two maps taken at once in order (an
+/// older one never replaces a newer one).
 #[derive(Default)]
-pub(crate) struct Maps(RwLock<Option<PartitionMap>>, tokio::sync::Notify);
+pub(crate) struct Maps(
+    RwLock<Option<PartitionMap>>,
+    tokio::sync::Notify,
+    std::sync::Mutex<()>,
+);
 
 impl Maps {
     pub(crate) fn new(map: Option<PartitionMap>) -> Self {
-        Maps(RwLock::new(map), tokio::sync::Notify::new())
+        Maps(
+            RwLock::new(map),
+            tokio::sync::Notify::new(),
+            std::sync::Mutex::default(),
+        )
     }
 
     /// Completes when a new map is taken (moves start at once, not at the next tick).
@@ -131,6 +140,7 @@ impl Kernel {
                 "the key may not apply partition maps: its grant needs manage for *",
             ));
         }
+        let _taking = self.maps.2.lock().unwrap_or_else(PoisonError::into_inner);
         if self.maps.get().is_some_and(|held| held.epoch >= map.epoch) {
             return Ok(false);
         }

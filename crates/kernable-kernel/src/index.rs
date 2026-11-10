@@ -158,7 +158,7 @@ impl Index {
         }
     }
 
-    /// Forgets what `tenant`'s streams hold: the tenant moved away (S4).
+    /// Forgets what `tenant`'s streams hold: the tenant moved away.
     pub(crate) fn forget_tenant(&mut self, tenant: &str) {
         let streams: Vec<StreamId> = self
             .cache

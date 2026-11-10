@@ -76,7 +76,7 @@
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   tr.click { cursor: pointer; } tr.click:hover td, tr.open td { background: var(--sunk); }
   td.wide { padding-top: 0; }
-  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
   pre { background: var(--code); border-radius: 6px; padding: 8px 10px; margin: 6px 0 0; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
   .chip { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; padding: 1px 8px; border-radius: 999px; font-weight: 500; white-space: nowrap; }
   .chip.ok { background: var(--ok-soft); } .chip.warn { background: var(--warn-soft); } .chip.bad { background: var(--bad-soft); } .chip.run { background: var(--accent-soft); color: var(--accent); } .chip.idle { background: var(--sunk); color: var(--muted); }
@@ -156,7 +156,6 @@
   .tl-item.open { cursor: default; border-color: var(--line); }
   .list .n { float: right; color: var(--muted); font-size: 12px; }
   /* map */
-  .map { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
   .kind { color: var(--faint); font-size: 11.5px; text-transform: uppercase; letter-spacing: .06em; }
   dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 8px 0 0; font-size: 13px; }
   dt { color: var(--muted); } dd { margin: 0; word-break: break-word; white-space: pre-line; }
@@ -183,8 +182,6 @@
   .dcard:hover { border-color: var(--accent); }
   .dcard .dhead { display: flex; align-items: baseline; gap: 8px; justify-content: space-between; }
   .dcard .dhead b { font-size: 16px; }
-  .drow { display: grid; grid-template-columns: 92px 1fr; gap: 8px; font-size: 13px; align-items: start; }
-  .drow > span:first-child { color: var(--faint); font-size: 12px; padding-top: 2px; }
   .chips { display: flex; flex-wrap: wrap; gap: 4px; }
   .t { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: 6px; background: var(--sunk); border: 1px solid var(--line); font-size: 12px; white-space: nowrap; color: var(--text); }
   a.t:hover { border-color: var(--accent); text-decoration: none; }
@@ -206,7 +203,7 @@
   td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
   .ver { font-size: 11px; color: var(--violet); margin-left: 6px; }
-  .bars { display: block; }
+  svg.bars { display: block; }
   .bars rect { fill: var(--accent); opacity: .75; }
   .bars .base { stroke: var(--line); }
   tr.group td { background: var(--sunk); padding-top: 9px; padding-bottom: 7px; font-size: 12.5px; color: var(--muted); }
@@ -249,7 +246,6 @@
   .tiles .kpi { display: grid; grid-template-columns: 1fr auto; align-items: end; column-gap: 10px; }
   .tiles .kpi .l, .tiles .kpi .s { grid-column: 1 / -1; }
   .agg-sub { color: var(--muted); font-size: 12.5px; }
-  .wildcard { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
   /* history cards */
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 11px 14px; }
   .card .top { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
@@ -257,7 +253,6 @@
   .card .when { color: var(--muted); font-size: 12px; margin-left: auto; }
   .card .line { color: var(--muted); font-size: 13px; margin-top: 4px; }
   .card details { margin-top: 6px; } .card summary { color: var(--muted); font-size: 12.5px; cursor: pointer; }
-  .snap { border-left: 3px solid var(--accent); background: var(--panel); padding: 8px 12px; border-radius: 6px; font-size: 13px; }
   /* sparklines */
   .spark { display: flex; align-items: center; gap: 8px; }
   .spark svg { display: block; overflow: visible; }
@@ -302,7 +297,7 @@
   .ev .rail i.warn { border-color: var(--warn); } .ev .rail i.bad { border-color: var(--bad); background: var(--bad-soft); } .ev .rail i.end { border-color: var(--ok); background: var(--ok-soft); }
   .ev .rail u { width: 2px; flex: 1; background: var(--line); min-height: 14px; }
   .ev .c { padding-bottom: 14px; } .ev .c small { display: block; color: var(--muted); }
-  .bars { display: grid; gap: 6px; }
+  div.bars { display: grid; gap: 6px; }
   .hbar { display: grid; grid-template-columns: 150px 1fr 60px; gap: 10px; align-items: center; font-size: 13px; }
   .hbar .track { height: 10px; border-radius: 5px; background: var(--sunk); overflow: hidden; display: flex; }
   .hbar .v { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -442,7 +437,9 @@ const color = (status) => `var(--${{ connected: "ok", behind: "warn", missing: "
 
 /** Copies `text`, and says so on the button for a moment. */
 function copyButton(text, label = "Copy") {
-  const b = el("button", { class: "btn", type: "button", onclick: async () => {
+  const b = el("button", { class: "btn", type: "button", onclick: async (ev) => {
+    // Inside a row that opens on a click, copying does not open it.
+    ev.stopPropagation();
     try { await navigator.clipboard.writeText(text); b.textContent = "Copied"; } catch { b.textContent = "Select and copy"; }
     setTimeout(() => (b.textContent = label), 1500);
   } }, label);
@@ -2117,10 +2114,12 @@ async function follow() {
   const run = searching; let r;
   try { r = await get(`/api/events?${q}`); } catch { return; }
   if (run !== searching) return;
-  tail = r.last;
-  if (!r.events.length) return;
-  markFresh(r.events);
-  found.unshift(...r.events.reverse());
+  tail = Math.max(tail, r.last);
+  const known = new Set(found.map((f) => f.position));
+  const fresh = r.events.filter((e) => !known.has(e.position));
+  if (!fresh.length) return;
+  markFresh(fresh);
+  found.unshift(...fresh.reverse());
   if (found.length > FOUND_MAX) { found.length = FOUND_MAX; older = found[found.length - 1].position; }
   drawFound();
 }
@@ -2142,9 +2141,6 @@ function dayLabel(ms) {
   return diff === 0 ? `Today · ${date}` : diff === 1 ? `Yesterday · ${date}` : `${d.toLocaleDateString("en-GB", { weekday: "long" })} · ${date}`;
 }
 const timeOfDay = (ms) => { const d = new Date(ms); return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3, "0")}`; };
-function copyButton(text, label = "copy") {
-  return el("button", { class: "copy", type: "button", onclick: (ev) => { ev.stopPropagation(); navigator.clipboard?.writeText(text).then(() => { ev.target.textContent = "copied"; setTimeout(() => (ev.target.textContent = label), 1200); }); } }, label);
-}
 /** The domains and event types the log knows, for the filter's choices. */
 function fillEventChoices() {
   const types = (state?.events ?? []).map((e) => e.type).sort();
@@ -2235,15 +2231,6 @@ function sender(ctx) {
   const who = ctx.senderIdentity;
   const link = el("a", { href: `/explore/commands?sender=${encodeURIComponent(who)}`, title: "Their commands", onclick: (ev) => ev.stopPropagation() }, who.startsWith("process:") ? `⟳ ${who.slice(8)}` : who);
   return el("span", {}, link, ctx.onBehalfOf ? el("span", { class: "faint" }, ` for ${ctx.onBehalfOf}`) : null);
-}
-/** The request context as a short list instead of raw JSON. */
-function contextView(ctx) {
-  if (!ctx) return null;
-  const rows = [["sent by", ctx.senderIdentity], ["on behalf of", ctx.onBehalfOf], ["tenant", ctx.senderTenant], ["account", ctx.senderAccount], ["session", ctx.senderSession],
-    ["correlation", ctx.correlationId], ["caused by", ctx.causationId], ["expected version", ctx.expectedVersion]].filter(([, v]) => v !== undefined && v !== null && v !== "");
-  const attrs = Object.entries(ctx.attributes ?? {});
-  return el("dl", { style: "margin:6px 0" }, rows.map(([k, v]) => [el("dt", {}, k), el("dd", { class: "mono" }, k === "correlation" ? el("a", { href: searchHref(String(v)) }, String(v)) : String(v))]),
-    attrs.map(([k, v]) => [el("dt", {}, k), el("dd", { class: "mono" }, String(v))]));
 }
 
 // ---- the command log: what was asked, by whom, and what came of it ----
@@ -2714,6 +2701,8 @@ function watch() {
     const text = new FormData($("search")).get("text")?.toString().trim() ?? "";
     const known = new Set(found.map((f) => f.position));
     const fresh = (data ?? []).filter((e) => (!text || e.payload.includes(text)) && !known.has(e.position));
+    // The stream moves the tail on too: following after a reconnect starts behind what it showed.
+    if (tail !== null) for (const e of data ?? []) tail = Math.max(tail, e.position);
     markFresh(fresh);
     found.unshift(...fresh.reverse());
     if (found.length > FOUND_MAX) found.length = FOUND_MAX;

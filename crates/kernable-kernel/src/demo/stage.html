@@ -32,11 +32,6 @@
   .logo.dark { display: none; }
   @media (prefers-color-scheme: dark) { .logo.light { display: none; } .logo.dark { display: block; } }
   header .brand span { color: var(--muted); font-weight: 500; }
-  header .scene { color: var(--muted); }
-  .scenes { display: flex; gap: 6px; align-items: center; color: var(--muted); }
-  .scenes button { padding: 3px 8px; min-width: 2em; }
-  .scenes button.on { border-color: var(--accent); color: var(--accent); font-weight: 600; }
-  .scenes .title { margin-left: 4px; }
   .timeline { display: flex; gap: 4px; padding: 8px max(16px, 2vw) 0; overflow-x: auto; }
   .timeline .chapter { flex: 1 1 0; min-width: 4.5rem; border-top: 3px solid var(--line); padding-top: 4px; }
   .timeline .chapter.on { border-top-color: var(--accent); }
@@ -133,7 +128,6 @@
   #flow .packet text { fill: #fff; font: 600 15px ui-monospace, Menlo, monospace; }
   #flow .log rect.slot { fill: var(--event-soft); stroke: var(--event); stroke-width: 1; }
   #flow .log text { font: 13px ui-monospace, Menlo, monospace; fill: var(--event); }
-  #flow .stamp { font: 12px ui-monospace, Menlo, monospace; fill: var(--muted); }
   #flow .band.write { fill: var(--write-soft); } #flow .band.read { fill: var(--read-soft); }
   #flow .band-label { font: 600 13px system-ui, sans-serif; letter-spacing: .12em; }
   #flow .band-label.write { fill: var(--event); } #flow .band-label.read { fill: var(--live); }
@@ -204,7 +198,7 @@
     </label>
     <button id="reset" title="Start the day again on a new, empty store">Reset<kbd>R</kbd></button>
     <button id="full" title="Full screen">Full screen<kbd>F</kbd></button>
-    <a href="/" title="The kernel's own UI: map, connections, history">Kernel UI</a>
+    <a href="/" title="The kernel's own UI: overview, processes, operations, explore">Kernel UI</a>
     <button id="back" title="Back one hop, shown again from what was recorded">Back<kbd>←</kbd></button>
     <button id="play" title="Run on by itself, or stop at every hop">Play<kbd>Space</kbd></button>
     <button id="next" class="primary" title="The next hop; Shift → finishes the step">Next step<kbd>→</kbd></button>
@@ -251,7 +245,7 @@
 const $ = (id) => document.getElementById(id);
 const NS = "http://www.w3.org/2000/svg";
 const HOP_MS = 950;
-let demo = null, code = null, shown = 0, generation = null, animating = false;
+let demo = null, shown = 0, generation = null, animating = false;
 
 function el(tag, attrs = {}, ...children) {
   const e = tag.startsWith("svg:") ? document.createElementNS(NS, tag.slice(4)) : document.createElement(tag);
@@ -1345,6 +1339,8 @@ async function commit(s, t, step) {
 // The payments reactor's part after a payment: it credits the receiver, or the kernel parks the
 // event for it.
 async function react(ev, t) {
+  const paid = t.sends.find((s) => s.data && s.data.to);
+  const receiver = paid ? paid.data.to : "the receiver";
   light(["reactor"]);
   caption(`The payments reactor gets <b>Paid</b> too, and reacts with a command of its own.`);
   await move("store-reactor", "Paid", "event");
@@ -1366,7 +1362,7 @@ async function react(ev, t) {
     await move("store-model", "Credited", "event");
   } else {
     badge([{ node: "reactor", text: "failed: parked", kind: "bad" }]);
-    caption(`The reactor fails. The kernel <b>parks</b> event #${esc(ev.position)} for it and moves the reactor on; everything else, the read model too, goes on. a2 is not credited yet.`);
+    caption(`The reactor fails. The kernel <b>parks</b> event #${esc(ev.position)} for it and moves the reactor on; everything else, the read model too, goes on. <b>${esc(receiver)}</b> is not credited yet.`);
     await sleep(2400);
   }
 }

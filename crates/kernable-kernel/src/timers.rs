@@ -31,12 +31,12 @@ use kernable_store::Error as StoreError;
 use tonic::{Request, Status};
 
 use crate::{
-    Kernel, MAX_REQUEST_AGE_MS,
+    Kernel,
     config::{self, Limits},
     fenced, internal, now_ms, protocol, queue, sealed,
 };
 
-const DAY_MS: i64 = 86_400_000;
+pub(crate) const DAY_MS: i64 = 86_400_000;
 
 /// How long a due command waits to be looked at again when it cannot be checked now.
 const RETRY_MS: i64 = 1_000;
@@ -278,17 +278,13 @@ pub(crate) async fn cancel(
     protocol(req.protocol)?;
     kernel.owns(&req.tenant_id)?;
     let _running = kernel.request()?;
-    let sig = req
-        .client_sig
-        .as_ref()
-        .ok_or_else(|| Status::unauthenticated("cancel is not signed"))?;
-    signing::verify(sig, &signing::cancel_message(&req))
-        .map_err(|_| Status::unauthenticated("invalid cancel signature"))?;
-    kernel.present(&metadata, &sig.key_id)?;
-    let _slot = kernel.request_slot(&sig.key_id)?;
-    if (now_ms() - req.issued_at).abs() > MAX_REQUEST_AGE_MS {
-        return Err(Status::unauthenticated("cancel expired; check the clock"));
-    }
+    let (sig, _slot) = kernel.signed(
+        &metadata,
+        req.client_sig.as_ref(),
+        &signing::cancel_message(&req),
+        req.issued_at,
+        "cancel",
+    )?;
     let id = req.command_id.clone();
     let answer = |outcome| CancelResult {
         command_id: id.clone(),
@@ -312,6 +308,12 @@ pub(crate) async fn cancel(
         return Ok(refused("not_found", "no command with this ID"));
     };
     let command = stored.command;
+    // A case's timers are the engine's: only it withdraws them, or the case would wait forever.
+    if command.domain == crate::process_engine::DOMAIN {
+        return Err(Status::permission_denied(
+            "a process case's scheduled commands are the engine's: it cancels them itself",
+        ));
+    }
     let name = config::qualified(&command.domain, &command.command_type);
     let permissions = kernel.permissions();
     if !config::allowed(&permissions.submit, &sig.key_id, &name) {

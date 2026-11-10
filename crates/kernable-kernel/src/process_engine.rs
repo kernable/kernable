@@ -1,4 +1,4 @@
-//! The process engine (design/processes.md, stage 2): runs the cases of the registered process
+//! The process engine (design/processes.md): runs the cases of the registered process
 //! models on the kernel that serves their tenants.
 //!
 //! **Cases are aggregates in the log.** A case is the aggregate `<process>` (the qualified
@@ -17,7 +17,8 @@
 //! commands it sent ([`Kernel::complete`] hands them over), its scheduled commands as they fall
 //! due (`timers.rs`), query answers and operators' resolutions come through [`Engine`]'s channel.
 //! Handling an event again after a crash is harmless: each case records the positions of the
-//! events that moved it, and the position is saved before a case ends.
+//! events that moved it, and an event the newest case of its key already saw starts no case
+//! again, even when that case has ended since.
 //!
 //! **Exactly once:** every command, scheduled command and query of a case has an ID fixed by
 //! the case and the version of the `StepReached` event of its step, so whatever runs again sends
@@ -34,7 +35,7 @@ use std::{
 use kernable_core::{
     proto::{
         AggregateIndex, Attribute, Command, CommandResult, Event, NewEvent, QueryRequest, Rejected,
-        RequestContext, When, command_result::Outcome, middleware_call, query_result,
+        RequestContext, command_result::Outcome, query_result,
     },
     signing,
 };
@@ -910,18 +911,43 @@ impl<'a> State<'a> {
         }
     }
 
-    /// The next free case ID of `key`.
-    fn case_id(&self, tenant: &str, process: &str, key: &str) -> Result<String, StoreError> {
+    /// The next free case ID of `key` for a case the event at `position` starts; `None` if the
+    /// newest case of the key ended and already saw that event: the event is handled again after
+    /// a crash (the engine's position is saved now and then), and started it, or came while it
+    /// ran and so started nothing.
+    fn case_id(
+        &mut self,
+        tenant: &str,
+        process: &str,
+        key: &str,
+        position: u64,
+    ) -> Result<Option<String>, StoreError> {
+        let mut newest: Option<(String, Vec<Event>)> = None;
         for n in 1.. {
             let id = format!("{key}#{n}");
-            if self
+            let events = self
                 .kernel
                 .store
-                .read_stream_after(tenant, DOMAIN, process, &id, 0)?
-                .is_empty()
-            {
-                return Ok(id);
+                .read_stream_after(tenant, DOMAIN, process, &id, 0)?;
+            if !events.is_empty() {
+                newest = Some((id, events));
+                continue;
             }
+            if let Some((before, events)) = newest {
+                let stream = StreamId {
+                    tenant_id: tenant.to_owned(),
+                    domain: DOMAIN.to_owned(),
+                    aggregate_type: process.to_owned(),
+                    aggregate_id: before,
+                };
+                if self
+                    .replay(&stream, &events)
+                    .is_some_and(|c| c.ended && c.seen >= position)
+                {
+                    return Ok(None);
+                }
+            }
+            return Ok(Some(id));
         }
         unreachable!("some sequence is free")
     }
@@ -935,8 +961,12 @@ impl<'a> State<'a> {
         e: &Event,
         payload: &Value,
     ) {
-        let id = match self.case_id(&e.tenant_id, process, &key) {
-            Ok(id) => id,
+        let id = match self.case_id(&e.tenant_id, process, &key, e.global_position) {
+            Ok(Some(id)) => id,
+            Ok(None) => {
+                tracing::debug!(%process, %key, position = e.global_position, "the event was handled before a restart: no case starts again");
+                return;
+            }
             Err(err) => {
                 tracing::error!(error = %err, "reading the cases of a key failed");
                 return;
@@ -1154,7 +1184,13 @@ impl<'a> State<'a> {
                         return;
                     }
                     if let Some(ms) = timeout_ms {
-                        let at = now_ms() + ms as i64;
+                        let at = match self.due(Some(ms), None) {
+                            Ok(at) => at,
+                            Err(why) => {
+                                self.raise(case, batch, &step, "no_time", &why);
+                                return;
+                            }
+                        };
                         case.timer_at = Some(at);
                         batch.push(
                             "TimerSet",
@@ -1166,21 +1202,23 @@ impl<'a> State<'a> {
                 }
                 Kind::Timer { after_ms, at, .. } => {
                     let due = match (after_ms, at) {
-                        (Some(ms), _) => Some(now_ms() + ms as i64),
+                        (Some(ms), _) => self.due(Some(ms), None),
                         (None, Some(r)) => {
-                            from_case(&Source::Ref(r), &case.data).and_then(|v| v.as_i64())
+                            match from_case(&Source::Ref(r), &case.data).and_then(|v| v.as_i64()) {
+                                Some(at) => self.due(None, Some(at)),
+                                None => Err("the timer's time is not a number of ms in the \
+                                             case's data"
+                                    .into()),
+                            }
                         }
-                        (None, None) => None,
+                        (None, None) => Err("the timer has no time".into()),
                     };
-                    let Some(due) = due else {
-                        self.raise(
-                            case,
-                            batch,
-                            &step,
-                            "no_time",
-                            "the timer's time is not a number of ms in the case's data",
-                        );
-                        return;
+                    let due = match due {
+                        Ok(due) => due,
+                        Err(why) => {
+                            self.raise(case, batch, &step, "no_time", &why);
+                            return;
+                        }
                     };
                     case.timer_at = Some(due);
                     batch.push(
@@ -1196,13 +1234,37 @@ impl<'a> State<'a> {
                 }
             }
         }
+        // The step the case stands at, not the next one it was about to reach.
+        let at = case.at.as_ref().map_or(step, |(s, _)| s.clone());
         self.raise(
             case,
             batch,
-            &step,
+            &at,
             "loop",
             &format!("{MAX_STEPS} steps in one go: the decisions loop"),
         );
+    }
+
+    /// When a timer falls due: `after` ms from now, or `at` (ms since epoch). Refused like a
+    /// scheduled command of a client: before the epoch, or beyond `--schedule-max-days`.
+    fn due(&self, after: Option<u64>, at: Option<i64>) -> Result<i64, String> {
+        let now = now_ms();
+        let at = match (after, at) {
+            (Some(ms), _) => i64::try_from(ms).ok().and_then(|ms| now.checked_add(ms)),
+            (None, at) => at,
+        }
+        .filter(|at| *at >= 0)
+        .ok_or("the timer's time is out of range")?;
+        let days = self.kernel.config().limits.schedule_max_days;
+        let limit = i64::try_from(days)
+            .unwrap_or(i64::MAX)
+            .saturating_mul(crate::timers::DAY_MS);
+        if at > now.saturating_add(limit) {
+            return Err(format!(
+                "the timer is more than {days} days ahead (--schedule-max-days)"
+            ));
+        }
+        Ok(at)
     }
 
     /// A kept event of `event_type` whose key, by `key`, is the case's; the oldest.
@@ -1250,10 +1312,6 @@ impl<'a> State<'a> {
         if batch.events.is_empty() {
             self.cases.insert(reference.clone(), case);
             return;
-        }
-        // A case that ends: the event that started it is never handled again.
-        if case.ended && self.saved < case.started_at {
-            self.save_position(true);
         }
         if let Err(e) = self.write(&case, &batch, under) {
             tracing::error!(case = %case.id, process = %case.process, error = %e, "writing a case failed; reading it again");
@@ -2013,7 +2071,7 @@ fn kind_name(kind: &Kind) -> &'static str {
 /// process belongs to no tenant (its cases do), as a global unique key has none. A listener
 /// granted `listen` for `process.ProcessRegistered` gets it like any event; it is written on
 /// the control partition only.
-pub(crate) fn registry_stream(name: &str) -> StreamId {
+fn registry_stream(name: &str) -> StreamId {
     StreamId {
         tenant_id: String::new(),
         domain: DOMAIN.into(),
@@ -2155,25 +2213,9 @@ async fn submit(
             .store
             .command(&cmd.command_id)
             .map_err(crate::internal)?;
-        if stored.is_none()
-            && let Err(reason) = kernel.queue.room(&cmd, &kernel.config().limits)
-        {
-            kernel.metrics.limited(reason);
-            return Err(Status::resource_exhausted(format!(
-                "the command queue is full ({reason})"
-            )));
-        }
         if stored.is_none() {
-            let request = middleware_call::Request::Command(cmd.clone());
-            if let Some(reason) = kernel
-                .check(&name, &cmd.command_id, When::Before, request, &[], None)
-                .await?
-            {
-                let result = CommandResult {
-                    command_id: cmd.command_id.clone(),
-                    outcome: Some(Outcome::Rejected(reason)),
-                };
-                kernel.observe(&cmd, &result);
+            kernel.queue_room(&cmd)?;
+            if let Some(result) = kernel.check_before(&name, &cmd, &[]).await? {
                 return Ok(Some(result));
             }
         }

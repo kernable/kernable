@@ -142,7 +142,7 @@ pub(crate) fn render(kernel: &Kernel) -> String {
     metric(
         "kernable_refused_total",
         "counter",
-        "Requests and connections a limit refused since the kernel started, by reason: connections, requests_per_key, subscriptions_per_key, listeners_per_key, queued_commands, queued_per_aggregate, queued_bytes, cache_bytes, handshake_timeout, too_large, http_host, http_connections.",
+        "Requests and connections a limit refused since the kernel started, by reason: connections, requests_per_key, rate, quota_storage, subscriptions_per_key, listeners_per_key, queued_commands, queued_per_aggregate, queued_bytes, cache_bytes, handshake_timeout, too_large, http_host, http_connections.",
         &refused,
     );
     metric(

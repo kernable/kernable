@@ -73,7 +73,7 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "--tls-client-ca",
-        "KERNABLE_TLS_CLIENT_CA",
+        "KERNABLE_KERNEL_TLS_CLIENT_CA",
         "",
         "Mutual TLS: the CA certificate (PEM) that must have signed every client's certificate. A client without one is refused.",
     ),
@@ -314,7 +314,7 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
 ];
 
 /// The largest `--max-data-bytes`: a file travels whole in one message, also to a standby.
-pub const MAX_DATA_BYTES: usize = 128 << 20;
+const MAX_DATA_BYTES: usize = 128 << 20;
 
 /// Kernel configuration, from the flags of `kernable start` (see [`FLAGS`]).
 #[derive(Debug, Clone)]
@@ -348,11 +348,11 @@ pub struct Config {
     pub replication: Replication,
     /// `--key-command`: the program and arguments that unwrap a key file; empty: none.
     pub key_command: Vec<String>,
-    /// `--partition`: one partition of several (S2).
+    /// `--partition`: one partition of several.
     pub partition: Option<PartitionConfig>,
 }
 
-/// A kernel of one partition (S2).
+/// A kernel of one partition.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PartitionConfig {
     /// Its name in the partition map.
@@ -559,6 +559,9 @@ impl Config {
             }),
         };
         let pair = match get("--witness") {
+            None if get("--advertise").is_some() => {
+                return Err("--advertise is for a kernel of a pair: give --witness too".into());
+            }
             None => None,
             Some(_) if follow.is_some() => {
                 return Err("--witness decides the roles: drop --follow".into());
@@ -677,13 +680,23 @@ impl Config {
                 .map(str::to_owned)
                 .collect(),
             partition: match get("--partition") {
+                None if get("--control").is_some() => {
+                    return Err("--control is for a partition: give --partition too".into());
+                }
                 None => None,
                 Some(name) if !valid_domain(&name) => {
                     return Err(format!("--partition: {name} is not a valid name").into());
                 }
                 Some(name) => Some(PartitionConfig {
                     name,
-                    control: get("--control"),
+                    control: match get("--control") {
+                        Some(c) if !c.split(',').any(|a| !a.trim().is_empty()) => {
+                            return Err("--control: give the control partition's addresses, \
+                                        comma-separated"
+                                .into());
+                        }
+                        c => c,
+                    },
                     node_key: get("--node-key").expect("has a default").into(),
                 }),
             },
@@ -697,7 +710,7 @@ fn root_key_id(root: &str) -> Result<String, Error> {
 }
 
 /// A key given to `flag` as a key ID or as the path of a `.pub` file.
-fn key_id(flag: &str, key: &str) -> Result<String, Error> {
+pub fn key_id(flag: &str, key: &str) -> Result<String, Error> {
     let id = if kernable_core::signing::verifying_key_from_hex(key).is_ok() {
         key.to_owned()
     } else {
@@ -722,10 +735,17 @@ pub fn utc_ms(s: &str) -> Option<i64> {
         return None;
     };
     let sec = sec.first().copied().unwrap_or(0);
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let days_in_month = match m {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
     // Four-digit years only: anything else is a typo, and would overflow below.
     let valid = (0..=9999).contains(y)
         && (1..=12).contains(m)
-        && (1..=31).contains(day)
+        && (1..=days_in_month).contains(day)
         && (0..24).contains(h)
         && (0..60).contains(min)
         && (0..60).contains(&sec);
@@ -839,7 +859,7 @@ pub fn valid_pattern(pattern: &str) -> bool {
 
 /// The default snapshot store: SQLite next to the event store `store`, or memory for a memory
 /// store.
-pub fn snapshots_next_to(store: &str) -> String {
+fn snapshots_next_to(store: &str) -> String {
     let path = match kernable_store::backend(store) {
         ("memory", _) => return "memory:".into(),
         (_, path) => std::path::Path::new(path),
@@ -887,7 +907,7 @@ impl Config {
         if let Some(key) = cached {
             return Ok(key);
         }
-        let child = std::process::Command::new(program)
+        let mut child = std::process::Command::new(program)
             .args(args)
             .arg(path)
             .stdin(std::process::Stdio::null())
@@ -895,24 +915,45 @@ impl Config {
             .stderr(std::process::Stdio::piped())
             .spawn()
             .map_err(|e| std::io::Error::other(format!("--key-command {program}: {e}")))?;
-        let pid = child.id();
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(child.wait_with_output());
-        });
-        let out = match rx.recv_timeout(KEY_COMMAND_TIMEOUT) {
-            Ok(out) => out?,
-            Err(_) => {
-                #[cfg(unix)]
-                // SAFETY: kill(2) on the command's own pid, which has not been waited for yet.
-                unsafe {
-                    libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        let timed_out = || {
+            std::io::Error::other(format!(
+                "--key-command {program} did not answer within {KEY_COMMAND_TIMEOUT:?} for {}",
+                path.display()
+            ))
+        };
+        // Its output read beside it, so a full pipe cannot block it.
+        let read = |pipe: Option<Box<dyn std::io::Read + Send>>| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                if let Some(mut pipe) = pipe {
+                    let _ = pipe.read_to_end(&mut bytes);
                 }
-                return Err(std::io::Error::other(format!(
-                    "--key-command {program} did not answer within {KEY_COMMAND_TIMEOUT:?} for {}",
-                    path.display()
-                )));
+                let _ = tx.send(bytes);
+            });
+            rx
+        };
+        let stdout = read(child.stdout.take().map(|p| Box::new(p) as _));
+        let stderr = read(child.stderr.take().map(|p| Box::new(p) as _));
+        let deadline = std::time::Instant::now() + KEY_COMMAND_TIMEOUT;
+        let status = loop {
+            if let Some(status) = child.try_wait()? {
+                break status;
             }
+            if std::time::Instant::now() >= deadline {
+                // Through the handle: it kills only the command, never a process that took
+                // its pid after it ended.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(timed_out());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        let left = || deadline.saturating_duration_since(std::time::Instant::now());
+        let out = std::process::Output {
+            status,
+            stdout: stdout.recv_timeout(left()).map_err(|_| timed_out())?,
+            stderr: stderr.recv_timeout(left()).unwrap_or_default(),
         };
         let text = zeroize::Zeroizing::new(String::from_utf8_lossy(&out.stdout).into_owned());
         if !out.status.success() {
@@ -1091,6 +1132,19 @@ mod tests {
         let normal = Config::from_args(&["--root", &root, "--durability", "normal"], |_| None);
         assert_eq!(normal.unwrap().durability, Durability::Normal);
         assert!(Config::from_args(&["--root", &root, "--durability", "fast"], |_| None).is_err());
+        // Flags that would do nothing are refused, not ignored.
+        let refused = |args: &[&str]| {
+            let mut all = vec!["--root", root.as_str()];
+            all.extend(args);
+            Config::from_args(&all, |_| None).unwrap_err().to_string()
+        };
+        assert!(refused(&["--control", "127.0.0.1:1"]).contains("give --partition too"));
+        assert!(refused(&["--advertise", "127.0.0.1:1"]).contains("give --witness too"));
+        assert!(refused(&["--partition", "p2", "--control", " , "]).contains("--control"));
+        let tls = Config::from_args(&["--root", &root], |v| {
+            (v == "KERNABLE_KERNEL_TLS_CLIENT_CA").then(|| "ca.pem".to_owned())
+        });
+        assert!(tls.unwrap_err().to_string().contains("TLS needs"));
     }
 
     #[test]
@@ -1106,6 +1160,8 @@ mod tests {
         assert_eq!(utc_ms("2026-10-27T09:00:00Z"), Some(1_793_091_600_000));
         assert_eq!(utc_ms("2026-10-27T09:00Z"), Some(1_793_091_600_000));
         assert_eq!(utc_ms("2000-02-29T12:30:15Z"), Some(951_827_415_000));
+        assert!(utc_ms("2028-02-29T00:00:00Z").is_some());
+        assert!(utc_ms("2026-12-31T00:00:00Z").is_some());
         for t in [
             "1970-01-01T00:00:00Z",
             "2000-02-29T12:30:15Z",
@@ -1117,6 +1173,10 @@ mod tests {
         for bad in [
             "2026-10-27 09:00:00",
             "2026-13-01T00:00:00Z",
+            "2026-02-31T00:00:00Z",
+            "2026-02-29T00:00:00Z",
+            "1900-02-29T00:00:00Z",
+            "2026-04-31T00:00:00Z",
             "2026-10-27T09:00:00+01:00",
             "x",
         ] {

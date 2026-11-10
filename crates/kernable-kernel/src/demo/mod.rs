@@ -4,8 +4,8 @@
 //! temporary directory, and the parts of the bank ([`bank`]) the scene needs in this process
 //! with the Rust SDK: workers, read models, reactors, a middleware and a client. Its UI is the
 //! kernel's own, with the Stage (`/demo`) on top; every other path goes to the kernel's UI.
-//! Reset, and a change of scene, stop both and start them again on a new store; nothing of the
-//! demo outlives the process, and it never touches an existing store.
+//! Reset stops both and starts them again on a new store; nothing of the demo outlives the
+//! process, and it never touches an existing store.
 //!
 //! The Stage asks with `POST /api/demo/next` and `POST /api/demo/reset`, each with an
 //! `x-kernable-demo` header (a page elsewhere cannot
@@ -32,14 +32,17 @@ use tokio::{
     net::TcpStream,
 };
 
-use crate::{BoxError, http::reply};
+use crate::{
+    BoxError,
+    http::{Answer, reply},
+};
 
 const STAGE: &str = include_str!("stage.html");
 const UI: &str = include_str!("../ui.html");
 
 /// How long a new kernel and the bank may take to come up.
 const START_TIMEOUT: Duration = Duration::from_secs(30);
-/// How long the kernel's UI may take to answer a request passed on to it.
+/// How long the kernel's UI may take to answer a request (to accept one passed on to it).
 const PROXY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What the bank's handlers saw of each command, by command ID: when it first reached the
@@ -183,8 +186,6 @@ impl Drop for Dir {
 struct State {
     /// Counts the runs; the Stage starts over when it changes.
     generation: u64,
-    /// The scene shown, an index into [`SCENES`].
-    scene: usize,
     run: Option<Arc<Run>>,
     /// What runs now (a step or a reset), if anything.
     busy: Option<&'static str>,
@@ -241,7 +242,7 @@ pub async fn run(ui: &str) -> Result<(), BoxError> {
 }
 
 impl Demo {
-    async fn respond(self: &Arc<Self>, request: &[u8]) -> Vec<u8> {
+    async fn respond(self: &Arc<Self>, request: &[u8]) -> Answer {
         let text = String::from_utf8_lossy(request);
         let mut words = text.split_whitespace();
         let (method, target) = (words.next().unwrap_or(""), words.next().unwrap_or(""));
@@ -250,7 +251,7 @@ impl Demo {
             .lines()
             .take_while(|line| !line.is_empty())
             .any(|line| line.to_ascii_lowercase().starts_with("x-kernable-demo:"));
-        match (method, path) {
+        let bytes = match (method, path) {
             ("GET", "/") => reply("200 OK", "text/html; charset=utf-8", UI.as_bytes()),
             ("GET", "/demo") => reply("200 OK", "text/html; charset=utf-8", STAGE.as_bytes()),
             ("GET", "/api/demo") => json_reply(&self.view()),
@@ -260,21 +261,22 @@ impl Demo {
                 b"the demo takes requests from its Stage only\n",
             ),
             ("POST", "/api/demo/next") => self.next(),
-            ("POST", "/api/demo/reset") => self.reset(None),
+            ("POST", "/api/demo/reset") => self.reset(),
             ("GET", _) => {
                 let ui = lock(&self.state).run.as_ref().map(|r| r.ui.clone());
                 match ui {
-                    Some(ui) => proxy(&ui, request).await,
+                    Some(ui) => return passed_on(ui, request.to_vec()),
                     None => reply("503 Service Unavailable", "text/plain", b"resetting\n"),
                 }
             }
             _ => reply("404 Not Found", "text/plain", b"not found\n"),
-        }
+        };
+        bytes.into()
     }
 
     fn view(&self) -> Value {
         let state = lock(&self.state);
-        let scene = &SCENES[state.scene];
+        let scene = &SCENES[0];
         let rows = match &state.run {
             Some(r) => json!({
                 "accounts": r.rows.view("accounts"),
@@ -354,7 +356,6 @@ impl Demo {
                 "intents": intents(scene.intents),
                 // The command and query types a middleware checks before the kernel acts.
                 "checks": if scene.parts.rbac { vec!["Withdraw", "GetAccount"] } else { Vec::new() },
-                "keys": scene.parts.customers,
                 "facts": scene.parts.payments,
                 "chapters": chapters,
                 "steps": steps,
@@ -375,11 +376,11 @@ impl Demo {
             if state.busy.is_some() {
                 return conflict("a step is running");
             }
-            if index >= SCENES[state.scene].steps.len() {
+            if index >= SCENES[0].steps.len() {
                 return conflict("the scene is over: reset to start again");
             }
             state.busy = Some("step");
-            (run, &SCENES[state.scene], index, state.generation)
+            (run, &SCENES[0], index, state.generation)
         };
         let demo = Arc::clone(self);
         tokio::spawn(async move {
@@ -402,18 +403,12 @@ impl Demo {
         json_reply(&json!({ "step": index }))
     }
 
-    /// Replaces the kernel and the bank with new ones on a new store, for `scene` if given.
-    fn reset(self: &Arc<Self>, scene: Option<usize>) -> Vec<u8> {
+    /// Replaces the kernel and the bank with new ones on a new store.
+    fn reset(self: &Arc<Self>) -> Vec<u8> {
         let (generation, scene) = {
             let mut state = lock(&self.state);
             if state.busy == Some("reset") {
                 return conflict("already resetting");
-            }
-            if let Some(scene) = scene {
-                if scene >= SCENES.len() {
-                    return conflict("no such scene");
-                }
-                state.scene = scene;
             }
             state.generation += 1;
             state.busy = Some("reset");
@@ -421,7 +416,7 @@ impl Demo {
             state.error = None;
             // The old run stops here, or once a step still using it ends.
             state.run = None;
-            (state.generation, &SCENES[state.scene])
+            (state.generation, &SCENES[0])
         };
         let demo = Arc::clone(self);
         tokio::spawn(async move {
@@ -662,7 +657,35 @@ fn intents(intents: scenes::Intents) -> Value {
     )
 }
 
-/// Passes a request on to the kernel's UI and returns its answer.
+/// Passes a request on to the kernel's UI, its answer streamed back as it comes: `/api/watch`
+/// never ends.
+fn passed_on(ui: String, request: Vec<u8>) -> Answer {
+    Answer::Stream(Box::new(move |mut conn| {
+        Box::pin(async move {
+            let connected = async {
+                let mut upstream = TcpStream::connect(&ui).await?;
+                upstream.write_all(&request).await?;
+                Ok::<_, std::io::Error>(upstream)
+            };
+            match tokio::time::timeout(PROXY_TIMEOUT, connected).await {
+                Ok(Ok(mut upstream)) => {
+                    // Until either side closes.
+                    let _ = tokio::io::copy(&mut upstream, &mut conn).await;
+                }
+                _ => {
+                    let failed = reply(
+                        "502 Bad Gateway",
+                        "text/plain",
+                        b"the kernel's UI did not answer\n",
+                    );
+                    let _ = conn.write_all(&failed).await;
+                }
+            }
+        })
+    }))
+}
+
+/// Passes a request on to the kernel's UI and returns its whole answer.
 async fn proxy(addr: &str, request: &[u8]) -> Vec<u8> {
     let forward = async {
         let mut conn = TcpStream::connect(addr).await?;

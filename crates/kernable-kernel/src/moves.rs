@@ -101,6 +101,10 @@ impl Kernel {
             return Err(Status::unauthenticated("request expired; check the clock"));
         }
         self.present(request.metadata(), &sig.key_id)?;
+        // Any node key granted `replicate` may act for any partition: a grant ties a key to no
+        // partition. Acceptable because such a key is already trusted with everything (it may
+        // follow any kernel of the cluster and read every record), and the move itself must be
+        // one the signed partition map lists, from and to the partitions it names.
         if !config::allowed(&self.permissions().replicate, &sig.key_id, "*") {
             return Err(Status::permission_denied(
                 "only a partition's node key (granted replicate) may move tenants",
@@ -679,7 +683,8 @@ pub(crate) async fn follow_moves(kernel: &Arc<Kernel>) {
             }
         }
         if cleaned != Some(map.epoch) {
-            cleaned = Some(map.epoch);
+            // Noted as cleaned once every tenant's data is gone; a failure tries again.
+            let mut all = true;
             let gone: HashSet<&str> = map
                 .moved
                 .iter()
@@ -713,12 +718,17 @@ pub(crate) async fn follow_moves(kernel: &Arc<Kernel>) {
                         tracing::warn!(%tenant, streams, values, files, "dropped the keys, vault values and files of a tenant that moved away");
                     }
                     Ok(Err(e)) => {
+                        all = false;
                         tracing::error!(%tenant, error = %e, "deleting a moved tenant's data failed")
                     }
                     Err(e) => {
+                        all = false;
                         tracing::error!(%tenant, error = %e, "deleting a moved tenant's data failed")
                     }
                 }
+            }
+            if all {
+                cleaned = Some(map.epoch);
             }
         }
     }

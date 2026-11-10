@@ -180,8 +180,8 @@ impl MembershipService for Api {
 
 /// Takes a signed membership into effect: its signer must be granted `manage` for the service,
 /// and it must be newer than the applied one (an equal one changes nothing). For `Apply` after
-/// its age was checked, and for the memberships a partition takes from the control partition
-/// (S2), which are older.
+/// its age was checked, and for the memberships a partition takes from the control partition,
+/// which are older.
 pub(crate) fn take(kernel: &Arc<Kernel>, m: Membership, sig: Signature) -> Result<(), Status> {
     validate(&m)?;
     if !config::allowed(&kernel.permissions().manage, &sig.key_id, &m.service) {

@@ -1,5 +1,6 @@
 //! Replication, the primary's side (design/replication.md): the standby's stream, and the
-//! wait that keeps every write from being told before the standby holds it (P1).
+//! wait that keeps every write from being told before the standby holds it ("When a write
+//! counts").
 //!
 //! With `--replication sync`, [`crate::Kernel::sync`] waits in [`Primary::wait`] until the
 //! standby has acknowledged every record written so far, before the `durable` position moves
@@ -153,12 +154,12 @@ impl Primary {
         primary
     }
 
-    /// Whether writes are told without a standby until one catches up.
     /// A primary without a witness, whose switchover the operator asks for.
     pub(crate) fn is_fixed(&self) -> bool {
         self.fixed
     }
 
+    /// Whether writes are told without a standby until one catches up.
     pub(crate) fn catching_up(&self) -> bool {
         self.state().catching_up
     }
@@ -167,7 +168,8 @@ impl Primary {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Returns once the standby holds record `seq` (P1). Waits as long as it takes: without a
+    /// Returns once the standby holds record `seq` (design/replication.md, "When a write
+    /// counts"). Waits as long as it takes: without a
     /// standby, nothing written may be told (with a witness, the witness decides otherwise). Blocks the
     /// thread, [`blocking`]: the other tasks move on meanwhile.
     pub(crate) fn wait(&self, seq: u64) {

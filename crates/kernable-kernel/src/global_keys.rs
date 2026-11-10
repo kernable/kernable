@@ -235,6 +235,10 @@ impl Kernel {
             return Err(Status::unauthenticated("request expired; check the clock"));
         }
         self.present(request.metadata(), &sig.key_id)?;
+        // Any node key granted `replicate` may ask for any partition named in the map: a grant
+        // ties a key to no partition. Acceptable because such a key is already trusted with
+        // everything: it may follow any kernel of the cluster as its standby and read every
+        // record. Tying keys to partitions would need partition-scoped grants.
         if !config::allowed(&self.permissions().replicate, &sig.key_id, "*") {
             return Err(Status::permission_denied(
                 "only a partition's node key (granted replicate) may ask",

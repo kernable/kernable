@@ -212,7 +212,7 @@ fn decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Everything the map and the connections view show.
+/// `/api/state`: the kernel, its services and their connections, as the UI's views show them.
 fn state(kernel: &Kernel) -> Result<Value, BoxError> {
     let services: Vec<Value> = kernel
         .store
@@ -1105,8 +1105,6 @@ fn events(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, Bo
     Ok(json!({ "head": head, "events": found, "next": next }))
 }
 
-/// The newest rejected commands: what was sent, by whom, and why it was refused. The rejection
-/// itself carries no time; `receivedAt` is when the kernel accepted the command.
 /// How many erasures `/api/vault` lists.
 const VAULT_ERASURES: usize = 50;
 
@@ -1369,6 +1367,8 @@ fn counts(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, Bo
     }))
 }
 
+/// The newest rejected commands: what was sent, by whom, and why it was refused. The rejection
+/// itself carries no time; `receivedAt` is when the kernel accepted the command.
 fn rejections(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, BoxError> {
     let limit = match params.get("limit").filter(|v| !v.is_empty()) {
         Some(v) => v.parse().map_err(|_| "limit: not a number")?,

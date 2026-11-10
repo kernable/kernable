@@ -156,7 +156,8 @@ impl Tally {
             let events = store.read_all(st.position, want)?;
             let Some(last) = events.last() else { break };
             st.position = last.global_position.min(stop).max(st.position + 1);
-            for e in &events {
+            // Those beyond `stop` are counted by the next call, which reads on from `stop`.
+            for e in events.iter().take_while(|e| e.global_position <= stop) {
                 st.count(
                     &format!("{}.{}", e.domain, e.event_type),
                     e.created_at,

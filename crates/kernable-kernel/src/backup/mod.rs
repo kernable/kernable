@@ -88,7 +88,6 @@ pub struct Status {
     pub record: u64,
     /// When it was last connected to the kernel and had put everything it got into the target:
     /// a backup that is current although nothing new came.
-    #[serde(default)]
     pub current_at: i64,
     pub checked_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -275,11 +274,15 @@ impl Generation {
     }
 
     fn began(&self) -> i64 {
-        self.name
-            .strip_prefix('g')
-            .and_then(|t| t.parse().ok())
-            .unwrap_or(0)
+        began(&self.name)
     }
+}
+
+/// When the generation `name` began, as its name says.
+fn began(name: &str) -> i64 {
+    name.strip_prefix('g')
+        .and_then(|t| t.parse().ok())
+        .unwrap_or(0)
 }
 
 fn generation_name(at: i64) -> String {
@@ -332,9 +335,10 @@ pub fn generations(target: &dyn Target, crypt: &BackupKey) -> Result<Vec<Generat
         let g = gens.last_mut().expect("pushed above");
         if object == "base.done" {
             // One unreadable base leaves its generation unfinished, not the backup unusable.
-            let read = target
-                .get(&name)
-                .and_then(|sealed| crypt.open(&name, &sealed))
+            // A target that cannot be reached is an error, not an unreadable base.
+            let sealed = target.get(&name)?;
+            let read = crypt
+                .open(&name, &sealed)
                 .and_then(|plain| Ok(BackupBase::decode(plain.as_slice())?));
             match read {
                 Ok(base) => g.base = Some(base),
@@ -353,9 +357,33 @@ pub fn generations(target: &dyn Target, crypt: &BackupKey) -> Result<Vec<Generat
     Ok(gens)
 }
 
-/// Runs the follower until it fails to start; reconnects whenever the stream ends.
+/// An error if a generation's base marker exists but cannot be read with `crypt`. The follower
+/// never writes into or deletes from a backup it cannot read: with the wrong key every base
+/// looks unfinished, and pruning would delete the whole backup.
+fn refuse_unreadable(gens: &[Generation], crypt: &BackupKey) -> Result<(), BoxError> {
+    match gens.iter().find(|g| g.unreadable.is_some()) {
+        Some(g) => Err(format!(
+            "generation {} of the backup cannot be read with the backup key {}: {}; \
+             give the key the backup was written with, or move the generation away",
+            g.name,
+            crypt.id(),
+            g.unreadable.as_deref().unwrap_or_default()
+        )
+        .into()),
+        None => Ok(()),
+    }
+}
+
+/// Runs the follower until it fails to start; reconnects whenever the stream ends. Refuses to
+/// start when a generation already in the target cannot be read with its key.
 pub async fn run(follower: Follower) -> Result<(), BoxError> {
     let follower = Arc::new(follower);
+    let (target, crypt) = (Arc::clone(&follower.target), Arc::clone(&follower.crypt));
+    match blocking(move || generations(target.as_ref(), &crypt)).await {
+        Ok(gens) => refuse_unreadable(&gens, &follower.crypt)?,
+        // The target may come back: the follower tries again (and checks again) when it connects.
+        Err(e) => tracing::warn!(error = %e, "listing the backup's generations failed"),
+    }
     let mut fresh = false;
     let mut delay = Duration::from_secs(1);
     let mut turn = 0;
@@ -397,6 +425,7 @@ async fn follow_once(
 ) -> Result<(), BoxError> {
     let (target, crypt) = (Arc::clone(&follower.target), Arc::clone(&follower.crypt));
     let gens = blocking(move || generations(target.as_ref(), &crypt)).await?;
+    refuse_unreadable(&gens, &follower.crypt)?;
     let base_age = Duration::from_millis(follower.base_every.as_millis() as u64);
     let current = gens
         .iter()
@@ -535,8 +564,7 @@ async fn follow_once(
                 flush(&mut segment, &mut first, &head).await?;
                 note(&follower.status_file, |s| s.current_at = now_ms());
                 deadline = Instant::now() + follower.segment_every;
-                let began = generation.strip_prefix('g').and_then(|t| t.parse::<i64>().ok()).unwrap_or(0);
-                if now_ms() - began >= base_age.as_millis() as i64 {
+                if now_ms() - began(&generation) >= base_age.as_millis() as i64 {
                     tracing::info!(generation = %generation, "the generation is old enough: a new one begins");
                     *fresh = true;
                     return Ok(());
@@ -625,7 +653,8 @@ async fn write_base(
 }
 
 /// Deletes the generations beyond `--keep` (oldest first) and unfinished ones before
-/// `current`; logs what fails, and tries again with the next generation.
+/// `current`; deletes nothing while a generation cannot be read with the key. Logs what fails,
+/// and tries again with the next generation.
 async fn prune(follower: &Arc<Follower>, current: &str) {
     let (target, crypt, keep) = (
         Arc::clone(&follower.target),
@@ -635,6 +664,7 @@ async fn prune(follower: &Arc<Follower>, current: &str) {
     let current = current.to_owned();
     let pruned = blocking(move || {
         let gens = generations(target.as_ref(), &crypt)?;
+        refuse_unreadable(&gens, &crypt)?;
         let finished: Vec<&Generation> = gens.iter().filter(|g| g.base.is_some()).collect();
         let mut doomed: HashSet<&str> = finished
             .iter()
@@ -892,6 +922,41 @@ mod tests {
         assert_eq!((s.first, s.last, s.hash), (513, 9000, vec![0xcd; 32]));
         assert!(parse_segment("g1/base.done").is_none());
         assert!(generation_name(5) < generation_name(1_000_000_000_000));
+    }
+
+    #[test]
+    fn a_backup_written_with_another_key_is_refused_not_pruned() {
+        let dir = std::env::temp_dir().join(format!("kn-backup-wrong-key-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let target = target::open(&format!("file:{}", dir.display())).unwrap();
+        let right = BackupKey::new(&[7; 32]);
+        for at in [1_000, 2_000] {
+            let name = format!("{}/base.done", generation_name(at));
+            let base = BackupBase {
+                seq: 0,
+                hash: vec![0; 32],
+                ..Default::default()
+            };
+            target
+                .put(&name, &right.seal(&name, &base.encode_to_vec()).unwrap())
+                .unwrap();
+        }
+        let gens = generations(target.as_ref(), &right).unwrap();
+        assert!(gens.iter().all(|g| g.base.is_some()));
+        refuse_unreadable(&gens, &right).unwrap();
+
+        let wrong = BackupKey::new(&[8; 32]);
+        let gens = generations(target.as_ref(), &wrong).unwrap();
+        assert!(
+            gens.iter()
+                .all(|g| g.base.is_none() && g.unreadable.is_some())
+        );
+        let refused = refuse_unreadable(&gens, &wrong).unwrap_err().to_string();
+        assert!(
+            refused.contains("cannot be read with the backup key"),
+            "{refused}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! The kernel's two plain HTTP endpoints, metrics and the UI: one `GET` per connection, at
-//! most [`CONNECTIONS`] at once, each read within [`READ_TIMEOUT`]. On a loopback address a
+//! most [`CONNECTIONS`] at once, each request's head (at most [`REQUEST_BYTES`]) read within
+//! [`READ_TIMEOUT`]. On a loopback address a
 //! request must name a loopback `Host`, so a web page cannot reach them through DNS rebinding.
 //! An answer is either a whole response or a stream that keeps the connection (the UI's
 //! `/api/watch`); one beyond [`CONNECTIONS`] gets `503`.
@@ -18,6 +19,8 @@ use crate::{BoxError, Kernel};
 const CONNECTIONS: usize = 32;
 /// How long a connection may take to send its request.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// The most a request's line and headers may take; a `GET` has no body.
+const REQUEST_BYTES: usize = 8192;
 
 /// A stream: given the connection, writes to it for as long as it wants.
 pub(crate) type Streamer =
@@ -35,7 +38,7 @@ impl From<Vec<u8>> for Answer {
     }
 }
 
-/// Serves `respond(request)` on `addr` until the listener fails, each on a thread meant for
+/// Serves `respond(request)` on `addr` until the listener cannot be bound, each on a thread meant for
 /// blocking work (a request may read much of the store); `stream(request)` may take a
 /// request over instead.
 pub(crate) async fn serve(
@@ -91,7 +94,16 @@ where
     let permits = Arc::new(Semaphore::new(CONNECTIONS));
     let (limited, respond) = (Arc::new(limited), Arc::new(respond));
     loop {
-        let (mut conn, _) = listener.accept().await?;
+        let mut conn = match listener.accept().await {
+            Ok((conn, _)) => conn,
+            Err(e) => {
+                // Out of file descriptors, or a connection reset while waiting: retry after a
+                // pause instead of ending the server (and with it the kernel) or spinning.
+                tracing::warn!(error = %e, "accepting an HTTP connection failed");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
         let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
             limited("http_connections");
             // Said, not just closed: the browser shows why, and the UI tries again.
@@ -108,12 +120,20 @@ where
         let (limited, respond) = (Arc::clone(&limited), Arc::clone(&respond));
         tokio::spawn(async move {
             let _permit = permit;
-            let mut request = [0u8; 4096];
-            let Ok(Ok(n)) = tokio::time::timeout(READ_TIMEOUT, conn.read(&mut request)).await
-            else {
-                return;
+            let request = match tokio::time::timeout(READ_TIMEOUT, read_head(&mut conn)).await {
+                Ok(Ok(Some(request))) => request,
+                Ok(Ok(None)) => {
+                    let large = reply(
+                        "431 Request Header Fields Too Large",
+                        "text/plain",
+                        b"the request is too large\n",
+                    );
+                    let _ = conn.write_all(&large).await;
+                    return;
+                }
+                _ => return,
             };
-            let request = &request[..n];
+            let request = &request[..];
             let answer = if check_host && !host(request).is_some_and(|h| loopback_host(&h)) {
                 limited("http_host");
                 Answer::Bytes(reply(
@@ -131,6 +151,29 @@ where
                 Answer::Stream(stream) => stream(conn).await,
             }
         });
+    }
+}
+
+/// Reads a request up to the end of its headers (the empty line), or until the connection
+/// ends; `None` if it is longer than [`REQUEST_BYTES`].
+async fn read_head(conn: &mut TcpStream) -> std::io::Result<Option<Vec<u8>>> {
+    let mut request = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 2048];
+    loop {
+        let n = conn.read(&mut chunk).await?;
+        if n == 0 {
+            return Ok(Some(request));
+        }
+        // Where the search for the end may start: the end may straddle two reads.
+        let from = request.len().saturating_sub(3);
+        request.extend_from_slice(&chunk[..n]);
+        if let Some(end) = request[from..].windows(4).position(|w| w == b"\r\n\r\n") {
+            request.truncate(from + end + 4);
+            return Ok(Some(request));
+        }
+        if request.len() > REQUEST_BYTES {
+            return Ok(None);
+        }
     }
 }
 
@@ -175,6 +218,42 @@ pub(crate) fn loopback_host(host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_request_is_read_to_the_end_of_its_headers() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move {
+            let mut c = TcpStream::connect(addr).await.unwrap();
+            // Sent in pieces, the end of the headers split across two writes.
+            for piece in [
+                "GET /api/state HTTP/1.1\r\n",
+                "Host: localhost\r",
+                "\n\r",
+                "\nextra",
+            ] {
+                c.write_all(piece.as_bytes()).await.unwrap();
+                c.flush().await.unwrap();
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            c
+        });
+        let (mut conn, _) = listener.accept().await.unwrap();
+        let head = read_head(&mut conn).await.unwrap().unwrap();
+        assert_eq!(head, b"GET /api/state HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        assert_eq!(host(&head).as_deref(), Some("localhost"));
+        drop(client.await.unwrap());
+
+        let client = tokio::spawn(async move {
+            let mut c = TcpStream::connect(addr).await.unwrap();
+            let long = format!("GET / HTTP/1.1\r\nX: {}\r\n", "a".repeat(REQUEST_BYTES));
+            let _ = c.write_all(long.as_bytes()).await;
+            c
+        });
+        let (mut conn, _) = listener.accept().await.unwrap();
+        assert!(read_head(&mut conn).await.unwrap().is_none(), "too long");
+        drop(client.await.unwrap());
+    }
 
     #[test]
     fn only_loopback_hosts_pass() {

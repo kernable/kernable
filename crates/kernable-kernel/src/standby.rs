@@ -153,7 +153,8 @@ impl Standby {
     }
 
     /// Closes the stores, moves them aside (`<path>.diverged-<ms>`) and opens new, empty ones:
-    /// for a standby whose log diverged, or that needs an image while it holds data (P4).
+    /// for a standby whose log diverged, or that needs an image while it holds data
+    /// (design/replication.md, "The stream").
     async fn start_over(&self, why: &str) -> Result<(), BoxError> {
         self.forget_in_sync();
         // Every handle closes before the files move: SQLite's lock goes with the last one.
@@ -539,7 +540,6 @@ async fn follow_once(
                     .await?;
                 return Ok(());
             }
-            standby.forget_in_sync();
             let seq = take_image(standby, &mut inbound).await?;
             tx.send(say(follow_request::Msg::Ack(FollowAck { seq })))
                 .await?;
@@ -827,7 +827,8 @@ pub(crate) fn apply(stores: &Stores, batch: RecordBatch, keys: &[String]) -> Res
                 &a.erasing,
                 &a.stream,
             );
-            vault.drop_intents(&a.command_id)?;
+            // Each carried out erasure dropped its intent; one that failed keeps it, and the
+            // next start carries it out (recover_vault).
         }
     }
     Ok(last)
@@ -846,7 +847,6 @@ pub(crate) fn marker(url: &str, name: &str) -> Option<PathBuf> {
     }
 }
 
-/// Moves the files of the store at `url` to `<path>.diverged-<at>`; returns where they went.
 /// The copies of the store at `url` moved aside before (`<file>.diverged-<ms>`, also its
 /// `-wal`, `-shm`, `.lock` and `.image`).
 fn set_aside(url: &str) -> Vec<PathBuf> {
@@ -913,6 +913,7 @@ pub fn finish_rewind(url: &str, store: &dyn Store, vault: Option<&Vault>) -> Res
     Ok(())
 }
 
+/// Moves the files of the store at `url` to `<path>.diverged-<at>`; returns where they went.
 fn move_aside(url: &str, at: i64) -> Result<Vec<PathBuf>, BoxError> {
     let path = match url.split_once(':') {
         Some(("memory", _)) => return Ok(Vec::new()),

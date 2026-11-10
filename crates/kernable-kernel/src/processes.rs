@@ -1,5 +1,5 @@
-//! Business processes (design/processes.md), stage 1: registering models and removing
-//! processes. Every version of a model is kept as a signed record in the store (replicated and
+//! Business processes (design/processes.md): registering models and removing processes.
+//! Every version of a model is kept as a signed record in the store (replicated and
 //! exported like memberships), and each process is active or removed: a removed one starts no
 //! new cases (a membership no longer lists it, or `kernable processes remove`); registering it
 //! again makes it active.
@@ -19,7 +19,7 @@ use kernable_core::{
 use tonic::{Request, Response, Status};
 
 use crate::{
-    Api, Kernel, MAX_REQUEST_AGE_MS, config, internal, now_ms,
+    Api, Kernel, config, internal, now_ms,
     process_model::{self, Kind, Model},
     protocol,
 };
@@ -63,7 +63,6 @@ impl Processes {
     }
 
     /// The process `name`, if it was ever registered.
-    #[allow(dead_code)] // the engine (stage 2) and the UI read processes
     pub(crate) fn get(&self, name: &str) -> Option<Entry> {
         self.all
             .read()
@@ -180,7 +179,7 @@ impl Processes {
         Ok(true)
     }
 
-    /// Takes a process record of the control partition (S2): a version this kernel lacks, or a
+    /// Takes a process record of the control partition: a version this kernel lacks, or a
     /// state that differs from the one it holds.
     pub(crate) fn take(&self, kernel: &Kernel, record: ProcessRecord) -> Result<(), Status> {
         let _changing = self.changing();
@@ -363,30 +362,9 @@ fn known_commands(kernel: &Kernel, model: &Model) -> Result<(), Status> {
     Ok(())
 }
 
-/// Checks a signed request's signature, grant header and age.
-fn signed<'a>(
-    kernel: &Kernel,
-    metadata: &tonic::metadata::MetadataMap,
-    sig: Option<&'a Signature>,
-    message: &[u8],
-    issued_at: i64,
-    what: &str,
-) -> Result<&'a Signature, Status> {
-    let sig = sig.ok_or_else(|| Status::unauthenticated(format!("the {what} is not signed")))?;
-    signing::verify(sig, message)
-        .map_err(|_| Status::unauthenticated(format!("invalid {what} signature")))?;
-    kernel.present(metadata, &sig.key_id)?;
-    if (now_ms() - issued_at).abs() > MAX_REQUEST_AGE_MS {
-        return Err(Status::unauthenticated(format!(
-            "the {what} expired; check the clock"
-        )));
-    }
-    Ok(sig)
-}
-
 /// The registration of `model` (checked, its signer authorized) by `sig`: its version and
 /// whether it is new.
-pub(crate) fn register(
+fn register(
     kernel: &Arc<Kernel>,
     json: &[u8],
     issued_at: i64,
@@ -418,7 +396,8 @@ pub(crate) fn register(
                 new: false,
             }),
             None => Err(Status::failed_precondition(format!(
-                "process {}: register process models on the control partition; this partition                  takes them from there",
+                "process {}: register process models on the control partition; this partition \
+                 takes them from there",
                 model.name
             ))),
         };
@@ -448,8 +427,7 @@ impl ProcessService for Api {
         let req = request.into_inner();
         protocol(req.protocol)?;
         let _running = kernel.request()?;
-        let sig = signed(
-            kernel,
+        let (sig, _slot) = kernel.signed(
             &metadata,
             req.sig.as_ref(),
             &signing::process_message(&req.model, req.issued_at),
@@ -468,8 +446,7 @@ impl ProcessService for Api {
         let req = request.into_inner();
         protocol(req.protocol)?;
         let _running = kernel.request()?;
-        let sig = signed(
-            kernel,
+        let (sig, _slot) = kernel.signed(
             &metadata,
             req.sig.as_ref(),
             &signing::process_remove_message(&req.name, req.issued_at),
@@ -508,8 +485,7 @@ impl ProcessService for Api {
         let req = request.into_inner();
         protocol(req.protocol)?;
         let _running = kernel.request()?;
-        let sig = signed(
-            kernel,
+        let (sig, _slot) = kernel.signed(
             &metadata,
             req.sig.as_ref(),
             &signing::process_act_message(&req.name, req.context.as_ref(), req.issued_at),
@@ -551,8 +527,7 @@ impl ProcessService for Api {
         let req = request.into_inner();
         protocol(req.protocol)?;
         let _running = kernel.request()?;
-        let sig = signed(
-            kernel,
+        let (sig, _slot) = kernel.signed(
             &metadata,
             req.sig.as_ref(),
             &signing::process_resolve_message(

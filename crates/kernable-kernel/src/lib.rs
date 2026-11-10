@@ -129,7 +129,8 @@ const SNAPSHOT_STALE: &str = "snapshot_stale";
 const POLL: Duration = Duration::from_millis(100);
 /// The longest pause before a command whose commit failed runs again.
 const COMMIT_BACKOFF_MAX: Duration = Duration::from_secs(5);
-/// Accepted clock difference for signed subscribe requests.
+/// Accepted clock difference for signed requests (subscriptions, cancels, memberships, maps,
+/// registrations and the requests between kernels), against replays of old ones.
 const MAX_REQUEST_AGE_MS: i64 = 60_000;
 
 /// The largest file of the data service, cache value and key.
@@ -217,23 +218,20 @@ impl Drop for Running<'_> {
     }
 }
 
-/// The protocol versions this kernel accepts; see "Protocol versions" in `kernable.proto`.
-pub const PROTOCOLS: std::ops::RangeInclusive<u32> =
-    kernable_core::PROTOCOL..=kernable_core::PROTOCOL;
-
-/// Refuses a request or stream of a protocol version this kernel does not speak.
+/// Refuses a request or stream of another protocol version than this kernel's; see "Protocol
+/// versions" in `kernable.proto`.
 pub(crate) fn protocol(version: u32) -> Result<(), Status> {
-    if PROTOCOLS.contains(&version) {
+    let speaks = kernable_core::PROTOCOL;
+    if version == speaks {
         return Ok(());
     }
-    let (min, max) = (PROTOCOLS.start(), PROTOCOLS.end());
-    let advice = if version < *min {
+    let advice = if version < speaks {
         "update the SDK"
     } else {
         "update the kernel"
     };
     Err(Status::failed_precondition(format!(
-        "protocol {version} is not supported; this kernel speaks {min} to {max}: {advice}"
+        "protocol {version} is not supported; this kernel speaks {speaks}: {advice}"
     )))
 }
 
@@ -323,9 +321,9 @@ pub struct Kernel {
     usage_base: usage::Usage,
     /// Requests per key and second.
     rates: Rates,
-    /// The partition map, with `--partition` (S2).
+    /// The partition map, with `--partition`.
     maps: partitions::Maps,
-    /// Global keys of commits in flight on this partition (S3).
+    /// Global keys of commits in flight on this partition.
     in_flight_keys: global_keys::InFlight,
     /// On the key owner: one decision about global keys at a time.
     global_owner: tokio::sync::Mutex<()>,
@@ -405,7 +403,7 @@ impl Kernel {
         let maps = partitions::Maps::new(store.partition_map()?);
         let queue = queue::Queue::default();
         // Commands of a tenant moving here are copies a stopped copy left pending: the next
-        // copy completes them, no worker runs them (S4). Scheduled ones wait in the timer list
+        // copy completes them, no worker runs them. Scheduled ones wait in the timer list
         // all the same: they run here once the tenant is ([`timers::run`] asks the map when due).
         let arriving: Vec<String> = match (&config.partition, maps.get()) {
             (Some(p), Some(map)) => map
@@ -512,12 +510,12 @@ impl Kernel {
             .clone()
     }
 
-    /// Since when `key_id` is revoked (ms since epoch), if it is.
     /// Whether `key_id` is revoked.
     pub(crate) fn revoked(&self, key_id: &str) -> bool {
         self.revoked_since(key_id).is_some()
     }
 
+    /// Since when `key_id` is revoked (ms since epoch), if it is.
     fn revoked_since(&self, key_id: &str) -> Option<i64> {
         let revoked = self.revoked.lock().unwrap_or_else(PoisonError::into_inner);
         revoked.get(key_id).copied()
@@ -790,7 +788,6 @@ impl Kernel {
         }
     }
 
-    /// Deletes a completed command's secrets.
     /// Notes a changed file in the record log; with a standby, it holds the note before the
     /// client is told.
     fn data_changed(&self, r: &DataRequest) -> Result<(), Status> {
@@ -803,6 +800,7 @@ impl Kernel {
         Ok(())
     }
 
+    /// Deletes a completed command's secrets.
     fn drop_secrets(&self, command_id: &str) {
         if let Some(vault) = &self.vault
             && let Err(e) = vault.drop_secrets(command_id)
@@ -953,6 +951,66 @@ impl Kernel {
             })
     }
 
+    /// Whether the queue has room for `cmd`; if not, the limit counted and the refusal.
+    pub(crate) fn queue_room(&self, cmd: &Command) -> Result<(), Status> {
+        self.queue
+            .room(cmd, &self.config().limits)
+            .map_err(|reason| {
+                self.metrics.limited(reason);
+                Status::resource_exhausted(format!(
+                    "the command queue is full ({reason}); retry later"
+                ))
+            })
+    }
+
+    /// Runs the command `cmd` (of the qualified type `name`) through the middlewares before it is
+    /// stored: the rejection as its result (observed) if one rejected it.
+    pub(crate) async fn check_before(
+        self: &Arc<Self>,
+        name: &str,
+        cmd: &Command,
+        values: &[VaultValue],
+    ) -> Result<Option<CommandResult>, Status> {
+        let request = middleware_call::Request::Command(cmd.clone());
+        let Some(reason) = self
+            .check(name, &cmd.command_id, When::Before, request, values, None)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let result = CommandResult {
+            command_id: cmd.command_id.clone(),
+            outcome: Some(Outcome::Rejected(reason)),
+        };
+        self.observe(cmd, &result);
+        Ok(Some(result))
+    }
+
+    /// Checks a signed request: its signature over `message`, the grant header, the key's
+    /// request limits and the request's age; `what` names it in the errors. Returns the signature
+    /// and the request's slot.
+    pub(crate) fn signed<'a>(
+        &self,
+        metadata: &MetadataMap,
+        sig: Option<&'a Signature>,
+        message: &[u8],
+        issued_at: i64,
+        what: &str,
+    ) -> Result<(&'a Signature, Slot), Status> {
+        let sig =
+            sig.ok_or_else(|| Status::unauthenticated(format!("the {what} is not signed")))?;
+        signing::verify(sig, message)
+            .map_err(|_| Status::unauthenticated(format!("invalid {what} signature")))?;
+        self.present(metadata, &sig.key_id)?;
+        let slot = self.request_slot(&sig.key_id)?;
+        if (now_ms() - issued_at).abs() > MAX_REQUEST_AGE_MS {
+            return Err(Status::unauthenticated(format!(
+                "the {what} expired; check the clock"
+            )));
+        }
+        Ok((sig, slot))
+    }
+
     /// Checks a data or cache request: the signature over `msg`, its age, a valid domain and
     /// key, and that the key may do `action` (`rules`) in the domain. Returns the request's slot.
     #[allow(clippy::too_many_arguments)]
@@ -1044,6 +1102,19 @@ impl Kernel {
 
     fn waiters(&self) -> MutexGuard<'_, HashMap<String, Vec<oneshot::Sender<CommandResult>>>> {
         self.waiters.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// A submit no longer waits for the result of `command_id`: its waiter `rx` goes, and the
+    /// entry with it if it was the last; other submits of the same command keep waiting.
+    fn stop_waiting(&self, command_id: &str, rx: oneshot::Receiver<CommandResult>) {
+        drop(rx);
+        let mut waiters = self.waiters();
+        if let Some(waiting) = waiters.get_mut(command_id) {
+            waiting.retain(|w| !w.is_closed());
+            if waiting.is_empty() {
+                waiters.remove(command_id);
+            }
+        }
     }
 
     /// Serves on after an abandoned switchover: requests are taken and records written again.
@@ -1307,7 +1378,6 @@ impl Kernel {
     }
 }
 
-/// Whether the TCP address `host:port` only accepts connections from this machine.
 /// A kernel's socket: its owner and group may connect, others only through an ACL that grants
 /// them (the default mode would let others read it but not connect, and leave an ACL's write
 /// masked off).
@@ -1317,13 +1387,9 @@ pub fn socket_mode(path: &str) -> std::io::Result<()> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
 }
 
+/// Whether the TCP address `host:port` only accepts connections from this machine.
 fn loopback(addr: &str) -> bool {
-    let host = addr.rsplit_once(':').map_or(addr, |(host, _)| host);
-    let host = host.trim_start_matches('[').trim_end_matches(']');
-    host == "localhost"
-        || host
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback())
+    http::loopback_host(addr)
 }
 
 /// Opens with `open`; while another process holds the stores, tries again for up to
@@ -1781,28 +1847,16 @@ impl CommandService for Api {
         }
         // A full queue refuses new commands before anything is stored; a stored one is always
         // answered.
-        if let Err(reason) = kernel.queue.room(&cmd, &kernel.config().limits)
+        if kernel.queue.room(&cmd, &kernel.config().limits).is_err()
             && kernel
                 .store
                 .command(&cmd.command_id)
                 .map_err(internal)?
                 .is_none()
         {
-            kernel.metrics.limited(reason);
-            return Err(Status::resource_exhausted(format!(
-                "the command queue is full ({reason}); retry later"
-            )));
+            kernel.queue_room(&cmd)?;
         }
-        let request = middleware_call::Request::Command(cmd.clone());
-        if let Some(reason) = kernel
-            .check(&name, &cmd.command_id, When::Before, request, &values, None)
-            .await?
-        {
-            let result = CommandResult {
-                command_id: cmd.command_id.clone(),
-                outcome: Some(Outcome::Rejected(reason)),
-            };
-            kernel.observe(&cmd, &result);
+        if let Some(result) = kernel.check_before(&name, &cmd, &values).await? {
             return Ok(Response::new(result));
         }
 
@@ -1848,15 +1902,7 @@ impl CommandService for Api {
         let enqueued = match kernel.store.enqueue(&cmd, received_at) {
             Ok(enqueued) => enqueued,
             Err(e) => {
-                // Not answered: our waiter goes, and the entry with it if it was the last.
-                drop(rx);
-                let mut waiters = kernel.waiters();
-                if let Some(waiting) = waiters.get_mut(&cmd.command_id) {
-                    waiting.retain(|w| !w.is_closed());
-                    if waiting.is_empty() {
-                        waiters.remove(&cmd.command_id);
-                    }
-                }
+                kernel.stop_waiting(&cmd.command_id, rx);
                 return Err(internal(e));
             }
         };
@@ -1869,7 +1915,6 @@ impl CommandService for Api {
                 result: Some(result),
             } => {
                 kernel.sync(last_position(&result));
-                kernel.waiters().remove(&cmd.command_id);
                 kernel.drop_secrets(&cmd.command_id); // a resubmission brought them again
                 Some(result)
             }
@@ -1895,11 +1940,14 @@ impl CommandService for Api {
         // A scheduled command is answered `accepted` at once: its result comes when it is due.
         let later = cmd.deliver_at > received_at;
         let mut result = match done {
-            Some(result) => result,
+            Some(result) => {
+                kernel.stop_waiting(&cmd.command_id, rx);
+                result
+            }
             None if wait == Wait::Accepted || later => {
                 // Told it is accepted, the client may never send it again: on the disk first.
                 kernel.sync(0);
-                kernel.waiters().remove(&cmd.command_id);
+                kernel.stop_waiting(&cmd.command_id, rx);
                 return Ok(Response::new(CommandResult {
                     command_id: cmd.command_id,
                     outcome: Some(Outcome::Accepted(Accepted {})),
@@ -2712,7 +2760,7 @@ impl Drop for ReleaseOnDrop {
 /// A lease dispatch took for its worker: handed back to the queue when dropped, unless the
 /// command reached a worker that is still there. Dispatch ends at its next await once the
 /// worker is gone, after [`ReleaseOnDrop`] handed back what was in flight: a command it took
-/// meanwhile would otherwise wait for its lease to run out (10 s by default; the soak saw it).
+/// meanwhile would otherwise wait for its lease to run out (10 s by default).
 struct GiveBack {
     session: Arc<Session>,
     lease_id: String,
@@ -3226,7 +3274,7 @@ impl Session {
             .iter()
             .any(|e| !e.origin_partition.is_empty() || e.origin_position != 0)
         {
-            // Only the kernel sets where an event came from, when its tenant moves (S4).
+            // Only the kernel sets where an event came from, when its tenant moves.
             let reason = Rejected {
                 code: "invalid_event_origin".into(),
                 message: "a worker's events have no origin; the kernel sets it on a move".into(),
@@ -3291,7 +3339,7 @@ impl Session {
                 .collect(),
             facts: r.facts.iter().filter(|_| exists).cloned().collect(),
         };
-        // Global keys across partitions (S3): reserved with the key owner first, and held as
+        // Global keys across partitions: reserved with the key owner first, and held as
         // in flight until this commit is done.
         let global: Vec<(&str, [u8; 32])> = wanted
             .keys
@@ -3682,7 +3730,7 @@ impl Session {
             .iter()
             .filter(|k| !current.held.keys.contains(k))
         {
-            // A stream of a tenant that moved away holds nothing here any more (S4).
+            // A stream of a tenant that moved away holds nothing here any more.
             if index
                 .holder(store, vault, &k.id)?
                 .is_some_and(|holder| holder != *stream && self.kernel.serves(&holder.tenant_id))
@@ -3820,11 +3868,6 @@ impl Session {
     }
 }
 
-/// Whether `event` matches the type patterns of a subscription (`None`: all events).
-/// Erases `subjects` of `tenant` for the committed command `command_id`: their vault values,
-/// and the snapshots of every stream that used them and of `own`, the command's stream, whose
-/// worker state may hold them. Returns those streams. A failure is logged and leaves the
-/// intent in the vault: the next start carries it out.
 /// Finishes what the vault was left with by a crash, before anything is served: drops the
 /// secrets of commands that completed, carries out erasures whose events were committed and
 /// drops those of commands that did not commit (they run again and note them anew).
@@ -3853,12 +3896,14 @@ pub(crate) fn recover_vault(
                     aggregate_type: e.aggregate_type.clone(),
                     aggregate_id: e.aggregate_id.clone(),
                 });
-                let subjects = [subject];
-                if let Some(own) = own {
-                    erase_subjects(vault, snapshots, &tenant, &command_id, &subjects, &own);
+                // A carried out erasure drops its intent with it; one that fails keeps it for
+                // the next start.
+                match own {
+                    Some(own) => {
+                        erase_subjects(vault, snapshots, &tenant, &command_id, &[subject], &own);
+                    }
+                    None => vault.drop_intents(&command_id)?,
                 }
-                vault.drop_intents(&command_id)?;
-                tracing::info!(command = %command_id, "carried out an erasure committed before a crash");
             }
             _ => vault.drop_intents(&command_id)?,
         }
@@ -3866,6 +3911,10 @@ pub(crate) fn recover_vault(
     Ok(())
 }
 
+/// Erases `subjects` of `tenant` for the committed command `command_id`: their vault values,
+/// and the snapshots of every stream that used them and of `own`, the command's stream, whose
+/// worker state may hold them. Returns those streams. A failure is logged and leaves the
+/// intent in the vault: the next start carries it out.
 fn erase_subjects(
     vault: &Vault,
     snapshots: &dyn SnapshotStore,
@@ -3896,8 +3945,9 @@ fn erase_subjects(
     erased
 }
 
-/// Whether a listener or subscription gets `event`: one of its types, and not a copy its tenant
-/// brought along when it moved here (S4): the original is delivered where it was committed.
+/// Whether a listener or subscription gets `event` (`None`: all types): one of its types, and
+/// not a copy its tenant brought along when it moved here: the original is delivered where it
+/// was committed.
 fn wanted(types: Option<&[String]>, event: &Event) -> bool {
     event.origin_partition.is_empty()
         && types.is_none_or(|patterns| {
@@ -3924,7 +3974,8 @@ fn internal(e: StoreError) -> Status {
     }
 }
 
-fn now_ms() -> i64 {
+/// Milliseconds since the epoch.
+pub fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64)

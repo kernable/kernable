@@ -7,7 +7,7 @@ use std::{
     path::Path,
     process::ExitCode,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use kernable_core::{
@@ -25,7 +25,7 @@ use kernable_core::{
     signing, transport,
 };
 use kernable_kernel::{
-    BoxError, Config, GRANT_HEADER, Kernel, backup, config, export, grants, node,
+    BoxError, Config, GRANT_HEADER, Kernel, backup, config, export, grants, node, now_ms,
     partitions::partition_of, serve, standby, witness,
 };
 use prost::Message;
@@ -48,8 +48,9 @@ Run the kernel:
                                           creates root.key, kernel.key, vault.key, app.key and
                                           app.grant in the working directory if missing (app may do
                                           everything) and defaults to --root root.pub, --vault-key
-                                          vault.key and --ui-listen 127.0.0.1:7234. Exit 2 on
-                                          invalid flags; exit 1 if the kernel stops on an error.
+                                          vault.key, --ui-listen 127.0.0.1:7234 and --durability
+                                          normal. Exit 2 on invalid flags; exit 1 if the kernel
+                                          stops on an error.
   kernable demo [--ui-listen <addr>]      Runs kernable for presentations: a kernel on a new store
                                           in a temporary directory, with a small bank built in,
                                           shown step by step on the Stage at http://<addr>/demo
@@ -66,8 +67,9 @@ Keys and trust:
                                           or a bare <type> for every action. Actions: submit run
                                           subscribe listen query answer check privileged vault_read
                                           vault_erase data_read data_write cache manage replicate
-                                          export backup reserved_order. A type is *, <domain>.* or
-                                          <domain>.<Type>; manage takes service names, privileged
+                                          export backup reserved_order process. A type is *,
+                                          <domain>.* or <domain>.<Type>; manage takes service names,
+                                          process takes process names (<domain>.<name>), privileged
                                           takes bypass_authorization; replicate, export, backup and
                                           reserved_order (negative listener orders, for kits) take *.
                                           --succeeds lets this key take over the aggregates and
@@ -248,19 +250,25 @@ Export and import:
 Run a node:
   kernable node <project.toml>            Runs one node of a project: the kernel and, with a
                                           [backup] section, the backup follower, as child processes
-                                          it restarts when they exit. It reads the file again every
-                                          two seconds or on SIGHUP, and restarts a child whose
-                                          command changed or whose binary was replaced. SIGTERM or
-                                          SIGINT stops the children (SIGKILL after stop-seconds,
-                                          default 30). The file has [kernel] (flags: the flags of
-                                          kernable start without their dashes, env, binary,
-                                          stop-seconds), [backup] (to, key, backup-key, follow,
-                                          segment-seconds, base-hours, keep, check-hours, env), [node]
-                                          (instance, project, podman, metrics-listen: GET /metrics)
-                                          and any number of [[service]]
-                                          (name, build, file, command, key, env, secrets, cpus,
-                                          memory, stop-seconds, writable, expose): containers built
-                                          with podman on the node,
+                                          it restarts when they exit. It reads the file again when
+                                          it changed (it looks twice a second) or on SIGHUP, and
+                                          restarts a child whose command changed or whose binary
+                                          was replaced (a kernel hands its stores over to the new
+                                          one). SIGTERM or SIGINT stops the children (SIGKILL after
+                                          stop-seconds, default 30). The file has [kernel] (flags:
+                                          the flags of kernable start without their dashes, env,
+                                          binary, image, cpus, memory, stop-seconds), [backup] (to,
+                                          key, backup-key, follow, segment-seconds, base-hours,
+                                          keep, check-hours, cpus, memory, env), [pair] (witness,
+                                          node-key, advertise, peer, kernel-keys,
+                                          standby-timeout-ms: this node's kernel of a pair), [node]
+                                          (instance, project, podman, metrics-listen: GET /metrics,
+                                          cpus and memory: the instance's total, network: own, the
+                                          default, or host), any number of [[secret]] (name, and
+                                          file or command) and any number of [[service]] (name,
+                                          build, file, command, key, env, secrets, cpus, memory,
+                                          stop-seconds, writable, expose): containers built with
+                                          podman on the node,
                                           rebuilt on SIGHUP, run after the kernel with KERNABLE_URL,
                                           KERNABLE_INSTANCE and their key. Every child's output comes
                                           out of the node prefixed with its name. Paths are relative
@@ -585,13 +593,16 @@ fn development_setup() -> Result<Vec<String>> {
     }
     if !Path::new("app.grant").exists() {
         let root = signing::read_signing_key("root.key")?;
-        let key_id = key_id_of("app.pub")?;
+        let key_id = key_id_of("key", "app.pub")?;
         let all = vec![Permission {
             action: "*".into(),
             types: vec!["*".into()],
         }];
         let grant = signing::grant(&root, &key_id, all, "", now_ms());
-        fs::write("app.grant", format!("{}\n", hex(&grant.encode_to_vec())))?;
+        fs::write(
+            "app.grant",
+            format!("{}\n", hex::encode(grant.encode_to_vec())),
+        )?;
         notes.push("created app.grant".into());
     }
     notes.push(
@@ -859,23 +870,19 @@ async fn run_kernel_on(
 /// stores) still ends it at once: that standby is back within moments.
 fn leave_on_sigterm() -> tokio::task::JoinHandle<()> {
     tokio::spawn(async {
-        #[cfg(unix)]
-        {
-            use tokio::signal::unix::{SignalKind, signal};
-            let Ok(mut term) = signal(SignalKind::terminate()) else {
-                return;
-            };
-            if term.recv().await.is_some() {
-                tracing::info!("stopping: telling the primary that this standby leaves");
-                standby::leave().await;
-                std::process::exit(0);
-            }
+        use tokio::signal::unix::{SignalKind, signal};
+        let Ok(mut term) = signal(SignalKind::terminate()) else {
+            return;
+        };
+        if term.recv().await.is_some() {
+            tracing::info!("stopping: telling the primary that this standby leaves");
+            standby::leave().await;
+            std::process::exit(0);
         }
     })
 }
 
 /// SIGINT, SIGTERM, or SIGUSR1 (let the stores go to a new kernel binary).
-#[cfg(unix)]
 async fn shutdown_signal() -> std::io::Result<&'static str> {
     use tokio::signal::unix::{SignalKind, signal};
     let mut term = signal(SignalKind::terminate())?;
@@ -887,16 +894,9 @@ async fn shutdown_signal() -> std::io::Result<&'static str> {
     }
 }
 
-#[cfg(not(unix))]
-async fn shutdown_signal() -> std::io::Result<&'static str> {
-    tokio::signal::ctrl_c().await.map(|()| "Ctrl+C")
-}
-
-/// SIGHUP on Unix; elsewhere it never comes.
-#[cfg(unix)]
+/// SIGHUP.
 struct Hangup(tokio::signal::unix::Signal);
 
-#[cfg(unix)]
 impl Hangup {
     fn new() -> std::io::Result<Self> {
         use tokio::signal::unix::{SignalKind, signal};
@@ -908,30 +908,16 @@ impl Hangup {
     }
 }
 
-#[cfg(not(unix))]
-struct Hangup;
-
-#[cfg(not(unix))]
-impl Hangup {
-    fn new() -> std::io::Result<Self> {
-        Ok(Hangup)
-    }
-
-    async fn recv(&mut self) -> Option<()> {
-        std::future::pending().await
-    }
-}
-
 /// Writes `<name>.grant` next to `<name>.pub`: the grant, signed by the root key, hex encoded.
 fn grant(root: &str, key: &str, args: &[&str]) -> Result<bool> {
     let root = signing::read_signing_key(root)?;
-    let key_id = key_id_of(key)?;
+    let key_id = key_id_of("key", key)?;
     let mut succeeds = String::new();
     let mut permissions: Vec<Permission> = Vec::new();
     let mut rest = args.iter();
     while let Some(&arg) = rest.next() {
         if arg == "--succeeds" {
-            succeeds = key_id_of(rest.next().ok_or("--succeeds needs a key")?)?;
+            succeeds = key_id_of("--succeeds", rest.next().ok_or("--succeeds needs a key")?)?;
             continue;
         }
         let (action, types) = arg.split_once('=').unwrap_or(("*", arg));
@@ -945,7 +931,7 @@ fn grant(root: &str, key: &str, args: &[&str]) -> Result<bool> {
         return Err(reason.into());
     }
     let path = format!("{}.grant", key.strip_suffix(".pub").unwrap_or(key));
-    fs::write(&path, format!("{}\n", hex(&grant.encode_to_vec())))?;
+    fs::write(&path, format!("{}\n", hex::encode(grant.encode_to_vec())))?;
     for p in &grant.permissions {
         println!("{} {}", p.action, p.types.join(","));
     }
@@ -958,7 +944,7 @@ fn grant(root: &str, key: &str, args: &[&str]) -> Result<bool> {
 
 async fn revoke(addr: &str, root: &str, key: &str, since: &str) -> Result<bool> {
     let root = signing::read_signing_key(root)?;
-    let key_id = key_id_of(key)?;
+    let key_id = key_id_of("key", key)?;
     let since = config::utc_ms(since)
         .ok_or_else(|| format!("{since} is not a UTC time like 2026-10-27T09:00:00Z"))?;
     let issued_at = now_ms();
@@ -1006,7 +992,7 @@ async fn run_witness(flags: &[&str]) -> ExitCode {
             .get("--root")
             .ok_or("no root key: pass --root <key ID or .pub file>")?
             .iter()
-            .map(|r| key_id_of(r))
+            .map(|r| key_id_of("--root", r))
             .collect::<Result<Vec<_>>>()?;
         let tls = match (one("--tls-cert"), one("--tls-key"), one("--tls-client-ca")) {
             (Some(cert), Some(key), Some(client_ca)) => Some(config::Tls {
@@ -1356,7 +1342,7 @@ fn restore(from: &str, flags: &[&str]) -> Result<ExitCode> {
     let kernel_keys = flags
         .kernel_pubs
         .iter()
-        .map(|k| key_id_of(k))
+        .map(|k| key_id_of("--kernel-pub", k))
         .collect::<Result<Vec<_>>>()?;
     let restored =
         backup::restore(target.as_ref(), &crypt, &stores, until, &kernel_keys).map_err(boxed)?;
@@ -1754,12 +1740,9 @@ async fn connect(addr: &str) -> Result<tonic::transport::Channel> {
     }
 }
 
-/// A key ID given as itself or as the path of a `.pub` file.
-fn key_id_of(key: &str) -> Result<String> {
-    if signing::verifying_key_from_hex(key).is_ok() {
-        return Ok(key.to_owned());
-    }
-    Ok(signing::key_id(&signing::read_verifying_key(key)?))
+/// A key ID given to `flag` as itself or as the path of a `.pub` file.
+fn key_id_of(flag: &str, key: &str) -> Result<String> {
+    config::key_id(flag, key).map_err(boxed)
 }
 
 fn keys_new(name: &str) -> Result<bool> {
@@ -2039,7 +2022,7 @@ fn import(file: &str, flags: &[&str]) -> Result<ExitCode> {
         false => flags
             .kernel_pubs
             .iter()
-            .map(|k| key_id_of(k))
+            .map(|k| key_id_of("--kernel-pub", k))
             .collect::<Result<Vec<_>>>()?,
         true => {
             if !end.kernel_keys.is_empty() {
@@ -2508,10 +2491,15 @@ fn with_key_grant<T>(request: &mut tonic::Request<T>, key_path: &str) -> Result<
         "{}.grant",
         key_path.strip_suffix(".key").unwrap_or(key_path)
     );
-    if let Ok(grant) = fs::read_to_string(&grant) {
-        request
-            .metadata_mut()
-            .insert(GRANT_HEADER, grant.trim().parse()?);
+    // No grant file next to the key: the request goes without one. Any other failure is said.
+    match fs::read_to_string(&grant) {
+        Ok(text) => {
+            request
+                .metadata_mut()
+                .insert(GRANT_HEADER, text.trim().parse()?);
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("{grant}: {e}").into()),
     }
     Ok(())
 }
@@ -2593,17 +2581,7 @@ async fn submit(addr: &str, key_path: &str, mut cmd: Command) -> Result<bool> {
 fn random_id() -> String {
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes).expect("OS randomness unavailable");
-    hex(&bytes)
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as i64)
+    hex::encode(bytes)
 }
 
 #[cfg(test)]
