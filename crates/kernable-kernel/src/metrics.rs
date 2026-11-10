@@ -305,7 +305,7 @@ pub(crate) fn render_standby(applied: u64, primary_head: u64) -> String {
 /// on its own, so a slow one cannot hold up the health checks.
 pub(crate) async fn serve(kernel: Arc<Kernel>, addr: &str) -> Result<(), BoxError> {
     tracing::info!(%addr, "serving metrics");
-    crate::http::serve(kernel, addr, respond).await
+    crate::http::serve(kernel, addr, respond, |_, _| None).await
 }
 
 pub(crate) fn respond(kernel: &Kernel, request: &[u8]) -> Vec<u8> {

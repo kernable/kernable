@@ -4,12 +4,20 @@
 //!
 //! - `GET /api/state`: the kernel, the services' memberships, the registered aggregates and the
 //!   connected workers, the listeners, and which aggregate writes which event type;
-//! - `GET /api/streams`: the aggregates with events, the most recently changed first;
+//! - `GET /api/health`: the verdict (ok, warn, bad) and every problem behind it, with what
+//!   fixes it, as the UI's top bar shows it; and the counts it shows beside (incidents, parked);
+//! - `GET /api/watch`: server-sent events while the page is open: `head` (the log's newest
+//!   position) when the log moved on, `health` when the verdict changed, at most once a second,
+//!   and a comment every 15 s; the page reloads what it shows only then;
+//! - `GET /api/streams?q=&engine=&limit=`: the aggregates with events, the most recently
+//!   changed first, those whose tenant, domain, type or ID contains `q`;
 //! - `GET /api/history?tenant=&domain=&type=&id=`: one aggregate's events with their commands,
 //!   and the unique keys (by name and identity, never the value) and facts it holds;
 //! - `GET /api/events?…`: events of the whole log that match a filter, newest first, or the
 //!   ones after a position (the live tail); see [`events`];
-//! - `GET /api/rejections?limit=`: the most recently received rejected commands, with why;
+//! - `GET /api/rejections?limit=&brief=&since=`: the most recently received rejected commands,
+//!   with why (`brief=1`: without payload and context; `since=`: only how many of the business
+//!   since then);
 //! - `GET /api/commands?…`: stored commands that match a filter, newest first, each with its
 //!   request context and outcome (committed with its events, rejected with why, waiting,
 //!   scheduled); see [`commands`];
@@ -51,6 +59,9 @@ const LOGO_DARK: &[u8] = include_bytes!("logo-dark.png");
 /// How many aggregates `/api/streams` lists.
 const STREAMS: usize = 500;
 
+/// How many of the most recently changed aggregates a search in `/api/streams` looks through.
+const STREAMS_SEARCH: usize = 20_000;
+
 /// How many events `/api/events` returns at most, and by default.
 const EVENTS_MAX: usize = 500;
 const EVENTS_DEFAULT: usize = 100;
@@ -73,7 +84,13 @@ const PARKED_DEFAULT: usize = 1_000;
 /// Serves the UI until the listener fails.
 pub(crate) async fn serve(kernel: Arc<Kernel>, addr: &str) -> Result<(), BoxError> {
     tracing::info!(%addr, "serving the UI");
-    crate::http::serve(kernel, addr, respond).await
+    crate::http::serve(kernel, addr, respond, |kernel, request| {
+        request.starts_with(b"GET /api/watch ").then(|| {
+            let kernel = Arc::clone(kernel);
+            crate::http::Answer::Stream(Box::new(move |conn| Box::pin(watch(kernel, conn))))
+        })
+    })
+    .await
 }
 
 pub(crate) fn respond(kernel: &Kernel, request: &[u8]) -> Vec<u8> {
@@ -91,7 +108,8 @@ pub(crate) fn respond(kernel: &Kernel, request: &[u8]) -> Vec<u8> {
         "/logo.png" => return reply("200 OK", "image/png", LOGO),
         "/logo-dark.png" => return reply("200 OK", "image/png", LOGO_DARK),
         "/api/state" => state(kernel),
-        "/api/streams" => streams(kernel),
+        "/api/streams" => streams(kernel, &params),
+        "/api/health" => health(kernel),
         "/api/history" => history(kernel, &params),
         "/api/events" => events(kernel, &params),
         "/api/rejections" => rejections(kernel, &params),
@@ -260,11 +278,40 @@ fn system(kernel: &Kernel) -> Value {
     })
 }
 
-fn streams(kernel: &Kernel) -> Result<Value, BoxError> {
+fn streams(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, BoxError> {
+    let q = params
+        .get("q")
+        .map(|v| v.trim().to_lowercase())
+        .unwrap_or_default();
+    // The process engine's cases (domain `process`) only when asked for.
+    let engine = params.get("engine").is_some_and(|v| v == "1");
+    let limit = match params.get("limit").filter(|v| !v.is_empty()) {
+        Some(v) => v.parse::<usize>().map_err(|_| "limit: not a number")?,
+        None => 50,
+    }
+    .clamp(1, STREAMS);
     let streams: Vec<Value> = kernel
         .store
-        .streams(STREAMS)?
+        .streams(if q.is_empty() && engine {
+            limit
+        } else {
+            STREAMS_SEARCH
+        })?
         .into_iter()
+        .filter(|s| engine || s.stream.domain != "process")
+        .filter(|s| {
+            q.is_empty()
+                || format!(
+                    "{}/{}/{}/{}",
+                    s.stream.tenant_id,
+                    s.stream.domain,
+                    s.stream.aggregate_type,
+                    s.stream.aggregate_id
+                )
+                .to_lowercase()
+                .contains(&q)
+        })
+        .take(limit)
         .map(|s| {
             json!({
                 "tenant": s.stream.tenant_id,
@@ -276,7 +323,251 @@ fn streams(kernel: &Kernel) -> Result<Value, BoxError> {
             })
         })
         .collect();
-    Ok(json!({ "streams": streams, "limit": STREAMS }))
+    Ok(json!({ "streams": streams, "limit": limit }))
+}
+
+/// The verdict the UI's top bar shows, computed here so every page asks one small question:
+/// a listener missing or behind, parked events, incidents, a standby not in sync, a backup
+/// follower away, the store near its quota, a burst of rejections.
+fn health(kernel: &Kernel) -> Result<Value, BoxError> {
+    let head = kernel.store.head_position()?;
+    let c = &kernel.config;
+    let mut issues: Vec<Value> = Vec::new();
+    let mut add = |level: &str, text: String, sub: String, extra: Value| {
+        let mut issue = json!({ "level": level, "text": text, "sub": sub });
+        if let (Some(i), Value::Object(more)) = (issue.as_object_mut(), extra) {
+            i.extend(more);
+        }
+        issues.push(issue);
+    };
+    let listeners = kernel.listeners.view();
+    let mut missing = false;
+    for l in &listeners {
+        if l["live"].as_bool() == Some(true) {
+            continue;
+        }
+        let name = l["name"].as_str().unwrap_or_default();
+        let middleware = l["middlewares"].as_array().is_some_and(|m| !m.is_empty());
+        let behind = head.saturating_sub(l["position"].as_u64().unwrap_or(head));
+        if l["counts"].as_bool() == Some(true) && l["connected"].as_bool() != Some(true) {
+            missing = true;
+            let (what, why) = if middleware {
+                (
+                    "Middleware",
+                    "The commands it checks are refused until it is back; the kernel is not ready.",
+                )
+            } else {
+                (
+                    "Listener",
+                    "The kernel waits for it: it is not ready, and commands that settle wait too.",
+                )
+            };
+            add(
+                "bad",
+                format!("{what} {name} is missing"),
+                why.into(),
+                json!({ "href": "/operations" }),
+            );
+        } else if l["connected"].as_bool() == Some(true) && behind >= 100 {
+            add(
+                "warn",
+                format!("Listener {name} is {behind} events behind"),
+                "Queries to its read model answer from older data.".into(),
+                json!({ "href": "/operations" }),
+            );
+        }
+    }
+    if let (Err(why), false) = (kernel.readiness(), missing) {
+        add("warn", "Not ready".into(), why, Value::Null);
+    }
+    let parked = parked(
+        kernel,
+        &HashMap::from([("limit".to_owned(), PARKED_MAX.to_string())]),
+    )?;
+    let mut by_listener: std::collections::BTreeMap<String, (u64, String)> = Default::default();
+    for p in parked["parked"].as_array().into_iter().flatten() {
+        let entry = by_listener
+            .entry(p["listener"].as_str().unwrap_or_default().to_owned())
+            .or_default();
+        entry.0 += 1;
+        if entry.1.is_empty() {
+            entry.1 = p["message"].as_str().unwrap_or_default().to_owned();
+        }
+    }
+    for (listener, (n, message)) in by_listener {
+        add(
+            "bad",
+            format!(
+                "{n} event{} parked in {listener}",
+                if n == 1 { "" } else { "s" }
+            ),
+            if message.is_empty() {
+                "a handler gave up on them".into()
+            } else {
+                message
+            },
+            json!({ "cmd": format!("kernable listeners retry {} <key> {listener} --all", c.listen) }),
+        );
+    }
+    let filter = crate::process_view::CaseFilter {
+        state: "incident".into(),
+        ..Default::default()
+    };
+    let incidents = kernel.process_view.cases(kernel, &filter, 1000)?;
+    // Incidents of one process with one code are one problem: listed together, with the
+    // process to open; a single one with its case.
+    let mut grouped: std::collections::BTreeMap<(String, String), Vec<&Value>> = Default::default();
+    for i in incidents["cases"].as_array().into_iter().flatten() {
+        let key = (
+            i["process"].as_str().unwrap_or_default().to_owned(),
+            i["incident"]["code"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        );
+        grouped.entry(key).or_default().push(i);
+    }
+    for ((process, code), cases) in grouped {
+        let first = cases[0];
+        let message = first["incident"]["message"].as_str().unwrap_or_default();
+        let step = first["step"].as_str().unwrap_or_default();
+        if let [one] = cases.as_slice() {
+            add(
+                "bad",
+                format!(
+                    "Incident in {process}: {}",
+                    one["key"].as_str().unwrap_or_default()
+                ),
+                format!("{code}: {message} · at step {step}"),
+                json!({ "case": { "tenant": one["tenant"], "process": one["process"], "id": one["id"] } }),
+            );
+        } else {
+            add(
+                "bad",
+                format!("{} incidents in {process}: {code}", cases.len()),
+                format!("{message} · at step {step}"),
+                json!({ "href": format!("/processes/{process}") }),
+            );
+        }
+    }
+    if let (true, Some(primary)) = (c.replication.sync, kernel.replication.as_ref()) {
+        let state = primary.state_name();
+        if state != "in-sync" {
+            let (level, sub) = if state == "waiting" {
+                ("bad", "Writes wait for a standby that is away.")
+            } else {
+                ("warn", "Writes are told without a standby holding them.")
+            };
+            add(level, format!("Standby {state}"), sub.into(), Value::Null);
+        }
+    }
+    if c.replication.backup && kernel.backup.connected().is_none() {
+        add(
+            "warn",
+            "No backup follower connected".into(),
+            "--backup on, but nothing follows the kernel now.".into(),
+            Value::Null,
+        );
+    }
+    let max = c.limits.store_bytes;
+    let held = kernel
+        .stored_bytes
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if max > 0 && held * 10 >= max * 8 {
+        add(
+            if held >= max { "bad" } else { "warn" },
+            format!("Store at {} % of its quota", held * 100 / max),
+            format!("{held} of {max} bytes: at the limit new commands are refused."),
+            Value::Null,
+        );
+    }
+    // A burst of rejections: of the business (not the process engine's own), 5 or more and
+    // more than 5 % of the commands in the last 10 minutes.
+    let since = now_ms() - 600_000;
+    let rejected = kernel
+        .store
+        .rejections(REJECTIONS_DEFAULT)?
+        .iter()
+        .filter(|(p, _)| p.received_at >= since && p.command.domain != "process")
+        .count() as u64;
+    let commands = kernel.trend.commands_since(since);
+    if rejected >= 5 && rejected * 20 > commands {
+        add(
+            "warn",
+            format!("{rejected} commands rejected in the last 10 min"),
+            format!("of {commands} commands"),
+            json!({ "href": "/operations" }),
+        );
+    }
+    let level = if issues.iter().any(|i| i["level"] == "bad") {
+        "bad"
+    } else if issues.is_empty() {
+        "ok"
+    } else {
+        "warn"
+    };
+    Ok(json!({
+        "level": level,
+        "issues": issues,
+        "incidents": incidents["total"],
+        "parked": parked["total"],
+        "head": head,
+        "version": env!("CARGO_PKG_VERSION"),
+        "addr": c.listen,
+        "now": now_ms(),
+    }))
+}
+
+/// `/api/watch`: tells the page when the log moved on (`head`) and when the verdict changed
+/// (`health`), checked every second and said at most once a second; a comment every 15 s keeps
+/// the connection and finds one that is gone.
+async fn watch(kernel: Arc<Kernel>, mut conn: tokio::net::TcpStream) {
+    use tokio::io::AsyncWriteExt;
+    let start =
+        b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-store\r\n\
+                  connection: close\r\n\r\nretry: 2000\n\n";
+    if conn.write_all(start).await.is_err() {
+        return;
+    }
+    let (mut head, mut verdict, mut quiet) = (None, None, 0u32);
+    loop {
+        let k = Arc::clone(&kernel);
+        let now = tokio::task::spawn_blocking(move || {
+            let head = k.store.head_position().ok();
+            // What the top bar shows, without the time: changes only when the verdict does.
+            let verdict = health(&k).ok().map(|mut h| {
+                if let Some(o) = h.as_object_mut() {
+                    o.remove("now");
+                    o.remove("head");
+                }
+                h.to_string()
+            });
+            (head, verdict)
+        })
+        .await;
+        let Ok((new_head, new_verdict)) = now else {
+            return;
+        };
+        let mut said = String::new();
+        if new_head.is_some() && new_head != head {
+            said += &format!("event: head\ndata: {}\n\n", new_head.unwrap_or_default());
+        }
+        if new_verdict.is_some() && new_verdict != verdict {
+            said += "event: health\ndata: changed\n\n";
+        }
+        (head, verdict) = (new_head, new_verdict);
+        quiet += 1;
+        if said.is_empty() && quiet >= 15 {
+            said = ": still here\n\n".into();
+        }
+        if !said.is_empty() {
+            quiet = 0;
+            if conn.write_all(said.as_bytes()).await.is_err() {
+                return;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
 }
 
 /// One aggregate's events, each with the command that caused it, and what the vault still
@@ -484,6 +775,20 @@ fn rejections(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value
         None => REJECTIONS_DEFAULT,
     }
     .clamp(1, REJECTIONS_MAX);
+    // `since=` (ms): only how many of the business (not the process engine's own) were
+    // received since then, of the newest `limit`.
+    if let Some(since) = params.get("since").filter(|v| !v.is_empty()) {
+        let since: i64 = since.parse().map_err(|_| "since: not a number")?;
+        let count = kernel
+            .store
+            .rejections(limit)?
+            .iter()
+            .filter(|(p, _)| p.received_at >= since && p.command.domain != "process")
+            .count();
+        return Ok(json!({ "count": count, "limit": limit }));
+    }
+    // `brief=1`: without payload and context.
+    let brief = params.get("brief").is_some_and(|v| v == "1");
     let rejected: Vec<Value> = kernel
         .store
         .rejections(limit)?
@@ -517,6 +822,13 @@ fn rejections(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value
                 "uniqueKey": r.key,
                 "requirement": requirement,
             })
+        })
+        .map(|mut r| {
+            if let (true, Some(o)) = (brief, r.as_object_mut()) {
+                o.remove("payload");
+                o.remove("context");
+            }
+            r
         })
         .collect();
     Ok(json!({ "rejections": rejected, "limit": limit }))

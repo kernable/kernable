@@ -310,7 +310,7 @@ const num = (n) => (n ?? 0).toLocaleString("en-US");
 const pct = (a, b) => (b ? `${Math.round((a / b) * 1000) / 10} %` : "–");
 const fit = (s, n) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
 const covers = (pattern, name) => pattern === "*" || pattern === name || (pattern.endsWith(".*") && name.split(".")[0] === pattern.slice(0, -2));
-const now = () => state?.kernel.now ?? Date.now();
+const now = () => health?.now ?? state?.kernel.now ?? Date.now();
 const pad = (n) => String(n).padStart(2, "0");
 /** Local time as 2026-11-10 10:09:45 (with `seconds`) or 2026-11-10 10:09. */
 function iso(ms, seconds = true) {
@@ -382,6 +382,8 @@ function keyUses(id) {
 /** The key's popover: its full ID, where it is used, and a name kept in this browser. */
 function openKey(id, anchor) {
   $("keypop")?.remove();
+  // What a key signs comes from /api/state, which not every view loads.
+  if (!state) { loadState().then(() => state && openKey(id, anchor)); return; }
   const name = keyNames[id] ?? "";
   const input = el("input", { class: "ctl", id: "keyname", value: name, placeholder: "e.g. app, operator, billing worker" });
   const save = (value) => {
@@ -407,65 +409,35 @@ function openKey(id, anchor) {
 document.addEventListener("click", () => $("keypop")?.remove());
 document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") $("keypop")?.remove(); });
 
-// ---- data, refreshed in the background ----
-let state = null, system = null, trend = null, parked = null, rejections = null, procs = null, incidents = null;
-let unreachable = false;
+// ---- data: the verdict from /api/health; each view loads what it shows ----
+let health = null, state = null, system = null, trend = null, parked = null, rejections = null, procs = null, incidents = null;
+// Failed asks for the verdict in a row: one is a hiccup (said calmly), three mean it is down.
+let misses = 0;
 
-async function loadState() {
-  try { state = await get("/api/state"); unreachable = false; } catch { unreachable = true; }
+async function loadHealth() {
+  try { health = await get("/api/health"); misses = 0; } catch { misses++; }
 }
+async function loadState() { try { state = await get("/api/state"); } catch {} }
 async function loadSystem() { try { system = await get("/api/system"); } catch {} }
 async function loadTrend() { try { trend = await get("/api/trend"); } catch {} }
 async function loadParked() { try { parked = await get("/api/parked"); } catch {} }
 async function loadRejections() { try { rejections = await get("/api/rejections?limit=200"); } catch {} }
+// The overview only shows how many: the kernel counts the business ones of the last 24 h.
+let rejectedDay = null;
+async function loadRejectedDay() { try { rejectedDay = (await get(`/api/rejections?limit=1000&since=${now() - 86_400_000}`)).count; } catch {} }
 async function loadProcs() {
   try { procs = await get(`/api/processes?window=${procWindow}`); } catch {}
   await loadIncidents();
 }
 async function loadIncidents() { try { incidents = await get("/api/cases?state=incident&limit=1000"); } catch {} }
 
-// ---- the verdict: healthy, degraded or down, and why ----
-function issues() {
-  const out = [];
-  if (unreachable || !state) return [{ level: "bad", text: "The kernel does not answer", sub: "The UI cannot reach /api/state." }];
-  const k = state.kernel, head = k.head;
-  const missing = state.listeners.some((l) => !l.live && l.counts && !l.connected);
-  if (k.ready !== "ready" && !missing) out.push({ level: "warn", text: "Not ready", sub: k.ready });
-  for (const l of state.listeners) {
-    if (l.live) continue;
-    if (l.counts && !l.connected) out.push({ level: "bad", text: `${l.middlewares.length ? "Middleware" : "Listener"} ${l.name} is missing`, sub: l.middlewares.length ? "The commands it checks are refused until it is back; the kernel is not ready." : "The kernel waits for it: it is not ready, and commands that settle wait too.", href: "/operations" });
-    else if (l.connected && head - l.position >= 100) out.push({ level: "warn", text: `Listener ${l.name} is ${num(head - l.position)} events behind`, sub: "Queries to its read model answer from older data.", href: "/operations" });
-  }
-  if (parked?.total) {
-    const by = {};
-    for (const p of parked.parked) by[p.listener] = (by[p.listener] ?? 0) + 1;
-    for (const [listener, n] of Object.entries(by)) out.push({ level: "bad", text: `${n} event${n === 1 ? "" : "s"} parked in ${listener}`, sub: parked.parked.find((p) => p.listener === listener)?.message || "a handler gave up on them",
-      cmd: `kernable listeners retry ${system?.addr ?? "<addr>"} <key> ${listener} --all` });
-  }
-  for (const c of incidents?.cases ?? []) out.push({ level: "bad", text: `Incident in ${c.process}: ${c.key}`, sub: `${c.incident?.code}: ${c.incident?.message ?? ""} · at step ${c.step}`, href: caseHref(c) });
-  const r = system?.replication;
-  if (r?.sync && r.primary && r.primary.state !== "in-sync") out.push({ level: r.primary.state === "waiting" ? "bad" : "warn", text: `Standby ${r.primary.state}`, sub: r.primary.state === "waiting" ? "Writes wait for a standby that is away." : "Writes are told without a standby holding them." });
-  if (system?.backup.enabled && !system.backup.connected) out.push({ level: "warn", text: "No backup follower connected", sub: "--backup on, but nothing follows the kernel now." });
-  if (system?.store.maxBytes) {
-    const used = system.store.bytes / system.store.maxBytes;
-    if (used >= 0.8) out.push({ level: used >= 1 ? "bad" : "warn", text: `Store at ${Math.round(used * 100)} % of its quota`, sub: `${bytes(system.store.bytes)} of ${bytes(system.store.maxBytes)}: at the limit new commands are refused.` });
-  }
-  const spike = rejectedRecently();
-  if (spike.business >= 5 && spike.business > spike.commands * 0.05) out.push({ level: "warn", text: `${spike.business} commands rejected in the last 10 min`, sub: `${pct(spike.business, spike.commands)} of the commands`, href: "/operations" });
-  return out;
-}
+// ---- the verdict: healthy, degraded or down, and why (computed by the kernel) ----
 function verdict() {
-  const list = issues();
-  const level = list.some((i) => i.level === "bad") ? "bad" : list.length ? "warn" : "ok";
-  return { level, list, text: unreachable ? "Down" : level === "ok" ? "Healthy" : level === "bad" ? `${list.length} problem${list.length === 1 ? "" : "s"}` : "Degraded" };
-}
-/** Business rejections (not the process engine's own) and commands, last 10 minutes. */
-function rejectedRecently() {
-  const since = now() - 600_000;
-  const business = (rejections?.rejections ?? []).filter((r) => r.domain !== "process" && r.receivedAt >= since).length;
-  const a = trend?.activity ?? [];
-  const from = a.find((x) => x[0] >= since), last = a[a.length - 1];
-  return { business, commands: from && last ? last[2] - from[2] : 0 };
+  if (misses >= 3) return { level: "bad", list: [{ level: "bad", text: "The kernel does not answer", sub: "The UI keeps trying." }], text: "Down" };
+  if (misses > 0 && !health) return { level: "warn", list: [], text: "Connecting…" };
+  const list = (health?.issues ?? []).map((i) => ({ ...i, href: i.case ? caseHref(i.case) : i.href }));
+  const level = health?.level ?? "ok";
+  return { level, list, text: !health ? "…" : level === "ok" ? "Healthy" : level === "bad" ? `${list.length} problem${list.length === 1 ? "" : "s"}` : "Degraded" };
 }
 
 // ---- routing: every view has a URL ----
@@ -521,7 +493,7 @@ function onRoute() {
   render();
   window.scrollTo(0, 0);
   // What this view needs may not be loaded yet.
-  if (started) slow();
+  if (started) reload(true);
 }
 let started = false;
 
@@ -535,12 +507,12 @@ function render() {
 function draw() {
   const v = verdict();
   const pill = $("verdict");
-  pill.className = `verdict ${unreachable ? "bad" : v.level}`;
+  pill.className = `verdict ${v.level}`;
   pill.lastChild.textContent = v.text;
   pill.title = v.list.map((i) => `• ${i.text}`).join("\n") || "Nothing needs attention.";
-  const nInc = incidents?.cases?.length ?? 0;
+  const nInc = health?.incidents ?? 0;
   $("nav-incidents").hidden = !nInc; $("nav-incidents").textContent = nInc;
-  if (state) $("footer").textContent = `kernable ${state.kernel.version} · times in ${Intl.DateTimeFormat().resolvedOptions().timeZone} · read-only, on loopback`;
+  if (health) $("footer").textContent = `kernable ${health.version} · times in ${Intl.DateTimeFormat().resolvedOptions().timeZone} · read-only, on loopback · ${live ? "live" : "refreshing every 5 s"}`;
   const top = document.querySelector("nav a.on")?.dataset.view;
   if (top === "overview") drawOverview(v);
   if (top === "processes") route.view === "case" ? drawCase() : drawProcesses();
@@ -560,18 +532,18 @@ function activityWindow(minutes) {
 
 function drawOverview(v) {
   const box = $("v-overview");
-  if (!state) { box.replaceChildren(el("div", { class: "empty" }, unreachable ? "The kernel does not answer." : "Loading…")); return; }
+  if (!state) { box.replaceChildren(el("div", { class: "empty" }, misses >= 3 ? "The kernel does not answer." : "Loading…")); return; }
   const day = activityWindow(24 * 60);
   const span = !day ? "since the kernel started" : day.minutes >= 1440 ? "last 24 h" : day.minutes < 2 ? "since the kernel started" : `last ${duration(day.minutes * 60_000)}, since the kernel started`;
   const versions = (procs?.processes ?? []).flatMap((p) => p.versions.map((x) => ({ p, x })));
   const started = versions.reduce((n, { x }) => n + x.started, 0);
   const open = versions.reduce((n, { x }) => n + openCount(x), 0);
-  const nInc = incidents?.cases?.length ?? 0;
-  const businessRejected = (rejections?.rejections ?? []).filter((r) => r.domain !== "process" && r.receivedAt >= now() - 86_400_000).length;
+  const nInc = health?.incidents ?? 0;
+  const businessRejected = rejectedDay ?? 0;
   const kpi = (l, n, s, cls = "") => el("div", { class: "panel kpi" }, el("span", { class: "l" }, l), el("span", { class: `n ${cls}` }, n), el("span", { class: "s" }, s));
   box.replaceChildren(
     el("div", { class: "grid cols-kpi" },
-      kpi("Commands", day ? num(day.commands) : num(system ? system.counts.commands : 0), span),
+      kpi("Commands", day ? num(day.commands) : "–", day ? span : "counted once a minute: soon"),
       kpi("Events", day ? num(day.events) : "–", `${num(state.kernel.head)} in the log`),
       kpi("Cases started", num(started), `last ${procWindow} · ${procs?.processes.length ?? 0} process${procs?.processes.length === 1 ? "" : "es"}`),
       kpi("Cases open", num(open), open ? "running or waiting" : "none"),
@@ -584,10 +556,12 @@ function drawOverview(v) {
 }
 
 function attentionPanel(v) {
-  const items = v.list.map((i) => el("div", { class: "attn" },
+  const MAX = 8;
+  const items = v.list.slice(0, MAX).map((i) => el("div", { class: "attn" },
     el("span", { class: "bar", style: `background:var(--${i.level})` }),
     el("div", {}, i.text, el("small", {}, i.sub)),
     i.cmd ? copyButton(i.cmd, "Copy fix") : i.href ? el("a", { class: "btn", href: i.href }, "Open") : el("span")));
+  if (v.list.length > MAX) items.push(el("div", { class: "note" }, `+ ${v.list.length - MAX} more: Operations and Processes list them`));
   if (!items.length) items.push(el("div", { class: "attn calm" }, el("span", { class: "bar", style: "background:var(--ok)" }), el("div", {}, "Nothing needs attention", el("small", {}, "No incidents, nothing parked, every listener caught up.")), el("span")));
   return el("div", { class: "panel" }, el("h2", {}, "Needs attention", el("span", { class: "aside" }, String(v.list.length))), items);
 }
@@ -1553,14 +1527,18 @@ function drawCatalog() {
 
 // ---- aggregates and their history ----
 let stream = null, streams = [];
+/** The aggregates list: the 50 most recently changed, or those matching the filter, searched by the kernel. */
 async function loadStreams() {
-  try { streams = (await get("/api/streams")).streams; } catch { return; }
+  const q = new URLSearchParams({ q: $("filter").value.trim(), limit: 50 });
+  if ($("streams-engine").checked) q.set("engine", "1");
+  try { streams = (await get(`/api/streams?${q}`)).streams; } catch { return; }
   drawStreams();
 }
+let streamsTimer = null;
+function filterStreams() { clearTimeout(streamsTimer); streamsTimer = setTimeout(loadStreams, 250); }
 function drawStreams() {
-  const f = $("filter").value.toLowerCase(), engine = $("streams-engine").checked;
   const key = (s) => `${s.tenant}/${s.domain}/${s.type}/${s.id}`;
-  const shown = streams.filter((s) => (engine || s.domain !== "process") && key(s).toLowerCase().includes(f));
+  const shown = streams;
   $("streams").replaceChildren(...(shown.length ? shown.map((s) =>
     el("li", { class: stream && key(stream) === key(s) ? "on" : "", onclick: () => go(historyHref(s)) },
       el("div", { class: "id" }, s.id), el("div", { class: "of" }, `${s.domain}.${s.type} · v${s.version} · ${s.tenant} · `, when(s.lastAt)))) : [el("li", { class: "of" }, "No aggregate matches.")]));
@@ -1808,8 +1786,8 @@ $("agg-head").append(sideToggle("aggregates"));
 $("x-aggregates").classList.toggle("collapsed", collapsed.aggregates);
 $("searchform").addEventListener("submit", (ev) => { ev.preventDefault(); go(searchHref($("q").value.trim())); });
 $("verdict").addEventListener("click", () => go("/"));
-$("filter").addEventListener("input", drawStreams);
-$("streams-engine").addEventListener("change", drawStreams);
+$("filter").addEventListener("input", filterStreams);
+$("streams-engine").addEventListener("change", loadStreams);
 $("search").addEventListener("submit", (ev) => {
   ev.preventDefault();
   const q = new URLSearchParams();
@@ -1831,31 +1809,57 @@ $("clive").addEventListener("change", () => ($("clive").checked ? csearch() : dr
 $("live").addEventListener("change", () => ($("live").checked ? search() : drawFound()));
 window.addEventListener("popstate", onRoute);
 
-async function tick() {
-  await loadState();
+// ---- keeping the view current: told by the kernel when something changed (/api/watch) ----
+// Each view loads only what it shows, at most every 2 s; the rejection list and the activity
+// (the heavy ones) at most every 5 s. Without the stream, the page asks every 5 s instead.
+let live = false, lastLoad = 0, lastHeavy = 0, pendingLoad = null;
+async function load() {
+  lastLoad = Date.now();
   const top = document.querySelector("nav a.on")?.dataset.view;
-  if (top === "explore" && exploreTab === "events") follow();
-  if (top === "explore" && exploreTab === "commands") cfollow();
-  if (top === "processes" && route.view === "case" && caseData && !caseData.events?.some((e) => e.type === "ProcessEnded")) loadCaseRoute();
+  const heavy = Date.now() - lastHeavy >= 5000;
+  if (heavy) lastHeavy = Date.now();
+  const jobs = [];
+  if (top === "overview") jobs.push(loadState(), loadSystem(), heavy ? loadProcs() : null, heavy ? loadTrend() : null, heavy ? loadRejectedDay() : null);
+  if (top === "operations") jobs.push(loadState(), loadSystem(), loadParked(), heavy ? loadTrend() : null, heavy ? loadRejections() : null);
+  if (top === "processes") {
+    jobs.push(loadProcs());
+    if (route.view === "processes" && procFrame) { const p = currentProcess(); if (p) jobs.push(loadCases(p, currentVersion(p))); }
+    if (route.view === "case" && caseData && !caseData.events?.some((e) => e.type === "ProcessEnded")) jobs.push(loadCaseRoute());
+  }
+  if (top === "explore") {
+    if (["domains", "catalog"].includes(exploreTab)) jobs.push(loadState(), loadProcs());
+    if (exploreTab === "events") jobs.push(follow());
+    if (exploreTab === "commands") jobs.push(cfollow());
+    if (exploreTab === "aggregates") jobs.push(loadStreams(), stream ? loadHistory() : null);
+  }
+  await Promise.all(jobs);
   render();
 }
-// Each view loads only what it shows: the rejection list (hundreds of KB) and the activity only
-// for Overview and Operations, the processes where they are drawn. The verdict's incidents,
-// parked events and system state always.
-async function slow() {
-  const top = document.querySelector("nav a.on")?.dataset.view;
-  const health = top === "overview" || top === "operations";
-  const processes = top === "overview" || top === "processes" || (top === "explore" && ["domains", "catalog"].includes(exploreTab));
-  await Promise.all([loadSystem(), loadParked(), health ? loadTrend() : null, health ? loadRejections() : null, processes ? loadProcs() : loadIncidents()]);
-  if (top === "processes" && route.view === "processes" && procFrame) { const p = currentProcess(); if (p) await loadCases(p, currentVersion(p)); }
-  if (top === "explore" && exploreTab === "aggregates") loadStreams();
-  render();
+/** Loads what the view shows: now (`soon` false) or within 2 s of the last load. */
+function reload(now = false) {
+  if (pendingLoad) return;
+  const wait = now ? 0 : Math.max(0, lastLoad + 2000 - Date.now());
+  pendingLoad = setTimeout(() => { pendingLoad = null; load(); }, wait);
+}
+function watch() {
+  const source = new EventSource("/api/watch");
+  source.addEventListener("open", () => { live = true; });
+  source.addEventListener("head", () => { live = true; reload(); });
+  source.addEventListener("health", async () => { live = true; await loadHealth(); render(); });
+  // EventSource connects again by itself; meanwhile the page asks every 5 s.
+  source.addEventListener("error", () => { live = false; });
 }
 onRoute();
 started = true;
-tick(); slow();
-setInterval(tick, 2000);
-setInterval(slow, 5000);
+loadHealth().then(() => { render(); reload(true); });
+watch();
+setInterval(async () => {
+  if (live) return;
+  await loadHealth();
+  reload(true);
+}, 5000);
+// A safety net while live: the verdict once in a while even if nothing changed.
+setInterval(() => live && loadHealth().then(render), 30_000);
 // Under `kernable demo` only: the way back to the Stage.
 fetch("/api/demo").then((r) => { if (r.ok) $("stage").hidden = false; }).catch(() => {});
 </script>

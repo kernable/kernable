@@ -71,6 +71,18 @@ impl Trend {
         kept.push_back([at, events, commands, rejected, queries]);
     }
 
+    /// The commands committed since `since` (ms since epoch), as far back as kept.
+    pub(crate) fn commands_since(&self, since: i64) -> u64 {
+        let kept = self.activity.lock().unwrap_or_else(PoisonError::into_inner);
+        let (Some(from), Some(last)) = (
+            kept.iter().find(|row| row[0] >= since).or(kept.front()),
+            kept.back(),
+        ) else {
+            return 0;
+        };
+        u64::try_from(last[2] - from[2]).unwrap_or(0)
+    }
+
     /// Per listener, its samples oldest first as `[at, head, position]`; and the activity,
     /// oldest first as `[at, events, commands, rejected, queries]`, counted since the start.
     pub(crate) fn view(&self) -> Value {

@@ -209,8 +209,69 @@ async fn the_ui_shows_the_map_the_connections_and_an_aggregate_history() {
         "c1"
     );
 
+    // The verdict, computed by the kernel: nothing wrong here.
+    let health = json(get(&ui, "/api/health").await);
+    assert_eq!(
+        (&health["level"], &health["issues"], &health["head"]),
+        (
+            &serde_json::json!("ok"),
+            &serde_json::json!([]),
+            &serde_json::json!(1)
+        ),
+        "{health}"
+    );
+    assert_eq!(health["incidents"], 0);
+    assert_eq!(json(get(&ui, "/api/rejections?since=0").await)["count"], 0);
+    // The aggregates, searched by the kernel.
+    assert_eq!(
+        json(get(&ui, "/api/streams?q=O1").await)["streams"][0]["id"],
+        "o1"
+    );
+    assert_eq!(
+        json(get(&ui, "/api/streams?q=nothing-like-it").await)["streams"],
+        serde_json::json!([])
+    );
+    // The page is told when the log moves on: the head at once, then each new one.
+    {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut watch = tokio::net::TcpStream::connect(&ui).await.unwrap();
+        watch
+            .write_all(b"GET /api/watch HTTP/1.1\r\nhost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut said = String::new();
+        let mut buf = [0u8; 4096];
+        let read_until = |said: &String, what: &str| said.contains(what);
+        while !read_until(&said, "event: head\ndata: 1\n") {
+            let n = tokio::time::timeout(Duration::from_secs(5), watch.read(&mut buf))
+                .await
+                .expect("told the head")
+                .unwrap();
+            assert!(n > 0, "{said}");
+            said.push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+        assert!(
+            said.starts_with("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream"),
+            "{said}"
+        );
+        submit(
+            &env.addr,
+            signed(command("c2", "PlaceOrder", "o2"), &key(1)),
+        )
+        .await
+        .unwrap();
+        while !read_until(&said, "event: head\ndata: 2\n") {
+            let n = tokio::time::timeout(Duration::from_secs(5), watch.read(&mut buf))
+                .await
+                .expect("told the new head")
+                .unwrap();
+            assert!(n > 0, "{said}");
+            said.push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+    }
+
     let streams = json(get(&ui, "/api/streams").await);
-    assert_eq!(streams["streams"][0]["id"], "o1");
+    assert_eq!(streams["streams"][0]["id"], "o2");
     let history = json(get(&ui, "/api/history?tenant=t1&domain=orders&type=Order&id=o1").await);
     assert_eq!(history["events"][0]["type"], "OrderPlaced");
     assert_eq!(history["commands"]["c1"]["type"], "PlaceOrder");

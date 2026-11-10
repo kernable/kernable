@@ -1,12 +1,14 @@
 //! The kernel's two plain HTTP endpoints, metrics and the UI: one `GET` per connection, at
 //! most [`CONNECTIONS`] at once, each read within [`READ_TIMEOUT`]. On a loopback address a
 //! request must name a loopback `Host`, so a web page cannot reach them through DNS rebinding.
+//! An answer is either a whole response or a stream that keeps the connection (the UI's
+//! `/api/watch`); one beyond [`CONNECTIONS`] gets `503`.
 
-use std::{sync::Arc, time::Duration};
+use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
     sync::Semaphore,
 };
 
@@ -17,20 +19,56 @@ const CONNECTIONS: usize = 32;
 /// How long a connection may take to send its request.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Serves `respond(request)` on `addr` until the listener fails.
+/// A stream: given the connection, writes to it for as long as it wants.
+pub(crate) type Streamer =
+    Box<dyn FnOnce(TcpStream) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
+
+/// What answers a request: a whole response, or a stream.
+pub(crate) enum Answer {
+    Bytes(Vec<u8>),
+    Stream(Streamer),
+}
+
+impl From<Vec<u8>> for Answer {
+    fn from(bytes: Vec<u8>) -> Self {
+        Answer::Bytes(bytes)
+    }
+}
+
+/// Serves `respond(request)` on `addr` until the listener fails, each on a thread meant for
+/// blocking work (a request may read much of the store); `stream(request)` may take a
+/// request over instead.
 pub(crate) async fn serve(
     kernel: Arc<Kernel>,
     addr: &str,
     respond: impl Fn(&Kernel, &[u8]) -> Vec<u8> + Send + Sync + 'static,
+    stream: impl Fn(&Arc<Kernel>, &[u8]) -> Option<Answer> + Send + Sync + 'static,
 ) -> Result<(), BoxError> {
-    let respond = Arc::new(respond);
+    let (respond, stream) = (Arc::new(respond), Arc::new(stream));
     let metrics = Arc::clone(&kernel);
     serve_with(
         addr,
         move |reason| metrics.metrics.limited(reason),
         move |request| {
-            let (kernel, respond) = (Arc::clone(&kernel), Arc::clone(&respond));
-            async move { respond(&kernel, &request) }
+            let (kernel, respond, stream) = (
+                Arc::clone(&kernel),
+                Arc::clone(&respond),
+                Arc::clone(&stream),
+            );
+            async move {
+                if let Some(answer) = stream(&kernel, &request) {
+                    return answer;
+                }
+                let blocking =
+                    tokio::task::spawn_blocking(move || respond(&kernel, &request)).await;
+                Answer::Bytes(blocking.unwrap_or_else(|_| {
+                    reply(
+                        "500 Internal Server Error",
+                        "text/plain",
+                        b"the request failed\n",
+                    )
+                }))
+            }
         },
     )
     .await
@@ -45,7 +83,8 @@ pub(crate) async fn serve_with<F, R>(
 ) -> Result<(), BoxError>
 where
     F: Fn(Vec<u8>) -> R + Send + Sync + 'static,
-    R: Future<Output = Vec<u8>> + Send + 'static,
+    R: Future + Send + 'static,
+    R::Output: Into<Answer>,
 {
     let listener = TcpListener::bind(addr).await?;
     let check_host = crate::loopback(addr);
@@ -55,6 +94,15 @@ where
         let (mut conn, _) = listener.accept().await?;
         let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
             limited("http_connections");
+            // Said, not just closed: the browser shows why, and the UI tries again.
+            tokio::spawn(async move {
+                let busy = reply(
+                    "503 Service Unavailable",
+                    "text/plain",
+                    b"too many connections; try again\n",
+                );
+                let _ = conn.write_all(&busy).await;
+            });
             continue;
         };
         let (limited, respond) = (Arc::clone(&limited), Arc::clone(&respond));
@@ -66,17 +114,22 @@ where
                 return;
             };
             let request = &request[..n];
-            let response = if check_host && !host(request).is_some_and(|h| loopback_host(&h)) {
+            let answer = if check_host && !host(request).is_some_and(|h| loopback_host(&h)) {
                 limited("http_host");
-                reply(
+                Answer::Bytes(reply(
                     "403 Forbidden",
                     "text/plain",
                     b"a loopback Host is required\n",
-                )
+                ))
             } else {
-                respond(request.to_vec()).await
+                respond(request.to_vec()).await.into()
             };
-            let _ = conn.write_all(&response).await;
+            match answer {
+                Answer::Bytes(response) => {
+                    let _ = conn.write_all(&response).await;
+                }
+                Answer::Stream(stream) => stream(conn).await,
+            }
         });
     }
 }
