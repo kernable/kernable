@@ -370,11 +370,17 @@ async fn switchover_crash(point: &str) {
     }
     worker.abort();
     if !on_primary {
-        // The standby died after it answered: started again, its primary gone, it waits.
-        assert!(
-            standby.child.try_wait().unwrap().is_some(),
-            "{point}: the standby crashed"
-        );
+        // The standby dies right after it answered; the old primary may exit first, so wait for
+        // the crash rather than look at the instant the primary is gone. Then started again, its
+        // primary gone, it waits.
+        let started = Instant::now();
+        while standby.child.try_wait().unwrap().is_none() {
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "{point}: the standby did not crash"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         let _ = std::fs::remove_file(dir.join("s.sock"));
         standby = start(&dir, &standby_args, None);
     }

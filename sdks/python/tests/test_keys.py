@@ -95,9 +95,9 @@ class Keys(unittest.TestCase):
         self.run_worker(*shop_domain().aggregates)
         self.assertTrue(self.register("c1", "max@example.com", "max").committed)
         self.assertEqual(self.register("c2", "max@example.com", "moritz").code, "unique_taken")
-        self.assertTrue(self.register("c1", "max@example.com", "max").committed, "its own key is no conflict")
+        self.assertTrue(self.register("c1", "max@example.org", "max").committed, "its own key is no conflict")
         self.assertTrue(self.register("c2", "max@example.com", "moritz").committed)
-        self.assertEqual(self.register("c3", "max@example.com", "erika").code, "unique_taken")
+        self.assertEqual(self.register("c3", "max@example.org", "erika").code, "unique_taken")
 
     def test_a_command_commits_only_while_the_fact_it_requires_is_held(self):
         self.run_worker(*shop_domain().aggregates)
