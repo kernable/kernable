@@ -17,12 +17,16 @@ one before it held.
    clean machine of each kind before announcing.
 5. **Container image.** `docker load -i image-<arch>.tar`, tag, push to the registry (not chosen
    yet), as one multi-arch manifest.
-6. **SDKs.**
-   - npm: `cd sdks/typescript && npm publish --access public` (`@kernable/sdk`).
-   - PyPI: `kernable-sdk`, the wheel and sdist from `sdks/python` (`python -m build`, `twine upload`).
-   - crates.io: `kernable-sdk` depends on `kernable-core` and `kernable-sdk-macros`, which go
-     first; `publish = false` in `[workspace.package]` has to give way to `publish = true` in
-     these three crates only. The kernel, the store and the tools stay off crates.io.
+6. **SDKs.** Push the tag `v<version>`: `.github/workflows/release.yml` publishes the crates
+   (`kernable-core`, `kernable-sdk-macros`, `kernable-sdk`, in that order), `@kernable/sdk` and
+   `kernable-sdk` on PyPI through Trusted Publishing, after approval in the `release`
+   environment. A version a registry already has is skipped. The kernel, the store and the
+   tools stay off crates.io. By hand (the first release of a package, before its registry
+   trusts the workflow):
+   - crates.io: `(cd crates/kernable-core && ./pack_proto.sh) && (cd sdks/rust && ./pack_kit.sh)`,
+     then `cargo publish --allow-dirty -p kernable-core -p kernable-sdk-macros -p kernable-sdk`
+     with a token from `cargo login`.
+   - npm: `cd sdks/typescript && npm publish` (logged in with `npm login`).
 7. **Licenses.** Each archive and package carries the MIT license (`LICENSE`); each SDK also carries it
    for its kit, as `kit/LICENSE`.
 8. **Notes.** What changed, what an operator must do (none before 1.0: no migrations), the

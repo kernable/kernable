@@ -49,7 +49,12 @@ fn main() {
     let mut files: Vec<(String, PathBuf)> = vec![];
     if kit.join("src").is_dir() {
         for part in PARTS {
-            let path = kit.join(part);
+            // Packed, the kit's manifest is `Cargo.toml.kit`: cargo leaves out any directory
+            // with a `Cargo.toml` when it packages the SDK.
+            let path = match *part {
+                "Cargo.toml" if kit == packed => kit.join("Cargo.toml.kit"),
+                _ => kit.join(part),
+            };
             println!("cargo:rerun-if-changed={}", path.display());
             if path.is_dir() {
                 walk(&path, &kit, &mut files);

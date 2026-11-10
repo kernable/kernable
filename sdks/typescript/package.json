@@ -2,8 +2,24 @@
   "name": "@kernable/sdk",
   "version": "0.1.0",
   "description": "kernable SDK for TypeScript: event-sourced business logic in TypeScript on the kernable kernel",
-  "private": true,
+  "keywords": [
+    "event-sourcing",
+    "cqrs",
+    "grpc",
+    "kernable",
+    "sdk"
+  ],
+  "homepage": "https://kernable.com/docs/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kernable/kernable.git",
+    "directory": "sdks/typescript"
+  },
+  "bugs": {
+    "url": "https://github.com/kernable/kernable/issues"
+  },
   "license": "MIT",
+  "author": "kernable",
   "type": "module",
   "exports": {
     ".": {
@@ -37,5 +53,9 @@
   },
   "bin": {
     "kernable-sdk": "dist/cli.js"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   }
 }

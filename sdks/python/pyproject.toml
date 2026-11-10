@@ -7,9 +7,27 @@ name = "kernable-sdk"
 version = "0.1.0"
 description = "kernable SDK for Python: event-sourced business logic in Python on the kernable kernel"
 license = "MIT"
+readme = "README.md"
+authors = [{ name = "kernable" }]
+keywords = ["event-sourcing", "cqrs", "grpc", "kernable", "sdk"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Database",
+    "Topic :: Software Development :: Libraries",
+]
 requires-python = ">=3.10"
 # The generated stubs in kernable/v1 need at least the versions they were generated with.
 dependencies = ["grpcio>=1.85", "protobuf>=7.35.1,<8", "cryptography>=43"]
+
+[project.urls]
+Homepage = "https://kernable.com"
+Documentation = "https://kernable.com/docs/"
+Repository = "https://github.com/kernable/kernable"
+Issues = "https://github.com/kernable/kernable/issues"
 
 [project.scripts]
 kernable-sdk = "kernable.cli:main"

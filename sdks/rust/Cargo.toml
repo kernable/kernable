@@ -4,7 +4,15 @@ description = "Write event-sourced business logic in Rust; the kernable kernel d
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish.workspace = true
+publish = true
+repository.workspace = true
+homepage.workspace = true
+rust-version = "1.93"
+documentation = "https://kernable.com/docs/"
+readme = "README.md"
+keywords = ["event-sourcing", "cqrs", "grpc", "sdk"]
+include = ["src/**/*", "build.rs", "kit/**/*", "README.md", "LICENSE"]
+categories = ["database", "network-programming", "asynchronous"]
 
 # The crate is kernable-sdk (kernable is the kernel); code imports it as `kernable`.
 [lib]
@@ -14,8 +22,8 @@ name = "kernable"
 ed25519-dalek.workspace = true
 getrandom.workspace = true
 hex.workspace = true
-kernable-core = { path = "../../crates/kernable-core" }
-kernable-sdk-macros = { path = "../rust-macros" }
+kernable-core = { path = "../../crates/kernable-core", version = "=0.1.0" }
+kernable-sdk-macros = { path = "../rust-macros", version = "=0.1.0" }
 prost.workspace = true
 rusqlite.workspace = true
 serde.workspace = true

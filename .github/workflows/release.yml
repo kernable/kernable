@@ -1,0 +1,119 @@
+name: Release
+
+# Publishes the SDKs for a version tag (v0.1.0): the Rust crates to crates.io, @kernable/sdk to
+# npm, kernable-sdk to PyPI. Every registry trusts this workflow directly (Trusted Publishing,
+# OpenID Connect): no tokens are stored anywhere. A version a registry already has is skipped,
+# so a failed release can be run again. See RELEASING.md.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Check the version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: v
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          cargo=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          npm=$(node -p 'require("./sdks/typescript/package.json").version')
+          py=$(sed -n 's/^version = "\(.*\)"/\1/p' sdks/python/pyproject.toml)
+          echo "tag $v, Cargo $cargo, npm $npm, PyPI $py"
+          [ "$v" = "$cargo" ] && [ "$v" = "$npm" ] && [ "$v" = "$py" ]
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+  crates:
+    name: crates.io
+    needs: version
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install  # the toolchain pinned in rust-toolchain.toml
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - id: exists
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' -A 'kernable-release (github.com/kernable/kernable)' \
+            "https://crates.io/api/v1/crates/kernable-sdk/${{ needs.version.outputs.version }}")
+          echo "published=$([ "$code" = 200 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - if: steps.exists.outputs.published == 'false'
+        uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - if: steps.exists.outputs.published == 'false'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          (cd crates/kernable-core && ./pack_proto.sh)
+          (cd sdks/rust && ./pack_kit.sh)
+          cargo publish --allow-dirty -p kernable-core -p kernable-sdk-macros -p kernable-sdk
+
+  npm:
+    name: npm
+    needs: version
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      # Trusted Publishing needs npm 11.5.1 or newer.
+      - run: npm install -g npm@11
+      - id: exists
+        run: |
+          if npm view "@kernable/sdk@${{ needs.version.outputs.version }}" version >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.exists.outputs.published == 'false'
+        working-directory: sdks/typescript
+        run: npm ci --no-audit --no-fund && npm publish
+
+  pypi:
+    name: PyPI
+    needs: version
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - id: exists
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/kernable-sdk/${{ needs.version.outputs.version }}/json")
+          echo "published=$([ "$code" = 200 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - if: steps.exists.outputs.published == 'false'
+        run: |
+          make py
+          cd sdks/python
+          .venv/bin/python pack_kit.py
+          .venv/bin/pip install -q build
+          .venv/bin/python -m build --outdir dist .
+      - if: steps.exists.outputs.published == 'false'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: sdks/python/dist
