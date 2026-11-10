@@ -1534,6 +1534,19 @@ async function loadStreams() {
   try { streams = (await get(`/api/streams?${q}`)).streams; } catch { return; }
   drawStreams();
 }
+/** The kernel told which aggregates changed: they move to the top of the list (if they match
+ * the filter), and the open one is fetched again only if it is among them. No request else. */
+function changedStreams(changed) {
+  const key = (s) => `${s.tenant}/${s.domain}/${s.type}/${s.id}`;
+  const q = $("filter").value.trim().toLowerCase(), engine = $("streams-engine").checked;
+  const shown = changed.filter((s) => (engine || s.domain !== "process") && (!q || key(s).toLowerCase().includes(q)));
+  if (shown.length) {
+    const fresh = new Set(shown.map(key));
+    streams = [...shown, ...streams.filter((s) => !fresh.has(key(s)))].slice(0, 50);
+    drawStreams();
+  }
+  if (stream?.id && changed.some((s) => key(s) === key(stream))) loadHistory();
+}
 let streamsTimer = null;
 function filterStreams() { clearTimeout(streamsTimer); streamsTimer = setTimeout(loadStreams, 250); }
 function drawStreams() {
@@ -1844,7 +1857,14 @@ function reload(now = false) {
 function watch() {
   const source = new EventSource("/api/watch");
   source.addEventListener("open", () => { live = true; });
-  source.addEventListener("head", () => { live = true; reload(); });
+  source.addEventListener("head", (ev) => {
+    live = true;
+    let told = {};
+    try { told = JSON.parse(ev.data); } catch {}
+    // The aggregates view updates from what the kernel says changed; every other view reloads.
+    if (told.streams && document.querySelector("nav a.on")?.dataset.view === "explore" && exploreTab === "aggregates") changedStreams(told.streams);
+    else reload();
+  });
   source.addEventListener("health", async () => { live = true; await loadHealth(); render(); });
   // EventSource connects again by itself; meanwhile the page asks every 5 s.
   source.addEventListener("error", () => { live = false; });

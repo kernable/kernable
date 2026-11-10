@@ -242,7 +242,7 @@ async fn the_ui_shows_the_map_the_connections_and_an_aggregate_history() {
         let mut said = String::new();
         let mut buf = [0u8; 4096];
         let read_until = |said: &String, what: &str| said.contains(what);
-        while !read_until(&said, "event: head\ndata: 1\n") {
+        while !read_until(&said, "event: head\ndata: {\"head\":1}") {
             let n = tokio::time::timeout(Duration::from_secs(5), watch.read(&mut buf))
                 .await
                 .expect("told the head")
@@ -260,7 +260,7 @@ async fn the_ui_shows_the_map_the_connections_and_an_aggregate_history() {
         )
         .await
         .unwrap();
-        while !read_until(&said, "event: head\ndata: 2\n") {
+        while !read_until(&said, "\"id\":\"o2\"") {
             let n = tokio::time::timeout(Duration::from_secs(5), watch.read(&mut buf))
                 .await
                 .expect("told the new head")
@@ -268,6 +268,11 @@ async fn the_ui_shows_the_map_the_connections_and_an_aggregate_history() {
             assert!(n > 0, "{said}");
             said.push_str(&String::from_utf8_lossy(&buf[..n]));
         }
+        // The second tells which aggregate the new event changed.
+        assert!(
+            said.contains("\"head\":2,\"streams\":[{\"tenant\":\"t1\",\"domain\":\"orders\",\"type\":\"Order\",\"id\":\"o2\",\"version\":1"),
+            "{said}"
+        );
     }
 
     let streams = json(get(&ui, "/api/streams").await);

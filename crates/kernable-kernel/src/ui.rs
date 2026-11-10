@@ -6,9 +6,11 @@
 //!   connected workers, the listeners, and which aggregate writes which event type;
 //! - `GET /api/health`: the verdict (ok, warn, bad) and every problem behind it, with what
 //!   fixes it, as the UI's top bar shows it; and the counts it shows beside (incidents, parked);
-//! - `GET /api/watch`: server-sent events while the page is open: `head` (the log's newest
-//!   position) when the log moved on, `health` when the verdict changed, at most once a second,
-//!   and a comment every 15 s; the page reloads what it shows only then;
+//! - `GET /api/watch`: server-sent events while the page is open: `head` when the log moved on
+//!   (`{"head": position, "streams": [the aggregates the new events changed, newest first]}`,
+//!   without `streams` after many events), `health` when the verdict changed, at most once a
+//!   second, and a comment every 15 s; the page reloads what it shows only then, or not at all
+//!   when what changed is not on it;
 //! - `GET /api/streams?q=&engine=&limit=`: the aggregates with events, the most recently
 //!   changed first, those whose tenant, domain, type or ID contains `q`;
 //! - `GET /api/history?tenant=&domain=&type=&id=`: one aggregate's events with their commands,
@@ -58,6 +60,10 @@ const LOGO_DARK: &[u8] = include_bytes!("logo-dark.png");
 
 /// How many aggregates `/api/streams` lists.
 const STREAMS: usize = 500;
+
+/// The most events `/api/watch` looks at to tell which aggregates changed; more since the last
+/// message, and it tells only that the log moved on.
+const WATCH_STREAMS: usize = 200;
 
 /// How many of the most recently changed aggregates a search in `/api/streams` looks through.
 const STREAMS_SEARCH: usize = 20_000;
@@ -529,11 +535,47 @@ async fn watch(kernel: Arc<Kernel>, mut conn: tokio::net::TcpStream) {
     if conn.write_all(start).await.is_err() {
         return;
     }
-    let (mut head, mut verdict, mut quiet) = (None, None, 0u32);
+    let (mut head, mut verdict, mut quiet) = (None::<u64>, None, 0u32);
     loop {
         let k = Arc::clone(&kernel);
+        let before = head;
         let now = tokio::task::spawn_blocking(move || {
             let head = k.store.head_position().ok();
+            // The aggregates the new events changed, so the page updates its list itself and
+            // reloads an aggregate only if it changed; beyond WATCH_STREAMS, only "many".
+            let changed = match (before, head) {
+                (Some(from), Some(to)) if to > from => {
+                    if to - from > WATCH_STREAMS as u64 {
+                        None
+                    } else {
+                        let events = k
+                            .store
+                            .read_all(from, WATCH_STREAMS as u32)
+                            .unwrap_or_default();
+                        let mut latest: Vec<Value> = Vec::new();
+                        for e in events.iter().rev() {
+                            let same = |s: &Value| {
+                                s["tenant"] == e.tenant_id.as_str()
+                                    && s["domain"] == e.domain.as_str()
+                                    && s["type"] == e.aggregate_type.as_str()
+                                    && s["id"] == e.aggregate_id.as_str()
+                            };
+                            if !latest.iter().any(same) {
+                                latest.push(json!({
+                                    "tenant": e.tenant_id,
+                                    "domain": e.domain,
+                                    "type": e.aggregate_type,
+                                    "id": e.aggregate_id,
+                                    "version": e.version,
+                                    "lastAt": e.created_at,
+                                }));
+                            }
+                        }
+                        Some(latest)
+                    }
+                }
+                _ => None,
+            };
             // What the top bar shows, without the time: changes only when the verdict does.
             let verdict = health(&k).ok().map(|mut h| {
                 if let Some(o) = h.as_object_mut() {
@@ -542,15 +584,20 @@ async fn watch(kernel: Arc<Kernel>, mut conn: tokio::net::TcpStream) {
                 }
                 h.to_string()
             });
-            (head, verdict)
+            (head, verdict, changed)
         })
         .await;
-        let Ok((new_head, new_verdict)) = now else {
+        let Ok((new_head, new_verdict, changed)) = now else {
             return;
         };
         let mut said = String::new();
         if new_head.is_some() && new_head != head {
-            said += &format!("event: head\ndata: {}\n\n", new_head.unwrap_or_default());
+            // Newest first; without `streams` the page reloads what it shows.
+            let data = match changed {
+                Some(streams) => json!({ "head": new_head, "streams": streams }),
+                None => json!({ "head": new_head }),
+            };
+            said += &format!("event: head\ndata: {data}\n\n");
         }
         if new_verdict.is_some() && new_verdict != verdict {
             said += "event: health\ndata: changed\n\n";
