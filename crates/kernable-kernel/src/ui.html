@@ -162,7 +162,20 @@
   dt { color: var(--muted); } dd { margin: 0; word-break: break-word; white-space: pre-line; }
   /* explore: domains and the catalog */
   .domains { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 14px; }
-  .dcard { cursor: pointer; transition: border-color .15s; }
+  .dcard { cursor: pointer; transition: border-color .15s; display: flex; flex-direction: column; gap: 10px; }
+  .dcard .made { font-size: 12.5px; color: var(--muted); }
+  .dcard .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 16px; padding: 10px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+  .dcard .stat { display: grid; gap: 1px; align-content: start; }
+  .dcard .stat .l { color: var(--faint); font-size: 11.5px; }
+  .dcard .stat .n { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; display: flex; gap: 8px; align-items: center; }
+  .dcard .stat .s { font-size: 12px; color: var(--muted); }
+  .dcard .state { font-size: 12.5px; display: grid; gap: 3px; }
+  .dcard .state div { display: flex; gap: 6px; align-items: baseline; }
+  .dcard .foot { margin-top: auto; display: flex; gap: 14px; flex-wrap: wrap; font-size: 12.5px; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+  .seg a { padding: 4px 10px; font-size: 12.5px; color: var(--muted); }
+  .seg a.on { background: var(--accent-soft); color: var(--accent); }
+  .seg a:hover { text-decoration: none; color: var(--accent); }
   .dcard:hover { border-color: var(--accent); }
   .dcard .dhead { display: flex; align-items: baseline; gap: 8px; justify-content: space-between; }
   .dcard .dhead b { font-size: 16px; }
@@ -1436,6 +1449,8 @@ function rejectionsPanel() {
 let exploreTab = "domains", domainSel = null, catalogKind = "events", catalogText = "";
 /** The catalog's domain filter ("" all) and sorting: a column's label and direction; none: by domain and name. */
 let catalogDomain = "", catalogSort = "", catalogDir = "desc";
+/** The domains overview's order: by name, or the busiest (events in the last hour) first. */
+let domainsSort = "name";
 function enterExplore() {
   if (route.view === "history") { exploreTab = "aggregates"; stream = { tenant: route.args[0], domain: route.args[1], type: route.args[2], id: route.args[3] }; if (stream.domain === "process") $("streams-engine").checked = true; }
   else exploreTab = ["domains", "catalog", "events", "commands", "aggregates"].includes(route.args[0]) ? route.args[0] : "domains";
@@ -1453,7 +1468,7 @@ function enterExplore() {
     }
     if (changed) cnewest = null;
   }
-  if (exploreTab === "domains") domainSel = route.args[1] ?? null;
+  if (exploreTab === "domains") { domainSel = route.args[1] ?? null; domainsSort = route.query?.get("sort") === "activity" ? "activity" : "name"; }
   if (exploreTab === "catalog") { catalogKind = ["events", "commands", "queries", "processes"].includes(route.query?.get("kind")) ? route.query.get("kind") : "events"; catalogText = route.query?.get("q") ?? ""; catalogDomain = route.query?.get("domain") ?? ""; catalogSort = route.query?.get("sort") ?? ""; catalogDir = route.query?.get("dir") === "asc" ? "asc" : "desc"; }
   // The event log's filters come from the address: /explore/events?type=shop.Order&tenant=t1
   if (exploreTab === "events" && route.query) {
@@ -1530,34 +1545,75 @@ const plain = (text, title) => el("span", { class: "t", title }, text);
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 /** At most `n` chips, then how many more. */
 const some = (chips, n = 8) => el("div", { class: "chips" }, chips.slice(0, n), chips.length > n ? el("span", { class: "t more" }, `+${chips.length - n}`) : null, chips.length ? null : el("span", { class: "faint" }, "–"));
-function wildcardNote(data) {
-  if (!data.wildcards.length) return null;
-  return el("div", { class: "wildcard" }, "Reads every event its key may read (it registered no event types):", data.wildcards.map(listenerChip));
-}
 
-// ---- Domains: one card each ----
+// ---- Domains: one card each, with its numbers and what needs attention ----
 function drawDomains() {
   const box = $("x-domains");
   if (!state) return;
   const data = catalogData();
   if (domainSel) return drawDomain(box, data, data.domains.find((d) => d.name === domainSel));
-  const row = (label, content) => el("div", { class: "drow" }, el("span", {}, label), content);
-  const cards = data.domains.map((d) => el("div", { class: "panel dcard", onclick: (ev) => { if (!ev.target.closest("a")) go(`/explore/domains/${encodeURIComponent(d.name)}`); } },
-    el("div", { class: "dhead" }, el("span", {}, dotOf(d.level === "bad" ? "missing" : d.level === "warn" ? "behind" : "connected"), " ", el("b", {}, d.name)),
-      el("span", { class: "note" }, [plural(d.aggregates.length, "aggregate"), plural(d.events.length, "event type"), plural(d.processes.length, "process", "processes")].join(" · "))),
-    d.aggregates.map((a) => row(a.name, el("div", { class: "grid", style: "gap:4px" },
-      el("span", { class: a.ok ? "note" : "bad", style: "font-size:12px" }, a.workers ? `${a.workers} worker${a.workers === 1 ? "" : "s"}` : a.dynamic ? "no worker (dynamic)" : "no worker: its commands wait"),
-      some(a.commands.map((c) => plain(short(c), c)), 7)))),
-    row("events", some(d.events.map((e) => evChip(e.type)), 6)),
-    row("read by", some([...d.readers.map(listenerChip), ...d.events.flatMap((e) => e.processes).filter((p, i, xs) => xs.indexOf(p) === i).map(procChip)], 6)),
-    d.queries.length ? row("answers", some(d.queries.map((q) => plain(short(q.type), `${q.type}, answered by ${q.answeredBy.name}`)))) : null,
-    d.checkers.length ? row("checked by", some(d.checkers.map(listenerChip))) : null,
-    d.processes.length ? row("processes", some(d.processes.map(procChip))) : null,
-    d.uses.length ? row("uses", some(d.uses.map((u) => el("a", { class: "t", href: `/explore/domains/${encodeURIComponent(u)}` }, u)))) : null));
-  box.replaceChildren(...[
-    el("div", { class: "note" }, "Each domain with its aggregates and their commands, the events they write, who reads them, and its processes. Click one for its flow."),
-    el("div", { class: "domains" }, cards.length ? cards : el("div", { class: "empty" }, "Nothing registered yet: a worker registers its aggregates when it connects.")),
-    wildcardNote(data)].filter(Boolean));
+  const c = counts?.domain === "" ? counts : null;
+  const head = state.kernel.head;
+  const cases = incidents?.cases ?? [];
+  const per = data.domains.filter((d) => d.name !== "process").map((d) => {
+    const ev = d.events.map((e) => c?.events[e.type]).filter(Boolean);
+    const cmd = Object.entries(c?.commands ?? {}).filter(([k]) => domainOf(k) === d.name).map(([, v]) => v);
+    const commands = data.commands.filter((x) => x.domain === d.name);
+    // What needs attention, worst first; nothing: all is well.
+    const issues = [];
+    for (const a of d.aggregates.filter((a) => !a.ok)) issues.push(["bad", `no worker for ${a.name}: its commands wait`, null]);
+    for (const l of [...d.readers, ...d.queries.map((q) => q.answeredBy)].filter((l, i, xs) => xs.indexOf(l) === i)) {
+      if (l.status === "missing") issues.push(["bad", `${l.name} is away`, "/operations"]);
+      else if (l.status === "behind") issues.push(["warn", `${l.name} ${num(head - l.position)} behind`, "/operations"]);
+    }
+    for (const p of d.processes) {
+      const n = cases.filter((x) => x.process === p.name).length;
+      if (n) issues.push(["bad", `${plural(n, "incident")} in ${p.name}`, procHref(p.name)]);
+    }
+    return { d, commands, total: sum(ev.map((x) => x.count)), perMinute: Array.from({ length: 60 }, (_, i) => sum(ev.map((x) => x.perMinute[i]))),
+      cmdCount: sum(cmd.map((x) => x.count)), cmdRejected: sum(cmd.map((x) => x.rejected)), lastAt: Math.max(0, ...ev.map((x) => x.lastAt)), issues };
+  });
+  if (domainsSort === "activity") per.sort((a, b) => sum(b.perMinute) - sum(a.perMinute) || b.lastAt - a.lastAt);
+  const dash = () => el("span", { class: "faint" }, c ? "–" : "…");
+  const stat = (label, value, sub, chart) => el("div", { class: "stat" }, el("span", { class: "l" }, label), el("span", { class: "n" }, value, chart), sub ? el("span", { class: "s" }, sub) : null);
+  const link = (href, text) => el("a", { href, onclick: (ev) => ev.stopPropagation() }, text);
+  const cards = per.map(({ d, commands, total, perMinute, cmdCount, cmdRejected, lastAt, issues }) => {
+    const level = issues.some((i) => i[0] === "bad") ? "bad" : issues.length ? "warn" : "ok";
+    const made = [plural(d.aggregates.length, "aggregate"), plural(commands.length, "command"), plural(d.events.length, "event"), d.queries.length ? plural(d.queries.length, "query", "queries") : null, d.processes.length ? plural(d.processes.length, "process", "processes") : null].filter(Boolean).join(" · ");
+    return el("div", { class: "panel dcard", onclick: (ev) => { if (!ev.target.closest("a")) go(`/explore/domains/${encodeURIComponent(d.name)}`); } },
+      el("div", { class: "dhead" }, el("span", {}, dotOf(level === "bad" ? "missing" : level === "warn" ? "behind" : "connected"), " ", el("b", {}, d.name)), el("span", { class: "note" }, lastAt ? ["last event ", when(lastAt)] : "")),
+      el("div", { class: "made" }, made),
+      el("div", { class: "stats" },
+        stat("Events", c ? num(total) : dash()),
+        stat("Events, last hour", c ? num(sum(perMinute)) : dash(), null, c ? bars(perMinute, `${d.name}: events per minute, last hour`, 72, 18) : null),
+        stat("Commands, last hour", c ? num(cmdCount) : dash(), c && cmdCount ? (cmdRejected ? el("span", { class: "warn" }, `${num(cmdRejected)} rejected · ${pct(cmdRejected, cmdCount)}`) : "none rejected") : null),
+        stat("Workers", num(sum(d.aggregates.map((a) => a.workers))), d.aggregates.some((a) => a.dynamic && !a.workers) ? "dynamic" : `for ${plural(d.aggregates.length, "aggregate")}`)),
+      el("div", { class: "state" }, issues.length
+        ? issues.slice(0, 3).map(([lvl, text, href]) => el("div", { class: lvl }, "●", href ? link(href, text) : text))
+        : el("div", { class: "ok" }, "●", el("span", { class: "muted" }, "All workers and readers connected")),
+        issues.length > 3 ? el("div", { class: "note" }, `and ${issues.length - 3} more`) : null),
+      el("div", { class: "foot" },
+        link(`/explore/domains/${encodeURIComponent(d.name)}`, "Flow →"),
+        link(`/explore/events?domain=${encodeURIComponent(d.name)}`, "Events"),
+        link(`/explore/commands?domain=${encodeURIComponent(d.name)}`, "Commands"),
+        link(`/explore/catalog?kind=events&domain=${encodeURIComponent(d.name)}`, "Catalog")));
+  });
+
+  // ---- totals over every domain ----
+  const allMinute = Array.from({ length: 60 }, (_, i) => sum(per.map((x) => x.perMinute[i])));
+  const cmdAll = sum(per.map((x) => x.cmdCount)), rejAll = sum(per.map((x) => x.cmdRejected));
+  const tile = (label, value, sub, chart) => el("div", { class: "panel kpi" }, el("span", { class: "l" }, label), el("span", { class: "n" }, value), chart ?? el("span"), el("span", { class: "s" }, sub));
+  const tiles = el("div", { class: "tiles" },
+    tile("Domains", num(per.length), plural(sum(per.map((x) => x.d.aggregates.length)), "aggregate type")),
+    tile("Events", c ? num(sum(per.map((x) => x.total))) : "…", c && c.counted < c.head ? `counting… ${pct(c.counted, c.head)}` : "in the log"),
+    tile("Events, last hour", c ? num(sum(allMinute)) : "…", "per minute", c ? bars(allMinute, "Events per minute, last hour", 110, 30) : null),
+    tile("Commands, last hour", c ? num(cmdAll) : "…", c ? (rejAll ? el("span", { class: "warn" }, `${num(rejAll)} rejected · ${pct(rejAll, cmdAll)}`) : "none rejected") : ""),
+    tile("Open incidents", cases.length ? el("a", { class: "bad", href: "/processes" }, num(cases.length)) : "0", cases.length ? "cases waiting for a person" : "none"));
+  const sortLink = (key, label) => el("a", { href: `/explore/domains${key === "name" ? "" : "?sort=activity"}`, class: domainsSort === key ? "on" : "", onclick: (ev) => { ev.preventDefault(); domainsSort = key; history.replaceState(null, "", ev.currentTarget.getAttribute("href")); drawDomains(); } }, label);
+  box.replaceChildren(
+    tiles,
+    el("div", { class: "controls", style: "justify-content:space-between" }, el("span", { class: "note" }, "Click a domain for its flow."), el("span", { class: "seg" }, sortLink("name", "By name"), sortLink("activity", "Busiest first"))),
+    el("div", { class: "domains" }, cards.length ? cards : el("div", { class: "empty" }, "Nothing registered yet: a worker registers its aggregates when it connects.")));
 }
 
 /** Per minute over the last hour as small bars, the current minute on the right. */
@@ -2395,7 +2451,7 @@ async function load() {
   }
   if (top === "explore") {
     if (["domains", "catalog"].includes(exploreTab)) jobs.push(loadState(), loadProcs());
-    if (exploreTab === "domains" && domainSel) jobs.push(loadCounts());
+    if (exploreTab === "domains") jobs.push(loadCounts());
     if (exploreTab === "catalog") jobs.push(loadCounts(""));
     if (exploreTab === "events" && !live) jobs.push(follow());
     if (exploreTab === "commands" && !live) jobs.push(cfollow());
