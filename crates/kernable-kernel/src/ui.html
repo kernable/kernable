@@ -417,11 +417,12 @@ async function loadState() {
 async function loadSystem() { try { system = await get("/api/system"); } catch {} }
 async function loadTrend() { try { trend = await get("/api/trend"); } catch {} }
 async function loadParked() { try { parked = await get("/api/parked"); } catch {} }
-async function loadRejections() { try { rejections = await get("/api/rejections?limit=500"); } catch {} }
+async function loadRejections() { try { rejections = await get("/api/rejections?limit=200"); } catch {} }
 async function loadProcs() {
   try { procs = await get(`/api/processes?window=${procWindow}`); } catch {}
-  try { incidents = await get("/api/cases?state=incident&limit=1000"); } catch {}
+  await loadIncidents();
 }
+async function loadIncidents() { try { incidents = await get("/api/cases?state=incident&limit=1000"); } catch {} }
 
 // ---- the verdict: healthy, degraded or down, and why ----
 function issues() {
@@ -519,7 +520,10 @@ function onRoute() {
   if (route.view === "processes") { procFrame = ""; caseList = null; }
   render();
   window.scrollTo(0, 0);
+  // What this view needs may not be loaded yet.
+  if (started) slow();
 }
+let started = false;
 
 // ---- drawing whatever view is open ----
 function render() {
@@ -1835,14 +1839,20 @@ async function tick() {
   if (top === "processes" && route.view === "case" && caseData && !caseData.events?.some((e) => e.type === "ProcessEnded")) loadCaseRoute();
   render();
 }
+// Each view loads only what it shows: the rejection list (hundreds of KB) and the activity only
+// for Overview and Operations, the processes where they are drawn. The verdict's incidents,
+// parked events and system state always.
 async function slow() {
-  await Promise.all([loadSystem(), loadTrend(), loadParked(), loadRejections(), loadProcs()]);
   const top = document.querySelector("nav a.on")?.dataset.view;
+  const health = top === "overview" || top === "operations";
+  const processes = top === "overview" || top === "processes" || (top === "explore" && ["domains", "catalog"].includes(exploreTab));
+  await Promise.all([loadSystem(), loadParked(), health ? loadTrend() : null, health ? loadRejections() : null, processes ? loadProcs() : loadIncidents()]);
   if (top === "processes" && route.view === "processes" && procFrame) { const p = currentProcess(); if (p) await loadCases(p, currentVersion(p)); }
   if (top === "explore" && exploreTab === "aggregates") loadStreams();
   render();
 }
 onRoute();
+started = true;
 tick(); slow();
 setInterval(tick, 2000);
 setInterval(slow, 5000);
