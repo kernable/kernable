@@ -21,6 +21,8 @@ pub const ACCESS_TOKEN_MINUTES: i64 = 15;
 pub const SESSION_IDLE_DAYS: i64 = 14;
 pub const SESSION_MAX_DAYS: i64 = 90;
 pub const INVITATION_DAYS: i64 = 7;
+/// How many of a session's older refresh tokens are recognised as a reuse (which ends the session).
+pub const REUSE_WINDOW: usize = 32;
 
 /// Listener orders the kit takes: its keys need a grant of `reserved_order`.
 /// `CLEANUP`: reactors that must see a deleted tenant's rows before the read models drop them.
@@ -36,10 +38,37 @@ pub const HOUR: i64 = 60 * MINUTE;
 pub const DAY: i64 = 24 * HOUR;
 
 /// The relying party passkeys are bound to (WebAuthn): your site's domain, name and origins.
-pub mod passkeys {
-    pub const RP_ID: &str = "localhost";
-    pub const RP_NAME: &str = "kernable";
-    pub const ORIGINS: &[&str] = &["http://localhost:3000"];
+/// [`use_passkeys`] sets it at runtime; the defaults suit local development.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelyingParty {
+    /// Your site's domain: `example.com`.
+    pub rp_id: String,
+    /// The name authenticators show.
+    pub rp_name: String,
+    /// The origins your pages are served from: `https://example.com`.
+    pub origins: Vec<String>,
+}
+
+impl Default for RelyingParty {
+    fn default() -> RelyingParty {
+        RelyingParty {
+            rp_id: "localhost".into(),
+            rp_name: "kernable".into(),
+            origins: vec!["http://localhost:3000".into()],
+        }
+    }
+}
+
+static PASSKEYS: std::sync::RwLock<Option<RelyingParty>> = std::sync::RwLock::new(None);
+
+/// Binds passkeys to your site: call it before the app runs and the API serves.
+pub fn use_passkeys(rp: RelyingParty) {
+    *PASSKEYS.write().unwrap() = Some(rp);
+}
+
+/// The relying party passkeys are bound to now.
+pub fn passkeys() -> RelyingParty {
+    PASSKEYS.read().unwrap().clone().unwrap_or_default()
 }
 pub const CHALLENGE_SECONDS: i64 = 300;
 

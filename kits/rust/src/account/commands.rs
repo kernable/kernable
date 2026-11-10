@@ -13,8 +13,8 @@ use crate::shared::constants::{
 };
 use crate::shared::passkeys;
 use crate::shared::secrets::{
-    check_password, equal_secrets, hash_password, normal_email, parse_token, random_secret, sha256,
-    totp_step, valid_email, valid_password,
+    check_password, email_domain, equal_secrets, hash_password, normal_email, parse_token,
+    random_secret, sha256, totp_step, valid_email, valid_password,
 };
 
 type Events = Result<Vec<NewEvent>, Rejected>;
@@ -141,7 +141,9 @@ pub struct OpenSession {
     pub at: i64,
 }
 
-/// Public: the refresh token is the proof; an older generation is a reuse and ends the session.
+/// Public: the refresh token is the proof. It names its session and generation; one of the
+/// session's older tokens is a reuse and ends the session. Any other token is refused, so knowing
+/// a session's ID is not enough to end it.
 #[command("account", aggregate = "session", secret = [refresh_token, new_refresh_token, ip])]
 pub struct RefreshSession {
     pub refresh_token: String,
@@ -367,8 +369,11 @@ fn provider(value: &str) -> Result<String, Rejected> {
     }
 }
 
-/// The API's: a linked login signs in; a tenant's SSO with a verified domain links the same
-/// verified email first (`auto_link`, which the API sets). Else `not_linked`.
+/// The API's: it did the OAuth/OIDC exchange and checked the ID token. A linked login signs in;
+/// an unlinked one is linked first only for a tenant's SSO (`auto_link`, which the API sets), the
+/// same verified email, and an email in one of the domains the tenant verified for that SSO
+/// (`domains`, which the API read): else a tenant's provider could take over any account by
+/// answering with its email (`email_not_in_domain`). Otherwise `not_linked`.
 #[command("account", aggregate = "account", secret = [refresh_token, ip, user_agent, subject, email])]
 pub struct SignInWithProvider {
     pub session_id: String,
@@ -377,6 +382,8 @@ pub struct SignInWithProvider {
     pub email: Option<String>,
     pub email_verified: Option<bool>,
     pub auto_link: Option<bool>,
+    /// For an `sso:` provider: the domains its tenant verified.
+    pub domains: Option<Vec<String>>,
     pub refresh_token: String,
     pub ip: Option<String>,
     pub user_agent: Option<String>,
@@ -620,9 +627,14 @@ pub fn handle(account: &Aggregate<Account>, session: &Aggregate<Session>, sso: &
         let Some((_, generation, _)) = parts.filter(|_| s.status == SessionStatus::Active) else {
             return Err(invalid());
         };
-        let generation: i64 = generation.parse().unwrap_or(-1);
-        let current = s.generation as i64;
-        if generation < current {
+        if !generation.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(invalid());
+        }
+        let hash = sha256(&d.refresh_token);
+        if s.previous_token_hashes
+            .iter()
+            .any(|h| equal_secrets(h, &hash))
+        {
             return Ok(vec![
                 SessionEnded {
                     reason: SessionEnd::Reuse,
@@ -630,7 +642,9 @@ pub fn handle(account: &Aggregate<Account>, session: &Aggregate<Session>, sso: &
                 .into(),
             ]);
         }
-        if generation != current || sha256(&d.refresh_token) != s.refresh_token_hash {
+        if generation.parse::<u64>().ok() != Some(s.generation)
+            || !equal_secrets(&hash, &s.refresh_token_hash)
+        {
             return Err(invalid());
         }
         if at > s.last_refresh_at + SESSION_IDLE_DAYS * DAY {
@@ -1031,27 +1045,35 @@ pub fn handle(account: &Aggregate<Account>, session: &Aggregate<Session>, sso: &
             return failed(&p, FailureReason::NotActive, d.ip, at);
         }
         let email = normal_email(d.email.as_deref().unwrap_or_default());
+        let sso = p.starts_with("sso:");
         let linked = s
             .links
             .iter()
             .any(|x| x.provider == p && x.subject.as_deref() == Some(&d.subject));
         let auto = !linked
+            && sso
             && d.auto_link == Some(true)
             && d.email_verified == Some(true)
             && s.email.as_deref() == Some(email.as_str());
+        let domain = email_domain(&email);
+        if auto
+            && !d
+                .domains
+                .iter()
+                .flatten()
+                .any(|x| x.to_lowercase() == domain)
+        {
+            return Err(rejected(
+                "The email is not in a domain of this single sign-on",
+                "email_not_in_domain",
+            ));
+        }
         if !linked && !auto {
             return failed(&p, FailureReason::NotLinked, d.ip, at);
         }
         let signed = SignedIn {
             session_id: d.session_id,
-            factors: vec![
-                if p.starts_with("sso:") {
-                    "sso"
-                } else {
-                    "provider"
-                }
-                .into(),
-            ],
+            factors: vec![if sso { "sso" } else { "provider" }.into()],
             method: p.clone(),
             refresh_token_hash: sha256(&d.refresh_token),
             ip: d.ip,

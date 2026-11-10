@@ -497,13 +497,24 @@ async fn slice(w: &World) -> Acme {
     api.accept_invitation(&invite("carol@example.com").await, Some(&carol), None)
         .await
         .unwrap();
-    api.accept_invitation(
-        &invite("dana@example.com").await,
-        None,
-        Some(("Dana", PASSWORD)),
-    )
-    .await
-    .unwrap();
+    let danas = invite("dana@example.com").await;
+    // The token's secret is checked before the page learns the invited address.
+    let (named, _) = danas.rsplit_once('.').unwrap();
+    assert!(
+        api.peek_invitation(&format!("{named}.not-the-secret"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // A refused registration does not spend the invitation.
+    refused(
+        api.accept_invitation(&danas, None, Some(("Dana", "short")))
+            .await,
+        "weak_password",
+    );
+    api.accept_invitation(&danas, None, Some(("Dana", PASSWORD)))
+        .await
+        .unwrap();
     let dana = api
         .sign_in("dana@example.com", PASSWORD, None, None)
         .await
@@ -614,6 +625,12 @@ async fn slice(w: &World) -> Acme {
     api.sign_out(&bob).await.unwrap();
     rejected(
         &w.send(PlaceOrder {}, "o3", &t, as_bob.clone()).await,
+        "unauthenticated",
+    );
+    // Accepting an invitation checks the session like every signed-in call.
+    refused(
+        api.accept_invitation(&invite("bob@example.com").await, Some(&bob), None)
+            .await,
         "unauthenticated",
     );
 
@@ -827,6 +844,17 @@ async fn account_flows(w: &World) {
     // A refresh rotates the token; the old one again is a reuse and ends the session.
     let (access, rotated) = api.refresh(&one.refresh_token, None).await.unwrap();
     assert_eq!(api.check(&access).unwrap().sid, one.session_id);
+    // Knowing the session's ID is not enough to end it: a made-up older token is refused, nothing more.
+    refused(
+        api.refresh(&format!("{}.1.made-up-secret", one.session_id), None)
+            .await,
+        "invalid_token",
+    );
+    refused(
+        api.refresh(&format!("{}.x.made-up-secret", one.session_id), None)
+            .await,
+        "invalid_token",
+    );
     refused(api.refresh(&one.refresh_token, None).await, "reuse");
     assert!(
         api.refresh(&rotated, None).await.is_err(),
@@ -932,6 +960,12 @@ async fn second_factor_and_api_keys(w: &World) {
         .await
     };
     rejected(&open().await, "mfa_required");
+    // Joining through a link checks the session too: the token parses, the second factor is missing.
+    refused(
+        api.join_with_invitation_link(&claims, &format!("link_{henrys}.l1.{}", "A".repeat(32)))
+            .await,
+        "mfa_required",
+    );
     // The confirming code counts once; the next step's code, or a recovery code, proves it.
     refused(
         api.prove_second_factor(&claims, &totp_code(&secret, step))
@@ -1323,6 +1357,47 @@ async fn oauth_and_sso(w: &World) {
     assert_eq!(own(as_mia_sso).await.unwrap().id, as_mia.sender_identity);
     // The owner keeps a password session, so a broken SSO can be mended.
     assert!(!own(as_liam).await.unwrap().id.is_empty());
+
+    // Lumen's provider speaks only for lumen.example: it cannot take over Kate's account by naming
+    // her verified address, nor register someone of another domain.
+    let takeover = json!({ "sub": "c-evil", "email": "kate@example.com", "email_verified": true });
+    refused(
+        sso.oidc_finish(
+            &company.login(
+                &start(None, Some("mia@lumen.example"), None).await,
+                takeover,
+            ),
+            None,
+        )
+        .await,
+        "email_not_in_domain",
+    );
+    let stranger =
+        json!({ "sub": "c-zed", "email": "zed@elsewhere.example", "email_verified": true });
+    refused(
+        sso.oidc_finish(
+            &company.login(
+                &start(None, Some("mia@lumen.example"), None).await,
+                stranger,
+            ),
+            None,
+        )
+        .await,
+        "email_not_in_domain",
+    );
+    let zed = w
+        .kit
+        .ask(
+            FindAccountByEmail {
+                email: "zed@elsewhere.example".into(),
+            },
+            |q| q.tenant(PLATFORM).context(sso.service_context.clone()),
+        )
+        .await;
+    match zed {
+        Err(Error::Rejected(r)) => assert_eq!(r.code, "not_found"),
+        other => panic!("expected not_found, got {other:?}"),
+    }
 }
 
 /// Lists show what one may see; Explain says why a request is allowed or refused.
@@ -1484,7 +1559,14 @@ async fn example_server(w: &World) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let router = server::router(w.api.clone(), w.kit.clone());
-    let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let task = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap()
+    });
     let http = reqwest::Client::new();
     let post = |path: &'static str, body: Value, bearer: Option<String>| {
         let (http, base) = (http.clone(), base.clone());
@@ -1661,6 +1743,13 @@ async fn invitation_links(w: &World) {
         api.join_with_invitation_link(&rosa, &token).await,
         "used_up",
     );
+    // Joining checks the session like every signed-in call: an ended one joins nothing.
+    let (sven, _) = w.person("link-sven@example.com").await;
+    api.sign_out(&sven).await.unwrap();
+    refused(
+        api.join_with_invitation_link(&sven, &token).await,
+        "unauthenticated",
+    );
     assert!(
         !api.peek_invitation_link(&token)
             .await
@@ -1672,6 +1761,11 @@ async fn invitation_links(w: &World) {
     let mut other = token.clone();
     let last = other.pop().unwrap();
     other.push(if last == 'A' { 'B' } else { 'A' });
+    assert_eq!(
+        api.peek_invitation_link(&other).await.unwrap(),
+        None,
+        "only the whole token is peeked"
+    );
     refused(
         api.join_with_invitation_link(&rosa, &other).await,
         "invalid_token",

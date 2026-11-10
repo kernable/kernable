@@ -21,6 +21,8 @@ ACCESS_TOKEN_MINUTES = 15
 SESSION_IDLE_DAYS = 14
 SESSION_MAX_DAYS = 90
 INVITATION_DAYS = 7
+#: How many of a session's older refresh tokens are recognised as a reuse (which ends the session).
+REUSE_WINDOW = 32
 
 #: Listener orders the kit takes: its keys need a grant of `reserved_order`. `cleanup`:
 #: reactors that must see a deleted tenant's rows before the read models drop them.

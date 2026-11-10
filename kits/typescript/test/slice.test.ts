@@ -200,6 +200,10 @@ test("register, verify, sign in, open a tenant, and let groups and relations dec
   const carolsInvitation = await invite("carol@example.com");
   assert.ok((await api.acceptInvitation(carolsInvitation, { claims: carol.claims })).ok);
   const danasInvitation = await invite("dana@example.com");
+  // The token's secret is checked before the page learns the invited address.
+  assert.equal(await api.peekInvitation(danasInvitation.replace(/\.[^.]+$/, ".not-the-secret")), null);
+  // A refused registration does not spend the invitation.
+  assert.deepEqual(await api.acceptInvitation(danasInvitation, { name: "Dana", password: "short" }), { ok: false, reason: "weak_password" });
   const dana = await api.acceptInvitation(danasInvitation, { name: "Dana", password: PASSWORD });
   assert.ok(dana.ok, JSON.stringify(dana));
   const danaSignedIn = await api.signIn({ email: "dana@example.com", password: PASSWORD });
@@ -249,6 +253,8 @@ test("register, verify, sign in, open a tenant, and let groups and relations dec
   await api.signOut(bob.claims);
   const afterSignOut = await send(PlaceOrder.new(), "o3", asBob);
   assert.equal(!afterSignOut.committed && afterSignOut.code, "unauthenticated");
+  // Accepting an invitation checks the session like every signed-in call.
+  assert.deepEqual(await api.acceptInvitation(await invite("bob@example.com"), { claims: bob.claims }), { ok: false, reason: "unauthenticated" });
 
   // Lookups are the API's only: a signed-in person cannot ask for accounts by email.
   await assert.rejects(
@@ -345,6 +351,9 @@ test("account flows: refresh and reuse, password change and reset, email change,
   // A refresh rotates the token; the old one again is a reuse and ends the session.
   const refreshed = await api.refresh(one.refreshToken);
   assert.ok(refreshed.ok && api.check(refreshed.accessToken)?.sid === one.sessionId);
+  // Knowing the session's ID is not enough to end it: a made-up older token is refused, nothing more.
+  assert.deepEqual(await api.refresh(`${one.sessionId}.1.made-up-secret`), { ok: false, reason: "invalid_token" });
+  assert.deepEqual(await api.refresh(`${one.sessionId}.x.made-up-secret`), { ok: false, reason: "invalid_token" });
   assert.deepEqual(await api.refresh(one.refreshToken), { ok: false, reason: "reuse" });
   assert.equal((await api.refresh(refreshed.ok ? refreshed.refreshToken : "")).ok, false, "the session ended with the reuse");
 
@@ -401,6 +410,8 @@ test("a second factor: TOTP with recovery codes; and a service with an API key",
   });
   const refused = await open();
   assert.equal(!refused.committed && refused.code, "mfa_required");
+  // So does joining through a link, which the API does in its own name.
+  assert.deepEqual(await api.joinWithInvitationLink(claims, `link_${henrys}.l1.${"A".repeat(32)}`), { ok: false, reason: "mfa_required" });
   // The confirming code counts once; the next step's code, or a recovery code, proves it.
   assert.deepEqual(await api.proveSecondFactor(claims, totpCode(totp.secret, step)), { ok: false, reason: "wrong_code" });
   const proved = await api.proveSecondFactor(claims, confirmed.recoveryCodes[0]);
@@ -529,6 +540,15 @@ test("OAuth and SSO: a social login registers or signs in, links on request; a t
     assert.equal((await own(asMiaSso)).id, asMia.senderIdentity);
     // The owner keeps a password session, so a broken SSO can be mended.
     assert.ok((await own(asLiam)).id);
+
+    // Lumen's provider speaks only for lumen.example: it cannot take over Kate's account by naming
+    // her verified address, nor register someone of another domain.
+    const takeover = { sub: "c-evil", email: "kate@example.com", email_verified: true };
+    assert.deepEqual(await sso.oidcFinish(company.login(await start({ email: "mia@lumen.example" }), takeover)), { ok: false, reason: "email_not_in_domain" });
+    const stranger = { sub: "c-zed", email: "zed@elsewhere.example", email_verified: true };
+    assert.deepEqual(await sso.oidcFinish(company.login(await start({ email: "mia@lumen.example" }), stranger)), { ok: false, reason: "email_not_in_domain" });
+    await assert.rejects(kit.query(FindAccountByEmail.new({ email: "zed@elsewhere.example" }), { tenant: PLATFORM_TENANT, context: sso.serviceContext }),
+      (e: Rejected) => e.code === "not_found");
   } finally {
     social.stop();
     company.stop();
@@ -620,6 +640,7 @@ test("invitation links let people join with groups; a query about one order is d
   const link = await api.createInvitationLink(asOlga, shopTenant, { groups: [{ group: customers }], label: "website", maxUses: 2 });
   assert.ok(link.ok, JSON.stringify(link));
   assert.deepEqual(await api.peekInvitationLink(link.token), { tenant: shopTenant, linkId: link.linkId, label: "website", usable: true });
+  assert.equal(await api.peekInvitationLink(link.token.replace(/.$/, (c) => (c === "A" ? "B" : "A"))), null, "only the whole token is peeked");
 
   const pia = await person("link-pia@example.com");
   const quinn = await person("link-quinn@example.com");
@@ -628,6 +649,10 @@ test("invitation links let people join with groups; a query about one order is d
   assert.deepEqual(await api.joinWithInvitationLink(pia.claims, link.token), { ok: false, reason: "exists" });
   assert.deepEqual(await api.joinWithInvitationLink(quinn.claims, link.token), { ok: true, tenant: shopTenant });
   assert.deepEqual(await api.joinWithInvitationLink(rosa.claims, link.token), { ok: false, reason: "used_up" });
+  // Joining checks the session like every signed-in call: an ended one joins nothing.
+  const sven = await person("link-sven@example.com");
+  await api.signOut(sven.claims);
+  assert.deepEqual(await api.joinWithInvitationLink(sven.claims, link.token), { ok: false, reason: "unauthenticated" });
   assert.equal((await api.peekInvitationLink(link.token))?.usable, false);
   // A link's token is checked whole: another secret for the same link is refused.
   assert.deepEqual(await api.joinWithInvitationLink(rosa.claims, link.token.replace(/.$/, (c) => (c === "A" ? "B" : "A"))), { ok: false, reason: "invalid_token" });

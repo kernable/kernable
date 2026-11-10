@@ -40,7 +40,7 @@ needed. It can be suspended and resumed without losing it, or revoked. When a gr
 memberships stop counting at once, and a reactor revokes them afterwards.
 
 Nobody grants a group whose permissions they do not hold themselves (see
-[no escalation](./authorization#no-escalation)).
+[no escalation](./group#no-escalation)).
 
 ## API keys
 

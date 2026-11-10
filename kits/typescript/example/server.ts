@@ -1,7 +1,7 @@
 // An example API on node:http over the kit's API part: how a framework wires `KitApi` in.
 // Carry the routes over to Express, Fastify or whatever you use; the kit's functions stay.
 //
-//   KERNABLE_URL=… KERNABLE_KEY=kit.key node example/server.ts      (port 3000, or PORT)
+//   KERNABLE_URL=… KERNABLE_KEY=kit.key node example/server.ts      (127.0.0.1, port 3000 or PORT)
 //
 // Requests carry `Authorization: Bearer <access token>` (or `ApiKey <key>`) and, inside a tenant,
 // `X-Tenant: <tenant ID>`; the server turns them into the request context the middleware decides on.
@@ -156,5 +156,6 @@ if (import.meta.url === new URL(`file://${process.argv[1]}`).href) {
   // The access token key: a PEM file in production (KIT_SIGNING_KEY), new on every start otherwise.
   const keys = process.env.KIT_SIGNING_KEY ? signingKeysFrom(process.env.KIT_SIGNING_KEY) : newSigningKeys();
   const port = Number(process.env.PORT ?? 3000);
-  exampleServer(new KitApi({ kernable, keys, service }), kernable).listen(port, () => process.stderr.write(`example server on :${port}\n`));
+  // Loopback only: put it behind your reverse proxy (TLS, rate limits) to serve it.
+  exampleServer(new KitApi({ kernable, keys, service }), kernable).listen(port, "127.0.0.1", () => process.stderr.write(`example server on 127.0.0.1:${port}\n`));
 }

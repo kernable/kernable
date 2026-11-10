@@ -70,9 +70,12 @@ pub struct SsoSecret {
     pub issuer: String,
     pub client_id: String,
     pub client_secret: Option<String>,
+    /// The verified domains whose people it may sign in.
+    pub domains: Vec<String>,
 }
 
-/// The API's only: what it signs in with, the client secret included.
+/// The API's only: what it signs in with, the client secret included, and the verified domains
+/// whose people it may sign in.
 #[query("account", answer = SsoSecret)]
 pub struct GetSsoSecret {
     pub sso_id: String,
@@ -162,6 +165,12 @@ pub fn answer(
                 issuer: r.issuer.clone(),
                 client_id: r.client_id.clone(),
                 client_secret: r.client_secret.clone(),
+                domains: r
+                    .domains
+                    .iter()
+                    .filter(|x| x.verified)
+                    .map(|x| x.domain.clone())
+                    .collect(),
             });
         async move { found.ok_or_else(|| not_found("No such SSO")) }
     });

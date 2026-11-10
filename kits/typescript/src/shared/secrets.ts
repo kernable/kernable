@@ -55,8 +55,21 @@ export function normalEmail(email: unknown): string {
   return typeof email === "string" ? email.trim().toLowerCase() : "";
 }
 
+/** The domain of an address, lowercased: what follows its `@`. */
+export function emailDomain(email: unknown): string {
+  const e = normalEmail(email);
+  return e.slice(e.lastIndexOf("@") + 1);
+}
+
+/**
+ * An address: one `@`, a local part, a domain of at least two labels, none of them empty, no
+ * whitespace, at most 254 bytes in UTF-8. The same rule in every language's kit.
+ */
 export function validEmail(email: string): boolean {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 254;
+  const at = email.indexOf("@");
+  if (at < 1 || email.indexOf("@", at + 1) !== -1 || /\s/.test(email) || Buffer.byteLength(email, "utf8") > 254) return false;
+  const labels = email.slice(at + 1).split(".");
+  return labels.length >= 2 && labels.every((l) => l.length > 0);
 }
 
 export function validPassword(password: unknown): password is string {

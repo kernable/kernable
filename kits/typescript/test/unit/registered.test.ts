@@ -1,5 +1,6 @@
-// Every command and query of the catalogue (design/kits.md) is registered: a file in command/ or
-// query/ that its domain's index.ts does not import would silently not exist.
+// Every command and query of the catalogue (design/kits.md) is registered: a handler that its
+// domain's commands.ts or queries.ts does not register, or an index.ts that does not import them,
+// would silently not exist.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";

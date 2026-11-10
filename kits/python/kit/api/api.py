@@ -7,6 +7,7 @@ Every method answers a dict: `{"ok": True, ...}`, or `{"ok": False, "reason": co
 import base64
 import hashlib
 import json
+import re
 import secrets
 import time
 import uuid
@@ -32,7 +33,8 @@ from ..invitation.commands import AcceptInvitation, CreateInvitationLink, JoinWi
 from ..invitation.domain import InvitedGroup, link_token, parse_link_token
 from ..invitation.queries import PeekInvitation, PeekInvitationLink
 from ..shared.constants import CHALLENGE_SECONDS, PASSKEYS, PLATFORM_TENANT
-from ..shared.secrets import equal_secrets, parse_invitation_token, parse_token, random_secret, token, totp_secret
+from ..shared.secrets import (email_domain, equal_secrets, parse_invitation_token, parse_token, random_secret, token, totp_secret,
+                              valid_password)
 from .tokens import Claims, SigningKeys, check_access_token, issue_access_token
 
 
@@ -112,6 +114,16 @@ class KitApi:
         """The context of the token's account acting on itself."""
         return RequestContext(sender_account=claims.sub, sender_session=claims.sid)
 
+    def _signed_in_account(self, claims: Claims) -> dict:
+        """The token's account, read as itself: the middleware checks the session as for every signed-in
+        request (active, the account active, a second factor proved if it has one). For what the API
+        then does with its own context (accepting an invitation, joining through a link)."""
+        try:
+            account = self.kernable.query(GetAccount(account_id=claims.sub), tenant=PLATFORM_TENANT, context=self._own(claims))
+        except Rejected as err:
+            return {"ok": False, "reason": err.code}
+        return {"ok": True, "account": account}
+
     def _signed_in(self, account_id: str, session_id: str, refresh_token: str, data: dict, second_factor: bool | None = None) -> dict:
         return {"ok": True, "account_id": account_id, "session_id": session_id, "refresh_token": refresh_token,
                 "second_factor": bool(data.get("mfa")) if second_factor is None else second_factor,
@@ -180,6 +192,8 @@ class KitApi:
         if not parts:
             return {"ok": False, "reason": "invalid_token"}
         session_id, generation, _ = parts
+        if not re.fullmatch(r"[0-9]+", generation):
+            return {"ok": False, "reason": "invalid_token"}
         following = token(session_id, int(generation) + 1, random_secret())
         outcome = self._submit(RefreshSession(refresh_token=refresh_token, new_refresh_token=following, ip=ip), session_id)
         if not outcome.committed:
@@ -331,6 +345,7 @@ class KitApi:
         return self._configs[issuer]
 
     def _sso_settings(self, tenant: str, sso_id: str) -> dict | None:
+        """A tenant's SSO: what the API signs in with, and the domains it verified."""
         try:
             s = self._ask(GetSsoSecret(sso_id=sso_id), tenant)
         except Rejected:
@@ -338,7 +353,7 @@ class KitApi:
         if not s.get("client_secret"):
             return None
         return {"provider": f"sso:{sso_id}", "issuer": s["issuer"], "client_id": s["client_id"], "client_secret": s["client_secret"],
-                "tenant": tenant, "sso_id": sso_id}
+                "tenant": tenant, "sso_id": sso_id, "domains": s.get("domains") or []}
 
     def _provider(self, provider: str | None, email: str | None) -> dict | None:
         """The provider's settings: a social one by name, or the SSO of the tenant that verified the email's domain."""
@@ -346,7 +361,7 @@ class KitApi:
             p = self.providers.get(provider)
             return {"provider": provider, **p} if p else None
         try:
-            found = self._ask(FindSsoByDomain(domain=(email or "").partition("@")[2]), all_partitions=True)
+            found = self._ask(FindSsoByDomain(domain=email_domain(email)), all_partitions=True)
         except Rejected:
             return None
         return self._sso_settings(found["tenant"], found["sso_id"])
@@ -388,7 +403,9 @@ class KitApi:
     def oidc_finish(self, callback: str, ip: str | None = None) -> dict:
         """The browser came back (`callback` is the full URL). Signs in a linked login; links a tenant SSO
         login to the account with the same verified email; registers a new person whose email nobody
-        has; refuses a social login whose email has an account (`not_linked`: sign in and link it)."""
+        has; refuses a social login whose email has an account (`not_linked`: sign in and link it). A
+        tenant's SSO answers only for its verified domains: an unlinked login with another email is
+        refused (`email_not_in_domain`), so a tenant's provider cannot take over anyone else's account."""
         state = (parse_qs(urlparse(callback).query).get("state") or [""])[0]
         raw = self._take(f"oidc:{state}") if state else None
         if raw is None:
@@ -410,8 +427,13 @@ class KitApi:
         if kept.get("link"):
             linked = self._submit(LinkProvider(provider=provider, subject=subject, email=email), kept["link"]["account_id"], context=self.service_context)
             return {"ok": True, "linked": True} if linked.committed else {"ok": False, "reason": linked.code}
-        account_id = self._find(FindAccountByLink(provider=provider, subject=subject)) or (self._find(FindAccountByEmail(email=email)) if email else None)
         sso = provider.startswith("sso:")
+        account_id = self._find(FindAccountByLink(provider=provider, subject=subject))
+        # Not linked yet: a tenant's SSO speaks only for the domains its tenant verified.
+        if not account_id and sso and email_domain(email) not in (p.get("domains") or []):
+            return {"ok": False, "reason": "email_not_in_domain"}
+        if not account_id and email:
+            account_id = self._find(FindAccountByEmail(email=email))
         if not account_id:
             # A new person: registered (verified if the provider says so), the login linked.
             if not email:
@@ -426,7 +448,7 @@ class KitApi:
         session_id = str(uuid.uuid4())
         refresh_token = token(session_id, 1, random_secret())
         outcome = self._submit(SignInWithProvider(session_id=session_id, provider=provider, subject=subject, email=email, email_verified=email_verified,
-                                                  auto_link=sso, refresh_token=refresh_token, ip=ip), account_id, context=self.service_context)
+                                                  auto_link=sso, domains=p.get("domains"), refresh_token=refresh_token, ip=ip), account_id, context=self.service_context)
         if not outcome.committed:
             return {"ok": False, "reason": outcome.code}
         signed_in = _first(outcome, "SignedIn")
@@ -486,16 +508,25 @@ class KitApi:
 
     def accept_invitation(self, invitation_token: str, *, claims: Claims | None = None, name: str | None = None,
                           password: str | None = None) -> dict:
-        """Accepts an invitation: as the signed-in account (`claims`), or as a new person with a
-        name and password, registered in the same step (active: the token proved the email). The
-        accepting account's email must be the invited one."""
+        """Accepts an invitation: as the signed-in account (`claims`, its session checked as for every
+        signed-in call), or as a new person with a name and password, registered in the same step
+        (active: the token proved the email). The accepting account's email must be the invited one.
+        A new person's name and password are checked before the invitation is used, so a refused
+        registration does not spend it."""
         peek = self.peek_invitation(invitation_token)
         if not peek or not peek.get("email"):
             return {"ok": False, "reason": "invalid_token"}
         if claims:
+            signed_in = self._signed_in_account(claims)
+            if not signed_in["ok"]:
+                return signed_in
             account_id = claims.sub
-            email = self._ask(GetAccount(account_id=account_id)).get("email") or ""
+            email = signed_in["account"].get("email") or ""
         else:
+            if not isinstance(name, str) or not name.strip() or len(name) > 200:
+                return {"ok": False, "reason": "invalid_name"}
+            if not valid_password(password):
+                return {"ok": False, "reason": "weak_password"}
             # Someone with an account signs in first, so nobody gets an account they could not use.
             if self._find(FindAccountByEmail(email=peek["email"])):
                 return {"ok": False, "reason": "sign_in_first"}
@@ -505,7 +536,7 @@ class KitApi:
         if not accepted.committed:
             return {"ok": False, "reason": accepted.code}
         if claims is None:
-            registered = self._submit(RegisterAccount(email=email, name=name or "", password=password, verified=True), account_id,
+            registered = self._submit(RegisterAccount(email=email, name=name, password=password, verified=True), account_id,
                                       context=self.service_context)
             if not registered.committed:
                 return {"ok": False, "reason": registered.code}
@@ -533,11 +564,15 @@ class KitApi:
             return None
 
     def join_with_invitation_link(self, claims: Claims, link: str) -> dict:
-        """The signed-in account joins the link's tenant with its groups. Someone without an account
-        registers and verifies first: a link proves no email."""
+        """The signed-in account joins the link's tenant with its groups (its session checked as for
+        every signed-in call). Someone without an account registers and verifies first: a link proves
+        no email."""
         t = parse_link_token(link)
         if not t:
             return {"ok": False, "reason": "invalid_token"}
+        signed_in = self._signed_in_account(claims)
+        if not signed_in["ok"]:
+            return signed_in
         outcome = self._submit(JoinWithInvitationLink(token=link, account_id=claims.sub), t["link_id"], t["tenant"], self.service_context)
         return {"ok": True, "tenant": t["tenant"]} if outcome.committed else {"ok": False, "reason": outcome.code}
 

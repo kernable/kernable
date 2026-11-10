@@ -182,7 +182,7 @@ fn aggregates() -> BTreeMap<String, Runner> {
 #[test]
 fn every_shared_case_passes() {
     let aggregates = aggregates();
-    let (mut passed, mut skipped, mut failed) = (0, BTreeMap::<String, usize>::new(), Vec::new());
+    let (mut passed, mut failed) = (0, Vec::new());
     let mut files: Vec<PathBuf> = std::fs::read_dir(fixtures_dir())
         .unwrap()
         .map(|e| e.unwrap().path())
@@ -196,7 +196,10 @@ fn every_shared_case_passes() {
         for case in spec["cases"].as_array().unwrap() {
             let aggregate = format!("{domain}.{}", case["aggregate"].as_str().unwrap());
             let Some(run) = aggregates.get(&aggregate) else {
-                *skipped.entry(aggregate).or_default() += 1;
+                failed.push(format!(
+                    "{domain}: {}: no aggregate {aggregate}",
+                    case["name"].as_str().unwrap_or_default()
+                ));
                 continue;
             };
             match run(domain, case) {
@@ -208,7 +211,6 @@ fn every_shared_case_passes() {
             }
         }
     }
-    eprintln!("{passed} cases passed; not yet ported: {skipped:?}");
     assert!(
         failed.is_empty(),
         "{} cases failed:\n{}",

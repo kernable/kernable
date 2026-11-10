@@ -304,7 +304,12 @@ class SliceTest(unittest.TestCase):
         # A used invitation is gone.
         self.assertFalse(api.accept_invitation(bobs, claims=bob)["ok"])
         self.assertTrue(api.accept_invitation(invite("carol@example.com"), claims=carol)["ok"])
-        dana = api.accept_invitation(invite("dana@example.com"), name="Dana", password=PASSWORD)
+        danas = invite("dana@example.com")
+        # The token's secret is checked before the page learns the invited address.
+        self.assertIsNone(api.peek_invitation(danas.rsplit(".", 1)[0] + ".not-the-secret"))
+        # A refused registration does not spend the invitation.
+        self.assertEqual(api.accept_invitation(danas, name="Dana", password="short"), {"ok": False, "reason": "weak_password"})
+        dana = api.accept_invitation(danas, name="Dana", password=PASSWORD)
         self.assertTrue(dana["ok"], dana)
         dana_in = api.sign_in("dana@example.com", PASSWORD)
         self.assertTrue(dana_in["ok"], "Dana signs in without verifying: the invitation proved her email")
@@ -343,6 +348,8 @@ class SliceTest(unittest.TestCase):
         # Signing out ends the session at once, although the access token is still valid.
         api.sign_out(bob)
         self.rejected(submit(PlaceOrder(), "o3", tenant, as_bob), "unauthenticated")
+        # Accepting an invitation checks the session like every signed-in call.
+        self.assertEqual(api.accept_invitation(invite("bob@example.com"), claims=bob), {"ok": False, "reason": "unauthenticated"})
 
         # Lookups are the API's only: a signed-in person cannot ask for accounts by email.
         with self.assertRaises(Rejected) as caught:
@@ -428,6 +435,9 @@ class SliceTest(unittest.TestCase):
         refreshed = api.refresh(one["refresh_token"])
         self.assertTrue(refreshed["ok"])
         self.assertEqual(api.check(refreshed["access_token"]).sid, one["session_id"])
+        # Knowing the session's ID is not enough to end it: a made-up older token is refused, nothing more.
+        self.assertEqual(api.refresh(f"{one['session_id']}.1.made-up-secret"), {"ok": False, "reason": "invalid_token"})
+        self.assertEqual(api.refresh(f"{one['session_id']}.x.made-up-secret"), {"ok": False, "reason": "invalid_token"})
         self.assertEqual(api.refresh(one["refresh_token"]), {"ok": False, "reason": "reuse"})
         self.assertFalse(api.refresh(refreshed["refresh_token"])["ok"], "the session ended with the reuse")
 
@@ -485,6 +495,8 @@ class SliceTest(unittest.TestCase):
             return submit(CreateTenant(slug="henrys", name="Henry's", owner={"account_id": claims.sub}), henrys, henrys, api.context_for(claims))
 
         self.rejected(open_(), "mfa_required")
+        # So is joining through a link: the token parses, then the session check refuses.
+        self.assertEqual(api.join_with_invitation_link(claims, f"link_{henrys}.l1.{'A' * 32}"), {"ok": False, "reason": "mfa_required"})
         # The confirming code counts once; the next step's code, or a recovery code, proves it.
         self.assertEqual(api.prove_second_factor(claims, totp_code(totp["secret"], step)), {"ok": False, "reason": "wrong_code"})
         self.assertTrue(api.prove_second_factor(claims, confirmed["recovery_codes"][0])["ok"])
@@ -602,6 +614,16 @@ class SliceTest(unittest.TestCase):
             self.assertEqual(own(api.context_for(sso.check(mia_sso["access_token"]), lumen))["id"], as_mia.sender_identity)
             # The owner keeps a password session, so a broken SSO can be mended.
             self.assertTrue(own(as_liam)["id"])
+
+            # Lumen's provider speaks only for lumen.example: it cannot take over Kate's account by naming
+            # her verified address, nor register someone of another domain.
+            takeover = {"sub": "c-evil", "email": "kate@example.com", "email_verified": True}
+            self.assertEqual(sso.oidc_finish(company.login(start(email="mia@lumen.example"), takeover)), {"ok": False, "reason": "email_not_in_domain"})
+            stranger = {"sub": "c-zed", "email": "zed@elsewhere.example", "email_verified": True}
+            self.assertEqual(sso.oidc_finish(company.login(start(email="mia@lumen.example"), stranger)), {"ok": False, "reason": "email_not_in_domain"})
+            with self.assertRaises(Rejected) as missing:
+                kit.query(FindAccountByEmail(email="zed@elsewhere.example"), tenant="platform", context=sso.service_context)
+            self.assertEqual(missing.exception.code, "not_found")
         finally:
             social.stop()
             company.stop()
@@ -674,12 +696,16 @@ class SliceTest(unittest.TestCase):
             self.assertEqual(post("/verify", {"token": mailer.last("quinn@example.com").token})[0], 200)
             status, tokens = post("/sign-in", {"email": "quinn@example.com", "password": PASSWORD})
             self.assertEqual(status, 200)
-            bearer = {"authorization": f"Bearer {tokens['access_token']}"}
+            self.assertEqual(sorted(tokens), ["accessToken", "refreshToken", "secondFactor"])
+            bearer = {"authorization": f"Bearer {tokens['accessToken']}"}
             # Outside a tenant, Quinn has no identity: the shop refuses.
-            self.assertEqual(post("/commands/shop/order/PlaceOrder", {"aggregate_id": "q1"}, bearer), (403, {"error": "forbidden"}))
-            self.assertEqual(post("/commands/shop/order/PlaceOrder", {"aggregate_id": "q1"})[0], 401)
+            self.assertEqual(post("/commands/shop/order/PlaceOrder", {"aggregateId": "q1"}, bearer), (403, {"error": "forbidden"}))
+            self.assertEqual(post("/commands/shop/order/PlaceOrder", {"aggregateId": "q1"})[0], 401)
+            refreshed = post("/refresh", {"refreshToken": tokens["refreshToken"]})
+            self.assertEqual((refreshed[0], sorted(refreshed[1])), (200, ["accessToken", "ok", "refreshToken"]))
             self.assertEqual(post("/sign-out", {}, bearer)[0], 204)
-            self.assertEqual(post("/refresh", {"refresh_token": tokens["refresh_token"]})[0], 401, "signed out")
+            self.assertEqual(post("/refresh", {"refreshToken": refreshed[1]["refreshToken"]}), (401, {"ok": False, "reason": "invalid_token"}),
+                             "signed out")
         finally:
             server.shutdown()
             server.server_close()
@@ -701,6 +727,8 @@ class SliceTest(unittest.TestCase):
         link = api.create_invitation_link(as_olga, shop_tenant, [{"group": customers}], label="website", max_uses=2)
         self.assertTrue(link["ok"], link)
         self.assertEqual(api.peek_invitation_link(link["token"]), {"tenant": shop_tenant, "link_id": link["link_id"], "label": "website", "usable": True})
+        wrong = link["token"][:-1] + ("B" if link["token"][-1] == "A" else "A")
+        self.assertIsNone(api.peek_invitation_link(wrong), "only the whole token is peeked")
 
         pia, _ = person("link-pia@example.com")
         quinn, _ = person("link-quinn@example.com")
@@ -709,6 +737,10 @@ class SliceTest(unittest.TestCase):
         self.assertEqual(api.join_with_invitation_link(pia, link["token"]), {"ok": False, "reason": "exists"})
         self.assertEqual(api.join_with_invitation_link(quinn, link["token"]), {"ok": True, "tenant": shop_tenant})
         self.assertEqual(api.join_with_invitation_link(rosa, link["token"]), {"ok": False, "reason": "used_up"})
+        # Joining checks the session like every signed-in call: an ended one joins nothing.
+        sven, _ = person("link-sven@example.com")
+        api.sign_out(sven)
+        self.assertEqual(api.join_with_invitation_link(sven, link["token"]), {"ok": False, "reason": "unauthenticated"})
         self.assertFalse(api.peek_invitation_link(link["token"])["usable"])
         # A link's token is checked whole: another secret for the same link is refused.
         forged = link["token"][:-1] + ("B" if link["token"][-1] == "A" else "A")

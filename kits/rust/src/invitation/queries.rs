@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::readmodels::{InvitationRow, LinkRow, Links, Shared, row_key};
 use super::{InvitationStatus, LinkStatus, parse_link_token};
-use crate::shared::secrets::parse_invitation_token;
+use crate::shared::secrets::{equal_secrets, parse_invitation_token, sha256};
 
 /// The tenant's invitations; the open ones appear in user lists.
 #[query("invitation", answer = Vec<InvitationRow>)]
@@ -23,7 +23,7 @@ pub struct Peeked {
     pub expired: bool,
 }
 
-/// The API's only: what the acceptance page shows for a token (the token itself is checked on accepting).
+/// The API's only: what the acceptance page shows for a token, only for the right token (its secret checked).
 #[query("invitation", answer = Peeked)]
 pub struct PeekInvitation {
     pub token: String,
@@ -42,7 +42,8 @@ pub struct PeekedLink {
     pub usable: bool,
 }
 
-/// The API's only: whether a link token can be used, for the join page (the token is checked on joining).
+/// The API's only: whether a link token can be used, for the join page, only for the right token
+/// (its hash checked).
 #[query("invitation", answer = PeekedLink)]
 pub struct PeekInvitationLink {
     pub token: String,
@@ -67,6 +68,11 @@ pub fn answer(invitations: &Listener, state: &Shared, links: &Links) {
                 .unwrap()
                 .get(&row_key(&t.tenant, &t.invitation_id))
                 .filter(|r| r.status == InvitationStatus::Open)
+                .filter(|r| {
+                    r.token.as_ref().is_some_and(|(id, hash)| {
+                        *id == t.token_id && equal_secrets(hash, &sha256(&t.secret))
+                    })
+                })
                 .map(|r| Peeked {
                     tenant: r.tenant.clone(),
                     invitation_id: r.id.clone(),
@@ -100,7 +106,7 @@ pub fn answer(invitations: &Listener, state: &Shared, links: &Links) {
             l.read()
                 .unwrap()
                 .get(&row_key(&t.tenant, &t.link_id))
-                .filter(|r| r.status == LinkStatus::Open)
+                .filter(|r| r.status == LinkStatus::Open && equal_secrets(&r.hash, &t.hash))
                 .map(|r| {
                     let now = Timestamp::now().millis();
                     PeekedLink {

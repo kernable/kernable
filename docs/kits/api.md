@@ -54,10 +54,10 @@ does not decide who may do what.
 
 | Task | Method | Returns |
 |---|---|---|
-| **Registration** | `register({ email, name, password? })` | `{ accountId }`, the same whether or not the address was taken |
+| **Registration** | `register({ email, name, password? })` | `{ ok: true, accountId }`, the same whether or not the address was taken; `{ ok: false, reason }` for an invalid email, name or password |
 | | `verifyEmail(token)` | whether it worked |
 | **Password sign-in** | `signIn({ email, password, ip?, userAgent? })` | access and refresh token, session ID, and `secondFactor: true` if the account must prove one now; or a reason |
-| | `refresh(refreshToken, ip?)` | a new access token and the next refresh token |
+| | `refresh(refreshToken, ip?)` | a new access token and the next refresh token; an older token of the session ends it (`reuse`), any other is refused (`invalid_token`) |
 | | `signOut(claims)` | ends the session |
 | **Second factor** | `proveSecondFactor(claims, code)` | a new access token with the factor, for a TOTP or recovery code |
 | | `startTotp(claims, issuer, label)` | the secret and the `otpauth:` URI to show as a QR code |
@@ -66,16 +66,16 @@ does not decide who may do what.
 | | `passkeySignInOptions()`, then `signInWithPasskey(response, ip?)` | signs in without a password |
 | | `provePasskey(claims, response)` | a passkey as the second factor of a password session |
 | **OAuth/OIDC** | `oidcStart({ provider } \| { email }, link?)` | the provider's URL to redirect to; `{ email }` finds the tenant SSO of the email's domain; with `link`, links the login to the signed-in account |
-| | `oidcFinish(callbackUrl, ip?)` | signs in, registers or links (see [Accounts](./account#other-ways-to-sign-in)) |
+| | `oidcFinish(callbackUrl, ip?)` | signs in, registers or links (see [Accounts](./account#other-ways-to-sign-in)); a tenant SSO's login outside its verified domains is refused (`email_not_in_domain`) |
 | | `verifySsoDomain(tenant, ssoId, domain)` | looks up the `_kernable-sso.<domain>` TXT record and verifies the domain |
 | **Account changes** | `changePassword(claims, current, next)` | ends every other session |
 | | `requestPasswordReset(email)`, `resetPassword(token, next)` | the reset by mail; the request answers the same for unknown addresses |
 | | `requestEmailChange(claims, email)`, `confirmEmailChange(token)` | the change, confirmed from the new address |
-| **Invitations** | `peekInvitation(token)` | tenant name, email, whether it expired |
-| | `acceptInvitation(token, { claims } \| { name, password })` | as the signed-in account, or as a new person ([Invitations](./invitation#the-flow)) |
+| **Invitations** | `peekInvitation(token)` | tenant name, email, whether it expired; nothing for a wrong secret |
+| | `acceptInvitation(token, { claims } \| { name, password })` | as the signed-in account (its session checked), or as a new person ([Invitations](./invitation#the-flow)) |
 | **Invitation links** | `createInvitationLink(context, tenant, { groups, label?, expiresAt?, maxUses? })` | the link's token, shown this once |
-| | `peekInvitationLink(token)` | tenant, label, whether it can be used |
-| | `joinWithInvitationLink(claims, token)` | the signed-in account joins with the link's groups ([Invitation links](./invitation#invitation-links)) |
+| | `peekInvitationLink(token)` | tenant, label, whether it can be used; nothing for a wrong token |
+| | `joinWithInvitationLink(claims, token)` | the signed-in account (its session checked) joins with the link's groups ([Invitation links](./invitation#invitation-links)) |
 | **Services** | `createApiKey(context, tenant, identityId, label?, expiresAt?)` | the key, shown this once |
 | | `checkApiKey(key)` | the request context of the key, or null |
 
@@ -85,7 +85,9 @@ does not decide who may do what.
   addresses, and registration and password reset answer the same either way.
 - **Tokens are short and narrow.** Access tokens last 15 minutes and are checked without the
   kernel; the middleware still refuses an ended session at once. Refresh tokens rotate, and a
-  reused one ends its session.
+  reused one ends its session; a made-up one does not. The calls the API makes in its own name for
+  a signed-in person (accepting an invitation, joining through a link) check that person's session
+  first, as the middleware does for every other signed-in request.
 - **Passkey challenges and OIDC state** live a few minutes in the kernable cache, so any instance
   of your API can finish what another started. That is why the API's key needs `cache` on
   `account`.

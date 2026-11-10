@@ -1,4 +1,4 @@
-//! Passkeys (WebAuthn), verified here (R4): a browser's answer to registration options with
+//! Passkeys (WebAuthn), verified here: a browser's answer to registration options with
 //! attestation `none`, and to sign-in options, with ES256 keys (P-256), as platform
 //! authenticators and password managers make them. The account keeps the COSE key as base64url,
 //! the same as the other kits, so every kit verifies every kit's passkeys.
@@ -37,7 +37,7 @@ fn client_data(response: &Value, kind: &str, challenge: &str) -> Result<Vec<u8>,
     }
     if !data["origin"]
         .as_str()
-        .is_some_and(|o| passkeys::ORIGINS.contains(&o))
+        .is_some_and(|o| passkeys().origins.iter().any(|x| x == o))
     {
         return Err("another origin".into());
     }
@@ -50,7 +50,7 @@ fn authenticator_data(data: &[u8]) -> Result<(u8, u64), String> {
     if data.len() < 37 {
         return Err("short authenticator data".into());
     }
-    if data[..32] != Sha256::digest(passkeys::RP_ID.as_bytes())[..] {
+    if data[..32] != Sha256::digest(passkeys().rp_id.as_bytes())[..] {
         return Err("another relying party".into());
     }
     let flags = data[32];

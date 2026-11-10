@@ -4,7 +4,9 @@ use kernable::{Aggregate, Domain, Unique};
 use serde::{Deserialize, Serialize};
 
 use super::{AccountStatus, FailureReason, Suspension, TokenPurpose, events::*};
-use crate::shared::constants::{LOCKOUT_AFTER, LOCKOUT_MAX_MINUTES, MINUTE, SNAPSHOT_SCHEMA};
+use crate::shared::constants::{
+    LOCKOUT_AFTER, LOCKOUT_MAX_MINUTES, MINUTE, REUSE_WINDOW, SNAPSHOT_SCHEMA,
+};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Password {
@@ -308,6 +310,8 @@ pub struct Session {
     pub factors: Vec<String>,
     pub generation: u64,
     pub refresh_token_hash: String,
+    /// The hashes of the last refresh tokens before the current one: a reuse is one of them.
+    pub previous_token_hashes: Vec<String>,
     pub opened_at: i64,
     pub last_refresh_at: i64,
     pub end_reason: Option<super::SessionEnd>,
@@ -325,12 +329,19 @@ pub fn session(domain: &Domain) -> Aggregate<Session> {
             factors: d.factors,
             generation: 1,
             refresh_token_hash: d.refresh_token_hash,
+            previous_token_hashes: Vec::new(),
             opened_at: d.at,
             last_refresh_at: d.at,
             end_reason: None,
         }
     });
     a.apply(SessionRefreshed, |s, d, _, _| {
+        if !s.refresh_token_hash.is_empty() {
+            let previous = std::mem::take(&mut s.refresh_token_hash);
+            s.previous_token_hashes.push(previous);
+            let extra = s.previous_token_hashes.len().saturating_sub(REUSE_WINDOW);
+            s.previous_token_hashes.drain(..extra);
+        }
         s.generation = d.generation;
         s.refresh_token_hash = d.refresh_token_hash;
         s.last_refresh_at = d.at;

@@ -7,7 +7,7 @@ from .events import (MfaRequirementChanged, OwnerAdded, OwnerRemoved, SignUpPoli
                      TenantDeleted, TenantReactivated, TenantRenamed, TenantSlugChanged, TenantSuspended)
 
 
-class Tenant(Aggregate, domain=tenancy_domain):
+class Tenant(Aggregate, domain=tenancy_domain, schema="py-1"):
     """The tenant's state, and the aggregate `tenancy.tenant`; its ID is the tenant's."""
     id: str | None = None
     status: TenantStatus = "none"

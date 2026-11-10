@@ -7,7 +7,6 @@ Requests carry `Authorization: Bearer <access token>` (or `ApiKey <key>`) and, i
 `X-Tenant: <tenant ID>`; the server turns them into the request context the middleware decides on.
 """
 
-import dataclasses
 import json
 import os
 import re
@@ -19,6 +18,32 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from kernable import Kernable, Rejected, RequestContext
 
 from kit.api.api import KitApi
+
+def _camel(name: str) -> str:
+    head, *rest = name.split("_")
+    return head + "".join(w.title() for w in rest)
+
+
+def camel(value):
+    """The kit's answers (snake_case keys) as the JSON the example serves: camelCase, like the other kits' examples."""
+    if isinstance(value, dict):
+        return {_camel(k): camel(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [camel(v) for v in value]
+    return value
+
+
+def context_json(c: RequestContext) -> dict:
+    """The request context as JSON: its fields that are set."""
+    out = {name: value for name, value in [("senderAccount", c.sender_account), ("senderSession", c.sender_session),
+                                            ("senderTenant", c.sender_tenant), ("senderIdentity", c.sender_identity),
+                                            ("onBehalfOf", c.on_behalf_of)] if value}
+    if c.bypass_authorization:
+        out["bypassAuthorization"] = True
+    if c.attributes:
+        out["attributes"] = c.attributes
+    return out
+
 
 COMMAND = re.compile(r"^/commands/([\w-]+)/([\w-]+)/(\w+)$")
 QUERY = re.compile(r"^/queries/([\w-]+)/(\w+)$")
@@ -91,10 +116,10 @@ def example_server(api: KitApi, kernable: Kernable, port: int = 3000) -> Threadi
                 r = api.sign_in(b.get("email", ""), b.get("password", ""), ip=ip, user_agent=self.headers.get("user-agent"))
                 if not r["ok"]:
                     return self.send(401, {"error": r["reason"]})
-                return self.send(200, {k: r[k] for k in ("access_token", "refresh_token", "second_factor")})
+                return self.send(200, {"accessToken": r["access_token"], "refreshToken": r["refresh_token"], "secondFactor": r["second_factor"]})
             if path == "/refresh":
-                r = api.refresh(b.get("refresh_token", ""), ip)
-                return self.send(200 if r["ok"] else 401, r)
+                r = api.refresh(b.get("refreshToken", ""), ip)
+                return self.send(200 if r["ok"] else 401, camel(r))
             if path == "/password-reset":
                 api.request_password_reset(b.get("email", ""))
                 return self.send(202, {"message": "Check your email"})
@@ -104,14 +129,14 @@ def example_server(api: KitApi, kernable: Kernable, port: int = 3000) -> Threadi
                 claims = self.claims()
                 r = (api.accept_invitation(b.get("token", ""), claims=claims) if claims
                      else api.accept_invitation(b.get("token", ""), name=b.get("name"), password=b.get("password")))
-                return self.send(200 if r["ok"] else 400, r)
+                return self.send(200 if r["ok"] else 400, camel(r))
             # Everything below needs a signed-in caller.
             claims = self.claims()
             if path == "/second-factor":
                 if not claims:
                     return self.send(401, {"error": "unauthenticated"})
                 r = api.prove_second_factor(claims, b.get("code", ""))
-                return self.send(200 if r["ok"] else 401, r)
+                return self.send(200 if r["ok"] else 401, camel(r))
             if path == "/sign-out":
                 if claims:
                     api.sign_out(claims)
@@ -129,7 +154,7 @@ def example_server(api: KitApi, kernable: Kernable, port: int = 3000) -> Threadi
                 if not claims:
                     return self.send(401, {"error": "unauthenticated"})
                 r = api.join_with_invitation_link(claims, b.get("token", ""))
-                return self.send(200 if r["ok"] else 400, r)
+                return self.send(200 if r["ok"] else 400, camel(r))
             self.in_tenant("POST", path, b)
 
         def in_tenant(self, method: str, path: str, b: dict) -> None:
@@ -139,17 +164,17 @@ def example_server(api: KitApi, kernable: Kernable, port: int = 3000) -> Threadi
                 return self.send(401, {"error": "unauthenticated"})
             route = f"{method} {path}"
             if route == "GET /me":
-                return self.send(200, dataclasses.asdict(context))
+                return self.send(200, context_json(context))
             if route == "POST /invitation-links":
                 r = api.create_invitation_link(context, context.sender_tenant, b.get("groups") or [], label=b.get("label"),
-                                               expires_at=b.get("expires_at"), max_uses=b.get("max_uses"))
+                                               expires_at=b.get("expiresAt"), max_uses=b.get("maxUses"))
                 if not r["ok"]:
                     return self.send(403, {"error": r["reason"]})
-                return self.send(201, {"token": r["token"], "link_id": r["link_id"]})
+                return self.send(201, {"token": r["token"], "linkId": r["link_id"]})
             # POST /commands/<domain>/<aggregate_type>/<Type>: the app's commands, as the caller.
             m = COMMAND.match(path) if method == "POST" else None
             if m:
-                outcome = kernable.submit(m.group(1), m.group(2), b.get("aggregate_id") or str(uuid.uuid4()), m.group(3), b.get("data") or {},
+                outcome = kernable.submit(m.group(1), m.group(2), b.get("aggregateId") or str(uuid.uuid4()), m.group(3), b.get("data") or {},
                                           tenant=context.sender_tenant, context=context)
                 if outcome.committed:
                     return self.send(200, {"events": [e.type for e in outcome.events]})
@@ -168,7 +193,7 @@ def example_server(api: KitApi, kernable: Kernable, port: int = 3000) -> Threadi
 
 def main() -> None:
     """The kit as one service, the bootstrap (it may run again), and the server."""
-    from kit import kit_domains
+    from kit import kit_domains, kit_schemas
     from kit.api.tokens import new_signing_keys, signing_keys_from
     from kit.bootstrap import bootstrap
 
@@ -176,7 +201,8 @@ def main() -> None:
     threading.Thread(target=app.run, daemon=True).start()
     if not app.ready.wait(30):
         sys.exit("the kit's service did not connect")
-    kernable = Kernable()
+    # The API's client knows the kit's schemas, so it seals the vault fields before signing.
+    kernable = Kernable().use(*kit_schemas())
     service = bootstrap(kernable, sign_up={"tenants": "active", "accounts": "open"})["api"]
     # The access token key: a PEM file in production (KIT_SIGNING_KEY), new on every start otherwise.
     keys = signing_keys_from(os.environ["KIT_SIGNING_KEY"]) if os.environ.get("KIT_SIGNING_KEY") else new_signing_keys()

@@ -33,6 +33,8 @@ sequenceDiagram
   K-->>A: EmailVerified (account active)
 ```
 
+- An address has one `@`, a local part, and a domain of at least two labels, none of them empty;
+  no whitespace, at most 254 bytes. Anything else is refused with `invalid_email`.
 - An account starts `pending` and becomes `active` with `VerifyEmail`. The token is valid for
   `VERIFICATION_HOURS` (48) and is erased once used.
 - **Registration does not reveal who has an account.** If the address is taken, `register` answers
@@ -61,10 +63,11 @@ After `SignedIn`, a reactor opens the **session** (`OpenSession`). Your API then
 | access token (EdDSA, claims: account, session, factors) | `ACCESS_TOKEN_MINUTES` (15) | your API alone, per request, without the kernel |
 | refresh token `<sessionId>.<generation>.<secret>` | as long as the session | the kernel (`RefreshSession`) |
 
-**Refresh tokens rotate.** Each `RefreshSession` issues the next generation. A token from an older
-generation is a reuse, a sign that it was stolen, so the session ends at once (`reuse`). Sessions
-also end after `SESSION_IDLE_DAYS` (14) without a refresh, and after `SESSION_MAX_DAYS` (90) in
-any case.
+**Refresh tokens rotate.** Each `RefreshSession` issues the next generation. One of the session's
+older tokens (the last `REUSE_WINDOW`, 32, recognised by their hashes) is a reuse, a sign that it
+was stolen, so the session ends at once (`reuse`). Any other token is refused (`invalid_token`):
+knowing a session's ID is not enough to end it. Sessions also end after `SESSION_IDLE_DAYS` (14)
+without a refresh, and after `SESSION_MAX_DAYS` (90) in any case.
 
 A short-lived access token does not leave a gap: the middleware learns from the events when a
 session ends, an account is suspended or a password changes, and refuses that session's requests
@@ -83,7 +86,29 @@ succeeds, the middleware allows nothing but signing out. A [tenant may require](
 a second factor from everyone in it.
 
 Passkeys can also be the only sign-in method: `SignInWithPasskey` needs no password. Passkeys are
-bound to your site: set the relying party with `usePasskeys({ rpId, rpName, origins })`.
+bound to your site: set the relying party (your domain, a name, and the origins your pages are
+served from) once at start, before the kit's service runs and before your API creates passkey
+options. Both need the same setting.
+
+::: code-group
+```ts [TypeScript]
+import { usePasskeys } from "./kit/src/kit.ts";
+
+usePasskeys({ rpId: "example.com", rpName: "Example", origins: ["https://example.com"] });
+```
+```python [Python]
+from kit import use_passkeys
+
+use_passkeys(rp_id="example.com", rp_name="Example", origins=["https://example.com"])
+```
+```rust [Rust]
+kit::use_passkeys(kit::RelyingParty {
+    rp_id: "example.com".into(),
+    rp_name: "Example".into(),
+    origins: vec!["https://example.com".into()],
+});
+```
+:::
 
 ## Other ways to sign in
 
@@ -96,7 +121,10 @@ bound to your site: set the relying party with `usePasskeys({ rpId, rpName, orig
   provider (`CreateSso`) and add their email domains. A domain counts once its DNS carries the
   TXT record `_kernable-sso.<domain>` (`VerifySsoDomain`, run by your API); each domain belongs to
   one tenant only. People with an address in a verified domain then sign in through that provider,
-  and their first SSO login is linked to the account with the same email.
+  and their first SSO login is linked to the account with the same verified email. A tenant's
+  provider speaks only for its verified domains: a login that is not linked yet and whose email
+  is in another domain is refused (`email_not_in_domain`), neither linked nor registered, so a
+  tenant cannot take over someone else's account through its own provider.
 - **Enforced SSO** (`EnforceSso`): in that tenant, only sessions signed in through its SSO count.
   Owners are exempt, so a broken SSO configuration can be mended. The same person may still sign
   in with a password for *other* tenants.
@@ -126,7 +154,8 @@ found.
 | `RESET_MINUTES` | 60 | how long a password reset token is valid |
 | `ACCESS_TOKEN_MINUTES` | 15 | the access token's lifetime |
 | `SESSION_IDLE_DAYS`, `SESSION_MAX_DAYS` | 14, 90 | when a session ends without a refresh, and at the latest |
-| `PASSKEYS` | `localhost` | the relying party; set it with `usePasskeys` |
+| `REUSE_WINDOW` | 32 | how many of a session's older refresh tokens count as a reuse |
+| `PASSKEYS` | `localhost` | the relying party; set it with `usePasskeys` (`use_passkeys` in Python and Rust) |
 | `CHALLENGE_SECONDS` | 300 | how long a passkey challenge is valid |
 
 The password hash parameters (argon2id, 19 MiB, 2 iterations, OWASP's recommendation) are in

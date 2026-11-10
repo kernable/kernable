@@ -119,17 +119,28 @@ pub fn normal_email(email: &str) -> String {
     email.trim().to_lowercase()
 }
 
+/// The domain of an address, lowercased: what follows its `@`.
+pub fn email_domain(email: &str) -> String {
+    let e = normal_email(email);
+    match e.rfind('@') {
+        Some(at) => e[at + 1..].to_owned(),
+        None => e,
+    }
+}
+
+/// An address: one `@`, a local part, a domain of at least two labels, none of them empty, no
+/// whitespace, at most 254 bytes in UTF-8. The same rule in every language's kit.
 pub fn valid_email(email: &str) -> bool {
     let Some((user, host)) = email.split_once('@') else {
         return false;
     };
+    let labels: Vec<&str> = host.split('.').collect();
     email.len() <= 254
         && !user.is_empty()
-        && !email.contains(char::is_whitespace)
         && !host.contains('@')
-        && host
-            .split_once('.')
-            .is_some_and(|(a, b)| !a.is_empty() && !b.is_empty() && !b.ends_with('.'))
+        && !email.contains(char::is_whitespace)
+        && labels.len() >= 2
+        && labels.iter().all(|l| !l.is_empty())
 }
 
 pub fn valid_password(password: &str) -> bool {

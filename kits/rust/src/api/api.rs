@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use super::tokens::{Claims, SigningKeys, check_access_token, issue_access_token};
+use crate::account::AccountRow;
 use crate::account::{
     AddPasskey, ChangePassword, ConfirmEmailChange, ConfirmTotp, EndSession, FindAccountByEmail,
     FindAccountByLink, FindSsoByDomain, GetAccount, GetSsoSecret, LinkProvider,
@@ -34,8 +35,8 @@ use crate::invitation::{
 };
 use crate::shared::constants::{CHALLENGE_SECONDS, PLATFORM_TENANT, passkeys};
 use crate::shared::secrets::{
-    equal_secrets, new_id, parse_invitation_token, parse_token, random_bytes, random_secret, token,
-    totp_secret,
+    email_domain, equal_secrets, new_id, parse_invitation_token, parse_token, random_bytes,
+    random_secret, token, totp_secret, valid_password,
 };
 
 /// Why a call did not do what was asked.
@@ -290,6 +291,22 @@ impl KitApi {
         }
     }
 
+    /// The token's account, read as itself: the middleware checks the session as for every
+    /// signed-in request (active, the account active, a second factor proved if it has one). For
+    /// what the API then does with its own context (accepting an invitation, joining through a link).
+    async fn signed_in_account(&self, claims: &Claims) -> ApiResult<AccountRow> {
+        let q = Query::of(GetAccount {
+            account_id: claims.sub.clone(),
+        })
+        .tenant(PLATFORM_TENANT)
+        .context(Self::own(claims));
+        match self.kernable.query(q).await {
+            Ok(account) => Ok(account),
+            Err(Error::Rejected(r)) => refused(&r.code),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     fn signed_in(
         &self,
         account_id: &str,
@@ -475,7 +492,14 @@ impl KitApi {
         let Some((session_id, generation, _)) = parse_token(refresh_token) else {
             return refused("invalid_token");
         };
-        let generation: u64 = generation.parse().unwrap_or(0);
+        let Some(generation) = generation
+            .bytes()
+            .all(|b| b.is_ascii_digit())
+            .then(|| generation.parse::<u64>().ok())
+            .flatten()
+        else {
+            return refused("invalid_token");
+        };
         let next = token(&session_id, generation + 1, &random_secret(32));
         let command = RefreshSession {
             refresh_token: refresh_token.into(),
@@ -710,9 +734,10 @@ impl KitApi {
         claims: &Claims,
         user_name: &str,
     ) -> ApiResult<Value> {
+        let rp = passkeys();
         Ok(json!({
             "challenge": self.new_challenge().await?,
-            "rp": { "name": passkeys::RP_NAME, "id": passkeys::RP_ID },
+            "rp": { "name": rp.rp_name, "id": rp.rp_id },
             "user": { "id": BASE64URL_NOPAD.encode(claims.sub.as_bytes()), "name": user_name, "displayName": user_name },
             "pubKeyCredParams": [{ "alg": -7, "type": "public-key" }],
             "timeout": CHALLENGE_SECONDS * 1000,
@@ -748,7 +773,7 @@ impl KitApi {
     /// What the browser needs to sign in with a passkey (or prove one): any of the user's passkeys.
     pub async fn passkey_sign_in_options(&self) -> ApiResult<Value> {
         Ok(
-            json!({ "challenge": self.new_challenge().await?, "rpId": passkeys::RP_ID, "timeout": CHALLENGE_SECONDS * 1000, "userVerification": "required" }),
+            json!({ "challenge": self.new_challenge().await?, "rpId": passkeys().rp_id, "timeout": CHALLENGE_SECONDS * 1000, "userVerification": "required" }),
         )
     }
 
@@ -865,11 +890,12 @@ impl KitApi {
         Ok(config)
     }
 
+    /// A tenant's SSO: its provider name, what the API signs in with, and the domains it verified.
     async fn sso_settings(
         &self,
         tenant: &str,
         sso_id: &str,
-    ) -> ApiResult<Option<(String, Provider)>> {
+    ) -> ApiResult<Option<(String, Provider, Vec<String>)>> {
         let found = self
             .ask(
                 GetSsoSecret {
@@ -888,6 +914,7 @@ impl KitApi {
                     client_id: s.client_id,
                     client_secret,
                 },
+                s.domains,
             ))
         }))
     }
@@ -906,17 +933,14 @@ impl KitApi {
             };
             (name.to_owned(), p.clone(), None, None)
         } else {
-            let domain = email
-                .and_then(|e| e.split_once('@'))
-                .map(|(_, d)| d.to_owned())
-                .unwrap_or_default();
+            let domain = email_domain(email.unwrap_or_default());
             let Some(found) = self
                 .ask(FindSsoByDomain { domain }, PLATFORM_TENANT, true)
                 .await?
             else {
                 return refused("no_provider");
             };
-            let Some((name, p)) = self.sso_settings(&found.tenant, &found.sso_id).await? else {
+            let Some((name, p, _)) = self.sso_settings(&found.tenant, &found.sso_id).await? else {
                 return refused("no_provider");
             };
             (name, p, Some(found.tenant), Some(found.sso_id))
@@ -1024,7 +1048,10 @@ impl KitApi {
     /// The browser came back (`callback` is the full URL). Signs in a linked login (`Some`); links
     /// a tenant SSO login to the account with the same verified email; registers a new person
     /// whose email nobody has; refuses a social login whose email has an account (`not_linked`:
-    /// sign in and link it). `Ok(None)`: the signed-in account linked the login (`oidc_start` with `link`).
+    /// sign in and link it). A tenant's SSO answers only for its verified domains: an unlinked
+    /// login with another email is refused (`email_not_in_domain`), so a tenant's provider cannot
+    /// take over anyone else's account. `Ok(None)`: the signed-in account linked the login
+    /// (`oidc_start` with `link`).
     pub async fn oidc_finish(
         &self,
         callback: &str,
@@ -1047,12 +1074,17 @@ impl KitApi {
             return refused("invalid_state");
         };
         let p = match (&kept.tenant, &kept.sso_id) {
-            (Some(tenant), Some(sso_id)) => {
-                self.sso_settings(tenant, sso_id).await?.map(|(_, p)| p)
-            }
-            _ => self.providers.get(&kept.provider).cloned(),
+            (Some(tenant), Some(sso_id)) => self
+                .sso_settings(tenant, sso_id)
+                .await?
+                .map(|(_, p, domains)| (p, Some(domains))),
+            _ => self
+                .providers
+                .get(&kept.provider)
+                .cloned()
+                .map(|p| (p, None)),
         };
-        let Some(p) = p else {
+        let Some((p, domains)) = p else {
             return refused("no_provider");
         };
         let Ok(claims) = self.exchange(&p, &url, &kept).await else {
@@ -1088,6 +1120,17 @@ impl KitApi {
                 false,
             )
             .await?;
+        let sso = provider.starts_with("sso:");
+        // Not linked yet: a tenant's SSO speaks only for the domains its tenant verified.
+        if by_link.is_none()
+            && sso
+            && !domains
+                .as_deref()
+                .unwrap_or_default()
+                .contains(&email_domain(&email))
+        {
+            return refused("email_not_in_domain");
+        }
         let by_email = if by_link.is_none() && !email.is_empty() {
             self.ask(
                 FindAccountByEmail {
@@ -1100,7 +1143,6 @@ impl KitApi {
         } else {
             None
         };
-        let sso = provider.starts_with("sso:");
         let account_id = match by_link.or(by_email) {
             Some(found) => found.id,
             None => {
@@ -1135,6 +1177,7 @@ impl KitApi {
             email: Some(email),
             email_verified: Some(email_verified),
             auto_link: Some(sso),
+            domains,
             refresh_token: refresh_token.clone(),
             ip: ip.map(Into::into),
             user_agent: None,
@@ -1291,9 +1334,11 @@ impl KitApi {
         .await
     }
 
-    /// Accepts an invitation: as the signed-in account (`claims`), or as a new person with a
-    /// name and password (`new_person`), registered in the same step (active: the token proved the
-    /// email). The accepting account's email must be the invited one. The account and tenant.
+    /// Accepts an invitation: as the signed-in account (`claims`, its session checked as for every
+    /// signed-in call), or as a new person with a name and password (`new_person`), registered in
+    /// the same step (active: the token proved the email). The accepting account's email must be
+    /// the invited one. A new person's name and password are checked before the invitation is
+    /// used, so a refused registration does not spend it. The account and tenant.
     pub async fn accept_invitation(
         &self,
         invitation_token: &str,
@@ -1306,23 +1351,19 @@ impl KitApi {
         let Some(invited) = peek.email.clone().filter(|e| !e.is_empty()) else {
             return refused("invalid_token");
         };
-        let (account_id, email) = match claims {
+        let (account_id, email, person) = match claims {
             Some(c) => {
-                let account = self
-                    .ask(
-                        GetAccount {
-                            account_id: c.sub.clone(),
-                        },
-                        PLATFORM_TENANT,
-                        false,
-                    )
-                    .await?;
-                (
-                    c.sub.clone(),
-                    account.and_then(|a| a.email).unwrap_or_default(),
-                )
+                let account = self.signed_in_account(c).await?;
+                (c.sub.clone(), account.email.unwrap_or_default(), None)
             }
             None => {
+                let (name, password) = new_person.unwrap_or_default();
+                if name.trim().is_empty() || name.chars().count() > 200 {
+                    return refused("invalid_name");
+                }
+                if !valid_password(password) {
+                    return refused("weak_password");
+                }
                 // Someone with an account signs in first, so nobody gets an account they could not use.
                 if self
                     .ask(
@@ -1337,7 +1378,7 @@ impl KitApi {
                 {
                     return refused("sign_in_first");
                 }
-                (new_id(), invited)
+                (new_id(), invited, Some((name, password)))
             }
         };
         let accept = AcceptInvitation {
@@ -1355,8 +1396,7 @@ impl KitApi {
             )
             .await?,
         )?;
-        if claims.is_none() {
-            let (name, password) = new_person.unwrap_or_default();
+        if let Some((name, password)) = person {
             let register = RegisterAccount {
                 email,
                 name: name.into(),
@@ -1403,8 +1443,9 @@ impl KitApi {
             .await
     }
 
-    /// The signed-in account joins the link's tenant with its groups: the tenant. Someone without
-    /// an account registers and verifies first: a link proves no email.
+    /// The signed-in account joins the link's tenant with its groups (its session checked as for
+    /// every signed-in call): the tenant. Someone without an account registers and verifies first:
+    /// a link proves no email.
     pub async fn join_with_invitation_link(
         &self,
         claims: &Claims,
@@ -1413,6 +1454,7 @@ impl KitApi {
         let Some(t) = parse_link_token(link) else {
             return refused("invalid_token");
         };
+        self.signed_in_account(claims).await?;
         let join = JoinWithInvitationLink {
             token: link.into(),
             account_id: claims.sub.clone(),

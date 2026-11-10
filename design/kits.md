@@ -1,6 +1,6 @@
 # Kits: the event catalogue
 
-Status: decided, built in TypeScript, Python and Rust (merged 2026-11-06); where the build differs from the first catalogue, this file follows the build ("Found while building" at the end). The user documentation is `docs/kits/`, with tables generated from the TypeScript kit. The kits are the open set of tenancy, accounts, identities, groups, invitations and authorization that each SDK copies into a customer's project: `npx @kernable/sdk add kit`, `kernable-sdk add kit` for Python and Rust. Section by section, each decided before it was built. This catalogue is the contract the TypeScript, Python and Rust sets share: the shared fixture suite is generated from it.
+Status: decided, built in TypeScript, Python and Rust (merged 2026-11-06); where the build differs from the first catalogue, this file follows the build ("Found while building" at the end). The user documentation is `docs/kits/`, with tables generated from the TypeScript kit. The kits are the open set of tenancy, accounts, identities, groups, invitations and authorization that each SDK copies into a customer's project: `npx @kernable/sdk add kit`, `kernable-sdk add kit` for Python and Rust. Section by section, each decided before it was built. This catalogue is the contract the TypeScript, Python and Rust sets share; the shared fixtures in `kits/fixtures/` are written by hand from it, and all three kits run them.
 
 ## Conventions
 
@@ -113,6 +113,7 @@ Emailed tokens have the form `<aggregateId>.<tokenId>.<secret>` (base64url), so 
 | `VERIFICATION_HOURS` / `RESET_MINUTES` | 48 h / 60 min |
 | `ACCESS_TOKEN_MINUTES` | 15 |
 | `SESSION_IDLE_DAYS` / `SESSION_MAX_DAYS` | 14 / 90 |
+| `REUSE_WINDOW` | 32 older refresh tokens of a session recognised as a reuse |
 
 ### `account.account`: state
 
@@ -145,7 +146,7 @@ Locked while `failures.count ≥ LOCKOUT_AFTER` and `now < lastAt + min(2^(count
 | `SignIn` | `sessionId`, `password` (secret), `refreshToken` (secret), `ip`, `userAgent` | — | `SignedIn` {`sessionId`, `method`: `password`, `factors`, `refreshTokenHash`, `ip`, `userAgent`} or `SignInFailed` {`method`, `reason`: `wrong_password` · `locked` · `not_verified` · `not_active`, `ip`} | `public` (proof) |
 | `SignInWithPasskey` | `sessionId`, `challenge`, `assertion`, `refreshToken` (secret), `ip`, `userAgent` | the credential is the account's | `PasskeyUsed` {`credentialId`, `counter`}, `SignedIn` (`method`: `passkey`, `factors`: `passkey`) or `SignInFailed` | `api` (it issued the challenge) |
 | `ProvePasskey` | `sessionId`, `challenge`, `assertion` | the credential is the account's | `PasskeyUsed`, `SecondFactorProved` (`method`: `passkey`) or `SecondFactorFailed` | `api` (a passkey as the second factor of a password session) |
-| `SignInWithProvider` | `sessionId`, `provider`, `subject`, `email`, `emailVerified`, `refreshToken` (secret), `ip`, `userAgent` | linked, or the tenant's SSO with a verified domain (then linked first) | [`ProviderLinked`], `SignedIn` (`method`: the provider) or `SignInFailed` (`not_linked`) | `api` |
+| `SignInWithProvider` | `sessionId`, `provider`, `subject`, `email`, `emailVerified`, `autoLink`, `domains`, `refreshToken` (secret), `ip`, `userAgent` | linked, or an `sso:` provider with `autoLink`, the same verified email, and the email's domain in `domains` (the SSO's verified domains; else `email_not_in_domain`), then linked first | [`ProviderLinked`], `SignedIn` (`method`: the provider) or `SignInFailed` (`not_linked`) | `api` |
 | `ProveSecondFactor` | `sessionId`, `code` (secret) | TOTP confirmed | `SecondFactorProved` {`sessionId`, `method`: `totp` · `recovery`, `recoveryCodeHash`?} or `SecondFactorFailed` | `public` (proof) |
 | `ChangePassword` | `current`? (secret), `new` (secret) | `current` matches, if there is a password | `PasswordChanged` {`hash`} | own account |
 | `RequestPasswordReset` | — | `active` | `PasswordResetRequested` {`tokenId`, `token`, `expiresAt`} | `api` |
@@ -173,9 +174,9 @@ Locked while `failures.count ≥ LOCKOUT_AFTER` and `now < lastAt + min(2^(count
 
 ### `account.session`
 
-State: `status` (`none` · `active` · `ended`), `accountId`, `method`, `factors`, `generation`, `refreshTokenHash`, `openedAt`, `lastRefreshAt`, `endReason`.
+State: `status` (`none` · `active` · `ended`), `accountId`, `method`, `factors`, `generation`, `refreshTokenHash`, `previousTokenHashes` (the last `REUSE_WINDOW`), `openedAt`, `lastRefreshAt`, `endReason`.
 
-Refresh tokens have the form `<sessionId>.<generation>.<secret>`. A token of an older generation of the session is a reuse: the session ends.
+Refresh tokens have the form `<sessionId>.<generation>.<secret>`, the generation in decimal digits. One of the session's older tokens (its hash among `previousTokenHashes`) is a reuse: the session ends. Any other token is refused (`invalid_token`), so a session's ID alone cannot end it.
 
 | Command | Allowed when | Events | Level |
 |---|---|---|---|
@@ -210,7 +211,7 @@ Unique key `domain`: global, each verified domain, so one tenant per domain. Wit
 | `GetAccount` | profile, sign-in methods, MFA, links; target `data.accountId` | own account, `platform` |
 | `ListSessions` | the account's sessions (device, IP, last use); target `data.accountId` | own account, `platform` |
 | `FindSsoByDomain` | `{ tenantId, ssoId, issuer, clientId }` | `api` |
-| `GetSsoSecret` | the client secret | `api` |
+| `GetSsoSecret` | `{ issuer, clientId, clientSecret, domains }`: the client secret and the verified domains | `api` |
 | `GetSso` | the configuration without the secret | owners |
 
 ### Reactions
@@ -358,7 +359,7 @@ The token is `<tenantId>.<invitationId>.<tokenId>.<secret>`, so the API knows th
 
 The API runs it, since the person may have no account yet:
 
-1. It checks who is signed in. Signed in: `accountId` and `email` are the session's account. Not signed in: the person enters a name and password, the API picks a new account ID and sets `newAccount`.
+1. It checks who is signed in. Signed in: `accountId` and `email` are the session's account, read with the session's own context, so the middleware checks the session as for every signed-in request. Not signed in: the person enters a name and password, which the API checks first (`invalid_name`, `weak_password`) so a refused registration does not spend the invitation; it picks a new account ID and sets `newAccount`.
 2. `AcceptInvitation` checks the token and the email.
 3. For a new person, the API then submits `account.RegisterAccount` with that ID (level `api`, active at once: the token proved the email).
 4. The identity reactor creates the identity with its memberships, and the owner for an owner invitation.
@@ -372,7 +373,7 @@ The API runs it, since the person may have no account yet:
 | Query | Answers | Level |
 |---|---|---|
 | `ListInvitations` | the tenant's invitations (open ones in user lists) | group |
-| `PeekInvitation` | `{ tenantName, email, expired }` for a token, to show the acceptance page | `api` |
+| `PeekInvitation` | `{ tenant, invitationId, email, owner, expired }` for a token whose secret is right, to show the acceptance page | `api` |
 
 ### Decided (2026-11-06)
 
@@ -387,9 +388,9 @@ A second aggregate, `invitation.link`, random ID, under its tenant: `status` (`n
 |---|---|---|---|---|
 | `CreateInvitationLink` | `secret` (secret), `groups`, `label`?, `expiresAt`?, `maxUses`? | `none`; groups active (required facts) | `InvitationLinkCreated` {`groups`, `hash`, `label`, `expiresAt`, `maxUses`} | group, only groups the sender could grant |
 | `RevokeInvitationLink` | — | `open` | `InvitationLinkRevoked` | group |
-| `JoinWithInvitationLink` | `token` (secret), `accountId` | `open`, this tenant's and link's, hash equal, not expired (`expired_token`), not used up (`used_up`), the account not yet joined (`exists`) | `InvitationLinkUsed` {`accountId`, `groups`} | `api` (for a signed-in account: a link proves no email) |
+| `JoinWithInvitationLink` | `token` (secret), `accountId` | `open`, this tenant's and link's, hash equal, not expired (`expired_token`), not used up (`used_up`), the account not yet joined (`exists`) | `InvitationLinkUsed` {`accountId`, `groups`} | `api` (for a signed-in account, its session checked first: a link proves no email) |
 
-Queries `ListInvitationLinks` (group) and `PeekInvitationLink` (`api`: tenant, label, usable). The identity reactor turns `InvitationLinkUsed` into an identity with the groups, never an owner.
+Queries `ListInvitationLinks` (group) and `PeekInvitationLink` (`api`: tenant, linkId, label, usable; only for a token whose hash is right). The identity reactor turns `InvitationLinkUsed` into an identity with the groups, never an owner.
 
 ## The authorization middleware
 
@@ -438,7 +439,7 @@ Refusals reach the client as `PERMISSION_DENIED` with the code. `group.Explain` 
 ### For the app
 
 - **Its own middlewares** run after this one (`order` ≥ 0, which the kernel guarantees), for rules declarations cannot express.
-- **Lists**: a query's answer is not filtered by this middleware. The set provides a fold, `visibleTo(identity, type)`, that the app's read models use on the same relation declarations and events.
+- **Lists**: a query's answer is not filtered by this middleware. The set provides `visibility(readModel)`, a check the app's read models run per row on the same relation declarations and events (`visible(tenant, request, type, target)`).
 
 ### Orders
 
@@ -469,5 +470,7 @@ Found while writing `docs/kits/`; the tables above now follow the code.
 - **Account mail is not recorded as an event** (no `RecordMailSent`/`MailSent` in `account`); a failed send retries and parks like any reactor. Invitations record it as `InvitationMailSent` (`RecordInvitationMailSent`).
 - **`NoteRegistrationAttempt` / `RegistrationAttempted`**: how the existing account learns of a second registration (decision 1 of `account`).
 - **`ProvePasskey` and `PasskeyUsed`**: a passkey also proves the second factor of a password session; every use raises the stored counter.
+- **A tenant's SSO speaks only for its verified domains**: an unlinked SSO login whose email is in another domain is neither linked nor registered (`email_not_in_domain`, in `KitApi` and in `SignInWithProvider`), so a tenant cannot take over someone else's account through its own provider.
+- **Email addresses** are checked the same in every kit: one `@`, a local part, a domain of at least two labels, none empty, no whitespace, at most 254 bytes in UTF-8.
 - **Accepting an invitation needs exactly the invited email**; an address in a domain the tenant's SSO verified does not count. A person whose email already has an account signs in first (`sign_in_first`, in `KitApi`).
 

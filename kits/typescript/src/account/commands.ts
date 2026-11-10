@@ -4,7 +4,7 @@ import { Command, type PersonalFields, Rejected } from "@kernable/sdk";
 import { verifyAuthenticationResponse, verifyRegistrationResponse, type AuthenticationResponseJSON, type RegistrationResponseJSON } from "@simplewebauthn/server";
 
 import { DAY, HOUR, SESSION_IDLE_DAYS, SESSION_MAX_DAYS, VERIFICATION_HOURS, MINUTE, RESET_MINUTES, PASSKEYS } from "../shared/constants.ts";
-import { checkPassword, equalSecrets, hashPassword, normalEmail, parseToken, randomSecret, sha256, validEmail, validPassword, totpStep } from "../shared/secrets.ts";
+import { checkPassword, emailDomain, equalSecrets, hashPassword, normalEmail, parseToken, randomSecret, sha256, validEmail, validPassword, totpStep } from "../shared/secrets.ts";
 import { type Account, accountAggregate, lockedUntil, sessionAggregate, ssoAggregate } from "./aggregates.ts";
 import { ACCOUNT_SUSPENSION_REASONS, type AccountSuspensionReason, type SessionEnd } from "./domain.ts";
 import { ProviderLinked, ProviderUnlinked, SsoCreated, SsoDeleted, SsoDisabled, SsoDomainAdded, SsoDomainRemoved, SsoDomainVerified, SsoEnabled, SsoEnforcementChanged, SsoUpdated, PasskeyAdded, PasskeyRemoved, PasskeyUsed, RecoveryCodesGenerated, SecondFactorFailed, SecondFactorProved, TotpConfirmed, TotpDisabled, TotpStarted, EmailChangeRequested, EmailChanged, PasswordChanged, PasswordReset, PasswordResetRequested, RegistrationAttempted, AccountDeleted, AccountReactivated, AccountSuspended, AccountRegistered, EmailVerified, SessionEnded, SessionFactorAdded, SessionOpened, SessionRefreshed, SignedIn, SignInFailed, VerificationRequested } from "./events.ts";
@@ -49,8 +49,9 @@ sessionAggregate.command(OpenSession, (s, d) => {
 });
 
 /**
- * Public: the refresh token is the proof. It names its session and generation; an older
- * generation is a reuse and ends the session.
+ * Public: the refresh token is the proof. It names its session and generation; one of the
+ * session's older tokens is a reuse and ends the session. Any other token is refused, so knowing
+ * a session's ID is not enough to end it.
  */
 export class RefreshSession extends Command {
   static secret: (keyof RefreshSession)[] = ["refreshToken", "newRefreshToken", "ip"];
@@ -64,13 +65,13 @@ sessionAggregate.command(RefreshSession, (s, d, cmd, ctx) => {
   const at = ctx.now().getTime();
   const parts = parseToken(d.refreshToken);
   const next = parseToken(d.newRefreshToken);
-  if (s.status !== "active" || !parts || parts[0] !== cmd.aggregateId) throw new Rejected("Not a valid session", "invalid_token");
-  const generation = Number(parts[1]);
-  if (generation < s.generation) return [SessionEnded.new({ reason: "reuse" })];
-  if (generation !== s.generation || sha256(d.refreshToken) !== s.refreshTokenHash) throw new Rejected("Not a valid session", "invalid_token");
+  if (s.status !== "active" || !parts || parts[0] !== cmd.aggregateId || !/^[0-9]+$/.test(parts[1])) throw new Rejected("Not a valid session", "invalid_token");
+  const hash = sha256(d.refreshToken);
+  if (s.previousTokenHashes.some((h) => equalSecrets(h, hash))) return [SessionEnded.new({ reason: "reuse" })];
+  if (Number(parts[1]) !== s.generation || !equalSecrets(hash, s.refreshTokenHash ?? "")) throw new Rejected("Not a valid session", "invalid_token");
   if (at > s.lastRefreshAt + SESSION_IDLE_DAYS * DAY) return [SessionEnded.new({ reason: "idle" })];
   if (at > s.openedAt + SESSION_MAX_DAYS * DAY) return [SessionEnded.new({ reason: "expired" })];
-  if (!next || next[0] !== cmd.aggregateId || Number(next[1]) !== s.generation + 1) throw new Rejected("A malformed refresh token", "invalid_token");
+  if (!next || next[0] !== cmd.aggregateId || next[1] !== String(s.generation + 1)) throw new Rejected("A malformed refresh token", "invalid_token");
   return [SessionRefreshed.new({
     generation: s.generation + 1, refreshTokenHash: sha256(d.newRefreshToken), ip: d.ip ?? null, accountId: s.accountId!, factors: s.factors, at,
   })];
@@ -467,8 +468,10 @@ function provider(value: unknown): string {
 
 /**
  * The API's: it did the OAuth/OIDC exchange and checked the ID token. A linked login signs in;
- * an unlinked one is linked first only for a tenant's SSO whose domain the tenant verified
- * (`autoLink`, which the API sets) and the same verified email. Else `not_linked`.
+ * an unlinked one is linked first only for a tenant's SSO (`autoLink`, which the API sets), the
+ * same verified email, and an email in one of the domains the tenant verified for that SSO
+ * (`domains`, which the API read): else a tenant's provider could take over any account by
+ * answering with its email (`email_not_in_domain`). Otherwise `not_linked`.
  */
 export class SignInWithProvider extends Command {
   static secret: (keyof SignInWithProvider)[] = ["refreshToken", "ip", "userAgent", "subject", "email"];
@@ -478,6 +481,8 @@ export class SignInWithProvider extends Command {
   email?: string;
   emailVerified?: boolean;
   autoLink?: boolean;
+  /** For an `sso:` provider: the domains its tenant verified. */
+  domains?: string[];
   refreshToken!: string;
   ip?: string;
   userAgent?: string;
@@ -492,11 +497,15 @@ accountAggregate.command(SignInWithProvider, (s, d, _cmd, ctx) => {
   if (!refresh || refresh[0] !== d.sessionId || refresh[1] !== "1") throw new Rejected("A malformed refresh token", "invalid_token");
   if (typeof d.subject !== "string" || !d.subject) throw new Rejected("Which subject?", "invalid_subject");
   if (s.status !== "active") return failed("not_active");
+  const sso = p.startsWith("sso:");
   const linked = s.links.some((l) => l.provider === p && l.subject === d.subject);
-  const autoLink = !linked && d.autoLink === true && d.emailVerified === true && normalEmail(d.email) === s.email;
+  const autoLink = !linked && sso && d.autoLink === true && d.emailVerified === true && normalEmail(d.email) === s.email;
+  if (autoLink && !(Array.isArray(d.domains) && d.domains.some((x) => typeof x === "string" && x.toLowerCase() === emailDomain(d.email)))) {
+    throw new Rejected("The email is not in a domain of this single sign-on", "email_not_in_domain");
+  }
   if (!linked && !autoLink) return failed("not_linked");
   const signedIn = SignedIn.new({
-    sessionId: d.sessionId, method: p, factors: [p.startsWith("sso:") ? "sso" : "provider"], refreshTokenHash: sha256(d.refreshToken),
+    sessionId: d.sessionId, method: p, factors: [sso ? "sso" : "provider"], refreshTokenHash: sha256(d.refreshToken),
     ip: d.ip ?? null, userAgent: d.userAgent ?? null, mfa: s.totp?.confirmed === true, at,
   });
   return autoLink ? [ProviderLinked.new({ provider: p, subject: d.subject, email: normalEmail(d.email), at }), signedIn] : [signedIn];

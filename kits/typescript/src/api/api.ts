@@ -6,7 +6,7 @@ import { resolveTxt } from "node:dns/promises";
 
 import * as oidc from "openid-client";
 
-import type { Kernable, Outcome, RequestContext, StoredEvent } from "@kernable/sdk";
+import { Rejected, type Kernable, type Outcome, type RequestContext, type StoredEvent } from "@kernable/sdk";
 import {
   generateAuthenticationOptions, generateRegistrationOptions, type AuthenticationResponseJSON, type PublicKeyCredentialCreationOptionsJSON,
   type PublicKeyCredentialRequestOptionsJSON, type RegistrationResponseJSON,
@@ -14,14 +14,14 @@ import {
 
 import {
   AddPasskey, FindAccountByLink, FindSsoByDomain, GetSsoSecret, LinkProvider, SignInWithProvider, VerifySsoDomain, ChangePassword, ConfirmEmailChange, ConfirmTotp, ProvePasskey, ProveSecondFactor, SignInWithPasskey, StartTotp, EndSession, FindAccountByEmail, GetAccount, NoteRegistrationAttempt, RefreshSession, RegisterAccount, RequestEmailChange,
-  RequestPasswordReset, ResetPassword, SignIn, VerifyEmail, type SessionRefreshed, type SignInFailed, type SignedIn,
+  RequestPasswordReset, ResetPassword, SignIn, VerifyEmail, type AccountRow, type SessionRefreshed, type SignInFailed, type SignedIn,
 } from "../account/index.ts";
 import {
   AcceptInvitation, CreateInvitationLink, JoinWithInvitationLink, PeekInvitation, PeekInvitationLink, linkToken, parseLinkToken, type InvitedGroup,
 } from "../invitation/index.ts";
 import { CreateApiKey, FindApiKey, FindIdentityByAccount, apiKey, parseApiKey } from "../identity/index.ts";
 import { CHALLENGE_SECONDS, PASSKEYS, PLATFORM_TENANT } from "../shared/constants.ts";
-import { equalSecrets, parseInvitationToken, parseToken, randomSecret, token, totpSecret } from "../shared/secrets.ts";
+import { emailDomain, equalSecrets, parseInvitationToken, parseToken, randomSecret, token, totpSecret, validPassword } from "../shared/secrets.ts";
 import { checkAccessToken, issueAccessToken, type Claims, type SigningKeys } from "./tokens.ts";
 
 export interface KitApiOptions {
@@ -81,22 +81,22 @@ export class KitApi {
    * Registers a person. Answers the same whether or not the email was taken: the caller
    * shows "check your email" either way.
    */
-  async register(input: { email: string; name: string; password?: string }): Promise<{ accountId: string } | { ok: false; code: string }> {
+  async register(input: { email: string; name: string; password?: string }): Promise<{ ok: true; accountId: string } | { ok: false; reason: string }> {
     const accountId = randomUUID();
     const outcome = await this.kernable.submit(RegisterAccount.new(input), { aggregateId: accountId, tenant: PLATFORM_TENANT, context: {} });
-    if (outcome.committed) return { accountId };
-    if (outcome.code !== "unique_taken") return { ok: false, code: outcome.code };
+    if (outcome.committed) return { ok: true, accountId };
+    if (outcome.code !== "unique_taken") return { ok: false, reason: outcome.code };
     // The address is held: a registration that expired unverified is taken over (same aggregate);
     // otherwise the same answer as success, so nobody learns who has an account.
     const held = await this.kernable.query(FindAccountByEmail.new({ email: input.email }), { tenant: PLATFORM_TENANT, context: this.serviceContext });
     if (held.status === "pending") {
       const again = await this.kernable.submit(RegisterAccount.new(input), { aggregateId: held.id, tenant: PLATFORM_TENANT, context: {} });
-      if (again.committed) return { accountId: held.id };
+      if (again.committed) return { ok: true, accountId: held.id };
     } else {
       // The account's owner learns that someone tried; the caller learns nothing.
       await this.kernable.submit(NoteRegistrationAttempt.new(), { aggregateId: held.id, tenant: PLATFORM_TENANT, context: this.serviceContext });
     }
-    return { accountId: randomUUID() };
+    return { ok: true, accountId: randomUUID() };
   }
 
   /** Confirms an email address with the token from the mail. */
@@ -154,6 +154,7 @@ export class KitApi {
     const parts = parseToken(refreshToken);
     if (!parts) return { ok: false, reason: "invalid_token" };
     const [sessionId, generation] = parts;
+    if (!/^[0-9]+$/.test(generation)) return { ok: false, reason: "invalid_token" };
     const next = token(sessionId, Number(generation) + 1, randomSecret());
     const outcome = await this.kernable.submit(RefreshSession.new({ refreshToken, newRefreshToken: next, ip }), {
       aggregateId: sessionId, tenant: PLATFORM_TENANT, context: {},
@@ -224,6 +225,20 @@ export class KitApi {
   /** The context of the token's account acting on itself. */
   private own(claims: Claims): RequestContext {
     return { senderAccount: claims.sub, senderSession: claims.sid };
+  }
+
+  /**
+   * The token's account, read as itself: the middleware checks the session as for every signed-in
+   * request (active, the account active, a second factor proved if it has one). For what the API
+   * then does with its own context (accepting an invitation, joining through a link).
+   */
+  private async signedInAccount(claims: Claims): Promise<{ ok: true; account: AccountRow } | { ok: false; reason: string }> {
+    try {
+      return { ok: true, account: await this.kernable.query(GetAccount.new({ accountId: claims.sub }), { tenant: PLATFORM_TENANT, context: this.own(claims) }) };
+    } catch (err) {
+      if (err instanceof Rejected) return { ok: false, reason: err.code };
+      throw err;
+    }
   }
 
   // --- Passkeys: challenges live a few minutes in the kernable cache and count once. ---
@@ -319,11 +334,9 @@ export class KitApi {
       return p ? { provider: by.provider, ...p } : null;
     }
     try {
-      const domain = by.email.split("@")[1] ?? "";
-      const found = await this.kernable.query(FindSsoByDomain.new({ domain }), { tenant: PLATFORM_TENANT, context: this.serviceContext, allPartitions: true });
-      const secret = await this.kernable.query(GetSsoSecret.new({ ssoId: found.ssoId }), { tenant: found.tenant, context: this.serviceContext });
-      if (!secret.clientSecret) return null;
-      return { provider: `sso:${found.ssoId}`, issuer: secret.issuer, clientId: secret.clientId, clientSecret: secret.clientSecret, tenant: found.tenant, ssoId: found.ssoId };
+      const found = await this.kernable.query(FindSsoByDomain.new({ domain: emailDomain(by.email) }), { tenant: PLATFORM_TENANT, context: this.serviceContext, allPartitions: true });
+      const settings = await this.ssoSettings(found.tenant, found.ssoId);
+      return settings ? { ...settings, tenant: found.tenant, ssoId: found.ssoId } : null;
     } catch {
       return null;
     }
@@ -352,7 +365,9 @@ export class KitApi {
   /**
    * The browser came back (`callback` is the full URL). Signs in a linked login; links a tenant SSO
    * login to the account with the same verified email; registers a new person whose email nobody
-   * has; refuses a social login whose email has an account (`not_linked`: sign in and link it).
+   * has; refuses a social login whose email has an account (`not_linked`: sign in and link it). A
+   * tenant's SSO answers only for its verified domains: an unlinked login with another email is
+   * refused (`email_not_in_domain`), so a tenant's provider cannot take over anyone else's account.
    */
   async oidcFinish(callback: string, ip?: string): Promise<SignInResult | { ok: true; linked: true }> {
     const state = new URL(callback).searchParams.get("state") ?? "";
@@ -361,7 +376,7 @@ export class KitApi {
       return { ok: false, reason: "invalid_state" };
     }
     const kept = JSON.parse(Buffer.from(raw).toString("utf8")) as OidcState;
-    const p = kept.ssoId
+    const p: { provider: string; issuer: string; clientId: string; clientSecret: string; domains?: string[] } | null = kept.ssoId
       ? await this.ssoSettings(kept.tenant!, kept.ssoId)
       : this.options.providers?.[kept.provider] ? { provider: kept.provider, ...this.options.providers[kept.provider] } : null;
     if (!p) return { ok: false, reason: "no_provider" };
@@ -389,8 +404,11 @@ export class KitApi {
         return null;
       }
     };
-    let accountId = (await find(FindAccountByLink.new({ provider: kept.provider, subject: claims.sub }))) ?? (email ? await find(FindAccountByEmail.new({ email })) : null);
     const sso = kept.provider.startsWith("sso:");
+    let accountId = await find(FindAccountByLink.new({ provider: kept.provider, subject: claims.sub }));
+    // Not linked yet: a tenant's SSO speaks only for the domains its tenant verified.
+    if (!accountId && sso && !(p.domains ?? []).includes(emailDomain(email))) return { ok: false, reason: "email_not_in_domain" };
+    if (!accountId && email) accountId = await find(FindAccountByEmail.new({ email }));
     if (!accountId) {
       // A new person: registered (verified if the provider says so), the login linked.
       if (!email) return { ok: false, reason: "no_email" };
@@ -406,7 +424,7 @@ export class KitApi {
     const sessionId = randomUUID();
     const refreshToken = token(sessionId, 1, randomSecret());
     const outcome = await this.kernable.submit(
-      SignInWithProvider.new({ sessionId, provider: kept.provider, subject: claims.sub, email, emailVerified, autoLink: sso, refreshToken, ip }),
+      SignInWithProvider.new({ sessionId, provider: kept.provider, subject: claims.sub, email, emailVerified, autoLink: sso, domains: p.domains, refreshToken, ip }),
       { aggregateId: accountId, tenant: PLATFORM_TENANT, context: this.serviceContext },
     );
     if (!outcome.committed) return { ok: false, reason: outcome.code };
@@ -416,10 +434,11 @@ export class KitApi {
     return { ok: true, accountId, sessionId, refreshToken, secondFactor: d.mfa, accessToken: issueAccessToken(this.keys, { sub: accountId, sid: sessionId, fac: d.factors }) };
   }
 
+  /** A tenant's SSO: what the API signs in with, and the domains it verified. */
   private async ssoSettings(tenant: string, ssoId: string) {
     try {
       const s = await this.kernable.query(GetSsoSecret.new({ ssoId }), { tenant, context: this.serviceContext });
-      return s.clientSecret ? { provider: `sso:${ssoId}`, issuer: s.issuer, clientId: s.clientId, clientSecret: s.clientSecret } : null;
+      return s.clientSecret ? { provider: `sso:${ssoId}`, issuer: s.issuer, clientId: s.clientId, clientSecret: s.clientSecret, domains: s.domains } : null;
     } catch {
       return null;
     }
@@ -491,9 +510,11 @@ export class KitApi {
   }
 
   /**
-   * Accepts an invitation: as the signed-in account (`claims`), or as a new person with a
-   * name and password, registered in the same step (active: the token proved the email). The
-   * accepting account's email must be the invited one.
+   * Accepts an invitation: as the signed-in account (`claims`, its session checked as for every
+   * signed-in call), or as a new person with a name and password, registered in the same step
+   * (active: the token proved the email). The accepting account's email must be the invited one.
+   * A new person's name and password are checked before the invitation is used, so a refused
+   * registration does not spend it.
    */
   async acceptInvitation(
     invitationToken: string,
@@ -503,12 +524,14 @@ export class KitApi {
     if (!peek || !peek.email) return { ok: false, reason: "invalid_token" };
     let accountId: string;
     let email: string;
-    const newAccount = !("claims" in as);
     if ("claims" in as) {
+      const signedIn = await this.signedInAccount(as.claims);
+      if (!signedIn.ok) return signedIn;
       accountId = as.claims.sub;
-      const account = await this.kernable.query(GetAccount.new({ accountId }), { tenant: PLATFORM_TENANT, context: this.serviceContext });
-      email = account.email ?? "";
+      email = signedIn.account.email ?? "";
     } else {
+      if (typeof as.name !== "string" || !as.name.trim() || as.name.length > 200) return { ok: false, reason: "invalid_name" };
+      if (typeof as.password !== "string" || !validPassword(as.password)) return { ok: false, reason: "weak_password" };
       // Someone with an account signs in first, so nobody gets an account they could not use.
       try {
         await this.kernable.query(FindAccountByEmail.new({ email: peek.email }), { tenant: PLATFORM_TENANT, context: this.serviceContext });
@@ -518,7 +541,7 @@ export class KitApi {
         email = peek.email;
       }
     }
-    const accepted = await this.kernable.submit(AcceptInvitation.new({ token: invitationToken, accountId, email, newAccount }), {
+    const accepted = await this.kernable.submit(AcceptInvitation.new({ token: invitationToken, accountId, email, newAccount: !("claims" in as) }), {
       aggregateId: peek.invitationId, tenant: peek.tenant, context: this.serviceContext,
     });
     if (!accepted.committed) return { ok: false, reason: accepted.code };
@@ -558,12 +581,15 @@ export class KitApi {
   }
 
   /**
-   * The signed-in account joins the link's tenant with its groups. Someone without an account
-   * registers and verifies first: a link proves no email.
+   * The signed-in account joins the link's tenant with its groups (its session checked as for
+   * every signed-in call). Someone without an account registers and verifies first: a link proves
+   * no email.
    */
   async joinWithInvitationLink(claims: Claims, link: string): Promise<{ ok: true; tenant: string } | { ok: false; reason: string }> {
     const t = parseLinkToken(link);
     if (!t) return { ok: false, reason: "invalid_token" };
+    const signedIn = await this.signedInAccount(claims);
+    if (!signedIn.ok) return signedIn;
     const outcome = await this.kernable.submit(JoinWithInvitationLink.new({ token: link, accountId: claims.sub }), {
       aggregateId: t.linkId, tenant: t.tenant, context: this.serviceContext,
     });

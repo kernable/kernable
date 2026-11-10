@@ -63,15 +63,15 @@ ssosReadModel.query(FindSsoByDomain, (d) => {
   return { tenant: r.tenant, ssoId: r.id, issuer: r.issuer, clientId: r.clientId, enforced: r.enforced };
 });
 
-/** The API's only: what it signs in with, the client secret included. */
-export class GetSsoSecret extends Query<{ issuer: string; clientId: string; clientSecret: string | null }> {
+/** The API's only: what it signs in with, the client secret included, and the verified domains whose people it may sign in. */
+export class GetSsoSecret extends Query<{ issuer: string; clientId: string; clientSecret: string | null; domains: string[] }> {
   ssoId!: string;
 }
 
 ssosReadModel.query(GetSsoSecret, (d, qry) => {
   const r = ssoRows.get(ssoKey(qry.tenant, d?.ssoId));
   if (!r) throw new Rejected("No such SSO", "not_found");
-  return { issuer: r.issuer, clientId: r.clientId, clientSecret: r.clientSecret };
+  return { issuer: r.issuer, clientId: r.clientId, clientSecret: r.clientSecret, domains: r.domains.filter((x) => x.verified).map((x) => x.domain) };
 });
 
 /** The tenant's owners: the configuration without the secret, with the TXT values to publish. */

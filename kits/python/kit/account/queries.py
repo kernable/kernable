@@ -72,7 +72,7 @@ def _(d: FindSsoByDomain):
 
 
 class GetSsoSecret(Query[dict]):
-    """The API's only: what it signs in with, the client secret included."""
+    """The API's only: what it signs in with, the client secret included, and the verified domains whose people it may sign in."""
     sso_id: str
 
 
@@ -81,7 +81,8 @@ def _(d: GetSsoSecret, qry):
     r = sso_rows.get(sso_key(qry.tenant, d.sso_id))
     if not r:
         raise Rejected("No such SSO", "not_found")
-    return {"issuer": r["issuer"], "client_id": r["client_id"], "client_secret": r["client_secret"]}
+    return {"issuer": r["issuer"], "client_id": r["client_id"], "client_secret": r["client_secret"],
+            "domains": [x["domain"] for x in r["domains"] if x["verified"]]}
 
 
 class GetSso(Query[dict]):

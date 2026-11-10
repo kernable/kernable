@@ -2,7 +2,7 @@
 
 from kernable import Aggregate
 
-from ..shared.constants import LOCKOUT_AFTER, LOCKOUT_MAX_MINUTES, MINUTE
+from ..shared.constants import LOCKOUT_AFTER, LOCKOUT_MAX_MINUTES, MINUTE, REUSE_WINDOW
 from .domain import AccountStatus, account_domain
 from .events import (AccountDeleted, AccountReactivated, AccountRegistered, AccountSuspended, EmailChanged,
                      EmailChangeRequested, EmailVerified, PasskeyAdded, PasskeyRemoved, PasskeyUsed, PasswordChanged,
@@ -211,6 +211,8 @@ class Session(Aggregate, domain=account_domain, schema="py-1"):
     factors: list = []
     generation: int = 0
     refresh_token_hash: str | None = None
+    #: The hashes of the last refresh tokens before the current one: a reuse is one of them.
+    previous_token_hashes: list = []
     opened_at: int = 0
     last_refresh_at: int = 0
     end_reason: str | None = None
@@ -224,6 +226,8 @@ def _(s: Session, d: SessionOpened):
 
 @Session.apply(SessionRefreshed)
 def _(s: Session, d: SessionRefreshed):
+    if s.refresh_token_hash:
+        s.update(previous_token_hashes=[*s.previous_token_hashes, s.refresh_token_hash][-REUSE_WINDOW:])
     s.update(generation=d.generation, refresh_token_hash=d.refresh_token_hash, last_refresh_at=d.at)
 
 

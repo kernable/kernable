@@ -58,8 +58,7 @@ class FixturesTest(unittest.TestCase):
 def make(domain: str, case: dict):
     def test(self):
         aggregate = AGGREGATES.get(f"{domain}.{case['aggregate']}")
-        if aggregate is None:
-            self.skipTest(f"no aggregate {domain}.{case['aggregate']} yet")
+        self.assertIsNotNone(aggregate, f"no aggregate {domain}.{case['aggregate']}")
         meta = dict(aggregate_id=case["aggregateId"], tenant=case["tenant"], domain=domain, aggregate_type=case["aggregate"])
         history = [(e["type"], 1, e["data"], EventMeta(e["type"], version=i + 1, **meta)) for i, e in enumerate(case["given"])]
         state = aggregate.fold(history)

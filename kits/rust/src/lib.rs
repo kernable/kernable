@@ -32,6 +32,8 @@ pub mod tenancy;
 
 use kernable::Domain;
 
+pub use shared::constants::{RelyingParty, use_passkeys};
+
 /// Every domain of the kit, built anew, ready for an app: `kernable.app(App::new("kit").domains(kit_domains()))`.
 pub fn kit_domains() -> Vec<Domain> {
     vec![

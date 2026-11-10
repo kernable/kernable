@@ -54,7 +54,7 @@ Secret fields leave the vault once the command completes; personal fields stay i
 | `RemovePasskey`<br>on `account` | `credentialId: string` | `PasskeyRemoved` | a group permission, or the sender itself | `last_method`, `not_found` |
 | `SignInWithPasskey`<br>on `account` | `sessionId: string`<br>`challenge: string`<br>`response: AuthenticationResponseJSON`<br>`refreshToken: string` (secret)<br>`ip?: string` (secret)<br>`userAgent?: string` (secret) | `SignInFailed`, `PasskeyUsed`, `SignedIn` | the API (its `api` group) | `invalid_token`, `not_found` |
 | `ProvePasskey`<br>on `account` | `sessionId: string`<br>`challenge: string`<br>`response: AuthenticationResponseJSON` | `SecondFactorFailed`, `PasskeyUsed`, `SecondFactorProved` | the API (its `api` group) | `invalid_state` |
-| `SignInWithProvider`<br>on `account` | `sessionId: string`<br>`provider: string`<br>`subject: string` (secret)<br>`email?: string` (secret)<br>`emailVerified?: boolean`<br>`autoLink?: boolean`<br>`refreshToken: string` (secret)<br>`ip?: string` (secret)<br>`userAgent?: string` (secret) | `SignInFailed`, `SignedIn`, `ProviderLinked` | the API (its `api` group) | `invalid_provider`, `invalid_subject`, `invalid_token`, `not_found` |
+| `SignInWithProvider`<br>on `account` | `sessionId: string`<br>`provider: string`<br>`subject: string` (secret)<br>`email?: string` (secret)<br>`emailVerified?: boolean`<br>`autoLink?: boolean`<br>`domains?: string[]`<br>`refreshToken: string` (secret)<br>`ip?: string` (secret)<br>`userAgent?: string` (secret) | `SignInFailed`, `SignedIn`, `ProviderLinked` | the API (its `api` group) | `email_not_in_domain`, `invalid_provider`, `invalid_subject`, `invalid_token`, `not_found` |
 | `LinkProvider`<br>on `account` | `provider: string`<br>`subject: string` (secret)<br>`email?: string` (secret) | `ProviderLinked` | the API (its `api` group) | `exists`, `invalid_provider`, `invalid_state`, `invalid_subject` |
 | `UnlinkProvider`<br>on `account` | `provider: string`<br>`subject: string` (secret) | `ProviderUnlinked` | a group permission, or the sender itself | `last_method`, `not_found` |
 | `CreateSso`<br>on `sso` | `issuer: string`<br>`clientId: string`<br>`clientSecret: string` (secret) | `SsoCreated` | owners | `exists`, `invalid_client`, `invalid_issuer` |
@@ -121,7 +121,7 @@ A query about one aggregate names it (`static target`): the middleware decides o
 | `ListSessions`<br>by `account.accounts` | `accountId: string` | `account.account` in `accountId` | `SessionRow[]` | a group permission, or the sender itself |
 | `FindAccountByLink`<br>by `account.accounts` | `provider: string`<br>`subject: string` | — | `{ id: string; status: AccountStatus }` | the API (its `api` group) |
 | `FindSsoByDomain`<br>by `account.ssos` | `domain: string` | — | `{ tenant: string; ssoId: string; issuer: string; clientId: string; enforced: boolean }` | the API (its `api` group) |
-| `GetSsoSecret`<br>by `account.ssos` | `ssoId: string` | — | `{ issuer: string; clientId: string; clientSecret: string \| null }` | the API (its `api` group) |
+| `GetSsoSecret`<br>by `account.ssos` | `ssoId: string` | — | `{ issuer: string; clientId: string; clientSecret: string \| null; domains: string[] }` | the API (its `api` group) |
 | `GetSso`<br>by `account.ssos` | `ssoId: string` | — | `Omit<SsoRow, "clientSecret">` | owners |
 
 ### Listeners

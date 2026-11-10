@@ -22,7 +22,7 @@ own modules relatively, and the copy's tests and example import it by your name.
 | `account` | a person's Account (registration, email verification, password, TOTP and recovery codes, passkeys, OAuth/OIDC links), a Session per sign-in, a tenant's single sign-on (`Sso`) |
 | `identity` | a person or service in one tenant, its profile, group memberships (scoped, expiring) and API keys |
 | `group` | named sets of permissions per tenant; `owners` is virtual |
-| `invitation` | invitations by email, accepted by a signed-in account or a new person |
+| `invitation` | invitations by email, accepted by a signed-in account or a new person; reusable invitation links |
 | `authorization` | the middleware that decides every request, and `relation()`, `visibility()`, `Explain` |
 | `api` | `KitApi`: what only your API can do (sign-in, tokens, OIDC, passkey challenges, API keys); `AsyncKitApi` for asyncio |
 
@@ -43,16 +43,17 @@ Kernable().app(service="kit", domains=[*kit_domains(), shop_domain]).run()
 
 Once, with a key granted `privileged` for `bypass_authorization`, `kit.bootstrap.bootstrap()`
 creates the platform tenant, the sign-up policy, the API's service identity and its key, and
-optionally the first platform administrator. `example/server.py` shows an HTTP API over
-`KitApi` with `http.server`; in FastAPI or another asyncio framework, wrap it:
+optionally the first platform administrator. Passkeys are bound to your site: set the relying
+party with `use_passkeys(rp_id, rp_name, origins)` from `kit` before serving. `example/server.py` shows an HTTP API over
+`KitApi` with `http.server` (on 127.0.0.1, camelCase JSON like the other kits' examples); in FastAPI or another asyncio framework, wrap it:
 `AsyncKitApi(KitApi(...))` has the same methods, awaited.
 
 ## Keys and grants
 
 | Process | Needs |
 |---|---|
-| the kit's service | `run` on the kit's domains, `listen`, `answer`, `check` on `*`, `vault_read`, `vault_erase`, `reserved_order` (`*`: its listeners run before yours), `privileged` for `bypass_authorization` (its reactors) |
-| your API | `submit` and `query` on what it sends, `cache` on `account` (passkey challenges, OIDC state) |
+| the kit's service | `run` on the kit's domains, `listen`, `answer`, `check` on `*`, `vault_read`, `vault_erase`, `reserved_order` (`*`: its listeners run before yours), `process` on `*` (process identities: the kit gives each process its identity and key), `privileged` for `bypass_authorization` (its reactors) |
+| your API | `submit` and `query` on what it sends, `cache` on `account` (passkey challenges, OIDC state); its client knows the kit's schemas: `Kernable().use(*kit_schemas())` |
 
 ## Changing it
 

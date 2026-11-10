@@ -66,6 +66,86 @@
       "rejected": "invalid_email"
     },
     {
+      "name": "an address whose domain ends with a dot is not an email address",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "RegisterAccount",
+        "data": {
+          "email": "ann@example.com.",
+          "name": "Ann"
+        }
+      },
+      "rejected": "invalid_email"
+    },
+    {
+      "name": "an address whose domain starts with a dot is not an email address",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "RegisterAccount",
+        "data": {
+          "email": "ann@.example.com",
+          "name": "Ann"
+        }
+      },
+      "rejected": "invalid_email"
+    },
+    {
+      "name": "an address with an empty label in its domain is not an email address",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "RegisterAccount",
+        "data": {
+          "email": "ann@example..com",
+          "name": "Ann"
+        }
+      },
+      "rejected": "invalid_email"
+    },
+    {
+      "name": "an address with two @ is not an email address",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "RegisterAccount",
+        "data": {
+          "email": "ann@b@example.com",
+          "name": "Ann"
+        }
+      },
+      "rejected": "invalid_email"
+    },
+    {
+      "name": "an address is at most 254 bytes long, counted in UTF-8",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "RegisterAccount",
+        "data": {
+          "email": "äääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääää@example.com",
+          "name": "Ann"
+        }
+      },
+      "rejected": "invalid_email"
+    },
+    {
       "name": "a password has at least 10 characters",
       "aggregate": "account",
       "aggregateId": "a1",
@@ -785,6 +865,112 @@
           }
         }
       ]
+    },
+    {
+      "name": "an older generation with a wrong secret is refused: the session goes on",
+      "aggregate": "session",
+      "aggregateId": "s1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "SessionOpened",
+          "data": {
+            "accountId": "a1",
+            "method": "password",
+            "factors": [
+              "password"
+            ],
+            "refreshTokenHash": "623eb122f7c6115ddd49a01a83d1367e2f5fdffed24ba88b069c85458dfe645c",
+            "ip": null,
+            "userAgent": null,
+            "at": 900000
+          }
+        },
+        {
+          "type": "SessionRefreshed",
+          "data": {
+            "generation": 2,
+            "refreshTokenHash": "cdb350a26128d8c1311f44cddc350d79344cd06d4c9d93292da91b7116409534",
+            "ip": null,
+            "accountId": "a1",
+            "at": 950000,
+            "factors": [
+              "password"
+            ]
+          }
+        }
+      ],
+      "when": {
+        "type": "RefreshSession",
+        "data": {
+          "refreshToken": "s1.1.guessed",
+          "newRefreshToken": "s1.2.x"
+        }
+      },
+      "rejected": "invalid_token"
+    },
+    {
+      "name": "a generation that is not a number is refused",
+      "aggregate": "session",
+      "aggregateId": "s1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "SessionOpened",
+          "data": {
+            "accountId": "a1",
+            "method": "password",
+            "factors": [
+              "password"
+            ],
+            "refreshTokenHash": "623eb122f7c6115ddd49a01a83d1367e2f5fdffed24ba88b069c85458dfe645c",
+            "ip": null,
+            "userAgent": null,
+            "at": 900000
+          }
+        }
+      ],
+      "when": {
+        "type": "RefreshSession",
+        "data": {
+          "refreshToken": "s1.x.r",
+          "newRefreshToken": "s1.2.n"
+        }
+      },
+      "rejected": "invalid_token"
+    },
+    {
+      "name": "a negative generation is refused, not taken for a reuse",
+      "aggregate": "session",
+      "aggregateId": "s1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "SessionOpened",
+          "data": {
+            "accountId": "a1",
+            "method": "password",
+            "factors": [
+              "password"
+            ],
+            "refreshTokenHash": "623eb122f7c6115ddd49a01a83d1367e2f5fdffed24ba88b069c85458dfe645c",
+            "ip": null,
+            "userAgent": null,
+            "at": 900000
+          }
+        }
+      ],
+      "when": {
+        "type": "RefreshSession",
+        "data": {
+          "refreshToken": "s1.-1.r",
+          "newRefreshToken": "s1.2.n"
+        }
+      },
+      "rejected": "invalid_token"
     },
     {
       "name": "signing out ends the session",
@@ -2363,7 +2549,10 @@
           "refreshToken": "s1.1.r",
           "email": "Ann@Acme.example",
           "emailVerified": true,
-          "autoLink": true
+          "autoLink": true,
+          "domains": [
+            "acme.example"
+          ]
         }
       },
       "then": [
@@ -2439,7 +2628,10 @@
           "refreshToken": "s1.1.r",
           "email": "ann@acme.example",
           "emailVerified": false,
-          "autoLink": true
+          "autoLink": true,
+          "domains": [
+            "acme.example"
+          ]
         }
       },
       "then": [
@@ -2453,6 +2645,131 @@
           }
         }
       ]
+    },
+    {
+      "name": "... not an email outside the SSO's verified domains (another tenant's provider cannot take over an account)",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@mail.example",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        }
+      ],
+      "when": {
+        "type": "SignInWithProvider",
+        "data": {
+          "sessionId": "s1",
+          "provider": "sso:sso1",
+          "subject": "x-1",
+          "refreshToken": "s1.1.r",
+          "email": "ann@mail.example",
+          "emailVerified": true,
+          "autoLink": true,
+          "domains": [
+            "acme.example"
+          ]
+        }
+      },
+      "rejected": "email_not_in_domain"
+    },
+    {
+      "name": "... not without the SSO's verified domains",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@acme.example",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        }
+      ],
+      "when": {
+        "type": "SignInWithProvider",
+        "data": {
+          "sessionId": "s1",
+          "provider": "sso:sso1",
+          "subject": "x-1",
+          "refreshToken": "s1.1.r",
+          "email": "Ann@Acme.example",
+          "emailVerified": true,
+          "autoLink": true
+        }
+      },
+      "rejected": "email_not_in_domain"
+    },
+    {
+      "name": "... and a social provider never links by email, autoLink or not",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@acme.example",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        }
+      ],
+      "when": {
+        "type": "SignInWithProvider",
+        "data": {
+          "sessionId": "s1",
+          "provider": "social",
+          "subject": "x-1",
+          "refreshToken": "s1.1.r",
+          "email": "Ann@Acme.example",
+          "emailVerified": true,
+          "autoLink": true,
+          "domains": [
+            "acme.example"
+          ]
+        }
+      },
+      "then": [
+        {
+          "type": "SignInFailed",
+          "data": {
+            "method": "social",
+            "reason": "not_linked",
+            "ip": null,
+            "at": 1000000
+          }
+        }
+      ],
+      "index": {
+        "keys": [
+          {
+            "name": "email",
+            "value": "ann@acme.example",
+            "scope": "tenant",
+            "subject": "a1"
+          }
+        ],
+        "facts": [
+          "active"
+        ]
+      }
     },
     {
       "name": "the last way to sign in is not unlinked",

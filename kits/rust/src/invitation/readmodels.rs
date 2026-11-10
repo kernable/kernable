@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{InvitationStatus, InvitedGroup, LinkStatus, events::*};
 use crate::shared::constants::orders;
+use crate::shared::secrets::sha256;
 use crate::tenancy::TenantDeleted;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -22,6 +23,10 @@ pub struct InvitationRow {
     pub expires_at: i64,
     pub invited_by: Option<String>,
     pub invited_at: i64,
+    /// The open token's ID and the SHA-256 of its secret: `PeekInvitation` answers only for the
+    /// right token. Never shown in lists.
+    #[serde(skip)]
+    pub token: Option<(String, String)>,
 }
 
 /// `tenant/invitationId` → the invitation.
@@ -41,6 +46,10 @@ pub struct LinkRow {
     pub uses: i64,
     pub created_by: Option<String>,
     pub created_at: i64,
+    /// The link token's hash: `PeekInvitationLink` answers only for the right token. Never shown
+    /// in lists.
+    #[serde(skip)]
+    pub hash: String,
 }
 
 /// `tenant/linkId` → the invitation link.
@@ -77,6 +86,7 @@ pub fn invitations(domain: &Domain) -> (Listener, Shared, Links) {
                     expires_at: d.expires_at,
                     invited_by: Some(ctx.request.sender_identity.clone()).filter(|s| !s.is_empty()),
                     invited_at: evt.created_at.millis(),
+                    token: d.token.map(|t| (d.token_id, sha256(&t))),
                 };
                 state
                     .write()
@@ -89,22 +99,34 @@ pub fn invitations(domain: &Domain) -> (Listener, Shared, Links) {
     on!(l, state, InvitationResent, |t, d, evt| update(
         t,
         &evt,
-        |r| r.expires_at = d.expires_at
+        |r| {
+            r.expires_at = d.expires_at;
+            r.token = d.token.map(|token| (d.token_id, sha256(&token)));
+        }
     ));
     on!(l, state, InvitationRevoked, |t, _d, evt| update(
         t,
         &evt,
-        |r| r.status = InvitationStatus::Revoked
+        |r| {
+            r.status = InvitationStatus::Revoked;
+            r.token = None;
+        }
     ));
     on!(l, state, InvitationDeclined, |t, _d, evt| update(
         t,
         &evt,
-        |r| r.status = InvitationStatus::Declined
+        |r| {
+            r.status = InvitationStatus::Declined;
+            r.token = None;
+        }
     ));
     on!(l, state, InvitationAccepted, |t, _d, evt| update(
         t,
         &evt,
-        |r| r.status = InvitationStatus::Accepted
+        |r| {
+            r.status = InvitationStatus::Accepted;
+            r.token = None;
+        }
     ));
     on!(l, state, InvitationErased, |t, _d, evt| update(
         t,
@@ -127,6 +149,7 @@ pub fn invitations(domain: &Domain) -> (Listener, Shared, Links) {
                     uses: 0,
                     created_by: Some(ctx.request.sender_identity.clone()).filter(|s| !s.is_empty()),
                     created_at: evt.created_at.millis(),
+                    hash: d.hash,
                 };
                 links
                     .write()

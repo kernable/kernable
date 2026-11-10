@@ -70,8 +70,20 @@ def normal_email(email: object) -> str:
     return email.strip().lower() if isinstance(email, str) else ""
 
 
+def email_domain(email: object) -> str:
+    """The domain of an address, lowercased: what follows its `@`."""
+    e = normal_email(email)
+    return e[e.rfind("@") + 1:]
+
+
 def valid_email(email: str) -> bool:
-    return bool(re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", email)) and len(email) <= 254
+    """An address: one `@`, a local part, a domain of at least two labels, none of them empty, no
+    whitespace, at most 254 bytes in UTF-8. The same rule in every language's kit."""
+    at = email.find("@")
+    if at < 1 or "@" in email[at + 1:] or re.search(r"\s", email) or len(email.encode()) > 254:
+        return False
+    labels = email[at + 1:].split(".")
+    return len(labels) >= 2 and all(labels)
 
 
 def valid_password(password: object) -> bool:

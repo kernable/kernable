@@ -24,8 +24,9 @@ node --test kit/test/unit/*.test.ts    # the contract: every case passes in the 
 | `api` | `KitApi`: what only your API can do (sign-in, tokens, OIDC, passkey challenges, API keys) |
 
 Every domain has the same files: `domain.ts`, `events.ts`, `aggregates.ts`, `commands.ts`,
-`readmodels.ts`, `queries.ts`, `reactors.ts` and `index.ts`, which registers the parts. The
-constants you are most likely to change are in `src/shared/constants.ts`.
+`readmodels.ts`, `queries.ts` and `index.ts`, which registers the parts, and `reactors.ts` where
+the domain has reactors (`account`, `identity`, `invitation`). The constants you are most likely
+to change are in `src/shared/constants.ts`.
 
 ## Running it
 

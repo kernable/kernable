@@ -3,6 +3,7 @@
 from typing import TypedDict
 
 from ..shared.constants import ORDERS
+from ..shared.secrets import sha256
 from ..tenancy.events import TenantDeleted
 from .domain import InvitationStatus, InvitedGroup, LinkStatus, invitation_domain
 from .events import (InvitationAccepted, InvitationCreated, InvitationDeclined, InvitationErased, InvitationLinkCreated, InvitationLinkRevoked,
@@ -47,6 +48,21 @@ def row_key(tenant: str, invitation_id: str) -> str:
     return f"{tenant}/{invitation_id}"
 
 
+#: `tenant/invitationId` → the open token's ID and the SHA-256 of its secret, and `tenant/linkId` →
+#: the link token's hash: the peek queries answer only for the right token. Kept apart from the rows,
+#: which lists show.
+invitation_tokens: dict[str, dict] = {}
+link_hashes: dict[str, str] = {}
+
+
+def _keep_token(d, evt) -> None:
+    key = row_key(evt.tenant, evt.aggregate_id)
+    if d.token:
+        invitation_tokens[key] = {"token_id": d.token_id, "hash": sha256(d.token)}
+    else:
+        invitation_tokens.pop(key, None)
+
+
 invitations_readmodel = invitation_domain.read_model("invitation.invitations", order=ORDERS.read_models)
 
 
@@ -55,18 +71,21 @@ def _(d: InvitationCreated, evt, ctx):
     invitation_rows[row_key(evt.tenant, evt.aggregate_id)] = InvitationRow(
         id=evt.aggregate_id, tenant=evt.tenant, email=d.email, groups=d.groups, owner=d.owner, status="open", expires_at=d.expires_at,
         invited_by=ctx.request.sender_identity or None, invited_at=int(evt.created_at.timestamp() * 1000))
+    _keep_token(d, evt)
 
 
 @invitations_readmodel.on(InvitationResent)
 def _(d: InvitationResent, evt):
     if r := invitation_rows.get(row_key(evt.tenant, evt.aggregate_id)):
         r["expires_at"] = d.expires_at
+    _keep_token(d, evt)
 
 
 def _status(status: InvitationStatus):
     def handler(d, evt):
         if r := invitation_rows.get(row_key(evt.tenant, evt.aggregate_id)):
             r["status"] = status
+        invitation_tokens.pop(row_key(evt.tenant, evt.aggregate_id), None)
     return handler
 
 
@@ -86,6 +105,7 @@ def _(d: InvitationLinkCreated, evt, ctx):
     link_rows[row_key(evt.tenant, evt.aggregate_id)] = LinkRow(
         id=evt.aggregate_id, tenant=evt.tenant, groups=d.groups, label=d.label, status="open", expires_at=d.expires_at, max_uses=d.max_uses,
         uses=0, created_by=ctx.request.sender_identity or None, created_at=int(evt.created_at.timestamp() * 1000))
+    link_hashes[row_key(evt.tenant, evt.aggregate_id)] = d.hash
 
 
 @invitations_readmodel.on(InvitationLinkRevoked)
@@ -106,3 +126,6 @@ def _(d, evt):
         del invitation_rows[k]
     for k in [k for k, r in link_rows.items() if r["tenant"] == evt.aggregate_id]:
         del link_rows[k]
+    for table in (invitation_tokens, link_hashes):
+        for k in [k for k in table if k.startswith(f"{evt.aggregate_id}/")]:
+            del table[k]

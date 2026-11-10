@@ -2,13 +2,15 @@
 //! the routes over to whatever you use; the kit's functions stay.
 //!
 //! ```sh
-//! KERNABLE_URL=... KERNABLE_KEY=kit.key cargo run --example server      # port 3000, or PORT
+//! KERNABLE_URL=... KERNABLE_KEY=kit.key cargo run --example server      # 127.0.0.1, port 3000 or PORT
 //! ```
 //!
 //! Requests carry `Authorization: Bearer <access token>` (or `ApiKey <key>`) and, inside a tenant,
 //! `X-Tenant: <tenant ID>`; the server turns them into the request context the middleware decides on.
 
-use axum::extract::{Path, State};
+use std::net::SocketAddr;
+
+use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -30,6 +32,17 @@ fn reply(status: StatusCode, body: Value) -> Response {
 fn refusal(e: ApiError, status: StatusCode) -> Response {
     match e.refused() {
         Some(code) => reply(status, json!({ "error": code })),
+        None => reply(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({ "error": e.to_string() }),
+        ),
+    }
+}
+
+/// A refusal in the shape the TypeScript and Python examples answer: `{ "ok": false, "reason" }`.
+fn not_ok(e: ApiError, status: StatusCode) -> Response {
+    match e.refused() {
+        Some(code) => reply(status, json!({ "ok": false, "reason": code })),
         None => reply(
             StatusCode::INTERNAL_SERVER_ERROR,
             json!({ "error": e.to_string() }),
@@ -84,11 +97,17 @@ async fn verify(State(s): State<Server>, Json(b): Json<Value>) -> Response {
     }
 }
 
-async fn sign_in(State(s): State<Server>, headers: HeaderMap, Json(b): Json<Value>) -> Response {
+async fn sign_in(
+    State(s): State<Server>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(b): Json<Value>,
+) -> Response {
     let agent = headers.get("user-agent").and_then(|a| a.to_str().ok());
+    let ip = peer.ip().to_string();
     match s
         .api
-        .sign_in(text(&b, "email"), text(&b, "password"), None, agent)
+        .sign_in(text(&b, "email"), text(&b, "password"), Some(&ip), agent)
         .await
     {
         Ok(signed) => reply(
@@ -99,13 +118,18 @@ async fn sign_in(State(s): State<Server>, headers: HeaderMap, Json(b): Json<Valu
     }
 }
 
-async fn refresh(State(s): State<Server>, Json(b): Json<Value>) -> Response {
-    match s.api.refresh(text(&b, "refreshToken"), None).await {
+async fn refresh(
+    State(s): State<Server>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(b): Json<Value>,
+) -> Response {
+    let ip = peer.ip().to_string();
+    match s.api.refresh(text(&b, "refreshToken"), Some(&ip)).await {
         Ok((access, refresh)) => reply(
             StatusCode::OK,
-            json!({ "accessToken": access, "refreshToken": refresh }),
+            json!({ "ok": true, "accessToken": access, "refreshToken": refresh }),
         ),
-        Err(e) => refusal(e, StatusCode::UNAUTHORIZED),
+        Err(e) => not_ok(e, StatusCode::UNAUTHORIZED),
     }
 }
 
@@ -140,9 +164,9 @@ async fn accept(State(s): State<Server>, headers: HeaderMap, Json(b): Json<Value
     {
         Ok((account, tenant)) => reply(
             StatusCode::OK,
-            json!({ "accountId": account, "tenant": tenant }),
+            json!({ "ok": true, "accountId": account, "tenant": tenant }),
         ),
-        Err(e) => refusal(e, StatusCode::BAD_REQUEST),
+        Err(e) => not_ok(e, StatusCode::BAD_REQUEST),
     }
 }
 
@@ -158,8 +182,8 @@ async fn second_factor(
         );
     };
     match s.api.prove_second_factor(&claims, text(&b, "code")).await {
-        Ok(access) => reply(StatusCode::OK, json!({ "accessToken": access })),
-        Err(e) => refusal(e, StatusCode::UNAUTHORIZED),
+        Ok(access) => reply(StatusCode::OK, json!({ "ok": true, "accessToken": access })),
+        Err(e) => not_ok(e, StatusCode::UNAUTHORIZED),
     }
 }
 
@@ -229,11 +253,7 @@ async fn join_link(State(s): State<Server>, headers: HeaderMap, Json(b): Json<Va
         .await
     {
         Ok(tenant) => reply(StatusCode::OK, json!({ "ok": true, "tenant": tenant })),
-        Err(ApiError::Refused(code)) => reply(
-            StatusCode::BAD_REQUEST,
-            json!({ "ok": false, "reason": code }),
-        ),
-        Err(e) => failed(e),
+        Err(e) => not_ok(e, StatusCode::BAD_REQUEST),
     }
 }
 
@@ -345,7 +365,9 @@ async fn query(
     }
 }
 
-/// The routes; `kernable` submits the app's own commands with the caller's context.
+/// The routes; `kernable` submits the app's own commands with the caller's context. Serve them
+/// with `into_make_service_with_connect_info::<SocketAddr>()`: sign-in and refresh read the
+/// client's address.
 pub fn router(api: KitApi, kernable: Kernable) -> Router {
     Router::new()
         .route("/register", post(register))
@@ -412,7 +434,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let port = std::env::var("PORT").unwrap_or_else(|_| "3000".into());
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await?;
-    eprintln!("example server on :{port}");
-    axum::serve(listener, router(api, kernable)).await?;
+    eprintln!("example server on 127.0.0.1:{port}");
+    // The client's address reaches the handlers (sign-in and refresh keep it with the session).
+    axum::serve(
+        listener,
+        router(api, kernable).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }

@@ -2,7 +2,7 @@
   "name": "kernable-kits",
   "private": true,
   "type": "module",
-  "description": "kernable's kits for TypeScript: tenancy, accounts, identities, groups, invitations and authorization, copied into your project by `kernable kits add typescript`",
+  "description": "kernable's kits for TypeScript: tenancy, accounts, identities, groups, invitations and authorization, copied into your project by `npx @kernable/sdk add kit`",
   "license": "MIT",
   "engines": {
     "node": ">=22.18"

@@ -40,6 +40,12 @@ use kit::authorization::{ids, relation, use_authorization_store};
 // Your relations first: who stands in which relation to your aggregates, from your events.
 relation("shop.order", "owner").set("shop.OrderPlaced", |e| ids(&e.data["customer"]));
 use_authorization_store("sqlite:authorization.db");
+// Passkeys are bound to your site: its domain, a name, the origins your pages are served from.
+kit::use_passkeys(kit::RelyingParty {
+    rp_id: "example.com".into(),
+    rp_name: "Example".into(),
+    origins: vec!["https://example.com".into()],
+});
 let mut app = App::new().service("kit");
 for d in kit::kit_domains().iter().chain([&shop_domain]) {
     app = app.domain(d);
@@ -56,7 +62,7 @@ optionally the first platform administrator. `examples/server.rs` shows an HTTP 
 
 | Process | Needs |
 |---|---|
-| the kit's service | `run` on the kit's domains, `listen`, `answer`, `check` on `*`, `vault_read`, `vault_erase`, `reserved_order` (`*`: its listeners run before yours), `privileged` for `bypass_authorization` (its reactors) |
+| the kit's service | `run` on the kit's domains, `listen`, `answer`, `check` on `*`, `vault_read`, `vault_erase`, `reserved_order` (`*`: its listeners run before yours), `privileged` for `bypass_authorization` (its reactors), `process` on `*` (it gives processes their identities and keys) |
 | your API | `submit` and `query` on what it sends, `cache` on `account` (passkey challenges, OIDC state) |
 
 ## Changing it

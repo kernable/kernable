@@ -1,6 +1,6 @@
 // The account aggregates: state, how each event changes it, unique keys and facts.
 
-import { LOCKOUT_AFTER, LOCKOUT_MAX_MINUTES, MINUTE } from "../shared/constants.ts";
+import { LOCKOUT_AFTER, LOCKOUT_MAX_MINUTES, MINUTE, REUSE_WINDOW } from "../shared/constants.ts";
 import { accountDomain, type AccountStatus, type AccountSuspensionReason, type SessionEnd, type TokenPurpose } from "./domain.ts";
 import { ProviderLinked, ProviderUnlinked, SsoCreated, SsoDeleted, SsoDisabled, SsoDomainAdded, SsoDomainRemoved, SsoDomainVerified, SsoEnabled, SsoEnforcementChanged, SsoUpdated, PasskeyAdded, PasskeyRemoved, PasskeyUsed, RecoveryCodesGenerated, SecondFactorFailed, SecondFactorProved, TotpConfirmed, TotpDisabled, TotpStarted, EmailChangeRequested, EmailChanged, PasswordChanged, PasswordReset, PasswordResetRequested, AccountDeleted, AccountReactivated, AccountRegistered, AccountSuspended, EmailVerified, SessionEnded, SessionFactorAdded, SessionOpened, SessionRefreshed, SignedIn, SignInFailed, VerificationRequested } from "./events.ts";
 
@@ -142,13 +142,15 @@ export interface Session {
   factors: string[];
   generation: number;
   refreshTokenHash?: string;
+  /** The hashes of the last refresh tokens before the current one: a reuse is one of them. */
+  previousTokenHashes: string[];
   openedAt: number;
   lastRefreshAt: number;
   endReason?: SessionEnd;
 }
 
 export const sessionAggregate = accountDomain
-  .aggregate<Session>("session", { status: "none", factors: [], generation: 0, openedAt: 0, lastRefreshAt: 0 })
+  .aggregate<Session>("session", { status: "none", factors: [], generation: 0, previousTokenHashes: [], openedAt: 0, lastRefreshAt: 0 })
   .apply(SessionOpened, (s, d) => {
     s.status = "active";
     s.accountId = d.accountId;
@@ -160,6 +162,7 @@ export const sessionAggregate = accountDomain
     s.lastRefreshAt = d.at;
   })
   .apply(SessionRefreshed, (s, d) => {
+    if (s.refreshTokenHash) s.previousTokenHashes = [...s.previousTokenHashes, s.refreshTokenHash].slice(-REUSE_WINDOW);
     s.generation = d.generation;
     s.refreshTokenHash = d.refreshTokenHash;
     s.lastRefreshAt = d.at;
