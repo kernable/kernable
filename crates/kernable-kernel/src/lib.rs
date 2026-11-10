@@ -275,6 +275,8 @@ pub struct Kernel {
     trend: trend::Trend,
     /// Events per type, counted for the UI when it first asks.
     tally: trend::Tally,
+    /// Queries per type over the last hour, for the UI.
+    query_counts: trend::QueryCounts,
     /// When this kernel started, ms since epoch, for the UI.
     started_at: i64,
     /// The highest payload version stored per qualified event type; never goes down. Held
@@ -453,6 +455,7 @@ impl Kernel {
             metrics: metrics::Metrics::default(),
             trend: trend::Trend::default(),
             tally: trend::Tally::default(),
+            query_counts: trend::QueryCounts::default(),
             started_at: now_ms(),
             schemas: Mutex::new(schemas),
             index: Mutex::new(index),
@@ -2421,7 +2424,29 @@ impl QueryService for Api {
 
 /// Runs `query` (of the qualified type `name`, authorized already) through the middleware
 /// chain and to a read model that answers it; for the Query RPC and the process engine.
+/// Counted per type for the UI: answered, rejected or failed, and how long it took.
 pub(crate) async fn answer_query(
+    kernel: &Arc<Kernel>,
+    name: &str,
+    query: QueryRequest,
+    caller: Option<&listeners::Caller>,
+) -> Result<QueryResult, Status> {
+    let started = Instant::now();
+    let result = run_query(kernel, name, query, caller).await;
+    let outcome = match &result {
+        Ok(QueryResult {
+            outcome: Some(query_result::Outcome::Response(_)),
+            ..
+        }) => trend::QueryOutcome::Answered,
+        Ok(_) => trend::QueryOutcome::Rejected,
+        Err(_) => trend::QueryOutcome::Failed,
+    };
+    let micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    kernel.query_counts.record(name, outcome, micros, now_ms());
+    result
+}
+
+async fn run_query(
     kernel: &Arc<Kernel>,
     name: &str,
     query: QueryRequest,

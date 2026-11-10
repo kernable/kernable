@@ -1,7 +1,8 @@
 //! How far each listener was behind over the last hour, for the UI: the head and every
 //! listener's position, sampled every [`EVERY`]; and the kernel's activity per minute over the
-//! last day; and per event type, how many events the log holds ([`Tally`]). Kept in memory
-//! only (a restart starts over).
+//! last day; per event type, how many events the log holds ([`Tally`]); and per query type,
+//! how many were asked over the last hour ([`QueryCounts`]). Kept in memory only (a restart
+//! starts over).
 
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
@@ -217,6 +218,105 @@ impl TallyState {
     }
 }
 
+/// What came of a query.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum QueryOutcome {
+    Answered,
+    /// By the read model or a middleware.
+    Rejected,
+    /// No read model answered, in time or at all.
+    Failed,
+}
+
+/// Per query type (`domain.QueryType`), per minute over the last [`TALLY_MINUTES`]: how many
+/// were answered, rejected and failed, and how long the answered ones took (µs).
+#[derive(Default)]
+pub(crate) struct QueryCounts {
+    types: Mutex<BTreeMap<String, QueryMinutes>>,
+}
+
+#[derive(Default)]
+struct QueryMinutes {
+    last_at: i64,
+    /// Per minute, oldest first: the minute, answered, rejected, failed, µs of the answered.
+    minutes: VecDeque<(i64, [u64; 4])>,
+}
+
+impl QueryCounts {
+    pub(crate) fn record(&self, name: &str, outcome: QueryOutcome, micros: u64, now: i64) {
+        let mut types = self.types.lock().unwrap_or_else(PoisonError::into_inner);
+        let q = types.entry(name.to_owned()).or_default();
+        q.last_at = now;
+        let minute = now / 60_000;
+        if q.minutes.back().is_none_or(|(m, _)| *m != minute) {
+            q.minutes.push_back((minute, [0; 4]));
+        }
+        while q
+            .minutes
+            .front()
+            .is_some_and(|(m, _)| *m <= minute - TALLY_MINUTES)
+        {
+            q.minutes.pop_front();
+        }
+        let Some((_, n)) = q.minutes.back_mut() else {
+            return;
+        };
+        match outcome {
+            QueryOutcome::Answered => {
+                n[0] += 1;
+                n[3] += micros;
+            }
+            QueryOutcome::Rejected => n[1] += 1,
+            QueryOutcome::Failed => n[2] += 1,
+        }
+    }
+
+    /// The types in `domain` (empty: every domain) asked in the last hour: `{type: {count,
+    /// answered, rejected, failed, avgMicros, lastAt, perMinute}}`, `perMinute` oldest first.
+    pub(crate) fn view(&self, domain: &str, now: i64) -> Value {
+        let types = self.types.lock().unwrap_or_else(PoisonError::into_inner);
+        let prefix = format!("{domain}.");
+        let minute = now / 60_000;
+        let mut out = serde_json::Map::new();
+        for (name, q) in types
+            .iter()
+            .filter(|(t, _)| domain.is_empty() || t.starts_with(&prefix))
+        {
+            let recent: Vec<&(i64, [u64; 4])> = q
+                .minutes
+                .iter()
+                .filter(|(m, _)| *m > minute - TALLY_MINUTES)
+                .collect();
+            if recent.is_empty() {
+                continue;
+            }
+            let total = |i: usize| recent.iter().map(|(_, n)| n[i]).sum::<u64>();
+            let (answered, rejected, failed, micros) = (total(0), total(1), total(2), total(3));
+            let per_minute: Vec<u64> = (minute - TALLY_MINUTES + 1..=minute)
+                .map(|m| {
+                    recent
+                        .iter()
+                        .find(|(at, _)| *at == m)
+                        .map_or(0, |(_, n)| n[0] + n[1] + n[2])
+                })
+                .collect();
+            out.insert(
+                name.clone(),
+                json!({
+                    "count": answered + rejected + failed,
+                    "answered": answered,
+                    "rejected": rejected,
+                    "failed": failed,
+                    "avgMicros": if answered > 0 { micros / answered } else { 0 },
+                    "lastAt": q.last_at,
+                    "perMinute": per_minute,
+                }),
+            );
+        }
+        Value::Object(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,6 +401,47 @@ mod tests {
             tally.view("", now).as_object().unwrap().len(),
             2,
             "every domain"
+        );
+    }
+
+    #[test]
+    fn counts_queries_per_type_for_an_hour() {
+        let counts = QueryCounts::default();
+        let start = 1_000 * 60_000;
+        counts.record("shop.GetOrder", QueryOutcome::Answered, 4, start);
+        counts.record("shop.GetOrder", QueryOutcome::Answered, 8, start + 60_000);
+        counts.record("shop.GetOrder", QueryOutcome::Rejected, 1, start + 60_000);
+        counts.record("shop.GetOrder", QueryOutcome::Failed, 0, start + 60_000);
+        counts.record("billing.GetInvoice", QueryOutcome::Answered, 1, start);
+        let view = counts.view("shop", start + 60_000);
+        let q = &view["shop.GetOrder"];
+        assert_eq!(
+            (
+                q["count"].clone(),
+                q["answered"].clone(),
+                q["rejected"].clone(),
+                q["failed"].clone()
+            ),
+            (json!(4), json!(2), json!(1), json!(1))
+        );
+        assert_eq!(q["avgMicros"], 6);
+        let per_minute = q["perMinute"].as_array().unwrap();
+        assert_eq!(
+            (per_minute[58].clone(), per_minute[59].clone()),
+            (json!(1), json!(3))
+        );
+        assert!(view.get("billing.GetInvoice").is_none());
+        assert_eq!(
+            counts.view("", start + 60_000).as_object().unwrap().len(),
+            2
+        );
+        // An hour later, nothing is left to show.
+        assert!(
+            counts
+                .view("shop", start + 61 * 60_000)
+                .as_object()
+                .unwrap()
+                .is_empty()
         );
     }
 }

@@ -1575,7 +1575,7 @@ function drawDomain(box, data, d) {
     el("td", { style: "white-space:nowrap" }, dotOf(l.status), " ", el("b", {}, l.name)),
     el("td", { style: "white-space:nowrap" }, kind(l), l.order ? el("span", { class: "faint" }, ` · order ${l.order}`) : null),
     el("td", {}, l.everything ? el("span", { class: "muted" }, "every event its key may read") : some(l.events.map((t) => t.endsWith("*") ? plain(t) : evChip(t, domainOf(t) === d.name ? short(t) : t)), 6)),
-    el("td", {}, l.queries.length ? l.queries.map((q, i) => [i ? ", " : "", el("span", { class: "mono" }, q)]) : el("span", { class: "faint" }, "–")),
+    el("td", {}, l.queries.length ? l.queries.map((q, i) => [i ? ", " : "", el("span", { class: "mono" }, q), c?.queries?.[q] ? el("span", { class: "faint", title: "asked in the last hour" }, ` · ${num(c.queries[q].count)} last hour`) : null]) : el("span", { class: "faint" }, "–")),
     el("td", { class: "n" }, position(l))));
   const foreign = [...new Set(d.processes.flatMap((p) => p.events).filter((e) => domainOf(e) !== d.name))];
   box.replaceChildren(...[
@@ -1652,7 +1652,7 @@ function drawCatalog() {
     const on = catalogSort === label || (!catalogSort && key === "name");
     const next = key === "name" ? "" : catalogSort === label ? (catalogDir === "desc" ? "asc" : "desc") : numeric ? "desc" : "asc";
     const arrow = on ? (key === "name" ? " ↑" : catalogDir === "asc" ? " ↑" : " ↓") : "";
-    const right = ["Count", "Rejected", "Open", "Incidents", started].includes(label) || (label === "Last hour" && catalogKind === "commands");
+    const right = ["Count", "Rejected", "Not answered", "Avg time", "Open", "Incidents", started].includes(label) || (label === "Last hour" && ["commands", "queries"].includes(catalogKind));
     const cls = [right ? "n" : "", key ? "sort" : "", on ? "on" : ""].filter(Boolean).join(" ");
     return el("th", { class: cls, "aria-sort": on ? (key === "name" || catalogDir === "asc" ? "ascending" : "descending") : null },
       key ? el("a", { href: href(catalogKind, key === "name" ? "" : label, next || "desc"), onclick: (ev) => { ev.preventDefault(); catalogSort = key === "name" ? "" : label; catalogDir = next || "desc"; history.replaceState(null, "", href()); drawCatalog(); } }, label, arrow) : label);
@@ -1696,12 +1696,17 @@ function drawCatalog() {
   } else if (catalogKind === "queries") {
     const items = data.queries.filter((q) => `${q.type} ${q.answeredBy.name} ${q.askedBy.map((p) => p.name).join(" ")}`.toLowerCase().includes(f));
     const behind = (l) => l.live || !l.connected ? -1 : state.kernel.head - l.position;
-    columns = [["Query", "name"], ["Answered by", (q) => q.answeredBy.name], ["Its read model reads"], ["Position", (q) => behind(q.answeredBy), true], ["Asked by", (q) => q.askedBy.map((p) => p.name).join(", ")]];
-    rows = grouped(items, 5, (xs) => plural(xs.length, "query", "queries"), (q) => {
-      const l = q.answeredBy;
+    const n = (q) => c?.queries?.[q.type];
+    const missed = (x) => x ? x.rejected + x.failed : 0;
+    columns = [["Query", "name"], ["Answered by", (q) => q.answeredBy.name], ["Last hour", (q) => n(q)?.count ?? 0, true], ["Not answered", (q) => n(q)?.count ? missed(n(q)) / n(q).count : 0, true], ["Avg time", (q) => n(q)?.avgMicros ?? 0, true], ["Its read model reads"], ["Position", (q) => behind(q.answeredBy), true], ["Asked by", (q) => q.askedBy.map((p) => p.name).join(", ")]];
+    rows = grouped(items, 8, (xs) => [plural(xs.length, "query", "queries"), c ? ` · ${num(sum(xs.map((q) => n(q)?.count ?? 0)))} asked in the last hour` : ""], (q) => {
+      const l = q.answeredBy, x = n(q);
       return [
         el("td", {}, el("span", { class: "mono" }, short(q.type))),
         el("td", {}, listenerChip(l)),
+        el("td", { class: "n", title: x ? `last ${when(x.lastAt).textContent}` : null }, x ? num(x.count) : dash()),
+        el("td", { class: "n", title: x ? `${num(x.rejected)} rejected, ${num(x.failed)} failed (no read model answered in time)` : null }, x ? (missed(x) ? el("span", { class: x.failed ? "bad" : "warn" }, `${num(missed(x))} · ${pct(missed(x), x.count)}`) : el("span", { class: "faint" }, "–")) : dash()),
+        el("td", { class: "n" }, x?.answered ? (x.avgMicros < 1000 ? `${(x.avgMicros / 1000).toFixed(2)} ms` : `${num(Math.round(x.avgMicros / 1000))} ms`) : dash()),
         el("td", {}, l.everything ? el("span", { class: "muted" }, "every event its key may read") : some(l.events.map((t) => t.endsWith("*") ? plain(t) : evChip(t, t)), 5)),
         el("td", { style: "white-space:nowrap" }, position(l)),
         el("td", {}, q.askedBy.length ? q.askedBy.map((p, i) => [i ? ", " : "", el("a", { href: procHref(p.name) }, p.name)]) : el("span", { class: "faint" }, "–")),

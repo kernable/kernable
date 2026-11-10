@@ -36,7 +36,8 @@
 //!   command it sent (its aggregate and outcome) or the event that moved it;
 //! - `GET /api/counts?domain=`: per event type of the domain (without: of every domain), how
 //!   many the log holds, the newest's time and the last hour per minute; per command type, how
-//!   many came in the last hour, and how many of them were rejected.
+//!   many came in the last hour, and how many of them were rejected; per query type, how many
+//!   were asked in the last hour, answered, rejected or failed, and how long they took.
 //!
 //! It never decrypts the vault: a vault field shows its subject, whether it is secret, or that
 //! it was erased. Snapshot states are not shown either, as they may hold personal values.
@@ -1114,6 +1115,7 @@ fn counts(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, Bo
         "head": head,
         "counted": counted,
         "events": kernel.tally.view(domain, now),
+        "queries": kernel.query_counts.view(domain, now),
         "commands": commands,
         "commandsComplete": complete,
     }))
