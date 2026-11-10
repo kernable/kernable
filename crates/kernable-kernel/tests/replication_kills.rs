@@ -45,26 +45,12 @@ fn kills() -> u32 {
         .unwrap_or(6)
 }
 
-fn random_ms(range: std::ops::Range<u64>) -> Duration {
-    let mut b = [0u8; 8];
-    getrandom::fill(&mut b).unwrap();
-    Duration::from_millis(range.start + u64::from_le_bytes(b) % (range.end - range.start))
-}
-
 fn coin() -> bool {
     random_ms(0..2).as_millis() == 1
 }
 
-struct Dir(PathBuf);
-
+/// What the tests of a pair keep in their directory.
 impl Dir {
-    fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("kn-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        Dir(dir)
-    }
-
     fn sock(&self, name: &str) -> String {
         format!("unix:{}", self.0.join(format!("{name}.sock")).display())
     }
@@ -89,16 +75,6 @@ impl Dir {
             .unwrap();
         }
         path
-    }
-}
-
-impl Drop for Dir {
-    fn drop(&mut self) {
-        if std::thread::panicking() {
-            eprintln!("kept for its logs: {}", self.0.display());
-        } else if std::env::var_os("KERNABLE_TEST_LOGS").is_none() {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
     }
 }
 
@@ -808,22 +784,6 @@ async fn a_pair_updates_both_kernels_by_handing_their_stores_over() {
 }
 
 // ---- the model test of a pair (P1–P4) ----
-
-/// xorshift: the same seed picks the same faults.
-struct Rng(u64);
-
-impl Rng {
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
-    }
-
-    fn ms(&mut self, range: std::ops::Range<u64>) -> Duration {
-        Duration::from_millis(range.start + self.next() % (range.end - range.start))
-    }
-}
 
 /// Sends `signal` (`STOP`, `CONT`) to `process`.
 fn signal(process: &KillOnDrop, signal: &str) {

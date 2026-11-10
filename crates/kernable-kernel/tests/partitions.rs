@@ -18,16 +18,6 @@ use kernable_kernel::config::PartitionConfig;
 use prost::Message;
 use tonic::Code;
 
-async fn until(what: &str, done: impl AsyncFn() -> bool) {
-    for _ in 0..500 {
-        if done().await {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    panic!("timed out waiting: {what}");
-}
-
 fn map(epoch: u64, p1: &str, p2: &str) -> PartitionMap {
     let mut map = PartitionMap {
         epoch,
@@ -84,13 +74,6 @@ fn file(
     r
 }
 
-fn resign(mut map: PartitionMap) -> PartitionMap {
-    map.issued_at = issued_now();
-    map.protocol = kernable_core::PROTOCOL;
-    map.sig = Some(signing::sign(&key(1), &signing::partitions_message(&map)));
-    map
-}
-
 async fn move_status(addr: &str, tenant: &str) -> kernable_core::proto::MoveStatus {
     PartitionServiceClient::new(transport::connect(addr).await.unwrap())
         .moving(with_grant(
@@ -103,13 +86,6 @@ async fn move_status(addr: &str, tenant: &str) -> kernable_core::proto::MoveStat
         .await
         .unwrap()
         .into_inner()
-}
-
-async fn apply_map(addr: &str, map: PartitionMap) -> Result<(), tonic::Status> {
-    PartitionServiceClient::new(transport::connect(addr).await.unwrap())
-        .apply(with_grant(map, &key(1)))
-        .await
-        .map(|_| ())
 }
 
 async fn map_of(addr: &str) -> Option<PartitionMap> {
@@ -178,7 +154,7 @@ async fn two_partitions_share_the_tenants_by_the_map_of_the_control_partition() 
     apply_map(&p1.addr, map(1, &p1.addr, &p2.addr))
         .await
         .unwrap();
-    until("p2 holds the map", async || {
+    until_async("p2 holds the map", async || {
         map_of(&p2.addr).await.is_some_and(|m| m.epoch == 1)
     })
     .await;
@@ -247,7 +223,7 @@ async fn two_partitions_share_the_tenants_by_the_map_of_the_control_partition() 
             .unwrap();
         assert!(placed.is_committed(), "{tenant}: {placed:?}");
     }
-    until("the subscription saw both partitions", async || {
+    until_async("the subscription saw both partitions", async || {
         let seen = seen.lock().unwrap();
         seen.iter().any(|t| t == "acme") && seen.iter().any(|t| t == "t1")
     })
@@ -259,7 +235,7 @@ async fn two_partitions_share_the_tenants_by_the_map_of_the_control_partition() 
         .await
         .unwrap();
     let p2_store = p2.store.clone();
-    until("p2 holds the membership", async || {
+    until_async("p2 holds the membership", async || {
         kernable_store::open_read_only(&p2_store)
             .unwrap()
             .memberships()
@@ -272,7 +248,7 @@ async fn two_partitions_share_the_tenants_by_the_map_of_the_control_partition() 
     // A key revoked on the control partition is refused on p2 within seconds.
     p1.kernel.revoke(&id(&key(1)), 0).unwrap();
     let p2_addr = p2.addr.clone();
-    until("p2 refuses the revoked key", async || {
+    until_async("p2 refuses the revoked key", async || {
         submit(&p2_addr, place("c5", "acme"))
             .await
             .is_err_and(|e| matches!(e.code(), Code::PermissionDenied | Code::Unauthenticated))
@@ -312,14 +288,6 @@ fn with_email(id: &str, command_type: &str, order: &str, tenant: &str, email: &s
     signed(cmd, &key(1))
 }
 
-fn node_key(dir: &std::path::Path) -> std::path::PathBuf {
-    let node_key = dir.join("node.key");
-    std::fs::write(&node_key, hex(key(13).as_bytes())).unwrap();
-    let grant = grant(&key(13), &[("replicate", &["*"])]);
-    std::fs::write(dir.join("node.grant"), hex(&grant.encode_to_vec())).unwrap();
-    node_key
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn a_global_key_is_unique_across_partitions() {
     let p1 = start_custom("gk-p1", |config, dir| {
@@ -349,7 +317,7 @@ async fn a_global_key_is_unique_across_partitions() {
     apply_map(&p1.addr, map(1, &p1.addr, &p2.addr))
         .await
         .unwrap();
-    until("p2 holds the map", async || {
+    until_async("p2 holds the map", async || {
         map_of(&p2.addr).await.is_some()
     })
     .await;
@@ -459,7 +427,7 @@ async fn a_tenant_moves_with_its_events_and_global_keys_and_back() {
     apply_map(&p1.addr, map(1, &p1.addr, &p2.addr))
         .await
         .unwrap();
-    until("p2 holds the map", async || {
+    until_async("p2 holds the map", async || {
         map_of(&p2.addr).await.is_some()
     })
     .await;
@@ -505,13 +473,13 @@ async fn a_tenant_moves_with_its_events_and_global_keys_and_back() {
         epoch: 2,
         ..Default::default()
     });
-    apply_map(&p1.addr, resign(moving)).await.unwrap();
+    apply_map(&p1.addr, moving).await.unwrap();
     let held = submit(&p1.addr, with_email("m3", "AddItem", "o1", "t1", "a@x"))
         .await
         .unwrap_err();
     assert_eq!(held.code(), Code::Unavailable, "{held:?}");
     assert!(held.message().starts_with("moving"), "{held:?}");
-    until("p2 copied t1", async || {
+    until_async("p2 copied t1", async || {
         let s = move_status(&p2.addr, "t1").await;
         s.done && s.epoch == 2
     })
@@ -546,8 +514,8 @@ async fn a_tenant_moves_with_its_events_and_global_keys_and_back() {
         target_after: status.target_after,
         ..m
     });
-    apply_map(&p1.addr, resign(moved)).await.unwrap();
-    until("p2 holds the final map", async || {
+    apply_map(&p1.addr, moved).await.unwrap();
+    until_async("p2 holds the final map", async || {
         map_of(&p2.addr).await.is_some_and(|m| m.epoch == 3)
     })
     .await;
@@ -626,7 +594,7 @@ async fn a_tenant_moves_with_its_events_and_global_keys_and_back() {
         let replaying = replaying.clone();
         async move { replaying.run().await }
     });
-    until("the new read model saw t1's events", async || {
+    until_async("the new read model saw t1's events", async || {
         order.lock().unwrap().len() >= 4
     })
     .await;
@@ -636,7 +604,7 @@ async fn a_tenant_moves_with_its_events_and_global_keys_and_back() {
     running.await.unwrap();
 
     // A read model across tenants, slow on t1's events (now on p2): asked in t9's partition
-    // (p1), a query with `all_partitions` waits until it has processed p2 as well (S5).
+    // (p1), a query with `all_partitions` waits until it has processed p2 as well.
     let seen = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     // Slow only once it has caught up, so the first query need not wait long.
     let slowly = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -749,7 +717,7 @@ async fn a_tenant_moves_with_its_events_and_global_keys_and_back() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    until("p2 holds the map with t1 back", async || {
+    until_async("p2 holds the map with t1 back", async || {
         map_of(&p2.addr).await.is_some_and(|m| m.epoch == 5)
     })
     .await;
@@ -824,7 +792,7 @@ async fn a_tenant_moves_while_clients_write_to_it() {
     apply_map(&p1.addr, map(1, &p1.addr, &p2.addr))
         .await
         .unwrap();
-    until("p2 holds the map", async || {
+    until_async("p2 holds the map", async || {
         map_of(&p2.addr).await.is_some()
     })
     .await;

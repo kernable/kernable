@@ -5,7 +5,7 @@
 mod common;
 
 use std::{
-    path::{Path, PathBuf},
+    path::Path,
     sync::{Arc, Weak},
     time::Duration,
 };
@@ -22,14 +22,6 @@ use prost::Message;
 use tokio::{net::UnixListener, sync::oneshot, task::JoinHandle};
 
 const LEASE_MS: u64 = 600;
-
-struct Dir(PathBuf);
-
-impl Drop for Dir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
 
 /// A socket in front of a kernel's: cut, every connection through it ends, as when the
 /// kernel's machine is gone.
@@ -194,22 +186,9 @@ fn place(i: u32) -> kernable_core::proto::Command {
     )
 }
 
-async fn until(what: &str, done: impl Fn() -> bool) {
-    for _ in 0..1_000 {
-        if done() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("timed out waiting: {what}");
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn a_pair_fails_over_on_its_own_and_the_old_primary_comes_back_as_its_standby() {
-    let dir = std::env::temp_dir().join(format!("kn-pair-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let dir = Dir(dir);
+    let dir = Dir::new("pair");
     let state = dir.0.join("witness.state");
     tokio::spawn(witness::run(WitnessConfig {
         listen: format!("unix:{}", dir.0.join("witness.sock").display()),
@@ -334,10 +313,7 @@ async fn a_pair_fails_over_on_its_own_and_the_old_primary_comes_back_as_its_stan
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_primary_alone_tells_nothing_once_its_lease_runs_out() {
-    let dir = std::env::temp_dir().join(format!("kn-pair-alone-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let dir = Dir(dir);
+    let dir = Dir::new("pair-alone");
     let state = dir.0.join("witness.state");
     // The kernel reaches the witness through a plug (`witness.sock` in its config).
     tokio::spawn(witness::run(WitnessConfig {
@@ -407,10 +383,7 @@ async fn a_primary_alone_tells_nothing_once_its_lease_runs_out() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_primary_the_witness_replaced_stops() {
-    let dir = std::env::temp_dir().join(format!("kn-pair-deposed-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let dir = Dir(dir);
+    let dir = Dir::new("pair-deposed");
     let state = dir.0.join("witness.state");
     tokio::spawn(witness::run(WitnessConfig {
         listen: format!("unix:{}", dir.0.join("witness.sock").display()),
@@ -458,10 +431,7 @@ async fn a_primary_the_witness_replaced_stops() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_revoked_standby_is_not_named_in_sync() {
-    let dir = std::env::temp_dir().join(format!("kn-pair-revoked-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let dir = Dir(dir);
+    let dir = Dir::new("pair-revoked");
     let state = dir.0.join("witness.state");
     tokio::spawn(witness::run(WitnessConfig {
         listen: format!("unix:{}", dir.0.join("witness.sock").display()),
@@ -501,10 +471,7 @@ async fn a_switchover_hands_the_primary_role_over_without_waiting_for_the_lease(
         proto::{SwitchoverRequest, replication_service_client::ReplicationServiceClient},
         signing, transport,
     };
-    let dir = std::env::temp_dir().join(format!("kn-pair-switch-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let dir = Dir(dir);
+    let dir = Dir::new("pair-switch");
     let state = dir.0.join("witness.state");
     tokio::spawn(witness::run(WitnessConfig {
         listen: format!("unix:{}", dir.0.join("witness.sock").display()),
@@ -595,10 +562,7 @@ async fn a_switchover_hands_the_primary_role_over_without_waiting_for_the_lease(
 /// within two thirds of a lease, and the standby takes over once the lease ran out.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_standby_takes_over_from_a_primary_the_network_cut_off_silently() {
-    let dir = std::env::temp_dir().join(format!("kn-pair-cut-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let dir = Dir(dir);
+    let dir = Dir::new("pair-cut");
     let state = dir.0.join("witness.state");
     tokio::spawn(witness::run(WitnessConfig {
         listen: format!("unix:{}", dir.0.join("witness.sock").display()),

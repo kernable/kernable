@@ -474,31 +474,6 @@ fn of_tenant(mut cmd: Command, tenant: &str) -> Command {
     signed(cmd, &key(1))
 }
 
-fn node_key(dir: &std::path::Path) -> std::path::PathBuf {
-    use prost::Message;
-    let node_key = dir.join("node.key");
-    std::fs::write(&node_key, hex(key(13).as_bytes())).unwrap();
-    let grant = grant(&key(13), &[("replicate", &["*"])]);
-    std::fs::write(dir.join("node.grant"), hex(&grant.encode_to_vec())).unwrap();
-    node_key
-}
-
-fn signed_map(mut map: PartitionMap) -> PartitionMap {
-    map.issued_at = issued_now();
-    map.protocol = kernable_core::PROTOCOL;
-    map.sig = Some(signing::sign(&key(1), &signing::partitions_message(&map)));
-    map
-}
-
-async fn apply_map(addr: &str, map: PartitionMap) {
-    kernable_core::proto::partition_service_client::PartitionServiceClient::new(
-        transport::connect(addr).await.unwrap(),
-    )
-    .apply(with_grant(signed_map(map), &key(1)))
-    .await
-    .unwrap();
-}
-
 async fn move_status(addr: &str, tenant: &str) -> kernable_core::proto::MoveStatus {
     kernable_core::proto::partition_service_client::PartitionServiceClient::new(
         transport::connect(addr).await.unwrap(),
@@ -513,16 +488,6 @@ async fn move_status(addr: &str, tenant: &str) -> kernable_core::proto::MoveStat
     .await
     .unwrap()
     .into_inner()
-}
-
-async fn until(what: &str, done: impl AsyncFn() -> bool) {
-    for _ in 0..500 {
-        if done().await {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    panic!("timed out waiting: {what}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -560,10 +525,10 @@ async fn a_scheduled_command_moves_with_its_tenant_and_runs_there() {
         control: "p1".into(),
         ..Default::default()
     };
-    apply_map(&p1.addr, map.clone()).await;
+    apply_map(&p1.addr, map.clone()).await.unwrap();
     let (seen1, mut ran_on_p1) = mpsc::unbounded_channel();
     start_worker(p1.addr.clone(), TestWorker::with(Behavior::Honest, seen1)).await;
-    until("p2 holds the map", async || {
+    until_async("p2 holds the map", async || {
         kernable_core::proto::partition_service_client::PartitionServiceClient::new(
             transport::connect(&p2.addr).await.unwrap(),
         )
@@ -604,8 +569,8 @@ async fn a_scheduled_command_moves_with_its_tenant_and_runs_there() {
     };
     map.epoch = 2;
     map.copying = vec![t1(2)];
-    apply_map(&p1.addr, map.clone()).await;
-    until("p2 copied t1 while it runs", async || {
+    apply_map(&p1.addr, map.clone()).await.unwrap();
+    until_async("p2 copied t1 while it runs", async || {
         let s = move_status(&p2.addr, "t1").await;
         s.done && s.precopy && s.epoch == 2
     })
@@ -613,8 +578,8 @@ async fn a_scheduled_command_moves_with_its_tenant_and_runs_there() {
     map.epoch = 3;
     map.copying.clear();
     map.moving = vec![t1(3)];
-    apply_map(&p1.addr, map.clone()).await;
-    until("p2 took t1", async || {
+    apply_map(&p1.addr, map.clone()).await.unwrap();
+    until_async("p2 took t1", async || {
         let s = move_status(&p2.addr, "t1").await;
         s.done && !s.precopy && s.epoch == 3
     })
@@ -631,7 +596,7 @@ async fn a_scheduled_command_moves_with_its_tenant_and_runs_there() {
         target_after: status.target_after,
         ..t1(3)
     }];
-    apply_map(&p1.addr, map).await;
+    apply_map(&p1.addr, map).await.unwrap();
     assert!(now() < t + 4_000, "moved before it was due");
     let pending = kernable_store::open_read_only(&p2.store)
         .unwrap()

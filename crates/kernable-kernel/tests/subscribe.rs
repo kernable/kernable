@@ -2,7 +2,7 @@
 
 mod common;
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use common::*;
 use ed25519_dalek::SigningKey;
@@ -11,13 +11,6 @@ use kernable_core::{
     signing, transport,
 };
 use tonic::{Code, Status, Streaming};
-
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64
-}
 
 fn request(key: &SigningKey, after: u64, types: &[&str], issued_at: i64) -> SubscribeRequest {
     let event_types: Vec<String> = types.iter().map(|t| t.to_string()).collect();

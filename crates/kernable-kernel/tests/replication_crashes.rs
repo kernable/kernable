@@ -1,7 +1,8 @@
 //! Crash points of replication (`--features crash-points`): the primary or the standby
 //! aborts at each point under load, is started again, and afterwards everything a client was
-//! told once the standby was in sync is on the standby (P1; before, the primary serves alone), the standby holds exactly what the primary holds, and every store invariant holds on
-//! both. A switchover without a witness interrupted by a crash on either side ends with the
+//! told once the standby was in sync is on the standby (P1; until then the primary serves
+//! alone), the standby holds exactly what the primary holds, and every store invariant holds
+//! on both. A switchover without a witness interrupted by a crash on either side ends with the
 //! standby serving everything told, and the old primary refusing to serve.
 //!
 //! `KERNABLE_CRASH_ROUNDS=<n>` repeats every point n times (`make torture`).

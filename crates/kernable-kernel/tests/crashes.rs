@@ -328,13 +328,6 @@ async fn every_crash_point_recovers_without_loss_or_duplicates() {
     }
 }
 
-/// A random delay in `range` milliseconds.
-fn random_ms(range: std::ops::Range<u64>) -> Duration {
-    let mut b = [0u8; 8];
-    getrandom::fill(&mut b).unwrap();
-    Duration::from_millis(range.start + u64::from_le_bytes(b) % (range.end - range.start))
-}
-
 /// `kill -9` at random moments under load: three clients keep placing orders with two items
 /// each, while the kernel dies and restarts `KERNABLE_KILLS` times (5 by default). Afterwards
 /// every command has its one expected outcome, nothing is lost or duplicated, the listener has

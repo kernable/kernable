@@ -23,13 +23,6 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Code;
 
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64
-}
-
 /// Revokes `key_id` from `since` on through the kernel's API, signed by `signer`.
 async fn revoke_with(
     env: &Env,
@@ -337,7 +330,11 @@ async fn sighup_reads_the_kernel_key_of_the_running_kernel_again() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     let add = signed(command("c2", "AddItem", "o1"), &key(1));
     submit(&addr, add).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await; // a checkpoint with key 4
+    until("a checkpoint with key 4", || {
+        let store = kernable_store::open_read_only(&store).unwrap();
+        !store.verify(&[id(&key(3))]).unwrap().is_ok()
+    })
+    .await;
     assert!(kernel.child.try_wait().unwrap().is_none(), "still running");
     drop(kernel);
 

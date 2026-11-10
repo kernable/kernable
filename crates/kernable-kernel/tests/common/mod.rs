@@ -15,10 +15,11 @@ use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
         ApplyRequest, ChallengeResponse, Command, CommandResult, EventSchema, Execute, Grant,
-        Membership, NewEvent, Permission, Register, Rejected, Rejection, Result as WorkResult,
-        Snapshot, SubmitRequest, Wait, WorkerAggregate, WorkerMessage, command_result::Outcome,
-        command_service_client::CommandServiceClient, kernel_message::Msg as Out,
-        membership_service_client::MembershipServiceClient,
+        Membership, NewEvent, PartitionMap, Permission, Register, Rejected, Rejection,
+        Result as WorkResult, Snapshot, SubmitRequest, Wait, WorkerAggregate, WorkerMessage,
+        command_result::Outcome, command_service_client::CommandServiceClient,
+        kernel_message::Msg as Out, membership_service_client::MembershipServiceClient,
+        partition_service_client::PartitionServiceClient,
         worker_gateway_client::WorkerGatewayClient, worker_message::Msg as In,
     },
     signing, transport,
@@ -208,8 +209,19 @@ pub async fn start_wrapped(
     }
 }
 
-/// A free local TCP address.
+/// A free local TCP address. Each test process takes its ports from its own block below the
+/// ephemeral range, so another test binary that asks the OS for a port, or takes ports from its
+/// own block, does not get the same one between this check and the kernel's bind.
 pub fn free_addr() -> String {
+    const BLOCK: usize = 40;
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let start = 20_000 + (std::process::id() as usize % 250) * BLOCK;
+    for _ in 0..BLOCK {
+        let port = start + NEXT.fetch_add(1, Ordering::SeqCst) % BLOCK;
+        if let Ok(listener) = std::net::TcpListener::bind(("127.0.0.1", port as u16)) {
+            return listener.local_addr().unwrap().to_string();
+        }
+    }
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.local_addr().unwrap().to_string()
 }
@@ -669,14 +681,19 @@ pub async fn apply_issued(
         .map(|_| ())
 }
 
+/// Now in milliseconds since the epoch.
+pub fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
 /// Now in milliseconds, later than every earlier call: the kernel refuses a membership that is
 /// not newer than the applied one, and two applies can fall within one millisecond.
 pub fn issued_now() -> i64 {
     static LAST: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = now_ms();
     let previous = LAST
         .try_update(
             std::sync::atomic::Ordering::SeqCst,
@@ -898,4 +915,117 @@ pub fn watchdog(pid: u32) -> std::process::Child {
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap()
+}
+
+/// Waits until `done` holds, checking every 10 ms for up to 10 s.
+pub async fn until(what: &str, done: impl Fn() -> bool) {
+    for _ in 0..1_000 {
+        if done() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("timed out waiting: {what}");
+}
+
+/// Like [`until`], for a check that has to ask over the network.
+pub async fn until_async(what: &str, done: impl AsyncFn() -> bool) {
+    for _ in 0..500 {
+        if done().await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("timed out waiting: {what}");
+}
+
+/// A test directory, created empty and removed when dropped; kept for its logs when the test
+/// fails or `KERNABLE_TEST_LOGS` is set.
+pub struct Dir(pub PathBuf);
+
+impl Dir {
+    pub fn new(name: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("kn-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Dir(dir)
+    }
+}
+
+impl Drop for Dir {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!("kept for its logs: {}", self.0.display());
+        } else if std::env::var_os("KERNABLE_TEST_LOGS").is_none() {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+}
+
+/// Writes the node key of a partition (key 13, granted `replicate`) and its grant into `dir`;
+/// returns the key's path.
+pub fn node_key(dir: &Path) -> PathBuf {
+    use prost::Message;
+    let node_key = dir.join("node.key");
+    std::fs::write(&node_key, hex(key(13).as_bytes())).unwrap();
+    let grant = grant(&key(13), &[("replicate", &["*"])]);
+    std::fs::write(dir.join("node.grant"), hex(&grant.encode_to_vec())).unwrap();
+    node_key
+}
+
+/// `map`, issued now and signed by the client key.
+pub fn signed_map(mut map: PartitionMap) -> PartitionMap {
+    map.issued_at = issued_now();
+    map.protocol = kernable_core::PROTOCOL;
+    map.sig = Some(signing::sign(&key(1), &signing::partitions_message(&map)));
+    map
+}
+
+/// Applies `map`, issued now and signed by the client key, at the partition at `addr`.
+pub async fn apply_map(addr: &str, map: PartitionMap) -> Result<(), tonic::Status> {
+    PartitionServiceClient::new(transport::connect(addr).await.unwrap())
+        .apply(with_grant(signed_map(map), &key(1)))
+        .await
+        .map(|_| ())
+}
+
+/// Copies the store files of the kernel in `from` (event store and vault) into `to`.
+pub fn copy_store(from: &Path, to: &Path) {
+    for file in ["k.db", "k.db-wal", "k.log", "vault.db"] {
+        if from.join(file).exists() {
+            std::fs::copy(from.join(file), to.join(file)).unwrap();
+        }
+    }
+}
+
+/// A random delay in `range` milliseconds.
+pub fn random_ms(range: std::ops::Range<u64>) -> Duration {
+    let mut b = [0u8; 8];
+    getrandom::fill(&mut b).unwrap();
+    Duration::from_millis(range.start + u64::from_le_bytes(b) % (range.end - range.start))
+}
+
+/// xorshift: the same seed gives the same sequence.
+pub struct Rng(pub u64);
+
+impl Rng {
+    pub fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+
+    pub fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+
+    pub fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
+        &items[self.below(items.len() as u64) as usize]
+    }
+
+    /// A delay in `range` milliseconds.
+    pub fn ms(&mut self, range: std::ops::Range<u64>) -> Duration {
+        Duration::from_millis(range.start + self.next() % (range.end - range.start))
+    }
 }

@@ -142,13 +142,6 @@ fn call() -> impl Strategy<Value = Call> {
     ]
 }
 
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64
-}
-
 async fn send(addr: &str, call: Call) {
     let channel = transport::connect(addr).await.unwrap();
     match call {

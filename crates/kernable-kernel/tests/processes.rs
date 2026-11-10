@@ -4,8 +4,6 @@
 
 mod common;
 
-use std::path::Path;
-
 use common::*;
 use ed25519_dalek::SigningKey;
 use kernable_core::{
@@ -427,14 +425,6 @@ async fn a_process_is_removed_and_registered_again() {
 async fn restarted(env: &Env, name: &str) -> Env {
     let from = env.dir.clone();
     start_custom(name, move |_, dir| copy_store(&from, dir)).await
-}
-
-fn copy_store(from: &Path, to: &Path) {
-    for file in ["k.db", "k.db-wal", "k.log"] {
-        if from.join(file).exists() {
-            std::fs::copy(from.join(file), to.join(file)).unwrap();
-        }
-    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

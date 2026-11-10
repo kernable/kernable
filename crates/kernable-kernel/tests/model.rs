@@ -50,26 +50,6 @@ fn env_number(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-/// xorshift: the same seed runs the same sequence of steps.
-struct Rng(u64);
-
-impl Rng {
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
-    }
-
-    fn below(&mut self, n: u64) -> u64 {
-        self.next() % n
-    }
-
-    fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
-        &items[self.below(items.len() as u64) as usize]
-    }
-}
-
 // ---- listeners ----
 
 /// What the two listeners saw, with a global sequence number per delivery and acknowledgement.

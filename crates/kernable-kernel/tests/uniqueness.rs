@@ -124,14 +124,6 @@ async fn restarted(env: &Env, name: &str) -> Env {
     .await
 }
 
-fn copy_store(from: &Path, to: &Path) {
-    for file in ["k.db", "k.db-wal", "k.log", "vault.db"] {
-        if from.join(file).exists() {
-            std::fs::copy(from.join(file), to.join(file)).unwrap();
-        }
-    }
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn a_key_taken_by_one_aggregate_rejects_another_of_its_scope() {
     let env = start("unique-taken").await;

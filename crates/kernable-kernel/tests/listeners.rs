@@ -311,8 +311,10 @@ async fn the_kernel_is_ready_once_every_listener_is_connected_and_caught_up() {
 
     assert_eq!(positions(&model.next().await), [1]);
     model.ack(1).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(ready(get(&metrics, "/ready").await));
+    until_async("ready once the ack arrived", async || {
+        ready(get(&metrics, "/ready").await)
+    })
+    .await;
     assert!(
         get(&metrics, "/metrics")
             .await
@@ -321,8 +323,10 @@ async fn the_kernel_is_ready_once_every_listener_is_connected_and_caught_up() {
 
     // A registered listener that went away makes the kernel not ready; health is unaffected.
     drop(model);
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(!ready(get(&metrics, "/ready").await));
+    until_async("not ready once the listener left", async || {
+        !ready(get(&metrics, "/ready").await)
+    })
+    .await;
     assert!(get(&metrics, "/health").await.starts_with("HTTP/1.1 200"));
 }
 
@@ -541,7 +545,12 @@ async fn a_membership_decides_which_listeners_count_and_which_middlewares_check(
 
     // A listed middleware that is away refuses what it checks: security fails closed.
     drop(guard);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    until_async("the kernel waits for the guard", async || {
+        get(&metrics, "/ready")
+            .await
+            .ends_with("waiting for listeners: guard\n")
+    })
+    .await;
     let place = signed(command("c1", "PlaceOrder", "o1"), &key(1));
     let refused = submit(&env.addr, place.clone()).await.unwrap_err();
     assert_eq!(refused.code(), Code::Unavailable);
@@ -564,12 +573,12 @@ async fn a_membership_decides_which_listeners_count_and_which_middlewares_check(
     // A listener without a service always counts.
     let plain = listen(&env, "plain", opts(0)).await.unwrap();
     drop((plain, carts));
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let waiting = get(&metrics, "/ready").await;
-    assert!(
-        waiting.ends_with("waiting for listeners: carts, plain\n"),
-        "{waiting}"
-    );
+    until_async("the kernel waits for carts and plain", async || {
+        get(&metrics, "/ready")
+            .await
+            .ends_with("waiting for listeners: carts, plain\n")
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

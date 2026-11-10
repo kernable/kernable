@@ -45,13 +45,6 @@ async fn refused(metrics: &str, reason: &str) -> u64 {
         .map_or(0, |n| n.parse().unwrap())
 }
 
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64
-}
-
 fn with_payload(id: &str, command_type: &str, aggregate_id: &str, bytes: usize) -> Command {
     let mut cmd = command(id, command_type, aggregate_id);
     cmd.payload = vec![b'x'; bytes];

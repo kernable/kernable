@@ -30,23 +30,6 @@ use kernable_store::{
 use prost::Message;
 use tonic::Code;
 
-struct Dir(std::path::PathBuf);
-
-impl Dir {
-    fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("kn-repl-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        Dir(dir)
-    }
-}
-
-impl Drop for Dir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
 /// A kernel's configuration in `dir`, its files named after `name`.
 fn config(dir: &Path, name: &str, kernel_seed: u8) -> Config {
     let kernel_key = dir.join(format!("{name}-kernel.key"));
@@ -106,16 +89,6 @@ fn standby_config(dir: &Path, primary: &Config) -> Config {
 fn in_sync(standby: &Config) -> bool {
     let (_, path) = kernable_store::backend(&standby.store);
     Path::new(&format!("{path}.in-sync")).exists()
-}
-
-async fn until(what: &str, done: impl Fn() -> bool) {
-    for _ in 0..1_000 {
-        if done() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("timed out waiting: {what}");
 }
 
 fn events(result: &CommandResult) -> Vec<Event> {
@@ -195,7 +168,7 @@ async fn open(config: &Config) -> Arc<Kernel> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_standby_holds_every_write_a_client_was_told_and_takes_over() {
-    let dir = Dir::new("follow");
+    let dir = Dir::new("repl-follow");
     let mut primary_config = config(&dir.0, "primary", 3);
     primary_config.replication.sync = true;
     let primary = open(&primary_config).await;
@@ -284,7 +257,7 @@ async fn a_standby_holds_every_write_a_client_was_told_and_takes_over() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_standby_of_a_primary_that_ran_alone_takes_an_image_and_follows() {
-    let dir = Dir::new("image");
+    let dir = Dir::new("repl-image");
     let mut primary_config = config(&dir.0, "primary", 3);
     // Written before replication was on: with SQLite, no standby can follow from the start.
     {
@@ -334,7 +307,7 @@ async fn a_standby_of_a_primary_that_ran_alone_takes_an_image_and_follows() {
 /// is told it is accepted, and run by the promoted standby when it is due.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_scheduled_command_reaches_the_standby_and_runs_after_a_promotion() {
-    let dir = Dir::new("scheduled");
+    let dir = Dir::new("repl-scheduled");
     let mut primary_config = config(&dir.0, "primary", 3);
     primary_config.replication.sync = true;
     let primary = open(&primary_config).await;
@@ -390,7 +363,7 @@ async fn a_scheduled_command_reaches_the_standby_and_runs_after_a_promotion() {
 #[tokio::test(flavor = "multi_thread")]
 async fn processes_reach_the_standby() {
     use kernable_core::proto::{ProcessRegistration, process_service_client::ProcessServiceClient};
-    let dir = Dir::new("processes");
+    let dir = Dir::new("repl-processes");
     let mut primary_config = config(&dir.0, "primary", 3);
     primary_config.replication.sync = true;
     let primary = open(&primary_config).await;
@@ -510,7 +483,7 @@ async fn processes_reach_the_standby() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_case_goes_on_after_a_failover() {
     use kernable_core::proto::{ProcessRegistration, process_service_client::ProcessServiceClient};
-    let dir = Dir::new("case-failover");
+    let dir = Dir::new("repl-case-failover");
     let mut primary_config = config(&dir.0, "primary", 3);
     primary_config.replication.sync = true;
     let primary = open(&primary_config).await;
@@ -592,7 +565,7 @@ async fn a_case_goes_on_after_a_failover() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_standby_without_a_grant_for_replicate_is_refused() {
-    let dir = Dir::new("refused");
+    let dir = Dir::new("repl-refused");
     let mut primary_config = config(&dir.0, "primary", 3);
     primary_config.replication.sync = true;
     let _primary = open(&primary_config).await;
@@ -617,7 +590,7 @@ async fn a_standby_without_a_grant_for_replicate_is_refused() {
 /// copying everything again (design/rewind.md).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_standby_takes_back_its_own_newest_records_and_follows_on() {
-    let dir = Dir::new("rewound");
+    let dir = Dir::new("repl-rewound");
     let mut primary_config = config(&dir.0, "primary", 3);
     primary_config.replication.sync = true;
     let primary = open(&primary_config).await;
@@ -656,7 +629,7 @@ async fn a_standby_takes_back_its_own_newest_records_and_follows_on() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_standby_whose_log_diverged_moves_its_stores_aside_and_starts_over() {
-    let dir = Dir::new("diverged");
+    let dir = Dir::new("repl-diverged");
     let mut primary_config = config(&dir.0, "primary", 3);
     primary_config.replication.sync = true;
     let primary = open(&primary_config).await;
@@ -708,7 +681,7 @@ async fn a_standby_whose_log_diverged_moves_its_stores_aside_and_starts_over() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_standby_whose_key_is_revoked_follows_no_longer() {
-    let dir = Dir::new("revoked");
+    let dir = Dir::new("repl-revoked");
     let mut primary_config = config(&dir.0, "primary", 3);
     primary_config.replication.sync = true;
     let primary = open(&primary_config).await;
@@ -768,7 +741,7 @@ impl Gate {
 /// once the standby acknowledges.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_membership_waiting_for_the_standby_does_not_stall_the_primary() {
-    let dir = Dir::new("one-worker");
+    let dir = Dir::new("repl-one-worker");
     let mut primary_config = config(&dir.0, "primary", 3);
     primary_config.replication.sync = true;
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -820,7 +793,7 @@ async fn a_membership_waiting_for_the_standby_does_not_stall_the_primary() {
 /// on every write waits for it, and only a standby the primary told so may be promoted.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_primary_without_a_witness_serves_alone_until_its_standby_caught_up() {
-    let dir = Dir::new("catch-up");
+    let dir = Dir::new("repl-catch-up");
     let mut primary_config = config(&dir.0, "primary", 3);
     primary_config.replication.sync = true;
     let primary = open(&primary_config).await;
@@ -901,7 +874,7 @@ async fn a_primary_without_a_witness_serves_alone_until_its_standby_caught_up() 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_switchover_without_a_witness_hands_the_role_to_the_standby() {
     use kernable_core::proto::SwitchoverRequest;
-    let dir = Dir::new("switchover");
+    let dir = Dir::new("repl-switchover");
     let mut primary_config = config(&dir.0, "primary", 3);
     primary_config.replication.sync = true;
     // A runtime of its own: shut down, it ends the old primary as its process would.
@@ -1012,7 +985,7 @@ async fn a_completion_with_vault_values_is_taken_back_while_they_are_held() {
         return;
     }
     for values_held in [true, false] {
-        let dir = Dir::new(&format!("rewind-values-{values_held}"));
+        let dir = Dir::new(&format!("repl-rewind-values-{values_held}"));
         let mut primary_config = config(&dir.0, "primary", 3);
         primary_config.replication.sync = true;
         let mut standby_config = standby_config(&dir.0, &primary_config);
@@ -1079,7 +1052,7 @@ async fn a_completion_with_vault_values_is_taken_back_while_they_are_held() {
 /// the store still holds stay.
 #[test]
 fn a_rewind_a_crash_cut_short_is_finished_when_the_stores_open() {
-    let dir = Dir::new("rewind-note");
+    let dir = Dir::new("repl-rewind-note");
     let mut config = config(&dir.0, "standby", 8);
     with_vault(&mut config, &dir.0);
     let (gone, kept) = (vault_value("", "gone"), vault_value("", "kept"));

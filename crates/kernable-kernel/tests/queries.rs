@@ -3,7 +3,7 @@
 
 mod common;
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use common::*;
 use ed25519_dalek::SigningKey;
@@ -91,13 +91,6 @@ fn read_model(env: &Env, name: &str, key: SigningKey, ack: bool) -> JoinHandle<t
             }
         }
     })
-}
-
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64
 }
 
 fn signed_query(query_type: &str, min_position: u64, key: &SigningKey) -> QueryRequest {

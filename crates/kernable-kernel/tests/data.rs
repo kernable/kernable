@@ -2,10 +2,7 @@
 
 mod common;
 
-use std::{
-    path::Path,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::{path::Path, time::Duration};
 
 use common::*;
 use ed25519_dalek::SigningKey;
@@ -18,13 +15,6 @@ use kernable_core::{
 };
 use kernable_kernel::Config;
 use tonic::Code;
-
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64
-}
 
 fn data(key: &SigningKey, op: &str, domain: &str, name: &str, bytes: &[u8]) -> DataRequest {
     let mut r = DataRequest {

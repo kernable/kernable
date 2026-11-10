@@ -19,7 +19,7 @@ use kernable_core::{
         TenantPartition, Wait, command_result::Outcome,
         partition_service_client::PartitionServiceClient,
     },
-    signing, transport,
+    transport,
 };
 use kernable_kernel::crash::MOVE_POINTS;
 use kernable_store::invariants::Log;
@@ -117,15 +117,6 @@ async fn copied(dir: &Path, epoch: u64) -> Option<kernable_core::proto::MoveStat
         .ok()?
         .into_inner();
     (status.done && status.epoch == epoch).then_some(status)
-}
-
-async fn apply_map(addr: &str, mut map: PartitionMap) -> Result<(), tonic::Status> {
-    map.issued_at = issued_now();
-    map.sig = Some(signing::sign(&key(1), &signing::partitions_message(&map)));
-    PartitionServiceClient::new(transport::connect(addr).await.unwrap())
-        .apply(with_grant(map, &key(1)))
-        .await
-        .map(|_| ())
 }
 
 /// An order of t1 with a global unique key `email`.

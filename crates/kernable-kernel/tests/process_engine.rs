@@ -278,6 +278,23 @@ async fn until_ended(store: &str, case: &str) -> String {
         .to_owned()
 }
 
+/// Waits until the process engine has handled every event written so far, and saved its
+/// position after them.
+async fn until_engine_caught_up(store: &str) {
+    let head = kernable_store::open_read_only(store)
+        .unwrap()
+        .head_position()
+        .unwrap();
+    until("the process engine handled every event", || {
+        kernable_store::open_read_only(store)
+            .unwrap()
+            .process_position()
+            .unwrap()
+            >= head
+    })
+    .await;
+}
+
 /// The steps a case reached, in order.
 fn steps(store: &str, case: &str) -> Vec<String> {
     case_events(store, case)
@@ -474,6 +491,7 @@ async fn an_unpaid_order_is_cancelled_when_its_time_is_up() {
     assert!(events.iter().any(|e| e.event_type == "TimerFired"));
     // A payment after the case ended moves nothing.
     pay(&k, "o2").await;
+    until_engine_caught_up(&env.store).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(case_events(&env.store, "o2#1").len(), events.len());
 }
@@ -510,6 +528,7 @@ async fn an_event_named_in_cancel_on_ends_the_case_at_any_step() {
     assert_eq!(payload(cancelled)["event"], "shop.OrderCancelled");
     // A payment after it moves nothing, and the timeout was withdrawn.
     pay(&k, "o9").await;
+    until_engine_caught_up(&env.store).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(case_events(&env.store, "o9#1").len(), events.len());
     assert!(events.iter().all(|e| e.event_type != "TimerFired"));
@@ -645,6 +664,7 @@ async fn one_case_runs_per_key_and_the_next_starts_after_it_ended() {
     until_reached(&env.store, "o4#1", "paid").await;
     // Submitted again while its case runs: ignored.
     submit_order(&k, "o4", 100).await;
+    until_engine_caught_up(&env.store).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(case_events(&env.store, "o4#2").is_empty());
     assert_eq!(until_ended(&env.store, "o4#1").await, "done");
@@ -700,6 +720,7 @@ async fn a_removed_process_starts_no_case_and_a_new_version_leaves_running_ones_
         .await
         .unwrap();
     submit_order(&k, "v4", 100).await;
+    until_engine_caught_up(&env.store).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(case_events(&env.store, "v4#1").is_empty());
     pay(&k, "v3").await;
@@ -783,18 +804,6 @@ async fn until_follow_ended(store: &str, tenant: &str, case: &str) {
         "case {case} of {tenant} never ended: {:?}",
         timeline(&follow_events(store, tenant, case))
     );
-}
-
-fn node_key(dir: &Path) -> std::path::PathBuf {
-    let node_key = dir.join("node.key");
-    std::fs::write(&node_key, hex(key(13).as_bytes())).unwrap();
-    let grant = grant(&key(13), &[("replicate", &["*"])]);
-    std::fs::write(
-        dir.join("node.grant"),
-        hex(&prost::Message::encode_to_vec(&grant)),
-    )
-    .unwrap();
-    node_key
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1058,14 +1067,7 @@ async fn the_registry_stream_announces_each_change_once() {
 
     // After a restart: nothing written again.
     let from = env.dir.clone();
-    let back = start_custom("pe-registry-back", move |_, dir| {
-        for file in ["k.db", "k.db-wal", "k.log"] {
-            if from.join(file).exists() {
-                std::fs::copy(from.join(file), dir.join(file)).unwrap();
-            }
-        }
-    })
-    .await;
+    let back = start_custom("pe-registry-back", move |_, dir| copy_store(&from, dir)).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(registry(&back.store, "orders.follow"), events);
 }
@@ -1181,7 +1183,10 @@ async fn a_process_acts_as_whom_act_says() {
     submit(&env.addr, of_tenant("o2-p", "PlaceOrder", "o2", "t1"))
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    until("the case of o2 waits", || {
+        !follow_events(&env.store, "t1", "o2#1").is_empty()
+    })
+    .await;
     assert!(act(&env.addr, "orders.follow", &ctx).await.unwrap());
     assert!(
         !act(&env.addr, "orders.follow", &ctx).await.unwrap(),
