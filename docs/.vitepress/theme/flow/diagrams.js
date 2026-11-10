@@ -295,6 +295,58 @@ diagrams.saga = {
 }
 
 /* ------------------------------------------------------------------
+   pieces — how commands, events, read models, reactors and a process work together,
+   on one account's onboarding (concepts/pieces.md)
+------------------------------------------------------------------ */
+diagrams.pieces = {
+  w: 760, h: 320,
+  intro: 'One account\'s onboarding: the aggregate decides, the process only says what comes next, a reactor talks to the outside, a read model answers.',
+  legend: ['cmd', 'evt', 'qry', 'kern'],
+  build (g) {
+    g.node('app', { x: 30, y: 30, w: 200, h: 56, label: 'Your app', sub: 'API · back office', kind: 'cmd' })
+    g.node('view', { x: 30, y: 234, w: 200, h: 56, label: 'Read model', sub: 'accounts', kind: 'qry' })
+    g.node('agg', { x: 280, y: 125, w: 200, h: 70, label: 'Aggregate account', sub: 'a-17 · none', kind: 'cmd' })
+    g.node('proc', { x: 530, y: 30, w: 200, h: 56, label: 'Process onboarding', sub: 'no case yet', kind: 'kern' })
+    g.node('react', { x: 530, y: 234, w: 200, h: 56, label: 'Reactor', sub: 'calls the KYC provider', kind: 'evt' })
+    g.wire('cmd', [g.port('app', 'right'), [330, 58], g.port('agg', 'top', -50)])
+    g.wire('proc', [g.port('agg', 'top', 50), [430, 58], g.port('proc', 'left')])
+    g.wire('react', [g.port('agg', 'bottom', 50), [430, 262], g.port('react', 'left')])
+    g.wire('view', [g.port('agg', 'bottom', -50), [330, 262], g.port('view', 'right')])
+    g.wire('ask', [g.port('app', 'bottom'), g.port('view', 'top')])
+  },
+  steps () {
+    const sub = (id, text) => ({ run: (g) => g.setSub(id, text), after: (g) => g.setSub(id, text) })
+    return [
+      { say: 'Your API sends a command: a request, "open account a-17". The aggregate may refuse it.',
+        hot: ['app', 'agg'], packets: [['cmd', { kind: 'cmd', label: 'Open', dur: 900 }]] },
+      { say: 'The aggregate accepts it and writes an event: a fact. Every reader gets it.',
+        hot: ['agg', 'proc', 'view'], ...sub('agg', 'a-17 · opened'),
+        packets: [['proc', { kind: 'evt', label: 'AccountOpened', dur: 900 }], ['view', { kind: 'evt', label: 'AccountOpened', dur: 900 }]] },
+      { say: 'The kernel starts a case of the onboarding process for a-17. The process only says what comes next.',
+        hot: ['proc'], ...sub('proc', 'a-17#1 · request-kyc'), pause: 700 },
+      { say: 'It sends an ordinary command to the same aggregate, as any sender would.',
+        hot: ['proc', 'agg'], packets: [['proc', { kind: 'cmd', label: 'RequestKyc', dur: 900, reverse: true }]] },
+      { say: 'The fact goes to a reactor, which calls the KYC provider: talking to the outside is a reactor\'s job, not the process\'s.',
+        hot: ['agg', 'react'], ...sub('proc', 'a-17#1 · waits at kyc'),
+        packets: [['react', { kind: 'evt', label: 'KycRequested', dur: 900 }], ['proc', { kind: 'evt', label: 'KycRequested', dur: 900 }]] },
+      { say: 'A reviewer decides in your back office: one more command, approved.',
+        hot: ['app', 'agg'], packets: [['cmd', { kind: 'cmd', label: 'DecideKyc', dur: 900 }]] },
+      { say: 'The process was waiting for exactly this event of a-17. It goes on.',
+        hot: ['agg', 'proc'], ...sub('proc', 'a-17#1 · activate'),
+        packets: [['proc', { kind: 'evt', label: 'KycDecided', dur: 900 }]] },
+      { say: 'Its next command; the aggregate checks its own rules again, the process cannot skip them.',
+        hot: ['proc', 'agg'], ...sub('agg', 'a-17 · active'),
+        packets: [['proc', { kind: 'cmd', label: 'Activate', dur: 900, reverse: true }], ['view', { kind: 'evt', label: 'AccountActivated', dur: 900, delay: 950 }]] },
+      { say: 'Your app reads through the read model, up to date with every event.',
+        hot: ['app', 'view'], packets: [['ask', { kind: 'qry', label: 'GetAccount', dur: 700 }], ['ask', { kind: 'qry', label: 'active', dur: 700, reverse: true, delay: 750 }]] },
+      { say: 'Next account.', hot: [], pause: 900,
+        run: (g) => { g.setSub('agg', 'a-18 · none'); g.setSub('proc', 'no case yet') },
+        after: (g) => { g.setSub('agg', 'a-18 · none'); g.setSub('proc', 'no case yet') } }
+    ]
+  }
+}
+
+/* ------------------------------------------------------------------
    lanes — commands: one at a time per aggregate, aggregates in parallel
 ------------------------------------------------------------------ */
 diagrams.lanes = {

@@ -6,6 +6,11 @@ scheduled commands and a read model that remembers where each order stands, and 
 it. In kernable you define it once, in code next to your domain; the **kernel runs it**, keeps
 every step in the log, and its UI shows the diagram, where each case stands, and statistics.
 
+A process is optional, and it builds on the other pieces: it sends ordinary commands to your
+aggregates and waits for the events they write; it never changes your data itself. "When X, do
+Y" is a reactor; a process is for flows that wait, have deadlines, and whose cases you want to
+see. [How the pieces fit](./pieces) shows where it belongs, on an account's onboarding.
+
 ## A process
 
 The shop's fulfilment, from [part 10 of the tutorial](../tutorial/shop/10-process):
@@ -28,6 +33,7 @@ kernel, runs the processes of every language; your processes only define and reg
 | `decide(name, …)` | picks a path by the case's data | `when` with `then`, or a list of them; `otherwise` |
 | `query(name, Query, …)` | asks a read model; its answer picks the path | `data`, `answer`, `paths`, `into`, `otherwise` |
 | `end(name)` | ends the case | |
+| `cancelOn(Event, …)` | ends a running case at once when the event comes, at any step (not a step itself) | `key`, `end`: an `end` step |
 
 - **Steps run in the order written**, unless a step names `next`. Step names are required: the
   UI, the statistics and new versions know a step by its name.
@@ -59,6 +65,11 @@ data or a read model's answer.
 - **A wait** completes with the first event of its type whose key is the case's. An event that
   comes before the case reaches its wait (a fast payment, a slow confirmation) is kept for the
   case and counts when it gets there.
+- **A cancelling event** (`cancelOn`) of the case's key ends it at once at the end step named,
+  whatever step it is at: its timer is withdrawn, a command or query it still awaits is ignored
+  when it comes, an incident ends with it. Events the case's own commands caused (their
+  correlation is the case) do not cancel it, so a step that closes the account does not cut its
+  own case short.
 - **A timeout or a timer** is a [scheduled command](../how-to/schedule) of the case, cancelled when
   the awaited event comes first. It survives restarts, failover and moves like any other.
 - **A query step** asks with the position of the event that moved the case, so the read model has
@@ -83,6 +94,7 @@ Its events say what happened, in order:
 | `TimerSet`, `TimerFired` | a timeout or a timer was set, and fell due |
 | `EventKept` | an event a later wait of the case may need came early |
 | `IncidentRaised`, `IncidentResolved` | the case stopped, and an operator resolved it |
+| `CaseCancelled` | an event named in `cancelOn` ended the case: the step it was at, the event and its position, the end |
 | `ProcessEnded` | the case ended, at which end |
 
 The kernel writes and signs them itself; `kernable verify` refuses case events signed by any other

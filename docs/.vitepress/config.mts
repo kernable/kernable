@@ -37,6 +37,7 @@ const SIDEBAR = [
       { text: "Architecture", link: "/concepts/architecture" },
       { text: "Event sourcing in kernable", link: "/concepts/event-sourcing" },
       { text: "Domains", link: "/concepts/domains" },
+      { text: "How the pieces fit", link: "/concepts/pieces" },
       { text: "Order and consistency", link: "/concepts/ordering" },
       { text: "Unique keys and conditions", link: "/concepts/uniqueness" },
       { text: "Trust", link: "/concepts/trust" },

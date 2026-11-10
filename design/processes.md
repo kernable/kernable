@@ -175,6 +175,12 @@ must produce it; each SDK's tests build the example and compare structurally.
 ```
 
 - **`name`**: qualified, `<domain>.<process>`; the process's domain is the domain it is defined on.
+- **`cancelOn`** (optional, added 2026-11-10): an array of `{ "event", "key", "end" }`: an event
+  (qualified) that ends a running case of its key at once, whatever step it is at, at the `end`
+  step named (which must be of kind `end`; an end reached only this way counts as reachable).
+  The engine writes `CaseCancelled` (step, event, position, end), then the end. Events whose
+  correlation is the case itself (caused by its own commands) do not cancel it. One entry per
+  event.
 - **`steps`**: an array in the order written in code (the UI and the statistics keep it). Every
   step has `name` (unique; letters, digits, `_`, `-`) and `kind`. The builder resolves the implicit
   order: every step but `end` carries an explicit `next` (or its kind's own targets), so the model

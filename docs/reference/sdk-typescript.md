@@ -1181,6 +1181,13 @@ The options of `ProcessBuilder.start`.
 - `key: string`: Where the case's key is in the event: `aggregateId` or `data.<field>`. One case per key.
 - `data?: Mapping`: The case's data, from the event: `{ orderId: "aggregateId", total: "data.total" }`.
 
+### CancelOnOptions
+
+The options of `ProcessBuilder.cancelOn`.
+
+- `key: string`: Where the case's key is in the event: `aggregateId` or `data.<field>`.
+- `end: string`: The end step the case ends at: `closed`.
+
 ### CommandStepOptions
 
 The options of `ProcessBuilder.command`.
@@ -1249,6 +1256,7 @@ A process model, as the kernel registers it; see "The model format" in design/pr
 - `name: string`: Qualified: `shop.fulfilment`.
 - `start: { on: string; key: string; data?: Mapping }`
 - `steps: ProcessStep[]`: In the order written.
+- `cancelOn?: { event: string; key: string; end: string }[]`: Events that end a running case at once, whatever step it is at.
 
 ### ProcessStep
 
@@ -1314,6 +1322,7 @@ export const fulfilment = shop.process("fulfilment")
 - `timer(name: string, when: TimerWhen, options: TimerOptions = {}): this`: Waits for a time: `{ after: "1d" }` from when the case reached the step, or `{ at: "case.dueAt" }` (a reference to a time in ms since epoch). Then `options.next`, else the next step written.
 - `decide(name: string, options: DecideOptions): this`: Picks a path by the case's data: `{ when: "case.total > 1000", then: "approval", otherwise: "paid" }`, or several conditions in order, `{ cases: [{ when, then }, …], otherwise }`. Conditions are references to the case (`case.<field>`), literals, `== != < <= > >=`, `and`, `or`, `not` and parentheses; anything more is a query.
 - `query<Q>(name: string, query: QueryClass<Q> | string, options: QueryStepOptions): this`: Asks a read model a `query` with `options.data` built from the case; the answer (or its field `options.answer`) picks the step in `options.paths`, else `options.otherwise`. `options.into` keeps the answer in the case's data.
+- `cancelOn<E>(event: EventClass<E> | string, options: CancelOnOptions): this`: Ends a running case at once when an `event` of its key commits, whatever step it is at: `.cancelOn("AccountClosed", { key: "aggregateId", end: "closed" })`. Its timer is withdrawn, an outcome it still awaits is ignored, an incident ends with it. Events the case's own commands cause do not count. `end` must be an `end` step.
 - `end(name: string): this`: Ends the case. A process may have several ends, e.g. `shipped` and `cancelled`.
 - `model(): ProcessModel`: The model the kernel registers (see "The model format"): types qualified, durations in ms, the order written resolved into explicit `next`s. Checks what it can before the kernel does, and throws naming the process and the step: no start, no steps, a malformed or repeated step name, a target that names no step, a step other than `end` without a successor, a malformed duration, `timeout` without `onTimeout` or the other way round. Conditions and references are the kernel's to check.
 
