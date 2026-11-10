@@ -131,11 +131,14 @@ The resolution is an event of the case (`IncidentResolved`, with the key that si
 
 ## Watching processes
 
-- **The UI's Processes** draw each version as a diagram from left to right, each path as wide
-  as the cases that took it, with the cases at each step now and incidents in red; show outcomes
-  over time and how long open cases have waited; list the cases and tell one as a story linked to
-  the aggregates it touched; and list the incidents with the commands that resolve them, over the
-  last hour, day or week ([Monitor kernable](../how-to/monitor#the-ui)).
+- **The UI's Processes** draw each version as a diagram (left to right, or top to bottom when it
+  is long), each path as wide as the cases that took it, with the cases at each step now,
+  incidents in red, and the conditions of its decisions; show outcomes over time and how long
+  open cases have waited; list the cases and tell one, at its own address, as a story linked to
+  the aggregates it touched, with its incident and the commands that resolve it first; over the
+  last hour, day or week ([Monitor kernable](../how-to/monitor#the-ui)). Explore's **Catalog**
+  lists every process with what it starts on, waits for, sends and asks, and its open cases and
+  incidents.
 - **Metrics:** `kernable_process_cases` by process and state, `kernable_process_incidents` and
   `kernable_process_step_seconds` per step ([Metrics](../reference/metrics)).
 - **The command line:** `kernable processes list`, `show`, `cases` and `case` read the store, also

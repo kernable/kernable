@@ -118,7 +118,7 @@ kernable vault rekey sqlite:data/vault.db keys/vault.key keys/vault-2.key
 
 The old key cannot read the vault afterwards. Backups made before still need the old key.
 
-Rekey also when a key has encrypted many values. Each value gets a random nonce, and one key is safe for 2^32 of them. The kernel counts them, logs a warning at startup past 2^31, and refuses new values at 2^32 until the vault is rekeyed.
+Rekey also when a key has encrypted many values. Each value gets a random nonce, and one key is safe for 2^32 of them. The kernel counts them, logs a warning at startup past 2^31 (the UI's verdict warns too, and **Explore → Data → Vault** shows the count), and refuses new values at 2^32 until the vault is rekeyed.
 
 ## Keys that are not on the disk in clear
 

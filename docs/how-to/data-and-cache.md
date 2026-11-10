@@ -108,3 +108,7 @@ Keep personal data out of cache values, or give them a short TTL. See [Handle an
 A listing reads the domain's directory, so it takes longer the more files a tenant keeps in a domain.
 
 Back up the data directory together with the event store ([Back up and restore](./backup)). All flags: [Configuration](../reference/configuration).
+
+## Watching them
+
+The UI's **Explore → Data** shows the files per tenant and domain (how many, their size, and a domain as folders by `/` in its keys) and the cache (entries, memory against `--max-cache-bytes`, the hit rate, values that expired or were evicted, and the keys with how long until they expire). It lists names and sizes only: it never opens a file or shows a cache value ([Monitor kernable](./monitor#the-ui)).
