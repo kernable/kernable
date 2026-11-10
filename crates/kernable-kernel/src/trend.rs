@@ -307,7 +307,7 @@ impl QueryCounts {
                     "answered": answered,
                     "rejected": rejected,
                     "failed": failed,
-                    "avgMicros": if answered > 0 { micros / answered } else { 0 },
+                    "avgMicros": micros.checked_div(answered).unwrap_or(0),
                     "lastAt": q.last_at,
                     "perMinute": per_minute,
                 }),
