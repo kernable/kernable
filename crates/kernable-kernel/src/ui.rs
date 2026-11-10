@@ -33,12 +33,18 @@
 //!   model, the cases at each step now and the statistics over the window (`process_view.rs`);
 //! - `GET /api/cases?process=&version=&step=&state=&text=&limit=`: the cases that match;
 //! - `GET /api/case?tenant=&process=&id=`: one case's events, each with what it links to: the
-//!   command it sent (its aggregate and outcome) or the event that moved it.
+//!   command it sent (its aggregate and outcome) or the event that moved it;
+//! - `GET /api/counts?domain=`: per event type of the domain, how many the log holds, the
+//!   newest's time and the last hour per minute; per command type, how many came in the last
+//!   hour, and how many of them were rejected.
 //!
 //! It never decrypts the vault: a vault field shows its subject, whether it is secret, or that
 //! it was erased. Snapshot states are not shown either, as they may hold personal values.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 use kernable_core::proto::{Event, RequestContext};
 use kernable_store::StreamId;
@@ -132,6 +138,7 @@ pub(crate) fn respond(kernel: &Kernel, request: &[u8]) -> Vec<u8> {
         "/api/processes" => processes(kernel, &params),
         "/api/cases" => cases(kernel, &params),
         "/api/case" => case(kernel, &params),
+        "/api/counts" => counts(kernel, &params),
         _ => return reply("404 Not Found", "text/plain", b"not found\n"),
     };
     match result {
@@ -1036,6 +1043,85 @@ fn events(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, Bo
 
 /// The newest rejected commands: what was sent, by whom, and why it was refused. The rejection
 /// itself carries no time; `receivedAt` is when the kernel accepted the command.
+/// How many events one `/api/counts` request counts at most: a long log is counted over
+/// several, and the answer says how far it got.
+const COUNT_BUDGET: u64 = 200_000;
+
+/// How many of the newest commands `/api/counts` looks through at most.
+const COUNT_COMMANDS: usize = 5_000;
+
+fn counts(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, BoxError> {
+    let domain = params.get("domain").map_or("", |v| v.trim());
+    if domain.is_empty() {
+        return Err("domain: missing".into());
+    }
+    let now = now_ms();
+    let head = kernel.store.head_position()?;
+    let counted = kernel
+        .tally
+        .catch_up(kernel.store.as_ref(), head, COUNT_BUDGET, now)?;
+    // The commands of the last hour, newest first, as far as the newest COUNT_COMMANDS reach.
+    let since = now - crate::trend::TALLY_MINUTES * 60_000;
+    let minute = now / 60_000;
+    let mut commands: BTreeMap<String, (u64, u64, Vec<u64>)> = BTreeMap::new();
+    let mut looked = 0;
+    let mut before = None;
+    let mut complete = false;
+    'pages: while looked < COUNT_COMMANDS {
+        let page = kernel.store.commands(before, 500)?;
+        if page.is_empty() {
+            complete = true;
+            break;
+        }
+        for s in &page {
+            looked += 1;
+            if s.pending.received_at < since {
+                complete = true;
+                break 'pages;
+            }
+            let c = &s.pending.command;
+            if c.domain != domain {
+                continue;
+            }
+            let entry = commands
+                .entry(format!(
+                    "{}.{}.{}",
+                    c.domain, c.aggregate_type, c.command_type
+                ))
+                .or_insert_with(|| (0, 0, vec![0; crate::trend::TALLY_MINUTES as usize]));
+            entry.0 += 1;
+            if command_status(s, now) == "rejected" {
+                entry.1 += 1;
+            }
+            let back = minute - s.pending.received_at / 60_000;
+            if let Ok(back) = usize::try_from(back)
+                && back < entry.2.len()
+            {
+                let i = entry.2.len() - 1 - back;
+                entry.2[i] += 1;
+            }
+        }
+        before = page.last().map(|s| s.seq);
+    }
+    let commands: serde_json::Map<String, Value> = commands
+        .into_iter()
+        .map(|(t, (count, rejected, per_minute))| {
+            (
+                t,
+                json!({ "count": count, "rejected": rejected, "perMinute": per_minute }),
+            )
+        })
+        .collect();
+    Ok(json!({
+        "now": now,
+        "head": head,
+        "counted": counted,
+        "events": kernel.tally.view(domain, now),
+        "commands": commands,
+        "commandsComplete": complete,
+    }))
+}
+
 fn rejections(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, BoxError> {
     let limit = match params.get("limit").filter(|v| !v.is_empty()) {
         Some(v) => v.parse().map_err(|_| "limit: not a number")?,

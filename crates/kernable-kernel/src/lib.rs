@@ -273,6 +273,8 @@ pub struct Kernel {
     metrics: metrics::Metrics,
     /// Listener positions over the last hour, for the UI.
     trend: trend::Trend,
+    /// Events per type, counted for the UI when it first asks.
+    tally: trend::Tally,
     /// When this kernel started, ms since epoch, for the UI.
     started_at: i64,
     /// The highest payload version stored per qualified event type; never goes down. Held
@@ -450,6 +452,7 @@ impl Kernel {
             queue,
             metrics: metrics::Metrics::default(),
             trend: trend::Trend::default(),
+            tally: trend::Tally::default(),
             started_at: now_ms(),
             schemas: Mutex::new(schemas),
             index: Mutex::new(index),

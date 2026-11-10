@@ -154,6 +154,21 @@
   .flowrow { display: grid; grid-template-columns: minmax(0, 1fr) 24px minmax(0, 1.4fr); gap: 10px; align-items: start; }
   @media (max-width: 900px) { .flowrow { grid-template-columns: 1fr; } .flowrow .arrow { display: none; } }
   .flowrow .arrow { color: var(--faint); text-align: center; padding-top: 18px; font-size: 16px; }
+  .tbl.flat { border: none; border-radius: 0; }
+  .tbl.flat th { background: none; padding-top: 0; }
+  .tbl.flat th:first-child, .tbl.flat td:first-child { padding-left: 0; }
+  .tbl.flat th:last-child, .tbl.flat td:last-child { padding-right: 0; }
+  .tbl.flat tr:last-child td { border-bottom: none; }
+  td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+  .ver { font-size: 11px; color: var(--violet); margin-left: 6px; }
+  .bars { display: block; }
+  .bars rect { fill: var(--accent); opacity: .75; }
+  .bars .base { stroke: var(--line); }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
+  .tiles .kpi { display: grid; grid-template-columns: 1fr auto; align-items: end; column-gap: 10px; }
+  .tiles .kpi .l, .tiles .kpi .s { grid-column: 1 / -1; }
+  .agg-sub { color: var(--muted); font-size: 12.5px; }
   .wildcard { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
   /* history cards */
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 11px 14px; }
@@ -430,6 +445,16 @@ async function loadRejectedDay() { try { rejectedDay = (await get(`/api/rejectio
 async function loadProcs() {
   try { procs = await get(`/api/processes?window=${procWindow}`); } catch {}
   await loadIncidents();
+}
+/** The counts of the domain shown: events per type, commands of the last hour. A long log is
+ *  counted over several requests: until it caught up, the page asks again soon. */
+let counts = null;
+async function loadCounts() {
+  if (!domainSel) return;
+  try {
+    counts = { ...(await get(`/api/counts?domain=${encodeURIComponent(domainSel)}`)), domain: domainSel };
+    if (counts.counted < counts.head) setTimeout(() => reload(true), 300);
+  } catch {}
 }
 async function loadIncidents() { try { incidents = await get("/api/cases?state=incident&limit=1000"); } catch {} }
 
@@ -1452,47 +1477,111 @@ function drawDomains() {
     wildcardNote(data)].filter(Boolean));
 }
 
-/** One domain: per aggregate, its commands, the events it writes, and who reads each. */
+/** Per minute over the last hour as small bars, the current minute on the right. */
+function bars(perMinute, label, width = 96, height = 20) {
+  const xs = perMinute ?? [];
+  const max = Math.max(1, ...xs), w = width / Math.max(1, xs.length);
+  return el("svg:svg", { class: "bars", width, height, viewBox: `0 0 ${width} ${height}`, role: "img", "aria-label": label },
+    el("svg:line", { class: "base", x1: 0, x2: width, y1: height - 0.5, y2: height - 0.5 }),
+    xs.map((n, i) => n ? el("svg:rect", { x: (i * w).toFixed(1), width: Math.max(1, w - 0.6).toFixed(1), y: (height - 1 - (n / max) * (height - 2)).toFixed(1), height: ((n / max) * (height - 2)).toFixed(1) }) : null));
+}
+const sum = (xs) => (xs ?? []).reduce((a, b) => a + b, 0);
+/** `n` and its share of `of`, in the warning color when there are any. */
+const share = (n, of) => n ? el("span", { class: "warn", title: `${num(n)} of ${num(of)}` }, `${num(n)} · ${pct(n, of)}`) : el("span", { class: "faint" }, "–");
+
+/** One domain: what it holds in numbers, per aggregate its commands and the events it writes,
+ *  who reads them, and its processes. */
 function drawDomain(box, data, d) {
   const back = el("a", { href: "/explore/domains" }, "← all domains");
   if (!d) { box.replaceChildren(back, el("div", { class: "empty" }, `No domain ${domainSel}.`)); return; }
+  const c = counts?.domain === d.name ? counts : null;
+  const ev = (type) => c?.events[type];
+  const cmd = (a, name) => c?.commands[`${a.aggregate}.${name}`];
+  const counting = c && c.counted < c.head;
+  const dash = () => el("span", { class: "faint" }, c ? "–" : "…");
+
+  // ---- the domain in numbers ----
+  const evCounts = d.events.map((e) => ev(e.type)).filter(Boolean);
+  const total = sum(evCounts.map((x) => x.count));
+  const perMinute = Array.from({ length: 60 }, (_, i) => sum(evCounts.map((x) => x.perMinute[i])));
+  const cmdCounts = Object.values(c?.commands ?? {});
+  const cmdTotal = sum(cmdCounts.map((x) => x.count)), cmdRejected = sum(cmdCounts.map((x) => x.rejected));
+  const cmdMinute = Array.from({ length: 60 }, (_, i) => sum(cmdCounts.map((x) => x.perMinute[i])));
+  const lastAt = Math.max(0, ...evCounts.map((x) => x.lastAt));
+  const tile = (label, value, sub, chart) => el("div", { class: "panel kpi" }, el("span", { class: "l" }, label), el("span", { class: "n" }, value), chart ?? el("span"), el("span", { class: "s" }, sub));
+  const tiles = el("div", { class: "tiles" },
+    tile("Events", c ? num(total) : "…", counting ? `counting… ${pct(c.counted, c.head)} of the log` : `in ${plural(d.events.length, "type")}`),
+    tile("Events, last hour", c ? num(sum(perMinute)) : "…", "per minute", c ? bars(perMinute, "Events per minute, last hour", 110, 30) : null),
+    tile("Commands, last hour", c ? num(cmdTotal) : "…", c ? (cmdRejected ? el("span", { class: "warn" }, `${num(cmdRejected)} rejected · ${pct(cmdRejected, cmdTotal)}`) : "none rejected") : "", c ? bars(cmdMinute, "Commands per minute, last hour", 110, 30) : null),
+    tile("Last event", lastAt ? when(lastAt) : c ? "never" : "…", lastAt ? iso(lastAt) : ""));
+
+  // ---- per aggregate: commands → events ----
   const aggregates = d.aggregates.map((a) => {
-    const cmds = data.commands.filter((c) => c.aggregate === a);
+    const cmds = data.commands.filter((x) => x.aggregate === a);
     const evs = data.events.filter((e) => e.writers.includes(a.aggregate));
-    const cmdRows = cmds.map((c) => el("div", { class: "chips" }, plain(short(c.type), c.type),
-      c.checkedBy.map((l) => el("span", { class: "t more", title: `checked by ${l.name} before it runs` }, "checked by ", l.name)),
-      c.sentBy.map((p) => el("a", { class: "t more", href: procHref(p.name) }, "sent by ", p.name))));
-    const evRows = el("div", { class: "tbl" }, el("table", {},
-      el("tr", {}, el("th", {}, "Event"), el("th", {}, "Schema"), el("th", {}, "Read by")),
-      evs.length ? evs.map((e) => el("tr", {}, el("td", {}, evChip(e.type)), el("td", {}, `v${e.schema}`),
-        el("td", {}, e.readers.length || e.processes.length ? some([...e.readers.map(listenerChip), ...e.processes.map(procChip)], 10) : el("span", { class: "note" }, data.wildcards.length ? "only listeners that read everything" : "nobody reads it"))))
-        : el("tr", {}, el("td", { colspan: 3, class: "note" }, "It wrote no event yet."))));
+    // Middleware that checks every command is said once, above; the rest per command.
+    const everyCheck = cmds.length ? cmds[0].checkedBy.filter((l) => cmds.every((x) => x.checkedBy.includes(l))) : [];
+    const cmdTable = el("div", { class: "tbl flat" }, el("table", {},
+      el("tr", {}, el("th", {}, "Command"), el("th", { class: "n" }, "Last hour"), el("th", { class: "n" }, "Rejected")),
+      cmds.length ? cmds.map((x) => {
+        const n = cmd(a, short(x.type));
+        const extra = [...x.checkedBy.filter((l) => !everyCheck.includes(l)).map((l) => `checked by ${l.name}`)];
+        return el("tr", {},
+          el("td", {}, el("span", { class: "mono", title: x.type }, short(x.type)),
+            x.sentBy.map((p) => el("div", { class: "note" }, "sent by ", el("a", { href: procHref(p.name) }, p.name))),
+            extra.map((t) => el("div", { class: "note" }, t))),
+          el("td", { class: "n" }, n ? num(n.count) : dash()),
+          el("td", { class: "n" }, n ? share(n.rejected, n.count) : dash()));
+      }) : el("tr", {}, el("td", { colspan: 3, class: "note" }, "No commands registered."))));
+    const readers = (e) => e.readers.length || e.processes.length ? some([...e.readers.map(listenerChip), ...e.processes.map(procChip)], 6)
+      : el("span", { class: "note" }, data.wildcards.length ? "listeners that read everything" : "nobody");
+    const evTable = el("div", { class: "tbl flat" }, el("table", {},
+      el("tr", {}, el("th", {}, "Event"), el("th", { class: "n" }, "Count"), el("th", {}, "Last hour"), el("th", {}, "Last"), el("th", {}, "Read by")),
+      evs.length ? evs.map((e) => {
+        const n = ev(e.type);
+        return el("tr", {},
+          el("td", {}, el("a", { class: "mono", href: `/explore/events?type=${encodeURIComponent(e.type)}`, title: `${e.type}: its events in the log` }, short(e.type)),
+            e.schema > 1 ? el("span", { class: "ver", title: `schema version ${e.schema}` }, `v${e.schema}`) : null),
+          el("td", { class: "n" }, n ? num(n.count) : dash()),
+          el("td", {}, n ? bars(n.perMinute, `${short(e.type)} per minute, last hour: ${num(sum(n.perMinute))}`) : dash()),
+          el("td", { style: "white-space:nowrap" }, n ? when(n.lastAt) : dash()),
+          el("td", {}, readers(e)));
+      }) : el("tr", {}, el("td", { colspan: 5, class: "note" }, "It wrote no event yet."))));
+    const workers = a.workers ? plural(a.workers, "worker") : a.dynamic ? "no worker (dynamic)" : el("span", { class: "bad" }, "no worker: its commands wait in the queue");
     return el("div", { class: "panel agg" },
       el("div", { class: "agg-head" }, dotOf(a.ok ? "connected" : "missing"), el("b", {}, a.aggregate),
-        el("span", { class: "note" }, a.workers ? `${a.workers} worker${a.workers === 1 ? "" : "s"}` : a.dynamic ? "no worker (dynamic)" : "no worker: its commands wait in the queue", a.service ? ` · service ${a.service}` : "", " · key "), keyView(a.key)),
+        el("span", { class: "agg-sub" }, workers, a.service ? ` · service ${a.service}` : "",
+          everyCheck.length ? [" · commands pass through ", everyCheck.map((l, i) => [i ? ", " : "", l.name])] : ""),
+        el("span", { class: "note", style: "margin-left:auto" }, "signing key "), keyView(a.key)),
       el("div", { class: "flowrow" },
-        el("div", { class: "grid", style: "gap:6px" }, el("div", { class: "kind" }, "Commands"), cmdRows),
+        el("div", { class: "grid", style: "gap:6px" }, cmdTable),
         el("div", { class: "arrow" }, "→"),
-        el("div", { class: "grid", style: "gap:6px" }, el("div", { class: "kind" }, "Events it writes"), evRows)));
+        el("div", { class: "grid", style: "gap:6px" }, evTable)));
   });
-  // Listeners that read this domain's events or answer its queries.
-  const relevant = data.listeners.filter((l) => d.readers.includes(l) || d.queries.some((q) => q.answeredBy === l) || d.checkers.includes(l));
+
+  // ---- who reads its events, answers its queries or checks its commands ----
+  const relevant = data.listeners.filter((l) => d.readers.includes(l) || d.queries.some((q) => q.answeredBy === l) || d.checkers.includes(l) || l.everything);
+  const head = state.kernel.head;
+  const kind = (l) => l.middlewares.length ? `middleware, ${l.middlewares.map((m) => m.when).join(", ")}` : l.queries.length ? "read model" : "listener";
+  const position = (l) => l.live ? el("span", { class: "faint" }, "live") : !l.connected ? el("span", { class: "bad" }, "away") : head - l.position > 0 ? el("span", { class: head - l.position >= 100 ? "warn" : "muted" }, `${num(head - l.position)} behind`) : el("span", { class: "ok" }, "caught up");
   const listenerRows = relevant.map((l) => el("tr", {},
-    el("td", {}, dotOf(l.status), " ", el("b", {}, l.name)),
-    el("td", {}, l.middlewares.length ? `middleware (${l.middlewares.map((m) => m.when).join(", ")})` : l.queries.length ? "read model" : "reactor or listener", ` · order ${l.order}`),
-    el("td", {}, l.everything ? el("span", { class: "note" }, "everything") : some(l.events.map((t) => t.endsWith("*") ? plain(t) : evChip(t, domainOf(t) === d.name ? short(t) : t)), 6)),
-    el("td", {}, some(l.queries.map((q) => plain(q))))));
+    el("td", { style: "white-space:nowrap" }, dotOf(l.status), " ", el("b", {}, l.name)),
+    el("td", { style: "white-space:nowrap" }, kind(l), l.order ? el("span", { class: "faint" }, ` · order ${l.order}`) : null),
+    el("td", {}, l.everything ? el("span", { class: "muted" }, "every event its key may read") : some(l.events.map((t) => t.endsWith("*") ? plain(t) : evChip(t, domainOf(t) === d.name ? short(t) : t)), 6)),
+    el("td", {}, l.queries.length ? l.queries.map((q, i) => [i ? ", " : "", el("span", { class: "mono" }, q)]) : el("span", { class: "faint" }, "–")),
+    el("td", { class: "n" }, position(l))));
   const foreign = [...new Set(d.processes.flatMap((p) => p.events).filter((e) => domainOf(e) !== d.name))];
   box.replaceChildren(...[
     el("div", { class: "title" }, back, el("h3", {}, d.name), el("span", { class: "meta" }, [plural(d.aggregates.length, "aggregate"), plural(d.events.length, "event type"), plural(d.queries.length, "query", "queries"), plural(d.processes.length, "process", "processes")].join(" · "))),
+    tiles,
     ...aggregates,
-    el("div", { class: "panel" }, el("h2", {}, "Read models, reactors, middleware", el("span", { class: "aside" }, "that read its events, answer its queries or check its commands")),
-      relevant.length ? el("div", { class: "tbl" }, el("table", {}, el("tr", {}, ["Name", "Kind", "Reads", "Answers"].map((h) => el("th", {}, h))), listenerRows)) : el("div", { class: "note" }, "None.")),
-    d.processes.length ? el("div", { class: "panel" }, el("h2", {}, "Processes"), d.processes.map((p) => el("div", { class: "row" }, el("span", {}, "⟳"),
+    el("div", { class: "panel" }, el("h2", {}, "Read models, listeners, middleware", el("span", { class: "aside" }, "that read its events, answer its queries or check its commands")),
+      relevant.length ? el("div", { class: "tbl flat" }, el("table", {}, el("tr", {}, ["Name", "Kind", "Reads", "Answers"].map((h) => el("th", {}, h)), el("th", { class: "n" }, "Position")), listenerRows)) : el("div", { class: "note" }, "None.")),
+    d.processes.length ? el("div", { class: "panel" }, el("h2", {}, "Processes"), d.processes.map((p) => el("div", { class: "row" }, el("span", { class: "faint" }, "⟳"),
       el("span", {}, el("a", { href: procHref(p.name) }, p.name), el("span", { class: "note" }, ` · starts on ${p.model.start.on} · version ${p.versions}${p.removed ? " · removed" : ""}`)),
-      el("span", { class: "v" }, some([...new Set(p.commands)].map((c) => plain(short(c), c)), 5))))) : null,
+      el("span", { class: "v" }, p.commands.length ? ["sends ", [...new Set(p.commands)].map((x, i) => [i ? ", " : "", el("span", { class: "mono" }, short(x))])] : "")))) : null,
     foreign.length ? el("div", { class: "panel" }, el("h2", {}, "From other domains", el("span", { class: "aside" }, "events its processes start on or wait for")), some(foreign.map((e) => evChip(e, e)), 20)) : null,
-    wildcardNote(data)].filter(Boolean));
+  ].filter(Boolean));
 }
 
 // ---- Catalog: every event, command and query in one searchable table ----
@@ -1848,6 +1937,7 @@ async function load() {
   }
   if (top === "explore") {
     if (["domains", "catalog"].includes(exploreTab)) jobs.push(loadState(), loadProcs());
+    if (exploreTab === "domains" && domainSel) jobs.push(loadCounts());
     if (exploreTab === "events" && !live) jobs.push(follow());
     if (exploreTab === "commands" && !live) jobs.push(cfollow());
     if (exploreTab === "aggregates") jobs.push(loadStreams(), stream ? loadHistory() : null);
