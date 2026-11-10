@@ -665,7 +665,9 @@ impl<'a> State<'a> {
             min_position: 0,
             kept: Vec::new(),
         };
-        let mut kept_there: Vec<u64> = Vec::new();
+        // Keyed by the source partition too: a tenant moved more than once brings copies from
+        // several partitions, whose positions may coincide.
+        let mut kept_there: Vec<(String, u64)> = Vec::new();
         for e in events {
             let p = payload_of(e);
             // The positions an event names are those of the partition that wrote it. A copy a
@@ -696,7 +698,10 @@ impl<'a> State<'a> {
                         case.data.extend(data.clone());
                     }
                     if copy {
-                        let named = p["position"].as_u64().unwrap_or(0);
+                        let named = (
+                            e.origin_partition.clone(),
+                            p["position"].as_u64().unwrap_or(0),
+                        );
                         kept_there.retain(|k| *k != named);
                     } else {
                         case.kept.retain(|(_, k)| *k != position);
@@ -706,7 +711,10 @@ impl<'a> State<'a> {
                     }
                 }
                 // Kept before the tenant moved: its position is the source's, not found here.
-                "EventKept" if copy => kept_there.push(p["position"].as_u64().unwrap_or(0)),
+                "EventKept" if copy => kept_there.push((
+                    e.origin_partition.clone(),
+                    p["position"].as_u64().unwrap_or(0),
+                )),
                 "EventKept" => case
                     .kept
                     .push((p["event"].as_str().unwrap_or_default().to_owned(), position)),
@@ -1294,14 +1302,17 @@ impl<'a> State<'a> {
             if t != event_type {
                 continue;
             }
-            let e = self
+            // One stale or unreadable entry must not hide the ones after it.
+            let Some(e) = self
                 .kernel
                 .store
-                .read_all(position - 1, 1)
-                .ok()?
-                .into_iter()
-                .next()
-                .filter(|e| e.global_position == *position && e.tenant_id == case.tenant)?;
+                .read_all(position.saturating_sub(1), 1)
+                .ok()
+                .and_then(|events| events.into_iter().next())
+                .filter(|e| e.global_position == *position && e.tenant_id == case.tenant)
+            else {
+                continue;
+            };
             let payload = payload_of(&e);
             if key_of(key, &e, &payload).as_deref() == Some(case.key.as_str()) {
                 return Some((e, payload));

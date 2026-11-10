@@ -38,6 +38,8 @@ mkdir demo && cd demo
 kernable start --dev                                # a kernel on 127.0.0.1:7233, its UI on :7234
 ```
 
+The kernel runs on Linux and macOS (Unix) only; on Windows, run it in WSL.
+
 `--dev` creates the keys in the directory, among them `app.key`, which may do everything. In a second terminal, a worker in TypeScript (`npm install @kernable/sdk`; Python: `pip install kernable-sdk`, Rust: `cargo add kernable-sdk`):
 
 ```ts

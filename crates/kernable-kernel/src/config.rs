@@ -605,7 +605,10 @@ impl Config {
             store: get("--store").expect("has a default"),
             listen: get("--listen").expect("has a default"),
             kernel_key: get("--kernel-key").expect("has a default").into(),
-            lease_ttl_ms: number("--lease-ttl-ms")? as i64,
+            lease_ttl_ms: {
+                let ms = number("--lease-ttl-ms")?;
+                i64::try_from(ms).map_err(|_| format!("--lease-ttl-ms: {ms} is too large"))?
+            },
             checkpoint_interval_ms: number("--checkpoint-interval-ms")?,
             submit_timeout_ms: number("--submit-timeout-ms")?,
             settle_timeout_ms: number("--settle-timeout-ms")?,
@@ -731,9 +734,13 @@ pub fn utc_ms(s: &str) -> Option<i64> {
     let num = |p: &str| p.parse::<i64>().ok();
     let d: Vec<i64> = date.split('-').map(num).collect::<Option<_>>()?;
     let t: Vec<i64> = time.split(':').map(num).collect::<Option<_>>()?;
+    // `HH:MM` or `HH:MM:SS`, nothing after the seconds.
     let ([y, m, day], [h, min, sec @ ..]) = (d.as_slice(), t.as_slice()) else {
         return None;
     };
+    if sec.len() > 1 {
+        return None;
+    }
     let sec = sec.first().copied().unwrap_or(0);
     let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
     let days_in_month = match m {
@@ -1118,6 +1125,18 @@ mod tests {
     }
 
     #[test]
+    fn a_lease_ttl_beyond_i64_is_refused_not_wrapped() {
+        let root =
+            kernable_core::signing::key_id(&kernable_core::signing::generate_key().verifying_key());
+        let max = i64::MAX.to_string();
+        let config = Config::from_args(&["--root", &root, "--lease-ttl-ms", &max], |_| None);
+        assert_eq!(config.unwrap().lease_ttl_ms, i64::MAX);
+        let beyond = (i64::MAX as u64 + 1).to_string();
+        let refused = Config::from_args(&["--root", &root, "--lease-ttl-ms", &beyond], |_| None);
+        assert!(refused.unwrap_err().to_string().contains("--lease-ttl-ms"));
+    }
+
+    #[test]
     fn limits_default_to_the_flag_defaults_and_are_positive() {
         let root =
             kernable_core::signing::key_id(&kernable_core::signing::generate_key().verifying_key());
@@ -1178,6 +1197,8 @@ mod tests {
             "1900-02-29T00:00:00Z",
             "2026-04-31T00:00:00Z",
             "2026-10-27T09:00:00+01:00",
+            "2026-10-27T10:00:00:99Z",
+            "2026-10-27T10Z",
             "x",
         ] {
             assert_eq!(utc_ms(bad), None, "{bad}");

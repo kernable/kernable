@@ -205,7 +205,9 @@ impl Kernel {
                     continue;
                 }
             };
-            let mut client = GlobalKeyServiceClient::new(channel);
+            let mut client = GlobalKeyServiceClient::new(channel)
+                .max_decoding_message_size(crate::replication::MAX_MESSAGE_BYTES)
+                .max_encoding_message_size(crate::replication::MAX_MESSAGE_BYTES);
             let answer = match op {
                 "reserve" => client.reserve(request).await,
                 _ => client.holds(request).await,

@@ -298,7 +298,17 @@ pub(crate) async fn cancel(
         }))
     };
     let cancelled = || answer(cancel_result::Outcome::Cancelled(Cancelled {}));
-    // A command of another tenant is not found either.
+    // What needs no command is checked before the lookup says whether it exists.
+    let permissions = kernel.permissions();
+    let bypass = req.context.as_ref().is_some_and(|c| c.bypass_authorization);
+    if bypass && !config::allowed(&permissions.privileged, &sig.key_id, "bypass_authorization") {
+        return Err(Status::permission_denied(
+            "key may not set bypass_authorization",
+        ));
+    }
+    // A command of another tenant is not found either. The submit check below needs the
+    // command's type, so it comes after: a signed key learns whether an ID exists in the
+    // tenant, not what the command is.
     let Some(stored) = kernel
         .store
         .command(&id)
@@ -309,17 +319,10 @@ pub(crate) async fn cancel(
     };
     let command = stored.command;
     let name = config::qualified(&command.domain, &command.command_type);
-    let permissions = kernel.permissions();
     if !config::allowed(&permissions.submit, &sig.key_id, &name) {
         return Err(Status::permission_denied(format!(
             "key may not submit {name}, so not cancel it"
         )));
-    }
-    let bypass = req.context.as_ref().is_some_and(|c| c.bypass_authorization);
-    if bypass && !config::allowed(&permissions.privileged, &sig.key_id, "bypass_authorization") {
-        return Err(Status::permission_denied(
-            "key may not set bypass_authorization",
-        ));
     }
     // A case's timers are the engine's: only it withdraws them, or the case would wait forever.
     if command.domain == crate::process_engine::DOMAIN {

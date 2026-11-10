@@ -78,7 +78,9 @@ data or a read model's answer.
   incident `query_failed`.
 - **Tenants:** a case lives in the tenant of the event that started it, and its commands, queries
   and waits stay in that tenant. With [partitions](../how-to/partitions), each partition runs the
-  cases of its own tenants, and a tenant's running cases move with it.
+  cases of its own tenants, and a tenant's running cases move with it. An event a case kept early
+  for a later wait does not move with it: the case waits on the target for that event again (or
+  its timeout), and the kernel logs a warning naming the case.
 
 ## Cases in the log
 

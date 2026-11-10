@@ -400,6 +400,8 @@ async fn sync_once(
         .metadata_mut()
         .insert(GRANT_HEADER, grant.trim().parse()?);
     let records = TrustSyncServiceClient::new(crate::standby::connect(address).await?)
+        .max_decoding_message_size(crate::replication::MAX_MESSAGE_BYTES)
+        .max_encoding_message_size(crate::replication::MAX_MESSAGE_BYTES)
         .sync(request)
         .await?
         .into_inner();

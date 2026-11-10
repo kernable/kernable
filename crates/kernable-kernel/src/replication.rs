@@ -45,7 +45,7 @@ const RETAIN: u64 = 100_000;
 /// How often the stream looks for records no `sync` announced (listener positions).
 const TICK: Duration = Duration::from_millis(50);
 /// The largest message on a replication stream: a batch with files of the data service.
-pub(crate) const MAX_MESSAGE_BYTES: usize = 256 << 20;
+pub const MAX_MESSAGE_BYTES: usize = 256 << 20;
 
 /// Runs `f`, which blocks until the standby acknowledges, or until a request that waits for it
 /// is done (a lock held across [`Primary::wait`]), with the worker's tasks handed to another

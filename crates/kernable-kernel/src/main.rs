@@ -25,8 +25,8 @@ use kernable_core::{
     signing, transport,
 };
 use kernable_kernel::{
-    BoxError, Config, GRANT_HEADER, Kernel, backup, config, export, grants, node, now_ms,
-    partitions::partition_of, serve, standby, witness,
+    BoxError, Config, GRANT_HEADER, Kernel, MAX_MESSAGE_BYTES, backup, config, export, grants,
+    node, now_ms, partitions::partition_of, serve, standby, witness,
 };
 use prost::Message;
 use tracing_subscriber::EnvFilter;
@@ -1459,6 +1459,8 @@ async fn apply_map(
     let mut request = tonic::Request::new(map.clone());
     with_key_grant(&mut request, key_path)?;
     PartitionServiceClient::new(connect(addr).await?)
+        .max_decoding_message_size(MAX_MESSAGE_BYTES)
+        .max_encoding_message_size(MAX_MESSAGE_BYTES)
         .apply(request)
         .await?;
     Ok(())
@@ -1471,6 +1473,8 @@ async fn held_map(addr: &str, key_path: &str) -> Result<Option<PartitionMap>> {
     });
     with_key_grant(&mut request, key_path)?;
     match PartitionServiceClient::new(connect(addr).await?)
+        .max_decoding_message_size(MAX_MESSAGE_BYTES)
+        .max_encoding_message_size(MAX_MESSAGE_BYTES)
         .map(request)
         .await
     {
@@ -1501,7 +1505,12 @@ async fn wait_copied(
             let Ok(channel) = connect(address).await else {
                 continue;
             };
-            match PartitionServiceClient::new(channel).moving(request).await {
+            match PartitionServiceClient::new(channel)
+                .max_decoding_message_size(MAX_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_MESSAGE_BYTES)
+                .moving(request)
+                .await
+            {
                 Ok(s) if s.get_ref().done && s.get_ref().epoch == epoch => {
                     return Ok(s.into_inner());
                 }
@@ -1939,7 +1948,7 @@ async fn export_running(addr: &str, key_path: &str, file: &str) -> Result<bool> 
     });
     with_key_grant(&mut request, key_path)?;
     let mut stream = ExportServiceClient::new(connect(addr).await?)
-        .max_decoding_message_size(usize::MAX)
+        .max_decoding_message_size(MAX_MESSAGE_BYTES)
         .export(request)
         .await?
         .into_inner();
@@ -2269,6 +2278,8 @@ async fn processes_resolve(
     let resolved = kernable_core::proto::process_service_client::ProcessServiceClient::new(
         connect(addr).await?,
     )
+    .max_decoding_message_size(MAX_MESSAGE_BYTES)
+    .max_encoding_message_size(MAX_MESSAGE_BYTES)
     .resolve(request)
     .await?
     .into_inner();
@@ -2343,6 +2354,8 @@ async fn processes_remove(addr: &str, key_path: &str, name: &str) -> Result<bool
     let removed = kernable_core::proto::process_service_client::ProcessServiceClient::new(
         connect(addr).await?,
     )
+    .max_decoding_message_size(MAX_MESSAGE_BYTES)
+    .max_encoding_message_size(MAX_MESSAGE_BYTES)
     .remove(request)
     .await?
     .into_inner()

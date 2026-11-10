@@ -789,13 +789,23 @@ fn start_explains_its_flags_and_logs_json_if_asked() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// One request to the demo's UI: the status code and the body; `None` if no answer came.
+/// How long one request to the demo waits for its answer. Its handlers answer at once (a step
+/// runs in the background), so this only bounds a hung server.
+#[cfg(unix)]
+const DEMO_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// One request to the demo's UI: the status code and the body; `None` only if the demo did
+/// not take the connection (not listening yet). Any other failure, an empty or malformed
+/// answer among them, panics: it is a bug, not a demo still starting.
 #[cfg(unix)]
 fn try_demo_http(addr: &str, method: &str, path: &str, from_stage: bool) -> Option<(u16, String)> {
     use std::io::{Read, Write};
-    let mut conn = std::net::TcpStream::connect(addr).ok()?;
-    conn.set_read_timeout(Some(std::time::Duration::from_secs(150)))
-        .unwrap();
+    let mut conn = match std::net::TcpStream::connect(addr) {
+        Ok(conn) => conn,
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => return None,
+        Err(e) => panic!("{method} {path}: connecting failed: {e}"),
+    };
+    conn.set_read_timeout(Some(DEMO_READ_TIMEOUT)).unwrap();
     let header = if from_stage {
         "x-kernable-demo: 1\r\n"
     } else {
@@ -804,16 +814,25 @@ fn try_demo_http(addr: &str, method: &str, path: &str, from_stage: bool) -> Opti
     // In one write: the server reads the request with one read.
     let request =
         format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\n{header}content-length: 0\r\n\r\n");
-    conn.write_all(request.as_bytes()).ok()?;
+    conn.write_all(request.as_bytes())
+        .unwrap_or_else(|e| panic!("{method} {path}: sending failed: {e}"));
     let mut response = String::new();
-    conn.read_to_string(&mut response).ok()?;
-    let status = response.get(9..12)?.parse().ok()?;
-    let body = response.split_once("\r\n\r\n")?.1.to_owned();
+    conn.read_to_string(&mut response)
+        .unwrap_or_else(|e| panic!("{method} {path}: reading the answer failed: {e}"));
+    let status = response
+        .get(9..12)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| panic!("{method} {path}: no status in {response:?}"));
+    let body = response
+        .split_once("\r\n\r\n")
+        .unwrap_or_else(|| panic!("{method} {path}: no end of headers in {response:?}"))
+        .1
+        .to_owned();
     Some((status, body))
 }
 
-/// One request to the demo's UI: the status code and the body. A GET is asked again if no
-/// answer came; anything else is not, it may have been done.
+/// One request to the demo's UI: the status code and the body. A GET is asked again while the
+/// demo refuses the connection; anything else is not, it may have been done.
 #[cfg(unix)]
 fn demo_http(addr: &str, method: &str, path: &str, from_stage: bool) -> (u16, String) {
     let tries = if method == "GET" { 5 } else { 1 };
@@ -823,7 +842,7 @@ fn demo_http(addr: &str, method: &str, path: &str, from_stage: bool) -> (u16, St
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    panic!("the demo did not answer {method} {path}");
+    panic!("the demo did not take {method} {path}");
 }
 
 #[cfg(unix)]
@@ -875,9 +894,11 @@ fn demo_idle(addr: &str, demo: &mut KillOnDrop, dir: &std::path::Path) -> serde_
             let log = std::fs::read_to_string(dir.join("demo.log")).unwrap_or_default();
             panic!("the demo exited ({status}): {log}");
         }
-        if let Some((_, body)) = try_demo_http(addr, "GET", "/api/demo", false)
-            && let Ok(state) = serde_json::from_str::<serde_json::Value>(&body)
-        {
+        // Refused: not listening yet. Anything else answers, and must be a state.
+        if let Some((status, body)) = try_demo_http(addr, "GET", "/api/demo", false) {
+            assert!((200..300).contains(&status), "{status} {body:?}");
+            let state: serde_json::Value =
+                serde_json::from_str(&body).unwrap_or_else(|e| panic!("{status} {body:?}: {e}"));
             assert!(state["error"].is_null(), "{state}");
             if state["ready"] == true && state["busy"].is_null() {
                 return state;

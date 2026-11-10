@@ -43,7 +43,7 @@ mod processes;
 mod queue;
 mod replays;
 mod replication;
-pub use replication::{refuse_if_handed_over, switchover_keeper};
+pub use replication::{MAX_MESSAGE_BYTES, refuse_if_handed_over, switchover_keeper};
 pub mod standby;
 pub mod supervisor;
 mod timers;
@@ -1510,16 +1510,29 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
                 .max_decoding_message_size(cache_max)
                 .max_encoding_message_size(cache_max),
         )
-        .add_service(PartitionServiceServer::new(api.clone()))
-        .add_service(GlobalKeyServiceServer::new(api.clone()))
+        .add_service(
+            PartitionServiceServer::new(api.clone())
+                .max_decoding_message_size(max)
+                .max_encoding_message_size(max),
+        )
+        .add_service(
+            GlobalKeyServiceServer::new(api.clone())
+                .max_decoding_message_size(max)
+                .max_encoding_message_size(max),
+        )
         .add_service(
             MoveServiceServer::new(api.clone())
                 .max_encoding_message_size(replication::MAX_MESSAGE_BYTES),
         )
-        .add_service(TrustSyncServiceServer::new(api.clone()))
+        .add_service(
+            TrustSyncServiceServer::new(api.clone())
+                .max_decoding_message_size(max)
+                .max_encoding_message_size(max),
+        )
         .add_service(
             kernable_core::proto::process_service_server::ProcessServiceServer::new(api.clone())
-                .max_decoding_message_size(max),
+                .max_decoding_message_size(max)
+                .max_encoding_message_size(max),
         )
         .add_service(
             ExportServiceServer::new(api.clone())
@@ -3921,18 +3934,19 @@ fn erase_subjects(
     own: &StreamId,
 ) -> Vec<StreamId> {
     let mut erased = Vec::new();
+    // The streams whose snapshot could not be dropped.
     let drop_snapshots = |streams: &[StreamId], erased: &mut Vec<StreamId>| {
-        let mut all = true;
+        let mut failed = Vec::new();
         for s in streams.iter().chain([own]) {
             if let Err(e) = snapshots.remove(s) {
                 tracing::error!(error = %e, "dropping a snapshot failed");
-                all = false;
+                failed.push(s.clone());
             }
             if !erased.contains(s) {
                 erased.push(s.clone());
             }
         }
-        all
+        failed
     };
     for subject in subjects {
         let streams = match vault.streams_of(tenant, subject) {
@@ -3942,7 +3956,7 @@ fn erase_subjects(
                 continue;
             }
         };
-        if !drop_snapshots(&streams, &mut erased) {
+        if !drop_snapshots(&streams, &mut erased).is_empty() {
             tracing::error!(command = %command_id, "erasing a subject failed; the next start tries again");
             continue;
         }
@@ -3950,8 +3964,27 @@ fn erase_subjects(
             // Streams that used the subject since: their snapshots go as well.
             Ok(now) => {
                 let new: Vec<StreamId> = now.into_iter().filter(|s| !streams.contains(s)).collect();
+                // The intent is gone with the values: nothing retries this at the next start,
+                // so try once more now and name what is left.
                 if !new.is_empty() {
-                    drop_snapshots(&new, &mut erased);
+                    let failed = drop_snapshots(&new, &mut erased);
+                    let left = if failed.is_empty() {
+                        failed
+                    } else {
+                        drop_snapshots(&failed, &mut erased)
+                    };
+                    if !left.is_empty() {
+                        let streams: Vec<String> = left
+                            .iter()
+                            .map(|s| {
+                                format!(
+                                    "{}/{}/{}/{}",
+                                    s.tenant_id, s.domain, s.aggregate_type, s.aggregate_id
+                                )
+                            })
+                            .collect();
+                        tracing::error!(command = %command_id, ?streams, "snapshots that may still hold erased values could not be dropped");
+                    }
                 }
             }
             Err(e) => {
