@@ -59,5 +59,7 @@ jobs:
           python-version: "3.12"
       - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - if: matrix.part == 'check-rust'
+        run: podman --version && podman info --format '{{.Host.NetworkBackend}} {{.Host.Pasta.Executable}}' || true
+      - if: matrix.part == 'check-rust'
         run: cargo install cargo-audit --locked
       - run: make ${{ matrix.part }}

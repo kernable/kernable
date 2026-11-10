@@ -44,6 +44,7 @@ check-sdks: prune py
 # The documentation: generated reference up to date, the site builds, every example runs.
 check-docs: prune py
 	cargo build --workspace
+	cd sdks/typescript && npm install --no-audit --no-fund --silent
 	cd docs && npm install --no-audit --no-fund --silent && npm run -s check
 
 # The documentation site at http://localhost:5173; `npm run reference` in docs/ regenerates the

@@ -33,6 +33,8 @@ impl Node {
         std::thread::spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                 let line = plain(&line);
+                // Shown when a test fails: why the node did not start something.
+                eprintln!("node: {line}");
                 // A service's own output, passed on by the node with its name.
                 let own = line.split_once(" | ").map_or("", |(_, rest)| rest);
                 if let Some(rest) = own.strip_prefix("reached-kernel ") {
