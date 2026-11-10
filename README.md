@@ -1,8 +1,32 @@
-# kernable
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="crates/kernable-kernel/src/logo-dark.png">
+    <img src="crates/kernable-kernel/src/logo.png" alt="kernable" width="360">
+  </picture>
+</p>
 
-Event sourcing and CQRS with a Rust kernel and business logic in any language.
+<p align="center">
+  <a href="https://github.com/kernable/kernable/actions/workflows/ci.yml"><img src="https://github.com/kernable/kernable/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
+  <a href="https://www.npmjs.com/package/@kernable/sdk"><img src="https://img.shields.io/npm/v/@kernable/sdk?label=npm" alt="npm"></a>
+  <a href="https://pypi.org/project/kernable-sdk/"><img src="https://img.shields.io/pypi/v/kernable-sdk?label=PyPI" alt="PyPI"></a>
+  <a href="https://crates.io/crates/kernable-sdk"><img src="https://img.shields.io/crates/v/kernable-sdk?label=crates.io" alt="crates.io"></a>
+  <a href="https://kernable.com/docs/"><img src="https://img.shields.io/badge/docs-kernable.com-0b5fff.svg" alt="Documentation"></a>
+</p>
 
-The kernel stores commands and events, signs and checks every message, runs commands one at a time per aggregate, and delivers events to listeners in a fixed order. Your processes hold the business logic: workers decide, read models answer queries, reactors act, middleware checks. They connect over gRPC; TypeScript, Python and Rust have SDKs with the same API.
+**Event sourcing and CQRS with a Rust kernel and business logic in any language.**
+
+The kernel stores commands and events, signs and checks every message, runs commands one at a time per aggregate, and delivers events to listeners in a fixed order. Your services hold the business logic: workers decide, read models answer queries, reactors act, middleware checks. They connect over gRPC; TypeScript, Python and Rust have SDKs with the same API.
+
+## What you get
+
+- **Read your own writes.** A submit returns once every listener has processed the command's events, so the next query already sees them.
+- **Signed and verifiable.** Every command, result and query is signed; the log is a hash chain with signed checkpoints, and `kernable verify` checks all of it.
+- **Business processes.** A flow across commands, events, timers and queries, defined in code next to your domain; the kernel runs it, keeps every step in the log and shows each case in its UI.
+- **Unique keys and requirements,** checked atomically at commit: no second account with the same email, no order for a closed customer.
+- **Personal data, deletable.** Marked fields go to an encrypted vault instead of the log; erasing a person removes their data everywhere.
+- **Operations built in.** A synchronous standby with automatic failover, partitions by tenant with live moves, continuous backups to object storage, scheduled commands, metrics and a web UI.
+- **Kits.** Tenancy, accounts, identities, groups, invitations and authorization, copied into your project as code you own.
 
 ## Quickstart
 
@@ -27,16 +51,17 @@ cart.command("AddItem", (state, data: { sku: string; qty: number }) => {
 await new Kernable({ key: "app.key" }).worker(cart).run();
 ```
 
-The [getting-started guide](docs/tutorial/getting-started.md) goes on from here: a read model, a query that reads its own writes, and the same in Python and Rust. A container image runs the same kernel, listening with mutual TLS outside the container (see `Dockerfile`).
+The [getting-started guide](https://kernable.com/docs/tutorial/getting-started) goes on from here: a read model, a query that reads its own writes, and the same in Python and Rust. A container image runs the same kernel, listening with mutual TLS outside the container (see `Dockerfile`).
 
 ## Documentation
 
-`docs/` is the documentation site (VitePress): `make docs` serves it at http://localhost:5173.
+[kernable.com/docs](https://kernable.com/docs/), built from `docs/` (`make docs` serves it locally):
 
-- **Tutorials:** getting started in ten minutes, and "Build a shop" in eight parts.
-- **Concepts:** architecture, order and consistency, trust, data over time, failures.
-- **How-to guides:** deploying, backups, monitoring, TLS, keys, event versions, erasure requests, new SDKs.
-- **Reference:** the `kernable start` flags, the CLI, the SDKs, the protocol, signatures, errors and metrics. Generated from the code.
+- **Tutorials:** [getting started](https://kernable.com/docs/tutorial/getting-started) in ten minutes, and [build a shop](https://kernable.com/docs/tutorial/shop/) in ten parts, from the first command to sign-in and a business process.
+- **Concepts:** architecture, order and consistency, trust, unique keys, personal data, business processes, failures.
+- **How-to guides:** deploying, standby and failover, partitions, backups, monitoring, TLS, keys, event versions, erasure requests, new SDKs.
+- **Kits:** the domains you copy into your project, with their commands, events and permissions.
+- **Reference:** the `kernable start` flags, the CLI, the SDKs, the protocol, signatures, errors and metrics, generated from the code.
 
 Every code example in the documentation is a file that runs in `make check` against a real kernel.
 
@@ -50,6 +75,7 @@ Every code example in the documentation is a file that runs in `make check` agai
 | `crates/kernable-kernel` | The kernel and the `kernable` command: `kernable start --root <root.pub>`, keys, grants, revocation, certificates, verify, listeners, vault |
 | `crates/kernable-bench`, `bench/` | Load generator, benchmark matrix and results |
 | `sdks/typescript`, `sdks/python`, `sdks/rust` | The SDKs |
+| `kits/` | The kits in TypeScript, Python and Rust, and the fixtures all three are tested against |
 | `examples/shop` | Reference application: identity in Python, orders and an HTTP API in TypeScript, with kill tests |
 | `docs/` | The documentation site and its runnable examples |
 | `fuzz/` | Fuzz targets (cargo-fuzz) |
@@ -57,10 +83,12 @@ Every code example in the documentation is a file that runs in `make check` agai
 ## Develop
 
 ```sh
-make test           # the simple tier: fmt, clippy and in-process tests, no kernel processes (about a minute)
-make check          # Rust, TypeScript, Python, the SDKs and the documentation, against every storage backend,
-                    # and known vulnerable dependencies (cargo install cargo-audit)
-                    # (Python ≥ 3.10; the first run installs the Python SDK's venv)
+make test           # the simple tier: fmt, clippy and in-process tests, no kernel processes (a few minutes)
+make check          # everything, in four parts CI runs in parallel (Python ≥ 3.10, cargo-audit):
+                    #   check-rust   lints, known vulnerable dependencies, every test on every storage backend
+                    #   check-crash  the real kernel aborted at every crash point
+                    #   check-sdks   the TypeScript and Python SDKs against a real kernel
+                    #   check-docs   the documentation builds and every example runs
 make check-packages # builds the npm package and the Python wheel, installs and runs them
 make docs           # the documentation site; `npm run reference` in docs/ regenerates the reference
 make torture        # crash points and property tests, many rounds (ROUNDS=20 CASES=10000)
@@ -70,7 +98,7 @@ make fuzz           # fuzzes the file log and the wire messages (nightly Rust, c
 
 `make check` also aborts the real kernel at every crash point (`crates/kernable-kernel/src/crash.rs`, built only with `--features crash-points`) and runs property tests on damaged logs, all storage backends and arbitrary requests.
 
-`crates/kernable-kernel/tests/fixtures/format-<n>` holds a frozen store of the current data format; `make check` verifies and runs it. There are no migrations before the first release: a format change bumps `kernable_store::FORMAT`, and the fixture is regenerated in a new directory (`KERNABLE_WRITE_FIXTURES=1` fills only missing ones).
+`crates/kernable-kernel/tests/fixtures/format-<n>` holds a frozen store of the current data format; `make check` verifies and runs it. Before 1.0 the format stays 1 and changes in place: after a change, delete the directory and write it again with `KERNABLE_WRITE_FIXTURES=1` (see `tests/compat.rs`).
 
 ## Status
 
