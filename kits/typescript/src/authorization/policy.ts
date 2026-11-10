@@ -284,7 +284,18 @@ export function decide(k: Knowledge, check: Check, now: number, options: DecideO
   // Oneself: the account and its sessions at once; an identity lives in a tenant, so only after
   // the tenant's checks (suspended, MFA, enforced SSO) below.
   const self = rule.self === true && isSelf(k, check, r, target);
-  if (self && target?.type !== "identity.identity") return allow(`oneself (${target?.type})`);
+  if (self && target?.type !== "identity.identity") {
+    // Oneself in another tenant than the platform's (the API checks a person against a tenant they
+    // join, before they hold an identity there): that tenant's checks too.
+    if (check.domain === "account" && check.tenant !== PLATFORM_TENANT) {
+      const t = k.tenants.get(check.tenant);
+      if (!t || t.status === "deleted") return no("forbidden", "No such tenant");
+      if (t.status !== "active") return no("tenant_suspended", `The tenant is ${t.status}`);
+      if (t.mfaRequired && sender.factors.length < 2 && !sender.factors.includes("passkey")) return no("mfa_required", "This tenant requires a second factor");
+      if (t.ssoEnforced && !options.assumeSession && sender.method !== `sso:${t.ssoEnforced}`) return no("sso_required", "Sign in through the tenant's single sign-on");
+    }
+    return allow(`oneself (${target?.type})`);
+  }
   // The person suspends their own account only for themselves.
   if (type === "account.SuspendAccount" && data.reason === "owner_requested" && isSelf(k, check, r, target)) return allow("one's own account, for oneself");
 

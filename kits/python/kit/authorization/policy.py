@@ -277,6 +277,19 @@ def decide(k: Knowledge, check, now: int, trace: list[str] | None = None, assume
     # Oneself: the account and its sessions at once; an identity only after the tenant's checks.
     self_ = bool(rule.get("self")) and _is_self(k, check, r, target)
     if self_ and target and target["type"] != "identity.identity":
+        # Oneself in another tenant than the platform's (the API checks a person against a tenant
+        # they join, before they hold an identity there): that tenant's checks too.
+        if check.domain == "account" and check.tenant != PLATFORM_TENANT:
+            t = k.tenants.get(check.tenant)
+            if not t or t["status"] == "deleted":
+                return no("forbidden", "No such tenant")
+            if t["status"] != "active":
+                return no("tenant_suspended", f"The tenant is {t['status']}")
+            if t["mfa_required"] and not two:
+                return no("mfa_required", "This tenant requires a second factor")
+            sso = t.get("sso_enforced")
+            if sso and not assume_session and sender["method"] != f"sso:{sso}":
+                return no("sso_required", "Sign in through the tenant's single sign-on")
         return allow(f"oneself ({target['type']})")
     if type_ == "account.SuspendAccount" and data.get("reason") == "owner_requested" and _is_self(k, check, r, target):
         return allow("one's own account, for oneself")

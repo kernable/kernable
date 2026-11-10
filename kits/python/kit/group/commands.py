@@ -4,6 +4,7 @@ import re
 
 from kernable import Command, Rejected
 
+from ..shared.secrets import trim_space
 from .aggregates import Group
 from .domain import Permission
 from .events import GroupCreated, GroupDeleted, GroupPermissionsSet, GroupUpdated
@@ -34,9 +35,9 @@ def permissions(value) -> list[Permission]:
 
 
 def name(value) -> str:
-    if not isinstance(value, str) or not value.strip() or len(value) > 100 or value.strip().lower() == "owners":
+    if not isinstance(value, str) or not trim_space(value) or len(value) > 100 or trim_space(value).lower() == "owners":
         raise Rejected("A group needs a name other than owners", "invalid_name")
-    return value.strip()
+    return trim_space(value)
 
 
 class CreateGroup(Command):

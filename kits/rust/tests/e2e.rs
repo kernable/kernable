@@ -45,8 +45,8 @@ use kit::shared::constants::PLATFORM_TENANT as PLATFORM;
 use kit::shared::mail::{MemoryMailer, Purpose, use_mailer};
 use kit::shared::secrets::{new_id, totp_code};
 use kit::tenancy::{
-    AccountSignUp, CreateTenant, DeleteTenant, GetTenant, Owner, SignUpPolicy, SuspendTenant,
-    SuspensionReason, TenantSignUp, TenantStatus,
+    AccountSignUp, CreateTenant, DeleteTenant, GetTenant, Owner, ReactivateTenant, RequireMfa,
+    SignUpPolicy, SuspendTenant, SuspensionReason, TenantSignUp, TenantStatus,
 };
 use serde_json::{Value, json};
 
@@ -400,6 +400,7 @@ async fn the_kit_end_to_end() {
     lists_and_explain(&world).await;
     example_server(&world).await;
     invitation_links(&world).await;
+    joining_checks_the_tenant(&world).await;
     a_process_acts_as_its_own_identity(&world).await;
     world.stop_app();
 }
@@ -1296,7 +1297,7 @@ async fn oauth_and_sso(w: &World) {
         .await,
     );
 
-    // Mia of lumen.example joins with a password; in Lumen only an SSO session counts.
+    // Mia of lumen.example has a password; in Lumen only an SSO session counts, from accepting on.
     let (mia, mia_id) = w.person("mia@lumen.example").await;
     w.send(
         CreateInvitation {
@@ -1309,12 +1310,30 @@ async fn oauth_and_sso(w: &World) {
         as_liam.clone(),
     )
     .await;
-    w.api
-        .accept_invitation(
-            &w.mailer.last("mia@lumen.example").unwrap().token,
-            Some(&mia),
+    let mias_invitation = w.mailer.last("mia@lumen.example").unwrap().token;
+    refused(
+        w.api
+            .accept_invitation(&mias_invitation, Some(&mia), None)
+            .await,
+        "sso_required",
+    );
+    // Through the company's provider: linked to her account by the verified domain and email.
+    let mia_user = json!({ "sub": "c-mia", "email": "mia@lumen.example", "email_verified": true });
+    let mia_sso = sso
+        .oidc_finish(
+            &company.login(
+                &start(None, Some("mia@lumen.example"), None).await,
+                mia_user,
+            ),
             None,
         )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(mia_sso.account_id, mia_id);
+    let mia_sso_claims = sso.check(&mia_sso.access_token).unwrap();
+    w.api
+        .accept_invitation(&mias_invitation, Some(&mia_sso_claims), None)
         .await
         .unwrap();
     let as_mia = w.context(&mia, Some(&lumen)).await;
@@ -1335,23 +1354,9 @@ async fn oauth_and_sso(w: &World) {
         Err(Error::Rejected(r)) => assert_eq!(r.code, "sso_required"),
         other => panic!("expected sso_required, got {:?}", other.map(|r| r.id)),
     }
-    // Through the company's provider: linked to her account by the verified domain and email.
-    let mia_user = json!({ "sub": "c-mia", "email": "mia@lumen.example", "email_verified": true });
-    let mia_sso = sso
-        .oidc_finish(
-            &company.login(
-                &start(None, Some("mia@lumen.example"), None).await,
-                mia_user,
-            ),
-            None,
-        )
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(mia_sso.account_id, mia_id);
     let as_mia_sso = w
         .api
-        .context_for(&sso.check(&mia_sso.access_token).unwrap(), Some(&lumen))
+        .context_for(&mia_sso_claims, Some(&lumen))
         .await
         .unwrap();
     assert_eq!(own(as_mia_sso).await.unwrap().id, as_mia.sender_identity);
@@ -1652,6 +1657,73 @@ async fn example_server(w: &World) {
 }
 
 /// Invitation links let people join with groups; a query about one order is decided on that order.
+/// Accepting and joining check the tenant joined too: suspended, a second factor required.
+async fn joining_checks_the_tenant(w: &World) {
+    let api = &w.api;
+    let (tara, tara_id) = w.person("join-tara@example.com").await;
+    let taras = new_id();
+    committed(
+        &w.send(
+            tenant("taras", "Tara's", &tara_id, Some(TenantStatus::Active)),
+            &taras,
+            &taras,
+            w.context(&tara, None).await,
+        )
+        .await,
+    );
+    let as_tara = w.context(&tara, Some(&taras)).await;
+    let (ugo, _) = w.person("join-ugo@example.com").await;
+    let (link, _) = api
+        .create_invitation_link(as_tara.clone(), &taras, NewInvitationLink::default())
+        .await
+        .unwrap();
+    let invite = CreateInvitation {
+        email: "join-ugo@example.com".into(),
+        groups: None,
+        owner: None,
+    };
+    committed(&w.send(invite, &new_id(), &taras, as_tara.clone()).await);
+    let invitation = w.mailer.last("join-ugo@example.com").unwrap().token;
+
+    // The tenant requires a second factor: Ugo's password session neither joins nor accepts.
+    let mfa = |required| RequireMfa { required };
+    committed(&w.send(mfa(true), &taras, &taras, as_tara.clone()).await);
+    refused(
+        api.join_with_invitation_link(&ugo, &link).await,
+        "mfa_required",
+    );
+    refused(
+        api.accept_invitation(&invitation, Some(&ugo), None).await,
+        "mfa_required",
+    );
+    // (Tara herself has one factor only now: the platform lifts it.)
+    let platform = RequestContext {
+        bypass_authorization: true,
+        ..RequestContext::default()
+    };
+    committed(&w.send(mfa(false), &taras, &taras, platform).await);
+
+    // Suspended: nobody joins it.
+    let suspend = SuspendTenant {
+        reason: SuspensionReason::OwnerRequested,
+    };
+    committed(&w.send(suspend, &taras, &taras, as_tara.clone()).await);
+    refused(
+        api.join_with_invitation_link(&ugo, &link).await,
+        "tenant_suspended",
+    );
+    refused(
+        api.accept_invitation(&invitation, Some(&ugo), None).await,
+        "tenant_suspended",
+    );
+    committed(&w.send(ReactivateTenant {}, &taras, &taras, as_tara).await);
+
+    // Active again, without the requirement: Ugo accepts.
+    api.accept_invitation(&invitation, Some(&ugo), None)
+        .await
+        .unwrap();
+}
+
 async fn invitation_links(w: &World) {
     let api = &w.api;
     let (olga, olga_id) = w.person("link-olga@example.com").await;

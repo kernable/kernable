@@ -149,8 +149,10 @@ export interface Session {
   endReason?: SessionEnd;
 }
 
+// Snapshot schema "2": the state gained `previousTokenHashes`; snapshots of schema "1" lack it, so
+// the kernel drops them and the state is rebuilt from the events.
 export const sessionAggregate = accountDomain
-  .aggregate<Session>("session", { status: "none", factors: [], generation: 0, previousTokenHashes: [], openedAt: 0, lastRefreshAt: 0 })
+  .aggregate<Session>("session", { status: "none", factors: [], generation: 0, previousTokenHashes: [], openedAt: 0, lastRefreshAt: 0 }, { schema: "2" })
   .apply(SessionOpened, (s, d) => {
     s.status = "active";
     s.accountId = d.accountId;

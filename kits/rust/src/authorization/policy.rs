@@ -553,6 +553,31 @@ pub fn decide(
         .as_ref()
         .filter(|t| itself && t.r#type != "identity.identity")
     {
+        // Oneself in another tenant than the platform's (the API checks a person against a tenant
+        // they join, before they hold an identity there): that tenant's checks too.
+        if check.domain == "account" && check.tenant != PLATFORM_TENANT {
+            match k.get::<TenantK>(TENANTS, &check.tenant) {
+                None => no!("forbidden", "No such tenant"),
+                Some(t) if t.status == "deleted" => no!("forbidden", "No such tenant"),
+                Some(t) if t.status != "active" => {
+                    no!("tenant_suspended", "The tenant is {}", t.status)
+                }
+                Some(t) if t.mfa_required && !two => {
+                    no!("mfa_required", "This tenant requires a second factor")
+                }
+                Some(t) => {
+                    if let Some(sso) = t.sso_enforced
+                        && !assume_session
+                        && sender.method != format!("sso:{sso}")
+                    {
+                        no!(
+                            "sso_required",
+                            "Sign in through the tenant's single sign-on"
+                        );
+                    }
+                }
+            }
+        }
         allow!("oneself ({})", t.r#type);
     }
     if r#type == "account.SuspendAccount"

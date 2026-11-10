@@ -40,7 +40,7 @@ def order_aggregate():
 
 def worker(*aggregates) -> Worker:
     key = Key(VECTORS["key"]["seed"])
-    return Worker(grpc.insecure_channel("unix:/nonexistent"), key, aggregates, _Log("test", "test.key", key.id))
+    return Worker._new(grpc.insecure_channel("unix:/nonexistent"), key, aggregates, _Log("test", "test.key", key.id))
 
 
 class IndexSigning(unittest.TestCase):

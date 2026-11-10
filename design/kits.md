@@ -1,6 +1,6 @@
 # Kits: the event catalogue
 
-Status: decided, built in TypeScript, Python and Rust (merged 2026-11-06); where the build differs from the first catalogue, this file follows the build ("Found while building" at the end). The user documentation is `docs/kits/`, with tables generated from the TypeScript kit. The kits are the open set of tenancy, accounts, identities, groups, invitations and authorization that each SDK copies into a customer's project: `npx @kernable/sdk add kit`, `kernable-sdk add kit` for Python and Rust. Section by section, each decided before it was built. This catalogue is the contract the TypeScript, Python and Rust sets share; the shared fixtures in `kits/fixtures/` are written by hand from it, and all three kits run them.
+Status: decided, built in TypeScript, Python and Rust; where the build differs from the first catalogue, this file follows the build ("Found while building" at the end). The user documentation is `docs/kits/`, with tables generated from the TypeScript kit. The kits are the open set of tenancy, accounts, identities, groups, invitations and authorization that each SDK copies into a customer's project: `npx @kernable/sdk add kit`, `kernable-sdk add kit` for Python and Rust. Section by section, each decided before it was built. This catalogue is the contract the TypeScript, Python and Rust sets share; the shared fixtures in `kits/fixtures/` are written by hand from it, and all three kits run them.
 
 ## Conventions
 
@@ -90,7 +90,7 @@ A script in the set, run once with a privileged key (`bypassAuthorization`), cre
 
 ### Decided
 
-Owners only on the Tenant, `owners` a virtual group; `SuspendTenant` also from `pending` (reason `rejected`); bootstrap by script; a tenant the platform creates gets its first owner by an owner invitation (2026-11-06).
+Owners only on the Tenant, `owners` a virtual group; `SuspendTenant` also from `pending` (reason `rejected`); bootstrap by script; a tenant the platform creates gets its first owner by an owner invitation.
 
 ## account
 
@@ -223,7 +223,7 @@ Unique key `domain`: global, each verified domain, so one tenant per domain. Wit
 
 ### Decided
 
-All five as proposed (2026-11-06):
+All five as proposed:
 
 1. **Registration does not reveal existing accounts.** `RegisterAccount` with a taken email is refused by the unique key; the API answers "check your email" either way and the existing account gets a "you already have an account" mail (`NoteRegistrationAttempt`).
 2. **A password change or reset ends the other sessions.**
@@ -289,7 +289,7 @@ API keys have the form `key_<keyId>_<secret>`. The API generates them and shows 
 - `tenancy.TenantDeleted`, `account.AccountDeleted` → `DeleteIdentity` for each identity concerned.
 - `group.GroupDeleted` → `RevokeMembership` for each membership of the group.
 
-### Decided (2026-11-06)
+### Decided
 
 1. **No separate event per API key use**. Every command made with a key carries the key ID in `senderSession`, so the log already shows every use. Queries are not stored, for people neither.
 2. **The API checks API keys** against the hash from `FindApiKey`, cached briefly, instead of a command per request. A revoked key is refused at once by the middleware, which learns of `ApiKeyRevoked` from the events.
@@ -328,7 +328,7 @@ Groups of the platform tenant hold their permissions in every tenant.
 
 `Explain` is answered by the authorization middleware's read model, the same knowledge it decides from. The middleware gets its own section.
 
-### Decided (2026-11-06)
+### Decided
 
 1. **No escalation when editing groups either**: creating a group or changing its permissions is allowed only with permissions the sender holds; otherwise someone who may edit groups could give their own group `*`.
 2. **`SetPermissions` replaces the whole list** in one event, rather than add and remove events per permission: simpler to read in the audit.
@@ -375,12 +375,12 @@ The API runs it, since the person may have no account yet:
 | `ListInvitations` | the tenant's invitations (open ones in user lists) | group |
 | `PeekInvitation` | `{ tenant, invitationId, email, owner, expired }` for a token whose secret is right, to show the acceptance page | `api` |
 
-### Decided (2026-11-06)
+### Decided
 
 1. **Accepting as described**, run by the API in up to two commands.
 2. **Invitations keep the email until the tenant is deleted** (for the audit, who was invited when), unless the person asks to be erased (`EraseInvitation`).
 
-### Invitation links (2026-11-09)
+### Invitation links
 
 A second aggregate, `invitation.link`, random ID, under its tenant: `status` (`none` · `open` · `revoked`), `groups`, `hash` (sha256 of the whole token `link_<tenantId>.<linkId>.<secret>`; the API shows the token once), `label`, `expiresAt` and `maxUses` (null: none), `accounts` (who joined, each once).
 
@@ -445,7 +445,7 @@ Refusals reach the client as `PERMISSION_DENIED` with the code. `group.Explain` 
 
 The set's listeners take kernable's reserved orders: the authorization middleware -30, the cleanup reactors -25 (they must see a deleted tenant's rows before the read models drop them), the read models -20, the other reactors -10. Listener names are qualified with their domain (`account.mail`, `invitation.mail`): the kernel tracks listeners by name across domains. Their keys are granted `reserved_order`; app listeners cannot go below 0.
 
-### Decided (2026-11-06)
+### Decided
 
 1. **Order -30** through a grant, not 0.
 2. **`onBehalfOf` is refused** until impersonation for support comes (later).
@@ -453,15 +453,16 @@ The set's listeners take kernable's reserved orders: the authorization middlewar
 4. **The index is kept in a store** (the SDK's SQLite listener store), so a restart resumes instead of replaying the whole log while every request is refused.
 5. **Escalation is judged conservatively**: only the sender's permissions without scope and `when` count as held.
 
-## Found while building (confirmed 2026-11-06)
+## Found while building
 
 - **An account with TOTP on needs it in every session**, not only in tenants that require MFA; one line in `policy.ts` to narrow it.
 - **Owners are exempt from enforced SSO**, so a broken SSO can be mended; everyone else in the tenant needs an SSO session.
 - **Oneself, for an identity, after the tenant's checks**: reading one's own identity in a suspended tenant, or with enforced SSO, is refused like anything else (found by the SSO test; the account and its sessions stay reachable).
+- **Oneself, for an account, in another tenant than the platform's**: the tenant's checks apply too (it exists, not suspended, MFA and SSO as it requires). Accepting an invitation or joining by a link checks the target tenant this way first, so a session without the second factor, or a password session where SSO is enforced, cannot join.
 - **The API's key needs `cache` on `account`** (passkey challenges and OIDC state live a few minutes in the kernable cache).
 - **Every `events.ts` declares its events on its domain**, so an event without `apply` is known too.
 
-## Differences from the first catalogue (checked against the code 2026-11-09)
+## Differences from the first catalogue (checked against the code)
 
 Found while writing `docs/kits/`; the tables above now follow the code.
 

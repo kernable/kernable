@@ -2,6 +2,7 @@
 
 import { Command, Rejected } from "@kernable/sdk";
 
+import { chars, trimSpace } from "../shared/secrets.ts";
 import { groupAggregate } from "./aggregates.ts";
 import type { Permission } from "./domain.ts";
 import { GroupCreated, GroupDeleted, GroupPermissionsSet, GroupUpdated } from "./events.ts";
@@ -26,10 +27,10 @@ export function permissions(value: unknown): Permission[] {
 }
 
 export function name(value: unknown): string {
-  if (typeof value !== "string" || !value.trim() || value.length > 100 || value.trim().toLowerCase() === "owners") {
+  if (typeof value !== "string" || !trimSpace(value) || chars(value) > 100 || trimSpace(value).toLowerCase() === "owners") {
     throw new Rejected("A group needs a name other than owners", "invalid_name");
   }
-  return value.trim();
+  return trimSpace(value);
 }
 
 /** The middleware lets the sender hand out only permissions it holds. */

@@ -1,5 +1,6 @@
 // The group aggregates: state, how each event changes it, unique keys and facts.
 
+import { trimSpace } from "../shared/secrets.ts";
 import { groupDomain, type Permission } from "./domain.ts";
 import { GroupCreated, GroupDeleted, GroupPermissionsSet, GroupUpdated } from "./events.ts";
 
@@ -24,5 +25,5 @@ export const groupAggregate = groupDomain
   })
   .apply(GroupPermissionsSet, (s, d) => void (s.permissions = d.permissions))
   .apply(GroupDeleted, (s) => void (s.status = "deleted"))
-  .unique("name", (s) => (s.status === "active" ? s.name?.trim().toLowerCase() : null))
+  .unique("name", (s) => (s.status === "active" ? (s.name ? trimSpace(s.name).toLowerCase() : null) : null))
   .fact("active", (s) => s.status === "active");

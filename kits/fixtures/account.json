@@ -3036,6 +3036,241 @@
         "keys": [],
         "facts": []
       }
+    },
+    {
+      "name": "a byte order mark in an address is space: not an email address",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "RegisterAccount",
+        "data": {
+          "email": "ann\ufeff@example.com",
+          "name": "Ann"
+        }
+      },
+      "rejected": "invalid_email"
+    },
+    {
+      "name": "a next line (U+0085) in an address is space: not an email address",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "RegisterAccount",
+        "data": {
+          "email": "ann\u0085@example.com",
+          "name": "Ann"
+        }
+      },
+      "rejected": "invalid_email"
+    },
+    {
+      "name": "a no-break space in an address is space: not an email address",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "RegisterAccount",
+        "data": {
+          "email": "ann\u00a0@example.com",
+          "name": "Ann"
+        }
+      },
+      "rejected": "invalid_email"
+    },
+    {
+      "name": "an ideographic space in an address is space: not an email address",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "RegisterAccount",
+        "data": {
+          "email": "ann@exam\u3000ple.com",
+          "name": "Ann"
+        }
+      },
+      "rejected": "invalid_email"
+    },
+    {
+      "name": "a control character in an address (U+001C) is space: not an email address",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "RegisterAccount",
+        "data": {
+          "email": "ann\u001c@example.com",
+          "name": "Ann"
+        }
+      },
+      "rejected": "invalid_email"
+    },
+    {
+      "name": "every kit trims the same space characters off an address: byte order mark, next line, ideographic space",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "RegisterAccount",
+        "data": {
+          "email": "\ufeff\u0085 Ann@Example.com\u3000",
+          "name": "Ann",
+          "verified": true
+        }
+      },
+      "then": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": null,
+            "verified": true,
+            "at": 1000000
+          }
+        }
+      ],
+      "index": {
+        "keys": [
+          {
+            "name": "email",
+            "value": "ann@example.com",
+            "scope": "tenant",
+            "subject": "a1"
+          }
+        ],
+        "facts": [
+          "active"
+        ]
+      }
+    },
+    {
+      "name": "a name has at most 200 characters, counted in code points: 200 emoji-heavy ones are taken",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "RegisterAccount",
+        "data": {
+          "email": "ann@example.com",
+          "name": "👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦😀😀😀😀",
+          "verified": true
+        }
+      },
+      "then": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦😀😀😀😀",
+            "passwordHash": null,
+            "verified": true,
+            "at": 1000000
+          }
+        }
+      ],
+      "index": {
+        "keys": [
+          {
+            "name": "email",
+            "value": "ann@example.com",
+            "scope": "tenant",
+            "subject": "a1"
+          }
+        ],
+        "facts": [
+          "active"
+        ]
+      }
+    },
+    {
+      "name": "a name of 201 characters, counted in code points, is too long",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "RegisterAccount",
+        "data": {
+          "email": "ann@example.com",
+          "name": "👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦😀😀😀😀😀"
+        }
+      },
+      "rejected": "invalid_name"
+    },
+    {
+      "name": "every kit trims the same space characters off a name",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "RegisterAccount",
+        "data": {
+          "email": "ann@example.com",
+          "name": "\ufeff\u0085Ann\u3000",
+          "verified": true
+        }
+      },
+      "then": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": null,
+            "verified": true,
+            "at": 1000000
+          }
+        }
+      ],
+      "index": {
+        "keys": [
+          {
+            "name": "email",
+            "value": "ann@example.com",
+            "scope": "tenant",
+            "subject": "a1"
+          }
+        ],
+        "facts": [
+          "active"
+        ]
+      }
+    },
+    {
+      "name": "a name of only a byte order mark is no name",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "RegisterAccount",
+        "data": {
+          "email": "ann@example.com",
+          "name": "\ufeff"
+        }
+      },
+      "rejected": "invalid_name"
     }
   ]
 }

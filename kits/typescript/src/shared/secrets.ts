@@ -50,9 +50,30 @@ export async function checkPassword(stored: string | null | undefined, password:
   }
 }
 
+/**
+ * The characters the kits take for space: controls, spaces, line and paragraph separators and the
+ * byte order mark. One explicit set, the same in every language's kit (each language's own idea of
+ * whitespace differs).
+ */
+const SPACE = "\\x00-\\x20\\x7f\\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff";
+const SPACE_ANY = new RegExp(`[${SPACE}]`);
+const SPACE_EDGES = new RegExp(`^[${SPACE}]+|[${SPACE}]+$`, "g");
+/** An unpaired surrogate: no character at all (with the `u` flag, paired ones are one code point). */
+const LONE_SURROGATE = /\p{Cs}/u;
+
+/** `value` without the kits' space characters at either end. */
+export function trimSpace(value: string): string {
+  return value.replace(SPACE_EDGES, "");
+}
+
+/** The length of `value` in Unicode code points: how every kit counts the length of names and secrets. */
+export function chars(value: string): number {
+  return [...value].length;
+}
+
 /** Lowercased and trimmed: how emails are compared and held as unique keys. */
 export function normalEmail(email: unknown): string {
-  return typeof email === "string" ? email.trim().toLowerCase() : "";
+  return typeof email === "string" ? trimSpace(email).toLowerCase() : "";
 }
 
 /** The domain of an address, lowercased: what follows its `@`. */
@@ -62,18 +83,20 @@ export function emailDomain(email: unknown): string {
 }
 
 /**
- * An address: one `@`, a local part, a domain of at least two labels, none of them empty, no
- * whitespace, at most 254 bytes in UTF-8. The same rule in every language's kit.
+ * An address: one `@`, a local part, a domain of at least two labels, none of them empty, none of
+ * the kits' space characters (see `SPACE`), no unpaired surrogates, at most 254 bytes in UTF-8. The
+ * same rule in every language's kit.
  */
 export function validEmail(email: string): boolean {
   const at = email.indexOf("@");
-  if (at < 1 || email.indexOf("@", at + 1) !== -1 || /\s/.test(email) || Buffer.byteLength(email, "utf8") > 254) return false;
+  if (at < 1 || email.indexOf("@", at + 1) !== -1 || SPACE_ANY.test(email) || LONE_SURROGATE.test(email)) return false;
+  if (Buffer.byteLength(email, "utf8") > 254) return false;
   const labels = email.slice(at + 1).split(".");
   return labels.length >= 2 && labels.every((l) => l.length > 0);
 }
 
 export function validPassword(password: unknown): password is string {
-  return typeof password === "string" && password.length >= 10 && password.length <= 1024;
+  return typeof password === "string" && chars(password) >= 10 && chars(password) <= 1024;
 }
 
 /** An invitation's token names its tenant too, so the API knows where to accept it: four parts. */

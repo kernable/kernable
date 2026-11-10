@@ -84,7 +84,7 @@ class Partitions(unittest.TestCase):
         self.assertGreater(listener.store.committed_for("p1"), 0)
         self.assertGreater(listener.store.committed_for("p2"), 0)
 
-        # t1 moves to p2 with its events (S4); the client finds it there.
+        # t1 moves to p2 with its events; the client finds it there.
         k.submit("counters", "Counter", "c1", "Increment", {"by": 3}, id="t1-2")
         moved = p1.cli("partitions", "move", p1.url, "app.key", "t1", "p2")
         self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
@@ -117,7 +117,7 @@ class Partitions(unittest.TestCase):
         self.assertEqual(order, [1, 2, 3])
 
         # A read model across tenants, slow on acme's events: asked in t9's partition (p1), a
-        # query with all_partitions waits until it has processed p2 as well (S5).
+        # query with all_partitions waits until it has processed p2 as well.
         total = {"sum": 0}
         slow = counters_domain.read_model("sum", reconnect_s=0.05)
 

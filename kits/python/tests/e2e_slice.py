@@ -37,7 +37,7 @@ from kit.invitation.commands import CreateInvitation, EraseInvitation, RevokeInv
 from kit.invitation.queries import ListInvitations  # noqa: E402
 from kit.shared.mail import MemoryMailer, use_mailer  # noqa: E402
 from kit.shared.secrets import totp_code  # noqa: E402
-from kit.tenancy.commands import CreateTenant, DeleteTenant, SuspendTenant  # noqa: E402
+from kit.tenancy.commands import CreateTenant, DeleteTenant, ReactivateTenant, RequireMfa, SuspendTenant  # noqa: E402
 from kit.tenancy.queries import GetTenant  # noqa: E402
 from oidc_provider import OidcProvider  # noqa: E402
 
@@ -596,10 +596,16 @@ class SliceTest(unittest.TestCase):
             self.assertEqual(sso.verify_sso_domain(lumen, sso_id, "lumen.example"), {"ok": True})
             self.committed(submit(EnforceSso(enforced=True), sso_id, lumen, as_liam))
 
-            # Mia of lumen.example joins with a password; in Lumen only an SSO session counts.
+            # Mia of lumen.example has a password; in Lumen only an SSO session counts, from accepting on.
             mia, mia_id = person("mia@lumen.example")
             submit(CreateInvitation(email="mia@lumen.example"), new_id(), lumen, as_liam)
-            self.assertTrue(api.accept_invitation(mailer.last("mia@lumen.example").token, claims=mia)["ok"])
+            mias_invitation = mailer.last("mia@lumen.example").token
+            self.assertEqual(api.accept_invitation(mias_invitation, claims=mia), {"ok": False, "reason": "sso_required"})
+            # Through the company's provider: linked to her account by the verified domain and email.
+            mia_sso = sso.oidc_finish(company.login(start(email="mia@lumen.example"), {"sub": "c-mia", "email": "mia@lumen.example", "email_verified": True}))
+            self.assertEqual(mia_sso.get("account_id"), mia_id, mia_sso)
+            mia_sso_claims = sso.check(mia_sso["access_token"])
+            self.assertTrue(api.accept_invitation(mias_invitation, claims=mia_sso_claims)["ok"])
             as_mia = api.context_for(mia, lumen)
 
             def own(context):
@@ -608,10 +614,7 @@ class SliceTest(unittest.TestCase):
             with self.assertRaises(Rejected) as caught:
                 own(as_mia)
             self.assertEqual(caught.exception.code, "sso_required")
-            # Through the company's provider: linked to her account by the verified domain and email.
-            mia_sso = sso.oidc_finish(company.login(start(email="mia@lumen.example"), {"sub": "c-mia", "email": "mia@lumen.example", "email_verified": True}))
-            self.assertEqual(mia_sso.get("account_id"), mia_id, mia_sso)
-            self.assertEqual(own(api.context_for(sso.check(mia_sso["access_token"]), lumen))["id"], as_mia.sender_identity)
+            self.assertEqual(own(api.context_for(mia_sso_claims, lumen))["id"], as_mia.sender_identity)
             # The owner keeps a password session, so a broken SSO can be mended.
             self.assertTrue(own(as_liam)["id"])
 
@@ -770,6 +773,36 @@ class SliceTest(unittest.TestCase):
         self.assertIsNone(api.peek_invitation_link(second["token"]))
         self.assertEqual(api.join_with_invitation_link(rosa, second["token"]), {"ok": False, "reason": "invalid_token"})
 
+
+    def test_10b_accepting_and_joining_check_the_tenant_joined_too(self):
+        """Accepting and joining check the tenant joined too: suspended, a second factor required."""
+        api: KitApi = S["api"]
+        tara, tara_id = person("join-tara@example.com")
+        taras = new_id()
+        self.committed(submit(CreateTenant(slug="taras", name="Tara's", owner={"account_id": tara_id}, status="active"),
+                              taras, taras, api.context_for(tara)))
+        as_tara = api.context_for(tara, taras)
+        ugo, _ = person("join-ugo@example.com")
+        link = api.create_invitation_link(as_tara, taras, [])
+        self.assertTrue(link["ok"], link)
+        self.committed(submit(CreateInvitation(email="join-ugo@example.com"), new_id(), taras, as_tara))
+        invitation = mailer.last("join-ugo@example.com").token
+
+        # The tenant requires a second factor: Ugo's password session neither joins nor accepts.
+        self.committed(submit(RequireMfa(required=True), taras, taras, as_tara))
+        self.assertEqual(api.join_with_invitation_link(ugo, link["token"]), {"ok": False, "reason": "mfa_required"})
+        self.assertEqual(api.accept_invitation(invitation, claims=ugo), {"ok": False, "reason": "mfa_required"})
+        # (Tara herself has one factor only now: the platform lifts it.)
+        self.committed(submit(RequireMfa(required=False), taras, taras, RequestContext(bypass_authorization=True)))
+
+        # Suspended: nobody joins it.
+        self.committed(submit(SuspendTenant(reason="owner_requested"), taras, taras, as_tara))
+        self.assertEqual(api.join_with_invitation_link(ugo, link["token"]), {"ok": False, "reason": "tenant_suspended"})
+        self.assertEqual(api.accept_invitation(invitation, claims=ugo), {"ok": False, "reason": "tenant_suspended"})
+        self.committed(submit(ReactivateTenant(), taras, taras, as_tara))
+
+        # Active again, without the requirement: Ugo accepts.
+        self.assertTrue(api.accept_invitation(invitation, claims=ugo)["ok"])
 
     def test_11_a_process_acts_as_its_own_identity_once_a_platform_group_holds(self):
         """The kit gives a registered process an identity and an API key; its commands need a platform group."""

@@ -1805,7 +1805,7 @@ class Kernable:
         """A worker that runs these aggregates' commands, in this client's service; see
         `Worker`. `run()` on it blocks until `stop()`: `k.worker(cart_aggregate).run()`."""
         aggregates = tuple(getattr(a, "__aggregate__", a) for a in aggregates)
-        return Worker(self._parts, self._key, aggregates, self._log, self._service)
+        return Worker._new(self._parts, self._key, aggregates, self._log, self._service)
 
     def app(self, *, domains: Iterable[Domain], service: str | None = None, version: str | None = None,
             description: str | None = None, metadata: dict[str, str] | None = None) -> "App":
@@ -1833,8 +1833,8 @@ class Kernable:
                             middlewares=[l for l in durable if l._middlewares],
                             metadata={**meta, **(metadata or {})},
                             processes=[p for d in domains for p in d.processes])
-        worker = Worker(self._parts, self._key, aggregates, self._log, service) if aggregates else None
-        handles = [ListenerHandle(self._parts, self._key, l, self._log, service, self) for l in listeners]
+        worker = Worker._new(self._parts, self._key, aggregates, self._log, service) if aggregates else None
+        handles = [ListenerHandle._new(self._parts, self._key, l, self._log, service, self) for l in listeners]
         return App(self, manifest, worker, handles, [d.name for d in domains])
 
     def apply(self, *, service: str | None = None, workers: Iterable[AggregateType] = (),
@@ -2056,7 +2056,7 @@ class Kernable:
         """A handle that runs a listener defined with `Domain.read_model` or `Domain.reactor`, in
         this client's service; see `ListenerHandle`. `run()` on it blocks until `stop()`:
         `k.listener(carts_readmodel).run()`. Each call gives a new handle."""
-        return ListenerHandle(self._parts, self._key, listener, self._log, self._service, self)
+        return ListenerHandle._new(self._parts, self._key, listener, self._log, self._service, self)
 
     def subscribe(self, handler: Callable[["StoredEvent"], None], *, after: int = 0,
                   types: Iterable[str] = (), reconnect_s: float = 1.0) -> "Subscription":
@@ -2074,7 +2074,7 @@ class Kernable:
         upcast, vault fields `None` and listed in `redacted`). The key needs `subscribe` for the
         types. With partitions, a stream per partition, each from the beginning (`after` names a
         position of one kernel); events are in order within a partition, not across them."""
-        sub = Subscription(self._parts, self._key, handler, after, list(types), reconnect_s, self._log)
+        sub = Subscription._new(self._parts, self._key, handler, after, list(types), reconnect_s, self._log)
         threading.Thread(target=sub.run, name="kernable subscription", daemon=True).start()
         return sub
 
@@ -2512,6 +2512,25 @@ class App:
         sys.stderr.write("\n".join(lines) + "\n")
 
 
+class _HandlerFailed(Exception):
+    """A handler's own error, carried out of a stream's loop: told apart from the stream's errors
+    (a `grpc.RpcError` from a request the handler made is no refusal of the stream)."""
+
+    def __init__(self, err: Exception):
+        super().__init__(str(err) or type(err).__name__)
+        self.err = err
+
+
+def _handle(handler: Callable, *args):
+    """Runs a handler; its errors come out as `_HandlerFailed`, except `ClientClosed`."""
+    try:
+        return handler(*args)
+    except ClientClosed:
+        raise
+    except Exception as err:
+        raise _HandlerFailed(err) from err
+
+
 class _Stream:
     """A bidirectional stream that reconnects until stopped."""
 
@@ -2529,6 +2548,14 @@ class _Stream:
         self._call = None
         self._outbox: queue.Queue | None = None
 
+    @classmethod
+    def _new(cls, *args, **kwargs):
+        """Made by the client (`Kernable.worker`, `.listener`, `.subscribe`), not by applications:
+        the constructor's arguments are the client's internals."""
+        stream = cls.__new__(cls)
+        stream._init(*args, **kwargs)
+        return stream
+
     def run(self) -> None:
         """Processes messages until `stop()`, reconnecting when the stream drops."""
         attempt = 0
@@ -2544,21 +2571,24 @@ class _Stream:
                     self._call.cancel()
                 outbox.put(self._hello())
                 for msg in self._call:
-                    reply = self._on(msg)
+                    reply = _handle(self._on, msg)
                     if reply is not None:
                         outbox.put(reply)
                 reason = "stream ended"
             except ClientClosed:
                 return
+            except _HandlerFailed as failed:  # a failing handler: reconnect and get the message again
+                reason = str(failed)
             except grpc.RpcError as err:
                 reason = err.details()
                 refused = err.code() in _REFUSALS
-            except Exception as err:  # a failing handler: reconnect and get the event again
+            except Exception as err:
                 reason = str(err) or type(err).__name__
-                if self._call is not None:
-                    self._call.cancel()
             finally:
                 outbox.put(None)
+                # Whatever ended the loop, the call ends with it (a no-op once it ended by itself).
+                if self._call is not None:
+                    self._call.cancel()
             attempt = 1 if self._connects > connects else attempt + 1
             if not self._stopped:
                 self._log.reconnect(self._what, reason, self._reconnect_s, attempt, refused, self._wake)
@@ -2660,7 +2690,7 @@ class Worker(_Stream):
     `threading.Thread(target=worker.run, daemon=True).start()`. `stop()` ends `run()`, also
     from another thread."""
 
-    def __init__(self, channel: "grpc.Channel | _Partitioned", key: Key, aggregates, log: _Log,
+    def _init(self, channel: "grpc.Channel | _Partitioned", key: Key, aggregates, log: _Log,
                  service: str = ""):
         """Use `Kernable.worker`."""
         super().__init__("worker", 1.0, log)
@@ -2684,7 +2714,7 @@ class Worker(_Stream):
         if parts is None:
             return
         if len(parts) > 1 or parts[0][0] != "":
-            self._run_children([Worker(channel, self._key, self._aggregates, self._log, self._service)
+            self._run_children([Worker._new(channel, self._key, self._aggregates, self._log, self._service)
                                 for _, channel in parts])
             return
         self._stub = rpc.WorkerGatewayStub(parts[0][1])
@@ -3034,7 +3064,7 @@ class ListenerHandle(_Stream):
     handled event, or skipped, for other event types) and `store` (the listener's `Store`, while
     `run()` has it open)."""
 
-    def __init__(self, channel: "grpc.Channel | _Partitioned", key: Key, listener: Listener, log: _Log,
+    def _init(self, channel: "grpc.Channel | _Partitioned", key: Key, listener: Listener, log: _Log,
                  service: str = "", kernable: "Kernable | None" = None, part: str = "",
                  store: "Store | None" = None, parent: "ListenerHandle | None" = None):
         """Use `Kernable.listener`. `part` and `store`: a partition's stream, sharing the
@@ -3055,7 +3085,7 @@ class ListenerHandle(_Stream):
         self._part = part
         self._shared = store is not None
         # As a partition's stream: the handle that runs it. As that handle: how far each
-        # partition's stream has handled, for the order across moves (S4).
+        # partition's stream has handled, for the order across tenant moves.
         self._parent = parent
         self._progress: dict[str, int] = {}
         self._moves = threading.Condition()
@@ -3105,7 +3135,7 @@ class ListenerHandle(_Stream):
                 self._start = self.position
         try:
             if partitioned:
-                self._run_children([ListenerHandle(channel, self._key, self.listener, self._log, self._service,
+                self._run_children([ListenerHandle._new(channel, self._key, self.listener, self._log, self._service,
                                                    self._kernable, part=name, store=self.store,
                                                    parent=self)
                                     for name, channel in parts])
@@ -3373,7 +3403,7 @@ class Subscription(_Stream):
     handled event) and `done` (a `threading.Event`, set once the subscription has ended:
     `sub.stop(); sub.done.wait(5)`)."""
 
-    def __init__(self, source: "grpc.Channel | _Partitioned", key: Key, handler: Callable, after: int,
+    def _init(self, source: "grpc.Channel | _Partitioned", key: Key, handler: Callable, after: int,
                  types: list[str], reconnect_s: float, log: _Log, part: str = "",
                  turns: "threading.Lock | None" = None):
         """Use `Kernable.subscribe`. `part` and `turns`: a partition's stream, taking turns with
@@ -3399,7 +3429,7 @@ class Subscription(_Stream):
                 self._read(parts[0][1])
                 return
             turns = threading.Lock()
-            self._run_children([Subscription(channel, self._key, self._handler, 0, self._types, self._reconnect_s,
+            self._run_children([Subscription._new(channel, self._key, self._handler, 0, self._types, self._reconnect_s,
                                              self._log, part=name, turns=turns)
                                 for name, channel in parts])
         finally:
@@ -3424,19 +3454,23 @@ class Subscription(_Stream):
                 for e in self._call:
                     event = _to_event(e)
                     if self._turns is None:
-                        self._handler(event)
+                        _handle(self._handler, event)
                     else:
                         with self._turns:
-                            self._handler(event)
+                            _handle(self._handler, event)
                     self.position = e.global_position
                 reason = "stream ended"
             except ClientClosed:
                 return
+            except _HandlerFailed as failed:  # a failing handler: reconnect and get the event again
+                reason = str(failed)
             except grpc.RpcError as err:
                 reason = err.details() or str(err.code())
                 refused = err.code() in _REFUSALS
-            except Exception as err:  # a failing handler: reconnect and get the event again
+            except Exception as err:
                 reason = str(err) or type(err).__name__
+            finally:
+                # Whatever ended the loop, the call ends with it (a no-op once it ended by itself).
                 if self._call is not None:
                     self._call.cancel()
             attempt = 1 if self.position > start else attempt + 1

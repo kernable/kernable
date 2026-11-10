@@ -871,7 +871,7 @@ struct HandleInner {
     /// As a partition's stream: the handle that runs it.
     parent: Option<Arc<HandleInner>>,
     /// As that handle: how far each partition's stream has handled, for the order across
-    /// moves (S4); `moved` counts the changes.
+    /// tenant moves; `moved` counts the changes.
     progress: Mutex<HashMap<String, u64>>,
     moved: watch::Sender<u64>,
     /// As a partition's stream: tenants it read the map again for.

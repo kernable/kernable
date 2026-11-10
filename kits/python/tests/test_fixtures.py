@@ -86,5 +86,14 @@ for file in sorted(DIR.glob("*.json")):
         setattr(FixturesTest, f"test_{spec['domain']}_{i:03d}_{re.sub(r'[^a-z0-9]+', '_', case['name'].lower())[:60]}", make(spec["domain"], case))
 
 
+class EmailTest(unittest.TestCase):
+    """What JSON fixtures cannot carry: a lone surrogate, which a Python str can hold."""
+
+    def test_a_lone_surrogate_is_not_an_email_address(self):
+        from kit.shared.secrets import valid_email
+        self.assertFalse(valid_email("ann\ud800@example.com"))
+        self.assertFalse(valid_email("ann@example.com\udfff"))
+
+
 if __name__ == "__main__":
     unittest.main()

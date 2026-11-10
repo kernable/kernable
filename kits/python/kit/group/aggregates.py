@@ -2,6 +2,7 @@
 
 from kernable import Aggregate
 
+from ..shared.secrets import trim_space
 from .domain import group_domain
 from .events import GroupCreated, GroupDeleted, GroupPermissionsSet, GroupUpdated
 
@@ -36,7 +37,7 @@ def _(s: Group):
     s.status = "deleted"
 
 
-Group.unique("name", lambda s: s.name.strip().lower() if s.status == "active" and s.name else None)
+Group.unique("name", lambda s: trim_space(s.name).lower() if s.status == "active" and s.name else None)
 Group.fact("active", lambda s: s.status == "active")
 
 #: The aggregate type, for workers and `requires`.

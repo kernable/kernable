@@ -71,11 +71,11 @@ does not decide who may do what.
 | **Account changes** | `changePassword(claims, current, next)` | ends every other session |
 | | `requestPasswordReset(email)`, `resetPassword(token, next)` | the reset by mail; the request answers the same for unknown addresses |
 | | `requestEmailChange(claims, email)`, `confirmEmailChange(token)` | the change, confirmed from the new address |
-| **Invitations** | `peekInvitation(token)` | tenant name, email, whether it expired; nothing for a wrong secret |
-| | `acceptInvitation(token, { claims } \| { name, password })` | as the signed-in account (its session checked), or as a new person ([Invitations](./invitation#the-flow)) |
+| **Invitations** | `peekInvitation(token)` | the tenant (its ID), the invitation ID, the email, whether it makes an owner, whether it expired; nothing for a wrong secret |
+| | `acceptInvitation(token, { claims } \| { name, password })` | as the signed-in account (its session checked, also against the invitation's tenant: active, its second factor, its enforced SSO), or as a new person ([Invitations](./invitation#the-flow)) |
 | **Invitation links** | `createInvitationLink(context, tenant, { groups, label?, expiresAt?, maxUses? })` | the link's token, shown this once |
 | | `peekInvitationLink(token)` | tenant, label, whether it can be used; nothing for a wrong token |
-| | `joinWithInvitationLink(claims, token)` | the signed-in account (its session checked) joins with the link's groups ([Invitation links](./invitation#invitation-links)) |
+| | `joinWithInvitationLink(claims, token)` | the signed-in account (its session checked, also against the link's tenant) joins with the link's groups ([Invitation links](./invitation#invitation-links)) |
 | **Services** | `createApiKey(context, tenant, identityId, label?, expiresAt?)` | the key, shown this once |
 | | `checkApiKey(key)` | the request context of the key, or null |
 

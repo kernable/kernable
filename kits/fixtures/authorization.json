@@ -2449,6 +2449,278 @@
           }
         }
       ]
+    },
+    {
+      "name": "oneself in a tenant one joins (no identity there yet): allowed when its checks pass",
+      "check": {
+        "kind": "query",
+        "tenant": "t1",
+        "domain": "account",
+        "type": "ListSessions",
+        "target": {
+          "type": "account.account",
+          "id": "a-out"
+        },
+        "data": {
+          "accountId": "a-out"
+        },
+        "request": {
+          "senderAccount": "a-out",
+          "senderSession": "s-out"
+        }
+      },
+      "expect": "allow",
+      "extra": []
+    },
+    {
+      "name": "... refused while the tenant is suspended",
+      "check": {
+        "kind": "query",
+        "tenant": "t1",
+        "domain": "account",
+        "type": "ListSessions",
+        "target": {
+          "type": "account.account",
+          "id": "a-out"
+        },
+        "data": {
+          "accountId": "a-out"
+        },
+        "request": {
+          "senderAccount": "a-out",
+          "senderSession": "s-out"
+        }
+      },
+      "expect": "tenant_suspended",
+      "extra": [
+        {
+          "domain": "tenancy",
+          "aggregateType": "tenant",
+          "type": "TenantSuspended",
+          "tenant": "t1",
+          "aggregateId": "t1",
+          "data": {
+            "reason": "unpaid",
+            "at": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "... refused with one factor where the tenant requires a second",
+      "check": {
+        "kind": "query",
+        "tenant": "t1",
+        "domain": "account",
+        "type": "ListSessions",
+        "target": {
+          "type": "account.account",
+          "id": "a-out"
+        },
+        "data": {
+          "accountId": "a-out"
+        },
+        "request": {
+          "senderAccount": "a-out",
+          "senderSession": "s-out"
+        }
+      },
+      "expect": "mfa_required",
+      "extra": [
+        {
+          "domain": "tenancy",
+          "aggregateType": "tenant",
+          "type": "MfaRequirementChanged",
+          "tenant": "t1",
+          "aggregateId": "t1",
+          "data": {
+            "required": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "... allowed with a second factor where the tenant requires one",
+      "check": {
+        "kind": "query",
+        "tenant": "t1",
+        "domain": "account",
+        "type": "ListSessions",
+        "target": {
+          "type": "account.account",
+          "id": "a-out"
+        },
+        "data": {
+          "accountId": "a-out"
+        },
+        "request": {
+          "senderAccount": "a-out",
+          "senderSession": "s-out"
+        }
+      },
+      "expect": "allow",
+      "extra": [
+        {
+          "domain": "tenancy",
+          "aggregateType": "tenant",
+          "type": "MfaRequirementChanged",
+          "tenant": "t1",
+          "aggregateId": "t1",
+          "data": {
+            "required": true
+          }
+        },
+        {
+          "domain": "account",
+          "aggregateType": "session",
+          "type": "SessionFactorAdded",
+          "tenant": "platform",
+          "aggregateId": "s-out",
+          "data": {
+            "factor": "totp"
+          }
+        }
+      ]
+    },
+    {
+      "name": "... refused with a password session where the tenant enforces SSO",
+      "check": {
+        "kind": "query",
+        "tenant": "t1",
+        "domain": "account",
+        "type": "ListSessions",
+        "target": {
+          "type": "account.account",
+          "id": "a-out"
+        },
+        "data": {
+          "accountId": "a-out"
+        },
+        "request": {
+          "senderAccount": "a-out",
+          "senderSession": "s-out"
+        }
+      },
+      "expect": "sso_required",
+      "extra": [
+        {
+          "domain": "account",
+          "aggregateType": "sso",
+          "type": "SsoEnforcementChanged",
+          "tenant": "t1",
+          "aggregateId": "sso1",
+          "data": {
+            "enforced": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "... allowed with a session of the tenant's SSO",
+      "check": {
+        "kind": "query",
+        "tenant": "t1",
+        "domain": "account",
+        "type": "ListSessions",
+        "target": {
+          "type": "account.account",
+          "id": "a-out"
+        },
+        "data": {
+          "accountId": "a-out"
+        },
+        "request": {
+          "senderAccount": "a-out",
+          "senderSession": "s-out-sso"
+        }
+      },
+      "expect": "allow",
+      "extra": [
+        {
+          "domain": "account",
+          "aggregateType": "sso",
+          "type": "SsoEnforcementChanged",
+          "tenant": "t1",
+          "aggregateId": "sso1",
+          "data": {
+            "enforced": true
+          }
+        },
+        {
+          "domain": "account",
+          "aggregateType": "session",
+          "type": "SessionOpened",
+          "tenant": "platform",
+          "aggregateId": "s-out-sso",
+          "data": {
+            "accountId": "a-out",
+            "method": "sso:sso1",
+            "factors": [
+              "sso"
+            ],
+            "refreshTokenHash": "h",
+            "ip": null,
+            "userAgent": null,
+            "at": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "... refused in a tenant that does not exist",
+      "check": {
+        "kind": "query",
+        "tenant": "t-none",
+        "domain": "account",
+        "type": "ListSessions",
+        "target": {
+          "type": "account.account",
+          "id": "a-out"
+        },
+        "data": {
+          "accountId": "a-out"
+        },
+        "request": {
+          "senderAccount": "a-out",
+          "senderSession": "s-out"
+        }
+      },
+      "expect": "forbidden",
+      "extra": []
+    },
+    {
+      "name": "oneself in the platform tenant: another tenant's suspension does not matter",
+      "check": {
+        "kind": "query",
+        "tenant": "platform",
+        "domain": "account",
+        "type": "ListSessions",
+        "target": {
+          "type": "account.account",
+          "id": "a-out"
+        },
+        "data": {
+          "accountId": "a-out"
+        },
+        "request": {
+          "senderAccount": "a-out",
+          "senderSession": "s-out"
+        }
+      },
+      "expect": "allow",
+      "extra": [
+        {
+          "domain": "tenancy",
+          "aggregateType": "tenant",
+          "type": "TenantSuspended",
+          "tenant": "t1",
+          "aggregateId": "t1",
+          "data": {
+            "reason": "unpaid",
+            "at": 1
+          }
+        }
+      ]
     }
   ]
 }

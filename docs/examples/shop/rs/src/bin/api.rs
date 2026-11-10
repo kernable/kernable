@@ -86,7 +86,13 @@ async fn main() -> Result<(), BoxError> {
     );
     let port = std::env::var("PORT").unwrap_or_else(|_| "3000".into());
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await?;
-    axum::serve(listener, server::router(api, kernable)).await?;
+    // Sign-in and refresh read the caller's address (sessions keep it).
+    let app = server::router(api, kernable);
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     // #endregion run
     Ok(())
 }

@@ -6,7 +6,7 @@ use super::{
     AccountSignUp, Owner, SuspensionReason, Tenant, TenantSignUp, TenantStatus, events::*,
 };
 use crate::shared::constants::{DAY, DELETE_AFTER_DAYS, PLATFORM_TENANT, RESERVED_SLUGS};
-use crate::shared::secrets::{normal_email, valid_email};
+use crate::shared::secrets::{normal_email, trim_space, valid_email};
 
 fn rejected(message: &str, code: &str) -> Rejected {
     Rejected::new(message).code(code)
@@ -30,7 +30,7 @@ fn slug(value: &str, tenant_id: &str) -> Result<String, Rejected> {
 }
 
 fn name(value: &str) -> Result<String, Rejected> {
-    let trimmed = value.trim();
+    let trimmed = trim_space(value);
     if trimmed.is_empty() || value.chars().count() > 200 {
         return Err(rejected("A tenant needs a name", "invalid_name"));
     }

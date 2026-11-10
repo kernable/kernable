@@ -14,7 +14,7 @@ use crate::shared::constants::{
 use crate::shared::passkeys;
 use crate::shared::secrets::{
     check_password, email_domain, equal_secrets, hash_password, normal_email, parse_token,
-    random_secret, sha256, totp_step, valid_email, valid_password,
+    random_secret, sha256, totp_step, trim_space, valid_email, valid_password,
 };
 
 type Events = Result<Vec<NewEvent>, Rejected>;
@@ -416,7 +416,7 @@ fn issuer(value: &str) -> Result<String, Rejected> {
 }
 
 fn sso_domain(value: &str) -> Result<String, Rejected> {
-    let d = value.trim().to_lowercase();
+    let d = trim_space(value).to_lowercase();
     let labels: Vec<&str> = d.split('.').collect();
     let label_ok = |l: &&str| {
         !l.is_empty()
@@ -513,7 +513,7 @@ pub fn handle(account: &Aggregate<Account>, session: &Aggregate<Session>, sso: &
         if !valid_email(&email) {
             return Err(rejected("Not an email address", "invalid_email"));
         }
-        if d.name.trim().is_empty() || d.name.chars().count() > 200 {
+        if trim_space(&d.name).is_empty() || d.name.chars().count() > 200 {
             return Err(rejected("A name is needed", "invalid_name"));
         }
         if d.password.as_deref().is_some_and(|p| !valid_password(p)) {
@@ -525,7 +525,7 @@ pub fn handle(account: &Aggregate<Account>, session: &Aggregate<Session>, sso: &
         let verified = d.verified == Some(true);
         let registered = AccountRegistered {
             email: Some(email.clone()),
-            name: Some(d.name.trim().to_owned()),
+            name: Some(trim_space(&d.name).to_owned()),
             password_hash: d.password.as_deref().map(hash_password),
             verified,
             at,

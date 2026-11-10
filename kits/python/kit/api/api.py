@@ -25,7 +25,7 @@ from ..account.commands import (AddPasskey, ChangePassword, ConfirmEmailChange, 
                                 NoteRegistrationAttempt, ProvePasskey, ProveSecondFactor, RefreshSession, RegisterAccount,
                                 RequestEmailChange, RequestPasswordReset, ResetPassword, SignIn, SignInWithPasskey,
                                 SignInWithProvider, StartTotp, VerifyEmail, VerifySsoDomain)
-from ..account.queries import FindAccountByEmail, FindAccountByLink, FindSsoByDomain, GetAccount, GetSsoSecret
+from ..account.queries import FindAccountByEmail, FindAccountByLink, FindSsoByDomain, GetAccount, GetSsoSecret, ListSessions
 from ..identity.commands import CreateApiKey
 from ..identity.domain import api_key, parse_api_key
 from ..identity.queries import FindApiKey, FindIdentityByAccount
@@ -33,7 +33,7 @@ from ..invitation.commands import AcceptInvitation, CreateInvitationLink, JoinWi
 from ..invitation.domain import InvitedGroup, link_token, parse_link_token
 from ..invitation.queries import PeekInvitation, PeekInvitationLink
 from ..shared.constants import CHALLENGE_SECONDS, PASSKEYS, PLATFORM_TENANT
-from ..shared.secrets import (email_domain, equal_secrets, parse_invitation_token, parse_token, random_secret, token, totp_secret,
+from ..shared.secrets import (trim_space, email_domain, equal_secrets, parse_invitation_token, parse_token, random_secret, token, totp_secret,
                               valid_password)
 from .tokens import Claims, SigningKeys, check_access_token, issue_access_token
 
@@ -123,6 +123,17 @@ class KitApi:
         except Rejected as err:
             return {"ok": False, "reason": err.code}
         return {"ok": True, "account": account}
+
+    def _may_join(self, claims: Claims, tenant: str) -> dict:
+        """The token's account checked against a tenant it is about to join, where it holds no identity
+        yet: the middleware applies that tenant's checks to the account acting on itself (the tenant
+        active, its second-factor requirement, its enforced SSO). A cheap query of one's own sessions
+        in that tenant carries the check; its answer is not used."""
+        try:
+            self.kernable.query(ListSessions(account_id=claims.sub), tenant=tenant, context=self._own(claims))
+        except Rejected as err:
+            return {"ok": False, "reason": err.code}
+        return {"ok": True}
 
     def _signed_in(self, account_id: str, session_id: str, refresh_token: str, data: dict, second_factor: bool | None = None) -> dict:
         return {"ok": True, "account_id": account_id, "session_id": session_id, "refresh_token": refresh_token,
@@ -509,7 +520,8 @@ class KitApi:
     def accept_invitation(self, invitation_token: str, *, claims: Claims | None = None, name: str | None = None,
                           password: str | None = None) -> dict:
         """Accepts an invitation: as the signed-in account (`claims`, its session checked as for every
-        signed-in call), or as a new person with a name and password, registered in the same step
+        signed-in call, and against the invitation's tenant: active, its second factor, its enforced
+        SSO), or as a new person with a name and password, registered in the same step
         (active: the token proved the email). The accepting account's email must be the invited one.
         A new person's name and password are checked before the invitation is used, so a refused
         registration does not spend it."""
@@ -520,10 +532,13 @@ class KitApi:
             signed_in = self._signed_in_account(claims)
             if not signed_in["ok"]:
                 return signed_in
+            may = self._may_join(claims, peek["tenant"])
+            if not may["ok"]:
+                return may
             account_id = claims.sub
             email = signed_in["account"].get("email") or ""
         else:
-            if not isinstance(name, str) or not name.strip() or len(name) > 200:
+            if not isinstance(name, str) or not trim_space(name) or len(name) > 200:
                 return {"ok": False, "reason": "invalid_name"}
             if not valid_password(password):
                 return {"ok": False, "reason": "weak_password"}
@@ -565,7 +580,8 @@ class KitApi:
 
     def join_with_invitation_link(self, claims: Claims, link: str) -> dict:
         """The signed-in account joins the link's tenant with its groups (its session checked as for
-        every signed-in call). Someone without an account registers and verifies first: a link proves
+        every signed-in call, and against the link's tenant: active, its second factor, its enforced
+        SSO). Someone without an account registers and verifies first: a link proves
         no email."""
         t = parse_link_token(link)
         if not t:
@@ -573,6 +589,9 @@ class KitApi:
         signed_in = self._signed_in_account(claims)
         if not signed_in["ok"]:
             return signed_in
+        may = self._may_join(claims, t["tenant"])
+        if not may["ok"]:
+            return may
         outcome = self._submit(JoinWithInvitationLink(token=link, account_id=claims.sub), t["link_id"], t["tenant"], self.service_context)
         return {"ok": True, "tenant": t["tenant"]} if outcome.committed else {"ok": False, "reason": outcome.code}
 

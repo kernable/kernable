@@ -8,7 +8,7 @@ from webauthn.helpers import base64url_to_bytes, bytes_to_base64url
 
 from ..shared.constants import (DAY, HOUR, MINUTE, PASSKEYS, PLATFORM_TENANT, RESET_MINUTES, SESSION_IDLE_DAYS,
                                 SESSION_MAX_DAYS, VERIFICATION_HOURS, now_ms)
-from ..shared.secrets import (check_password, email_domain, equal_secrets, hash_password, normal_email, parse_token, random_secret, sha256,
+from ..shared.secrets import (trim_space, check_password, email_domain, equal_secrets, hash_password, normal_email, parse_token, random_secret, sha256,
                               totp_step, valid_email, valid_password)
 from .aggregates import Account, Session, Sso, locked_until
 from .domain import ACCOUNT_SUSPENSION_REASONS, AccountSuspensionReason, SessionEnd, own
@@ -48,13 +48,13 @@ def _(s: Account, d: RegisterAccount, cmd, ctx):
         raise Rejected("Only the same address takes over a registration", "exists")
     if not valid_email(email):
         raise Rejected("Not an email address", "invalid_email")
-    if not isinstance(d.name, str) or not d.name.strip() or len(d.name) > 200:
+    if not isinstance(d.name, str) or not trim_space(d.name) or len(d.name) > 200:
         raise Rejected("A name is needed", "invalid_name")
     if d.password is not None and not valid_password(d.password):
         raise Rejected("A password has 10 to 1024 characters", "weak_password")
     password_hash = hash_password(d.password) if d.password is not None else None
     verified = d.verified is True
-    registered = AccountRegistered(email=email, name=d.name.strip(), password_hash=password_hash, verified=verified, at=at)
+    registered = AccountRegistered(email=email, name=trim_space(d.name), password_hash=password_hash, verified=verified, at=at)
     return [registered] if verified else [registered, verification_requested(email, at)]
 
 
@@ -658,7 +658,7 @@ def _issuer(value) -> str:
 
 
 def _sso_domain(value) -> str:
-    d = value.strip().lower() if isinstance(value, str) else ""
+    d = trim_space(value).lower() if isinstance(value, str) else ""
     if not re.fullmatch(r"([a-z0-9](-?[a-z0-9])*\.)+[a-z]{2,}", d):
         raise Rejected("A domain name", "invalid_domain")
     return d

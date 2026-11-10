@@ -22,7 +22,7 @@ sequenceDiagram
   K-->>M: InvitationCreated
   M->>P: mail with a token
   P->>A: opens the link
-  A->>K: PeekInvitation (tenant name, email, expired?)
+  A->>K: PeekInvitation (tenant, email, expired?)
   P->>A: accepts: signed in, or with a name and password
   A->>K: AcceptInvitation (+ RegisterAccount for a new person)
   K-->>K: identity reactor: identity, memberships, owner
@@ -41,7 +41,11 @@ sequenceDiagram
 4. **Accepting**, through `KitApi.acceptInvitation(token, as)`:
    - **Signed in**: the account's email must be the invited one (else `wrong_email`). The session
      is checked as for every signed-in request: an ended one is refused (`unauthenticated`), and
-     one that has not proved the account's second factor too (`mfa_required`).
+     one that has not proved the account's second factor too (`mfa_required`). It is checked
+     against the invitation's tenant as well: a suspended tenant takes nobody in
+     (`tenant_suspended`), one that requires a second factor wants a session that proved one
+     (`mfa_required`), and one that enforces single sign-on a session signed in through it
+     (`sso_required`).
    - **New person**: they choose a name and password; the account is registered at once and is
      active, since the token proved the email. The name and password are checked first
      (`invalid_name`, `weak_password`), so a refused registration leaves the invitation open.
@@ -70,7 +74,8 @@ aggregate, `invitation.link`:
   hash is stored, as for API keys. The creator may only hand out groups they could grant
   themselves ([no escalation](./group#no-escalation)).
 - **Joining** goes through `KitApi.joinWithInvitationLink(claims, token)`. The person must be
-  signed in, with the session checked as for every signed-in request: unlike an emailed
+  signed in, with the session checked as for every signed-in request and against the link's
+  tenant, as for accepting an invitation: unlike an emailed
   invitation, a link proves no email address, so someone new registers and verifies first, then
   joins. Each account joins through a link once; a link that
   expired, is used up or was revoked is refused (`expired_token`, `used_up`, `invalid_token`).

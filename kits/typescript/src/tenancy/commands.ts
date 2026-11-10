@@ -3,7 +3,7 @@
 import { Command, type CommandMeta, Rejected } from "@kernable/sdk";
 
 import { DAY, DELETE_AFTER_DAYS, PLATFORM_TENANT, RESERVED_SLUGS } from "../shared/constants.ts";
-import { normalEmail, validEmail } from "../shared/secrets.ts";
+import { chars, normalEmail, trimSpace, validEmail } from "../shared/secrets.ts";
 import { type Tenant, tenantAggregate } from "./aggregates.ts";
 import { type Owner, SUSPENSION_REASONS, type SuspensionReason } from "./domain.ts";
 import { MfaRequirementChanged, OwnerAdded, OwnerRemoved, SignUpPolicyChanged, TenantActivated, TenantCreated, TenantDeleted, TenantReactivated, TenantRenamed, TenantSlugChanged, TenantSuspended } from "./events.ts";
@@ -17,8 +17,8 @@ export function slug(value: unknown, tenantId: string): string {
 }
 
 export function name(value: unknown): string {
-  if (typeof value !== "string" || !value.trim() || value.length > 200) throw new Rejected("A tenant needs a name", "invalid_name");
-  return value.trim();
+  if (typeof value !== "string" || !trimSpace(value) || chars(value) > 200) throw new Rejected("A tenant needs a name", "invalid_name");
+  return trimSpace(value);
 }
 
 /** A tenant's aggregate ID is its tenant ID. */

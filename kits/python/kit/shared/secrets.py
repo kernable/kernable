@@ -65,9 +65,23 @@ def check_password(stored: str | None, password: object) -> bool:
         return False
 
 
+# The characters the kits take for space: controls, spaces, line and paragraph separators and the
+# byte order mark. One explicit set, the same in every language's kit (each language's own idea of
+# whitespace differs).
+_SPACE = "\\x00-\\x20\\x7f\\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff"
+_SPACE_ANY = re.compile(f"[{_SPACE}]")
+_SPACE_EDGES = re.compile(f"^[{_SPACE}]+|[{_SPACE}]+$")
+_SURROGATE = re.compile("[\\ud800-\\udfff]")
+
+
+def trim_space(value: str) -> str:
+    """`value` without the kits' space characters at either end."""
+    return _SPACE_EDGES.sub("", value)
+
+
 def normal_email(email: object) -> str:
     """Lowercased and trimmed: how emails are compared and held as unique keys."""
-    return email.strip().lower() if isinstance(email, str) else ""
+    return trim_space(email).lower() if isinstance(email, str) else ""
 
 
 def email_domain(email: object) -> str:
@@ -77,10 +91,13 @@ def email_domain(email: object) -> str:
 
 
 def valid_email(email: str) -> bool:
-    """An address: one `@`, a local part, a domain of at least two labels, none of them empty, no
-    whitespace, at most 254 bytes in UTF-8. The same rule in every language's kit."""
+    """An address: one `@`, a local part, a domain of at least two labels, none of them empty, none
+    of the kits' space characters (see `_SPACE`), no surrogates, at most 254 bytes in UTF-8. The
+    same rule in every language's kit."""
     at = email.find("@")
-    if at < 1 or "@" in email[at + 1:] or re.search(r"\s", email) or len(email.encode()) > 254:
+    if at < 1 or "@" in email[at + 1:] or _SPACE_ANY.search(email) or _SURROGATE.search(email):
+        return False
+    if len(email.encode()) > 254:
         return False
     labels = email[at + 1:].split(".")
     return len(labels) >= 2 and all(labels)

@@ -203,8 +203,9 @@ Account.fact("mfa", lambda s: bool(s.totp and s.totp["confirmed"]))
 # --- Sessions ---------------------------------------------------------------------------------------
 
 
-class Session(Aggregate, domain=account_domain, schema="py-1"):
-    """One sign-in."""
+class Session(Aggregate, domain=account_domain, schema="py-2"):
+    """One sign-in. Snapshot schema `py-2`: the state gained `previous_token_hashes`; snapshots of
+    `py-1` lack it, so the kernel drops them and the state is rebuilt from the events."""
     status: str = "none"
     account_id: str | None = None
     method: str | None = None

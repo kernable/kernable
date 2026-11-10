@@ -9,6 +9,7 @@ import { test } from "node:test";
 import { CommandContext, Rejected, type Aggregate } from "@kernable/sdk";
 
 import { kitDomains } from "../../src/kit.ts";
+import { validEmail } from "../../src/shared/secrets.ts";
 
 interface Case {
   name: string;
@@ -89,3 +90,10 @@ for (const file of files) {
     });
   }
 }
+
+// What JSON fixtures cannot carry: a lone surrogate, which a JavaScript string can hold.
+test("a lone surrogate is not an email address", () => {
+  assert.equal(validEmail("ann\ud800@example.com"), false);
+  assert.equal(validEmail("ann@example.com\udfff"), false);
+  assert.equal(validEmail("ann\u{1F600}@example.com"), true);
+});

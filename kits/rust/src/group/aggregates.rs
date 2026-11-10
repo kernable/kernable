@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{Permission, events::*};
 use crate::shared::constants::SNAPSHOT_SCHEMA;
+use crate::shared::secrets::trim_space;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Group {
@@ -45,7 +46,7 @@ pub fn group(domain: &Domain) -> Aggregate<Group> {
     });
     a.unique(
         "name",
-        |s| s.active.then(|| s.name.trim().to_lowercase()),
+        |s| s.active.then(|| trim_space(&s.name).to_lowercase()),
         Unique::tenant(),
     );
     a.fact("active", |s| s.active);

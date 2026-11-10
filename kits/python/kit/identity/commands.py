@@ -5,7 +5,7 @@ import re
 
 from kernable import Command, Rejected, Requirement
 
-from ..shared.secrets import sha256
+from ..shared.secrets import sha256, trim_space
 from .aggregates import Identity
 from .domain import Scope, api_key, own
 from .events import (ApiKeyCreated, ApiKeyRevoked, IdentityCreated, IdentityDeleted, IdentityReactivated, IdentitySuspended,
@@ -53,9 +53,9 @@ class CreateServiceIdentity(Command):
 def _(s: Identity, d: CreateServiceIdentity):
     if s.status != "none":
         raise Rejected("The identity exists", "exists")
-    if not isinstance(d.display_name, str) or not d.display_name.strip():
+    if not isinstance(d.display_name, str) or not trim_space(d.display_name):
         raise Rejected("A service needs a name", "invalid_name")
-    return [IdentityCreated(kind="service", account_id=None, display_name=d.display_name.strip(), title=None, email=None)]
+    return [IdentityCreated(kind="service", account_id=None, display_name=trim_space(d.display_name), title=None, email=None)]
 
 
 class CreateProcessIdentity(Command):

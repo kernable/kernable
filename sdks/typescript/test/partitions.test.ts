@@ -67,7 +67,7 @@ test("one client serves the tenants of two partitions", async () => {
     await until("the subscription saw both partitions", () => seen.includes("acme") && seen.includes("t1"));
     assert.ok(listener.store.committedFor("p1") > 0 && listener.store.committedFor("p2") > 0, "a position per partition");
 
-    // t1 moves to p2 with its events (S4); the client finds it there.
+    // t1 moves to p2 with its events; the client finds it there.
     await kernable.submit({ domain: "counters", aggregateType: "Counter", aggregateId: "c1", type: "Increment", data: { by: 3 }, id: "t1-2" });
     const moved = p1.cli("partitions", "move", p1.url, "app.key", "t1", "p2");
     assert.ok(moved.ok, `moved: ${moved.out}`);
@@ -92,7 +92,7 @@ test("one client serves the tenants of two partitions", async () => {
     }
 
     // A read model across tenants, slow on acme's events: asked in t9's partition (p1), a query with
-    // `allPartitions` waits until it has processed p2 as well (S5).
+    // `allPartitions` waits until it has processed p2 as well.
     let sum = 0;
     const slow = counters.readModel("sum", { reconnectMs: 50 })
       .on("Incremented", async (data: { by: number }, evt) => {

@@ -301,6 +301,10 @@ pub enum SessionStatus {
     Ended,
 }
 
+/// The session's snapshot format: `rs-2` since the state gained `previous_token_hashes`; snapshots
+/// of `rs-1` lack it, so the kernel drops them and the state is rebuilt from the events.
+const SESSION_SNAPSHOT_SCHEMA: &str = "rs-2";
+
 /// One sign-in.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Session {
@@ -320,7 +324,7 @@ pub struct Session {
 pub fn session(domain: &Domain) -> Aggregate<Session> {
     let a = domain
         .aggregate("session", Session::default())
-        .schema(SNAPSHOT_SCHEMA);
+        .schema(SESSION_SNAPSHOT_SCHEMA);
     a.apply(SessionOpened, |s, d, _, _| {
         *s = Session {
             status: SessionStatus::Active,

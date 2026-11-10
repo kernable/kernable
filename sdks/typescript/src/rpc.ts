@@ -411,7 +411,7 @@ export interface WirePartitionMap {
   tenants: { tenant: string; partition: string }[];
   default: string;
   control: string;
-  /** Tenants that moved between partitions (S4), with the heads that keep their order. */
+  /** Tenants that moved between partitions, with the heads that keep their order. */
   moved?: WireTenantMove[];
 }
 

@@ -23,7 +23,7 @@ import { totpCode } from "../src/shared/secrets.ts";
 import { Authenticator } from "./authenticator.ts";
 import { OidcProvider } from "./oidc-provider.ts";
 import { exampleServer } from "../example/server.ts";
-import { CreateTenant, DeleteTenant, GetTenant, SuspendTenant } from "../src/tenancy/index.ts";
+import { CreateTenant, DeleteTenant, GetTenant, ReactivateTenant, RequireMfa, SuspendTenant } from "../src/tenancy/index.ts";
 
 // --- A small app: orders that belong to whoever placed them --------------------------------------
 
@@ -526,17 +526,20 @@ test("OAuth and SSO: a social login registers or signs in, links on request; a t
     assert.deepEqual(await sso.verifySsoDomain(lumen, ssoId, "lumen.example"), { ok: true });
     assert.ok((await at(EnforceSso.new({ enforced: true }))).committed);
 
-    // Mia of lumen.example joins with a password; in Lumen only an SSO session counts.
+    // Mia of lumen.example has a password; in Lumen only an SSO session counts, from accepting on.
     const mia = await person("mia@lumen.example");
     await kit.submit(CreateInvitation.new({ email: "mia@lumen.example" }), { aggregateId: crypto.randomUUID(), tenant: lumen, context: asLiam });
-    assert.ok((await api.acceptInvitation(mailer.last("mia@lumen.example")!.token, { claims: mia.claims })).ok);
-    const asMia = await api.contextFor(mia.claims, lumen);
-    const own = (context: typeof asMia) => kit.query(GetIdentity.new({ identityId: context.senderIdentity! }), { tenant: lumen, context });
-    await assert.rejects(own(asMia), (e: Rejected) => e.code === "sso_required");
+    const miasInvitation = mailer.last("mia@lumen.example")!.token;
+    assert.deepEqual(await api.acceptInvitation(miasInvitation, { claims: mia.claims }), { ok: false, reason: "sso_required" });
     // Through the company's provider: linked to her account by the verified domain and email.
     const miaSso = await sso.oidcFinish(company.login(await start({ email: "mia@lumen.example" }), { sub: "c-mia", email: "mia@lumen.example", email_verified: true }));
     assert.ok(miaSso.ok && "accountId" in miaSso && miaSso.accountId === mia.accountId, JSON.stringify(miaSso));
-    const asMiaSso = await api.contextFor(sso.check(miaSso.accessToken)!, lumen);
+    const miaSsoClaims = sso.check(miaSso.accessToken)!;
+    assert.ok((await api.acceptInvitation(miasInvitation, { claims: miaSsoClaims })).ok);
+    const asMia = await api.contextFor(mia.claims, lumen);
+    const own = (context: typeof asMia) => kit.query(GetIdentity.new({ identityId: context.senderIdentity! }), { tenant: lumen, context });
+    await assert.rejects(own(asMia), (e: Rejected) => e.code === "sso_required");
+    const asMiaSso = await api.contextFor(miaSsoClaims, lumen);
     assert.equal((await own(asMiaSso)).id, asMia.senderIdentity);
     // The owner keeps a password session, so a broken SSO can be mended.
     assert.ok((await own(asLiam)).id);
@@ -680,6 +683,37 @@ test("invitation links let people join with groups; a query about one order is d
   assert.ok((await kit.submit(RevokeInvitationLink.new(), { aggregateId: second.linkId, tenant: shopTenant, context: asOlga })).committed);
   assert.equal(await api.peekInvitationLink(second.token), null);
   assert.deepEqual(await api.joinWithInvitationLink(rosa.claims, second.token), { ok: false, reason: "invalid_token" });
+});
+
+test("accepting and joining check the tenant joined too: suspended, a second factor required", async () => {
+  const tara = await person("join-tara@example.com");
+  const taras = crypto.randomUUID();
+  const opened = await kit.submit(CreateTenant.new({ slug: "taras", name: "Tara's", owner: { accountId: tara.accountId }, status: "active" }), {
+    aggregateId: taras, tenant: taras, context: await api.contextFor(tara.claims),
+  });
+  assert.ok(opened.committed, JSON.stringify(opened));
+  const asTara = await api.contextFor(tara.claims, taras);
+  const ugo = await person("join-ugo@example.com");
+  const link = await api.createInvitationLink(asTara, taras, { groups: [] });
+  assert.ok(link.ok, JSON.stringify(link));
+  assert.ok((await kit.submit(CreateInvitation.new({ email: "join-ugo@example.com" }), { aggregateId: crypto.randomUUID(), tenant: taras, context: asTara })).committed);
+  const invitation = mailer.last("join-ugo@example.com")!.token;
+
+  // The tenant requires a second factor: Ugo's password session neither joins nor accepts.
+  assert.ok((await kit.submit(RequireMfa.new({ required: true }), { aggregateId: taras, tenant: taras, context: asTara })).committed);
+  assert.deepEqual(await api.joinWithInvitationLink(ugo.claims, link.token), { ok: false, reason: "mfa_required" });
+  assert.deepEqual(await api.acceptInvitation(invitation, { claims: ugo.claims }), { ok: false, reason: "mfa_required" });
+  // (Tara herself has one factor only now: the platform lifts it.)
+  assert.ok((await kit.submit(RequireMfa.new({ required: false }), { aggregateId: taras, tenant: taras, context: { bypassAuthorization: true } })).committed);
+
+  // Suspended: nobody joins it.
+  assert.ok((await kit.submit(SuspendTenant.new({ reason: "owner_requested" }), { aggregateId: taras, tenant: taras, context: asTara })).committed);
+  assert.deepEqual(await api.joinWithInvitationLink(ugo.claims, link.token), { ok: false, reason: "tenant_suspended" });
+  assert.deepEqual(await api.acceptInvitation(invitation, { claims: ugo.claims }), { ok: false, reason: "tenant_suspended" });
+  assert.ok((await kit.submit(ReactivateTenant.new(), { aggregateId: taras, tenant: taras, context: asTara })).committed);
+
+  // Active again, without the requirement: Ugo accepts and joins.
+  assert.ok((await api.acceptInvitation(invitation, { claims: ugo.claims })).ok);
 });
 
 test("a process gets an identity and a key from the kit, and acts only with a platform group", async () => {

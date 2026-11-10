@@ -23,7 +23,7 @@ use super::tokens::{Claims, SigningKeys, check_access_token, issue_access_token}
 use crate::account::AccountRow;
 use crate::account::{
     AddPasskey, ChangePassword, ConfirmEmailChange, ConfirmTotp, EndSession, FindAccountByEmail,
-    FindAccountByLink, FindSsoByDomain, GetAccount, GetSsoSecret, LinkProvider,
+    FindAccountByLink, FindSsoByDomain, GetAccount, GetSsoSecret, LinkProvider, ListSessions,
     NoteRegistrationAttempt, ProvePasskey, ProveSecondFactor, RefreshSession, RegisterAccount,
     RequestEmailChange, RequestPasswordReset, ResetPassword, SessionEnd, SignIn, SignInWithPasskey,
     SignInWithProvider, StartTotp, VerifyEmail, VerifySsoDomain,
@@ -36,7 +36,7 @@ use crate::invitation::{
 use crate::shared::constants::{CHALLENGE_SECONDS, PLATFORM_TENANT, passkeys};
 use crate::shared::secrets::{
     email_domain, equal_secrets, new_id, parse_invitation_token, parse_token, random_bytes,
-    random_secret, token, totp_secret, valid_password,
+    random_secret, token, totp_secret, trim_space, valid_password,
 };
 
 /// Why a call did not do what was asked.
@@ -302,6 +302,23 @@ impl KitApi {
         .context(Self::own(claims));
         match self.kernable.query(q).await {
             Ok(account) => Ok(account),
+            Err(Error::Rejected(r)) => refused(&r.code),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// The token's account checked against a tenant it is about to join, where it holds no identity
+    /// yet: the middleware applies that tenant's checks to the account acting on itself (the tenant
+    /// active, its second-factor requirement, its enforced SSO). A cheap query of one's own
+    /// sessions in that tenant carries the check; its answer is not used.
+    async fn may_join(&self, claims: &Claims, tenant: &str) -> ApiResult<()> {
+        let q = Query::of(ListSessions {
+            account_id: claims.sub.clone(),
+        })
+        .tenant(tenant)
+        .context(Self::own(claims));
+        match self.kernable.query::<serde::de::IgnoredAny>(q).await {
+            Ok(_) => Ok(()),
             Err(Error::Rejected(r)) => refused(&r.code),
             Err(e) => Err(e.into()),
         }
@@ -1335,7 +1352,8 @@ impl KitApi {
     }
 
     /// Accepts an invitation: as the signed-in account (`claims`, its session checked as for every
-    /// signed-in call), or as a new person with a name and password (`new_person`), registered in
+    /// signed-in call, and against the invitation's tenant: active, its second factor, its enforced
+    /// SSO), or as a new person with a name and password (`new_person`), registered in
     /// the same step (active: the token proved the email). The accepting account's email must be
     /// the invited one. A new person's name and password are checked before the invitation is
     /// used, so a refused registration does not spend it. The account and tenant.
@@ -1354,11 +1372,12 @@ impl KitApi {
         let (account_id, email, person) = match claims {
             Some(c) => {
                 let account = self.signed_in_account(c).await?;
+                self.may_join(c, &peek.tenant).await?;
                 (c.sub.clone(), account.email.unwrap_or_default(), None)
             }
             None => {
                 let (name, password) = new_person.unwrap_or_default();
-                if name.trim().is_empty() || name.chars().count() > 200 {
+                if trim_space(name).is_empty() || name.chars().count() > 200 {
                     return refused("invalid_name");
                 }
                 if !valid_password(password) {
@@ -1444,7 +1463,8 @@ impl KitApi {
     }
 
     /// The signed-in account joins the link's tenant with its groups (its session checked as for
-    /// every signed-in call): the tenant. Someone without an account registers and verifies first:
+    /// every signed-in call, and against the link's tenant: active, its second factor, its enforced
+    /// SSO): the tenant. Someone without an account registers and verifies first:
     /// a link proves no email.
     pub async fn join_with_invitation_link(
         &self,
@@ -1455,6 +1475,7 @@ impl KitApi {
             return refused("invalid_token");
         };
         self.signed_in_account(claims).await?;
+        self.may_join(claims, &t.tenant).await?;
         let join = JoinWithInvitationLink {
             token: link.into(),
             account_id: claims.sub.clone(),

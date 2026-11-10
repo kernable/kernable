@@ -13,7 +13,7 @@ import {
 } from "@simplewebauthn/server";
 
 import {
-  AddPasskey, FindAccountByLink, FindSsoByDomain, GetSsoSecret, LinkProvider, SignInWithProvider, VerifySsoDomain, ChangePassword, ConfirmEmailChange, ConfirmTotp, ProvePasskey, ProveSecondFactor, SignInWithPasskey, StartTotp, EndSession, FindAccountByEmail, GetAccount, NoteRegistrationAttempt, RefreshSession, RegisterAccount, RequestEmailChange,
+  AddPasskey, FindAccountByLink, FindSsoByDomain, GetSsoSecret, LinkProvider, SignInWithProvider, VerifySsoDomain, ChangePassword, ConfirmEmailChange, ConfirmTotp, ProvePasskey, ProveSecondFactor, SignInWithPasskey, StartTotp, EndSession, FindAccountByEmail, GetAccount, ListSessions, NoteRegistrationAttempt, RefreshSession, RegisterAccount, RequestEmailChange,
   RequestPasswordReset, ResetPassword, SignIn, VerifyEmail, type AccountRow, type SessionRefreshed, type SignInFailed, type SignedIn,
 } from "../account/index.ts";
 import {
@@ -21,7 +21,7 @@ import {
 } from "../invitation/index.ts";
 import { CreateApiKey, FindApiKey, FindIdentityByAccount, apiKey, parseApiKey } from "../identity/index.ts";
 import { CHALLENGE_SECONDS, PASSKEYS, PLATFORM_TENANT } from "../shared/constants.ts";
-import { emailDomain, equalSecrets, parseInvitationToken, parseToken, randomSecret, token, totpSecret, validPassword } from "../shared/secrets.ts";
+import { emailDomain, equalSecrets, parseInvitationToken, parseToken, randomSecret, token, totpSecret, validPassword, chars, trimSpace } from "../shared/secrets.ts";
 import { checkAccessToken, issueAccessToken, type Claims, type SigningKeys } from "./tokens.ts";
 
 export interface KitApiOptions {
@@ -235,6 +235,22 @@ export class KitApi {
   private async signedInAccount(claims: Claims): Promise<{ ok: true; account: AccountRow } | { ok: false; reason: string }> {
     try {
       return { ok: true, account: await this.kernable.query(GetAccount.new({ accountId: claims.sub }), { tenant: PLATFORM_TENANT, context: this.own(claims) }) };
+    } catch (err) {
+      if (err instanceof Rejected) return { ok: false, reason: err.code };
+      throw err;
+    }
+  }
+
+  /**
+   * The token's account checked against a tenant it is about to join, where it holds no identity
+   * yet: the middleware applies that tenant's checks to the account acting on itself (the tenant
+   * active, its second-factor requirement, its enforced SSO). A cheap query of one's own sessions
+   * in that tenant carries the check; its answer is not used.
+   */
+  private async mayJoin(claims: Claims, tenant: string): Promise<{ ok: true } | { ok: false; reason: string }> {
+    try {
+      await this.kernable.query(ListSessions.new({ accountId: claims.sub }), { tenant, context: this.own(claims) });
+      return { ok: true };
     } catch (err) {
       if (err instanceof Rejected) return { ok: false, reason: err.code };
       throw err;
@@ -511,7 +527,8 @@ export class KitApi {
 
   /**
    * Accepts an invitation: as the signed-in account (`claims`, its session checked as for every
-   * signed-in call), or as a new person with a name and password, registered in the same step
+   * signed-in call, and against the invitation's tenant: active, its second factor, its enforced
+   * SSO), or as a new person with a name and password, registered in the same step
    * (active: the token proved the email). The accepting account's email must be the invited one.
    * A new person's name and password are checked before the invitation is used, so a refused
    * registration does not spend it.
@@ -527,10 +544,12 @@ export class KitApi {
     if ("claims" in as) {
       const signedIn = await this.signedInAccount(as.claims);
       if (!signedIn.ok) return signedIn;
+      const may = await this.mayJoin(as.claims, peek.tenant);
+      if (!may.ok) return may;
       accountId = as.claims.sub;
       email = signedIn.account.email ?? "";
     } else {
-      if (typeof as.name !== "string" || !as.name.trim() || as.name.length > 200) return { ok: false, reason: "invalid_name" };
+      if (typeof as.name !== "string" || !trimSpace(as.name) || chars(as.name) > 200) return { ok: false, reason: "invalid_name" };
       if (typeof as.password !== "string" || !validPassword(as.password)) return { ok: false, reason: "weak_password" };
       // Someone with an account signs in first, so nobody gets an account they could not use.
       try {
@@ -582,7 +601,8 @@ export class KitApi {
 
   /**
    * The signed-in account joins the link's tenant with its groups (its session checked as for
-   * every signed-in call). Someone without an account registers and verifies first: a link proves
+   * every signed-in call, and against the link's tenant: active, its second factor, its enforced
+   * SSO). Someone without an account registers and verifies first: a link proves
    * no email.
    */
   async joinWithInvitationLink(claims: Claims, link: string): Promise<{ ok: true; tenant: string } | { ok: false; reason: string }> {
@@ -590,6 +610,8 @@ export class KitApi {
     if (!t) return { ok: false, reason: "invalid_token" };
     const signedIn = await this.signedInAccount(claims);
     if (!signedIn.ok) return signedIn;
+    const may = await this.mayJoin(claims, t.tenant);
+    if (!may.ok) return may;
     const outcome = await this.kernable.submit(JoinWithInvitationLink.new({ token: link, accountId: claims.sub }), {
       aggregateId: t.linkId, tenant: t.tenant, context: this.serviceContext,
     });

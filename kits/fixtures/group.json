@@ -131,6 +131,88 @@
           }
         }
       ]
+    },
+    {
+      "name": "a group's name has at most 100 characters, counted in code points",
+      "aggregate": "group",
+      "aggregateId": "g1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateGroup",
+        "data": {
+          "name": "👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦😀😀",
+          "permissions": [
+            {
+              "pattern": "shop.PlaceOrder",
+              "viaParent": true
+            },
+            {
+              "pattern": "shop.CancelOrder",
+              "when": "owner",
+              "viaParent": true
+            }
+          ]
+        }
+      },
+      "then": [
+        {
+          "type": "GroupCreated",
+          "data": {
+            "name": "👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦😀😀",
+            "description": "",
+            "permissions": [
+              {
+                "pattern": "shop.PlaceOrder"
+              },
+              {
+                "pattern": "shop.CancelOrder",
+                "when": "owner",
+                "viaParent": true
+              }
+            ]
+          }
+        }
+      ],
+      "index": {
+        "keys": [
+          {
+            "name": "name",
+            "value": "👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦😀😀",
+            "scope": "tenant"
+          }
+        ],
+        "facts": [
+          "active"
+        ]
+      }
+    },
+    {
+      "name": "a group's name of 101 characters, counted in code points, is too long",
+      "aggregate": "group",
+      "aggregateId": "g1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateGroup",
+        "data": {
+          "name": "👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦👩‍👩‍👧‍👦😀😀😀",
+          "permissions": [
+            {
+              "pattern": "shop.PlaceOrder",
+              "viaParent": true
+            },
+            {
+              "pattern": "shop.CancelOrder",
+              "when": "owner",
+              "viaParent": true
+            }
+          ]
+        }
+      },
+      "rejected": "invalid_name"
     }
   ]
 }

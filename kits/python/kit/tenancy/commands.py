@@ -6,7 +6,7 @@ from typing import Literal
 from kernable import Command, Rejected, Requirement
 
 from ..shared.constants import DAY, DELETE_AFTER_DAYS, PLATFORM_TENANT, RESERVED_SLUGS, now_ms
-from ..shared.secrets import normal_email, valid_email
+from ..shared.secrets import normal_email, trim_space, valid_email
 from .aggregates import Tenant
 from .domain import SUSPENSION_REASONS, Owner, SignUpPolicy, SuspensionReason
 from .events import (MfaRequirementChanged, OwnerAdded, OwnerRemoved, SignUpPolicyChanged, TenantActivated, TenantCreated,
@@ -21,9 +21,9 @@ def slug(value: object, tenant_id: str) -> str:
 
 
 def name(value: object) -> str:
-    if not isinstance(value, str) or not value.strip() or len(value) > 200:
+    if not isinstance(value, str) or not trim_space(value) or len(value) > 200:
         raise Rejected("A tenant needs a name", "invalid_name")
-    return value.strip()
+    return trim_space(value)
 
 
 def itself(cmd) -> None:

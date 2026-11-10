@@ -3,6 +3,7 @@
 use kernable::{Aggregate, Rejected, command};
 
 use super::{Group, Permission, events::*};
+use crate::shared::secrets::trim_space;
 
 fn rejected(message: &str, code: &str) -> Rejected {
     Rejected::new(message).code(code)
@@ -63,7 +64,7 @@ pub fn permissions(value: Vec<Permission>) -> Result<Vec<Permission>, Rejected> 
 }
 
 fn name(value: &str) -> Result<String, Rejected> {
-    let trimmed = value.trim();
+    let trimmed = trim_space(value);
     if trimmed.is_empty() || value.chars().count() > 100 || trimmed.eq_ignore_ascii_case("owners") {
         return Err(rejected(
             "A group needs a name other than owners",

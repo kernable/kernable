@@ -4,7 +4,7 @@ use kernable::{Aggregate, Rejected, Requirement, command};
 
 use super::aggregates::MembershipStatus;
 use super::{Identity, IdentityKind, IdentityStatus, Scope, api_key, events::*, own};
-use crate::shared::secrets::sha256;
+use crate::shared::secrets::{sha256, trim_space};
 
 fn rejected(message: &str, code: &str) -> Rejected {
     Rejected::new(message).code(code)
@@ -159,14 +159,14 @@ pub fn handle(identity: &Aggregate<Identity>) {
         if s.status != IdentityStatus::None {
             return Err(rejected("The identity exists", "exists"));
         }
-        if d.display_name.trim().is_empty() {
+        if trim_space(&d.display_name).is_empty() {
             return Err(rejected("A service needs a name", "invalid_name"));
         }
         Ok(vec![
             IdentityCreated {
                 kind: IdentityKind::Service,
                 account_id: None,
-                display_name: Some(d.display_name.trim().to_owned()),
+                display_name: Some(trim_space(&d.display_name).to_owned()),
                 title: None,
                 email: None,
             }

@@ -114,9 +114,35 @@ pub fn check_password(stored: Option<&str>, password: &str) -> bool {
     hasher().verify_password(password.as_bytes(), &hash).is_ok()
 }
 
+/// One of the characters the kits take for space: controls, spaces, line and paragraph separators
+/// and the byte order mark. One explicit set, the same in every language's kit (each language's own
+/// idea of whitespace differs).
+pub fn is_space(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00}'..='\u{20}'
+            | '\u{7f}'
+            | '\u{85}'
+            | '\u{a0}'
+            | '\u{1680}'
+            | '\u{2000}'..='\u{200a}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{202f}'
+            | '\u{205f}'
+            | '\u{3000}'
+            | '\u{feff}'
+    )
+}
+
+/// `value` without the kits' space characters at either end.
+pub fn trim_space(value: &str) -> &str {
+    value.trim_matches(is_space)
+}
+
 /// Lowercased and trimmed: how emails are compared and held as unique keys.
 pub fn normal_email(email: &str) -> String {
-    email.trim().to_lowercase()
+    trim_space(email).to_lowercase()
 }
 
 /// The domain of an address, lowercased: what follows its `@`.
@@ -128,8 +154,9 @@ pub fn email_domain(email: &str) -> String {
     }
 }
 
-/// An address: one `@`, a local part, a domain of at least two labels, none of them empty, no
-/// whitespace, at most 254 bytes in UTF-8. The same rule in every language's kit.
+/// An address: one `@`, a local part, a domain of at least two labels, none of them empty, none of
+/// the kits' space characters (see [`is_space`]), at most 254 bytes in UTF-8. The same rule in every
+/// language's kit.
 pub fn valid_email(email: &str) -> bool {
     let Some((user, host)) = email.split_once('@') else {
         return false;
@@ -138,7 +165,7 @@ pub fn valid_email(email: &str) -> bool {
     email.len() <= 254
         && !user.is_empty()
         && !host.contains('@')
-        && !email.contains(char::is_whitespace)
+        && !email.contains(is_space)
         && labels.len() >= 2
         && labels.iter().all(|l| !l.is_empty())
 }

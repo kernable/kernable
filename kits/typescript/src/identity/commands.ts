@@ -2,7 +2,7 @@
 
 import { Command, type PersonalFields, Rejected } from "@kernable/sdk";
 
-import { sha256 } from "../shared/secrets.ts";
+import { chars, sha256, trimSpace } from "../shared/secrets.ts";
 import { type Identity, identityAggregate } from "./aggregates.ts";
 import { apiKey, type Membership, type Scope } from "./domain.ts";
 import { ApiKeyCreated, ApiKeyRevoked, IdentityCreated, IdentityDeleted, IdentityReactivated, IdentitySuspended, MembershipGranted, MembershipResumed, MembershipRevoked, MembershipSuspended, ProfileUpdated } from "./events.ts";
@@ -30,7 +30,7 @@ export class CreateApiKey extends Command {
 identityAggregate.command(CreateApiKey, (s, d) => {
   active(s);
   if (s.kind !== "service" && s.kind !== "process") throw new Rejected("Only a service or a process has API keys", "not_a_service");
-  if (typeof d.keyId !== "string" || !/^[A-Za-z0-9]{8,32}$/.test(d.keyId) || typeof d.secret !== "string" || d.secret.length < 32) {
+  if (typeof d.keyId !== "string" || !/^[A-Za-z0-9]{8,32}$/.test(d.keyId) || typeof d.secret !== "string" || chars(d.secret) < 32) {
     throw new Rejected("A key ID of 8 to 32 letters and digits, and a secret of at least 32 characters", "invalid_key");
   }
   if (s.apiKeys.some((k) => k.keyId === d.keyId)) throw new Rejected("The key exists", "exists");
@@ -44,8 +44,8 @@ export class CreateServiceIdentity extends Command {
 
 identityAggregate.command(CreateServiceIdentity, (s, d) => {
   if (s.status !== "none") throw new Rejected("The identity exists", "exists");
-  if (typeof d.displayName !== "string" || !d.displayName.trim()) throw new Rejected("A service needs a name", "invalid_name");
-  return [IdentityCreated.new({ kind: "service", accountId: null, displayName: d.displayName.trim(), title: null, email: null })];
+  if (typeof d.displayName !== "string" || !trimSpace(d.displayName)) throw new Rejected("A service needs a name", "invalid_name");
+  return [IdentityCreated.new({ kind: "service", accountId: null, displayName: trimSpace(d.displayName), title: null, email: null })];
 });
 
 /**
