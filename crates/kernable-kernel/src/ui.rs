@@ -785,8 +785,16 @@ impl Watch {
 
     /// Writes what the looks find, once a second; a comment after 15 quiet seconds keeps the
     /// connection and finds one that is gone.
-    async fn serve(mut self, kernel: Arc<Kernel>, mut conn: tokio::net::TcpStream) {
-        use tokio::io::AsyncWriteExt;
+    async fn serve(mut self, kernel: Arc<Kernel>, conn: tokio::net::TcpStream) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // The page closes the stream when it moves to another view: noticed at once by
+        // reading (it sends nothing more, so a read ends only then), not at the next write.
+        let (mut incoming, mut conn) = conn.into_split();
+        let closed = async move {
+            let mut buf = [0u8; 256];
+            while matches!(incoming.read(&mut buf).await, Ok(n) if n > 0) {}
+        };
+        tokio::pin!(closed);
         let start =
             b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-store\r\n\
                       connection: close\r\n\r\nretry: 2000\n\n";
@@ -815,7 +823,10 @@ impl Watch {
                     return;
                 }
             }
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            tokio::select! {
+                () = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+                () = &mut closed => return,
+            }
         }
     }
 }
