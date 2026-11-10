@@ -62,7 +62,9 @@ data or a read model's answer.
 - **A timeout or a timer** is a [scheduled command](../how-to/schedule) of the case, cancelled when
   the awaited event comes first. It survives restarts, failover and moves like any other.
 - **A query step** asks with the position of the event that moved the case, so the read model has
-  seen it ([reading your own writes](./ordering)).
+  seen it ([reading your own writes](./ordering)). While no read model answers (one reconnecting
+  after a restart, say), it asks again every second, for up to 30 s, before the case stops as an
+  incident `query_failed`.
 - **Tenants:** a case lives in the tenant of the event that started it, and its commands, queries
   and waits stay in that tenant. With [partitions](../how-to/partitions), each partition runs the
   cases of its own tenants, and a tenant's running cases move with it.

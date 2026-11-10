@@ -124,6 +124,13 @@ impl Shop {
     /// Connects the shop's worker, the payments' worker and the read model to the kernel at
     /// `addr`; returns a client.
     async fn connect(&self, dir: &Path, addr: &str) -> Kernable {
+        let k = self.connect_workers(dir, addr).await;
+        self.start_read_model(&k).await;
+        k
+    }
+
+    /// The workers only: no read model answers `NeedsApproval` until [`Shop::start_read_model`].
+    async fn connect_workers(&self, dir: &Path, addr: &str) -> Kernable {
         let key_path = dir.join("app.key");
         std::fs::write(&key_path, hex(app_key().as_bytes())).unwrap();
         std::fs::write(
@@ -137,12 +144,15 @@ impl Shop {
             tokio::spawn(async move { running.run().await });
             aggregate_worker.ready().await;
         }
+        let _ = &self.shop;
+        k
+    }
+
+    async fn start_read_model(&self, k: &Kernable) {
         let listener = k.listener(&self.approvals);
         let running = listener.clone();
         tokio::spawn(async move { running.run().await });
         listener.ready().await;
-        let _ = &self.shop;
-        k
     }
 
     fn ran(&self, command: &str) -> Vec<(String, Value)> {
@@ -362,6 +372,33 @@ async fn the_example_runs_from_the_order_to_the_shipment() {
             "kernable_process_step_seconds_count{process=\"shop.fulfilment\",step=\"paid\"} 1"
         ),
         "{page}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_query_step_asks_again_while_no_read_model_answers() {
+    let env = start("pe-query-waits").await;
+    env.kernel.grant(app_grant()).unwrap();
+    let shop = shop();
+    let k = shop.connect_workers(&env.dir, &env.addr).await;
+    register(&env.addr, &example(60_000)).await.unwrap();
+    submit_order(&k, "big", 1500).await;
+    until_reached(&env.store, "big#1", "approval").await;
+    // No read model answers NeedsApproval yet (one reconnecting after a restart, say): the case
+    // asks again instead of stopping as an incident.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    assert!(
+        !case_events(&env.store, "big#1")
+            .iter()
+            .any(|e| e.event_type == "IncidentRaised"),
+        "{:?}",
+        steps(&env.store, "big#1")
+    );
+    shop.start_read_model(&k).await;
+    until_reached(&env.store, "big#1", "paid").await;
+    assert_eq!(
+        steps(&env.store, "big#1"),
+        ["confirm", "large", "approval", "paid"]
     );
 }
 

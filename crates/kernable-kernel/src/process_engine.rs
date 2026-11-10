@@ -69,6 +69,10 @@ const MAX_STEPS: usize = 200;
 /// middleware away, a full queue).
 const RETRY: Duration = Duration::from_secs(1);
 
+/// How long a query step asks again while no read model can answer (one reconnecting after a
+/// restart, say) before the case stops as an incident `query_failed`.
+const QUERY_PATIENCE_MS: i64 = 30_000;
+
 /// The buckets of `kernable_process_step_seconds`.
 const BUCKETS: [f64; 9] = [
     0.01, 0.1, 1.0, 10.0, 60.0, 600.0, 3600.0, 86_400.0, 604_800.0,
@@ -526,6 +530,8 @@ struct State<'a> {
     by_key: HashMap<(String, String, String), String>,
     /// The case each command sent waits for.
     awaiting: HashMap<String, CaseRef>,
+    /// Query steps asking again while no read model answers: since when (ms).
+    asking_since: HashMap<CaseRef, i64>,
     models: HashMap<(String, u32), Arc<Model>>,
     /// The state each case was last counted in, for the metrics.
     counted: HashMap<CaseRef, (String, &'static str)>,
@@ -542,6 +548,7 @@ impl<'a> State<'a> {
             cases: HashMap::new(),
             by_key: HashMap::new(),
             awaiting: HashMap::new(),
+            asking_since: HashMap::new(),
             models: HashMap::new(),
             counted: HashMap::new(),
         };
@@ -1744,17 +1751,32 @@ impl<'a> State<'a> {
             }
             Ok(None) => Value::Null,
             Err(status) => {
-                self.raise(
-                    &mut case,
-                    &mut batch,
-                    &name,
-                    "query_failed",
-                    status.message(),
-                );
+                // Nobody to answer right now (UNAVAILABLE: no read model connected, or one
+                // reconnecting): asked again every second for a while, like a command whose
+                // middleware is away; then, or for any other failure, an incident.
+                let since = *self
+                    .asking_since
+                    .entry(reference.clone())
+                    .or_insert_with(now_ms);
+                if status.code() == tonic::Code::Unavailable && now_ms() - since < QUERY_PATIENCE_MS
+                {
+                    tracing::warn!(case = %reference.2, error = %status.message(), "a case's query found no answer for now; asking again");
+                    self.cases.insert(reference.clone(), case);
+                    self.retry_later(reference, instance);
+                    return;
+                }
+                self.asking_since.remove(reference);
+                let message = if status.code() == tonic::Code::Unavailable {
+                    format!("{} (for {} s)", status.message(), QUERY_PATIENCE_MS / 1000)
+                } else {
+                    status.message().to_owned()
+                };
+                self.raise(&mut case, &mut batch, &name, "query_failed", &message);
                 self.commit(case, batch, None).await;
                 return;
             }
         };
+        self.asking_since.remove(reference);
         let matched = process_model::lookup(&response, &path)
             .cloned()
             .unwrap_or(Value::Null);
