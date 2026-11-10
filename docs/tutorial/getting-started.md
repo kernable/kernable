@@ -215,7 +215,7 @@ cargo run --bin submit            # saved as src/bin/submit.rs
 Now look at it in the UI, http://127.0.0.1:7234:
 
 - **Overview:** *Healthy*, and the commands and events so far.
-- **Explore › Domain map:** the cart writes `ItemAdded` and `CheckedOut`, the carts read model reads them and answers `GetCart`; green dots show both connected and up to date.
+- **Explore › Domains:** the `shop` domain with the cart, its commands and the events it writes (`ItemAdded`, `CheckedOut`), read by the carts read model, which answers `GetCart`; green dots show both connected and up to date.
 - **Operations:** the worker and the read model, each with its key, since when, and how far behind.
 - **Search** `c1`: the cart and its events in order, each with the command that caused it and who sent it.
 

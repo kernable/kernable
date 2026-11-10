@@ -128,26 +128,31 @@
   .list .n { float: right; color: var(--muted); font-size: 12px; }
   /* map */
   .map { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
-  .mapwrap { display: flex; gap: 16px; align-items: flex-start; }
-  aside.details { width: 320px; flex: none; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; position: sticky; top: 70px; max-height: calc(100vh - 90px); overflow: auto; }
-  aside.details h4 { margin: 2px 0 4px; font-size: 15px; word-break: break-all; }
   .kind { color: var(--faint); font-size: 11.5px; text-transform: uppercase; letter-spacing: .06em; }
   dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 8px 0 0; font-size: 13px; }
   dt { color: var(--muted); } dd { margin: 0; word-break: break-word; white-space: pre-line; }
-  .legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 12px; }
-  .legend span { display: inline-flex; align-items: center; gap: 6px; }
-  .map svg text { fill: var(--text); font-size: 12px; }
-  .map svg .colhead { fill: var(--faint); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; }
-  .map svg .node rect { fill: var(--panel); stroke: var(--line); }
-  .map svg .node.sel rect { stroke: var(--accent); stroke-width: 2; }
-  .map svg .node { cursor: pointer; }
-  .map svg .sub { fill: var(--muted); font-size: 11px; }
-  .map svg path.edge { fill: none; stroke: var(--edge); stroke-width: 1.3; }
-  .map svg path.edge.own { stroke-dasharray: 3 4; }
-  .map svg path.edge.check { stroke: var(--check); stroke-dasharray: 5 4; }
-  .map svg path.edge.hi { stroke: var(--accent); stroke-width: 2; }
-  .map svg path.edge.check.hi { stroke: var(--check); stroke-width: 2; }
-  .map svg .dim { opacity: .25; }
+  /* explore: domains and the catalog */
+  .domains { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 14px; }
+  .dcard { cursor: pointer; transition: border-color .15s; }
+  .dcard:hover { border-color: var(--accent); }
+  .dcard .dhead { display: flex; align-items: baseline; gap: 8px; justify-content: space-between; }
+  .dcard .dhead b { font-size: 16px; }
+  .drow { display: grid; grid-template-columns: 92px 1fr; gap: 8px; font-size: 13px; align-items: start; }
+  .drow > span:first-child { color: var(--faint); font-size: 12px; padding-top: 2px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; }
+  .t { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: 6px; background: var(--sunk); border: 1px solid var(--line); font-size: 12px; white-space: nowrap; color: var(--text); }
+  a.t:hover { border-color: var(--accent); text-decoration: none; }
+  .t.tev { background: var(--accent-soft); border-color: transparent; color: var(--accent); }
+  .t.proc { background: var(--panel); border-style: dashed; }
+  .t.more { background: none; border: none; color: var(--faint); }
+  .t .dot { width: 7px; height: 7px; }
+  .agg { display: grid; gap: 12px; }
+  .agg-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+  .agg-head b { font-size: 15px; }
+  .flowrow { display: grid; grid-template-columns: minmax(0, 1fr) 24px minmax(0, 1.4fr); gap: 10px; align-items: start; }
+  @media (max-width: 900px) { .flowrow { grid-template-columns: 1fr; } .flowrow .arrow { display: none; } }
+  .flowrow .arrow { color: var(--faint); text-align: center; padding-top: 18px; font-size: 16px; }
+  .wildcard { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
   /* history cards */
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 11px 14px; }
   .card .top { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
@@ -227,24 +232,13 @@
   <section class="view" id="v-operations"></section>
   <section class="view" id="v-explore">
     <div class="sub" id="explore-tabs">
-      <a href="/explore/map" data-tab="map">Domain map</a>
+      <a href="/explore/domains" data-tab="domains">Domains</a>
+      <a href="/explore/catalog" data-tab="catalog">Catalog</a>
       <a href="/explore/events" data-tab="events">Event log</a>
       <a href="/explore/aggregates" data-tab="aggregates">Aggregates</a>
     </div>
-    <div id="x-map">
-      <div class="controls" style="margin-bottom:10px">
-        <label><input type="checkbox" id="map-engine"> Show the process engine's event types</label>
-        <span class="legend">
-          <span><i class="dot" style="color:var(--ok)"></i>connected</span>
-          <span><i class="dot" style="color:var(--warn)"></i>behind</span>
-          <span><i class="dot" style="color:var(--bad)"></i>missing (the kernel waits for it)</span>
-          <span><i class="dot" style="color:var(--dyn)"></i>dynamic or away</span>
-          <span><i class="dot" style="color:var(--live)"></i>live</span>
-          <span>— produces · reacts</span><span style="color:var(--check)">- - checks commands</span>
-        </span>
-      </div>
-      <div class="mapwrap"><div class="map" id="graph"></div><aside class="details" id="details"></aside></div>
-    </div>
+    <div id="x-domains" class="grid"></div>
+    <div id="x-catalog" class="grid" hidden></div>
     <div id="x-events" hidden>
       <form class="controls" id="search" style="margin-bottom:10px">
         <input class="ctl" name="type" placeholder="Event type, e.g. shop.Order">
@@ -271,6 +265,12 @@
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
+// Views are put together with optional parts (`cond ? part : null`): replaceChildren skips the
+// missing ones and flattens lists, as `el` does, instead of writing "null" into the page.
+const nativeReplace = Element.prototype.replaceChildren;
+Element.prototype.replaceChildren = function (...parts) {
+  return nativeReplace.apply(this, parts.flat(Infinity).filter((x) => x !== null && x !== undefined && x !== false));
+};
 const NS = "http://www.w3.org/2000/svg";
 
 // ---- helpers ----
@@ -462,7 +462,7 @@ function parseRoute() {
   if (parts[0] === "processes") return { view: "processes", args: parts.slice(1, 2) };
   if (parts[0] === "operations") return { view: "operations", args: [] };
   if (parts[0] === "explore" && parts[1] === "aggregates" && parts[4]) return { view: "history", args: [tenant, parts[2], parts[3], parts.slice(4).join("/")] };
-  if (parts[0] === "explore") return { view: "explore", args: parts.slice(1, 2), query: q };
+  if (parts[0] === "explore") return { view: "explore", args: parts.slice(1, 3), query: q };
   if (parts[0] === "search") return { view: "search", args: [q.get("q") ?? ""] };
   return { view: "overview", args: [] };
 }
@@ -524,7 +524,8 @@ function draw() {
   if (top === "overview") drawOverview(v);
   if (top === "processes") route.view === "case" ? drawCase() : drawProcesses();
   if (top === "operations") drawOperations(v);
-  if (top === "explore" && exploreTab === "map") drawMap();
+  if (top === "explore" && exploreTab === "domains") drawDomains();
+  if (top === "explore" && exploreTab === "catalog") drawCatalog();
 }
 
 // ================= Overview =================
@@ -1335,10 +1336,12 @@ function rejectionsPanel() {
 }
 
 // ================= Explore =================
-let exploreTab = "map";
+let exploreTab = "domains", domainSel = null, catalogKind = "events", catalogText = "";
 function enterExplore() {
   if (route.view === "history") { exploreTab = "aggregates"; stream = { tenant: route.args[0], domain: route.args[1], type: route.args[2], id: route.args[3] }; if (stream.domain === "process") $("streams-engine").checked = true; }
-  else exploreTab = ["map", "events", "aggregates"].includes(route.args[0]) ? route.args[0] : "map";
+  else exploreTab = ["domains", "catalog", "events", "aggregates"].includes(route.args[0]) ? route.args[0] : "domains";
+  if (exploreTab === "domains") domainSel = route.args[1] ?? null;
+  if (exploreTab === "catalog") { catalogKind = ["events", "commands", "queries"].includes(route.query?.get("kind")) ? route.query.get("kind") : "events"; catalogText = route.query?.get("q") ?? ""; }
   // The event log's filters come from the address: /explore/events?type=shop.Order&tenant=t1
   if (exploreTab === "events" && route.query) {
     const form = $("search");
@@ -1350,140 +1353,170 @@ function enterExplore() {
     if (changed) tail = null;
   }
   document.querySelectorAll("#explore-tabs a").forEach((a) => a.classList.toggle("on", a.dataset.tab === exploreTab));
-  for (const t of ["map", "events", "aggregates"]) $(`x-${t}`).hidden = t !== exploreTab;
+  for (const t of ["domains", "catalog", "events", "aggregates"]) $(`x-${t}`).hidden = t !== exploreTab;
   if (exploreTab === "events" && tail === null) search();
   if (exploreTab === "aggregates") { loadStreams(); loadHistory(); }
 }
 
-// ---- the domain map ----
-let selected = null;
-function model(s) {
-  const head = s.kernel.head, engine = $("map-engine").checked;
-  const nodes = new Map(), edges = [];
-  const add = (id, col, label, sub, status, info) => { if (!nodes.has(id)) nodes.set(id, { id, col, label, sub, status, info }); return nodes.get(id); };
-  const services = new Map(s.services.map((m) => [m.service, m]));
-  for (const m of s.services) {
-    const meta = Object.entries(m.metadata).map(([k, v]) => `${k} ${v}`).join(" · ");
-    add(`s:${m.service}`, 0, m.service, meta || "membership applied", "connected", { kind: "service", ...m });
+// ---- what the kernel knows of the domains: aggregates, commands, events, readers, queries ----
+const domainOf = (type) => type.split(".")[0];
+const short = (type) => type.split(".").slice(1).join(".");
+
+/** Everything Explore shows, derived from /api/state and the process models. */
+function catalogData() {
+  const s = state, head = s.kernel.head;
+  const status = (l) => l.live ? "live" : !l.counts ? (l.connected ? "dynamic" : "away") : !l.connected ? "missing" : head - l.position >= 100 ? "behind" : "connected";
+  // A listener that registered no event types gets every event its key may read.
+  const everything = (l) => !l.live && (!l.events.length || l.events.includes("*"));
+  const listeners = s.listeners.map((l) => ({ ...l, status: status(l), everything: everything(l) }));
+  const models = (procs?.processes ?? []).map((p) => ({ name: p.name, removed: p.removed, versions: p.versions.length, model: p.versions[p.versions.length - 1]?.model })).filter((p) => p.model);
+  const commandType = (c) => { const [d, , name] = c.split("."); return name ? `${d}.${name}` : c; };
+  for (const p of models) {
+    p.events = [p.model.start.on, ...p.model.steps.filter((x) => x.kind === "wait").map((x) => x.event)];
+    p.commands = p.model.steps.filter((x) => x.kind === "command").map((x) => commandType(x.command));
+    p.queries = p.model.steps.filter((x) => x.kind === "query").map((x) => x.query);
   }
-  const serviceNode = (name) => name ? add(`s:${name}`, 0, name, "no membership", "dynamic", { kind: "service", service: name, note: "No membership applied: everything it registers counts." }) : null;
-  for (const a of s.aggregates) {
-    const m = services.get(a.service);
-    const status = a.workers > 0 ? "connected" : a.dynamic ? "dynamic" : "missing";
-    add(`a:${a.aggregate}`, 1, a.aggregate, `${a.workers} worker${a.workers === 1 ? "" : "s"} · ${a.commands.length} commands`, status, { kind: "aggregate", ...a, listed: m ? m.workers.includes(a.aggregate) : null });
-    const owner = serviceNode(a.service);
-    if (owner) edges.push({ from: owner.id, to: `a:${a.aggregate}`, kind: "own" });
-  }
-  for (const m of s.services) for (const a of m.workers) {
-    if (!nodes.has(`a:${a}`)) add(`a:${a}`, 1, a, "listed, never registered", "missing", { kind: "aggregate", aggregate: a, service: m.service, note: "Listed in the membership; no worker ever registered it. Its commands wait in the queue." });
-    edges.push({ from: `s:${m.service}`, to: `a:${a}`, kind: "own" });
-  }
-  const shownEvents = s.events.filter((e) => engine || !e.type.startsWith("process."));
-  const hiddenEngine = s.events.length - shownEvents.length;
-  if (hiddenEngine) add("e:process.*", 2, "process engine", `${hiddenEngine} event types, hidden`, "dynamic", { kind: "event types", note: "The process engine's own events (cases, steps, timers). Show them with the switch above." });
-  for (const e of shownEvents) {
-    add(`e:${e.type}`, 2, e.type, `schema ${e.schema}`, "connected", { kind: "event type", ...e });
-    for (const w of e.writers) if (nodes.has(`a:${w}`)) edges.push({ from: `a:${w}`, to: `e:${e.type}` });
-  }
-  for (const l of s.listeners) {
-    const behind = l.connected && l.position < head;
-    const status = l.live ? "live" : !l.counts ? (l.connected ? "dynamic" : "away") : !l.connected ? "missing" : behind ? "behind" : "connected";
-    const what = l.live ? "live" : l.middlewares.length ? "middleware" : "listener";
-    const parkedN = l.parked ? ` · ${l.parked} parked` : "";
-    const sub = `${what} · order ${l.order} · ${l.connected ? (behind ? `${head - l.position} behind` : "up to date") : "away"}${parkedN}`;
-    const node = add(`l:${l.name}`, 3, l.name, sub, status, { kind: what, ...l });
-    const owner = serviceNode(l.service);
-    if (owner) edges.push({ from: owner.id, to: node.id, kind: "own" });
-    const types = l.events.length ? l.events : ["*"];
-    for (const e of shownEvents) if (types.some((p) => covers(p, e.type))) edges.push({ from: `e:${e.type}`, to: node.id });
-    for (const q of l.queries) { add(`q:${q}`, 4, q, "query", "connected", { kind: "query", type: q }); edges.push({ from: node.id, to: `q:${q}` }); }
-    for (const mw of l.middlewares) for (const a of s.aggregates) if (a.commands.some((c) => mw.types.some((p) => covers(p, c)))) edges.push({ from: node.id, to: `a:${a.aggregate}`, kind: "check" });
-  }
-  for (const m of s.services) for (const name of [...m.listeners, ...m.middlewares]) {
-    if (!nodes.has(`l:${name}`)) add(`l:${name}`, 3, name, "listed, never registered", "missing", { kind: "listener", name, service: m.service, note: "Listed in the membership; it never connected. The kernel is not ready until it does." });
-    edges.push({ from: `s:${m.service}`, to: `l:${name}`, kind: "own" });
-  }
-  return { nodes: [...nodes.values()], edges };
+  const events = s.events.filter((e) => !e.type.startsWith("process.")).map((e) => ({
+    ...e, domain: domainOf(e.type),
+    readers: listeners.filter((l) => !l.everything && l.events.some((p) => covers(p, e.type))),
+    processes: models.filter((p) => p.events.includes(e.type)),
+  }));
+  const aggregates = s.aggregates.map((a) => ({ ...a, domain: domainOf(a.aggregate), name: short(a.aggregate), ok: a.workers > 0 || a.dynamic }));
+  const commands = aggregates.flatMap((a) => a.commands.map((c) => ({
+    type: c, domain: domainOf(c), aggregate: a,
+    checkedBy: listeners.filter((l) => l.middlewares.some((m) => m.types.some((p) => covers(p, c)))),
+    sentBy: models.filter((p) => p.commands.includes(c)),
+  })));
+  const queries = listeners.flatMap((l) => l.queries.map((q) => ({ type: q, domain: domainOf(q), answeredBy: l, askedBy: models.filter((p) => p.queries.includes(q)) })));
+  const names = new Set([...aggregates.map((a) => a.domain), ...events.map((e) => e.domain), ...queries.map((q) => q.domain), ...models.map((p) => domainOf(p.name))]);
+  const domains = [...names].sort().map((d) => {
+    const own = { aggregates: aggregates.filter((a) => a.domain === d), events: events.filter((e) => e.domain === d), queries: queries.filter((q) => q.domain === d), processes: models.filter((p) => domainOf(p.name) === d) };
+    const readers = new Map(), checkers = new Map();
+    for (const e of own.events) for (const l of e.readers) readers.set(l.name, l);
+    for (const c of commands.filter((x) => x.domain === d)) for (const l of c.checkedBy) checkers.set(l.name, l);
+    // What it uses of other domains: their events its processes wait for or start on.
+    const uses = new Set();
+    for (const p of own.processes) for (const e of p.events) if (domainOf(e) !== d) uses.add(domainOf(e));
+    const bad = own.aggregates.some((a) => !a.ok) || [...readers.values(), ...own.queries.map((q) => q.answeredBy)].some((l) => l.status === "missing");
+    const warn = [...readers.values()].some((l) => l.status === "behind");
+    return { name: d, ...own, readers: [...readers.values()], checkers: [...checkers.values()], uses: [...uses], level: bad ? "bad" : warn ? "warn" : "ok" };
+  });
+  return { domains, events, commands, queries, listeners, models, wildcards: listeners.filter((l) => l.everything) };
 }
 
-const COLS = ["Services", "Aggregates", "Event types", "Listeners", "Queries"];
-const NODE_H = 40, GAP = 10, TOP = 40, NW = 196;
-function drawMap() {
+// ---- small pieces ----
+const dotOf = (status) => el("span", { class: "dot", style: `color:${color(status)}` });
+const evChip = (type, label = short(type)) => el("a", { class: "t tev", href: `/explore/events?type=${encodeURIComponent(type)}`, title: `${type}: its events in the log` }, label);
+const listenerChip = (l) => el("a", { class: "t", href: "/operations", title: `${l.name}: ${l.status}${l.queries.length ? `, answers ${l.queries.join(", ")}` : ""}` }, dotOf(l.status), l.name);
+const procChip = (p) => el("a", { class: "t proc", href: procHref(p.name), title: `process ${p.name}` }, "⟳ ", p.name);
+const plain = (text, title) => el("span", { class: "t", title }, text);
+const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+/** At most `n` chips, then how many more. */
+const some = (chips, n = 8) => el("div", { class: "chips" }, chips.slice(0, n), chips.length > n ? el("span", { class: "t more" }, `+${chips.length - n}`) : null, chips.length ? null : el("span", { class: "faint" }, "–"));
+function wildcardNote(data) {
+  if (!data.wildcards.length) return null;
+  return el("div", { class: "wildcard" }, "Reads every event its key may read (it registered no event types):", data.wildcards.map(listenerChip));
+}
+
+// ---- Domains: one card each ----
+function drawDomains() {
+  const box = $("x-domains");
   if (!state) return;
-  const { nodes, edges } = model(state);
-  const used = COLS.map((_, i) => nodes.some((n) => n.col === i));
-  const colIndex = []; let k = 0; used.forEach((u, i) => (colIndex[i] = u ? k++ : -1));
-  const box = $("graph");
-  const ncols = Math.max(1, k);
-  const width = Math.max(box.clientWidth - 2, ncols * (NW + 36) + 30);
-  const step = ncols > 1 ? (width - 40 - NW) / (ncols - 1) : 0;
-  const counts = new Array(ncols).fill(0);
-  for (const n of nodes.sort((a, b) => a.label.localeCompare(b.label))) {
-    const c = colIndex[n.col];
-    n.x = 20 + c * step; n.y = TOP + counts[c]++ * (NODE_H + GAP);
-  }
-  const height = TOP + Math.max(1, ...counts) * (NODE_H + GAP) + 10;
-  const svg = el("svg:svg", { width, height, viewBox: `0 0 ${width} ${height}` });
-  COLS.forEach((c, i) => colIndex[i] >= 0 && svg.append(el("svg:text", { class: "colhead", x: 20 + colIndex[i] * step, y: 22 }, c)));
-  const byId = new Map(nodes.map((n) => [n.id, n]));
-  const lines = el("svg:g"); svg.append(lines);
-  for (const e of edges) {
-    const a = byId.get(e.from), b = byId.get(e.to);
-    if (!a || !b) continue;
-    let d;
-    if (e.kind === "check") { const x1 = a.x, y1 = a.y + NODE_H / 2, x2 = b.x + NW, y2 = b.y + NODE_H / 2; d = `M${x1},${y1} C${x1 - 60},${y1 + 30} ${x2 + 60},${y2 + 30} ${x2},${y2}`; }
-    else { const x1 = a.x + NW, y1 = a.y + NODE_H / 2, x2 = b.x, y2 = b.y + NODE_H / 2, mid = (x1 + x2) / 2; d = `M${x1},${y1} C${mid},${y1} ${mid},${y2} ${x2},${y2}`; }
-    const path = el("svg:path", { class: `edge ${e.kind ?? ""}`, d }); path.dataset.from = e.from; path.dataset.to = e.to; lines.append(path);
-  }
-  for (const n of nodes) {
-    const g = el("svg:g", { class: `node${selected === n.id ? " sel" : ""}`, transform: `translate(${n.x},${n.y})`, onclick: () => { selected = n.id; drawMap(); } });
-    g.dataset.id = n.id;
-    g.append(el("svg:rect", { width: NW, height: NODE_H, rx: 7 }), el("svg:circle", { cx: 12, cy: 14, r: 4.5, fill: color(n.status) }), el("svg:text", { x: 23, y: 18 }, fit(n.label, 26)), el("svg:text", { class: "sub", x: 12, y: 33 }, fit(n.sub, 32)));
-    g.addEventListener("mouseenter", () => highlight(n.id, true)); g.addEventListener("mouseleave", () => highlight(n.id, false));
-    svg.append(g);
-  }
-  box.replaceChildren(svg);
-  details(byId.get(selected));
+  const data = catalogData();
+  if (domainSel) return drawDomain(box, data, data.domains.find((d) => d.name === domainSel));
+  const row = (label, content) => el("div", { class: "drow" }, el("span", {}, label), content);
+  const cards = data.domains.map((d) => el("div", { class: "panel dcard", onclick: (ev) => { if (!ev.target.closest("a")) go(`/explore/domains/${encodeURIComponent(d.name)}`); } },
+    el("div", { class: "dhead" }, el("span", {}, dotOf(d.level === "bad" ? "missing" : d.level === "warn" ? "behind" : "connected"), " ", el("b", {}, d.name)),
+      el("span", { class: "note" }, [plural(d.aggregates.length, "aggregate"), plural(d.events.length, "event type"), plural(d.processes.length, "process", "processes")].join(" · "))),
+    d.aggregates.map((a) => row(a.name, el("div", { class: "grid", style: "gap:4px" },
+      el("span", { class: a.ok ? "note" : "bad", style: "font-size:12px" }, a.workers ? `${a.workers} worker${a.workers === 1 ? "" : "s"}` : a.dynamic ? "no worker (dynamic)" : "no worker: its commands wait"),
+      some(a.commands.map((c) => plain(short(c), c)), 7)))),
+    row("events", some(d.events.map((e) => evChip(e.type)), 6)),
+    row("read by", some([...d.readers.map(listenerChip), ...d.events.flatMap((e) => e.processes).filter((p, i, xs) => xs.indexOf(p) === i).map(procChip)], 6)),
+    d.queries.length ? row("answers", some(d.queries.map((q) => plain(short(q.type), `${q.type}, answered by ${q.answeredBy.name}`)))) : null,
+    d.checkers.length ? row("checked by", some(d.checkers.map(listenerChip))) : null,
+    d.processes.length ? row("processes", some(d.processes.map(procChip))) : null,
+    d.uses.length ? row("uses", some(d.uses.map((u) => el("a", { class: "t", href: `/explore/domains/${encodeURIComponent(u)}` }, u)))) : null));
+  box.replaceChildren(...[
+    el("div", { class: "note" }, "Each domain with its aggregates and their commands, the events they write, who reads them, and its processes. Click one for its flow."),
+    el("div", { class: "domains" }, cards.length ? cards : el("div", { class: "empty" }, "Nothing registered yet: a worker registers its aggregates when it connects.")),
+    wildcardNote(data)].filter(Boolean));
 }
-function highlight(id, on) {
-  const svg = $("graph").firstChild; if (!svg) return;
-  const near = new Set([id]);
-  svg.querySelectorAll("path.edge").forEach((p) => { const hit = on && (p.dataset.from === id || p.dataset.to === id); p.classList.toggle("hi", hit); if (hit) { near.add(p.dataset.from); near.add(p.dataset.to); } });
-  svg.querySelectorAll("g.node").forEach((g) => g.classList.toggle("dim", on && !near.has(g.dataset.id)));
-  svg.querySelectorAll("path.edge").forEach((p) => p.classList.toggle("dim", on && !p.classList.contains("hi")));
+
+/** One domain: per aggregate, its commands, the events it writes, and who reads each. */
+function drawDomain(box, data, d) {
+  const back = el("a", { href: "/explore/domains" }, "← all domains");
+  if (!d) { box.replaceChildren(back, el("div", { class: "empty" }, `No domain ${domainSel}.`)); return; }
+  const aggregates = d.aggregates.map((a) => {
+    const cmds = data.commands.filter((c) => c.aggregate === a);
+    const evs = data.events.filter((e) => e.writers.includes(a.aggregate));
+    const cmdRows = cmds.map((c) => el("div", { class: "chips" }, plain(short(c.type), c.type),
+      c.checkedBy.map((l) => el("span", { class: "t more", title: `checked by ${l.name} before it runs` }, "checked by ", l.name)),
+      c.sentBy.map((p) => el("a", { class: "t more", href: procHref(p.name) }, "sent by ", p.name))));
+    const evRows = el("div", { class: "tbl" }, el("table", {},
+      el("tr", {}, el("th", {}, "Event"), el("th", {}, "Schema"), el("th", {}, "Read by")),
+      evs.length ? evs.map((e) => el("tr", {}, el("td", {}, evChip(e.type)), el("td", {}, `v${e.schema}`),
+        el("td", {}, e.readers.length || e.processes.length ? some([...e.readers.map(listenerChip), ...e.processes.map(procChip)], 10) : el("span", { class: "note" }, data.wildcards.length ? "only listeners that read everything" : "nobody reads it"))))
+        : el("tr", {}, el("td", { colspan: 3, class: "note" }, "It wrote no event yet."))));
+    return el("div", { class: "panel agg" },
+      el("div", { class: "agg-head" }, dotOf(a.ok ? "connected" : "missing"), el("b", {}, a.aggregate),
+        el("span", { class: "note" }, a.workers ? `${a.workers} worker${a.workers === 1 ? "" : "s"}` : a.dynamic ? "no worker (dynamic)" : "no worker: its commands wait in the queue", a.service ? ` · service ${a.service}` : "", " · key "), keyView(a.key)),
+      el("div", { class: "flowrow" },
+        el("div", { class: "grid", style: "gap:6px" }, el("div", { class: "kind" }, "Commands"), cmdRows),
+        el("div", { class: "arrow" }, "→"),
+        el("div", { class: "grid", style: "gap:6px" }, el("div", { class: "kind" }, "Events it writes"), evRows)));
+  });
+  // Listeners that read this domain's events or answer its queries.
+  const relevant = data.listeners.filter((l) => d.readers.includes(l) || d.queries.some((q) => q.answeredBy === l) || d.checkers.includes(l));
+  const listenerRows = relevant.map((l) => el("tr", {},
+    el("td", {}, dotOf(l.status), " ", el("b", {}, l.name)),
+    el("td", {}, l.middlewares.length ? `middleware (${l.middlewares.map((m) => m.when).join(", ")})` : l.queries.length ? "read model" : "reactor or listener", ` · order ${l.order}`),
+    el("td", {}, l.everything ? el("span", { class: "note" }, "everything") : some(l.events.map((t) => t.endsWith("*") ? plain(t) : evChip(t, domainOf(t) === d.name ? short(t) : t)), 6)),
+    el("td", {}, some(l.queries.map((q) => plain(q))))));
+  const foreign = [...new Set(d.processes.flatMap((p) => p.events).filter((e) => domainOf(e) !== d.name))];
+  box.replaceChildren(...[
+    el("div", { class: "title" }, back, el("h3", {}, d.name), el("span", { class: "meta" }, [plural(d.aggregates.length, "aggregate"), plural(d.events.length, "event type"), plural(d.queries.length, "query", "queries"), plural(d.processes.length, "process", "processes")].join(" · "))),
+    ...aggregates,
+    el("div", { class: "panel" }, el("h2", {}, "Read models, reactors, middleware", el("span", { class: "aside" }, "that read its events, answer its queries or check its commands")),
+      relevant.length ? el("div", { class: "tbl" }, el("table", {}, el("tr", {}, ["Name", "Kind", "Reads", "Answers"].map((h) => el("th", {}, h))), listenerRows)) : el("div", { class: "note" }, "None.")),
+    d.processes.length ? el("div", { class: "panel" }, el("h2", {}, "Processes"), d.processes.map((p) => el("div", { class: "row" }, el("span", {}, "⟳"),
+      el("span", {}, el("a", { href: procHref(p.name) }, p.name), el("span", { class: "note" }, ` · starts on ${p.model.start.on} · version ${p.versions}${p.removed ? " · removed" : ""}`)),
+      el("span", { class: "v" }, some([...new Set(p.commands)].map((c) => plain(short(c), c)), 5))))) : null,
+    foreign.length ? el("div", { class: "panel" }, el("h2", {}, "From other domains", el("span", { class: "aside" }, "events its processes start on or wait for")), some(foreign.map((e) => evChip(e, e)), 20)) : null,
+    wildcardNote(data)].filter(Boolean));
 }
-function details(n) {
-  const box = $("details");
-  if (!n) { box.replaceChildren(el("div", { class: "kind" }, "Details"), el("p", { class: "note" }, "Click a node: a service, an aggregate, an event type, a listener or a query.")); return; }
-  const i = n.info, rows = [];
-  const row = (k, v) => v !== undefined && v !== null && v !== "" && rows.push(el("dt", {}, k), el("dd", {}, v));
-  row("status", el("span", {}, el("i", { class: "dot", style: `color:${color(n.status)};margin-right:6px` }), n.status));
-  if (i.note) row("note", i.note);
-  if (i.kind === "service") {
-    for (const [k, v] of Object.entries(i.metadata ?? {})) row(k, v);
-    row("workers", (i.workers ?? []).join(", ")); row("listeners", (i.listeners ?? []).join(", ")); row("middlewares", (i.middlewares ?? []).join(", "));
-    if (i.appliedAt) row("applied", el("span", {}, when(i.appliedAt), " by ", keyView(i.key)));
-  } else if (i.kind === "aggregate") {
-    row("service", i.service || "none"); row("commands", (i.commands ?? []).join(", ")); row("workers", i.workers);
-    row("in membership", i.listed === null || i.listed === undefined ? "no membership" : i.listed ? "listed" : "not listed (dynamic)");
-    row("key", keyView(i.key)); row("last seen", i.lastSeen ? when(i.lastSeen) : undefined);
-  } else if (i.kind === "event type") {
-    row("schema", i.schema); row("written by", i.writers.join(", "));
-    row("events", el("a", { href: `/explore/events?type=${encodeURIComponent(n.label)}` }, "search them →"));
-  } else if (i.kind === "query") {
-    row("type", i.type);
-  } else if (i.kind !== "event types") {
-    row("service", i.service || "none"); row("order", i.order);
-    row("reads", i.events?.length ? i.events.join(", ") : "everything its key may read"); row("answers", i.queries?.join(", "));
-    for (const m of i.middlewares ?? []) row(`checks ${m.when}`, `${m.types.join(", ")} (order ${m.order})`);
-    if (i.position !== undefined) row("position", `${num(i.position)} of ${num(state.kernel.head)}`);
-    row("connected", i.connected ? el("span", {}, "since ", when(i.since)) : i.lastSeen ? el("span", {}, "no, last seen ", when(i.lastSeen)) : "no");
-    if (i.instances?.length) row(`instances · ${i.single ? "single" : "replicated"}`, i.instances.map((x) => `${x.id}: position ${x.position}`).join("\n"));
-    row("counts", i.counts === undefined ? undefined : i.counts ? "yes: others wait for it" : "no");
-    row("key", keyView(i.key));
-    if (i.parked) row(`parked · ${i.parked}`, el("a", { href: "/operations" }, "see Operations →"));
+
+// ---- Catalog: every event, command and query in one searchable table ----
+function drawCatalog() {
+  const box = $("x-catalog");
+  if (!state) return;
+  const data = catalogData();
+  const f = catalogText.toLowerCase();
+  const tab = (kind, label, n) => el("a", { href: `/explore/catalog?kind=${kind}${catalogText ? `&q=${encodeURIComponent(catalogText)}` : ""}`, class: catalogKind === kind ? "on" : "" }, `${label} · ${n}`);
+  const input = el("input", { class: "ctl", id: "catalog-q", placeholder: "Filter by name, domain, reader…", value: catalogText, style: "width:300px" });
+  input.addEventListener("input", () => { catalogText = input.value; history.replaceState(null, "", `/explore/catalog?kind=${catalogKind}${catalogText ? `&q=${encodeURIComponent(catalogText)}` : ""}`); const at = input.selectionStart; drawCatalog(); $("catalog-q").focus(); $("catalog-q").setSelectionRange(at, at); });
+  let table;
+  if (catalogKind === "events") {
+    const rows = data.events.filter((e) => `${e.type} ${e.writers.join(" ")} ${e.readers.map((l) => l.name).join(" ")} ${e.processes.map((p) => p.name).join(" ")}`.toLowerCase().includes(f))
+      .map((e) => el("tr", {}, el("td", {}, evChip(e.type, e.type)), el("td", {}, `v${e.schema}`), el("td", {}, e.writers.join(", ") || "–"),
+        el("td", {}, e.readers.length || e.processes.length ? some([...e.readers.map(listenerChip), ...e.processes.map(procChip)], 12) : el("span", { class: "note" }, data.wildcards.length ? "only listeners that read everything" : "nobody reads it"))));
+    table = [el("tr", {}, ["Event type", "Schema", "Written by", "Read by"].map((h) => el("th", {}, h))), rows];
+  } else if (catalogKind === "commands") {
+    const rows = data.commands.filter((c) => `${c.type} ${c.aggregate.aggregate} ${c.checkedBy.map((l) => l.name).join(" ")} ${c.sentBy.map((p) => p.name).join(" ")}`.toLowerCase().includes(f))
+      .map((c) => el("tr", {}, el("td", {}, el("b", {}, c.type)), el("td", {}, c.aggregate.aggregate),
+        el("td", {}, c.aggregate.ok ? el("span", { class: "ok" }, c.aggregate.workers ? `${c.aggregate.workers} connected` : "dynamic") : el("span", { class: "bad" }, "none: commands wait")),
+        el("td", {}, some(c.checkedBy.map(listenerChip))), el("td", {}, some(c.sentBy.map(procChip)))));
+    table = [el("tr", {}, ["Command", "Aggregate", "Worker", "Checked by", "Sent by processes"].map((h) => el("th", {}, h))), rows];
+  } else {
+    const rows = data.queries.filter((q) => `${q.type} ${q.answeredBy.name} ${q.askedBy.map((p) => p.name).join(" ")}`.toLowerCase().includes(f))
+      .map((q) => el("tr", {}, el("td", {}, el("b", {}, q.type)), el("td", {}, listenerChip(q.answeredBy)), el("td", {}, some(q.askedBy.map(procChip)))));
+    table = [el("tr", {}, ["Query", "Answered by", "Asked by processes"].map((h) => el("th", {}, h))), rows];
   }
-  box.replaceChildren(el("div", { class: "kind" }, i.kind), el("h4", {}, n.label), el("dl", {}, rows));
+  const empty = table[1].length ? null : el("tr", {}, el("td", { colspan: 5, class: "note" }, "Nothing matches."));
+  box.replaceChildren(...[
+    el("div", { class: "controls" }, el("div", { class: "sub", style: "border:none" }, tab("events", "Events", data.events.length), tab("commands", "Commands", data.commands.length), tab("queries", "Queries", data.queries.length)), input),
+    el("div", { class: "tbl" }, el("table", {}, table, empty)),
+    wildcardNote(data)].filter(Boolean));
 }
 
 // ---- aggregates and their history ----
@@ -1659,7 +1692,6 @@ $("searchform").addEventListener("submit", (ev) => { ev.preventDefault(); go(sea
 $("verdict").addEventListener("click", () => go("/"));
 $("filter").addEventListener("input", drawStreams);
 $("streams-engine").addEventListener("change", drawStreams);
-$("map-engine").addEventListener("change", drawMap);
 $("search").addEventListener("submit", (ev) => {
   ev.preventDefault();
   const q = new URLSearchParams();
@@ -1670,7 +1702,6 @@ $("search").addEventListener("submit", (ev) => {
 $("engine").addEventListener("change", search);
 $("older").addEventListener("click", loadOlder);
 $("live").addEventListener("change", () => ($("live").checked ? search() : drawFound()));
-window.addEventListener("resize", () => exploreTab === "map" && drawMap());
 window.addEventListener("popstate", onRoute);
 
 async function tick() {

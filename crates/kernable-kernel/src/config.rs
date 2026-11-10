@@ -87,7 +87,7 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "--ui-listen",
         "KERNABLE_UI_LISTEN",
         "",
-        "A TCP `host:port` for the kernel's UI in a browser: an overview of health and activity, the business processes and their cases, operations (services, lag, parked events, rejections, standby, store), and the domain map, the log and every aggregate's history. It has no login, so the address must be loopback, or the kernel does not start. If the address is taken, the kernel runs on without the UI and logs `the UI is off`. Off when empty; `--dev` sets `127.0.0.1:7234` unless it is given.",
+        "A TCP `host:port` for the kernel's UI in a browser: an overview of health and activity, the business processes and their cases, operations (services, lag, parked events, rejections, standby, store), and the domains with their commands, events and readers, the log and every aggregate's history. It has no login, so the address must be loopback, or the kernel does not start. If the address is taken, the kernel runs on without the UI and logs `the UI is off`. Off when empty; `--dev` sets `127.0.0.1:7234` unless it is given.",
     ),
     (
         "--replication",
