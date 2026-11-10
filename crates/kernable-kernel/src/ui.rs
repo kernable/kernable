@@ -607,6 +607,12 @@ fn commands(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, 
             if !matches {
                 continue;
             }
+            // An event's time is when the kernel committed it: the command took from when it
+            // was received (or due, if scheduled) until then. Rejections keep no time.
+            let committed_at = match outcome {
+                Some(Outcome::Committed(done)) => done.events.first().map(|e| e.created_at),
+                _ => None,
+            };
             let (events, rejection) = match outcome {
                 Some(Outcome::Committed(done)) => (
                     done.events
@@ -635,6 +641,8 @@ fn commands(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, 
                 "receivedAt": s.pending.received_at,
                 "deliverAt": c.deliver_at,
                 "status": status,
+                "committedAt": committed_at,
+                "tookMs": committed_at.map(|at| at - s.pending.received_at.max(c.deliver_at)),
                 "events": events,
                 "rejection": rejection,
             }));

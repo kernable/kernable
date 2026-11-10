@@ -198,6 +198,7 @@ async fn the_ui_shows_the_map_the_connections_and_an_aggregate_history() {
         )
     );
     assert_eq!(c["events"][0]["type"], "OrderPlaced");
+    assert!(c["tookMs"].as_i64().unwrap() >= 0, "{c}");
     assert!(commands["next"].is_null(), "{commands}");
     assert_eq!(
         json(get(&ui, "/api/commands?status=rejected").await)["commands"],

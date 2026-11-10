@@ -1737,7 +1737,7 @@ async function cfollow() {
   drawCommands();
 }
 function outcomeView(c) {
-  if (c.status === "committed") return el("span", {}, el("span", { class: "chip ok" }, "committed"), " ",
+  if (c.status === "committed") return el("span", {}, el("span", { class: "chip ok" }, "committed"), c.tookMs !== null && c.tookMs !== undefined ? el("span", { class: "faint", title: `received ${iso(c.receivedAt)}, committed ${iso(c.committedAt)}` }, ` in ${duration(Math.max(0, c.tookMs))} `) : " ",
     c.events.length ? c.events.map((e, i) => [i ? " " : "", el("a", { class: "t tev", href: `/explore/events?command=${encodeURIComponent(c.commandId)}`, title: `position ${e.position}`, onclick: (ev) => ev.stopPropagation() }, e.type)]) : el("span", { class: "faint" }, "no events"));
   if (c.status === "rejected") return el("span", {}, el("span", { class: "chip bad" }, "rejected"), " ", el("span", { class: "code" }, c.rejection?.code ?? ""), el("span", { class: "muted" }, ` ${fit(c.rejection?.message ?? "", 60)}`));
   if (c.status === "scheduled") return el("span", {}, el("span", { class: "chip run" }, "scheduled"), " for ", el("span", { title: iso(c.deliverAt) }, iso(c.deliverAt)));
