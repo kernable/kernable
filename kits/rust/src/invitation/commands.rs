@@ -23,6 +23,14 @@ fn groups(value: Option<Vec<InvitedGroup>>) -> Result<Vec<InvitedGroup>, Rejecte
     Ok(groups)
 }
 
+/// The tenant (named by the token; the handler checks it is the command's) must be active when one
+/// joins it.
+fn active_tenant(tenant: Option<String>) -> Vec<Requirement> {
+    tenant
+        .map(|t| vec![Requirement::new("tenancy", "tenant", &t, "active")])
+        .unwrap_or_default()
+}
+
 /// The token, checked against the invitation: open, this tenant's, not expired, the secret right.
 fn proven(
     s: &Invitation,
@@ -71,6 +79,9 @@ pub struct DeclineInvitation {
 }
 
 /// The API's: it says which account accepts, and its email, which must be the invited one.
+/// For a new person it picks the account ID and registers the account right after. The tenant
+/// must be active when it commits (its `active` fact), so a suspended tenant takes nobody in,
+/// whoever accepts: `requirement_missing` otherwise.
 #[command("invitation", aggregate = "invitation", secret = [token])]
 pub struct AcceptInvitation {
     pub token: String,
@@ -214,6 +225,9 @@ pub fn handle(invitation: &Aggregate<Invitation>) {
             vec![InvitationErased {}.into()]
         })
     });
+    invitation.requires(AcceptInvitation, |_, d| {
+        active_tenant(parse_invitation_token(&d.token).map(|t| t.tenant))
+    });
 }
 
 /// A reusable invitation link into `groups` (never as owner). The API generates the secret and
@@ -235,7 +249,7 @@ pub struct RevokeInvitationLink {}
 
 /// The API's: the signed-in account `account_id` joins the tenant through the link. Someone
 /// without an account registers and verifies first: a link, unlike an emailed invitation, proves
-/// no email.
+/// no email. The tenant must be active when it commits, as for `AcceptInvitation`.
 #[command("invitation", aggregate = "link", secret = [token])]
 pub struct JoinWithInvitationLink {
     pub token: String,
@@ -320,5 +334,8 @@ pub fn handle_links(link: &Aggregate<InvitationLink>) {
             }
             .into(),
         ])
+    });
+    link.requires(JoinWithInvitationLink, |_, d| {
+        active_tenant(parse_link_token(&d.token).map(|t| t.tenant))
     });
 }

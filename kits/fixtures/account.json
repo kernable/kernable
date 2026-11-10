@@ -3271,6 +3271,415 @@
         }
       },
       "rejected": "invalid_name"
+    },
+    {
+      "name": "a reset asked for again within the mail cooldown sends nothing",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        },
+        {
+          "type": "PasswordResetRequested",
+          "data": {
+            "tokenId": "tk",
+            "token": "sec",
+            "email": "ann@example.com",
+            "expiresAt": 4360000
+          }
+        }
+      ],
+      "when": {
+        "type": "RequestPasswordReset",
+        "data": {}
+      },
+      "then": []
+    },
+    {
+      "name": "a reset asked for again after the mail cooldown sends a new token",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        },
+        {
+          "type": "PasswordResetRequested",
+          "data": {
+            "tokenId": "tk",
+            "token": "sec",
+            "email": "ann@example.com",
+            "expiresAt": 4300000
+          }
+        }
+      ],
+      "when": {
+        "type": "RequestPasswordReset",
+        "data": {}
+      },
+      "then": [
+        {
+          "type": "PasswordResetRequested",
+          "data": {
+            "tokenId": "<string>",
+            "token": "<string>",
+            "email": "ann@example.com",
+            "expiresAt": 4600000
+          }
+        }
+      ]
+    },
+    {
+      "name": "a registration attempt within the mail cooldown is not told again",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        },
+        {
+          "type": "RegistrationAttempted",
+          "data": {
+            "email": "ann@example.com",
+            "at": 760000
+          }
+        }
+      ],
+      "when": {
+        "type": "NoteRegistrationAttempt",
+        "data": {}
+      },
+      "then": []
+    },
+    {
+      "name": "a registration attempt after the mail cooldown is told again",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        },
+        {
+          "type": "RegistrationAttempted",
+          "data": {
+            "email": "ann@example.com",
+            "at": 700000
+          }
+        }
+      ],
+      "when": {
+        "type": "NoteRegistrationAttempt",
+        "data": {}
+      },
+      "then": [
+        {
+          "type": "RegistrationAttempted",
+          "data": {
+            "email": "ann@example.com",
+            "at": 1000000
+          }
+        }
+      ]
+    },
+    {
+      "name": "a locked account answers locked for a wrong password too, without counting it",
+      "aggregate": "account",
+      "aggregateId": "a1",
+      "tenant": "platform",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "AccountRegistered",
+          "data": {
+            "email": "ann@example.com",
+            "name": "Ann",
+            "passwordHash": "$argon2id$v=19$m=19456,t=2,p=1$PWzCsG3lZ7KlNlkegxnBeg$GPFZqNYVi/hFG9ow5KXbHtrh/A5ZWrwItxUQA0jqgww",
+            "verified": true,
+            "at": 1
+          }
+        },
+        {
+          "type": "SignInFailed",
+          "data": {
+            "method": "password",
+            "reason": "wrong_password",
+            "ip": null,
+            "at": 999000
+          }
+        },
+        {
+          "type": "SignInFailed",
+          "data": {
+            "method": "password",
+            "reason": "wrong_password",
+            "ip": null,
+            "at": 999000
+          }
+        },
+        {
+          "type": "SignInFailed",
+          "data": {
+            "method": "password",
+            "reason": "wrong_password",
+            "ip": null,
+            "at": 999000
+          }
+        },
+        {
+          "type": "SignInFailed",
+          "data": {
+            "method": "password",
+            "reason": "wrong_password",
+            "ip": null,
+            "at": 999000
+          }
+        },
+        {
+          "type": "SignInFailed",
+          "data": {
+            "method": "password",
+            "reason": "wrong_password",
+            "ip": null,
+            "at": 999000
+          }
+        }
+      ],
+      "when": {
+        "type": "SignIn",
+        "data": {
+          "sessionId": "s1",
+          "password": "wrong horse battery",
+          "refreshToken": "s1.1.r"
+        }
+      },
+      "then": [
+        {
+          "type": "SignInFailed",
+          "data": {
+            "method": "password",
+            "reason": "locked",
+            "ip": null,
+            "at": 1000000
+          }
+        }
+      ]
+    },
+    {
+      "name": "an issuer loses all its trailing slashes",
+      "aggregate": "sso",
+      "aggregateId": "sso1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateSso",
+        "data": {
+          "issuer": "https://id.acme.example/realms/acme//",
+          "clientId": "c",
+          "clientSecret": "s"
+        }
+      },
+      "then": [
+        {
+          "type": "SsoCreated",
+          "data": {
+            "issuer": "https://id.acme.example/realms/acme",
+            "clientId": "c",
+            "clientSecret": "s"
+          }
+        }
+      ]
+    },
+    {
+      "name": "an issuer is https",
+      "aggregate": "sso",
+      "aggregateId": "sso1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateSso",
+        "data": {
+          "issuer": "http://id.acme.example",
+          "clientId": "c",
+          "clientSecret": "s"
+        }
+      },
+      "rejected": "invalid_issuer"
+    },
+    {
+      "name": "an http issuer on localhost is taken, for development",
+      "aggregate": "sso",
+      "aggregateId": "sso1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateSso",
+        "data": {
+          "issuer": "http://localhost:8080/",
+          "clientId": "c",
+          "clientSecret": "s"
+        }
+      },
+      "then": [
+        {
+          "type": "SsoCreated",
+          "data": {
+            "issuer": "http://localhost:8080",
+            "clientId": "c",
+            "clientSecret": "s"
+          }
+        }
+      ]
+    },
+    {
+      "name": "an http issuer on 127.0.0.1 is taken, for development",
+      "aggregate": "sso",
+      "aggregateId": "sso1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateSso",
+        "data": {
+          "issuer": "http://127.0.0.1:9000/oidc",
+          "clientId": "c",
+          "clientSecret": "s"
+        }
+      },
+      "then": [
+        {
+          "type": "SsoCreated",
+          "data": {
+            "issuer": "http://127.0.0.1:9000/oidc",
+            "clientId": "c",
+            "clientSecret": "s"
+          }
+        }
+      ]
+    },
+    {
+      "name": "an http issuer on a host that only starts with localhost is refused",
+      "aggregate": "sso",
+      "aggregateId": "sso1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateSso",
+        "data": {
+          "issuer": "http://localhost.evil.example",
+          "clientId": "c",
+          "clientSecret": "s"
+        }
+      },
+      "rejected": "invalid_issuer"
+    },
+    {
+      "name": "an issuer needs a host",
+      "aggregate": "sso",
+      "aggregateId": "sso1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateSso",
+        "data": {
+          "issuer": "https:///realms",
+          "clientId": "c",
+          "clientSecret": "s"
+        }
+      },
+      "rejected": "invalid_issuer"
+    },
+    {
+      "name": "an issuer of slashes only is refused",
+      "aggregate": "sso",
+      "aggregateId": "sso1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateSso",
+        "data": {
+          "issuer": "https:////",
+          "clientId": "c",
+          "clientSecret": "s"
+        }
+      },
+      "rejected": "invalid_issuer"
+    },
+    {
+      "name": "an issuer with a no-break space is refused",
+      "aggregate": "sso",
+      "aggregateId": "sso1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateSso",
+        "data": {
+          "issuer": "https://id.acme.example\u00a0/",
+          "clientId": "c",
+          "clientSecret": "s"
+        }
+      },
+      "rejected": "invalid_issuer"
+    },
+    {
+      "name": "an issuer with a line separator is refused",
+      "aggregate": "sso",
+      "aggregateId": "sso1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [],
+      "when": {
+        "type": "CreateSso",
+        "data": {
+          "issuer": "https://id.acme.example/\u2028",
+          "clientId": "c",
+          "clientSecret": "s"
+        }
+      },
+      "rejected": "invalid_issuer"
     }
   ]
 }

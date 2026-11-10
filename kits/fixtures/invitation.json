@@ -619,6 +619,118 @@
         }
       },
       "rejected": "invalid_token"
+    },
+    {
+      "name": "accepting requires the tenant active, so a suspended tenant takes nobody in",
+      "aggregate": "invitation",
+      "aggregateId": "i1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "InvitationCreated",
+          "data": {
+            "email": "bob@example.com",
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ],
+            "owner": true,
+            "tokenId": "tk",
+            "token": "sec",
+            "expiresAt": 2000000
+          }
+        }
+      ],
+      "when": {
+        "type": "AcceptInvitation",
+        "data": {
+          "token": "t1.i1.tk.sec",
+          "accountId": "a2",
+          "email": "bob@example.com",
+          "newAccount": true
+        }
+      },
+      "then": [
+        {
+          "type": "InvitationAccepted",
+          "data": {
+            "tokenId": "tk",
+            "accountId": "a2",
+            "newAccount": true,
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ],
+            "owner": true
+          }
+        }
+      ],
+      "requires": [
+        {
+          "domain": "tenancy",
+          "aggregateType": "tenant",
+          "aggregateId": "t1",
+          "fact": "active"
+        }
+      ]
+    },
+    {
+      "name": "joining through a link requires the tenant active",
+      "aggregate": "link",
+      "aggregateId": "l1",
+      "tenant": "t1",
+      "now": 1000000,
+      "given": [
+        {
+          "type": "InvitationLinkCreated",
+          "data": {
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ],
+            "hash": "9c957929b94dae791833d4d7b07c2fe749ca43b883170420c5de5a2df8bc8b12",
+            "label": "website",
+            "expiresAt": 2000000,
+            "maxUses": 2
+          }
+        }
+      ],
+      "when": {
+        "type": "JoinWithInvitationLink",
+        "data": {
+          "token": "link_t1.l1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "accountId": "a1"
+        }
+      },
+      "then": [
+        {
+          "type": "InvitationLinkUsed",
+          "data": {
+            "accountId": "a1",
+            "groups": [
+              {
+                "group": "g1",
+                "scope": null
+              }
+            ]
+          }
+        }
+      ],
+      "requires": [
+        {
+          "domain": "tenancy",
+          "aggregateType": "tenant",
+          "aggregateId": "t1",
+          "fact": "active"
+        }
+      ]
     }
   ]
 }

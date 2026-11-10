@@ -45,12 +45,16 @@ sequenceDiagram
      against the invitation's tenant as well: a suspended tenant takes nobody in
      (`tenant_suspended`), one that requires a second factor wants a session that proved one
      (`mfa_required`), and one that enforces single sign-on a session signed in through it
-     (`sso_required`).
+     (`sso_required`), except for an owner invitation: owners are exempt from enforced SSO, so a
+     new owner accepts with any session and can mend a broken configuration.
    - **New person**: they choose a name and password; the account is registered at once and is
      active, since the token proved the email. The name and password are checked first
      (`invalid_name`, `weak_password`), so a refused registration leaves the invitation open.
      Someone whose email already has an account must sign in first (`sign_in_first`), so nobody
-     ends up with an account they cannot use.
+     ends up with an account they cannot use. A suspended tenant takes nobody new in either
+     (`tenant_suspended`): nobody is registered and the invitation stays open.
+   - Either way, `AcceptInvitation` requires the tenant's `active` fact when it commits, so a
+     tenant suspended in between takes nobody in.
 5. **Afterwards**, the identity reactor creates the person's identity in the tenant (or keeps the
    one they have), grants the invitation's groups, and adds them as owner for an owner invitation.
 

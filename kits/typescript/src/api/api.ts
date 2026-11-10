@@ -21,7 +21,7 @@ import {
 } from "../invitation/index.ts";
 import { CreateApiKey, FindApiKey, FindIdentityByAccount, apiKey, parseApiKey } from "../identity/index.ts";
 import { CHALLENGE_SECONDS, PASSKEYS, PLATFORM_TENANT } from "../shared/constants.ts";
-import { emailDomain, equalSecrets, parseInvitationToken, parseToken, randomSecret, token, totpSecret, validPassword, chars, trimSpace } from "../shared/secrets.ts";
+import { checkPassword, emailDomain, equalSecrets, parseInvitationToken, parseToken, randomSecret, token, totpSecret, validPassword, chars, trimSpace } from "../shared/secrets.ts";
 import { checkAccessToken, issueAccessToken, type Claims, type SigningKeys } from "./tokens.ts";
 
 export interface KitApiOptions {
@@ -51,6 +51,15 @@ export type SignInResult =
       secondFactor: boolean;
     }
   | { ok: false; reason: string };
+
+/**
+ * Why a sign-in failed, as the caller hears it: a locked account answers `wrong_password` like an
+ * unknown address, so nobody learns from it that an account exists (its `SignInFailed` event
+ * keeps `locked`).
+ */
+function signInReason(reason: string): string {
+  return reason === "locked" ? "wrong_password" : reason;
+}
 
 /** The events of a committed outcome; a rejection as an error with its code. */
 function events(outcome: Outcome): StoredEvent[] {
@@ -107,12 +116,17 @@ export class KitApi {
     return outcome.committed;
   }
 
-  /** Signs in with email and password: an access token and a refresh token, or why not. */
+  /**
+   * Signs in with email and password: an access token and a refresh token, or why not. An unknown
+   * address and a locked account answer `wrong_password`, and an unknown address takes as long (a
+   * password check against a dummy hash), so nobody learns whether an account exists.
+   */
   async signIn(input: { email: string; password: string; ip?: string; userAgent?: string }): Promise<SignInResult> {
     let account: { id: string };
     try {
       account = await this.kernable.query(FindAccountByEmail.new({ email: input.email }), { tenant: PLATFORM_TENANT, context: this.serviceContext });
     } catch {
+      await checkPassword(null, input.password); // as slow as a wrong password
       return { ok: false, reason: "wrong_password" }; // never say whether the account exists
     }
     const sessionId = randomUUID();
@@ -122,7 +136,7 @@ export class KitApi {
       { aggregateId: account.id, tenant: PLATFORM_TENANT, context: {} },
     );
     const [event] = events(outcome);
-    if (event.type !== "SignedIn") return { ok: false, reason: (event.data as SignInFailed).reason };
+    if (event.type !== "SignedIn") return { ok: false, reason: signInReason((event.data as SignInFailed).reason) };
     const { factors, mfa } = event.data as SignedIn;
     return {
       ok: true, accountId: account.id, sessionId, refreshToken, secondFactor: mfa,
@@ -311,7 +325,7 @@ export class KitApi {
     });
     if (!outcome.committed) return { ok: false, reason: "wrong_password" };
     const signedIn = outcome.events.find((e) => e.type === "SignedIn");
-    if (!signedIn) return { ok: false, reason: (outcome.events[0].data as SignInFailed).reason };
+    if (!signedIn) return { ok: false, reason: signInReason((outcome.events[0].data as SignInFailed).reason) };
     return {
       ok: true, accountId, sessionId, refreshToken, secondFactor: false,
       accessToken: issueAccessToken(this.keys, { sub: accountId, sid: sessionId, fac: (signedIn.data as SignedIn).factors }),
@@ -445,7 +459,7 @@ export class KitApi {
     );
     if (!outcome.committed) return { ok: false, reason: outcome.code };
     const signedIn = outcome.events.find((e) => e.type === "SignedIn");
-    if (!signedIn) return { ok: false, reason: (outcome.events[0].data as SignInFailed).reason };
+    if (!signedIn) return { ok: false, reason: signInReason((outcome.events[0].data as SignInFailed).reason) };
     const d = signedIn.data as SignedIn;
     return { ok: true, accountId, sessionId, refreshToken, secondFactor: d.mfa, accessToken: issueAccessToken(this.keys, { sub: accountId, sid: sessionId, fac: d.factors }) };
   }
@@ -480,7 +494,10 @@ export class KitApi {
     return outcome.committed ? { ok: true } : { ok: false, reason: outcome.code };
   }
 
-  /** Sends a reset mail if the address has an active account; answers the same either way. */
+  /**
+   * Sends a reset mail if the address has an active account; answers the same either way. At most
+   * one mail per account in `MAIL_COOLDOWN_MINUTES` (the command sends nothing within it).
+   */
   async requestPasswordReset(email: string): Promise<void> {
     try {
       const held = await this.kernable.query(FindAccountByEmail.new({ email }), { tenant: PLATFORM_TENANT, context: this.serviceContext });
@@ -528,10 +545,11 @@ export class KitApi {
   /**
    * Accepts an invitation: as the signed-in account (`claims`, its session checked as for every
    * signed-in call, and against the invitation's tenant: active, its second factor, its enforced
-   * SSO), or as a new person with a name and password, registered in the same step
-   * (active: the token proved the email). The accepting account's email must be the invited one.
-   * A new person's name and password are checked before the invitation is used, so a refused
-   * registration does not spend it.
+   * SSO, except for an owner invitation: owners are exempt from it, so they can mend it), or as a
+   * new person with a name and password, registered in the same step (active: the token proved
+   * the email). The accepting account's email must be the invited one. A new person's name and
+   * password are checked before the invitation is used, so a refused registration does not spend
+   * it. Either way a suspended tenant takes nobody in (`tenant_suspended`).
    */
   async acceptInvitation(
     invitationToken: string,
@@ -545,7 +563,9 @@ export class KitApi {
       const signedIn = await this.signedInAccount(as.claims);
       if (!signedIn.ok) return signedIn;
       const may = await this.mayJoin(as.claims, peek.tenant);
-      if (!may.ok) return may;
+      // The middleware checks the tenant (exists, active), then its second factor, then its
+      // enforced SSO: `sso_required` means every other check passed, and an owner is exempt from it.
+      if (!may.ok && !(peek.owner && may.reason === "sso_required")) return may;
       accountId = as.claims.sub;
       email = signedIn.account.email ?? "";
     } else {
@@ -563,7 +583,8 @@ export class KitApi {
     const accepted = await this.kernable.submit(AcceptInvitation.new({ token: invitationToken, accountId, email, newAccount: !("claims" in as) }), {
       aggregateId: peek.invitationId, tenant: peek.tenant, context: this.serviceContext,
     });
-    if (!accepted.committed) return { ok: false, reason: accepted.code };
+    // The command requires the tenant active (its fact): missing, the tenant is suspended or gone.
+    if (!accepted.committed) return { ok: false, reason: accepted.code === "requirement_missing" ? "tenant_suspended" : accepted.code };
     if (!("claims" in as)) {
       const registered = await this.kernable.submit(RegisterAccount.new({ email, name: as.name, password: as.password, verified: true }), {
         aggregateId: accountId, tenant: PLATFORM_TENANT, context: this.serviceContext,
@@ -615,7 +636,8 @@ export class KitApi {
     const outcome = await this.kernable.submit(JoinWithInvitationLink.new({ token: link, accountId: claims.sub }), {
       aggregateId: t.linkId, tenant: t.tenant, context: this.serviceContext,
     });
-    return outcome.committed ? { ok: true, tenant: t.tenant } : { ok: false, reason: outcome.code };
+    if (outcome.committed) return { ok: true, tenant: t.tenant };
+    return { ok: false, reason: outcome.code === "requirement_missing" ? "tenant_suspended" : outcome.code };
   }
 
   /** Signs out: ends the session. */

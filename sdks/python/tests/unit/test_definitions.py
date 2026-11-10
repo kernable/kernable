@@ -74,3 +74,28 @@ class EventSchemaDefinitionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StreamConstructionTest(unittest.TestCase):
+    """Workers, listener handles and subscriptions are made by the client: called directly, their
+    classes refuse at once instead of building an object that fails later."""
+
+    def test_calling_a_stream_class_directly_raises(self):
+        from kernable import ListenerHandle, Subscription, Worker
+        for cls, made_by in ((Worker, "Kernable.worker"), (ListenerHandle, "Kernable.listener"),
+                             (Subscription, "Kernable.subscribe")):
+            with self.subTest(cls=cls.__name__):
+                with self.assertRaisesRegex(TypeError, made_by):
+                    cls(None, None, None)
+                with self.assertRaisesRegex(TypeError, made_by):
+                    cls()
+
+    def test_the_client_still_makes_them(self):
+        import grpc
+
+        from kernable import Worker, _Log
+        from kernable.signing import Key
+        key = Key("00" * 32)
+        worker = Worker._new(grpc.insecure_channel("unix:/nonexistent"), key, [], _Log("test", "test.key", key.id))
+        self.assertIsInstance(worker, Worker)
+        self.assertFalse(worker.ready.is_set())

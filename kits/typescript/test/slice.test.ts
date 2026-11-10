@@ -372,6 +372,10 @@ test("account flows: refresh and reuse, password change and reset, email change,
   await api.requestPasswordReset(email);
   const reset = mailer.last(email)!;
   assert.equal(reset.purpose, "reset");
+  // Asking again at once mails nothing more: one mail per cooldown.
+  const mailed = mailer.sent.length;
+  await api.requestPasswordReset(email);
+  assert.equal(mailer.sent.length, mailed);
   assert.deepEqual(await api.resetPassword(reset.token, "third horse battery"), { ok: true });
   assert.equal((await api.refresh(twoAgain.ok ? twoAgain.refreshToken : "")).ok, false, "every session ended");
   assert.deepEqual(await api.signIn({ email, password: "another horse battery" }), { ok: false, reason: "wrong_password" });
@@ -389,6 +393,17 @@ test("account flows: refresh and reuse, password change and reset, email change,
   const again = await api.register({ email: "frank@new.example", name: "Not Frank", password: PASSWORD });
   assert.ok("accountId" in again);
   assert.equal(mailer.last("frank@new.example")!.purpose, "account_exists");
+  // Again at once: the same answer, and no second mail within the cooldown.
+  const told = mailer.sent.length;
+  assert.ok("accountId" in (await api.register({ email: "frank@new.example", name: "Not Frank", password: PASSWORD })));
+  assert.equal(mailer.sent.length, told);
+
+  // Five wrong passwords lock the account; a locked account answers like a wrong password, even
+  // for the right one, so the answer tells nobody that the account exists.
+  await person("gus@example.com");
+  for (let i = 0; i < 5; i++) assert.deepEqual(await api.signIn({ email: "gus@example.com", password: "wrong horse battery" }), { ok: false, reason: "wrong_password" });
+  assert.deepEqual(await api.signIn({ email: "gus@example.com", password: PASSWORD }), { ok: false, reason: "wrong_password" });
+  assert.deepEqual(await api.signIn({ email: "nobody-at-all@example.com", password: PASSWORD }), { ok: false, reason: "wrong_password" });
 });
 
 test("a second factor: TOTP with recovery codes; and a service with an API key", async () => {
@@ -543,6 +558,10 @@ test("OAuth and SSO: a social login registers or signs in, links on request; a t
     assert.equal((await own(asMiaSso)).id, asMia.senderIdentity);
     // The owner keeps a password session, so a broken SSO can be mended.
     assert.ok((await own(asLiam)).id);
+    // So does a new owner: an owner invitation is accepted with a password session.
+    const nils = await person("nils@lumen.example");
+    assert.ok((await kit.submit(CreateInvitation.new({ email: "nils@lumen.example", owner: true }), { aggregateId: crypto.randomUUID(), tenant: lumen, context: asLiam })).committed);
+    assert.deepEqual(await api.acceptInvitation(mailer.last("nils@lumen.example")!.token, { claims: nils.claims }), { ok: true, accountId: nils.accountId, tenant: lumen });
 
     // Lumen's provider speaks only for lumen.example: it cannot take over Kate's account by naming
     // her verified address, nor register someone of another domain.
@@ -618,6 +637,10 @@ test("the example server: register, verify, sign in, and a command as the caller
     assert.deepEqual(await post("/commands/shop/order/PlaceOrder", { aggregateId: "q1" }, bearer), [403, { error: "forbidden" }]);
     const [unauth] = await post("/commands/shop/order/PlaceOrder", { aggregateId: "q1" });
     assert.equal(unauth, 401);
+    // Account requests go to the platform tenant, where accounts live, whatever tenant the caller is in.
+    const accountId = api.check(tokens.accessToken)!.sub;
+    const [own, account] = await post("/queries/account/GetAccount", { data: { accountId } }, bearer);
+    assert.deepEqual([own, account.email], [200, "quinn@example.com"]);
     assert.equal((await post("/sign-out", {}, bearer))[0], 204);
     assert.equal((await post("/refresh", { refreshToken: tokens.refreshToken }))[0], 401, "signed out");
   } finally {
@@ -706,14 +729,20 @@ test("accepting and joining check the tenant joined too: suspended, a second fac
   // (Tara herself has one factor only now: the platform lifts it.)
   assert.ok((await kit.submit(RequireMfa.new({ required: false }), { aggregateId: taras, tenant: taras, context: { bypassAuthorization: true } })).committed);
 
-  // Suspended: nobody joins it.
+  // Suspended: nobody joins it, not even someone new, who would register in the same step.
+  assert.ok((await kit.submit(CreateInvitation.new({ email: "join-vera@example.com" }), { aggregateId: crypto.randomUUID(), tenant: taras, context: asTara })).committed);
+  const vera = mailer.last("join-vera@example.com")!.token;
   assert.ok((await kit.submit(SuspendTenant.new({ reason: "owner_requested" }), { aggregateId: taras, tenant: taras, context: asTara })).committed);
   assert.deepEqual(await api.joinWithInvitationLink(ugo.claims, link.token), { ok: false, reason: "tenant_suspended" });
   assert.deepEqual(await api.acceptInvitation(invitation, { claims: ugo.claims }), { ok: false, reason: "tenant_suspended" });
+  assert.deepEqual(await api.acceptInvitation(vera, { name: "Vera", password: PASSWORD }), { ok: false, reason: "tenant_suspended" });
+  await assert.rejects(kit.query(FindAccountByEmail.new({ email: "join-vera@example.com" }), { tenant: PLATFORM_TENANT, context: api.serviceContext }),
+    (e: Rejected) => e.code === "not_found", "nobody registered");
   assert.ok((await kit.submit(ReactivateTenant.new(), { aggregateId: taras, tenant: taras, context: asTara })).committed);
 
-  // Active again, without the requirement: Ugo accepts and joins.
+  // Active again, without the requirement: Ugo accepts and joins; Vera's invitation is still open.
   assert.ok((await api.acceptInvitation(invitation, { claims: ugo.claims })).ok);
+  assert.ok((await api.acceptInvitation(vera, { name: "Vera", password: PASSWORD })).ok);
 });
 
 test("a process gets an identity and a key from the kit, and acts only with a platform group", async () => {

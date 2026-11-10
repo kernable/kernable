@@ -9,12 +9,13 @@ use super::{
     events::*, own,
 };
 use crate::shared::constants::{
-    DAY, HOUR, MINUTE, RESET_MINUTES, SESSION_IDLE_DAYS, SESSION_MAX_DAYS, VERIFICATION_HOURS,
+    DAY, HOUR, MAIL_COOLDOWN_MINUTES, MINUTE, RESET_MINUTES, SESSION_IDLE_DAYS, SESSION_MAX_DAYS,
+    VERIFICATION_HOURS,
 };
 use crate::shared::passkeys;
 use crate::shared::secrets::{
-    check_password, email_domain, equal_secrets, hash_password, normal_email, parse_token,
-    random_secret, sha256, totp_step, trim_space, valid_email, valid_password,
+    check_password, email_domain, equal_secrets, has_space, hash_password, normal_email,
+    parse_token, random_secret, sha256, totp_step, trim_space, valid_email, valid_password,
 };
 
 type Events = Result<Vec<NewEvent>, Rejected>;
@@ -191,7 +192,9 @@ pub struct ChangePassword {
     pub keep_session_id: Option<String>,
 }
 
-/// The API's: asked for by email, without saying whether the account exists.
+/// The API's: asked for by email, without saying whether the account exists. While the open reset
+/// token is younger than `MAIL_COOLDOWN_MINUTES`, nothing new is sent (no events): asking again and
+/// again mails the person once per cooldown.
 #[command("account", aggregate = "account")]
 pub struct RequestPasswordReset {}
 
@@ -214,7 +217,8 @@ pub struct ConfirmEmailChange {
     pub token: String,
 }
 
-/// The API's, when someone registers with this account's address: the account gets a mail.
+/// The API's, when someone registers with this account's address: the account gets a mail, at
+/// most one per `MAIL_COOLDOWN_MINUTES` (within it, no events).
 #[command("account", aggregate = "account")]
 pub struct NoteRegistrationAttempt {}
 
@@ -403,15 +407,40 @@ pub struct UnlinkProvider {
     pub subject: String,
 }
 
+/// An issuer URL without its trailing slashes: `https://` and a host, no space characters (the
+/// kits' set). Plain `http://` only for `localhost` and `127.0.0.1` (development and tests).
 fn issuer(value: &str) -> Result<String, Rejected> {
-    let rest = value
+    let v = if has_space(value) {
+        ""
+    } else {
+        value.trim_end_matches('/')
+    };
+    let secure = v
         .strip_prefix("https://")
-        .or_else(|| value.strip_prefix("http://"));
-    match rest {
-        Some(r) if !r.is_empty() && !value.contains(char::is_whitespace) => {
-            Ok(value.trim_end_matches('/').to_owned())
-        }
-        _ => Err(rejected("An issuer URL", "invalid_issuer")),
+        .is_some_and(|r| !r.is_empty() && !r.starts_with('/'));
+    let local = v
+        .strip_prefix("http://")
+        .and_then(|r| {
+            r.strip_prefix("localhost")
+                .or_else(|| r.strip_prefix("127.0.0.1"))
+        })
+        .is_some_and(|r| {
+            let r = match r.strip_prefix(':') {
+                Some(p) => {
+                    let digits = p.bytes().take_while(u8::is_ascii_digit).count();
+                    if digits == 0 {
+                        return false;
+                    }
+                    &p[digits..]
+                }
+                None => r,
+            };
+            r.is_empty() || r.starts_with('/')
+        });
+    if secure || local {
+        Ok(v.to_owned())
+    } else {
+        Err(rejected("An https:// issuer URL", "invalid_issuer"))
     }
 }
 
@@ -571,13 +600,16 @@ pub fn handle(account: &Aggregate<Account>, session: &Aggregate<Session>, sso: &
             return Err(rejected("No such account", "not_found"));
         }
         refresh_ok(&d.refresh_token, &d.session_id)?;
+        // The password is checked even while the account is locked, so a locked account answers
+        // as slowly as any other.
+        let right = check_password(
+            s.password.as_ref().and_then(|p| p.hash.as_deref()),
+            &d.password,
+        );
         if at < s.locked_until() {
             return failed("password", FailureReason::Locked, d.ip, at);
         }
-        if !check_password(
-            s.password.as_ref().and_then(|p| p.hash.as_deref()),
-            &d.password,
-        ) {
+        if !right {
             return failed("password", FailureReason::WrongPassword, d.ip, at);
         }
         match s.status {
@@ -767,12 +799,20 @@ pub fn handle(account: &Aggregate<Account>, session: &Aggregate<Session>, sso: &
 
     account.command(RequestPasswordReset, |s, _, _, ctx| {
         active(s)?;
+        let now = ctx.now().millis();
+        // An open token was requested RESET_MINUTES before it expires.
+        if s.open_tokens.iter().any(|t| {
+            t.purpose == TokenPurpose::Reset
+                && now < t.expires_at - (RESET_MINUTES - MAIL_COOLDOWN_MINUTES) * MINUTE
+        }) {
+            return Ok(vec![]);
+        }
         Ok(vec![
             PasswordResetRequested {
                 token_id: random_secret(9),
                 token: Some(random_secret(32)),
                 email: s.email.clone(),
-                expires_at: ctx.now().millis() + RESET_MINUTES * MINUTE,
+                expires_at: now + RESET_MINUTES * MINUTE,
             }
             .into(),
         ])
@@ -843,10 +883,14 @@ pub fn handle(account: &Aggregate<Account>, session: &Aggregate<Session>, sso: &
         if !matches!(s.status, AccountStatus::Active | AccountStatus::Suspended) {
             return Err(rejected("No account to tell", "invalid_state"));
         }
+        let now = ctx.now().millis();
+        if s.attempt_noted_at != 0 && now < s.attempt_noted_at + MAIL_COOLDOWN_MINUTES * MINUTE {
+            return Ok(vec![]);
+        }
         Ok(vec![
             RegistrationAttempted {
                 email: s.email.clone(),
-                at: ctx.now().millis(),
+                at: now,
             }
             .into(),
         ])

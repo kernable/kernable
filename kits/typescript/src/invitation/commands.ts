@@ -1,6 +1,6 @@
 // The invitation commands: each class with its handler.
 
-import { Command, Rejected } from "@kernable/sdk";
+import { Command, Rejected, type Requirement } from "@kernable/sdk";
 
 import { DAY, INVITATION_DAYS } from "../shared/constants.ts";
 import { equalSecrets, normalEmail, parseInvitationToken, randomSecret, sha256, validEmail } from "../shared/secrets.ts";
@@ -19,6 +19,11 @@ function groups(value: unknown): InvitedGroup[] {
     const scope = g.scope && typeof g.scope.type === "string" && typeof g.scope.id === "string" ? { type: g.scope.type, id: g.scope.id } : null;
     return { group: g.group, scope };
   });
+}
+
+/** The tenant (named by the token; the handler checks it is the command's) must be active when one joins it. */
+function activeTenant(tenant: string | undefined): Requirement[] {
+  return tenant ? [{ domain: "tenancy", aggregateType: "tenant", aggregateId: tenant, fact: "active" }] : [];
 }
 
 /** The token, checked against the invitation: open, this tenant's, not expired, the secret right. */
@@ -83,7 +88,9 @@ invitationAggregate.command(DeclineInvitation, (s, d, cmd, ctx) => {
 
 /**
  * The API's: it says which account accepts, and its email, which must be the invited one.
- * For a new person it picks the account ID and registers the account right after.
+ * For a new person it picks the account ID and registers the account right after. The tenant
+ * must be active when it commits (its `active` fact), so a suspended tenant takes nobody in,
+ * whoever accepts: `requirement_missing` otherwise.
  */
 export class AcceptInvitation extends Command {
   static secret: (keyof AcceptInvitation)[] = ["token"];
@@ -98,7 +105,7 @@ invitationAggregate.command(AcceptInvitation, (s, d, cmd, ctx) => {
   if (normalEmail(d.email) !== s.email) throw new Rejected("The invitation is for another email address", "wrong_email");
   if (typeof d.accountId !== "string" || !d.accountId) throw new Rejected("Which account?", "invalid_account");
   return [InvitationAccepted.new({ tokenId, accountId: d.accountId, newAccount: d.newAccount === true, groups: s.groups, owner: s.owner })];
-});
+}, { requires: (d) => activeTenant(parseInvitationToken(d.token)?.tenant) });
 
 /** Internal: the mail reactor, once the mail is out. */
 export class RecordInvitationMailSent extends Command {
@@ -156,6 +163,7 @@ linkAggregate.command(RevokeInvitationLink, (s) => {
 /**
  * The API's: the signed-in account `accountId` joins the tenant through the link. Someone without
  * an account registers and verifies first: a link, unlike an emailed invitation, proves no email.
+ * The tenant must be active when it commits, as for `AcceptInvitation`.
  */
 export class JoinWithInvitationLink extends Command {
   static secret: (keyof JoinWithInvitationLink)[] = ["token"];
@@ -173,4 +181,4 @@ linkAggregate.command(JoinWithInvitationLink, (s, d, cmd, ctx) => {
   if (typeof d.accountId !== "string" || !d.accountId) throw new Rejected("Which account?", "invalid_account");
   if (s.accounts.includes(d.accountId)) throw new Rejected("Joined through this link already", "exists");
   return [InvitationLinkUsed.new({ accountId: d.accountId, groups: s.groups })];
-});
+}, { requires: (d) => activeTenant(parseLinkToken(d.token)?.tenant) });

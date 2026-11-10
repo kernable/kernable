@@ -6,9 +6,9 @@ from kernable import Command, Rejected
 from webauthn import verify_authentication_response, verify_registration_response
 from webauthn.helpers import base64url_to_bytes, bytes_to_base64url
 
-from ..shared.constants import (DAY, HOUR, MINUTE, PASSKEYS, PLATFORM_TENANT, RESET_MINUTES, SESSION_IDLE_DAYS,
+from ..shared.constants import (DAY, HOUR, MAIL_COOLDOWN_MINUTES, MINUTE, PASSKEYS, PLATFORM_TENANT, RESET_MINUTES, SESSION_IDLE_DAYS,
                                 SESSION_MAX_DAYS, VERIFICATION_HOURS, now_ms)
-from ..shared.secrets import (trim_space, check_password, email_domain, equal_secrets, hash_password, normal_email, parse_token, random_secret, sha256,
+from ..shared.secrets import (trim_space, check_password, email_domain, equal_secrets, has_space, hash_password, normal_email, parse_token, random_secret, sha256,
                               totp_step, valid_email, valid_password)
 from .aggregates import Account, Session, Sso, locked_until
 from .domain import ACCOUNT_SUSPENSION_REASONS, AccountSuspensionReason, SessionEnd, own
@@ -110,6 +110,8 @@ class SignIn(Command):
     user_agent: str | None = None
 
 
+# A failed attempt is an event, not a rejection. A reactor opens the session. The password is
+# checked even while the account is locked, so a locked account answers as slowly as any other.
 @Account.command(SignIn)
 def _(s: Account, d: SignIn, cmd, ctx):
     at = now_ms(ctx)
@@ -120,9 +122,10 @@ def _(s: Account, d: SignIn, cmd, ctx):
     if s.status in ("none", "deleted"):
         raise Rejected("No such account", "not_found")
     _refresh_ok(d.refresh_token, d.session_id)
+    right = check_password((s.password or {}).get("hash"), d.password)
     if at < locked_until(s):
         return failed("locked")
-    if not check_password((s.password or {}).get("hash"), d.password):
+    if not right:
         return failed("wrong_password")
     if s.status == "pending":
         return failed("not_verified")
@@ -278,15 +281,21 @@ def _(s: Account, d: ChangePassword, cmd, ctx):
 
 
 class RequestPasswordReset(Command):
-    """The API's: asked for by email, without saying whether the account exists."""
+    """The API's: asked for by email, without saying whether the account exists. While the open
+    reset token is younger than `MAIL_COOLDOWN_MINUTES`, nothing new is sent (no events): asking
+    again and again mails the person once per cooldown."""
 
 
 @Account.command(RequestPasswordReset)
 def _(s: Account, d, cmd, ctx):
     if s.status != "active":
         raise Rejected("The account is not active", "invalid_state")
+    now = now_ms(ctx)
+    # An open token was requested RESET_MINUTES before it expires.
+    if any(t["purpose"] == "reset" and now < t["expires_at"] - (RESET_MINUTES - MAIL_COOLDOWN_MINUTES) * MINUTE for t in s.open_tokens):
+        return []
     return [PasswordResetRequested(token_id=random_secret(9), token=random_secret(), email=s.email,
-                                   expires_at=now_ms(ctx) + RESET_MINUTES * MINUTE)]
+                                   expires_at=now + RESET_MINUTES * MINUTE)]
 
 
 class ResetPassword(Command):
@@ -336,14 +345,18 @@ def _(s: Account, d: ConfirmEmailChange, cmd, ctx):
 
 
 class NoteRegistrationAttempt(Command):
-    """The API's, when someone registers with this account's address: the account gets a mail."""
+    """The API's, when someone registers with this account's address: the account gets a mail, at
+    most one per `MAIL_COOLDOWN_MINUTES` (within it, no events)."""
 
 
 @Account.command(NoteRegistrationAttempt)
 def _(s: Account, d, cmd, ctx):
     if s.status not in ("active", "suspended"):
         raise Rejected("No account to tell", "invalid_state")
-    return [RegistrationAttempted(email=s.email, at=now_ms(ctx))]
+    now = now_ms(ctx)
+    if s.attempt_noted_at and now < s.attempt_noted_at + MAIL_COOLDOWN_MINUTES * MINUTE:
+        return []
+    return [RegistrationAttempted(email=s.email, at=now)]
 
 
 # --- TOTP and recovery codes ---------------------------------------------------------------------------
@@ -652,9 +665,12 @@ def _(s: Account, d: UnlinkProvider):
 
 
 def _issuer(value) -> str:
-    if not isinstance(value, str) or not re.fullmatch(r"https?://\S+", value):
-        raise Rejected("An issuer URL", "invalid_issuer")
-    return value.rstrip("/")
+    """An issuer URL without its trailing slashes: `https://` and a host, no space characters (the
+    kits' set). Plain `http://` only for `localhost` and `127.0.0.1` (development and tests)."""
+    v = value.rstrip("/") if isinstance(value, str) and not has_space(value) else ""
+    if not re.match(r"https://[^/]", v) and not re.match(r"http://(localhost|127\.0\.0\.1)(:[0-9]+)?(/|$)", v):
+        raise Rejected("An https:// issuer URL", "invalid_issuer")
+    return v
 
 
 def _sso_domain(value) -> str:

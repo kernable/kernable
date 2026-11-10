@@ -39,7 +39,8 @@ sequenceDiagram
   `VERIFICATION_HOURS` (48) and is erased once used.
 - **Registration does not reveal who has an account.** If the address is taken, `register` answers
   exactly as on success. The owner of the address gets a "you already have an account" mail
-  instead (`RegistrationAttempted`).
+  instead (`RegistrationAttempted`), at most one per `MAIL_COOLDOWN_MINUTES` (5): registering
+  again within it sends nothing.
 - A registration that expired unverified does not block the address: registering again takes it
   over with a new token.
 - Whether anyone may register is the platform's [sign-up policy](./tenancy#the-platform-tenant).
@@ -49,12 +50,16 @@ sequenceDiagram
 ## Signing in
 
 `SignIn` checks the password against its argon2id hash and writes either `SignedIn` or
-`SignInFailed` with a reason: `wrong_password`, `locked`, `not_verified` or `not_active`. A
-missing account answers `wrong_password` too.
+`SignInFailed` with a reason: `wrong_password`, `locked`, `not_verified` or `not_active`. Your API
+answers `wrong_password` for a missing account and for a locked one too (the event keeps
+`locked`), and checks the password against a dummy hash for a missing account, so neither the
+answer nor its time tells whether an account exists.
 
 **Lockout:** after `LOCKOUT_AFTER` (5) failures in a row, the account is locked for 1 minute, then
 2, 4 and so on, at most `LOCKOUT_MAX_MINUTES` (15). The lock is computed from the failures, not
-stored, and a successful sign-in resets it. Failed second factors count as well.
+stored, and a successful sign-in resets it. Failed second factors count as well. Anyone who knows
+an address can lock its account this way, for up to `LOCKOUT_MAX_MINUTES` at a time; throttle
+sign-ins per IP address in front of your API (see [Rate limits are yours](./api#rate-limits-are-yours)).
 
 After `SignedIn`, a reactor opens the **session** (`OpenSession`). Your API then holds two tokens:
 
@@ -118,7 +123,8 @@ kit::use_passkeys(kit::RelyingParty {
   (`not_linked`): the person signs in another way and links it (`LinkProvider`), so nobody takes
   over an account through a provider.
 - **Single sign-on per tenant** (`account.sso`): a tenant's owners configure their identity
-  provider (`CreateSso`) and add their email domains. A domain counts once its DNS carries the
+  provider (`CreateSso`: its issuer is an `https://` URL, kept without trailing slashes; plain
+  `http://` only for `localhost` and `127.0.0.1`, for development) and add their email domains. A domain counts once its DNS carries the
   TXT record `_kernable-sso.<domain>` (`VerifySsoDomain`, run by your API); each domain belongs to
   one tenant only. People with an address in a verified domain then sign in through that provider,
   and their first SSO login is linked to the account with the same verified email. A tenant's
@@ -126,7 +132,8 @@ kit::use_passkeys(kit::RelyingParty {
   is in another domain is refused (`email_not_in_domain`), neither linked nor registered, so a
   tenant cannot take over someone else's account through its own provider.
 - **Enforced SSO** (`EnforceSso`): in that tenant, only sessions signed in through its SSO count.
-  Owners are exempt, so a broken SSO configuration can be mended. The same person may still sign
+  Owners are exempt, so a broken SSO configuration can be mended; so is someone accepting an owner
+  invitation. The same person may still sign
   in with a password for *other* tenants.
 
 ## Changing an account
@@ -134,7 +141,7 @@ kit::use_passkeys(kit::RelyingParty {
 | Change | Command | What else happens |
 |---|---|---|
 | password | `ChangePassword` (with the current one, if there is one) | every other session of the account ends; this one stays |
-| forgotten password | `RequestPasswordReset`, then `ResetPassword` with the mailed token (valid `RESET_MINUTES`, 60) | every session ends |
+| forgotten password | `RequestPasswordReset`, then `ResetPassword` with the mailed token (valid `RESET_MINUTES`, 60); asking again within `MAIL_COOLDOWN_MINUTES` (5) of the last mail sends nothing | every session ends |
 | email | `RequestEmailChange`, then `ConfirmEmailChange` with the token mailed to the new address | the old address stays until it is confirmed |
 
 Who may do these: the account itself, or the platform. A person may suspend their own account
@@ -152,6 +159,7 @@ found.
 | `LOCKOUT_AFTER`, `LOCKOUT_MAX_MINUTES` | 5, 15 | failures before the lock, and its longest duration |
 | `VERIFICATION_HOURS` | 48 | how long an email verification token is valid |
 | `RESET_MINUTES` | 60 | how long a password reset token is valid |
+| `MAIL_COOLDOWN_MINUTES` | 5 | at most one reset mail, and one "you already have an account" mail, per account in this time |
 | `ACCESS_TOKEN_MINUTES` | 15 | the access token's lifetime |
 | `SESSION_IDLE_DAYS`, `SESSION_MAX_DAYS` | 14, 90 | when a session ends without a refresh, and at the latest |
 | `REUSE_WINDOW` | 32 | how many of a session's older refresh tokens count as a reuse |

@@ -4,7 +4,7 @@ from kernable import Aggregate
 
 from ..shared.constants import LOCKOUT_AFTER, LOCKOUT_MAX_MINUTES, MINUTE, REUSE_WINDOW
 from .domain import AccountStatus, account_domain
-from .events import (AccountDeleted, AccountReactivated, AccountRegistered, AccountSuspended, EmailChanged,
+from .events import (AccountDeleted, AccountReactivated, AccountRegistered, AccountSuspended, EmailChanged, RegistrationAttempted,
                      EmailChangeRequested, EmailVerified, PasskeyAdded, PasskeyRemoved, PasskeyUsed, PasswordChanged,
                      PasswordReset, PasswordResetRequested, ProviderLinked, ProviderUnlinked, RecoveryCodesGenerated,
                      SecondFactorFailed, SecondFactorProved, SessionEnded, SessionFactorAdded, SessionOpened, SessionRefreshed,
@@ -13,9 +13,11 @@ from .events import (AccountDeleted, AccountReactivated, AccountRegistered, Acco
                      VerificationRequested)
 
 
-class Account(Aggregate, domain=account_domain, schema="py-1"):
-    """A person's account, in the platform tenant. Its snapshots say `py-1`: a TypeScript
-    worker's snapshots (other key names) are never mixed in."""
+class Account(Aggregate, domain=account_domain, schema="py-2"):
+    """A person's account, in the platform tenant. Its snapshots say `py-2`: a TypeScript
+    worker's snapshots (other key names) are never mixed in. `py-2`: the state gained
+    `attempt_noted_at`; snapshots of `py-1` lack it, so the kernel drops them and the state is
+    rebuilt from the events."""
     id: str | None = None
     status: AccountStatus = "none"
     email: str | None = None
@@ -33,6 +35,8 @@ class Account(Aggregate, domain=account_domain, schema="py-1"):
     recovery_codes: list = []
     passkeys: list = []
     links: list = []
+    #: When the last "you already have an account" mail went out (`RegistrationAttempted`); 0: never.
+    attempt_noted_at: int = 0
 
 
 def locked_until(s: Account) -> int:
@@ -178,6 +182,11 @@ def _(s: Account, d: ProviderLinked):
 @Account.apply(ProviderUnlinked)
 def _(s: Account, d: ProviderUnlinked):
     s.links = [x for x in s.links if not (x["provider"] == d.provider and x["subject"] == d.subject)]
+
+
+@Account.apply(RegistrationAttempted)
+def _(s: Account, d: RegistrationAttempted):
+    s.attempt_noted_at = d.at
 
 
 @Account.apply(SignedIn)

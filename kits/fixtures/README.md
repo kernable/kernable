@@ -18,7 +18,9 @@ same cases. A kit a customer changed may leave them; the kits as shipped pass th
 Fold `given` (schema 1, vault values in clear), run `when` at `now` (ms) with the aggregate ID and
 tenant, and compare the produced events with `then` field by field (no field more, none less), or
 the rejection's code with `rejected`. `index`, if present: the unique keys and facts the aggregate
-holds after the new events. Values that differ on every run are placeholders: `"<string>"` (a
+holds after the new events. `requires`, if present: the facts of other aggregates the command
+requires (`[{ "domain", "aggregateType", "aggregateId", "fact" }]`, plus `key` and `value` for an
+aggregate named by a key, `absent: true` for a fact it must not hold). Values that differ on every run are placeholders: `"<string>"` (a
 non-empty string: random IDs and tokens), `"<number>"`, `"<argon2>"` (an argon2id hash), `"<any>"`.
 
 ## Authorization: `authorization.json`

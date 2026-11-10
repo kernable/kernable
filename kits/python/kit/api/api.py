@@ -33,7 +33,7 @@ from ..invitation.commands import AcceptInvitation, CreateInvitationLink, JoinWi
 from ..invitation.domain import InvitedGroup, link_token, parse_link_token
 from ..invitation.queries import PeekInvitation, PeekInvitationLink
 from ..shared.constants import CHALLENGE_SECONDS, PASSKEYS, PLATFORM_TENANT
-from ..shared.secrets import (trim_space, email_domain, equal_secrets, parse_invitation_token, parse_token, random_secret, token, totp_secret,
+from ..shared.secrets import (trim_space, check_password, email_domain, equal_secrets, parse_invitation_token, parse_token, random_secret, token, totp_secret,
                               valid_password)
 from .tokens import Claims, SigningKeys, check_access_token, issue_access_token
 
@@ -56,9 +56,12 @@ def _first(outcome: Outcome, type_: str) -> dict | None:
 
 
 def _failed(outcome: Outcome) -> str:
-    """Why a sign-in that committed did not sign in: its `SignInFailed` reason."""
+    """Why a sign-in that committed did not sign in, as the caller hears it: its `SignInFailed`
+    reason, except that a locked account answers `wrong_password` like an unknown address, so
+    nobody learns from it that an account exists (the event keeps `locked`)."""
     events = _events(outcome)
-    return (events[0]["data"].get("reason") if events else None) or "wrong_password"
+    reason = (events[0]["data"].get("reason") if events else None) or "wrong_password"
+    return "wrong_password" if reason == "locked" else reason
 
 
 def _done(outcome: Outcome) -> dict:
@@ -170,9 +173,12 @@ class KitApi:
 
     def sign_in(self, email: str, password: str, ip: str | None = None, user_agent: str | None = None) -> dict:
         """Signs in with email and password: an access token and a refresh token, or why not.
-        `second_factor`: the account has a second factor on; prove it before anything else."""
+        `second_factor`: the account has a second factor on; prove it before anything else. An
+        unknown address and a locked account answer `wrong_password`, and an unknown address takes
+        as long (a password check against a dummy hash), so nobody learns whether an account exists."""
         account_id = self._find(FindAccountByEmail(email=email))
         if not account_id:
+            check_password(None, password)  # as slow as a wrong password
             return {"ok": False, "reason": "wrong_password"}  # never say whether the account exists
         session_id = str(uuid.uuid4())
         refresh_token = token(session_id, 1, random_secret())
@@ -482,7 +488,8 @@ class KitApi:
         return _done(self._submit(ChangePassword(current=current, new=new, keep_session_id=claims.sid), claims.sub, context=self._own(claims)))
 
     def request_password_reset(self, email: str) -> None:
-        """Sends a reset mail if the address has an active account; answers the same either way."""
+        """Sends a reset mail if the address has an active account; answers the same either way. At
+        most one mail per account in `MAIL_COOLDOWN_MINUTES` (the command sends nothing within it)."""
         account_id = self._find(FindAccountByEmail(email=email))
         if account_id:
             self._submit(RequestPasswordReset(), account_id, context=self.service_context)
@@ -521,10 +528,11 @@ class KitApi:
                           password: str | None = None) -> dict:
         """Accepts an invitation: as the signed-in account (`claims`, its session checked as for every
         signed-in call, and against the invitation's tenant: active, its second factor, its enforced
-        SSO), or as a new person with a name and password, registered in the same step
-        (active: the token proved the email). The accepting account's email must be the invited one.
-        A new person's name and password are checked before the invitation is used, so a refused
-        registration does not spend it."""
+        SSO, except for an owner invitation: owners are exempt from it, so they can mend it), or as a
+        new person with a name and password, registered in the same step (active: the token proved
+        the email). The accepting account's email must be the invited one. A new person's name and
+        password are checked before the invitation is used, so a refused registration does not spend
+        it. Either way a suspended tenant takes nobody in (`tenant_suspended`)."""
         peek = self.peek_invitation(invitation_token)
         if not peek or not peek.get("email"):
             return {"ok": False, "reason": "invalid_token"}
@@ -533,7 +541,9 @@ class KitApi:
             if not signed_in["ok"]:
                 return signed_in
             may = self._may_join(claims, peek["tenant"])
-            if not may["ok"]:
+            # The middleware checks the tenant (exists, active), then its second factor, then its
+            # enforced SSO: `sso_required` means every other check passed, and an owner is exempt from it.
+            if not may["ok"] and not (peek.get("owner") and may["reason"] == "sso_required"):
                 return may
             account_id = claims.sub
             email = signed_in["account"].get("email") or ""
@@ -548,8 +558,9 @@ class KitApi:
             account_id, email = str(uuid.uuid4()), peek["email"]
         accepted = self._submit(AcceptInvitation(token=invitation_token, account_id=account_id, email=email, new_account=claims is None),
                                 peek["invitation_id"], peek["tenant"], self.service_context)
+        # The command requires the tenant active (its fact): missing, the tenant is suspended or gone.
         if not accepted.committed:
-            return {"ok": False, "reason": accepted.code}
+            return {"ok": False, "reason": "tenant_suspended" if accepted.code == "requirement_missing" else accepted.code}
         if claims is None:
             registered = self._submit(RegisterAccount(email=email, name=name, password=password, verified=True), account_id,
                                       context=self.service_context)
@@ -593,7 +604,9 @@ class KitApi:
         if not may["ok"]:
             return may
         outcome = self._submit(JoinWithInvitationLink(token=link, account_id=claims.sub), t["link_id"], t["tenant"], self.service_context)
-        return {"ok": True, "tenant": t["tenant"]} if outcome.committed else {"ok": False, "reason": outcome.code}
+        if outcome.committed:
+            return {"ok": True, "tenant": t["tenant"]}
+        return {"ok": False, "reason": "tenant_suspended" if outcome.code == "requirement_missing" else outcome.code}
 
     def sign_out(self, claims: Claims) -> None:
         """Signs out: ends the session."""

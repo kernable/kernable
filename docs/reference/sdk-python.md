@@ -367,6 +367,7 @@ What a listener handler gets besides the event's data and meta (as an optional t
 
 A running `Listener`, returned by `kernable.listener(listener)`: `run()` processes events, queries and checks until `stop()`; `ready` is set once the kernel accepted it. `run()` blocks the calling thread. To run several listeners in one process, run all but one in threads (`threading.Thread(target=handle.run, daemon=True).start()`), or use `Kernable.app`. `ready` is a `threading.Event`: `handle.ready.wait(5)` returns whether the kernel accepted the listener within 5 seconds. `stop()` ends `run()`, also from another thread. Attributes: `listener` (the definition), `position` (global position of the last handled event, or skipped, for other event types) and `store` (the listener's `Store`, while `run()` has it open).
 
+- `ListenerHandle(*args, **kwargs)`: Not for applications: `Kernable.listener` (or `Kernable.app`) runs listeners.
 - `run() -> None`: Processes events, queries and checks until `stop()`, reconnecting when the stream drops; with a store, opens it first and continues after its position, and closes it when `run()` ends. A store that cannot be opened (a full disk) is tried again, backing off like a reconnect. With partitions, a stream per partition, each from its own position in the shared store.
 
 ### Manifest
@@ -514,6 +515,7 @@ What a listener handler gets about the event besides its data (as an optional se
 
 A running subscription, from `Kernable.subscribe`: it streams until `stop()`, reconnecting after `position` when the stream drops. Attributes: `position` (global position of the last handled event) and `done` (a `threading.Event`, set once the subscription has ended: `sub.stop(); sub.done.wait(5)`).
 
+- `Subscription(*args, **kwargs)`: Not for applications: `Kernable.subscribe` starts subscriptions.
 - `run() -> None`: Streams events to the handler until `stop()`; `Kernable.subscribe` runs it in a thread.
 
 ### Tls
@@ -528,6 +530,7 @@ Paths of PEM files for mutual TLS with a kernel at `host:port`: the CA that sign
 
 Runs the commands of its aggregates, one at a time: the kernel sends each command with the aggregate's events (or a snapshot and the events after it), the worker folds the state, calls the command handler and sends the new events back, signed. Made with `Kernable.worker`. `run()` processes commands until `stop()`, reconnecting when the session drops (after 1 s); it blocks the calling thread. `ready` (a `threading.Event`) is set once the kernel registered the worker: run it in a thread and wait with `worker.ready.wait(5)`, e.g. `threading.Thread(target=worker.run, daemon=True).start()`. `stop()` ends `run()`, also from another thread.
 
+- `Worker(*args, **kwargs)`: Not for applications: `Kernable.worker` (or `Kernable.app`) makes workers.
 - `run() -> None`: Processes commands until `stop()`, reconnecting when the session drops; with partitions, a session per partition.
 
 ### Value

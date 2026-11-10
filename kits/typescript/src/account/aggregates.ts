@@ -2,7 +2,7 @@
 
 import { LOCKOUT_AFTER, LOCKOUT_MAX_MINUTES, MINUTE, REUSE_WINDOW } from "../shared/constants.ts";
 import { accountDomain, type AccountStatus, type AccountSuspensionReason, type SessionEnd, type TokenPurpose } from "./domain.ts";
-import { ProviderLinked, ProviderUnlinked, SsoCreated, SsoDeleted, SsoDisabled, SsoDomainAdded, SsoDomainRemoved, SsoDomainVerified, SsoEnabled, SsoEnforcementChanged, SsoUpdated, PasskeyAdded, PasskeyRemoved, PasskeyUsed, RecoveryCodesGenerated, SecondFactorFailed, SecondFactorProved, TotpConfirmed, TotpDisabled, TotpStarted, EmailChangeRequested, EmailChanged, PasswordChanged, PasswordReset, PasswordResetRequested, AccountDeleted, AccountReactivated, AccountRegistered, AccountSuspended, EmailVerified, SessionEnded, SessionFactorAdded, SessionOpened, SessionRefreshed, SignedIn, SignInFailed, VerificationRequested } from "./events.ts";
+import { RegistrationAttempted, ProviderLinked, ProviderUnlinked, SsoCreated, SsoDeleted, SsoDisabled, SsoDomainAdded, SsoDomainRemoved, SsoDomainVerified, SsoEnabled, SsoEnforcementChanged, SsoUpdated, PasskeyAdded, PasskeyRemoved, PasskeyUsed, RecoveryCodesGenerated, SecondFactorFailed, SecondFactorProved, TotpConfirmed, TotpDisabled, TotpStarted, EmailChangeRequested, EmailChanged, PasswordChanged, PasswordReset, PasswordResetRequested, AccountDeleted, AccountReactivated, AccountRegistered, AccountSuspended, EmailVerified, SessionEnded, SessionFactorAdded, SessionOpened, SessionRefreshed, SignedIn, SignInFailed, VerificationRequested } from "./events.ts";
 
 export interface Account {
   id?: string;
@@ -25,6 +25,8 @@ export interface Account {
   recoveryCodes: string[];
   /** A new address waiting for its confirmation: it holds no key yet. */
   pendingEmail?: string | null;
+  /** When the last "you already have an account" mail went out (`RegistrationAttempted`); 0: never. */
+  attemptNotedAt: number;
 }
 
 /** Until when the account is locked after failed sign-ins: computed, never stored. */
@@ -34,6 +36,8 @@ export function lockedUntil(s: Account): number {
   return s.failures.lastAt + minutes * MINUTE;
 }
 
+// Snapshot schema "2": the state gained `attemptNotedAt`; snapshots of schema "1" lack it, so the
+// kernel drops them and the state is rebuilt from the events.
 export const accountAggregate = accountDomain
   .aggregate<Account>("account", {
     status: "none",
@@ -46,7 +50,8 @@ export const accountAggregate = accountDomain
     recoveryCodes: [],
     passkeys: [],
     links: [],
-  })
+    attemptNotedAt: 0,
+  }, { schema: "2" })
   .apply(AccountRegistered, (s, d, evt) => {
     s.id = evt.aggregateId;
     s.status = d.verified ? "active" : "pending";
@@ -124,6 +129,7 @@ export const accountAggregate = accountDomain
   })
   .apply(ProviderLinked, (s, d) => void s.links.push({ provider: d.provider, subject: d.subject }))
   .apply(ProviderUnlinked, (s, d) => void (s.links = s.links.filter((l) => !(l.provider === d.provider && l.subject === d.subject))))
+  .apply(RegistrationAttempted, (s, d) => void (s.attemptNotedAt = d.at))
   .apply(SignedIn, (s) => void (s.failures = { count: 0, lastAt: 0 }))
   .apply(SignInFailed, (s, d) => {
     if (d.reason === "wrong_password") s.failures = { count: s.failures.count + 1, lastAt: d.at };

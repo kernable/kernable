@@ -44,8 +44,12 @@ echo "installed $("$DEST/kernable" --version) to $DEST/kernable"
 case ":$PATH:" in
   *":$DEST:"*) ;;
   *)
-    # zsh is the default shell on macOS and does not read ~/.profile.
-    profile="~/.profile"
-    [ "$(uname -s)" = Darwin ] && profile="~/.zprofile"
+    # The file the user's login shell reads: zsh and bash do not read ~/.profile when they have
+    # their own, and bash on Linux reads ~/.bashrc in each terminal.
+    case "$(basename "${SHELL:-sh}")" in
+      zsh) profile="~/.zprofile" ;;
+      bash) if [ "$(uname -s)" = Darwin ]; then profile="~/.bash_profile"; else profile="~/.bashrc"; fi ;;
+      *) profile="~/.profile" ;;
+    esac
     echo "add $DEST to your PATH, e.g. echo 'export PATH=\"$DEST:\$PATH\"' >> $profile" ;;
 esac

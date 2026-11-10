@@ -313,7 +313,18 @@ async fn create_link(
     }
 }
 
-/// POST /commands/{domain}/{aggregate}/{type}: the app's commands, as the caller.
+/// Where a request of `domain` goes: accounts and sessions live in the platform tenant, the rest
+/// in the caller's.
+fn tenant_for(domain: &str, context: &RequestContext) -> String {
+    if domain == "account" {
+        kit::shared::constants::PLATFORM_TENANT.to_owned()
+    } else {
+        context.sender_tenant.clone()
+    }
+}
+
+/// POST /commands/{domain}/{aggregate}/{type}: the app's commands, as the caller; `account` ones
+/// go to the platform tenant, where every account lives.
 async fn command(
     State(s): State<Server>,
     Path((domain, aggregate, r#type)): Path<(String, String, String)>,
@@ -328,7 +339,7 @@ async fn command(
         .map_or_else(kit::shared::secrets::new_id, str::to_owned);
     let submit = Submit::new(&domain, &aggregate, &id, &r#type)
         .data(data(&b))
-        .tenant(context.sender_tenant.clone())
+        .tenant(tenant_for(&domain, &context))
         .context(context);
     match s.kernable.submit(submit).await {
         Ok(Outcome::Committed(events)) => reply(
@@ -353,7 +364,7 @@ async fn query(
     };
     let q = Query::new(&domain, &r#type)
         .data(data(&b))
-        .tenant(context.sender_tenant.clone())
+        .tenant(tenant_for(&domain, &context))
         .context(context);
     match s.kernable.query::<Value>(q).await {
         Ok(answer) => reply(StatusCode::OK, answer),

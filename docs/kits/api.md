@@ -50,13 +50,20 @@ await kernable.submit(PlaceOrder.new({ … }), { aggregateId, tenant: tenantId, 
 The context goes with the command; the [middleware](./authorization) decides on it. Your API
 does not decide who may do what.
 
+**Account requests go to the platform tenant.** Every account and session lives there, so send
+`account` commands and queries (`GetAccount`, `ListSessions`, `EndSession`, `SuspendAccount` …)
+with `tenant: PLATFORM_TENANT`, whatever tenant the caller works in. Sent to another tenant, an
+account acting on itself meets that tenant's checks too (suspended, its second factor, its
+enforced SSO), which is what the API uses when someone joins a tenant, not what a settings page
+wants. The example servers route every `account` request to the platform tenant.
+
 ## Methods
 
 | Task | Method | Returns |
 |---|---|---|
 | **Registration** | `register({ email, name, password? })` | `{ ok: true, accountId }`, the same whether or not the address was taken; `{ ok: false, reason }` for an invalid email, name or password |
 | | `verifyEmail(token)` | whether it worked |
-| **Password sign-in** | `signIn({ email, password, ip?, userAgent? })` | access and refresh token, session ID, and `secondFactor: true` if the account must prove one now; or a reason |
+| **Password sign-in** | `signIn({ email, password, ip?, userAgent? })` | access and refresh token, session ID, and `secondFactor: true` if the account must prove one now; or a reason (`wrong_password` also for an unknown address and a locked account) |
 | | `refresh(refreshToken, ip?)` | a new access token and the next refresh token; an older token of the session ends it (`reuse`), any other is refused (`invalid_token`) |
 | | `signOut(claims)` | ends the session |
 | **Second factor** | `proveSecondFactor(claims, code)` | a new access token with the factor, for a TOTP or recovery code |
@@ -69,10 +76,10 @@ does not decide who may do what.
 | | `oidcFinish(callbackUrl, ip?)` | signs in, registers or links (see [Accounts](./account#other-ways-to-sign-in)); a tenant SSO's login outside its verified domains is refused (`email_not_in_domain`) |
 | | `verifySsoDomain(tenant, ssoId, domain)` | looks up the `_kernable-sso.<domain>` TXT record and verifies the domain |
 | **Account changes** | `changePassword(claims, current, next)` | ends every other session |
-| | `requestPasswordReset(email)`, `resetPassword(token, next)` | the reset by mail; the request answers the same for unknown addresses |
+| | `requestPasswordReset(email)`, `resetPassword(token, next)` | the reset by mail; the request answers the same for unknown addresses, and mails at most once per `MAIL_COOLDOWN_MINUTES` |
 | | `requestEmailChange(claims, email)`, `confirmEmailChange(token)` | the change, confirmed from the new address |
 | **Invitations** | `peekInvitation(token)` | the tenant (its ID), the invitation ID, the email, whether it makes an owner, whether it expired; nothing for a wrong secret |
-| | `acceptInvitation(token, { claims } \| { name, password })` | as the signed-in account (its session checked, also against the invitation's tenant: active, its second factor, its enforced SSO), or as a new person ([Invitations](./invitation#the-flow)) |
+| | `acceptInvitation(token, { claims } \| { name, password })` | as the signed-in account (its session checked, also against the invitation's tenant: active, its second factor, its enforced SSO unless the invitation makes an owner), or as a new person; a tenant that is not active takes nobody in (`tenant_suspended`) ([Invitations](./invitation#the-flow)) |
 | **Invitation links** | `createInvitationLink(context, tenant, { groups, label?, expiresAt?, maxUses? })` | the link's token, shown this once |
 | | `peekInvitationLink(token)` | tenant, label, whether it can be used; nothing for a wrong token |
 | | `joinWithInvitationLink(claims, token)` | the signed-in account (its session checked, also against the link's tenant) joins with the link's groups ([Invitation links](./invitation#invitation-links)) |
@@ -82,7 +89,9 @@ does not decide who may do what.
 ## Security notes
 
 - **Nothing reveals whether an account exists.** Sign-in answers `wrong_password` for unknown
-  addresses, and registration and password reset answer the same either way.
+  addresses and locked accounts (the `SignInFailed` event keeps `locked`), and checks an unknown
+  address's password against a dummy hash so it takes as long; registration and password reset
+  answer the same either way.
 - **Tokens are short and narrow.** Access tokens last 15 minutes and are checked without the
   kernel; the middleware still refuses an ended session at once. Refresh tokens rotate, and a
   reused one ends its session; a made-up one does not. The calls the API makes in its own name for
@@ -94,3 +103,20 @@ does not decide who may do what.
 - **Secrets never stay in the log.** Passwords, tokens and codes travel as secret command fields
   and leave the vault once the command completes; hashes and personal data stay in the vault and
   are erased with the person.
+
+## Rate limits are yours
+
+`KitApi` does not count requests per caller: it cannot see your load balancer, your proxies or
+which addresses you trust. What the kit limits, it limits per account:
+
+- **Lockout.** After `LOCKOUT_AFTER` (5) wrong passwords in a row, the account is locked for 1, 2,
+  4 … minutes, at most `LOCKOUT_MAX_MINUTES` (15). Anyone who knows an address can therefore lock
+  its account for up to `LOCKOUT_MAX_MINUTES` at a time, again and again.
+- **Mails.** A password reset and the "you already have an account" mail go out at most once per
+  account in `MAIL_COOLDOWN_MINUTES` (5); requests within it send nothing and answer the same.
+
+Everything per IP address or per client is your API's job, in front of `KitApi`: throttle
+`signIn`, `register`, `requestPasswordReset`, `verifyEmail`, `refresh`, `proveSecondFactor`,
+`peekInvitation` and `oidcStart` per IP (a reverse proxy's rate limit, or middleware in your
+framework), so that one client cannot lock many accounts, mail many addresses or guess tokens.
+The example servers bind to loopback and leave this to the proxy in front of them.

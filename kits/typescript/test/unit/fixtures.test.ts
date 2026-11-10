@@ -22,6 +22,7 @@ interface Case {
   then?: { type: string; data: unknown }[];
   rejected?: string;
   index?: { keys: unknown[]; facts: string[] };
+  requires?: unknown[];
 }
 
 // The fixtures: next to the kit in a copy (`kernable-sdk add kit`), or in the repository.
@@ -85,6 +86,15 @@ for (const file of files) {
         const after = aggregate.fold(plain.map((e: { type: string; data: unknown }, i: number) => ({ ...meta, type: e.type, schema: 1, data: e.data, version: c.given.length + i + 1 })), state);
         const index = JSON.parse(JSON.stringify(aggregate.index(after)));
         const m = matches(c.index, index);
+        assert.equal(m, null, m ?? "");
+      }
+      if (c.requires) {
+        const declared = aggregate.requirements.get(c.when.type)?.(c.when.data ?? {}, structuredClone(state)) ?? [];
+        const plainRequires = declared.map((r) => ({
+          domain: r.domain ?? domain, aggregateType: r.aggregateType, aggregateId: r.aggregateId ?? "", fact: r.fact,
+          ...(r.key ? { key: r.key, value: r.value } : {}), ...(r.absent ? { absent: true } : {}),
+        }));
+        const m = matches(c.requires, plainRequires);
         assert.equal(m, null, m ?? "");
       }
     });

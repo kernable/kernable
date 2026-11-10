@@ -895,6 +895,10 @@ async fn account_flows(w: &World) {
     api.request_password_reset(email).await.unwrap();
     let reset = w.mailer.last(email).unwrap();
     assert_eq!(reset.purpose, Purpose::Reset);
+    // Asking again at once mails nothing more: one mail per cooldown.
+    let mailed = w.mailer.sent.lock().unwrap().len();
+    api.request_password_reset(email).await.unwrap();
+    assert_eq!(w.mailer.sent.lock().unwrap().len(), mailed);
     api.reset_password(&reset.token, "third horse battery")
         .await
         .unwrap();
@@ -929,6 +933,32 @@ async fn account_flows(w: &World) {
     assert_eq!(
         w.mailer.last("frank@new.example").unwrap().purpose,
         Purpose::AccountExists
+    );
+    // Again at once: the same answer, and no second mail within the cooldown.
+    let told = w.mailer.sent.lock().unwrap().len();
+    api.register("frank@new.example", "Not Frank", Some(PASSWORD))
+        .await
+        .unwrap();
+    assert_eq!(w.mailer.sent.lock().unwrap().len(), told);
+
+    // Five wrong passwords lock the account; a locked account answers like a wrong password, even
+    // for the right one, so the answer tells nobody that the account exists.
+    w.person("gus@example.com").await;
+    for _ in 0..5 {
+        refused(
+            api.sign_in("gus@example.com", "wrong horse battery", None, None)
+                .await,
+            "wrong_password",
+        );
+    }
+    refused(
+        api.sign_in("gus@example.com", PASSWORD, None, None).await,
+        "wrong_password",
+    );
+    refused(
+        api.sign_in("nobody-at-all@example.com", PASSWORD, None, None)
+            .await,
+        "wrong_password",
     );
 }
 
@@ -1361,7 +1391,30 @@ async fn oauth_and_sso(w: &World) {
         .unwrap();
     assert_eq!(own(as_mia_sso).await.unwrap().id, as_mia.sender_identity);
     // The owner keeps a password session, so a broken SSO can be mended.
-    assert!(!own(as_liam).await.unwrap().id.is_empty());
+    assert!(!own(as_liam.clone()).await.unwrap().id.is_empty());
+    // So does a new owner: an owner invitation is accepted with a password session.
+    let (nils, nils_id) = w.person("nils@lumen.example").await;
+    committed(
+        &w.send(
+            CreateInvitation {
+                email: "nils@lumen.example".into(),
+                groups: None,
+                owner: Some(true),
+            },
+            &new_id(),
+            &lumen,
+            as_liam.clone(),
+        )
+        .await,
+    );
+    let nils_invitation = w.mailer.last("nils@lumen.example").unwrap().token;
+    assert_eq!(
+        w.api
+            .accept_invitation(&nils_invitation, Some(&nils), None)
+            .await
+            .unwrap(),
+        (nils_id, lumen.clone())
+    );
 
     // Lumen's provider speaks only for lumen.example: it cannot take over Kate's account by naming
     // her verified address, nor register someone of another domain.
@@ -1563,7 +1616,12 @@ async fn lists_and_explain(w: &World) {
 async fn example_server(w: &World) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    let router = server::router(w.api.clone(), w.kit.clone());
+    // As the example's main does: its client knows what the kit's queries asked by name are about.
+    let kernable = w.kit.clone();
+    for d in &kit::kit_domains() {
+        kernable.with_domain(d);
+    }
+    let router = server::router(w.api.clone(), kernable);
     let task = tokio::spawn(async move {
         axum::serve(
             listener,
@@ -1641,6 +1699,18 @@ async fn example_server(w: &World) {
         .0,
         401
     );
+    // Account requests go to the platform tenant, where accounts live, whatever tenant the caller is in.
+    let account_id = w.api.check(&access).unwrap().sub;
+    let (own, account): (u16, Value) = post(
+        "/queries/account/GetAccount",
+        json!({ "data": { "accountId": account_id } }),
+        Some(access.clone()),
+    )
+    .await;
+    assert_eq!(
+        (own, account["email"].clone()),
+        (200, json!("quinn@example.com"))
+    );
     assert_eq!(post("/sign-out", json!({}), Some(access)).await.0, 204);
     assert_eq!(
         post(
@@ -1703,7 +1773,17 @@ async fn joining_checks_the_tenant(w: &World) {
     };
     committed(&w.send(mfa(false), &taras, &taras, platform).await);
 
-    // Suspended: nobody joins it.
+    // Suspended: nobody joins it, not even someone new, who would register in the same step.
+    let invite_vera = CreateInvitation {
+        email: "join-vera@example.com".into(),
+        groups: None,
+        owner: None,
+    };
+    committed(
+        &w.send(invite_vera, &new_id(), &taras, as_tara.clone())
+            .await,
+    );
+    let vera = w.mailer.last("join-vera@example.com").unwrap().token;
     let suspend = SuspendTenant {
         reason: SuspensionReason::OwnerRequested,
     };
@@ -1716,10 +1796,28 @@ async fn joining_checks_the_tenant(w: &World) {
         api.accept_invitation(&invitation, Some(&ugo), None).await,
         "tenant_suspended",
     );
+    refused(
+        api.accept_invitation(&vera, None, Some(("Vera", PASSWORD)))
+            .await,
+        "tenant_suspended",
+    );
+    let nobody = Query::of(FindAccountByEmail {
+        email: "join-vera@example.com".into(),
+    })
+    .tenant(kit::shared::constants::PLATFORM_TENANT)
+    .context(api.service_context.clone());
+    assert_eq!(
+        query_code::<Value>(&w.kit, nobody).await,
+        "not_found",
+        "nobody registered"
+    );
     committed(&w.send(ReactivateTenant {}, &taras, &taras, as_tara).await);
 
-    // Active again, without the requirement: Ugo accepts.
+    // Active again, without the requirement: Ugo accepts; Vera's invitation is still open.
     api.accept_invitation(&invitation, Some(&ugo), None)
+        .await
+        .unwrap();
+    api.accept_invitation(&vera, None, Some(("Vera", PASSWORD)))
         .await
         .unwrap();
 }

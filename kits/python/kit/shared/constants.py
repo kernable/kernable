@@ -17,6 +17,9 @@ LOCKOUT_MAX_MINUTES = 15
 
 VERIFICATION_HOURS = 48
 RESET_MINUTES = 60
+#: At most one mail per account in this many minutes for what anyone can ask for by email: a
+#: password reset, the "you already have an account" mail. A request within it sends nothing.
+MAIL_COOLDOWN_MINUTES = 5
 ACCESS_TOKEN_MINUTES = 15
 SESSION_IDLE_DAYS = 14
 SESSION_MAX_DAYS = 90

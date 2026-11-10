@@ -35,8 +35,8 @@ use crate::invitation::{
 };
 use crate::shared::constants::{CHALLENGE_SECONDS, PLATFORM_TENANT, passkeys};
 use crate::shared::secrets::{
-    email_domain, equal_secrets, new_id, parse_invitation_token, parse_token, random_bytes,
-    random_secret, token, totp_secret, trim_space, valid_password,
+    check_password, email_domain, equal_secrets, new_id, parse_invitation_token, parse_token,
+    random_bytes, random_secret, token, totp_secret, trim_space, valid_password,
 };
 
 /// Why a call did not do what was asked.
@@ -152,13 +152,27 @@ fn first<'a>(outcome: &'a Outcome, r#type: &str) -> Option<&'a Value> {
         .map(|e| &e.data)
 }
 
-/// Why a sign-in that committed did not sign in: its `SignInFailed` reason.
+/// Why a sign-in that committed did not sign in, as the caller hears it: its `SignInFailed`
+/// reason, except that a locked account answers `wrong_password` like an unknown address, so
+/// nobody learns from it that an account exists (the event keeps `locked`).
 fn failed_reason(outcome: &Outcome) -> String {
-    events(outcome)
+    match events(outcome)
         .first()
         .and_then(|e| e.data["reason"].as_str())
         .unwrap_or("wrong_password")
-        .to_owned()
+    {
+        "locked" => "wrong_password".to_owned(),
+        reason => reason.to_owned(),
+    }
+}
+
+/// A refusal of a command that requires the tenant active (its fact): missing, the tenant is
+/// suspended or gone.
+fn joined(outcome: Outcome) -> ApiResult<()> {
+    match outcome {
+        Outcome::Rejected(r) if r.code == "requirement_missing" => refused("tenant_suspended"),
+        outcome => done(outcome),
+    }
 }
 
 fn done(outcome: Outcome) -> ApiResult<()> {
@@ -422,7 +436,9 @@ impl KitApi {
             .is_committed())
     }
 
-    /// Signs in with email and password: an access token and a refresh token, or why not.
+    /// Signs in with email and password: an access token and a refresh token, or why not. An
+    /// unknown address and a locked account answer `wrong_password`, and an unknown address takes
+    /// as long (a password check against a dummy hash), so nobody learns whether an account exists.
     pub async fn sign_in(
         &self,
         email: &str,
@@ -441,6 +457,7 @@ impl KitApi {
             )
             .await?
         else {
+            check_password(None, password); // as slow as a wrong password
             return refused("wrong_password");
         };
         let session_id = new_id();
@@ -1263,7 +1280,8 @@ impl KitApi {
         )
     }
 
-    /// Sends a reset mail if the address has an active account; answers the same either way.
+    /// Sends a reset mail if the address has an active account; answers the same either way. At
+    /// most one mail per account in `MAIL_COOLDOWN_MINUTES` (the command sends nothing within it).
     pub async fn request_password_reset(&self, email: &str) -> ApiResult<()> {
         if let Some(held) = self
             .ask(
@@ -1353,10 +1371,12 @@ impl KitApi {
 
     /// Accepts an invitation: as the signed-in account (`claims`, its session checked as for every
     /// signed-in call, and against the invitation's tenant: active, its second factor, its enforced
-    /// SSO), or as a new person with a name and password (`new_person`), registered in
-    /// the same step (active: the token proved the email). The accepting account's email must be
-    /// the invited one. A new person's name and password are checked before the invitation is
-    /// used, so a refused registration does not spend it. The account and tenant.
+    /// SSO, except for an owner invitation: owners are exempt from it, so they can mend it), or as a
+    /// new person with a name and password (`new_person`), registered in the same step (active:
+    /// the token proved the email). The accepting account's email must be the invited one. A new
+    /// person's name and password are checked before the invitation is used, so a refused
+    /// registration does not spend it. Either way a suspended tenant takes nobody in
+    /// (`tenant_suspended`). The account and tenant.
     pub async fn accept_invitation(
         &self,
         invitation_token: &str,
@@ -1372,7 +1392,13 @@ impl KitApi {
         let (account_id, email, person) = match claims {
             Some(c) => {
                 let account = self.signed_in_account(c).await?;
-                self.may_join(c, &peek.tenant).await?;
+                // The middleware checks the tenant (exists, active), then its second factor, then
+                // its enforced SSO: `sso_required` means every other check passed, and an owner is
+                // exempt from it.
+                match self.may_join(c, &peek.tenant).await {
+                    Err(ApiError::Refused(code)) if peek.owner && code == "sso_required" => {}
+                    other => other?,
+                }
                 (c.sub.clone(), account.email.unwrap_or_default(), None)
             }
             None => {
@@ -1406,7 +1432,7 @@ impl KitApi {
             email: email.clone(),
             new_account: claims.is_none(),
         };
-        done(
+        joined(
             self.submit(
                 accept,
                 &peek.invitation_id,
@@ -1480,7 +1506,7 @@ impl KitApi {
             token: link.into(),
             account_id: claims.sub.clone(),
         };
-        done(
+        joined(
             self.submit(join, &t.link_id, &t.tenant, self.service_context.clone())
                 .await?,
         )?;

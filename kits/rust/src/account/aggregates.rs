@@ -69,6 +69,9 @@ pub struct Account {
     pub recovery_codes: Vec<String>,
     pub passkeys: Vec<Passkey>,
     pub links: Vec<Link>,
+    /// When the last "you already have an account" mail went out (`RegistrationAttempted`); 0: never.
+    #[serde(default)]
+    pub attempt_noted_at: i64,
 }
 
 impl Account {
@@ -110,10 +113,14 @@ impl Account {
     }
 }
 
+/// Snapshot schema `rs-2`: the state gained `attempt_noted_at`; snapshots of `rs-1` lack it, so the
+/// kernel drops them and the state is rebuilt from the events.
+const ACCOUNT_SNAPSHOT_SCHEMA: &str = "rs-2";
+
 pub fn account(domain: &Domain) -> Aggregate<Account> {
     let a = domain
         .aggregate("account", Account::default())
-        .schema(SNAPSHOT_SCHEMA);
+        .schema(ACCOUNT_SNAPSHOT_SCHEMA);
     a.apply(AccountRegistered, |s, d, evt, _| {
         s.id = evt.aggregate_id.clone();
         s.status = if d.verified {
@@ -246,6 +253,9 @@ pub fn account(domain: &Domain) -> Aggregate<Account> {
     a.apply(ProviderUnlinked, |s, d, _, _| {
         s.links
             .retain(|x| !(x.provider == d.provider && x.subject == d.subject))
+    });
+    a.apply(RegistrationAttempted, |s, d, _, _| {
+        s.attempt_noted_at = d.at
     });
     a.apply(SignedIn, |s, _, _, _| s.failures = Failures::default());
     a.apply(SignInFailed, |s, d, _, _| {

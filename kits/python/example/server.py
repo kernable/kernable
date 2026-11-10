@@ -18,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from kernable import Kernable, Rejected, RequestContext
 
 from kit.api.api import KitApi
+from kit.shared.constants import PLATFORM_TENANT
 
 def _camel(name: str) -> str:
     head, *rest = name.split("_")
@@ -47,6 +48,11 @@ def context_json(c: RequestContext) -> dict:
 
 COMMAND = re.compile(r"^/commands/([\w-]+)/([\w-]+)/(\w+)$")
 QUERY = re.compile(r"^/queries/([\w-]+)/(\w+)$")
+
+
+def tenant_for(domain: str, context: RequestContext) -> str | None:
+    """Where a request of `domain` goes: accounts and sessions live in the platform tenant, the rest in the caller's."""
+    return PLATFORM_TENANT if domain == "account" else context.sender_tenant
 
 
 def example_server(api: KitApi, kernable: Kernable, port: int = 3000) -> ThreadingHTTPServer:
@@ -171,11 +177,12 @@ def example_server(api: KitApi, kernable: Kernable, port: int = 3000) -> Threadi
                 if not r["ok"]:
                     return self.send(403, {"error": r["reason"]})
                 return self.send(201, {"token": r["token"], "linkId": r["link_id"]})
-            # POST /commands/<domain>/<aggregate_type>/<Type>: the app's commands, as the caller.
+            # POST /commands/<domain>/<aggregate_type>/<Type>: the app's commands, as the caller; `account`
+            # ones go to the platform tenant, where every account lives.
             m = COMMAND.match(path) if method == "POST" else None
             if m:
                 outcome = kernable.submit(m.group(1), m.group(2), b.get("aggregateId") or str(uuid.uuid4()), m.group(3), b.get("data") or {},
-                                          tenant=context.sender_tenant, context=context)
+                                          tenant=tenant_for(m.group(1), context), context=context)
                 if outcome.committed:
                     return self.send(200, {"events": [e.type for e in outcome.events]})
                 return self.send(403, {"error": outcome.code})
@@ -183,7 +190,7 @@ def example_server(api: KitApi, kernable: Kernable, port: int = 3000) -> Threadi
             m = QUERY.match(path) if method == "POST" else None
             if m:
                 try:
-                    return self.send(200, kernable.query(m.group(1), m.group(2), b.get("data") or {}, tenant=context.sender_tenant, context=context))
+                    return self.send(200, kernable.query(m.group(1), m.group(2), b.get("data") or {}, tenant=tenant_for(m.group(1), context), context=context))
                 except Rejected as err:
                     return self.send(404 if err.code == "not_found" else 403, {"error": err.code})
             self.send(404, {"error": "not_found"})

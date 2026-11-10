@@ -17,6 +17,9 @@ pub const LOCKOUT_MAX_MINUTES: i64 = 15;
 
 pub const VERIFICATION_HOURS: i64 = 48;
 pub const RESET_MINUTES: i64 = 60;
+/// At most one mail per account in this many minutes for what anyone can ask for by email: a
+/// password reset, the "you already have an account" mail. A request within it sends nothing.
+pub const MAIL_COOLDOWN_MINUTES: i64 = 5;
 pub const ACCESS_TOKEN_MINUTES: i64 = 15;
 pub const SESSION_IDLE_DAYS: i64 = 14;
 pub const SESSION_MAX_DAYS: i64 = 90;

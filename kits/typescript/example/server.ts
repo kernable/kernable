@@ -12,8 +12,14 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { Kernable, RequestContext } from "@kernable/sdk";
 
 import { KitApi } from "../src/api/api.ts";
+import { PLATFORM_TENANT } from "../src/shared/constants.ts";
 
 type Json = Record<string, any>;
+
+/** Where a request of `domain` goes: accounts and sessions live in the platform tenant, the rest in the caller's. */
+function tenantFor(domain: string, context: RequestContext): string | undefined {
+  return domain === "account" ? PLATFORM_TENANT : context.senderTenant;
+}
 
 async function body(req: IncomingMessage): Promise<Json> {
   let raw = "";
@@ -115,12 +121,13 @@ export function exampleServer(api: KitApi, kernable: Kernable): Server {
           return send(res, r.ok ? 201 : 403, r.ok ? { token: r.token, linkId: r.linkId } : { error: r.reason });
         }
       }
-      // POST /commands/<domain>/<aggregateType>/<Type>: the app's commands, as the caller.
+      // POST /commands/<domain>/<aggregateType>/<Type>: the app's commands, as the caller; `account`
+      // ones go to the platform tenant, where every account lives.
       const command = /^POST \/commands\/([\w-]+)\/([\w-]+)\/(\w+)$/.exec(route);
       if (command) {
         const outcome = await kernable.submit({
           domain: command[1], aggregateType: command[2], type: command[3], aggregateId: b.aggregateId ?? randomUUID(),
-          tenant: context.senderTenant, data: b.data ?? {}, context,
+          tenant: tenantFor(command[1], context), data: b.data ?? {}, context,
         });
         return send(res, outcome.committed ? 200 : 403, outcome.committed ? { events: outcome.events.map((e) => e.type) } : { error: outcome.code });
       }
@@ -128,7 +135,7 @@ export function exampleServer(api: KitApi, kernable: Kernable): Server {
       const query = /^POST \/queries\/([\w-]+)\/(\w+)$/.exec(route);
       if (query) {
         try {
-          return send(res, 200, await kernable.query({ domain: query[1], type: query[2], data: b.data ?? {}, tenant: context.senderTenant, context }));
+          return send(res, 200, await kernable.query({ domain: query[1], type: query[2], data: b.data ?? {}, tenant: tenantFor(query[1], context), context }));
         } catch (err) {
           const code = (err as { code?: string }).code;
           if (!code) throw err;

@@ -24,7 +24,7 @@ from kernel import TestKernel  # noqa: E402
 
 from authenticator import Authenticator  # noqa: E402
 from example.server import example_server  # noqa: E402
-from kit import Explain, kit_domains, relation, use_authorization_store, visibility  # noqa: E402
+from kit import Explain, kit_domains, kit_schemas, relation, use_authorization_store, visibility  # noqa: E402
 from kit.account.commands import AddSsoDomain, CreateSso, DeleteAccount, EnforceSso, SuspendAccount  # noqa: E402
 from kit.account.queries import FindAccountByEmail, GetSso  # noqa: E402
 from kit.api.api import KitApi  # noqa: E402
@@ -209,7 +209,7 @@ def setUpModule():
                   "privileged=bypass_authorization"]):
         assert kernel.cli(*args).returncode == 0, args
     S["key"] = os.path.join(kernel.dir, "kit.key")
-    S["kit"] = Kernable(kernel.url, S["key"])
+    S["kit"] = Kernable(kernel.url, S["key"]).use(*kit_schemas())
     use_authorization_store(f"sqlite:{os.path.join(kernel.dir, 'authorization.db')}")
     start_app()
     booted = bootstrap(S["kit"], sign_up={"tenants": "active", "accounts": "open"},
@@ -457,6 +457,10 @@ class SliceTest(unittest.TestCase):
         api.request_password_reset(email)
         reset = mailer.last(email)
         self.assertEqual(reset.purpose, "reset")
+        # Asking again at once mails nothing more: one mail per cooldown.
+        mailed = len(mailer.sent)
+        api.request_password_reset(email)
+        self.assertEqual(len(mailer.sent), mailed)
         self.assertEqual(api.reset_password(reset.token, "third horse battery"), {"ok": True})
         self.assertFalse(api.refresh(two_again["refresh_token"])["ok"], "every session ended")
         self.assertEqual(api.sign_in(email, "another horse battery"), {"ok": False, "reason": "wrong_password"})
@@ -473,6 +477,18 @@ class SliceTest(unittest.TestCase):
         # Registering with a taken address answers as usual; the account's owner gets a mail.
         self.assertTrue(api.register("frank@new.example", "Not Frank", PASSWORD)["ok"])
         self.assertEqual(mailer.last("frank@new.example").purpose, "account_exists")
+        # Again at once: the same answer, and no second mail within the cooldown.
+        told = len(mailer.sent)
+        self.assertTrue(api.register("frank@new.example", "Not Frank", PASSWORD)["ok"])
+        self.assertEqual(len(mailer.sent), told)
+
+        # Five wrong passwords lock the account; a locked account answers like a wrong password, even
+        # for the right one, so the answer tells nobody that the account exists.
+        person("gus@example.com")
+        for _ in range(5):
+            self.assertEqual(api.sign_in("gus@example.com", "wrong horse battery"), {"ok": False, "reason": "wrong_password"})
+        self.assertEqual(api.sign_in("gus@example.com", PASSWORD), {"ok": False, "reason": "wrong_password"})
+        self.assertEqual(api.sign_in("nobody-at-all@example.com", PASSWORD), {"ok": False, "reason": "wrong_password"})
 
     def test_5_a_second_factor_and_a_service_with_an_api_key(self):
         api: KitApi = S["api"]
@@ -617,6 +633,11 @@ class SliceTest(unittest.TestCase):
             self.assertEqual(own(api.context_for(mia_sso_claims, lumen))["id"], as_mia.sender_identity)
             # The owner keeps a password session, so a broken SSO can be mended.
             self.assertTrue(own(as_liam)["id"])
+            # So does a new owner: an owner invitation is accepted with a password session.
+            nils, nils_id = person("nils@lumen.example")
+            self.committed(submit(CreateInvitation(email="nils@lumen.example", owner=True), new_id(), lumen, as_liam))
+            self.assertEqual(api.accept_invitation(mailer.last("nils@lumen.example").token, claims=nils),
+                             {"ok": True, "account_id": nils_id, "tenant": lumen})
 
             # Lumen's provider speaks only for lumen.example: it cannot take over Kate's account by naming
             # her verified address, nor register someone of another domain.
@@ -704,6 +725,10 @@ class SliceTest(unittest.TestCase):
             # Outside a tenant, Quinn has no identity: the shop refuses.
             self.assertEqual(post("/commands/shop/order/PlaceOrder", {"aggregateId": "q1"}, bearer), (403, {"error": "forbidden"}))
             self.assertEqual(post("/commands/shop/order/PlaceOrder", {"aggregateId": "q1"})[0], 401)
+            # Account requests go to the platform tenant, where accounts live, whatever tenant the caller is in.
+            account_id = S["api"].check(tokens["accessToken"]).sub
+            own, account = post("/queries/account/GetAccount", {"data": {"accountId": account_id}}, bearer)
+            self.assertEqual((own, account.get("email")), (200, "quinn@example.com"))
             refreshed = post("/refresh", {"refreshToken": tokens["refreshToken"]})
             self.assertEqual((refreshed[0], sorted(refreshed[1])), (200, ["accessToken", "ok", "refreshToken"]))
             self.assertEqual(post("/sign-out", {}, bearer)[0], 204)
@@ -795,14 +820,21 @@ class SliceTest(unittest.TestCase):
         # (Tara herself has one factor only now: the platform lifts it.)
         self.committed(submit(RequireMfa(required=False), taras, taras, RequestContext(bypass_authorization=True)))
 
-        # Suspended: nobody joins it.
+        # Suspended: nobody joins it, not even someone new, who would register in the same step.
+        self.committed(submit(CreateInvitation(email="join-vera@example.com"), new_id(), taras, as_tara))
+        vera = mailer.last("join-vera@example.com").token
         self.committed(submit(SuspendTenant(reason="owner_requested"), taras, taras, as_tara))
         self.assertEqual(api.join_with_invitation_link(ugo, link["token"]), {"ok": False, "reason": "tenant_suspended"})
         self.assertEqual(api.accept_invitation(invitation, claims=ugo), {"ok": False, "reason": "tenant_suspended"})
+        self.assertEqual(api.accept_invitation(vera, name="Vera", password=PASSWORD), {"ok": False, "reason": "tenant_suspended"})
+        with self.assertRaises(Rejected) as caught:
+            S["kit"].query(FindAccountByEmail(email="join-vera@example.com"), tenant="platform", context=api.service_context)
+        self.assertEqual(caught.exception.code, "not_found", "nobody registered")
         self.committed(submit(ReactivateTenant(), taras, taras, as_tara))
 
-        # Active again, without the requirement: Ugo accepts.
+        # Active again, without the requirement: Ugo accepts; Vera's invitation is still open.
         self.assertTrue(api.accept_invitation(invitation, claims=ugo)["ok"])
+        self.assertTrue(api.accept_invitation(vera, name="Vera", password=PASSWORD)["ok"])
 
     def test_11_a_process_acts_as_its_own_identity_once_a_platform_group_holds(self):
         """The kit gives a registered process an identity and an API key; its commands need a platform group."""

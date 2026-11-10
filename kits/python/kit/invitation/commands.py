@@ -27,6 +27,12 @@ def _groups(value) -> list[InvitedGroup]:
     return out
 
 
+def _active_tenant(tenant: str | None) -> list[Requirement]:
+    """The tenant (named by the token; the handler checks it is the command's) must be active when
+    one joins it."""
+    return [Requirement("tenancy", "tenant", tenant, "active")] if tenant else []
+
+
 def _proven(s: Invitation, value, tenant: str, aggregate_id: str, now: int) -> str:
     """The token, checked against the invitation: open, this tenant's, not expired, the secret right."""
     t = parse_invitation_token(value)
@@ -91,7 +97,10 @@ def _(s: Invitation, d: DeclineInvitation, cmd, ctx):
 
 
 class AcceptInvitation(Command):
-    """The API's: it says which account accepts, and its email, which must be the invited one."""
+    """The API's: it says which account accepts, and its email, which must be the invited one.
+    For a new person it picks the account ID and registers the account right after. The tenant
+    must be active when it commits (its `active` fact), so a suspended tenant takes nobody in,
+    whoever accepts: `requirement_missing` otherwise."""
     vault = {"secret": ["token"]}
     token: str
     account_id: str
@@ -99,7 +108,7 @@ class AcceptInvitation(Command):
     new_account: bool
 
 
-@Invitation.command(AcceptInvitation)
+@Invitation.command(AcceptInvitation, requires=lambda d, s: _active_tenant((parse_invitation_token(d.token) or {}).get("tenant")))
 def _(s: Invitation, d: AcceptInvitation, cmd, ctx):
     token_id = _proven(s, d.token, cmd.tenant, cmd.aggregate_id, now_ms(ctx))
     if normal_email(d.email) != s.email:
@@ -177,13 +186,14 @@ def _(s: InvitationLink):
 
 class JoinWithInvitationLink(Command):
     """The API's: the signed-in account `account_id` joins the tenant through the link. Someone
-    without an account registers and verifies first: a link, unlike an emailed invitation, proves no email."""
+    without an account registers and verifies first: a link, unlike an emailed invitation, proves no email.
+    The tenant must be active when it commits, as for `AcceptInvitation`."""
     vault = {"secret": ["token"]}
     token: str
     account_id: str
 
 
-@InvitationLink.command(JoinWithInvitationLink)
+@InvitationLink.command(JoinWithInvitationLink, requires=lambda d, s: _active_tenant((parse_link_token(d.token) or {}).get("tenant")))
 def _(s: InvitationLink, d: JoinWithInvitationLink, cmd, ctx):
     t = parse_link_token(d.token)
     if s.status != "open" or not t or t["tenant"] != cmd.tenant or t["link_id"] != cmd.aggregate_id or not s.hash \

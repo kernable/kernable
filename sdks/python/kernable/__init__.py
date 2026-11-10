@@ -2017,7 +2017,8 @@ class Kernable:
             return _from_wire(self._ask(b.domain, kind.type_name(), asked.to_wire(), _query_target(kind), tenant,
                                         context, min_position, timeout_s, all_partitions))
         spec = self._domains.get(domain)
-        declared = spec.queries.get(type) if spec else None
+        # A domain known only from a command class it submitted has no queries: none declared.
+        declared = getattr(spec, "queries", {}).get(type) if spec else None
         return self._ask(domain, type, data, declared.target_of if declared else None, tenant, context,
                          min_position, timeout_s, all_partitions)
 
@@ -2551,7 +2552,8 @@ class _Stream:
     @classmethod
     def _new(cls, *args, **kwargs):
         """Made by the client (`Kernable.worker`, `.listener`, `.subscribe`), not by applications:
-        the constructor's arguments are the client's internals."""
+        the arguments are the client's internals. It bypasses `__init__`, which each public
+        stream class makes raise `TypeError`, so a direct call never builds a broken object."""
         stream = cls.__new__(cls)
         stream._init(*args, **kwargs)
         return stream
@@ -2689,6 +2691,10 @@ class Worker(_Stream):
     registered the worker: run it in a thread and wait with `worker.ready.wait(5)`, e.g.
     `threading.Thread(target=worker.run, daemon=True).start()`. `stop()` ends `run()`, also
     from another thread."""
+
+    def __init__(self, *args, **kwargs):
+        """Not for applications: `Kernable.worker` (or `Kernable.app`) makes workers."""
+        raise TypeError("use Kernable.worker (or Kernable.app), not Worker(...)")
 
     def _init(self, channel: "grpc.Channel | _Partitioned", key: Key, aggregates, log: _Log,
                  service: str = ""):
@@ -3064,6 +3070,10 @@ class ListenerHandle(_Stream):
     handled event, or skipped, for other event types) and `store` (the listener's `Store`, while
     `run()` has it open)."""
 
+    def __init__(self, *args, **kwargs):
+        """Not for applications: `Kernable.listener` (or `Kernable.app`) runs listeners."""
+        raise TypeError("use Kernable.listener (or Kernable.app), not ListenerHandle(...)")
+
     def _init(self, channel: "grpc.Channel | _Partitioned", key: Key, listener: Listener, log: _Log,
                  service: str = "", kernable: "Kernable | None" = None, part: str = "",
                  store: "Store | None" = None, parent: "ListenerHandle | None" = None):
@@ -3402,6 +3412,10 @@ class Subscription(_Stream):
     after `position` when the stream drops. Attributes: `position` (global position of the last
     handled event) and `done` (a `threading.Event`, set once the subscription has ended:
     `sub.stop(); sub.done.wait(5)`)."""
+
+    def __init__(self, *args, **kwargs):
+        """Not for applications: `Kernable.subscribe` starts subscriptions."""
+        raise TypeError("use Kernable.subscribe, not Subscription(...)")
 
     def _init(self, source: "grpc.Channel | _Partitioned", key: Key, handler: Callable, after: int,
                  types: list[str], reconnect_s: float, log: _Log, part: str = "",

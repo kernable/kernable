@@ -107,8 +107,18 @@ pub fn hash_password(password: &str) -> String {
         .to_string()
 }
 
+/// An argon2id hash of a password nobody uses, with the same parameters: checked instead when
+/// there is no hash to check, so an unknown address or an account without a password takes as long
+/// as a wrong password. The same in every language's kit.
+pub const DUMMY_PASSWORD_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$xZHjBkZVyzUUEIsFk5QnZg$ATIGagX8bkGblnc8NAAmXvUMTDX3izgmV74SUrCIjZg";
+
+/// Whether `password` is the one `stored` hashes. Without a hash, a check against
+/// [`DUMMY_PASSWORD_HASH`] that fails, taking as long.
 pub fn check_password(stored: Option<&str>, password: &str) -> bool {
     let Some(hash) = stored.and_then(|s| PasswordHash::new(s).ok()) else {
+        if let Ok(dummy) = PasswordHash::new(DUMMY_PASSWORD_HASH) {
+            let _ = hasher().verify_password(password.as_bytes(), &dummy);
+        }
         return false;
     };
     hasher().verify_password(password.as_bytes(), &hash).is_ok()
@@ -133,6 +143,11 @@ pub fn is_space(c: char) -> bool {
             | '\u{3000}'
             | '\u{feff}'
     )
+}
+
+/// Whether `value` holds one of the kits' space characters.
+pub fn has_space(value: &str) -> bool {
+    value.chars().any(is_space)
 }
 
 /// `value` without the kits' space characters at either end.

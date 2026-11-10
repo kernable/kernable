@@ -56,8 +56,20 @@ def hash_password(password: str) -> str:
     return _hasher.hash(password)
 
 
+#: An argon2id hash of a password nobody uses, with the same parameters: checked instead when there
+#: is no hash to check, so an unknown address or an account without a password takes as long as a
+#: wrong password. The same in every language's kit.
+DUMMY_PASSWORD_HASH = "$argon2id$v=19$m=19456,t=2,p=1$xZHjBkZVyzUUEIsFk5QnZg$ATIGagX8bkGblnc8NAAmXvUMTDX3izgmV74SUrCIjZg"
+
+
 def check_password(stored: str | None, password: object) -> bool:
+    """Whether `password` is the one `stored` hashes. Without a hash, a check against
+    `DUMMY_PASSWORD_HASH` that fails, taking as long."""
     if not stored or not isinstance(password, str):
+        try:
+            _hasher.verify(DUMMY_PASSWORD_HASH, password if isinstance(password, str) else "")
+        except (VerifyMismatchError, VerificationError, InvalidHashError):
+            pass
         return False
     try:
         return _hasher.verify(stored, password)
@@ -72,6 +84,11 @@ _SPACE = "\\x00-\\x20\\x7f\\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\
 _SPACE_ANY = re.compile(f"[{_SPACE}]")
 _SPACE_EDGES = re.compile(f"^[{_SPACE}]+|[{_SPACE}]+$")
 _SURROGATE = re.compile("[\\ud800-\\udfff]")
+
+
+def has_space(value: str) -> bool:
+    """Whether `value` holds one of the kits' space characters."""
+    return _SPACE_ANY.search(value) is not None
 
 
 def trim_space(value: str) -> str:

@@ -2,6 +2,7 @@
 events (or this rejection), and these unique keys and facts. The TypeScript kit runs the same
 cases, so the kits write the same events."""
 
+import copy
 import json
 import re
 import unittest
@@ -75,6 +76,13 @@ def make(domain: str, case: dict):
         if "index" in case:
             after = aggregate.fold([(e["type"], 1, e["data"], EventMeta(e["type"], version=len(history) + i + 1, **meta)) for i, e in enumerate(plain)], state)
             self.assertIsNone(matches(case["index"], index_of(aggregate, after)))
+        if "requires" in case:
+            fn = aggregate.requirements.get(case["when"]["type"])
+            declared = fn(case["when"].get("data") or {}, copy.deepcopy(state)) if fn else []
+            plain_requires = [{"domain": r.domain or domain, "aggregateType": r.aggregate_type, "aggregateId": r.aggregate_id or "", "fact": r.fact,
+                               **({"key": r.key, "value": r.value} if r.key else {}), **({"absent": True} if r.absent else {})}
+                              for r in declared]
+            self.assertIsNone(matches(case["requires"], plain_requires))
     return test
 
 

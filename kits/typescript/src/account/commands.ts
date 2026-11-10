@@ -3,8 +3,8 @@
 import { Command, type PersonalFields, Rejected } from "@kernable/sdk";
 import { verifyAuthenticationResponse, verifyRegistrationResponse, type AuthenticationResponseJSON, type RegistrationResponseJSON } from "@simplewebauthn/server";
 
-import { DAY, HOUR, SESSION_IDLE_DAYS, SESSION_MAX_DAYS, VERIFICATION_HOURS, MINUTE, RESET_MINUTES, PASSKEYS } from "../shared/constants.ts";
-import { checkPassword, emailDomain, equalSecrets, hashPassword, normalEmail, parseToken, randomSecret, sha256, validEmail, validPassword, totpStep, chars, trimSpace } from "../shared/secrets.ts";
+import { DAY, HOUR, MAIL_COOLDOWN_MINUTES, SESSION_IDLE_DAYS, SESSION_MAX_DAYS, VERIFICATION_HOURS, MINUTE, RESET_MINUTES, PASSKEYS } from "../shared/constants.ts";
+import { checkPassword, emailDomain, equalSecrets, hashPassword, hasSpace, normalEmail, parseToken, randomSecret, sha256, validEmail, validPassword, totpStep, chars, trimSpace } from "../shared/secrets.ts";
 import { type Account, accountAggregate, lockedUntil, sessionAggregate, ssoAggregate } from "./aggregates.ts";
 import { ACCOUNT_SUSPENSION_REASONS, type AccountSuspensionReason, type SessionEnd } from "./domain.ts";
 import { ProviderLinked, ProviderUnlinked, SsoCreated, SsoDeleted, SsoDisabled, SsoDomainAdded, SsoDomainRemoved, SsoDomainVerified, SsoEnabled, SsoEnforcementChanged, SsoUpdated, PasskeyAdded, PasskeyRemoved, PasskeyUsed, RecoveryCodesGenerated, SecondFactorFailed, SecondFactorProved, TotpConfirmed, TotpDisabled, TotpStarted, EmailChangeRequested, EmailChanged, PasswordChanged, PasswordReset, PasswordResetRequested, RegistrationAttempted, AccountDeleted, AccountReactivated, AccountSuspended, AccountRegistered, EmailVerified, SessionEnded, SessionFactorAdded, SessionOpened, SessionRefreshed, SignedIn, SignInFailed, VerificationRequested } from "./events.ts";
@@ -130,15 +130,17 @@ export class SignIn extends Command {
   userAgent?: string;
 }
 
-// A failed attempt is an event, not a rejection. A reactor opens the session.
+// A failed attempt is an event, not a rejection. A reactor opens the session. The password is
+// checked even while the account is locked, so a locked account answers as slowly as any other.
 accountAggregate.command(SignIn, async (s, d, _cmd, ctx) => {
   const at = ctx.now().getTime();
   const failed = (reason: SignInFailed["reason"]) => [SignInFailed.new({ method: "password", reason, ip: d.ip ?? null, at })];
   if (s.status === "none" || s.status === "deleted") throw new Rejected("No such account", "not_found");
   const refresh = parseToken(d.refreshToken);
   if (!refresh || refresh[0] !== d.sessionId || refresh[1] !== "1") throw new Rejected("A malformed refresh token", "invalid_token");
+  const right = await checkPassword(s.password?.hash, d.password);
   if (at < lockedUntil(s)) return failed("locked");
-  if (!(await checkPassword(s.password?.hash, d.password))) return failed("wrong_password");
+  if (!right) return failed("wrong_password");
   if (s.status === "pending") return failed("not_verified");
   if (s.status !== "active") return failed("not_active");
   return [SignedIn.new({
@@ -214,12 +216,19 @@ accountAggregate.command(ChangePassword, async (s, d, _cmd, ctx) => {
   return [PasswordChanged.new({ hash: await hashPassword(d.new), keepSessionId: d.keepSessionId ?? null, at: ctx.now().getTime() })];
 });
 
-/** The API's: asked for by email, without saying whether the account exists. */
+/**
+ * The API's: asked for by email, without saying whether the account exists. While the open reset
+ * token is younger than `MAIL_COOLDOWN_MINUTES`, nothing new is sent (no events): asking again and
+ * again mails the person once per cooldown.
+ */
 export class RequestPasswordReset extends Command {}
 
 accountAggregate.command(RequestPasswordReset, (s, _d, _cmd, ctx) => {
   if (s.status !== "active") throw new Rejected("The account is not active", "invalid_state");
-  return [PasswordResetRequested.new({ tokenId: randomSecret(9), token: randomSecret(), email: s.email!, expiresAt: ctx.now().getTime() + RESET_MINUTES * MINUTE })];
+  const now = ctx.now().getTime();
+  // An open token was requested RESET_MINUTES before it expires.
+  if (s.openTokens.some((t) => t.purpose === "reset" && now < t.expiresAt - (RESET_MINUTES - MAIL_COOLDOWN_MINUTES) * MINUTE)) return [];
+  return [PasswordResetRequested.new({ tokenId: randomSecret(9), token: randomSecret(), email: s.email!, expiresAt: now + RESET_MINUTES * MINUTE })];
 });
 
 /** Public: the emailed token is the proof. Ends every session (a reactor). */
@@ -260,12 +269,17 @@ accountAggregate.command(ConfirmEmailChange, (s, d, cmd, ctx) => {
   return [EmailChanged.new({ tokenId, email: s.pendingEmail! })];
 });
 
-/** The API's, when someone registers with this account's address: the account gets a mail. */
+/**
+ * The API's, when someone registers with this account's address: the account gets a mail, at most
+ * one per `MAIL_COOLDOWN_MINUTES` (within it, no events).
+ */
 export class NoteRegistrationAttempt extends Command {}
 
 accountAggregate.command(NoteRegistrationAttempt, (s, _d, _cmd, ctx) => {
   if (s.status !== "active" && s.status !== "suspended") throw new Rejected("No account to tell", "invalid_state");
-  return [RegistrationAttempted.new({ email: s.email!, at: ctx.now().getTime() })];
+  const now = ctx.now().getTime();
+  if (s.attemptNotedAt && now < s.attemptNotedAt + MAIL_COOLDOWN_MINUTES * MINUTE) return [];
+  return [RegistrationAttempted.new({ email: s.email!, at: now })];
 });
 
 /** The account's own: the secret the API generated and showed (as a QR code). */
@@ -541,9 +555,14 @@ accountAggregate.command(UnlinkProvider, (s, d) => {
 
 // --- account.sso ---
 
+/**
+ * An issuer URL without its trailing slashes: `https://` and a host, no space characters (the
+ * kits' set). Plain `http://` only for `localhost` and `127.0.0.1` (development and tests).
+ */
 function issuer(value: unknown): string {
-  if (typeof value !== "string" || !/^https?:\/\/[^\s]+$/.test(value)) throw new Rejected("An issuer URL", "invalid_issuer");
-  return value.replace(/\/$/, "");
+  const v = typeof value === "string" && !hasSpace(value) ? value.replace(/\/+$/, "") : "";
+  if (!/^https:\/\/[^/]/.test(v) && !/^http:\/\/(localhost|127\.0\.0\.1)(:[0-9]+)?(\/|$)/.test(v)) throw new Rejected("An https:// issuer URL", "invalid_issuer");
+  return v;
 }
 
 function ssoDomain(value: unknown): string {

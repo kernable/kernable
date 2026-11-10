@@ -1,5 +1,5 @@
 //! The shared fixtures (kits/fixtures): given these events, when this command, then these
-//! events (or this rejection), and these unique keys and facts. The TypeScript and Python kits run
+//! events (or this rejection), these unique keys and facts, and these requirements. The TypeScript and Python kits run
 //! the same cases, so the kits write the same events.
 
 use std::collections::BTreeMap;
@@ -104,7 +104,7 @@ fn runner<S: State>(aggregate: Aggregate<S>) -> Runner {
         let produced = match aggregate.handle(
             &state,
             when["type"].as_str().unwrap_or_default(),
-            data,
+            data.clone(),
             &mut ctx,
         ) {
             Err(Error::Rejected(r)) => {
@@ -131,7 +131,7 @@ fn runner<S: State>(aggregate: Aggregate<S>) -> Runner {
         }
         if !case["index"].is_null() {
             let after = aggregate
-                .fold(fold(&plain, given.len()), Some(state))
+                .fold(fold(&plain, given.len()), Some(state.clone()))
                 .map_err(|e| format!("then: {e}"))?;
             let held = aggregate.index(&after).map_err(|e| format!("index: {e}"))?;
             let keys: Vec<Value> = held
@@ -150,6 +150,33 @@ fn runner<S: State>(aggregate: Aggregate<S>) -> Runner {
                 &json!({ "keys": keys, "facts": held.facts }),
                 "index",
             ) {
+                return Err(m);
+            }
+        }
+        if !case["requires"].is_null() {
+            let declared = aggregate
+                .requirements(&state, when["type"].as_str().unwrap_or_default(), data)
+                .map_err(|e| format!("requires: {e}"))?;
+            let plain: Vec<Value> = declared
+                .iter()
+                .map(|r| {
+                    let mut req = json!({
+                        "domain": if r.domain.is_empty() { domain } else { r.domain.as_str() },
+                        "aggregateType": r.aggregate_type,
+                        "aggregateId": r.aggregate_id,
+                        "fact": r.fact,
+                    });
+                    if let Some(key) = &r.key {
+                        req["key"] = json!(key);
+                        req["value"] = json!(r.value);
+                    }
+                    if r.absent {
+                        req["absent"] = json!(true);
+                    }
+                    req
+                })
+                .collect();
+            if let Some(m) = matches(&case["requires"], &Value::Array(plain), "requires") {
                 return Err(m);
             }
         }

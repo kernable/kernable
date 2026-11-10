@@ -15,6 +15,11 @@ export const LOCKOUT_MAX_MINUTES = 15;
 
 export const VERIFICATION_HOURS = 48;
 export const RESET_MINUTES = 60;
+/**
+ * At most one mail per account in this many minutes for what anyone can ask for by email: a
+ * password reset, the "you already have an account" mail. A request within it sends nothing.
+ */
+export const MAIL_COOLDOWN_MINUTES = 5;
 export const ACCESS_TOKEN_MINUTES = 15;
 export const SESSION_IDLE_DAYS = 14;
 export const SESSION_MAX_DAYS = 90;

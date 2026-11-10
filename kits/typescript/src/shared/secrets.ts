@@ -41,8 +41,19 @@ export function hashPassword(password: string): Promise<string> {
   return hash(password, { memoryCost: 19 * 1024, timeCost: 2, parallelism: 1 });
 }
 
+/**
+ * An argon2id hash of a password nobody uses, with the same parameters: checked instead when there
+ * is no hash to check, so an unknown address or an account without a password takes as long as a
+ * wrong password. The same in every language's kit.
+ */
+export const DUMMY_PASSWORD_HASH = "$argon2id$v=19$m=19456,t=2,p=1$xZHjBkZVyzUUEIsFk5QnZg$ATIGagX8bkGblnc8NAAmXvUMTDX3izgmV74SUrCIjZg";
+
+/** Whether `password` is the one `stored` hashes. Without a hash, a check against `DUMMY_PASSWORD_HASH` that fails, taking as long. */
 export async function checkPassword(stored: string | null | undefined, password: unknown): Promise<boolean> {
-  if (!stored || typeof password !== "string") return false;
+  if (!stored || typeof password !== "string") {
+    await verify(DUMMY_PASSWORD_HASH, typeof password === "string" ? password : "").catch(() => false);
+    return false;
+  }
   try {
     return await verify(stored, password);
   } catch {
@@ -60,6 +71,11 @@ const SPACE_ANY = new RegExp(`[${SPACE}]`);
 const SPACE_EDGES = new RegExp(`^[${SPACE}]+|[${SPACE}]+$`, "g");
 /** An unpaired surrogate: no character at all (with the `u` flag, paired ones are one code point). */
 const LONE_SURROGATE = /\p{Cs}/u;
+
+/** Whether `value` holds one of the kits' space characters. */
+export function hasSpace(value: string): boolean {
+  return SPACE_ANY.test(value);
+}
 
 /** `value` without the kits' space characters at either end. */
 export function trimSpace(value: string): string {

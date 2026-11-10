@@ -111,6 +111,7 @@ Emailed tokens have the form `<aggregateId>.<tokenId>.<secret>` (base64url), so 
 | `ARGON2` | argon2id, 19 MiB, 2 iterations, 1 lane (OWASP) |
 | `LOCKOUT_AFTER` / `LOCKOUT_MAX_MINUTES` | 5 failures, then 1, 2, 4 … minutes, at most 15 |
 | `VERIFICATION_HOURS` / `RESET_MINUTES` | 48 h / 60 min |
+| `MAIL_COOLDOWN_MINUTES` | 5: at most one reset mail and one "you already have an account" mail per account in this time |
 | `ACCESS_TOKEN_MINUTES` | 15 |
 | `SESSION_IDLE_DAYS` / `SESSION_MAX_DAYS` | 14 / 90 |
 | `REUSE_WINDOW` | 32 older refresh tokens of a session recognised as a reuse |
@@ -143,13 +144,13 @@ Locked while `failures.count ≥ LOCKOUT_AFTER` and `now < lastAt + min(2^(count
 | `RegisterAccount` | `email`, `name`, `password`? (secret), `invitation`? | `none`; email free | `AccountRegistered` {`email`, `name`, `passwordHash`?}, `VerificationRequested` {`tokenId`, `token`, `expiresAt`} | `public` when `signUp.accounts` = `open`; else only from an invitation, active at once |
 | `VerifyEmail` | `token` (secret) | the token is open and not expired | `EmailVerified` (pending → active; erases the token) | `public` (proof) |
 | `RequestVerification` | — | `pending` | `VerificationRequested` (erases the previous token) | `api` |
-| `SignIn` | `sessionId`, `password` (secret), `refreshToken` (secret), `ip`, `userAgent` | — | `SignedIn` {`sessionId`, `method`: `password`, `factors`, `refreshTokenHash`, `ip`, `userAgent`} or `SignInFailed` {`method`, `reason`: `wrong_password` · `locked` · `not_verified` · `not_active`, `ip`} | `public` (proof) |
+| `SignIn` | `sessionId`, `password` (secret), `refreshToken` (secret), `ip`, `userAgent` | — | `SignedIn` {`sessionId`, `method`: `password`, `factors`, `refreshTokenHash`, `ip`, `userAgent`} or `SignInFailed` {`method`, `reason`: `wrong_password` · `locked` · `not_verified` · `not_active`, `ip`}; the password is checked before the lock, so a locked account takes as long | `public` (proof) |
 | `SignInWithPasskey` | `sessionId`, `challenge`, `assertion`, `refreshToken` (secret), `ip`, `userAgent` | the credential is the account's | `PasskeyUsed` {`credentialId`, `counter`}, `SignedIn` (`method`: `passkey`, `factors`: `passkey`) or `SignInFailed` | `api` (it issued the challenge) |
 | `ProvePasskey` | `sessionId`, `challenge`, `assertion` | the credential is the account's | `PasskeyUsed`, `SecondFactorProved` (`method`: `passkey`) or `SecondFactorFailed` | `api` (a passkey as the second factor of a password session) |
 | `SignInWithProvider` | `sessionId`, `provider`, `subject`, `email`, `emailVerified`, `autoLink`, `domains`, `refreshToken` (secret), `ip`, `userAgent` | linked, or an `sso:` provider with `autoLink`, the same verified email, and the email's domain in `domains` (the SSO's verified domains; else `email_not_in_domain`), then linked first | [`ProviderLinked`], `SignedIn` (`method`: the provider) or `SignInFailed` (`not_linked`) | `api` |
 | `ProveSecondFactor` | `sessionId`, `code` (secret) | TOTP confirmed | `SecondFactorProved` {`sessionId`, `method`: `totp` · `recovery`, `recoveryCodeHash`?} or `SecondFactorFailed` | `public` (proof) |
 | `ChangePassword` | `current`? (secret), `new` (secret) | `current` matches, if there is a password | `PasswordChanged` {`hash`} | own account |
-| `RequestPasswordReset` | — | `active` | `PasswordResetRequested` {`tokenId`, `token`, `expiresAt`} | `api` |
+| `RequestPasswordReset` | — | `active` | `PasswordResetRequested` {`tokenId`, `token`, `expiresAt`}; none while the open reset token is younger than `MAIL_COOLDOWN_MINUTES` | `api` |
 | `ResetPassword` | `token` (secret), `new` (secret) | the token is open | `PasswordReset` {`hash`} (erases the token) | `public` (proof) |
 | `RequestEmailChange` | `email` | the new email free | `EmailChangeRequested` {`tokenId`, `token`, `email`, `expiresAt`} | own account |
 | `ConfirmEmailChange` | `token` (secret) | the token is open | `EmailChanged` {`email`} (erases the token) | `public` (proof) |
@@ -161,7 +162,7 @@ Locked while `failures.count ≥ LOCKOUT_AFTER` and `now < lastAt + min(2^(count
 | `RemovePasskey` | `credentialId` | not the last sign-in method | `PasskeyRemoved` | own account |
 | `LinkProvider` | `provider`, `subject`, `email` | not linked to another account (unique key) | `ProviderLinked` | own account, through `api` |
 | `UnlinkProvider` | `provider`, `subject` | not the last sign-in method | `ProviderUnlinked` | own account |
-| `NoteRegistrationAttempt` | — | `active` or `suspended` | `RegistrationAttempted` {`email`, `at`} (the "you already have an account" mail) | `api` |
+| `NoteRegistrationAttempt` | — | `active` or `suspended` | `RegistrationAttempted` {`email`, `at`} (the "you already have an account" mail); none within `MAIL_COOLDOWN_MINUTES` of the last | `api` |
 | `SuspendAccount` | `reason` | `pending`, `active` | `AccountSuspended` {`reason`} | `platform`; own account with `owner_requested` |
 | `ReactivateAccount` | — | `suspended` | `AccountReactivated` | `platform` |
 | `DeleteAccount` | — | `suspended` | `AccountDeleted` (erases the account's subject) | `platform` |
@@ -193,7 +194,7 @@ State: `status` (`none` · `active` · `disabled` · `deleted`), `issuer`, `clie
 
 | Command | Events | Level |
 |---|---|---|
-| `CreateSso` (`issuer`, `clientId`, `clientSecret` secret) | `SsoCreated` | owners |
+| `CreateSso` (`issuer`, `clientId`, `clientSecret` secret): the issuer `https://` and a host, no space characters, trailing slashes removed; `http://` only for `localhost` and `127.0.0.1` (else `invalid_issuer`) | `SsoCreated` | owners |
 | `UpdateSso` | `SsoUpdated` | owners |
 | `AddSsoDomain` (`domain`) | `SsoDomainAdded` {`domain`, `txt`} | owners |
 | `VerifySsoDomain` (`domain`) | `SsoDomainVerified` | `api` (it found the TXT record) |
@@ -225,7 +226,7 @@ Unique key `domain`: global, each verified domain, so one tenant per domain. Wit
 
 All five as proposed:
 
-1. **Registration does not reveal existing accounts.** `RegisterAccount` with a taken email is refused by the unique key; the API answers "check your email" either way and the existing account gets a "you already have an account" mail (`NoteRegistrationAttempt`).
+1. **Registration does not reveal existing accounts.** `RegisterAccount` with a taken email is refused by the unique key; the API answers "check your email" either way and the existing account gets a "you already have an account" mail (`NoteRegistrationAttempt`). Nor does sign-in: an unknown address and a locked account answer `wrong_password`, and an unknown address is checked against a dummy argon2id hash (`DUMMY_PASSWORD_HASH`), so it takes as long.
 2. **A password change or reset ends the other sessions.**
 3. **Session lifetime**: 14 days idle, 90 days at most.
 4. **A passkey counts as two factors** (it verifies the user), so it satisfies a tenant's MFA requirement.
@@ -349,7 +350,7 @@ One aggregate, `invitation.invitation`, with a random ID, under its tenant's `te
 | `ResendInvitation` | — | `open` | `InvitationResent` {`tokenId`, `token`, `expiresAt`} (erases the old token) | group |
 | `RevokeInvitation` | — | `open` | `InvitationRevoked` (erases the token) | group; the invitation reactor (tenant deleted) |
 | `DeclineInvitation` | `token` (secret) | `open`, not expired | `InvitationDeclined` (erases the token) | `public` (proof) |
-| `AcceptInvitation` | `token` (secret), `accountId`, `email`, `newAccount` | `open`, not expired; `email` is the invited one (`wrong_email`) | `InvitationAccepted` {`accountId`, `newAccount`} (erases the token) | `api` |
+| `AcceptInvitation` | `token` (secret), `accountId`, `email`, `newAccount` | `open`, not expired; `email` is the invited one (`wrong_email`); requires the tenant's `active` fact | `InvitationAccepted` {`accountId`, `newAccount`} (erases the token) | `api` |
 | `RecordInvitationMailSent` | `tokenId` | — | `InvitationMailSent` | the mail reactor |
 | `EraseInvitation` | — | not `open` | `InvitationErased` (erases `invitation:<id>`) | `platform`; the invitation reactor (tenant deleted) |
 
@@ -360,7 +361,7 @@ The token is `<tenantId>.<invitationId>.<tokenId>.<secret>`, so the API knows th
 The API runs it, since the person may have no account yet:
 
 1. It checks who is signed in. Signed in: `accountId` and `email` are the session's account, read with the session's own context, so the middleware checks the session as for every signed-in request. Not signed in: the person enters a name and password, which the API checks first (`invalid_name`, `weak_password`) so a refused registration does not spend the invitation; it picks a new account ID and sets `newAccount`.
-2. `AcceptInvitation` checks the token and the email.
+2. `AcceptInvitation` checks the token and the email, and requires the tenant `active` at commit (the `tenancy.tenant` fact), so a tenant that is not active takes nobody in, new or signed in; the API answers `requirement_missing` as `tenant_suspended`. A signed-in account is checked against the tenant first (its second factor, its enforced SSO), except that an owner invitation skips enforced SSO, as owners do.
 3. For a new person, the API then submits `account.RegisterAccount` with that ID (level `api`, active at once: the token proved the email).
 4. The identity reactor creates the identity with its memberships, and the owner for an owner invitation.
 
@@ -388,7 +389,7 @@ A second aggregate, `invitation.link`, random ID, under its tenant: `status` (`n
 |---|---|---|---|---|
 | `CreateInvitationLink` | `secret` (secret), `groups`, `label`?, `expiresAt`?, `maxUses`? | `none`; groups active (required facts) | `InvitationLinkCreated` {`groups`, `hash`, `label`, `expiresAt`, `maxUses`} | group, only groups the sender could grant |
 | `RevokeInvitationLink` | — | `open` | `InvitationLinkRevoked` | group |
-| `JoinWithInvitationLink` | `token` (secret), `accountId` | `open`, this tenant's and link's, hash equal, not expired (`expired_token`), not used up (`used_up`), the account not yet joined (`exists`) | `InvitationLinkUsed` {`accountId`, `groups`} | `api` (for a signed-in account, its session checked first: a link proves no email) |
+| `JoinWithInvitationLink` | `token` (secret), `accountId` | `open`, this tenant's and link's, hash equal, not expired (`expired_token`), not used up (`used_up`), the account not yet joined (`exists`); requires the tenant's `active` fact | `InvitationLinkUsed` {`accountId`, `groups`} | `api` (for a signed-in account, its session checked first: a link proves no email) |
 
 Queries `ListInvitationLinks` (group) and `PeekInvitationLink` (`api`: tenant, linkId, label, usable; only for a token whose hash is right). The identity reactor turns `InvitationLinkUsed` into an identity with the groups, never an owner.
 
@@ -456,7 +457,7 @@ The set's listeners take kernable's reserved orders: the authorization middlewar
 ## Found while building
 
 - **An account with TOTP on needs it in every session**, not only in tenants that require MFA; one line in `policy.ts` to narrow it.
-- **Owners are exempt from enforced SSO**, so a broken SSO can be mended; everyone else in the tenant needs an SSO session.
+- **Owners are exempt from enforced SSO**, so a broken SSO can be mended; everyone else in the tenant needs an SSO session. Someone accepting an owner invitation is no owner yet, so the API skips the SSO part of the tenant check for owner invitations.
 - **Oneself, for an identity, after the tenant's checks**: reading one's own identity in a suspended tenant, or with enforced SSO, is refused like anything else (found by the SSO test; the account and its sessions stay reachable).
 - **Oneself, for an account, in another tenant than the platform's**: the tenant's checks apply too (it exists, not suspended, MFA and SSO as it requires). Accepting an invitation or joining by a link checks the target tenant this way first, so a session without the second factor, or a password session where SSO is enforced, cannot join.
 - **The API's key needs `cache` on `account`** (passkey challenges and OIDC state live a few minutes in the kernable cache).
