@@ -127,6 +127,33 @@
   .list li:hover { background: var(--sunk); }
   .list li.on { border-left-color: var(--accent); background: var(--sunk); }
   .list .id { font-weight: 500; word-break: break-all; } .list .of { color: var(--muted); font-size: 12px; }
+  .list li.aggrow { padding: 6px 12px; }
+  .list li.aggrow .r1 { display: flex; gap: 8px; justify-content: space-between; align-items: baseline; }
+  .list li.aggrow .id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+  .list li.aggrow .r1 span:last-child { color: var(--faint); font-size: 11.5px; white-space: nowrap; }
+  .list li.aggrow .of { font-size: 11.5px; }
+  /* aggregates: overview and timeline */
+  .typecards { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 12px; }
+  .typecard { cursor: pointer; } .typecard:hover, .typecard.on { border-color: var(--accent); }
+  .agghead { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+  .agghead h3 { margin: 0; font-size: 18px; } .agghead h3 .faint { font-weight: 400; }
+  .agghead .links { margin-left: auto; display: flex; gap: 14px; font-size: 13px; }
+  .labels { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; font-size: 12.5px; color: var(--muted); }
+  .tl { position: relative; padding-left: 26px; display: grid; gap: 6px; }
+  .tl::before { content: ""; position: absolute; left: 8px; top: 30px; bottom: 14px; width: 2px; background: var(--faint); opacity: .35; }
+  .tl-day { margin: 12px 0 6px; font-weight: 600; font-size: 12.5px; color: var(--muted); }
+  .tl-day:first-child { margin-top: 0; }
+  .tl-gap { font-size: 11.5px; color: var(--faint); padding-left: 2px; }
+  .tl-item { position: relative; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 9px 12px; cursor: pointer; }
+  .tl-item:hover { border-color: var(--accent); }
+  .tl-item::before { content: ""; position: absolute; left: -23px; top: 13px; width: 10px; height: 10px; border-radius: 50%; background: var(--corr, var(--accent)); box-shadow: 0 0 0 3px var(--bg); }
+  .tl-item .top { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+  .tl-item .v { font-weight: 600; color: var(--accent); font-variant-numeric: tabular-nums; }
+  .tl-item .when { color: var(--muted); font-size: 12px; margin-left: auto; font-variant-numeric: tabular-nums; }
+  .tl-item .line { color: var(--muted); font-size: 13px; margin-top: 3px; }
+  .tl-item .corr { display: inline-block; width: 8px; height: 8px; border-radius: 2px; background: var(--corr); margin-right: 4px; }
+  .tl-item.fresh { animation: fresh 2.5s ease-out; }
+  .tl-item.open { cursor: default; border-color: var(--line); }
   .list .n { float: right; color: var(--muted); font-size: 12px; }
   /* map */
   .map { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
@@ -335,8 +362,8 @@
       <div class="controls" style="margin-top:10px"><button class="btn" id="colder" hidden>Older</button><span class="note" id="colder-meta"></span></div>
     </div>
     <div id="x-aggregates" class="split" hidden>
-      <div class="list"><div class="lhead" id="agg-head"><span class="note">Aggregates</span></div><div class="head"><input class="ctl" id="filter" placeholder="Filter aggregates…"><label class="note"><input type="checkbox" id="streams-engine"> process cases too</label></div><ul id="streams"></ul></div>
-      <div class="grid" id="timeline"><div class="empty">Pick an aggregate.</div></div>
+      <div class="list"><div class="lhead" id="agg-head"><span class="note">Aggregates</span></div><div class="head"><select class="ctl" id="agg-type" aria-label="Aggregate type"><option value="">All types</option></select><input class="ctl" id="filter" placeholder="Filter by ID or tenant…"><label class="note"><input type="checkbox" id="streams-engine"> process cases too</label></div><ul id="streams"></ul></div>
+      <div class="grid" id="timeline"></div>
     </div>
   </section>
   <section class="view" id="v-search"></section>
@@ -1412,6 +1439,7 @@ let catalogDomain = "", catalogSort = "", catalogDir = "desc";
 function enterExplore() {
   if (route.view === "history") { exploreTab = "aggregates"; stream = { tenant: route.args[0], domain: route.args[1], type: route.args[2], id: route.args[3] }; if (stream.domain === "process") $("streams-engine").checked = true; }
   else exploreTab = ["domains", "catalog", "events", "commands", "aggregates"].includes(route.args[0]) ? route.args[0] : "domains";
+  if (route.view === "explore" && exploreTab === "aggregates") stream = null;
   // The command log's filters come from the address too: /explore/commands?sender=c1&status=rejected
   if (exploreTab === "commands" && route.query) {
     const form = $("csearch");
@@ -1785,35 +1813,169 @@ function drawCatalog() {
 }
 
 // ---- aggregates and their history ----
-let stream = null, streams = [];
-/** The aggregates list: the 50 most recently changed, or those matching the filter, searched by the kernel. */
+let stream = null, streams = [], aggType = "", aggSummary = null;
+const streamKey = (s) => `${s.tenant}/${s.domain}/${s.type}/${s.id}`;
+/** The aggregates list: the 50 most recently changed, or those matching the filters, searched by the kernel. */
 async function loadStreams() {
   const q = new URLSearchParams({ q: $("filter").value.trim(), limit: 50 });
+  if (aggType) q.set("type", aggType);
   if ($("streams-engine").checked) q.set("engine", "1");
-  try { streams = (await get(`/api/streams?${q}`)).streams; } catch { return; }
+  const summary = new URLSearchParams({ summary: 1 });
+  if ($("streams-engine").checked) summary.set("engine", "1");
+  try {
+    const [list, sum] = await Promise.all([get(`/api/streams?${q}`), stream ? null : get(`/api/streams?${summary}`)]);
+    streams = list.streams;
+    if (sum) aggSummary = sum;
+  } catch { return; }
   drawStreams();
+  if (!stream) drawAggOverview();
 }
 /** The kernel told which aggregates changed: they move to the top of the list (if they match
- * the filter), and the open one is fetched again only if it is among them. No request else. */
+ * the filters), and the open one is fetched again only if it is among them. No request else. */
 function changedStreams(changed) {
-  const key = (s) => `${s.tenant}/${s.domain}/${s.type}/${s.id}`;
   const q = $("filter").value.trim().toLowerCase(), engine = $("streams-engine").checked;
-  const shown = changed.filter((s) => (engine || s.domain !== "process") && (!q || key(s).toLowerCase().includes(q)));
+  const shown = changed.filter((s) => (engine || s.domain !== "process") && (!aggType || `${s.domain}.${s.type}` === aggType) && (!q || streamKey(s).toLowerCase().includes(q)));
   if (shown.length) {
-    const fresh = new Set(shown.map(key));
-    streams = [...shown, ...streams.filter((s) => !fresh.has(key(s)))].slice(0, 50);
+    const fresh = new Set(shown.map(streamKey));
+    streams = [...shown, ...streams.filter((s) => !fresh.has(streamKey(s)))].slice(0, 50);
     drawStreams();
   }
-  if (stream?.id && changed.some((s) => key(s) === key(stream))) loadHistory();
+  if (stream?.id && changed.some((s) => streamKey(s) === streamKey(stream))) loadHistory();
 }
 let streamsTimer = null;
 function filterStreams() { clearTimeout(streamsTimer); streamsTimer = setTimeout(loadStreams, 250); }
 function drawStreams() {
-  const key = (s) => `${s.tenant}/${s.domain}/${s.type}/${s.id}`;
-  const shown = streams;
-  $("streams").replaceChildren(...(shown.length ? shown.map((s) =>
-    el("li", { class: stream && key(stream) === key(s) ? "on" : "", onclick: () => go(historyHref(s)) },
-      el("div", { class: "id" }, s.id), el("div", { class: "of" }, `${s.domain}.${s.type} · v${s.version} · ${s.tenant} · `, when(s.lastAt)))) : [el("li", { class: "of" }, "No aggregate matches.")]));
+  const types = [...new Set((state?.aggregates ?? []).map((a) => a.aggregate))].sort();
+  const sel = $("agg-type");
+  if (sel.options.length !== types.length + 1) sel.replaceChildren(el("option", { value: "" }, "All types"), types.map((t) => el("option", { value: t }, t)));
+  if (sel.value !== aggType) sel.value = aggType;
+  $("streams").replaceChildren(...(streams.length ? streams.map((s) =>
+    el("li", { class: `aggrow${stream && streamKey(stream) === streamKey(s) ? " on" : ""}`, onclick: () => go(historyHref(s)) },
+      el("div", { class: "r1" }, el("span", { class: "id" }, s.id), when(s.lastAt)),
+      el("div", { class: "of" }, `${s.domain}.${s.type} · v${s.version}`, s.tenant !== "default" ? ` · ${s.tenant}` : ""))) : [el("li", { class: "of" }, "No aggregate matches.")]));
+}
+/** Nothing opened: the aggregate types, how many of each, and when one last changed. */
+function drawAggOverview() {
+  if (stream) return;
+  const types = aggSummary?.types ?? [];
+  $("timeline").replaceChildren(...[
+    el("div", { class: "agghead" }, el("h3", {}, "Aggregates"), el("span", { class: "note" }, aggSummary ? `${num(sum(types.map((t) => t.count)))} in ${plural(types.length, "type")}${aggSummary.complete ? "" : `, among the ${num(aggSummary.looked)} changed last`}` : "…")),
+    el("div", { class: "typecards" }, types.map((t) => el("div", { class: `panel kpi typecard${aggType === t.type ? " on" : ""}`, title: `List the ${t.type} aggregates`, onclick: () => { aggType = aggType === t.type ? "" : t.type; loadStreams(); } },
+      el("span", { class: "l" }, el("span", { class: "faint" }, `${domainOf(t.type)}.`), short(t.type)), el("span", { class: "n" }, num(t.count)), el("span", { class: "s" }, "last change ", when(t.lastAt))))),
+    el("div", { class: "note" }, "Pick one on the left, or a type above to list only those.")]);
+}
+
+/** The aggregate opened: its events as a timeline, with what it holds and where else to look. */
+let aggHistory = null, historyKey = null, historySeen = new Set(), historyFresh = new Set(), tlOpened = new Set(), aggCases = [];
+/** A color per correlation, so the events one chain of commands wrote share it. */
+const corrColor = (id) => { let h = 0; for (const ch of id ?? "") h = (h * 31 + ch.charCodeAt(0)) % 360; return `hsl(${h} 62% 52%)`; };
+async function loadHistory() {
+  if (!stream || !stream.id) return;
+  const q = new URLSearchParams({ tenant: stream.tenant, domain: stream.domain, type: stream.type, id: stream.id });
+  let h;
+  try { h = await get(`/api/history?${q}`); } catch (e) { $("timeline").replaceChildren(el("div", { class: "err" }, String(e))); return; }
+  const key = streamKey(stream);
+  if (historyKey !== key) { historyKey = key; historySeen = new Set(h.events.map((e) => e.position)); historyFresh = new Set(); tlOpened = new Set(); aggCases = []; loadAggCases(); }
+  else {
+    const fresh = h.events.filter((e) => !historySeen.has(e.position));
+    for (const e of fresh) { historySeen.add(e.position); historyFresh.add(e.position); }
+    if (fresh.length) setTimeout(() => { for (const e of fresh) historyFresh.delete(e.position); }, 3000);
+  }
+  aggHistory = h;
+  drawHistory();
+}
+/** The process cases this aggregate started: their key is its ID. */
+async function loadAggCases() {
+  if (!stream || stream.domain === "process") return;
+  const at = streamKey(stream);
+  try {
+    const r = await get(`/api/cases?text=${encodeURIComponent(stream.id)}&limit=50`);
+    if (stream && streamKey(stream) === at) { aggCases = r.cases.filter((c) => c.key === stream.id && c.tenant === stream.tenant); drawHistory(); }
+  } catch {}
+}
+function drawHistory() {
+  const h = aggHistory;
+  if (!h || !stream) return;
+  const events = h.events, first = events[0], last = events[events.length - 1];
+  const tile = (label, value, sub) => el("div", { class: "panel kpi" }, el("span", { class: "l" }, label), el("span", { class: "n", style: "font-size:19px" }, value), sub ? el("span", { class: "s" }, sub) : null);
+  const evLink = `/explore/events?${new URLSearchParams({ domain: stream.domain, id: stream.id, ...(stream.tenant !== "default" ? { tenant: stream.tenant } : {}) })}`;
+  const cmdLink = `/explore/commands?${new URLSearchParams({ domain: stream.domain, id: stream.id, ...(stream.tenant !== "default" ? { tenant: stream.tenant } : {}) })}`;
+  const ix = h.index;
+  const labels = [
+    ix?.keys?.length ? ["unique keys", ix.keys.map((k) => el("span", { class: "t", title: k.global ? "global" : "per tenant" }, k.name, k.global ? " · global" : "", k.personal ? " · personal" : ""))] : null,
+    ix?.facts?.length ? ["facts", ix.facts.map((f) => el("span", { class: "t" }, f))] : null,
+    h.snapshot ? ["snapshot", el("span", { class: "t", title: "Its state is not shown: it may hold personal values" }, `at v${h.snapshot.version} · schema ${h.snapshot.schema} · ${num(h.snapshot.bytes)} bytes`)] : null,
+  ].filter(Boolean);
+
+  // ---- the timeline ----
+  const items = [];
+  let day = null;
+  events.forEach((e, i) => {
+    const d = dayLabel(e.createdAt);
+    if (d !== day) { day = d; items.push(el("div", { class: "tl-day" }, d)); }
+    else if (i > 0) {
+      const gap = e.createdAt - events[i - 1].createdAt;
+      if (gap >= 1000) items.push(el("div", { class: "tl-gap" }, `+ ${duration(gap)}`));
+    }
+    const c = h.commands[e.commandId], ctx = e.context ?? {}, attrs = ctx.attributes ?? {};
+    const caseOf = attrs.process && attrs.case ? { tenant: e.tenant, process: attrs.process, id: attrs.case } : null;
+    const open = tlOpened.has(e.position);
+    const corr = ctx.correlationId;
+    const data = oneLine(e.payload);
+    items.push(el("div", { class: `tl-item${open ? " open" : ""}${historyFresh.has(e.position) ? " fresh" : ""}`, style: corr ? `--corr:${corrColor(corr)}` : "", onclick: (ev) => { if (open || ev.target.closest("a, button")) return; tlOpened.add(e.position); drawHistory(); } },
+      el("div", { class: "top" }, el("span", { class: "v" }, `v${e.version}`), el("b", {}, e.type),
+        e.erases ? el("span", { class: "tag erased" }, `erases ${e.erases}`) : null,
+        el("span", { class: "when", title: iso(e.createdAt) }, timeOfDay(e.createdAt)),
+        open ? el("button", { class: "copy", type: "button", onclick: () => { tlOpened.delete(e.position); drawHistory(); } }, "close") : null),
+      el("div", { class: "line" }, data === "no data" ? el("span", { class: "faint" }, "no data") : data),
+      el("div", { class: "line" }, "by ", el("b", {}, c ? c.type : "–"), " · ", sender(ctx),
+        caseOf ? [" · ", el("a", { href: caseHref(caseOf) }, "⟳ case")] : null,
+        corr ? [" · ", el("span", { class: "corr", title: "Events of one correlation share this color" }), el("a", { href: `/explore/events?command=${encodeURIComponent(corr)}`, title: corr, class: "mono" }, fit(corr, 14))] : null),
+      open ? historyDetail(e, c, caseOf) : null));
+  });
+  if (!events.length) items.push(el("div", { class: "empty" }, "No events."));
+
+  $("timeline").replaceChildren(...[
+    el("div", { class: "agghead" }, el("h3", {}, el("span", { class: "faint" }, `${stream.domain}.${stream.type} `), stream.id),
+      stream.domain === "process" ? el("a", { href: caseHref({ tenant: stream.tenant, process: stream.type, id: stream.id }) }, "as a case →") : null,
+      el("span", { class: "links" }, el("a", { href: evLink }, "Its events in the log →"), el("a", { href: cmdLink }, "Its commands →"))),
+    el("div", { class: "tiles" },
+      tile("Version", last ? `v${last.version}` : "–", plural(events.length, "event")),
+      tile("Created", first ? when(first.createdAt) : "–", first ? iso(first.createdAt) : ""),
+      tile("Last change", last ? when(last.createdAt) : "–", last ? `${last.type}` : ""),
+      tile("Tenant", stream.tenant, first?.context?.senderIdentity ? ["created by ", first.context.senderIdentity] : "")),
+    labels.length ? el("div", { class: "labels" }, labels.map(([k, v]) => [el("span", { class: "kind" }, k), v])) : null,
+    aggCases.length ? el("div", { class: "panel" }, el("h2", {}, "Process cases", el("span", { class: "aside" }, "that it started")),
+      aggCases.map((c) => el("div", { class: "row" }, stateChip(c.state), el("span", {}, el("a", { href: caseHref(c) }, c.process), el("span", { class: "faint" }, ` #${c.id.split("#")[1] ?? ""}`), el("span", { class: "note" }, ` · at ${c.step}`)), el("span", { class: "v" }, when(c.lastAt))))) : null,
+    el("div", { class: "tl" }, items),
+  ].filter(Boolean));
+}
+/** One event of the timeline opened: payload beside its command and signatures, then where to go. */
+function historyDetail(e, c, caseOf) {
+  const ctx = e.context ?? {};
+  const row = (k, v, cls = "mono") => v === undefined || v === null || v === "" ? null : [el("dt", {}, k), el("dd", { class: cls }, v)];
+  return el("div", { class: "evdetail", style: "margin-top:10px" },
+    el("div", {},
+      el("div", { class: "boxhead" }, el("span", { class: "kind" }, `Payload · schema ${e.schema}`), copyButton(e.payload, "copy JSON")),
+      payloadView(e.payload, aggHistory.vault),
+      c ? [el("div", { class: "boxhead", style: "margin-top:10px" }, el("span", { class: "kind" }, `Command ${c.type}`), copyButton(c.payload, "copy JSON")), payloadView(c.payload, aggHistory.vault)] : null),
+    el("div", {},
+      el("div", { class: "boxhead" }, el("span", { class: "kind" }, "Where it came from")),
+      el("dl", {},
+        row("sent by", ctx.senderIdentity), row("on behalf of", ctx.onBehalfOf), row("account", ctx.senderAccount),
+        row("correlation", ctx.correlationId), row("caused by", ctx.causationId),
+        caseOf ? row("case", `${caseOf.process} · ${caseOf.id}`) : null,
+        row("command", [el("span", {}, `${e.commandId} `), copyButton(e.commandId)]),
+        c ? row("received", `${iso(c.receivedAt)} · committed ${timeOfDay(e.createdAt)}`, "") : null,
+        row("position", String(e.position)),
+        c?.key ? [el("dt", {}, "signed by"), el("dd", {}, keyView(c.key))] : null,
+        [el("dt", {}, "worker key"), el("dd", {}, keyView(e.key))],
+        [el("dt", {}, "hash"), el("dd", { class: "mono" }, `${e.hash.slice(0, 16)}… `, copyButton(e.hash))]),
+      el("div", { class: "actions" },
+        el("a", { href: `/explore/events?command=${encodeURIComponent(e.commandId)}` }, "In the event log →"),
+        el("a", { href: `/explore/commands?command=${encodeURIComponent(e.commandId)}` }, "The command →"),
+        ctx.correlationId ? el("a", { href: `/explore/events?command=${encodeURIComponent(ctx.correlationId)}` }, "Same correlation →") : null,
+        caseOf ? el("a", { href: caseHref(caseOf) }, "The case →") : null)));
 }
 
 /** A payload with its vault references as tags: personal (subject), secret, or erased. */
@@ -1845,35 +2007,6 @@ function oneLine(text) {
     if (!d || typeof d !== "object") return String(d);
     return Object.entries(d).map(([k, v]) => `${k}: ${v && typeof v === "object" ? (v.$vault ? "‹vault›" : "{…}") : fit(JSON.stringify(v), 40)}`).join(" · ") || "no data";
   } catch { return fit(text, 80); }
-}
-
-async function loadHistory() {
-  if (!stream || !stream.id) return;
-  const q = new URLSearchParams({ tenant: stream.tenant, domain: stream.domain, type: stream.type, id: stream.id });
-  let h;
-  try { h = await get(`/api/history?${q}`); } catch (e) { $("timeline").replaceChildren(el("div", { class: "err" }, String(e))); return; }
-  const cards = [el("div", { class: "title" }, el("h3", {}, `${stream.type} ${stream.id}`), el("span", { class: "meta" }, `${stream.domain} · ${stream.tenant} · ${h.events.length} events`),
-    stream.domain === "process" ? el("a", { href: caseHref({ tenant: stream.tenant, process: stream.type, id: stream.id }) }, "as a case →") : null)];
-  const ix = h.index;
-  if (ix && (ix.keys?.length || ix.facts?.length)) cards.push(el("div", { class: "snap" }, ix.keys?.length ? `Holds unique keys: ${ix.keys.map((k) => `${k.name}${k.global ? " (global)" : ""}${k.personal ? " (personal)" : ""}`).join(", ")}. ` : "", ix.facts?.length ? `Facts: ${ix.facts.join(", ")}.` : ""));
-  if (h.snapshot) cards.push(el("div", { class: "snap" }, `Snapshot at version ${h.snapshot.version} · state schema ${h.snapshot.schema} · ${h.snapshot.bytes} bytes (not shown: it may hold personal values)`));
-  for (const e of h.events) {
-    const c = h.commands[e.commandId];
-    const ctx = e.context ?? {};
-    cards.push(el("div", { class: "card" },
-      el("div", { class: "top" }, el("span", { class: "v" }, `v${e.version}`), el("span", { class: "t" }, e.type),
-        e.erases ? el("span", { class: "tag erased" }, `erases ${e.erases}`) : null, el("span", { class: "when", title: iso(e.createdAt) }, iso(e.createdAt))),
-      el("div", { class: "line" }, oneLine(e.payload)),
-      el("div", { class: "line" }, "by command ", el("b", {}, c ? c.type : "–"), " from ", el("b", {}, ctx.senderIdentity ?? "–"),
-        ctx.correlationId ? [" · correlation ", el("a", { href: searchHref(ctx.correlationId) }, fit(ctx.correlationId, 40))] : null),
-      el("details", {}, el("summary", {}, "Payload, command and signatures"),
-        payloadView(e.payload, h.vault),
-        c ? [el("div", { class: "note", style: "margin-top:6px" }, "command ", el("b", {}, c.type), " · received ", iso(c.receivedAt), " · signed by ", keyView(c.key)), payloadView(c.payload, h.vault), el("pre", {}, JSON.stringify(c.context, null, 2))] : null,
-        el("div", { class: "note mono" }, `schema ${e.schema} · position ${e.position} · worker `, keyView(e.key), ` · hash ${e.hash.slice(0, 16)}…`))));
-    if (h.snapshot && h.snapshot.version === e.version) cards.push(el("div", { class: "snap" }, `▲ snapshot taken here (version ${e.version})`));
-  }
-  if (!h.events.length) cards.push(el("div", { class: "empty" }, "No events."));
-  $("timeline").replaceChildren(...cards);
 }
 
 // ---- the event log: search and live tail ----
@@ -2213,6 +2346,7 @@ $("searchform").addEventListener("submit", (ev) => { ev.preventDefault(); go(sea
 $("verdict").addEventListener("click", () => go("/"));
 $("filter").addEventListener("input", filterStreams);
 $("streams-engine").addEventListener("change", loadStreams);
+$("agg-type").addEventListener("change", (ev) => { aggType = ev.target.value; loadStreams(); });
 $("search").addEventListener("submit", (ev) => {
   ev.preventDefault();
   const q = new URLSearchParams();

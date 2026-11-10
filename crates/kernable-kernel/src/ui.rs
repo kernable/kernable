@@ -10,8 +10,10 @@
 //!   second: the log moved on with the aggregates it changed (`head`), new events, case
 //!   changes, commands stored and completed, the verdict, the counts and listener positions
 //!   (`pulse`), each filtered; resumes from `Last-Event-ID`; see [`Watch`];
-//! - `GET /api/streams?q=&engine=&limit=`: the aggregates with events, the most recently
-//!   changed first, those whose tenant, domain, type or ID contains `q`;
+//! - `GET /api/streams?q=&type=&engine=&limit=`: the aggregates with events, the most recently
+//!   changed first, those whose tenant, domain, type or ID contains `q` (and of the type
+//!   `domain.aggregate` with `type=`); with `summary=1`, per aggregate type how many there are
+//!   and when the last one changed;
 //! - `GET /api/history?tenant=&domain=&type=&id=`: one aggregate's events with their commands,
 //!   and the unique keys (by name and identity, never the value) and facts it holds;
 //! - `GET /api/events?…`: events of the whole log that match a filter, newest first, or the
@@ -305,6 +307,11 @@ fn streams(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, B
         .unwrap_or_default();
     // The process engine's cases (domain `process`) only when asked for.
     let engine = params.get("engine").is_some_and(|v| v == "1");
+    // `type=domain.aggregate`: that aggregate type only.
+    let only = params.get("type").map_or("", |v| v.trim());
+    if params.get("summary").is_some_and(|v| v == "1") {
+        return stream_summary(kernel, engine);
+    }
     let limit = match params.get("limit").filter(|v| !v.is_empty()) {
         Some(v) => v.parse::<usize>().map_err(|_| "limit: not a number")?,
         None => 50,
@@ -312,13 +319,16 @@ fn streams(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, B
     .clamp(1, STREAMS);
     let streams: Vec<Value> = kernel
         .store
-        .streams(if q.is_empty() && engine {
+        .streams(if q.is_empty() && only.is_empty() && engine {
             limit
         } else {
             STREAMS_SEARCH
         })?
         .into_iter()
         .filter(|s| engine || s.stream.domain != "process")
+        .filter(|s| {
+            only.is_empty() || format!("{}.{}", s.stream.domain, s.stream.aggregate_type) == only
+        })
         .filter(|s| {
             q.is_empty()
                 || format!(
@@ -344,6 +354,29 @@ fn streams(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, B
         })
         .collect();
     Ok(json!({ "streams": streams, "limit": limit }))
+}
+
+/// Per aggregate type, how many aggregates the newest [`STREAMS_SEARCH`] changed hold and when
+/// the last one changed; `complete` false when there are more than that.
+fn stream_summary(kernel: &Kernel, engine: bool) -> Result<Value, BoxError> {
+    let all = kernel.store.streams(STREAMS_SEARCH)?;
+    let complete = all.len() < STREAMS_SEARCH;
+    let mut types: BTreeMap<String, (u64, i64)> = BTreeMap::new();
+    for s in all
+        .iter()
+        .filter(|s| engine || s.stream.domain != "process")
+    {
+        let t = types
+            .entry(format!("{}.{}", s.stream.domain, s.stream.aggregate_type))
+            .or_default();
+        t.0 += 1;
+        t.1 = t.1.max(s.last_at);
+    }
+    let types: Vec<Value> = types
+        .into_iter()
+        .map(|(t, (count, last_at))| json!({ "type": t, "count": count, "lastAt": last_at }))
+        .collect();
+    Ok(json!({ "types": types, "complete": complete, "looked": all.len() }))
 }
 
 /// The verdict the UI's top bar shows, computed here so every page asks one small question:
