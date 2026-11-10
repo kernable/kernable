@@ -48,7 +48,7 @@
   h2 .aside { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--muted); font-size: 12px; }
   h3 { margin: 0; font-size: 18px; }
   .grid { display: grid; gap: 14px; }
-  .cols-kpi { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  .cols-kpi { grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); }
   .cols-2 { grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); }
   .cols-2e { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .cols-3 { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
@@ -167,7 +167,10 @@
   .spark .say { color: var(--muted); font-size: 12px; white-space: nowrap; }
   /* process diagram */
   .flow { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
-  .flow svg { display: block; }
+  .flow svg { display: block; margin: 0 auto; }
+  .flow .conds { display: flex; flex-wrap: wrap; gap: 4px 18px; padding: 0 16px 12px; font-size: 12px; color: var(--muted); }
+  .flow .conds b { color: var(--text); font-weight: 600; }
+  .flow .wide { padding: 0 16px 10px; font-size: 12px; color: var(--faint); }
   .flow svg text { fill: var(--text); font-size: 12px; }
   .flow .sub { fill: var(--muted); font-size: 11px; }
   .flow .step { cursor: pointer; }
@@ -598,15 +601,23 @@ function activityChart() {
 }
 function niceMax(v) { const p = 10 ** Math.floor(Math.log10(v)); for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= v) return m * p; return 10 * p; }
 
-/** A bar of the ends a version reached, in shares. */
+/** One color per end of a model, in the order the model writes its ends; `cancelled` (by an operator) red. */
+// Neutral: the UI cannot know which end is the good one.
+const END_COLORS = ["var(--accent)", "var(--violet)", "var(--live)", "var(--warn)", "var(--dyn)", "var(--check)"];
+function endColor(model, end) {
+  if (end === "cancelled") return "var(--bad)";
+  const i = (model?.steps ?? []).filter((s) => s.kind === "end").findIndex((s) => s.name === end);
+  return END_COLORS[(i < 0 ? 5 : i) % END_COLORS.length];
+}
+
+/** A bar of the ends a version (or several of one process) reached, in shares. */
 function outcomeBar(x, width = 140) {
   const ends = Object.entries(x.ended).filter(([, n]) => n);
   const total = ends.reduce((a, [, n]) => a + n, 0);
   if (!total) return el("span", { class: "faint" }, "–");
-  const palette = ["var(--ok)", "var(--warn)", "var(--accent)", "var(--violet)", "var(--live)", "var(--dyn)"];
   let at = 0;
   const svg = el("svg:svg", { width, height: 10, viewBox: `0 0 ${width} 10`, role: "img", "aria-label": ends.map(([e, n]) => `${e} ${pct(n, total)}`).join(", ") });
-  ends.forEach(([e, n], i) => { const w = (n / total) * width; svg.append(el("svg:rect", { x: at, width: Math.max(0, w - 1), height: 10, rx: 2, fill: e === "cancelled" ? "var(--bad)" : palette[i % palette.length] }, el("svg:title", {}, `${e}: ${n} (${pct(n, total)})`))); at += w; });
+  ends.forEach(([e, n]) => { const w = (n / total) * width; svg.append(el("svg:rect", { x: at, width: Math.max(0, w - 1), height: 10, rx: 2, fill: endColor(x.model, e) }, el("svg:title", {}, `${e}: ${n} (${pct(n, total)})`))); at += w; });
   return svg;
 }
 const openCount = (x) => Object.values(x.steps).reduce((m, s) => m + Object.values(s.now).reduce((a, b) => a + b, 0), 0);
@@ -615,7 +626,7 @@ const firstWait = (x) => x.model.steps.find((s) => s.kind === "wait" || s.kind =
 function processesPanel() {
   const rows = (procs?.processes ?? []).map((p) => {
     const all = p.versions;
-    const sum = { started: 0, ended: {}, steps: {} };
+    const sum = { started: 0, ended: {}, steps: {}, model: all[all.length - 1]?.model };
     for (const x of all) { sum.started += x.started; for (const [e, n] of Object.entries(x.ended)) sum.ended[e] = (sum.ended[e] ?? 0) + n; }
     const open = all.reduce((n, x) => n + openCount(x), 0);
     const bad = (incidents?.cases ?? []).filter((c) => c.process === p.name).length;
@@ -747,7 +758,7 @@ function processKpis(v) {
   const w = firstWait(v);
   return [
     kpi("Started", num(v.started), `last ${procWindow}`),
-    ...ends.filter(([e, n]) => n || e !== "cancelled").map(([e, n]) => kpi(`Ended: ${e}`, num(n), pct(n, total), e === "cancelled" ? "bad" : "")),
+    ...ends.filter(([e, n]) => n || e !== "cancelled").map(([e, n]) => kpi(el("span", {}, el("span", { style: `color:${endColor(v.model, e)}` }, "■ "), `Ended: ${e}`), num(n), pct(n, total), e === "cancelled" ? "bad" : "")),
     w ? kpi(`Median at ${w.name}`, duration(v.steps[w.name]?.medianMs), `p95 ${duration(v.steps[w.name]?.p95Ms)}`) : null,
     kpi("Open · incidents", el("span", {}, num(open), " · ", el("span", { class: bad ? "bad" : "ok" }, num(bad))), open ? "running or waiting now" : "none open"),
   ];
@@ -758,8 +769,7 @@ function seriesChart(v) {
   const s = v.series ?? [];
   if (!s.length) return el("div", { class: "note" }, "No data.");
   const ends = [...new Set(s.flatMap((b) => Object.keys(b.ended)))];
-  const palette = ["var(--ok)", "var(--warn)", "var(--accent)", "var(--violet)", "var(--live)"];
-  const colorOf = (e, i) => (e === "cancelled" ? "var(--bad)" : palette[i % palette.length]);
+  const colorOf = (e) => endColor(v.model, e);
   const W = 520, H = 150, L = 34, B = 20, T = 8;
   const max = niceMax(Math.max(1, ...s.map((b) => Math.max(b.started, Object.values(b.ended).reduce((a, n) => a + n, 0)))));
   const bw = (W - L - 6) / s.length;
@@ -860,7 +870,8 @@ function incidentRow(c) {
 }
 
 // ---- the diagram, left to right, with how many cases took each path ----
-const SW = 172, SH = 60, ROW = 104, PAD = 34;
+let SW = 168;
+const SH = 60, ROW = 104, PAD = 34;
 let COL = 300;
 
 /** The paths out of a step: where to, and a label for all but the plain `next`. */
@@ -918,11 +929,18 @@ function layout(model) {
  * the paths it took, where it is now) that case's way is drawn and the rest faded; without, the
  * whole version with how many cases took each path.
  */
+let flowDir = "auto";
+try { flowDir = localStorage.getItem("kernable.flow") ?? "auto"; } catch {}
+
 function flow(v, one = null) {
   const model = v.model, { out, back, rank, row, cols } = layout(model);
-  // Columns as wide as the panel allows, between 230 and 320 px.
-  const room = ($(one ? "c-flow" : "p-flow")?.clientWidth ?? 1100) - 2 * PAD - SW - 4;
-  COL = cols > 1 ? Math.max(230, Math.min(320, Math.floor(room / (cols - 1)))) : 300;
+  const avail = ($(one ? "c-flow" : "p-flow")?.clientWidth ?? 1100) - 4;
+  // Left to right while it fits (columns 220 to 320 px wide); a longer process top to bottom,
+  // where the page grows downward. The viewer may choose either.
+  const fits = PAD * 2 + (cols - 1) * 220 + 152 <= avail;
+  const vert = flowDir === "down" || (flowDir === "auto" && !fits);
+  SW = vert ? 168 : cols > 6 ? 152 : 168;
+  COL = cols > 1 ? Math.max(220, Math.min(320, Math.floor((avail - 2 * PAD - SW) / (cols - 1)))) : 300;
   const rows = [...row.values()];
   const minRow = Math.min(0, ...rows), maxRow = Math.max(0, ...rows);
   // How many cases took each path in the window: from the start all started ones, from a step
@@ -942,11 +960,16 @@ function flow(v, one = null) {
   }
   const leaving = new Map();
   for (const e of edgeList) leaving.set(e.from, (leaving.get(e.from) ?? 0) + e.count);
-  const LANE = 18;
-  const width = PAD * 2 + (cols - 1) * COL + SW;
-  const top = PAD + 12 + over * LANE, bottom = top + (maxRow - minRow) * ROW + SH;
-  const height = bottom + 36 + under * LANE + 28;
-  const pos = (n) => ({ x: PAD + (rank.get(n) ?? 0) * COL, y: top + ((row.get(n) ?? 0) - minRow) * ROW });
+  const LANE = 26;
+  // Top to bottom: ranks go down, rows go across; lanes "over" run left of the steps, "under" right.
+  const COLV = SW + 70, ROWV = SH + 70;
+  const left = PAD + 12 + over * LANE, right = left + (maxRow - minRow) * COLV + SW;
+  const top = vert ? PAD : PAD + 12 + over * LANE, bottom = vert ? PAD + (cols - 1) * ROWV + SH : top + (maxRow - minRow) * ROW + SH;
+  const width = vert ? right + 36 + under * LANE + 150 : PAD * 2 + (cols - 1) * COL + SW;
+  const height = vert ? bottom + PAD : bottom + 36 + under * LANE + 28;
+  const pos = (n) => vert
+    ? { x: left + ((row.get(n) ?? 0) - minRow) * COLV, y: PAD + (rank.get(n) ?? 0) * ROWV }
+    : { x: PAD + (rank.get(n) ?? 0) * COL, y: top + ((row.get(n) ?? 0) - minRow) * ROW };
   const svg = el("svg:svg", { width, height, viewBox: `0 0 ${width} ${height}` },
     el("svg:defs", {}, el("svg:marker", { id: "arrow", viewBox: "0 0 10 10", refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: "auto-start-reverse" }, el("svg:path", { d: "M0,0 L10,5 L0,10 z" }))));
   const edges = el("svg:g"), labels = el("svg:g");
@@ -955,38 +978,60 @@ function flow(v, one = null) {
   for (const e of edgeList) {
     const a = pos(e.from), b = pos(e.to);
     let d, lx, ly, anchor = "middle";
-    if (e.kind === "next") {
+    if (vert && e.kind === "next") {
+      const x1 = a.x + SW / 2, y1 = e.from === "" ? a.y + 36 : a.y + SH, x2 = b.x + SW / 2, y2 = b.y, mid = (y1 + y2) / 2;
+      d = `M${x1},${y1} C${x1},${mid} ${x2},${mid} ${x2},${y2}`;
+      lx = (x1 + x2) / 2 + 10; ly = mid + 4; anchor = "start";
+    } else if (vert) {
+      const shift = (e.lane % 4) * 8 - 12;
+      const y1 = a.y + SH / 2 + shift, y2 = b.y + SH / 2 + shift;
+      const isOver = e.kind === "over";
+      const x = isOver ? left - 12 - e.lane * LANE : right + 36 + e.lane * LANE;
+      const x1 = isOver ? a.x : a.x + SW, x2 = isOver ? b.x : b.x + SW;
+      const dx = isOver ? R : -R, dir = y2 > y1 ? 1 : -1;
+      d = `M${x1},${y1} L${x + dx},${y1} Q${x},${y1} ${x},${y1 + dir * R} L${x},${y2 - dir * R} Q${x},${y2} ${x + dx},${y2} L${x2},${y2}`;
+      lx = x + 6; ly = y1 + dir * (R + 16); anchor = "start";
+    } else if (e.kind === "next") {
       const fromX = e.from === "" ? a.x + 36 : a.x + SW;
       const y1 = a.y + SH / 2, y2 = b.y + SH / 2, mid = (fromX + b.x) / 2;
       d = `M${fromX},${y1} C${mid},${y1} ${mid},${y2} ${b.x},${y2}`;
-      lx = mid; ly = (y1 + y2) / 2 - 8;
+      lx = mid; ly = (y1 + y2) / 2 - 7;
     } else {
       const shift = (e.lane % 4) * 8 - 12;
       const x1 = a.x + SW / 2 + shift, x2 = b.x + SW / 2 + shift;
       const [y1, y2, y] = e.kind === "over" ? [a.y, b.y, top - 12 - e.lane * LANE] : [a.y + SH, b.y + SH, bottom + 36 + e.lane * LANE];
       const dy = e.kind === "over" ? R : -R, dir = x2 > x1 ? 1 : -1;
       d = `M${x1},${y1} L${x1},${y + dy} Q${x1},${y} ${x1 + dir * R},${y} L${x2 - dir * R},${y} Q${x2},${y} ${x2},${y + dy} L${x2},${y2}`;
-      lx = (x1 + x2) / 2; ly = y - 5;
+      lx = x1 + dir * (R + 8); ly = y - 6; anchor = dir > 0 ? "start" : "end";
     }
+    const lane = e.kind !== "next";
+    // On the path itself only how many took it; a condition goes to the list below the diagram.
+    const keyword = e.alt ? e.label : "";
     if (one) {
       const taken = one.edges.has(`${e.from}>${e.to}`);
       edges.append(el("svg:path", { class: `edge${taken ? " used" : " faded"}${e.back ? " back" : ""}${e.alt ? " alt" : ""}`, d, "stroke-width": taken ? 5 : 1.3, "marker-end": taken ? null : "url(#arrow)" },
         el("svg:title", {}, `${e.from || "start"} → ${e.to}${e.label ? ` (${e.label})` : ""}${taken ? ": this case went this way" : ""}`)));
-      if (e.label) labels.append(el("svg:text", { class: `elabel${taken ? "" : " faded"}`, x: lx, y: ly, "text-anchor": anchor }, fit(e.label, 34)));
+      if (keyword) labels.append(el("svg:text", { class: `elabel${taken ? "" : " faded"}`, x: lx, y: ly, "text-anchor": anchor }, el("svg:title", {}, e.label), fit(keyword, 22)));
       continue;
     }
-    const w = e.count ? 1.5 + (e.count / most) * 12 : 1.3;
+    const w = e.count ? Math.min(lane ? 8 : 14, 1.5 + (e.count / most) * 12) : 1.3;
     edges.append(el("svg:path", { class: `edge${e.count ? " used" : ""}${e.back ? " back" : ""}${e.alt ? " alt" : ""}`, d, "stroke-width": w, "marker-end": e.count ? null : "url(#arrow)" },
       el("svg:title", {}, `${e.from || "start"} → ${e.to}${e.label ? ` (${e.label})` : ""}: ${e.count} in the last ${procWindow}`)));
     const share = e.from !== "" && (leaving.get(e.from) ?? 0) > 0 && out.get(e.from).length > 1 ? ` (${Math.round((e.count / leaving.get(e.from)) * 100)} %)` : "";
-    const text = [e.label, e.count || e.label ? `${num(e.count)}${share}` : ""].filter(Boolean).join(" · ");
-    if (text) labels.append(el("svg:text", { class: "elabel", x: lx, y: ly, "text-anchor": anchor }, fit(text, 34)));
+    const text = [keyword ? fit(keyword, 22) : "", e.count ? `${num(e.count)}${share}` : ""].filter(Boolean).join(" · ");
+    if (text) labels.append(el("svg:text", { class: "elabel", x: lx, y: ly, "text-anchor": anchor }, el("svg:title", {}, `${e.label ? `${e.label}: ` : ""}${e.count} in the last ${procWindow}`), text));
   }
   const s0 = pos("");
-  svg.append(el("svg:g", {},
-    el("svg:circle", { class: "start", cx: s0.x + 18, cy: s0.y + SH / 2, r: 16 }),
-    el("svg:text", { x: s0.x, y: s0.y + SH / 2 + 34, class: "sub" }, fit(`on ${model.start.on}`, 32)),
-    el("svg:text", { x: s0.x, y: s0.y + SH / 2 + 50, class: "sub" }, one ? `started ${iso(one.startedAt).slice(11)}` : `${num(v.started)} started`)));
+  const startText = [fit(`on ${model.start.on}`, 32), one ? `started ${iso(one.startedAt).slice(11)}` : `${num(v.started)} started`];
+  svg.append(vert
+    ? el("svg:g", {},
+      el("svg:circle", { class: "start", cx: s0.x + SW / 2, cy: s0.y + 18, r: 16 }),
+      el("svg:text", { x: s0.x + SW / 2 + 26, y: s0.y + 14, class: "sub" }, startText[0]),
+      el("svg:text", { x: s0.x + SW / 2 + 26, y: s0.y + 30, class: "sub" }, startText[1]))
+    : el("svg:g", {},
+      el("svg:circle", { class: "start", cx: s0.x + 18, cy: s0.y + SH / 2, r: 16 }),
+      el("svg:text", { x: s0.x, y: s0.y + SH / 2 + 34, class: "sub" }, startText[0]),
+      el("svg:text", { x: s0.x, y: s0.y + SH / 2 + 50, class: "sub" }, startText[1])));
   for (const s of model.steps) {
     const { x, y } = pos(s.name), st = v.steps[s.name] ?? { now: {} };
     const open = (st.now.running ?? 0) + (st.now.waiting ?? 0), bad = st.now.incident ?? 0;
@@ -1008,7 +1053,7 @@ function flow(v, one = null) {
     if (one && s.kind === "command") sub = s.command;
     const median = st.medianMs !== null && st.medianMs !== undefined ? `median ${duration(st.medianMs)}` : "";
     const third = one
-      ? (mine && s.kind !== "end" ? `${one.at === s.name ? "here for " : "took "}${duration(mine.ms)}${s.kind === "wait" && s.timeoutMs ? ` · max ${duration(s.timeoutMs)}` : ""}` : "")
+      ? (mine && s.kind !== "end" && s.kind !== "decide" ? `${one.at === s.name ? "here for " : "took "}${duration(mine.ms)}${s.kind === "wait" && s.timeoutMs ? ` · max ${duration(s.timeoutMs)}` : ""}` : "")
       : s.kind === "wait" ? [median, s.timeoutMs ? `max ${duration(s.timeoutMs)}` : ""].filter(Boolean).join(" · ") : (s.kind === "timer" || s.kind === "query") ? median : "";
     const clockIcon = s.kind === "wait" || s.kind === "timer";
     if (clockIcon) g.append(el("svg:circle", { class: "icon", cx: 15, cy: 18, r: 6.5 }), el("svg:path", { class: "icon", d: "M15,14 L15,18 L18,20" }));
@@ -1024,7 +1069,17 @@ function flow(v, one = null) {
   svg.append(labels);
   const cancelled = one ? 0 : v.ended.cancelled ?? 0;
   if (cancelled) svg.append(el("svg:text", { class: "sub", x: PAD, y: height - 8 }, `${cancelled} cancelled by an operator`));
-  return svg;
+  // What decides between the paths, written out under the diagram instead of on the paths.
+  const conds = [];
+  for (const s of model.steps) {
+    if (s.kind === "decide") conds.push(el("span", {}, el("b", {}, s.name), ": ", (s.when ?? []).map((w, i) => [i ? "; " : "", el("code", {}, w.if), ` → ${w.next}`]), s.otherwise ? `; otherwise → ${s.otherwise}` : ""));
+    if (s.kind === "query") conds.push(el("span", {}, el("b", {}, s.name), `: asks ${s.query}; `, (s.paths ?? []).map((x, i) => [i ? ", " : "", el("code", {}, JSON.stringify(x.value)), ` → ${x.next}`]), s.otherwise ? `; otherwise → ${s.otherwise}` : ""));
+  }
+  const dirLink = (value, label) => flowDir === value ? el("b", {}, label) : el("a", { href: "#", onclick: (ev) => { ev.preventDefault(); flowDir = value; try { localStorage.setItem("kernable.flow", value); } catch {} render(); } }, label);
+  return el("div", {}, svg,
+    conds.length ? el("div", { class: "conds" }, conds) : null,
+    el("div", { class: "wide" }, "Direction: ", dirLink("auto", "auto"), " · ", dirLink("right", "left to right"), " · ", dirLink("down", "top to bottom"),
+      width > avail + 4 ? " · wider than the page: scroll it sideways" : ""));
 }
 
 // ================= one case, as a story =================
@@ -1137,14 +1192,16 @@ function drawCase() {
     events.map((e) => el("div", { class: "card", style: "margin-top:8px" }, el("div", { class: "top" }, el("span", { class: "v" }, `v${e.version}`), el("span", { class: "t" }, e.type), el("span", { class: "when" }, iso(e.createdAt))), payloadView(e.payload, null))),
     el("div", { style: "margin-top:8px" }, el("a", { href: historyHref({ tenant, domain: "process", type: process, id }) }, "Its stream in Explore →")));
   const version = p?.versions.find((x) => x.version === started.version);
+  const resolve = incident ? el("div", { class: "panel", style: "border-color:var(--bad)" }, el("h2", {}, "Resolve this incident"),
+    el("div", {}, el("span", { class: "code" }, incident.incident?.code), ` at ${incident.step}: ${incident.incident?.message ?? ""}`), el("div", { class: "note" }, "Fix the cause first, then:"), resolving(incident)) : null;
   box.replaceChildren(
     el("div", { class: "title" }, back, el("h3", {}, `${process}: ${started.key ?? id}`), stateChip(status)),
+    resolve,
     version ? el("div", { class: "flow", id: "c-flow" }) : null,
     el("div", { class: "grid cols-2" },
       el("div", { class: "panel" }, el("h2", {}, "What happened"), story),
       el("div", { class: "grid", style: "align-content:start" },
         el("div", { class: "panel" }, el("h2", {}, "Case"), facts),
-        incident ? el("div", { class: "panel" }, el("h2", {}, "Resolve"), el("div", {}, el("span", { class: "code" }, incident.incident?.code), ` at ${incident.step}: ${incident.incident?.message ?? ""}`), el("div", { class: "note" }, "Fix the cause first, then:"), resolving(incident)) : null,
         el("div", { class: "panel" }, raw))));
   if (version) $("c-flow").replaceChildren(flow(version, casePath(events, incident)));
 }
