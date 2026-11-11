@@ -132,6 +132,12 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "With `--witness`: the address the other kernel reaches this one at. Default: `--listen`.",
     ),
     (
+        "--witness-generation",
+        "KERNABLE_WITNESS_GENERATION",
+        "",
+        "With `--witness`: a file of the witness's generation (`kernable witness generation`), signed by a root key. The kernel keeps the newest generation it has seen (from this file, its witness or the other kernel) in `<node-key>.generation` and ignores every witness of an older one, or one answering with another witness's generation, so a replaced witness that comes back cannot make a second primary. It reads the file again before every question to the witness: raise it on both kernels before they turn to a new witness.",
+    ),
+    (
         "--standby-timeout-ms",
         "KERNABLE_STANDBY_TIMEOUT_MS",
         "5000",
@@ -384,6 +390,8 @@ pub struct Pair {
     pub node_key: PathBuf,
     /// Where the other kernel reaches this one.
     pub advertise: String,
+    /// `--witness-generation`: the witness's generation, read again while it runs.
+    pub witness_generation: Option<PathBuf>,
     pub standby_timeout_ms: u64,
     /// The other kernel's kernel keys (and this one's): checkpoints of either are accepted.
     pub kernel_keys: Vec<String>,
@@ -562,6 +570,11 @@ impl Config {
             None if get("--advertise").is_some() => {
                 return Err("--advertise is for a kernel of a pair: give --witness too".into());
             }
+            None if get("--witness-generation").is_some() => {
+                return Err(
+                    "--witness-generation is for a kernel of a pair: give --witness too".into(),
+                );
+            }
             None => None,
             Some(_) if follow.is_some() => {
                 return Err("--witness decides the roles: drop --follow".into());
@@ -571,6 +584,7 @@ impl Config {
                 node_key: get("--node-key").expect("has a default").into(),
                 advertise: get("--advertise")
                     .unwrap_or_else(|| get("--listen").expect("has a default")),
+                witness_generation: get("--witness-generation").map(PathBuf::from),
                 standby_timeout_ms: positive("--standby-timeout-ms")?,
                 kernel_keys: kernel_keys()?,
             }),
@@ -1159,6 +1173,7 @@ mod tests {
         };
         assert!(refused(&["--control", "127.0.0.1:1"]).contains("give --partition too"));
         assert!(refused(&["--advertise", "127.0.0.1:1"]).contains("give --witness too"));
+        assert!(refused(&["--witness-generation", "w.generation"]).contains("give --witness too"));
         assert!(refused(&["--partition", "p2", "--control", " , "]).contains("--control"));
         let tls = Config::from_args(&["--root", &root], |v| {
             (v == "KERNABLE_KERNEL_TLS_CLIENT_CA").then(|| "ca.pem".to_owned())

@@ -12,6 +12,7 @@ use zeroize::Zeroizing;
 use crate::proto::{
     CacheRequest, CancelRequest, Command, DataRequest, Event, Grant, Membership, NewEvent,
     Permission, QueryRequest, Rejected, RequestContext, Requirement, Signature, UniqueKey,
+    WitnessGeneration,
 };
 
 /// Hash that precedes the first event of the chain.
@@ -591,6 +592,34 @@ pub fn witness_message(
         .str(standby)
         .i64(issued_at)
         .0
+}
+
+/// What a root key signs to name the current witness of a pair: its `generation` and its
+/// address as the kernels name it (`--witness`).
+pub fn witness_generation_message(generation: u64, witness: &str, issued_at: i64) -> Vec<u8> {
+    Msg::new("kernable.v1.witness-generation")
+        .u64(generation)
+        .str(witness)
+        .i64(issued_at)
+        .0
+}
+
+/// Witness generation `generation` for the witness at `witness`, signed by `root`.
+pub fn witness_generation(
+    root: &SigningKey,
+    generation: u64,
+    witness: &str,
+    issued_at: i64,
+) -> WitnessGeneration {
+    WitnessGeneration {
+        generation,
+        witness: witness.to_owned(),
+        issued_at,
+        root_sig: Some(sign(
+            root,
+            &witness_generation_message(generation, witness, issued_at),
+        )),
+    }
 }
 
 /// What the kernel signs to anchor the chain at `global_position`.

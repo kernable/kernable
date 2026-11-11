@@ -51,6 +51,7 @@ Each message starts with a `str` **tag** for domain separation. Payloads are sig
 | Operator tooling | `kernable.v1.retry` | `listener`, `positions_count: u64` and every `position: u64`, `dismiss: u64` (1 or 0), `issued_at: i64` |
 | Root key | `kernable.v1.revoke` | `key_id`, `since: i64`, `issued_at: i64` |
 | Kernel of a pair | `kernable.v1.witness` | `op: u64`, `term: u64`, `address`, `standby`, `issued_at: i64` (see `WitnessRequest` in `replication.proto`) |
+| Root key | `kernable.v1.witness-generation` | `generation: u64`, `witness`, `issued_at: i64` (see `WitnessGeneration` in `replication.proto`: the current witness of a pair, at the address the kernels name in `--witness`; a kernel ignores witnesses of an older generation) |
 | Deploy tooling | `kernable.v1.partitions` | `epoch: u64`, `partition_count: u64`, then per partition `name`, `address_count: u64` and every address, then `tenant_count: u64` and per tenant `tenant`, `partition`, then `default`, `control`, `issued_at: i64`; with moves, then for `moving` and `moved` each `count: u64` and per move `tenant`, `from`, `to`, `source_head: u64`, `target_after: u64`, `epoch: u64`; with copies while tenants run, then the `str` `copying`, `count: u64` and per copy `tenant`, `from`, `to`, `epoch: u64` (a key granted `manage` for `*`) |
 | Kernel of a partition | `kernable.v1.trust-sync` | `issued_at: i64` |
 | Kernel of a partition | `kernable.v1.move` | `op` (`precopy`, `export` or `done`), `tenant`, `from`, `to`, `issued_at: i64`, and for an export after a precopy `after: u64` |
@@ -70,6 +71,7 @@ The kernel checks that a result, index, rejection or snapshot is signed by the k
 - Query answers and middleware verdicts. They travel on the read model's authenticated stream and are not stored. A middleware gets the command or query with the client's signature, so it can check the signature itself.
 - Listener acknowledgements. They travel on a stream whose key was proven by the challenge, and they only affect waiting and ordering, never stored data.
 - The grant sent with a call (see [Grants and revocation](#grants-and-revocation)).
+- The witness's answers. They travel on the connection the kernel opened to the address it names in `--witness` (mutual TLS beyond one machine). The witness generation they carry is signed by a root key and names that address, so an answer cannot pass for a newer witness's: a kernel that has seen generation N ignores every answer below it.
 
 ## Time windows
 

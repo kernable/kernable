@@ -26,8 +26,11 @@ use kernable_core::{
 use tonic::transport::Channel;
 
 use crate::{
-    BoxError, GRANT_HEADER, Kernel, config::Config, config::Follow, now_ms, standby,
-    witness::Witness,
+    BoxError, GRANT_HEADER, Kernel,
+    config::Config,
+    config::Follow,
+    now_ms, standby,
+    witness::{Generations, Witness},
 };
 
 /// This kernel towards the witness.
@@ -41,6 +44,8 @@ pub(crate) struct Link {
     channel: Mutex<Option<Channel>>,
     /// The lease the witness grants, from its last answer.
     lease_ms: Mutex<u64>,
+    /// The newest witness generation seen: answers of an older witness do not count.
+    pub(crate) generations: Arc<Generations>,
 }
 
 impl Link {
@@ -58,7 +63,14 @@ impl Link {
             .map_err(|e| format!("the node's grant {}: {e}", grant_path.display()))?
             .trim()
             .to_owned();
+        let generations = Generations::open(
+            config.roots.clone(),
+            &pair.witness,
+            pair.witness_generation.clone(),
+            pair.node_key.with_extension("generation"),
+        )?;
         Ok(Link {
+            generations: Arc::new(generations),
             witness: pair.witness.clone(),
             me: signing::key_id(&key.verifying_key()),
             key,
@@ -79,13 +91,15 @@ impl Link {
         Witness::margin(self.lease())
     }
 
-    /// Asks the witness once.
+    /// Asks the witness once. An answer of a witness older than the newest generation seen,
+    /// or naming another witness, is no answer.
     pub(crate) async fn ask(
         &self,
         op: WitnessOp,
         term: u64,
         standby: &str,
     ) -> Result<WitnessAnswer, BoxError> {
+        self.generations.refresh();
         let issued_at = now_ms();
         let msg = signing::witness_message(op.into(), term, &self.advertise, standby, issued_at);
         let mut request = tonic::Request::new(WitnessRequest {
@@ -123,6 +137,7 @@ impl Link {
         match client.ask(request).await {
             Ok(answer) => {
                 let answer = answer.into_inner();
+                self.generations.check(&answer)?;
                 if answer.lease_ms > 0 {
                     *self.lease_ms.lock().unwrap_or_else(PoisonError::into_inner) = answer.lease_ms;
                 }
@@ -176,6 +191,8 @@ pub async fn become_primary(config: Config) -> Result<NodePrimary, BoxError> {
                 .clone()
                 .expect("a kernel of a pair runs with --replication sync");
             primary.set_lease(sent + link.lease() - link.margin());
+            // The standby learns the newest witness generation from its primary.
+            primary.set_generations(Arc::clone(&link.generations));
             // The witness names no standby in sync (a new pair, or a claim, which clears it):
             // nobody else can claim, so writes need not wait for one. They wait again once
             // a standby caught up.

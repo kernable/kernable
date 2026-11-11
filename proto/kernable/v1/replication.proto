@@ -66,6 +66,9 @@ message FollowHello {
   // record before each of its newest writes it can take back (design/rewind.md). A primary that
   // holds one of them answers REWIND to the newest it holds instead of DIVERGED.
   repeated RecordPoint rewind_points = 6;
+  // A kernel of a pair: the newest witness generation it has seen (absent: none), so the
+  // primary learns it too.
+  WitnessGeneration witness_generation = 7;
 }
 
 message RecordPoint {
@@ -87,6 +90,9 @@ message FollowResponse {
     RecordBatch records = 5;
     StandbyInSync in_sync = 6;
     TakeOver take_over = 7;
+    // A pair's primary: the newest witness generation it has seen, sent once the stream
+    // follows and again whenever it rises. The standby ignores witnesses older than it.
+    WitnessGeneration generation = 8;
   }
 }
 
@@ -322,6 +328,19 @@ message WitnessAnswer {
   string in_sync = 5;          // key ID of the standby in sync; empty while the primary is alone
   uint64 lease_ms = 6;         // how long a granted lease lasts, from when the node asked
   string message = 7;          // why not, if not granted
+  // The witness's generation (`kernable witness --generation`); absent: generation 0. A kernel
+  // ignores an answer older than the newest generation it has seen, or naming another witness.
+  WitnessGeneration generation = 8;
+}
+
+// Which witness of a pair is the current one: a witness replaced gets a higher generation,
+// signed by a root key (`kernable witness generation`). Signed over
+// kernable.v1.witness-generation. `witness` is the address the kernels name in --witness.
+message WitnessGeneration {
+  uint64 generation = 1;
+  string witness = 2;
+  int64 issued_at = 3; // ms since epoch
+  Signature root_sig = 4;
 }
 
 // What the witness keeps on its disk.

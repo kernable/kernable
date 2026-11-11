@@ -507,6 +507,7 @@ async fn follow_once(
         protocol: kernable_core::PROTOCOL,
         backup: false,
         rewind_points,
+        witness_generation: standby.link.as_ref().and_then(|l| l.generations.newest()),
     })))
     .await?;
     let mut request = Request::new(ReceiverStream::new(rx));
@@ -612,6 +613,15 @@ async fn follow_once(
                     let _ = promote.send(());
                 }
                 return Ok(());
+            }
+            // The primary's newest witness generation: older witnesses no longer count here,
+            // so this standby never claims through one.
+            Some(follow_response::Msg::Generation(g)) => {
+                if let Some(link) = &standby.link
+                    && let Err(e) = link.generations.learn(&g)
+                {
+                    tracing::warn!(error = %e, "the primary's witness generation is not taken");
+                }
             }
             None => return Ok(()),
             Some(_) => return Err("the primary sent something other than records".into()),

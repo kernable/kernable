@@ -50,11 +50,29 @@ kernable start --root root.pub --witness 10.0.0.9:7300 \
 | The old primary comes back | The witness names the new primary; the old one follows it. Writes it never told anyone of make its log differ; it moves its stores aside and takes an image. |
 | The primary loses the witness | In sync, it goes on: the standby's acknowledgements fence it. Alone, it stops telling writes once its lease has run out (a margin before the witness would let anyone take over), until it reaches the witness again. |
 | The witness is down | No failover, and the primary cannot go alone; writes with the standby in sync go on. |
+| A replaced witness comes back | Kernels that have seen its successor's [generation](#replace-a-lost-witness) ignore it: it makes no primary. |
 | A primary learns it was replaced | It stops with an error. Run kernels under a supervisor (systemd, Kubernetes): started again, it follows the new primary. |
 
 `kernable promote` on the standby of a pair asks the witness, too: it is refused while the primary holds its lease.
 
 Keep the witness on a third machine, so a lost machine never takes the witness and a kernel down together. Its state file decides who is the primary: back it up, and never start a pair against a new, empty witness while the old primary may still run.
+
+### Replace a lost witness
+
+A new witness knows no primary: the first kernel to ask it becomes one. If the old witness came back while one kernel still asked it, each witness could name another primary. **Witness generations** prevent that. Each witness can carry a generation, signed by the root key; a kernel keeps the newest generation it has seen, and ignores every witness of an older one (or one answering with another witness's generation) as if it did not answer. So a witness that was replaced cannot make a primary of anyone who has seen its successor's generation.
+
+- `kernable witness generation <root.key> <n> <address>` writes `witness.generation`: generation `n` for the witness the kernels reach at `<address>`, exactly as they name it in `--witness`.
+- The witness sends its generation with every answer: `kernable witness … --generation witness.generation`.
+- A kernel of the pair reads `--witness-generation <file>` (in a [project](./node), `[pair] witness-generation`) before every question to the witness, so a running kernel takes a new file without a restart. It keeps the newest generation it has seen, from that file, from its witness or from the other kernel (the primary tells its standby on their stream, the standby tells the primary when it connects), in `<node key>.generation` next to its node key: the generation on the first line, the signed message on the second. It never goes back.
+
+Start a pair with generation 1 if you may ever replace its witness. To replace a lost witness:
+
+1. **Sign the next generation for the new witness**, one higher than the last: `kernable witness generation root.key 2 10.0.0.8:7300`, and start the new witness with it (`--generation`) and an empty state file.
+2. **Give the new file to both kernels** as their `--witness-generation`, still pointed at the old witness, and wait until each has taken it: its `node.generation` starts with `2`, and its log says `a newer witness generation`. From now on both ignore the old witness, wherever it comes back. Nothing else changes: the pair runs as with a witness that is down (no failover; writes with the standby in sync go on).
+3. **Restart the primary** towards the new witness (`--witness 10.0.0.8:7300`). It asks first, so the new witness makes it the primary.
+4. **Restart the standby** towards the new witness. It follows the primary, catches up, and the primary tells the new witness it is in sync.
+
+A kernel that never saw the newer generation (one whose machine was lost before step 2, together with the old witness, say) still trusts the old witness. Never start it with its old configuration: give it the new file and the new witness's address first.
 
 ### Update a pair without downtime
 

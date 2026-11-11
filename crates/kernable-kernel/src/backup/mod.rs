@@ -457,6 +457,7 @@ async fn follow_once(
         protocol: kernable_core::PROTOCOL,
         backup: true,
         rewind_points: Vec::new(),
+        witness_generation: None,
     })))
     .await?;
     let mut request = Request::new(ReceiverStream::new(rx));

@@ -80,7 +80,7 @@ Keys and trust:
                                           2026-10-27T09:00:00Z): the kernel refuses it, ends its
                                           connections and rejects its queued commands accepted since
                                           then (key_revoked). The kernel must be running.
-  kernable witness --listen <addr> --root <root.pub> --state <file> [--lease-ms <ms>] [--tls-...]
+  kernable witness --listen <addr> --root <root.pub> --state <file> [--lease-ms <ms>] [--generation <file>] [--tls-...]
                                           Runs the witness of a pair of kernels started with
                                           --witness: it decides which one is the primary, renews
                                           the primary's lease (3000 ms by default) and lets the
@@ -88,7 +88,14 @@ Keys and trust:
                                           It keeps the term and the roles in <file> (default
                                           witness.state); listens on 127.0.0.1:7300 by default,
                                           elsewhere only with mutual TLS (--tls-cert, --tls-key,
-                                          --tls-client-ca).
+                                          --tls-client-ca). --generation: its generation (below),
+                                          checked against the roots and sent with every answer.
+  kernable witness generation <root.key> <generation> <witness-address>
+                                          Writes witness.generation: the generation of the witness
+                                          the kernels of a pair reach at <witness-address> (as
+                                          they name it in --witness), signed by the root key. A
+                                          witness that replaces a lost one gets a higher one;
+                                          kernels that have seen it ignore older witnesses.
   kernable partitions apply <addr> <key> <map.json>
                                           Applies a partition map on the control partition at
                                           <addr>: {'epoch': 2, 'partitions': {'p1': ['host:7233'],
@@ -261,7 +268,8 @@ Run a node:
                                           key, backup-key, follow, segment-seconds, base-hours,
                                           keep, check-hours, cpus, memory, env), [pair] (witness,
                                           node-key, advertise, peer, kernel-keys,
-                                          standby-timeout-ms: this node's kernel of a pair), [node]
+                                          standby-timeout-ms, witness-generation: this node's
+                                          kernel of a pair), [node]
                                           (instance, project, podman, metrics-listen: GET /metrics,
                                           cpus and memory: the instance's total, network: own, the
                                           default, or host), any number of [[secret]] (name, and
@@ -427,6 +435,9 @@ async fn main() -> ExitCode {
         ["partitions", "show", addr, key] => partitions_show(addr, key).await,
         ["partitions", "move", addr, key, tenant, to] => {
             partitions_move(addr, key, tenant, to).await
+        }
+        ["witness", "generation", root, generation, address] => {
+            witness_generation(root, generation, address)
         }
         ["witness", flags @ ..] => return run_witness(flags).await,
         ["node", project] => return run_node(project).await,
@@ -908,6 +919,27 @@ impl Hangup {
     }
 }
 
+/// Writes `witness.generation`: generation `generation` of the witness the kernels of a pair
+/// reach at `address`, signed by the root key.
+fn witness_generation(root: &str, generation: &str, address: &str) -> Result<bool> {
+    let root = signing::read_signing_key(root)?;
+    let generation: u64 = generation
+        .parse()
+        .ok()
+        .filter(|g| *g > 0)
+        .ok_or_else(|| format!("{generation}: a generation is a number from 1"))?;
+    if address.trim().is_empty() || address.trim() != address {
+        return Err("the witness's address, as the kernels name it in --witness".into());
+    }
+    let g = signing::witness_generation(&root, generation, address, now_ms());
+    fs::write(
+        "witness.generation",
+        format!("{}\n", hex::encode(g.encode_to_vec())),
+    )?;
+    println!("{generation}");
+    Ok(true)
+}
+
 /// Writes `<name>.grant` next to `<name>.pub`: the grant, signed by the root key, hex encoded.
 fn grant(root: &str, key: &str, args: &[&str]) -> Result<bool> {
     let root = signing::read_signing_key(root)?;
@@ -982,6 +1014,7 @@ async fn run_witness(flags: &[&str]) -> ExitCode {
                 "--tls-cert",
                 "--tls-key",
                 "--tls-client-ca",
+                "--generation",
             ];
             if !known.contains(&flag) {
                 return Err(format!("unknown flag {flag}").into());
@@ -1018,6 +1051,7 @@ async fn run_witness(flags: &[&str]) -> ExitCode {
                 None => witness::LEASE_MS,
             },
             tls,
+            generation: one("--generation").map(Into::into),
         })
     })();
     let config = match parsed {

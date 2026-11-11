@@ -10,6 +10,13 @@
 //!
 //! A restarted witness grants no claim for a lease's length plus the margin: it does not know
 //! when the primary renewed last.
+//!
+//! **Generations.** A witness that is replaced (its machine lost) gets a successor with a higher
+//! generation, signed by a root key ([`WitnessGeneration`]), which the new witness puts into
+//! every answer. A kernel keeps the newest generation it has seen (from its
+//! `--witness-generation` file, a witness's answer, or the other kernel) next to its node key,
+//! and treats every answer below it, or naming another witness, as no answer at all
+//! ([`Generations`]). So an old witness that comes back cannot make a second primary.
 
 use std::{
     collections::HashMap,
@@ -21,7 +28,7 @@ use std::{
 
 use kernable_core::{
     proto::{
-        Grant, WitnessAnswer, WitnessOp, WitnessRequest, WitnessState,
+        Grant, WitnessAnswer, WitnessGeneration, WitnessOp, WitnessRequest, WitnessState,
         witness_service_server::{WitnessService, WitnessServiceServer},
     },
     signing, transport,
@@ -47,6 +54,8 @@ pub struct WitnessConfig {
     pub state: PathBuf,
     pub lease_ms: u64,
     pub tls: Option<config::Tls>,
+    /// `--generation`: the file of this witness's generation, put into every answer.
+    pub generation: Option<PathBuf>,
 }
 
 /// What a request asks, without its signature: what [`Witness::decide`] decides on.
@@ -64,6 +73,8 @@ pub struct Witness {
     inner: Mutex<Inner>,
     path: PathBuf,
     lease: Duration,
+    /// This witness's generation, in every answer; `None`: generation 0.
+    generation: Option<WitnessGeneration>,
 }
 
 struct Inner {
@@ -93,7 +104,14 @@ impl Witness {
             }),
             path: path.to_owned(),
             lease,
+            generation: None,
         })
+    }
+
+    /// The witness answers with `generation` (checked by the caller).
+    pub fn with_generation(mut self, generation: Option<WitnessGeneration>) -> Self {
+        self.generation = generation;
+        self
     }
 
     fn inner(&self) -> MutexGuard<'_, Inner> {
@@ -115,7 +133,8 @@ impl Witness {
     pub fn decide(&self, ask: &Ask, now: Instant) -> Result<WitnessAnswer, BoxError> {
         let mut inner = self.inner();
         let kept = inner.kept.clone();
-        let refuse = |message: String| Ok(answer(&kept, false, &message, self.lease));
+        let generation = self.generation.as_ref();
+        let refuse = |message: String| Ok(answer(&kept, false, &message, self.lease, generation));
         let primary = !kept.primary.is_empty() && ask.node == kept.primary;
         let leased = now < inner.lease_until;
         let mut next = kept.clone();
@@ -151,7 +170,7 @@ impl Witness {
                 inner.released = true;
                 inner.lease_until = now;
                 tracing::warn!(term = kept.term, primary = %kept.primary, standby = %kept.in_sync, "the primary hands its place over");
-                return Ok(answer(&kept, true, "", self.lease));
+                return Ok(answer(&kept, true, "", self.lease, generation));
             }
             WitnessOp::Alone | WitnessOp::InSync if !primary || ask.term != kept.term => {
                 return refuse(format!("only the primary of term {} may say so", kept.term));
@@ -207,12 +226,19 @@ impl Witness {
         if next.term != kept.term {
             inner.released = false;
         }
-        Ok(answer(&next, true, "", self.lease))
+        Ok(answer(&next, true, "", self.lease, generation))
     }
 }
 
-fn answer(kept: &WitnessState, granted: bool, message: &str, lease: Duration) -> WitnessAnswer {
+fn answer(
+    kept: &WitnessState,
+    granted: bool,
+    message: &str,
+    lease: Duration,
+    generation: Option<&WitnessGeneration>,
+) -> WitnessAnswer {
     WitnessAnswer {
+        generation: generation.cloned(),
         granted,
         term: kept.term,
         primary: kept.primary.clone(),
@@ -237,6 +263,194 @@ fn write_state(path: &Path, state: &WitnessState) -> Result<(), BoxError> {
     };
     std::fs::File::open(dir)?.sync_all()?;
     Ok(())
+}
+
+// ---- generations
+
+/// Whether `g` is a witness generation signed by one of `roots`; its generation, or why not.
+pub fn check_generation(g: &WitnessGeneration, roots: &[String]) -> Result<u64, String> {
+    let sig = g
+        .root_sig
+        .as_ref()
+        .ok_or("the witness generation is not signed")?;
+    if !roots.contains(&sig.key_id) {
+        return Err(format!(
+            "the witness generation is signed by {}, not by a root this kernel trusts",
+            sig.key_id
+        ));
+    }
+    signing::verify(
+        sig,
+        &signing::witness_generation_message(g.generation, &g.witness, g.issued_at),
+    )
+    .map_err(|_| "the witness generation's signature does not hold".to_owned())?;
+    if g.generation == 0 {
+        return Err("a witness generation starts at 1".into());
+    }
+    Ok(g.generation)
+}
+
+/// A witness generation from its text: hex of the message on its last line (a
+/// `witness.generation` file has only that line, the file a kernel keeps has its generation in
+/// decimal before it).
+pub fn parse_generation(text: &str) -> Result<WitnessGeneration, String> {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .rfind(|l| !l.is_empty())
+        .ok_or("empty: no witness generation")?;
+    let bytes = hex::decode(line).map_err(|_| "not a witness generation (hex)".to_owned())?;
+    WitnessGeneration::decode(bytes.as_slice())
+        .map_err(|e| format!("not a witness generation: {e}"))
+}
+
+/// Reads a witness generation file.
+pub fn read_generation(path: &Path) -> Result<WitnessGeneration, BoxError> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(parse_generation(&text).map_err(|e| format!("{}: {e}", path.display()))?)
+}
+
+/// How often at most a kernel logs that it ignores its witness.
+const IGNORED_LOG_EVERY: Duration = Duration::from_secs(10);
+
+/// The newest witness generation a kernel of a pair has seen: below it, no witness counts.
+///
+/// It rises from the kernel's `--witness-generation` file (read again before every question to
+/// the witness, so an operator raises it on a running kernel), from a witness's answer, and from
+/// the other kernel of the pair; it never falls, and is on the disk (`<node key>.generation`)
+/// before anything acts on it.
+pub struct Generations {
+    roots: Vec<String>,
+    /// The address this kernel asks its witness at (`--witness`).
+    witness: String,
+    /// `--witness-generation`, if given.
+    file: Option<PathBuf>,
+    /// Where the newest is kept: line 1 its generation in decimal, line 2 the message in hex.
+    kept: PathBuf,
+    newest: Mutex<Option<WitnessGeneration>>,
+    logged: Mutex<Option<Instant>>,
+}
+
+impl Generations {
+    /// The generations of a kernel that asks the witness at `witness`, keeping the newest at
+    /// `kept`. A kept or given file that does not hold up stops the kernel.
+    pub fn open(
+        roots: Vec<String>,
+        witness: &str,
+        file: Option<PathBuf>,
+        kept: PathBuf,
+    ) -> Result<Self, BoxError> {
+        let generations = Generations {
+            roots,
+            witness: witness.to_owned(),
+            file,
+            kept,
+            newest: Mutex::default(),
+            logged: Mutex::default(),
+        };
+        if generations.kept.exists() {
+            let g = read_generation(&generations.kept)?;
+            check_generation(&g, &generations.roots)
+                .map_err(|e| format!("{}: {e}", generations.kept.display()))?;
+            *generations.lock() = Some(g);
+        }
+        if let Some(path) = &generations.file {
+            let g = read_generation(path)?;
+            check_generation(&g, &generations.roots)
+                .map_err(|e| format!("--witness-generation {}: {e}", path.display()))?;
+            generations.learn(&g)?;
+        }
+        Ok(generations)
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Option<WitnessGeneration>> {
+        self.newest.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The newest generation seen; 0 for none.
+    pub fn floor(&self) -> u64 {
+        self.lock().as_ref().map_or(0, |g| g.generation)
+    }
+
+    /// The newest generation seen, to tell the other kernel.
+    pub fn newest(&self) -> Option<WitnessGeneration> {
+        self.lock().clone()
+    }
+
+    /// Takes `g` if it holds up and is newer than the newest seen, on the disk first; whether
+    /// it was newer.
+    pub fn learn(&self, g: &WitnessGeneration) -> Result<bool, String> {
+        let generation = check_generation(g, &self.roots)?;
+        let mut newest = self.lock();
+        if generation <= newest.as_ref().map_or(0, |n| n.generation) {
+            return Ok(false);
+        }
+        let text = format!("{generation}\n{}\n", hex::encode(g.encode_to_vec()));
+        crate::replication::write_synced(&self.kept, text.as_bytes())
+            .map_err(|e| format!("{}: {e}", self.kept.display()))?;
+        tracing::warn!(generation, witness = %g.witness, "a newer witness generation: older witnesses are ignored from now on");
+        *newest = Some(g.clone());
+        Ok(true)
+    }
+
+    /// Reads the `--witness-generation` file again: an operator may have raised it.
+    pub fn refresh(&self) {
+        let Some(path) = &self.file else { return };
+        let read = read_generation(path)
+            .map_err(|e| e.to_string())
+            .and_then(|g| self.learn(&g));
+        if let Err(e) = read {
+            self.warn(&format!("--witness-generation {}: {e}", path.display()));
+        }
+    }
+
+    /// Whether `answer` counts: its generation holds up, names the witness this kernel asks,
+    /// and is not older than the newest seen. A newer one is taken first. Not counting, the
+    /// answer is as if the witness had not answered.
+    pub fn check(&self, answer: &WitnessAnswer) -> Result<(), String> {
+        let result = self.judge(answer);
+        if let Err(e) = &result {
+            self.warn(e);
+        }
+        result
+    }
+
+    fn judge(&self, answer: &WitnessAnswer) -> Result<(), String> {
+        let floor = self.floor();
+        let Some(g) = &answer.generation else {
+            return match floor {
+                0 => Ok(()),
+                _ => Err(format!(
+                    "the witness at {} has no generation, older than generation {floor}: ignored",
+                    self.witness
+                )),
+            };
+        };
+        let generation = check_generation(g, &self.roots)
+            .map_err(|e| format!("the witness at {}: {e}: ignored", self.witness))?;
+        if g.witness != self.witness {
+            return Err(format!(
+                "the witness at {} answers with the generation of {}: ignored",
+                self.witness, g.witness
+            ));
+        }
+        if generation < floor {
+            return Err(format!(
+                "the witness at {} is of generation {generation}, older than generation {floor}: ignored",
+                self.witness
+            ));
+        }
+        self.learn(g)?;
+        Ok(())
+    }
+
+    fn warn(&self, message: &str) {
+        let mut logged = self.logged.lock().unwrap_or_else(PoisonError::into_inner);
+        if logged.is_none_or(|at| at.elapsed() >= IGNORED_LOG_EVERY) {
+            tracing::warn!("{message}");
+            *logged = Some(Instant::now());
+        }
+    }
 }
 
 struct Api {
@@ -309,9 +523,24 @@ impl WitnessService for Api {
 /// Serves the witness until it fails.
 pub async fn run(config: WitnessConfig) -> Result<(), BoxError> {
     let lease = Duration::from_millis(config.lease_ms);
-    let witness = Witness::open(&config.state, lease)?;
+    let generation = match &config.generation {
+        Some(path) => {
+            let g = read_generation(path)?;
+            check_generation(&g, &config.roots)
+                .map_err(|e| format!("--generation {}: {e}", path.display()))?;
+            Some(g)
+        }
+        None => None,
+    };
+    let witness = Witness::open(&config.state, lease)?.with_generation(generation.clone());
     let state = witness.state();
-    tracing::info!(listen = %config.listen, term = state.term, primary = %state.primary, "witness starting");
+    tracing::info!(
+        listen = %config.listen,
+        term = state.term,
+        primary = %state.primary,
+        generation = generation.as_ref().map_or(0, |g| g.generation),
+        "witness starting"
+    );
     let api = Api {
         witness,
         roots: config.roots.clone(),
@@ -520,5 +749,135 @@ mod tests {
                 .granted
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    fn root(n: u8) -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[n; 32])
+    }
+
+    fn roots() -> Vec<String> {
+        vec![signing::key_id(&root(1).verifying_key())]
+    }
+
+    fn generation(n: u64, witness: &str) -> WitnessGeneration {
+        signing::witness_generation(&root(1), n, witness, 1_700_000_000_000)
+    }
+
+    fn with(g: Option<WitnessGeneration>) -> WitnessAnswer {
+        WitnessAnswer {
+            granted: true,
+            generation: g,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_witness_generation_holds_only_signed_by_a_root_and_from_one() {
+        assert_eq!(check_generation(&generation(2, "w2:443"), &roots()), Ok(2));
+        let other = signing::witness_generation(&root(9), 2, "w2:443", 1);
+        assert!(
+            check_generation(&other, &roots())
+                .unwrap_err()
+                .contains("not by a root")
+        );
+        let mut changed = generation(2, "w2:443");
+        changed.generation = 3;
+        assert!(
+            check_generation(&changed, &roots())
+                .unwrap_err()
+                .contains("signature")
+        );
+        changed.root_sig = None;
+        assert!(
+            check_generation(&changed, &roots())
+                .unwrap_err()
+                .contains("not signed")
+        );
+        assert!(check_generation(&generation(0, "w2:443"), &roots()).is_err());
+        let text = format!(
+            "2\n{}\n",
+            hex::encode(generation(2, "w2:443").encode_to_vec())
+        );
+        assert_eq!(parse_generation(&text).unwrap(), generation(2, "w2:443"));
+        assert!(parse_generation("").is_err() && parse_generation("zz").is_err());
+    }
+
+    #[test]
+    fn a_witness_answers_with_its_generation() {
+        let (w, path) = open("generation");
+        let w = w.with_generation(Some(generation(2, "w2:443")));
+        let a = w
+            .decide(&ask(WitnessOp::Lease, "a", 0), Instant::now())
+            .unwrap();
+        assert_eq!(a.generation, Some(generation(2, "w2:443")));
+        let b = w
+            .decide(&ask(WitnessOp::Lease, "b", 0), Instant::now())
+            .unwrap();
+        assert!(!b.granted);
+        assert_eq!(b.generation, Some(generation(2, "w2:443")), "refusals too");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_kernel_ignores_witnesses_older_than_the_newest_generation_it_saw() {
+        let dir = std::env::temp_dir().join(format!("kn-generations-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let kept = dir.join("node.generation");
+        let file = dir.join("witness.generation");
+        let write = |g: &WitnessGeneration| {
+            std::fs::write(&file, format!("{}\n", hex::encode(g.encode_to_vec()))).unwrap()
+        };
+
+        // No generation anywhere: a witness without one counts, as before.
+        let none = Generations::open(roots(), "w1:443", None, kept.clone()).unwrap();
+        assert_eq!(none.floor(), 0);
+        none.check(&with(None)).unwrap();
+        // A witness with one raises the floor, on the disk first.
+        none.check(&with(Some(generation(1, "w1:443")))).unwrap();
+        assert_eq!(none.floor(), 1);
+        assert!(std::fs::read_to_string(&kept).unwrap().starts_with("1\n"));
+        assert!(
+            none.check(&with(None))
+                .unwrap_err()
+                .contains("no generation")
+        );
+        assert!(
+            none.check(&with(Some(generation(1, "w9:443"))))
+                .unwrap_err()
+                .contains("generation of w9:443"),
+            "another witness's generation, replayed"
+        );
+
+        // The operator raises it on the running kernel, which still asks the old witness.
+        write(&generation(1, "w1:443"));
+        let g = Generations::open(roots(), "w1:443", Some(file.clone()), kept.clone()).unwrap();
+        assert_eq!(g.floor(), 1, "kept from before");
+        write(&generation(2, "w2:443"));
+        g.refresh();
+        assert_eq!(g.floor(), 2, "whatever witness it names");
+        let old = g.check(&with(Some(generation(1, "w1:443")))).unwrap_err();
+        assert!(old.contains("older than generation 2"), "{old}");
+        // Learned from the other kernel: an older one changes nothing, a forged one is refused.
+        assert_eq!(g.learn(&generation(1, "w1:443")), Ok(false));
+        assert!(
+            g.learn(&signing::witness_generation(&root(9), 7, "w1:443", 1))
+                .is_err()
+        );
+        assert_eq!(g.floor(), 2);
+
+        // Started again towards the new witness: the floor stays, the new witness counts.
+        drop(g);
+        let g = Generations::open(roots(), "w2:443", Some(file.clone()), kept.clone()).unwrap();
+        assert_eq!(g.floor(), 2);
+        g.check(&with(Some(generation(2, "w2:443")))).unwrap();
+        g.check(&with(Some(generation(3, "w2:443")))).unwrap();
+        assert_eq!(g.floor(), 3);
+        assert_eq!(g.newest(), Some(generation(3, "w2:443")));
+
+        // A kept file that does not hold up stops the kernel.
+        std::fs::write(&kept, "3\nzz\n").unwrap();
+        assert!(Generations::open(roots(), "w2:443", None, kept.clone()).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

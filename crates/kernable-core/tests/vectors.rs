@@ -347,6 +347,10 @@ fn vectors() -> Value {
             json!({"key_id": signing::key_id(&key.verifying_key()), "since": 1_700_000_000_000i64, "created_at": 1_700_000_100_000i64}),
             signing::revocation_message(&signing::key_id(&key.verifying_key()), 1_700_000_000_000, 1_700_000_100_000),
         ),
+        "witness_generation": entry(
+            json!({"generation": 2, "witness": "shop-w2.example.com:443", "issued_at": 1_700_000_000_000i64}),
+            signing::witness_generation_message(2, "shop-w2.example.com:443", 1_700_000_000_000),
+        ),
         "grant": entry(
             json!({"key_id": "8b84", "succeeds": "1f0a", "issued_at": 1_700_000_000_000i64,
                    "permissions": [{"action": "submit", "types": ["orders.*", "identity.Register"]}, {"action": "listen", "types": ["*"]}]}),

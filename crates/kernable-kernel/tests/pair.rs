@@ -146,6 +146,7 @@ fn node_config(dir: &Path, name: &str, kernel_seed: u8, node_seed: u8) -> Config
                 witness: format!("unix:{}", dir.join("witness.sock").display()),
                 node_key,
                 advertise,
+                witness_generation: None,
                 standby_timeout_ms: LEASE_MS,
                 kernel_keys: vec![id(&key(3)), id(&key(8))],
             }),
@@ -196,6 +197,7 @@ async fn a_pair_fails_over_on_its_own_and_the_old_primary_comes_back_as_its_stan
         state: state.clone(),
         lease_ms: LEASE_MS,
         tls: None,
+        generation: None,
     }));
     wait_for(&format!("unix:{}", dir.0.join("witness.sock").display())).await;
     let witnessed = || {
@@ -322,6 +324,7 @@ async fn a_primary_alone_tells_nothing_once_its_lease_runs_out() {
         state: state.clone(),
         lease_ms: LEASE_MS,
         tls: None,
+        generation: None,
     }));
     wait_for(&format!(
         "unix:{}",
@@ -391,6 +394,7 @@ async fn a_primary_the_witness_replaced_stops() {
         state: state.clone(),
         lease_ms: LEASE_MS,
         tls: None,
+        generation: None,
     }));
     wait_for(&format!("unix:{}", dir.0.join("witness.sock").display())).await;
     // A reaches the witness through a plug of its own, and B reaches A through A's plug.
@@ -439,6 +443,7 @@ async fn a_revoked_standby_is_not_named_in_sync() {
         state: state.clone(),
         lease_ms: LEASE_MS,
         tls: None,
+        generation: None,
     }));
     wait_for(&format!("unix:{}", dir.0.join("witness.sock").display())).await;
     let (a_config, b_config) = (
@@ -479,6 +484,7 @@ async fn a_switchover_hands_the_primary_role_over_without_waiting_for_the_lease(
         state: state.clone(),
         lease_ms: LEASE_MS,
         tls: None,
+        generation: None,
     }));
     wait_for(&format!("unix:{}", dir.0.join("witness.sock").display())).await;
     let witnessed = || {
@@ -570,6 +576,7 @@ async fn a_standby_takes_over_from_a_primary_the_network_cut_off_silently() {
         state: state.clone(),
         lease_ms: LEASE_MS,
         tls: None,
+        generation: None,
     }));
     wait_for(&format!("unix:{}", dir.0.join("witness.sock").display())).await;
     // A reaches the witness through a plug of its own, cut off with it.

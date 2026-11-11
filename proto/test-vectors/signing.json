@@ -280,6 +280,15 @@
       ]
     }
   },
+  "witness_generation": {
+    "input": {
+      "generation": 2,
+      "issued_at": 1700000000000,
+      "witness": "shop-w2.example.com:443"
+    },
+    "message": "0000001e6b65726e61626c652e76312e7769746e6573732d67656e65726174696f6e00000000000000020000001773686f702d77322e6578616d706c652e636f6d3a3434330000018bcfe56800",
+    "signature": "0ee81b318f43fac6f9263826570cc93dad08632ca6f83f6e74a43b2a384c84890ff6c6d83128e19120d4ae92230bcf7f963e9d8b0ab2d4629fcef8d7b2257001"
+  },
   "grant": {
     "input": {
       "issued_at": 1700000000000,

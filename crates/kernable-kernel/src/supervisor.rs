@@ -60,8 +60,8 @@
 //!
 //! Secrets are named in `[[secret]]` (a `file`, or a `command` run at start and on SIGHUP)
 //! and mounted read-only at `/run/secrets/<name>` into the services that list them; a new value
-//! restarts those. A `[pair]` section (witness, node-key, advertise, peer, kernel-keys) sets the
-//! kernel's pair flags and gives the backup follower and the services both kernels' addresses.
+//! restarts those. A `[pair]` section (witness, node-key, advertise, peer, kernel-keys,
+//! witness-generation) sets the kernel's pair flags and gives the backup follower and the services both kernels' addresses.
 //!
 //! The kernel's flags are those of `kernable start`, without their dashes; a `[backup]`
 //! section adds `--backup on`. Paths are relative to the file's directory, where the children
@@ -282,15 +282,18 @@ struct PairSection {
     /// Both kernels' kernel keys: either may be the primary.
     kernel_keys: Vec<String>,
     standby_timeout_ms: Option<u64>,
+    /// The witness's generation file (`kernable witness generation`).
+    witness_generation: Option<String>,
 }
 
 /// The kernel flags `[pair]` sets.
-const PAIR_FLAGS: [&str; 5] = [
+const PAIR_FLAGS: [&str; 6] = [
     "witness",
     "node-key",
     "advertise",
     "primary-kernel-key",
     "standby-timeout-ms",
+    "witness-generation",
 ];
 
 #[derive(Debug, Deserialize)]
@@ -539,6 +542,10 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
         }
         if let Some(ms) = pair.standby_timeout_ms {
             args.extend(["--standby-timeout-ms".into(), ms.to_string()]);
+        }
+        if let Some(file) = &pair.witness_generation {
+            inside("[pair] witness-generation", file)?;
+            args.extend(["--witness-generation".into(), file.clone()]);
         }
         peer = Some((advertise, pair.peer.clone()));
     }
@@ -2306,6 +2313,15 @@ build = "."
         assert!(error.contains("witness comes from [pair]"), "{error}");
         let keyless = text.replace("[\"kernel-a.pub\", \"kernel-b.pub\"]", "[]");
         assert!(specs_of(&keyless).is_err());
+        let generation = text.replace(
+            "peer = ",
+            "witness-generation = \"witness.generation\"\npeer = ",
+        );
+        let args = specs_of(&generation).unwrap()[0].args.join(" ");
+        assert!(
+            args.contains("--witness-generation witness.generation"),
+            "{args}"
+        );
     }
 
     #[test]

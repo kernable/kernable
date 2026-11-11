@@ -78,6 +78,8 @@ pub(crate) struct Primary {
     took_over: Notify,
     /// The standby said it leaves.
     left: Notify,
+    /// A pair's primary: the newest witness generation seen, which the standby learns.
+    generations: std::sync::OnceLock<Arc<crate::witness::Generations>>,
 }
 
 #[derive(Default)]
@@ -132,7 +134,13 @@ impl Primary {
             caught_up_marker: None,
             took_over: Notify::new(),
             left: Notify::new(),
+            generations: std::sync::OnceLock::new(),
         }
+    }
+
+    /// A pair's primary: the witness generations its standby learns from it.
+    pub(crate) fn set_generations(&self, generations: Arc<crate::witness::Generations>) {
+        let _ = self.generations.set(generations);
     }
 
     /// A primary without a witness, its store at `store`: until a standby has caught up
@@ -747,6 +755,14 @@ async fn run(
     };
     signing::verify(&proof, &signing::challenge_message(&nonce))
         .map_err(|_| Status::unauthenticated("challenge failed"))?;
+    // The standby's newest witness generation: a primary that had not seen it learns it.
+    if let (Some(g), Some(generations)) = (
+        &hello.witness_generation,
+        primary.as_ref().and_then(|p| p.generations.get()),
+    ) && let Err(e) = generations.learn(g)
+    {
+        tracing::warn!(error = %e, "the standby's witness generation is not taken");
+    }
     let _connected = primary
         .as_ref()
         .map(|p| p.connect(&hello.key_id))
@@ -837,8 +853,16 @@ async fn run(
     let mut changes = kernel.changes();
     let mut told_in_sync = false;
     let mut told_take_over = false;
+    let mut told_generation = 0;
     loop {
         if let Some(p) = &primary {
+            // A pair: the standby learns the newest witness generation, and again when it rises.
+            if let Some(newest) = p.generations.get().and_then(|g| g.newest())
+                && newest.generation > told_generation
+            {
+                told_generation = newest.generation;
+                send(out, follow_response::Msg::Generation(newest)).await?;
+            }
             // Without a witness: the standby learns that it is in sync, once per stream.
             if p.fixed {
                 if !told_in_sync && p.note_caught_up() {

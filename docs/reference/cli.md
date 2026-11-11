@@ -54,10 +54,18 @@ Revokes a key for good from `<since>` on (UTC, like `2026-10-27T09:00:00Z`): the
 ### `kernable witness`
 
 ```text
-kernable witness --listen <addr> --root <root.pub> --state <file> [--lease-ms <ms>] [--tls-...]
+kernable witness --listen <addr> --root <root.pub> --state <file> [--lease-ms <ms>] [--generation <file>] [--tls-...]
 ```
 
-Runs the witness of a pair of kernels started with `--witness`: it decides which one is the primary, renews the primary's lease (3000 ms by default) and lets the standby in sync take its place when the lease runs out. It keeps the term and the roles in `<file>` (default witness.state); listens on `127.0.0.1:7300` by default, elsewhere only with mutual TLS (`--tls-cert`, `--tls-key`, `--tls-client-ca`).
+Runs the witness of a pair of kernels started with `--witness`: it decides which one is the primary, renews the primary's lease (3000 ms by default) and lets the standby in sync take its place when the lease runs out. It keeps the term and the roles in `<file>` (default witness.state); listens on `127.0.0.1:7300` by default, elsewhere only with mutual TLS (`--tls-cert`, `--tls-key`, `--tls-client-ca`). `--generation`: its generation (below), checked against the roots and sent with every answer.
+
+### `kernable witness generation`
+
+```text
+kernable witness generation <root.key> <generation> <witness-address>
+```
+
+Writes witness.generation: the generation of the witness the kernels of a pair reach at `<witness-address>` (as they name it in `--witness`), signed by the root key. A witness that replaces a lost one gets a higher one; kernels that have seen it ignore older witnesses.
 
 ### `kernable partitions apply`
 
@@ -277,7 +285,7 @@ Fills new, empty stores from an export, then checks the store like verify, with 
 kernable node <project.toml>
 ```
 
-Runs one node of a project: the kernel and, with a [backup] section, the backup follower, as child processes it restarts when they exit. It reads the file again when it changed (it looks twice a second) or on SIGHUP, and restarts a child whose command changed or whose binary was replaced (a kernel hands its stores over to the new one). SIGTERM or SIGINT stops the children (SIGKILL after stop-seconds, default 30). The file has [kernel] (flags: the flags of kernable start without their dashes, env, binary, image, cpus, memory, stop-seconds), [backup] (to, key, backup-key, follow, segment-seconds, base-hours, keep, check-hours, cpus, memory, env), [pair] (witness, node-key, advertise, peer, kernel-keys, standby-timeout-ms: this node's kernel of a pair), [node] (instance, project, podman, metrics-listen: GET /metrics, cpus and `memory:` the instance's total, network: own, the default, or host), any number of [[secret]] (name, and file or command) and any number of [[service]] (name, build, file, command, key, env, secrets, cpus, memory, stop-seconds, writable, expose): containers built with podman on the node, rebuilt on SIGHUP, run after the kernel with `KERNABLE_URL`, `KERNABLE_INSTANCE` and their key. Every child's output comes out of the node prefixed with its name. Paths are relative to its directory. Exit 2 if the file is invalid at start.
+Runs one node of a project: the kernel and, with a [backup] section, the backup follower, as child processes it restarts when they exit. It reads the file again when it changed (it looks twice a second) or on SIGHUP, and restarts a child whose command changed or whose binary was replaced (a kernel hands its stores over to the new one). SIGTERM or SIGINT stops the children (SIGKILL after stop-seconds, default 30). The file has [kernel] (flags: the flags of kernable start without their dashes, env, binary, image, cpus, memory, stop-seconds), [backup] (to, key, backup-key, follow, segment-seconds, base-hours, keep, check-hours, cpus, memory, env), [pair] (witness, node-key, advertise, peer, kernel-keys, standby-timeout-ms, witness-generation: this node's kernel of a pair), [node] (instance, project, podman, metrics-listen: GET /metrics, cpus and `memory:` the instance's total, network: own, the default, or host), any number of [[secret]] (name, and file or command) and any number of [[service]] (name, build, file, command, key, env, secrets, cpus, memory, stop-seconds, writable, expose): containers built with podman on the node, rebuilt on SIGHUP, run after the kernel with `KERNABLE_URL`, `KERNABLE_INSTANCE` and their key. Every child's output comes out of the node prefixed with its name. Paths are relative to its directory. Exit 2 if the file is invalid at start.
 
 ### `kernable expose`
 
