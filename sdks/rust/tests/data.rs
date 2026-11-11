@@ -267,4 +267,17 @@ async fn a_middleware_checks_file_and_cache_requests_on_their_context() {
     );
     guard.stop();
     running.await.unwrap();
+
+    // While it is away a write is refused, and not asked again: it may not run twice.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let started = std::time::Instant::now();
+    match as_alice
+        .data()
+        .put("shop", "b.txt", "x", "text/plain")
+        .await
+    {
+        Err(Error::Status(s)) => assert_eq!(s.code(), Code::Unavailable, "{s:?}"),
+        other => panic!("expected UNAVAILABLE, got {other:?}"),
+    }
+    assert!(started.elapsed() < Duration::from_secs(2));
 }

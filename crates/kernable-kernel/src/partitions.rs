@@ -443,7 +443,7 @@ fn take_trust(kernel: &Arc<Kernel>, records: TrustSync) {
             continue;
         }
         let service = m.service.clone();
-        if let Err(e) = memberships::take(kernel, m, sig) {
+        if let Err(e) = memberships::take(kernel, m, sig, true, false) {
             tracing::warn!(%service, error = %e.message(), "a membership of the control partition was not taken");
         }
     }

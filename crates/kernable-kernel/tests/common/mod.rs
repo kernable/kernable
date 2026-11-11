@@ -189,6 +189,7 @@ pub async fn start_wrapped(
         key_command: Vec::new(),
         partition: None,
         deployment_retention_days: Default::default(),
+        deployment_switch_lag: 100,
     };
     customize(&mut config, &dir);
     let addr = config.listen.clone();
@@ -674,6 +675,32 @@ pub async fn apply_as(
     apply_issued(addr, membership, key_).await
 }
 
+/// Applies a membership, issued now and signed by key 1, with the request's switch flags.
+pub async fn apply_switching(
+    addr: &str,
+    mut membership: Membership,
+    force: bool,
+    no_switch: bool,
+) -> Result<(), tonic::Status> {
+    membership.issued_at = issued_now();
+    let key_ = key(1);
+    let request = ApplyRequest {
+        sig: Some(signing::sign(
+            &key_,
+            &signing::membership_message(&membership),
+        )),
+        membership: Some(membership),
+        protocol: kernable_core::PROTOCOL,
+        force,
+        no_switch,
+    };
+    let channel = transport::connect(addr).await.unwrap();
+    MembershipServiceClient::new(channel)
+        .apply(with_grant(request, &key_))
+        .await
+        .map(|_| ())
+}
+
 /// Applies a membership with the `issued_at` it has, as a replay would.
 pub async fn apply_issued(
     addr: &str,
@@ -687,6 +714,7 @@ pub async fn apply_issued(
         )),
         membership: Some(membership),
         protocol: kernable_core::PROTOCOL,
+        ..Default::default()
     };
     let channel = transport::connect(addr).await.unwrap();
     MembershipServiceClient::new(channel)

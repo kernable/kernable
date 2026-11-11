@@ -142,7 +142,8 @@ Keys and trust:
                                           add clients. Production brings its own PKI.
 
 Deploy and inspect:
-  kernable apply <addr> <key> <manifest.json> [--deployment <version>]
+  kernable apply <addr> <key> <manifest.json> [--deployment <version>] [--wait <seconds>]
+                [--force]
                                           Applies a service's membership: a JSON manifest with
                                           service, workers, listeners, middlewares, processes,
                                           metadata and deployment (or --deployment): the code
@@ -152,6 +153,13 @@ Deploy and inspect:
                                           deployment's membership rolls back. A process the
                                           service's membership listed before and no longer lists
                                           starts no new cases.
+                                          A switch to another deployment waits until it has caught
+                                          up: its listed workers connected, its listed read models
+                                          within --deployment-switch-lag events of the head (at
+                                          once for a deployment that served before). Before, it is
+                                          refused (not_caught_up, exit code 3) naming what it waits
+                                          for; --wait tries again for up to that many seconds,
+                                          --force switches at once.
                                           Signed with <key>, whose grant needs manage=<service>; the
                                           grant file next to the key (app.grant for app.key) is sent
                                           along. The kernel must be running. Once per deploy.
@@ -611,9 +619,8 @@ async fn main() -> ExitCode {
         }
         ["processes", "case", store, process, case] => processes_case(store, process, case),
         ["services", store] => services(store),
-        ["apply", addr, key, manifest] => apply(addr, key, manifest, None).await,
-        ["apply", addr, key, manifest, "--deployment", deployment] => {
-            apply(addr, key, manifest, Some(deployment)).await
+        ["apply", addr, key, manifest, flags @ ..] if !manifest.starts_with("--") => {
+            apply(addr, key, manifest, flags).await
         }
         ["workers", "remove", store, aggregate] => remove_worker(store, aggregate),
         [
@@ -2820,11 +2827,50 @@ fn services(store: &str) -> Result<bool> {
 }
 
 /// Applies the membership in a manifest file, signed with `key_path` (granted `manage`).
-async fn apply(
+/// `flags`: `--deployment <v>`, `--wait <seconds>` (while the deployment has not caught up),
+/// `--force` (switch anyway).
+async fn apply(addr: &str, key_path: &str, manifest: &str, flags: &[&str]) -> Result<bool> {
+    let force = flags.contains(&"--force");
+    let flags: Vec<&str> = flags.iter().copied().filter(|f| *f != "--force").collect();
+    let values = flag_values(&flags, &["--deployment", "--wait"])?;
+    let deployment = values.get("--deployment").map(|v| v[0]);
+    let wait: u64 = match values.get("--wait") {
+        Some(v) => v[0]
+            .parse()
+            .map_err(|_| "--wait takes a number of seconds")?,
+        None => 0,
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(wait);
+    let mut told = false;
+    loop {
+        match apply_once(addr, key_path, manifest, deployment, force).await {
+            Err(e)
+                if e.downcast_ref::<tonic::Status>().is_some_and(|s| {
+                    s.code() == tonic::Code::FailedPrecondition
+                        && s.message().starts_with("not_caught_up")
+                }) =>
+            {
+                if std::time::Instant::now() >= deadline {
+                    eprintln!("error: {e}");
+                    std::process::exit(3);
+                }
+                if !told {
+                    eprintln!("{e}; waiting up to {wait} s");
+                    told = true;
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            result => return result,
+        }
+    }
+}
+
+async fn apply_once(
     addr: &str,
     key_path: &str,
     manifest: &str,
     deployment: Option<&str>,
+    force: bool,
 ) -> Result<bool> {
     let key = signing::read_signing_key(key_path)?;
     let json: serde_json::Value = serde_json::from_str(&fs::read_to_string(manifest)?)
@@ -2877,6 +2923,8 @@ async fn apply(
         )),
         membership: Some(membership.clone()),
         protocol: kernable_core::PROTOCOL,
+        force,
+        no_switch: false,
     });
     with_key_grant(&mut request, key_path)?;
     MembershipServiceClient::new(connect(addr).await?)

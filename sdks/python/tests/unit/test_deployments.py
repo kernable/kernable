@@ -23,9 +23,9 @@ def channel():
     return grpc.insecure_channel("unix:/nonexistent")
 
 
-def event(position: int, type: str, schema: int, data: dict) -> pb.Event:
+def event(position: int, type: str, schema: int, data: dict, erases: str = "") -> pb.Event:
     return pb.Event(global_position=position, tenant_id="default", domain="shop", aggregate_type="cart",
-                    aggregate_id="c1", version=position, event_type=type, schema=schema,
+                    aggregate_id="c1", version=position, event_type=type, schema=schema, erases=erases,
                     payload=json.dumps(data).encode(), deployment="v2" if schema > 1 else "v1")
 
 
@@ -95,6 +95,29 @@ class ListenerTest(unittest.TestCase):
             listener, seen = self.model("reactor", **options)
             handle, parked, skipped = self.run_batch(listener, [event(1, "ItemAdded", 2, {})])
             self.assertEqual((seen, parked, len(skipped), handle.skipped), ([], [], 1, 1), options)
+
+    def test_an_unknown_event_is_parked_erasing_or_not(self):
+        """The same fixture in the three SDKs: a reactor that parks parks every event newer than
+        its code, an erasing one too; listeners that cannot park skip them."""
+        events = [event(1, "ItemAdded", 1, {}), event(2, "ItemAdded", 2, {}),
+                  event(3, "CustomerForgotten", 2, {}, erases="customer-7"), event(4, "ItemAdded", 1, {})]
+        shop = domain("shop")
+        seen = []
+        mails = shop.reactor("mails", park_after=3)
+        for t in ("ItemAdded", "CustomerForgotten"):
+            mails.on(t, lambda data, evt: seen.append(evt.position))
+        _, parked, skipped = self.run_batch(mails, events)
+        self.assertEqual(list(skipped), [])
+        self.assertEqual([(p.position, p.code) for p in parked], [(2, "unknown_event"), (3, "unknown_event")])
+        self.assertIn("shop.CustomerForgotten schema 2", parked[1].message)
+        self.assertEqual(seen, [1, 4])
+        for listener in (shop.reactor("live", live=True),
+                         shop.reactor("replicated", park_after=3, instance="node-a", single=False),
+                         shop.read_model("carts")):
+            for t in ("ItemAdded", "CustomerForgotten"):
+                listener.on(t, lambda data, evt: None)
+            _, parked, skipped = self.run_batch(listener, events)
+            self.assertEqual((list(parked), [s.position for s in skipped]), ([], [2, 3]), listener.name)
 
     def test_a_raw_handler_gets_newer_events(self):
         shop = domain("shop")

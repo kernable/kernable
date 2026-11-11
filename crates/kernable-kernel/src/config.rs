@@ -192,6 +192,12 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "Days after which the kernel drops what it keeps for a deployment (code version) beside the log: its read models' registrations with their positions, and its snapshots. Only for a deployment that no membership names, with no read model connected and none seen for that long; logged as a warning. 0: never; drop one by hand with `kernable deployments drop`. The events stay either way.",
     ),
     (
+        "--deployment-switch-lag",
+        "KERNABLE_DEPLOYMENT_SWITCH_LAG",
+        "100",
+        "How many events a deployment's read models may be behind the newest one when a membership switches a service to that deployment. Further behind, or with a listed worker or listener not connected, the switch is refused as `not_caught_up` (unless forced: `kernable apply --force`), so a new deployment warms up beside the serving one before it takes over. A deployment that wrote events before (a rollback to kept read models) takes over at once.",
+    ),
+    (
         "--query-timeout-ms",
         "KERNABLE_QUERY_TIMEOUT_MS",
         "5000",
@@ -342,6 +348,9 @@ pub struct Config {
     pub settle_timeout_ms: u64,
     /// `--deployment-retention-days`: 0 keeps every deployment's read models and snapshots.
     pub deployment_retention_days: u64,
+    /// `--deployment-switch-lag`: events a deployment's read models may be behind when a
+    /// membership switches to it.
+    pub deployment_switch_lag: u64,
     pub query_timeout_ms: u64,
     pub middleware_timeout_ms: u64,
     pub drain_timeout_ms: u64,
@@ -638,6 +647,7 @@ impl Config {
             submit_timeout_ms: number("--submit-timeout-ms")?,
             settle_timeout_ms: number("--settle-timeout-ms")?,
             deployment_retention_days: number("--deployment-retention-days")?,
+            deployment_switch_lag: number("--deployment-switch-lag")?,
             query_timeout_ms: number("--query-timeout-ms")?,
             middleware_timeout_ms: number("--middleware-timeout-ms")?,
             drain_timeout_ms: number("--drain-timeout-ms")?,

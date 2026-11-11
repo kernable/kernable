@@ -835,6 +835,17 @@ impl Kernel {
         }
     }
 
+    /// Whether `deployment` could take over now (`deployments::warm_up`): every read model and
+    /// middleware registered for it within `--deployment-switch-lag` of the head (or it served
+    /// before), and something of it connected. Otherwise why not.
+    pub fn deployment_readiness(&self, deployment: &str) -> Result<(), String> {
+        if deployment.is_empty() || !config::valid_name(deployment) {
+            return Err("not a deployment name".into());
+        }
+        let warm = deployments::warm_up(self, deployment, None).map_err(|e| e.to_string())?;
+        warm.why_not().map_or(Ok(()), Err)
+    }
+
     /// Refuses new submits and queries, and waits up to `drain_timeout_ms` for running ones
     /// to finish. Returns whether they all did. Workers and listeners stay connected meanwhile,
     /// so running commands can complete and settle.

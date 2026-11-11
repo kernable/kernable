@@ -593,12 +593,14 @@ const app = new Kernable({ key: "app.key" }).app({ service: "shop", version: "1.
 await app.run(); // until app.stop()
 ```
 
-- `readonly ready: Promise<void>`: Resolves once every worker and listener of the app is connected and its processes are registered; rejects if a process cannot be registered (`run()` rejects then too).
+- `readonly ready: Promise<void>`: Resolves once every worker and listener of the app is connected, its deployment serves the service (`serving`) and its processes are registered; rejects if a process cannot be registered (`run()` rejects then too).
+- `readonly connected: Promise<void>`: Resolves once every worker and listener of the app is connected; while another deployment serves, they warm up beside it.
+- `readonly serving: Promise<void>`: Resolves once the app's membership is applied: its deployment serves the service. Right at the start, unless another deployment serves; then once the app's deployment has caught up and taken over (`AppOptions.switch`), or an operator switched to it.
 - `readonly registered: ProcessVersion[] = []`: The app's processes as the kernel registered them (`version`, `new`); filled once `ready`.
 - `readonly manifest: Manifest`: The membership `run()` applies.
 - `readonly worker?: Worker`: The worker of all the app's aggregates; none if its domains define no aggregate.
 - `readonly listeners: ListenerHandle[]`: One handle per read model and reactor of the app's domains, live ones included.
-- `async run(options: WorkerOptions = {}): Promise<void>`: Applies the membership (see `Kernable.apply`; the key needs `manage` for the service), then runs the worker and the listeners until `stop()`, reconnecting when a connection drops. `options` go to the worker. Once all are connected, it registers the domains' processes (see `Kernable.registerProcess`; the key needs `process` for each, and `submit` for their commands) and prints an overview of the app on stderr (unless `KERNABLE_LOG` is below `info`). Rejects if the membership cannot be applied, or if a process cannot be registered (an invalid model, a missing grant): it stops the app then, so the deploy fails.
+- `async run(options: WorkerOptions = {}): Promise<void>`: Applies the membership (see `Kernable.apply`; the key needs `manage` for the service), then runs the worker and the listeners until `stop()`, reconnecting when a connection drops. `options` go to the worker. If another deployment serves the service, the kernel switches to this one only as `AppOptions.switch` says: until then the app runs beside it (workers idle, read models building) and applies its membership again every second. Once all are connected and it serves, it registers the domains' processes (see `Kernable.registerProcess`; the key needs `process` for each, and `submit` for their commands) and prints an overview of the app on stderr (unless `KERNABLE_LOG` is below `info`). Rejects if the kernel refuses the membership for another reason than the switch, or if a process cannot be registered (an invalid model, a missing grant): it stops the app then, so the deploy fails.
 - `stop(): void`: Stops the worker and every listener of the app, so `run()` resolves.
 
 ### Manifest
@@ -619,6 +621,31 @@ await kernable.apply({ service: "shop", workers: [cart], listeners: [carts], mid
 - `metadata?: Record<string, string>`: Free metadata, e.g. `{ version: "1.0.0" }`.
 - `processes?: (ProcessBuilder | string)[]`: The service's business processes, by builder or qualified name (`shop.fulfilment`). One the membership no longer lists starts no new cases; its running cases finish.
 - `deployment?: string`: The deployment (code version) that serves the service: its workers run the commands, its listeners count, its middlewares check and its read models answer queries first. The service's workers and listeners of other deployments stay connected: workers idle, read models keep catching up. To roll back, apply a membership naming the earlier deployment. Default: this process's (`Options.deployment`); empty: every deployment serves.
+- `switch?: Switch`: When a membership that names another deployment than the one serving the service switches to it (see `Switch`). Default `"caught-up"`.
+
+### Switch
+
+```ts
+export type Switch = "caught-up" | "now" | "never";
+```
+
+When a membership switches its service to its deployment while another one serves:
+- `"caught-up"` (default): once that deployment has caught up: its listed workers connected and
+  its read models within the kernel's `--deployment-switch-lag` of the newest event, or it
+  served before (a rollback). Until then the kernel refuses it (`not_caught_up`); an app runs
+  beside the serving deployment meanwhile and applies again every second until it switches.
+- `"now"`: at once, caught up or not (`kernable apply --force`).
+- `"never"`: never by itself: it applies only while its deployment serves already (or the
+  service has no membership yet), else the kernel refuses it (`not_serving`). An app runs
+  beside the serving deployment until an operator switches (`kernable apply --deployment`).
+
+### waitsForSwitch()
+
+`export function waitsForSwitch(err: unknown): boolean`
+
+Whether the kernel refused a membership because it would switch its service to a deployment
+that has not caught up yet (`not_caught_up`), or would switch at all with `switch: "never"`
+(`not_serving`): applying it again may succeed later.
 
 ### AppOptions
 
@@ -630,6 +657,7 @@ An app: one service made of whole domains, for `Kernable.app`. `version`, `descr
 - `description?: string`: One line about the app.
 - `metadata?: Record<string, string>`: More metadata.
 - `domains: Domain[]`: Every aggregate, read model and reactor defined on them runs in this app; their processes are registered.
+- `switch?: Switch`: When the app's deployment takes the service over from another one that serves it (see `Switch`): by default once its read models have caught up; meanwhile it runs beside the serving deployment, its workers idle and its read models building. Default: `KERNABLE_SWITCH`, else `"caught-up"`.
 
 ### Options
 
@@ -647,7 +675,7 @@ a missing key file, an explicitly named grant file or a missing TLS file throws.
 - `context?: RequestContext`: Default request context for `submit`, `enqueue`, `query` and the requests of `data` and `cache`, e.g. this service's identity; a request's own `context` replaces it as a whole. Default: empty.
 - `tls?: TlsFiles`: Mutual TLS for `host:port` URLs: paths of the CA certificate and this process's certificate and key. Default: `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`, if set.
 - `insecure?: boolean`: Allows plain text to a kernel that is not on this machine. Without TLS, grants, signed requests and vault values cross the network readable, so the client refuses such a URL unless this is set. Default: `KERNABLE_INSECURE=1`, else false.
-- `timeoutMs?: number`: How long a request (`submit`, `query`, files, cache, `apply`) waits in all: for the connection, e.g. while the kernel restarts, and for its answer. Default 60 000 ms, above the kernel's own submit and settle timeouts.
+- `timeoutMs?: number`: How long a request (`submit`, `query`, files, cache, `apply`) waits in all: for the connection, e.g. while the kernel restarts, and for its answer. Default 60 000 ms, above the kernel's own submit and settle timeouts. A submit (by its command ID), a cancel or a query that a kernel answers `UNAVAILABLE` (shutting down, handing over, a middleware or read model not connected) is asked again with backoff within this time; any other request may have run, and fails at once.
 
 ### SubmitOptions
 
@@ -838,7 +866,7 @@ const push = shopDomain.reactor("push", { live: true });
 - `reconnectMs?: number`: Milliseconds to wait before reconnecting after the stream ends (default 1000); twice as long after each further failed attempt, at most 30 s.
 - `store?: string`: Keeps the listener's state in a store (`sqlite:<path>` or `memory:`) instead of memory: its data and position are written together per batch, and a restart continues after the stored position (`start` is then ignored). See `ListenerHandle.store`.
 - `schema?: string`: Version of the stored data's format (default "1"). Change it when the handlers store data differently: the store is cleared and the listener rebuilds from the first event.
-- `parkAfter?: number`: How often a handler may fail on one event before the listener parks it and moves on (default 5 for reactors, 0 for read models; 0: never, the listener keeps getting the event and everything behind it waits). A `Rejected` (also from `ctx.submit`) parks at once; the kernel being unreachable or busy (`UNAVAILABLE`, `DEADLINE_EXCEEDED`, `RESOURCE_EXHAUSTED`), `NotSettled` or the store failing never does: the listener waits and tries again. The kernel keeps parked events with the rejection's code and message (for other errors `handler_error` and the error's type; the log has the whole error) until an operator retries or dismisses them (`kernable listeners retry`). A read model should not park: it would miss the event's change. With a store, a parked event's writes are dropped, the rest of its batch kept. Live listeners never park, and no listener parks an event that erases a subject: its handler must get past it, so no personal data stays behind.
+- `parkAfter?: number`: How often a handler may fail on one event before the listener parks it and moves on (default 5 for reactors, 0 for read models; 0: never, the listener keeps getting the event and everything behind it waits). A `Rejected` (also from `ctx.submit`) parks at once; the kernel being unreachable or busy (`UNAVAILABLE`, `DEADLINE_EXCEEDED`, `RESOURCE_EXHAUSTED`), `NotSettled` or the store failing never does: the listener waits and tries again. The kernel keeps parked events with the rejection's code and message (for other errors `handler_error` and the error's type; the log has the whole error) until an operator retries or dismisses them (`kernable listeners retry`). A read model should not park: it would miss the event's change. With a store, a parked event's writes are dropped, the rest of its batch kept. Live listeners never park, and no listener parks an event that erases a subject because its handler failed: the handler must get past it, so no personal data stays behind. An event newer than the code (`unknown_event`) is parked, erasing or not: no handler ran on it.
 
 ### HandlerOptions
 

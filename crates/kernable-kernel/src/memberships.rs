@@ -204,16 +204,25 @@ impl MembershipService for Api {
                 "membership expired; check the clock",
             ));
         }
-        take(kernel, m, sig)?;
+        take(kernel, m, sig, req.force, req.no_switch)?;
         Ok(Response::new(ApplyResult {}))
     }
 }
 
 /// Takes a signed membership into effect: its signer must be granted `manage` for the service,
-/// and it must be newer than the applied one (an equal one changes nothing). For `Apply` after
-/// its age was checked, and for the memberships a partition takes from the control partition,
-/// which are older.
-pub(crate) fn take(kernel: &Arc<Kernel>, m: Membership, sig: Signature) -> Result<(), Status> {
+/// and it must be newer than the applied one (an equal one changes nothing). One that switches
+/// the service to another deployment waits until that deployment has caught up
+/// (`deployments::warm_up`) unless `force`d; with `no_switch` one that would switch is refused.
+/// For `Apply` after its age was checked, and for the
+/// memberships a partition takes from the control partition, which are older (forced: the
+/// control partition decided).
+pub(crate) fn take(
+    kernel: &Arc<Kernel>,
+    m: Membership,
+    sig: Signature,
+    force: bool,
+    no_switch: bool,
+) -> Result<(), Status> {
     validate(&m)?;
     if !config::allowed(&kernel.permissions().manage, &sig.key_id, &m.service) {
         return Err(Status::permission_denied(format!(
@@ -231,6 +240,34 @@ pub(crate) fn take(kernel: &Arc<Kernel>, m: Membership, sig: Signature) -> Resul
         .unwrap_or_else(PoisonError::into_inner)
         .get(&m.service)
         .cloned();
+    let serving = before.as_ref().map(|b| b.deployment.as_str());
+    if no_switch && serving.is_some_and(|s| s != m.deployment) {
+        return Err(Status::failed_precondition(format!(
+            "not_serving: {} is served by deployment {}, not {}; switch it with kernable apply --deployment {}",
+            m.service,
+            serving.filter(|s| !s.is_empty()).unwrap_or("(every one)"),
+            if m.deployment.is_empty() {
+                "(every one)"
+            } else {
+                &m.deployment
+            },
+            m.deployment
+        )));
+    }
+    if let Some(serving) = serving
+        && !force
+        && !m.deployment.is_empty()
+        && serving != m.deployment
+    {
+        let warm =
+            crate::deployments::warm_up(kernel, &m.deployment, Some(&m)).map_err(internal)?;
+        if let Some(why) = warm.why_not() {
+            return Err(Status::failed_precondition(format!(
+                "not_caught_up: {why}; it takes {} over once it has (apply again), or force the switch",
+                m.service
+            )));
+        }
+    }
     let record = MembershipRecord {
         membership: Some(m.clone()),
         sig: Some(sig),

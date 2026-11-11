@@ -7,7 +7,7 @@ import time
 import unittest
 from unittest import mock
 
-from kernable import Kernable, domain
+from kernable import Kernable, domain, waits_for_switch
 from tests.kernel import TestKernel
 
 
@@ -132,6 +132,71 @@ class Deployments(unittest.TestCase):
                          {"deployment": "v1", "seen": 1})
         self.assertEqual(seen1, [("B", "v1")])
         self.assertEqual(model.skipped, 1)
+
+
+class WarmUp(unittest.TestCase):
+    """A new deployment's app warms up beside the serving one before it takes over."""
+
+    def setUp(self):
+        self.kernel = TestKernel(["shop.*"], ["--deployment-switch-lag", "0"])
+        self.addCleanup(self.kernel.dispose)
+        self.kernel.start()
+
+    def app(self, deployment: str, switch: str):
+        shop = domain("shop")
+        cart = shop.aggregate("cart", 0)
+        cart.command("Add", lambda state, data: [{"type": "Added"}])
+        seen = []
+        carts = shop.read_model("carts")
+        carts.on("Added", lambda data, evt: seen.append(evt.aggregate_id))
+        carts.query("Count", lambda data: len(seen))
+        with mock.patch.dict(os.environ, {"KERNABLE_LOG": "off"}):
+            k = Kernable(self.kernel.url, self.kernel.app_key, deployment=deployment, service="shop")
+        self.addCleanup(k.close)
+        app = k.app(domains=[shop], switch=switch)
+        self.addCleanup(app.stop)
+        background(app.run)
+        return k, app, seen
+
+    def test_a_new_deployment_warms_up_beside_the_serving_one_before_it_takes_over(self):
+        with mock.patch.dict(os.environ, {"KERNABLE_LOG": "off"}):
+            client = Kernable(self.kernel.url, self.kernel.app_key)
+        self.addCleanup(client.close)
+
+        def by(id: str) -> str:
+            outcome = client.submit("shop", "cart", id, "Add", wait="committed")
+            self.assertTrue(outcome.committed, outcome)
+            return outcome.events[0].deployment
+
+        _, v1, _ = self.app("v1", "caught-up")
+        self.assertTrue(v1.ready.wait(10), "v1 serves")
+        self.assertEqual((by("c1"), by("c2")), ("v1", "v1"))
+
+        # v2 leaves the switch to an operator: it connects and builds its read model, v1 serves.
+        k2, v2, seen2 = self.app("v2", "never")
+        self.assertTrue(v2.connected.wait(10), "v2 connects")
+        self.assertTrue(eventually(lambda: len(seen2) >= 2))
+        self.assertEqual(by("c3"), "v1")
+        self.assertFalse(v2.serving.wait(0.3), "v2 does not take over by itself")
+
+        # v3 takes over by itself once it has caught up.
+        _, v3, _ = self.app("v3", "caught-up")
+        self.assertTrue(v3.ready.wait(10), "v3 takes over")
+        self.assertEqual(by("c4"), "v3")
+
+        # An operator switches to v2 (caught up meanwhile): v2's app sees it serve.
+        m = v2.manifest
+        for attempt in range(100):
+            try:
+                k2.apply(service=m.service, workers=m.workers, listeners=m.listeners, middlewares=m.middlewares,
+                         processes=m.processes, deployment="v2")
+                break
+            except Exception as err:
+                if not waits_for_switch(err) or attempt == 99:
+                    raise
+                time.sleep(0.05)
+        self.assertTrue(v2.ready.wait(10), "v2 serves")
+        self.assertEqual(by("c5"), "v2")
 
 
 if __name__ == "__main__":

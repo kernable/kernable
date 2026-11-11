@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { Kernable, domain, type Outcome } from "../src/index.ts";
+import { Kernable, domain, waitsForSwitch, type Outcome } from "../src/index.ts";
 import { TestKernel } from "./kernel.ts";
 
 test("read models of two deployments run side by side, each answering its own deployment", async () => {
@@ -111,6 +111,78 @@ test("a rollback to an older deployment: its worker runs again, history it canno
     for (const s of [workerV2, workerV1, items]) s.stop();
     await Promise.allSettled(running);
     for (const c of [v1, v2, client]) c.close();
+    await kernel.dispose();
+  }
+});
+
+test("a new deployment warms up beside the serving one before it takes over", async () => {
+  const kernel = new TestKernel(["shop.*"], ["--deployment-switch-lag", "0"]);
+  await kernel.start();
+  const client = new Kernable({ url: kernel.url, key: kernel.appKey });
+  // Each deployment's code, as its own process defines it.
+  const shopApp = (deployment: string, sw: "caught-up" | "never") => {
+    const shop = domain("shop");
+    shop.aggregate("Cart", 0).command("Add", () => [{ type: "Added" }]);
+    let seen = 0;
+    shop.readModel("carts").on("Added", () => void seen++).query("Count", () => seen);
+    const k = new Kernable({ url: kernel.url, key: kernel.appKey, service: "shop", deployment });
+    return { k, app: k.app({ domains: [shop], switch: sw }), seen: () => seen };
+  };
+  const by = async (id: string) => {
+    const outcome = await client.submit({ domain: "shop", aggregateType: "Cart", aggregateId: id, type: "Add", wait: "committed" });
+    assert.ok(outcome.committed);
+    return outcome.events[0].deployment;
+  };
+  const eventually = async (done: () => boolean) => {
+    for (let i = 0; i < 100 && !done(); i++) await new Promise((r) => setTimeout(r, 20));
+  };
+  const within = <T>(p: Promise<T>, what: string) =>
+    Promise.race([p, new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`${what} within 10 s`)), 10_000))]);
+  const apps: ReturnType<typeof shopApp>[] = [];
+  const running: Promise<void>[] = [];
+  const start = (deployment: string, sw: "caught-up" | "never") => {
+    const a = shopApp(deployment, sw);
+    apps.push(a);
+    running.push(a.app.run());
+    return a;
+  };
+  try {
+    const v1 = start("v1", "caught-up");
+    await within(v1.app.ready, "v1 serves");
+    assert.equal(await by("c1"), "v1");
+    assert.equal(await by("c2"), "v1");
+
+    // v2 leaves the switch to an operator: it connects and builds its read model, v1 serves.
+    const v2 = start("v2", "never");
+    await within(v2.app.connected, "v2 connects");
+    await eventually(() => v2.seen() >= 2);
+    assert.equal(v2.seen(), 2);
+    assert.equal(await by("c3"), "v1");
+    const early = await Promise.race([v2.app.serving.then(() => true), new Promise((r) => setTimeout(() => r(false), 300))]);
+    assert.equal(early, false, "v2 does not take over by itself");
+
+    // v3 takes over by itself once it has caught up.
+    const v3 = start("v3", "caught-up");
+    await within(v3.app.ready, "v3 takes over");
+    assert.equal(await by("c4"), "v3");
+
+    // An operator switches to v2 (caught up meanwhile): v2's app sees it serve.
+    for (let i = 0; ; i++) {
+      try {
+        await v2.k.apply({ ...v2.app.manifest, switch: "caught-up" });
+        break;
+      } catch (err) {
+        if (!waitsForSwitch(err) || i > 100) throw err;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    }
+    await within(v2.app.ready, "v2 serves");
+    assert.equal(await by("c5"), "v2");
+  } finally {
+    for (const a of apps) a.app.stop();
+    await Promise.all(running);
+    for (const a of apps) a.k.close();
+    client.close();
     await kernel.dispose();
   }
 });

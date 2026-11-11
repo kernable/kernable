@@ -248,6 +248,26 @@ impl Registry {
         (aggregates, instances)
     }
 
+    /// Whether a worker of `deployment` that runs the qualified `aggregate_type` is connected.
+    pub(crate) fn connected_of(&self, aggregate_type: &str, deployment: &str) -> bool {
+        self.instances()
+            .values()
+            .any(|i| i.deployment == deployment && i.aggregates.iter().any(|a| a == aggregate_type))
+    }
+
+    /// The aggregates the connected workers of `deployment` run, sorted.
+    pub(crate) fn aggregates_of(&self, deployment: &str) -> Vec<String> {
+        let mut all: Vec<String> = self
+            .instances()
+            .values()
+            .filter(|i| i.deployment == deployment)
+            .flat_map(|i| i.aggregates.clone())
+            .collect();
+        all.sort();
+        all.dedup();
+        all
+    }
+
     /// The deployments of the connected workers, without repeats.
     pub(crate) fn deployments(&self) -> Vec<String> {
         let mut all: Vec<String> = self

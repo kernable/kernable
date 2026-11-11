@@ -409,6 +409,91 @@ async fn read_models_run_per_deployment_and_only_the_serving_one_counts() {
     assert_eq!(names, ["carts@v1", "carts@v2", "mailer"]);
 }
 
+/// Applies `m` until the kernel takes it, for up to 2 s.
+async fn apply_eventually(env: &Env, m: &kernable_core::proto::Membership) {
+    for _ in 0..100 {
+        if apply(&env.addr, m.clone()).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    apply(&env.addr, m.clone()).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_deployment_takes_over_only_once_caught_up_and_a_rollback_at_once() {
+    let metrics = free_addr();
+    let env = start_custom("deployments-warm-up", |config, _| {
+        config.metrics_listen = Some(metrics.clone());
+        config.deployment_switch_lag = 0;
+    })
+    .await;
+    let mut m1 = membership("shop", &["orders.Order"], &["carts"], &[]);
+    m1.deployment = "v1".into();
+    apply(&env.addr, m1.clone()).await.unwrap();
+    start_worker(env.addr.clone(), worker("v1", 1).0).await;
+    let mut carts1 = listen(&env, "carts", "v1", false).await;
+    run(&env, "a1", "PlaceOrder", "a").await;
+    carts1.through(1).await;
+
+    // v2 connects beside v1: its read model rebuilds, its worker is not there yet.
+    let mut carts2 = listen(&env, "carts", "v2", false).await;
+    let mut m2 = m1.clone();
+    m2.deployment = "v2".into();
+    let refused = apply(&env.addr, m2.clone()).await.unwrap_err();
+    assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+    let why = refused.message();
+    assert!(why.starts_with("not_caught_up: deployment v2"), "{why}");
+    assert!(why.contains("carts@v2 at 0 of 1"), "{why}");
+    assert!(
+        why.contains("no worker of orders.Order is connected"),
+        "{why}"
+    );
+    let ready = get(&metrics, "/ready?deployment=v2").await;
+    assert!(ready.starts_with("HTTP/1.1 503"), "{ready}");
+    assert!(ready.contains("carts@v2 at 0 of 1"), "{ready}");
+    // An app that leaves the switch to an operator is refused as well, whatever the state.
+    let kept = apply_switching(&env.addr, m2.clone(), false, true)
+        .await
+        .unwrap_err();
+    assert!(
+        kept.message()
+            .starts_with("not_serving: shop is served by deployment v1")
+    );
+
+    // Caught up and its worker connected: it takes over; v1 keeps its read model.
+    start_worker(env.addr.clone(), worker("v2", 1).0).await;
+    carts2.through(1).await;
+    let ready = get(&metrics, "/ready?deployment=v2").await;
+    assert!(ready.starts_with("HTTP/1.1 200"), "{ready}");
+    apply_eventually(&env, &m2).await;
+    let written = events(&run(&env, "a2", "AddItem", "a").await);
+    assert_eq!(written[0].deployment, "v2");
+    carts2.through(2).await;
+
+    // Back to v1, which served before: at once, although its read model is one event behind.
+    let mut back = m1.clone();
+    back.metadata = vec![kernable_core::proto::Attribute {
+        key: "rollback".into(),
+        value: "1".into(),
+    }];
+    apply(&env.addr, back).await.unwrap();
+
+    // A deployment nothing of which connected waits, unless forced.
+    let mut m3 = m1.clone();
+    m3.deployment = "v3".into();
+    let refused = apply(&env.addr, m3.clone()).await.unwrap_err();
+    assert!(
+        refused.message().contains("carts has not connected"),
+        "{}",
+        refused.message()
+    );
+    let ready = get(&metrics, "/ready?deployment=v3").await;
+    assert!(ready.contains("nothing of it is connected"), "{ready}");
+    apply_switching(&env.addr, m3, true, false).await.unwrap();
+    drop((carts1, carts2));
+}
+
 #[test]
 fn a_deployment_is_dropped_by_hand_without_touching_the_events() {
     let dir = Dir::new("deployments-drop");

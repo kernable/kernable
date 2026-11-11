@@ -21,20 +21,55 @@ With a name set, the process tells the kernel which code it runs whenever it con
 
 ## Which deployment serves
 
-A service's [membership](./deploy#a-new-version-of-a-service) names the deployment that serves it. An app (`kernable.app(...).run()`) applies its membership with its own deployment when it starts; from a pipeline, the manifest's `deployment` field or `--deployment` does it:
-
-```sh
-kernable apply 127.0.0.1:7233 keys/deploy.key shop.json --deployment 2026-11-11.2
-```
-
-The deployment that serves:
+A service's [membership](./deploy#a-new-version-of-a-service) names the deployment that serves it. The deployment that serves:
 
 - runs the commands: workers of the service that declare another deployment stay connected and idle;
 - counts: its listeners are the ones the kernel waits for (`/ready`, settling submits, the order of delivery); another deployment's read models keep catching up but hold nobody back;
 - answers queries: a query goes to a read model of the asker's own deployment if there is one, else to the serving deployment's;
 - checks requests: of a middleware registered by several deployments, the serving one's checks, or, while it is away, another connected one.
 
-Applying a new deployment's membership switches to it at once. Its read models may still be rebuilding: `/ready` answers 503 and settling submits may come back `NotSettled` until they caught up. Send your traffic to it once `/ready` answers 200.
+## A new deployment warms up, then takes over
+
+A new deployment does not take over the moment its processes start: its read models first rebuild from the events beside the serving deployment's, while the serving one goes on. The kernel switches a service to another deployment only once that deployment has **caught up**:
+
+- for every aggregate the membership lists, a worker of the deployment is connected;
+- every read model and middleware it lists is registered for the deployment (`carts@2026-11-11.2`) and within `--deployment-switch-lag` events (default 100) of the newest one. A reactor keeps one registration across deployments and needs no warm-up.
+
+Until then, a membership that would switch is refused with `FAILED_PRECONDITION` `not_caught_up`, naming what it waits for:
+
+```
+not_caught_up: deployment 2026-11-11.2 has not caught up: carts@2026-11-11.2 at 1200 of 2215; it takes shop over once it has (apply again), or force the switch
+```
+
+A deployment that wrote events before (it served, and you go back to it) takes over at once: its read models are kept where they stopped and catch up the gap in moments. One whose read models were [dropped](#clean-up-old-deployments) warms up like a new one.
+
+### Who switches
+
+An app (`kernable.app(...).run()`) applies its membership when it starts. Its `switch` option (`AppOptions.switch`, `switch=` in Python, `App::switch` in Rust; default `KERNABLE_SWITCH`) says what happens when another deployment serves:
+
+| `switch` | The app |
+|---|---|
+| `caught-up` (default) | runs beside the serving deployment, its workers idle and its read models building, applies its membership again every second, and takes over once it has caught up. |
+| `never` | runs beside the serving deployment until an operator switches (below); it applies its membership only while its own deployment serves, and notices the switch within a second. |
+| `now` | takes over at once, caught up or not (what applying did before deployments warmed up). |
+
+A service that has no membership yet, or is served by the app's own deployment already, takes the membership at once in every mode. The app's `ready` resolves (is set) once it serves; `connected` once its workers and listeners are connected, also while it warms up; `serving` once its deployment serves. Its processes register once it serves.
+
+From a pipeline, apply the manifest with the deployment, and let it wait for the warm-up:
+
+```sh
+kernable apply 127.0.0.1:7233 keys/deploy.key shop.json --deployment 2026-11-11.2 --wait 600
+```
+
+Without `--wait` a refusal fails at once (exit code 3, so a script can tell it from other errors); `--force` switches without waiting. In code, `Kernable.apply` takes the same choice (`Manifest.switch`), and `waitsForSwitch` (`waits_for_switch`, `Error::waits_for_switch`) tells the refusal from other errors.
+
+### Is it caught up?
+
+- `GET /ready?deployment=2026-11-11.2` on the metrics address (`--metrics-listen`): 200 once every read model and middleware registered for the deployment is within the lag (or it served before) and some of its processes are connected, else 503 naming what it waits for.
+- `GET /api/deployments/warm-up?deployment=2026-11-11.2` in the kernel UI: per read model its registration, position, how far behind the newest event, whether it is connected and caught up; the aggregates the deployment's workers run.
+- `GET /ready` keeps answering for the deployment that serves.
+
+Before the switch, nothing of the new deployment counts: its read models hold nobody back and settling submits do not wait for them. After it, the old deployment's processes idle; stop them when you no longer want to go back quickly.
 
 ## Before you roll back: what the newer deployment left behind
 
@@ -66,7 +101,7 @@ No mark anywhere means the rollback is safe. Marks mean it is still possible, bu
 ## Roll back
 
 1. Start the older deployment's processes again, if they stopped. Its read models connect under their registrations and catch up on the events written meanwhile.
-2. Apply its membership: start its app, or apply its manifest with `--deployment <older>`. From then on its workers run the commands, and the newer deployment's processes idle; stop them.
+2. Apply its membership: start its app (it switches as soon as its workers are connected, as it served before), or apply its manifest with `--deployment <older>`. From then on its workers run the commands, and the newer deployment's processes idle; stop them.
 3. Watch `/ready` and the `unknown_history` rejections in the UI.
 
 Rolling forward again is the same with the newer deployment.
@@ -84,7 +119,7 @@ A worker without a deployment is not checked this way. Instead, as before, it ma
 
 ## Read models skip what they do not know
 
-A read model that gets an event of a newer schema than its code reads skips it instead of stopping: it moves on, counts it (`kernable_listener_skipped`, the listener's row in the UI) and logs a warning once per type and schema. A reactor parks such an event (`unknown_event`) instead, so that once code that reads it serves, `kernable listeners retry` handles it. After rolling forward, a read model that skipped events should [rebuild](./rebuild-read-model); in-memory read models do on every start.
+A read model that gets an event of a newer schema than its code reads skips it instead of stopping: it moves on, counts it (`kernable_listener_skipped`, the listener's row in the UI) and logs a warning once per type and schema. A reactor parks such an event (`unknown_event`) instead, also one that erases a subject, so that once code that reads it serves, `kernable listeners retry` handles it. After rolling forward, a read model that skipped events should [rebuild](./rebuild-read-model); in-memory read models do on every start.
 
 ## Fixing what went wrong
 

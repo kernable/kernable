@@ -1430,10 +1430,21 @@ function listenerDetails(l: Listener, position: number, name: (type: string) => 
  */
 export class App {
   /**
-   * Resolves once every worker and listener of the app is connected and its processes are
-   * registered; rejects if a process cannot be registered (`run()` rejects then too).
+   * Resolves once every worker and listener of the app is connected, its deployment serves the
+   * service (`serving`) and its processes are registered; rejects if a process cannot be
+   * registered (`run()` rejects then too).
    */
   readonly ready: Promise<void>;
+  /** Resolves once every worker and listener of the app is connected; while another deployment serves, they warm up beside it. */
+  readonly connected: Promise<void>;
+  /**
+   * Resolves once the app's membership is applied: its deployment serves the service. Right at
+   * the start, unless another deployment serves; then once the app's deployment has caught up
+   * and taken over (`AppOptions.switch`), or an operator switched to it.
+   */
+  readonly serving: Promise<void>;
+  private servingNow!: () => void;
+  private stopped = false;
   /** The app's processes as the kernel registered them (`version`, `new`); filled once `ready`. */
   readonly registered: ProcessVersion[] = [];
   /** The membership `run()` applies. */
@@ -1448,8 +1459,6 @@ export class App {
   private readonly domains: Set<string>;
   /** The processes of the app's domains. */
   private readonly processes: ProcessBuilder[];
-  /** Every worker and listener connected. */
-  private readonly connected: Promise<void>;
   /** Hands `run()`'s registration to `ready`. */
   private registering!: (done: Promise<void>) => void;
 
@@ -1462,6 +1471,7 @@ export class App {
     this.worker = worker;
     this.listeners = listeners;
     this.connected = Promise.all([worker?.ready, ...listeners.map((l) => l.ready)]).then(() => {});
+    this.serving = new Promise<void>((resolve) => (this.servingNow = resolve));
     this.ready = new Promise<Promise<void>>((resolve) => (this.registering = resolve)).then((done) => done);
     // Whoever awaits `ready` sees a failed registration; `run()` reports it anyway.
     this.ready.catch(() => {});
@@ -1470,26 +1480,56 @@ export class App {
   /**
    * Applies the membership (see `Kernable.apply`; the key needs `manage` for the service), then
    * runs the worker and the listeners until `stop()`, reconnecting when a connection drops.
-   * `options` go to the worker. Once all are connected, it registers the domains' processes
-   * (see `Kernable.registerProcess`; the key needs `process` for each, and `submit` for their
+   * `options` go to the worker. If another deployment serves the service, the kernel switches
+   * to this one only as `AppOptions.switch` says: until then the app runs beside it (workers
+   * idle, read models building) and applies its membership again every second. Once all are
+   * connected and it serves, it registers the domains' processes (see
+   * `Kernable.registerProcess`; the key needs `process` for each, and `submit` for their
    * commands) and prints an overview of the app on stderr (unless `KERNABLE_LOG` is below
-   * `info`). Rejects if the membership cannot be applied, or if a process cannot be registered
-   * (an invalid model, a missing grant): it stops the app then, so the deploy fails.
+   * `info`). Rejects if the kernel refuses the membership for another reason than the switch,
+   * or if a process cannot be registered (an invalid model, a missing grant): it stops the app
+   * then, so the deploy fails.
    */
   async run(options: WorkerOptions = {}): Promise<void> {
     const started = Date.now();
-    await this.kernable.apply(this.manifest);
+    this.stopped = false;
+    let applied = true;
+    try {
+      await this.kernable.apply(this.manifest);
+    } catch (err) {
+      if (!waitsForSwitch(err)) throw err;
+      applied = false;
+      this.log.print("info", "app", `deployment ${this.manifest.deployment} runs beside the one that serves (${(err as { details: string }).details})`);
+    }
     if (this.worker) this.worker.announce = false;
     for (const l of this.listeners) l.announce = false;
     const running = Promise.all([this.worker?.run(options), ...this.listeners.map((l) => l.run())]);
-    // Once all are connected; not at all if the app stops before.
-    const registered = Promise.race([this.connected.then(() => true), running.then(() => false)]).then((go) => (go ? this.register() : undefined));
+    const switched = applied ? Promise.resolve(true) : this.switchLater();
+    switched.then((yes) => yes && this.servingNow());
+    // Once all are connected and it serves; not at all if the app stops before.
+    const go = Promise.all([this.connected, switched]).then(([, yes]) => yes);
+    const registered = Promise.race([go, running.then(() => false)]).then((yes) => (yes ? this.register() : undefined));
     this.registering(this.connected.then(() => registered));
     registered.then(
       () => this.overview(Date.now() - started),
       () => this.stop(),
     );
     await Promise.all([running, registered]);
+  }
+
+  /** Applies the membership every second until the kernel takes it; false if the app stops first. */
+  private async switchLater(): Promise<boolean> {
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 1_000));
+      if (this.stopped) return false;
+      try {
+        await this.kernable.apply(this.manifest);
+        this.log.print("info", "app", `deployment ${this.manifest.deployment} serves ${this.manifest.service} now`);
+        return true;
+      } catch (err) {
+        if (!waitsForSwitch(err)) this.log.print("warn", "app", `applying the membership failed: ${(err as Error).message}`);
+      }
+    }
   }
 
   /** Registers every process of the app's domains, in order. */
@@ -1542,6 +1582,7 @@ export class App {
 
   /** Stops the worker and every listener of the app, so `run()` resolves. */
   stop(): void {
+    this.stopped = true;
     this.worker?.stop();
     for (const l of this.listeners) l.stop();
   }
@@ -1584,6 +1625,42 @@ export interface Manifest {
    * Default: this process's (`Options.deployment`); empty: every deployment serves.
    */
   deployment?: string;
+  /**
+   * When a membership that names another deployment than the one serving the service switches
+   * to it (see `Switch`). Default `"caught-up"`.
+   */
+  switch?: Switch;
+}
+
+/**
+ * When a membership switches its service to its deployment while another one serves:
+ * - `"caught-up"` (default): once that deployment has caught up: its listed workers connected and
+ *   its read models within the kernel's `--deployment-switch-lag` of the newest event, or it
+ *   served before (a rollback). Until then the kernel refuses it (`not_caught_up`); an app runs
+ *   beside the serving deployment meanwhile and applies again every second until it switches.
+ * - `"now"`: at once, caught up or not (`kernable apply --force`).
+ * - `"never"`: never by itself: it applies only while its deployment serves already (or the
+ *   service has no membership yet), else the kernel refuses it (`not_serving`). An app runs
+ *   beside the serving deployment until an operator switches (`kernable apply --deployment`).
+ */
+export type Switch = "caught-up" | "now" | "never";
+
+/**
+ * Whether the kernel refused a membership because it would switch its service to a deployment
+ * that has not caught up yet (`not_caught_up`), or would switch at all with `switch: "never"`
+ * (`not_serving`): applying it again may succeed later.
+ */
+export function waitsForSwitch(err: unknown): boolean {
+  const e = err as { code?: number; details?: unknown };
+  return e?.code === 9 /* FAILED_PRECONDITION */ && typeof e.details === "string" && /^not_(caught_up|serving)/.test(e.details);
+}
+
+/** `KERNABLE_SWITCH`, else `"caught-up"`. */
+function switchFromEnv(): Switch {
+  const v = process.env.KERNABLE_SWITCH ?? "";
+  if (v === "" || v === "caught-up") return "caught-up";
+  if (v === "now" || v === "never") return v;
+  throw new Error(`KERNABLE_SWITCH=${v}: caught-up, now or never`);
 }
 
 /**
@@ -1601,6 +1678,13 @@ export interface AppOptions {
   metadata?: Record<string, string>;
   /** Every aggregate, read model and reactor defined on them runs in this app; their processes are registered. */
   domains: Domain[];
+  /**
+   * When the app's deployment takes the service over from another one that serves it (see
+   * `Switch`): by default once its read models have caught up; meanwhile it runs beside the
+   * serving deployment, its workers idle and its read models building. Default:
+   * `KERNABLE_SWITCH`, else `"caught-up"`.
+   */
+  switch?: Switch;
 }
 
 /**
@@ -1667,7 +1751,10 @@ export interface Options {
   /**
    * How long a request (`submit`, `query`, files, cache, `apply`) waits in all: for the
    * connection, e.g. while the kernel restarts, and for its answer. Default 60 000 ms, above
-   * the kernel's own submit and settle timeouts.
+   * the kernel's own submit and settle timeouts. A submit (by its command ID), a cancel or a
+   * query that a kernel answers `UNAVAILABLE` (shutting down, handing over, a middleware or read
+   * model not connected) is asked again with backoff within this time; any other request may
+   * have run, and fails at once.
    */
   timeoutMs?: number;
 }
@@ -1983,6 +2070,8 @@ export class Kernable {
         ...(options.description === undefined ? {} : { description: options.description }),
         ...options.metadata,
       },
+      deployment: this.deployment,
+      switch: options.switch ?? switchFromEnv(),
     };
     const worker = aggregates.length ? new Worker(this.clients, this.key, aggregates, this.log, service, this.deployment) : undefined;
     const handles = listeners.map((l) => new ListenerHandle(this, this.clients, this.key, l, this.log, service, this.deployment));
@@ -2012,7 +2101,8 @@ export class Kernable {
       processes: (manifest.processes ?? []).map((p) => (typeof p === "string" ? p : p.qualified)),
       deployment: validDeployment(manifest.deployment ?? this.deployment),
     };
-    await (await this.clients.control()).apply(membership, this.key.sign(membershipMessage(membership)));
+    const flags = { force: manifest.switch === "now", no_switch: manifest.switch === "never" };
+    await (await this.clients.control()).apply(membership, this.key.sign(membershipMessage(membership)), flags);
   }
 
   /**
@@ -2622,7 +2712,9 @@ export interface ListenerOptions {
    * operator retries or dismisses them (`kernable listeners retry`). A read model should not
    * park: it would miss the event's change. With a store, a parked event's writes are dropped,
    * the rest of its batch kept. Live listeners never park, and no listener parks an event that
-   * erases a subject: its handler must get past it, so no personal data stays behind.
+   * erases a subject because its handler failed: the handler must get past it, so no personal
+   * data stays behind. An event newer than the code (`unknown_event`) is parked, erasing or
+   * not: no handler ran on it.
    */
   parkAfter?: number;
 }

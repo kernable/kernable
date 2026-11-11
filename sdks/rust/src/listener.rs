@@ -634,7 +634,9 @@ impl Listener {
     /// them (`kernable listeners retry`). A read model should not park: it would miss the
     /// event's change. With a store, a parked event's writes are dropped, the rest of its
     /// batch kept. Live listeners never park, and no listener parks an event that erases a
-    /// subject: its handler must get past it, so no personal data stays behind.
+    /// subject because its handler failed: the handler must get past it, so no personal data
+    /// stays behind. An event newer than the code (`unknown_event`) is parked, erasing or not:
+    /// no handler ran on it.
     pub fn park_after(&self, attempts: u32) -> Listener {
         self.inner.settings.lock().unwrap().park_after = attempts;
         self.clone()
@@ -1531,14 +1533,16 @@ impl ListenerHandle {
                     let reads = known_schema(known.as_ref(), &event.event_type);
                     if event.schema > reads {
                         // A newer deployment wrote it: a reactor parks it, so it can be retried
-                        // once this code is updated; any other listener goes on without it.
+                        // once this code is updated, erasing events too (no handler ran on it,
+                        // so nothing it would remove is left behind by this code); any other
+                        // listener goes on without it.
                         let unknown = Unknown {
                             position,
                             event_type: format!("{}.{}", event.domain, event.event_type),
                             schema: event.schema,
                             reads,
                         };
-                        if parking && !replicated && !erasing {
+                        if parking && !replicated {
                             parked.push(self.park_unknown(&unknown));
                         } else {
                             skipped.push(self.skip(&unknown));
@@ -2173,4 +2177,118 @@ fn stuck(what: &str, seconds: u64) -> String {
     format!(
         "still handling {what} after {seconds} s: everything behind it waits; is a handler stuck?"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+    use crate::{Options, domain};
+
+    fn event(position: u64, event_type: &str, schema: u32, erases: &str) -> proto::Event {
+        proto::Event {
+            global_position: position,
+            tenant_id: "default".into(),
+            domain: "shop".into(),
+            aggregate_type: "Cart".into(),
+            aggregate_id: "c1".into(),
+            version: position,
+            event_type: event_type.into(),
+            payload: b"{}".to_vec(),
+            command_id: format!("cmd-{position}"),
+            schema,
+            erases: erases.into(),
+            deployment: if schema > 1 { "v2" } else { "v1" }.into(),
+            ..Default::default()
+        }
+    }
+
+    fn client(dir: &Path) -> Kernable {
+        let key = dir.join("app.key");
+        std::fs::write(&key, "11".repeat(32)).unwrap();
+        let private = <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600);
+        std::fs::set_permissions(&key, private).unwrap();
+        let url = format!("unix:{}", dir.join("none.sock").display());
+        Kernable::new(Options::new(&key).url(url).deployment("v1")).unwrap()
+    }
+
+    /// A listener that parks parks every event newer than its code at once, an erasing one too;
+    /// one that cannot park skips it. The shared fixture of the three SDKs.
+    #[tokio::test]
+    async fn an_unknown_event_is_parked_erasing_or_not() {
+        let dir = std::env::temp_dir().join(format!("kn-unknown-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let kernable = client(&dir);
+        let events = vec![
+            event(1, "ItemAdded", 1, ""),
+            event(2, "ItemAdded", 2, ""),
+            event(3, "CustomerForgotten", 2, "customer-7"),
+            event(4, "ItemAdded", 1, ""),
+        ];
+        let batch = || proto::Batch {
+            events: events.clone(),
+            up_to: 4,
+            ..Default::default()
+        };
+        let shop = domain("shop"); // reads every type at schema 1
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let record = |seen: &Arc<Mutex<Vec<u64>>>| {
+            let seen = Arc::clone(seen);
+            move |_: Value, evt: StoredEventMeta, _ctx: ListenerContext| {
+                seen.lock().unwrap().push(evt.position);
+                async { Ok(()) }
+            }
+        };
+
+        let mails = shop
+            .reactor("mails")
+            .park_after(3)
+            .on("ItemAdded", record(&seen))
+            .on("CustomerForgotten", record(&seen));
+        let (parked, skipped) = kernable
+            .listener(&mails)
+            .handle_batch(batch(), 0, None)
+            .await
+            .unwrap();
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert_eq!(
+            parked
+                .iter()
+                .map(|p| (p.position, p.code.as_str()))
+                .collect::<Vec<_>>(),
+            [(2, UNKNOWN_EVENT), (3, UNKNOWN_EVENT)]
+        );
+        assert!(
+            parked[1]
+                .message
+                .contains("shop.CustomerForgotten schema 2")
+        );
+        assert_eq!(*seen.lock().unwrap(), [1, 4]);
+
+        // Live or replicated reactors and read models cannot park: they skip both.
+        for listener in [
+            shop.reactor("live").live(),
+            shop.reactor("replicated")
+                .park_after(3)
+                .instance("node-a")
+                .single(false),
+            shop.read_model("carts"),
+        ] {
+            let listener = listener
+                .on("ItemAdded", |_: Value, _, _| async { Ok(()) })
+                .on("CustomerForgotten", |_: Value, _, _| async { Ok(()) });
+            let (parked, skipped) = kernable
+                .listener(&listener)
+                .handle_batch(batch(), 0, None)
+                .await
+                .unwrap();
+            assert!(parked.is_empty());
+            assert_eq!(
+                skipped.iter().map(|s| s.position).collect::<Vec<_>>(),
+                [2, 3]
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

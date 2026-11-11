@@ -466,6 +466,7 @@ async fn a_middleware_checks_commands_and_queries_from_its_own_state_and_fails_c
     let worker = kernable
         .worker(&ticket)
         .reconnect(Duration::from_millis(100));
+    let guard_def = guard.clone();
     let (model, guard) = (kernable.listener(&model), kernable.listener(&guard));
     let running = [spawn_worker(&worker), spawn(&model), spawn(&guard)];
     worker.ready().await;
@@ -571,11 +572,30 @@ async fn a_middleware_checks_commands_and_queries_from_its_own_state_and_fails_c
     // While the middleware is away, everything it checks is refused.
     guard.stop();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let away = open("t5", "alice").await;
+    // Asked again until its deadline, then refused.
+    let away = kernable
+        .submit(
+            Submit::new("support", "Ticket", "t5", "Open")
+                .context(as_("alice"))
+                .timeout(Duration::from_millis(500)),
+        )
+        .await;
     assert!(
         matches!(&away, Err(Error::Status(s)) if s.message().contains("middleware guard is not connected")),
         "{away:?}"
     );
+    // Back while a submit waits: it goes through, at a single address too.
+    let back = kernable.listener(&guard_def);
+    let b = back.clone();
+    let returning = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        b.run().await
+    });
+    let started = std::time::Instant::now();
+    assert!(open("t5", "alice").await.unwrap().is_committed());
+    assert!(started.elapsed() >= Duration::from_millis(250));
+    back.stop();
+    returning.await.unwrap();
     worker.stop();
     model.stop();
     for r in running {

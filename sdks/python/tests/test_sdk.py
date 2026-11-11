@@ -144,6 +144,14 @@ class DataAndCache(unittest.TestCase):
                           ("data", "ListData", "alice")])
         stream.stop()  # before tearDown stops the kernel: no reconnect warning
 
+        # While it is away a write is refused, and not asked again: it may not run twice.
+        time.sleep(0.2)
+        started = time.monotonic()
+        with self.assertRaises(grpc.RpcError) as away:
+            self.k.data.put("shop", "notes/n-2.txt", "hi", context=alice)
+        self.assertEqual(away.exception.code(), grpc.StatusCode.UNAVAILABLE)
+        self.assertLess(time.monotonic() - started, 2)
+
 
 class Connection(unittest.TestCase):
     def test_plain_text_goes_only_to_a_kernel_on_this_machine_unless_allowed(self):
@@ -690,7 +698,7 @@ class EndToEnd(unittest.TestCase):
             if check.request.sender_identity == "guest" and (check.kind == "query" or totals.get(check.aggregate_id, 0) >= 3):
                 raise Rejected("guests stop at 3", "forbidden")
 
-        guard = self.run_stream(self.k.listener(guard))
+        guard_def, guard = guard, self.run_stream(self.k.listener(guard))
         guest = RequestContext(sender_identity="guest")
         self.assertTrue(self.increment(3, context=guest).committed)
         refused = self.increment(1, context=guest)  # the middleware already counted the first
@@ -704,9 +712,16 @@ class EndToEnd(unittest.TestCase):
 
         guard.stop()
         time.sleep(0.2)
-        with self.assertRaises(grpc.RpcError) as away:
-            self.increment(1)
+        with self.assertRaises(grpc.RpcError) as away:  # asked again until its deadline
+            self.increment(1, timeout_s=0.5)
         self.assertEqual(away.exception.code(), grpc.StatusCode.UNAVAILABLE)
+        # Back while a submit waits: it goes through, at a single address too.
+        back = self.k.listener(guard_def)
+        self.streams.append(back)
+        threading.Timer(0.3, back.run).start()
+        started = time.monotonic()
+        self.assertTrue(self.increment(1).committed)
+        self.assertGreaterEqual(time.monotonic() - started, 0.25)
 
     def test_a_query_declares_the_aggregate_it_is_about_and_a_middleware_gets_it(self):
         class GetCount(Query[int]):

@@ -236,6 +236,9 @@ impl Options {
     /// How long a request (`submit`, `query`, files, cache, `apply`) waits in all: for the
     /// connection, e.g. while the kernel restarts, and for its answer. Default 60 s. A
     /// connection the network dropped silently is noticed within 40 s by keepalive pings.
+    /// A submit (by its command ID), a cancel or a query that a kernel answers `UNAVAILABLE`
+    /// (shutting down, handing over, a middleware or read model not connected) is asked again
+    /// with backoff within this time; any other request may have run, and fails at once.
     pub fn timeout(mut self, timeout: Duration) -> Options {
         self.timeout = timeout;
         self
@@ -365,7 +368,7 @@ impl Client {
         }
         let request = proto::MapRequest { protocol: PROTOCOL };
         let map = match self
-            .call(None, request, |channel, r| async move {
+            .call_with(None, request, true, |channel, r| async move {
                 PartitionServiceClient::new(channel).map(r).await
             })
             .await
@@ -507,7 +510,8 @@ impl Client {
     /// be reached it waits and tries again, but only after failures to connect: the request
     /// never left, so a write cannot run twice. With several addresses, it also tries the next
     /// after `UNAVAILABLE` (a standby's `not_primary`; a resubmit is safe, as commands are
-    /// idempotent by ID). Gives up after `timeout` (default: the client's) in all.
+    /// idempotent by ID). Gives up after `timeout` (default: the client's) in all. For calls
+    /// that are safe to repeat, use [`call_with`](Self::call_with).
     async fn call<T: Clone, R, Fut>(
         &self,
         timeout: Option<Duration>,
@@ -520,9 +524,11 @@ impl Client {
         self.call_with(timeout, message, false, call).await
     }
 
-    /// Like [`call`](Self::call); `idempotent`, it also tries again when the connection dropped
-    /// with the request under way: whether it ran is unknown, and running it again is safe (a
-    /// command, by its ID: the kernel answers a resubmission with the stored result).
+    /// Like [`call`](Self::call); `idempotent` (a command, by its ID: the kernel answers a
+    /// resubmission with the stored result; a cancel; a query or another read), it also tries
+    /// again, with backoff until the deadline, when a kernel answers `UNAVAILABLE`, and for a
+    /// short while when the connection dropped with the request under way: whether it ran is
+    /// unknown, and running it again is safe.
     async fn call_with<T: Clone, R, Fut>(
         &self,
         timeout: Option<Duration>,
@@ -555,6 +561,22 @@ impl Client {
             match result {
                 Ok(response) => return Ok(response.into_inner()),
                 Err(status) if Instant::now() + pause < deadline && self.ended(at, &status) => {
+                    tokio::time::sleep(pause).await;
+                    pause = (pause * 2).min(MAX_PAUSE);
+                }
+                // A kernel that answers UNAVAILABLE (shutting down, handing over, a read model
+                // or middleware not connected yet) is asked again until the deadline, also at a
+                // single address; only an idempotent call, so a request that ran is never run a
+                // second time. A tenant that moves is waited for by `routed`, a dropped
+                // connection below.
+                Err(status)
+                    if idempotent
+                        && status.code() == tonic::Code::Unavailable
+                        && !moving(&status)
+                        && !dropped(&status)
+                        && !not_connected(&status)
+                        && Instant::now() + pause < deadline =>
+                {
                     tokio::time::sleep(pause).await;
                     pause = (pause * 2).min(MAX_PAUSE);
                 }
@@ -780,7 +802,10 @@ impl Kernable {
     /// process: the newest apply wins, and an older one that arrives late is refused. The key needs the `manage` grant for the service. A
     /// middleware the new membership no longer lists stops checking. It names the deployment
     /// that serves the service ([`Manifest::deployment`], default this connection's, see
-    /// [`Options::deployment`]): its workers run the commands and its read models answer. Example:
+    /// [`Options::deployment`]): its workers run the commands and its read models answer. A
+    /// membership that names another deployment than the serving one switches to it as
+    /// [`Manifest::switch`] says: by default only once that deployment has caught up, refused
+    /// before with `not_caught_up` ([`Error::waits_for_switch`]). Example:
     /// `kernable.apply(Manifest::new().service("shop").worker(&cart_aggregate).listener(&carts_readmodel)).await?`.
     /// [`Error::Config`] if neither the manifest nor the connection names a service, or the
     /// deployment is invalid, [`Error::Status`] if the kernel refuses it.
@@ -799,12 +824,15 @@ impl Kernable {
             .clone()
             .unwrap_or_else(|| self.client.deployment.clone());
         check_deployment(&deployment)?;
+        let manifest_switch = manifest.switch;
         let membership = membership(service, deployment, manifest, issued_now());
         let sig = self.client.sign(&signing::membership_message(&membership));
         let request = ApplyRequest {
             membership: Some(membership),
             sig: Some(sig),
             protocol: PROTOCOL,
+            force: manifest_switch == Switch::Now,
+            no_switch: manifest_switch == Switch::Never,
         };
         self.client
             .control()
@@ -1109,7 +1137,7 @@ impl Kernable {
                 let request = request.clone();
                 async move {
                     client
-                        .call(timeout, request, |channel, r| async move {
+                        .call_with(timeout, request, true, |channel, r| async move {
                             QueryServiceClient::new(channel).query(r).await
                         })
                         .await
@@ -1155,7 +1183,7 @@ impl Kernable {
             let wait = wait.clone();
             waits.spawn(async move {
                 client
-                    .call(timeout, wait, |channel, r| async move {
+                    .call_with(timeout, wait, true, |channel, r| async move {
                         QueryServiceClient::new(channel).query(r).await
                     })
                     .await
@@ -1271,6 +1299,39 @@ pub struct Manifest {
     metadata: Vec<(String, String)>,
     processes: Vec<String>,
     deployment: Option<String>,
+    switch: Switch,
+}
+
+/// When a membership that names another deployment than the one serving its service switches
+/// to it ([`Manifest::switch`], [`App::switch`]). See the how-to "Deployments and rollbacks".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Switch {
+    /// Once the deployment has caught up (the default): its listed workers are connected and its
+    /// read models within the kernel's `--deployment-switch-lag` of the newest event, or it
+    /// served before (a rollback). Until then the kernel refuses it (`not_caught_up`); an app
+    /// runs beside the serving deployment meanwhile and applies again until it switches.
+    #[default]
+    CaughtUp,
+    /// At once, caught up or not (`kernable apply --force`).
+    Now,
+    /// Never by itself: the membership applies only while its deployment serves already (or
+    /// the service has none yet); otherwise the kernel refuses it (`not_serving`). An app runs
+    /// beside the serving deployment until an operator switches (`kernable apply --deployment`).
+    Never,
+}
+
+impl Switch {
+    /// `KERNABLE_SWITCH`: `caught-up` (default), `now` or `never`.
+    pub fn from_env() -> Result<Switch, Error> {
+        match std::env::var("KERNABLE_SWITCH").as_deref() {
+            Err(_) | Ok("" | "caught-up") => Ok(Switch::CaughtUp),
+            Ok("now") => Ok(Switch::Now),
+            Ok("never") => Ok(Switch::Never),
+            Ok(other) => Err(Error::Config(format!(
+                "KERNABLE_SWITCH={other}: caught-up, now or never"
+            ))),
+        }
+    }
 }
 
 impl Manifest {
@@ -1329,6 +1390,13 @@ impl Manifest {
     /// ([`Options::deployment`]); empty: every deployment serves.
     pub fn deployment(mut self, deployment: impl Into<String>) -> Manifest {
         self.deployment = Some(deployment.into());
+        self
+    }
+
+    /// When it switches the service to its deployment if another one serves: see [`Switch`].
+    /// Default [`Switch::CaughtUp`].
+    pub fn switch(mut self, switch: Switch) -> Manifest {
+        self.switch = switch;
         self
     }
 }
@@ -1856,6 +1924,7 @@ mod deployment_tests {
                 .collect(),
             processes: texts(&input["processes"]),
             deployment: None,
+            switch: Switch::default(),
         };
         let membership = membership(
             input["service"].as_str().unwrap().to_owned(),

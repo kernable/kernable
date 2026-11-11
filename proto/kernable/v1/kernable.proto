@@ -372,6 +372,18 @@ message ApplyRequest {
   Membership membership = 1;
   Signature sig = 2;   // over kernable.v1.membership
   uint32 protocol = 3; // not signed
+  // Not signed. A membership that names another deployment than the one serving its service
+  // switches to it only once that deployment has caught up: every listener it lists registered
+  // for it within --deployment-switch-lag events of the head (or the deployment wrote events
+  // before: a rollback), and a worker of it connected for every aggregate it lists. Before, the
+  // apply fails FAILED_PRECONDITION `not_caught_up: ...` naming what it waits for. `force`
+  // switches at once anyway.
+  bool force = 4;
+  // Not signed. Applies the membership only if it names the deployment that serves its service
+  // already (or the service has no membership yet); otherwise fails FAILED_PRECONDITION
+  // `not_serving: ...`. For a process that starts beside the serving deployment and leaves the
+  // switch to an operator (an app with switch `never`).
+  bool no_switch = 5;
 }
 
 message ApplyResult {}

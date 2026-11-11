@@ -120,10 +120,10 @@ Writes a development CA (`ca.tls.crt`), a kernel certificate (`kernel.tls.crt`, 
 ### `kernable apply`
 
 ```text
-kernable apply <addr> <key> <manifest.json> [--deployment <version>]
+kernable apply <addr> <key> <manifest.json> [--deployment <version>] [--wait <seconds>]
 ```
 
-Applies a service's membership: a JSON manifest with service, workers, listeners, middlewares, processes, metadata and deployment (or `--deployment`): the code version that serves the service from now on. Its workers run the commands and its read models count; the other deployments' stay connected and idle. Applying an earlier deployment's membership rolls back. A process the service's membership listed before and no longer lists starts no new cases. Signed with `<key>`, whose grant needs `manage=<service>`; the grant file next to the key (`app.grant` for `app.key`) is sent along. The kernel must be running. Once per deploy.
+[--force] Applies a service's membership: a JSON manifest with service, workers, listeners, middlewares, processes, metadata and deployment (or `--deployment`): the code version that serves the service from now on. Its workers run the commands and its read models count; the other deployments' stay connected and idle. Applying an earlier deployment's membership rolls back. A process the service's membership listed before and no longer lists starts no new cases. A switch to another deployment waits until it has caught up: its listed workers connected, its listed read models within `--deployment-switch-lag` events of the head (at once for a deployment that served before). Before, it is refused (`not_caught_up`, exit code 3) naming what it waits for; `--wait` tries again for up to that many seconds, `--force` switches at once. Signed with `<key>`, whose grant needs `manage=<service>`; the grant file next to the key (`app.grant` for `app.key`) is sent along. The kernel must be running. Once per deploy.
 
 ### `kernable services`
 

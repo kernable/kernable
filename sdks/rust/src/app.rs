@@ -1,11 +1,14 @@
 //! Apps: one service made of whole domains.
 
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use tokio::task::JoinSet;
 
 use crate::{
-    Domain, Error, Kernable, ListenerHandle, Manifest, Process, Worker,
+    Domain, Error, Kernable, ListenerHandle, Manifest, Process, Switch, Worker,
     domain::Runnable,
     log::{self, Level, Overview, Row},
 };
@@ -25,6 +28,7 @@ pub struct App {
     description: Option<String>,
     metadata: Vec<(String, String)>,
     domains: Vec<Domain>,
+    switch: Option<Switch>,
 }
 
 impl App {
@@ -63,6 +67,15 @@ impl App {
         self.domains.push(domain.clone());
         self
     }
+
+    /// When the app's deployment takes the service over from another one that serves it (see
+    /// [`Switch`]): by default once its read models have caught up; meanwhile it runs beside
+    /// the serving deployment, its workers idle and its read models building. Default:
+    /// `KERNABLE_SWITCH` (`caught-up`, `now`, `never`), else [`Switch::CaughtUp`].
+    pub fn switch(mut self, switch: Switch) -> App {
+        self.switch = Some(switch);
+        self
+    }
 }
 
 struct AppInner {
@@ -77,6 +90,10 @@ struct AppInner {
     processes: Vec<Process>,
     /// Whether they are registered (also when there are none).
     registered: tokio::sync::watch::Sender<bool>,
+    /// When it switches the service to its deployment.
+    switch: Switch,
+    /// Whether its membership is applied: its deployment serves the service.
+    serving: tokio::sync::watch::Sender<bool>,
 }
 
 /// An [`App`] on a connection; see [`Kernable::app`]. Cloning gives another handle to the same
@@ -88,6 +105,10 @@ pub struct AppHandle {
 
 impl AppHandle {
     pub(crate) fn new(kernable: &Kernable, app: App) -> Result<AppHandle, Error> {
+        let switch = match app.switch {
+            Some(switch) => switch,
+            None => Switch::from_env()?,
+        };
         let service = app.service.unwrap_or_else(|| kernable.service.clone());
         if service.is_empty() {
             return Err(Error::Config(
@@ -148,6 +169,8 @@ impl AppHandle {
                 listeners,
                 registered: tokio::sync::watch::Sender::new(processes.is_empty()),
                 processes,
+                switch,
+                serving: tokio::sync::watch::Sender::new(false),
             }),
         })
     }
@@ -167,18 +190,34 @@ impl AppHandle {
         &self.inner.listeners
     }
 
-    /// Returns once the worker and every listener of the app are connected, and the domains'
-    /// processes are registered; waits forever if one never connects, so wrap it in
-    /// `tokio::time::timeout` where that matters.
+    /// Returns once the worker and every listener of the app are connected, its deployment
+    /// serves the service ([`AppHandle::serving`]) and the domains' processes are registered;
+    /// waits forever if one never connects, so wrap it in `tokio::time::timeout` where that
+    /// matters.
     pub async fn ready(&self) {
+        self.connected().await;
+        self.serving().await;
+        let mut registered = self.inner.registered.subscribe();
+        let _ = registered.wait_for(|done| *done).await;
+    }
+
+    /// Returns once the worker and every listener of the app are connected; while another
+    /// deployment serves, they are warming up beside it.
+    pub async fn connected(&self) {
         if let Some(worker) = &self.inner.worker {
             worker.ready().await;
         }
         for listener in &self.inner.listeners {
             listener.ready().await;
         }
-        let mut registered = self.inner.registered.subscribe();
-        let _ = registered.wait_for(|done| *done).await;
+    }
+
+    /// Returns once the app's membership is applied: its deployment serves the service. Right
+    /// at the start, unless another deployment serves; then once the app's deployment has
+    /// caught up and taken over ([`App::switch`]), or an operator switched to it.
+    pub async fn serving(&self) {
+        let mut serving = self.inner.serving.subscribe();
+        let _ = serving.wait_for(|s| *s).await;
     }
 
     /// Ends `run`: stops the worker and every listener.
@@ -192,20 +231,29 @@ impl AppHandle {
     }
 
     /// Applies the membership (see [`Kernable::apply`]; it lists the domains' processes), then
-    /// runs the worker and every listener until `stop()`. Once the worker is ready, it registers
-    /// the domains' processes ([`Kernable::register_process`]): a process whose commands no
-    /// worker runs yet would be refused. Once all are connected, it prints an overview of the app
-    /// (unless `KERNABLE_LOG` is below `info`) instead of their connection lines. Fails only if
-    /// the kernel refuses the membership ([`Error::Status`]); a failing handler does not end
-    /// it (a command handler's error rejects the command, a listener handler's error makes the
-    /// listener reconnect and get the event again), or the kernel refuses a process (then it
-    /// stops). A panic in a worker or listener task is passed on.
+    /// runs the worker and every listener until `stop()`. If another deployment serves the
+    /// service, the kernel switches to this one only as [`App::switch`] says: until then the app
+    /// runs beside it (workers idle, read models building) and applies its membership again
+    /// every second. Once it serves and the worker is ready, it registers the domains' processes
+    /// ([`Kernable::register_process`]): a process whose commands no worker runs yet would be
+    /// refused. Once all are connected and it serves, it prints an overview of the app (unless
+    /// `KERNABLE_LOG` is below `info`) instead of their connection lines. Fails only if the
+    /// kernel refuses the membership for another reason than the switch ([`Error::Status`]); a
+    /// failing handler does not end it (a command handler's error rejects the command, a
+    /// listener handler's error makes the listener reconnect and get the event again), or the
+    /// kernel refuses a process (then it stops). A panic in a worker or listener task is passed
+    /// on.
     pub async fn run(&self) -> Result<(), Error> {
         let started = Instant::now();
-        self.inner
-            .kernable
-            .apply(self.inner.manifest.clone())
-            .await?;
+        let manifest = self.inner.manifest.clone().switch(self.inner.switch);
+        let applied = match self.inner.kernable.apply(manifest.clone()).await {
+            Ok(()) => true,
+            Err(e) if e.waits_for_switch() => {
+                self.beside(&e);
+                false
+            }
+            Err(e) => return Err(e),
+        };
         if let Some(worker) = &self.inner.worker {
             worker.announce(false);
         }
@@ -227,20 +275,20 @@ impl AppHandle {
             let listener = listener.clone();
             running.spawn(async move { listener.run().await });
         }
-        if !self.inner.processes.is_empty() {
-            if let Some(worker) = &self.inner.worker {
-                worker.ready().await;
-            }
-            for process in &self.inner.processes {
-                if let Err(e) = self.inner.kernable.register_process(process).await {
-                    self.stop();
-                    while running.join_next().await.is_some() {}
-                    overview.abort();
-                    return Err(e);
+        let failed = Arc::new(Mutex::new(None));
+        let setup = {
+            let (app, failed) = (self.clone(), Arc::clone(&failed));
+            tokio::spawn(async move {
+                if !applied {
+                    app.switch_later(manifest).await;
                 }
-            }
-            self.inner.registered.send_replace(true);
-        }
+                app.inner.serving.send_replace(true);
+                if let Err(e) = app.register().await {
+                    *failed.lock().unwrap() = Some(e);
+                    app.stop();
+                }
+            })
+        };
         while let Some(done) = running.join_next().await {
             if let Err(e) = done
                 && e.is_panic()
@@ -249,6 +297,57 @@ impl AppHandle {
             }
         }
         overview.abort();
+        setup.abort();
+        let failed = failed.lock().unwrap().take();
+        failed.map_or(Ok(()), Err)
+    }
+
+    /// Logs why the app runs beside the deployment that serves.
+    fn beside(&self, refused: &Error) {
+        let deployment = self.inner.kernable.client.deployment.clone();
+        let why = match refused {
+            Error::Status(s) => s.message().to_owned(),
+            other => other.to_string(),
+        };
+        let log = &self.inner.kernable.client.log;
+        log.info("app", || {
+            format!("deployment {deployment} runs beside the one that serves ({why})")
+        });
+    }
+
+    /// Applies the membership every second until the kernel takes it.
+    async fn switch_later(&self, manifest: Manifest) {
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            match self.inner.kernable.apply(manifest.clone()).await {
+                Ok(()) => break,
+                Err(e) if e.waits_for_switch() => {}
+                Err(e) => {
+                    let log = &self.inner.kernable.client.log;
+                    log.warn("app", || format!("applying the membership failed: {e}"));
+                }
+            }
+        }
+        let deployment = self.inner.kernable.client.deployment.clone();
+        let service = self.inner.manifest.service.clone().unwrap_or_default();
+        let log = &self.inner.kernable.client.log;
+        log.info("app", || {
+            format!("deployment {deployment} serves {service} now")
+        });
+    }
+
+    /// Registers the domains' processes once the worker is ready.
+    async fn register(&self) -> Result<(), Error> {
+        if self.inner.processes.is_empty() {
+            return Ok(());
+        }
+        if let Some(worker) = &self.inner.worker {
+            worker.ready().await;
+        }
+        for process in &self.inner.processes {
+            self.inner.kernable.register_process(process).await?;
+        }
+        self.inner.registered.send_replace(true);
         Ok(())
     }
 

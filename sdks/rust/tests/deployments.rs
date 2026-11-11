@@ -231,3 +231,98 @@ async fn a_rollback_keeps_old_code_off_newer_history_and_its_listeners_skip_or_p
         r.await.unwrap();
     }
 }
+
+/// The shop as an app of one deployment: a cart and a read model that counts the items.
+fn shop_app(
+    kernel: &TestKernel,
+    deployment: &str,
+    switch: kernable::Switch,
+) -> kernable::AppHandle {
+    let shop = domain("shop");
+    let cart = shop.aggregate("Cart", ());
+    cart.command("Add", |_, _: Value, _cmd, _ctx| {
+        Ok(vec![NewEvent::new("ItemAdded", ())])
+    });
+    let count = Arc::new(AtomicU64::new(0));
+    let c = Arc::clone(&count);
+    shop.read_model("carts")
+        .on("ItemAdded", move |_: Value, _evt, _ctx| {
+            c.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        })
+        .query("Count", move |_: Value, _qry, _ctx| {
+            let n = count.load(Ordering::SeqCst);
+            async move { Ok(n) }
+        });
+    Kernable::new(kernel.options().service("shop").deployment(deployment))
+        .unwrap()
+        .app(kernable::App::new().domain(&shop).switch(switch))
+        .unwrap()
+}
+
+/// Waits up to 10 s for `f`.
+async fn within(what: &str, f: impl Future<Output = ()>) {
+    tokio::time::timeout(Duration::from_secs(10), f)
+        .await
+        .unwrap_or_else(|_| panic!("{what} within 10 s"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_deployment_warms_up_beside_the_serving_one_before_it_takes_over() {
+    use kernable::Switch;
+    let kernel = TestKernel::new(&["shop.*"], &["--deployment-switch-lag", "0"]);
+    kernel.start().await;
+    let kernable = kernel.client();
+    let start = |app: &kernable::AppHandle| {
+        let app = app.clone();
+        tokio::spawn(async move { app.run().await })
+    };
+    let by = |outcome: Outcome| outcome.events()[0].deployment.clone();
+
+    let v1 = shop_app(&kernel, "v1", Switch::CaughtUp);
+    let running1 = start(&v1);
+    within("v1 serves", v1.ready()).await;
+    for id in ["c1", "c2"] {
+        let outcome = kernable.submit(add(id).wait(Wait::Committed)).await;
+        assert_eq!(by(outcome.unwrap()), "v1");
+    }
+
+    // v2 leaves the switch to an operator: it connects and builds its read model, v1 serves.
+    let v2 = shop_app(&kernel, "v2", Switch::Never);
+    let running2 = start(&v2);
+    within("v2 connects", v2.connected()).await;
+    eventually(|| v2.listeners()[0].position() >= 2).await;
+    assert_eq!(by(kernable.submit(add("c3")).await.unwrap()), "v1");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), v2.serving())
+            .await
+            .is_err(),
+        "v2 does not take over by itself"
+    );
+
+    // v3 takes over by itself once it has caught up.
+    let v3 = shop_app(&kernel, "v3", Switch::CaughtUp);
+    let running3 = start(&v3);
+    within("v3 takes over", v3.ready()).await;
+    assert_eq!(by(kernable.submit(add("c4")).await.unwrap()), "v3");
+
+    // An operator switches to v2 (caught up meanwhile): v2's app sees it serve.
+    let operator = Kernable::new(kernel.options().deployment("v2")).unwrap();
+    let manifest = v2.manifest().clone().deployment("v2");
+    for _ in 0..100 {
+        match operator.apply(manifest.clone()).await {
+            Ok(()) => break,
+            Err(e) if e.waits_for_switch() => tokio::time::sleep(Duration::from_millis(50)).await,
+            Err(e) => panic!("{e}"),
+        }
+    }
+    within("v2 serves", v2.ready()).await;
+    assert_eq!(by(kernable.submit(add("c5")).await.unwrap()), "v2");
+
+    for app in [&v1, &v2, &v3] {
+        app.stop();
+    }
+    for running in [running1, running2, running3] {
+        running.await.unwrap().unwrap();
+    }
+}

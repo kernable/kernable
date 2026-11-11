@@ -412,7 +412,7 @@ export interface Clients {
   data(op: DataOp, req: WireDataRequest): Promise<WireDataResult>;
   listData(req: WireDataRequest): Promise<WireDataList>;
   cache(op: CacheOp, req: WireCacheRequest): Promise<WireCacheResult>;
-  apply(membership: WireMembership, sig: WireSignature): Promise<void>;
+  apply(membership: WireMembership, sig: WireSignature, flags?: { force?: boolean; no_switch?: boolean }): Promise<void>;
   /** Registers a process model (`ProcessService.Register`). */
   registerProcess(req: WireProcessRegistration): Promise<WireProcessRegistered>;
   /** Sets as whom a process acts (`ProcessService.Act`). */
@@ -609,6 +609,21 @@ const KEEPALIVE = {
 
 /** How long a request waits for one address of several before it tries the next. */
 const PER_ADDRESS_MS = 1_000;
+/** The first pause before an idempotent call asks a kernel that answered UNAVAILABLE again; it doubles up to the next. */
+const RETRY_PAUSE_MS = 50;
+const MAX_RETRY_PAUSE_MS = 200;
+/**
+ * How long an idempotent request whose connection dropped under way is tried again: long enough
+ * for a kernel handing its role over (a few hundred milliseconds), short enough that a crash
+ * reaches the caller.
+ */
+const DROPPED_RETRY_MS = 5_000;
+
+/** Whether `err` is the client's own UNAVAILABLE for a connection that went away under the request, not a kernel's answer. */
+function connectionDropped(err: unknown): boolean {
+  const details = (err as grpc.ServiceError)?.details ?? "";
+  return /connection dropped|socket closed|ECONNRESET|EPIPE|RST_STREAM|GOAWAY|connection reset/i.test(details);
+}
 
 /**
  * Clients for a kernel at `unix:/path` or `host:port` (with `tls`: over mutual TLS). `grant`,
@@ -661,15 +676,25 @@ export function connect(url: string, tls?: TlsFiles, grant?: string, timeoutMs =
   if (grant) metadata.set("kernable-grant", grant);
   // A unary call with the grant and the protocol version: it waits for the connection, then
   // for the answer, until the deadline; with several addresses, it turns to the next one when
-  // one does not connect within a second or answers UNAVAILABLE.
-  const unary = async <R>(service: keyof Target, rpc: string, req: object, ms = timeoutMs): Promise<R> => {
+  // one does not connect within a second or answers UNAVAILABLE. An `idempotent` call (a submit,
+  // by its command ID; a cancel; a query; the partition map) also asks a single address again
+  // after UNAVAILABLE, with backoff until the deadline; any other may have run, so the error is
+  // final. A tenant that moves is waited for by the caller (`moving`).
+  const unary = async <R>(service: keyof Target, rpc: string, req: object, ms = timeoutMs, idempotent = false): Promise<R> => {
     const deadline = Date.now() + ms;
+    let pause = RETRY_PAUSE_MS;
+    // Since when the request may have reached a kernel that then went away, and how: from then
+    // on it is tried again for a short while only (a handover), not until the deadline (a crash
+    // the caller should hear of).
+    let dropped: { at: number; err: unknown } | undefined;
     for (;;) {
       const at = current;
       const client = targets[at][service];
       const several = targets.length > 1;
-      const wait = several ? Math.min(deadline, Date.now() + PER_ADDRESS_MS) : deadline;
+      const until = dropped ? Math.min(deadline, dropped.at + DROPPED_RETRY_MS) : deadline;
+      const wait = several ? Math.min(until, Date.now() + PER_ADDRESS_MS) : until;
       const ready = await new Promise<boolean>((resolve) => client.waitForReady(wait, (err?: Error) => resolve(!err)));
+      if (!ready && dropped && Date.now() >= until && until < deadline) throw dropped.err;
       if (!ready) {
         // The next attempt, of this request or the next one, tries the next address.
         next(at);
@@ -683,8 +708,19 @@ export function connect(url: string, tls?: TlsFiles, grant?: string, timeoutMs =
           client[rpc]({ ...req, protocol: PROTOCOL }, metadata, { deadline }, (err: grpc.ServiceError | null, res: R) => (err ? reject(err) : resolve(res))),
         );
       } catch (err) {
-        if (!several || (err as grpc.ServiceError).code !== grpc.status.UNAVAILABLE || Date.now() >= deadline) throw err;
-        next(at);
+        if ((err as grpc.ServiceError).code !== grpc.status.UNAVAILABLE || Date.now() >= deadline) throw err;
+        if (several) {
+          next(at);
+        } else if (idempotent && !moving(err) && Date.now() + pause < deadline) {
+          if (connectionDropped(err)) {
+            dropped ??= { at: Date.now(), err };
+            if (Date.now() - dropped.at >= DROPPED_RETRY_MS) throw err;
+          }
+          await new Promise((resolve) => setTimeout(resolve, pause));
+          pause = Math.min(pause * 2, MAX_RETRY_PAUSE_MS);
+        } else {
+          throw err;
+        }
       }
     }
   };
@@ -699,23 +735,23 @@ export function connect(url: string, tls?: TlsFiles, grant?: string, timeoutMs =
   };
   return {
     submit: (command, wait, listener = "", vault = [], ms) =>
-      unary<WireCommandResult>("commands", "Submit", { command, wait, listener, vault }, ms),
+      unary<WireCommandResult>("commands", "Submit", { command, wait, listener, vault }, ms, true),
     session: () => stream((t) => t.workers.Session(metadata)),
     listen: () => stream((t) => t.listeners.Listen(metadata)),
-    query: (req, ms) => unary<WireQueryResult>("queries", "Query", req, ms),
-    cancel: (req, ms) => unary<WireCancelResult>("commands", "Cancel", req, ms),
+    query: (req, ms) => unary<WireQueryResult>("queries", "Query", req, ms, true),
+    cancel: (req, ms) => unary<WireCancelResult>("commands", "Cancel", req, ms, true),
     subscribe: (req) => stream((t) => t.events.Subscribe({ ...req, protocol: PROTOCOL }, metadata)),
     data: (op, req) => unary("data", op, req),
     listData: (req) => unary("data", "ListData", req),
     cache: (op, req) => unary("cache", op, req),
-    apply: async (membership, sig) => {
-      await unary("memberships", "Apply", { membership, sig });
+    apply: async (membership, sig, flags = {}) => {
+      await unary("memberships", "Apply", { membership, sig, ...flags });
     },
     registerProcess: (req) => unary<WireProcessRegistered>("processes", "Register", req),
     processAct: (req) => unary<{ changed: boolean }>("processes", "Act", req),
     map: async (ms) => {
       try {
-        return await unary<WirePartitionMap>("partitions", "Map", {}, ms);
+        return await unary<WirePartitionMap>("partitions", "Map", {}, ms, true);
       } catch (err) {
         const code = (err as grpc.ServiceError).code;
         if (code === grpc.status.NOT_FOUND || code === grpc.status.UNIMPLEMENTED) return null;

@@ -447,6 +447,149 @@ pub fn list(store: &dyn Store) -> kernable_store::Result<Value> {
     Ok(json!({ "deployments": deployments, "services": serving }))
 }
 
+/// How far a deployment is from taking a service over ([`warm_up`]).
+pub(crate) struct WarmUp {
+    pub(crate) deployment: String,
+    /// The newest durable position.
+    pub(crate) head: u64,
+    /// `--deployment-switch-lag`: how far behind the head a read model may be.
+    pub(crate) lag: u64,
+    /// The deployment wrote events before, so it served: its kept read models only catch up
+    /// on the gap, and it takes over at once.
+    pub(crate) served_before: bool,
+    /// Per listener name: the registration it takes over with, if any.
+    pub(crate) listeners: Vec<(String, Option<crate::listeners::Warming>)>,
+    /// Per qualified aggregate type: whether a worker of the deployment is connected.
+    pub(crate) workers: Vec<(String, bool)>,
+}
+
+impl WarmUp {
+    fn warm(&self, w: &crate::listeners::Warming) -> bool {
+        !w.versioned || self.served_before || w.position.saturating_add(self.lag) >= self.head
+    }
+
+    /// Why the deployment may not take over yet; `None` once every listener it takes over
+    /// with is registered and within `lag` of the head (or it served before), every worker is
+    /// connected, and something of it is.
+    pub(crate) fn why_not(&self) -> Option<String> {
+        let mut waiting = Vec::new();
+        for (name, w) in &self.listeners {
+            match w {
+                None => waiting.push(format!("{name} has not connected")),
+                Some(w) if !self.warm(w) => waiting.push(format!(
+                    "{} at {} of {}",
+                    w.registration, w.position, self.head
+                )),
+                Some(_) => {}
+            }
+        }
+        for (aggregate, connected) in &self.workers {
+            if !connected {
+                waiting.push(format!("no worker of {aggregate} is connected"));
+            }
+        }
+        let anything = self.workers.iter().any(|(_, c)| *c)
+            || self
+                .listeners
+                .iter()
+                .any(|(_, w)| w.as_ref().is_some_and(|w| w.connected));
+        if waiting.is_empty() && !anything {
+            waiting.push("nothing of it is connected".into());
+        }
+        (!waiting.is_empty()).then(|| {
+            format!(
+                "deployment {} has not caught up: {}",
+                self.deployment,
+                waiting.join(", ")
+            )
+        })
+    }
+
+    pub(crate) fn json(&self) -> Value {
+        let listeners: Vec<Value> = self
+            .listeners
+            .iter()
+            .map(|(name, w)| match w {
+                Some(w) => json!({
+                    "name": name,
+                    "registration": w.registration,
+                    "position": w.position,
+                    "behind": self.head.saturating_sub(w.position),
+                    "connected": w.connected,
+                    "caughtUp": self.warm(w),
+                }),
+                None => json!({ "name": name, "registration": null, "caughtUp": false }),
+            })
+            .collect();
+        let workers: Vec<Value> = self
+            .workers
+            .iter()
+            .map(|(a, c)| json!({ "aggregate": a, "connected": c }))
+            .collect();
+        let why = self.why_not();
+        json!({
+            "deployment": self.deployment,
+            "head": self.head,
+            "maxLag": self.lag,
+            "servedBefore": self.served_before,
+            "caughtUp": why.is_none(),
+            "waitingFor": why,
+            "listeners": listeners,
+            "workers": workers,
+        })
+    }
+}
+
+/// How far `deployment` is from taking a service over. With the membership `m` that would
+/// switch to it: its listed listeners and workers. Without one: every read model and middleware
+/// registered for the deployment, and the aggregates its connected workers run.
+pub(crate) fn warm_up(
+    kernel: &crate::Kernel,
+    deployment: &str,
+    m: Option<&kernable_core::proto::Membership>,
+) -> kernable_store::Result<WarmUp> {
+    let served_before = kernel
+        .written
+        .of(kernel.store.as_ref(), deployment)?
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .first
+        .is_some();
+    let (listeners, workers) = match m {
+        Some(m) => {
+            let names: Vec<String> = m.listeners.iter().chain(&m.middlewares).cloned().collect();
+            let workers = m
+                .workers
+                .iter()
+                .map(|a| (a.clone(), kernel.workers.connected_of(a, deployment)))
+                .collect();
+            (
+                kernel
+                    .listeners
+                    .warming(deployment, Some(&m.service), Some(&names)),
+                workers,
+            )
+        }
+        None => (
+            kernel.listeners.warming(deployment, None, None),
+            kernel
+                .workers
+                .aggregates_of(deployment)
+                .into_iter()
+                .map(|a| (a, true))
+                .collect(),
+        ),
+    };
+    Ok(WarmUp {
+        deployment: deployment.to_owned(),
+        head: kernel.durable.load(std::sync::atomic::Ordering::SeqCst),
+        lag: kernel.config().deployment_switch_lag,
+        served_before,
+        listeners,
+        workers,
+    })
+}
+
 /// Drops what the kernel keeps for `deployment` apart from the log: its read models' and
 /// middlewares' registrations (and positions) and its snapshots. The events stay. Returns how
 /// many registrations and snapshots went.

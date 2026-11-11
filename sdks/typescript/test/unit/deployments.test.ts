@@ -78,7 +78,7 @@ test("a worker declares every event type it knows, also those it only applies", 
   }
 });
 
-function wireEvent(position: number, type: string, schema: number): WireEvent {
+function wireEvent(position: number, type: string, schema: number, erases = ""): WireEvent {
   return {
     global_position: position,
     tenant_id: "default",
@@ -93,7 +93,7 @@ function wireEvent(position: number, type: string, schema: number): WireEvent {
     hash: Buffer.alloc(0),
     schema,
     vault_refs: [],
-    erases: "",
+    erases,
     deployment: schema > 1 ? "v2" : "v1",
   };
 }
@@ -132,6 +132,41 @@ test("a listener skips or parks an event newer than its code, and handles the re
     for (const [name, options] of [["live", { live: true }], ["replicated", { instance: "node-a", single: false }]] as const) {
       const h = kernable.listener(shop.reactor(name, options).on("ItemAdded", () => {}));
       assert.deepEqual((await handle(h, events)).skipped.map((s) => s.position), [2]);
+    }
+  } finally {
+    done();
+  }
+});
+
+test("an event newer than the code is parked, erasing or not; listeners that cannot park skip it", async () => {
+  // The same fixture in the three SDKs.
+  const shop = domain("shop"); // reads every type at schema 1
+  const { kernable, done } = client({ deployment: "v1" });
+  try {
+    const events = [
+      wireEvent(1, "ItemAdded", 1),
+      wireEvent(2, "ItemAdded", 2),
+      wireEvent(3, "CustomerForgotten", 2, "customer-7"),
+      wireEvent(4, "ItemAdded", 1),
+    ];
+    const seen: number[] = [];
+    const record = (_data: unknown, evt: { position: number }) => void seen.push(evt.position);
+    const mails = kernable.listener(shop.reactor("mails", { parkAfter: 3 }).on("ItemAdded", record).on("CustomerForgotten", record));
+    const r = await handle(mails, events);
+    assert.deepEqual(r.skipped, []);
+    assert.deepEqual(r.parked.map((p) => [p.position, p.code]), [[2, "unknown_event"], [3, "unknown_event"]]);
+    assert.match(r.parked[1].message, /shop\.CustomerForgotten schema 2/);
+    assert.deepEqual(seen, [1, 4]);
+
+    for (const listener of [
+      shop.reactor("live", { live: true }),
+      shop.reactor("replicated", { parkAfter: 3, instance: "node-a", single: false }),
+      shop.readModel("carts"),
+    ]) {
+      const h = kernable.listener(listener.on("ItemAdded", () => {}).on("CustomerForgotten", () => {}));
+      const b = await handle(h, events);
+      assert.deepEqual(b.parked, []);
+      assert.deepEqual(b.skipped.map((s) => s.position), [2, 3]);
     }
   } finally {
     done();

@@ -157,6 +157,7 @@ pub(crate) fn respond(kernel: &Kernel, request: &[u8]) -> Vec<u8> {
         "/api/cache" => cache(kernel, &params),
         "/api/deployments" => deployments(kernel),
         "/api/deployments/since" => deployments_since(kernel, &params),
+        "/api/deployments/warm-up" => deployments_warm_up(kernel, &params),
         _ => return reply("404 Not Found", "text/plain", b"not found\n"),
     };
     match result {
@@ -1184,6 +1185,21 @@ fn deployments(kernel: &Kernel) -> Result<Value, BoxError> {
         "workers": kernel.workers.deployments(),
         "readModels": listeners,
     }))
+}
+
+/// `GET /api/deployments/warm-up?deployment=<d>`: how far the deployment is from taking over
+/// (`deployments::warm_up`): per read model and middleware registered for it its position and
+/// how far behind the head, the aggregates its connected workers run, and whether it has caught
+/// up.
+fn deployments_warm_up(
+    kernel: &Kernel,
+    params: &HashMap<String, String>,
+) -> Result<Value, BoxError> {
+    let deployment = params
+        .get("deployment")
+        .filter(|d| !d.is_empty() && crate::config::valid_name(d))
+        .ok_or("give deployment=<name>")?;
+    Ok(crate::deployments::warm_up(kernel, deployment, None)?.json())
 }
 
 /// `GET /api/deployments/since?position=<n>` (or `time=<ms>`), optionally `&version=<v>`: what

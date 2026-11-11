@@ -200,6 +200,15 @@ pub(crate) struct ListenerStatus {
     pub(crate) skipped: u64,
 }
 
+/// A listener registration as a deployment would take over with it ([`Registry::warming`]).
+pub(crate) struct Warming {
+    pub(crate) registration: String,
+    /// Registered per deployment; otherwise one registration for all (a reactor).
+    pub(crate) versioned: bool,
+    pub(crate) position: u64,
+    pub(crate) connected: bool,
+}
+
 #[derive(Default)]
 pub(crate) struct Registry {
     entries: Mutex<HashMap<String, Entry>>,
@@ -284,6 +293,45 @@ impl Registry {
             })
             .collect();
         all.sort_by(|a, b| a.name.cmp(&b.name));
+        all
+    }
+
+    /// The registrations `deployment` takes over `service` with: for each of `names`, the
+    /// deployment's own (`name@deployment`), else the one for all deployments (a reactor), else
+    /// `None`; without `names`, every registration of the deployment.
+    pub(crate) fn warming(
+        &self,
+        deployment: &str,
+        service: Option<&str>,
+        names: Option<&[String]>,
+    ) -> Vec<(String, Option<Warming>)> {
+        let entries = self.entries();
+        let warming = |e: &Entry| Warming {
+            registration: e.record.name.clone(),
+            versioned: e.versioned,
+            position: e.record.position,
+            connected: e.connected(),
+        };
+        let of_service = |e: &Entry| service.is_none_or(|s| e.record.service == s) && !e.live;
+        let mut all: Vec<(String, Option<Warming>)> = match names {
+            Some(names) => names
+                .iter()
+                .map(|n| {
+                    let own = entries
+                        .get(&crate::deployments::key(n, deployment))
+                        .filter(|e| of_service(e));
+                    let shared = entries.get(n).filter(|e| of_service(e) && !e.versioned);
+                    (n.clone(), own.or(shared).map(warming))
+                })
+                .collect(),
+            None => entries
+                .values()
+                .filter(|e| e.versioned && e.deployment == deployment && of_service(e))
+                .map(|e| (e.base().to_owned(), Some(warming(e))))
+                .collect(),
+        };
+        all.sort_by(|a, b| a.0.cmp(&b.0));
+        all.dedup_by(|a, b| a.0 == b.0);
         all
     }
 

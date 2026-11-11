@@ -30,13 +30,14 @@ test("a middleware checks commands and queries from its own state and fails clos
   // Refuses banned identities, from the events it has processed.
   const banned = new Set<string>();
   const checked: Check[] = [];
-  const guard = kernable.listener(support.readModel("guard")
+  const guardDef = support.readModel("guard")
     .on("Banned", (data: { identity: string }) => void banned.add(data.identity))
     .middleware({ types: ["support.*"] }, (check) => {
       checked.push(check);
       if (banned.has(check.request.senderIdentity ?? "")) throw new Rejected("banned", "forbidden");
       if (check.type === "Crash") throw new Error("boom");
-    }));
+    });
+  const guard = kernable.listener(guardDef);
 
   const worker = kernable.worker(ticket);
   let running = [worker.run({ reconnectMs: 100 }), model.run(), guard.run()];
@@ -68,7 +69,18 @@ test("a middleware checks commands and queries from its own state and fails clos
     guard.stop();
     await running[2];
     await new Promise((r) => setTimeout(r, 100));
-    await assert.rejects(open("t5", "alice"), /middleware guard is not connected/);
+    // Asked again until its deadline, then refused.
+    await assert.rejects(
+      kernable.submit({ domain: "support", aggregateType: "Ticket", aggregateId: "t5", type: "Open", ...as("alice"), timeoutMs: 500 }),
+      /middleware guard is not connected/,
+    );
+    // Back while a submit waits: it goes through, at a single address too.
+    const back = kernable.listener(guardDef);
+    running = [...running, new Promise((r) => setTimeout(r, 300)).then(() => back.run())];
+    const started = Date.now();
+    assert.ok((await open("t5", "alice")).committed);
+    assert.ok(Date.now() - started >= 250);
+    back.stop();
   } finally {
     worker.stop();
     model.stop();
@@ -190,6 +202,14 @@ test("a middleware checks file and cache requests before they run", async () => 
     );
     // Only alice's put went through.
     assert.equal(Buffer.from((await alice.data.get("shop", "invoices/o-1.pdf"))!.data).toString(), "%PDF");
+
+    // While it is away a write is refused, and not asked again: it may not run twice.
+    guard.stop();
+    await running;
+    await new Promise((r) => setTimeout(r, 100));
+    const started = Date.now();
+    await assert.rejects(alice.data.put("shop", "invoices/o-2.pdf", "x"), { code: status.UNAVAILABLE });
+    assert.ok(Date.now() - started < 2_000);
   } finally {
     guard.stop();
     await running;

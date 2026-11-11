@@ -117,6 +117,16 @@ pub enum Error {
     Store(rusqlite::Error),
 }
 
+impl Error {
+    /// Whether the kernel refused a membership because it would switch its service to a
+    /// deployment that has not caught up yet (`not_caught_up`), or would switch at all while
+    /// [`crate::Switch::Never`] (`not_serving`): applying it again may succeed later.
+    pub fn waits_for_switch(&self) -> bool {
+        matches!(self, Error::Status(s) if s.code() == tonic::Code::FailedPrecondition
+            && (s.message().starts_with("not_caught_up") || s.message().starts_with("not_serving")))
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

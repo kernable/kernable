@@ -62,7 +62,7 @@ from .messages import (  # noqa: E402
 )
 from .processes import Process, Value, value  # noqa: E402
 
-__all__ = ["PROTOCOL", "Event", "Command", "Query", "StoredEvent", "Aggregate", "AggregateType", "MiddlewareContext", "App", "ApplyContext", "CacheClient", "CancelOutcome", "Check", "ClientClosed", "CommandContext", "CommandMeta",
+__all__ = ["PROTOCOL", "waits_for_switch", "Event", "Command", "Query", "StoredEvent", "Aggregate", "AggregateType", "MiddlewareContext", "App", "ApplyContext", "CacheClient", "CancelOutcome", "Check", "ClientClosed", "CommandContext", "CommandMeta",
            "CommandSchema", "QuerySchema", "Target",
            "Data", "DataClient", "Domain", "Listed", "Listing",
            "EventMeta", "EventSchema", "HeldKey", "Index", "Kernable", "Key", "Listener", "ListenerContext", "ListenerHandle", "Manifest", "NotDue", "NotSettled", "Outcome",
@@ -1019,7 +1019,9 @@ class Domain:
         exception's type; the log has the whole error) until an operator retries or dismisses
         them (`kernable listeners retry`). With a store, a parked event's writes are dropped, the
         rest of its batch kept. Live listeners never park, and no listener parks an event that
-        erases a subject: its handler must get past it, so no personal data stays behind.
+        erases a subject because its handler failed: the handler must get past it, so no personal
+        data stays behind. An event newer than the code (`unknown_event`) is parked, erasing or
+        not: no handler ran on it.
 
         `live`: not registered with the kernel: no stored position, always starts at the newest
         event, nobody waits for it, and it is forgotten when it disconnects. For reactions that
@@ -1621,6 +1623,69 @@ def _moving(err: grpc.RpcError) -> bool:
 _MOVE_WAIT_S = 30.0
 
 
+def _switch(switch: str) -> str:
+    """`switch` if it is one of `caught-up`, `now` and `never`."""
+    if switch not in ("caught-up", "now", "never"):
+        raise ValueError(f"switch {switch!r}: caught-up, now or never")
+    return switch
+
+
+def waits_for_switch(err: BaseException) -> bool:
+    """Whether the kernel refused a membership because it would switch its service to a
+    deployment that has not caught up yet (`not_caught_up`), or would switch at all with
+    `switch="never"` (`not_serving`): applying it again may succeed later."""
+    return (isinstance(err, grpc.RpcError) and err.code() == grpc.StatusCode.FAILED_PRECONDITION
+            and (err.details() or "").startswith(("not_caught_up", "not_serving")))
+
+# The first pause before an idempotent call asks a kernel that answered UNAVAILABLE again; it
+# doubles up to the second.
+_RETRY_PAUSE_S = 0.05
+_MAX_RETRY_PAUSE_S = 0.2
+# How long an idempotent request whose connection dropped under way is tried again: long enough
+# for a kernel handing its role over, short enough that a crash reaches the caller.
+_DROPPED_RETRY_S = 5.0
+_DROPPED = re.compile(r"connection dropped|socket closed|ECONNRESET|EPIPE|RST_STREAM|GOAWAY|connection reset",
+                      re.IGNORECASE)
+
+
+def _connection_dropped(err: grpc.RpcError) -> bool:
+    """Whether `err` is the client's own UNAVAILABLE for a connection that went away under the
+    request, not a kernel's answer."""
+    return bool(_DROPPED.search(err.details() or ""))
+
+
+def _idempotent(timeout_s: float, call: Callable[[float], Any]) -> Any:
+    """`call(left)` (a request with `left` seconds to go) for a call that is safe to repeat: a
+    submit, by its command ID (the kernel answers a resubmission with the stored result); a
+    cancel; a query. A kernel that answers `UNAVAILABLE` (shutting down, handing over, a read
+    model or middleware not connected yet, a connection that dropped) is asked again with backoff
+    until `timeout_s` passed, at a single address too; then the last error is raised. A tenant
+    that moves is waited for by `_Partitioned.route`."""
+    deadline = time.monotonic() + timeout_s
+    pause = _RETRY_PAUSE_S
+    # Since when the request may have reached a kernel that then went away: from then on it is
+    # tried again for a short while only (a handover), not until the deadline (a crash the
+    # caller should hear of).
+    dropped: "tuple[float, grpc.RpcError] | None" = None
+    while True:
+        until = deadline if dropped is None else min(deadline, dropped[0] + _DROPPED_RETRY_S)
+        try:
+            return call(max(0.001, until - time.monotonic()))
+        except grpc.RpcError as e:
+            if dropped is not None and until < deadline and time.monotonic() >= until:
+                raise dropped[1] from e
+            if (e.code() != grpc.StatusCode.UNAVAILABLE or _moving(e)
+                    or time.monotonic() + pause >= deadline):
+                raise
+            if _connection_dropped(e):
+                if dropped is None:
+                    dropped = (time.monotonic(), e)
+                elif time.monotonic() - dropped[0] >= _DROPPED_RETRY_S:
+                    raise
+            time.sleep(pause)
+            pause = min(pause * 2, _MAX_RETRY_PAUSE_S)
+
+
 def _partition_of(m, tenant: str) -> str:
     """The partition map `m` assigns `tenant` to."""
     return next((t.partition for t in m.tenants if t.tenant == tenant), m.default)
@@ -1639,8 +1704,9 @@ class _Partitioned:
 
     _UNREAD = object()
 
-    def __init__(self, entry: grpc.Channel, channel_for: Callable[[str], grpc.Channel]):
+    def __init__(self, entry: grpc.Channel, channel_for: Callable[[str], grpc.Channel], timeout_s: float):
         self.entry = entry
+        self._timeout_s = timeout_s
         self._channel_for = channel_for
         self._map: Any = self._UNREAD
         self._parts: dict[str, grpc.Channel] = {}
@@ -1654,8 +1720,8 @@ class _Partitioned:
                 self._map = self._UNREAD
             if self._map is self._UNREAD:
                 try:
-                    self._map = rpc.PartitionServiceStub(self.entry).Map(pb.MapRequest(protocol=PROTOCOL),
-                                                                         timeout=timeout_s)
+                    self._map = _idempotent(timeout_s or self._timeout_s, lambda left: rpc.PartitionServiceStub(
+                        self.entry).Map(pb.MapRequest(protocol=PROTOCOL), timeout=left))
                 except grpc.RpcError as e:
                     if e.code() not in (grpc.StatusCode.NOT_FOUND, grpc.StatusCode.UNIMPLEMENTED):
                         raise
@@ -1753,7 +1819,10 @@ class Kernable:
         so such a URL raises `ValueError` unless this is set; default `KERNABLE_INSECURE=1`, else
         False. `timeout_s`: how long a request (submit, query, files, cache, apply) waits in all,
         for the connection (e.g. while the kernel restarts) and its answer; default 60 s. A
-        connection the network dropped silently is noticed within 40 s by keepalive pings.
+        connection the network dropped silently is noticed within 40 s by keepalive pings. A
+        submit (by its command ID), a cancel or a query that a kernel answers `UNAVAILABLE`
+        (shutting down, handing over, a middleware or read model not connected) is asked again
+        with backoff within this time; any other request may have run, and fails at once.
         `deployment`: the code version this process runs (1 to 128 letters, digits, `-`, `_` and
         `.`, e.g. `2026-11-11.1`); default `KERNABLE_DEPLOYMENT`, else none. Its workers and
         listeners declare it, the events its workers write carry it, its queries prefer read
@@ -1812,9 +1881,10 @@ class Kernable:
             channel = channels[0] if len(channels) == 1 else _Failover(channels, raw, timeout_s)
             return grpc.intercept_channel(channel, self._open)
 
+        self._timeout_s = timeout_s
         self._channel = channel_for(url)
         # With partitions, each tenant's requests go to its partition.
-        self._parts = _Partitioned(self._channel, channel_for)
+        self._parts = _Partitioned(self._channel, channel_for, timeout_s)
         self._key = Key.from_file(key)
         self._log = _Log(given_url, key, self._key.id)
         # Whoever can read the key file can sign as this process.
@@ -1844,7 +1914,8 @@ class Kernable:
         return Worker._new(self._parts, self._key, aggregates, self._log, self._service, self._deployment)
 
     def app(self, *, domains: Iterable[Domain], service: str | None = None, version: str | None = None,
-            description: str | None = None, metadata: dict[str, str] | None = None) -> "App":
+            description: str | None = None, metadata: dict[str, str] | None = None,
+            switch: str | None = None) -> "App":
         """An app made of whole domains: every aggregate, read model and reactor defined on them.
         `run()` on it applies the service's membership (the domains' aggregates as workers, their
         read models and reactors as listeners, those with a middleware as middlewares, their
@@ -1855,7 +1926,12 @@ class Kernable:
         Example: `k.app(service="shop", version="1.0.0", domains=[shop_domain]).run()`. Every
         start applies the membership, so the key needs the `manage` grant for the service. One
         service is one app: two processes with the same service would replace each other's
-        membership. Raises `ValueError` if neither `service` nor the client names a service."""
+        membership. `switch` says when the app's deployment takes the service over from another
+        one that serves it (see `apply`): by default (`"caught-up"`) once its read models have
+        caught up; meanwhile it runs beside the serving deployment, its workers idle and its read
+        models building. Default: `KERNABLE_SWITCH`, else `"caught-up"`. Raises `ValueError` if
+        neither `service` nor the client names a service, or for an unknown `switch`."""
+        switch = _switch(switch if switch is not None else os.environ.get("KERNABLE_SWITCH") or "caught-up")
         service = service or self._service
         if not service:
             raise ValueError("an app needs a service: pass `service` or set it on the client (KERNABLE_SERVICE)")
@@ -1869,7 +1945,7 @@ class Kernable:
                             middlewares=[l for l in durable if l._middlewares],
                             metadata={**meta, **(metadata or {})},
                             processes=[p for d in domains for p in d.processes],
-                            deployment=self._deployment)
+                            deployment=self._deployment, switch=switch)
         worker = Worker._new(self._parts, self._key, aggregates, self._log, service, self._deployment) if aggregates else None
         handles = [ListenerHandle._new(self._parts, self._key, l, self._log, service, self) for l in listeners]
         return App(self, manifest, worker, handles, [d.name for d in domains])
@@ -1877,7 +1953,7 @@ class Kernable:
     def apply(self, *, service: str | None = None, workers: Iterable[AggregateType] = (),
               listeners: Iterable["Listener"] = (), middlewares: Iterable["Listener"] = (),
               metadata: dict[str, str] | None = None, processes: Iterable["Process | str"] = (),
-              deployment: str | None = None) -> None:
+              deployment: str | None = None, switch: str = "caught-up") -> None:
         """Replaces the membership of a service (default: this client's `service`): the workers,
         listeners and middlewares the kernel waits for, plus free metadata such as
         `{"version": "1.0.0"}`. `workers` are the aggregates the service runs (the kernel waits
@@ -1888,7 +1964,13 @@ class Kernable:
         client's) names the code version that serves the service: its workers run the commands,
         its listeners count and its read models answer queries first; the service's workers and
         listeners of other deployments stay connected, idle or catching up. A rollback applies a
-        membership naming the earlier deployment. Empty: every deployment serves.
+        membership naming the earlier deployment. Empty: every deployment serves. `switch` says
+        when a membership that names another deployment than the serving one switches to it:
+        `"caught-up"` (default) once that deployment has caught up (its listed workers connected,
+        its read models within the kernel's `--deployment-switch-lag` of the newest event, or it
+        served before: a rollback), refused before as `not_caught_up`; `"now"` at once;
+        `"never"`: applied only while its deployment serves already (or the service has no
+        membership yet), refused otherwise as `not_serving`. See `waits_for_switch`.
 
         Apply it once per deploy, e.g. from a deploy script, not from every process: the newest
         apply wins, and an older one that arrives late is refused. The key needs the `manage` grant for the service. A middleware the new
@@ -1907,9 +1989,10 @@ class Kernable:
                                    issued_at=_issued_now(),
                                    processes=[p.qualified if isinstance(p, Process) else p for p in processes],
                                    deployment=deployment)
+        switch = _switch(switch)
         rpc.MembershipServiceStub(self._parts.control()).Apply(
             pb.ApplyRequest(membership=membership, sig=self._key.sign(membership_message(membership)),
-                            protocol=PROTOCOL))
+                            protocol=PROTOCOL, force=switch == "now", no_switch=switch == "never"))
 
     def process_act(self, name: str, context: RequestContext) -> bool:
         """Sets as whom the process `name` (qualified: `shop.fulfilment`) acts: the request context
@@ -2020,7 +2103,8 @@ class Kernable:
                                context=_to_wire_context(context or self._context, command_id),
                                issued_at=_issued_now(), protocol=PROTOCOL)
         req.client_sig.CopyFrom(self._key.sign(cancel_message(req)))
-        res = self._parts.route(req.tenant_id, lambda ch: rpc.CommandServiceStub(ch).Cancel(req, timeout=timeout_s))
+        res = self._parts.route(req.tenant_id, lambda ch: _idempotent(
+            timeout_s or self._timeout_s, lambda left: rpc.CommandServiceStub(ch).Cancel(req, timeout=left)))
         if res.WhichOneof("outcome") == "cancelled":
             return CancelOutcome(cancelled=True)
         return CancelOutcome(cancelled=False, code=res.rejected.code, message=res.rejected.message)
@@ -2035,7 +2119,8 @@ class Kernable:
         wait.listener = q.listener
         parts = self._parts.all(timeout_s)
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(parts))) as pool:
-            waits = [pool.submit(lambda ch=ch: rpc.QueryServiceStub(ch).Query(wait, timeout=timeout_s))
+            waits = [pool.submit(lambda ch=ch: _idempotent(
+                timeout_s or self._timeout_s, lambda left: rpc.QueryServiceStub(ch).Query(wait, timeout=left)))
                      for _, ch in parts]
             for w in waits:
                 w.result()
@@ -2080,7 +2165,8 @@ class Kernable:
             self._caught_up_everywhere(q, timeout_s)
             q.issued_at = _issued_now()
         q.client_sig.CopyFrom(self._key.sign(query_message(q)))
-        res = self._parts.route(q.tenant_id, lambda ch: rpc.QueryServiceStub(ch).Query(q, timeout=timeout_s))
+        res = self._parts.route(q.tenant_id, lambda ch: _idempotent(
+            timeout_s or self._timeout_s, lambda left: rpc.QueryServiceStub(ch).Query(q, timeout=left)))
         if res.WhichOneof("outcome") == "rejected":
             raise Rejected(res.rejected.message, res.rejected.code)
         return _decode(res.response)
@@ -2145,8 +2231,8 @@ class Kernable:
         cmd.client_sig.CopyFrom(self._key.sign(command_message(cmd)))
         request = pb.SubmitRequest(command=cmd, wait=wait, protocol=PROTOCOL, listener=_HANDLING.get(),
                                    vault=values)
-        return self._parts.route(cmd.tenant_id,
-                                 lambda ch: rpc.CommandServiceStub(ch).Submit(request, timeout=timeout_s))
+        return self._parts.route(cmd.tenant_id, lambda ch: _idempotent(
+            timeout_s or self._timeout_s, lambda left: rpc.CommandServiceStub(ch).Submit(request, timeout=left)))
 
 
 class DataClient:
@@ -2395,6 +2481,8 @@ class Manifest:
     processes: list[Process] = field(default_factory=list)
     #: The deployment (code version) that serves the service; empty: every deployment.
     deployment: str = ""
+    #: When it switches the service to its deployment while another serves (see `Kernable.apply`).
+    switch: str = "caught-up"
 
 
 class _AllReady:
@@ -2449,13 +2537,23 @@ class App:
         #: The `RegisteredProcess` per process (qualified name), once registered by `run()`.
         self.processes: dict[str, RegisteredProcess] = {}
         streams = [s for s in (worker, *listeners) if s is not None]
-        #: Set once every worker and listener of the app is connected.
-        self.ready = _AllReady([s.ready for s in streams])
+        #: Set once every worker and listener of the app is connected; while another deployment
+        #: serves, they warm up beside it.
+        self.connected = _AllReady([s.ready for s in streams])
+        #: Set once the app's membership is applied: its deployment serves the service. Right at
+        #: the start, unless another deployment serves; then once the app's deployment has caught
+        #: up and taken over (`switch` of `Kernable.app`), or an operator switched to it.
+        self.serving = threading.Event()
+        #: Set once every worker and listener is connected and the app's deployment serves.
+        self.ready = _AllReady([s.ready for s in streams] + [self.serving])
         self._streams = streams
 
     def run(self) -> None:
         """Applies the membership (see `Kernable.apply`), then runs the worker and the listeners,
-        each in a thread of its own, until `stop()`; blocks until then. A failing handler does
+        each in a thread of its own, until `stop()`; blocks until then. If another deployment
+        serves the service, the kernel switches to this one only as the app's `switch` says: until
+        then the app runs beside it (workers idle, read models building), applies its membership
+        again every second, and registers its processes once it serves. A failing handler does
         not end it: a command handler's error rejects the command (`handler_error`), a listener
         handler's error makes the listener reconnect and get the event again. If a worker or
         listener itself fails, it stops the others and raises that error (a store that cannot
@@ -2465,9 +2563,41 @@ class App:
         started = time.monotonic()
         m = self.manifest
         models = [p.model() for p in m.processes]  # an invalid one stops the app before it starts
-        self._kernable.apply(service=m.service, workers=m.workers, listeners=m.listeners,
-                             middlewares=m.middlewares, metadata=m.metadata, processes=m.processes,
-                             deployment=m.deployment)
+        self._stopped = False
+        self.serving.clear()
+
+        def apply() -> None:
+            self._kernable.apply(service=m.service, workers=m.workers, listeners=m.listeners,
+                                 middlewares=m.middlewares, metadata=m.metadata, processes=m.processes,
+                                 deployment=m.deployment, switch=m.switch)
+
+        try:
+            apply()
+            self.serving.set()
+        except grpc.RpcError as err:
+            if not waits_for_switch(err):
+                raise
+            self._log.print("info", "app", f"deployment {m.deployment} runs beside the one that serves "
+                                           f"({err.details()})")
+
+        def switch_later() -> None:
+            # Applies the membership every second until the kernel takes it.
+            while not self._stopped:
+                time.sleep(1.0)
+                if self._stopped:
+                    return
+                try:
+                    apply()
+                except grpc.RpcError as err:
+                    if not waits_for_switch(err):
+                        self._log.print("warn", "app", f"applying the membership failed: {err.details()}")
+                    continue
+                self._log.print("info", "app", f"deployment {m.deployment} serves {m.service} now")
+                self.serving.set()
+                return
+
+        if not self.serving.is_set():
+            threading.Thread(target=switch_later, name="kernable switch", daemon=True).start()
         for s in self._streams:
             s.announce = False
         errors: list[BaseException] = []
@@ -2486,8 +2616,9 @@ class App:
                 self.stop()
 
         def register() -> None:
-            # Once the worker is connected, so the kernel knows the commands the models send.
-            while self.worker is not None and not self.worker.ready.wait(0.1):
+            # Once the app serves and the worker is connected, so the kernel knows the commands
+            # the models send.
+            while not self.serving.wait(0.1) or (self.worker is not None and not self.worker.ready.wait(0.1)):
                 if self._stopped:
                     return
             try:

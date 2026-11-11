@@ -305,8 +305,9 @@ pub(crate) fn render_standby(applied: u64, primary_head: u64) -> String {
     out
 }
 
-/// Serves `GET /metrics`, `GET /health` (the process runs) and `GET /ready` (see
-/// `Kernel::readiness`) until the listener fails. Deliberately minimal HTTP/1, each connection
+/// Serves `GET /metrics`, `GET /health` (the process runs), `GET /ready` (see
+/// `Kernel::readiness`) and `GET /ready?deployment=<d>` (see `Kernel::deployment_readiness`)
+/// until the listener fails. Deliberately minimal HTTP/1, each connection
 /// on its own, so a slow one cannot hold up the health checks.
 pub(crate) async fn serve(kernel: Arc<Kernel>, addr: &str) -> Result<(), BoxError> {
     tracing::info!(%addr, "serving metrics");
@@ -322,6 +323,18 @@ pub(crate) fn respond(kernel: &Kernel, request: &[u8]) -> Vec<u8> {
         )
     } else if request.starts_with(b"GET /health ") {
         reply("200 OK", "text/plain", b"ok\n")
+    } else if let Some(rest) = request.strip_prefix(b"GET /ready?deployment=".as_slice()) {
+        // How far a deployment is from taking over: 200 once it could.
+        let end = rest.iter().position(|b| *b == b' ').unwrap_or(rest.len());
+        let deployment = String::from_utf8_lossy(&rest[..end]).into_owned();
+        match kernel.deployment_readiness(&deployment) {
+            Ok(()) => reply("200 OK", "text/plain", b"caught up\n"),
+            Err(why) => reply(
+                "503 Service Unavailable",
+                "text/plain",
+                format!("{why}\n").as_bytes(),
+            ),
+        }
     } else if request.starts_with(b"GET /ready ") {
         match kernel.readiness() {
             Ok(()) => reply("200 OK", "text/plain", b"ready\n"),
