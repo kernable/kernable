@@ -992,6 +992,14 @@ impl Erasure {
         })
     }
 
+    /// Whether its command's context sets `bypass_authorization`.
+    pub fn privileged(&self) -> bool {
+        self.command
+            .as_ref()
+            .and_then(|c| c.context.as_ref())
+            .is_some_and(|c| c.bypass_authorization)
+    }
+
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             "record": self.record,
@@ -1008,6 +1016,9 @@ impl Erasure {
             // The command as stored (protobuf, hex): what `kernable erasures apply` submits again.
             "command": self.command.as_ref().map(|c| hex::encode(c.encode_to_vec())),
             "command_type": self.command.as_ref().map(|c| c.command_type.clone()),
+            // Its context sets bypass_authorization: whoever applies it again needs a key
+            // granted privileged for it.
+            "privileged": self.privileged(),
         })
     }
 
@@ -1419,6 +1430,8 @@ mod tests {
                     context: Some(RequestContext {
                         sender_identity: "support".into(),
                         expected_version: Some(3),
+                        // c4 a privileged one.
+                        bypass_authorization: id == "c4",
                         ..Default::default()
                     }),
                     ..Default::default()
@@ -1578,6 +1591,9 @@ mod tests {
         let text = plan_json("2026-11-04T13:39:00Z", &plan);
         assert_eq!(read_erasures(&text).unwrap(), plan.erasures);
         assert!(text.contains("\"vault_key\": \"k1\""), "{text}");
+        // c4 bypasses the domain's authorization: marked, for whoever applies it again.
+        assert!(!plan.erasures[1].privileged() && plan.erasures[2].privileged());
+        assert!(text.contains("\"privileged\": true"), "{text}");
 
         // To a record: the same, from the record on.
         let plan_r = super::plan(target.as_ref(), &key, Until::Record(4)).unwrap();

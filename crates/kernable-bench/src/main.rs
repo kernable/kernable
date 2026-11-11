@@ -11,12 +11,13 @@ use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
         Ack, AggregateIndex, ChallengeResponse, Command, Hello, ListenerMessage, NewEvent,
-        QueryAnswer, QueryRequest, Register, Result as WorkResult, StoredKey, SubmitRequest,
-        SubscribeRequest, UniqueKey, Wait, WorkerAggregate, WorkerMessage, command_result::Outcome,
-        command_service_client::CommandServiceClient, event_service_client::EventServiceClient,
-        kernel_message::Msg as Out, listener_delivery::Msg as Delivery,
-        listener_message::Msg as Listen, listener_service_client::ListenerServiceClient,
-        query_answer, query_result::Outcome as Answer, query_service_client::QueryServiceClient,
+        QueryAnswer, QueryRequest, Register, RequestContext, Result as WorkResult, StoredKey,
+        SubmitRequest, SubscribeRequest, UniqueKey, Wait, WorkerAggregate, WorkerMessage,
+        command_result::Outcome, command_service_client::CommandServiceClient,
+        event_service_client::EventServiceClient, kernel_message::Msg as Out,
+        listener_delivery::Msg as Delivery, listener_message::Msg as Listen,
+        listener_service_client::ListenerServiceClient, query_answer,
+        query_result::Outcome as Answer, query_service_client::QueryServiceClient,
         worker_gateway_client::WorkerGatewayClient, worker_message::Msg as In,
     },
     signing, transport,
@@ -42,6 +43,8 @@ fn granted<T>(message: T) -> tonic::Request<T> {
 const USAGE: &str = "usage:
   kernable-bench crypto
   kernable-bench store <store-url> [count]
+  kernable-bench erase <addr> <key> <subject> [privileged]   one bench.Erase command, the
+      worker's event erasing <subject>'s vault values; privileged: with bypass_authorization
   kernable-bench fill <store-url> <client.key> <worker.key> <from> <to> [payload]   writes commands from..to of the filled store
   kernable-bench worker <addr> <worker.key> [concurrency] [keys]   keys: every aggregate holds a unique key and a fact
   kernable-bench listener <addr> <listener.key> <name> <order>   acknowledges every event at once
@@ -117,6 +120,9 @@ async fn main() -> ExitCode {
         ["load", addr, key, opts @ ..] => load(addr, key, Opts::parse(opts)).await,
         ["history", addr, key, n] => history(addr, key, n.parse().unwrap_or(100)).await,
         ["probe", key, opts @ ..] => probe(key, opts).await,
+        ["erase", addr, key, subject, rest @ ..] => {
+            erase(addr, key, subject, rest.first() == Some(&"privileged")).await
+        }
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
@@ -265,7 +271,7 @@ async fn worker(addr: &str, key: &str, concurrency: u32, keys: bool) -> Result<(
         key_id: signing::key_id(&key.verifying_key()),
         aggregates: vec![WorkerAggregate {
             aggregate_type: "bench.Bench".into(),
-            command_types: vec!["bench.Write".into()],
+            command_types: vec!["bench.Write".into(), "bench.Erase".into()],
         }],
         max_concurrency: concurrency,
         ..Default::default()
@@ -283,10 +289,16 @@ async fn worker(addr: &str, key: &str, concurrency: u32, keys: bool) -> Result<(
             }),
             Some(Out::Execute(x)) => {
                 let cmd = x.command.unwrap_or_default();
+                // `Erase` erases the vault values of the subject its aggregate is.
+                let erase = cmd.command_type == "Erase";
                 let events = vec![NewEvent {
-                    erases: String::new(),
+                    erases: if erase {
+                        cmd.aggregate_id.clone()
+                    } else {
+                        String::new()
+                    },
                     vault_refs: Vec::new(),
-                    event_type: "Written".into(),
+                    event_type: if erase { "Erased" } else { "Written" }.into(),
                     payload: cmd.payload.clone(),
                     schema: 1,
                     origin_partition: String::new(),
@@ -916,6 +928,31 @@ async fn history(addr: &str, key: &str, events: usize) -> Result<(), BoxError> {
     }
     tally.report(&format!("history events={events}"), started.elapsed());
     Ok(())
+}
+
+/// One erasing command (`bench.Erase`) for `subject`: the worker answers it with an event
+/// that erases the subject's vault values. `privileged`: its context sets
+/// `bypass_authorization`. Prints its ID and the outcome.
+async fn erase(addr: &str, key: &str, subject: &str, privileged: bool) -> Result<(), BoxError> {
+    let key = signing::read_signing_key(key)?;
+    let mut cmd = command(&run_id(), 0, 1, b"{}");
+    cmd.aggregate_id = subject.to_owned();
+    cmd.command_type = "Erase".into();
+    cmd.context = Some(RequestContext {
+        bypass_authorization: privileged,
+        ..Default::default()
+    });
+    let id = cmd.command_id.clone();
+    match submit(connect(addr).await?, signed(&key, cmd), Wait::Committed).await? {
+        Outcome::Committed(_) => {
+            println!(
+                "erase {subject}: committed (command {id}{})",
+                if privileged { ", privileged" } else { "" }
+            );
+            Ok(())
+        }
+        other => Err(format!("erase {subject}: {other:?}").into()),
+    }
 }
 
 // ---- helpers ----
