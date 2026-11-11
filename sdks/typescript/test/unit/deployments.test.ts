@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { Kernable, domain, type ListenerHandle } from "../../src/index.ts";
+import { Kernable, domain, waitsForSwitch, type ListenerHandle } from "../../src/index.ts";
 import type { WireEvent } from "../../src/rpc.ts";
 import { Key, eventHash, membershipMessage } from "../../src/signing.ts";
 
@@ -171,4 +171,16 @@ test("an event newer than the code is parked, erasing or not; listeners that can
   } finally {
     done();
   }
+});
+
+test("an app waits beside while its deployment has not caught up or served before", () => {
+  for (const details of [
+    "not_caught_up: deployment v2 has not caught up",
+    "not_serving: shop is served by v1",
+    "served_before: deployment v1 served shop before and v2 serves it now",
+  ]) {
+    assert.ok(waitsForSwitch({ code: 9, details }), details);
+  }
+  assert.equal(waitsForSwitch({ code: 9, details: "key may not manage shop" }), false);
+  assert.equal(waitsForSwitch({ code: 14, details: "served_before" }), false);
 });

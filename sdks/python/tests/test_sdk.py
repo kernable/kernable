@@ -152,6 +152,25 @@ class DataAndCache(unittest.TestCase):
         self.assertEqual(away.exception.code(), grpc.StatusCode.UNAVAILABLE)
         self.assertLess(time.monotonic() - started, 2)
 
+        # A read is safe to repeat: asked again until its deadline, then refused.
+        impatient = Kernable(self.kernel.url, self.kernel.app_key, tenant="t1", context=alice, timeout_s=0.5)
+        self.addCleanup(impatient.close)
+        started = time.monotonic()
+        with self.assertRaises(grpc.RpcError) as away:
+            impatient.data.get("shop", "notes/n-1.txt")
+        self.assertEqual(away.exception.code(), grpc.StatusCode.UNAVAILABLE)
+        self.assertGreaterEqual(time.monotonic() - started, 0.3)
+        # Back while reads wait: they go through, at a single address too.
+        back = self.k.listener(guard)
+        self.addCleanup(back.stop)
+        threading.Timer(0.3, back.run).start()
+        started = time.monotonic()
+        self.assertEqual(as_alice.data.get("shop", "notes/n-1.txt").data, b"hi")
+        self.assertGreaterEqual(time.monotonic() - started, 0.25)
+        self.assertEqual([f.key for f in as_alice.data.list("shop", "notes/").files], ["notes/n-1.txt"])
+        self.assertEqual(as_alice.cache.get("shop", "rate/c-1"), b"1")
+        back.stop()
+
 
 class Connection(unittest.TestCase):
     def test_plain_text_goes_only_to_a_kernel_on_this_machine_unless_allowed(self):

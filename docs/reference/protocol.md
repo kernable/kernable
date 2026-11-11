@@ -385,6 +385,7 @@ without a membership, and a process without a service, count as listed.
 | `protocol` |  `uint32` | 3 | not signed |
 | `force` |  `bool` | 4 | Not signed. A membership that names another deployment than the one serving its service switches to it only once that deployment has caught up: every listener it lists registered for it within --deployment-switch-lag events of the head (or the deployment wrote events before: a rollback), and a worker of it connected for every aggregate it lists. Before, the apply fails FAILED_PRECONDITION `not_caught_up: ...` naming what it waits for. `force` switches at once anyway. |
 | `no_switch` |  `bool` | 5 | Not signed. Applies the membership only if it names the deployment that serves its service already (or the service has no membership yet); otherwise fails FAILED_PRECONDITION `not_serving: ...`. For a process that starts beside the serving deployment and leaves the switch to an operator (an app with switch `never`). |
+| `no_rollback` |  `bool` | 6 | Not signed. Refuses a switch to a deployment that served before (it wrote events) with FAILED_PRECONDITION `served_before: ...`: switching back is a rollback, which only an operator does (`kernable apply --deployment`). For an app with switch `caught-up`, so an older deployment's app that restarts runs beside the serving one instead of taking over. |
 
 ### ApplyResult
 

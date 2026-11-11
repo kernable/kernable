@@ -1634,10 +1634,14 @@ export interface Manifest {
 
 /**
  * When a membership switches its service to its deployment while another one serves:
- * - `"caught-up"` (default): once that deployment has caught up: its listed workers connected and
- *   its read models within the kernel's `--deployment-switch-lag` of the newest event, or it
- *   served before (a rollback). Until then the kernel refuses it (`not_caught_up`); an app runs
- *   beside the serving deployment meanwhile and applies again every second until it switches.
+ * - `"caught-up"` (default): once that deployment has caught up, and only to a deployment that
+ *   never served before: its listed workers connected and its read models within the kernel's
+ *   `--deployment-switch-lag` of the newest event. Until then the kernel refuses it
+ *   (`not_caught_up`); an app runs beside the serving deployment meanwhile and applies again
+ *   every second until it switches. A deployment that served before (it wrote events) is never
+ *   switched back to this way (`served_before`): its app runs beside, as with `"never"`, until
+ *   an operator rolls back (`kernable apply --deployment`). So an older deployment's app that
+ *   restarts during a rolling deploy does not take the service back.
  * - `"now"`: at once, caught up or not (`kernable apply --force`).
  * - `"never"`: never by itself: it applies only while its deployment serves already (or the
  *   service has no membership yet), else the kernel refuses it (`not_serving`). An app runs
@@ -1647,12 +1651,18 @@ export type Switch = "caught-up" | "now" | "never";
 
 /**
  * Whether the kernel refused a membership because it would switch its service to a deployment
- * that has not caught up yet (`not_caught_up`), or would switch at all with `switch: "never"`
- * (`not_serving`): applying it again may succeed later.
+ * that has not caught up yet (`not_caught_up`), back to one that served before with
+ * `switch: "caught-up"` (`served_before`), or at all with `switch: "never"` (`not_serving`):
+ * applying it again may succeed later, once the deployment caught up or an operator switched
+ * to it.
  */
 export function waitsForSwitch(err: unknown): boolean {
   const e = err as { code?: number; details?: unknown };
-  return e?.code === 9 /* FAILED_PRECONDITION */ && typeof e.details === "string" && /^not_(caught_up|serving)/.test(e.details);
+  return (
+    e?.code === 9 /* FAILED_PRECONDITION */ &&
+    typeof e.details === "string" &&
+    /^(not_caught_up|not_serving|served_before)/.test(e.details)
+  );
 }
 
 /** `KERNABLE_SWITCH`, else `"caught-up"`. */
@@ -1680,8 +1690,10 @@ export interface AppOptions {
   domains: Domain[];
   /**
    * When the app's deployment takes the service over from another one that serves it (see
-   * `Switch`): by default once its read models have caught up; meanwhile it runs beside the
-   * serving deployment, its workers idle and its read models building. Default:
+   * `Switch`): by default once its read models have caught up, if the deployment never served
+   * before; meanwhile it runs beside the serving deployment, its workers idle and its read
+   * models building. One that served before (an older deployment's app restarting) runs beside
+   * until an operator rolls back. Default:
    * `KERNABLE_SWITCH`, else `"caught-up"`.
    */
   switch?: Switch;
@@ -1751,10 +1763,10 @@ export interface Options {
   /**
    * How long a request (`submit`, `query`, files, cache, `apply`) waits in all: for the
    * connection, e.g. while the kernel restarts, and for its answer. Default 60 000 ms, above
-   * the kernel's own submit and settle timeouts. A submit (by its command ID), a cancel or a
-   * query that a kernel answers `UNAVAILABLE` (shutting down, handing over, a middleware or read
-   * model not connected) is asked again with backoff within this time; any other request may
-   * have run, and fails at once.
+   * the kernel's own submit and settle timeouts. A submit (by its command ID), a cancel, a
+   * query or a data or cache read (get, list) that a kernel answers `UNAVAILABLE` (shutting
+   * down, handing over, a middleware or read model not connected) is asked again with backoff
+   * within this time; any other request (a write) may have run, and fails at once.
    */
   timeoutMs?: number;
 }
@@ -2101,7 +2113,11 @@ export class Kernable {
       processes: (manifest.processes ?? []).map((p) => (typeof p === "string" ? p : p.qualified)),
       deployment: validDeployment(manifest.deployment ?? this.deployment),
     };
-    const flags = { force: manifest.switch === "now", no_switch: manifest.switch === "never" };
+    const flags = {
+      force: manifest.switch === "now",
+      no_switch: manifest.switch === "never",
+      no_rollback: (manifest.switch ?? "caught-up") === "caught-up",
+    };
     await (await this.clients.control()).apply(membership, this.key.sign(membershipMessage(membership)), flags);
   }
 

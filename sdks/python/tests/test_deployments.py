@@ -155,7 +155,7 @@ class WarmUp(unittest.TestCase):
         self.addCleanup(k.close)
         app = k.app(domains=[shop], switch=switch)
         self.addCleanup(app.stop)
-        background(app.run)
+        self.thread = background(app.run)
         return k, app, seen
 
     def test_a_new_deployment_warms_up_beside_the_serving_one_before_it_takes_over(self):
@@ -169,6 +169,7 @@ class WarmUp(unittest.TestCase):
             return outcome.events[0].deployment
 
         _, v1, _ = self.app("v1", "caught-up")
+        running1 = self.thread
         self.assertTrue(v1.ready.wait(10), "v1 serves")
         self.assertEqual((by("c1"), by("c2")), ("v1", "v1"))
 
@@ -197,6 +198,24 @@ class WarmUp(unittest.TestCase):
                 time.sleep(0.05)
         self.assertTrue(v2.ready.wait(10), "v2 serves")
         self.assertEqual(by("c5"), "v2")
+
+        # v1's app restarts (switch caught-up): v1 served before, so it runs beside and does not
+        # take the service back, although it catches up.
+        v1.stop()
+        running1.join(10)
+        self.assertFalse(running1.is_alive(), "v1 stops")
+        k1, v1, seen1 = self.app("v1", "caught-up")
+        self.assertTrue(v1.connected.wait(10), "v1 connects again")
+        self.assertTrue(eventually(lambda: len(seen1) >= 5))
+        self.assertFalse(v1.serving.wait(1.5), "a restarted v1 does not switch back by itself")
+        self.assertEqual(by("c6"), "v2")
+
+        # Only an operator's rollback switches back to it.
+        m = v1.manifest
+        k1.apply(service=m.service, workers=m.workers, listeners=m.listeners, middlewares=m.middlewares,
+                 processes=m.processes, deployment="v1", switch="now")
+        self.assertTrue(v1.ready.wait(10), "v1 serves again")
+        self.assertEqual(by("c7"), "v1")
 
 
 if __name__ == "__main__":

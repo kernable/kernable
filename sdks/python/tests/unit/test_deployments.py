@@ -11,7 +11,7 @@ from unittest import mock
 
 import grpc
 
-from kernable import Kernable, ListenerHandle, Worker, _Log, domain
+from kernable import Kernable, ListenerHandle, Worker, _Log, domain, waits_for_switch
 from kernable.signing import Key
 from kernable.v1 import kernable_pb2 as pb
 
@@ -126,6 +126,27 @@ class ListenerTest(unittest.TestCase):
         listener.on("ItemAdded", lambda data, evt: seen.append(evt.schema), raw=True)
         _, parked, skipped = self.run_batch(listener, [event(1, "ItemAdded", 2, {})])
         self.assertEqual((seen, parked, skipped), ([2], [], []))
+
+
+class _Refused(grpc.RpcError):
+    def __init__(self, code, details):
+        self._code, self._details = code, details
+
+    def code(self):
+        return self._code
+
+    def details(self):
+        return self._details
+
+
+class SwitchTest(unittest.TestCase):
+    def test_an_app_waits_beside_while_its_deployment_has_not_caught_up_or_served_before(self):
+        fp = grpc.StatusCode.FAILED_PRECONDITION
+        for details in ("not_caught_up: deployment v2 has not caught up", "not_serving: shop is served by v1",
+                        "served_before: deployment v1 served shop before and v2 serves it now"):
+            self.assertTrue(waits_for_switch(_Refused(fp, details)), details)
+        self.assertFalse(waits_for_switch(_Refused(fp, "key may not manage shop")))
+        self.assertFalse(waits_for_switch(_Refused(grpc.StatusCode.UNAVAILABLE, "served_before")))
 
 
 if __name__ == "__main__":

@@ -319,6 +319,29 @@ async fn a_new_deployment_warms_up_beside_the_serving_one_before_it_takes_over()
     within("v2 serves", v2.ready()).await;
     assert_eq!(by(kernable.submit(add("c5")).await.unwrap()), "v2");
 
+    // v1's app restarts (switch caught-up): v1 served before, so it runs beside and does not
+    // take the service back, although it catches up.
+    v1.stop();
+    running1.await.unwrap().unwrap();
+    let v1 = shop_app(&kernel, "v1", Switch::CaughtUp);
+    let running1 = start(&v1);
+    within("v1 connects again", v1.connected()).await;
+    eventually(|| v1.listeners()[0].position() >= 5).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1500), v1.serving())
+            .await
+            .is_err(),
+        "a restarted v1 does not switch back by itself"
+    );
+    assert_eq!(by(kernable.submit(add("c6")).await.unwrap()), "v2");
+
+    // Only an operator's rollback switches back to it.
+    let operator = Kernable::new(kernel.options().deployment("v1")).unwrap();
+    let rollback = v1.manifest().clone().deployment("v1").switch(Switch::Now);
+    operator.apply(rollback).await.unwrap();
+    within("v1 serves again", v1.ready()).await;
+    assert_eq!(by(kernable.submit(add("c7")).await.unwrap()), "v1");
+
     for app in [&v1, &v2, &v3] {
         app.stop();
     }

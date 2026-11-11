@@ -2925,6 +2925,7 @@ async fn apply_once(
         protocol: kernable_core::PROTOCOL,
         force,
         no_switch: false,
+        no_rollback: false,
     });
     with_key_grant(&mut request, key_path)?;
     MembershipServiceClient::new(connect(addr).await?)

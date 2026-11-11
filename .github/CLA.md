@@ -8,8 +8,13 @@ your contributions, so that kernable can keep developing, distributing and licen
 and so that you and every user are protected. You keep the copyright in your contributions; this
 agreement only grants a license to use them.
 
-You accept this agreement by signing it through the CLA check on your first pull request. It then
-applies to all your contributions to the project, past and future.
+You accept this agreement by posting the following sentence, unchanged, as a comment on your first
+pull request when the maintainer asks you to; the maintainer keeps a record of it:
+
+> I have read the kernable Individual Contributor License Agreement in .github/CLA.md and I agree
+> to it for all my contributions to kernable.
+
+It then applies to all your contributions to the project, past and future.
 
 ## 1. Definitions
 

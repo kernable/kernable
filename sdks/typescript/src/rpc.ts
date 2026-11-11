@@ -412,7 +412,7 @@ export interface Clients {
   data(op: DataOp, req: WireDataRequest): Promise<WireDataResult>;
   listData(req: WireDataRequest): Promise<WireDataList>;
   cache(op: CacheOp, req: WireCacheRequest): Promise<WireCacheResult>;
-  apply(membership: WireMembership, sig: WireSignature, flags?: { force?: boolean; no_switch?: boolean }): Promise<void>;
+  apply(membership: WireMembership, sig: WireSignature, flags?: { force?: boolean; no_switch?: boolean; no_rollback?: boolean }): Promise<void>;
   /** Registers a process model (`ProcessService.Register`). */
   registerProcess(req: WireProcessRegistration): Promise<WireProcessRegistered>;
   /** Sets as whom a process acts (`ProcessService.Act`). */
@@ -677,7 +677,7 @@ export function connect(url: string, tls?: TlsFiles, grant?: string, timeoutMs =
   // A unary call with the grant and the protocol version: it waits for the connection, then
   // for the answer, until the deadline; with several addresses, it turns to the next one when
   // one does not connect within a second or answers UNAVAILABLE. An `idempotent` call (a submit,
-  // by its command ID; a cancel; a query; the partition map) also asks a single address again
+  // by its command ID; a cancel; a query; a data or cache read; the partition map) also asks a single address again
   // after UNAVAILABLE, with backoff until the deadline; any other may have run, so the error is
   // final. A tenant that moves is waited for by the caller (`moving`).
   const unary = async <R>(service: keyof Target, rpc: string, req: object, ms = timeoutMs, idempotent = false): Promise<R> => {
@@ -741,9 +741,10 @@ export function connect(url: string, tls?: TlsFiles, grant?: string, timeoutMs =
     query: (req, ms) => unary<WireQueryResult>("queries", "Query", req, ms, true),
     cancel: (req, ms) => unary<WireCancelResult>("commands", "Cancel", req, ms, true),
     subscribe: (req) => stream((t) => t.events.Subscribe({ ...req, protocol: PROTOCOL }, metadata)),
-    data: (op, req) => unary("data", op, req),
-    listData: (req) => unary("data", "ListData", req),
-    cache: (op, req) => unary("cache", op, req),
+    // Reads are safe to repeat; a write is one-shot (the kernel's replay guard), so never.
+    data: (op, req) => unary("data", op, req, timeoutMs, op === "GetData"),
+    listData: (req) => unary("data", "ListData", req, timeoutMs, true),
+    cache: (op, req) => unary("cache", op, req, timeoutMs, op === "GetCache"),
     apply: async (membership, sig, flags = {}) => {
       await unary("memberships", "Apply", { membership, sig, ...flags });
     },

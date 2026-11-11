@@ -409,19 +409,25 @@ async fn read_models_run_per_deployment_and_only_the_serving_one_counts() {
     assert_eq!(names, ["carts@v1", "carts@v2", "mailer"]);
 }
 
-/// Applies `m` until the kernel takes it, for up to 2 s.
+/// Applies `m` as an app with switch `caught-up` does (`no_rollback`) until the kernel takes
+/// it, for up to 2 s.
 async fn apply_eventually(env: &Env, m: &kernable_core::proto::Membership) {
     for _ in 0..100 {
-        if apply(&env.addr, m.clone()).await.is_ok() {
+        if apply_switching(&env.addr, m.clone(), false, false, true)
+            .await
+            .is_ok()
+        {
             return;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    apply(&env.addr, m.clone()).await.unwrap();
+    apply_switching(&env.addr, m.clone(), false, false, true)
+        .await
+        .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_new_deployment_takes_over_only_once_caught_up_and_a_rollback_at_once() {
+async fn a_new_deployment_takes_over_only_once_caught_up_and_only_an_operator_rolls_back() {
     let metrics = free_addr();
     let env = start_custom("deployments-warm-up", |config, _| {
         config.metrics_listen = Some(metrics.clone());
@@ -453,7 +459,7 @@ async fn a_new_deployment_takes_over_only_once_caught_up_and_a_rollback_at_once(
     assert!(ready.starts_with("HTTP/1.1 503"), "{ready}");
     assert!(ready.contains("carts@v2 at 0 of 1"), "{ready}");
     // An app that leaves the switch to an operator is refused as well, whatever the state.
-    let kept = apply_switching(&env.addr, m2.clone(), false, true)
+    let kept = apply_switching(&env.addr, m2.clone(), false, true, false)
         .await
         .unwrap_err();
     assert!(
@@ -471,7 +477,27 @@ async fn a_new_deployment_takes_over_only_once_caught_up_and_a_rollback_at_once(
     assert_eq!(written[0].deployment, "v2");
     carts2.through(2).await;
 
-    // Back to v1, which served before: at once, although its read model is one event behind.
+    // An app of v2 that restarts applies again: the serving deployment, nothing switches.
+    apply_switching(&env.addr, m2.clone(), false, false, true)
+        .await
+        .unwrap();
+    // An app of v1 that restarts (switch caught-up, no_rollback) does not switch back.
+    let restarted = apply_switching(&env.addr, m1.clone(), false, false, true)
+        .await
+        .unwrap_err();
+    assert_eq!(restarted.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        restarted
+            .message()
+            .starts_with("served_before: deployment v1 served shop before and v2 serves it now"),
+        "{}",
+        restarted.message()
+    );
+    let written = events(&run(&env, "a3", "AddItem", "a").await);
+    assert_eq!(written[0].deployment, "v2");
+
+    // Back to v1, which served before, by an operator: at once, although its read model is
+    // behind.
     let mut back = m1.clone();
     back.metadata = vec![kernable_core::proto::Attribute {
         key: "rollback".into(),
@@ -490,7 +516,9 @@ async fn a_new_deployment_takes_over_only_once_caught_up_and_a_rollback_at_once(
     );
     let ready = get(&metrics, "/ready?deployment=v3").await;
     assert!(ready.contains("nothing of it is connected"), "{ready}");
-    apply_switching(&env.addr, m3, true, false).await.unwrap();
+    apply_switching(&env.addr, m3, true, false, false)
+        .await
+        .unwrap();
     drop((carts1, carts2));
 }
 

@@ -116,7 +116,7 @@ A domain declares per event type its current `schema` and an upcast from each ol
 
 ## 9. Memberships and apps
 
-- **`apply(manifest)`** sends a `Membership` to `MembershipService.Apply`: the service, the qualified aggregate types of its workers, the names of its listeners and of its middlewares, metadata in the given order, and `issued_at` now, signed over `kernable.v1.membership`. The key needs `manage` for the service.
+- **`apply(manifest)`** sends a `Membership` to `MembershipService.Apply`: the service, the qualified aggregate types of its workers, the names of its listeners and of its middlewares, metadata in the given order, and `issued_at` now, signed over `kernable.v1.membership`. The key needs `manage` for the service. Its switch (`caught-up` default, `now`, `never`) sets the request's unsigned flags: `caught-up` sends `no_rollback` (never switch back to a deployment that served before), `now` sends `force`, `never` sends `no_switch`. Treat the refusals `not_caught_up`, `not_serving` and `served_before` (`FAILED_PRECONDITION`) as "not yet" (`waitsForSwitch`).
 - **`app({ service, version, description, domains })`** runs whole domains as one service. Its `run()` applies the membership (all aggregates as workers; durable listeners without middlewares as listeners, those with one as middlewares; live listeners not listed; `version` and `description` in the metadata), then runs one worker and every listener.
 
 See [Remove a listener, middleware or aggregate](./remove-listener).
@@ -128,7 +128,7 @@ Pass the kernel's gRPC status to the caller with its code, so callers can act on
 | What | Where | SDK |
 |---|---|---|
 | `NOT_FOUND` | submit | No worker registered the aggregate or command type, and no membership lists it. Raise it. |
-| `UNAVAILABLE` | submit, query | A middleware is away, no read model answers, or the kernel is shutting down. A call that is safe to repeat (a submit, by its command ID; a cancel; a query; the partition map) is sent again with backoff (50 ms doubling to 200 ms) until its deadline, at one address too; then raise the last status. A connection that dropped under the request is retried for 5 s only, so a crashed kernel reaches the caller. Raise any other call's at once: it may have run. On a stream: reconnect. |
+| `UNAVAILABLE` | submit, query, data, cache | A middleware is away, no read model answers, or the kernel is shutting down. A call that is safe to repeat (a submit, by its command ID; a cancel; a query; a data or cache read: get, list; the partition map) is sent again with backoff (50 ms doubling to 200 ms) until its deadline, at one address too; then raise the last status. A connection that dropped under the request is retried for 5 s only, so a crashed kernel reaches the caller. Raise any other call's at once (a data or cache write is one-shot): it may have run. On a stream: reconnect. |
 | `PERMISSION_DENIED` | any call or stream | The grant does not allow it, or the key is revoked. Raise it; on a stream, log and reconnect. |
 | `FAILED_PRECONDITION` | any | Unsupported protocol version, an outdated worker, or a handler request that would wait for its own listener. Raise it. |
 | `version_mismatch` and other rejections | submit outcome | Not an error: return `committed: false` with the code. |

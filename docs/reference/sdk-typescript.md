@@ -630,10 +630,14 @@ export type Switch = "caught-up" | "now" | "never";
 ```
 
 When a membership switches its service to its deployment while another one serves:
-- `"caught-up"` (default): once that deployment has caught up: its listed workers connected and
-  its read models within the kernel's `--deployment-switch-lag` of the newest event, or it
-  served before (a rollback). Until then the kernel refuses it (`not_caught_up`); an app runs
-  beside the serving deployment meanwhile and applies again every second until it switches.
+- `"caught-up"` (default): once that deployment has caught up, and only to a deployment that
+  never served before: its listed workers connected and its read models within the kernel's
+  `--deployment-switch-lag` of the newest event. Until then the kernel refuses it
+  (`not_caught_up`); an app runs beside the serving deployment meanwhile and applies again
+  every second until it switches. A deployment that served before (it wrote events) is never
+  switched back to this way (`served_before`): its app runs beside, as with `"never"`, until
+  an operator rolls back (`kernable apply --deployment`). So an older deployment's app that
+  restarts during a rolling deploy does not take the service back.
 - `"now"`: at once, caught up or not (`kernable apply --force`).
 - `"never"`: never by itself: it applies only while its deployment serves already (or the
   service has no membership yet), else the kernel refuses it (`not_serving`). An app runs
@@ -644,8 +648,10 @@ When a membership switches its service to its deployment while another one serve
 `export function waitsForSwitch(err: unknown): boolean`
 
 Whether the kernel refused a membership because it would switch its service to a deployment
-that has not caught up yet (`not_caught_up`), or would switch at all with `switch: "never"`
-(`not_serving`): applying it again may succeed later.
+that has not caught up yet (`not_caught_up`), back to one that served before with
+`switch: "caught-up"` (`served_before`), or at all with `switch: "never"` (`not_serving`):
+applying it again may succeed later, once the deployment caught up or an operator switched
+to it.
 
 ### AppOptions
 
@@ -657,7 +663,7 @@ An app: one service made of whole domains, for `Kernable.app`. `version`, `descr
 - `description?: string`: One line about the app.
 - `metadata?: Record<string, string>`: More metadata.
 - `domains: Domain[]`: Every aggregate, read model and reactor defined on them runs in this app; their processes are registered.
-- `switch?: Switch`: When the app's deployment takes the service over from another one that serves it (see `Switch`): by default once its read models have caught up; meanwhile it runs beside the serving deployment, its workers idle and its read models building. Default: `KERNABLE_SWITCH`, else `"caught-up"`.
+- `switch?: Switch`: When the app's deployment takes the service over from another one that serves it (see `Switch`): by default once its read models have caught up, if the deployment never served before; meanwhile it runs beside the serving deployment, its workers idle and its read models building. One that served before (an older deployment's app restarting) runs beside until an operator rolls back. Default: `KERNABLE_SWITCH`, else `"caught-up"`.
 
 ### Options
 
@@ -675,7 +681,7 @@ a missing key file, an explicitly named grant file or a missing TLS file throws.
 - `context?: RequestContext`: Default request context for `submit`, `enqueue`, `query` and the requests of `data` and `cache`, e.g. this service's identity; a request's own `context` replaces it as a whole. Default: empty.
 - `tls?: TlsFiles`: Mutual TLS for `host:port` URLs: paths of the CA certificate and this process's certificate and key. Default: `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`, if set.
 - `insecure?: boolean`: Allows plain text to a kernel that is not on this machine. Without TLS, grants, signed requests and vault values cross the network readable, so the client refuses such a URL unless this is set. Default: `KERNABLE_INSECURE=1`, else false.
-- `timeoutMs?: number`: How long a request (`submit`, `query`, files, cache, `apply`) waits in all: for the connection, e.g. while the kernel restarts, and for its answer. Default 60 000 ms, above the kernel's own submit and settle timeouts. A submit (by its command ID), a cancel or a query that a kernel answers `UNAVAILABLE` (shutting down, handing over, a middleware or read model not connected) is asked again with backoff within this time; any other request may have run, and fails at once.
+- `timeoutMs?: number`: How long a request (`submit`, `query`, files, cache, `apply`) waits in all: for the connection, e.g. while the kernel restarts, and for its answer. Default 60 000 ms, above the kernel's own submit and settle timeouts. A submit (by its command ID), a cancel, a query or a data or cache read (get, list) that a kernel answers `UNAVAILABLE` (shutting down, handing over, a middleware or read model not connected) is asked again with backoff within this time; any other request (a write) may have run, and fails at once.
 
 ### SubmitOptions
 

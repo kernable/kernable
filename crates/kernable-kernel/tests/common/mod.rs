@@ -681,6 +681,7 @@ pub async fn apply_switching(
     mut membership: Membership,
     force: bool,
     no_switch: bool,
+    no_rollback: bool,
 ) -> Result<(), tonic::Status> {
     membership.issued_at = issued_now();
     let key_ = key(1);
@@ -693,6 +694,7 @@ pub async fn apply_switching(
         protocol: kernable_core::PROTOCOL,
         force,
         no_switch,
+        no_rollback,
     };
     let channel = transport::connect(addr).await.unwrap();
     MembershipServiceClient::new(channel)

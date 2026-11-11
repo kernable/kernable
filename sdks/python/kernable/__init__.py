@@ -1632,10 +1632,12 @@ def _switch(switch: str) -> str:
 
 def waits_for_switch(err: BaseException) -> bool:
     """Whether the kernel refused a membership because it would switch its service to a
-    deployment that has not caught up yet (`not_caught_up`), or would switch at all with
-    `switch="never"` (`not_serving`): applying it again may succeed later."""
+    deployment that has not caught up yet (`not_caught_up`), back to one that served before with
+    `switch="caught-up"` (`served_before`), or at all with `switch="never"` (`not_serving`):
+    applying it again may succeed later, once the deployment caught up or an operator switched
+    to it."""
     return (isinstance(err, grpc.RpcError) and err.code() == grpc.StatusCode.FAILED_PRECONDITION
-            and (err.details() or "").startswith(("not_caught_up", "not_serving")))
+            and (err.details() or "").startswith(("not_caught_up", "not_serving", "served_before")))
 
 # The first pause before an idempotent call asks a kernel that answered UNAVAILABLE again; it
 # doubles up to the second.
@@ -1657,9 +1659,9 @@ def _connection_dropped(err: grpc.RpcError) -> bool:
 def _idempotent(timeout_s: float, call: Callable[[float], Any]) -> Any:
     """`call(left)` (a request with `left` seconds to go) for a call that is safe to repeat: a
     submit, by its command ID (the kernel answers a resubmission with the stored result); a
-    cancel; a query. A kernel that answers `UNAVAILABLE` (shutting down, handing over, a read
-    model or middleware not connected yet, a connection that dropped) is asked again with backoff
-    until `timeout_s` passed, at a single address too; then the last error is raised. A tenant
+    cancel; a query; a data or cache read. A kernel that answers `UNAVAILABLE` (shutting down,
+    handing over, a read model or middleware not connected yet, a connection that dropped) is
+    asked again with backoff until `timeout_s` passed, at a single address too; then the last error is raised. A tenant
     that moves is waited for by `_Partitioned.route`."""
     deadline = time.monotonic() + timeout_s
     pause = _RETRY_PAUSE_S
@@ -1928,8 +1930,9 @@ class Kernable:
         service is one app: two processes with the same service would replace each other's
         membership. `switch` says when the app's deployment takes the service over from another
         one that serves it (see `apply`): by default (`"caught-up"`) once its read models have
-        caught up; meanwhile it runs beside the serving deployment, its workers idle and its read
-        models building. Default: `KERNABLE_SWITCH`, else `"caught-up"`. Raises `ValueError` if
+        caught up, if the deployment never served before; meanwhile it runs beside the serving
+        deployment, its workers idle and its read models building. One that served before (an
+        older deployment's app restarting) runs beside until an operator rolls back. Default: `KERNABLE_SWITCH`, else `"caught-up"`. Raises `ValueError` if
         neither `service` nor the client names a service, or for an unknown `switch`."""
         switch = _switch(switch if switch is not None else os.environ.get("KERNABLE_SWITCH") or "caught-up")
         service = service or self._service
@@ -1967,8 +1970,10 @@ class Kernable:
         membership naming the earlier deployment. Empty: every deployment serves. `switch` says
         when a membership that names another deployment than the serving one switches to it:
         `"caught-up"` (default) once that deployment has caught up (its listed workers connected,
-        its read models within the kernel's `--deployment-switch-lag` of the newest event, or it
-        served before: a rollback), refused before as `not_caught_up`; `"now"` at once;
+        its read models within the kernel's `--deployment-switch-lag` of the newest event),
+        refused before as `not_caught_up`, and never back to a deployment that served before (it
+        wrote events), refused as `served_before`: switching back is a rollback, which an
+        operator does (`kernable apply --deployment`); `"now"` at once;
         `"never"`: applied only while its deployment serves already (or the service has no
         membership yet), refused otherwise as `not_serving`. See `waits_for_switch`.
 
@@ -1992,7 +1997,8 @@ class Kernable:
         switch = _switch(switch)
         rpc.MembershipServiceStub(self._parts.control()).Apply(
             pb.ApplyRequest(membership=membership, sig=self._key.sign(membership_message(membership)),
-                            protocol=PROTOCOL, force=switch == "now", no_switch=switch == "never"))
+                            protocol=PROTOCOL, force=switch == "now", no_switch=switch == "never",
+                            no_rollback=switch == "caught-up"))
 
     def process_act(self, name: str, context: RequestContext) -> bool:
         """Sets as whom the process `name` (qualified: `shop.fulfilment`) acts: the request context
@@ -2288,6 +2294,9 @@ class DataClient:
                            issued_at=_issued_now(), protocol=PROTOCOL,
                            context=_to_wire_context(context or self._k._context, ""), **fields)
         r.client_sig.CopyFrom(self._k._key.sign(data_message(op, r)))
+        if op in ("get", "list"):  # safe to repeat; a write is one-shot (the kernel's replay guard)
+            return self._k._parts.route(r.tenant_id, lambda ch: _idempotent(
+                self._k._timeout_s, lambda left: getattr(self._stub(ch), method)(r, timeout=left)))
         return self._k._parts.route(r.tenant_id, lambda ch: getattr(self._stub(ch), method)(r))
 
 
@@ -2332,6 +2341,9 @@ class CacheClient:
                             issued_at=_issued_now(), protocol=PROTOCOL,
                             context=_to_wire_context(context or self._k._context, ""), **fields)
         r.client_sig.CopyFrom(self._k._key.sign(cache_message(op, r)))
+        if op == "get":  # safe to repeat; a write is one-shot (the kernel's replay guard)
+            return self._k._parts.route(r.tenant_id, lambda ch: _idempotent(
+                self._k._timeout_s, lambda left: getattr(self._stub(ch), method)(r, timeout=left)))
         return self._k._parts.route(r.tenant_id, lambda ch: getattr(self._stub(ch), method)(r))
 
 

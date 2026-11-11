@@ -204,15 +204,37 @@ impl MembershipService for Api {
                 "membership expired; check the clock",
             ));
         }
-        take(kernel, m, sig, req.force, req.no_switch)?;
+        take(
+            kernel,
+            m,
+            sig,
+            Switching {
+                force: req.force,
+                no_switch: req.no_switch,
+                no_rollback: req.no_rollback,
+            },
+        )?;
         Ok(Response::new(ApplyResult {}))
     }
+}
+
+/// How a membership that names another deployment than the serving one may switch to it
+/// (`ApplyRequest`'s unsigned flags).
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Switching {
+    /// Switch at once, caught up or not.
+    pub(crate) force: bool,
+    /// Refuse any switch (`not_serving`).
+    pub(crate) no_switch: bool,
+    /// Refuse a switch to a deployment that served before (`served_before`): a rollback.
+    pub(crate) no_rollback: bool,
 }
 
 /// Takes a signed membership into effect: its signer must be granted `manage` for the service,
 /// and it must be newer than the applied one (an equal one changes nothing). One that switches
 /// the service to another deployment waits until that deployment has caught up
-/// (`deployments::warm_up`) unless `force`d; with `no_switch` one that would switch is refused.
+/// (`deployments::warm_up`) unless `force`d; with `no_switch` one that would switch is refused,
+/// with `no_rollback` one that would switch back to a deployment that served before.
 /// For `Apply` after its age was checked, and for the
 /// memberships a partition takes from the control partition, which are older (forced: the
 /// control partition decided).
@@ -220,9 +242,13 @@ pub(crate) fn take(
     kernel: &Arc<Kernel>,
     m: Membership,
     sig: Signature,
-    force: bool,
-    no_switch: bool,
+    switching: Switching,
 ) -> Result<(), Status> {
+    let Switching {
+        force,
+        no_switch,
+        no_rollback,
+    } = switching;
     validate(&m)?;
     if !config::allowed(&kernel.permissions().manage, &sig.key_id, &m.service) {
         return Err(Status::permission_denied(format!(
@@ -261,6 +287,19 @@ pub(crate) fn take(
     {
         let warm =
             crate::deployments::warm_up(kernel, &m.deployment, Some(&m)).map_err(internal)?;
+        if no_rollback && warm.served_before {
+            return Err(Status::failed_precondition(format!(
+                "served_before: deployment {} served {} before and {} serves it now; switching back is a rollback: kernable apply --deployment {}",
+                m.deployment,
+                m.service,
+                if serving.is_empty() {
+                    "every deployment"
+                } else {
+                    serving
+                },
+                m.deployment
+            )));
+        }
         if let Some(why) = warm.why_not() {
             return Err(Status::failed_precondition(format!(
                 "not_caught_up: {why}; it takes {} over once it has (apply again), or force the switch",

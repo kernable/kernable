@@ -178,6 +178,23 @@ test("a new deployment warms up beside the serving one before it takes over", as
     }
     await within(v2.app.ready, "v2 serves");
     assert.equal(await by("c5"), "v2");
+
+    // v1's app restarts (switch caught-up): v1 served before, so it runs beside and does not
+    // take the service back, although it catches up.
+    v1.app.stop();
+    await running[0];
+    const v1b = start("v1", "caught-up");
+    await within(v1b.app.connected, "v1 connects again");
+    await eventually(() => v1b.seen() >= 5);
+    assert.equal(v1b.seen(), 5);
+    const back = await Promise.race([v1b.app.serving.then(() => true), new Promise((r) => setTimeout(() => r(false), 1_500))]);
+    assert.equal(back, false, "a restarted v1 does not switch back by itself");
+    assert.equal(await by("c6"), "v2");
+
+    // Only an operator's rollback switches back to it.
+    await v1b.k.apply({ ...v1b.app.manifest, switch: "now" });
+    await within(v1b.app.ready, "v1 serves again");
+    assert.equal(await by("c7"), "v1");
   } finally {
     for (const a of apps) a.app.stop();
     await Promise.all(running);

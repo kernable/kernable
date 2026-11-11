@@ -127,7 +127,7 @@ impl Files {
                 let request = request.clone();
                 async move {
                     client
-                        .call(None, request, |channel, r| {
+                        .call_with(None, request, true, |channel, r| {
                             let mut service = Self::service(channel);
                             async move { service.get_data(r).await }
                         })
@@ -155,7 +155,7 @@ impl Files {
                 let request = request.clone();
                 async move {
                     client
-                        .call(None, request, |channel, r| {
+                        .call_with(None, request, true, |channel, r| {
                             let mut service = Self::service(channel);
                             async move { service.list_data(r).await }
                         })
@@ -308,7 +308,7 @@ impl Cache {
                 let request = request.clone();
                 async move {
                     client
-                        .call(None, request, |channel, r| {
+                        .call_with(None, request, true, |channel, r| {
                             let mut service = Self::service(channel);
                             async move { service.get_cache(r).await }
                         })

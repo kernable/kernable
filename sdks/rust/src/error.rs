@@ -119,11 +119,15 @@ pub enum Error {
 
 impl Error {
     /// Whether the kernel refused a membership because it would switch its service to a
-    /// deployment that has not caught up yet (`not_caught_up`), or would switch at all while
-    /// [`crate::Switch::Never`] (`not_serving`): applying it again may succeed later.
+    /// deployment that has not caught up yet (`not_caught_up`), back to one that served before
+    /// while [`crate::Switch::CaughtUp`] (`served_before`), or at all while
+    /// [`crate::Switch::Never`] (`not_serving`): applying it again may succeed later, once
+    /// the deployment caught up or an operator switched to it.
     pub fn waits_for_switch(&self) -> bool {
         matches!(self, Error::Status(s) if s.code() == tonic::Code::FailedPrecondition
-            && (s.message().starts_with("not_caught_up") || s.message().starts_with("not_serving")))
+            && ["not_caught_up", "not_serving", "served_before"]
+                .iter()
+                .any(|reason| s.message().starts_with(reason)))
     }
 }
 

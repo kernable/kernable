@@ -173,11 +173,13 @@ test("a middleware checks file and cache requests before they run", async () => 
   const stranger = new Kernable({ url: kernel.url, key: kernel.appKey });
 
   const checked: Check[] = [];
-  const guard = alice.listener(domain("shop").readModel("guard").middleware({ types: ["shop.*"] }, (check) => {
+  const guardDef = domain("shop").readModel("guard").middleware({ types: ["shop.*"] }, (check) => {
     checked.push(check);
     if (check.request.senderIdentity !== "alice") throw new Rejected("unknown sender", "forbidden");
-  }));
-  const running = guard.run();
+  });
+  const guard = alice.listener(guardDef);
+  const back = alice.listener(guardDef);
+  let running = guard.run();
   try {
     await guard.ready;
     const denied = { code: status.PERMISSION_DENIED, details: "forbidden: unknown sender" };
@@ -210,8 +212,31 @@ test("a middleware checks file and cache requests before they run", async () => 
     const started = Date.now();
     await assert.rejects(alice.data.put("shop", "invoices/o-2.pdf", "x"), { code: status.UNAVAILABLE });
     assert.ok(Date.now() - started < 2_000);
+
+    // A read is safe to repeat: asked again until its deadline, then refused.
+    const impatient = new Kernable({ url: kernel.url, key: kernel.appKey, context: { senderIdentity: "alice" }, timeoutMs: 500 });
+    try {
+      const asked = Date.now();
+      await assert.rejects(impatient.data.get("shop", "invoices/o-1.pdf"), { code: status.UNAVAILABLE });
+      assert.ok(Date.now() - asked >= 300);
+    } finally {
+      impatient.close();
+    }
+    // Back while reads wait: they go through, at a single address too.
+    running = new Promise((r) => setTimeout(r, 300)).then(() => back.run());
+    const waited = Date.now();
+    const [file, listing, rate] = await Promise.all([
+      alice.data.get("shop", "invoices/o-1.pdf"),
+      alice.data.list("shop", "invoices/"),
+      alice.cache.get("shop", "rate/eur"),
+    ]);
+    assert.equal(Buffer.from(file!.data).toString(), "%PDF");
+    assert.deepEqual(listing.files.map((f) => f.key), ["invoices/o-1.pdf"]);
+    assert.equal(Buffer.from(rate!).toString(), "1.08");
+    assert.ok(Date.now() - waited >= 250);
   } finally {
     guard.stop();
+    back.stop();
     await running;
     alice.close();
     stranger.close();

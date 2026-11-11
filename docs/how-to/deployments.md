@@ -41,7 +41,7 @@ Until then, a membership that would switch is refused with `FAILED_PRECONDITION`
 not_caught_up: deployment 2026-11-11.2 has not caught up: carts@2026-11-11.2 at 1200 of 2215; it takes shop over once it has (apply again), or force the switch
 ```
 
-A deployment that wrote events before (it served, and you go back to it) takes over at once: its read models are kept where they stopped and catch up the gap in moments. One whose read models were [dropped](#clean-up-old-deployments) warms up like a new one.
+A deployment that wrote events before (it served, and an operator goes back to it) takes over at once: its read models are kept where they stopped and catch up the gap in moments. One whose read models were [dropped](#clean-up-old-deployments) warms up like a new one. Going back is always an operator's decision: an app never switches back by itself ([below](#who-switches)).
 
 ### Who switches
 
@@ -49,11 +49,13 @@ An app (`kernable.app(...).run()`) applies its membership when it starts. Its `s
 
 | `switch` | The app |
 |---|---|
-| `caught-up` (default) | runs beside the serving deployment, its workers idle and its read models building, applies its membership again every second, and takes over once it has caught up. |
+| `caught-up` (default) | for a deployment that never served: runs beside the serving deployment, its workers idle and its read models building, applies its membership again every second, and takes over once it has caught up. For a deployment that served before (it wrote events): runs beside like `never`, refused with `served_before`, until an operator rolls back to it. |
 | `never` | runs beside the serving deployment until an operator switches (below); it applies its membership only while its own deployment serves, and notices the switch within a second. |
 | `now` | takes over at once, caught up or not (what applying did before deployments warmed up). |
 
-A service that has no membership yet, or is served by the app's own deployment already, takes the membership at once in every mode. The app's `ready` resolves (is set) once it serves; `connected` once its workers and listeners are connected, also while it warms up; `serving` once its deployment serves. Its processes register once it serves.
+A service that has no membership yet, or is served by the app's own deployment already, takes the membership at once in every mode.
+
+So a restart never switches back. During a rolling deploy from `v1` to `v2`, a `v1` process that restarts (a crash, a node drained) after `v2` took over comes up beside `v2` instead of taking the service back: `v1` served before, so only an explicit rollback switches to it again. A `v2` process that restarts applies the membership of the deployment that serves, which changes nothing. The app's `ready` resolves (is set) once it serves; `connected` once its workers and listeners are connected, also while it warms up; `serving` once its deployment serves. Its processes register once it serves.
 
 From a pipeline, apply the manifest with the deployment, and let it wait for the warm-up:
 
@@ -101,7 +103,7 @@ No mark anywhere means the rollback is safe. Marks mean it is still possible, bu
 ## Roll back
 
 1. Start the older deployment's processes again, if they stopped. Its read models connect under their registrations and catch up on the events written meanwhile.
-2. Apply its membership: start its app (it switches as soon as its workers are connected, as it served before), or apply its manifest with `--deployment <older>`. From then on its workers run the commands, and the newer deployment's processes idle; stop them.
+2. Apply its manifest with `--deployment <older>` (`kernable apply 127.0.0.1:7233 keys/deploy.key shop.json --deployment 2026-11-11.1`): it switches as soon as its workers are connected, as it served before. Starting its app is not enough: an app does not switch back to a deployment that served before (`served_before`), it waits beside until you apply. In code, `Kernable.apply` with switch `now` rolls back as well. From then on its workers run the commands, and the newer deployment's processes idle; stop them.
 3. Watch `/ready` and the `unknown_history` rejections in the UI.
 
 Rolling forward again is the same with the newer deployment.

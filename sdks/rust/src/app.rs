@@ -69,8 +69,10 @@ impl App {
     }
 
     /// When the app's deployment takes the service over from another one that serves it (see
-    /// [`Switch`]): by default once its read models have caught up; meanwhile it runs beside
-    /// the serving deployment, its workers idle and its read models building. Default:
+    /// [`Switch`]): by default once its read models have caught up, if the deployment never
+    /// served before; meanwhile it runs beside the serving deployment, its workers idle and its
+    /// read models building. One that served before (an older deployment's app restarting) runs
+    /// beside until an operator rolls back. Default:
     /// `KERNABLE_SWITCH` (`caught-up`, `now`, `never`), else [`Switch::CaughtUp`].
     pub fn switch(mut self, switch: Switch) -> App {
         self.switch = Some(switch);

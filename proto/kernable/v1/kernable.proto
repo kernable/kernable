@@ -384,6 +384,11 @@ message ApplyRequest {
   // `not_serving: ...`. For a process that starts beside the serving deployment and leaves the
   // switch to an operator (an app with switch `never`).
   bool no_switch = 5;
+  // Not signed. Refuses a switch to a deployment that served before (it wrote events) with
+  // FAILED_PRECONDITION `served_before: ...`: switching back is a rollback, which only an
+  // operator does (`kernable apply --deployment`). For an app with switch `caught-up`, so an
+  // older deployment's app that restarts runs beside the serving one instead of taking over.
+  bool no_rollback = 6;
 }
 
 message ApplyResult {}

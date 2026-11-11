@@ -147,8 +147,8 @@ async fn a_middleware_checks_file_and_cache_requests_on_their_context() {
 
     let checked = Arc::new(Mutex::new(Vec::<Check>::new()));
     let c = Arc::clone(&checked);
-    let guard = domain("shop").read_model("guard");
-    guard.middleware(MiddlewareOptions::new(&["shop.*"]), move |check| {
+    let guard_def = domain("shop").read_model("guard");
+    guard_def.middleware(MiddlewareOptions::new(&["shop.*"]), move |check| {
         let allowed = check.request.sender_identity == "alice";
         c.lock().unwrap().push(check);
         async move {
@@ -158,7 +158,7 @@ async fn a_middleware_checks_file_and_cache_requests_on_their_context() {
             Ok(())
         }
     });
-    let guard = anonymous.listener(&guard);
+    let guard = anonymous.listener(&guard_def);
     let running = {
         let guard = guard.clone();
         tokio::spawn(async move { guard.run().await })
@@ -280,4 +280,48 @@ async fn a_middleware_checks_file_and_cache_requests_on_their_context() {
         other => panic!("expected UNAVAILABLE, got {other:?}"),
     }
     assert!(started.elapsed() < Duration::from_secs(2));
+
+    // A read is safe to repeat: asked again until its deadline, then refused.
+    let impatient = Kernable::new(
+        kernel
+            .options()
+            .context(alice_context())
+            .timeout(Duration::from_millis(500)),
+    )
+    .unwrap();
+    let started = std::time::Instant::now();
+    match impatient.data().get("shop", "a.txt").await {
+        Err(Error::Status(s)) => assert_eq!(s.code(), Code::Unavailable, "{s:?}"),
+        other => panic!("expected UNAVAILABLE, got {other:?}"),
+    }
+    assert!(started.elapsed() >= Duration::from_millis(300));
+    // Back while reads wait: they go through, at a single address too.
+    let back = anonymous.listener(&guard_def);
+    let returning = {
+        let back = back.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            back.run().await
+        })
+    };
+    let (files, cache) = (as_alice.data(), as_alice.cache());
+    let started = std::time::Instant::now();
+    let (file, listing, value) = tokio::join!(
+        files.get("shop", "a.txt"),
+        files.list("shop", "", ""),
+        cache.get("shop", "k"),
+    );
+    assert_eq!(file.unwrap().unwrap().data, b"hello");
+    assert_eq!(listing.unwrap().files.len(), 1);
+    assert_eq!(value.unwrap(), Some(b"v".to_vec()));
+    assert!(started.elapsed() >= Duration::from_millis(250));
+    back.stop();
+    returning.await.unwrap();
+}
+
+fn alice_context() -> RequestContext {
+    RequestContext {
+        sender_identity: "alice".into(),
+        ..Default::default()
+    }
 }

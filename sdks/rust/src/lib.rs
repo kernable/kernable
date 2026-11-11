@@ -236,9 +236,10 @@ impl Options {
     /// How long a request (`submit`, `query`, files, cache, `apply`) waits in all: for the
     /// connection, e.g. while the kernel restarts, and for its answer. Default 60 s. A
     /// connection the network dropped silently is noticed within 40 s by keepalive pings.
-    /// A submit (by its command ID), a cancel or a query that a kernel answers `UNAVAILABLE`
-    /// (shutting down, handing over, a middleware or read model not connected) is asked again
-    /// with backoff within this time; any other request may have run, and fails at once.
+    /// A submit (by its command ID), a cancel, a query or a data or cache read (get, list) that
+    /// a kernel answers `UNAVAILABLE` (shutting down, handing over, a middleware or read model
+    /// not connected) is asked again with backoff within this time; any other request (a
+    /// write) may have run, and fails at once.
     pub fn timeout(mut self, timeout: Duration) -> Options {
         self.timeout = timeout;
         self
@@ -805,7 +806,8 @@ impl Kernable {
     /// [`Options::deployment`]): its workers run the commands and its read models answer. A
     /// membership that names another deployment than the serving one switches to it as
     /// [`Manifest::switch`] says: by default only once that deployment has caught up, refused
-    /// before with `not_caught_up` ([`Error::waits_for_switch`]). Example:
+    /// before with `not_caught_up`, and never back to one that served before (`served_before`;
+    /// [`Error::waits_for_switch`]). Example:
     /// `kernable.apply(Manifest::new().service("shop").worker(&cart_aggregate).listener(&carts_readmodel)).await?`.
     /// [`Error::Config`] if neither the manifest nor the connection names a service, or the
     /// deployment is invalid, [`Error::Status`] if the kernel refuses it.
@@ -833,6 +835,7 @@ impl Kernable {
             protocol: PROTOCOL,
             force: manifest_switch == Switch::Now,
             no_switch: manifest_switch == Switch::Never,
+            no_rollback: manifest_switch == Switch::CaughtUp,
         };
         self.client
             .control()
@@ -1306,10 +1309,14 @@ pub struct Manifest {
 /// to it ([`Manifest::switch`], [`App::switch`]). See the how-to "Deployments and rollbacks".
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Switch {
-    /// Once the deployment has caught up (the default): its listed workers are connected and its
-    /// read models within the kernel's `--deployment-switch-lag` of the newest event, or it
-    /// served before (a rollback). Until then the kernel refuses it (`not_caught_up`); an app
-    /// runs beside the serving deployment meanwhile and applies again until it switches.
+    /// Once the deployment has caught up (the default), and only to a deployment that never
+    /// served before: its listed workers are connected and its read models within the kernel's
+    /// `--deployment-switch-lag` of the newest event. Until then the kernel refuses it
+    /// (`not_caught_up`); an app runs beside the serving deployment meanwhile and applies again
+    /// until it switches. A deployment that served before (it wrote events) is never switched
+    /// back to this way (`served_before`): its app runs beside, as with [`Switch::Never`],
+    /// until an operator rolls back (`kernable apply --deployment`). So an older deployment's
+    /// app that restarts during a rolling deploy does not take the service back.
     #[default]
     CaughtUp,
     /// At once, caught up or not (`kernable apply --force`).
@@ -1952,5 +1959,29 @@ mod deployment_tests {
                 "{invalid}"
             );
         }
+    }
+
+    /// An app keeps applying (it runs beside) while its deployment has not caught up, may not
+    /// switch, or served before; other refusals end it.
+    #[test]
+    fn an_app_waits_beside_while_its_deployment_has_not_caught_up_or_served_before() {
+        let refused = Error::Status;
+        for details in [
+            "not_caught_up: deployment v2 has not caught up",
+            "not_serving: shop is served by v1",
+            "served_before: deployment v1 served shop before and v2 serves it now",
+        ] {
+            assert!(
+                refused(tonic::Status::failed_precondition(details)).waits_for_switch(),
+                "{details}"
+            );
+        }
+        assert!(
+            !refused(tonic::Status::failed_precondition(
+                "key may not manage shop"
+            ))
+            .waits_for_switch()
+        );
+        assert!(!refused(tonic::Status::unavailable("served_before")).waits_for_switch());
     }
 }
