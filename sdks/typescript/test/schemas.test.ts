@@ -1,5 +1,5 @@
 // Event schemas: a new payload version is upcast for aggregates and listeners, old events stay
-// as they were stored, and a process that does not know a version stops instead of misreading.
+// as they were stored, and a process that does not know a version stops or skips it instead of misreading.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -66,8 +66,9 @@ test("a new event schema is upcast for aggregates and listeners", async () => {
     assert.deepEqual(counts, [{ sku: "apple", count: 3 }, { sku: "pear", count: 2 }]);
     assert.deepEqual(foreignCounts, counts);
     assert.deepEqual(archived, [[1, { sku: "apple", qty: 3 }], [2, { sku: "pear", count: 2 }]]);
-    // The listener that knows only version 1 stopped before the version 2 event.
-    assert.equal(stale.position, 1);
+    // The read model that knows only version 1 skipped the version 2 event, without misreading it.
+    assert.equal(stale.position, 2);
+    assert.equal(stale.skipped, 1);
   } finally {
     for (const s of [old, worker, outdated, archive, current, foreign, stale]) s.stop();
     await Promise.allSettled(running);

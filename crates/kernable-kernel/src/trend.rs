@@ -328,6 +328,7 @@ mod tests {
             position,
             connected: true,
             parked: 0,
+            skipped: 0,
         }
     }
 

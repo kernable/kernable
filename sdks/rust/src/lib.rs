@@ -109,7 +109,8 @@ fn handling() -> String {
 /// `Options::default()` takes everything from the environment, else the defaults: the key from
 /// `KERNABLE_KEY`, else `app.key` in the current directory; the kernel from `KERNABLE_URL`,
 /// else `http://127.0.0.1:7233`; the grant from `KERNABLE_GRANT`, else the `.grant` file next
-/// to the key; the service from `KERNABLE_SERVICE`; TLS from `KERNABLE_TLS_CA`,
+/// to the key; the service from `KERNABLE_SERVICE`; the deployment from `KERNABLE_DEPLOYMENT`;
+/// TLS from `KERNABLE_TLS_CA`,
 /// `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`; the tenant `default`. A key file's path (`&str`,
 /// `String`, `&Path`, `PathBuf`) converts into options with only the key set, so
 /// `Kernable::new("app.key")` works too. Example:
@@ -121,6 +122,7 @@ pub struct Options {
     grant: Option<PathBuf>,
     tenant: String,
     service: Option<String>,
+    deployment: Option<String>,
     context: RequestContext,
     tls: Option<Tls>,
     insecure: Option<bool>,
@@ -132,7 +134,9 @@ pub struct Options {
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Every option at its default: the key from `KERNABLE_KEY`, else `app.key` in the current
-/// directory; the service from `KERNABLE_SERVICE`, if set; TLS from `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY`, if set.
+/// directory; the service from `KERNABLE_SERVICE`, if set; the deployment from
+/// `KERNABLE_DEPLOYMENT`, if set; TLS from `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and
+/// `KERNABLE_TLS_KEY`, if set.
 impl Default for Options {
     fn default() -> Options {
         Options {
@@ -141,6 +145,7 @@ impl Default for Options {
             grant: None,
             tenant: "default".into(),
             service: None,
+            deployment: None,
             context: RequestContext::default(),
             tls: None,
             insecure: None,
@@ -189,6 +194,19 @@ impl Options {
     /// registered counts).
     pub fn service(mut self, service: impl Into<String>) -> Options {
         self.service = Some(service.into());
+        self
+    }
+
+    /// The deployment of this process: the version of its code, e.g. `2026-11-11.1` or a commit
+    /// hash; 1 to 128 letters, digits, `-`, `_` and `.`. Its workers write it into every event
+    /// and get commands only while the service's membership names it (or names none); its read
+    /// models and middlewares run beside those of other deployments, each from its own
+    /// position, and its queries go to its own read models first. [`Kernable::apply`] names it
+    /// in the membership, so a rollback is starting the earlier code and applying again.
+    /// Default: `KERNABLE_DEPLOYMENT`, else none. An invalid one is [`Error::Config`] in
+    /// [`Kernable::new`].
+    pub fn deployment(mut self, deployment: impl Into<String>) -> Options {
+        self.deployment = Some(deployment.into());
         self
     }
 
@@ -327,6 +345,8 @@ pub(crate) struct Client {
     grant: Option<MetadataValue<tonic::metadata::Ascii>>,
     log: log::Log,
     timeout: Duration,
+    /// The deployment of this process ([`Options::deployment`]); empty if none.
+    deployment: String,
 }
 
 impl Client {
@@ -601,7 +621,7 @@ impl Kernable {
     /// kernel; `Options::default()` takes everything from the environment (see [`Options`]). It
     /// connects on first use and again after the connection drops. Needs a Tokio runtime.
     /// [`Error::Config`] if the key, grant or TLS files cannot be read, only some of the TLS
-    /// variables are set, or the URL is invalid. Example: `Kernable::new("app.key")?`.
+    /// variables are set, or the URL or the deployment is invalid. Example: `Kernable::new("app.key")?`.
     pub fn new(options: impl Into<Options>) -> Result<Kernable, Error> {
         let options = options.into();
         let url = options
@@ -665,6 +685,11 @@ impl Kernable {
             .service
             .or_else(|| std::env::var("KERNABLE_SERVICE").ok())
             .unwrap_or_default();
+        let deployment = options
+            .deployment
+            .or_else(|| std::env::var("KERNABLE_DEPLOYMENT").ok())
+            .unwrap_or_default();
+        check_deployment(&deployment)?;
         let key_id = signing::key_id(&key.verifying_key());
         let log = log::Log::new(&url, &key_file, &key_id);
         // Whoever can read the key file can sign as this process.
@@ -691,6 +716,7 @@ impl Kernable {
                 grant,
                 log,
                 timeout: options.timeout,
+                deployment,
             },
             tenant: options.tenant,
             context: options.context,
@@ -752,30 +778,28 @@ impl Kernable {
     /// [`Options::service`]): the workers, listeners and middlewares the kernel waits for, plus
     /// free metadata. Apply it once per deploy (e.g. from a deploy script), not from every
     /// process: the newest apply wins, and an older one that arrives late is refused. The key needs the `manage` grant for the service. A
-    /// middleware the new membership no longer lists stops checking. Example:
+    /// middleware the new membership no longer lists stops checking. It names the deployment
+    /// that serves the service ([`Manifest::deployment`], default this connection's, see
+    /// [`Options::deployment`]): its workers run the commands and its read models answer. Example:
     /// `kernable.apply(Manifest::new().service("shop").worker(&cart_aggregate).listener(&carts_readmodel)).await?`.
-    /// [`Error::Config`] if neither the manifest nor the connection names a service,
-    /// [`Error::Status`] if the kernel refuses it.
+    /// [`Error::Config`] if neither the manifest nor the connection names a service, or the
+    /// deployment is invalid, [`Error::Status`] if the kernel refuses it.
     pub async fn apply(&self, manifest: Manifest) -> Result<(), Error> {
-        let service = manifest.service.unwrap_or_else(|| self.service.clone());
+        let service = manifest
+            .service
+            .clone()
+            .unwrap_or_else(|| self.service.clone());
         if service.is_empty() {
             return Err(Error::Config(
                 "apply needs a service: set it with Manifest::service or Options::service".into(),
             ));
         }
-        let membership = Membership {
-            service,
-            workers: manifest.workers,
-            listeners: manifest.listeners,
-            middlewares: manifest.middlewares,
-            metadata: manifest
-                .metadata
-                .into_iter()
-                .map(|(key, value)| Attribute { key, value })
-                .collect(),
-            issued_at: issued_now(),
-            processes: manifest.processes,
-        };
+        let deployment = manifest
+            .deployment
+            .clone()
+            .unwrap_or_else(|| self.client.deployment.clone());
+        check_deployment(&deployment)?;
+        let membership = membership(service, deployment, manifest, issued_now());
         let sig = self.client.sign(&signing::membership_message(&membership));
         let request = ApplyRequest {
             membership: Some(membership),
@@ -876,8 +900,10 @@ impl Kernable {
     }
 
     /// Runs a command and returns its outcome: [`Outcome::Committed`] with the new events, or
-    /// [`Outcome::Rejected`] if a handler or middleware rejected it (a rejection is `Ok`, not
-    /// an error). By default it waits until every listener that counts has processed the
+    /// [`Outcome::Rejected`] if a handler, a middleware or the kernel rejected it (a rejection
+    /// is `Ok`, not an error); the kernel rejects with `unknown_history` a command whose
+    /// aggregate holds events the serving deployment's worker does not know (after a
+    /// rollback, see [`Manifest::deployment`]). By default it waits until every listener that counts has processed the
     /// events; see [`Submit::wait`]. [`Error::NotSettled`] if they did not in time (the
     /// command is committed), [`Error::Status`] if the kernel refuses the call (no grant,
     /// unknown aggregate type, timeout). Example: `kernable.submit(Submit::new("shop", "cart",
@@ -1067,6 +1093,7 @@ impl Kernable {
             protocol: PROTOCOL,
             listener: String::new(),
             wait_only: false,
+            deployment: self.client.deployment.clone(),
         };
         let timeout = query.timeout;
         if query.all_partitions {
@@ -1194,6 +1221,44 @@ fn tls_from_env() -> Result<Option<Tls>, Error> {
     }
 }
 
+/// The membership `manifest` describes, for `service` and `deployment`.
+fn membership(
+    service: String,
+    deployment: String,
+    manifest: Manifest,
+    issued_at: i64,
+) -> Membership {
+    Membership {
+        service,
+        workers: manifest.workers,
+        listeners: manifest.listeners,
+        middlewares: manifest.middlewares,
+        metadata: manifest
+            .metadata
+            .into_iter()
+            .map(|(key, value)| Attribute { key, value })
+            .collect(),
+        issued_at,
+        processes: manifest.processes,
+        deployment,
+    }
+}
+
+/// [`Error::Config`] unless `deployment` is empty or 1 to 128 letters, digits, `-`, `_` and `.`.
+fn check_deployment(deployment: &str) -> Result<(), Error> {
+    let valid = deployment.len() <= 128
+        && deployment
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if valid {
+        Ok(())
+    } else {
+        Err(Error::Config(format!(
+            "deployment {deployment:?}: use 1 to 128 letters, digits, `-`, `_` and `.`"
+        )))
+    }
+}
+
 /// What a service consists of, for [`Kernable::apply`]; see `Membership` in kernable.proto.
 /// Built with methods that each return the changed manifest:
 /// `Manifest::new().service("shop").worker(&cart_aggregate).listener(&carts_readmodel).metadata("version", "1.0.0")`.
@@ -1205,6 +1270,7 @@ pub struct Manifest {
     middlewares: Vec<String>,
     metadata: Vec<(String, String)>,
     processes: Vec<String>,
+    deployment: Option<String>,
 }
 
 impl Manifest {
@@ -1253,6 +1319,16 @@ impl Manifest {
     /// Free metadata, e.g. `("version", "1.0.0")`; kept in the order given.
     pub fn metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Manifest {
         self.metadata.push((key.into(), value.into()));
+        self
+    }
+
+    /// The deployment that serves the service: its workers run the commands, its listeners
+    /// count and its read models answer queries first; the service's workers of other
+    /// deployments get no commands, their read models keep catching up. A rollback applies a
+    /// membership naming the earlier deployment. Default: the connection's
+    /// ([`Options::deployment`]); empty: every deployment serves.
+    pub fn deployment(mut self, deployment: impl Into<String>) -> Manifest {
+        self.deployment = Some(deployment.into());
         self
     }
 }
@@ -1606,6 +1682,8 @@ pub struct StoredEvent {
     pub created_at: Timestamp,
     /// The request context of the command that caused the event.
     pub request: RequestContext,
+    /// The code version of the worker that wrote it ([`Options::deployment`]); empty if none.
+    pub deployment: String,
 }
 
 impl StoredEvent {
@@ -1630,6 +1708,7 @@ impl StoredEvent {
             command_id: e.command_id,
             created_at: Timestamp(e.created_at),
             request: RequestContext::from_wire(e.context.as_ref()),
+            deployment: e.deployment,
         }
     }
 }
@@ -1734,5 +1813,75 @@ mod dropped_tests {
         assert!(!dropped(&tonic::Status::deadline_exceeded(
             "transport error"
         )));
+    }
+}
+
+#[cfg(test)]
+mod deployment_tests {
+    use serde_json::Value;
+
+    use super::*;
+
+    /// A membership with a deployment is signed as the shared test vector
+    /// `membership_deployment` says.
+    #[test]
+    fn a_membership_with_a_deployment_is_signed_as_the_test_vectors_say() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../proto/test-vectors/signing.json"
+        );
+        let vectors: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let vector = &vectors["membership_deployment"];
+        let input = &vector["input"];
+        let texts = |v: &Value| -> Vec<String> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s.as_str().unwrap().to_owned())
+                .collect()
+        };
+        let manifest = Manifest {
+            service: None,
+            workers: texts(&input["workers"]),
+            listeners: texts(&input["listeners"]),
+            middlewares: texts(&input["middlewares"]),
+            metadata: input["metadata"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| {
+                    let text = |k: &str| a[k].as_str().unwrap().to_owned();
+                    (text("key"), text("value"))
+                })
+                .collect(),
+            processes: texts(&input["processes"]),
+            deployment: None,
+        };
+        let membership = membership(
+            input["service"].as_str().unwrap().to_owned(),
+            input["deployment"].as_str().unwrap().to_owned(),
+            manifest,
+            input["issued_at"].as_i64().unwrap(),
+        );
+        let message = signing::membership_message(&membership);
+        assert_eq!(hex::encode(&message), vector["message"].as_str().unwrap());
+        let key = signing::signing_key_from_hex(vectors["key"]["seed"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            hex::encode(signing::sign(&key, &message).sig),
+            vector["signature"].as_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn a_deployment_is_letters_digits_dashes_underscores_and_dots() {
+        for valid in ["", "v1", "2026-11-11.1", "a_b", &"x".repeat(128)] {
+            assert!(check_deployment(valid).is_ok(), "{valid}");
+        }
+        for invalid in ["v 1", "v1@x", "ü", "a/b", &"x".repeat(129)] {
+            assert!(
+                matches!(check_deployment(invalid), Err(Error::Config(m)) if m.contains("1 to 128")),
+                "{invalid}"
+            );
+        }
     }
 }

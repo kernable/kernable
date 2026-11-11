@@ -99,6 +99,7 @@ fn event() -> impl Strategy<Value = NewEvent> {
             erases,
             origin_partition: String::new(),
             origin_position: 0,
+            deployment: Default::default(),
         },
     )
 }
@@ -169,6 +170,7 @@ fn membership() -> impl Strategy<Value = Membership> {
             middlewares,
             metadata,
             issued_at,
+            deployment: Default::default(),
         },
     )
 }

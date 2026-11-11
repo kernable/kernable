@@ -227,6 +227,11 @@ pub(crate) fn render(kernel: &Kernel) -> String {
         "Events the listener gave up on and parked, waiting for an operator to retry or dismiss them.",
         per(&|l| l.parked as u64),
     );
+    metric(
+        "kernable_listener_skipped",
+        "Events the listener skipped since the kernel started because its code does not know them (a newer schema): its deployment is older than the events.",
+        per(&|l| l.skipped),
+    );
     if let Some(primary) = &kernel.replication {
         let head = kernel.store.record_head().map_or(0, |h| h.seq);
         metric(

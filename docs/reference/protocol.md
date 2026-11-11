@@ -132,6 +132,7 @@ A stored event: a NewEvent of a worker, completed by the kernel when it committe
 | `erases` |  `string` | 16 | see NewEvent |
 | `origin_partition` |  `string` | 17 | An event its tenant brought along when it moved here from another partition: where it was first committed. Listeners do not get these; the original is delivered where it is. |
 | `origin_position` |  `uint64` | 18 |  |
+| `deployment` |  `string` | 19 | The code version (deployment) of the worker that produced it, as its Register declared it; empty for a worker that declared none, and for the events the kernel writes itself (process cases). Hashed only when set (SIGNING.md). |
 
 ### Snapshot
 
@@ -158,6 +159,7 @@ An event proposed by a worker; the kernel assigns position, version, time and ha
 | `erases` |  `string` | 5 | A subject (a person) whose vault values this event erases, everywhere; empty for none. The worker's key needs `vault_erase` for the event type (otherwise `erase_not_allowed`). |
 | `origin_partition` |  `string` | 6 | Set by the kernel only, on events a tenant brought from another partition when it moved there: where the event was first committed. A worker's result with them is refused. |
 | `origin_position` |  `uint64` | 7 |  |
+| `deployment` |  `string` | 8 | Set by the kernel only, from the producing worker's Register.deployment; whatever a worker sends here is replaced. |
 
 ## Vault
 
@@ -371,6 +373,7 @@ without a membership, and a process without a service, count as listed.
 | `metadata` | repeated `Attribute` | 5 | free, e.g. version and description; signed in order |
 | `issued_at` |  `int64` | 6 | ms since epoch |
 | `processes` | repeated `string` | 7 | Qualified process names (`shop.fulfilment`); signed only when there are any. A process a membership no longer lists starts no new cases; its running cases finish. |
+| `deployment` |  `string` | 8 | The deployment (code version) that serves the service; signed only when set. Its workers run the service's commands, its listeners count, its middlewares check and its read models answer queries first. Workers and listeners of the service that declare another deployment stay connected: workers idle, read models keep catching up, for a rollback. A rollback applies a membership naming the earlier deployment. Empty: every deployment serves. |
 
 ### ApplyRequest
 
@@ -629,6 +632,7 @@ Signed by the client over kernable.v1.query.
 | `listener` |  `string` | 11 | Set by SDKs when a listener's handler asks (not signed); see SubmitRequest.listener. The query is never routed to that listener, nor to one that could reach `min_position` only after that listener, and refused (FAILED_PRECONDITION) if no other read model answers it or if the listener itself checks the query as a middleware. |
 | `wait_only` |  `bool` | 12 | Signed, and only when set: answer nothing; return an empty response once a read model that answers `query_type` has processed this kernel's head (as of the request) and `min_position`. Not checked by middleware, and any partition takes it, whatever the tenant: the SDKs send it to every partition before a query across tenants (`allPartitions`), so that its answer holds every event committed before it. |
 | `target` |  `Target` | 13 | Signed, and only when set: the aggregate the query is about, as the query type declares it (the SDKs fill it from the query's data). A middleware decides on it as on a command's aggregate, e.g. "only the order's owner may read it"; the read model answers from the data. |
+| `deployment` |  `string` | 14 | Not signed: the asker's deployment (code version). The kernel routes the query to a read model of that deployment if one answers it, else to one of the deployment its service's membership names, else to any. Empty: the membership's deployment first. |
 
 ### Target
 
@@ -895,6 +899,7 @@ connections; it counts (see Membership) also while disconnected.
 | `live` |  `bool` | 10 | Not registered: no stored position, starts at the newest event, does not count for readiness, settling or the order of delivery, and is forgotten when it disconnects. For reactions that only matter while the process runs. Cannot be a middleware, nor use the name of a registered listener. |
 | `instance` |  `string` | 11 | One of several processes that run this listener under one name, e.g. a read model on each node of a pair: 1 to 128 letters, digits, `-`, `_` and `.`, unique in the group. Empty: the only one, and a second connection of the name is refused. The group counts for readiness, settling and the order of delivery as one listener: through an event once one instance acknowledged it, ready once one instance has caught up. Every instance of a group must agree on `single`. |
 | `single` |  `bool` | 12 | With `instance`: one instance at a time gets events, so a reactor's side effects happen once; the others get `Waiting`, and the first of them takes over after the group's position when the active one leaves. Without: every instance gets every event, from its own position, and queries and checks go to any instance that has reached what they need; such an instance cannot park events. Not for live listeners. |
+| `deployment` |  `string` | 13 | The code version (deployment) of the process: 1 to 128 letters, digits, `-`, `_` and `.`; empty: none. A listener that answers queries or checks requests (a read model or a middleware) is registered per name and deployment (shown as `name@deployment`): a new deployment's read model has its own position, starts from the first event when the name already has a position under another deployment, and runs beside the old one; its service's membership decides which deployment counts. Any other listener (a reactor) keeps one registration and position across deployments, so a new deployment goes on where the old one stopped and nothing is handled twice. |
 
 ### Waiting
 
@@ -934,6 +939,17 @@ only waiting and ordering. An ack beyond the delivered batches ends the stream.
 |---|---|---|---|
 | `position` |  `uint64` | 1 |  |
 | `parked` | repeated `Parked` | 2 | Events of the acknowledged batches (or their retries) the listener gave up on: it moves on, and the kernel keeps them, with the reason, until an operator retries or dismisses them (ListenerService.Retry). Each is above the previously acknowledged position or one of the retries, and at most `position`. Not for live listeners. |
+| `skipped` | repeated `Skipped` | 3 | Events of the acknowledged batches the listener skipped because it does not know them (a schema newer than it reads): it moved on without them. The kernel counts them per listener and shows them (UI, metrics); unlike parked events they are not kept for a retry. Each at most `position`. |
+
+### Skipped
+
+An event a listener skipped: newer than its code (see Ack.skipped).
+
+| Field | Type | Number | Description |
+|---|---|---|---|
+| `position` |  `uint64` | 1 |  |
+| `event_type` |  `string` | 2 | qualified |
+| `schema` |  `uint32` | 3 |  |
 
 ### Parked
 
@@ -954,7 +970,7 @@ Workers run the commands of their aggregates.
 
 | RPC | Request | Response | Description |
 |---|---|---|---|
-| `Session` | stream `WorkerMessage` | stream `KernelMessage` | A worker's stream. The worker sends Register, the kernel a Challenge, the worker a ChallengeResponse, the kernel Registered; then the kernel sends Execute, at most `max_concurrency` at a time, and the worker answers each with a Result or a Rejection. Needs `run` for every registered command type. When the stream ends, the kernel hands its unfinished commands to another worker. Errors: INVALID_ARGUMENT (malformed Register), PERMISSION_DENIED (missing permission, or an aggregate registered with another key), FAILED_PRECONDITION (the store holds a newer event schema than the worker writes), UNAUTHENTICATED (challenge failed, or an invalid result, rejection or snapshot signature). |
+| `Session` | stream `WorkerMessage` | stream `KernelMessage` | A worker's stream. The worker sends Register, the kernel a Challenge, the worker a ChallengeResponse, the kernel Registered; then the kernel sends Execute, at most `max_concurrency` at a time, and the worker answers each with a Result or a Rejection. Needs `run` for every registered command type. When the stream ends, the kernel hands its unfinished commands to another worker. Errors: INVALID_ARGUMENT (malformed Register), PERMISSION_DENIED (missing permission, or an aggregate registered with another key), FAILED_PRECONDITION (the store holds a newer event schema than a worker without a deployment writes), UNAUTHENTICATED (challenge failed, or an invalid result, rejection or snapshot signature). |
 
 ### WorkerMessage
 
@@ -991,6 +1007,7 @@ The first message of a worker's stream.
 | `event_schemas` | repeated `EventSchema` | 5 | The payload version the worker writes per event type; types not listed are written at 1. The kernel refuses a worker, or a result, that would write an older version of a type than the store already holds, and a result whose events differ from what was declared. |
 | `protocol` |  `uint32` | 6 |  |
 | `service` |  `string` | 7 | The service this worker belongs to; its membership (see `Membership`) decides whether the kernel waits for the worker's aggregates. Empty: no service, they are always waited for. |
+| `deployment` |  `string` | 8 | The code version (deployment) of the process: 1 to 128 letters, digits, `-`, `_` and `.`; empty: none. Stored with every event it writes and with its snapshots (it gets only snapshots its own deployment made). When the service's membership names another deployment, the worker gets no commands. With a deployment, `event_schemas` lists every event type the worker knows (also those it only reads, at the version it reads), and the kernel refuses a command (`unknown_history`, before the worker sees it) whose aggregate holds an event of a schema above the declared one, or of a type it does not declare that another deployment first wrote after this deployment's first event. Such a worker may also declare an older schema than the store holds (a rollback); the check above keeps it off aggregates it cannot read. |
 
 ### WorkerAggregate
 

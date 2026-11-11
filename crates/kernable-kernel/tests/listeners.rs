@@ -57,7 +57,11 @@ impl Listener {
                 attempts: 5,
             })
             .collect();
-        let msg = In::Ack(Ack { position, parked });
+        let msg = In::Ack(Ack {
+            position,
+            parked,
+            skipped: Default::default(),
+        });
         self.acks
             .send(ListenerMessage { msg: Some(msg) })
             .await

@@ -29,6 +29,7 @@ import {
   type WireRejected,
   type WireRequestContext,
   type WireRequirement,
+  type WireSkipped,
   type WireSnapshot,
   type WireUniqueKey,
   type WireVaultValue,
@@ -469,6 +470,8 @@ export interface StoredEventMeta extends EventMeta {
    * readable with this key (granted `vault_read`).
    */
   redacted: string[];
+  /** The code version (`Options.deployment`) of the worker that wrote it; empty if none. */
+  deployment: string;
 }
 
 /**
@@ -491,7 +494,9 @@ export interface StoredEvent extends StoredEventMeta {
  * with: `orders.Order key number is taken`, never the value), `requirement_missing` (an aggregate
  * the command requires does not hold the fact: `orders.Vehicle v1 does not hold open`) and
  * `invalid_index` (too many keys, facts or requirements, or a malformed name: a bug in the
- * aggregate's definition). A rejection is a result, not an exception; check `committed`:
+ * aggregate's definition). With deployments (`Options.deployment`), `unknown_history`: the
+ * aggregate holds an event the worker's deployment does not know (a newer schema, or a type
+ * a newer deployment wrote), e.g. after a rollback; the worker never sees the command. A rejection is a result, not an exception; check `committed`:
  *
  * ```ts
  * const outcome = await kernable.submit({ domain: "shop", aggregateType: "cart", aggregateId: "c1", type: "CheckOut" });
@@ -907,8 +912,25 @@ function unseal(data: unknown, vault: WireVaultValue[] | undefined): { data: unk
   return { data: walk(data, ""), redacted };
 }
 
+/** `deployment` if empty or valid (1 to 128 letters, digits, `-`, `_` and `.`); throws otherwise. */
+function validDeployment(deployment: string): string {
+  if (deployment && !/^[A-Za-z0-9_.-]{1,128}$/.test(deployment)) {
+    throw new Error(`a deployment has 1 to 128 letters, digits, \`-\`, \`_\` and \`.\`, not ${JSON.stringify(deployment)}`);
+  }
+  return deployment;
+}
+
 /** An event a process cannot read: its schema is newer than known, or a step is missing. */
 class SchemaError extends Error {}
+
+/**
+ * The newest schema of a `type` event this code knows (see `Domain.event`), if `schema` is
+ * newer: a newer deployment wrote it. Undefined if the code knows it.
+ */
+function newerThanKnown(events: Map<string, EventSchema> | undefined, type: string, schema: number): number | undefined {
+  const known = events?.get(type)?.schema ?? 1;
+  return schema > known ? known : undefined;
+}
 
 /** `data` of a `type` event stored at `schema`, upcast to the current version in `events`. */
 function upcast(events: Map<string, EventSchema> | undefined, domain: string, type: string, schema: number, data: unknown) {
@@ -1554,6 +1576,14 @@ export interface Manifest {
    * membership no longer lists starts no new cases; its running cases finish.
    */
   processes?: (ProcessBuilder | string)[];
+  /**
+   * The deployment (code version) that serves the service: its workers run the commands, its
+   * listeners count, its middlewares check and its read models answer queries first. The
+   * service's workers and listeners of other deployments stay connected: workers idle, read
+   * models keep catching up. To roll back, apply a membership naming the earlier deployment.
+   * Default: this process's (`Options.deployment`); empty: every deployment serves.
+   */
+  deployment?: string;
 }
 
 /**
@@ -1608,6 +1638,15 @@ export interface Options {
    * Default: `KERNABLE_SERVICE`, else none (everything registered counts).
    */
   service?: string;
+  /**
+   * This process's code version, e.g. a build ID: 1 to 128 letters, digits, `-`, `_` and `.`.
+   * Events its workers write carry it, its read models and middlewares are kept apart from
+   * those of other deployments (a new one builds its own from the first event, beside the old
+   * one), and its queries go to read models of the same deployment first. The service's
+   * membership (`Manifest.deployment`) decides which deployment serves. Default:
+   * `KERNABLE_DEPLOYMENT`, else none. The constructor throws for an invalid one.
+   */
+  deployment?: string;
   /**
    * Default request context for `submit`, `enqueue`, `query` and the requests of `data` and
    * `cache`, e.g. this service's identity; a request's own `context` replaces it as a whole.
@@ -1870,6 +1909,8 @@ export class Kernable {
   private readonly context: RequestContext;
   private readonly domains = new Map<string, Domain>();
   private readonly service: string;
+  /** This process's code version (`Options.deployment`); empty: none. */
+  private readonly deployment: string;
 
   constructor(options: Options = {}) {
     const env = process.env;
@@ -1889,6 +1930,7 @@ export class Kernable {
     this.tenant = options.tenant ?? "default";
     this.context = options.context ?? {};
     this.service = options.service ?? env.KERNABLE_SERVICE ?? "";
+    this.deployment = validDeployment(options.deployment ?? env.KERNABLE_DEPLOYMENT ?? "");
     this.data = new Data(this.clients, this.key, this.tenant, this.context);
     this.cache = new Cache(this.clients, this.key, this.tenant, this.context);
   }
@@ -1911,7 +1953,7 @@ export class Kernable {
    * `Options.service` or a membership, the aggregates count as soon as they are registered.
    */
   worker(...aggregates: Aggregate<any>[]): Worker {
-    return new Worker(this.clients, this.key, aggregates, this.log, this.service);
+    return new Worker(this.clients, this.key, aggregates, this.log, this.service, this.deployment);
   }
 
   /**
@@ -1942,8 +1984,8 @@ export class Kernable {
         ...options.metadata,
       },
     };
-    const worker = aggregates.length ? new Worker(this.clients, this.key, aggregates, this.log, service) : undefined;
-    const handles = listeners.map((l) => new ListenerHandle(this, this.clients, this.key, l, this.log, service));
+    const worker = aggregates.length ? new Worker(this.clients, this.key, aggregates, this.log, service, this.deployment) : undefined;
+    const handles = listeners.map((l) => new ListenerHandle(this, this.clients, this.key, l, this.log, service, this.deployment));
     return new App(this, this.log, options.domains, manifest, worker, handles);
   }
 
@@ -1953,7 +1995,8 @@ export class Kernable {
    * deploy script, not from every process: the newest apply wins, and an older one that arrives
    * late is refused. The key needs `manage` for
    * the service. A middleware the new membership no longer lists stops checking. Throws if
-   * neither `manifest.service` nor `Options.service` names a service. See
+   * neither `manifest.service` nor `Options.service` names a service, or for an invalid
+   * `manifest.deployment`. See
    * [Remove a listener](../how-to/remove-listener).
    */
   async apply(manifest: Manifest): Promise<void> {
@@ -1967,6 +2010,7 @@ export class Kernable {
       metadata: Object.entries(manifest.metadata ?? {}).map(([key, value]) => ({ key, value })),
       issued_at: issuedNow(),
       processes: (manifest.processes ?? []).map((p) => (typeof p === "string" ? p : p.qualified)),
+      deployment: validDeployment(manifest.deployment ?? this.deployment),
     };
     await (await this.clients.control()).apply(membership, this.key.sign(membershipMessage(membership)));
   }
@@ -2105,6 +2149,8 @@ export class Kernable {
    * (unchecked): `await kernable.query<Cart>({ domain: "shop", type: "GetCart", data: { id: "c1" } })`.
    * Queries always go through the kernel, also within one process, so grants and middleware
    * apply. The kernel waits until the read model has caught up (and reached `minPosition`).
+   * With `Options.deployment`, a read model of that deployment answers if one is connected,
+   * else one of the deployment the service's membership names.
    * Throws `Rejected` if the read model or a middleware rejects it.
    */
   async query<T = unknown>(options: QueryOptions): Promise<T>;
@@ -2132,6 +2178,8 @@ export class Kernable {
       min_position: options.minPosition ?? 0,
       issued_at: issuedNow(),
       ...(target ? { target } : {}),
+      // Not signed: read models of this deployment answer first.
+      deployment: this.deployment,
     };
     if (options.allPartitions) {
       // A wait-only query to every partition at once: each returns once the read model has
@@ -2158,7 +2206,7 @@ export class Kernable {
    * until `run()` connects.
    */
   listener(listener: Listener): ListenerHandle {
-    return new ListenerHandle(this, this.clients, this.key, listener, this.log, this.service);
+    return new ListenerHandle(this, this.clients, this.key, listener, this.log, this.service, this.deployment);
   }
 
   private send(options: SubmitOptions, wait: WireWait) {
@@ -2785,6 +2833,13 @@ export class Listener {
 export class ListenerHandle {
   /** Global position of the last handled event (or skipped, for other event types). */
   position = 0;
+  /**
+   * Events skipped because this code does not know them: a schema newer than the listener's
+   * domains declare, written by a newer deployment (see `Options.deployment`). Read models,
+   * live and replicated listeners skip them (with one warning per type and schema); a reactor
+   * that parks parks them instead (`unknown_event`). Counted since this process started.
+   */
+  skipped = 0;
   private stored?: Store;
   /** Resolves once the kernel accepted the listener. */
   readonly ready: Promise<void>;
@@ -2804,6 +2859,8 @@ export class ListenerHandle {
   private readonly log: Log;
   /** The service it belongs to (`Options.service`). */
   private readonly service: string;
+  /** Its code version (`Options.deployment`); empty: none. */
+  private readonly deployment: string;
   /** The definition it runs. */
   readonly listener: Listener;
   /** For handlers' follow-up commands and queries. */
@@ -2834,6 +2891,7 @@ export class ListenerHandle {
     listener: Listener,
     log: Log,
     service: string,
+    deployment: string,
     part?: { name: string; parent: ListenerHandle },
   ) {
     this.kernable = kernable;
@@ -2845,6 +2903,7 @@ export class ListenerHandle {
     this.key = key;
     this.log = log;
     this.service = service;
+    this.deployment = deployment;
     this.listener = listener;
     this.ready = new Promise((resolve) => (this.markReady = resolve));
   }
@@ -2886,7 +2945,7 @@ export class ListenerHandle {
         if (this.stopped) return;
         // A stream per partition, each from its own position in the shared store.
         this.children = parts.map((p) => {
-          const child = new ListenerHandle(this.kernable, p.clients, this.key, this.listener, this.log, this.service, { name: p.name, parent: this });
+          const child = new ListenerHandle(this.kernable, p.clients, this.key, this.listener, this.log, this.service, this.deployment, { name: p.name, parent: this });
           child.announce = this.announce;
           child.stored = this.stored;
           return child;
@@ -3010,6 +3069,7 @@ export class ListenerHandle {
           live: options.live ?? false,
           instance,
           single,
+          deployment: this.deployment,
           middlewares: [...middlewares].map(([when, m]) => ({
             order: m.options.order ?? 0,
             types: m.options.types,
@@ -3043,13 +3103,13 @@ export class ListenerHandle {
       // the partitions' batches take turns on a shared store.
       const batch = m.batch;
       await this.inOrder(batch.events);
-      const parked = await this.inTurn(async () => {
+      const { parked, skipped } = await this.inTurn(async () => {
         this.stored?.begin();
         try {
-          const parked = await this.handleBatch(batch);
+          const done = await this.handleBatch(batch);
           // After an erasure, nothing the handlers removed may stay in the store's files.
           this.stored?.commit(batch.up_to, [...batch.events, ...(batch.retries ?? [])].some((e) => e.erases), this.part);
-          return parked;
+          return done;
         } catch (err) {
           this.stored?.rollback();
           if (this.stored) this.position = this.stored.committedFor(this.part);
@@ -3058,7 +3118,9 @@ export class ListenerHandle {
       });
       this.position = m.batch.up_to;
       this.parent?.advanced(this.part, Number(m.batch.up_to));
-      call.write({ ack: { position: m.batch.up_to, parked } });
+      this.skipped += skipped.length;
+      if (this.parent) this.parent.skipped += skipped.length;
+      call.write({ ack: { position: m.batch.up_to, parked, skipped } });
     } else if (m.query) {
       call.write({ answer: { call_id: m.query.call_id, ...(await this.answer(m.query.query)) } });
     } else if (m.check) {
@@ -3148,17 +3210,36 @@ export class ListenerHandle {
 
   /**
    * Handles a batch: first the retries, then the events after the position. Returns the events
-   * it parked; throws if a handler failed on one it does not park.
+   * it parked and those it skipped as unknown; throws if a handler failed on one it does not park.
    */
-  private async handleBatch(batch: NonNullable<ListenerDelivery["batch"]>): Promise<WireParked[]> {
+  private async handleBatch(batch: NonNullable<ListenerDelivery["batch"]>): Promise<{ parked: WireParked[]; skipped: WireSkipped[] }> {
     const { handlers, domains, options } = this.listener;
     const parkAfter = options.live ? 0 : (options.parkAfter ?? 0);
+    // Replicated instances (not `single`) cannot park.
+    const replicated = (options.instance ?? process.env.KERNABLE_INSTANCE ?? "") !== "" && !(options.single ?? false);
     const parked: WireParked[] = [];
+    const skipped: WireSkipped[] = [];
     const retries = (batch.retries ?? []).map((e) => ({ e, retry: true }));
     for (const { e, retry } of [...retries, ...batch.events.map((e) => ({ e, retry: false }))]) {
       if (!retry && e.global_position <= this.position) continue; // handled already
       const entry = handlers.get(`${e.domain}.${e.event_type}`) ?? handlers.get(`${e.domain}.*`);
-      if (entry) {
+      const known = entry && !entry.raw ? newerThanKnown(domains.get(e.domain)?.events, e.event_type, e.schema) : undefined;
+      if (entry && known !== undefined) {
+        // Newer than this code: a newer deployment wrote it. No handler call.
+        const type = `${e.domain}.${e.event_type}`;
+        if (parkAfter > 0 && !replicated) {
+          const message = `${type} schema ${e.schema}: this code reads it up to ${known}; a newer deployment wrote it`;
+          this.log.print("warn", this.what, `${type} at ${e.global_position} parked: ${message}`);
+          parked.push({ position: e.global_position, code: "unknown_event", message, attempts: 1 });
+        } else {
+          skipped.push({ position: e.global_position, event_type: type, schema: e.schema });
+          const once = `${type}@${e.schema}`;
+          if (!warnedUnknown.has(once)) {
+            warnedUnknown.add(once);
+            this.log.print("warn", this.what, `skipped ${type} schema ${e.schema}: this code reads it up to ${known}; a newer deployment wrote it`);
+          }
+        }
+      } else if (entry) {
         const stored = toStored(e, batch.vault);
         const { data, request, ...evt } = entry.raw
           ? stored
@@ -3192,7 +3273,7 @@ export class ListenerHandle {
       }
       if (!retry) this.position = e.global_position;
     }
-    return parked;
+    return { parked, skipped };
   }
 
   /** `ListenerContext.submit`: a follow-up of `event`, its rejection thrown. */
@@ -3267,6 +3348,9 @@ export class ListenerHandle {
   }
 }
 
+/** The unknown event types and schemas a listener warned about, as `domain.Type@schema`: once per process. */
+const warnedUnknown = new Set<string>();
+
 /** How a worker runs: the argument of `Worker.run` and `App.run`. */
 export interface WorkerOptions {
   /** Commands executed in parallel, of different aggregates (default 16). */
@@ -3304,6 +3388,8 @@ export class Worker {
   private readonly aggregates: Aggregate<any>[];
   /** The service it belongs to (`Options.service`). */
   private readonly service: string;
+  /** Its code version (`Options.deployment`); empty: none. */
+  private readonly deployment: string;
   /** Whether the first connect gets its own line; an `App` prints it in its overview instead. */
   announce = true;
   private connects = 0;
@@ -3316,12 +3402,13 @@ export class Worker {
   /** The clients of the one kernel it runs on (without partitions, or as a partition's worker). */
   private single?: Clients;
 
-  constructor(clients: Partitioned | Clients, key: Key, aggregates: Aggregate<any>[], log: Log, service: string) {
+  constructor(clients: Partitioned | Clients, key: Key, aggregates: Aggregate<any>[], log: Log, service: string, deployment = "") {
     this.clients = clients;
     this.key = key;
     this.log = log;
     this.aggregates = aggregates;
     this.service = service;
+    this.deployment = deployment;
     for (const agg of aggregates) {
       for (const type of agg.handlers.keys()) this.byCommand.set(`${agg.domain}.${type}`, agg);
       this.byAggregate.set(`${agg.domain}.${agg.name}`, agg);
@@ -3340,7 +3427,7 @@ export class Worker {
       if (parts.length > 1 || parts[0].name !== "") {
         // A session per partition: commands of every partition's tenants run here.
         this.children = parts.map((p) => {
-          const worker = new Worker(p.clients, this.key, this.aggregates, this.log, this.service);
+          const worker = new Worker(p.clients, this.key, this.aggregates, this.log, this.service, this.deployment);
           worker.announce = this.announce;
           return worker;
         });
@@ -3394,14 +3481,18 @@ export class Worker {
           max_concurrency: concurrency,
           event_schemas: this.eventSchemas(),
           service: this.service,
+          deployment: this.deployment,
         },
       });
     });
   }
 
   /**
-   * The payload versions the worker writes, for every event type its aggregates know: the
-   * kernel refuses the worker if the store already holds a newer one.
+   * The payload versions the worker reads and writes, for every event type its aggregates know
+   * (those they apply and those their domains declare): without a deployment, the kernel
+   * refuses the worker if the store already holds a newer one; with one, it rejects commands
+   * on aggregates holding an event newer than declared here, or of a type not declared here
+   * that a newer deployment wrote (`unknown_history`).
    */
   private eventSchemas(): { event_type: string; schema: number }[] {
     const schemas = new Map<string, number>();
@@ -3816,5 +3907,6 @@ function toStored(e: WireEvent, vault?: WireVaultValue[]): StoredEvent {
     data,
     commandId: e.command_id,
     request: fromWireContext(e.context),
+    deployment: e.deployment ?? "",
   };
 }

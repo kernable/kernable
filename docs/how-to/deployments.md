@@ -1,0 +1,109 @@
+# Deployments and rollbacks
+
+Use this page when you put a new version of your code into production and want to be able to go back to the one before. A **deployment** is one version of your code: the workers, read models, reactors and processes built from it. kernable never changes the events for a deployment. Each deployment builds its own read models and snapshots from the events, so switching between deployments, forward or back, only changes which one serves.
+
+## Name every deployment
+
+Give every process of a version the same deployment name, through the environment:
+
+```sh
+KERNABLE_DEPLOYMENT=2026-11-11.2 node app.js
+```
+
+or in code (`new Kernable({ deployment })`, `Kernable(deployment=...)`, `Options::deployment` in Rust). A name has 1 to 128 letters, digits, `-`, `_` and `.`; a git commit or a build number works well. A process without one behaves as before deployments existed.
+
+With a name set, the process tells the kernel which code it runs whenever it connects, and:
+
+- **Every event records the deployment that wrote it** (`Event.deployment`, part of the event's hash). `kernable deployments <store>` lists each deployment with its first and last event.
+- **Snapshots are kept per deployment.** A worker only gets snapshots its own deployment made, so an older version never reads a newer state format.
+- **Read models and middlewares are kept per deployment.** The read model `carts` of deployment `v2` is registered as `carts@v2`, beside `carts@v1`, with its own position: it builds from the first event while `v1`'s keeps serving. Both stay registered, so a switch back finds `v1`'s read model where it stopped, and it catches up on what happened since.
+- **Reactors are not.** A reactor (a listener that answers no queries and checks nothing) keeps one registration across deployments, so the new deployment goes on after the old one's position and no email is sent twice. Run one deployment's reactors at a time.
+
+## Which deployment serves
+
+A service's [membership](./deploy#a-new-version-of-a-service) names the deployment that serves it. An app (`kernable.app(...).run()`) applies its membership with its own deployment when it starts; from a pipeline, the manifest's `deployment` field or `--deployment` does it:
+
+```sh
+kernable apply 127.0.0.1:7233 keys/deploy.key shop.json --deployment 2026-11-11.2
+```
+
+The deployment that serves:
+
+- runs the commands: workers of the service that declare another deployment stay connected and idle;
+- counts: its listeners are the ones the kernel waits for (`/ready`, settling submits, the order of delivery); another deployment's read models keep catching up but hold nobody back;
+- answers queries: a query goes to a read model of the asker's own deployment if there is one, else to the serving deployment's;
+- checks requests: of a middleware registered by several deployments, the serving one's checks, or, while it is away, another connected one.
+
+Applying a new deployment's membership switches to it at once. Its read models may still be rebuilding: `/ready` answers 503 and settling submits may come back `NotSettled` until they caught up. Send your traffic to it once `/ready` answers 200.
+
+## Before you roll back: what the newer deployment left behind
+
+Events are never undone. Before you switch back, look at what the newer deployment wrote since it started, from the position before its first event (`kernable deployments <store>` shows it) or from a time:
+
+```sh
+$ kernable deployments since kernable.db 1840 --version 2026-11-11.2
+after position 1840 (up to 2215), events of 2026-11-11.2
+  shop.ItemAdded schema 2  312 events in 97 aggregates, by 2026-11-11.2  NEW SCHEMA
+  shop.CartShared schema 1  4 events in 4 aggregates, by 2026-11-11.2  NEW TYPE
+  shop.OrderPlaced schema 1  51 events in 51 aggregates, by 2026-11-11.2
+  scheduled command 7d1c… shop.RemindCustomer on shop.cart/c-17, due 1762876800000
+  running case o-88#1 of shop.fulfilment (tenant t1), last StepReached
+  process shop.fulfilment version 4 registered
+```
+
+`--at 2026-11-11T09:00:00Z` starts from a time instead, `--json` prints it for a tool; the kernel UI serves the same at `GET /api/deployments/since?position=1840&version=…`. What each part means for a rollback:
+
+| What it shows | After a rollback to the older deployment |
+|---|---|
+| Rows without a mark | Safe: the older code knows these events. |
+| `NEW SCHEMA`, `NEW TYPE` | The aggregates listed hold events the older code does not know: their commands are refused with `unknown_history` until a deployment that knows them serves again. Every other aggregate works. The older read models skip these events and count them. |
+| Scheduled commands | They run when due, on the older workers, as the older code decides. A command type the older code does not run waits in the queue until a deployment that runs it serves. Cancel the ones that must not run (`Kernable.cancel`). |
+| Process timers, running cases | Cases keep the process version they started on, and the kernel runs them: their steps send commands to whatever serves. A newer version's case may send commands the older code does not know. |
+| Process versions registered | New cases start on the newest registered version unless the older deployment registers its own again (an app does when it starts). |
+
+No mark anywhere means the rollback is safe. Marks mean it is still possible, but those aggregates wait for the next roll forward.
+
+## Roll back
+
+1. Start the older deployment's processes again, if they stopped. Its read models connect under their registrations and catch up on the events written meanwhile.
+2. Apply its membership: start its app, or apply its manifest with `--deployment <older>`. From then on its workers run the commands, and the newer deployment's processes idle; stop them.
+3. Watch `/ready` and the `unknown_history` rejections in the UI.
+
+Rolling forward again is the same with the newer deployment.
+
+## The unknown-history refusal
+
+When a worker with a deployment gets a command, the kernel first looks at the aggregate's events (those after the snapshot of that deployment, or all of them). It refuses the command with `unknown_history`, before the worker sees it, if one of them is
+
+- of a schema above the one the worker declares for its type (`Domain.event(type, schema)`, the event classes' `version`), or
+- of a type the worker does not declare at all, that its deployment never wrote, and that another deployment first wrote after this deployment's first event.
+
+Refusing is safer than deciding on state the code cannot build: an aggregate that misses an event can accept what it must refuse. The second rule lets a deployment that is just a new build of the same code read types older than itself, but not types a newer deployment introduced. Declare every event type your aggregates read (the SDKs send every type that has an `apply` or a declaration).
+
+A worker without a deployment is not checked this way. Instead, as before, it may not register while the store holds a newer schema than it writes.
+
+## Read models skip what they do not know
+
+A read model that gets an event of a newer schema than its code reads skips it instead of stopping: it moves on, counts it (`kernable_listener_skipped`, the listener's row in the UI) and logs a warning once per type and schema. A reactor parks such an event (`unknown_event`) instead, so that once code that reads it serves, `kernable listeners retry` handles it. After rolling forward, a read model that skipped events should [rebuild](./rebuild-read-model); in-memory read models do on every start.
+
+## Fixing what went wrong
+
+A deployment that wrote wrong events, or sent something it should not have, is fixed forward:
+
+- **Wrong events of a known type:** correct them with new events (a command whose handler writes the correction, `PriceCorrected` after a wrong `PriceSet`), never by deleting. The log keeps both, and read models apply the correction.
+- **Side effects outside:** undo them with actions of their own, a reactor or a command that refunds, cancels or tells.
+- **Events the older code cannot read:** roll forward to code that reads them; or write the code that reads them into a new deployment of the older version.
+
+## Clean up old deployments
+
+A deployment's read model registrations (with their positions) and snapshots stay until you drop them, so a rollback can always find them. Drop one that you will not go back to, with the kernel stopped:
+
+```sh
+kernable deployments drop kernable.db 2026-11-01.1
+```
+
+or let the kernel drop deployments that no membership names, with none of their read models connected for a number of days: `--deployment-retention-days 30`. Either logs what it dropped; the events stay. A dropped deployment that comes back starts afresh: its read models rebuild, and for the unknown-history refusal it counts from its first event, as before.
+
+## Previews and replay checks
+
+A preview of a new deployment on a copy of production, or a check that replays recent commands on a copy before switching, needs a copy of the store: [export and import](./export) one. kernable Cloud makes such copies for you.

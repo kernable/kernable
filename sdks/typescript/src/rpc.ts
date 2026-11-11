@@ -83,6 +83,8 @@ export interface WireEvent {
   schema: number;
   vault_refs: string[];
   erases: string;
+  /** The code version of the worker that wrote it; empty if none. Set by the kernel only. */
+  deployment: string;
 }
 
 export interface WireNewEvent {
@@ -181,6 +183,8 @@ export type WorkerMessage =
         max_concurrency: number;
         event_schemas: { event_type: string; schema: number }[];
         service: string;
+        /** The process's code version; empty: none. See `Register.deployment`. */
+        deployment: string;
       };
     }
   | { challenge_response: { sig: Buffer } }
@@ -219,6 +223,8 @@ export interface WireQueryRequest {
   wait_only?: boolean;
   /** Signed when set: the aggregate the query is about; see `QueryRequest.target`. */
   target?: { aggregate_type: string; aggregate_id: string } | null;
+  /** Not signed: the asker's code version; see `QueryRequest.deployment`. */
+  deployment?: string;
 }
 
 export interface WireQueryResult {
@@ -274,10 +280,12 @@ export type ListenerMessage =
         live: boolean;
         instance: string;
         single: boolean;
+        /** The process's code version; empty: none. See `Hello.deployment`. */
+        deployment: string;
       };
     }
   | { challenge_response: { sig: Buffer } }
-  | { ack: { position: number; parked?: WireParked[] } }
+  | { ack: { position: number; parked?: WireParked[]; skipped?: WireSkipped[] } }
   | { answer: { call_id: string; response?: Buffer; rejected?: WireRejected } }
   | { verdict: { call_id: string; rejected?: WireRejected } };
 
@@ -289,6 +297,14 @@ export interface WireParked {
   code: string;
   message: string;
   attempts: number;
+}
+
+/** An event a listener skipped because its code does not know it; see `Skipped` in kernable.proto. */
+export interface WireSkipped {
+  position: number;
+  /** Qualified: `shop.ItemAdded`. */
+  event_type: string;
+  schema: number;
 }
 
 /** A file of a domain; see `DataService` in kernable.proto. */
@@ -352,6 +368,8 @@ export interface WireMembership {
   issued_at: number;
   /** Qualified process names; signed only when there are any. */
   processes?: string[];
+  /** The deployment that serves the service; signed only when set. */
+  deployment?: string;
 }
 
 /** A process model to register; see `ProcessRegistration` in kernable.proto. */

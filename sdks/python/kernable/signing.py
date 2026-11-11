@@ -160,6 +160,9 @@ def membership_message(m) -> bytes:
         msg.str("processes").u64(len(m.processes))
         for p in m.processes:
             msg.str(p)
+    # Optional: appended only when set.
+    if m.deployment:
+        msg.str("deployment").str(m.deployment)
     return bytes(msg.buf)
 
 

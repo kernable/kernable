@@ -120,10 +120,10 @@ Writes a development CA (`ca.tls.crt`), a kernel certificate (`kernel.tls.crt`, 
 ### `kernable apply`
 
 ```text
-kernable apply <addr> <key> <manifest.json>
+kernable apply <addr> <key> <manifest.json> [--deployment <version>]
 ```
 
-Applies a service's membership: a JSON manifest with service, workers, listeners, middlewares, processes and metadata. A process the service's membership listed before and no longer lists starts no new cases. Signed with `<key>`, whose grant needs `manage=<service>`; the grant file next to the key (`app.grant` for `app.key`) is sent along. The kernel must be running. Once per deploy.
+Applies a service's membership: a JSON manifest with service, workers, listeners, middlewares, processes, metadata and deployment (or `--deployment`): the code version that serves the service from now on. Its workers run the commands and its read models count; the other deployments' stay connected and idle. Applying an earlier deployment's membership rolls back. A process the service's membership listed before and no longer lists starts no new cases. Signed with `<key>`, whose grant needs `manage=<service>`; the grant file next to the key (`app.grant` for `app.key`) is sent along. The kernel must be running. Once per deploy.
 
 ### `kernable services`
 
@@ -164,6 +164,22 @@ kernable schemas <store>
 ```
 
 Lists the highest stored schema version per event type.
+
+### `kernable deployments`
+
+```text
+kernable deployments <store>
+```
+
+Lists the deployments (code versions) that wrote events or registered read models: first and last position and how many events each wrote, its read models; then the deployment each service's membership names.
+
+### `kernable deployments since`
+
+```text
+kernable deployments since <store> <position>|--at <time> [--version <v>] [--json]
+```
+
+What was written after `<position>` (or since the UTC `<time>`), to check before a rollback: per event type, schema and deployment the events and aggregates, marked NEW TYPE or NEW SCHEMA where no earlier event had them (an older deployment refuses commands on those aggregates: `unknown_history`); then scheduled commands and process timers stored since and still due, running process cases that moved, and process versions registered. `--version`: only that deployment's events.
 
 ### `kernable processes list`
 
@@ -370,6 +386,14 @@ kernable listeners remove <store> <name>
 ```
 
 Removes a listener and its middleware, so they no longer count. If a listener connects again under that name, it starts at the newest event. Exit 1 if there is no such listener.
+
+### `kernable deployments drop`
+
+```text
+kernable deployments drop <store> <deployment> [--snapshots <url>]
+```
+
+Forgets a deployment's read model and middleware registrations (with their positions) and its snapshots (default store: next to `<store>`); its events stay. A read model of it that connects again rebuilds from the start.
 
 ### `kernable workers remove`
 

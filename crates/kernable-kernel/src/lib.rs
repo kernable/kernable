@@ -23,6 +23,7 @@ pub mod config;
 mod connections;
 pub mod crash;
 pub mod demo;
+pub mod deployments;
 pub mod export;
 #[cfg(feature = "fuzzing")]
 pub mod fuzzing;
@@ -283,8 +284,10 @@ pub struct Kernel {
     /// The unique keys and facts every aggregate holds. Locked after `schemas`, never without
     /// it, so the two serialise commits in one order.
     index: Mutex<index::Index>,
-    /// The latest snapshot per aggregate, apart from the log.
+    /// The latest snapshot per aggregate and deployment, apart from the log.
     snapshots: Box<dyn SnapshotStore>,
+    /// What each deployment wrote, for the check of unknown history (`deployments.rs`).
+    written: deployments::Written,
     /// Personal and secret values; `None` without `[vault]`.
     vault: Option<Vault>,
     /// Files of the data service.
@@ -458,6 +461,7 @@ impl Kernel {
             schemas: Mutex::new(schemas),
             index: Mutex::new(index),
             snapshots,
+            written: Default::default(),
             vault,
             data,
             cache,
@@ -1576,6 +1580,7 @@ pub async fn serve(kernel: Arc<Kernel>) -> Result<(), BoxError> {
         _ = checkpoints(&kernel) => unreachable!(),
         _ = usage::keep(&kernel) => unreachable!(),
         _ = measure_stores(&kernel) => unreachable!(),
+        () = retire_deployments(&kernel) => unreachable!(),
         _ = flush_listeners(&kernel) => unreachable!(),
         () = keep_sealed_while_fenced(&kernel) => unreachable!(),
         _ = sample_trend(&kernel) => unreachable!(),
@@ -1706,6 +1711,66 @@ fn bytes_of(url: &str) -> u64 {
             .sum(),
         (_, path) => walk(std::path::Path::new(path)),
     }
+}
+
+/// Every hour, drops what the kernel keeps for deployments past `--deployment-retention-days`:
+/// unused (no membership names them, none of their read models connected) and not seen for
+/// that long. Logged, never silent.
+async fn retire_deployments(kernel: &Arc<Kernel>) {
+    let mut tick = tokio::time::interval(Duration::from_secs(3600));
+    loop {
+        tick.tick().await;
+        let days = kernel.config().deployment_retention_days;
+        if days == 0 || kernel.fenced() || sealed(kernel) {
+            continue;
+        }
+        let cutoff = now_ms().saturating_sub(
+            i64::try_from(days)
+                .unwrap_or(i64::MAX / 2)
+                .saturating_mul(86_400_000),
+        );
+        let serving: Vec<String> = kernel
+            .memberships
+            .deployments()
+            .into_iter()
+            .map(|(_, d)| d)
+            .collect();
+        let workers = kernel.workers.deployments();
+        for (deployment, last_seen, used) in kernel.listeners.deployments() {
+            if used
+                || last_seen >= cutoff
+                || serving.contains(&deployment)
+                || workers.contains(&deployment)
+            {
+                continue;
+            }
+            retire(kernel, &deployment);
+        }
+    }
+}
+
+/// Drops a deployment's read model registrations and snapshots (see [`retire_deployments`]).
+fn retire(kernel: &Kernel, deployment: &str) {
+    let removed = match kernel.listeners.drop_deployment(deployment) {
+        Ok(removed) => removed,
+        Err(why) => {
+            tracing::info!(%deployment, %why, "deployment kept");
+            return;
+        }
+    };
+    if let Err(e) = kernel.store.save_listeners(&removed) {
+        tracing::error!(error = %e, %deployment, "dropping the deployment's read models failed");
+        return;
+    }
+    let snapshots = kernel
+        .snapshots
+        .drop_deployment(deployment)
+        .unwrap_or_else(|e| {
+            tracing::error!(error = %e, %deployment, "dropping the deployment's snapshots failed");
+            0
+        });
+    let names: Vec<&str> = removed.iter().map(|r| r.name.as_str()).collect();
+    tracing::warn!(%deployment, read_models = ?names, snapshots, "dropped a deployment's read models and snapshots after --deployment-retention-days; its events stay");
 }
 
 /// Measures the stores every 10 s, and warns once they pass 80 % of `--max-store-bytes`.
@@ -2738,6 +2803,10 @@ struct InFlight {
 struct Session {
     kernel: Arc<Kernel>,
     key_id: String,
+    /// The worker's code version (`Register.deployment`); empty: none.
+    deployment: String,
+    /// Its service: the service's membership names the deployment that serves it.
+    service: String,
     /// The payload version the worker writes per qualified event type; others at 1.
     schemas: HashMap<String, u32>,
     out: Outbox,
@@ -2931,6 +3000,7 @@ async fn run_session(
     };
     protocol(reg.protocol)?;
     workers::validate(&reg)?;
+    deployments::validate(&reg.deployment)?;
     kernel.present(metadata, &reg.key_id)?;
     let permissions = kernel.permissions();
     let authorized = reg
@@ -2984,6 +3054,8 @@ async fn run_session(
     let session = Arc::new(Session {
         kernel,
         key_id: reg.key_id,
+        deployment: reg.deployment,
+        service: reg.service,
         schemas,
         out: out.clone(),
         in_flight: Mutex::default(),
@@ -3020,8 +3092,10 @@ async fn run_session(
     }
 }
 
-/// Checks the payload versions a registering worker declares: a worker that would write an
-/// older version of an event type than the store holds is outdated and refused.
+/// Checks the payload versions a registering worker declares: a worker without a deployment
+/// that would write an older version of an event type than the store holds is outdated and
+/// refused. One with a deployment may (a rollback): the kernel keeps it off the aggregates that
+/// hold the newer version (`deployments::unknown`).
 fn declared_schemas(kernel: &Kernel, reg: &Register) -> Result<HashMap<String, u32>, Status> {
     let domains: Vec<&str> = reg
         .aggregates
@@ -3043,7 +3117,10 @@ fn declared_schemas(kernel: &Kernel, reg: &Register) -> Result<HashMap<String, u
                 s.event_type
             )));
         }
-        if let Some(newer) = stored.get(&s.event_type).filter(|v| **v > s.schema) {
+        if let Some(newer) = stored
+            .get(&s.event_type)
+            .filter(|v| **v > s.schema && reg.deployment.is_empty())
+        {
             return Err(Status::failed_precondition(format!(
                 "outdated worker: the store holds {} at schema {newer}, this worker writes {}",
                 s.event_type, s.schema
@@ -3067,6 +3144,17 @@ async fn dispatch(session: Arc<Session>, command_types: Vec<String>, permits: Ar
         }
         let (lease_id, command, received_at) = loop {
             let notified = kernel.work.notified();
+            // While its service's membership names another deployment, the worker idles.
+            if !kernel
+                .memberships
+                .serves(&session.service, &session.deployment)
+            {
+                tokio::select! {
+                    _ = notified => {}
+                    _ = tokio::time::sleep(POLL) => {}
+                }
+                continue;
+            }
             // Not one it still runs itself: a lease that ran out under it goes to another
             // worker first, so a worker too slow for its lease cannot keep a command forever.
             let busy: std::collections::HashSet<String> = session
@@ -3127,12 +3215,16 @@ impl Session {
             aggregate_type: aggregate_type.clone(),
             aggregate_id: id.clone(),
         };
-        let loaded = self.kernel.snapshots.get(&stream).and_then(|record| {
-            let snapshot = record.and_then(|r| r.snapshot);
-            let after = snapshot.as_ref().map_or(0, |s| s.version);
-            let history = store.read_stream_after(tenant, domain, aggregate_type, id, after)?;
-            Ok((snapshot, history))
-        });
+        let loaded = self
+            .kernel
+            .snapshots
+            .get(&stream, &self.deployment)
+            .and_then(|record| {
+                let snapshot = record.and_then(|r| r.snapshot);
+                let after = snapshot.as_ref().map_or(0, |s| s.version);
+                let history = store.read_stream_after(tenant, domain, aggregate_type, id, after)?;
+                Ok((snapshot, history))
+            });
         let (snapshot, history) = match loaded {
             Ok(loaded) => loaded,
             Err(e) => {
@@ -3147,6 +3239,27 @@ impl Session {
             .map(|e| e.version)
             .or(snapshot.as_ref().map(|s| s.version))
             .unwrap_or(0);
+        // Events this deployment does not know: rejected before the worker decides on less.
+        match deployments::unknown(
+            &self.kernel.written,
+            store.as_ref(),
+            &self.deployment,
+            &self.schemas,
+            &history,
+        ) {
+            Ok(None) => {}
+            Ok(Some(reason)) => {
+                drop(permit);
+                self.reject(&lease_id, command, reason);
+                return true;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "reading what deployments wrote failed");
+                self.kernel.queue.release(&lease_id);
+                self.kernel.work.notify_waiters();
+                return true;
+            }
+        }
         let client = command.client_sig.as_ref().map(|sig| sig.key_id.as_str());
         // A scheduled command counts as sent when it is due: a key revoked before then does not
         // run it.
@@ -3244,7 +3357,7 @@ impl Session {
         sent
     }
 
-    async fn on_result(&self, r: kernable_core::proto::Result) -> Result<(), Status> {
+    async fn on_result(&self, mut r: kernable_core::proto::Result) -> Result<(), Status> {
         let Some(f) = self.in_flight().remove(&r.lease_id) else {
             return Ok(()); // unknown or already handled lease
         };
@@ -3292,6 +3405,10 @@ impl Session {
             };
             self.reject(&r.lease_id, f.command, reason);
             return Ok(());
+        }
+        // Only the kernel says which deployment wrote an event: the worker's own.
+        for e in &mut r.events {
+            e.deployment.clone_from(&self.deployment);
         }
 
         let name = |e: &NewEvent| config::qualified(&f.command.domain, &e.event_type);
@@ -3403,7 +3520,10 @@ impl Session {
             let mut stored = self.kernel.schemas();
             let mut index = self.kernel.index();
             let outdated = r.events.iter().find_map(|e| {
-                let newer = stored.get(&name(e)).filter(|v| **v > e.schema)?;
+                // A deployment may write an older version (a rollback); see `declared_schemas`.
+                let newer = stored
+                    .get(&name(e))
+                    .filter(|v| **v > e.schema && self.deployment.is_empty())?;
                 Some(format!(
                     "outdated worker: the store holds {} at schema {newer}, this worker writes {}",
                     name(e),
@@ -3510,6 +3630,7 @@ impl Session {
             Ok(events) => {
                 crash::point("commit.stored");
                 self.kernel.failed_commits.store(0, Relaxed);
+                self.kernel.written.committed(&events);
                 // The flush and what follows it run apart from the session, so the next results
                 // commit meanwhile and share the flush (group commit). The lease and the
                 // worker's permit are held until then: the aggregate's next command waits for
@@ -3517,6 +3638,7 @@ impl Session {
                 let kernel = Arc::clone(&self.kernel);
                 let snapshot = r.snapshot.filter(|_| erasing.is_empty());
                 let lease_id = r.lease_id;
+                let deployment = self.deployment.clone();
                 tokio::spawn(async move {
                     let last = events.last().map_or(0, |e| e.global_position);
                     let syncing = Arc::clone(&kernel);
@@ -3532,6 +3654,7 @@ impl Session {
                             aggregate_id: last.aggregate_id.clone(),
                             snapshot: Some(snapshot),
                             event_hash: last.hash.clone(),
+                            deployment,
                         };
                         // A snapshot is only a cache: losing one costs time, not data.
                         match kernel.snapshots.save(&record) {
@@ -4171,8 +4294,11 @@ mod tests {
 
         struct Failing;
         impl SnapshotStore for Failing {
-            fn get(&self, _: &StreamId) -> kernable_store::Result<Option<SnapshotRecord>> {
+            fn get(&self, _: &StreamId, _: &str) -> kernable_store::Result<Option<SnapshotRecord>> {
                 Ok(None)
+            }
+            fn drop_deployment(&self, _: &str) -> kernable_store::Result<usize> {
+                Ok(0)
             }
             fn save(&self, _: &SnapshotRecord) -> kernable_store::Result<()> {
                 Ok(())
@@ -4238,7 +4364,7 @@ mod tests {
             .unwrap();
         let erased = erase_subjects(&vault, &snapshots, "t1", "c-erase", &subjects, &own);
         assert_eq!(erased, [used.clone(), own]);
-        assert!(snapshots.get(&used).unwrap().is_none());
+        assert!(snapshots.get(&used, "").unwrap().is_none());
         assert!(vault.intents().unwrap().is_empty());
         assert!(vault.streams_of("t1", "alice").unwrap().is_empty());
     }

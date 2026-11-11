@@ -599,6 +599,7 @@ function errorCodes(): string[] {
   const sources = [
     "crates/kernable-kernel/src/lib.rs",
     "crates/kernable-kernel/src/listeners.rs",
+    "crates/kernable-kernel/src/deployments.rs",
     "sdks/typescript/src/index.ts",
     "sdks/python/kernable/__init__.py",
     "sdks/rust/src/domain.rs",
@@ -612,6 +613,7 @@ function errorCodes(): string[] {
     ...sources.matchAll(/pb\.Rejected\(code="([a-z_]+)"/g),
     ...sources.matchAll(/\.code\("([a-z_]+)"\)/g),
     ...sources.matchAll(/const SNAPSHOT_STALE: &str = "([a-z_]+)"/g),
+    ...sources.matchAll(/const UNKNOWN_HISTORY: &str = "([a-z_]+)"/g),
   ].map((m) => m[1]);
   return [...new Set(codes)].sort();
 }

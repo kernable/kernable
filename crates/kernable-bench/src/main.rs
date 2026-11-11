@@ -238,6 +238,7 @@ fn store(url: &str, count: usize) -> Result<(), BoxError> {
             schema: 1,
             origin_partition: String::new(),
             origin_position: 0,
+            deployment: Default::default(),
         }];
         let sig = signing::sign(&worker, &signing::result_message(&cmd, version, &events));
         signing::verify(&sig, &signing::result_message(&cmd, version, &events))?;
@@ -303,6 +304,7 @@ async fn worker(addr: &str, key: &str, concurrency: u32, keys: bool) -> Result<(
                     schema: 1,
                     origin_partition: String::new(),
                     origin_position: 0,
+                    deployment: Default::default(),
                 }];
                 let sig = signing::sign(
                     &key,
@@ -485,6 +487,7 @@ fn fill(
             schema: 1,
             origin_partition: String::new(),
             origin_position: 0,
+            deployment: Default::default(),
         }];
         let sig = signing::sign(&worker, &signing::result_message(&cmd, version, &events));
         // The kernel stores an index with the aggregate's first commit only; later ones

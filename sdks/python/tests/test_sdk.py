@@ -825,7 +825,7 @@ class EndToEnd(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "already"):
             support.read_model("x").middleware(["*"], fn=lambda check: None).middleware(["*"], fn=lambda check: None)
 
-    def test_a_new_event_schema_is_upcast_and_outdated_processes_stop(self):
+    def test_a_new_event_schema_is_upcast_outdated_workers_stop_and_outdated_read_models_skip(self):
         # Version 1 stores the increment as `by`.
         v1 = domain("counters").aggregate("Counter", 0)
         v1.apply("Incremented", lambda n, data: n + data["by"])
@@ -854,7 +854,8 @@ class EndToEnd(unittest.TestCase):
         archive = counters.read_model("archive")
         archive.on("counters.*", lambda data, evt: archived.append((evt.schema, data)), raw=True)
         stale = domain("counters").read_model("stale")
-        stale.on("Incremented", lambda data: None)
+        stale_seen = []
+        stale.on("Incremented", lambda data: stale_seen.append(data))
         current, archive, stale = (self.run_stream(self.k.listener(listener)) for listener in (current, archive, stale))
 
         old = self.run_stream(self.k.worker(v1))
@@ -873,7 +874,12 @@ class EndToEnd(unittest.TestCase):
 
         self.assertEqual(seen, [(2, {"amount": 3}), (2, {"amount": 2})])
         self.assertEqual(archived, [(1, {"by": 3}), (2, {"amount": 2})])
-        self.assertEqual(stale.position, 1)  # stopped before the version 2 event
+        # It never misreads the version 2 event: it skips it, counts it, and goes on.
+        for _ in range(100):
+            if stale.position == 2:
+                break
+            time.sleep(0.02)
+        self.assertEqual((stale.position, stale.skipped, stale_seen), (2, 1, [{"by": 3}]))
 
     def test_a_reactor_settles_on_the_read_models_before_it_and_never_waits_for_itself(self):
         self.run_stream(self.k.worker(counter))

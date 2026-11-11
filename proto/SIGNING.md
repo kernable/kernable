@@ -40,7 +40,7 @@ Each message starts with a `str` **tag** for domain separation. Payloads are sig
 | Subscriber | `kernable.v1.subscribe` | `after_position: u64`, `issued_at: i64`, `type_count: u64`, then every event type |
 | Data client | `kernable.v1.data.<op>` (`put`, `get`, `delete`, `list`) | `tenant_id`, `domain`, `key` (for list: the prefix), `content_type`, `sha256(data)` (the 32-byte digest as a `bytes` field), `issued_at: i64`, `context`, and for list only `after`; get, delete and list sign an empty `content_type` and the hash of empty data |
 | Cache client | `kernable.v1.cache.<op>` (`set`, `get`, `delete`) | `tenant_id`, `domain`, `key`, `sha256(value)` (as a `bytes` field), `ttl_ms: u64`, `issued_at: i64`, `context`; get and delete sign the hash of an empty value and `ttl_ms` 0 |
-| Deploy tooling | `kernable.v1.membership` | `service`, then for `workers`, `listeners` and `middlewares` each `count: u64` and every entry, then `metadata_count: u64` and per attribute `key`, `value`, then `issued_at: i64`; then only with processes (`processes` not empty) the `str` `processes`, `count: u64` and every process name |
+| Deploy tooling | `kernable.v1.membership` | `service`, then for `workers`, `listeners` and `middlewares` each `count: u64` and every entry, then `metadata_count: u64` and per attribute `key`, `value`, then `issued_at: i64`; then only with processes (`processes` not empty) the `str` `processes`, `count: u64` and every process name; then only with a deployment (`deployment` not empty) the `str` `deployment` and the deployment |
 | App (deploy) | `kernable.v1.process` | `model` (the model's JSON as sent, `bytes`), `issued_at: i64` (a key granted `process` for the process, see `ProcessService.Register`) |
 | Operator tooling | `kernable.v1.process_remove` | `name`, `issued_at: i64` (a key granted `process` for it) |
 | Identity kit, operator tooling | `kernable.v1.process_act` | `name`, `context` (as whom the process acts), `issued_at: i64` (a key granted `process` for it) |
@@ -154,6 +154,7 @@ Each stored event has `hash = SHA-256(message)`, where `message` has the tag `ke
 15. `context` (of the command that caused the event)
 16. the vault fields, only when set (see above)
 17. only for an event a tenant brought along when it moved to another partition: `origin_partition` and `origin_position: u64`, where the event was first committed
+18. only for an event whose worker declared a deployment (`Register.deployment`): the string `deployment`, then the event's `deployment`
 
 `prev_hash` is the hash of the event at the previous global position. For the first event it is 32 zero bytes. Every event of a command stores that command's worker result signature as `producer_sig`.
 
@@ -195,6 +196,8 @@ An SDK must reproduce these entries byte for byte:
 | `process_act` | `message` and `signature` of `kernable.v1.process_act`, with the context of `command` |
 | `process_resolve` | `message` and `signature` of `kernable.v1.process_resolve` |
 | `event_hash_origin` | `hash` from the input of `event_hash` plus `origin_partition` and `origin_position` |
+| `event_hash_deployment` | `hash` from the input of `event_hash` plus `deployment` |
+| `membership_deployment` | as `membership_processes`, with the `deployment` in `input` |
 | `derived_id` | `ids[i]` for `command_id` and `n[i]` |
 
 `grant` and `revoke` are only produced by root-key tooling, so an SDK need not reproduce them. The context in the vectors sets every field, including `expected_version` and two attributes; the empty and absent cases follow from the [encoding](#encoding).

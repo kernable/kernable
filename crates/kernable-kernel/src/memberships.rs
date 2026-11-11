@@ -104,6 +104,36 @@ impl Memberships {
             .any(|m| m.workers.iter().any(|a| a == aggregate_type))
     }
 
+    /// The deployment that serves `service`, as its membership names it; empty: every one.
+    pub(crate) fn serving(&self, service: &str) -> String {
+        let all = self.all.read().unwrap_or_else(PoisonError::into_inner);
+        all.get(service)
+            .map(|m| m.deployment.clone())
+            .unwrap_or_default()
+    }
+
+    /// Whether `deployment` serves `service`: its membership names it or none, or the process
+    /// declared no deployment.
+    pub(crate) fn serves(&self, service: &str, deployment: &str) -> bool {
+        deployment.is_empty() || {
+            let serving = self.serving(service);
+            serving.is_empty() || serving == deployment
+        }
+    }
+
+    /// The deployment each service's membership names, by service; services without one are
+    /// left out.
+    pub(crate) fn deployments(&self) -> Vec<(String, String)> {
+        let all = self.all.read().unwrap_or_else(PoisonError::into_inner);
+        let mut named: Vec<(String, String)> = all
+            .values()
+            .filter(|m| !m.deployment.is_empty())
+            .map(|m| (m.service.clone(), m.deployment.clone()))
+            .collect();
+        named.sort();
+        named
+    }
+
     /// Every listed aggregate type, and every listed listener and middleware name.
     pub(crate) fn listed(&self) -> (Vec<String>, Vec<String>) {
         let all = self.all.read().unwrap_or_else(PoisonError::into_inner);
@@ -149,6 +179,7 @@ pub(crate) fn validate(m: &Membership) -> Result<(), Status> {
             "a listener name has 1 to 128 letters, digits, `-`, `_` and `.`",
         ));
     }
+    crate::deployments::validate(&m.deployment)?;
     Ok(())
 }
 
@@ -217,6 +248,12 @@ pub(crate) fn take(kernel: &Arc<Kernel>, m: Membership, sig: Signature) -> Resul
     kernel.store.save_listeners(&changed).map_err(internal)?;
     kernel.workers.apply(kernel, &m)?;
     kernel.listeners.progress.notify_waiters();
-    tracing::info!(service = %m.service, workers = m.workers.len(), listeners = m.listeners.len(), middlewares = m.middlewares.len(), "membership applied");
+    // Workers of the deployment that serves now take commands; the others stop taking them.
+    kernel.work.notify_waiters();
+    let changed_deployment = before.as_ref().map_or("", |b| b.deployment.as_str()) != m.deployment;
+    if changed_deployment {
+        tracing::info!(service = %m.service, deployment = %m.deployment, before = %before.as_ref().map_or("", |b| b.deployment.as_str()), "the service is served by another deployment now");
+    }
+    tracing::info!(service = %m.service, deployment = %m.deployment, workers = m.workers.len(), listeners = m.listeners.len(), middlewares = m.middlewares.len(), "membership applied");
     Ok(())
 }

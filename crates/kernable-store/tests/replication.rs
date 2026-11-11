@@ -123,6 +123,7 @@ fn ev(event_type: &str) -> NewEvent {
         erases: String::new(),
         origin_partition: String::new(),
         origin_position: 0,
+        deployment: Default::default(),
     }
 }
 
@@ -244,6 +245,7 @@ fn writes(s: &dyn Store, round: u8) {
                 value: round.to_string(),
             }],
             issued_at: at,
+            deployment: Default::default(),
         }),
         sig: Some(Signature {
             key_id: "manager".into(),

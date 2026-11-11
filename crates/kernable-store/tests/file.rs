@@ -82,6 +82,7 @@ fn run(store: &dyn Store, id: &str, agg: &str) {
         schema: 1,
         origin_partition: String::new(),
         origin_position: 0,
+        deployment: Default::default(),
     }];
     let worker = SigningKey::from_bytes(&[2; 32]);
     let sig = signing::sign(&worker, &signing::result_message(&cmd, version, &events));

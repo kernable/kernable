@@ -213,7 +213,7 @@ fn snapshot_of(env: &Env, order: &str) -> bool {
         aggregate_id: order.into(),
     };
     let snapshots = kernable_store::snapshots::open(&env.snapshots).unwrap();
-    snapshots.get(&stream).unwrap().is_some()
+    snapshots.get(&stream, "").unwrap().is_some()
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -81,6 +81,7 @@ fn vectors() -> Value {
             schema: 2,
             origin_partition: String::new(),
             origin_position: 0,
+            deployment: Default::default(),
         },
         NewEvent {
             erases: String::new(),
@@ -90,6 +91,7 @@ fn vectors() -> Value {
             schema: 1,
             origin_partition: String::new(),
             origin_position: 0,
+            deployment: Default::default(),
         },
     ];
     let reason = Rejected {
@@ -121,6 +123,7 @@ fn vectors() -> Value {
         context: Some(context.clone()),
         origin_partition: String::new(),
         origin_position: 0,
+        deployment: Default::default(),
     };
     // The same command and events with vault references, and an event that erases a subject.
     let salt = [9u8; 16];
@@ -142,6 +145,10 @@ fn vectors() -> Value {
     let moved_event = Event {
         origin_partition: "p1".into(),
         origin_position: 42,
+        ..event.clone()
+    };
+    let deployed_event = Event {
+        deployment: "2026-11-11.1".into(),
         ..event.clone()
     };
 
@@ -254,6 +261,7 @@ fn vectors() -> Value {
                 min_position: 7,
                 issued_at: 1_700_000_000_000,
                 client_sig: None,
+                deployment: Default::default(),
             }),
         ),
         "query_wait_only": entry(
@@ -273,6 +281,7 @@ fn vectors() -> Value {
                 min_position: 7,
                 issued_at: 1_700_000_000_000,
                 client_sig: None,
+                deployment: Default::default(),
             }),
         ),
         "query_target": entry(
@@ -292,6 +301,7 @@ fn vectors() -> Value {
                 min_position: 7,
                 issued_at: 1_700_000_000_000,
                 client_sig: None,
+                deployment: Default::default(),
             }),
         ),
         "cancel": entry(
@@ -392,6 +402,23 @@ fn vectors() -> Value {
                 metadata: vec![kernable_core::proto::Attribute { key: "version".into(), value: "1.0.0".into() }],
                 issued_at: 1_700_000_000_000,
                 processes: Vec::new(),
+                deployment: String::new(),
+            }),
+        ),
+        "membership_deployment": entry(
+            json!({"service": "shop", "workers": ["shop.Cart", "shop.Order"], "listeners": ["carts"],
+                   "middlewares": ["guard"], "metadata": [{"key": "version", "value": "1.0.0"}],
+                   "issued_at": 1_700_000_000_000i64, "processes": ["shop.fulfilment", "shop.returns"],
+                   "deployment": "2026-11-11.1"}),
+            signing::membership_message(&kernable_core::proto::Membership {
+                service: "shop".into(),
+                workers: vec!["shop.Cart".into(), "shop.Order".into()],
+                listeners: vec!["carts".into()],
+                middlewares: vec!["guard".into()],
+                metadata: vec![kernable_core::proto::Attribute { key: "version".into(), value: "1.0.0".into() }],
+                issued_at: 1_700_000_000_000,
+                processes: vec!["shop.fulfilment".into(), "shop.returns".into()],
+                deployment: "2026-11-11.1".into(),
             }),
         ),
         "membership_processes": entry(
@@ -406,6 +433,7 @@ fn vectors() -> Value {
                 metadata: vec![kernable_core::proto::Attribute { key: "version".into(), value: "1.0.0".into() }],
                 issued_at: 1_700_000_000_000,
                 processes: vec!["shop.fulfilment".into(), "shop.returns".into()],
+                deployment: String::new(),
             }),
         ),
         "process": entry(
@@ -459,6 +487,10 @@ fn vectors() -> Value {
         "event_hash_origin": {
             "input": {"origin_partition": "p1", "origin_position": 42},
             "hash": hex::encode(signing::event_hash(&GENESIS, &moved_event)),
+        },
+        "event_hash_deployment": {
+            "input": {"deployment": "2026-11-11.1"},
+            "hash": hex::encode(signing::event_hash(&GENESIS, &deployed_event)),
         },
         "event_hash": {
             "input": {

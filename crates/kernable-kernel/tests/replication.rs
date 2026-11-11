@@ -66,6 +66,7 @@ fn config(dir: &Path, name: &str, kernel_seed: u8) -> Config {
         replication: Replication::default(),
         key_command: Vec::new(),
         partition: None,
+        deployment_retention_days: Default::default(),
     }
 }
 

@@ -278,6 +278,7 @@ export function membershipMessage(m: WireMembership): Buffer {
     msg.str("processes").u64(m.processes.length);
     for (const p of m.processes) msg.str(p);
   }
+  if (m.deployment) msg.str("deployment").str(m.deployment);
   return msg.done();
 }
 
@@ -338,5 +339,7 @@ export function eventHash(prev: Buffer, e: WireEvent): Buffer {
     for (const r of e.vault_refs) m.str(r);
     m.str(e.erases);
   }
+  // The producing worker's deployment, appended only when set.
+  if (e.deployment) m.str("deployment").str(e.deployment);
   return createHash("sha256").update(m.done()).digest();
 }

@@ -34,6 +34,7 @@ fn ev(event_type: &str, payload: &str) -> NewEvent {
         schema: 1,
         origin_partition: String::new(),
         origin_position: 0,
+        deployment: Default::default(),
     }
 }
 
@@ -204,6 +205,7 @@ fn consistently_rewritten_chain_is_detected_by_checkpoint() {
             schema: e.schema,
             origin_partition: String::new(),
             origin_position: 0,
+            deployment: Default::default(),
         })
         .collect();
     let forged = signing::sign(&attacker, &signing::result_message(&c1, 0, &c1_events));

@@ -256,6 +256,7 @@ impl Verifier {
                 erases: e.erases.clone(),
                 origin_partition: e.origin_partition.clone(),
                 origin_position: e.origin_position,
+                deployment: e.deployment.clone(),
             })
             .collect();
         let msg = signing::result_message(&cmd, first.version.saturating_sub(1), &events);

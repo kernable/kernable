@@ -303,6 +303,8 @@ class StoredEvent:
     redacted: list[str] = field(default_factory=list)
     #: When the kernel committed the event (UTC).
     created_at: datetime = _EPOCH
+    #: The code version (deployment) of the worker that wrote it; empty if none.
+    deployment: str = ""
 
 
 @dataclass
@@ -323,6 +325,8 @@ class StoredEventMeta(EventMeta):
     redacted: list[str] = field(default_factory=list)
     #: When the kernel committed the event (UTC).
     created_at: datetime = _EPOCH
+    #: The code version (deployment) of the worker that wrote it; empty if none.
+    deployment: str = ""
 
 
 @dataclass
@@ -418,7 +422,9 @@ class Outcome:
     #: The committed events, in order; empty if the command was rejected. Vault fields in them
     #: are `None` (see `StoredEvent.redacted`).
     events: list[StoredEvent] = field(default_factory=list)
-    #: The rejection code (see `Rejected`), if rejected.
+    #: The rejection code (see `Rejected`), if rejected: a handler's, or the kernel's, e.g.
+    #: `unknown_history` when the aggregate holds an event the deployment of the workers that run
+    #: the command does not know (a rollback after a newer deployment wrote it).
     code: str = ""
     #: The rejection message, if rejected.
     message: str = ""
@@ -615,6 +621,9 @@ PROTOCOL = 1
 
 #: Attempts before a reactor parks an event its handler keeps failing on.
 _PARK_AFTER = 5
+# The event types and schemas a listener of this process skipped already: each is logged once.
+_SKIP_WARNED: set[tuple[str, int]] = set()
+_SKIP_LOCK = threading.Lock()
 
 #: gRPC codes of a kernel that is away or busy.
 _BUSY = frozenset({grpc.StatusCode.CANCELLED, grpc.StatusCode.DEADLINE_EXCEEDED, grpc.StatusCode.RESOURCE_EXHAUSTED,
@@ -645,6 +654,14 @@ _UNQUALIFIED = re.compile(r"^[^.*]+$")
 _LISTENED = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*\.([^.]+|\*)$")
 _QUERY = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*\.[^.*]+$")
 _CHECKED = re.compile(r"^(\*|[A-Za-z][A-Za-z0-9_-]*\.([^.]+|\*))$")
+_DEPLOYMENT = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+
+
+def _deployment(value: str) -> str:
+    """`value` if it names a deployment (or is empty); raises `ValueError` otherwise."""
+    if value and not _DEPLOYMENT.match(value):
+        raise ValueError(f"a deployment is 1 to 128 letters, digits, `-`, `_` and `.`, not {value!r}")
+    return value
 def reindex_type(aggregate_type: str) -> str:
     """The type of the built-in command an aggregate with unique keys or facts runs without
     events, `_reindex_<aggregate_type>` (see `Aggregate.unique` and `Kernable.reindex`): one per
@@ -835,14 +852,25 @@ def _unseal(data: Any, vault) -> tuple[Any, list[str]]:
 class SchemaError(Exception):
     """An event a process cannot read: its schema is newer than known, or a step is missing."""
 
+    #: The event's qualified type (`shop.ItemAdded`).
+    type: str = ""
+    #: The event's schema, as stored.
+    schema: int = 0
+    #: The newest schema this process reads; `newer` is set when the event's is above it (a
+    #: newer deployment wrote it), unset when an upcast step is missing.
+    known: int = 0
+    newer: bool = False
+
 
 def _upcast(events: dict | None, domain: str, type: str, schema: int, data: Any) -> tuple[int, Any]:
     """`data` of a `type` event stored at `schema`, upcast to the current version in `events`."""
     spec = (events or {}).get(type)
     current = spec.schema if spec else 1
     if schema > current:
-        raise SchemaError(f"{domain}.{type} has schema {schema}, but this process knows it only up to {current}: "
+        err = SchemaError(f"{domain}.{type} has schema {schema}, but this process knows it only up to {current}: "
                           "update it")
+        err.type, err.schema, err.known, err.newer = f"{domain}.{type}", schema, current, True
+        raise err
     for v in range(schema, current):
         if v not in spec.steps:
             raise SchemaError(f"no upcast for {domain}.{type} from schema {v}")
@@ -1700,7 +1728,7 @@ class Kernable:
     def __init__(self, url: str | None = None, key: str | None = None, tenant: str = "default",
                  tls: Tls | None = None, context: RequestContext | None = None,
                  grant: str | None = None, service: str | None = None, insecure: bool | None = None,
-                 timeout_s: float = DEFAULT_TIMEOUT_S):
+                 timeout_s: float = DEFAULT_TIMEOUT_S, deployment: str | None = None):
         """A client for the kernel at `url`, signing with the key in the file `key`. It
         connects on first use and again after the connection drops.
 
@@ -1726,10 +1754,18 @@ class Kernable:
         False. `timeout_s`: how long a request (submit, query, files, cache, apply) waits in all,
         for the connection (e.g. while the kernel restarts) and its answer; default 60 s. A
         connection the network dropped silently is noticed within 40 s by keepalive pings.
+        `deployment`: the code version this process runs (1 to 128 letters, digits, `-`, `_` and
+        `.`, e.g. `2026-11-11.1`); default `KERNABLE_DEPLOYMENT`, else none. Its workers and
+        listeners declare it, the events its workers write carry it, its queries prefer read
+        models of it, and `apply` names it in the membership: the deployment a membership names
+        runs the service's commands and answers its queries, while the others stay connected
+        for a rollback.
 
         Workers and listeners print connection lines to stderr up to the level `KERNABLE_LOG`
         names (`off`, `error`, `warn`, `info` (default), `debug`). Raises `OSError` if the key
-        or grant file cannot be read, `ValueError` if only some of the TLS variables are set."""
+        or grant file cannot be read, `ValueError` if only some of the TLS variables are set or
+        `deployment` is invalid."""
+        self._deployment = _deployment(deployment or os.environ.get("KERNABLE_DEPLOYMENT") or "")
         key = key or os.environ.get("KERNABLE_KEY") or "app.key"
         tls = tls or _tls_from_env()
         self._context = context or RequestContext()
@@ -1805,14 +1841,14 @@ class Kernable:
         """A worker that runs these aggregates' commands, in this client's service; see
         `Worker`. `run()` on it blocks until `stop()`: `k.worker(cart_aggregate).run()`."""
         aggregates = tuple(getattr(a, "__aggregate__", a) for a in aggregates)
-        return Worker._new(self._parts, self._key, aggregates, self._log, self._service)
+        return Worker._new(self._parts, self._key, aggregates, self._log, self._service, self._deployment)
 
     def app(self, *, domains: Iterable[Domain], service: str | None = None, version: str | None = None,
             description: str | None = None, metadata: dict[str, str] | None = None) -> "App":
         """An app made of whole domains: every aggregate, read model and reactor defined on them.
         `run()` on it applies the service's membership (the domains' aggregates as workers, their
         read models and reactors as listeners, those with a middleware as middlewares, their
-        processes; live listeners are not listed), then runs all of them, and registers the
+        processes, and this client's deployment; live listeners are not listed), then runs all of them, and registers the
         domains' processes once its worker is connected (see `register_process`). `service` defaults to this client's; `version`
         and `description` go into the membership's metadata, followed by `metadata`.
 
@@ -1832,28 +1868,36 @@ class Kernable:
                             listeners=[l for l in durable if not l._middlewares],
                             middlewares=[l for l in durable if l._middlewares],
                             metadata={**meta, **(metadata or {})},
-                            processes=[p for d in domains for p in d.processes])
-        worker = Worker._new(self._parts, self._key, aggregates, self._log, service) if aggregates else None
+                            processes=[p for d in domains for p in d.processes],
+                            deployment=self._deployment)
+        worker = Worker._new(self._parts, self._key, aggregates, self._log, service, self._deployment) if aggregates else None
         handles = [ListenerHandle._new(self._parts, self._key, l, self._log, service, self) for l in listeners]
         return App(self, manifest, worker, handles, [d.name for d in domains])
 
     def apply(self, *, service: str | None = None, workers: Iterable[AggregateType] = (),
               listeners: Iterable["Listener"] = (), middlewares: Iterable["Listener"] = (),
-              metadata: dict[str, str] | None = None, processes: Iterable["Process | str"] = ()) -> None:
+              metadata: dict[str, str] | None = None, processes: Iterable["Process | str"] = (),
+              deployment: str | None = None) -> None:
         """Replaces the membership of a service (default: this client's `service`): the workers,
         listeners and middlewares the kernel waits for, plus free metadata such as
         `{"version": "1.0.0"}`. `workers` are the aggregates the service runs (the kernel waits
         for a worker of each), `listeners` the listeners it waits for (the service's others count
         for nobody), `middlewares` the service's listeners that may check requests (they count like
         listeners), `processes` its business processes (`Process`es or qualified names): one it no
-        longer lists starts no new cases, its running cases finish.
+        longer lists starts no new cases, its running cases finish. `deployment` (default: this
+        client's) names the code version that serves the service: its workers run the commands,
+        its listeners count and its read models answer queries first; the service's workers and
+        listeners of other deployments stay connected, idle or catching up. A rollback applies a
+        membership naming the earlier deployment. Empty: every deployment serves.
 
         Apply it once per deploy, e.g. from a deploy script, not from every process: the newest
         apply wins, and an older one that arrives late is refused. The key needs the `manage` grant for the service. A middleware the new
         membership no longer lists stops checking. Example: `k.apply(service="shop",
         workers=[cart_aggregate], listeners=[carts_readmodel], metadata={"version": "1.0.0"})`.
-        Raises `ValueError` without a service, `grpc.RpcError` if the kernel refuses it."""
+        Raises `ValueError` without a service or for an invalid `deployment`, `grpc.RpcError` if
+        the kernel refuses it."""
         service = service or self._service
+        deployment = self._deployment if deployment is None else _deployment(deployment)
         if not service:
             raise ValueError("apply needs a service: pass `service` or set it on the client (KERNABLE_SERVICE)")
         membership = pb.Membership(service=service, workers=[f"{a.domain}.{a.name}" for a in workers],
@@ -1861,7 +1905,8 @@ class Kernable:
                                    middlewares=[l.name for l in middlewares],
                                    metadata=[pb.Attribute(key=k, value=v) for k, v in (metadata or {}).items()],
                                    issued_at=_issued_now(),
-                                   processes=[p.qualified if isinstance(p, Process) else p for p in processes])
+                                   processes=[p.qualified if isinstance(p, Process) else p for p in processes],
+                                   deployment=deployment)
         rpc.MembershipServiceStub(self._parts.control()).Apply(
             pb.ApplyRequest(membership=membership, sig=self._key.sign(membership_message(membership)),
                             protocol=PROTOCOL))
@@ -2029,7 +2074,8 @@ class Kernable:
         q = pb.QueryRequest(query_id=query_id, tenant_id=tenant or self._tenant, domain=domain, query_type=type,
                             payload=_encode(data), context=_to_wire_context(context or self._context, query_id),
                             min_position=min_position, issued_at=_issued_now(), protocol=PROTOCOL,
-                            listener=_HANDLING.get(), target=_query_target_of(declared, domain, data))
+                            listener=_HANDLING.get(), target=_query_target_of(declared, domain, data),
+                            deployment=self._deployment)
         if all_partitions:
             self._caught_up_everywhere(q, timeout_s)
             q.issued_at = _issued_now()
@@ -2347,6 +2393,8 @@ class Manifest:
     metadata: dict[str, str] = field(default_factory=dict)
     #: The service's business processes; `Kernable.app` registers them.
     processes: list[Process] = field(default_factory=list)
+    #: The deployment (code version) that serves the service; empty: every deployment.
+    deployment: str = ""
 
 
 class _AllReady:
@@ -2418,7 +2466,8 @@ class App:
         m = self.manifest
         models = [p.model() for p in m.processes]  # an invalid one stops the app before it starts
         self._kernable.apply(service=m.service, workers=m.workers, listeners=m.listeners,
-                             middlewares=m.middlewares, metadata=m.metadata, processes=m.processes)
+                             middlewares=m.middlewares, metadata=m.metadata, processes=m.processes,
+                             deployment=m.deployment)
         for s in self._streams:
             s.announce = False
         errors: list[BaseException] = []
@@ -2697,7 +2746,7 @@ class Worker(_Stream):
         raise TypeError("use Kernable.worker (or Kernable.app), not Worker(...)")
 
     def _init(self, channel: "grpc.Channel | _Partitioned", key: Key, aggregates, log: _Log,
-                 service: str = ""):
+                 service: str = "", deployment: str = ""):
         """Use `Kernable.worker`."""
         super().__init__("worker", 1.0, log)
         # A channel, or the partitions: then a session per partition.
@@ -2710,6 +2759,8 @@ class Worker(_Stream):
         self._by_stream = {(a.domain, a.name): a for a in aggregates}
         # The service this worker belongs to; its membership decides whether the kernel waits for it.
         self._service = service
+        # The code version it declares (see `Kernable`).
+        self._deployment = deployment
         # Executes whose history is still coming in parts, by lease; per session.
         self._partial = {}
 
@@ -2720,7 +2771,8 @@ class Worker(_Stream):
         if parts is None:
             return
         if len(parts) > 1 or parts[0][0] != "":
-            self._run_children([Worker._new(channel, self._key, self._aggregates, self._log, self._service)
+            self._run_children([Worker._new(channel, self._key, self._aggregates, self._log, self._service,
+                                            self._deployment)
                                 for _, channel in parts])
             return
         self._stub = rpc.WorkerGatewayStub(parts[0][1])
@@ -2731,8 +2783,10 @@ class Worker(_Stream):
 
     def _hello(self):
         self._partial = {}
-        # Every event type the aggregates know: the kernel refuses an outdated worker.
-        schemas = {f"{a.domain}.{t}": a.schema_of(t) for a in self._by_command.values()
+        # Every event type the aggregates know, applied or declared by their domains: the kernel
+        # refuses an outdated worker, and with a deployment, commands on aggregates holding an
+        # event it does not know.
+        schemas = {f"{a.domain}.{t}": a.schema_of(t) for a in self._aggregates
                    for t in [*a.appliers, *a.events]}
         register = pb.Register(worker_id=f"py-{uuid.uuid4().hex[:8]}", key_id=self._key.id, protocol=PROTOCOL,
                                max_concurrency=1,
@@ -2740,7 +2794,7 @@ class Worker(_Stream):
                                                               command_types=[f"{a.domain}.{t}" for t in a.handlers])
                                            for a in self._aggregates],
                                event_schemas=[pb.EventSchema(event_type=t, schema=s) for t, s in schemas.items()],
-                               service=self._service)
+                               service=self._service, deployment=self._deployment)
         return pb.WorkerMessage(register=register)
 
     def _on(self, msg):
@@ -2907,8 +2961,11 @@ class Listener:
     other domains are qualified (`identity.AccountRegistered`, `identity.*`).
 
     Handlers get event payloads upcast to the versions of the listener's domain and of the domains
-    it `use`s. An event with a newer schema than known stops the listener (it retries and logs)
-    until it is updated, so it never misreads data.
+    it `use`s. An event with a newer schema than known (a newer deployment wrote it) never reaches
+    a handler, so it is never misread: a reactor that parks (`park_after` above 0, not live, not
+    one of several instances that each get every event) parks it at once with the code
+    `unknown_event`; every other listener skips it, logs a warning once per type and schema, and
+    counts it (`ListenerHandle.skipped`). Events of types without a handler are not affected.
 
     `on`, `query` and `middleware` work as decorators (`@carts_readmodel.on("ItemAdded")`) or
     directly (`carts_readmodel.on("ItemAdded", fn)`); handlers take only the parameters they
@@ -3067,8 +3124,9 @@ class ListenerHandle(_Stream):
     `Kernable.app`. `ready` is a `threading.Event`: `handle.ready.wait(5)` returns whether the
     kernel accepted the listener within 5 seconds. `stop()` ends `run()`, also from another
     thread. Attributes: `listener` (the definition), `position` (global position of the last
-    handled event, or skipped, for other event types) and `store` (the listener's `Store`, while
-    `run()` has it open)."""
+    handled event, or skipped, for other event types), `skipped` (how many events it skipped as
+    newer than its code, see `Listener`) and `store` (the listener's `Store`, while `run()` has it
+    open)."""
 
     def __init__(self, *args, **kwargs):
         """Not for applications: `Kernable.listener` (or `Kernable.app`) runs listeners."""
@@ -3106,6 +3164,9 @@ class ListenerHandle(_Stream):
         self._start = listener.start
         #: Global position of the last handled event (or skipped, for other event types).
         self.position = 0
+        #: How many events it skipped because their schema is newer than its code reads (a newer
+        #: deployment wrote them); see `Listener`. Across all partitions' streams.
+        self.skipped = 0
         # Newest event when the kernel accepted the listener; events up to it are replayed.
         self._replay_up_to = 0
         # The position sent in the last hello, if any.
@@ -3170,7 +3231,8 @@ class ListenerHandle(_Stream):
                          query_types=list(d._queries),
                          middlewares=[spec for spec, _ in d._middlewares.values()], live=d.live,
                          service=self._service, instance=instance,
-                         single=bool(instance) and d.single and not d.live)
+                         single=bool(instance) and d.single and not d.live,
+                         deployment=self._kernable._deployment if self._kernable else "")
         # Reconnects resume after the last handled event, once the kernel sent one (an instance
         # that only waited has none).
         start = self.position if self._connects > 0 else self._start
@@ -3215,7 +3277,7 @@ class ListenerHandle(_Stream):
             if self.store:
                 self.store._begin()
             try:
-                parked = self._handle_batch(msg.batch)
+                parked, skipped = self._handle_batch(msg.batch)
                 if self.store:
                     self.store._commit(msg.batch.up_to, self._part)
             except BaseException:
@@ -3229,7 +3291,7 @@ class ListenerHandle(_Stream):
             # Values removed after an erasure must not stay behind in the WAL, outside the batch.
             if self.store and any(e.erases for e in [*msg.batch.events, *msg.batch.retries]):
                 self.store._checkpoint()
-            return pb.ListenerMessage(ack=pb.Ack(position=msg.batch.up_to, parked=parked))
+            return pb.ListenerMessage(ack=pb.Ack(position=msg.batch.up_to, parked=parked, skipped=skipped))
         elif kind == "query":
             answer = self._answer(msg.query.call_id, msg.query.query)
             if self._log.enabled("debug"):
@@ -3313,12 +3375,16 @@ class ListenerHandle(_Stream):
             self._log.print("info", self._what, f"connected again at position {position}")
         self._connects += 1
 
-    def _handle_batch(self, batch) -> "list[pb.Parked]":
+    def _handle_batch(self, batch) -> "tuple[list[pb.Parked], list[pb.Skipped]]":
         """Handles a batch: first the retries, then the events after the position. Returns the
-        events it parked; raises if a handler failed on one it does not park."""
+        events it parked and those it skipped as newer than its code; raises if a handler failed
+        on one it does not park."""
         d = self.listener
         park_after = 0 if d.live else d.park_after
-        parked = []
+        instance = d.instance if d.instance is not None else os.environ.get("KERNABLE_INSTANCE", "")
+        # Instances that each get every event cannot park; they skip what they cannot read.
+        parks = park_after > 0 and not (instance and not d.single)
+        parked, skipped = [], []
         for e, retry in [*((e, True) for e in batch.retries), *((e, False) for e in batch.events)]:
             if not retry and e.global_position <= self.position:
                 continue  # handled already
@@ -3330,9 +3396,21 @@ class ListenerHandle(_Stream):
                 data, redacted = _unseal(_decode(e.payload), batch.vault)
                 schema = e.schema
                 if name not in d._raw:
-                    schema, data = _upcast(d._domains.get(e.domain), e.domain, e.event_type, schema, data)
+                    try:
+                        schema, data = _upcast(d._domains.get(e.domain), e.domain, e.event_type, schema, data)
+                    except SchemaError as err:
+                        if not err.newer:
+                            raise
+                        if parks:
+                            parked.append(self._unknown(err, e.global_position))
+                        else:
+                            skipped.append(self._skip(err, e.global_position))
+                        if not retry:
+                            self.position = e.global_position
+                        continue
                 evt = StoredEventMeta(e.event_type, e.version, e.tenant_id, e.domain, e.aggregate_type, e.aggregate_id,
-                                      e.command_id, e.global_position, schema, redacted, _time(e.created_at))
+                                      e.command_id, e.global_position, schema, redacted, _time(e.created_at),
+                                      e.deployment)
                 ctx = ListenerContext(e.global_position <= self._replay_up_to, _from_wire_context(e.context),
                                       self.store, e.command_id, e.tenant_id, d.domain.name, self._kernable)
                 saved = self.store is not None and park_after > 0
@@ -3354,7 +3432,28 @@ class ListenerHandle(_Stream):
                     self._log.print("debug", self._what, f"{e.domain}.{e.event_type} at {e.global_position}")
             if not retry:
                 self.position = e.global_position
-        return parked
+        return parked, skipped
+
+    def _unknown(self, err: SchemaError, position: int) -> "pb.Parked":
+        """Parks an event newer than this code reads, at once: no attempt could handle it."""
+        message = (f"{err.type} schema {err.schema}: this code reads it up to {err.known}; "
+                   "a newer deployment wrote it")
+        self._attempts.pop(position, None)
+        self._log.print("warn", self._what, f"{err.type} at {position} parked: {message}")
+        return pb.Parked(position=position, code="unknown_event", message=message, attempts=1)
+
+    def _skip(self, err: SchemaError, position: int) -> "pb.Skipped":
+        """Skips an event newer than this code reads: counts it, warns once per type and schema."""
+        for h in (self, self._parent):
+            if h is not None:
+                h.skipped += 1
+        with _SKIP_LOCK:
+            first = (err.type, err.schema) not in _SKIP_WARNED
+            _SKIP_WARNED.add((err.type, err.schema))
+        if first:
+            self._log.print("warn", self._what, f"skipped {err.type} schema {err.schema}: this code reads it up "
+                                                f"to {err.known}; a newer deployment wrote it")
+        return pb.Skipped(position=position, event_type=err.type, schema=err.schema)
 
     def _give_up(self, type: str, position: int, err: Exception, park_after: int) -> "pb.Parked":
         """What to do after the handler failed on the event at `position`: park it (a rejection
@@ -3623,4 +3722,4 @@ def _to_event(e, vault=None) -> StoredEvent:
     return StoredEvent(position=e.global_position, tenant=e.tenant_id, domain=e.domain, aggregate_type=e.aggregate_type,
                  aggregate_id=e.aggregate_id, version=e.version, type=e.event_type,
                  data=data, command_id=e.command_id, request=_from_wire_context(e.context),
-                 schema=e.schema, redacted=redacted, created_at=_time(e.created_at))
+                 schema=e.schema, redacted=redacted, created_at=_time(e.created_at), deployment=e.deployment)

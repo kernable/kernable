@@ -919,6 +919,7 @@ impl Store for FileStore {
                 context: cmd.context.clone(),
                 origin_partition: e.origin_partition.clone(),
                 origin_position: e.origin_position,
+                deployment: e.deployment.clone(),
             };
             event.hash = signing::event_hash(&prev, &event).to_vec();
             let prev_hash = std::mem::replace(&mut prev, event.hash.clone());

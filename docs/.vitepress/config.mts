@@ -54,6 +54,7 @@ const SIDEBAR = [
     items: [
       { text: "Overview", link: "/how-to/" },
       { text: "Deploy and upgrade", link: "/how-to/deploy" },
+      { text: "Deployments and rollbacks", link: "/how-to/deployments" },
       { text: "Back up and restore", link: "/how-to/backup" },
       { text: "Move a kernel", link: "/how-to/export" },
       { text: "Run a standby", link: "/how-to/standby" },

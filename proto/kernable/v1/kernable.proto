@@ -118,6 +118,10 @@ message Event {
   // first committed. Listeners do not get these; the original is delivered where it is.
   string origin_partition = 17;
   uint64 origin_position = 18;
+  // The code version (deployment) of the worker that produced it, as its Register declared it;
+  // empty for a worker that declared none, and for the events the kernel writes itself (process
+  // cases). Hashed only when set (SIGNING.md).
+  string deployment = 19;
 }
 
 // An aggregate's state after `version`, made by a worker: a cache, the events stay the truth.
@@ -147,6 +151,9 @@ message NewEvent {
   // there: where the event was first committed. A worker's result with them is refused.
   string origin_partition = 6;
   uint64 origin_position = 7;
+  // Set by the kernel only, from the producing worker's Register.deployment; whatever a worker
+  // sends here is replaced.
+  string deployment = 8;
 }
 
 // ---- vault ----
@@ -353,6 +360,12 @@ message Membership {
   // Qualified process names (`shop.fulfilment`); signed only when there are any. A process a
   // membership no longer lists starts no new cases; its running cases finish.
   repeated string processes = 7;
+  // The deployment (code version) that serves the service; signed only when set. Its workers
+  // run the service's commands, its listeners count, its middlewares check and its read models
+  // answer queries first. Workers and listeners of the service that declare another deployment
+  // stay connected: workers idle, read models keep catching up, for a rollback. A rollback
+  // applies a membership naming the earlier deployment. Empty: every deployment serves.
+  string deployment = 8;
 }
 
 message ApplyRequest {
@@ -608,6 +621,10 @@ message QueryRequest {
   // (the SDKs fill it from the query's data). A middleware decides on it as on a command's
   // aggregate, e.g. "only the order's owner may read it"; the read model answers from the data.
   Target target = 13;
+  // Not signed: the asker's deployment (code version). The kernel routes the query to a read
+  // model of that deployment if one answers it, else to one of the deployment its service's
+  // membership names, else to any. Empty: the membership's deployment first.
+  string deployment = 14;
 }
 
 // The aggregate a query is about; see QueryRequest.target.
@@ -886,6 +903,15 @@ message Hello {
   // and queries and checks go to any instance that has reached what they need; such an instance
   // cannot park events. Not for live listeners.
   bool single = 12;
+  // The code version (deployment) of the process: 1 to 128 letters, digits, `-`, `_` and `.`;
+  // empty: none. A listener that answers queries or checks requests (a read model or a
+  // middleware) is registered per name and deployment (shown as `name@deployment`): a new
+  // deployment's read model has its own position, starts from the first event when the name
+  // already has a position under another deployment, and runs beside the old one; its service's
+  // membership decides which deployment counts. Any other listener (a reactor) keeps one
+  // registration and position across deployments, so a new deployment goes on where the old
+  // one stopped and nothing is handled twice.
+  string deployment = 13;
 }
 
 // Another instance of the same `single` group is active; this one gets `Ready` and its
@@ -922,6 +948,18 @@ message Ack {
   // (ListenerService.Retry). Each is above the previously acknowledged position or one of the
   // retries, and at most `position`. Not for live listeners.
   repeated Parked parked = 2;
+  // Events of the acknowledged batches the listener skipped because it does not know them (a
+  // schema newer than it reads): it moved on without them. The kernel counts them per listener
+  // and shows them (UI, metrics); unlike parked events they are not kept for a retry. Each at
+  // most `position`.
+  repeated Skipped skipped = 3;
+}
+
+// An event a listener skipped: newer than its code (see Ack.skipped).
+message Skipped {
+  uint64 position = 1;
+  string event_type = 2; // qualified
+  uint32 schema = 3;
 }
 
 // An event a listener gave up on.
@@ -946,7 +984,8 @@ service WorkerGateway {
   // Needs `run` for every registered command type. When the stream ends, the kernel hands its
   // unfinished commands to another worker. Errors: INVALID_ARGUMENT (malformed Register),
   // PERMISSION_DENIED (missing permission, or an aggregate registered with another key),
-  // FAILED_PRECONDITION (the store holds a newer event schema than the worker writes),
+  // FAILED_PRECONDITION (the store holds a newer event schema than a worker without a
+  // deployment writes),
   // UNAUTHENTICATED (challenge failed, or an invalid result, rejection or snapshot signature).
   rpc Session(stream WorkerMessage) returns (stream KernelMessage);
 }
@@ -989,6 +1028,17 @@ message Register {
   // The service this worker belongs to; its membership (see `Membership`) decides whether the
   // kernel waits for the worker's aggregates. Empty: no service, they are always waited for.
   string service = 7;
+  // The code version (deployment) of the process: 1 to 128 letters, digits, `-`, `_` and `.`;
+  // empty: none. Stored with every event it writes and with its snapshots (it gets only
+  // snapshots its own deployment made). When the service's membership names another deployment,
+  // the worker gets no commands. With a deployment, `event_schemas` lists every event type the
+  // worker knows (also those it only reads, at the version it reads), and the kernel refuses a
+  // command (`unknown_history`, before the worker sees it) whose aggregate holds an event of a
+  // schema above the declared one, or of a type it does not declare that another deployment
+  // first wrote after this deployment's first event. Such a worker may also declare an older
+  // schema than the store holds (a rollback); the check above keeps it off aggregates it cannot
+  // read.
+  string deployment = 8;
 }
 
 message WorkerAggregate {

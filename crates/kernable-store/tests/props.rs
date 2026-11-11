@@ -43,6 +43,7 @@ fn events(n: usize) -> Vec<NewEvent> {
             schema: 1,
             origin_partition: String::new(),
             origin_position: 0,
+            deployment: Default::default(),
         })
         .collect()
 }

@@ -416,6 +416,10 @@ pub fn membership_message(m: &Membership) -> Vec<u8> {
             msg = msg.str(p);
         }
     }
+    // The deployment that serves the service: appended only when set, after its name.
+    if !m.deployment.is_empty() {
+        msg = msg.str("deployment").str(&m.deployment);
+    }
     msg.0
 }
 
@@ -712,6 +716,12 @@ pub fn event_hash(prev: &[u8], event: &Event) -> [u8; 32] {
         msg
     } else {
         msg.str(&event.origin_partition).u64(event.origin_position)
+    };
+    // The producer's deployment, appended only when set, after its name.
+    let msg = if event.deployment.is_empty() {
+        msg
+    } else {
+        msg.str("deployment").str(&event.deployment)
     };
     Sha256::digest(msg.0).into()
 }

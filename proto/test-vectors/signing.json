@@ -788,5 +788,40 @@
       "d85030f46603abd14ab3ac51cfce80c933bdccd8173dd8d9aec95ff49833ef59",
       "3a65028f6d16258af6351f0f91b8f0889c225436abb87096fbae3a156dce5212"
     ]
+  },
+  "event_hash_deployment": {
+    "input": {
+      "deployment": "2026-11-11.1"
+    },
+    "hash": "f09956e3add0ced18954921c3a58f7cbaa8451eea0e5563d3dc60fe636e1d722"
+  },
+  "membership_deployment": {
+    "input": {
+      "service": "shop",
+      "workers": [
+        "shop.Cart",
+        "shop.Order"
+      ],
+      "listeners": [
+        "carts"
+      ],
+      "middlewares": [
+        "guard"
+      ],
+      "metadata": [
+        {
+          "key": "version",
+          "value": "1.0.0"
+        }
+      ],
+      "issued_at": 1700000000000,
+      "processes": [
+        "shop.fulfilment",
+        "shop.returns"
+      ],
+      "deployment": "2026-11-11.1"
+    },
+    "message": "000000166b65726e61626c652e76312e6d656d626572736869700000000473686f7000000000000000020000000973686f702e436172740000000a73686f702e4f726465720000000000000001000000056361727473000000000000000100000005677561726400000000000000010000000776657273696f6e00000005312e302e300000018bcfe568000000000970726f63657373657300000000000000020000000f73686f702e66756c66696c6d656e740000000c73686f702e72657475726e730000000a6465706c6f796d656e740000000c323032362d31312d31312e31",
+    "signature": "798cc69d0141ad36aadd20be488a67e920a3fdb69a7e8e9b19bb27ba45a52dcb096d9d65805f0765632b5f24231ee3df11c971bb0d748113f674f8686f5b600c"
   }
 }

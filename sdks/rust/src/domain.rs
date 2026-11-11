@@ -530,6 +530,12 @@ impl std::fmt::Display for SchemaError {
 
 impl std::error::Error for SchemaError {}
 
+/// The schema of `event_type` that `known` declares: the newest this process reads (1 if it
+/// declares none). An event stored at a higher one was written by newer code.
+pub(crate) fn known_schema(known: Option<&Domain>, event_type: &str) -> u32 {
+    known.map_or(1, |d| d.schema_of(event_type))
+}
+
 /// `data` of a `domain.event_type` event stored at `schema`, upcast to the version `known`
 /// declares (1 if it declares none).
 pub(crate) fn upcast(
@@ -1405,6 +1411,8 @@ impl<S: State> Runnable for Aggregate<S> {
                 erases,
                 origin_partition: String::new(),
                 origin_position: 0,
+                // The kernel sets it from the worker's deployment.
+                deployment: String::new(),
             });
         }
 

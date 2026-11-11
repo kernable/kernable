@@ -142,11 +142,16 @@ Keys and trust:
                                           add clients. Production brings its own PKI.
 
 Deploy and inspect:
-  kernable apply <addr> <key> <manifest.json>
+  kernable apply <addr> <key> <manifest.json> [--deployment <version>]
                                           Applies a service's membership: a JSON manifest with
-                                          service, workers, listeners, middlewares, processes and
-                                          metadata. A process the service's membership listed before
-                                          and no longer lists starts no new cases.
+                                          service, workers, listeners, middlewares, processes,
+                                          metadata and deployment (or --deployment): the code
+                                          version that serves the service from now on. Its workers
+                                          run the commands and its read models count; the other
+                                          deployments' stay connected and idle. Applying an earlier
+                                          deployment's membership rolls back. A process the
+                                          service's membership listed before and no longer lists
+                                          starts no new cases.
                                           Signed with <key>, whose grant needs manage=<service>; the
                                           grant file next to the key (app.grant for app.key) is sent
                                           along. The kernel must be running. Once per deploy.
@@ -167,6 +172,20 @@ Deploy and inspect:
                                           asked for, and the message (for a handler error only the
                                           error's type; the listener's log has the rest).
   kernable schemas <store>                Lists the highest stored schema version per event type.
+  kernable deployments <store>            Lists the deployments (code versions) that wrote events
+                                          or registered read models: first and last position and
+                                          how many events each wrote, its read models; then the
+                                          deployment each service's membership names.
+  kernable deployments since <store> <position>|--at <time> [--version <v>] [--json]
+                                          What was written after <position> (or since the UTC
+                                          <time>), to check before a rollback: per event type,
+                                          schema and deployment the events and aggregates, marked
+                                          NEW TYPE or NEW SCHEMA where no earlier event had them
+                                          (an older deployment refuses commands on those
+                                          aggregates: unknown_history); then scheduled commands and
+                                          process timers stored since and still due, running
+                                          process cases that moved, and process versions
+                                          registered. --version: only that deployment's events.
   kernable processes list <store>         Lists the registered business processes: name, newest
                                           version, state (active or removed), as whom it acts
                                           (ProcessService.Act; else process:<name>), and when and
@@ -371,6 +390,11 @@ Maintenance, with the kernel stopped:
                                           count. If a listener connects again under that name, it
                                           starts at the newest event. Exit 1 if there is no such
                                           listener.
+  kernable deployments drop <store> <deployment> [--snapshots <url>]
+                                          Forgets a deployment's read model and middleware
+                                          registrations (with their positions) and its snapshots
+                                          (default store: next to <store>); its events stay. A read
+                                          model of it that connects again rebuilds from the start.
   kernable workers remove <store> <domain.Aggregate>
                                           Unregisters an aggregate type: its commands are refused
                                           (NOT_FOUND) unless a membership lists it. Exit 1 if there
@@ -525,6 +549,12 @@ async fn main() -> ExitCode {
         }
         ["listeners", store] => listeners(store),
         ["schemas", store] => schemas(store),
+        ["deployments", store] if !store.starts_with("--") => deployments_list(store),
+        ["deployments", "since", store, rest @ ..] => deployments_since(store, rest),
+        ["deployments", "drop", store, deployment] => deployments_drop(store, deployment, None),
+        ["deployments", "drop", store, deployment, "--snapshots", url] => {
+            deployments_drop(store, deployment, Some(url))
+        }
         ["listeners", "remove", store, name] => remove_listener(store, name),
         ["listeners", "parked", store] => parked(store),
         [
@@ -581,7 +611,10 @@ async fn main() -> ExitCode {
         }
         ["processes", "case", store, process, case] => processes_case(store, process, case),
         ["services", store] => services(store),
-        ["apply", addr, key, manifest] => apply(addr, key, manifest).await,
+        ["apply", addr, key, manifest] => apply(addr, key, manifest, None).await,
+        ["apply", addr, key, manifest, "--deployment", deployment] => {
+            apply(addr, key, manifest, Some(deployment)).await
+        }
         ["workers", "remove", store, aggregate] => remove_worker(store, aggregate),
         [
             "submit",
@@ -2423,12 +2456,10 @@ fn listeners(store: &str) -> Result<bool> {
                 )
             })
             .collect();
-        let unlisted = memberships.get(&l.service).is_some_and(|m| {
-            !m.listeners
-                .iter()
-                .chain(&m.middlewares)
-                .any(|n| *n == l.name)
-        });
+        let base = l.name.split_once('@').map_or(l.name.as_str(), |(n, _)| n);
+        let unlisted = memberships
+            .get(&l.service)
+            .is_some_and(|m| !m.listeners.iter().chain(&m.middlewares).any(|n| *n == base));
         let service = match (l.service.as_str(), unlisted) {
             ("", _) => String::new(),
             (service, false) => format!(" service {service}"),
@@ -2750,8 +2781,13 @@ fn services(store: &str) -> Result<bool> {
             .iter()
             .map(|a| format!(" {}={}", a.key, a.value))
             .collect();
+        let serving = if m.deployment.is_empty() {
+            String::new()
+        } else {
+            format!(" served by deployment {}", m.deployment)
+        };
         println!(
-            "{}{metadata} (applied {} by {})",
+            "{}{metadata}{serving} (applied {} by {})",
             m.service,
             config::utc(r.applied_at),
             sig.key_id
@@ -2763,11 +2799,16 @@ fn services(store: &str) -> Result<bool> {
         }
         for (kind, names) in [("listener", &m.listeners), ("middleware", &m.middlewares)] {
             for name in names {
-                let found = listeners.iter().any(|l| l.name == *name);
+                let found = listeners
+                    .iter()
+                    .any(|l| l.name.split_once('@').map_or(l.name.as_str(), |(n, _)| n) == name);
                 println!("  {kind} {name}{}", registered(found));
             }
         }
-        let listed = |name: &String| m.listeners.iter().chain(&m.middlewares).any(|n| n == name);
+        let listed = |name: &String| {
+            let base = name.split_once('@').map_or(name.as_str(), |(n, _)| n);
+            m.listeners.iter().chain(&m.middlewares).any(|n| n == base)
+        };
         for l in listeners
             .iter()
             .filter(|l| l.service == m.service && !listed(&l.name))
@@ -2779,7 +2820,12 @@ fn services(store: &str) -> Result<bool> {
 }
 
 /// Applies the membership in a manifest file, signed with `key_path` (granted `manage`).
-async fn apply(addr: &str, key_path: &str, manifest: &str) -> Result<bool> {
+async fn apply(
+    addr: &str,
+    key_path: &str,
+    manifest: &str,
+    deployment: Option<&str>,
+) -> Result<bool> {
     let key = signing::read_signing_key(key_path)?;
     let json: serde_json::Value = serde_json::from_str(&fs::read_to_string(manifest)?)
         .map_err(|e| format!("{manifest}: {e}"))?;
@@ -2815,6 +2861,14 @@ async fn apply(addr: &str, key_path: &str, manifest: &str) -> Result<bool> {
         metadata,
         issued_at: now_ms(),
         processes: strings("processes")?,
+        deployment: match (deployment, json.get("deployment")) {
+            (Some(d), _) => d.to_owned(),
+            (None, None) => String::new(),
+            (None, Some(d)) => d
+                .as_str()
+                .ok_or_else(|| format!("{manifest}: deployment is a string"))?
+                .to_owned(),
+        },
     };
     let mut request = tonic::Request::new(ApplyRequest {
         sig: Some(signing::sign(
@@ -2882,6 +2936,154 @@ fn schemas(store: &str) -> Result<bool> {
     for (event_type, schema) in kernable_store::open_read_only(store)?.event_schemas()? {
         println!("{event_type} schema {schema}");
     }
+    Ok(true)
+}
+
+fn deployments_list(store: &str) -> Result<bool> {
+    let store = kernable_store::open_read_only(store)?;
+    let list = kernable_kernel::deployments::list(store.as_ref())?;
+    let empty = Vec::new();
+    for d in list["deployments"].as_array().unwrap_or(&empty) {
+        println!(
+            "{}  {} events, positions {}..{}{}",
+            d["deployment"].as_str().unwrap_or_default(),
+            d["events"],
+            d["firstPosition"],
+            d["lastPosition"],
+            match d["listeners"].as_array() {
+                Some(l) if !l.is_empty() => format!(
+                    ", read models {}",
+                    l.iter()
+                        .filter_map(|n| n.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                _ => String::new(),
+            }
+        );
+    }
+    for m in list["services"].as_array().unwrap_or(&empty) {
+        let d = m["deployment"].as_str().unwrap_or_default();
+        println!(
+            "service {} served by {}",
+            m["service"].as_str().unwrap_or_default(),
+            if d.is_empty() { "every deployment" } else { d }
+        );
+    }
+    Ok(true)
+}
+
+fn deployments_since(store_url: &str, args: &[&str]) -> Result<bool> {
+    let store = kernable_store::open_read_only(store_url)?;
+    let (mut from, mut version, mut json) = (None, None, false);
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match *arg {
+            "--at" => {
+                let at = args.next().ok_or("--at needs a UTC time")?;
+                let ms = config::utc_ms(at).ok_or_else(|| {
+                    format!("--at {at}: not a UTC time like 2026-11-04T13:40:00Z")
+                })?;
+                from = Some(kernable_kernel::deployments::position_at(
+                    store.as_ref(),
+                    ms,
+                )?);
+            }
+            "--version" => version = Some(*args.next().ok_or("--version needs a deployment")?),
+            "--json" => json = true,
+            position => {
+                from = Some(
+                    position
+                        .parse()
+                        .map_err(|_| format!("{position}: not a position, nor --at <time>"))?,
+                )
+            }
+        }
+    }
+    let from = from.ok_or("give a position or --at <time>")?;
+    let report = kernable_kernel::deployments::since(store.as_ref(), from, version)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(true);
+    }
+    let empty = Vec::new();
+    let list = |field: &str| report[field].as_array().unwrap_or(&empty).clone();
+    println!(
+        "after position {} (up to {}){}",
+        report["from"],
+        report["head"],
+        version.map_or(String::new(), |v| format!(", events of {v}"))
+    );
+    for t in list("types") {
+        let mark = if t["newType"] == true {
+            "  NEW TYPE"
+        } else if t["newSchema"] == true {
+            "  NEW SCHEMA"
+        } else {
+            ""
+        };
+        let by = t["deployment"].as_str().unwrap_or_default();
+        println!(
+            "  {} schema {}  {} events in {} aggregates, by {}{mark}",
+            t["type"].as_str().unwrap_or_default(),
+            t["schema"],
+            t["events"],
+            t["aggregates"],
+            if by.is_empty() { "(none)" } else { by }
+        );
+    }
+    for (field, what) in [
+        ("scheduled", "scheduled command"),
+        ("timers", "process timer"),
+    ] {
+        for c in list(field) {
+            println!(
+                "  {what} {} {} on {}, due {}",
+                c["commandId"].as_str().unwrap_or_default(),
+                c["type"].as_str().unwrap_or_default(),
+                c["aggregate"].as_str().unwrap_or_default(),
+                c["deliverAt"]
+            );
+        }
+    }
+    for c in list("cases") {
+        println!(
+            "  running case {} of {} (tenant {}), last {}",
+            c["case"].as_str().unwrap_or_default(),
+            c["process"].as_str().unwrap_or_default(),
+            c["tenant"].as_str().unwrap_or_default(),
+            c["lastEvent"].as_str().unwrap_or_default()
+        );
+    }
+    for p in list("processVersions") {
+        println!(
+            "  process {} version {} registered",
+            p["process"].as_str().unwrap_or_default(),
+            p["version"]
+        );
+    }
+    Ok(true)
+}
+
+fn deployments_drop(store_url: &str, deployment: &str, snapshots: Option<&str>) -> Result<bool> {
+    if !config::valid_name(deployment) {
+        return Err("a deployment has 1 to 128 letters, digits, `-`, `_` and `.`".into());
+    }
+    let store = kernable_store::open(store_url)?;
+    let snapshots_url =
+        snapshots.map_or_else(|| config::snapshots_next_to(store_url), str::to_owned);
+    let snapshots = kernable_store::snapshots::open(&snapshots_url)?;
+    let (listeners, dropped) =
+        kernable_kernel::deployments::drop(store.as_ref(), snapshots.as_ref(), deployment)?;
+    println!(
+        "dropped deployment {deployment}: {} read model registrations{}, {dropped} snapshots",
+        listeners.len(),
+        if listeners.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", listeners.join(", "))
+        }
+    );
     Ok(true)
 }
 

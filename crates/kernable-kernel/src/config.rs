@@ -186,6 +186,12 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "How long a settling submit (the default) waits after the commit for the listeners that count to process the events, in milliseconds. After that the client gets the committed outcome marked as not settled (`NotSettled` in the SDKs).",
     ),
     (
+        "--deployment-retention-days",
+        "KERNABLE_DEPLOYMENT_RETENTION_DAYS",
+        "0",
+        "Days after which the kernel drops what it keeps for a deployment (code version) beside the log: its read models' registrations with their positions, and its snapshots. Only for a deployment that no membership names, with no read model connected and none seen for that long; logged as a warning. 0: never; drop one by hand with `kernable deployments drop`. The events stay either way.",
+    ),
+    (
         "--query-timeout-ms",
         "KERNABLE_QUERY_TIMEOUT_MS",
         "5000",
@@ -334,6 +340,8 @@ pub struct Config {
     pub checkpoint_interval_ms: u64,
     pub submit_timeout_ms: u64,
     pub settle_timeout_ms: u64,
+    /// `--deployment-retention-days`: 0 keeps every deployment's read models and snapshots.
+    pub deployment_retention_days: u64,
     pub query_timeout_ms: u64,
     pub middleware_timeout_ms: u64,
     pub drain_timeout_ms: u64,
@@ -629,6 +637,7 @@ impl Config {
             checkpoint_interval_ms: number("--checkpoint-interval-ms")?,
             submit_timeout_ms: number("--submit-timeout-ms")?,
             settle_timeout_ms: number("--settle-timeout-ms")?,
+            deployment_retention_days: number("--deployment-retention-days")?,
             query_timeout_ms: number("--query-timeout-ms")?,
             middleware_timeout_ms: number("--middleware-timeout-ms")?,
             drain_timeout_ms: number("--drain-timeout-ms")?,
@@ -883,7 +892,7 @@ pub fn valid_pattern(pattern: &str) -> bool {
 
 /// The default snapshot store: SQLite next to the event store `store`, or memory for a memory
 /// store.
-fn snapshots_next_to(store: &str) -> String {
+pub fn snapshots_next_to(store: &str) -> String {
     let path = match kernable_store::backend(store) {
         ("memory", _) => return "memory:".into(),
         (_, path) => std::path::Path::new(path),

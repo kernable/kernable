@@ -155,6 +155,8 @@ pub(crate) fn respond(kernel: &Kernel, request: &[u8]) -> Vec<u8> {
         "/api/snapshots" => snapshots(kernel),
         "/api/files" => files(kernel, &params),
         "/api/cache" => cache(kernel, &params),
+        "/api/deployments" => deployments(kernel),
+        "/api/deployments/since" => deployments_since(kernel, &params),
         _ => return reply("404 Not Found", "text/plain", b"not found\n"),
     };
     match result {
@@ -236,7 +238,7 @@ fn state(kernel: &Kernel) -> Result<Value, BoxError> {
             }))
         })
         .collect();
-    let (aggregates, instances) = kernel.workers.view();
+    let (aggregates, instances) = kernel.workers.view(&kernel.memberships);
     let mut events: Vec<Value> = Vec::new();
     let sources = kernel.store.event_sources()?;
     for (event_type, schema) in kernel.store.event_schemas()? {
@@ -951,11 +953,24 @@ fn history(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, B
             .collect(),
         None => serde_json::Map::new(),
     };
-    let snapshot = kernel
-        .snapshots
-        .get(&stream)?
-        .and_then(|r| r.snapshot)
-        .map(|s| json!({ "version": s.version, "schema": s.schema, "bytes": s.state.len() }));
+    // A snapshot per deployment: of workers without one, and of those memberships name.
+    let mut deployments: Vec<String> = kernel
+        .memberships
+        .deployments()
+        .into_iter()
+        .map(|(_, d)| d)
+        .chain(kernel.workers.deployments())
+        .collect();
+    deployments.push(String::new());
+    deployments.sort();
+    deployments.dedup();
+    let mut snapshots = Vec::new();
+    for d in &deployments {
+        if let Some(s) = kernel.snapshots.get(&stream, d)?.and_then(|r| r.snapshot) {
+            snapshots.push(json!({ "deployment": d, "version": s.version, "schema": s.schema, "bytes": s.state.len() }));
+        }
+    }
+    let snapshot = snapshots.first().cloned();
     let index = kernel.store.stream_index(&stream)?.map(|i| {
         let keys: Vec<Value> = i
             .keys
@@ -978,6 +993,7 @@ fn history(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, B
         "commands": commands,
         "vault": vault,
         "snapshot": snapshot,
+        "snapshots": snapshots,
     }))
 }
 
@@ -1146,6 +1162,50 @@ fn vault(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, Box
         "sealed": o.sealed,
         "limit": kernable_store::vault::MAX_SEALED,
     }))
+}
+
+/// The deployments of the connected workers and listeners and of the memberships, with their
+/// read models; what the log says of each is `kernable deployments`, which reads all of it.
+fn deployments(kernel: &Kernel) -> Result<Value, BoxError> {
+    let serving: Vec<Value> = kernel
+        .memberships
+        .deployments()
+        .into_iter()
+        .map(|(service, deployment)| json!({ "service": service, "deployment": deployment }))
+        .collect();
+    let listeners: Vec<Value> = kernel
+        .listeners
+        .deployments()
+        .into_iter()
+        .map(|(deployment, last_seen, used)| json!({ "deployment": deployment, "lastSeen": last_seen, "inUse": used }))
+        .collect();
+    Ok(json!({
+        "serving": serving,
+        "workers": kernel.workers.deployments(),
+        "readModels": listeners,
+    }))
+}
+
+/// `GET /api/deployments/since?position=<n>` (or `time=<ms>`), optionally `&version=<v>`: what
+/// was written after that point (`deployments::since`), to check before a rollback.
+fn deployments_since(kernel: &Kernel, params: &HashMap<String, String>) -> Result<Value, BoxError> {
+    let from = match (params.get("position"), params.get("time")) {
+        (Some(p), _) => p.parse().map_err(|_| "position: not a number")?,
+        (None, Some(t)) => crate::deployments::position_at(
+            kernel.store.as_ref(),
+            t.parse().map_err(|_| "time: not ms since epoch")?,
+        )?,
+        (None, None) => return Err("give position=<n> or time=<ms since epoch>".into()),
+    };
+    let version = params
+        .get("version")
+        .map(String::as_str)
+        .filter(|v| !v.is_empty());
+    Ok(crate::deployments::since(
+        kernel.store.as_ref(),
+        from,
+        version,
+    )?)
 }
 
 fn snapshots(kernel: &Kernel) -> Result<Value, BoxError> {

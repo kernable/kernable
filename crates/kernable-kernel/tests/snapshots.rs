@@ -38,7 +38,7 @@ fn snapshot_version(env: &Env) -> Option<u64> {
         aggregate_id: "o1".into(),
     };
     let snapshots = kernable_store::snapshots::open(&env.snapshots).unwrap();
-    let record = snapshots.get(&stream).unwrap()?;
+    let record = snapshots.get(&stream, "").unwrap()?;
     record.snapshot.map(|s| s.version)
 }
 

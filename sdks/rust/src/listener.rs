@@ -15,7 +15,7 @@ use kernable_core::{
     PROTOCOL,
     proto::{
         self, Ack, ChallengeResponse, Hello, ListenerMessage, Middleware, Parked, QueryAnswer,
-        SubscribeRequest, Verdict, event_service_client::EventServiceClient,
+        Skipped, SubscribeRequest, Verdict, event_service_client::EventServiceClient,
         listener_delivery::Msg as Delivery, listener_message::Msg as Reply,
         listener_service_client::ListenerServiceClient, middleware_call, query_answer,
         query_result,
@@ -31,11 +31,24 @@ use crate::{
     BoxError, Client, Domain, Error, HANDLING, Kernable, Outcome, Query, QueryOutcome, Rejected,
     RequestContext, Store, StoredEvent, Submit, Timestamp,
     context::issued_now,
-    domain::{decode, upcast},
+    domain::{decode, known_schema, upcast},
     log,
     messages::{Key, TypeKey},
     vault,
 };
+
+/// The code a reactor parks an event with whose schema is newer than its code reads.
+const UNKNOWN_EVENT: &str = "unknown_event";
+
+/// An event whose schema is newer than the listener's code reads.
+struct Unknown {
+    position: u64,
+    /// Qualified: `shop.ItemAdded`.
+    event_type: String,
+    schema: u32,
+    /// The newest schema the code reads.
+    reads: u32,
+}
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 type EventHandler =
@@ -68,6 +81,9 @@ pub struct StoredEventMeta {
     /// Fields kept in the vault whose value is not in the payload (`null`): erased, or not
     /// readable with this key (granted `vault_read`).
     pub redacted: Vec<String>,
+    /// The code version of the worker that wrote it ([`crate::Options::deployment`]); empty if
+    /// none.
+    pub deployment: String,
 }
 
 impl StoredEventMeta {
@@ -84,6 +100,7 @@ impl StoredEventMeta {
             created_at: e.created_at,
             schema: e.schema,
             redacted: e.redacted.clone(),
+            deployment: e.deployment.clone(),
         }
     }
 }
@@ -373,8 +390,10 @@ struct ListenerInner {
 /// Types without a domain (`ItemAdded`) are the listener's own domain's; other domains' are
 /// qualified (`identity.AccountRegistered`). Handlers get event payloads upcast to the versions
 /// of the listener's domain and of the domains it is given with `with_domain`. An event with a
-/// newer schema than known stops the listener (it retries and logs) until it is updated, so it
-/// never misreads data. Cloning gives another handle to the same definition, and every
+/// newer schema than known (a newer deployment wrote it) never reaches a handler, so it is never
+/// misread: a reactor that parks parks it at once (`unknown_event`), to be retried once it is
+/// updated; any other listener skips it, warns once per type and schema, and counts it
+/// ([`ListenerHandle::skipped`]). Raw handlers get it as stored. Cloning gives another handle to the same definition, and every
 /// configuring method returns one, so they chain.
 ///
 /// Handlers are closures that return a future: `Fn(data, meta, ctx) -> impl Future<Output =
@@ -862,6 +881,8 @@ struct HandleInner {
     announce: AtomicBool,
     /// Connects the kernel accepted so far.
     connects: AtomicU64,
+    /// Events skipped because their schema is newer than this code reads.
+    skipped: AtomicU64,
     /// Position after which the kernel delivered on the first connect.
     started_at: AtomicU64,
     /// As a partition's stream: its partition, whose position the store keeps apart.
@@ -924,6 +945,7 @@ impl ListenerHandle {
                 ready: watch::Sender::new(false),
                 announce: AtomicBool::new(true),
                 connects: AtomicU64::new(0),
+                skipped: AtomicU64::new(0),
                 started_at: AtomicU64::new(0),
                 part: String::new(),
                 shared: false,
@@ -951,6 +973,7 @@ impl ListenerHandle {
                 ready: watch::Sender::new(false),
                 announce: AtomicBool::new(inner.announce.load(Ordering::SeqCst)),
                 connects: AtomicU64::new(0),
+                skipped: AtomicU64::new(0),
                 started_at: AtomicU64::new(0),
                 part,
                 shared: true,
@@ -980,6 +1003,14 @@ impl ListenerHandle {
     /// Global position of the last handled event (or skipped, for other event types).
     pub fn position(&self) -> u64 {
         self.inner.position.load(Ordering::SeqCst)
+    }
+
+    /// How many events it skipped since it was made because their schema is newer than its
+    /// code reads (written by a newer deployment): a read model, live listener or replicated
+    /// instance goes on without them, the kernel counts them too. A reactor that parks
+    /// ([`Listener::park_after`]) parks such an event instead (`unknown_event`).
+    pub fn skipped(&self) -> u64 {
+        self.inner.skipped.load(Ordering::SeqCst)
     }
 
     /// The listener's store, while `run()` has it open.
@@ -1222,6 +1253,7 @@ impl ListenerHandle {
             live,
             instance,
             single,
+            deployment: client.deployment.clone(),
         };
         tx.send(msg(Reply::Hello(hello))).await?;
         let (at, channel) = client.channel();
@@ -1314,14 +1346,12 @@ impl ListenerHandle {
                     )
                     .await
                     .unwrap_or_else(|panic| Err(panic.into()))
-                    .and_then(|parked| match &store {
-                        Some(s) => {
-                            Ok(s.commit_part(up_to, erased, &inner.part).map(|()| parked)?)
-                        }
-                        None => Ok(parked),
+                    .and_then(|done| match &store {
+                        Some(s) => Ok(s.commit_part(up_to, erased, &inner.part).map(|()| done)?),
+                        None => Ok(done),
                     });
-                    let parked = match handled {
-                        Ok(parked) => parked,
+                    let (parked, skipped) = match handled {
+                        Ok(done) => done,
                         Err(e) => {
                             if let Some(s) = &store {
                                 s.rollback();
@@ -1338,6 +1368,7 @@ impl ListenerHandle {
                     Reply::Ack(Ack {
                         position: up_to,
                         parked,
+                        skipped,
                     })
                 }
                 Some(Delivery::Query(q)) => {
@@ -1461,20 +1492,24 @@ impl ListenerHandle {
     }
 
     /// Handles a batch: first the retries, then the events after the position. Returns the
-    /// events it parked; an error if a handler failed on one it does not park.
+    /// events it parked and those it skipped as newer than its code; an error if a handler
+    /// failed on one it does not park.
     async fn handle_batch(
         &self,
         batch: proto::Batch,
         replay_up_to: u64,
         store: Option<Store>,
-    ) -> Result<Vec<Parked>, BoxError> {
+    ) -> Result<(Vec<Parked>, Vec<Skipped>), BoxError> {
         let def = self.def();
         let (park_after, live) = {
             let s = def.settings.lock().unwrap();
             (s.park_after, s.live)
         };
         let parking = park_after > 0 && !live;
+        let (instance, single) = self.inner.listener.instance_of();
+        let replicated = !instance.is_empty() && !single;
         let mut parked = Vec::new();
+        let mut skipped = Vec::new();
         let retries = batch.retries.into_iter().map(|e| (e, true));
         for (e, retry) in retries.chain(batch.events.into_iter().map(|e| (e, false))) {
             let position = e.global_position;
@@ -1493,6 +1528,27 @@ impl ListenerHandle {
                 let mut event = StoredEvent::from_wire(e, &batch.vault);
                 if !raw {
                     let known = def.domains.read().unwrap().get(&event.domain).cloned();
+                    let reads = known_schema(known.as_ref(), &event.event_type);
+                    if event.schema > reads {
+                        // A newer deployment wrote it: a reactor parks it, so it can be retried
+                        // once this code is updated; any other listener goes on without it.
+                        let unknown = Unknown {
+                            position,
+                            event_type: format!("{}.{}", event.domain, event.event_type),
+                            schema: event.schema,
+                            reads,
+                        };
+                        if parking && !replicated && !erasing {
+                            parked.push(self.park_unknown(&unknown));
+                        } else {
+                            skipped.push(self.skip(&unknown));
+                        }
+                        self.inner.attempts.lock().unwrap().remove(&position);
+                        if !retry {
+                            self.inner.position.store(position, Ordering::SeqCst);
+                        }
+                        continue;
+                    }
                     event.data = upcast(
                         known.as_ref(),
                         &event.domain,
@@ -1554,7 +1610,64 @@ impl ListenerHandle {
                 self.inner.position.store(position, Ordering::SeqCst);
             }
         }
-        Ok(parked)
+        Ok((parked, skipped))
+    }
+
+    /// Parks an event newer than this code at once (`unknown_event`).
+    fn park_unknown(&self, unknown: &Unknown) -> Parked {
+        let Unknown {
+            position,
+            event_type,
+            schema,
+            reads,
+        } = unknown;
+        let message = format!(
+            "{event_type} schema {schema}: this code reads it up to {reads}; a newer deployment wrote it"
+        );
+        let what = format!("listener {}", self.def().name);
+        self.inner.client.log.warn(&what, || {
+            format!("{event_type} at {position} parked ({UNKNOWN_EVENT}): {message}")
+        });
+        Parked {
+            position: *position,
+            code: UNKNOWN_EVENT.to_owned(),
+            message,
+            attempts: 1,
+        }
+    }
+
+    /// Skips an event newer than this code: counts it and warns once per type and schema in
+    /// this process.
+    fn skip(&self, unknown: &Unknown) -> Skipped {
+        static WARNED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+        let Unknown {
+            position,
+            event_type,
+            schema,
+            reads,
+        } = unknown;
+        self.inner.skipped.fetch_add(1, Ordering::SeqCst);
+        if let Some(parent) = &self.inner.parent {
+            parent.skipped.fetch_add(1, Ordering::SeqCst);
+        }
+        let first = WARNED
+            .lock()
+            .unwrap()
+            .get_or_insert_default()
+            .insert(format!("{event_type}@{schema}"));
+        if first {
+            let what = format!("listener {}", self.def().name);
+            self.inner.client.log.warn(&what, || {
+                format!(
+                    "skipped {event_type} schema {schema}: this code reads it up to {reads}; a newer deployment wrote it"
+                )
+            });
+        }
+        Skipped {
+            position: *position,
+            event_type: event_type.clone(),
+            schema: *schema,
+        }
     }
 
     /// What to do after the handler failed on the event at `position`: park it (a rejection at

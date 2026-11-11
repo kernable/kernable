@@ -1375,20 +1375,27 @@ function servicesPanel() {
   const rows = [];
   for (const w of state.instances) rows.push(el("tr", {},
     el("td", {}, el("span", { class: "dot ok", style: "margin-right:8px" }), el("b", {}, w.worker)),
-    el("td", {}, `worker · ${w.aggregates.join(", ")}`), el("td", {}, w.service || "–"), el("td", {}, keyView(w.key)), el("td", {}, "–"), el("td", { class: "num" }, "–"), el("td", {}, when(w.since))));
+    el("td", {}, `worker · ${w.aggregates.join(", ")}`), el("td", {}, deployed(w.service, w.deployment, w.serving)), el("td", {}, keyView(w.key)), el("td", {}, "–"), el("td", { class: "num" }, "–"), el("td", {}, when(w.since))));
   for (const l of state.listeners) {
     const status = l.live ? "live" : !l.counts ? (l.connected ? "dynamic" : "away") : !l.connected ? "missing" : l.position < head ? "behind" : "connected";
     const kind = l.live ? "live subscription" : l.middlewares.length ? `middleware (${l.middlewares.map((m) => m.when).join(", ")})` : l.queries.length ? `read model · order ${l.order}` : `listener · order ${l.order}`;
     rows.push(el("tr", {},
       el("td", {}, el("span", { class: "dot", style: `color:${color(status)};margin-right:8px` }), el("b", {}, l.name)),
-      el("td", {}, kind), el("td", {}, l.service || "–"), el("td", {}, keyView(l.key)),
+      el("td", {}, kind), el("td", {}, deployed(l.service, l.deployment, !l.versioned || l.current)), el("td", {}, keyView(l.key)),
       el("td", {}, spark(l.name, head - l.position)),
-      el("td", { class: `num ${l.parked ? "bad" : ""}` }, l.parked ? num(l.parked) : "–"),
+      el("td", { class: `num ${l.parked || l.skipped ? "bad" : ""}`, title: l.skipped ? `skipped, unknown to its code: ${Object.entries(l.skippedTypes ?? {}).map(([t, n]) => `${t} ×${n}`).join(", ")}` : "" },
+        l.parked || l.skipped ? [l.parked ? num(l.parked) : "", l.skipped ? `${num(l.skipped)} skipped` : ""].filter(Boolean).join(" · ") : "–"),
       el("td", {}, l.connected ? when(l.since) : el("span", { class: "bad" }, "away · last seen ", when(l.lastSeen)))));
   }
   if (!rows.length) rows.push(el("tr", {}, el("td", { colspan: 7, class: "note" }, "Nothing connected.")));
   return el("div", { class: "panel" }, el("h2", {}, "Services", el("span", { class: "aside" }, `${state.instances.length} worker${state.instances.length === 1 ? "" : "s"} · ${state.listeners.length} listeners`)),
-    el("div", { class: "tbl" }, el("table", {}, el("tr", {}, ["Name", "Kind", "Service", "Key", "Behind, last hour", "Parked", "Connected"].map((h, i) => el("th", { class: i === 5 ? "num" : "" }, h))), rows)));
+    el("div", { class: "tbl" }, el("table", {}, el("tr", {}, ["Name", "Kind", "Service · deployment", "Key", "Behind, last hour", "Parked", "Connected"].map((h, i) => el("th", { class: i === 5 ? "num" : "" }, h))), rows)));
+}
+
+/** A service with the deployment (code version) of a connection, marked when another one serves. */
+function deployed(service, deployment, serving) {
+  if (!deployment) return service || "–";
+  return [`${service || "–"} · `, serving ? el("b", {}, deployment) : el("span", { class: "note", title: "another deployment serves this service" }, `${deployment} (not serving)`)];
 }
 
 /** How far a listener was behind (head − position) over the hour the kernel kept. */

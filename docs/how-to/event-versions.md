@@ -34,14 +34,14 @@ Use this page when an event must carry something different: a field renamed, rem
 
 ## What happens during the deploy
 
-- **A reader that meets a version it does not know stops** at that event instead of misreading it. It logs `shop.ItemAdded has schema 2, but this process knows it only up to 1: update it`, retries, and keeps its position. Listeners with a higher order wait behind it. Its lag grows in the metrics and in the UI ([Monitor](./monitor)). It continues once the process is updated.
-- **A worker cannot write an older version** than the store holds. Once a version-2 event is stored, the kernel refuses an old worker's result, ends its session and puts the command back in the queue for a current worker. Old and new workers never write side by side.
+- **A reader that meets a version it does not know never misreads it.** A read model skips the event and counts it (`kernable_listener_skipped`, the UI); a reactor parks it with the code `unknown_event`. Both log `shop.ItemAdded has schema 2, but this process knows it only up to 1` once per type and version. Once the process is updated, [rebuild](./rebuild-read-model) the read model (an in-memory one does on every start) and retry the reactor's parked events (`kernable listeners retry`).
+- **A worker cannot write an older version** than the store holds. Once a version-2 event is stored, the kernel refuses an old worker's result, ends its session and puts the command back in the queue for a current worker. Old and new workers never write side by side. With [deployments](./deployments), an older deployment may write the older version again after a rollback, and the kernel refuses its commands on the aggregates that hold the newer one (`unknown_history`).
 
-If readers and writers run in one app, deploy it as usual: old processes still running stop at the first new event and continue as soon as they are replaced.
+If readers and writers run in one app, deploy it as usual: old processes still running skip or park the new events until they are replaced.
 
 ## Pitfalls
 
-- **A listener of another domain without `use`** knows the event only at version 1, so it stops at the first version-2 event.
+- **A listener of another domain without `use`** knows the event only at version 1, so it skips (or parks) every version-2 event.
 - **State shapes are separate.** If the change also changes an aggregate's state, raise the aggregate's `schema` so old snapshots are rebuilt. If it changes what a read model with a store keeps, raise the read model's `schema` ([Rebuild a read model](./rebuild-read-model)).
 - **Avoid a new version** when you can: a new optional field that every reader can ignore or default needs none. **Use a new event type** when the meaning changes, not only the shape.
 

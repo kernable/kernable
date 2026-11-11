@@ -225,4 +225,7 @@ message SnapshotRecord {
   string aggregate_id = 4;
   Snapshot snapshot = 5;
   bytes event_hash = 6; // hash of the stream's event at snapshot.version
+  // The deployment of the worker that made it (Register.deployment): only workers of the same
+  // deployment get it, so an older deployment never reads a newer one's state format.
+  string deployment = 7;
 }

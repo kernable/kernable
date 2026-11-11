@@ -85,8 +85,12 @@ CREATE TABLE IF NOT EXISTS events (
     hash            BLOB    NOT NULL,
     origin_partition TEXT   NOT NULL DEFAULT '', -- a moved event: where it was first committed
     origin_position INTEGER NOT NULL DEFAULT 0,
+    deployment      TEXT    NOT NULL DEFAULT '', -- the producing worker's code version; '': none
     UNIQUE (tenant_id, domain, aggregate_type, aggregate_id, version)
 ) STRICT;
+-- What a deployment wrote: its first event, the types it wrote, the events after a point.
+CREATE INDEX IF NOT EXISTS events_deployment ON events (deployment, domain, event_type)
+    WHERE deployment != '';
 CREATE TABLE IF NOT EXISTS commands (
     command_id       TEXT PRIMARY KEY,
     tenant_id        TEXT    NOT NULL,
@@ -177,7 +181,8 @@ CREATE TABLE IF NOT EXISTS memberships (
     key_id      TEXT    NOT NULL, -- the key that applied it (granted manage)
     sig         BLOB    NOT NULL, -- its signature over kernable.v1.membership
     applied_at  INTEGER NOT NULL, -- ms since epoch
-    processes   TEXT    NOT NULL DEFAULT '' -- comma-separated qualified process names
+    processes   TEXT    NOT NULL DEFAULT '', -- comma-separated qualified process names
+    deployment  TEXT    NOT NULL DEFAULT ''  -- the deployment that serves the service; '': any
 ) STRICT;
 -- Every version of every process model, as registered (ProcessService.Register).
 CREATE TABLE IF NOT EXISTS process_versions (
@@ -238,7 +243,7 @@ CREATE TABLE IF NOT EXISTS unique_keys (
 const EVENT_COLUMNS: &str = "global_position, tenant_id, aggregate_type, aggregate_id, version, \
                              event_type, payload, command_id, created_at, \
                              producer_key_id, producer_sig, hash, context, domain, schema, \
-                             vault_refs, erases, origin_partition, origin_position";
+                             vault_refs, erases, origin_partition, origin_position, deployment";
 
 const COMMAND_COLUMNS: &str = "command_id, tenant_id, aggregate_type, aggregate_id, command_type, \
                                payload, client_key_id, client_sig, context, domain, vault_refs, \
@@ -970,6 +975,35 @@ impl Store for SqliteStore {
         stored_result(&self.conn(), command_id)
     }
 
+    fn deployment_written(&self, deployment: &str) -> Result<(Option<u64>, Vec<String>)> {
+        let conn = self.conn();
+        let first = conn.query_row(
+            "SELECT MIN(global_position) FROM events WHERE deployment = ?1 AND deployment != ''",
+            [deployment],
+            |r| r.get::<_, Option<u64>>(0),
+        )?;
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT domain || '.' || event_type FROM events
+             WHERE deployment = ?1 AND deployment != '' ORDER BY 1",
+        )?;
+        let types = stmt
+            .query_map([deployment], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok((first, types))
+    }
+
+    fn first_of_type(&self, domain: &str, event_type: &str) -> Result<Option<(u64, String)>> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT global_position, deployment FROM events
+                 WHERE domain = ?1 AND event_type = ?2 ORDER BY global_position LIMIT 1",
+                [domain, event_type],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+    }
+
     // ---- listeners ----
 
     fn listeners(&self) -> Result<Vec<ListenerRecord>> {
@@ -1657,7 +1691,7 @@ fn verify_tables(conn: &Connection, kernel_key_ids: &[String]) -> Result<Report>
     ))?;
     let mut rows = stmt.query([])?;
     while let Some(r) = rows.next()? {
-        let prev_hash: Vec<u8> = r.get(19)?;
+        let prev_hash: Vec<u8> = r.get(20)?;
         v.event(event_from_row(r)?, &prev_hash);
     }
 
@@ -1713,6 +1747,7 @@ fn event_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
         erases: r.get(16)?,
         origin_partition: r.get(17)?,
         origin_position: r.get(18)?,
+        deployment: r.get(19)?,
     })
 }
 
@@ -2057,15 +2092,17 @@ fn commit_tx(
             context: cmd.context.clone(),
             origin_partition: e.origin_partition.clone(),
             origin_position: e.origin_position,
+            deployment: e.deployment.clone(),
         };
         event.hash = signing::event_hash(&prev, &event).to_vec();
         tx.execute(
             "INSERT INTO events (global_position, tenant_id, aggregate_type, aggregate_id, version,
                                  event_type, payload, command_id, created_at,
                                  producer_key_id, producer_sig, prev_hash, hash, context, domain,
-                                 schema, vault_refs, erases, origin_partition, origin_position)
+                                 schema, vault_refs, erases, origin_partition, origin_position,
+                                 deployment)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                     ?18, ?19, ?20)",
+                     ?18, ?19, ?20, ?21)",
             params![
                 event.global_position,
                 event.tenant_id,
@@ -2086,7 +2123,8 @@ fn commit_tx(
                 event.vault_refs.join(","),
                 event.erases,
                 event.origin_partition,
-                event.origin_position
+                event.origin_position,
+                event.deployment
             ],
         )?;
         tx.execute(
@@ -2391,8 +2429,8 @@ fn save_membership_tx(tx: &Connection, record: &MembershipRecord) -> Result<()> 
     tx.execute(
         "INSERT OR REPLACE INTO memberships
              (service, workers, listeners, middlewares, metadata, issued_at, key_id, sig,
-              applied_at, processes)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+              applied_at, processes, deployment)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             m.service,
             m.workers.join(","),
@@ -2403,7 +2441,8 @@ fn save_membership_tx(tx: &Connection, record: &MembershipRecord) -> Result<()> 
             sig.key_id,
             sig.sig,
             record.applied_at,
-            m.processes.join(",")
+            m.processes.join(","),
+            m.deployment
         ],
     )?;
     Ok(())
@@ -2554,7 +2593,7 @@ pub(crate) fn read_workers(conn: &Connection) -> Result<Vec<WorkerRecord>> {
 fn read_memberships(conn: &Connection) -> Result<Vec<MembershipRecord>> {
     let mut stmt = conn.prepare(
         "SELECT service, workers, listeners, middlewares, metadata, issued_at, key_id, sig,
-                applied_at, processes
+                applied_at, processes, deployment
          FROM memberships ORDER BY service",
     )?;
     let memberships = stmt
@@ -2574,6 +2613,7 @@ fn read_memberships(conn: &Connection) -> Result<Vec<MembershipRecord>> {
                         .collect(),
                     issued_at: r.get(5)?,
                     processes: split_list(r.get(9)?),
+                    deployment: r.get(10)?,
                 }),
                 sig: Some(Signature {
                     key_id: r.get(6)?,
@@ -2923,6 +2963,7 @@ fn apply_commit(tx: &Transaction<'_>, c: &CommittedRecord) -> Result<()> {
             erases: e.erases.clone(),
             origin_partition: e.origin_partition.clone(),
             origin_position: e.origin_position,
+            deployment: e.deployment.clone(),
         })
         .collect();
     let first = theirs.first();
@@ -3021,7 +3062,7 @@ fn records_of(
         let mut commit: Option<CommittedRecord> = None;
         while let Some(r) = rows.next()? {
             let event = event_from_row(r)?;
-            let prev_hash: Vec<u8> = r.get(19)?;
+            let prev_hash: Vec<u8> = r.get(20)?;
             if let Some(done) = commit.take_if(|c| c.command_id != event.command_id) {
                 f(Record::Committed(done))?;
             }

@@ -560,8 +560,9 @@ async fn a_new_event_schema_is_upcast_for_aggregates_and_listeners() {
             (2, json!({ "sku": "pear", "count": 2 }))
         ]
     );
-    // The listener that knows only version 1 stopped before the version 2 event.
-    assert_eq!(stale.position(), 1);
+    // The read model that knows only version 1 skips the version 2 event and goes on.
+    eventually(|| stale.position() >= 2).await;
+    assert_eq!((stale.position(), stale.skipped()), (2, 1));
     for w in [&old, &worker, &outdated] {
         w.stop();
     }

@@ -484,6 +484,7 @@ fn apply(kernel: &Kernel, tenant: &str, from: &str, batch: MoveBatch) -> Result<
                             erases: e.erases.clone(),
                             origin_partition: origin,
                             origin_position: position,
+                            deployment: e.deployment.clone(),
                         }
                     })
                     .collect();
@@ -514,6 +515,8 @@ fn apply(kernel: &Kernel, tenant: &str, from: &str, batch: MoveBatch) -> Result<
     }
     // One write per batch where the store allows it.
     store.import(&copies)?;
+    // The copies are new events here: what the deployments wrote is read again when needed.
+    kernel.written.forget();
     crate::crash::point("move.batch");
     Ok(())
 }

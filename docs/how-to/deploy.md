@@ -29,6 +29,8 @@ Before you start, give the kernel a metrics address (`--metrics-listen 127.0.0.1
 
 6. **Check the result.** `kernable services <store>` shows each applied membership, who applied it and when; a listed member that never connected is marked `(never registered)`. The kernel UI shows the same live ([Monitor kernable](./monitor#the-ui)).
 
+Name each version (`KERNABLE_DEPLOYMENT`) to run versions side by side and roll back safely: each builds its own read models, and the membership names the one that serves ([Deployments and rollbacks](./deployments)).
+
 What the new membership no longer lists stops counting: the kernel stops waiting for it, and a middleware that is no longer listed stops checking ([Remove a listener, middleware or aggregate](./remove-listener)).
 
 ### Pitfalls

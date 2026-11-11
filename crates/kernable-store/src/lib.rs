@@ -345,6 +345,39 @@ pub trait Store: Send + Sync {
         Ok(sources.into_iter().collect())
     }
 
+    /// What the workers of `deployment` wrote: the position of its first event (`None`: it wrote
+    /// none) and every qualified event type (`domain.Type`) it wrote, sorted.
+    fn deployment_written(&self, deployment: &str) -> Result<(Option<u64>, Vec<String>)> {
+        let mut first = None;
+        let mut types = std::collections::BTreeSet::new();
+        self.each_event(&mut |e| {
+            if e.deployment == deployment {
+                first.get_or_insert(e.global_position);
+                types.insert(format!("{}.{}", e.domain, e.event_type));
+            }
+        })?;
+        Ok((first, types.into_iter().collect()))
+    }
+
+    /// The first event of the qualified type `domain.event_type`: its position and the
+    /// deployment that wrote it. `None` while there is none.
+    fn first_of_type(&self, domain: &str, event_type: &str) -> Result<Option<(u64, String)>> {
+        let mut after = 0;
+        loop {
+            let events = self.read_all(after, 1000)?;
+            let Some(last) = events.last() else {
+                return Ok(None);
+            };
+            after = last.global_position;
+            if let Some(e) = events
+                .iter()
+                .find(|e| e.domain == domain && e.event_type == event_type)
+            {
+                return Ok(Some((e.global_position, e.deployment.clone())));
+            }
+        }
+    }
+
     /// Calls `f` with every event, in order.
     fn each_event(&self, f: &mut dyn FnMut(&Event)) -> Result<()> {
         let mut after = 0;

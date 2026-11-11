@@ -209,6 +209,7 @@ impl Worker {
             event_schemas: event_schemas(&by_command),
             protocol: PROTOCOL,
             service: self.inner.service.clone(),
+            deployment: client.deployment.clone(),
         })))
         .await?;
         let (at, channel) = client.channel();
@@ -465,8 +466,10 @@ fn aggregates(by_command: &HashMap<String, Arc<dyn Runnable>>) -> Vec<WorkerAggr
         .collect()
 }
 
-/// The payload versions the worker writes, for every event type its aggregates know: the
-/// kernel refuses the worker if the store already holds a newer one.
+/// The payload versions the worker writes, for every event type its aggregates know: those
+/// they apply and those their domains declare. Without a deployment the kernel refuses the
+/// worker if the store already holds a newer one; with one it rejects commands on aggregates
+/// holding a newer schema, or a type not listed here (`unknown_history`).
 fn event_schemas(by_command: &HashMap<String, Arc<dyn Runnable>>) -> Vec<EventSchema> {
     let mut schemas = HashMap::new();
     for aggregate in by_command.values() {
@@ -588,5 +591,35 @@ mod tests {
         // Without keys, facts or requirements, a result has no index signature.
         let none = index_sig(&cmd, expected_version, (&[], &[], &[]), |_| unreachable!());
         assert!(none.is_none());
+    }
+
+    /// A worker lists every event type it knows: those its aggregates only apply (at 1 unless
+    /// declared), and those its domain declares, at the declared schema.
+    #[test]
+    fn the_event_schemas_list_applied_and_declared_types() {
+        let shop = domain("shop");
+        shop.event("ItemAdded", 2).upcast(1, |v| v);
+        shop.event("Noted", 3).upcast(1, |v| v).upcast(2, |v| v);
+        let cart = shop.aggregate("Cart", 0u32);
+        cart.apply("ItemAdded", |n, _: Value, _evt, _ctx| *n += 1);
+        cart.apply("Cleared", |n, _: Value, _evt, _ctx| *n = 0);
+        cart.command("Add", |_, _: Value, _cmd, _ctx| {
+            Ok(vec![NewEvent::new("ItemAdded", ())])
+        });
+        let mut by_command: HashMap<String, Arc<dyn Runnable>> = HashMap::new();
+        by_command.insert("shop.Add".into(), Arc::new(cart));
+        let mut schemas: Vec<(String, u32)> = event_schemas(&by_command)
+            .into_iter()
+            .map(|s| (s.event_type, s.schema))
+            .collect();
+        schemas.sort();
+        assert_eq!(
+            schemas,
+            [
+                ("shop.Cleared".to_owned(), 1),
+                ("shop.ItemAdded".to_owned(), 2),
+                ("shop.Noted".to_owned(), 3),
+            ]
+        );
     }
 }

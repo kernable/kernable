@@ -265,6 +265,7 @@ fn query(query_type: &str, key: &SigningKey) -> QueryRequest {
         min_position: 0,
         issued_at,
         client_sig: None,
+        deployment: Default::default(),
     };
     q.client_sig = Some(signing::sign(key, &signing::query_message(&q)));
     q

@@ -108,6 +108,7 @@ fn signed_query(query_type: &str, min_position: u64, key: &SigningKey) -> QueryR
         min_position,
         issued_at: now_ms(),
         client_sig: None,
+        deployment: Default::default(),
     };
     q.client_sig = Some(signing::sign(key, &signing::query_message(&q)));
     q

@@ -289,6 +289,7 @@ fn fill(store: &dyn Store, vault: &Vault) {
             value: "1.0.0".into(),
         }],
         issued_at: AT,
+        deployment: Default::default(),
     };
     store
         .save_membership(&MembershipRecord {

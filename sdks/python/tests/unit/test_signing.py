@@ -100,6 +100,10 @@ class SigningVectors(unittest.TestCase):
         m = dict(VECTORS["membership"]["input"])
         metadata = [pb.Attribute(**a) for a in m.pop("metadata")]
         self.check("membership", membership_message(pb.Membership(**m, metadata=metadata)))
+        for name in ("membership_processes", "membership_deployment"):
+            m = dict(VECTORS[name]["input"])
+            metadata = [pb.Attribute(**a) for a in m.pop("metadata")]
+            self.check(name, membership_message(pb.Membership(**m, metadata=metadata)))
 
 
 if __name__ == "__main__":

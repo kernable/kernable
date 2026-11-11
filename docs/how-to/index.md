@@ -18,6 +18,7 @@ Short guides for tasks you meet once your application runs. They assume you know
 | Guide | When you need it |
 |---|---|
 | [Deploy and upgrade](./deploy) | You start, stop or upgrade the kernel and your processes. |
+| [Deployments and rollbacks](./deployments) | Versions of your code run side by side, with their own read models, and you can switch back after checking what the newer one left behind. |
 | [Back up and restore](./backup) | You set up backups, or you need to restore. |
 | [Move a kernel with export and import](./export) | You leave a hosted kernel, move to another machine, or change the store backend. |
 | [Share tenants across kernels](./partitions) | One kernel is not enough for all your tenants: several share them by a signed map. |

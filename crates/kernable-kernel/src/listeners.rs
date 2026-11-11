@@ -27,6 +27,15 @@
 //! sent in order with the batches, and only once the listener has caught up with the events
 //! committed before it connected.
 //!
+//! Listeners declare the deployment (code version) of their process (`Hello.deployment`). A
+//! read model or middleware of a deployment is registered under `name@deployment`: each
+//! deployment builds its own state with its own position, and they run side by side. Its
+//! service's membership names the deployment that serves: only that deployment's listeners
+//! count (readiness, settling, the order of delivery), check requests and answer queries first;
+//! the others keep catching up, for a rollback. Within a deployment the order of delivery holds
+//! among its own listeners, whether it serves or not. A reactor keeps one registration across
+//! deployments: a new deployment goes on after the old one's position.
+//!
 //! A listener may give up on an event and park it (`Ack.parked`): it moves on, and the kernel
 //! keeps the event's position with the reason until an operator delivers it again or dismisses
 //! it (`ListenerService.Retry`). A retry goes out in a batch of its own (`Batch.retries`); the
@@ -85,6 +94,17 @@ struct Entry {
     listed: bool,
     /// Parked events sent to the connected listener again: (the batch's `up_to`, position).
     retrying: Vec<(u64, u64)>,
+    /// Registered per deployment (`name@deployment`); otherwise one registration for all.
+    versioned: bool,
+    /// The deployment of its key; for one registration for all, of the last instance that
+    /// connected.
+    deployment: String,
+    /// Its deployment serves its service (always for one registration for all).
+    current: bool,
+    /// Events it skipped as unknown to its code (`Ack.skipped`), since the kernel started.
+    skipped: u64,
+    /// Of those, how many per qualified type and schema (`shop.ItemAdded@3`).
+    skipped_types: std::collections::BTreeMap<String, u64>,
 }
 
 /// One connection of a listener.
@@ -110,7 +130,26 @@ impl Instance {
 impl Entry {
     /// Whether others wait for it: for readiness, settling and the order of delivery.
     fn counts(&self) -> bool {
-        !self.live && self.listed
+        !self.live && self.listed && self.current
+    }
+
+    /// Whether it holds back a listener of `order` and `deployment`: a lower order that counts,
+    /// within the listener's deployment; a deployment's own listeners always do (it keeps its
+    /// order also while another deployment serves), another deployment's never.
+    fn holds_back(&self, order: i32, deployment: &str) -> bool {
+        if self.live || !self.listed || self.record.order >= order {
+            return false;
+        }
+        if self.versioned {
+            self.deployment == deployment || (deployment.is_empty() && self.current)
+        } else {
+            true
+        }
+    }
+
+    /// The listener's name without its deployment.
+    fn base(&self) -> &str {
+        crate::deployments::base(&self.record.name)
     }
 
     fn connected(&self) -> bool {
@@ -158,6 +197,7 @@ pub(crate) struct ListenerStatus {
     pub(crate) position: u64,
     pub(crate) connected: bool,
     pub(crate) parked: usize,
+    pub(crate) skipped: u64,
 }
 
 #[derive(Default)]
@@ -177,14 +217,20 @@ impl Registry {
         let entries = records
             .into_iter()
             .map(|record| {
+                let (base, deployment) = crate::deployments::split(&record.name);
                 let entry = Entry {
-                    listed: memberships.counts_listener(&record.service, &record.name),
+                    listed: memberships.counts_listener(&record.service, base),
+                    current: memberships.serves(&record.service, deployment),
+                    versioned: !deployment.is_empty(),
+                    deployment: deployment.to_owned(),
                     record,
                     instances: HashMap::new(),
                     single: true,
                     dirty: false,
                     live: false,
                     retrying: Vec::new(),
+                    skipped: 0,
+                    skipped_types: Default::default(),
                 };
                 (entry.record.name.clone(), entry)
             })
@@ -201,12 +247,13 @@ impl Registry {
         self.entries.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The highest position a listener of `order` may receive: the lowest acknowledged
-    /// position among listeners with a lower order, or `u64::MAX` if there are none.
-    fn gate(&self, order: i32) -> u64 {
+    /// The highest position a listener of `order` and `deployment` may receive: the lowest
+    /// acknowledged position among listeners that hold it back (`Entry::holds_back`), or
+    /// `u64::MAX` if there are none.
+    fn gate(&self, order: i32, deployment: &str) -> u64 {
         self.entries()
             .values()
-            .filter(|e| e.counts() && e.record.order < order)
+            .filter(|e| e.holds_back(order, deployment))
             .map(|e| e.record.position)
             .min()
             .unwrap_or(u64::MAX)
@@ -233,6 +280,7 @@ impl Registry {
                 position: e.record.position,
                 connected: e.connected(),
                 parked: e.record.parked.len(),
+                skipped: e.skipped,
             })
             .collect();
         all.sort_by(|a, b| a.name.cmp(&b.name));
@@ -247,7 +295,16 @@ impl Registry {
             .values()
             .filter(|e| e.counts() && !e.instances.values().any(Instance::caught_up))
             .map(|e| e.record.name.clone())
-            .chain(listed.iter().filter(|n| !entries.contains_key(*n)).cloned())
+            .chain(
+                listed
+                    .iter()
+                    .filter(|n| {
+                        !entries
+                            .values()
+                            .any(|e| e.counts() && e.base() == n.as_str())
+                    })
+                    .cloned(),
+            )
             .collect();
         behind.sort();
         behind.dedup();
@@ -290,6 +347,11 @@ impl Registry {
                 let first = e.instances.values().map(|i| (i.since, i.caught_up_at)).min();
                 serde_json::json!({
                     "name": e.record.name,
+                    "deployment": e.deployment,
+                    "versioned": e.versioned,
+                    "current": e.current,
+                    "skipped": e.skipped,
+                    "skippedTypes": e.skipped_types,
                     "service": e.record.service,
                     "key": e.record.key_id,
                     "order": e.record.order,
@@ -323,16 +385,19 @@ impl Registry {
         all
     }
 
-    /// Applies a service's membership to its listeners: listed ones count, others not, and a
-    /// middleware it no longer lists as one stops checking. Returns the changed records.
+    /// Applies a service's membership to its listeners: listed ones count, others not, only
+    /// the deployment it names serves, and a middleware it no longer lists as one stops
+    /// checking. Returns the changed records.
     pub(crate) fn apply(&self, m: &Membership) -> Vec<ListenerRecord> {
         let mut changed = Vec::new();
         for e in self.entries().values_mut() {
             if e.live || e.record.service != m.service {
                 continue;
             }
-            e.listed = crate::memberships::listed_listener(m, &e.record.name);
-            if !e.record.middlewares.is_empty() && !m.middlewares.contains(&e.record.name) {
+            let base = e.base().to_owned();
+            e.listed = crate::memberships::listed_listener(m, &base);
+            e.current = !e.versioned || m.deployment.is_empty() || m.deployment == e.deployment;
+            if !e.record.middlewares.is_empty() && !m.middlewares.contains(&base) {
                 tracing::warn!(listener = %e.record.name, service = %m.service, "middleware removed: its service no longer lists it as one");
                 e.record.middlewares.clear();
                 changed.push(e.record.clone());
@@ -341,12 +406,18 @@ impl Registry {
         changed
     }
 
-    /// The registered listener `name`, as the sender of a request.
+    /// The registered listener `name`, as the sender of a request: registered so, else the
+    /// one of that name of the deployment that serves, else the one furthest ahead.
     pub(crate) fn caller(&self, name: &str) -> Option<Caller> {
         let entries = self.entries();
-        let e = entries.get(name)?;
+        let e = entries.get(name).or_else(|| {
+            entries
+                .values()
+                .filter(|e| e.versioned && e.base() == name)
+                .max_by_key(|e| (e.current, e.record.position))
+        })?;
         Some(Caller {
-            name: name.to_owned(),
+            name: e.record.name.clone(),
             order: e.record.order,
             position: e.record.position,
         })
@@ -407,6 +478,22 @@ impl Registry {
                     .is_err()
             })
             .count();
+        if let Some(s) = ack.skipped.iter().find(|s| s.position > ack.position) {
+            return Err(Status::invalid_argument(format!(
+                "skipped event {} is not in the acknowledged batches",
+                s.position
+            )));
+        }
+        for s in &ack.skipped {
+            e.skipped += 1;
+            let key = format!("{}@{}", truncated(&s.event_type, 256), s.schema);
+            if e.skipped_types.len() < 64 || e.skipped_types.contains_key(&key) {
+                *e.skipped_types.entry(key).or_default() += 1;
+            }
+        }
+        if !ack.skipped.is_empty() {
+            tracing::warn!(listener = %name, skipped = ack.skipped.len(), "listener skipped events its code does not know");
+        }
         if e.record.parked.len() + added > MAX_PARKED {
             return Err(Status::resource_exhausted(format!(
                 "listener {name} would have more than {MAX_PARKED} parked events: retry or \
@@ -585,6 +672,40 @@ impl Registry {
         })
     }
 
+    /// Of the listeners connected that answer `query_type` for `caller`, those of the best
+    /// deployment for the query: the asker's own (`QueryRequest.deployment`), else the one that
+    /// serves, else any. A query waits for these rather than going to another deployment.
+    fn answering<'a>(
+        entries: &'a HashMap<String, Entry>,
+        query_type: &str,
+        query: &QueryRequest,
+        caller: Option<&Caller>,
+    ) -> Vec<(&'a String, &'a Entry)> {
+        let rank = |e: &Entry| {
+            if e.versioned && !query.deployment.is_empty() && e.deployment == query.deployment {
+                0
+            } else if e.current {
+                1
+            } else {
+                2
+            }
+        };
+        let answering: Vec<(&String, &Entry)> = entries
+            .iter()
+            .filter(|(_, e)| {
+                e.instances
+                    .values()
+                    .any(|i| i.query_types.iter().any(|t| t == query_type))
+                    && caller.is_none_or(|c| c.independent(e, query.min_position))
+            })
+            .collect();
+        let best = answering.iter().map(|(_, e)| rank(e)).min();
+        answering
+            .into_iter()
+            .filter(|(_, e)| Some(rank(e)) == best)
+            .collect()
+    }
+
     /// Whether a connected listener that answers `query_type` has processed the query's
     /// `min_position` (a wait-only query).
     pub(crate) fn caught_up(
@@ -593,11 +714,15 @@ impl Registry {
         query: &QueryRequest,
         caller: Option<&Caller>,
     ) -> bool {
-        self.entries().values().any(|e| {
-            e.instances.values().any(|i| {
-                i.position >= query.min_position && i.query_types.iter().any(|t| t == query_type)
-            }) && caller.is_none_or(|c| c.independent(e, query.min_position))
-        })
+        let entries = self.entries();
+        Self::answering(&entries, query_type, query, caller)
+            .iter()
+            .any(|(_, e)| {
+                e.instances.values().any(|i| {
+                    i.position >= query.min_position
+                        && i.query_types.iter().any(|t| t == query_type)
+                })
+            })
     }
 
     /// Picks a connected listener that answers `query_type` and has processed the query's
@@ -609,9 +734,8 @@ impl Registry {
         caller: Option<&Caller>,
     ) -> Option<Dispatched> {
         let entries = self.entries();
-        let mut ready: Vec<(Conn, &Outbox)> = entries
-            .iter()
-            .filter(|(_, e)| caller.is_none_or(|c| c.independent(e, query.min_position)))
+        let mut ready: Vec<(Conn, &Outbox)> = Self::answering(&entries, query_type, query, caller)
+            .into_iter()
             .flat_map(|(name, e)| {
                 e.instances
                     .iter()
@@ -641,11 +765,26 @@ impl Registry {
     }
 
     /// The middlewares that check `name` (a qualified command or query type) at `when`, in
-    /// chain order: by order, then by listener name. Includes disconnected ones.
+    /// chain order: by order, then by listener name. Includes disconnected ones. Of a
+    /// middleware registered for several deployments, one checks: of the deployment that
+    /// serves if it is connected, else another connected one, else the one that serves.
     pub(crate) fn chain(&self, name: &str, when: When) -> Vec<String> {
-        let mut chain: Vec<(i32, String)> = self
-            .entries()
+        let entries = self.entries();
+        let mut chosen: HashMap<&str, &Entry> = HashMap::new();
+        for e in entries
             .values()
+            .filter(|e| !e.record.middlewares.is_empty())
+        {
+            let rank = |e: &Entry| (e.connected(), e.current, e.record.position);
+            match chosen.get(e.base()) {
+                Some(other) if rank(other) >= rank(e) => {}
+                _ => {
+                    chosen.insert(e.base(), e);
+                }
+            }
+        }
+        let mut chain: Vec<(i32, String)> = chosen
+            .into_values()
             .filter_map(|e| {
                 let m = e.record.middlewares.iter().find(|m| m.when() == when)?;
                 m.types
@@ -654,6 +793,7 @@ impl Registry {
                     .then(|| (m.order, e.record.name.clone()))
             })
             .collect();
+        drop(entries);
         chain.sort();
         chain.into_iter().map(|(_, name)| name).collect()
     }
@@ -741,6 +881,51 @@ impl Registry {
         }
     }
 
+    /// Forgets the registrations of `deployment`'s read models and middlewares (those registered
+    /// as `name@deployment`), unless one is connected. Returns the records that remove them.
+    pub(crate) fn drop_deployment(&self, deployment: &str) -> Result<Vec<ListenerRecord>, String> {
+        let mut entries = self.entries();
+        let of = |e: &Entry| e.versioned && e.deployment == deployment;
+        if let Some(e) = entries.values().find(|e| of(e) && e.connected()) {
+            return Err(format!(
+                "listener {} of deployment {deployment} is connected: stop it first",
+                e.record.name
+            ));
+        }
+        let mut removed = Vec::new();
+        entries.retain(|name, e| {
+            if !of(e) {
+                return true;
+            }
+            removed.push(ListenerRecord {
+                name: name.clone(),
+                removed: true,
+                ..Default::default()
+            });
+            false
+        });
+        drop(entries);
+        self.progress.notify_waiters();
+        Ok(removed)
+    }
+
+    /// The deployments of the registered listeners, with the newest `last_seen` of each, and
+    /// whether one of its listeners is connected or its deployment serves.
+    pub(crate) fn deployments(&self) -> Vec<(String, i64, bool)> {
+        let mut all: HashMap<String, (i64, bool)> = HashMap::new();
+        for e in self.entries().values().filter(|e| e.versioned) {
+            let seen = all.entry(e.deployment.clone()).or_default();
+            seen.0 = seen.0.max(e.record.last_seen);
+            seen.1 |= e.connected() || e.current;
+        }
+        let mut all: Vec<(String, i64, bool)> = all
+            .into_iter()
+            .map(|(d, (seen, used))| (d, seen, used))
+            .collect();
+        all.sort();
+        all
+    }
+
     /// Marks every connected listener changed, so the next flush stores it as seen now.
     pub(crate) fn seen_now(&self) {
         for e in self.entries().values_mut().filter(|e| e.connected()) {
@@ -802,6 +987,7 @@ pub(crate) async fn run(
             "a listener name has 1 to 128 letters, digits, `-`, `_` and `.`",
         ));
     }
+    crate::deployments::validate(&hello.deployment)?;
     kernel.present(metadata, &hello.key_id)?;
     let permissions = kernel.permissions();
     let types = config::readable(&permissions.listen, &hello.key_id, &hello.event_types)
@@ -895,7 +1081,16 @@ pub(crate) async fn run(
     signing::verify(&proof, &signing::challenge_message(&nonce))
         .map_err(|_| Status::unauthenticated("challenge failed"))?;
 
-    let conn: Conn = (hello.name.clone(), hello.instance.clone());
+    // A read model or middleware of a deployment has a registration of its own.
+    let versioned = !hello.deployment.is_empty()
+        && !hello.live
+        && (!hello.query_types.is_empty() || !hello.middlewares.is_empty());
+    let key = if versioned {
+        crate::deployments::key(&hello.name, &hello.deployment)
+    } else {
+        hello.name.clone()
+    };
+    let conn: Conn = (key.clone(), hello.instance.clone());
     // A listener without instances is a single group of one.
     let single = hello.single || hello.instance.is_empty();
     let mut waiting = false;
@@ -904,7 +1099,13 @@ pub(crate) async fn run(
         let head = kernel.store.head_position().map_err(internal)?;
         let step = 'decide: {
             let mut entries = kernel.listeners.entries();
-            let previous = entries.get(&hello.name);
+            let previous = entries.get(&key);
+            // Another deployment's registration of the name: a new one builds from the start.
+            let elsewhere = previous.is_none()
+                && versioned
+                && entries
+                    .values()
+                    .any(|e| !e.live && e.base() == hello.name.as_str());
             if let Some(e) = previous.filter(|e| e.connected()) {
                 if hello.instance.is_empty() || e.instances.contains_key("") {
                     return Err(Status::already_exists("listener is already connected"));
@@ -912,13 +1113,13 @@ pub(crate) async fn run(
                 if e.instances.contains_key(&hello.instance) {
                     return Err(Status::already_exists(format!(
                         "instance {} of listener {} is already connected",
-                        hello.instance, hello.name
+                        hello.instance, key
                     )));
                 }
                 if e.single != single {
                     return Err(Status::failed_precondition(format!(
                         "the instances of listener {} disagree on single: connected ones are {}",
-                        hello.name,
+                        key,
                         if e.single { "single" } else { "replicated" }
                     )));
                 }
@@ -955,7 +1156,7 @@ pub(crate) async fn run(
             if previous.is_some_and(|e| e.instances.len() >= MAX_INSTANCES) {
                 return Err(Status::resource_exhausted(format!(
                     "listener {} has {MAX_INSTANCES} instances connected",
-                    hello.name
+                    key
                 )));
             }
             // Another key only as the registered key's successor (`succeeds` in its grant).
@@ -965,7 +1166,7 @@ pub(crate) async fn run(
                         "listener is registered with another key",
                     ));
                 }
-                tracing::info!(listener = %hello.name, key = %hello.key_id, "listener moves to its successor key");
+                tracing::info!(listener = %key, key = %hello.key_id, "listener moves to its successor key");
             }
             // A new listener starts at the newest event: it never reacts to what happened before
             // it existed, unless it asks to (a read model rebuilding from 0). An instance taking
@@ -979,6 +1180,7 @@ pub(crate) async fn run(
                     previous.map_or(from, |e| e.record.position.max(from))
                 }
                 (false, Some(from)) if !waiting => from,
+                (false, None) if elsewhere => 0,
                 (false, _) => previous.map_or(head, |e| e.record.position),
             };
             // Instances of one listener normally run the same code; during a rolling deploy they
@@ -988,7 +1190,7 @@ pub(crate) async fn run(
                     || e.record.event_types != hello.event_types
                     || e.record.middlewares != hello.middlewares)
             {
-                tracing::warn!(listener = %hello.name, instance = %hello.instance, "instances of the listener differ in order, event types or middleware; this one's registration counts now");
+                tracing::warn!(listener = %key, instance = %hello.instance, "instances of the listener differ in order, event types or middleware; this one's registration counts now");
             }
             // The group's position is the highest any instance acknowledged; an instance that
             // rebuilds while others run does not take it back.
@@ -997,7 +1199,7 @@ pub(crate) async fn run(
                 None => position,
             };
             let record = ListenerRecord {
-                name: hello.name.clone(),
+                name: key.clone(),
                 key_id: hello.key_id.clone(),
                 order: hello.order,
                 event_types: hello.event_types.clone(),
@@ -1030,13 +1232,15 @@ pub(crate) async fn run(
             let listed = kernel
                 .memberships
                 .counts_listener(&hello.service, &hello.name);
-            let mut instances = entries
-                .remove(&hello.name)
-                .map(|e| e.instances)
+            let current =
+                !versioned || kernel.memberships.serves(&hello.service, &hello.deployment);
+            let (mut instances, skipped, skipped_types) = entries
+                .remove(&key)
+                .map(|e| (e.instances, e.skipped, e.skipped_types))
                 .unwrap_or_default();
             instances.insert(hello.instance.clone(), instance);
             entries.insert(
-                hello.name.clone(),
+                key.clone(),
                 Entry {
                     record,
                     instances,
@@ -1045,6 +1249,11 @@ pub(crate) async fn run(
                     live: hello.live,
                     listed,
                     retrying: Vec::new(),
+                    versioned,
+                    deployment: hello.deployment.clone(),
+                    current,
+                    skipped,
+                    skipped_types,
                 },
             );
             Ok(position)
@@ -1054,7 +1263,7 @@ pub(crate) async fn run(
             Err(active) => {
                 if !waiting {
                     waiting = true;
-                    tracing::info!(listener = %hello.name, instance = %hello.instance, %active, "listener instance waits");
+                    tracing::info!(listener = %key, instance = %hello.instance, %active, "listener instance waits");
                     send(out, Out::Waiting(Waiting { active })).await?;
                 }
                 tokio::select! {
@@ -1065,7 +1274,7 @@ pub(crate) async fn run(
         }
     };
     let _disconnect = DisconnectOnDrop(Arc::clone(&kernel), conn.clone());
-    tracing::info!(listener = %hello.name, instance = %hello.instance, order = hello.order, after = start, "listener connected");
+    tracing::info!(listener = %key, instance = %hello.instance, deployment = %hello.deployment, order = hello.order, after = start, "listener connected");
     kernel.listeners.progress.notify_waiters();
     send(
         out,
@@ -1083,7 +1292,7 @@ pub(crate) async fn run(
         Arc::clone(&kernel),
         conn.clone(),
         hello.key_id.clone(),
-        hello.order,
+        (hello.order, hello.deployment.clone()),
         Arc::clone(&filter),
         Arc::clone(&sent),
         out.clone(),
@@ -1156,7 +1365,7 @@ async fn deliver(
     kernel: Arc<Kernel>,
     conn: Conn,
     key_id: String,
-    order: i32,
+    (order, deployment): (i32, String),
     filter: Arc<Mutex<Option<Vec<String>>>>,
     sent: Arc<AtomicU64>,
     out: Outbox,
@@ -1189,7 +1398,7 @@ async fn deliver(
         // Never beyond the order gate, nor beyond what is on the disk.
         let gate = kernel
             .listeners
-            .gate(order)
+            .gate(order, &deployment)
             .min(kernel.durable.load(Ordering::SeqCst));
         let batch = if gate > after {
             match kernel.store.read_all(after, SUBSCRIBE_BATCH) {
@@ -1366,7 +1575,11 @@ mod tests {
                 ..Default::default()
             })
             .collect();
-        Ack { position, parked }
+        Ack {
+            position,
+            parked,
+            skipped: Default::default(),
+        }
     }
 
     fn mailer() -> Conn {
@@ -1486,7 +1699,11 @@ mod tests {
             10,
             "each keeps its own"
         );
-        assert_eq!(r.gate(1), 11, "a later order may get what one instance has");
+        assert_eq!(
+            r.gate(1, ""),
+            11,
+            "a later order may get what one instance has"
+        );
     }
 
     #[test]

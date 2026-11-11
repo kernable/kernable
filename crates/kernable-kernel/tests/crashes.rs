@@ -152,6 +152,7 @@ async fn listen_once(
                 In::Ack(Ack {
                     position: b.up_to,
                     parked,
+                    skipped: Default::default(),
                 })
             }
             _ => continue,

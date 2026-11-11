@@ -36,6 +36,8 @@ struct Instance {
     service: String,
     aggregates: Vec<String>,
     since: i64,
+    /// Its code version (`Register.deployment`).
+    deployment: String,
 }
 
 #[derive(Default)]
@@ -188,6 +190,7 @@ impl Registry {
                     .map(|a| a.aggregate_type.clone())
                     .collect(),
                 since: now,
+                deployment: reg.deployment.clone(),
             },
         );
         let types = reg
@@ -205,7 +208,10 @@ impl Registry {
     }
 
     /// The registered aggregates and the connected workers, for the UI.
-    pub(crate) fn view(&self) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+    pub(crate) fn view(
+        &self,
+        memberships: &crate::memberships::Memberships,
+    ) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
         let mut aggregates: Vec<serde_json::Value> = self
             .entries()
             .values()
@@ -233,11 +239,26 @@ impl Registry {
                     "service": i.service,
                     "aggregates": i.aggregates,
                     "since": i.since,
+                    "deployment": i.deployment,
+                    "serving": memberships.serves(&i.service, &i.deployment),
                 })
             })
             .collect();
         instances.sort_by_key(|i| i["since"].as_i64());
         (aggregates, instances)
+    }
+
+    /// The deployments of the connected workers, without repeats.
+    pub(crate) fn deployments(&self) -> Vec<String> {
+        let mut all: Vec<String> = self
+            .instances()
+            .values()
+            .map(|i| i.deployment.clone())
+            .filter(|d| !d.is_empty())
+            .collect();
+        all.sort();
+        all.dedup();
+        all
     }
 
     /// A worker of `aggregates` went away; the last one of an aggregate updates its `last_seen`,

@@ -35,6 +35,7 @@ fn ev(event_type: &str) -> NewEvent {
         schema: 1,
         origin_partition: String::new(),
         origin_position: 0,
+        deployment: Default::default(),
     }
 }
 
@@ -417,6 +418,7 @@ fn memberships_are_replaced_per_service(store: &dyn Store) {
                 },
             ],
             issued_at: at,
+            deployment: Default::default(),
         }),
         sig: Some(Signature {
             key_id: "k".into(),
@@ -1099,6 +1101,77 @@ fn file_store(name: &str) -> (TempDb, Box<dyn Store>) {
     (db, Box::new(store))
 }
 
+/// Events keep the deployment that wrote them, in their hash too; the store answers what each
+/// deployment wrote and which wrote a type first.
+fn events_keep_their_deployment(store: &dyn Store) {
+    let deployed = |event_type: &str, deployment: &str| NewEvent {
+        deployment: deployment.into(),
+        ..ev(event_type)
+    };
+    store.enqueue(&cmd("c1", "PlaceOrder"), 0).unwrap();
+    store
+        .commit(
+            "c1",
+            0,
+            &[deployed("OrderPlaced", "v1"), deployed("ItemAdded", "")],
+            &sig(),
+            None,
+            1,
+        )
+        .unwrap();
+    store.enqueue(&cmd("c2", "AddItem"), 0).unwrap();
+    store
+        .commit(
+            "c2",
+            2,
+            &[deployed("ItemAdded", "v2"), deployed("ItemRemoved", "v2")],
+            &sig(),
+            None,
+            2,
+        )
+        .unwrap();
+    let all = store.read_all(0, 10).unwrap();
+    let deployments: Vec<&str> = all.iter().map(|e| e.deployment.as_str()).collect();
+    assert_eq!(deployments, ["v1", "", "v2", "v2"]);
+    let mut prev = vec![0u8; 32];
+    for e in &all {
+        assert_eq!(
+            kernable_core::signing::event_hash(&prev, e).to_vec(),
+            e.hash
+        );
+        prev = e.hash.clone();
+    }
+    assert_eq!(
+        store.deployment_written("v2").unwrap(),
+        (
+            Some(3),
+            vec!["orders.ItemAdded".into(), "orders.ItemRemoved".into()]
+        )
+    );
+    assert_eq!(store.deployment_written("v3").unwrap(), (None, Vec::new()));
+    assert_eq!(
+        store.first_of_type("orders", "ItemAdded").unwrap(),
+        Some((2, String::new()))
+    );
+    assert_eq!(
+        store.first_of_type("orders", "ItemRemoved").unwrap(),
+        Some((4, "v2".into()))
+    );
+    assert_eq!(store.first_of_type("orders", "Nothing").unwrap(), None);
+    let membership = Membership {
+        service: "shop".into(),
+        deployment: "v2".into(),
+        ..Default::default()
+    };
+    store
+        .save_membership(&MembershipRecord {
+            membership: Some(membership.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(store.memberships().unwrap()[0].membership, Some(membership));
+}
+
 macro_rules! for_each_backend {
     ($($name:ident),* $(,)?) => {
         mod sqlite {
@@ -1125,6 +1198,7 @@ macro_rules! for_each_backend {
 
 for_each_backend!(
     commit_appends_events_and_completes_command,
+    events_keep_their_deployment,
     stale_version_conflicts_and_command_stays_pending,
     a_command_completes_at_most_once,
     pending_lists_open_commands_in_submission_order,

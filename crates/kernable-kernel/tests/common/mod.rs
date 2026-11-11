@@ -188,6 +188,7 @@ pub async fn start_wrapped(
         replication: Default::default(),
         key_command: Vec::new(),
         partition: None,
+        deployment_retention_days: Default::default(),
     };
     customize(&mut config, &dir);
     let addr = config.listen.clone();
@@ -376,6 +377,8 @@ pub struct TestWorker {
     pub index: Option<IndexWriter>,
     /// Commands it runs at once.
     pub max_concurrency: u32,
+    /// Its code version (`Register.deployment`).
+    pub deployment: String,
 }
 
 /// The aggregates some workers are executing: one lease per aggregate at a time (O7).
@@ -407,6 +410,7 @@ impl TestWorker {
             held: None,
             index: None,
             max_concurrency: 4,
+            deployment: String::new(),
         }
     }
 
@@ -461,6 +465,7 @@ pub async fn run_worker(addr: String, mut w: TestWorker) -> tonic::Status {
                 schema: *schema,
             })
             .collect(),
+        deployment: w.deployment.clone(),
     })))
     .await
     .unwrap();
