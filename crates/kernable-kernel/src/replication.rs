@@ -827,6 +827,10 @@ async fn run(
             mode: mode.into(),
             message,
             rewind_to,
+            vault_key: kernel
+                .vault
+                .as_ref()
+                .map_or(String::new(), |v| v.key_id().to_owned()),
         }),
     )
     .await?;

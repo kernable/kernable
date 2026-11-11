@@ -61,7 +61,8 @@
 //! Secrets are named in `[[secret]]` (a `file`, or a `command` run at start and on SIGHUP)
 //! and mounted read-only at `/run/secrets/<name>` into the services that list them; a new value
 //! restarts those. A `[pair]` section (witness, node-key, advertise, peer, kernel-keys,
-//! witness-generation) sets the kernel's pair flags and gives the backup follower and the services both kernels' addresses.
+//! witness-generation, which every pair needs) sets the kernel's pair flags and gives the backup
+//! follower and the services both kernels' addresses.
 //!
 //! The kernel's flags are those of `kernable start`, without their dashes; a `[backup]`
 //! section adds `--backup on`. Paths are relative to the file's directory, where the children
@@ -282,8 +283,8 @@ struct PairSection {
     /// Both kernels' kernel keys: either may be the primary.
     kernel_keys: Vec<String>,
     standby_timeout_ms: Option<u64>,
-    /// The witness's generation file (`kernable witness generation`).
-    witness_generation: Option<String>,
+    /// The witness's generation file (`kernable witness generation`): every pair has one.
+    witness_generation: String,
 }
 
 /// The kernel flags `[pair]` sets.
@@ -543,10 +544,11 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
         if let Some(ms) = pair.standby_timeout_ms {
             args.extend(["--standby-timeout-ms".into(), ms.to_string()]);
         }
-        if let Some(file) = &pair.witness_generation {
-            inside("[pair] witness-generation", file)?;
-            args.extend(["--witness-generation".into(), file.clone()]);
-        }
+        inside("[pair] witness-generation", &pair.witness_generation)?;
+        args.extend([
+            "--witness-generation".into(),
+            pair.witness_generation.clone(),
+        ]);
         peer = Some((advertise, pair.peer.clone()));
     }
     if project.backup.is_some() && !k.flags.contains_key("backup") {
@@ -2280,6 +2282,7 @@ flags = { listen = "10.0.0.1:7233", root = "root.pub" }
 [pair]
 witness = "10.0.0.9:7300"
 node-key = "node-a.key"
+witness-generation = "witness.generation"
 peer = "10.0.0.2:7233"
 kernel-keys = ["kernel-a.pub", "kernel-b.pub"]
 
@@ -2297,7 +2300,7 @@ build = "."
             specs[0].args.join(" "),
             "start --listen 10.0.0.1:7233 --root root.pub --witness 10.0.0.9:7300 \
              --node-key node-a.key --advertise 10.0.0.1:7233 --primary-kernel-key kernel-a.pub \
-             --primary-kernel-key kernel-b.pub --backup on"
+             --primary-kernel-key kernel-b.pub --witness-generation witness.generation --backup on"
         );
         assert_eq!(
             specs[1].args[..3],
@@ -2313,15 +2316,10 @@ build = "."
         assert!(error.contains("witness comes from [pair]"), "{error}");
         let keyless = text.replace("[\"kernel-a.pub\", \"kernel-b.pub\"]", "[]");
         assert!(specs_of(&keyless).is_err());
-        let generation = text.replace(
-            "peer = ",
-            "witness-generation = \"witness.generation\"\npeer = ",
-        );
-        let args = specs_of(&generation).unwrap()[0].args.join(" ");
-        assert!(
-            args.contains("--witness-generation witness.generation"),
-            "{args}"
-        );
+        // Every pair has a witness generation: without one, it is refused.
+        let ungenerated = text.replace("witness-generation = \"witness.generation\"\n", "");
+        let error = specs_of(&ungenerated).unwrap_err().to_string();
+        assert!(error.contains("witness-generation"), "{error}");
     }
 
     #[test]
@@ -2609,7 +2607,7 @@ build = "."
         let error = plan_on(&listen, dir, this, true).unwrap_err().to_string();
         assert!(error.contains("network = \"host\""), "{error}");
         let pair = format!(
-            "{text}\n[pair]\nwitness = \"10.0.0.9:7300\"\nnode-key = \"n.key\"\npeer = \"10.0.0.2:7233\"\nkernel-keys = [\"a.pub\"]\n"
+            "{text}\n[pair]\nwitness = \"10.0.0.9:7300\"\nnode-key = \"n.key\"\nwitness-generation = \"w.generation\"\npeer = \"10.0.0.2:7233\"\nkernel-keys = [\"a.pub\"]\n"
         );
         let error = plan_on(&pair, dir, this, true).unwrap_err().to_string();
         assert!(

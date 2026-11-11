@@ -32,7 +32,7 @@ use std::{
 use ed25519_dalek::SigningKey;
 use kernable_core::{
     proto::{
-        BackupBase, BackupBatch, ChallengeResponse, FollowAck, FollowHello, FollowMode,
+        BackupBase, BackupBatch, ChallengeResponse, Command, FollowAck, FollowHello, FollowMode,
         FollowRequest, FollowResponse, ImageBatch, RecordBatch, follow_request, follow_response,
         log_record::Record, replication_service_client::ReplicationServiceClient,
     },
@@ -238,7 +238,7 @@ async fn check_now_and_then(
 }
 
 /// A generation as listed in the target.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Generation {
     pub name: String,
     /// The finished base, if it is.
@@ -444,6 +444,10 @@ async fn follow_once(
         },
     };
     let mut generation = current.map(|g| g.name.clone());
+    // The vault key the current generation's values are sealed with.
+    let current_key = current
+        .and_then(|g| g.base.as_ref())
+        .map(|b| b.vault_key.clone());
 
     let mut client = ReplicationServiceClient::new(standby::connect(addr).await?)
         .max_decoding_message_size(replication::MAX_MESSAGE_BYTES)
@@ -476,6 +480,17 @@ async fn follow_once(
     let Some(follow_response::Msg::Start(start)) = next(&mut inbound).await? else {
         return Err("the kernel did not start the stream".into());
     };
+    // One vault key per generation: a kernel whose vault key changed (rekeyed, or restored
+    // with another key) begins a new one, which a restore opens with the new key alone.
+    if current_key.is_some_and(|k| k != start.vault_key) {
+        tracing::info!(
+            vault_key = %start.vault_key,
+            "the kernel's vault key changed: a new generation begins"
+        );
+        *fresh = true;
+        return Ok(());
+    }
+    let vault_key = start.vault_key.clone();
     let mut head = match start.mode() {
         FollowMode::Follow if generation.is_some() => {
             tracing::info!(
@@ -488,13 +503,13 @@ async fn follow_once(
         FollowMode::Follow => {
             // The kernel keeps its whole record log: the generation starts at record 0.
             let name = generation_name(now_ms());
-            write_base(follower, &name, 0, &from, (0, 0, 0)).await?;
+            write_base(follower, &name, 0, &from, (0, 0, 0), &vault_key).await?;
             generation = Some(name);
             from
         }
         FollowMode::Image => {
             let name = generation_name(now_ms());
-            let head = take_image(follower, &name, &mut inbound).await?;
+            let head = take_image(follower, &name, &mut inbound, &vault_key).await?;
             tx.send(say(follow_request::Msg::Ack(FollowAck { seq: head.seq })))
                 .await?;
             generation = Some(name);
@@ -509,7 +524,7 @@ async fn follow_once(
     };
     *fresh = false;
     let generation = generation.expect("set above");
-    prune(follower, &generation).await;
+    prune(follower, &generation, &vault_key).await;
 
     let mut segment: Vec<u8> = Vec::new();
     let mut first: Option<u64> = None;
@@ -590,6 +605,7 @@ async fn take_image(
     follower: &Arc<Follower>,
     generation: &str,
     inbound: &mut Streaming<FollowResponse>,
+    vault_key: &str,
 ) -> Result<Head, BoxError> {
     let mut part: Vec<u8> = Vec::new();
     let mut parts = 0u32;
@@ -620,7 +636,7 @@ async fn take_image(
                     seq: end.seq,
                     hash: end.hash,
                 };
-                write_base(follower, generation, parts, &head, counts).await?;
+                write_base(follower, generation, parts, &head, counts, vault_key).await?;
                 tracing::info!(%generation, records = counts.0, record = head.seq, "a new backup generation: its base is written");
                 return Ok(head);
             }
@@ -636,6 +652,7 @@ async fn write_base(
     parts: u32,
     head: &Head,
     (records, vault_values, files): (u64, u64, u64),
+    vault_key: &str,
 ) -> Result<(), BoxError> {
     let base = BackupBase {
         seq: head.seq,
@@ -645,6 +662,7 @@ async fn write_base(
         records,
         vault_values,
         files,
+        vault_key: vault_key.to_owned(),
     };
     let (target, crypt) = (Arc::clone(&follower.target), Arc::clone(&follower.crypt));
     let name = format!("{generation}/base.done");
@@ -661,17 +679,18 @@ async fn write_base(
 /// `current`; deletes nothing while no generation can be read with the key, and never a
 /// generation whose base cannot be read. Logs what fails, and tries again with the next
 /// generation.
-async fn prune(follower: &Arc<Follower>, current: &str) {
+async fn prune(follower: &Arc<Follower>, current: &str, vault_key: &str) {
     let (target, crypt, keep) = (
         Arc::clone(&follower.target),
         Arc::clone(&follower.crypt),
         follower.keep.max(1),
     );
-    let current = current.to_owned();
+    let (current, vault_key) = (current.to_owned(), vault_key.to_owned());
     let pruned = blocking(move || {
         let gens = generations(target.as_ref(), &crypt)?;
         refuse_unreadable(&gens, &crypt)?;
-        for name in &doomed(&gens, keep, &current) {
+        let doomed = doomed(&gens, keep, &current);
+        for name in &doomed {
             // The marker first: a generation half deleted is never taken for a whole one.
             target.delete(&format!("{name}/base.done"))?;
             for object in target.list(&format!("{name}/"))? {
@@ -679,12 +698,50 @@ async fn prune(follower: &Arc<Follower>, current: &str) {
             }
             tracing::info!(generation = %name, "deleted an old backup generation");
         }
+        // After its last generation: what is kept per vault key (an escrow of the key, say).
+        for key in retired_keys(&gens, &doomed, &vault_key) {
+            for object in target.list(&format!("{VAULT_KEYS}{key}/"))? {
+                target.delete(&object)?;
+            }
+            tracing::info!(vault_key = %key, "deleted what was kept for a vault key no generation needs");
+        }
         Ok(())
     })
     .await;
     if let Err(e) = pruned {
         tracing::warn!(error = %e, "deleting old backup generations failed");
     }
+}
+
+/// Where files kept per vault key live beside the generations: `vault-keys/<key id>/…`, for
+/// example an escrow of the key. Neither a restore nor the follower reads them; the follower
+/// deletes them with the last generation whose values are sealed with that key.
+pub const VAULT_KEYS: &str = "vault-keys/";
+
+/// The vault keys whose files go once `doomed` is deleted: named by a doomed generation and by
+/// no other one, and not the kernel's key now (`current`). None while a generation that stays
+/// cannot be read: it may need one of them.
+fn retired_keys(gens: &[Generation], doomed: &HashSet<&str>, current: &str) -> Vec<String> {
+    let staying = || gens.iter().filter(|g| !doomed.contains(g.name.as_str()));
+    if staying().any(|g| g.unreadable.is_some()) {
+        return Vec::new();
+    }
+    let needed: HashSet<&str> = staying()
+        .filter_map(|g| g.base.as_ref())
+        .map(|b| b.vault_key.as_str())
+        .chain([current])
+        .collect();
+    let mut retired: Vec<String> = gens
+        .iter()
+        .filter(|g| doomed.contains(g.name.as_str()))
+        .filter_map(|g| g.base.as_ref())
+        .map(|b| b.vault_key.as_str())
+        .filter(|k| !k.is_empty() && !needed.contains(k))
+        .map(str::to_owned)
+        .collect();
+    retired.sort();
+    retired.dedup();
+    retired
 }
 
 /// The generations [`prune`] deletes: the finished ones beyond the newest `keep`, and the
@@ -703,6 +760,312 @@ fn doomed<'a>(gens: &'a [Generation], keep: usize, current: &str) -> HashSet<&'a
     );
     doomed.remove(current);
     doomed
+}
+
+/// The generation a restore up to `until` builds from: the newest finished one that begins by
+/// then.
+fn choose(gens: &[Generation], until: Until) -> Result<&Generation, BoxError> {
+    let usable = |g: &&Generation| match (until, &g.base) {
+        (_, None) => false,
+        (Until::End, _) => true,
+        (Until::Record(n), Some(b)) => b.seq <= n,
+        (Until::Time(t), Some(b)) => b.created_at <= t,
+    };
+    gens.iter()
+        .rev()
+        .find(usable)
+        .ok_or_else(|| match gens.iter().find_map(|g| g.base.as_ref()) {
+            None => match gens.iter().find_map(|g| g.unreadable.as_ref()) {
+                Some(why) => format!("the backup cannot be read: {why}").into(),
+                None => "the backup holds no finished generation".into(),
+            },
+            Some(b) => format!(
+                "the backup begins later: its oldest base is at record {} ({})",
+                b.seq,
+                crate::config::utc(b.created_at)
+            )
+            .into(),
+        })
+}
+
+/// An erasure the backup holds after a restore point: an event that erased a subject's vault
+/// values, committed after the point. A restore to the point brings those values back.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Erasure {
+    /// The record and the event's position in the log, and when it was committed (ms).
+    pub record: u64,
+    pub position: u64,
+    pub at: i64,
+    pub tenant: String,
+    pub domain: String,
+    pub aggregate_type: String,
+    pub aggregate_id: String,
+    pub event_type: String,
+    /// The subject whose values it erased.
+    pub subject: String,
+    pub command_id: String,
+    /// The command that wrote it, if the backup holds it after the point; `None`: it was
+    /// queued before the point, so the restored store holds it.
+    pub command: Option<Command>,
+}
+
+/// What a restore up to a point uses, and what it leaves out ([`plan`]).
+#[derive(Debug, Default)]
+pub struct Plan {
+    pub generation: String,
+    /// The vault key the generation's values are sealed with (empty: no vault).
+    pub vault_key: String,
+    /// The erasures committed after the point, oldest first.
+    pub erasures: Vec<Erasure>,
+    /// Why the list may be incomplete: the backup holds records after the point only in a
+    /// later generation's base.
+    pub note: Option<String>,
+}
+
+/// What a restore up to `until` uses ([`restore`] picks the same generation), and the erasures
+/// the backup holds after that point: in the rest of that generation and in the segments of
+/// every later one. Reads the backup, writes nothing.
+pub fn plan(target: &dyn Target, crypt: &BackupKey, until: Until) -> Result<Plan, BoxError> {
+    let gens = generations(target, crypt)?;
+    let generation = choose(&gens, until)?;
+    let base = generation.base.as_ref().expect("chosen with a base");
+    let mut plan = Plan {
+        generation: generation.name.clone(),
+        vault_key: base.vault_key.clone(),
+        ..Plan::default()
+    };
+    if matches!(until, Until::End) {
+        return Ok(plan);
+    }
+    let mut found = Found::default();
+    // The chosen generation: what the restore leaves out of it.
+    let mut seen = base.seq;
+    let mut after = false;
+    for segment in &generation.segments {
+        let plain = crypt.open(&segment.name, &target.get(&segment.name)?)?;
+        let mut rest = plain.as_slice();
+        while !rest.is_empty() {
+            let taken = BackupBatch::decode_length_delimited(&mut rest)?;
+            let batch = taken.batch.unwrap_or_default();
+            after |= matches!(until, Until::Time(t) if taken.taken_at > t);
+            for r in &batch.records {
+                seen = seen.max(r.seq);
+                let later = after || matches!(until, Until::Record(n) if r.seq > n);
+                if let (true, Some(record)) =
+                    (later, r.record.as_ref().and_then(|l| l.record.as_ref()))
+                {
+                    found.take(r.seq, record);
+                }
+            }
+        }
+    }
+    // Later generations: their segments after what was seen; a base beyond it holds the
+    // records between only in its image, which is not read.
+    for g in gens.iter().filter(|g| g.name > generation.name) {
+        let Some(b) = &g.base else { continue };
+        if b.seq > seen && plan.note.is_none() {
+            plan.note = Some(format!(
+                "records {} to {} are only in generation {}'s base: erasures among them are not listed",
+                seen + 1,
+                b.seq,
+                g.name
+            ));
+        }
+        seen = seen.max(b.seq);
+        for segment in &g.segments {
+            if segment.last <= seen {
+                continue;
+            }
+            let plain = crypt.open(&segment.name, &target.get(&segment.name)?)?;
+            let mut rest = plain.as_slice();
+            while !rest.is_empty() {
+                let taken = BackupBatch::decode_length_delimited(&mut rest)?;
+                for r in taken.batch.unwrap_or_default().records {
+                    if r.seq <= seen {
+                        continue;
+                    }
+                    seen = r.seq;
+                    if let Some(record) = r.record.as_ref().and_then(|l| l.record.as_ref()) {
+                        found.take(r.seq, record);
+                    }
+                }
+            }
+        }
+    }
+    plan.erasures = found.erasures();
+    Ok(plan)
+}
+
+/// What [`plan`] collects from the records after the point.
+#[derive(Default)]
+struct Found {
+    erasures: Vec<Erasure>,
+    commands: std::collections::HashMap<String, Command>,
+}
+
+impl Found {
+    fn take(&mut self, seq: u64, record: &Record) {
+        match record {
+            Record::Enqueued(e) => {
+                if let Some(c) = &e.command {
+                    self.commands.insert(c.command_id.clone(), c.clone());
+                }
+            }
+            Record::Committed(c) => {
+                for e in c.events.iter().filter_map(|l| l.event.as_ref()) {
+                    if e.erases.is_empty()
+                        || self
+                            .erasures
+                            .iter()
+                            .any(|x| x.command_id == e.command_id && x.subject == e.erases)
+                    {
+                        continue;
+                    }
+                    self.erasures.push(Erasure {
+                        record: seq,
+                        position: e.global_position,
+                        at: e.created_at,
+                        tenant: e.tenant_id.clone(),
+                        domain: e.domain.clone(),
+                        aggregate_type: e.aggregate_type.clone(),
+                        aggregate_id: e.aggregate_id.clone(),
+                        event_type: e.event_type.clone(),
+                        subject: e.erases.clone(),
+                        command_id: e.command_id.clone(),
+                        command: None,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn erasures(mut self) -> Vec<Erasure> {
+        for e in &mut self.erasures {
+            e.command = self.commands.get(&e.command_id).cloned();
+        }
+        self.erasures
+    }
+}
+
+impl Erasure {
+    /// One line for people: when, which subject in which tenant, by which event.
+    pub fn line(&self) -> String {
+        format!(
+            "{}  {}/{}  {}.{} {} {} (command {})",
+            crate::config::utc(self.at),
+            self.tenant,
+            self.subject,
+            self.domain,
+            self.aggregate_type,
+            self.aggregate_id,
+            self.event_type,
+            self.command_id
+        )
+    }
+
+    /// Whether `kernable erasures apply` can submit its command again: the backup holds it,
+    /// and it carries no vault values (those are not in the list).
+    pub fn reapplicable(&self) -> Result<&Command, String> {
+        match &self.command {
+            None => Err("its command was queued before the point: the restored store holds it, and the kernel runs it".into()),
+            Some(c) if !c.vault_refs.is_empty() => Err("its command carries vault values: submit it again from your application".into()),
+            Some(c) => Ok(c),
+        }
+    }
+
+    /// The command that erases the subject again: the original's, with a new ID (`id`), its
+    /// context kept (the domain authorizes it as before) but without an expected version, and
+    /// the original named as its cause. Signed by whoever submits it.
+    pub fn again(&self, id: &str) -> Result<Command, String> {
+        let original = self.reapplicable()?;
+        let mut context = original.context.clone().unwrap_or_default();
+        context.expected_version = None;
+        context.causation_id = original.command_id.clone();
+        Ok(Command {
+            command_id: id.to_owned(),
+            client_sig: None,
+            context: Some(context),
+            deliver_at: 0,
+            deliver_until: 0,
+            ..original.clone()
+        })
+    }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "record": self.record,
+            "position": self.position,
+            "at": crate::config::utc(self.at),
+            "at_ms": self.at,
+            "tenant": self.tenant,
+            "domain": self.domain,
+            "aggregate_type": self.aggregate_type,
+            "aggregate_id": self.aggregate_id,
+            "event_type": self.event_type,
+            "subject": self.subject,
+            "command_id": self.command_id,
+            // The command as stored (protobuf, hex): what `kernable erasures apply` submits again.
+            "command": self.command.as_ref().map(|c| hex::encode(c.encode_to_vec())),
+            "command_type": self.command.as_ref().map(|c| c.command_type.clone()),
+        })
+    }
+
+    pub fn from_json(v: &serde_json::Value) -> Result<Self, String> {
+        let text = |k: &str| {
+            v.get(k)
+                .and_then(|x| x.as_str())
+                .map(str::to_owned)
+                .ok_or_else(|| format!("an erasure without {k}"))
+        };
+        let number = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+        let command = match v.get("command").and_then(|c| c.as_str()) {
+            Some(h) => Some(
+                hex::decode(h)
+                    .ok()
+                    .and_then(|b| Command::decode(b.as_slice()).ok())
+                    .ok_or("an erasure whose command does not decode")?,
+            ),
+            None => None,
+        };
+        Ok(Erasure {
+            record: number("record"),
+            position: number("position"),
+            at: v.get("at_ms").and_then(|x| x.as_i64()).unwrap_or(0),
+            tenant: text("tenant")?,
+            domain: text("domain")?,
+            aggregate_type: text("aggregate_type")?,
+            aggregate_id: text("aggregate_id")?,
+            event_type: text("event_type")?,
+            subject: text("subject")?,
+            command_id: text("command_id")?,
+            command,
+        })
+    }
+}
+
+/// What `kernable backup plan --json` and `kernable restore --reapply-erasures` write: the
+/// point, the generation and its vault key, and the erasures after the point.
+pub fn plan_json(point: &str, plan: &Plan) -> String {
+    let list = serde_json::json!({
+        "point": point,
+        "generation": plan.generation,
+        "vault_key": plan.vault_key,
+        "note": plan.note,
+        "erasures": plan.erasures.iter().map(Erasure::to_json).collect::<Vec<_>>(),
+    });
+    serde_json::to_string_pretty(&list).expect("serializes") + "\n"
+}
+
+/// The erasures of what [`plan_json`] wrote.
+pub fn read_erasures(text: &str) -> Result<Vec<Erasure>, String> {
+    let v: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    v.get("erasures")
+        .and_then(|e| e.as_array())
+        .ok_or("no erasures in it")?
+        .iter()
+        .map(Erasure::from_json)
+        .collect()
 }
 
 /// How far [`restore`] goes.
@@ -748,27 +1111,28 @@ pub fn restore(
         return Err("the store holds data already: restore into new, empty stores".into());
     }
     let gens = generations(target, crypt)?;
-    let usable = |g: &&Generation| match (until, &g.base) {
-        (_, None) => false,
-        (Until::End, _) => true,
-        (Until::Record(n), Some(b)) => b.seq <= n,
-        (Until::Time(t), Some(b)) => b.created_at <= t,
-    };
-    let Some(generation) = gens.iter().rev().find(usable) else {
-        return Err(match gens.iter().find_map(|g| g.base.as_ref()) {
-            None => match gens.iter().find_map(|g| g.unreadable.as_ref()) {
-                Some(why) => format!("the backup cannot be read: {why}").into(),
-                None => "the backup holds no finished generation".into(),
-            },
-            Some(b) => format!(
-                "the backup begins later: its oldest base is at record {} ({})",
-                b.seq,
-                crate::config::utc(b.created_at)
-            )
-            .into(),
-        });
-    };
+    let generation = choose(&gens, until)?;
     let base = generation.base.clone().expect("usable");
+    // The generation's vault values open with one vault key: the one it names.
+    match &stores.vault {
+        Some(vault) if !base.vault_key.is_empty() && vault.key_id() != base.vault_key => {
+            return Err(format!(
+                "generation {} holds vault values sealed with vault key {}; the vault key given is {}: give the source's vault key of that time",
+                generation.name,
+                base.vault_key,
+                vault.key_id()
+            )
+            .into());
+        }
+        None if !base.vault_key.is_empty() && base.vault_values > 0 => {
+            return Err(format!(
+                "generation {} holds vault values (vault key {}): give the vault and that key",
+                generation.name, base.vault_key
+            )
+            .into());
+        }
+        _ => {}
+    }
     let mut keys: Vec<String> = kernel_keys.to_vec();
     let named = kernel_keys.is_empty();
     let mut learn = |records: &mut dyn Iterator<Item = &Record>| {
@@ -1033,5 +1397,275 @@ mod tests {
         assert_eq!(batch.records.len(), 2);
         let keys: Vec<&str> = batch.files.iter().map(|f| f.key.as_str()).collect();
         assert_eq!(keys, ["a", "b"]);
+    }
+
+    /// A record of a command `id` queued (`erases` empty) or committed with one event that
+    /// erases `erases`.
+    fn record(seq: u64, id: &str, erases: Option<&str>) -> kernable_core::proto::ReplicatedRecord {
+        use kernable_core::proto::{
+            CommittedRecord, EnqueuedRecord, Event, LogRecord, LoggedEvent, ReplicatedRecord,
+            RequestContext,
+        };
+        let record = match erases {
+            None => Record::Enqueued(EnqueuedRecord {
+                command: Some(Command {
+                    command_id: id.into(),
+                    tenant_id: "t1".into(),
+                    domain: "shop".into(),
+                    aggregate_type: "customer".into(),
+                    aggregate_id: "c1".into(),
+                    command_type: "Erase".into(),
+                    payload: b"{}".to_vec(),
+                    context: Some(RequestContext {
+                        sender_identity: "support".into(),
+                        expected_version: Some(3),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                created_at: 0,
+            }),
+            Some(subject) => Record::Committed(CommittedRecord {
+                command_id: id.into(),
+                events: vec![LoggedEvent {
+                    event: Some(Event {
+                        global_position: seq,
+                        tenant_id: "t1".into(),
+                        domain: "shop".into(),
+                        aggregate_type: "customer".into(),
+                        aggregate_id: "c1".into(),
+                        event_type: "CustomerErased".into(),
+                        command_id: id.into(),
+                        created_at: seq as i64 * 1000,
+                        erases: subject.into(),
+                        ..Default::default()
+                    }),
+                    prev_hash: vec![],
+                }],
+                index: None,
+            }),
+        };
+        ReplicatedRecord {
+            seq,
+            hash: vec![seq as u8; 32],
+            record: Some(LogRecord {
+                record: Some(record),
+            }),
+        }
+    }
+
+    /// Writes generation `at` with an empty base at `base` (sealed with vault key `vault_key`)
+    /// and one segment per batch, each `(taken_at, records)`.
+    fn write_generation(
+        target: &dyn Target,
+        key: &BackupKey,
+        at: i64,
+        base: u64,
+        vault_key: &str,
+        batches: Vec<(i64, Vec<kernable_core::proto::ReplicatedRecord>)>,
+    ) {
+        let name = generation_name(at);
+        let marker = format!("{name}/base.done");
+        let b = BackupBase {
+            seq: base,
+            hash: vec![0; 32],
+            created_at: at,
+            vault_key: vault_key.into(),
+            ..Default::default()
+        };
+        target
+            .put(&marker, &key.seal(&marker, &b.encode_to_vec()).unwrap())
+            .unwrap();
+        for (taken_at, records) in batches {
+            let (first, last) = (records[0].seq, records.last().unwrap().seq);
+            let segment = segment_name(&name, first, last, &[last as u8; 32]);
+            let mut plain = Vec::new();
+            BackupBatch {
+                taken_at,
+                batch: Some(RecordBatch {
+                    records,
+                    ..Default::default()
+                }),
+            }
+            .encode_length_delimited(&mut plain)
+            .unwrap();
+            target
+                .put(&segment, &key.seal(&segment, &plain).unwrap())
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn a_plan_lists_the_erasures_after_the_point_with_their_commands() {
+        let dir = std::env::temp_dir().join(format!("kn-backup-plan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let target = target::open(&format!("file:{}", dir.display())).unwrap();
+        let key = BackupKey::new(&[7; 32]);
+        // Generation 1: c1 erases ann before 2_000; c2 is queued before and commits after it;
+        // c3 is queued and erases bob after it.
+        write_generation(
+            target.as_ref(),
+            &key,
+            1_000,
+            0,
+            "k1",
+            vec![
+                (
+                    1_500,
+                    vec![record(1, "c1", None), record(2, "c1", Some("ann"))],
+                ),
+                (1_900, vec![record(3, "c2", None)]),
+                (
+                    2_500,
+                    vec![
+                        record(4, "c2", Some("cid")),
+                        record(5, "c3", None),
+                        record(6, "c3", Some("bob")),
+                    ],
+                ),
+            ],
+        );
+        // Generation 2 goes on from record 6 (its base), with another vault key: c4 erases eve.
+        write_generation(
+            target.as_ref(),
+            &key,
+            3_000,
+            6,
+            "k2",
+            vec![(
+                3_500,
+                vec![record(7, "c4", None), record(8, "c4", Some("eve"))],
+            )],
+        );
+
+        let plan = plan(target.as_ref(), &key, Until::Time(2_000)).unwrap();
+        assert_eq!(
+            (plan.generation.as_str(), plan.vault_key.as_str()),
+            (generation_name(1_000).as_str(), "k1")
+        );
+        let subjects: Vec<&str> = plan.erasures.iter().map(|e| e.subject.as_str()).collect();
+        assert_eq!(
+            subjects,
+            ["cid", "bob", "eve"],
+            "after the point, oldest first"
+        );
+        assert_eq!(plan.note, None);
+        // c2 was queued before the point: the restored store holds it, the kernel runs it.
+        assert!(plan.erasures[0].command.is_none());
+        assert!(
+            plan.erasures[0]
+                .reapplicable()
+                .unwrap_err()
+                .contains("queued before")
+        );
+        // c3's command again: a new ID, its context without the expected version, c3 its cause.
+        let again = plan.erasures[1].again("n1").unwrap();
+        assert_eq!(
+            (again.command_id.as_str(), again.command_type.as_str()),
+            ("n1", "Erase")
+        );
+        let context = again.context.unwrap();
+        assert_eq!(context.expected_version, None);
+        assert_eq!(
+            (
+                context.causation_id.as_str(),
+                context.sender_identity.as_str()
+            ),
+            ("c3", "support")
+        );
+        assert!(again.client_sig.is_none(), "signed by whoever submits it");
+        // The list as written, read back.
+        let text = plan_json("2026-11-04T13:39:00Z", &plan);
+        assert_eq!(read_erasures(&text).unwrap(), plan.erasures);
+        assert!(text.contains("\"vault_key\": \"k1\""), "{text}");
+
+        // To a record: the same, from the record on.
+        let plan_r = super::plan(target.as_ref(), &key, Until::Record(4)).unwrap();
+        let subjects: Vec<&str> = plan_r.erasures.iter().map(|e| e.subject.as_str()).collect();
+        assert_eq!(subjects, ["bob", "eve"]);
+        // To the newest: nothing after it, from the newest generation and its key.
+        let end = super::plan(target.as_ref(), &key, Until::End).unwrap();
+        assert!(end.erasures.is_empty());
+        assert_eq!(end.vault_key, "k2");
+        // A later generation whose base lies beyond the segments: those records are not read.
+        write_generation(target.as_ref(), &key, 4_000, 20, "k2", vec![]);
+        let noted = super::plan(target.as_ref(), &key, Until::Time(2_000)).unwrap();
+        assert!(noted.note.unwrap().contains("records 9 to 20"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn files_kept_per_vault_key_go_with_the_last_generation_that_needs_the_key() {
+        let generation = |name: &str, key: Option<&str>| Generation {
+            name: name.into(),
+            base: key.map(|k| BackupBase {
+                vault_key: k.into(),
+                ..Default::default()
+            }),
+            unreadable: None,
+            segments: vec![],
+        };
+        let gens = vec![
+            generation("g1", Some("k1")),
+            generation("g2", Some("k1")),
+            generation("g3", Some("k2")),
+            generation("g4", Some("k3")),
+        ];
+        let doomed = |names: &[&'static str]| names.iter().copied().collect::<HashSet<&str>>();
+        // g1 goes, g2 still needs k1.
+        assert!(retired_keys(&gens, &doomed(&["g1"]), "k3").is_empty());
+        // g1 and g2 go: k1's files go with them; k2 stays with g3.
+        assert_eq!(retired_keys(&gens, &doomed(&["g1", "g2"]), "k3"), ["k1"]);
+        assert_eq!(
+            retired_keys(&gens, &doomed(&["g1", "g2", "g3"]), "k3"),
+            ["k1", "k2"]
+        );
+        // The kernel's key now is kept, whatever generation goes; no key, nothing to delete.
+        assert!(retired_keys(&gens, &doomed(&["g1", "g2"]), "k1").is_empty());
+        let keyless = vec![generation("g1", Some("")), generation("g2", Some(""))];
+        assert!(retired_keys(&keyless, &doomed(&["g1"]), "").is_empty());
+        // A generation that stays but cannot be read may need any of them: none goes.
+        let mut damaged = gens.clone();
+        damaged.push(Generation {
+            name: "g0".into(),
+            base: None,
+            unreadable: Some("bit rot".into()),
+            segments: vec![],
+        });
+        assert!(retired_keys(&damaged, &doomed(&["g1", "g2"]), "k3").is_empty());
+    }
+
+    #[test]
+    fn a_restore_refuses_a_vault_key_other_than_its_generation_s() {
+        let dir = std::env::temp_dir().join(format!("kn-backup-vault-key-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = target::open(&format!("file:{}", dir.join("backup").display())).unwrap();
+        let key = BackupKey::new(&[7; 32]);
+        let vault_key = [5u8; 32];
+        let other = kernable_core::signing::vault_key_id(&[6u8; 32]);
+        write_generation(target.as_ref(), &key, 1_000, 0, &other, vec![]);
+        let stores = standby::Stores {
+            store: kernable_store::open(&format!("sqlite:{}", dir.join("k.db").display())).unwrap(),
+            vault: Some(
+                kernable_store::vault::Vault::open(
+                    &format!("sqlite:{}", dir.join("v.db").display()),
+                    &vault_key,
+                )
+                .unwrap(),
+            ),
+            data: kernable_store::data::open(&format!("file:{}", dir.join("data").display()))
+                .unwrap(),
+            snapshots: kernable_store::snapshots::open("memory:").unwrap(),
+        };
+        let refused = restore(target.as_ref(), &key, &stores, Until::End, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains(&other), "{refused}");
+        assert!(
+            refused.contains(&kernable_core::signing::vault_key_id(&vault_key)),
+            "{refused}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

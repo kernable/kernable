@@ -116,7 +116,7 @@ kernable keys new keys/vault-2 >/dev/null
 kernable vault rekey sqlite:data/vault.db keys/vault.key keys/vault-2.key
 ```
 
-The old key cannot read the vault afterwards. Backups made before still need the old key.
+The old key cannot read the vault afterwards. Backups made before still need the old key: keep it as long as they are kept. A [continuous backup](./backup#restore-from-a-continuous-backup) begins a new generation with the new key, and `kernable backup list` names each generation's key.
 
 Rekey also when a key has encrypted many values. Each value gets a random nonce, and one key is safe for 2^32 of them. The kernel counts them, logs a warning at startup past 2^31 (the UI's verdict warns too, and **Explore → Data → Vault** shows the count), and refuses new values at 2^32 until the vault is rekeyed.
 

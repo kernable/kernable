@@ -127,6 +127,9 @@ message FollowStart {
   FollowMode mode = 1;
   string message = 2;
   uint64 rewind_to = 3; // with REWIND
+  // The ID of the kernel's vault key (signing::vault_key_id; empty without a vault): a backup
+  // follower begins a new generation when it changes, so each generation needs one vault key.
+  string vault_key = 4;
 }
 
 // Part of a full image: records in an order that applies (see Store::image), and the vault
@@ -328,13 +331,13 @@ message WitnessAnswer {
   string in_sync = 5;          // key ID of the standby in sync; empty while the primary is alone
   uint64 lease_ms = 6;         // how long a granted lease lasts, from when the node asked
   string message = 7;          // why not, if not granted
-  // The witness's generation (`kernable witness --generation`); absent: generation 0. A kernel
-  // ignores an answer older than the newest generation it has seen, or naming another witness.
+  // The witness's generation (`kernable witness --generation`), always set. A kernel ignores an
+  // answer without one, older than the newest generation it has seen, or naming another witness.
   WitnessGeneration generation = 8;
 }
 
-// Which witness of a pair is the current one: a witness replaced gets a higher generation,
-// signed by a root key (`kernable witness generation`). Signed over
+// Which witness of a pair is the current one: every pair starts with generation 1, a witness
+// replaced gets a higher one, signed by a root key (`kernable witness generation`). Signed over
 // kernable.v1.witness-generation. `witness` is the address the kernels name in --witness.
 message WitnessGeneration {
   uint64 generation = 1;
@@ -370,4 +373,8 @@ message BackupBase {
   uint64 records = 5;
   uint64 vault_values = 6;
   uint64 files = 7;
+  // The ID of the vault key the generation's vault values are sealed with (FollowStart.vault_key);
+  // empty for a kernel without a vault. Files kept per vault key beside the backup
+  // (`vault-keys/<id>/`) are deleted with the last generation that names it.
+  string vault_key = 8;
 }

@@ -135,7 +135,7 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "--witness-generation",
         "KERNABLE_WITNESS_GENERATION",
         "",
-        "With `--witness`: a file of the witness's generation (`kernable witness generation`), signed by a root key. The kernel keeps the newest generation it has seen (from this file, its witness or the other kernel) in `<node-key>.generation` and ignores every witness of an older one, or one answering with another witness's generation, so a replaced witness that comes back cannot make a second primary. It reads the file again before every question to the witness: raise it on both kernels before they turn to a new witness.",
+        "With `--witness`, and needed then: a file of the witness's generation (`kernable witness generation`), signed by a root key; a new pair starts with generation 1. The kernel keeps the newest generation it has seen (from this file, its witness or the other kernel) in `<node-key>.generation` and ignores every witness of an older one, or one answering with another witness's generation, so a replaced witness that comes back cannot make a second primary. It reads the file again before every question to the witness: raise it on both kernels before they turn to a new witness.",
     ),
     (
         "--standby-timeout-ms",
@@ -391,7 +391,7 @@ pub struct Pair {
     /// Where the other kernel reaches this one.
     pub advertise: String,
     /// `--witness-generation`: the witness's generation, read again while it runs.
-    pub witness_generation: Option<PathBuf>,
+    pub witness_generation: PathBuf,
     pub standby_timeout_ms: u64,
     /// The other kernel's kernel keys (and this one's): checkpoints of either are accepted.
     pub kernel_keys: Vec<String>,
@@ -579,12 +579,15 @@ impl Config {
             Some(_) if follow.is_some() => {
                 return Err("--witness decides the roles: drop --follow".into());
             }
+            Some(_) if get("--witness-generation").is_none() => {
+                return Err("a kernel of a pair needs --witness-generation: the witness's generation, signed by the root key (kernable witness generation <root.key> 1 <witness address> for a new pair)".into());
+            }
             Some(witness) => Some(Pair {
                 witness,
                 node_key: get("--node-key").expect("has a default").into(),
                 advertise: get("--advertise")
                     .unwrap_or_else(|| get("--listen").expect("has a default")),
-                witness_generation: get("--witness-generation").map(PathBuf::from),
+                witness_generation: get("--witness-generation").expect("checked above").into(),
                 standby_timeout_ms: positive("--standby-timeout-ms")?,
                 kernel_keys: kernel_keys()?,
             }),
@@ -1174,6 +1177,10 @@ mod tests {
         assert!(refused(&["--control", "127.0.0.1:1"]).contains("give --partition too"));
         assert!(refused(&["--advertise", "127.0.0.1:1"]).contains("give --witness too"));
         assert!(refused(&["--witness-generation", "w.generation"]).contains("give --witness too"));
+        assert!(
+            refused(&["--witness", "127.0.0.1:7300"]).contains("needs --witness-generation"),
+            "a pair without a witness generation"
+        );
         assert!(refused(&["--partition", "p2", "--control", " , "]).contains("--control"));
         let tls = Config::from_args(&["--root", &root], |v| {
             (v == "KERNABLE_KERNEL_TLS_CLIENT_CA").then(|| "ca.pem".to_owned())

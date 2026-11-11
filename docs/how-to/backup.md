@@ -99,7 +99,25 @@ kernable restore s3://acme-backups/shop --backup-key backup-encryption.key \
   --at 2026-11-04T13:39:00Z --store sqlite:kernable.db --vault-store sqlite:vault.db --vault-key vault.key
 ```
 
-It fills new, empty stores from the newest generation that begins before `--at` (or `--at-record <n>`; without either, everything), and stops before the first batch the follower took after that time. If the backup ends earlier, or holds nothing between the end of that generation and the base of the next, it says so in a `note:` line and restores up to there. Then it checks the store like `kernable verify`. `--vault-key` must be the source's vault key. Then start the kernel on the restored stores and rebuild the read models that have a store, as in steps 5 and 6 of [Restore](#restore); the note on erasure below applies too.
+It fills new, empty stores from the newest generation that begins before `--at` (or `--at-record <n>`; without either, everything), and stops before the first batch the follower took after that time. If the backup ends earlier, or holds nothing between the end of that generation and the base of the next, it says so in a `note:` line and restores up to there. Then it checks the store like `kernable verify`. `--vault-key` must be the source's vault key of that generation's time: each generation's values are sealed with one vault key, which `kernable backup list` names, and a restore with another is refused before it writes anything. Then start the kernel on the restored stores and rebuild the read models that have a store, as in steps 5 and 6 of [Restore](#restore).
+
+**Erasures after the point.** Before it writes anything, a restore to a point lists the erasures the backup holds after it:
+
+```text
+2 erasures since 2026-11-04T13:39:00Z, in the backup after the point:
+  2026-11-04T13:52:10Z  acme/c1  shop.customer c1 CustomerErased (command 5f0c…)
+  2026-11-04T14:03:44Z  acme/c7  shop.customer c7 CustomerErased (command 91aa…)
+```
+
+Restored as it was, the history is exact: at that point, those people's data was not erased yet, so their values are back in the vault. Whether to erase them again is your decision, not the kernel's. By default the restore keeps them (and warns); answer `y` when it asks, or pass `--reapply-erasures erasures.json`, to apply them again: the restore writes the list to that file (readable by its owner only), and once the kernel runs,
+
+```sh
+kernable erasures apply 127.0.0.1:7233 support.key erasures.json
+```
+
+submits each erasing command again, signed with a key granted `submit` for those commands, with its original context (so the domain authorizes it as before) and the original command as its cause. The kernel commits new erasing events and erases, as for any [erasure request](./erasure). An erasing command that was queued before the point is in the restored store already, and the kernel runs it; one whose command carries vault values is listed, not submitted: send it again from your application. `kernable backup plan <target> --backup-key <file> --at <time>` shows the same list without restoring (`--json <file>` for scripts).
+
+A **vault key that changes** (`kernable vault rekey`, or a kernel started with another key) begins a new backup generation: no generation needs two keys. Files you keep per vault key next to the backup, under `vault-keys/<key id>/` (an escrow of the key, say; the key ID is the one `kernable backup list` prints, the key ID of the key's `.pub`), are deleted by the follower with the last generation that needs that key. In a bucket with object lock or versioning, a delete adds a delete marker and the old versions stay until their retention ends, as the generations' objects do.
 
 ### Check a backup
 
@@ -127,7 +145,7 @@ A store five times as large (1,006,043 events, 1.17 GB) lost 559 commands (2.8 s
 
 A backup keeps personal data that was erased after it was taken. Keep vault backups only as long as your retention rules allow.
 
-The kernel does not repeat erasures by itself. If you restore a vault that is older than the event store, or older than an erasure that happened since, delete the erased values again. The log names every erased subject in the `erases` column of its erasing events. With the kernel stopped:
+A restore from a continuous backup lists the erasures after its point and can apply them again ([above](#restore-from-a-continuous-backup)). For copies made by hand, the kernel does not repeat erasures by itself. If you restore a vault that is older than the event store, or older than an erasure that happened since, delete the erased values again. The log names every erased subject in the `erases` column of its erasing events. With the kernel stopped:
 
 ```sh
 sqlite3 vault.db "ATTACH 'kernable.db' AS log;

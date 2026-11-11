@@ -34,6 +34,7 @@ env = { AWS_ACCESS_KEY_ID = "…", AWS_SECRET_ACCESS_KEY = "…" }
 [pair]                                     # optional: one node of a pair
 witness = "10.0.0.9:7300"
 node-key = "node-a.key"
+witness-generation = "witness.generation"  # the witness's generation (kernable witness generation)
 advertise = "10.0.0.1:7233"                # optional: default the kernel's listen
 peer = "10.0.0.2:7233"                     # the other node's kernel
 kernel-keys = ["kernel-a.pub", "kernel-b.pub"]
@@ -134,7 +135,7 @@ The kernel keeps its own metrics on its `--metrics-listen` ([Monitor kernable](.
 
 ## Two machines
 
-Each machine of a [standby pair](./standby) runs its own node, with its own `project.toml` and a `[pair]` section: the witness, this node's key, its own address and the other node's (`peer`), and both kernels' kernel keys. From it the node sets the kernel's pair flags (don't repeat them in `flags`), lets the backup follower turn to whichever kernel is the primary, and gives your services both addresses in `KERNABLE_URL`. Your read models and reactors run on both machines as [instances](./instances).
+Each machine of a [standby pair](./standby) runs its own node, with its own `project.toml` and a `[pair]` section: the witness and its generation file, this node's key, its own address and the other node's (`peer`), and both kernels' kernel keys. From it the node sets the kernel's pair flags (don't repeat them in `flags`), lets the backup follower turn to whichever kernel is the primary, and gives your services both addresses in `KERNABLE_URL`. Your read models and reactors run on both machines as [instances](./instances).
 
 In the pod's own network, `advertise` is required: the address of this machine's reverse proxy that leads to this kernel's socket (`a.example.com:443`), and `peer` the other machine's. The kernel reaches the other one and the witness over TLS with the files its `env` names (`KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT`, `KERNABLE_TLS_KEY`, inside the project directory), and so do your services that turn to the other node; the backup follower stays on this machine's socket.
 

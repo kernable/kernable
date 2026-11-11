@@ -113,6 +113,8 @@ pub struct Vault {
     cipher: Aes256Gcm,
     /// Keys the hashes of personal key identities ([`Vault::put_key`]).
     lookup: [u8; 32],
+    /// [`signing::vault_key_id`] of its key.
+    key_id: String,
 }
 
 /// The key that hashes personal key identities, derived from the vault key: without the vault
@@ -211,7 +213,13 @@ impl Vault {
             conn: Mutex::new(conn),
             cipher: Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key)),
             lookup: lookup_key(key),
+            key_id: signing::vault_key_id(key),
         })
+    }
+
+    /// The ID of the key this vault was opened with ([`signing::vault_key_id`]).
+    pub fn key_id(&self) -> &str {
+        &self.key_id
     }
 
     fn conn(&self) -> MutexGuard<'_, Connection> {

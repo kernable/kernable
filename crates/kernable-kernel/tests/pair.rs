@@ -96,7 +96,38 @@ async fn pass(
     }
 }
 
+/// Generation `n` of the witness the kernels reach at `address`, signed by the root, as
+/// `kernable witness generation` writes it.
+fn write_generation(path: &Path, n: u64, address: &str) {
+    let g = kernable_core::signing::witness_generation(&root(), n, address, 1_700_000_000_000);
+    std::fs::write(path, format!("{}\n", hex(&g.encode_to_vec()))).unwrap();
+}
+
+/// The witness the kernels name (`witness.sock`) and the generation file every kernel and the
+/// witness read: generation 1 of a new pair.
+fn witness_address(dir: &Path) -> String {
+    format!("unix:{}", dir.join("witness.sock").display())
+}
+
+fn first_generation(dir: &Path) -> std::path::PathBuf {
+    let path = dir.join("witness.generation");
+    if !path.exists() {
+        write_generation(&path, 1, &witness_address(dir));
+    }
+    path
+}
+
+/// Points `witness.sock`, the address both kernels name, at `to` (a plug of one kernel's):
+/// a kernel resolves it whenever it connects, so each can reach the witness through a plug
+/// of its own while both name it the same, as its generation requires.
+fn route_witness(dir: &Path, to: &str) {
+    let link = dir.join("witness.sock");
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(dir.join(to), &link).unwrap();
+}
+
 fn node_config(dir: &Path, name: &str, kernel_seed: u8, node_seed: u8) -> Config {
+    first_generation(dir);
     let kernel_key = dir.join(format!("{name}-kernel.key"));
     std::fs::write(&kernel_key, hex(key(kernel_seed).as_bytes())).unwrap();
     let node_key = dir.join(format!("{name}-node.key"));
@@ -146,7 +177,7 @@ fn node_config(dir: &Path, name: &str, kernel_seed: u8, node_seed: u8) -> Config
                 witness: format!("unix:{}", dir.join("witness.sock").display()),
                 node_key,
                 advertise,
-                witness_generation: None,
+                witness_generation: dir.join("witness.generation"),
                 standby_timeout_ms: LEASE_MS,
                 kernel_keys: vec![id(&key(3)), id(&key(8))],
             }),
@@ -197,7 +228,7 @@ async fn a_pair_fails_over_on_its_own_and_the_old_primary_comes_back_as_its_stan
         state: state.clone(),
         lease_ms: LEASE_MS,
         tls: None,
-        generation: None,
+        generation: first_generation(&dir.0),
     }));
     wait_for(&format!("unix:{}", dir.0.join("witness.sock").display())).await;
     let witnessed = || {
@@ -324,7 +355,7 @@ async fn a_primary_alone_tells_nothing_once_its_lease_runs_out() {
         state: state.clone(),
         lease_ms: LEASE_MS,
         tls: None,
-        generation: None,
+        generation: first_generation(&dir.0),
     }));
     wait_for(&format!(
         "unix:{}",
@@ -389,24 +420,34 @@ async fn a_primary_the_witness_replaced_stops() {
     let dir = Dir::new("pair-deposed");
     let state = dir.0.join("witness.state");
     tokio::spawn(witness::run(WitnessConfig {
-        listen: format!("unix:{}", dir.0.join("witness.sock").display()),
+        listen: format!("unix:{}", dir.0.join("witness-real.sock").display()),
         roots: vec![id(&root())],
         state: state.clone(),
         lease_ms: LEASE_MS,
         tls: None,
-        generation: None,
+        generation: first_generation(&dir.0),
     }));
-    wait_for(&format!("unix:{}", dir.0.join("witness.sock").display())).await;
-    // A reaches the witness through a plug of its own, and B reaches A through A's plug.
-    let mut a_config = node_config(&dir.0, "a", 3, 11);
-    a_config.replication.pair.as_mut().unwrap().witness =
-        format!("unix:{}", dir.0.join("a-witness.sock").display());
+    wait_for(&format!(
+        "unix:{}",
+        dir.0.join("witness-real.sock").display()
+    ))
+    .await;
+    // Each kernel reaches the witness through a plug of its own, and B reaches A through A's
+    // plug.
+    let a_config = node_config(&dir.0, "a", 3, 11);
     let b_config = node_config(&dir.0, "b", 8, 12);
-    let a_witness = |dir: &Path| Plug::new(&dir.join("a-witness.sock"), &dir.join("witness.sock"));
+    let a_witness =
+        |dir: &Path| Plug::new(&dir.join("a-witness.sock"), &dir.join("witness-real.sock"));
     let cut_witness = a_witness(&dir.0);
+    let _b_witness = Plug::new(
+        &dir.0.join("b-witness.sock"),
+        &dir.0.join("witness-real.sock"),
+    );
     let a_plug = Plug::new(&dir.0.join("a-plug.sock"), &dir.0.join("a.sock"));
+    route_witness(&dir.0, "a-witness.sock");
     let (a_task, a_primary) = run_node(a_config);
     let _a = a_primary.await.unwrap();
+    route_witness(&dir.0, "b-witness.sock");
     let (_b_task, b_primary) = run_node(b_config);
     let witnessed = || {
         Witness::open(&state, Duration::from_millis(LEASE_MS))
@@ -414,6 +455,9 @@ async fn a_primary_the_witness_replaced_stops() {
             .state()
     };
     until("B is in sync", || witnessed().in_sync == id(&key(12))).await;
+    // From now on a kernel that connects to the witness anew goes through A's plug: B keeps
+    // the connection it has.
+    route_witness(&dir.0, "a-witness.sock");
 
     // A still runs, but neither B nor the witness reach it: B takes its place.
     cut_witness.cut();
@@ -443,7 +487,7 @@ async fn a_revoked_standby_is_not_named_in_sync() {
         state: state.clone(),
         lease_ms: LEASE_MS,
         tls: None,
-        generation: None,
+        generation: first_generation(&dir.0),
     }));
     wait_for(&format!("unix:{}", dir.0.join("witness.sock").display())).await;
     let (a_config, b_config) = (
@@ -484,7 +528,7 @@ async fn a_switchover_hands_the_primary_role_over_without_waiting_for_the_lease(
         state: state.clone(),
         lease_ms: LEASE_MS,
         tls: None,
-        generation: None,
+        generation: first_generation(&dir.0),
     }));
     wait_for(&format!("unix:{}", dir.0.join("witness.sock").display())).await;
     let witnessed = || {
@@ -571,24 +615,35 @@ async fn a_standby_takes_over_from_a_primary_the_network_cut_off_silently() {
     let dir = Dir::new("pair-cut");
     let state = dir.0.join("witness.state");
     tokio::spawn(witness::run(WitnessConfig {
-        listen: format!("unix:{}", dir.0.join("witness.sock").display()),
+        listen: format!("unix:{}", dir.0.join("witness-real.sock").display()),
         roots: vec![id(&root())],
         state: state.clone(),
         lease_ms: LEASE_MS,
         tls: None,
-        generation: None,
+        generation: first_generation(&dir.0),
     }));
-    wait_for(&format!("unix:{}", dir.0.join("witness.sock").display())).await;
-    // A reaches the witness through a plug of its own, cut off with it.
-    let mut a_config = node_config(&dir.0, "a", 3, 11);
-    a_config.replication.pair.as_mut().unwrap().witness =
-        format!("unix:{}", dir.0.join("a-witness.sock").display());
+    wait_for(&format!(
+        "unix:{}",
+        dir.0.join("witness-real.sock").display()
+    ))
+    .await;
+    // A reaches the witness through a plug of its own, cut off with it; B through its own.
+    let a_config = node_config(&dir.0, "a", 3, 11);
     let b_config = node_config(&dir.0, "b", 8, 12);
-    let a_witness = Plug::new(&dir.0.join("a-witness.sock"), &dir.0.join("witness.sock"));
+    let a_witness = Plug::new(
+        &dir.0.join("a-witness.sock"),
+        &dir.0.join("witness-real.sock"),
+    );
+    let _b_witness = Plug::new(
+        &dir.0.join("b-witness.sock"),
+        &dir.0.join("witness-real.sock"),
+    );
     let a_plug = Plug::new(&dir.0.join("a-plug.sock"), &dir.0.join("a.sock"));
     let _b_plug = Plug::new(&dir.0.join("b-plug.sock"), &dir.0.join("b.sock"));
+    route_witness(&dir.0, "a-witness.sock");
     let (_a_task, a_primary) = run_node(a_config.clone());
     let a = a_primary.await.unwrap();
+    route_witness(&dir.0, "b-witness.sock");
     let (_b_task, b_primary) = run_node(b_config.clone());
     for seed in [1, 2] {
         a.grant(default_grant(&key(seed)).unwrap()).unwrap();
@@ -603,6 +658,7 @@ async fn a_standby_takes_over_from_a_primary_the_network_cut_off_silently() {
     })
     .await;
 
+    route_witness(&dir.0, "a-witness.sock");
     a_plug.freeze();
     a_witness.freeze();
     let cut = std::time::Instant::now();
@@ -616,4 +672,100 @@ async fn a_standby_takes_over_from_a_primary_the_network_cut_off_silently() {
         "B took over {} ms after the partition (lease {LEASE_MS} ms)",
         took.as_millis()
     );
+}
+
+/// A lost witness replaced: both kernels take the new witness's generation 2 while they still
+/// name the old one; the primary's machine is lost; the old witness comes back and grants the
+/// standby's claim, which the standby ignores; turned to the new witness, it becomes the primary.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_old_witness_back_after_both_kernels_took_generation_2_makes_nobody_primary() {
+    let dir = Dir::new("pair-generation");
+    let state = dir.0.join("witness.state");
+    let old_witness = || {
+        tokio::spawn(witness::run(WitnessConfig {
+            listen: witness_address(&dir.0),
+            roots: vec![id(&root())],
+            state: state.clone(),
+            lease_ms: LEASE_MS,
+            tls: None,
+            generation: first_generation(&dir.0),
+        }))
+    };
+    // Its own copy of generation 1: the kernels' file is raised below.
+    let old_generation = dir.0.join("old-witness.generation");
+    std::fs::copy(first_generation(&dir.0), &old_generation).unwrap();
+    let w1 = old_witness();
+    wait_for(&witness_address(&dir.0)).await;
+    let (a_config, b_config) = (
+        node_config(&dir.0, "a", 3, 11),
+        node_config(&dir.0, "b", 8, 12),
+    );
+    let a_plug = Plug::new(&dir.0.join("a-plug.sock"), &dir.0.join("a.sock"));
+    let _b_plug = Plug::new(&dir.0.join("b-plug.sock"), &dir.0.join("b.sock"));
+    let (a_task, a_primary) = run_node(a_config.clone());
+    let a = a_primary.await.unwrap();
+    let (b_task, b_primary) = run_node(b_config.clone());
+    let witnessed = || {
+        Witness::open(&state, Duration::from_millis(LEASE_MS))
+            .unwrap()
+            .state()
+    };
+    until("B is in sync", || witnessed().in_sync == id(&key(12))).await;
+    let kept = |c: &Config| {
+        let node_key = &c.replication.pair.as_ref().unwrap().node_key;
+        std::fs::read_to_string(node_key.with_extension("generation")).unwrap_or_default()
+    };
+    assert!(kept(&a_config).starts_with("1\n") && kept(&b_config).starts_with("1\n"));
+
+    // The witness is lost. The operator signs generation 2 for its successor and gives it to
+    // both kernels, which still name the old one: A reads it before its next question to the
+    // witness, B learns it from A on their stream.
+    w1.abort();
+    let new_address = format!("unix:{}", dir.0.join("witness2.sock").display());
+    write_generation(&dir.0.join("witness.generation"), 2, &new_address);
+    until("both kernels took generation 2", || {
+        kept(&a_config).starts_with("2\n") && kept(&b_config).starts_with("2\n")
+    })
+    .await;
+
+    // A's machine is lost; the old witness comes back, with generation 1 and the old state.
+    a_task.abort();
+    a_plug.cut();
+    drop(a);
+    let _w1_back = tokio::spawn(witness::run(WitnessConfig {
+        listen: witness_address(&dir.0),
+        roots: vec![id(&root())],
+        state: state.clone(),
+        lease_ms: LEASE_MS,
+        tls: None,
+        generation: old_generation,
+    }));
+    wait_for(&witness_address(&dir.0)).await;
+    // B asks it to claim once A's lease ran out; whatever it answers counts as no answer.
+    let b_primary = tokio::time::timeout(Duration::from_millis(10 * LEASE_MS), b_primary).await;
+    assert!(
+        b_primary.is_err(),
+        "B must not become the primary through the old witness"
+    );
+    assert!(kept(&b_config).starts_with("2\n"), "B keeps generation 2");
+    b_task.abort();
+    let _ = b_task.await;
+
+    // The new witness, generation 2, empty: B turned to it asks first and is the primary.
+    tokio::spawn(witness::run(WitnessConfig {
+        listen: new_address.clone(),
+        roots: vec![id(&root())],
+        state: dir.0.join("witness2.state"),
+        lease_ms: LEASE_MS,
+        tls: None,
+        generation: dir.0.join("witness.generation"),
+    }));
+    wait_for(&new_address).await;
+    let mut turned = b_config.clone();
+    turned.replication.pair.as_mut().unwrap().witness = new_address;
+    let (_b_task, b_primary) = run_node(turned);
+    tokio::time::timeout(Duration::from_secs(10), b_primary)
+        .await
+        .expect("B becomes the primary at the new witness")
+        .unwrap();
 }

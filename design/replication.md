@@ -104,6 +104,8 @@ The witness assigns the roles (both kernels start with the same flags), and a pr
 
 A restarted witness grants no claim for a lease and the margin.
 
+**Generations.** Every witness has a generation signed by a root key (`--generation`), 1 for a new pair, and every kernel of a pair reads one (`--witness-generation`); neither starts without. A kernel keeps the newest generation it has seen beside its node key and treats an answer without a generation, older than that, or naming another witness's address, as no answer. A witness that replaces a lost one gets a higher generation, which both kernels take before they turn to it: the old witness, wherever it comes back, makes nobody primary.
+
 **A node** (`kernable start --witness`, `node.rs`) asks `LEASE` at start: granted, it opens as the primary; otherwise it follows `primary_address` as a standby, and claims once its stream to the primary has been lost for a lease and the margin; granted, it asks again and opens as the primary. The primary renews every third of the lease and counts its lease from when it asked, a margin short.
 
 **Committing alone.** The primary's lease keeper watches its standby. When the standby is away or its acknowledgements stand still behind the head for `--standby-timeout-ms`, the keeper asks `ALONE`; only once granted does `Primary::wait` let writes through without the standby, and only while the lease holds. When the standby has caught up, the primary first waits for it again, then asks `IN_SYNC`: nothing told alone is missing on the standby the witness names.

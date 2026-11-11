@@ -80,7 +80,7 @@ Keys and trust:
                                           2026-10-27T09:00:00Z): the kernel refuses it, ends its
                                           connections and rejects its queued commands accepted since
                                           then (key_revoked). The kernel must be running.
-  kernable witness --listen <addr> --root <root.pub> --state <file> [--lease-ms <ms>] [--generation <file>] [--tls-...]
+  kernable witness --listen <addr> --root <root.pub> --state <file> --generation <file> [--lease-ms <ms>] [--tls-...]
                                           Runs the witness of a pair of kernels started with
                                           --witness: it decides which one is the primary, renews
                                           the primary's lease (3000 ms by default) and lets the
@@ -89,13 +89,16 @@ Keys and trust:
                                           witness.state); listens on 127.0.0.1:7300 by default,
                                           elsewhere only with mutual TLS (--tls-cert, --tls-key,
                                           --tls-client-ca). --generation: its generation (below),
-                                          checked against the roots and sent with every answer.
+                                          checked against the roots and sent with every answer;
+                                          every witness has one.
   kernable witness generation <root.key> <generation> <witness-address>
                                           Writes witness.generation: the generation of the witness
                                           the kernels of a pair reach at <witness-address> (as
                                           they name it in --witness), signed by the root key. A
-                                          witness that replaces a lost one gets a higher one;
-                                          kernels that have seen it ignore older witnesses.
+                                          new pair starts with 1, for its witness and both
+                                          kernels (--witness-generation); a witness that replaces
+                                          a lost one gets a higher one, and kernels that have seen
+                                          it ignore older witnesses.
   kernable partitions apply <addr> <key> <map.json>
                                           Applies a partition map on the control partition at
                                           <addr>: {'epoch': 2, 'partitions': {'p1': ['host:7233'],
@@ -309,23 +312,40 @@ Continuous backup:
                                           it last checked and what it found.
   kernable backup list <target> --backup-key <file>
                                           Prints the generations of a backup: each base's record
-                                          and time, and how far its segments reach.
+                                          and time, how far its segments reach, and the vault key
+                                          its vault values are sealed with (a generation has one;
+                                          a kernel whose vault key changed begins a new one).
+  kernable backup plan <target> --backup-key <file> [--at <time> | --at-record <n>] [--json <file>]
+                                          Prints what a restore to that point builds from (the
+                                          generation and its vault key) and the erasures the
+                                          backup holds after it: committed later, they are undone
+                                          by such a restore. --json writes the same as JSON.
   kernable backup check <target> --backup-key <file>
                                           Reads the newest generation all through, without writing
                                           a store: every object opens with the key and decodes, and
                                           the records chain from the base to the last segment.
                                           Prints the record a restore reaches and how old it is;
                                           exits 1 if the backup does not check out.
-  kernable restore <target> --backup-key <file> [--at <time> | --at-record <n>] [--store <s>] [--data-store <d>] [--vault-store <v> --vault-key <k>] [--kernel-pub <kernel.pub>]...
+  kernable restore <target> --backup-key <file> [--at <time> | --at-record <n>] [--reapply-erasures <file>] [--store <s>] [--data-store <d>] [--vault-store <v> --vault-key <k>] [--kernel-pub <kernel.pub>]...
                                           Fills new, empty stores from a backup: the newest
                                           generation that begins before --at (UTC, like
                                           2026-11-04T13:40:00Z) or --at-record, its base, then its
                                           segments up to there (default: everything), then checks
                                           the store like verify, with the same output and exit
-                                          codes. --vault-key must be the source's vault key; the
-                                          flags name the stores as for kernable start. Without
-                                          --kernel-pub, the store is checked with the kernel keys
-                                          the backup names.
+                                          codes. --vault-key must be the source's vault key of
+                                          that generation's time; the flags name the stores as
+                                          for kernable start. Without --kernel-pub, the store is
+                                          checked with the kernel keys the backup names. To a
+                                          point, it first lists the erasures committed after it:
+                                          restored as it was, they did not happen yet. To apply
+                                          them again, --reapply-erasures <file> (or yes when
+                                          asked) writes them to <file> for kernable erasures apply.
+  kernable erasures apply <addr> <key> <file>
+                                          Submits again each erasing command of the list restore
+                                          --reapply-erasures wrote, signed with <key> (granted
+                                          submit for those commands), its context kept: the
+                                          kernel commits new erasing events and erases the
+                                          values. Exit 1 if one is rejected or cannot be sent.
 
 Maintenance, with the kernel stopped:
   kernable listeners remove <store> <name>
@@ -445,6 +465,8 @@ async fn main() -> ExitCode {
         ["backup", "key", file] => backup_key(file),
         ["backup", "list", to, flags @ ..] if !to.starts_with("--") => backup_list(to, flags),
         ["backup", "check", to, flags @ ..] if !to.starts_with("--") => backup_check(to, flags),
+        ["backup", "plan", to, flags @ ..] if !to.starts_with("--") => backup_plan(to, flags),
+        ["erasures", "apply", addr, key, file] => erasures_apply(addr, key, file).await,
         ["backup", flags @ ..] => return run_backup(flags).await,
         ["restore", from, flags @ ..] if !from.starts_with("--") => {
             return restore(from, flags).unwrap_or_else(|e| {
@@ -999,8 +1021,8 @@ async fn revoke(addr: &str, root: &str, key: &str, since: &str) -> Result<bool> 
     Ok(true)
 }
 
-/// `kernable witness --listen <addr> --root <root.pub>... --state <file> [--lease-ms <ms>]
-/// [--tls-cert <pem> --tls-key <pem> --tls-client-ca <pem>]`.
+/// `kernable witness --listen <addr> --root <root.pub>... --state <file> --generation <file>
+/// [--lease-ms <ms>] [--tls-cert <pem> --tls-key <pem> --tls-client-ca <pem>]`.
 async fn run_witness(flags: &[&str]) -> ExitCode {
     let parsed = (|| -> Result<witness::WitnessConfig> {
         let mut given: std::collections::HashMap<&str, Vec<String>> = Default::default();
@@ -1051,7 +1073,9 @@ async fn run_witness(flags: &[&str]) -> ExitCode {
                 None => witness::LEASE_MS,
             },
             tls,
-            generation: one("--generation").map(Into::into),
+            generation: one("--generation")
+                .ok_or("no generation: pass --generation <file> (kernable witness generation <root.key> 1 <address> for a new pair)")?
+                .into(),
         })
     })();
     let config = match parsed {
@@ -1232,7 +1256,7 @@ fn backup_list(to: &str, flags: &[&str]) -> Result<bool> {
             Some(b) => {
                 let reach = g.segments.last().map_or(b.seq, |s| s.last);
                 println!(
-                    "{}  base at record {} ({}, {} records, {} vault values, {} files), {} segments up to record {}",
+                    "{}  base at record {} ({}, {} records, {} vault values, {} files), {} segments up to record {}{}",
                     g.name,
                     b.seq,
                     config::utc(b.created_at),
@@ -1240,7 +1264,11 @@ fn backup_list(to: &str, flags: &[&str]) -> Result<bool> {
                     b.vault_values,
                     b.files,
                     g.segments.len(),
-                    reach
+                    reach,
+                    match b.vault_key.as_str() {
+                        "" => String::new(),
+                        k => format!(", vault key {k}"),
+                    }
                 );
             }
             None => println!(
@@ -1339,19 +1367,10 @@ async fn run_backup(flags: &[&str]) -> ExitCode {
     }
 }
 
-/// `kernable restore <target> [flags]`: fills new, empty stores, then checks the store.
-fn restore(from: &str, flags: &[&str]) -> Result<ExitCode> {
-    // Every flag takes a value: the backup's go here, the stores' to StoreFlags.
-    let (mut mine, mut rest) = (Vec::new(), Vec::new());
-    for pair in flags.chunks(2) {
-        match ["--backup-key", "--at", "--at-record"].contains(&pair[0]) {
-            true => mine.extend_from_slice(pair),
-            false => rest.extend_from_slice(pair),
-        }
-    }
-    let values = flag_values(&mine, &["--backup-key", "--at", "--at-record"])?;
+/// `--at` / `--at-record` of `restore` and `backup plan`.
+fn until_of(values: &HashMap<&str, Vec<&str>>) -> Result<backup::Until> {
     let one = |flag: &str| values.get(flag).and_then(|v| v.first().copied());
-    let until = match (one("--at"), one("--at-record")) {
+    Ok(match (one("--at"), one("--at-record")) {
         (Some(_), Some(_)) => return Err("give --at or --at-record, not both".into()),
         (Some(at), None) => backup::Until::Time(
             config::utc_ms(at)
@@ -1362,11 +1381,110 @@ fn restore(from: &str, flags: &[&str]) -> Result<ExitCode> {
                 .map_err(|_| format!("--at-record {n}: not a number"))?,
         ),
         (None, None) => backup::Until::End,
-    };
+    })
+}
+
+/// The point `until` names, for people and for the list of erasures.
+fn point_of(until: backup::Until) -> String {
+    match until {
+        backup::Until::End => "the end".into(),
+        backup::Until::Record(n) => format!("record {n}"),
+        backup::Until::Time(t) => config::utc(t),
+    }
+}
+
+/// Prints the erasures a restore to `point` leaves out.
+fn print_erasures(point: &str, plan: &backup::Plan) {
+    if let Some(note) = &plan.note {
+        println!("note: {note}");
+    }
+    if plan.erasures.is_empty() {
+        return;
+    }
+    println!(
+        "{} erasure{} since {point}, in the backup after the point:",
+        plan.erasures.len(),
+        if plan.erasures.len() == 1 { "" } else { "s" }
+    );
+    for e in &plan.erasures {
+        println!("  {}", e.line());
+    }
+}
+
+/// `kernable backup plan <target> --backup-key <file> [--at <time> | --at-record <n>]
+/// [--json <file>]`: what a restore to the point uses, and the erasures after it.
+fn backup_plan(to: &str, flags: &[&str]) -> Result<bool> {
+    let values = flag_values(flags, &["--backup-key", "--at", "--at-record", "--json"])?;
+    let one = |flag: &str| values.get(flag).and_then(|v| v.first().copied());
+    let until = until_of(&values)?;
+    let key = one("--backup-key").ok_or("--backup-key is missing")?;
+    let crypt = backup::crypt::BackupKey::read(Path::new(key)).map_err(boxed)?;
+    let target = backup::target::open(to).map_err(boxed)?;
+    let plan = backup::plan(target.as_ref(), &crypt, until).map_err(boxed)?;
+    let point = point_of(until);
+    println!(
+        "a restore to {point} builds from generation {}{}",
+        plan.generation,
+        match plan.vault_key.as_str() {
+            "" => String::new(),
+            k => format!(", its vault values sealed with vault key {k}"),
+        }
+    );
+    print_erasures(&point, &plan);
+    if let Some(file) = one("--json") {
+        fs::write(file, backup::plan_json(&point, &plan))?;
+    }
+    Ok(true)
+}
+
+/// `kernable restore <target> [flags]`: lists the erasures after the point and asks whether to
+/// apply them again, fills new, empty stores, then checks the store.
+fn restore(from: &str, flags: &[&str]) -> Result<ExitCode> {
+    // Every flag takes a value: the backup's go here, the stores' to StoreFlags.
+    const MINE: [&str; 4] = ["--backup-key", "--at", "--at-record", "--reapply-erasures"];
+    let (mut mine, mut rest) = (Vec::new(), Vec::new());
+    for pair in flags.chunks(2) {
+        match MINE.contains(&pair[0]) {
+            true => mine.extend_from_slice(pair),
+            false => rest.extend_from_slice(pair),
+        }
+    }
+    let values = flag_values(&mine, &MINE)?;
+    let one = |flag: &str| values.get(flag).and_then(|v| v.first().copied());
+    let until = until_of(&values)?;
     let key = one("--backup-key").ok_or("--backup-key is missing")?;
     let crypt = backup::crypt::BackupKey::read(Path::new(key)).map_err(boxed)?;
     let target = backup::target::open(from).map_err(boxed)?;
     let flags = StoreFlags::parse(&rest, true)?;
+    // Before anything is written: the erasures the point leaves out. The restore is exact by
+    // default (before an erasing event, nothing was erased); the operator may apply them again.
+    let point = point_of(until);
+    let plan = backup::plan(target.as_ref(), &crypt, until).map_err(boxed)?;
+    print_erasures(&point, &plan);
+    let reapply = match (plan.erasures.is_empty(), one("--reapply-erasures")) {
+        (true, _) => None,
+        (false, Some(file)) => Some(file.to_owned()),
+        (false, None) if io::stdin().is_terminal() => {
+            print!(
+                "The restore brings the values they erased back. Apply them again once the \
+                 kernel runs? [y/N] "
+            );
+            io::stdout().flush()?;
+            let mut answer = String::new();
+            io::stdin().read_line(&mut answer)?;
+            matches!(answer.trim(), "y" | "Y" | "yes").then(|| "erasures.json".to_owned())
+        }
+        (false, None) => None,
+    };
+    if !plan.erasures.is_empty() && reapply.is_none() {
+        eprintln!(
+            "warning: restored as it was at {point}: the {} erasure{} above did not happen yet \
+             there, and the values they erased are back. To apply them again, restore with \
+             --reapply-erasures <file>",
+            plan.erasures.len(),
+            if plan.erasures.len() == 1 { "" } else { "s" }
+        );
+    }
     let stores = standby::Stores {
         // Nothing serves from it until it is filled: one flush at the end (`sync`), not one
         // per batch.
@@ -1399,8 +1517,59 @@ fn restore(from: &str, flags: &[&str]) -> Result<ExitCode> {
             restored.kernel_keys.join(", ")
         );
     }
+    if let Some(file) = &reapply {
+        // Its owner only: it names the erased subjects.
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        options
+            .open(file)?
+            .write_all(backup::plan_json(&point, &plan).as_bytes())?;
+        let types: std::collections::BTreeSet<String> = plan
+            .erasures
+            .iter()
+            .filter_map(|e| e.command.as_ref())
+            .map(|c| format!("{}.{}", c.domain, c.command_type))
+            .collect();
+        println!(
+            "the erasures to apply again are in {file}. Start the kernel, then: kernable erasures \
+             apply <addr> <key> {file}, with a key granted submit for {}: each erasing command is \
+             submitted again, and its events erase as they did",
+            types.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
     let report = stores.store.verify(&restored.kernel_keys)?;
     Ok(report_verify(&report))
+}
+
+/// `kernable erasures apply <addr> <key> <file>`: submits each erasing command of the list
+/// `restore --reapply-erasures` wrote again, signed with `key`, so the erasures happen again
+/// through the kernel as they did: new events, the vault values deleted.
+async fn erasures_apply(addr: &str, key: &str, file: &str) -> Result<bool> {
+    let text = fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))?;
+    let erasures = backup::read_erasures(&text).map_err(|e| format!("{file}: {e}"))?;
+    let mut all = true;
+    for e in &erasures {
+        println!("{}", e.line());
+        match e.again(&random_id()) {
+            Ok(command) => all &= submit(addr, key, command).await?,
+            Err(why) => {
+                println!("  not submitted: {why}");
+                all = false;
+            }
+        }
+    }
+    println!(
+        "{} erasure{} in {file}{}",
+        erasures.len(),
+        if erasures.len() == 1 { "" } else { "s" },
+        if all {
+            ", all applied again"
+        } else {
+            ": not all applied again (above)"
+        }
+    );
+    Ok(all)
 }
 
 async fn partitions_apply(addr: &str, key_path: &str, path: &str) -> Result<bool> {

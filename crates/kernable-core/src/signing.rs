@@ -692,6 +692,13 @@ pub fn key_id(key: &VerifyingKey) -> String {
     hex::encode(key.as_bytes())
 }
 
+/// The ID of a vault key: the key ID of the public half `kernable keys new` writes beside it
+/// (the key read as a signing key's seed). It names the key without revealing it: a backup
+/// generation says by it which vault key its values are sealed with.
+pub fn vault_key_id(key: &[u8; 32]) -> String {
+    key_id(&SigningKey::from_bytes(key).verifying_key())
+}
+
 pub fn generate_key() -> SigningKey {
     let mut seed = Zeroizing::new([0u8; 32]);
     getrandom::fill(seed.as_mut()).expect("OS randomness unavailable");

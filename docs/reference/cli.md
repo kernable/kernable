@@ -54,10 +54,10 @@ Revokes a key for good from `<since>` on (UTC, like `2026-10-27T09:00:00Z`): the
 ### `kernable witness`
 
 ```text
-kernable witness --listen <addr> --root <root.pub> --state <file> [--lease-ms <ms>] [--generation <file>] [--tls-...]
+kernable witness --listen <addr> --root <root.pub> --state <file> --generation <file> [--lease-ms <ms>] [--tls-...]
 ```
 
-Runs the witness of a pair of kernels started with `--witness`: it decides which one is the primary, renews the primary's lease (3000 ms by default) and lets the standby in sync take its place when the lease runs out. It keeps the term and the roles in `<file>` (default witness.state); listens on `127.0.0.1:7300` by default, elsewhere only with mutual TLS (`--tls-cert`, `--tls-key`, `--tls-client-ca`). `--generation`: its generation (below), checked against the roots and sent with every answer.
+Runs the witness of a pair of kernels started with `--witness`: it decides which one is the primary, renews the primary's lease (3000 ms by default) and lets the standby in sync take its place when the lease runs out. It keeps the term and the roles in `<file>` (default witness.state); listens on `127.0.0.1:7300` by default, elsewhere only with mutual TLS (`--tls-cert`, `--tls-key`, `--tls-client-ca`). `--generation`: its generation (below), checked against the roots and sent with every answer; every witness has one.
 
 ### `kernable witness generation`
 
@@ -65,7 +65,7 @@ Runs the witness of a pair of kernels started with `--witness`: it decides which
 kernable witness generation <root.key> <generation> <witness-address>
 ```
 
-Writes witness.generation: the generation of the witness the kernels of a pair reach at `<witness-address>` (as they name it in `--witness`), signed by the root key. A witness that replaces a lost one gets a higher one; kernels that have seen it ignore older witnesses.
+Writes witness.generation: the generation of the witness the kernels of a pair reach at `<witness-address>` (as they name it in `--witness`), signed by the root key. A new pair starts with 1, for its witness and both kernels (`--witness-generation`); a witness that replaces a lost one gets a higher one, and kernels that have seen it ignore older witnesses.
 
 ### `kernable partitions apply`
 
@@ -319,7 +319,15 @@ Follows the kernel at `<addr>` (started with `--backup` on; both kernels of a pa
 kernable backup list <target> --backup-key <file>
 ```
 
-Prints the generations of a backup: each base's record and time, and how far its segments reach.
+Prints the generations of a backup: each base's record and time, how far its segments reach, and the vault key its vault values are sealed with (a generation has one; a kernel whose vault key changed begins a new one).
+
+### `kernable backup plan`
+
+```text
+kernable backup plan <target> --backup-key <file> [--at <time> | --at-record <n>] [--json <file>]
+```
+
+Prints what a restore to that point builds from (the generation and its vault key) and the erasures the backup holds after it: committed later, they are undone by such a restore. `--json` writes the same as JSON.
 
 ### `kernable backup check`
 
@@ -332,10 +340,18 @@ Reads the newest generation all through, without writing a store: every object o
 ### `kernable restore`
 
 ```text
-kernable restore <target> --backup-key <file> [--at <time> | --at-record <n>] [--store <s>] [--data-store <d>] [--vault-store <v> --vault-key <k>] [--kernel-pub <kernel.pub>]...
+kernable restore <target> --backup-key <file> [--at <time> | --at-record <n>] [--reapply-erasures <file>] [--store <s>] [--data-store <d>] [--vault-store <v> --vault-key <k>] [--kernel-pub <kernel.pub>]...
 ```
 
-Fills new, empty stores from a backup: the newest generation that begins before `--at` (UTC, like `2026-11-04T13:40:00Z`) or `--at-record`, its base, then its segments up to there (default: everything), then checks the store like verify, with the same output and exit codes. `--vault-key` must be the source's vault key; the flags name the stores as for kernable start. Without `--kernel-pub`, the store is checked with the kernel keys the backup names.
+Fills new, empty stores from a backup: the newest generation that begins before `--at` (UTC, like `2026-11-04T13:40:00Z`) or `--at-record`, its base, then its segments up to there (default: everything), then checks the store like verify, with the same output and exit codes. `--vault-key` must be the source's vault key of that generation's time; the flags name the stores as for kernable start. Without `--kernel-pub`, the store is checked with the kernel keys the backup names. To a point, it first lists the erasures committed after it: restored as it was, they did not happen yet. To apply them again, `--reapply-erasures <file>` (or yes when asked) writes them to `<file>` for kernable erasures apply.
+
+### `kernable erasures apply`
+
+```text
+kernable erasures apply <addr> <key> <file>
+```
+
+Submits again each erasing command of the list restore `--reapply-erasures` wrote, signed with `<key>` (granted submit for those commands), its context kept: the kernel commits new erasing events and erases the values. Exit 1 if one is rejected or cannot be sent.
 
 ## Maintenance, with the kernel stopped
 
