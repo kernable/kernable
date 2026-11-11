@@ -269,7 +269,7 @@ Run a node:
                                           the flags of kernable start without their dashes, env,
                                           binary, image, cpus, memory, stop-seconds), [backup] (to,
                                           key, backup-key, follow, segment-seconds, base-hours,
-                                          keep, check-hours, cpus, memory, env), [pair] (witness,
+                                          keep, check-hours, signer, cpus, memory, env), [pair] (witness,
                                           node-key, advertise, peer, kernel-keys,
                                           standby-timeout-ms, witness-generation: this node's
                                           kernel of a pair), [node]
@@ -293,7 +293,7 @@ Continuous backup:
                                           <file>, readable by its owner only; never overwrites one.
                                           Keep it apart from the backups, as you keep the root key:
                                           without it a backup cannot be read.
-  kernable backup --follow <addr>[,<addr>] --key <key> --to <target> --backup-key <file> [--segment-seconds <s>] [--base-hours <h>] [--keep <n>] [--check-hours <h>] [--status-file <file>]
+  kernable backup --follow <addr>[,<addr>] --key <key> --to <target> --backup-key <file> [--segment-seconds <s>] [--base-hours <h>] [--keep <n>] [--check-hours <h>] [--status-file <file>] [--signer <url>] [--signer-key <file>]
                                           Follows the kernel at <addr> (started with --backup on;
                                           both kernels of a pair, comma-separated) and writes its
                                           records to <target>, encrypted with the backup key, until
@@ -310,23 +310,31 @@ Continuous backup:
                                           logs what it found. With --status-file, it notes there
                                           (JSON) when it last uploaded, up to which record, and when
                                           it last checked and what it found.
-  kernable backup list <target> --backup-key <file>
+                                          With --signer <url> (or KERNABLE_S3_SIGNER), an s3://
+                                          target needs no credentials: for every request it asks the
+                                          signer for a presigned one, signed with <key> (or
+                                          --signer-key, KERNABLE_S3_SIGNER_KEY);
+                                          KERNABLE_S3_SIGNER_CA names the CA certificates the
+                                          signer's certificate is checked against. While the target
+                                          or its signer fails, it logs an error, tries again, and
+                                          the kernel keeps the records.
+  kernable backup list <target> --backup-key <file> [--signer <url> --signer-key <file>]
                                           Prints the generations of a backup: each base's record
                                           and time, how far its segments reach, and the vault key
                                           its vault values are sealed with (a generation has one;
                                           a kernel whose vault key changed begins a new one).
-  kernable backup plan <target> --backup-key <file> [--at <time> | --at-record <n>] [--json <file>]
+  kernable backup plan <target> --backup-key <file> [--at <time> | --at-record <n>] [--json <file>] [--signer <url> --signer-key <file>]
                                           Prints what a restore to that point builds from (the
                                           generation and its vault key) and the erasures the
                                           backup holds after it: committed later, they are undone
                                           by such a restore. --json writes the same as JSON.
-  kernable backup check <target> --backup-key <file>
+  kernable backup check <target> --backup-key <file> [--signer <url> --signer-key <file>]
                                           Reads the newest generation all through, without writing
                                           a store: every object opens with the key and decodes, and
                                           the records chain from the base to the last segment.
                                           Prints the record a restore reaches and how old it is;
                                           exits 1 if the backup does not check out.
-  kernable restore <target> --backup-key <file> [--at <time> | --at-record <n>] [--reapply-erasures <file>] [--store <s>] [--data-store <d>] [--vault-store <v> --vault-key <k>] [--kernel-pub <kernel.pub>]...
+  kernable restore <target> --backup-key <file> [--at <time> | --at-record <n>] [--reapply-erasures <file>] [--signer <url> --signer-key <file>] [--store <s>] [--data-store <d>] [--vault-store <v> --vault-key <k>] [--kernel-pub <kernel.pub>]...
                                           Fills new, empty stores from a backup: the newest
                                           generation that begins before --at (UTC, like
                                           2026-11-04T13:40:00Z) or --at-record, its base, then its
@@ -340,6 +348,16 @@ Continuous backup:
                                           restored as it was, they did not happen yet. To apply
                                           them again, --reapply-erasures <file> (or yes when
                                           asked) writes them to <file> for kernable erasures apply.
+                                          With --signer and --signer-key, it reads an s3:// target
+                                          through a signer, as backup list, plan and check do.
+  kernable backup signer --listen <addr> --to s3://<bucket>/<prefix> --allow <key.pub>[,<key.pub>] [--expires-seconds <s>]
+                                          A reference backup signer: answers the signer protocol
+                                          over plain HTTP on <addr> with requests presigned with the
+                                          credentials of the environment (as for an s3:// target),
+                                          valid for --expires-seconds (default 300), for that prefix
+                                          and those below it, to the keys --allow names. For tests
+                                          and trusted networks; a signing service keeps the
+                                          credentials away from the machines it signs for.
   kernable erasures apply <addr> <key> <file>
                                           Submits again each erasing command of the list restore
                                           --reapply-erasures wrote, signed with <key> (granted
@@ -467,6 +485,7 @@ async fn main() -> ExitCode {
         ["backup", "check", to, flags @ ..] if !to.starts_with("--") => backup_check(to, flags),
         ["backup", "plan", to, flags @ ..] if !to.starts_with("--") => backup_plan(to, flags),
         ["erasures", "apply", addr, key, file] => erasures_apply(addr, key, file).await,
+        ["backup", "signer", flags @ ..] => return backup_signer(flags).await,
         ["backup", flags @ ..] => return run_backup(flags).await,
         ["restore", from, flags @ ..] if !from.starts_with("--") => {
             return restore(from, flags).unwrap_or_else(|e| {
@@ -1200,15 +1219,45 @@ fn backup_key(file: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// The backup target `to`, its requests presigned by the signer `--signer` (or
+/// `KERNABLE_S3_SIGNER`) names, if one does: asked with `--signer-key` (or
+/// `KERNABLE_S3_SIGNER_KEY`), else with `default_key`.
+fn backup_target(
+    to: &str,
+    values: &HashMap<&str, Vec<&str>>,
+    default_key: Option<&str>,
+) -> Result<Box<dyn backup::target::Target>> {
+    let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+    let one = |flag: &str| {
+        values
+            .get(flag)
+            .and_then(|v| v.first())
+            .map(|v| v.to_string())
+    };
+    let signer = match one("--signer").or_else(|| env("KERNABLE_S3_SIGNER")) {
+        None => None,
+        Some(url) => {
+            let key_path = one("--signer-key")
+                .or_else(|| env("KERNABLE_S3_SIGNER_KEY"))
+                .or(default_key.map(str::to_owned))
+                .ok_or("a signer needs a key to ask it with: --signer-key <file>")?;
+            let key = signing::read_signing_key(&key_path)
+                .map_err(|e| format!("--signer-key {key_path}: {e}"))?;
+            Some(backup::target::Signer::new(&url, key).map_err(boxed)?)
+        }
+    };
+    backup::target::open(to, signer).map_err(boxed)
+}
+
 /// `kernable backup check <target> --backup-key <file>`.
 fn backup_check(to: &str, flags: &[&str]) -> Result<bool> {
-    let values = flag_values(flags, &["--backup-key"])?;
+    let values = flag_values(flags, &["--backup-key", "--signer", "--signer-key"])?;
     let key = values
         .get("--backup-key")
         .and_then(|v| v.first())
         .ok_or("--backup-key is missing")?;
     let crypt = backup::crypt::BackupKey::read(Path::new(key)).map_err(boxed)?;
-    let target = backup::target::open(to).map_err(boxed)?;
+    let target = backup_target(to, &values, None)?;
     let started = std::time::Instant::now();
     match backup::check(target.as_ref(), &crypt) {
         Ok(c) => {
@@ -1240,13 +1289,13 @@ fn backup_check(to: &str, flags: &[&str]) -> Result<bool> {
 
 /// `kernable backup list <target> --backup-key <file>`.
 fn backup_list(to: &str, flags: &[&str]) -> Result<bool> {
-    let values = flag_values(flags, &["--backup-key"])?;
+    let values = flag_values(flags, &["--backup-key", "--signer", "--signer-key"])?;
     let key = values
         .get("--backup-key")
         .and_then(|v| v.first())
         .ok_or("--backup-key is missing")?;
     let crypt = backup::crypt::BackupKey::read(Path::new(key)).map_err(boxed)?;
-    let target = backup::target::open(to).map_err(boxed)?;
+    let target = backup_target(to, &values, None)?;
     let gens = backup::generations(target.as_ref(), &crypt).map_err(boxed)?;
     if gens.is_empty() {
         println!("no generations in {}", target.describe());
@@ -1295,6 +1344,8 @@ async fn run_backup(flags: &[&str]) -> ExitCode {
                 "--keep",
                 "--check-hours",
                 "--status-file",
+                "--signer",
+                "--signer-key",
             ],
         )?;
         let one = |flag: &str| values.get(flag).and_then(|v| v.first().copied());
@@ -1329,7 +1380,7 @@ async fn run_backup(flags: &[&str]) -> ExitCode {
             addrs,
             key,
             grant,
-            target: Arc::from(backup::target::open(need("--to")?).map_err(boxed)?),
+            target: Arc::from(backup_target(need("--to")?, &values, Some(key_path))?),
             crypt: Arc::new(
                 backup::crypt::BackupKey::read(Path::new(need("--backup-key")?)).map_err(boxed)?,
             ),
@@ -1363,6 +1414,68 @@ async fn run_backup(flags: &[&str]) -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        _ = shutdown_signal() => ExitCode::SUCCESS,
+    }
+}
+
+/// `kernable backup signer --listen <addr> --to s3://<bucket>/<prefix> --allow <key.pub>,...`:
+/// the reference signer, signing with the credentials of the environment until stopped.
+async fn backup_signer(flags: &[&str]) -> ExitCode {
+    let parsed = (|| -> Result<(String, backup::signer::Reference)> {
+        let values = flag_values(flags, &["--listen", "--to", "--allow", "--expires-seconds"])?;
+        let one = |flag: &str| values.get(flag).and_then(|v| v.first().copied());
+        let need = |flag: &str| one(flag).ok_or_else(|| format!("{flag} is missing"));
+        let mut allowed = Vec::new();
+        for path in need("--allow")?.split(',').filter(|p| !p.is_empty()) {
+            let key =
+                signing::read_verifying_key(path).map_err(|e| format!("--allow {path}: {e}"))?;
+            allowed.push(signing::key_id(&key));
+        }
+        let expires = match one("--expires-seconds") {
+            None => 300,
+            Some(v) => v
+                .parse::<u64>()
+                .ok()
+                .filter(|n| (1..=7 * 86_400).contains(n))
+                .ok_or_else(|| format!("--expires-seconds {v}: 1 to 604800"))?,
+        };
+        let keys = backup::target::Keys::from_env().map_err(boxed)?;
+        let reference = backup::signer::Reference::new(
+            keys,
+            need("--to")?,
+            allowed,
+            Duration::from_secs(expires),
+        )
+        .map_err(boxed)?;
+        Ok((need("--listen")?.to_owned(), reference))
+    })();
+    let (listen, reference) = match parsed {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let filter = EnvFilter::try_from_env("KERNABLE_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
+    let listener = match tokio::net::TcpListener::bind(&listen).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!(listen, error = %e, "the backup signer cannot listen");
+            return ExitCode::FAILURE;
+        }
+    };
+    tracing::info!(listen, "the backup signer signs");
+    tokio::select! {
+        result = Arc::new(reference).serve(listener) => {
+            if let Err(e) = result {
+                tracing::error!(error = %e, "the backup signer stopped");
+            }
+            ExitCode::FAILURE
+        }
         _ = shutdown_signal() => ExitCode::SUCCESS,
     }
 }
@@ -1414,12 +1527,22 @@ fn print_erasures(point: &str, plan: &backup::Plan) {
 /// `kernable backup plan <target> --backup-key <file> [--at <time> | --at-record <n>]
 /// [--json <file>]`: what a restore to the point uses, and the erasures after it.
 fn backup_plan(to: &str, flags: &[&str]) -> Result<bool> {
-    let values = flag_values(flags, &["--backup-key", "--at", "--at-record", "--json"])?;
+    let values = flag_values(
+        flags,
+        &[
+            "--backup-key",
+            "--at",
+            "--at-record",
+            "--json",
+            "--signer",
+            "--signer-key",
+        ],
+    )?;
     let one = |flag: &str| values.get(flag).and_then(|v| v.first().copied());
     let until = until_of(&values)?;
     let key = one("--backup-key").ok_or("--backup-key is missing")?;
     let crypt = backup::crypt::BackupKey::read(Path::new(key)).map_err(boxed)?;
-    let target = backup::target::open(to).map_err(boxed)?;
+    let target = backup_target(to, &values, None)?;
     let plan = backup::plan(target.as_ref(), &crypt, until).map_err(boxed)?;
     let point = point_of(until);
     println!(
@@ -1441,7 +1564,14 @@ fn backup_plan(to: &str, flags: &[&str]) -> Result<bool> {
 /// apply them again, fills new, empty stores, then checks the store.
 fn restore(from: &str, flags: &[&str]) -> Result<ExitCode> {
     // Every flag takes a value: the backup's go here, the stores' to StoreFlags.
-    const MINE: [&str; 4] = ["--backup-key", "--at", "--at-record", "--reapply-erasures"];
+    const MINE: [&str; 6] = [
+        "--backup-key",
+        "--at",
+        "--at-record",
+        "--reapply-erasures",
+        "--signer",
+        "--signer-key",
+    ];
     let (mut mine, mut rest) = (Vec::new(), Vec::new());
     for pair in flags.chunks(2) {
         match MINE.contains(&pair[0]) {
@@ -1454,7 +1584,7 @@ fn restore(from: &str, flags: &[&str]) -> Result<ExitCode> {
     let until = until_of(&values)?;
     let key = one("--backup-key").ok_or("--backup-key is missing")?;
     let crypt = backup::crypt::BackupKey::read(Path::new(key)).map_err(boxed)?;
-    let target = backup::target::open(from).map_err(boxed)?;
+    let target = backup_target(from, &values, None)?;
     let flags = StoreFlags::parse(&rest, true)?;
     // Before anything is written: the erasures the point leaves out. The restore is exact by
     // default (before an erasing event, nothing was erased); the operator may apply them again.

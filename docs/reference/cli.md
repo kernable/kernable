@@ -285,7 +285,7 @@ Fills new, empty stores from an export, then checks the store like verify, with 
 kernable node <project.toml>
 ```
 
-Runs one node of a project: the kernel and, with a [backup] section, the backup follower, as child processes it restarts when they exit. It reads the file again when it changed (it looks twice a second) or on SIGHUP, and restarts a child whose command changed or whose binary was replaced (a kernel hands its stores over to the new one). SIGTERM or SIGINT stops the children (SIGKILL after stop-seconds, default 30). The file has [kernel] (flags: the flags of kernable start without their dashes, env, binary, image, cpus, memory, stop-seconds), [backup] (to, key, backup-key, follow, segment-seconds, base-hours, keep, check-hours, cpus, memory, env), [pair] (witness, node-key, advertise, peer, kernel-keys, standby-timeout-ms, witness-generation: this node's kernel of a pair), [node] (instance, project, podman, metrics-listen: GET /metrics, cpus and `memory:` the instance's total, network: own, the default, or host), any number of [[secret]] (name, and file or command) and any number of [[service]] (name, build, file, command, key, env, secrets, cpus, memory, stop-seconds, writable, expose): containers built with podman on the node, rebuilt on SIGHUP, run after the kernel with `KERNABLE_URL`, `KERNABLE_INSTANCE` and their key. Every child's output comes out of the node prefixed with its name. Paths are relative to its directory. Exit 2 if the file is invalid at start.
+Runs one node of a project: the kernel and, with a [backup] section, the backup follower, as child processes it restarts when they exit. It reads the file again when it changed (it looks twice a second) or on SIGHUP, and restarts a child whose command changed or whose binary was replaced (a kernel hands its stores over to the new one). SIGTERM or SIGINT stops the children (SIGKILL after stop-seconds, default 30). The file has [kernel] (flags: the flags of kernable start without their dashes, env, binary, image, cpus, memory, stop-seconds), [backup] (to, key, backup-key, follow, segment-seconds, base-hours, keep, check-hours, signer, cpus, memory, env), [pair] (witness, node-key, advertise, peer, kernel-keys, standby-timeout-ms, witness-generation: this node's kernel of a pair), [node] (instance, project, podman, metrics-listen: GET /metrics, cpus and `memory:` the instance's total, network: own, the default, or host), any number of [[secret]] (name, and file or command) and any number of [[service]] (name, build, file, command, key, env, secrets, cpus, memory, stop-seconds, writable, expose): containers built with podman on the node, rebuilt on SIGHUP, run after the kernel with `KERNABLE_URL`, `KERNABLE_INSTANCE` and their key. Every child's output comes out of the node prefixed with its name. Paths are relative to its directory. Exit 2 if the file is invalid at start.
 
 ### `kernable expose`
 
@@ -308,15 +308,15 @@ Writes a new backup key (32 random bytes in hex) to `<file>`, readable by its ow
 ### `kernable backup`
 
 ```text
-kernable backup --follow <addr>[,<addr>] --key <key> --to <target> --backup-key <file> [--segment-seconds <s>] [--base-hours <h>] [--keep <n>] [--check-hours <h>] [--status-file <file>]
+kernable backup --follow <addr>[,<addr>] --key <key> --to <target> --backup-key <file> [--segment-seconds <s>] [--base-hours <h>] [--keep <n>] [--check-hours <h>] [--status-file <file>] [--signer <url>] [--signer-key <file>]
 ```
 
-Follows the kernel at `<addr>` (started with `--backup` on; both kernels of a pair, comma-separated) and writes its records to `<target>`, encrypted with the backup key, until stopped: a base, then a segment every `--segment-seconds` (default 5) or 16 MiB, a new generation every `--base-hours` (default 24), the newest `--keep` (default 7) kept. `<key>` needs a grant for backup on `*`; the grant file next to it is sent along. `<target>` is `file:<dir>` or `s3://<bucket>/<prefix>`, with `KERNABLE_S3_ENDPOINT`, `KERNABLE_S3_REGION`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. Vault values stay encrypted with the kernel's vault key besides. With `--check-hours`, it also checks the backup that often, as backup check does, and logs what it found. With `--status-file`, it notes there (JSON) when it last uploaded, up to which record, and when it last checked and what it found.
+Follows the kernel at `<addr>` (started with `--backup` on; both kernels of a pair, comma-separated) and writes its records to `<target>`, encrypted with the backup key, until stopped: a base, then a segment every `--segment-seconds` (default 5) or 16 MiB, a new generation every `--base-hours` (default 24), the newest `--keep` (default 7) kept. `<key>` needs a grant for backup on `*`; the grant file next to it is sent along. `<target>` is `file:<dir>` or `s3://<bucket>/<prefix>`, with `KERNABLE_S3_ENDPOINT`, `KERNABLE_S3_REGION`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. Vault values stay encrypted with the kernel's vault key besides. With `--check-hours`, it also checks the backup that often, as backup check does, and logs what it found. With `--status-file`, it notes there (JSON) when it last uploaded, up to which record, and when it last checked and what it found. With `--signer <url>` (or `KERNABLE_S3_SIGNER`), an s3:// target needs no credentials: for every request it asks the signer for a presigned one, signed with `<key>` (or `--signer-key`, `KERNABLE_S3_SIGNER_KEY`); `KERNABLE_S3_SIGNER_CA` names the CA certificates the signer's certificate is checked against. While the target or its signer fails, it logs an error, tries again, and the kernel keeps the records.
 
 ### `kernable backup list`
 
 ```text
-kernable backup list <target> --backup-key <file>
+kernable backup list <target> --backup-key <file> [--signer <url> --signer-key <file>]
 ```
 
 Prints the generations of a backup: each base's record and time, how far its segments reach, and the vault key its vault values are sealed with (a generation has one; a kernel whose vault key changed begins a new one).
@@ -324,7 +324,7 @@ Prints the generations of a backup: each base's record and time, how far its seg
 ### `kernable backup plan`
 
 ```text
-kernable backup plan <target> --backup-key <file> [--at <time> | --at-record <n>] [--json <file>]
+kernable backup plan <target> --backup-key <file> [--at <time> | --at-record <n>] [--json <file>] [--signer <url> --signer-key <file>]
 ```
 
 Prints what a restore to that point builds from (the generation and its vault key) and the erasures the backup holds after it: committed later, they are undone by such a restore. `--json` writes the same as JSON.
@@ -332,7 +332,7 @@ Prints what a restore to that point builds from (the generation and its vault ke
 ### `kernable backup check`
 
 ```text
-kernable backup check <target> --backup-key <file>
+kernable backup check <target> --backup-key <file> [--signer <url> --signer-key <file>]
 ```
 
 Reads the newest generation all through, without writing a store: every object opens with the key and decodes, and the records chain from the base to the last segment. Prints the record a restore reaches and how old it is; exits 1 if the backup does not check out.
@@ -340,10 +340,18 @@ Reads the newest generation all through, without writing a store: every object o
 ### `kernable restore`
 
 ```text
-kernable restore <target> --backup-key <file> [--at <time> | --at-record <n>] [--reapply-erasures <file>] [--store <s>] [--data-store <d>] [--vault-store <v> --vault-key <k>] [--kernel-pub <kernel.pub>]...
+kernable restore <target> --backup-key <file> [--at <time> | --at-record <n>] [--reapply-erasures <file>] [--signer <url> --signer-key <file>] [--store <s>] [--data-store <d>] [--vault-store <v> --vault-key <k>] [--kernel-pub <kernel.pub>]...
 ```
 
-Fills new, empty stores from a backup: the newest generation that begins before `--at` (UTC, like `2026-11-04T13:40:00Z`) or `--at-record`, its base, then its segments up to there (default: everything), then checks the store like verify, with the same output and exit codes. `--vault-key` must be the source's vault key of that generation's time; the flags name the stores as for kernable start. Without `--kernel-pub`, the store is checked with the kernel keys the backup names. To a point, it first lists the erasures committed after it: restored as it was, they did not happen yet. To apply them again, `--reapply-erasures <file>` (or yes when asked) writes them to `<file>` for kernable erasures apply.
+Fills new, empty stores from a backup: the newest generation that begins before `--at` (UTC, like `2026-11-04T13:40:00Z`) or `--at-record`, its base, then its segments up to there (default: everything), then checks the store like verify, with the same output and exit codes. `--vault-key` must be the source's vault key of that generation's time; the flags name the stores as for kernable start. Without `--kernel-pub`, the store is checked with the kernel keys the backup names. To a point, it first lists the erasures committed after it: restored as it was, they did not happen yet. To apply them again, `--reapply-erasures <file>` (or yes when asked) writes them to `<file>` for kernable erasures apply. With `--signer` and `--signer-key`, it reads an s3:// target through a signer, as backup list, plan and check do.
+
+### `kernable backup signer`
+
+```text
+kernable backup signer --listen <addr> --to s3://<bucket>/<prefix> --allow <key.pub>[,<key.pub>] [--expires-seconds <s>]
+```
+
+A reference backup signer: answers the signer protocol over plain HTTP on `<addr>` with requests presigned with the credentials of the environment (as for an s3:// target), valid for `--expires-seconds` (default 300), for that prefix and those below it, to the keys `--allow` names. For tests and trusted networks; a signing service keeps the credentials away from the machines it signs for.
 
 ### `kernable erasures apply`
 

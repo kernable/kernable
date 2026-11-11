@@ -577,6 +577,34 @@ pub fn switchover_message(issued_at: i64) -> Vec<u8> {
     Msg::new("kernable.v1.switchover").i64(issued_at).0
 }
 
+/// What a backup follower (or `kernable backup list`, `check`, `plan`, `restore`) signs to ask
+/// a backup signer for a presigned request: `op` (`put`, `get`, `list` or `delete`) on the
+/// object `name` under `prefix` in `bucket` (for `list`: the names starting with `name`, from
+/// `continuation` on), with the SHA-256 and length of the body it will send (`put`; others the
+/// hash of nothing and 0).
+#[allow(clippy::too_many_arguments)]
+pub fn backup_object_message(
+    op: &str,
+    bucket: &str,
+    prefix: &str,
+    name: &str,
+    continuation: &str,
+    sha256: &[u8],
+    length: u64,
+    issued_at: i64,
+) -> Vec<u8> {
+    Msg::new("kernable.v1.backup-object")
+        .str(op)
+        .str(bucket)
+        .str(prefix)
+        .str(name)
+        .str(continuation)
+        .bytes(sha256)
+        .u64(length)
+        .i64(issued_at)
+        .0
+}
+
 /// What a kernel of a pair signs to ask the witness (`WitnessRequest`).
 pub fn witness_message(
     op: i32,

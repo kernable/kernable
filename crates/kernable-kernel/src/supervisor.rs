@@ -308,6 +308,8 @@ struct BackupSection {
     base_hours: Option<u64>,
     keep: Option<u64>,
     check_hours: Option<u64>,
+    /// A backup signer's URL: the follower asks it to presign every request, with its key.
+    signer: Option<String>,
     cpus: Option<String>,
     memory: Option<String>,
     #[serde(default)]
@@ -582,6 +584,9 @@ fn plan_on(text: &str, dir: &Path, this: &Path, contained: bool) -> Result<Plan,
             "--status-file".into(),
             "backup.status".into(),
         ];
+        if let Some(signer) = b.signer {
+            args.extend(["--signer".into(), signer]);
+        }
         for (flag, value) in [
             ("--segment-seconds", b.segment_seconds),
             ("--base-hours", b.base_hours),
@@ -2099,6 +2104,18 @@ segment-seconds = 2
             ]
         );
         assert_eq!(specs[0].binary, Path::new("/bin/kernable"));
+        // With a signer, the follower asks it instead of holding storage credentials.
+        let signed = PROJECT.replace(
+            "segment-seconds = 2",
+            "signer = \"https://signer.example.com/backup\"",
+        );
+        let signed = plan(&signed, Path::new("/srv/shop"), Path::new("/bin/kernable"))
+            .unwrap()
+            .children;
+        assert_eq!(
+            signed[1].args[11..],
+            ["--signer", "https://signer.example.com/backup"]
+        );
     }
 
     #[test]

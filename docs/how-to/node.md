@@ -30,6 +30,7 @@ follow = "10.0.0.1:7233,10.0.0.2:7233"     # optional: default the kernel's list
 segment-seconds = 5                        # optional, as base-hours and keep
 check-hours = 24                           # optional: reads the backup through that often
 env = { AWS_ACCESS_KEY_ID = "…", AWS_SECRET_ACCESS_KEY = "…" }
+# signer = "https://signer.example.com/backup"   # instead of credentials: a backup signer presigns each request
 
 [pair]                                     # optional: one node of a pair
 witness = "10.0.0.9:7300"
@@ -63,7 +64,7 @@ name = "stripe"
 file = "secrets/stripe.key"                # or: command = ["vault", "kv", "get", "-field=key", "shop/stripe"]
 ```
 
-`flags` are the flags of `kernable start` ([Configuration](../reference/configuration)) without their dashes; `dev = true` stands for `--dev`. With a `[backup]` section the kernel gets `--backup on`; it takes `cpus` and `memory` too. Paths are relative to the file's directory, where the children run; on Linux every path the kernel and the backup follower use lies inside it, since that directory is all their container sees. Unknown keys are refused, so a typo does not go unnoticed: at start the node exits with 2, later it logs the error and the children run on as they are.
+`flags` are the flags of `kernable start` ([Configuration](../reference/configuration)) without their dashes; `dev = true` stands for `--dev`. With a `[backup]` section the kernel gets `--backup on`; it takes `cpus` and `memory` too, and `signer`, the URL of a [backup signer](./backup#without-credentials-on-the-server-a-signer), so that the follower needs no storage credentials in its `env`. Paths are relative to the file's directory, where the children run; on Linux every path the kernel and the backup follower use lies inside it, since that directory is all their container sees. Unknown keys are refused, so a typo does not go unnoticed: at start the node exits with 2, later it logs the error and the children run on as they are.
 
 ```sh
 kernable node project.toml

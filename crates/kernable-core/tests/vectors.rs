@@ -351,6 +351,21 @@ fn vectors() -> Value {
             json!({"generation": 2, "witness": "shop-w2.example.com:443", "issued_at": 1_700_000_000_000i64}),
             signing::witness_generation_message(2, "shop-w2.example.com:443", 1_700_000_000_000),
         ),
+        "backup_object": entry(
+            json!({"op": "put", "bucket": "acme-backups", "prefix": "shop", "name": "g0001700000000000/seg-1",
+                   "continuation": "", "sha256_hex": hex::encode(Sha256::digest(b"sealed")), "length": 6,
+                   "issued_at": 1_700_000_000_000i64}),
+            signing::backup_object_message(
+                "put",
+                "acme-backups",
+                "shop",
+                "g0001700000000000/seg-1",
+                "",
+                &Sha256::digest(b"sealed"),
+                6,
+                1_700_000_000_000,
+            ),
+        ),
         "grant": entry(
             json!({"key_id": "8b84", "succeeds": "1f0a", "issued_at": 1_700_000_000_000i64,
                    "permissions": [{"action": "submit", "types": ["orders.*", "identity.Register"]}, {"action": "listen", "types": ["*"]}]}),

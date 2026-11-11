@@ -21,11 +21,15 @@
 //! in time.
 
 pub mod crypt;
+pub mod signer;
 pub mod target;
 
 use std::{
     collections::HashSet,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicI64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -92,6 +96,16 @@ pub struct Status {
     pub checked_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check_error: Option<String>,
+    /// While the target (its storage, or its signer) cannot be written: why the last attempt
+    /// failed, and since when (ms); both cleared by the next upload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_error: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub failing_since: i64,
+}
+
+fn is_zero(n: &i64) -> bool {
+    *n == 0
 }
 
 /// Updates the status file at `path`, if there is one: read, changed, written in one step.
@@ -381,7 +395,10 @@ fn refuse_unreadable(gens: &[Generation], crypt: &BackupKey) -> Result<(), BoxEr
 /// Runs the follower until it fails to start; reconnects whenever the stream ends. Refuses to
 /// start when the target holds finished generations but none can be read with its key.
 pub async fn run(follower: Follower) -> Result<(), BoxError> {
-    let follower = Arc::new(follower);
+    let follower = Arc::new(Running {
+        follower,
+        failing_since: AtomicI64::new(0),
+    });
     let (target, crypt) = (Arc::clone(&follower.target), Arc::clone(&follower.crypt));
     match blocking(move || generations(target.as_ref(), &crypt)).await {
         Ok(gens) => refuse_unreadable(&gens, &follower.crypt)?,
@@ -405,13 +422,81 @@ pub async fn run(follower: Follower) -> Result<(), BoxError> {
         match follow_once(&follower, &addr, &mut fresh).await {
             Ok(()) => delay = Duration::from_secs(1),
             Err(e) => {
-                tracing::warn!(kernel = %addr, error = %e, "the backup follower lost the kernel; connecting again in {delay:?}");
-                turn += 1;
+                match e.downcast_ref::<target::StorageError>() {
+                    // Nothing is acknowledged that is not in the target: the kernel keeps the
+                    // records, and the follower takes them once the target is back.
+                    Some(storage) => {
+                        let since = failing(&follower, &e.to_string());
+                        tracing::error!(
+                            to = %follower.target.describe(),
+                            signer = storage.signer,
+                            failing_s = (now_ms() - since) / 1000,
+                            error = %e,
+                            "the backup is falling behind: its target cannot be written; the kernel keeps the records, trying again in {delay:?}"
+                        );
+                    }
+                    None => {
+                        tracing::warn!(kernel = %addr, error = %e, "the backup follower lost the kernel; connecting again in {delay:?}");
+                        turn += 1;
+                    }
+                }
                 tokio::time::sleep(delay).await;
                 delay = (delay * 2).min(Duration::from_secs(30));
             }
         }
     }
+}
+
+/// A follower while it runs, and since when its target cannot be written (ms; 0: it can).
+struct Running {
+    follower: Follower,
+    failing_since: AtomicI64,
+}
+
+impl std::ops::Deref for Running {
+    type Target = Follower;
+
+    fn deref(&self) -> &Follower {
+        &self.follower
+    }
+}
+
+/// Notes that the target cannot be written (`why`), in the status file too; returns since when
+/// it fails.
+fn failing(running: &Running, why: &str) -> i64 {
+    let now = now_ms();
+    let since =
+        match running
+            .failing_since
+            .compare_exchange(0, now, Ordering::Relaxed, Ordering::Relaxed)
+        {
+            Ok(_) => now,
+            Err(since) => since,
+        };
+    note(&running.status_file, |s| {
+        s.failing_since = since;
+        s.upload_error = Some(why.to_owned());
+    });
+    since
+}
+
+/// Notes an upload up to `record`; after a time the target could not be written, logs that it
+/// can again.
+fn uploaded(running: &Running, record: u64) {
+    let since = running.failing_since.swap(0, Ordering::Relaxed);
+    if since != 0 {
+        tracing::info!(
+            record,
+            failed_s = (now_ms() - since) / 1000,
+            "the backup's target can be written again: the backup catches up"
+        );
+    }
+    note(&running.status_file, |s| {
+        s.uploaded_at = now_ms();
+        s.record = record;
+        s.upload_error = None;
+        s.failing_since = 0;
+    });
 }
 
 /// Runs `f` on a blocking thread: the target's requests block.
@@ -423,7 +508,7 @@ async fn blocking<T: Send + 'static>(
 
 /// One connection: continue the current generation, or begin a new one.
 async fn follow_once(
-    follower: &Arc<Follower>,
+    follower: &Arc<Running>,
     addr: &str,
     fresh: &mut bool,
 ) -> Result<(), BoxError> {
@@ -537,16 +622,13 @@ async fn follow_once(
             .map(|first| segment_name(&generation, first, head.seq, &head.hash));
         let seq = head.seq;
         let tx = tx.clone();
-        let status_file = follower.status_file.clone();
+        let running = Arc::clone(follower);
         async move {
             let Some(name) = name else {
                 return Ok::<(), BoxError>(());
             };
             blocking(move || target.put(&name, &crypt.seal(&name, &plain)?)).await?;
-            note(&status_file, |s| {
-                s.uploaded_at = now_ms();
-                s.record = seq;
-            });
+            uploaded(&running, seq);
             // In the target: the kernel may drop these records from its log now.
             tx.send(FollowRequest {
                 msg: Some(follow_request::Msg::Ack(FollowAck { seq })),
@@ -602,7 +684,7 @@ async fn next(
 
 /// Receives an image into the base parts of `generation`; returns where it stands.
 async fn take_image(
-    follower: &Arc<Follower>,
+    follower: &Arc<Running>,
     generation: &str,
     inbound: &mut Streaming<FollowResponse>,
     vault_key: &str,
@@ -647,7 +729,7 @@ async fn take_image(
 }
 
 async fn write_base(
-    follower: &Arc<Follower>,
+    follower: &Arc<Running>,
     generation: &str,
     parts: u32,
     head: &Head,
@@ -668,10 +750,7 @@ async fn write_base(
     let name = format!("{generation}/base.done");
     let seq = base.seq;
     blocking(move || target.put(&name, &crypt.seal(&name, &base.encode_to_vec())?)).await?;
-    note(&follower.status_file, |s| {
-        s.uploaded_at = now_ms();
-        s.record = seq;
-    });
+    uploaded(follower, seq);
     Ok(())
 }
 
@@ -679,7 +758,7 @@ async fn write_base(
 /// `current`; deletes nothing while no generation can be read with the key, and never a
 /// generation whose base cannot be read. Logs what fails, and tries again with the next
 /// generation.
-async fn prune(follower: &Arc<Follower>, current: &str, vault_key: &str) {
+async fn prune(follower: &Arc<Running>, current: &str, vault_key: &str) {
     let (target, crypt, keep) = (
         Arc::clone(&follower.target),
         Arc::clone(&follower.crypt),
@@ -1315,7 +1394,7 @@ mod tests {
     fn a_backup_written_with_another_key_is_refused_not_pruned() {
         let dir = std::env::temp_dir().join(format!("kn-backup-wrong-key-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let target = target::open(&format!("file:{}", dir.display())).unwrap();
+        let target = target::open(&format!("file:{}", dir.display()), None).unwrap();
         let right = BackupKey::new(&[7; 32]);
         for at in [1_000, 2_000] {
             let name = format!("{}/base.done", generation_name(at));
@@ -1351,7 +1430,7 @@ mod tests {
     fn one_damaged_generation_is_left_out_and_kept_not_refused() {
         let dir = std::env::temp_dir().join(format!("kn-backup-damaged-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let target = target::open(&format!("file:{}", dir.display())).unwrap();
+        let target = target::open(&format!("file:{}", dir.display()), None).unwrap();
         let key = BackupKey::new(&[7; 32]);
         for at in [1_000, 2_000, 3_000] {
             let name = format!("{}/base.done", generation_name(at));
@@ -1512,7 +1591,7 @@ mod tests {
     fn a_plan_lists_the_erasures_after_the_point_with_their_commands() {
         let dir = std::env::temp_dir().join(format!("kn-backup-plan-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let target = target::open(&format!("file:{}", dir.display())).unwrap();
+        let target = target::open(&format!("file:{}", dir.display()), None).unwrap();
         let key = BackupKey::new(&[7; 32]);
         // Generation 1: c1 erases ann before 2_000; c2 is queued before and commits after it;
         // c3 is queued and erases bob after it.
@@ -1656,7 +1735,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kn-backup-vault-key-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let target = target::open(&format!("file:{}", dir.join("backup").display())).unwrap();
+        let target = target::open(&format!("file:{}", dir.join("backup").display()), None).unwrap();
         let key = BackupKey::new(&[7; 32]);
         let vault_key = [5u8; 32];
         let other = kernable_core::signing::vault_key_id(&[6u8; 32]);

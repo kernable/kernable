@@ -86,11 +86,62 @@ The steps above copy the stores now and then: what happened since the last copy 
      --to s3://acme-backups/shop --backup-key backup-encryption.key
    ```
 
-   `--follow` names both kernels of a pair: the follower turns to whichever is the primary. `--to` is `s3://<bucket>/<prefix>` for AWS S3 and S3-compatible storage (Hetzner, MinIO with `KERNABLE_S3_PATH_STYLE=1`), or `file:<directory>`. `KERNABLE_S3_ENDPOINT` may carry a path (`https://storage.example.com/s3`); a bucket name with dots needs `KERNABLE_S3_PATH_STYLE=1` over HTTPS, as its name does not match the endpoint's certificate otherwise. The connection uses `KERNABLE_TLS_*`, as the SDKs do.
+   `--follow` names both kernels of a pair: the follower turns to whichever is the primary. `--to` is `s3://<bucket>/<prefix>` for AWS S3 and S3-compatible storage (Hetzner, MinIO with `KERNABLE_S3_PATH_STYLE=1`), or `file:<directory>`. `KERNABLE_S3_ENDPOINT` may carry a path (`https://storage.example.com/s3`); a bucket name with dots needs `KERNABLE_S3_PATH_STYLE=1` over HTTPS, as its name does not match the endpoint's certificate otherwise. The connection uses `KERNABLE_TLS_*`, as the SDKs do. To keep storage credentials off the machine, give it a [signer](#without-credentials-on-the-server-a-signer) instead.
 
 What it writes, in **generations**: a base (a full image of the kernel, or nothing if the record log reaches back to the start), then a segment every `--segment-seconds` (default 5), 16 MiB or 4,096 records. The follower acknowledges records to the kernel only once their segment is in the target, so the kernel keeps them until then. A new generation starts every `--base-hours` (default 24), and the newest `--keep` (default 7) are kept. So a lost primary loses at most the last few seconds that were not uploaded yet, unless a [standby](./standby) holds them. The follower never holds up the kernel: it is not a standby, and a write never waits for it. Stopped and started again, it continues where its last segment ends; if the kernel no longer keeps those records, or its log differs from the backup's, a new generation begins.
 
 `kernable backup list s3://acme-backups/shop --backup-key backup-encryption.key` shows the generations, each base's record and time, and how far its segments reach.
+
+### Without credentials on the server: a signer
+
+Storage credentials on a machine let whoever takes the machine read, overwrite or delete every backup they reach. To keep them off it, give the follower a **signer**: a small HTTP service, run where the credentials are, that presigns each request for it. The follower asks it right before every request to object storage, then sends the presigned request to the storage itself; the backup's bytes never pass through the signer.
+
+```sh
+kernable backup --follow https://10.0.0.1:7233,https://10.0.0.2:7233 --key backup.key \
+  --to s3://acme-backups/shop --backup-key backup-encryption.key \
+  --signer https://signer.example.com/backup
+```
+
+`--signer` (or `KERNABLE_S3_SIGNER`) takes the place of `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `KERNABLE_S3_ENDPOINT` and the other `KERNABLE_S3_*` variables: the follower needs none of them. It signs what it asks with its own key (`--key`; another one with `--signer-key <file>` or `KERNABLE_S3_SIGNER_KEY`), so the signer knows which instance asks. The signer's certificate is checked against the public roots, or only against the CA certificates in the PEM file `KERNABLE_S3_SIGNER_CA`. In a node's `[backup]`: `signer = "https://…"`. `kernable backup list`, `plan`, `check` and `kernable restore` take `--signer <url> --signer-key <file>` as well.
+
+**While the signer is away** (or the storage), nothing is uploaded and nothing acknowledged, so the kernel keeps the records: up to a million beyond what a standby needs; a follower further behind takes a full image when it is back, a new generation. The follower logs, as an error, `the backup is falling behind: its target cannot be written`, with why (`the backup signer … cannot be reached`, `… refused …`, or the storage's answer), tries again after 1 s and then up to every 30 s, and notes `upload_error` and `failing_since` in its `--status-file`: alert on the log line or on `failing_since`. Once the signer answers again, the follower takes what the kernel kept, logs `the backup's target can be written again`, and clears both.
+
+**The protocol.** For each request to object storage, the follower `POST`s JSON to the signer's URL:
+
+```json
+{
+  "op": "put",
+  "bucket": "acme-backups",
+  "prefix": "shop",
+  "name": "g1762862400000/seg-00000000000000000001-00000000000000000412-9f2c…",
+  "continuation": "",
+  "sha256": "<the body's SHA-256, hex>",
+  "length": 52311,
+  "issued_at": 1762862412345,
+  "key_id": "<the key's ID>",
+  "sig": "<the Ed25519 signature, hex>"
+}
+```
+
+- `op`: `put` (a PUT of the object), `get` (a GET), `delete` (a DELETE), or `list`: a GET of the bucket with `list-type=2` (ListObjectsV2) for the objects whose keys start with `<prefix>/<name>` (`name` may be empty), after `continuation` (the `NextContinuationToken` of the page before; empty for the first page). Objects go whole: the follower sends no parts and asks for no ranges (a base part is at most 64 MiB).
+- `name` is relative to `prefix`: the object's key is `<prefix>/<name>`.
+- `sha256` and `length` describe the body a put sends; the other operations send none (the SHA-256 of nothing, 0).
+- `sig` signs the message `kernable.v1.backup-object` ([Signatures](../reference/signing)) with the key `key_id` names; `issued_at` (ms) must be within 60 s of the signer's clock.
+
+The signer checks the signature and the time, and decides whether that key may do `op` under that bucket and prefix: the kernel's grants play no part. It answers `200`:
+
+```json
+{
+  "method": "PUT",
+  "url": "https://fsn1.your-objectstorage.com/acme-backups/shop/g1762862400000/seg-…?X-Amz-Algorithm=AWS4-HMAC-SHA256&…&X-Amz-Signature=…",
+  "headers": {},
+  "expires_at": 1762862712345
+}
+```
+
+The follower sends `method` to `url`, with `headers` (if any) and the body. `method` must be the operation's, and `expires_at` (ms) later than now; the follower keeps no answer, it asks again for every request. The URL may name the bucket in its path or its host. Any other status (with `{"error": "…"}`) means the signer refused (4xx) or failed (5xx): the follower logs it and tries again later.
+
+**A reference signer** answers this for tests and for a trusted network: `kernable backup signer --listen 127.0.0.1:7390 --to s3://acme-backups/shop --allow backup.pub` signs with the credentials of its environment (as for `--to s3://`), for that prefix and the ones below it, for the keys `--allow` names (comma-separated `.pub` files), each request valid for `--expires-seconds` (default 300). It speaks plain HTTP: put TLS in front of it beyond one machine. A signing service for many instances does the same with one prefix per key.
 
 ### Restore from a continuous backup
 

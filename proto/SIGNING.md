@@ -59,6 +59,7 @@ Each message starts with a `str` **tag** for domain separation. Payloads are sig
 | Operator tooling | `kernable.v1.promote` | `issued_at: i64` (a key granted `manage` for `*`; asked of a standby, see `replication.proto`) |
 | Operator tooling | `kernable.v1.switchover` | `issued_at: i64` (a key granted `manage` for `*`; asked of the primary of a pair, see `replication.proto`) |
 | Operator tooling | `kernable.v1.export` | `issued_at: i64` (a key granted `export` for `*`; see `export.proto`) |
+| Backup follower, backup tooling | `kernable.v1.backup-object` | `op` (`put`, `get`, `list` or `delete`), `bucket`, `prefix`, `name` (for `list`: the start of the names), `continuation` (for `list`: the token of the page before, else empty), `sha256` (the 32-byte SHA-256 of the body a put sends, of nothing otherwise, as a `bytes` field), `length: u64` (the body's bytes, else 0), `issued_at: i64` (asks a backup signer for a presigned request; see [Backup signer requests](#backup-signer-requests)) |
 
 Four more tagged messages are hashed, not signed: `kernable.v1.vault` ([Vault references](#vault-references)), `kernable.v1.id` ([Derived IDs](#derived-ids)), `kernable.v1.key` ([Unique keys and facts](#unique-keys-and-facts)) and `kernable.v1.event` ([Event hash chain](#event-hash-chain)).
 
@@ -75,9 +76,13 @@ The kernel checks that a result, index, rejection or snapshot is signed by the k
 
 ## Time windows
 
-Queries, cancels, process registrations, removals, resolutions and acting, subscribe requests, data and cache requests, memberships, retry requests and revoke requests are valid for 60 s around `issued_at` (ms since epoch), measured on the kernel's clock. Commands have no time window: a command ID runs once, so a replayed command only returns its stored result.
+Queries, cancels, process registrations, removals, resolutions and acting, subscribe requests, data and cache requests, memberships, retry requests and revoke requests are valid for 60 s around `issued_at` (ms since epoch), measured on the kernel's clock; backup signer requests for 60 s on the signer's clock. Commands have no time window: a command ID runs once, so a replayed command only returns its stored result.
 
 Within the window a captured subscribe or query request could be replayed, but it only grants the read access the key already has. Transport encryption (mutual TLS over TCP) closes this gap. For data and cache requests the operation is part of the tag, so a signed get cannot be replayed as a delete.
+
+## Backup signer requests
+
+A backup follower without storage credentials asks a signer for each request to object storage (`kernable backup --signer`; the protocol is in the how-to "Back up and restore", section "Without credentials on the server: a signer"). It `POST`s JSON to the signer's URL: the fields of `kernable.v1.backup-object` (`sha256` in lowercase hex), `key_id` and `sig` (the 64-byte signature in lowercase hex). The signer checks the signature and the time window, and decides from `key_id` whether that key may do `op` under `bucket`/`prefix`; the kernel's grants play no part. The operation is part of the message, so a signed get cannot be replayed as a delete; a replay within the window yields the same request for the same object. The answer is not signed: it travels on the TLS connection to the signer's URL, and only lets the follower reach its own objects.
 
 ## Grants and revocation
 
