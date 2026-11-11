@@ -96,13 +96,6 @@ async fn pass(
     }
 }
 
-/// Generation `n` of the witness the kernels reach at `address`, signed by the root, as
-/// `kernable witness generation` writes it.
-fn write_generation(path: &Path, n: u64, address: &str) {
-    let g = kernable_core::signing::witness_generation(&root(), n, address, 1_700_000_000_000);
-    std::fs::write(path, format!("{}\n", hex(&g.encode_to_vec()))).unwrap();
-}
-
 /// The witness the kernels name (`witness.sock`) and the generation file every kernel and the
 /// witness read: generation 1 of a new pair.
 fn witness_address(dir: &Path) -> String {

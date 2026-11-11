@@ -266,6 +266,15 @@ pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Generation `n` of the witness the kernels reach at `address`, signed by the root, as
+/// `kernable witness generation` writes it: what a witness takes as `--generation` and a kernel
+/// of a pair as `--witness-generation`.
+pub fn write_generation(path: &Path, n: u64, address: &str) {
+    use prost::Message;
+    let g = signing::witness_generation(&root(), n, address, 1_700_000_000_000);
+    std::fs::write(path, format!("{}\n", hex(&g.encode_to_vec()))).unwrap();
+}
+
 /// Order domain as a plain function of whether the order exists and the command. `Reindex`
 /// produces no events.
 pub fn order(exists: bool, cmd: &Command) -> Result<Vec<NewEvent>, Rejected> {

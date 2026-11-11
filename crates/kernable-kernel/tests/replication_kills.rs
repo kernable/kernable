@@ -62,6 +62,25 @@ impl Dir {
         }
     }
 
+    /// Generation 1 of the witness the kernels name (`w.sock`), signed by the root: the
+    /// witness's `--generation` and every kernel's `--witness-generation`.
+    fn generation(&self) -> String {
+        let path = self.0.join("witness.generation");
+        if !path.exists() {
+            write_generation(&path, 1, &self.sock("w"));
+        }
+        path.display().to_string()
+    }
+
+    /// Points `w.sock`, the witness both kernels name, at `to` (a plug of one kernel's): a
+    /// kernel resolves it whenever it connects, so each reaches the witness through a plug of
+    /// its own while both name it the same, as their generation requires.
+    fn route_witness(&self, to: &str) {
+        let link = self.0.join("w.sock");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(self.0.join(format!("{to}.sock")), &link).unwrap();
+    }
+
     /// Writes `<name>.key` with the seed's key, and `<name>.grant` with `permissions`.
     fn key(&self, name: &str, seed: u8, permissions: &[(&str, &[&str])]) -> PathBuf {
         let path = self.0.join(format!("{name}.key"));
@@ -380,6 +399,8 @@ async fn a_pair_under_random_kills_of_its_primary_loses_nothing_a_client_was_tol
             dir.sock("w"),
             "--root".into(),
             id(&root()),
+            "--generation".into(),
+            dir.generation(),
             "--state".into(),
             state.display().to_string(),
             "--lease-ms".into(),
@@ -394,6 +415,8 @@ async fn a_pair_under_random_kills_of_its_primary_loses_nothing_a_client_was_tol
         args.extend([
             "--witness".into(),
             dir.sock("w"),
+            "--witness-generation".into(),
+            dir.generation(),
             "--node-key".into(),
             node_key.display().to_string(),
             "--standby-timeout-ms".into(),
@@ -465,6 +488,8 @@ async fn a_planned_stop_of_a_pairs_primary_hands_over_without_waiting_for_the_le
             dir.sock("w"),
             "--root".into(),
             id(&root()),
+            "--generation".into(),
+            dir.generation(),
             "--state".into(),
             state.display().to_string(),
             "--lease-ms".into(),
@@ -479,6 +504,8 @@ async fn a_planned_stop_of_a_pairs_primary_hands_over_without_waiting_for_the_le
         args.extend([
             "--witness".into(),
             dir.sock("w"),
+            "--witness-generation".into(),
+            dir.generation(),
             "--node-key".into(),
             node_key.display().to_string(),
             "--standby-timeout-ms".into(),
@@ -652,6 +679,8 @@ async fn a_pair_updates_both_kernels_by_handing_their_stores_over() {
             dir.sock("w"),
             "--root".into(),
             id(&root()),
+            "--generation".into(),
+            dir.generation(),
             "--state".into(),
             state.display().to_string(),
             "--lease-ms".into(),
@@ -666,6 +695,8 @@ async fn a_pair_updates_both_kernels_by_handing_their_stores_over() {
         args.extend([
             "--witness".into(),
             dir.sock("w"),
+            "--witness-generation".into(),
+            dir.generation(),
             "--node-key".into(),
             node_key.display().to_string(),
             "--standby-timeout-ms".into(),
@@ -897,6 +928,8 @@ async fn pair_model(seed: u64, steps: u32) {
         dir.sock("w"),
         "--root".into(),
         id(&root()),
+        "--generation".into(),
+        dir.generation(),
         "--state".into(),
         state.display().to_string(),
         "--lease-ms".into(),
@@ -911,6 +944,8 @@ async fn pair_model(seed: u64, steps: u32) {
         args.extend([
             "--witness".into(),
             dir.sock("w"),
+            "--witness-generation".into(),
+            dir.generation(),
             "--node-key".into(),
             node_key.display().to_string(),
             "--standby-timeout-ms".into(),
@@ -1165,32 +1200,41 @@ async fn a_primary_cut_off_answers_unavailable_and_its_standby_takes_over() {
         &[
             "witness".into(),
             "--listen".into(),
-            dir.sock("w"),
+            dir.sock("w-real"),
             "--root".into(),
             id(&root()),
+            "--generation".into(),
+            dir.generation(),
             "--state".into(),
             state.display().to_string(),
             "--lease-ms".into(),
             LEASE_MS.to_string(),
         ],
     );
-    wait_for(&dir.sock("w")).await;
+    wait_for(&dir.sock("w-real")).await;
     let plug = |front: &str, back: &str| {
         Plug::new(
             &dir.0.join(format!("{front}.sock")),
             &dir.0.join(format!("{back}.sock")),
         )
     };
-    // A reaches the witness, and B reaches A, through plugs: frozen, A is cut off.
-    let (a_witness, a_front, _b_front) =
-        (plug("wa", "w"), plug("a-plug", "a"), plug("b-plug", "b"));
-    let node = |name: &str, kernel_seed: u8, node_seed: u8, witness: &str| {
+    // A reaches the witness, and B reaches A, through plugs: frozen, A is cut off. B reaches
+    // the witness through a plug of its own.
+    let (a_witness, _b_witness, a_front, _b_front) = (
+        plug("wa", "w-real"),
+        plug("wb", "w-real"),
+        plug("a-plug", "a"),
+        plug("b-plug", "b"),
+    );
+    let node = |name: &str, kernel_seed: u8, node_seed: u8| {
         let mut args = vec!["start".to_owned()];
         args.extend(flags(&dir, name, kernel_seed));
         let node_key = dir.key(&format!("{name}-node"), node_seed, &[("replicate", &["*"])]);
         args.extend([
             "--witness".into(),
-            dir.sock(witness),
+            dir.sock("w"),
+            "--witness-generation".into(),
+            dir.generation(),
             "--advertise".into(),
             dir.sock(&format!("{name}-plug")),
             "--node-key".into(),
@@ -1204,16 +1248,25 @@ async fn a_primary_cut_off_answers_unavailable_and_its_standby_takes_over() {
         ]);
         args
     };
-    let _a = start(&dir, &node("a", 3, 11, "wa"));
+    dir.route_witness("wa");
+    let _a = start(&dir, &node("a", 3, 11));
     wait_for(&dir.sock("a")).await;
-    let _b = start(&dir, &node("b", 8, 12, "w"));
-    wait_for(&dir.sock("b")).await;
     let kept = || {
         Witness::open(&state, Duration::from_millis(LEASE_MS))
             .unwrap()
             .state()
     };
     let started = Instant::now();
+    while kept().primary != id(&key(11)) {
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "A never became the primary"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    dir.route_witness("wb");
+    let _b = start(&dir, &node("b", 8, 12));
+    wait_for(&dir.sock("b")).await;
     while kept().in_sync != id(&key(12)) {
         assert!(
             started.elapsed() < Duration::from_secs(20),
@@ -1221,6 +1274,9 @@ async fn a_primary_cut_off_answers_unavailable_and_its_standby_takes_over() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    // From now on a kernel that connects to the witness anew goes through A's plug: B keeps
+    // the connection it has.
+    dir.route_witness("wa");
     let a = dir.sock("a");
     worker(a.clone());
     let order = |n: u32| {
@@ -1274,31 +1330,39 @@ async fn a_client_of_both_kernels_writes_again_soon_after_a_partition() {
         &[
             "witness".into(),
             "--listen".into(),
-            dir.sock("w"),
+            dir.sock("w-real"),
             "--root".into(),
             id(&root()),
+            "--generation".into(),
+            dir.generation(),
             "--state".into(),
             state.display().to_string(),
             "--lease-ms".into(),
             LEASE_MS.to_string(),
         ],
     );
-    wait_for(&dir.sock("w")).await;
+    wait_for(&dir.sock("w-real")).await;
     let plug = |front: &str, back: &str| {
         Plug::new(
             &dir.0.join(format!("{front}.sock")),
             &dir.0.join(format!("{back}.sock")),
         )
     };
-    let (a_witness, a_front, _b_front) =
-        (plug("wa", "w"), plug("a-plug", "a"), plug("b-plug", "b"));
-    let node = |name: &str, kernel_seed: u8, node_seed: u8, witness: &str| {
+    let (a_witness, _b_witness, a_front, _b_front) = (
+        plug("wa", "w-real"),
+        plug("wb", "w-real"),
+        plug("a-plug", "a"),
+        plug("b-plug", "b"),
+    );
+    let node = |name: &str, kernel_seed: u8, node_seed: u8| {
         let mut args = vec!["start".to_owned()];
         args.extend(flags(&dir, name, kernel_seed));
         let node_key = dir.key(&format!("{name}-node"), node_seed, &[("replicate", &["*"])]);
         args.extend([
             "--witness".into(),
-            dir.sock(witness),
+            dir.sock("w"),
+            "--witness-generation".into(),
+            dir.generation(),
             "--advertise".into(),
             dir.sock(&format!("{name}-plug")),
             "--node-key".into(),
@@ -1312,16 +1376,25 @@ async fn a_client_of_both_kernels_writes_again_soon_after_a_partition() {
         ]);
         args
     };
-    let mut a = Some(start(&dir, &node("a", 3, 11, "wa")));
+    dir.route_witness("wa");
+    let mut a = Some(start(&dir, &node("a", 3, 11)));
     wait_for(&dir.sock("a")).await;
-    let _b = start(&dir, &node("b", 8, 12, "w"));
-    wait_for(&dir.sock("b")).await;
     let kept = || {
         Witness::open(&state, Duration::from_millis(LEASE_MS))
             .unwrap()
             .state()
     };
     let started = Instant::now();
+    while kept().primary != id(&key(11)) {
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "A never became the primary"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    dir.route_witness("wb");
+    let _b = start(&dir, &node("b", 8, 12));
+    wait_for(&dir.sock("b")).await;
     while kept().in_sync != id(&key(12)) {
         assert!(
             started.elapsed() < Duration::from_secs(20),
@@ -1329,6 +1402,9 @@ async fn a_client_of_both_kernels_writes_again_soon_after_a_partition() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    // From now on a kernel that connects to the witness anew goes through A's plug: B keeps
+    // the connection it has.
+    dir.route_witness("wa");
     worker(dir.sock("a"));
     worker(dir.sock("b"));
     let sdk_key = dir.key("sdk", 1, &[("submit", &["*"])]);
@@ -1376,7 +1452,7 @@ async fn a_client_of_both_kernels_writes_again_soon_after_a_partition() {
     // its node starts the kernel again: here the node is started again.
     drop(a.take());
     tokio::time::sleep(Duration::from_millis(300)).await;
-    a = Some(start(&dir, &node("a", 3, 11, "wa")));
+    a = Some(start(&dir, &node("a", 3, 11)));
     let healed = Instant::now();
     // A's node as started again: the newest `<n>-start.log`.
     let mut nodes: Vec<_> = std::fs::read_dir(&dir.0)

@@ -288,6 +288,20 @@ async fn run(a: Args) -> Result<(), String> {
             &["grant", "root.key", node, "replicate=*"],
         )?;
     }
+    if pair {
+        // Generation 1 of the witness both kernels name, for the witness and both kernels.
+        cli(
+            &kernable_bin,
+            &dir,
+            &[
+                "witness",
+                "generation",
+                "root.key",
+                "1",
+                &format!("127.0.0.1:{wport}"),
+            ],
+        )?;
+    }
     let me = Identity {
         key: Arc::new(key(&dir.join("app.key"))?),
         grant: std::fs::read_to_string(dir.join("app.grant"))
@@ -344,6 +358,8 @@ async fn run(a: Args) -> Result<(), String> {
                 &format!("file:{}", data.join(format!("files{suffix}")).display()),
                 "--witness",
                 &format!("127.0.0.1:{wport}"),
+                "--witness-generation",
+                "witness.generation",
                 "--node-key",
                 if suffix.is_empty() {
                     "node-a.key"
@@ -409,6 +425,8 @@ async fn run(a: Args) -> Result<(), String> {
                 "root.pub",
                 "--listen",
                 &format!("127.0.0.1:{wport}"),
+                "--generation",
+                "witness.generation",
                 "--state",
                 "witness.state",
             ]),
