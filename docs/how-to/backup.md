@@ -76,7 +76,7 @@ The steps above copy the stores now and then: what happened since the last copy 
    kernable backup key backup-encryption.key
    ```
 
-   The grant lets the key read every record and file; vault values reach it sealed with the kernel's vault key. The backup key encrypts everything the follower writes (AES-256-GCM): a bucket that leaks reveals nothing. Keep the backup key apart from the bucket, as you keep the root key; without it, no backup can be read.
+   The grant lets the key read every record and file; vault values reach it sealed with the kernel's vault key. The follower reads the grant (`backup.grant` beside `backup.key`) again each time it connects, so a renewed grant takes effect without a restart. The backup key encrypts everything the follower writes (AES-256-GCM): a bucket that leaks reveals nothing. Keep the backup key apart from the bucket, as you keep the root key; without it, no backup can be read.
 
 3. **Run the follower**, next to the kernel or on another machine:
 

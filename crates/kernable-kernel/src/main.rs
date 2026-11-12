@@ -1496,6 +1496,7 @@ async fn run_backup(flags: &[&str]) -> ExitCode {
             addrs,
             key,
             grant,
+            grant_file: Some(grant_path.clone()),
             target: Arc::from(backup_target(need("--to")?, &values, Some(key_path))?),
             crypt: Arc::new(
                 backup::crypt::BackupKey::read(Path::new(need("--backup-key")?)).map_err(boxed)?,

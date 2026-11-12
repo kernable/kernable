@@ -61,6 +61,14 @@ pub const SEGMENT_BYTES: usize = 16 << 20;
 /// are in the target, and the kernel sends at most 8,192 ahead of its acknowledgements.
 pub const SEGMENT_RECORDS: u64 = 4_096;
 
+/// The grant the follower sends: its file as it reads now, else the one it started with.
+fn current_grant(file: Option<&std::path::Path>, started_with: &str) -> String {
+    file.and_then(|f| std::fs::read_to_string(f).ok())
+        .map(|g| g.trim().to_owned())
+        .filter(|g| !g.is_empty())
+        .unwrap_or_else(|| started_with.to_owned())
+}
+
 /// How a backup follower runs.
 pub struct Follower {
     /// The kernels to follow, tried in turn: both kernels of a pair.
@@ -68,6 +76,10 @@ pub struct Follower {
     /// Its key, granted `backup`, and the grant.
     pub key: SigningKey,
     pub grant: String,
+    /// The grant's file, read again on every connection, so a grant renewed beside the key
+    /// (a new one for a new key, say) is taken without a restart; `grant` while it does not
+    /// read.
+    pub grant_file: Option<std::path::PathBuf>,
     pub target: Arc<dyn Target>,
     pub crypt: Arc<BackupKey>,
     /// A segment at least this often while records come.
@@ -550,9 +562,10 @@ async fn follow_once(
     })))
     .await?;
     let mut request = Request::new(ReceiverStream::new(rx));
-    request
-        .metadata_mut()
-        .insert(GRANT_HEADER, follower.grant.parse()?);
+    request.metadata_mut().insert(
+        GRANT_HEADER,
+        current_grant(follower.grant_file.as_deref(), &follower.grant).parse()?,
+    );
     let mut inbound = client.follow(request).await?.into_inner();
     let Some(follow_response::Msg::Challenge(challenge)) = next(&mut inbound).await? else {
         return Err("the kernel sent no challenge".into());
@@ -1417,6 +1430,18 @@ fn cut(batch: &mut RecordBatch, n: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_grant_is_read_again_from_its_file() {
+        let file = std::env::temp_dir().join(format!("kn-backup-grant-{}", std::process::id()));
+        std::fs::write(&file, "abcd\n").unwrap();
+        assert_eq!(current_grant(Some(&file), "old"), "abcd");
+        std::fs::write(&file, "ef01").unwrap();
+        assert_eq!(current_grant(Some(&file), "old"), "ef01");
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(current_grant(Some(&file), "old"), "old");
+        assert_eq!(current_grant(None, "old"), "old");
+    }
 
     #[test]
     fn segment_names_say_where_they_stand_and_sort_in_order() {

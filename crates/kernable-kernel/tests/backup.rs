@@ -36,6 +36,7 @@ fn follower(env: &Env, to: &str) -> Follower {
         addrs: vec![env.addr.clone()],
         key,
         grant: hex(&grant.encode_to_vec()),
+        grant_file: None,
         target: Arc::from(target::open(to, None).unwrap()),
         crypt: Arc::new(BackupKey::new(&[7; 32])),
         segment_every: Duration::from_millis(100),
