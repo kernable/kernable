@@ -463,6 +463,16 @@ kernable submit <addr> <client.key> <tenant> <domain> <aggregate_type> <aggregat
 
 Signs a command with a new ID and submits it, waiting until it has settled; the grant file next to the key is sent along. `<payload>` is sent as given, usually JSON. Prints the command ID, then a committed line per event with its global position, version, type and payload, or rejected `<code>`: `<message>` with exit 1. It cannot seal vault fields: not for commands with personal or secret values.
 
+## kernable Cloud
+
+### `kernable cloud login | logout | whoami | teams | members | tokens | projects`
+
+```text
+kernable cloud login | logout | whoami | teams | members | tokens | projects
+```
+
+Signs in to a kernable Cloud installation by device code and manages its teams, members, CI tokens and projects through its account API (`--api <url>`); kernable cloud help lists them all.
+
 ## Arguments and exit codes
 
 `<addr>` is `host:port`, `http://host:port`, or `unix:<path>` on Unix. To reach a kernel over mutual TLS, set `KERNABLE_TLS_CA`, `KERNABLE_TLS_CERT` and `KERNABLE_TLS_KEY` to PEM files, as for the SDKs. `<store>` is the kernel's `--store`: `sqlite:<path>`, a bare SQLite path, or `file:<path>`. Exit codes, unless a command says otherwise: 0 success, 1 failure, 2 unknown command or wrong arguments.

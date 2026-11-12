@@ -20,6 +20,7 @@
 mod admin;
 pub mod backup;
 mod cache;
+pub mod cloud;
 pub mod config;
 mod connections;
 pub mod copy;
