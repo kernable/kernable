@@ -232,9 +232,23 @@ fn listener(
     })
 }
 
-fn read_model(addr: &str, name: &str) -> JoinHandle<tonic::Status> {
+/// Connects a read model at `addr` and waits until the kernel there has registered it (a
+/// query sent before its Hello arrived finds no read model). Whether it caught up is for the
+/// queries' `min_position` to say.
+async fn read_model(addr: &str, name: &str) -> JoinHandle<tonic::Status> {
     let (seen, _) = mpsc::unbounded_channel();
-    listener(addr, name, false, seen)
+    let model = listener(addr, name, false, seen);
+    until_async("the read model is registered", async || {
+        match count(addr, 0).await {
+            Ok(_) => true,
+            Err(s) if s.code() == Code::Unavailable && s.message().starts_with("no read model") => {
+                false
+            }
+            Err(s) => panic!("{s:?}"),
+        }
+    })
+    .await;
+    model
 }
 
 fn count_query(min_position: u64, key: &SigningKey) -> QueryRequest {
@@ -280,8 +294,9 @@ async fn two_readers_answer_queries_and_see_a_command_sent_through_either() {
     let writer = open(&writer_config).await;
     grant_defaults(&writer);
     start_worker(writer_config.listen.clone(), TestWorker::honest()).await;
+    let mut placed = 0;
     for i in 0..5 {
-        submit(&writer_config.listen, place(i)).await.unwrap();
+        placed = position(&submit(&writer_config.listen, place(i)).await.unwrap());
     }
 
     let first = reader_config(&dir.0, "reader-1", 21, &writer_config.listen);
@@ -291,15 +306,17 @@ async fn two_readers_answer_queries_and_see_a_command_sent_through_either() {
     assert_eq!(reader_1.role()["role"], "reader");
     assert_eq!(writer.role()["role"], "writer");
     let _models = [
-        read_model(&first.listen, "orders-count"),
-        read_model(&second.listen, "orders-count"),
+        read_model(&first.listen, "orders-count").await,
+        read_model(&second.listen, "orders-count").await,
     ];
     until_async("both readers are ready", async || {
         reader_1.readiness().is_ok() && reader_2.readiness().is_ok()
     })
     .await;
-    assert_eq!(count(&first.listen, 0).await.unwrap(), 5);
-    assert_eq!(count(&second.listen, 0).await.unwrap(), 5);
+    // A read model that just connected may answer before it caught up; with the position of
+    // what the client saw committed, every copy answers only once it holds it.
+    assert_eq!(count(&first.listen, placed).await.unwrap(), 5);
+    assert_eq!(count(&second.listen, placed).await.unwrap(), 5);
 
     // A command sent through a reader runs on the writer, and the reader answers once its own
     // copy holds the events and its read model processed them.
@@ -461,7 +478,7 @@ async fn a_new_reader_starts_from_the_backup_and_catches_up_from_the_writer() {
         vault_key: None,
     });
     let reader = start_reader(&reader_config).await;
-    let _model = read_model(&reader_config.listen, "orders-count");
+    let _model = read_model(&reader_config.listen, "orders-count").await;
     let last = submit(&writer_config.listen, place(25)).await.unwrap();
     assert_eq!(
         count(&reader_config.listen, position(&last)).await.unwrap(),
@@ -477,7 +494,7 @@ async fn a_new_reader_starts_from_the_backup_and_catches_up_from_the_writer() {
         vault_key: None,
     });
     let _fallback = start_reader(&broken).await;
-    let _model = read_model(&broken.listen, "orders-count");
+    let _model = read_model(&broken.listen, "orders-count").await;
     assert_eq!(count(&broken.listen, position(&last)).await.unwrap(), 26);
 }
 
@@ -512,7 +529,7 @@ async fn a_reader_follows_the_standby_after_a_failover() {
     let both = format!("{},{}", writer_config.listen, standby_config.listen);
     let reader_config = reader_config(&dir.0, "reader", 21, &both);
     let reader = start_reader(&reader_config).await;
-    let _model = read_model(&reader_config.listen, "orders-count");
+    let _model = read_model(&reader_config.listen, "orders-count").await;
     let mut told = 0;
     for i in 0..10 {
         told = position(&submit(&reader_config.listen, place(i)).await.unwrap());
@@ -572,7 +589,7 @@ async fn a_reader_keeps_up_under_load() {
     start_worker(writer_config.listen.clone(), TestWorker::honest()).await;
     let reader_config = reader_config(&dir.0, "reader", 21, &writer_config.listen);
     let reader = start_reader(&reader_config).await;
-    let _model = read_model(&reader_config.listen, "orders-count");
+    let _model = read_model(&reader_config.listen, "orders-count").await;
 
     let lag = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let watching = {
