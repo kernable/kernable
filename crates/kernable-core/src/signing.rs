@@ -390,8 +390,30 @@ pub fn grant(
         succeeds: succeeds.to_owned(),
         issued_at,
         root_sig: None,
+        issuer: None,
     };
     grant.root_sig = Some(sign(root, &grant_message(&grant)));
+    grant
+}
+
+/// A delegated grant for `key_id`, signed by `delegate`, whose own grant `issuer` (signed by a
+/// root key) lets it grant these permissions' actions; it carries `issuer`.
+pub fn delegated_grant(
+    delegate: &SigningKey,
+    issuer: Grant,
+    key_id: &str,
+    permissions: Vec<Permission>,
+    issued_at: i64,
+) -> Grant {
+    let mut grant = Grant {
+        key_id: key_id.to_owned(),
+        permissions,
+        succeeds: String::new(),
+        issued_at,
+        root_sig: None,
+        issuer: Some(Box::new(issuer)),
+    };
+    grant.root_sig = Some(sign(delegate, &grant_message(&grant)));
     grant
 }
 

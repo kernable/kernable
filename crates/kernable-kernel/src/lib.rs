@@ -602,7 +602,12 @@ impl Kernel {
     pub fn grant(&self, grant: Grant) -> Result<(), Status> {
         self.check_grant(&grant)?;
         // A reader keeps it in memory: what it stores comes from its writer.
-        self.keep(grant, self.reader.is_none())
+        let store = self.reader.is_none();
+        // A delegated grant: the delegate's own grant is kept too, so the newest of it decides.
+        if let Some(issuer) = grant.issuer.as_deref() {
+            self.keep(issuer.clone(), store)?;
+        }
+        self.keep(grant, store)
     }
 
     fn check_grant(&self, grant: &Grant) -> Result<(), Status> {
@@ -610,7 +615,34 @@ impl Kernel {
             .root_sig
             .as_ref()
             .ok_or_else(|| Status::unauthenticated("grant is not signed"))?;
-        self.by_root(sig, &signing::grant_message(grant))?;
+        if self.config.roots.contains(&sig.key_id) || grant.issuer.is_none() {
+            if grant.issuer.is_some() {
+                return Err(Status::permission_denied(
+                    "a grant signed by a root key carries no issuer",
+                ));
+            }
+            self.by_root(sig, &signing::grant_message(grant))?;
+        } else {
+            // A delegated grant: signed by a delegate, for the actions its own grant names.
+            let held = self
+                .grants
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&sig.key_id)
+                .cloned();
+            let issuer = grants::chain(grant, &self.config.roots, held.as_ref())
+                .map_err(Status::permission_denied)?
+                .ok_or_else(|| Status::permission_denied("not signed by a root key"))?;
+            let issuer_root = issuer.root_sig.as_ref().map(|s| s.key_id.as_str());
+            if self.revoked_since(&sig.key_id).is_some() {
+                return Err(Status::permission_denied(
+                    "the key that signed the grant was revoked",
+                ));
+            }
+            if issuer_root.is_some_and(|r| self.revoked_since(r).is_some()) {
+                return Err(Status::permission_denied("the root key was revoked"));
+            }
+        }
         if let Some(reason) = grants::malformed(grant) {
             return Err(Status::invalid_argument(format!("grant: {reason}")));
         }

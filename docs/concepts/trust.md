@@ -52,12 +52,23 @@ kernable grant root.key app.pub 'submit=shop.*' 'listen=shop.*'   # writes app.g
 | `export` | `*`: [exporting](../how-to/export) the whole kernel; the vault values stay sealed with its vault key |
 | `backup` | `*`: following the kernel as its [backup follower](../how-to/backup#continuous-backup); the key gets every record and file, the vault values sealed |
 | `reserved_order` | `*`: registering listeners and middlewares at negative orders, which run before every other listener; for kernable's kits (tenancy, accounts, authorization) |
+| `grant` | the actions (by name, never `*` or `grant`) it may grant other keys: a [delegate](#delegated-grants); not part of the action `*` |
 
 A type is a qualified type (`shop.PlaceOrder`), a whole domain (`shop.*`) or everything (`*`). A bare type (`'shop.*'`) means every action on it.
 
 The process sends its grant with every call, in the gRPC metadata entry `kernable-grant`; the SDKs read `<name>.grant` next to the key file. The kernel checks the chain: the grant is signed by a root key, it names the key that signed the request, and neither key is revoked. It keeps the newest grant per key. The kernel's settings hold no keys of services and no permissions, so a new service needs a grant, not a change to the kernel.
 
 The root key is used only to issue grants and revocations, so it can stay offline. Several roots (`--root` repeated) allow replacing one.
+
+### Delegated grants
+
+A root key can let another key, a **delegate**, grant a few actions in its place, so the root key stays offline while, for example, a tool that adds standbys and readers works: `kernable grant root.key mover.pub grant=replicate,read`. The delegate then signs grants for those actions only (`kernable grant mover.key reader.pub --delegated read=*`). Such a grant carries the delegate's own grant, and the kernel takes it only
+
+- for actions the delegate's grant names (never `*`, `grant` or `succeeds`): anything else it signs is refused;
+- one step from a root: a key a delegate granted cannot grant on;
+- while the delegate's newest grant still names the action: a newer grant of the delegate with fewer actions takes the rest away.
+
+Revoking the delegate, or the root that signed its grant, ends what it granted, and the streams of those keys end.
 
 A grant cannot be withdrawn. A newer grant for the same key (by its issue time) replaces it, and the kernel refuses the older one once it has seen the newer one, also after a restart: it stores the newest grant per key. Open streams follow the newer grant at once: a worker, listener or subscription whose key may no longer do what it registered for is disconnected, and one that asked for every event type gets only the types the newer grant allows from then on. Rights a key used before the newer grant stay used; to take rights away from a key that may be stolen, give the service a new key and revoke the old one.
 

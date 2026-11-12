@@ -45,6 +45,18 @@ A process that runs an app (`kernable.app(...).run()`) applies its service's mem
 
 A key without a grant, or whose grant does not cover a type, gets `PERMISSION_DENIED`. A grant takes effect when a process first presents it: the kernel's settings hold no keys of services, so a new service needs no change to the kernel.
 
+## A key that grants a few actions
+
+To keep the root key offline while a tool adds standbys or readers, let a key of the tool grant just those actions (see [Delegated grants](../concepts/trust#delegated-grants)):
+
+```sh
+kernable keys new keys/mover
+kernable grant keys/root.key keys/mover.pub grant=replicate,read     # writes keys/mover.grant
+kernable grant keys/mover.key keys/reader-1.pub --delegated 'read=*'   # signed by the mover
+```
+
+`--delegated` puts `keys/mover.grant` (beside the signing key) into the new grant; the kernel takes it for `replicate` and `read` only and refuses anything else the mover signs. A key the mover granted cannot grant on. To end it, revoke the mover: every grant it signed goes with it. To narrow it, issue the mover a newer grant with fewer actions.
+
 ## Changing what a key may do
 
 Issue a new grant for the key and restart the service with it. The kernel keeps the newest grant per key: once it has seen the new one, it refuses the old one, and workers, listeners and subscriptions whose key may no longer do what it does are disconnected. A listener or subscription that asked for every event type stays connected and gets only the types the new grant allows. A new service needs only its grant; the kernel does not change.

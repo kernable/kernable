@@ -266,6 +266,7 @@ fn writes(s: &dyn Store, round: u8) {
             key_id: "root".into(),
             sig: vec![2; 64],
         }),
+        issuer: None,
     };
     s.save_grant(&grant(at + 10)).unwrap();
     s.save_grant(&grant(at)).unwrap(); // older: kept out

@@ -184,6 +184,14 @@ message VaultValue {
 // (by issued_at) and ignores older ones. A grant has no time window; it ends when a newer grant
 // replaces it or the key, or the root key that signed it, is revoked. Streams whose key loses a
 // permission they use end with PERMISSION_DENIED.
+//
+// A delegated grant is signed by a key that is not a root key, a delegate, whose own grant
+// (signed by a root key) has the action `grant` naming the actions it may grant
+// (`grant=replicate,read`). It carries that grant in `issuer`. The kernel takes it only for
+// those actions (never `*` or `grant` itself), without `succeeds`, and checks it against the
+// newest grant of the delegate it knows, so a newer grant of the delegate that names fewer
+// actions takes the rest away. One delegation only: an issuer has no issuer. Revoking the
+// delegate, or the root key that signed its grant, ends what it granted.
 message Grant {
   string key_id = 1;                   // the grantee
   repeated Permission permissions = 2;
@@ -191,7 +199,10 @@ message Grant {
   // that key may connect with key_id and keep their registration.
   string succeeds = 3;
   int64 issued_at = 4;                 // ms since epoch
+  // The signature over kernable.v1.grant: by a root key, or by the delegate `issuer` names.
   Signature root_sig = 5;
+  // A delegated grant: the delegate's own grant, signed by a root key (absent: none).
+  Grant issuer = 6;
 }
 
 // One action and the types it covers. Types are `*`, `domain.*` or a qualified `domain.Type`,
@@ -212,6 +223,8 @@ message Grant {
 // - manage: apply the membership of these services (service names, or `*`).
 // - replicate: follow the kernel as its standby (`*`).
 // - read: follow the kernel as a reader, a read-only copy (`*`); never as its standby.
+// - grant: sign grants for other keys (a delegated grant, see Grant) for these actions only;
+//   the types are action names, never `*` or `grant`. Not included in the action `*`.
 // - export: export the whole kernel (`*`, ExportService in export.proto).
 message Permission {
   string action = 1;

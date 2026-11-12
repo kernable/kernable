@@ -66,7 +66,7 @@ Keys and trust:
   kernable keys new <name>                Writes <name>.key (the secret key, readable by the owner
                                           only, never overwritten) and <name>.pub (the key ID), and
                                           prints the key ID.
-  kernable grant <root.key> <name.pub> [--succeeds <old.pub>] <permission>...
+  kernable grant <root.key> <name.pub> [--succeeds <old.pub>] [--delegated] <permission>...
                                           Writes <name>.grant, signed by the root key, and prints
                                           its permissions. A permission is <action>=<type>,<type>...
                                           or a bare <type> for every action. Actions: submit run
@@ -80,7 +80,11 @@ Keys and trust:
                                           listener orders, for kits) take *.
                                           --succeeds lets this key take over the aggregates and
                                           listeners registered with <old.pub>. A newer grant for the
-                                          same key replaces the older one.
+                                          same key replaces the older one. grant=<action>,... lets
+                                          a key grant those actions to others (never * or grant;
+                                          not part of *). --delegated: <root.key> is such a key, not
+                                          a root; its own grant (<root>.grant beside it) goes along,
+                                          and the kernel takes the grant for those actions only.
   kernable revoke <addr> <root.key> <key.pub> <since>
                                           Revokes a key for good from <since> on (UTC, like
                                           2026-10-27T09:00:00Z): the kernel refuses it, ends its
@@ -1082,14 +1086,20 @@ fn witness_generation(root: &str, generation: &str, address: &str) -> Result<boo
 
 /// Writes `<name>.grant` next to `<name>.pub`: the grant, signed by the root key, hex encoded.
 fn grant(root: &str, key: &str, args: &[&str]) -> Result<bool> {
+    let signer_path = root;
     let root = signing::read_signing_key(root)?;
     let key_id = key_id_of("key", key)?;
     let mut succeeds = String::new();
+    let mut delegated = false;
     let mut permissions: Vec<Permission> = Vec::new();
     let mut rest = args.iter();
     while let Some(&arg) = rest.next() {
         if arg == "--succeeds" {
             succeeds = key_id_of("--succeeds", rest.next().ok_or("--succeeds needs a key")?)?;
+            continue;
+        }
+        if arg == "--delegated" {
+            delegated = true;
             continue;
         }
         let (action, types) = arg.split_once('=').unwrap_or(("*", arg));
@@ -1098,7 +1108,33 @@ fn grant(root: &str, key: &str, args: &[&str]) -> Result<bool> {
             types: types.split(',').map(str::to_owned).collect(),
         });
     }
-    let grant = signing::grant(&root, &key_id, permissions, &succeeds, now_ms());
+    let grant = match delegated {
+        false => signing::grant(&root, &key_id, permissions, &succeeds, now_ms()),
+        true => {
+            if !succeeds.is_empty() {
+                return Err("a delegated grant cannot succeed another key".into());
+            }
+            // The delegate's own grant, beside its key, goes along.
+            let path = format!(
+                "{}.grant",
+                signer_path.strip_suffix(".key").unwrap_or(signer_path)
+            );
+            let issuer = fs::read_to_string(&path)
+                .map_err(|e| format!("the delegate's grant {path}: {e}"))?;
+            let issuer =
+                kernable_core::proto::Grant::decode(hex::decode(issuer.trim())?.as_slice())?;
+            if issuer.key_id != signing::key_id(&root.verifying_key()) {
+                return Err(format!("{path} is not the grant of the signing key").into());
+            }
+            if let Some(p) = permissions
+                .iter()
+                .find(|p| !grants::delegable(&issuer).any(|a| a == p.action))
+            {
+                return Err(format!("{path} does not let the key grant {}", p.action).into());
+            }
+            signing::delegated_grant(&root, issuer, &key_id, permissions, now_ms())
+        }
+    };
     if let Some(reason) = grants::malformed(&grant) {
         return Err(reason.into());
     }

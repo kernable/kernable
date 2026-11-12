@@ -689,6 +689,84 @@ async fn a_reader_key_never_follows_as_a_standby() {
     assert!(as_reader.message().contains("needs read"), "{as_reader:?}");
 }
 
+/// A narrow move key: a root lets it grant `replicate` and `read` only (`grant=replicate,read`).
+/// A follower it grants `read` follows as a reader; anything else it signs is refused, a key it
+/// granted cannot grant on, and revoking the move key ends what it granted.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_key_grants_only_what_its_grant_names_until_it_is_revoked() {
+    use kernable_core::proto::Permission;
+    let dir = Dir::new("readers-delegated");
+    let writer_config = writer_config(&dir.0, false);
+    let writer = open(&writer_config).await;
+    let (mover, reader, other) = (key(73), key(74), key(75));
+    let issuer = grant(&mover, &[("grant", &["replicate", "read"])]);
+    let delegated =
+        |by: &SigningKey, issuer: kernable_core::proto::Grant, to: &SigningKey, action: &str| {
+            signing::delegated_grant(
+                by,
+                issuer,
+                &id(to),
+                vec![Permission {
+                    action: action.into(),
+                    types: vec!["*".into()],
+                }],
+                now_ms(),
+            )
+        };
+    let hello = async |key: &SigningKey| -> Result<(), tonic::Status> {
+        let (tx, rx) = mpsc::channel(1);
+        tx.send(FollowRequest {
+            msg: Some(follow_request::Msg::Hello(FollowHello {
+                key_id: id(key),
+                protocol: kernable_core::PROTOCOL,
+                reader: true,
+                ..Default::default()
+            })),
+        })
+        .await
+        .unwrap();
+        let channel = transport::connect(&writer_config.listen).await.unwrap();
+        let mut answers = ReplicationServiceClient::new(channel)
+            .follow(ReceiverStream::new(rx))
+            .await?
+            .into_inner();
+        match answers.message().await?.and_then(|m| m.msg) {
+            Some(follow_response::Msg::Challenge(_)) => Ok(()),
+            other => panic!("expected a challenge, got {other:?}"),
+        }
+    };
+
+    // Granted `read` by the move key: it follows as a reader (the move key's own grant is
+    // carried along and kept).
+    writer
+        .grant(delegated(&mover, issuer.clone(), &reader, "read"))
+        .unwrap();
+    hello(&reader).await.unwrap();
+
+    // An action outside the move key's list is refused.
+    let e = writer
+        .grant(delegated(&mover, issuer.clone(), &other, "submit"))
+        .unwrap_err();
+    assert_eq!(e.code(), Code::PermissionDenied, "{e:?}");
+    assert!(e.message().contains("may not grant submit"), "{e:?}");
+
+    // One delegation only: the reader cannot pass on what it was granted.
+    let second = delegated(&mover, issuer.clone(), &other, "replicate");
+    let e = writer
+        .grant(delegated(&other, second, &key(76), "read"))
+        .unwrap_err();
+    assert!(e.message().contains("one delegation only"), "{e:?}");
+
+    // The move key revoked: what it granted ends, and nothing new it signs is taken.
+    writer.revoke(&id(&mover), now_ms() - 1_000).unwrap();
+    let e = hello(&reader).await.unwrap_err();
+    assert_eq!(e.code(), Code::PermissionDenied, "{e:?}");
+    let e = writer
+        .grant(delegated(&mover, issuer, &key(77), "read"))
+        .unwrap_err();
+    assert_eq!(e.code(), Code::PermissionDenied, "{e:?}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_writer_without_readers_on_refuses_a_reader() {
     let dir = Dir::new("readers-refused");

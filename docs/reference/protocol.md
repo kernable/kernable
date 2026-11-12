@@ -195,13 +195,22 @@ signed the request (otherwise PERMISSION_DENIED). The kernel keeps the newest gr
 replaces it or the key, or the root key that signed it, is revoked. Streams whose key loses a
 permission they use end with PERMISSION_DENIED.
 
+A delegated grant is signed by a key that is not a root key, a delegate, whose own grant
+(signed by a root key) has the action `grant` naming the actions it may grant
+(`grant=replicate,read`). It carries that grant in `issuer`. The kernel takes it only for
+those actions (never `*` or `grant` itself), without `succeeds`, and checks it against the
+newest grant of the delegate it knows, so a newer grant of the delegate that names fewer
+actions takes the rest away. One delegation only: an issuer has no issuer. Revoking the
+delegate, or the root key that signed its grant, ends what it granted.
+
 | Field | Type | Number | Description |
 |---|---|---|---|
 | `key_id` |  `string` | 1 | the grantee |
 | `permissions` | repeated `Permission` | 2 |  |
 | `succeeds` |  `string` | 3 | An older key this key replaces (empty: none). Listeners and aggregates registered with that key may connect with key_id and keep their registration. |
 | `issued_at` |  `int64` | 4 | ms since epoch |
-| `root_sig` |  `Signature` | 5 |  |
+| `root_sig` |  `Signature` | 5 | The signature over kernable.v1.grant: by a root key, or by the delegate `issuer` names. |
+| `issuer` |  `Grant` | 6 | A delegated grant: the delegate's own grant, signed by a root key (absent: none). |
 
 ### Permission
 
@@ -223,6 +232,8 @@ except where noted. The action `*` stands for all actions.
 - manage: apply the membership of these services (service names, or `*`).
 - replicate: follow the kernel as its standby (`*`).
 - read: follow the kernel as a reader, a read-only copy (`*`); never as its standby.
+- grant: sign grants for other keys (a delegated grant, see Grant) for these actions only;
+  the types are action names, never `*` or `grant`. Not included in the action `*`.
 - export: export the whole kernel (`*`, ExportService in export.proto).
 
 | Field | Type | Number | Description |

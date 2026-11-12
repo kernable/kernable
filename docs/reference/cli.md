@@ -38,10 +38,10 @@ Writes `<name>.key` (the secret key, readable by the owner only, never overwritt
 ### `kernable grant`
 
 ```text
-kernable grant <root.key> <name.pub> [--succeeds <old.pub>] <permission>...
+kernable grant <root.key> <name.pub> [--succeeds <old.pub>] [--delegated] <permission>...
 ```
 
-Writes `<name>.grant`, signed by the root key, and prints its permissions. A permission is `<action>=<type>,<type>`... or a bare `<type>` for every action. Actions: `submit` `run` `subscribe` `listen` `query` `answer` `check` `privileged` `vault_read` `vault_erase` `data_read` `data_write` `cache` `manage` `replicate` `read` `export` `backup` `reserved_order` `process`. A type is `*`, `<domain>.*` or `<domain>.<Type>`; manage takes service names, process takes process names (`<domain>.<name>`), privileged takes `bypass_authorization`; replicate (a standby), read (a reader), export, backup and `reserved_order` (negative listener orders, for kits) take `*`. `--succeeds` lets this key take over the aggregates and listeners registered with `<old.pub>`. A newer grant for the same key replaces the older one.
+Writes `<name>.grant`, signed by the root key, and prints its permissions. A permission is `<action>=<type>,<type>`... or a bare `<type>` for every action. Actions: `submit` `run` `subscribe` `listen` `query` `answer` `check` `privileged` `vault_read` `vault_erase` `data_read` `data_write` `cache` `manage` `replicate` `read` `export` `backup` `reserved_order` `process`. A type is `*`, `<domain>.*` or `<domain>.<Type>`; manage takes service names, process takes process names (`<domain>.<name>`), privileged takes `bypass_authorization`; replicate (a standby), read (a reader), export, backup and `reserved_order` (negative listener orders, for kits) take `*`. `--succeeds` lets this key take over the aggregates and listeners registered with `<old.pub>`. A newer grant for the same key replaces the older one. `grant=<action>`,... lets a key grant those actions to others (never `*` or grant; not part of `*`). `--delegated`: `<root.key>` is such a key, not a root; its own grant (`<root>.grant` beside it) goes along, and the kernel takes the grant for those actions only.
 
 ### `kernable revoke`
 

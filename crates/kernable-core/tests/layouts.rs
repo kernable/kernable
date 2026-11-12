@@ -153,6 +153,7 @@ fn grant() -> impl Strategy<Value = Grant> {
             issued_at,
             permissions,
             root_sig: None,
+            issuer: None,
         })
 }
 

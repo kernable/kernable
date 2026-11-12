@@ -494,6 +494,7 @@ fn grant(key_id: &str, action: &str, issued_at: i64) -> Grant {
         succeeds: String::new(),
         issued_at,
         root_sig: Some(sig()),
+        issuer: None,
     }
 }
 

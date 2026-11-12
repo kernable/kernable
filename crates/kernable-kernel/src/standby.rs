@@ -1361,11 +1361,8 @@ fn may_manage(
         .and_then(|b| Grant::decode(b.as_slice()).ok());
     let stored = stores.store.grants().map_err(internal)?;
     let roots = &standby.config.roots;
-    let signed = |g: &Grant| {
-        g.root_sig.as_ref().is_some_and(|s| {
-            roots.contains(&s.key_id) && signing::verify(s, &signing::grant_message(g)).is_ok()
-        })
-    };
+    // By a root, or delegated by a key a root let grant it.
+    let signed = |g: &Grant| crate::grants::chain(g, roots, None).is_ok();
     let newest = presented
         .into_iter()
         .chain(stored)

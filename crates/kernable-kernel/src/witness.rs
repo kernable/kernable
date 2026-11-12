@@ -483,12 +483,8 @@ impl WitnessService for Api {
         // The witness keeps no grants: every request presents its own.
         let grant = presented
             .filter(|g| g.key_id == req.node)
-            .filter(|g| {
-                g.root_sig.as_ref().is_some_and(|s| {
-                    self.roots.contains(&s.key_id)
-                        && signing::verify(s, &signing::grant_message(g)).is_ok()
-                })
-            })
+            // By a trusted root, or delegated by a key a root let grant it.
+            .filter(|g| crate::grants::chain(g, &self.roots, None).is_ok())
             .ok_or_else(|| {
                 Status::permission_denied("present the node's grant, signed by a trusted root")
             })?;
