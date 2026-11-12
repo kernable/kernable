@@ -31,14 +31,47 @@ export interface KitApiOptions {
   keys: SigningKeys;
   /** The API's own identity (a service of the platform tenant with an API key, from the bootstrap). */
   service: { identityId: string; keyId: string };
-  /** Social OAuth/OIDC providers by name (`google`, …); tenants' SSO is configured as `account.sso`. */
-  providers?: Record<string, { issuer: string; clientId: string; clientSecret: string }>;
+  /**
+   * Social OAuth/OIDC providers by name (`google`, …); tenants' SSO is configured as `account.sso`.
+   * An OpenID Connect provider is found by its `issuer`; a plain OAuth2 one (GitHub) names its
+   * endpoints in `oauth2` (`github()` makes one).
+   */
+  providers?: Record<string, Provider>;
   /** Where providers send the browser back to; your route calls `oidcFinish` with the full URL. */
   redirectUri?: string;
   /** Allows http:// issuers: for development and tests only. */
   insecureIssuers?: boolean;
   /** How DNS TXT records are read (tests replace it). */
   resolveTxt?: (name: string) => Promise<string[][]>;
+}
+
+/** A social sign-in provider: OpenID Connect by its issuer, or plain OAuth2 by its endpoints. */
+export interface Provider { issuer: string; clientId: string; clientSecret: string; oauth2?: OAuth2 }
+
+/**
+ * The endpoints of an OAuth2 provider without OpenID Connect: where the browser signs in, where
+ * the code becomes an access token, and where the person (`user`: its `id` is the subject) and
+ * their email addresses (`emails`: the primary verified one counts) are read.
+ */
+export interface OAuth2 { authorize: string; token: string; user: string; emails: string; scope: string }
+
+/** GitHub (an OAuth app's client): `web` and `api` default to github.com's; GitHub Enterprise Server's otherwise. */
+export function github(clientId: string, clientSecret: string, web = "https://github.com", api = "https://api.github.com"): Provider {
+  const w = web.replace(/\/+$/, ""), a = api.replace(/\/+$/, "");
+  return {
+    issuer: w, clientId, clientSecret,
+    oauth2: {
+      authorize: `${w}/login/oauth/authorize`, token: `${w}/login/oauth/access_token`,
+      user: `${a}/user`, emails: `${a}/user/emails`, scope: "read:user user:email",
+    },
+  };
+}
+
+/** The address an OAuth2 provider's email list says is the person's: the primary one if verified, else the first verified. */
+export function oauth2Email(emails: unknown): string | null {
+  if (!Array.isArray(emails)) return null;
+  const verified = emails.filter((e) => e?.verified === true && typeof e.email === "string" && e.email);
+  return (verified.find((e) => e.primary === true) ?? verified[0])?.email ?? null;
 }
 
 /** What `oidcStart` keeps in the cache until the browser comes back. */
@@ -358,7 +391,7 @@ export class KitApi {
   }
 
   /** The provider's settings: a social one by name, or the SSO of the tenant that verified the email's domain. */
-  private async provider(by: { provider: string } | { email: string }): Promise<{ provider: string; issuer: string; clientId: string; clientSecret: string; tenant?: string; ssoId?: string } | null> {
+  private async provider(by: { provider: string } | { email: string }): Promise<{ provider: string; issuer: string; clientId: string; clientSecret: string; oauth2?: OAuth2; tenant?: string; ssoId?: string } | null> {
     if ("provider" in by) {
       const p = this.options.providers?.[by.provider];
       return p ? { provider: by.provider, ...p } : null;
@@ -379,12 +412,22 @@ export class KitApi {
   async oidcStart(by: { provider: string } | { email: string }, link?: Claims): Promise<{ ok: true; url: string } | { ok: false; reason: string }> {
     const p = await this.provider(by);
     if (!p || !this.options.redirectUri) return { ok: false, reason: "no_provider" };
-    const config = await this.config(p.issuer, p.clientId, p.clientSecret);
     const verifier = oidc.randomPKCECodeVerifier();
     const state = oidc.randomState();
     const nonce = oidc.randomNonce();
     const kept: OidcState = { provider: p.provider, tenant: p.tenant, ssoId: p.ssoId, verifier, nonce, ...(link ? { link: { accountId: link.sub } } : {}) };
     await this.kernable.cache.set("account", `oidc:${state}`, JSON.stringify(kept), { ttlMs: CHALLENGE_SECONDS * 1000, tenant: PLATFORM_TENANT, context: this.serviceContext });
+    if (p.oauth2) {
+      // Plain OAuth2: no discovery, no nonce (nothing brings it back).
+      if (!this.secure(p.oauth2.authorize)) return { ok: false, reason: "no_provider" };
+      const url = new URL(p.oauth2.authorize);
+      for (const [k, v] of Object.entries({
+        response_type: "code", client_id: p.clientId, redirect_uri: this.options.redirectUri, scope: p.oauth2.scope, state,
+        code_challenge_method: "S256", code_challenge: await oidc.calculatePKCECodeChallenge(verifier),
+      })) url.searchParams.set(k, v);
+      return { ok: true, url: url.href };
+    }
+    const config = await this.config(p.issuer, p.clientId, p.clientSecret);
     const url = oidc.buildAuthorizationUrl(config, {
       redirect_uri: this.options.redirectUri, scope: "openid email", state, nonce,
       code_challenge: await oidc.calculatePKCECodeChallenge(verifier), code_challenge_method: "S256",
@@ -406,16 +449,20 @@ export class KitApi {
       return { ok: false, reason: "invalid_state" };
     }
     const kept = JSON.parse(Buffer.from(raw).toString("utf8")) as OidcState;
-    const p: { provider: string; issuer: string; clientId: string; clientSecret: string; domains?: string[] } | null = kept.ssoId
+    const p: { provider: string; issuer: string; clientId: string; clientSecret: string; oauth2?: OAuth2; domains?: string[] } | null = kept.ssoId
       ? await this.ssoSettings(kept.tenant!, kept.ssoId)
       : this.options.providers?.[kept.provider] ? { provider: kept.provider, ...this.options.providers[kept.provider] } : null;
     if (!p) return { ok: false, reason: "no_provider" };
     let claims: { sub: string; email?: string; email_verified?: boolean };
     try {
-      const tokens = await oidc.authorizationCodeGrant(await this.config(p.issuer, p.clientId, p.clientSecret), new URL(callback), {
-        pkceCodeVerifier: kept.verifier, expectedState: state, expectedNonce: kept.nonce,
-      });
-      claims = tokens.claims() as typeof claims;
+      if (p.oauth2) {
+        claims = await this.exchangeOAuth2(p, p.oauth2, callback, kept);
+      } else {
+        const tokens = await oidc.authorizationCodeGrant(await this.config(p.issuer, p.clientId, p.clientSecret), new URL(callback), {
+          pkceCodeVerifier: kept.verifier, expectedState: state, expectedNonce: kept.nonce,
+        });
+        claims = tokens.claims() as typeof claims;
+      }
     } catch {
       return { ok: false, reason: "provider_refused" };
     }
@@ -462,6 +509,36 @@ export class KitApi {
     if (!signedIn) return { ok: false, reason: signInReason((outcome.events[0].data as SignInFailed).reason) };
     const d = signedIn.data as SignedIn;
     return { ok: true, accountId, sessionId, refreshToken, secondFactor: d.mfa, accessToken: issueAccessToken(this.keys, { sub: accountId, sid: sessionId, fac: d.factors }) };
+  }
+
+  /** Whether `url` may be used: https, or anything with `insecureIssuers` (tests). */
+  private secure(url: string): boolean {
+    return this.options.insecureIssuers === true || url.startsWith("https://");
+  }
+
+  /**
+   * For an OAuth2 provider: the person behind the code in `callback`, as the claims an ID token
+   * would hold (`sub`: their `id`; `email`, `email_verified`: their primary verified address).
+   */
+  private async exchangeOAuth2(p: { clientId: string; clientSecret: string }, o: OAuth2, callback: string, kept: OidcState): Promise<{ sub: string; email?: string; email_verified?: boolean }> {
+    for (const url of [o.token, o.user, o.emails]) if (!this.secure(url)) throw new Error(`${url} is not https`);
+    const code = new URL(callback).searchParams.get("code");
+    if (!code) throw new Error("no code");
+    const res = await fetch(o.token, {
+      method: "POST",
+      headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "authorization_code", code, client_id: p.clientId, client_secret: p.clientSecret,
+        redirect_uri: this.options.redirectUri ?? "", code_verifier: kept.verifier,
+      }),
+    });
+    const tokens = (await res.json()) as { access_token?: string; error?: string };
+    if (!tokens.access_token) throw new Error(`no access_token: ${tokens.error ?? res.status}`);
+    const get = async (url: string) => (await fetch(url, { headers: { authorization: `Bearer ${tokens.access_token}`, accept: "application/json", "user-agent": "kernable-kit" } })).json();
+    const user = (await get(o.user)) as { id?: number | string };
+    if (user.id === undefined || user.id === "") throw new Error("no id");
+    const email = oauth2Email(await get(o.emails));
+    return { sub: String(user.id), email: email ?? "", email_verified: email !== null };
   }
 
   /** A tenant's SSO: what the API signs in with, and the domains it verified. */

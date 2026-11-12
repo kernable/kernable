@@ -12,7 +12,7 @@ standard library; copy its routes into your framework.
 ## Setting it up
 
 ```ts
-import { KitApi } from "./kit/src/api/api.ts";
+import { KitApi, github } from "./kit/src/api/api.ts";
 import { signingKeysFrom } from "./kit/src/api/tokens.ts";
 
 const api = new KitApi({
@@ -21,10 +21,17 @@ const api = new KitApi({
   service: { identityId: "api", keyId },             // from bootstrap(): the API's own identity
   providers: {                                       // optional: social logins
     google: { issuer: "https://accounts.google.com", clientId, clientSecret },
+    github: github(githubClientId, githubClientSecret), // plain OAuth2 (GitHub speaks no OIDC)
   },
   redirectUri: "https://example.com/oidc/callback",  // where providers send the browser back
 });
 ```
+
+A provider is found by its OpenID Connect `issuer`, or, for a plain OAuth2 one, by the endpoints
+in its `oauth2` (`github(clientId, clientSecret)`; GitHub Enterprise Server: its web and API
+addresses as two more arguments). For OAuth2 the API exchanges the code for an access token and
+reads the person's `id` (the login's subject) and their primary *verified* email address; one
+without a verified address signs in only to an account the login is already linked to.
 
 In Python the same is `KitApi(kernable, signing_keys_from(...), service)`; it blocks like the
 SDK's client, and `AsyncKitApi(KitApi(...))` offers the same methods for asyncio. In Rust,

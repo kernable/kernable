@@ -104,12 +104,57 @@ pub struct SignedIn {
     pub second_factor: bool,
 }
 
-/// A social OAuth/OIDC provider; a tenant's SSO is configured as `account.sso`.
+/// A social OAuth/OIDC provider; a tenant's SSO is configured as `account.sso`. An OpenID
+/// Connect provider is found by its `issuer`; a plain OAuth2 one (GitHub) names its endpoints in
+/// `oauth2` ([`Provider::github`]).
 #[derive(Clone, Debug)]
 pub struct Provider {
     pub issuer: String,
     pub client_id: String,
     pub client_secret: String,
+    pub oauth2: Option<OAuth2>,
+}
+
+/// The endpoints of an OAuth2 provider without OpenID Connect: where the browser signs in, where
+/// the code becomes an access token, and where the person (`user`: its `id` is the subject) and
+/// their email addresses (`emails`: the primary verified one counts) are read.
+#[derive(Clone, Debug)]
+pub struct OAuth2 {
+    pub authorize: String,
+    pub token: String,
+    pub user: String,
+    pub emails: String,
+    pub scope: String,
+}
+
+impl Provider {
+    /// An OpenID Connect provider at `issuer` (discovery at `<issuer>/.well-known/openid-configuration`).
+    pub fn oidc(issuer: &str, client_id: &str, client_secret: &str) -> Provider {
+        Provider {
+            issuer: issuer.into(),
+            client_id: client_id.into(),
+            client_secret: client_secret.into(),
+            oauth2: None,
+        }
+    }
+
+    /// GitHub (an OAuth app's client): `web` `https://github.com` and `api`
+    /// `https://api.github.com`, or a GitHub Enterprise Server's.
+    pub fn github(client_id: &str, client_secret: &str, web: &str, api: &str) -> Provider {
+        let (web, api) = (web.trim_end_matches('/'), api.trim_end_matches('/'));
+        Provider {
+            issuer: web.into(),
+            client_id: client_id.into(),
+            client_secret: client_secret.into(),
+            oauth2: Some(OAuth2 {
+                authorize: format!("{web}/login/oauth/authorize"),
+                token: format!("{web}/login/oauth/access_token"),
+                user: format!("{api}/user"),
+                emails: format!("{api}/user/emails"),
+                scope: "read:user user:email".into(),
+            }),
+        }
+    }
 }
 
 type Txt = Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = Vec<String>> + Send>> + Send + Sync>;
@@ -950,6 +995,7 @@ impl KitApi {
                     issuer: s.issuer,
                     client_id: s.client_id,
                     client_secret,
+                    oauth2: None,
                 },
                 s.domains,
             ))
@@ -985,11 +1031,29 @@ impl KitApi {
         let Some(redirect_uri) = &self.redirect_uri else {
             return refused("no_provider");
         };
-        let config = self
-            .config(&p.issuer)
-            .await
-            .map_err(|_| ApiError::Refused("no_provider".into()))?;
         let (verifier, state, nonce) = (random_secret(48), random_secret(24), random_secret(24));
+        let (authorize, scope) = match &p.oauth2 {
+            Some(o) => {
+                if !self.secure(&o.authorize) {
+                    return refused("no_provider");
+                }
+                (o.authorize.clone(), o.scope.clone())
+            }
+            None => {
+                let config = self
+                    .config(&p.issuer)
+                    .await
+                    .map_err(|_| ApiError::Refused("no_provider".into()))?;
+                (
+                    config["authorization_endpoint"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                    "openid email".to_owned(),
+                )
+            }
+        };
+        let oauth2 = p.oauth2.is_some();
         let kept = OidcState {
             provider: name,
             tenant,
@@ -1004,25 +1068,105 @@ impl KitApi {
         )
         .await?;
         let challenge = BASE64URL_NOPAD.encode(&Sha256::digest(verifier.as_bytes()));
-        let mut url = reqwest::Url::parse(
-            config["authorization_endpoint"]
-                .as_str()
-                .unwrap_or_default(),
-        )
-        .map_err(|_| ApiError::Refused("no_provider".into()))?;
-        url.query_pairs_mut()
-            .append_pair("response_type", "code")
-            .append_pair("client_id", &p.client_id)
-            .append_pair("redirect_uri", redirect_uri)
-            .append_pair("scope", "openid email")
-            .append_pair("state", &state)
-            .append_pair("nonce", &nonce)
-            .append_pair("code_challenge_method", "S256")
-            .append_pair("code_challenge", &challenge);
+        let mut url =
+            reqwest::Url::parse(&authorize).map_err(|_| ApiError::Refused("no_provider".into()))?;
+        {
+            let mut q = url.query_pairs_mut();
+            q.append_pair("response_type", "code")
+                .append_pair("client_id", &p.client_id)
+                .append_pair("redirect_uri", redirect_uri)
+                .append_pair("scope", &scope)
+                .append_pair("state", &state);
+            // Only OpenID Connect knows a nonce (it comes back in the ID token).
+            if !oauth2 {
+                q.append_pair("nonce", &nonce);
+            }
+            q.append_pair("code_challenge_method", "S256")
+                .append_pair("code_challenge", &challenge);
+        }
         Ok(url.to_string())
     }
 
-    /// The ID token's claims for the code in `callback`, checked (issuer, audience, nonce, expiry).
+    /// Whether `url` may be used: https, or anything with `insecure_issuers` (tests).
+    fn secure(&self, url: &str) -> bool {
+        self.insecure_issuers || url.starts_with("https://")
+    }
+
+    /// For an OAuth2 provider: the person behind the code in `callback`, as claims an ID token
+    /// would hold (`sub`: their `id`; `email` and `email_verified`: their primary verified address,
+    /// else none).
+    async fn exchange_oauth2(
+        &self,
+        p: &Provider,
+        o: &OAuth2,
+        code: &str,
+        kept: &OidcState,
+    ) -> Result<Value, String> {
+        for url in [&o.token, &o.user, &o.emails] {
+            if !self.secure(url) {
+                return Err(format!("{url} is not https"));
+            }
+        }
+        let form = [
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("client_id", p.client_id.as_str()),
+            ("client_secret", p.client_secret.as_str()),
+            (
+                "redirect_uri",
+                self.redirect_uri.as_deref().unwrap_or_default(),
+            ),
+            ("code_verifier", kept.verifier.as_str()),
+        ];
+        let tokens: Value = self
+            .http
+            .post(&o.token)
+            .header("accept", "application/json")
+            .form(&form)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?
+            .json()
+            .await
+            .map_err(|e| e.to_string())?;
+        let access = tokens["access_token"]
+            .as_str()
+            .ok_or_else(|| format!("no access_token: {}", tokens["error"]))?;
+        let get = |url: &str| {
+            self.http
+                .get(url)
+                .bearer_auth(access)
+                .header("accept", "application/json")
+                .header("user-agent", "kernable-kit")
+                .send()
+        };
+        let user: Value = get(&o.user)
+            .await
+            .map_err(|e| e.to_string())?
+            .json()
+            .await
+            .map_err(|e| e.to_string())?;
+        let sub = match &user["id"] {
+            Value::Number(n) => n.to_string(),
+            Value::String(s) if !s.is_empty() => s.clone(),
+            _ => return Err("no id".into()),
+        };
+        let emails: Value = get(&o.emails)
+            .await
+            .map_err(|e| e.to_string())?
+            .json()
+            .await
+            .map_err(|e| e.to_string())?;
+        let email = oauth2_email(&emails);
+        Ok(serde_json::json!({
+            "sub": sub,
+            "email": email.clone().unwrap_or_default(),
+            "email_verified": email.is_some(),
+        }))
+    }
+
+    /// The ID token's claims for the code in `callback`, checked (issuer, audience, nonce, expiry);
+    /// for an OAuth2 provider, the same claims read from it ([`KitApi::exchange_oauth2`]).
     async fn exchange(
         &self,
         p: &Provider,
@@ -1034,6 +1178,9 @@ impl KitApi {
             .find(|(k, _)| k == "code")
             .map(|(_, v)| v.into_owned())
             .ok_or("no code")?;
+        if let Some(o) = &p.oauth2 {
+            return self.exchange_oauth2(p, o, &code, kept).await;
+        }
         let config = self.config(&p.issuer).await?;
         let form = [
             ("grant_type", "authorization_code"),
@@ -1569,5 +1716,66 @@ async fn system_txt(name: &str) -> Vec<String> {
             })
             .collect(),
         Err(_) => vec![],
+    }
+}
+
+/// The address an OAuth2 provider's email list (`[{email, primary, verified}]`) says is the
+/// person's: the primary one if verified, else the first verified; none if none is verified.
+pub fn oauth2_email(emails: &Value) -> Option<String> {
+    let list = emails.as_array()?;
+    let verified = |e: &&Value| e["verified"] == Value::Bool(true);
+    list.iter()
+        .filter(verified)
+        .find(|e| e["primary"] == Value::Bool(true))
+        .or_else(|| list.iter().find(verified))
+        .and_then(|e| e["email"].as_str())
+        .filter(|e| !e.is_empty())
+        .map(str::to_owned)
+}
+
+#[cfg(test)]
+mod oauth2_tests {
+    use super::*;
+
+    #[test]
+    fn the_primary_verified_address_is_the_persons() {
+        let list = serde_json::json!([
+            { "email": "old@example.com", "primary": false, "verified": true },
+            { "email": "ada@example.com", "primary": true, "verified": true },
+        ]);
+        assert_eq!(oauth2_email(&list).as_deref(), Some("ada@example.com"));
+        // A primary address that is not verified does not count; another verified one does.
+        let list = serde_json::json!([
+            { "email": "ada@example.com", "primary": true, "verified": false },
+            { "email": "work@example.com", "primary": false, "verified": true },
+        ]);
+        assert_eq!(oauth2_email(&list).as_deref(), Some("work@example.com"));
+        let none =
+            serde_json::json!([{ "email": "ada@example.com", "primary": true, "verified": false }]);
+        assert_eq!(oauth2_email(&none), None);
+        assert_eq!(
+            oauth2_email(&serde_json::json!({ "message": "Bad credentials" })),
+            None
+        );
+    }
+
+    #[test]
+    fn github_names_its_endpoints_on_its_web_and_api_hosts() {
+        let p = Provider::github(
+            "id",
+            "secret",
+            "https://github.com/",
+            "https://api.github.com",
+        );
+        let o = p.oauth2.unwrap();
+        assert_eq!(o.authorize, "https://github.com/login/oauth/authorize");
+        assert_eq!(o.token, "https://github.com/login/oauth/access_token");
+        assert_eq!(o.user, "https://api.github.com/user");
+        assert_eq!(o.emails, "https://api.github.com/user/emails");
+        assert!(
+            Provider::oidc("https://accounts.example.com", "id", "s")
+                .oauth2
+                .is_none()
+        );
     }
 }

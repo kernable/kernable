@@ -5,7 +5,9 @@
 pub mod api;
 pub mod tokens;
 
-pub use api::{ApiError, ApiResult, KitApi, NewInvitationLink, Provider, SignedIn};
+pub use api::{
+    ApiError, ApiResult, KitApi, NewInvitationLink, OAuth2, Provider, SignedIn, oauth2_email,
+};
 pub use tokens::{
     Claims, SigningKeys, check_access_token, issue_access_token, new_signing_keys,
     signing_keys_from,

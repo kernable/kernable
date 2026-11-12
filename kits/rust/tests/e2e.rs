@@ -1179,6 +1179,7 @@ async fn oauth_and_sso(w: &World) {
             issuer: social.issuer.clone(),
             client_id: social.client_id.clone(),
             client_secret: social.client_secret.clone(),
+            oauth2: None,
         },
     )
     .redirect_uri("http://localhost:3000/callback")

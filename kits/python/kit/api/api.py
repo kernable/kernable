@@ -74,12 +74,33 @@ def _resolve_txt(name: str) -> list[str]:
     return [b"".join(r.strings).decode() for r in dns.resolver.resolve(name, "TXT")]
 
 
+def github(client_id: str, client_secret: str, web: str = "https://github.com", api: str = "https://api.github.com") -> dict:
+    """GitHub (an OAuth app's client) as a provider: plain OAuth2, its endpoints on `web` and `api`
+    (github.com's, or a GitHub Enterprise Server's)."""
+    web, api = web.rstrip("/"), api.rstrip("/")
+    return {"issuer": web, "client_id": client_id, "client_secret": client_secret,
+            "oauth2": {"authorize": f"{web}/login/oauth/authorize", "token": f"{web}/login/oauth/access_token",
+                       "user": f"{api}/user", "emails": f"{api}/user/emails", "scope": "read:user user:email"}}
+
+
+def oauth2_email(emails) -> str | None:
+    """The address an OAuth2 provider's email list says is the person's: the primary one if verified,
+    else the first verified; none if none is."""
+    if not isinstance(emails, list):
+        return None
+    verified = [e for e in emails if isinstance(e, dict) and e.get("verified") is True and e.get("email")]
+    primary = next((e for e in verified if e.get("primary") is True), None)
+    chosen = primary or (verified[0] if verified else None)
+    return chosen["email"] if chosen else None
+
+
 class KitApi:
     """What only your API does. `kernable`: a client whose key may submit and query (it signs every
     request). `keys`: what access tokens are signed with. `service`: the API's own identity, a
     service of the platform tenant with an API key, from the bootstrap (`{"identity_id", "key_id"}`).
     `providers`: social OAuth/OIDC providers by name (`{"google": {"issuer", "client_id",
-    "client_secret"}}`); tenants' SSO is configured as `account.sso`. `redirect_uri`: where providers
+    "client_secret"}}`; a plain OAuth2 one names its endpoints in `oauth2`, `github()` makes one);
+    tenants' SSO is configured as `account.sso`. `redirect_uri`: where providers
     send the browser back to; your route calls `oidc_finish` with the full URL. `insecure_issuers`
     allows http:// issuers, for development and tests only. `resolve_txt` reads DNS TXT records
     (tests replace it; the default needs `dnspython`)."""
@@ -389,23 +410,57 @@ class KitApi:
         p = self._provider(provider, email)
         if not p or not self.redirect_uri:
             return {"ok": False, "reason": "no_provider"}
-        config = self._config(p["issuer"])
+        oauth2 = p.get("oauth2")
+        if oauth2 and not self._secure(oauth2["authorize"]):
+            return {"ok": False, "reason": "no_provider"}
+        config = None if oauth2 else self._config(p["issuer"])
         verifier = secrets.token_urlsafe(48)
         state = secrets.token_urlsafe(24)
         nonce = secrets.token_urlsafe(24)
         kept = {"provider": p["provider"], "tenant": p.get("tenant"), "sso_id": p.get("sso_id"), "verifier": verifier, "nonce": nonce,
                 "link": {"account_id": link.sub} if link else None}
         self._keep(f"oidc:{state}", json.dumps(kept))
+        challenge = _b64(hashlib.sha256(verifier.encode()).digest())
+        if oauth2:
+            # Plain OAuth2: no nonce (nothing brings it back).
+            query = urlencode({"response_type": "code", "client_id": p["client_id"], "redirect_uri": self.redirect_uri, "scope": oauth2["scope"],
+                               "state": state, "code_challenge_method": "S256", "code_challenge": challenge})
+            return {"ok": True, "url": f"{oauth2['authorize']}?{query}"}
         query = urlencode({"response_type": "code", "client_id": p["client_id"], "redirect_uri": self.redirect_uri, "scope": "openid email",
-                           "state": state, "nonce": nonce, "code_challenge_method": "S256",
-                           "code_challenge": _b64(hashlib.sha256(verifier.encode()).digest())})
+                           "state": state, "nonce": nonce, "code_challenge_method": "S256", "code_challenge": challenge})
         return {"ok": True, "url": f"{config['authorization_endpoint']}?{query}"}
 
+    def _secure(self, url: str) -> bool:
+        """Whether `url` may be used: https, or anything with `insecure_issuers` (tests)."""
+        return self.insecure_issuers or url.startswith("https://")
+
+    def _exchange_oauth2(self, p: dict, o: dict, code: str, kept: dict) -> dict:
+        """For an OAuth2 provider: the person behind `code`, as the claims an ID token would hold
+        (`sub`: their `id`; `email`, `email_verified`: their primary verified address)."""
+        for url in (o["token"], o["user"], o["emails"]):
+            if not self._secure(url):
+                raise ValueError(f"{url} is not https")
+        res = requests.post(o["token"], timeout=10, headers={"accept": "application/json"},
+                            data={"grant_type": "authorization_code", "code": code, "client_id": p["client_id"],
+                                  "client_secret": p["client_secret"], "redirect_uri": self.redirect_uri, "code_verifier": kept["verifier"]})
+        access = res.json().get("access_token")
+        if not access:
+            raise ValueError("no access_token")
+        headers = {"authorization": f"Bearer {access}", "accept": "application/json", "user-agent": "kernable-kit"}
+        user = requests.get(o["user"], timeout=10, headers=headers).json()
+        if user.get("id") in (None, ""):
+            raise ValueError("no id")
+        email = oauth2_email(requests.get(o["emails"], timeout=10, headers=headers).json())
+        return {"sub": str(user["id"]), "email": email or "", "email_verified": email is not None}
+
     def _exchange(self, p: dict, callback: str, kept: dict, state: str) -> dict:
-        """The ID token's claims for the code in `callback`, checked (issuer, audience, nonce, expiry)."""
+        """The ID token's claims for the code in `callback`, checked (issuer, audience, nonce, expiry);
+        for an OAuth2 provider, the same claims read from it."""
         params = {k: v[0] for k, v in parse_qs(urlparse(callback).query).items()}
         if params.get("state") != state or "code" not in params:
             raise ValueError("no code for this state")
+        if p.get("oauth2"):
+            return self._exchange_oauth2(p, p["oauth2"], params["code"], kept)
         config = self._config(p["issuer"])
         res = requests.post(config["token_endpoint"], timeout=10,
                             auth=(quote(p["client_id"], safe=""), quote(p["client_secret"], safe="")),
