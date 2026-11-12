@@ -476,6 +476,8 @@ async fn a_new_reader_starts_from_the_backup_and_catches_up_from_the_writer() {
         target: to.clone(),
         key: key_file,
         vault_key: None,
+        signer: None,
+        signer_key: None,
     });
     let reader = start_reader(&reader_config).await;
     let _model = read_model(&reader_config.listen, "orders-count").await;
@@ -492,6 +494,8 @@ async fn a_new_reader_starts_from_the_backup_and_catches_up_from_the_writer() {
         target: format!("file:{}", dir.0.join("no-backup-here").display()),
         key: dir.0.join("backup.key"),
         vault_key: None,
+        signer: None,
+        signer_key: None,
     });
     let _fallback = start_reader(&broken).await;
     let _model = read_model(&broken.listen, "orders-count").await;

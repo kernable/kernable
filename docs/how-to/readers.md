@@ -74,7 +74,7 @@ kernable start … --reader 10.0.0.1:7233,10.0.0.2:7233 \
   --from-backup s3://backups/shop --from-backup-key backup.key --from-backup-vault-key vault.key
 ```
 
-- `--from-backup` takes a target as `kernable restore` does, with the same `KERNABLE_S3_*` and `AWS_*` variables.
+- `--from-backup` takes a target as `kernable restore` does, with the same `KERNABLE_S3_*` and `AWS_*` variables. With a [backup signer](./backup#continuous-backup) (`KERNABLE_S3_SIGNER`, and `KERNABLE_S3_SIGNER_CA` for its certificate) the reader holds no S3 keys: it asks the signer with `KERNABLE_S3_SIGNER_KEY`, or else with its own `--follow-key`, which the signer must sign for.
 - `--from-backup-vault-key` is the writer's vault key of the time the backup was taken: its values are encrypted with it. The reader encrypts them with its own `--vault-key` right after the restore, so the writer's key stays only where you keep it.
 - It is used only by a reader whose store is empty, or one the writer no longer keeps the records for. If the backup cannot be read, or the writer no longer holds the records after it, the reader takes a full image from the writer instead.
 

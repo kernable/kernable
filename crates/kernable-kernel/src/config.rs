@@ -123,7 +123,7 @@ pub const FLAGS: &[(&str, &str, &str, &str)] = &[
         "--from-backup",
         "KERNABLE_FROM_BACKUP",
         "",
-        "With `--reader`: a new or empty reader first restores the newest generation of this backup (a target as for `kernable restore`) and then catches up the rest from the writer, so a large store need not come from the writer. Needs `--from-backup-key`; if the backup holds vault values, also `--from-backup-vault-key`. If the writer no longer keeps the records after the backup, or the backup cannot be read, the reader takes a full image from the writer instead.",
+        "With `--reader`: a new or empty reader first restores the newest generation of this backup (a target as for `kernable restore`) and then catches up the rest from the writer, so a large store need not come from the writer. Needs `--from-backup-key`; if the backup holds vault values, also `--from-backup-vault-key`. With `KERNABLE_S3_SIGNER` it reads the backup through that signer, asked with `KERNABLE_S3_SIGNER_KEY` or else its `--follow-key`, and needs no S3 keys. If the writer no longer keeps the records after the backup, or the backup cannot be read, the reader takes a full image from the writer instead.",
     ),
     (
         "--from-backup-key",
@@ -453,6 +453,11 @@ pub struct FromBackup {
     pub key: PathBuf,
     /// The vault key its values are sealed with; `None` if it holds none.
     pub vault_key: Option<PathBuf>,
+    /// `KERNABLE_S3_SIGNER`: a signer that presigns the requests to the backup's bucket, as
+    /// for `kernable restore`, so the reader holds no S3 keys.
+    pub signer: Option<String>,
+    /// `KERNABLE_S3_SIGNER_KEY`: the key it asks the signer with; else its `--follow-key`.
+    pub signer_key: Option<PathBuf>,
 }
 
 /// A kernel of a pair.
@@ -670,6 +675,10 @@ impl Config {
                     .ok_or("--from-backup needs --from-backup-key: the backup key file")?
                     .into(),
                 vault_key: get("--from-backup-vault-key").map(PathBuf::from),
+                signer: env("KERNABLE_S3_SIGNER").filter(|v| !v.is_empty()),
+                signer_key: env("KERNABLE_S3_SIGNER_KEY")
+                    .filter(|v| !v.is_empty())
+                    .map(PathBuf::from),
             }),
         };
         let pair = match get("--witness") {

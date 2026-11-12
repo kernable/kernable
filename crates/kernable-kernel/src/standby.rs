@@ -1065,7 +1065,23 @@ fn restore_into(
     from: &config::FromBackup,
     kernel_keys: &[String],
 ) -> Result<crate::backup::Restored, BoxError> {
-    let target = crate::backup::target::open(&from.target, None)?;
+    // Through the signer, as `kernable restore` does: the reader holds no S3 keys then. It
+    // asks with KERNABLE_S3_SIGNER_KEY, else with its own follow key.
+    let signer = match &from.signer {
+        None => None,
+        Some(url) => {
+            let key = match (&from.signer_key, &config.replication.follow) {
+                (Some(path), _) => config.read_signing_key(path),
+                (None, Some(follow)) => config.read_signing_key(&follow.key),
+                (None, None) => Err(std::io::Error::other(
+                    "a signer needs a key: KERNABLE_S3_SIGNER_KEY",
+                )),
+            }
+            .map_err(|e| format!("the backup signer's key: {e}"))?;
+            Some(crate::backup::target::Signer::new(url, key)?)
+        }
+    };
+    let target = crate::backup::target::open(&from.target, signer)?;
     let crypt = crate::backup::crypt::BackupKey::read(&from.key)?;
     let vault = match (&config.vault, &from.vault_key) {
         (Some(v), Some(backup_key)) => Some(Vault::open_locked(

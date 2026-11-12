@@ -692,6 +692,15 @@ async fn start_signer(
     s3: &FakeS3,
     addr: Option<std::net::SocketAddr>,
 ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    start_signer_for(s3, addr, vec![id(&key(9))]).await
+}
+
+/// Like [`start_signer`], signing for the key IDs `allowed`.
+async fn start_signer_for(
+    s3: &FakeS3,
+    addr: Option<std::net::SocketAddr>,
+    allowed: Vec<String>,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind(addr.unwrap_or("127.0.0.1:0".parse().unwrap()))
         .await
         .unwrap();
@@ -699,7 +708,7 @@ async fn start_signer(
     let reference = Reference::new(
         s3.keys.clone(),
         &format!("s3://{BUCKET}/shop"),
-        [id(&key(9))],
+        allowed,
         Duration::from_secs(60),
     )
     .unwrap();
@@ -1027,4 +1036,107 @@ async fn a_masked_copy_restores_from_a_backup_through_a_signer() {
         .unwrap()
         .unwrap();
     assert!(mark.position >= 5, "{mark:?}");
+}
+
+/// A new reader with `--from-backup` and `KERNABLE_S3_SIGNER` restores the backup through the
+/// signer, asking with its own follow key, so it needs no S3 keys; then it catches up the rest
+/// from the writer. Without the signer it could not read the bucket and would take a full image.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reader_restores_from_a_backup_through_the_signer() {
+    use kernable_kernel::config::{Follow, FromBackup, Replication};
+    let env = start_custom("backup-reader-signer", |c, _| {
+        c.replication.backup = true;
+        c.replication.readers = true;
+    })
+    .await;
+    spawn_worker(&env).await;
+    let reader_key = key(60);
+    let reader_grant = grant(&reader_key, &[("read", &["*"])]);
+    env.kernel.grant(reader_grant.clone()).unwrap();
+    let s3 = FakeS3::start().await;
+    let (addr, _signing) = start_signer_for(&s3, None, vec![id(&key(9)), id(&reader_key)]).await;
+    let url = format!("http://{addr}/sign");
+    let to = format!("s3://{BUCKET}/shop/reader");
+    let target = || -> Arc<dyn target::Target> {
+        Arc::from(target::open(&to, Some(Signer::new(&url, key(9)).unwrap())).unwrap())
+    };
+    place(&env, 0, 10).await;
+    let mut f = follower(&env, "file:unused");
+    f.target = target();
+    let running = tokio::spawn(backup::run(f));
+    let head = env.kernel_head();
+    let mut reached = false;
+    for _ in 0..600 {
+        if reach_of(target()).await.is_ok_and(|r| r >= head) {
+            reached = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(reached, "backed up through the signer");
+    running.abort();
+    let _ = running.await;
+    // After the backup: these come from the writer.
+    place(&env, 10, 15).await;
+
+    let dir = env.dir.join("reader");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = |name: &str| dir.join(name);
+    std::fs::write(path("reader.key"), hex(reader_key.as_bytes())).unwrap();
+    std::fs::write(path("reader.grant"), hex(&reader_grant.encode_to_vec())).unwrap();
+    std::fs::write(path("kernel.key"), hex(key(23).as_bytes())).unwrap();
+    std::fs::write(path("backup.key"), hex(&[7; 32])).unwrap();
+    let mut config = (*env.kernel.config()).clone();
+    config.store = format!("sqlite:{}", path("reader.db").display());
+    config.listen = format!("unix:{}", path("r.sock").display());
+    config.kernel_key = path("kernel.key");
+    config.snapshots = format!("sqlite:{}", path("snapshots.db").display());
+    config.data = format!("file:{}", path("data").display());
+    config.vault = None;
+    config.metrics_listen = None;
+    config.admin_socket = None;
+    config.ui_listen = None;
+    config.replication = Replication {
+        follow: Some(Follow {
+            primary: env.addr.clone(),
+            key: path("reader.key"),
+            primary_kernel_keys: vec![id(&key(3))],
+        }),
+        reader: true,
+        from_backup: Some(FromBackup {
+            target: to.clone(),
+            key: path("backup.key"),
+            vault_key: None,
+            signer: Some(url.clone()),
+            signer_key: None,
+        }),
+        ..Default::default()
+    };
+    let taken = s3.taken.load(Ordering::Relaxed);
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        kernable_kernel::standby::run(config.clone()),
+    )
+    .await
+    .expect("the reader catches up")
+    .unwrap();
+    assert!(
+        s3.taken.load(Ordering::Relaxed) > taken,
+        "the reader read the bucket through the signer"
+    );
+    assert_eq!(s3.refused.load(Ordering::Relaxed), 0);
+    // It restored the backup: nothing was moved aside for an image from the writer.
+    let aside: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().contains(".diverged-"))
+        .collect();
+    assert!(aside.is_empty(), "the restore failed: {aside:?}");
+    let copy = kernable_store::open_read_only(&config.store).unwrap();
+    let source = kernable_store::open_read_only(&env.store).unwrap();
+    assert_eq!(
+        copy.read_all(0, 1_000).unwrap(),
+        source.read_all(0, 1_000).unwrap(),
+        "the backup's events and the writer's after it"
+    );
 }
